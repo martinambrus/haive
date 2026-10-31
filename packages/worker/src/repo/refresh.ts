@@ -148,6 +148,12 @@ async function sourceFor(
   };
 }
 
+/** Only pre-move gates may answer this refusal, after their captured files are put back. */
+function unreadableOperationRefusal(err: unknown): string {
+  if (!(err instanceof GitOperationUnreadableError)) throw err;
+  return `Not refreshed: the checkout could not be checked for an open merge or rebase (${firstLine(err.message)}). The checkout was not moved.`;
+}
+
 /** Fast-forward the checkout to its source. Answers why it was left as it was, or null once it is
  *  up to date. `merge --ff-only` never drops a commit or overwrites a local change: git refuses. */
 export async function fastForward(
@@ -221,76 +227,89 @@ export async function fastForward(
     return `Not refreshed: the checkout's HEAD could not be read (${firstLine(headRead.stderr || headRead.stdout)}).`;
   }
   const before = headRead.stdout.trim();
-  try {
-    for (let attempt = 1; ; attempt++) {
-      let aside;
+  for (let attempt = 1; ; attempt++) {
+    let aside;
+    try {
+      aside = await setAsideHaiveProjections(db, payload.repositoryId, dest, fence);
+    } catch (err) {
       try {
-        aside = await setAsideHaiveProjections(db, payload.repositoryId, dest, fence);
-      } catch (err) {
         if (asided) await putBackAfterFailure(db, payload.repositoryId, dest, kept, err);
-        throw err;
+      } catch (recovered) {
+        return unreadableOperationRefusal(recovered);
       }
-      if ((aside.outcome === 'refused' || aside.outcome === 'held') && asided) {
-        await putBackProjections(db, payload.repositoryId, dest, kept);
-      }
-      if (aside.outcome === 'refused') {
-        return `Not refreshed: ${aside.reason}. The checkout was not moved.`;
-      }
-      if (aside.outcome === 'held') return holdingRefusal(aside.holding);
-      if (aside.outcome === 'set-aside') {
-        asided = true;
-        for (const [file, was] of aside.kept) if (!kept.has(file)) kept.set(file, was);
-      }
-
-      let moved;
-      try {
-        moved = await db.transaction(async (tx) => {
-          // Every task's start and every revival take this lock, so none lands between the fence and the move.
-          await lockRepositoryTasksKey(tx, payload.repositoryId);
-          const check = await restoreProjectionsInTx(tx, payload.repositoryId, dest);
-          if (check.outcome !== 'clean') return { again: check, merge: null, after: null };
-          if ((await checkoutHoldingTasks(tx, payload.repositoryId)) > 0) {
-            return { again: check, merge: null, after: null };
-          }
-          const merge = await gitRun(dest, ['merge', '--ff-only', target]);
-          // A failed process may still have moved HEAD; only this read decides recovery.
-          return { again: check, merge, after: await headCommit(dest) };
-        });
-      } catch (err) {
-        if (asided)
-          await recoverAfterMoveFailure(db, payload.repositoryId, dest, kept, before, err);
-        throw err;
-      }
-      const { again, merge: merged, after } = moved;
-      if (again.outcome === 'retry' && attempt < MOVE_ATTEMPTS) continue;
-      if (after !== null && after !== before) {
-        try {
-          await handBackAfterMove(dest, before);
-        } finally {
-          try {
-            await resyncHaiveProjections(db, payload.repositoryId, dest);
-          } finally {
-            await restoreKeptMetadata(dest, kept);
-          }
-        }
-      } else if (asided) await putBackProjections(db, payload.repositoryId, dest, kept);
-      if (again.outcome === 'refused') {
-        return `Not refreshed: ${again.reason}. The checkout was not moved.`;
-      }
-      if (again.outcome === 'retry') {
-        return "Not refreshed: Haive's project files kept changing under the move. The checkout was not moved; refresh again.";
-      }
-      if (merged === null) return 'Not refreshed: a task started using this repository meanwhile.';
-      if (merged.code !== 0) {
-        return after === before
-          ? `Not refreshed: git refused the fast-forward (${firstLine(merged.stderr || merged.stdout)}).`
-          : `Refresh failed: the fast-forward moved the checkout but failed (${firstLine(merged.stderr || merged.stdout)}).`;
-      }
-      break;
+      return unreadableOperationRefusal(err);
     }
-  } catch (err) {
-    if (!(err instanceof GitOperationUnreadableError)) throw err;
-    return `Not refreshed: the checkout could not be checked for an open merge or rebase (${firstLine(err.message)}). The checkout was not moved.`;
+    if ((aside.outcome === 'refused' || aside.outcome === 'held') && asided) {
+      await putBackProjections(db, payload.repositoryId, dest, kept);
+    }
+    if (aside.outcome === 'refused') {
+      return `Not refreshed: ${aside.reason}. The checkout was not moved.`;
+    }
+    if (aside.outcome === 'held') return holdingRefusal(aside.holding);
+    if (aside.outcome === 'set-aside') {
+      asided = true;
+      for (const [file, was] of aside.kept) if (!kept.has(file)) kept.set(file, was);
+    }
+
+    let moved;
+    try {
+      moved = await db.transaction(async (tx) => {
+        // Every task's start and every revival take this lock, so none lands between the fence and the move.
+        await lockRepositoryTasksKey(tx, payload.repositoryId);
+        let check;
+        try {
+          check = await restoreProjectionsInTx(tx, payload.repositoryId, dest);
+        } catch (err) {
+          if (err instanceof GitOperationUnreadableError) return { gateError: err };
+          throw err;
+        }
+        if (check.outcome !== 'clean') return { again: check, merge: null, after: null };
+        if ((await checkoutHoldingTasks(tx, payload.repositoryId)) > 0) {
+          return { again: check, merge: null, after: null };
+        }
+        const merge = await gitRun(dest, ['merge', '--ff-only', target]);
+        // A failed process may still have moved HEAD; only this read decides recovery.
+        return { again: check, merge, after: await headCommit(dest) };
+      });
+    } catch (err) {
+      if (asided) await recoverAfterMoveFailure(db, payload.repositoryId, dest, kept, before, err);
+      throw err;
+    }
+    if ('gateError' in moved) {
+      try {
+        if (asided)
+          await putBackAfterFailure(db, payload.repositoryId, dest, kept, moved.gateError);
+      } catch (recovered) {
+        return unreadableOperationRefusal(recovered);
+      }
+      return unreadableOperationRefusal(moved.gateError);
+    }
+    const { again, merge: merged, after } = moved;
+    if (again.outcome === 'retry' && attempt < MOVE_ATTEMPTS) continue;
+    if (after !== null && after !== before) {
+      try {
+        await handBackAfterMove(dest, before);
+      } finally {
+        try {
+          await resyncHaiveProjections(db, payload.repositoryId, dest);
+        } finally {
+          await restoreKeptMetadata(dest, kept);
+        }
+      }
+    } else if (asided) await putBackProjections(db, payload.repositoryId, dest, kept);
+    if (again.outcome === 'refused') {
+      return `Not refreshed: ${again.reason}. The checkout was not moved.`;
+    }
+    if (again.outcome === 'retry') {
+      return "Not refreshed: Haive's project files kept changing under the move. The checkout was not moved; refresh again.";
+    }
+    if (merged === null) return 'Not refreshed: a task started using this repository meanwhile.';
+    if (merged.code !== 0) {
+      return after === before
+        ? `Not refreshed: git refused the fast-forward (${firstLine(merged.stderr || merged.stdout)}).`
+        : `Refresh failed: the fast-forward moved the checkout but failed (${firstLine(merged.stderr || merged.stdout)}).`;
+    }
+    break;
   }
   logger.info(
     { repositoryId: payload.repositoryId, branch, commits: behind },

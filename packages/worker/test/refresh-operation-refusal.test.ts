@@ -7,6 +7,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { REPO_JOB_NAMES } from '@haive/shared';
 import type { Job, Processor } from 'bullmq';
 import { schema } from '@haive/database';
+import { restoreFaults } from '../src/project-state/set-aside.js';
 import type { Database } from '@haive/database';
 import type { RepoJobPayload } from '@haive/shared';
 import { failGit, type FakeGit } from './support/fake-git.js';
@@ -83,6 +84,8 @@ beforeEach(async () => {
   root = await mkdtemp(path.join(tmpdir(), 'refresh-operation-'));
 });
 afterEach(async () => {
+  delete restoreFaults.afterRestore;
+  delete restoreFaults.beforePutBack;
   await shim?.restore();
   shim = null;
   await rm(root, { recursive: true, force: true });
@@ -165,5 +168,45 @@ it.each(['usable', 'unusable', 'unknown', 'holding', 'refused'] as const)(
     await runRefresh(payload).catch(() => undefined);
     expect(row.status).toBe(kind === 'unknown' ? 'error' : 'ready');
     expect(['ready', 'error']).toContain(row.status);
+  },
+);
+it.each([false, true])(
+  'T397 D2 later unreadable gate puts pending bytes and index back (put-back fails: %s)',
+  async (failedPutBack) => {
+    const { dest, payload } = await fixture();
+    const file = '.haive-data/plan.md';
+    await git(dest, ['add', '--', file]);
+    const staged = await git(dest, ['ls-files', '-s', '--', file]);
+    const before = await git(dest, ['rev-parse', 'HEAD']);
+    let restored = 0;
+    restoreFaults.afterRestore = async () => {
+      restored++;
+      expect(await readFile(path.join(dest, file), 'utf8').catch(() => null)).toBeNull();
+      expect(await git(dest, ['ls-files', '-s', '--', file])).toBe('');
+      // A sweep leaves another pending file after capture. The next pre-move gate must put back the captured one.
+      await writeFile(path.join(dest, '.haive-data/plan.json'), '{}\n');
+      shim = await failGit(['rev-parse', '--git-path']);
+    };
+    const putError = new Error('put-back fault');
+    if (failedPutBack)
+      restoreFaults.beforePutBack = () => {
+        throw putError;
+      };
+    if (failedPutBack) {
+      const err = await handleRefresh(payload, db, root).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(AggregateError);
+      expect((err as AggregateError).errors).toContain(putError);
+      expect((err as AggregateError).errors[0]).toHaveProperty(
+        'name',
+        'GitOperationUnreadableError',
+      );
+    } else {
+      await handleRefresh(payload, db, root);
+      expect(row.statusMessage).toMatch(/could not be checked.*The checkout was not moved/);
+      expect(await readFile(path.join(dest, file), 'utf8')).toBe('pending\n');
+      expect(await git(dest, ['ls-files', '-s', '--', file])).toBe(staged);
+    }
+    expect(restored).toBe(1);
+    expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(before);
   },
 );

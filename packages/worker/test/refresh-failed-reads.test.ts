@@ -27,6 +27,7 @@ vi.mock('../src/step-engine/git-merge.js', async (original) => ({
   ...(await original<typeof import('../src/step-engine/git-merge.js')>()),
   handBackAfterMove: h.handBack,
 }));
+import { GitOperationUnreadableError } from '../src/repo/git-operation.js';
 import { fastForward } from '../src/repo/refresh.js';
 
 const exec = promisify(execFile);
@@ -173,4 +174,13 @@ it('T397 fix8 a deepen failure has its own refusal and does not move HEAD', asyn
     await base.restore();
   }
   expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(before);
+});
+
+it('T397 D4 an unreadable operation error after the move is not an unmoved refusal', async () => {
+  const { dest, payload } = await fixture();
+  const before = await git(dest, ['rev-parse', 'HEAD']);
+  const err = new GitOperationUnreadableError('post-move gate failure');
+  h.handBack.mockRejectedValueOnce(err);
+  await expect(fastForward(db, payload, dest)).rejects.toBe(err);
+  expect(await git(dest, ['rev-parse', 'HEAD'])).not.toBe(before);
 });
