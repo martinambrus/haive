@@ -263,14 +263,16 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
       lookup.mockClear();
       const insert = (h.db as any).insert;
       const writes: Promise<unknown>[] = [];
+      let release!: () => void;
+      const resume = new Promise<void>((resolve) => {
+        release = resolve;
+      });
       const delayedInsert = vi.spyOn(h.db as any, 'insert').mockImplementation((table) => {
         const query = insert(table);
         if (table !== schema.auditEvents) return query;
         return {
           values: (values: unknown) => {
-            const write = new Promise((resolve) => setTimeout(resolve, 25)).then(() =>
-              query.values(values),
-            );
+            const write = resume.then(() => query.values(values));
             writes.push(write);
             return write;
           },
@@ -279,6 +281,8 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
       try {
         const got = await statuses(Array.from({ length: 20 }, () => login(email, WRONG)));
         expect(got).toEqual(Array(20).fill(429));
+        expect(throttled()).toHaveLength(0);
+        release();
         await vi.waitFor(() => expect(throttled()).toHaveLength(1), { timeout: 15_000 });
         expect(lookup).toHaveBeenCalledTimes(1);
         expect(throttled()[0]).toMatchObject({
@@ -295,6 +299,7 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
         await expectRefused(() => login(email, WRONG));
         await vi.waitFor(() => expect(throttled()).toHaveLength(2), { timeout: 15_000 });
       } finally {
+        release();
         await Promise.all(writes);
         delayedInsert.mockRestore();
       }
