@@ -318,6 +318,33 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
       }
       expect(throttled()).toEqual([]);
     });
+    it.each(['lookup', 'insert'])(
+      'answers 429 promptly when the audit %s never settles',
+      async (stall) => {
+        const email = mail(`audit-stall-${stall}`);
+        for (let i = 0; i < 10; i++) await login(email, WRONG);
+        const never = new Promise<never>(() => {});
+        const blocked =
+          stall === 'lookup'
+            ? vi.spyOn((h.db as any).query.users, 'findFirst').mockReturnValue(never)
+            : vi.spyOn(h.db as any, 'insert').mockReturnValue({ values: () => never });
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const response = await Promise.race([
+            login(email, WRONG),
+            new Promise<never>((_resolve, reject) => {
+              timer = setTimeout(() => reject(new Error('429 waited for audit')), 1500);
+            }),
+          ]);
+          expect(response.status).toBe(429);
+          expect(response.headers.get('Retry-After')).toBe('60');
+          expect(throttled()).toEqual([]);
+        } finally {
+          clearTimeout(timer);
+          blocked.mockRestore();
+        }
+      },
+    );
     it('register throttle never opens the database', async () => {
       const email = mail('register-no-db');
       for (let i = 0; i < 10; i++) await register(email);

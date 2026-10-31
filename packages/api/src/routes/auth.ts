@@ -254,7 +254,7 @@ authRoutes.post('/login', async (c) => {
   } catch (err) {
     if (!(err instanceof HTTPException) || err.status !== 429) throw err;
     if (err instanceof AuthThrottleError && err.auditAllowed) {
-      try {
+      void (async () => {
         const db = getDb();
         const existing =
           err.limiter === 'account'
@@ -270,9 +270,9 @@ authRoutes.post('/login', async (c) => {
           targetId: existing?.id ?? null,
           metadata: { reason: 'throttled', limiter: err.limiter },
         });
-      } catch (auditError) {
+      })().catch((auditError: unknown) => {
         log.error({ err: auditError }, 'failed to audit throttled sign-in');
-      }
+      });
     }
     throw err;
   }
