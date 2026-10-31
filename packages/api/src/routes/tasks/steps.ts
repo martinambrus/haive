@@ -110,27 +110,45 @@ async function reopenFailedTask(tx: DbHandle, taskId: string, now: Date): Promis
     .where(and(eq(schema.tasks.id, taskId), eq(schema.tasks.status, 'failed')));
 }
 
-/** Supersede the live invocations of the step rows `ids` and drop their agent minings. */
-async function sweepRunsOf(tx: DbHandle, ids: string[], now: Date): Promise<void> {
+/** Supersede the live invocations of the step rows `ids` and drop their agent minings. With
+ *  `noWait`, for a caller that already holds step rows and the task row, it first locks what it will
+ *  write without waiting: a pass holds a run and then wants its step row (`writeLoginHint`), so a
+ *  wait for the run from there closes a cycle, and a held row is answered with a lock-not-available
+ *  error instead. */
+async function sweepRunsOf(
+  tx: DbHandle,
+  ids: string[],
+  now: Date,
+  opts: { noWait?: boolean } = {},
+): Promise<void> {
   // Both halves of the step's spend: its own invocations AND the recap pass, whose
   // task_step_id is deliberately NULL. Without the second arm a re-run leaves the prior
   // recap's failure row live, and the step card keeps showing an error about a run that
   // has been replaced.
-  await tx
-    .update(schema.cliInvocations)
-    .set({ supersededAt: now })
-    .where(
-      and(
-        or(
-          inArray(schema.cliInvocations.taskStepId, ids),
-          inArray(schema.cliInvocations.summaryForStepId, ids),
-        ),
-        isNull(schema.cliInvocations.supersededAt),
-      ),
-    );
-  await tx
-    .delete(schema.taskStepAgentMinings)
-    .where(inArray(schema.taskStepAgentMinings.taskStepId, ids));
+  const runs = and(
+    or(
+      inArray(schema.cliInvocations.taskStepId, ids),
+      inArray(schema.cliInvocations.summaryForStepId, ids),
+    ),
+    isNull(schema.cliInvocations.supersededAt),
+  );
+  if (opts.noWait) {
+    await tx
+      .select({ id: schema.cliInvocations.id })
+      .from(schema.cliInvocations)
+      .where(runs)
+      .for('no key update', { noWait: true });
+  }
+  await tx.update(schema.cliInvocations).set({ supersededAt: now }).where(runs);
+  const minings = inArray(schema.taskStepAgentMinings.taskStepId, ids);
+  if (opts.noWait) {
+    await tx
+      .select({ id: schema.taskStepAgentMinings.id })
+      .from(schema.taskStepAgentMinings)
+      .where(minings)
+      .for('update', { noWait: true });
+  }
+  await tx.delete(schema.taskStepAgentMinings).where(minings);
 }
 
 /** Blank a set of step rows so the worker re-runs them from detect: supersede their live
@@ -173,7 +191,10 @@ export async function resetRowsForRerun(
 ): Promise<void> {
   if (rows.length === 0) return;
   const ids = rows.map((r) => r.id);
-  await sweepRunsOf(tx, ids, now);
+  // The rows a pass activated meanwhile are held already (`rowsHeld`) and the task row is bumped:
+  // their runs are swept without waiting, and a held one refuses the action as a held row does.
+  if (opts.rowsHeld) await refusingWhenLocked(() => sweepRunsOf(tx, ids, now, { noWait: true }));
+  else await sweepRunsOf(tx, ids, now);
   // Re-running 06c-dag-execute (or any step whose set includes it) must also clear the wedged
   // DAG level: resetting task_steps alone leaves task_dag_issues failed_unrecoverable, so
   // resolveDagPhase re-derives the same failure and the step re-halts identically. No-op when
@@ -246,11 +267,24 @@ export function rowsLeftActive<T extends { id: string; status: string }>(
   );
 }
 
+/** A statement that could not take a lock without waiting: the pass that holds it is mid-write, and
+ *  the action rolls back. The bump holds the task row, so waiting here could close a cycle. */
+async function refusingWhenLocked<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    if (isLockNotAvailable(err)) {
+      throw new HttpError(503, 'The task changed while this was being applied; try again');
+    }
+    throw err;
+  }
+}
+
 /** Rows a pass activated between the action's read and its epoch bump. The worker's claim checks
  *  the epoch under the task row's lock, so after the bump this set is final. */
 async function rowsActivatedMeanwhile(tx: DbHandle, taskId: string, kept: readonly string[]) {
-  try {
-    return await tx
+  return refusingWhenLocked(() =>
+    tx
       .select()
       .from(schema.taskSteps)
       .where(
@@ -263,14 +297,8 @@ async function rowsActivatedMeanwhile(tx: DbHandle, taskId: string, kept: readon
       // The rows are normally held by the id-ordered batch already, and FOR UPDATE on a row held
       // FOR NO KEY UPDATE is an upgrade that conflicts with the KEY SHARE a pass's run insert holds
       // on it: a 503 for a row this transaction holds itself.
-      .for('no key update', { noWait: true });
-  } catch (err) {
-    // The bump holds the task row, so a row a pass is still writing rolls the action back.
-    if (isLockNotAvailable(err)) {
-      throw new HttpError(503, 'The task changed while this was being applied; try again');
-    }
-    throw err;
-  }
+      .for('no key update', { noWait: true }),
+  );
 }
 
 /** A row whose CLI may still be running in a sandbox. */
