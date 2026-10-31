@@ -19,8 +19,24 @@ const h = vi.hoisted(() => ({
   actor: '',
   throttle: vi.fn(),
   close: vi.fn(),
+  auditInsert: vi.fn(),
+  auditLog: vi.fn(),
 }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/lib/audit.js', async (original) => {
+  const real = await original<any>();
+  return {
+    ...real,
+    insertAuditEvent: async (db: any, event: any) => {
+      h.auditInsert(event);
+      return real.insertAuditEvent(db, event);
+    },
+    logAuditEvent: (event: any) => {
+      h.auditLog(event);
+      real.logAuditEvent(event);
+    },
+  };
+});
 vi.mock('../src/lib/user-sockets.js', () => ({ closeUserSockets: h.close }));
 vi.mock('../src/lib/auth-throttle.js', () => ({ reserveAuthAttempt: h.throttle }));
 vi.mock('../src/auth/password.js', () => ({
@@ -65,6 +81,8 @@ describe.skipIf(!url)('Account security audit on Postgres', () => {
     vi.spyOn(secretsService, 'getJwtSecret').mockResolvedValue('cd'.repeat(32));
     vi.spyOn(secretsService, 'getEmailBlindIndexPepper').mockResolvedValue('ef'.repeat(32));
     h.actor = (await makeActor(db)).id;
+    h.auditInsert.mockClear();
+    h.auditLog.mockClear();
     await db
       .update(schema.users)
       .set({
@@ -142,6 +160,7 @@ describe.skipIf(!url)('Account security audit on Postgres', () => {
       if (refused) expect(res.headers.getSetCookie()).toEqual([]);
       else {
         const payload = (await res.json()) as any;
+        expect(h.auditLog.mock.calls[0]![0]).toBe(h.auditInsert.mock.calls[0]![0]);
         expect(rows[0]).toMatchObject({
           action: 'user.register',
           actorUserId: payload.user.id,

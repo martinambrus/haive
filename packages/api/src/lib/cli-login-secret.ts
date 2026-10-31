@@ -16,7 +16,7 @@ export async function saveCliLoginSecret(
     action: 'cli_provider.secret.set',
     targetType: 'cli_provider',
     targetId: providerId,
-    metadata: { source: 'login' },
+    metadata: { source: 'login', secretName: 'CLAUDE_CODE_OAUTH_TOKEN' },
   };
   await db.transaction(async (tx) => {
     // Provider before secret, matching the environment editor's write order. The lock also

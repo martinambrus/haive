@@ -20,8 +20,24 @@ const h = vi.hoisted(() => ({
   exchange: vi.fn(),
   poll: vi.fn(),
   stash: '',
+  auditInsert: vi.fn(),
+  auditLog: vi.fn(),
 }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/lib/audit.js', async (original) => {
+  const real = await original<any>();
+  return {
+    ...real,
+    insertAuditEvent: async (db: any, event: any) => {
+      h.auditInsert(event);
+      return real.insertAuditEvent(db, event);
+    },
+    logAuditEvent: (event: any) => {
+      h.auditLog(event);
+      real.logAuditEvent(event);
+    },
+  };
+});
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: any, next: any) => {
     c.set('userId', h.actor);
@@ -67,6 +83,8 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
   });
   beforeEach(async () => {
     h.actor = (await makeActor(db)).id;
+    h.auditInsert.mockClear();
+    h.auditLog.mockClear();
     vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue(KEK);
     vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
     const [row] = await db
@@ -126,7 +144,11 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
             actorUserId: h.actor,
             targetId: provider,
             targetType: 'cli_provider',
+            metadata: {
+              secretName: label === 'set' || label === 'delete' ? 'API_KEY' : 'CLAUDE_USAGE_OAUTH',
+            },
           });
+          expect(h.auditLog.mock.calls[0]![0]).toBe(h.auditInsert.mock.calls[0]![0]);
           expect(JSON.stringify(rows)).not.toContain('synthetic-');
         }
         if (label === 'usage connect' && refuse) expect(h.exchange).not.toHaveBeenCalled();
@@ -167,6 +189,13 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
           refused ? 500 : operation === 'clone' || operation === 'create' ? 201 : 200,
         );
         expect(await audits(db)).toHaveLength(refused ? 0 : 1);
+        if (!refused) {
+          expect(h.auditLog.mock.calls[0]![0]).toBe(h.auditInsert.mock.calls[0]![0]);
+          if (operation !== 'provider-delete')
+            expect((await audits(db))[0]!.metadata).toMatchObject({
+              secretNames: [operation === 'clone' ? 'API_KEY' : 'ANTHROPIC_API_KEY'],
+            });
+        }
         if (refused) {
           expect(await db.select().from(schema.cliProviders)).toEqual(before);
           expect(await secrets()).toEqual(beforeSecrets);
@@ -191,6 +220,9 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
       } else {
         await save;
         expect(await secrets()).toHaveLength(1);
+        expect((await audits(db))[0]!.metadata).toMatchObject({
+          secretName: 'CLAUDE_CODE_OAUTH_TOKEN',
+        });
         expect(
           (await db.query.cliProviders.findFirst({ where: eq(schema.cliProviders.id, provider) }))!
             .envVars,

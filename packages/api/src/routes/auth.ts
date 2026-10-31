@@ -87,6 +87,7 @@ authRoutes.post('/register', async (c) => {
 
   // Hashing is deliberately outside the transaction below: bcrypt takes ~100ms and the transaction
   // holds a lock every other registration queues behind.
+  let registrationEvent: AuditEvent;
   const user = await db.transaction(async (tx) => {
     // Serialise the count-then-insert. Without it two simultaneous first-registrations both read
     // zero users and BOTH become admin — the one race this feature has, and it is invisible in
@@ -179,25 +180,20 @@ authRoutes.post('/register', async (c) => {
       }
     }
 
-    await insertAuditEvent(tx, {
+    registrationEvent = {
       actorUserId: inserted[0]!.id,
       action: 'user.register',
       targetType: 'user',
       targetId: inserted[0]!.id,
       metadata: { role, invited: invite !== null, firstRun: decision.firstRun },
-    });
+    };
+    await insertAuditEvent(tx, registrationEvent);
     if (decision.firstRun) {
       log.info({ userId: inserted[0]!.id }, 'first account created — anointed as administrator');
     }
     return { ...inserted[0]!, firstRun: decision.firstRun };
   });
-  logAuditEvent({
-    actorUserId: user.id,
-    action: 'user.register',
-    targetType: 'user',
-    targetId: user.id,
-    metadata: { role: user.role, invited: Boolean(body.inviteToken), firstRun: user.firstRun },
-  });
+  logAuditEvent(registrationEvent!);
   const { accessToken, refreshToken, expiresAt } = await issueTokens(
     user.id,
     user.role,

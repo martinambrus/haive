@@ -354,6 +354,7 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
   const split = body.envVars ? splitSecretLikeEnv(body.envVars) : null;
   const model = body.model?.trim() || null;
   const provisioningModel = shouldProvisionOllamaModel({ name: body.name, model });
+  let secretEvent: AuditEvent | undefined;
   const inserted = await db.transaction(async (tx) => {
     await admitNewWork(tx);
     const rows = await tx
@@ -395,26 +396,25 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
         onExisting: 'overwrite',
       });
     }
-    if (Object.keys(split?.secrets ?? {}).length > 0)
-      await insertAuditEvent(tx, {
+    if (Object.keys(split?.secrets ?? {}).length > 0) {
+      secretEvent = {
         actorUserId: userId,
         action: 'cli_provider.secret.set',
         targetType: 'cli_provider',
         targetId: rows[0]!.id,
-        metadata: { source: 'environment', secretCount: Object.keys(split?.secrets ?? {}).length },
-      });
+        metadata: {
+          source: 'environment',
+          secretCount: Object.keys(split?.secrets ?? {}).length,
+          secretNames: Object.keys(split?.secrets ?? {}).sort(),
+        },
+      };
+      await insertAuditEvent(tx, secretEvent);
+    }
     return rows;
   });
 
   const created = inserted[0]!;
-  if (Object.keys(split?.secrets ?? {}).length > 0)
-    logAuditEvent({
-      actorUserId: userId,
-      action: 'cli_provider.secret.set',
-      targetType: 'cli_provider',
-      targetId: created.id,
-      metadata: { source: 'environment', secretCount: Object.keys(split?.secrets ?? {}).length },
-    });
+  if (secretEvent) logAuditEvent(secretEvent);
   await enqueueBuildForProvider(created.id, userId);
   if (provisioningModel) await enqueueOllamaProvisionForProvider(created.id, userId);
   return c.json(
@@ -526,6 +526,19 @@ cliProviderRoutes.patch('/:id', async (c) => {
     }
   }
 
+  const secretEvent: AuditEvent | undefined = Object.keys(split?.secrets ?? {}).length
+    ? {
+        actorUserId: userId,
+        action: 'cli_provider.secret.set',
+        targetType: 'cli_provider',
+        targetId: id,
+        metadata: {
+          source: 'environment',
+          secretCount: Object.keys(split?.secrets ?? {}).length,
+          secretNames: Object.keys(split?.secrets ?? {}).sort(),
+        },
+      }
+    : undefined;
   const updated = await db.transaction(async (tx) => {
     if (startsJob) await admitNewWork(tx);
     const rows = await tx
@@ -542,25 +555,11 @@ cliProviderRoutes.patch('/:id', async (c) => {
         onExisting: 'overwrite',
       });
     }
-    if (Object.keys(split?.secrets ?? {}).length > 0)
-      await insertAuditEvent(tx, {
-        actorUserId: userId,
-        action: 'cli_provider.secret.set',
-        targetType: 'cli_provider',
-        targetId: id,
-        metadata: { source: 'environment', secretCount: Object.keys(split?.secrets ?? {}).length },
-      });
+    if (secretEvent) await insertAuditEvent(tx, secretEvent);
     return rows;
   });
   const updatedRow = updated[0]!;
-  if (Object.keys(split?.secrets ?? {}).length > 0)
-    logAuditEvent({
-      actorUserId: userId,
-      action: 'cli_provider.secret.set',
-      targetType: 'cli_provider',
-      targetId: id,
-      metadata: { source: 'environment', secretCount: Object.keys(split?.secrets ?? {}).length },
-    });
+  if (secretEvent) logAuditEvent(secretEvent);
 
   if (provisioningModel) await enqueueOllamaProvisionForProvider(id, userId);
   const modelStatusOverride = provisioningModel
@@ -763,6 +762,7 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
   // A source saved before the split still holds secret-looking keys in envVars; the clone does not.
   const split = splitSecretLikeEnv(source.envVars ?? {});
   const provisioningModel = shouldProvisionOllamaModel(source);
+  let cloneEvent: AuditEvent;
   const created = await db.transaction(async (tx) => {
     await admitNewWork(tx);
     const inserted = await tx
@@ -821,23 +821,23 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
         });
       }
     }
-    await insertAuditEvent(tx, {
+    cloneEvent = {
       actorUserId: userId,
       action: 'cli_provider.clone',
       targetType: 'cli_provider',
       targetId: row.id,
-      metadata: { sourceProviderId: source.id },
-    });
+      metadata: {
+        sourceProviderId: source.id,
+        secretNames: [
+          ...new Set([...sourceSecrets.map((s) => s.secretName), ...Object.keys(split.secrets)]),
+        ].sort(),
+      },
+    };
+    await insertAuditEvent(tx, cloneEvent);
     return row;
   });
 
-  logAuditEvent({
-    actorUserId: userId,
-    action: 'cli_provider.clone',
-    targetType: 'cli_provider',
-    targetId: created.id,
-    metadata: { sourceProviderId: source.id },
-  });
+  logAuditEvent(cloneEvent!);
   await enqueueBuildForProvider(created.id, userId);
   if (provisioningModel) await enqueueOllamaProvisionForProvider(created.id, userId);
   return c.json(
@@ -893,7 +893,7 @@ cliProviderRoutes.post('/:providerId/secrets', async (c) => {
     action: 'cli_provider.secret.set',
     targetType: 'cli_provider',
     targetId: providerId,
-    metadata: { source: 'manual' },
+    metadata: { source: 'manual', secretName: body.secretName },
   };
   const masterKek = await secretsService.getMasterKek();
   const secret = await db.transaction(async (tx) => {
@@ -989,7 +989,7 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
     action: 'cli_provider.secret.set',
     targetType: 'cli_provider',
     targetId: providerId,
-    metadata: { source: 'usage_oauth' },
+    metadata: { source: 'usage_oauth', secretName: CLAUDE_USAGE_OAUTH_SECRET },
   };
   const masterKek = await secretsService.getMasterKek();
   const tokens = await db.transaction(async (tx) => {
@@ -1052,7 +1052,7 @@ cliProviderRoutes.delete('/:providerId/usage-auth', async (c) => {
     action: 'cli_provider.secret.delete',
     targetType: 'cli_provider',
     targetId: providerId,
-    metadata: { source: 'usage_oauth' },
+    metadata: { source: 'usage_oauth', secretName: CLAUDE_USAGE_OAUTH_SECRET },
   };
   const deleted = await db.transaction(async (tx) => {
     const rows = await tx
@@ -1088,7 +1088,7 @@ cliProviderRoutes.delete('/:providerId/secrets/:secretName', async (c) => {
     action: 'cli_provider.secret.delete',
     targetType: 'cli_provider',
     targetId: providerId,
-    metadata: { source: 'manual' },
+    metadata: { source: 'manual', secretName },
   };
   await db.transaction(async (tx) => {
     const result = await tx
