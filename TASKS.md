@@ -953,7 +953,7 @@ Decide whether the class is worth a general mechanism (copy DOM values into stat
 
 ### T465 · FNF[smoke-hang-watchdog] · one hung smoke burns the whole CI smokes job and hides every smoke after it
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T02:35Z · last: 2026-10-31T02:35Z
 From the T349 fix-round review (2026-10-31). PRE-EXISTING, minor (CI cost and lost signal). `smoke:ci` chains the smokes with `&&` and no per-smoke limit (api package.json ~:29, worker package.json ~:59), so a smoke that hangs runs until the job's 30-minute limit cancels it, and the smokes after it never run: in PR #951's first run 46 of the 52 smokes never ran. Main's green run uses about 1408 of the 1800 s. Give each smoke its own limit (a wrapper that kills it and names it), so a hang fails one smoke fast and the rest still run.
 
 ### T466 · FNF[stale-outbox-rows] [verify-first] · dirty project-state outbox rows whose checkout is gone fail every sweep tick
