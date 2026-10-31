@@ -870,14 +870,6 @@ From the T449 review (2026-10-30). PRE-EXISTING, minor (signed-in pages; only a 
 1. web components/new-repo-form.tsx ~:116 keeps the repository name in a controlled `useState('')` and ~:239 renders `<form onSubmit>` with no `method`: text typed into `/repos/new` before hydration is reset to '' by the first re-render, and a submit before hydration is a GET reload of the same page (the input has no `name`, so nothing reaches the URL). The fix class is T449's: uncontrolled inputs read with `new FormData(event.currentTarget)` at submit.
 2. The other server-rendered forms were not surveyed: list each controlled form a page renders on the server and say which lose pre-hydration input or put a value in the URL on a native submit.
 
-### T455 · FNF[api-body-shape] · a JSON `null` body is a 500 in twelve api handlers; wrongly typed fields in the tooling PATCH are a 500 (+1)
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T00:38Z · last: 2026-10-31T00:38Z
-From the T447 review (2026-10-30). PRE-EXISTING, minor. Line numbers as of main 8c655fc81.
-
-1. A JSON `null` body is read as an object, so the handler throws a TypeError and answers 500: api routes/plan.ts ~:1008-1010 (DELETE plan, `body.confirm`), tasks/index.ts ~:1522-1527 (steer), tooling.ts ~:19-20, ~:59-64, ~:150-151, ~:340-341 and ~:218 (SSE: an empty 200 stream plus a console error, not a 500), user-settings.ts ~:244-245, ~:280-281, ~:312-313, bundles.ts ~:757-762, and tooling-upgrades.ts ~:250-256 (POST tooling-upgrade: `null` survives its try/catch, then `parsed.components` throws). T447 (PR #948) guarded the tooling PATCH alone. Fix: one shared guard (a body must be a JSON object, else 400 `invalid_body`), one control per route.
-2. Fields of the wrong type in an object body to PATCH `/repositories/:id/tooling` are a 500: `rtkVersion: 5` (~:832), `chromeDevtoolsMcpVersion: true` (~:834), `secretMaskAllow: [5]` (~:853), `secretMaskDenyExtend: [{}]` (~:858) ("x.trim is not a function", probed in T447 evidence/f3-probe-summary.txt); an unknown `ragEmbedAction` string takes the retry branch (~:795, ~:900-932) and reaches the RAG lock. A zod schema for the body fixes all of them and subsumes the object guard.
-
 ### T456 · FNF[api-optional-body-defaults] [design] · a malformed or empty body becomes `{}` and succeeds where the body is optional (+1)
 
 status: open
@@ -961,6 +953,7 @@ Decide whether the class is worth a general mechanism (copy DOM values into stat
 
 ## Done
 
+- T455 — a JSON body that is not an object answers 400 invalid_body in the twelve handlers that read fields off it, through one shared guard (requireJsonObject; the Ollama pull SSE route answers an error event); PATCH tooling parses its body with a zod schema, so a field of the wrong type answers 400 Validation failed naming it and an unknown ragEmbedAction never reaches the RAG lock — PR #953 (dbc091f20), 2026-10-31; main CI green; checked on the dev stack; follow-ups T463, T456 +1, T364 item 26
 - T437 — repository responses carry no credential: the create and exclusions PATCH responses answer redactEditableGitUrl(remote) like list and detail, and no repository response (list, detail, create, upload, upload-complete, exclusions) carries the onboarding tooling or environment mirror, which held the RAG connection string with its password and MCP env values; a failed clone or refresh was already stored redacted (pinned) — PR #952 (52985ee80), 2026-10-31; main CI green; checked on the dev stack (78 list rows, detail)
 - T445 — a project-state sync with no base logs one warn naming the units whose held value the checkout's replaced (at most ten, settings and environment first, never a value); the web-bundle guard also fails on Node globals read as values (Buffer.byteLength became TextEncoder); the conflict-sides comment moved onto conflictSide; item 2 (the page saying a value was refused or replaced) moved to T462 [design] — PR #950 (9d8c78f58), 2026-10-31; main CI green; docs also record T446's verdict; follow-ups T462, T364 item 25
 - T452 — the 150 ms Enter after a token paste is one of the login session's tracked one-shot timers and cleanupSession clears it; a chunk after cleanup starts no antigravity URL step or menu-advance timer — PR #949 (fc7789288), 2026-10-30; main CI green; follow-up T457
