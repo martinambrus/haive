@@ -4,6 +4,7 @@ import { PLAN_CHAT_STEP_ID, PLAN_MERGE_STEP_ID, type PlanMergeState } from '@/li
 import { PlanChat } from './plan-chat';
 import { PlanMergePanel } from './plan-merge-panel';
 import { FormError } from '@/components/ui';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 
 // Hooks on a plain slot list, as in toast-stack.test.tsx: this package has no DOM environment.
 const rt = vi.hoisted(() => {
@@ -63,6 +64,7 @@ const net = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
   discardPlanMerge: vi.fn(),
+  submitPlanMergeTurn: vi.fn(),
   endPlanChat: vi.fn(),
   messages: undefined as unknown,
 }));
@@ -70,6 +72,7 @@ vi.mock('@/lib/api-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api-client')>()),
   api: { get: net.get, post: net.post },
   discardPlanMerge: net.discardPlanMerge,
+  submitPlanMergeTurn: net.submitPlanMergeTurn,
   endPlanChat: net.endPlanChat,
   getPlanMessages: async () => net.messages,
   getPlanBuildClis: async () => ({ plannerCliProviderId: null }),
@@ -185,6 +188,7 @@ beforeEach(() => {
   net.get.mockReset();
   net.post.mockReset().mockResolvedValue(undefined);
   net.discardPlanMerge.mockReset();
+  net.submitPlanMergeTurn.mockReset().mockResolvedValue(undefined);
   net.endPlanChat.mockReset().mockResolvedValue(undefined);
 });
 afterEach(() => {
@@ -434,6 +438,7 @@ describe('PlanMergePanel with a merge task', () => {
 
     expect(onSettled).toHaveBeenCalledTimes(1);
     expect(hasNotice()).toBe(true);
+    expect(shown().find((el) => el.props.role === 'status')).toBeDefined();
     expect(labelled('Discard')).toBeUndefined();
     expect(host('textarea')).toBeUndefined();
     expect(vi.getTimerCount()).toBe(0);
@@ -451,9 +456,10 @@ describe('PlanMergePanel with a merge task', () => {
     expect(labelled(CONFIRM)).toBeDefined();
     expect(host('textarea')).toBeDefined();
     expect(pulsing()).toBe(false);
-    expect(shown().find((el) => el.type === FormError)?.props.message).toBe(
-      'The merge has already completed or closed. Nothing was discarded.',
-    );
+    expect(shown().find((el) => el.type === FormError)?.props.message).toBeNull();
+    const status = shown().find((el) => el.props.role === 'status');
+    expect(status).toBeDefined();
+    expect(shownIn(status).find((el) => el.type === InlineMarkdown)?.props.body).toBe(NOTICE);
     expect(taskFetches()).toBe(1);
   });
 
@@ -480,6 +486,27 @@ describe('PlanMergePanel with a merge task', () => {
       expect(hasNotice()).toBe(false);
       expect(shown().find((el) => el.type === FormError)?.props.message).toBeNull();
       expect(host('textarea')?.props.value).toBe('');
+    },
+  );
+
+  it.each(['answer', 'discard'] as const)(
+    'clears the previous outcome when trying to %s again',
+    async (action) => {
+      vi.stubGlobal('window', { confirm: vi.fn(() => true) });
+      net.discardPlanMerge.mockResolvedValue({ ok: true, cancelled: false });
+      await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+      await press('Discard');
+      expect(hasNotice()).toBe(true);
+      net.discardPlanMerge.mockRejectedValue({ message: 'Next request failed' });
+      net.submitPlanMergeTurn.mockRejectedValue({ message: 'Next request failed' });
+
+      await press(action === 'answer' ? CONFIRM : 'Discard');
+
+      expect(hasNotice()).toBe(false);
+      expect(shown().find((el) => el.props.role === 'status')).toBeUndefined();
+      expect(shown().find((el) => el.type === FormError)?.props.message).toBe(
+        'Next request failed',
+      );
     },
   );
 

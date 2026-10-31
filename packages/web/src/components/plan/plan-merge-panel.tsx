@@ -13,6 +13,7 @@ import {
   type TaskStep,
 } from '@/lib/api-client';
 import { Button, FormError } from '@/components/ui';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
 import { isAwaitingFormInput } from '@/lib/submit-state';
@@ -178,7 +179,12 @@ export function PlanMergePanel({
 
   const outcome =
     notice && (merge === null || merge.taskId === notice.taskId) ? (
-      <FormError message={notice.text} />
+      <div
+        role="status"
+        className="rounded-md border border-neutral-800 px-3 py-2 text-xs text-neutral-400"
+      >
+        <InlineMarkdown body={notice.text} />
+      </div>
     ) : null;
   if (!merge) return outcome;
 
