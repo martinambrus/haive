@@ -1,3 +1,4 @@
+import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { gitRun } from './git-exec.js';
 import { gitWorkspaceStatus } from './git-workspace.js';
 
@@ -29,4 +30,11 @@ export async function readNamedCheckout(repoPath: string): Promise<NamedCheckout
 export async function checkoutMatches(repoPath: string, expected: NamedCheckout): Promise<boolean> {
   const now = await readNamedCheckout(repoPath);
   return now?.ref === expected.ref && now.sha === expected.sha;
+}
+
+/** Whether the checkout directory is gone: absent, or not a directory. Strict on purpose: an
+ * unreadable parent (EACCES) is not a gone checkout and must keep failing loudly, where a lenient
+ * read would answer `null` and read as one. */
+export async function checkoutMissing(repoPath: string): Promise<boolean> {
+  return (await lstatNoFollow(repoPath, '', { strict: true })) === null;
 }
