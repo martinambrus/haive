@@ -33,7 +33,9 @@ type PollResponse =
 export function findGithubOauthCredential(
   credentials: RepoCredentialSummary[],
 ): RepoCredentialSummary | undefined {
-  return credentials.find((c) => c.host === 'github.com' && c.label.startsWith('GitHub OAuth '));
+  return credentials.find(
+    (c) => c.host.toLowerCase() === 'github.com' && c.label.startsWith('GitHub OAuth '),
+  );
 }
 
 /**

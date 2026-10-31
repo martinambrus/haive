@@ -73,7 +73,7 @@ githubOauthRoutes.get('/repos', async (c) => {
     ),
   });
   if (!cred) throw new HttpError(404, 'Credential not found');
-  if (cred.host !== 'github.com') {
+  if (cred.host.toLowerCase() !== 'github.com') {
     throw new HttpError(400, 'Credential is not a github.com credential');
   }
 

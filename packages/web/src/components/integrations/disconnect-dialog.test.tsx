@@ -19,6 +19,7 @@ const connection = (over: Partial<IntegrationConnection> = {}): IntegrationConne
   grantedScopes: ['repo'],
   status: 'connected',
   lastError: null,
+  refreshRefusedAt: null,
   repoCredentialId: 'cred-1',
   expiresAt: null,
   createdAt: '2026-10-14T10:00:00.000Z',

@@ -3,10 +3,9 @@
 import { spawn } from 'node:child_process';
 import { constants } from 'node:os';
 
-// Across 8 green main runs, 50 of the 52 smokes never took longer than 17 s. The other two,
-// repo-refresh (270 s) and two-install (81 s), carry their own limit in package.json. A hung
-// smoke costs its whole limit, which has to stay inside the ~350 s that the job's 1800 s leave
-// over a normal run.
+// Every smoke has a time limit: this default, or its own in package.json (repo-refresh and
+// two-install take longest). A hung smoke costs its whole limit, which has to stay inside what the
+// job's limit leaves over a normal run (docs/architecture/ci-smokes.md, Limits, has the numbers).
 const DEFAULT_LIMIT_S = 120;
 
 const usage = (reason) => {

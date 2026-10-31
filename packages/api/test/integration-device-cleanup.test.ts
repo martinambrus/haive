@@ -47,6 +47,7 @@ const result: SignInResult = {
     grantedScopes: ['repo'],
     status: 'connected',
     lastError: null,
+    refreshRefusedAt: null,
     repoCredentialId: 'credential-1',
     expiresAt: null,
     createdAt: new Date(0),
