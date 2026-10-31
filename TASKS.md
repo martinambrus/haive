@@ -84,7 +84,7 @@ board. At session start, load the board's tasks you own or will work on into the
 - T270, T310, T318, T326 — design decisions (see each task).
 - T319 — go-ahead on the scope of set-aside batching (rewrites four helpers).
 - T323 item 4 — retention rule for `complete`/`consumed` upload rows.
-- T492, T493 — design decisions (see each task).
+- T492, T493, T497 — design decisions (see each task).
 - T376 — strict sign-in rows: with `audit_events` unwritable nobody can sign in, the administrator included (no break-glass). Keep strict (recommended: a database that cannot write blocks sessions anyway) or make sign-in rows best-effort.
 
 ---
@@ -1068,6 +1068,19 @@ From the T397 review (2026-10-31). Same class as T397 (git's exit code, never it
 2. 10-gate-3-commit.ts ~:200: a failed `show --name-only` (non-zero, not no-answer) yields `[]`, so `task.changedPaths` silently misses the commit's files.
 3. [verify-first] _dependency-policy.ts ~:159 and ~:214: `git show <base>:<file>` exit 128 means absent or failed; a failure drops the baseline Drupal protection and `ownedPaths`. `rev-parse -q --verify <base>:<path>` (exit 1) tells absent apart.
 4. [verify-first] project-state/set-aside.ts ~:264-267 (`headOid`) and ~:1147-1152 (`headEntry`): a failed read reads as "HEAD lacks the path" (used for `untracked` ~:519 and in `putBackIndex` ~:1251); guarded by earlier successful reads in the same transaction.
+
+### T496 · FNF[vendor-call-deadlines] · the worker's usage poll awaits vendor calls with no deadline (+1)
+
+status: open
+From the T376 follow-up review (2026-10-31). PRE-EXISTING, moderate; the same class as the 15 s deadline T376 gives `postToken`.
+
+1. The Grok token refresh (worker grok-oauth.ts ~:130) is awaited ahead of the poll (usage-poll-queue.ts ~:693) on a `concurrency: 1` worker (~:698), and the usage fetchers (claude-code.ts ~:43, codex.ts ~:72, zai.ts ~:71, gemini.ts ~:40, awaited per batch through `cfg.fetch` ~:340) pass no `signal`; the only bound is the HTTP client's default. A stalled endpoint holds the tick, the provider-outage watch behind it and the Claude refresh. Give each an `AbortSignal.timeout` and pin it.
+2. The Grok refresh reads a permanent rejection from the message text (credential-refresh.ts ~:141 `msg.includes('invalid_grant')`, relying on grok-oauth.ts ~:144-146); the Claude twin has a typed `ClaudeOauthError.code`. Key it on a code.
+
+### T497 · FNF[plan-merge-failed-visibility] [design] · after a reload a failed plan merge leaves no trace on the plan page
+
+status: open
+From the T491 review (2026-10-31). `GET /plan/merge` lists open merges only (api plan.ts ~:447-459) and `plan_merge` tasks are hidden from the task list (tasks/index.ts ~:289-292), so once the page that saw the failure is gone, a FAILED merge (which keeps its worktree for a Retry) cannot be found from the plan page. Options: the route also returns the newest failed merge not followed by a successful one, shown with its Retry link; or a plan-page notice from the task events. Recommended: the first.
 
 ## Done
 
