@@ -119,10 +119,20 @@ export function cancelLiveRuns(tx: DbHandle, taskId: string, by: string, now: Da
     .returning({ id: schema.cliInvocations.id });
 }
 
-/** A park's live wait added to idle_ms, clamped since idle_ms is int4 (see cancelTaskRow). */
-const parkFoldedIntoIdle = () =>
-  sql`${schema.taskSteps.idleMs} + least(2147483647 - ${schema.taskSteps.idleMs},
-        greatest(0, floor(extract(epoch from (now() - ${schema.taskSteps.waitingStartedAt})) * 1000)))::int`;
+const parkMs = sql`greatest(0, floor(extract(epoch from (now() - ${schema.taskSteps.waitingStartedAt})) * 1000))`;
+const preRun = sql`${schema.taskSteps.startedAt} IS NULL`;
+/** A park's live wait, booked where the worker's foldPark books it (worker cli-park-timing.ts).
+ *  computeStepContribution bills work as span minus idle_ms and ADDS carried_idle_ms, so idle_ms may
+ *  only hold a wait inside the current run. A row parked before its run has no started_at, and a
+ *  fresh one follows when it runs, so its wait belongs in carried_idle_ms: in idle_ms it would clamp
+ *  that run's work to 0 for as long as the park lasted. Both columns are clamped to int4 headroom
+ *  (see cancelTaskRow), and greatest(0, NULL) is 0, so a row with no marker adds nothing. */
+const parkFolded = {
+  idleMs: sql`${schema.taskSteps.idleMs} + case when ${preRun} then 0
+    else least(2147483647 - ${schema.taskSteps.idleMs}, ${parkMs})::int end`,
+  carriedIdleMs: sql`${schema.taskSteps.carriedIdleMs} + case when ${preRun}
+    then least(2147483647 - ${schema.taskSteps.carriedIdleMs}, ${parkMs})::int else 0 end`,
+};
 
 /** The worker's gate-answer test (`readFixLoopGateAction`). */
 const holdsGateAnswer = sql`jsonb_typeof(${schema.taskSteps.formValues} -> ${FIX_LOOP_ACTION_FIELD}::text) = 'string'`;
@@ -155,7 +165,7 @@ export async function reofferParkedSteps(
     .update(schema.taskSteps)
     .set({
       status: 'pending',
-      idleMs: parkFoldedIntoIdle(),
+      ...parkFolded,
       waitingStartedAt: null,
       statusMessage: null,
       updatedAt: now,
@@ -238,12 +248,13 @@ async function failStuckSteps(
       statusMessage: null,
       // Fold an outstanding park into idle_ms before closing the row — see the same fold in
       // cancelTaskRow (api/lib/cancel-task.ts) for why stamping ended_at alone silently turns
-      // a recorded park back into work, and why the int4 clamp is load-bearing.
+      // a recorded park back into work, and why the int4 clamp is load-bearing. A row parked
+      // before its run books it to carried_idle_ms instead (parkFolded).
       // Caveat accepted: a step re-entered from waiting_cli keeps that status through its
       // apply phase (step-runner.ts only flips pending -> running), so stopping mid-apply
       // books that sliver as idle. Apply windows are sub-minute here (777 such rows total
       // 0.04h) against multi-hour parks, so the trade is strongly net-correct.
-      idleMs: parkFoldedIntoIdle(),
+      ...parkFolded,
       waitingStartedAt: null,
       updatedAt: now,
     })
