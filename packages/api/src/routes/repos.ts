@@ -1123,24 +1123,37 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
     Array.from(new Set(body.scopeExcludeGlobs.map(trimGlobSlashes).filter((p) => p.length > 0))),
   ).sort();
 
-  const event: AuditEvent = {
-    actorUserId: userId,
-    action: 'repository.scope.update',
-    targetType: 'repository',
-    targetId: id,
-    metadata: { excludeCount: scopeExcludeGlobs.length },
-  };
+  let event: AuditEvent | undefined;
   const updated = await db.transaction(async (tx) => {
+    const [stored] = await tx
+      .select()
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, id))
+      .for('update');
+    if (!stored) throw new HttpError(404, 'Repository not found');
+    const previous = new Set(stored.scopeExcludeGlobs ?? []);
+    const wanted = new Set(scopeExcludeGlobs);
+    const addedCount = [...wanted].filter((glob) => !previous.has(glob)).length;
+    const removedCount = [...previous].filter((glob) => !wanted.has(glob)).length;
     const rows = await tx
       .update(schema.repositories)
       .set({ scopeExcludeGlobs, updatedAt: new Date() })
       .where(eq(schema.repositories.id, id))
       .returning();
     await markProjectStateDirty(tx, id);
-    await insertAuditEvent(tx, event);
+    if (addedCount || removedCount) {
+      event = {
+        actorUserId: userId,
+        action: 'repository.scope.update',
+        targetType: 'repository',
+        targetId: id,
+        metadata: { addedCount, removedCount },
+      };
+      await insertAuditEvent(tx, event);
+    }
     return rows;
   });
-  logAuditEvent(event);
+  if (event) logAuditEvent(event);
   const {
     fileTree: _drop,
     renderContext: _context,

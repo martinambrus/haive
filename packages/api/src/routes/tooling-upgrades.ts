@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { Hono } from 'hono';
 import { and, desc, eq, isNull, or, sql, inArray } from 'drizzle-orm';
 import { isRootClaimLive, lockRepositoryTasksKey, schema } from '@haive/database';
@@ -975,28 +976,50 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
       'secretMaskDenyExtend',
       'agentRulesOverride',
       'appAuth',
-      'reviewDimensions',
       'verifyCommands',
-      'stepGuidanceEnabled',
       'prWorkflowEnabled',
-    ].filter((field) => field in updates);
+    ] as const;
+    let changedFields: string[] = [];
     const securityEvent: AuditEvent = {
       actorUserId: userId,
       action: 'repository.security.update',
       targetType: 'repository',
       targetId: repositoryId,
-      metadata: { fields: securityFields },
+      metadata: null,
     };
     assertRagLockHeld(lock);
     await db.transaction(async (tx) => {
-      if (typeof body.rtkEnabled === 'boolean') {
-        const [stored] = await tx
-          .select({ rtkEnabled: schema.repositories.rtkEnabled })
-          .from(schema.repositories)
-          .where(eq(schema.repositories.id, repositoryId))
-          .for('update');
-        if (stored?.rtkEnabled !== body.rtkEnabled) updates.rtkChoiceMadeAt = new Date();
-      }
+      const [stored] = await tx
+        .select()
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, repositoryId))
+        .for('update');
+      if (!stored) throw new HttpError(404, 'Repository not found');
+      if (typeof body.rtkEnabled === 'boolean' && stored.rtkEnabled !== body.rtkEnabled)
+        updates.rtkChoiceMadeAt = new Date();
+      changedFields = securityFields.filter(
+        (field) => field in updates && !isDeepStrictEqual(stored[field], updates[field]),
+      );
+      securityEvent.metadata = {
+        fields: changedFields,
+        values: Object.fromEntries(
+          changedFields.map((field) => {
+            const value = updates[field as keyof typeof updates];
+            return [
+              field,
+              field === 'appAuth'
+                ? Boolean((value as { enabled?: boolean } | null)?.enabled)
+                : typeof value === 'boolean'
+                  ? value
+                  : Array.isArray(value)
+                    ? value.length
+                    : value && typeof value === 'object'
+                      ? Object.keys(value).length
+                      : value !== null,
+            ];
+          }),
+        ),
+      };
       await tx
         .update(schema.repositories)
         .set(updates)
@@ -1007,14 +1030,14 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
         else await userSecretsService.delete(userId, key, tx);
       }
       if (appAuthWrites.length > 0) await insertAuditEvent(tx, appAuthEvent);
-      if (securityFields.length > 0) await insertAuditEvent(tx, securityEvent);
+      if (changedFields.length > 0) await insertAuditEvent(tx, securityEvent);
       if (updates.rtkEnabled === false) await convergeRtkQuestion(tx, repositoryId, userId);
       if (PORTABLE_SETTING_UPDATE_KEYS.some((key) => key in updates)) {
         await markProjectStateDirty(tx, repositoryId);
       }
     });
     if (appAuthWrites.length > 0) logAuditEvent(appAuthEvent);
-    if (securityFields.length > 0) logAuditEvent(securityEvent);
+    if (changedFields.length > 0) logAuditEvent(securityEvent);
     // A sync can write fallback rows between the probe and the clear; look once more after it.
     // Unfenced: the save has committed, and a lock lost by expiry leaves no sync to restore the flag.
     if (retryCleared && (await ragStoreAwaitsReembedBounded(db, repositoryId))) {

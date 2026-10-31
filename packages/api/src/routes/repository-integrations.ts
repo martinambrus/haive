@@ -52,17 +52,24 @@ repositoryIntegrationRoutes.put('/:id/integrations', async (c) => {
   const wanted = new Set(body.connectionIds);
   await requireOwnConnections(db, userId, [...wanted]);
 
-  const event: AuditEvent = {
+  let event: AuditEvent | undefined;
+  const makeEvent = (added: string[], removed: string[]): AuditEvent => ({
     actorUserId: userId,
     action: 'repository.integrations.update',
     targetType: 'repository',
     targetId: repositoryId,
-    metadata: { restricted: body.restricted, connectionIds: [...wanted] },
-  };
+    metadata: { restricted: body.restricted, added, removed },
+  });
   await db.transaction(async (tx) => {
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`integration-allow-list:${repositoryId}`}, 0))`,
     );
+    const [stored] = await tx
+      .select({ restricted: schema.repositories.integrationsRestricted })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, repositoryId))
+      .for('update');
+    if (!stored) throw new HttpError(404, 'Repository not found');
     const current = new Set(
       (
         await tx
@@ -99,8 +106,11 @@ repositoryIntegrationRoutes.put('/:id/integrations', async (c) => {
           ne(schema.repositories.integrationsRestricted, body.restricted),
         ),
       );
-    await insertAuditEvent(tx, event);
+    if (added.length || removed.length || stored.restricted !== body.restricted) {
+      event = makeEvent(added, removed);
+      await insertAuditEvent(tx, event);
+    }
   });
-  logAuditEvent(event);
+  if (event) logAuditEvent(event);
   return c.json({ restricted: body.restricted, connectionIds: [...wanted] });
 });

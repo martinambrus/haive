@@ -175,6 +175,59 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
           expect(JSON.stringify(await audits(db))).not.toMatch(/synthetic-password|user:|https:/);
         }
       });
+  const sendSetting = (suffix: string, body: unknown, method = 'PATCH') =>
+    app.request(`${suffix === 'exclusions' ? '/repos' : '/repositories'}/${repository}/${suffix}`, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  it('no-op tooling saves and quality knobs write no security row', async () => {
+    const current = (await stored())!;
+    const res = await sendSetting('tooling', {
+      secretMaskEnabled: current.secretMaskEnabled,
+      secretMaskAllow: current.secretMaskAllow,
+      secretMaskDenyExtend: current.secretMaskDenyExtend,
+      appAuth: null,
+      reviewDimensions: ['security'],
+      stepGuidanceEnabled: false,
+    });
+    expect(res.status).toBe(200);
+    expect(await audits(db)).toEqual([]);
+  });
+  it('scope records added and removed counts and omits no-op saves', async () => {
+    await db
+      .update(schema.repositories)
+      .set({ scopeExcludeGlobs: ['old'] })
+      .where(eq(schema.repositories.id, repository));
+    expect((await sendSetting('exclusions', { scopeExcludeGlobs: ['new'] })).status).toBe(200);
+    expect((await audits(db))[0]!.metadata).toEqual({ addedCount: 1, removedCount: 1 });
+    expect((await sendSetting('exclusions', { scopeExcludeGlobs: ['new'] })).status).toBe(200);
+    expect(await audits(db)).toHaveLength(1);
+  });
+  it('integrations record added and removed ids and omit no-op saves', async () => {
+    expect(
+      (await sendSetting('integrations', { restricted: true, connectionIds: [connection] }, 'PUT'))
+        .status,
+    ).toBe(200);
+    expect((await audits(db))[0]!.metadata).toEqual({
+      restricted: true,
+      added: [connection],
+      removed: [],
+    });
+    expect(
+      (await sendSetting('integrations', { restricted: true, connectionIds: [connection] }, 'PUT'))
+        .status,
+    ).toBe(200);
+    expect(await audits(db)).toHaveLength(1);
+    expect(
+      (await sendSetting('integrations', { restricted: true, connectionIds: [] }, 'PUT')).status,
+    ).toBe(200);
+    expect((await audits(db))[1]!.metadata).toEqual({
+      restricted: true,
+      added: [],
+      removed: [connection],
+    });
+  });
   const changes = [
     [
       'mask',
@@ -183,7 +236,21 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       { secretMaskEnabled: false, secretMaskAllow: ['private'], secretMaskDenyExtend: ['other'] },
     ],
     ['rules', 'PATCH', 'tooling', { agentRulesOverride: 'synthetic-rule-content' }],
-    ['app config', 'PATCH', 'tooling', { appAuth: null }],
+    [
+      'app config',
+      'PATCH',
+      'tooling',
+      {
+        appAuth: {
+          enabled: true,
+          loginUrl: '/login',
+          usernameSelector: '#user',
+          passwordSelector: '#pass',
+          submitSelector: '#go',
+          successCondition: { type: 'url_contains', value: '/home' },
+        },
+      },
+    ],
     ['MCP accept', 'PATCH', 'tooling', { repoMcpServersAction: 'accept' }],
     ['MCP discard', 'PATCH', 'tooling', { repoMcpServersAction: 'discard' }],
     ['exclusions', 'PATCH', 'exclusions', { scopeExcludeGlobs: ['private'] }],

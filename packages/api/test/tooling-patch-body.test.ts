@@ -232,8 +232,6 @@ describe('PATCH tooling still accepts what the Tooling page sends', () => {
             'secretMaskAllow',
             'secretMaskDenyExtend',
             'appAuth',
-            'reviewDimensions',
-            'stepGuidanceEnabled',
             'prWorkflowEnabled',
           ],
         },
