@@ -927,13 +927,6 @@ From the T466 review (2026-10-31). PRE-EXISTING, minor.
 
 Also (T459 fix round, 2026-10-31; PRE-EXISTING, minor): `DELETE /repositories/:id/plan` (api routes/plan.ts ~:1038) calls `applyPlanPatch` outside the `try`/`planError` mapping, so a repository deleted meanwhile answers 500 instead of 404; and the header of shared plan/errors.ts (~:1-6) still says a worker step turns `invalid` into a `RetryableParseError`, which `_plan-prompt.ts` (~:274-285) no longer does.
 
-### T479 · FNF[extract-swap] · an archive extract that fails between its two renames loses the previous repository tree
-
-status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T12:36Z · last: 2026-10-31T12:36Z
-From the T466 review (2026-10-31). PRE-EXISTING, minor, theoretical.
-
-`extractArchive` (worker repo/clone.ts ~:604-614) moves the old `dest` into the stage and then renames the new tree in; if the second rename fails or the process dies between the two, no repository directory is left, and the `finally` removes the stage with the old tree in it, although the doc comment (~:509-511) says a failure leaves the previous contents untouched. Direction: on a failed second rename move the old tree back before the `finally`, and say in the comment what a crash between the renames leaves.
-
 ### T480 · FNF[git-data-stored-dirs-2] · the KB path validator accepts a git-data name; 09_5, 09_5b and 11d still dispatch agents for a stored git-data dir (+4)
 
 status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T13:23Z · last: 2026-10-31T13:23Z
@@ -1054,6 +1047,7 @@ From the T476 follow-up review (2026-10-31). Minor (UX); PRE-EXISTING unless sta
 
 ## Done
 
+- T479 — an archive extract whose swap fails restores the previous destination tree before the stage is removed (the old tree was deleted with the stage); a failed restore keeps the stage and logs the absolute path of the kept tree; a failed stage removal after a good swap warns instead of failing silently; the comment says what a crash between the two renames leaves — PR #966 (a1a74f596), 2026-10-31; main CI green; delivered with codex-sonnet (1 fix round); follow-ups T486, T487
 - T474 — schema-parity, the web checks of production-images and macos-preflight run each check on !cancelled() && steps.<setup>.conclusion == 'success'; the smokes job's gated step and Redis-script steps have their own limits (25, 10, 5 minutes) and the job 45 minutes, pinned by a budget model of the GATED list (907 s plus 7.5 s a row; fails at 134 and 160 rows); the gated step's errexit comes from the runner's bash -e (comment only) — PR #967 (6bad0f036), 2026-10-31; main CI green with every guarded check run (PR run and main); ci-smokes.md; follow-ups T488, T489, T475 notes
 - T341 — a credential delete confirms and names the connection the cascade takes (audited with its id), a re-sign-in takes back the account's earlier credential by (user, host, account id: repo_credentials.sign_in_account_id, 0216) instead of adding one, a backing credential's host or forge cannot be edited (409), the resolver and task choice compare a forge connection's credential forge, hosts compare case-insensitively, a refused OAuth refresh is recorded and shown (refresh_refused_at, 0217), a rename follows into the token connection's label, and delete and edit lock the connection before the credential (a late link NOWAIT, 503) — PR #965 (e880cf343), 2026-10-31; main CI green; checked live on the dev stack with throwaway credentials; follow-up T485; item 14 (device poll retry on 5xx) is an owner question
 - T459 — measured first: run and agent-row statements lock in heap order (Bitmap/Seq scans at 96k runs), so no scan-order deadlock and no id-ordered batch; fixed the six measured lock-tier cycles instead (requeueAbandonedOrphan runs first, fan-out Resume supersede before agent marks, the reopened form's agent rows before its step row, the late sweep's runs and agent rows NOWAIT to the existing 503, the CANCEL step sweep in a short lockStepRows transaction) and a plan patch that may insert takes the repository row FOR KEY SHARE first (repository_gone: 404, clarify fails at once; update-only patches take no lock, since a project-state write holds that row 0.4-2 s) — PR #964 (823b83cf1), 2026-10-31; main CI green incl. all smokes; follow-ups T482, T483, T484, T478 +1, T364 +1
