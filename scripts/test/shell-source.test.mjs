@@ -39,3 +39,20 @@ describe('fail-closed shell lexing (item 1)', () => {
     });
   }
 });
+
+describe('fallback shell separators (item 2)', () => {
+  for (const script of [
+    '(cmd || true)',
+    'x=$(cmd || true)',
+    'cmd || true|cat',
+    'cmd || true &',
+    'cmd || :}',
+    'cmd || exit 0)',
+  ]) {
+    it(`rejects ${script}`, () =>
+      rejects(
+        script,
+        script.includes('exit') ? '|| exit 0' : script.includes(':') ? '|| :' : '|| true',
+      ));
+  }
+});

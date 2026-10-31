@@ -151,7 +151,9 @@ export function shellSource(source, { maskQuotes = false, step = 'shell script' 
 
 export function swallowedFailure(source, options = {}) {
   const script = shellSource(source, { ...options, maskQuotes: true });
-  const fallback = /\|\|\s*(?:true(?=\s|;|$)|:(?=\s|;|$)|exit\s+0(?=\s|;|$))/.exec(script);
+  const fallback = /\|\|\s*(?:true(?=[\s;|&)}]|$)|:(?=[\s;|&)}]|$)|exit\s+0(?=[\s;|&)}]|$))/.exec(
+    script,
+  );
   if (fallback) return fallback[0].replace(/\s+/g, ' ').trim();
   let branches = 0;
   let cases = 0;
