@@ -446,8 +446,18 @@ describe('the onboarding tooling unit', () => {
     ['no tooling object', { schemaVersion: 1, tooling: [] }],
     ['a list', []],
     ['a unit past the file limit', { schemaVersion: 1, tooling: { pad: 'x'.repeat(1024 * 1024) } }],
+    [
+      'a unit past the file limit in bytes, though not in characters',
+      { schemaVersion: 1, tooling: { pad: 'é'.repeat(512 * 1024) } },
+    ],
   ])('has no unit for a column holding %s', (_what, column) => {
     expect(toolingUnitOf(column)).toBeNull();
+  });
+
+  it('keeps a unit of multi-byte text that stays inside the file limit in bytes', () => {
+    const tooling = { pad: 'é'.repeat(512 * 1024 - 100) };
+
+    expect(toolingUnitOf({ schemaVersion: 1, tooling })).toEqual(tooling);
   });
 
   it('reads a checkout’s value only when it is an object', () => {

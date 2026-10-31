@@ -528,7 +528,7 @@ status: open · kind: design · was modular #203
 
 2. QUEUED broader finding, PRE-EXISTING; not authorized for T118 or the design fix above: at 375px on an onboarded repository, the New Task header with Re-run onboarding + Cancel overflows horizontally and squeezes the description into a narrow column. `packages/web/src/app/(app)/tasks/new/page.tsx:817` uses a non-wrapping header/action row. Fix direction: responsive stacking/wrapping with a viewport control for both actions. Source is byte-identical to main; evidence `.claude/tmp/board-run/T118/browser-reset-cli/before-reset-375.png` and `T118/fnf-mobile-header.json`. Leave queued when T118 pauses.
 
-### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+24)
+### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+25)
 
 status: open · was modular #211
 
@@ -557,6 +557,7 @@ status: open · was modular #211
 23. (main CI on 02a25e357, 2026-10-30) PRE-EXISTING since T118, flaky: worker test/onboarding-recorded-membership.test.ts `tree()` (~:287) reads every file under the fixture repository, `.git` included, right after the fixture's `git commit` (~:340-345, ~:442-445), and the detached `git maintenance run --auto` that commit starts creates and removes `.git/objects/maintenance.lock` in between: `ENOENT ... open '.../.git/objects/maintenance.lock'` (run 41136606433). Give the fixture's git calls `-c maintenance.auto=false` (or skip that lock in the walk), and grep the other tests that walk a git fixture after a commit for the same race.
 24. (T349 review, 2026-10-31) PRE-EXISTING, minor: of the four step actions that write the clicked row before they move the task (loop Resume, `retry_ai`, the CLI switch, Skip), only Skip has a committed lock-order control; no case tells `cancelStillOpen` locking every row of the task from locking only the open ones; and the cancel route's control (K7) now passes from the Stop batch alone, so the step abort's (K8) is the only one that pins `cancelStillOpen`.
 25. (T445 review, 2026-10-31) PRE-EXISTING, minor: since T445 the node-free guard fails on Node globals read as values, but it covers only the project-state subpath the web imports; shared naming/index.ts ~:63 (`process.env` as a default parameter) and forge/bitbucket-cloud.ts ~:33 (`Buffer.from`) are unguarded. The web never calls them today. Extend the guard to every shared subpath the web bundles.
+26. (T455 review, 2026-10-31) PRE-EXISTING, hardening: nothing enforces T455's `requireJsonObject` guard, so a new `(await c.req.json()) as {...}` in an api route brings the `null`-body 500 back. A ratchet test over api routes (as `fs-ratchet.test.ts` does for path-based fs calls) would catch it.
 
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+3)
 
@@ -781,7 +782,7 @@ status: open · area: modular-haive-plan owns merge-resolver.ts landing sections
 
 ### T421 · FNF[git-data-ledger-rows] · ledger rows recorded at git-data paths stay live forever
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T01:43Z · last: 2026-10-31T01:43Z
 From the T304 review (2026-10-24). PRE-EXISTING, minor. `onboarding_artifacts` rows an earlier release recorded at a git-data path (a literal `.git` segment or, since T304, an NTFS or HFS+ alias of it) are skipped by every reader (01 plan, 02 and 04 writes, 03 staging, the sync), but nothing retires them and they still count in `liveArtifacts` (api upgrades.ts ~:456, ~:723, ~:787). Fix: retire them in a numbered, idempotent data migration (SQL cannot call `namesGitData`, so the migration needs the same rule in SQL, or ship a deploy script), or leave them out of the counts.
 
 ### T425 · FNF[orphan-gitlink] · gate 3 commits an agent-left nested repository as a gitlink with no .gitmodules entry
@@ -839,15 +840,6 @@ From the T119 review (2026-10-30). Introduced by T119, fails closed. worker onbo
 status: open
 From the T119 review (2026-10-30). Minor. shared project-state limits.ts ~:12 `MAX_AGENT_RULES_BYTES` is 64 KiB, while codex reads only the first 32 KiB of AGENTS.md (the reason AGENTS.md itself is kept under 32 KiB), so a large override silently truncates what codex sees, and the rest of the file after the block with it. Decide: a 24-32 KiB cap, or a size hint on the Tooling editor.
 
-### T445 · FNF[first-import-visibility] · a first sync silently replaces a locally typed setting; a refused checkout value is only logged (+2)
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T23:56Z · last: 2026-10-30T23:56Z
-From the T119 review (2026-10-30). PRE-EXISTING, minor. Cross-reference: T317 [design] (an RTK choice loses to the first record import).
-
-1. shared project-state merge.ts ~:29,46,58 computes `overwritten` (a local value an incoming one replaced) and nothing outside merge.ts reads it, so a first sync with no base replaces a locally typed value of every portable setting without a word. Surface it in the sync's answers or log it at warn with the unit names.
-2. worker project-state sync.ts ~:948: a checkout value that is refused (over its cap, holding a region marker) is only logged; the repository page never says the committed value was ignored.
-3. Nits: the doc comment about `{ v }` sides sits above `SETTING_LABELS` (shared project-state conflicts.ts ~:72) instead of above what it describes; the node-free guard test checks import specifiers only, so `Buffer.byteLength` in settings.ts ~:127 and limits.ts ~:23 goes unchecked (harmless unless the web calls them).
-
 ### T446 · FNF[bundle-descriptor-removal] [design] [parked: user] · an install removes a teammate's claim-less bundle descriptor, and its own upgrade commit can carry the removal
 
 status: open (parked: user decision)
@@ -874,7 +866,7 @@ Before React attaches `handleSubmit`, a click on Sign in (web components/auth-fo
 
 ### T454 · FNF[ssr-form-prehydration-values] · server-rendered controlled forms lose text typed before hydration
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T01:06Z · last: 2026-10-31T01:06Z
 From the T449 review (2026-10-30). PRE-EXISTING, minor (signed-in pages; only a hard load exposes it).
 
 1. web components/new-repo-form.tsx ~:116 keeps the repository name in a controlled `useState('')` and ~:239 renders `<form onSubmit>` with no `method`: text typed into `/repos/new` before hydration is reset to '' by the first re-render, and a submit before hydration is a GET reload of the same page (the input has no `name`, so nothing reaches the URL). The fix class is T449's: uncontrolled inputs read with `new FormData(event.currentTarget)` at submit.
@@ -888,12 +880,14 @@ From the T447 review (2026-10-30). PRE-EXISTING, minor. Line numbers as of main 
 1. A JSON `null` body is read as an object, so the handler throws a TypeError and answers 500: api routes/plan.ts ~:1008-1010 (DELETE plan, `body.confirm`), tasks/index.ts ~:1522-1527 (steer), tooling.ts ~:19-20, ~:59-64, ~:150-151, ~:340-341 and ~:218 (SSE: an empty 200 stream plus a console error, not a 500), user-settings.ts ~:244-245, ~:280-281, ~:312-313, bundles.ts ~:757-762, and tooling-upgrades.ts ~:250-256 (POST tooling-upgrade: `null` survives its try/catch, then `parsed.components` throws). T447 (PR #948) guarded the tooling PATCH alone. Fix: one shared guard (a body must be a JSON object, else 400 `invalid_body`), one control per route.
 2. Fields of the wrong type in an object body to PATCH `/repositories/:id/tooling` are a 500: `rtkVersion: 5` (~:832), `chromeDevtoolsMcpVersion: true` (~:834), `secretMaskAllow: [5]` (~:853), `secretMaskDenyExtend: [{}]` (~:858) ("x.trim is not a function", probed in T447 evidence/f3-probe-summary.txt); an unknown `ragEmbedAction` string takes the retry branch (~:795, ~:900-932) and reaches the RAG lock. A zod schema for the body fixes all of them and subsumes the object guard.
 
-### T456 · FNF[api-optional-body-defaults] [design] · a malformed or empty body becomes `{}` and succeeds where the body is optional
+### T456 · FNF[api-optional-body-defaults] [design] · a malformed or empty body becomes `{}` and succeeds where the body is optional (+1)
 
 status: open
 From the T447 review (2026-10-30). PRE-EXISTING; consequential for the caller.
 
 Where a route reads an optional body with `.json().catch(() => ({}))` or a try/catch, a malformed or truncated body is read as "no options" and the request succeeds with the defaults: api routes/tooling-upgrades.ts ~:250-256 (a truncated `{"components":["rtk"` upgrades ALL components), plan.ts ~:469 (snapshot save), ~:1285 (sequence: the task runs on the default CLI), ~:1311 (merge start: same), ~:1439 (advisory: the question is dropped), ddev-control.ts ~:75 (null-safe, but a malformed body returns the default logs; read-only). Decide the policy (for example: an empty body means the defaults, a malformed one is a 400, which needs the text read rather than the parse error caught) and apply it to every such route.
+
+Also (T455 review, 2026-10-31; consequential, reproduced by the T455 reviewer): POST tooling-upgrade with `components` of the wrong type (a string, `null`, a number) reads as absent and upgrades every component (api routes/tooling-upgrades.ts ~:258). A present field of the wrong type must be refused whatever the empty-body policy is.
 
 ### T457 · FNF[cli-login-post-cleanup-chunks] [design] · a sign-in line that arrives after the login session ended still starts a probe
 
@@ -944,8 +938,19 @@ From the T445 review (2026-10-31; was T445 item 2). PRE-EXISTING.
 2. Minor: the sync's warns (~:933, ~:953, and T445's first-sync warn) are emitted before the writer that called the sync may roll back (worker project-state/write.ts ~:818, throws at ~:848 and ~:850): one extra line for a sync that did not commit, repeated by the retry. A stored notice would replace them.
 3. Minor: shared plan/projection-merge.ts ~:289, the other `mergeProjectState` caller, drops `merge.overwritten` for a plan merge with no merge base (`--allow-unrelated-histories`, plan/merge.ts ~:232), per that resolver's documented "takes theirs" rule.
 
+### T463 · FNF[api-body-shape-2] · a form read of a JSON request is a 500; a `null` WebSocket frame throws in the login listener; two settings PUTs accept a non-object (+2)
+
+status: open
+From the T455 review (2026-10-31). PRE-EXISTING, minor.
+
+1. `c.req.formData()` on a request whose content type is not a form throws and answers 500: api routes/repos.ts ~:556 and routes/user-settings.ts ~:382. Answer 400 (or 415) instead.
+2. A JSON `null` WebSocket frame throws in the CLI login banner's message listener (api routes/cli-login-banner.ts ~:557-573); it is logged as an unhandled rejection and the api stays up (read, not run). Guard the parsed frame as an object. T457 [design] is a design single in that file and must not carry this.
+3. PUT `/user-settings/ide` and `/user-settings/ui-prefs` accept a `settingsJson` that parses to `null`, a list or a scalar (user-settings.ts ~:252, ~:288), while the PATCH refuses it (~:328). Refuse it the same way.
+4. Trivial: api routes/user-settings.ts is tracked with mode 100755, the only such file among the api's sources; reset it to 100644.
+
 ## Done
 
+- T445 — a project-state sync with no base logs one warn naming the units whose held value the checkout's replaced (at most ten, settings and environment first, never a value); the web-bundle guard also fails on Node globals read as values (Buffer.byteLength became TextEncoder); the conflict-sides comment moved onto conflictSide; item 2 (the page saying a value was refused or replaced) moved to T462 [design] — PR #950 (9d8c78f58), 2026-10-31; main CI green; docs also record T446's verdict; follow-ups T462, T364 item 25
 - T452 — the 150 ms Enter after a token paste is one of the login session's tracked one-shot timers and cleanupSession clears it; a chunk after cleanup starts no antigravity URL step or menu-advance timer — PR #949 (fc7789288), 2026-10-30; main CI green; follow-up T457
 - T447 — PATCH /repositories/:id/tooling answers 400 invalid_body for a JSON body that is not an object and invalid_json for one that is not JSON, writing nothing; refresh-tree reads only the eight repository columns it uses; an AGENTS.md rules override keeps its first line's indent while the default block stays byte-identical (no manifest bump) — PR #948 (8330687b8), 2026-10-30; main CI green; checked on the dev stack; follow-ups T455, T456
 - T119 — the AGENTS.md rules block is the repository's: repositories.agent_rules_override (migration 0215), settings/agent-rules.md in the project-state record, a Tooling page card with its own save, and buildRepoCliRulesBlock for 07, 12, 01 and the api's upgrade-status — PR #940 (5b6467e9c) and the editor fix PR #947 (1989f1f2a), 2026-10-30; main CI green; browser-checked at 1280, 768 and 375; follow-ups T443, T444, T445, T446, T447
