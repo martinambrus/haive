@@ -19,8 +19,7 @@
 ## Limits
 
 The limits are CI numbers, MEASURED over 8 green main runs (2026-10-30/31): 50 of 52 smokes took at most 17 s,
-repo-refresh 206-270 s (limit 480) and two-install 50-81 s (limit 240). The job's 1800 s leaves about 350 s over a
-green run (1305-1445 s), and a hung smoke costs its whole limit, so every limit has to fit inside that. A new smoke
+repo-refresh 206-270 s (limit 480) and two-install 50-81 s (limit 240). The job's 1800 s leaves about 275 s over a green run (1221-1525 s over the 13 green main runs to 2026-10-31, the newest the slowest), and a hung smoke costs its whole limit, so every limit has to fit inside that. A new smoke
 needs an override only if it can take more than about 40 s; one that exceeds its limit fails by name.
 
 `smoke:all` is the local chain and stays a plain `&&` chain: beside other suites on one host, CI's limits would time
