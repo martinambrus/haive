@@ -611,6 +611,13 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
           continue;
         }
         if (resumed) {
+          // Stamped with the epoch the re-open left the task at, as every other advance is: a Retry
+          // or a re-drive that moves it on before the job is picked up then drops the job as stale,
+          // where an unstamped one is exempt from that drop and re-enters the step by its status.
+          const reopened = await db.query.tasks.findFirst({
+            where: eq(schema.tasks.id, task.id),
+            columns: { orchestrationEpoch: true },
+          });
           await getTaskQueue().add(
             TASK_JOB_NAMES.ADVANCE_STEP,
             {
@@ -618,6 +625,7 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
               userId: task.userId,
               stepId: task.currentStepId,
               round: task.currentRound ?? 0,
+              epoch: reopened?.orchestrationEpoch,
             },
             {
               attempts: 3,

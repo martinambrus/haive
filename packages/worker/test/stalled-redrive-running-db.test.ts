@@ -900,7 +900,7 @@ describe.skipIf(!url)('the stalled sweep and a running row nothing drives, on Po
       ).toHaveLength(1);
     });
 
-    it('E2: an advance with no epoch (as the usage poller queues one) after the re-driven pass is dropped too', async () => {
+    it('E2: an advance with no epoch (as a form submit queues one) after the re-driven pass is dropped too', async () => {
       const { taskId } = await running();
       const { deps, advances } = rig();
       await expect(

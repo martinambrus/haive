@@ -139,6 +139,44 @@ describe('the allowance auto-resume of a task whose provider is back', () => {
     ]);
   });
 
+  it('stamps the advance with the epoch the task stands at, so one a Retry or a re-drive left behind is dropped as stale', async () => {
+    config('auto', 'normal');
+    const t = setup();
+    t.fake.patch(schema.tasks, TASK, { orchestrationEpoch: 7 });
+
+    await checkProviderRecovery(t.db);
+
+    expect(t.task()).toMatchObject({ status: 'running', orchestrationEpoch: 7 });
+    expect(h.queued).toMatchObject([
+      {
+        name: TASK_JOB_NAMES.ADVANCE_STEP,
+        data: { taskId: TASK, userId: USER, stepId: 'fan-out', round: 0, epoch: 7 },
+      },
+    ]);
+  });
+
+  it('keeps the epoch of each task it resumes in one poll apart', async () => {
+    config('auto', 'normal');
+    const t = setup();
+    t.fake.patch(schema.tasks, TASK, { orchestrationEpoch: 7 });
+    t.fake.insert(schema.tasks, { ...t.task(), id: NEXT_TASK, orchestrationEpoch: 11 });
+    t.fake.insert(schema.taskSteps, {
+      id: NEXT_ROW,
+      taskId: NEXT_TASK,
+      stepId: 'fan-out',
+      round: 0,
+      status: 'failed',
+    });
+    t.next.push({ ...t.armed, id: NEXT_TASK });
+
+    await checkProviderRecovery(t.db);
+
+    expect(h.queued).toMatchObject([
+      { data: { taskId: TASK, epoch: 7 } },
+      { data: { taskId: NEXT_TASK, epoch: 11 } },
+    ]);
+  });
+
   describe.each(['draining', 'maintenance'])('while the system is %s', (state) => {
     it('changes nothing, queues nothing and spends no attempt', async () => {
       config('auto', state);
