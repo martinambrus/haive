@@ -170,12 +170,18 @@ export class AuthThrottleError extends HTTPException {
   constructor(
     res: Response,
     readonly auditAllowed: boolean,
+    readonly limiter: 'account' | 'address' = 'account',
   ) {
     super(429, { res });
   }
 }
 
-function refused(scope: Scope, waitMs: number, auditAllowed: boolean): AuthThrottleError {
+function refused(
+  scope: Scope,
+  waitMs: number,
+  auditAllowed: boolean,
+  limiter: 'account' | 'address',
+): AuthThrottleError {
   const seconds = Math.min(Math.max(1, Math.ceil(waitMs / 1000)), AUTH_THROTTLE_WINDOW_MS / 1000);
   const what = scope === 'login' ? 'sign-in' : 'registration';
   const res = Response.json(
@@ -186,7 +192,7 @@ function refused(scope: Scope, waitMs: number, auditAllowed: boolean): AuthThrot
     },
     { status: 429, headers: { 'Retry-After': String(seconds) } },
   );
-  return new AuthThrottleError(res, auditAllowed);
+  return new AuthThrottleError(res, auditAllowed, limiter);
 }
 
 export async function reserveAuthAttempt(
@@ -250,7 +256,12 @@ export async function reserveAuthAttempt(
         log.warn({ err }, 'throttled sign-in audit gate unavailable');
       }
     }
-    throw refused(scope, Number(waitMs), auditAllowed);
+    throw refused(
+      scope,
+      Number(waitMs),
+      auditAllowed,
+      rejectedKey === keys[0] ? 'account' : 'address',
+    );
   }
   return {
     refund: async () => {

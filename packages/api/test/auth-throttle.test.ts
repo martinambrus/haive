@@ -253,6 +253,7 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
       fake.rows(schema.auditEvents).filter((r) => r.action === 'auth.login.throttled');
     it('writes one row and does one lookup for a parallel burst on the rejected account key', async () => {
       const email = mail('audit-account');
+      addUser(email);
       for (let i = 0; i < 10; i++) await login(email, WRONG);
       const lookup = vi.spyOn((h.db as any).query.users, 'findFirst');
       lookup.mockClear();
@@ -260,6 +261,10 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
       expect(got).toEqual(Array(20).fill(429));
       expect(throttled()).toHaveLength(1);
       expect(lookup).toHaveBeenCalledTimes(1);
+      expect(throttled()[0]).toMatchObject({
+        targetId: fake.rows(schema.users)[0]!.id,
+        metadata: { reason: 'throttled', limiter: 'account' },
+      });
       const gate = `${acctKey('login', email)}:audit`;
       expect(await client.get(gate)).toBe('1');
       expect(await client.pttl(gate)).toBeGreaterThan(0);
@@ -272,8 +277,18 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
     });
     it('uses the rejected address key even for distinct login identifiers', async () => {
       for (let i = 0; i < 30; i++) await login(mail(`audit-ip-${i}`), WRONG, { peer: peer(1) });
-      for (let i = 0; i < 20; i++)
+      const victim = mail('audit-victim');
+      addUser(victim);
+      const lookup = vi.spyOn((h.db as any).query.users, 'findFirst');
+      lookup.mockClear();
+      await expectRefused(() => login(victim, WRONG, { peer: peer(1) }));
+      for (let i = 0; i < 19; i++)
         await expectRefused(() => login(mail(`audit-new-${i}`), WRONG, { peer: peer(1) }));
+      expect(lookup).not.toHaveBeenCalled();
+      expect(throttled()[0]).toMatchObject({
+        targetId: null,
+        metadata: { reason: 'throttled', limiter: 'address' },
+      });
       expect(throttled()).toHaveLength(1);
       expect(await client.get(`${ipKey('login', peer(1))}:audit`)).toBe('1');
     });

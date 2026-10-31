@@ -256,16 +256,19 @@ authRoutes.post('/login', async (c) => {
     if (err instanceof AuthThrottleError && err.auditAllowed) {
       try {
         const db = getDb();
-        const existing = await db.query.users.findFirst({
-          where: eq(schema.users.emailBlindIndex, blindIndex),
-          columns: { id: true },
-        });
+        const existing =
+          err.limiter === 'account'
+            ? await db.query.users.findFirst({
+                where: eq(schema.users.emailBlindIndex, blindIndex),
+                columns: { id: true },
+              })
+            : undefined;
         await recordAuditEvent(db, {
           actorUserId: ANONYMOUS_AUDIT_ACTOR,
           action: 'auth.login.throttled',
           targetType: 'user',
           targetId: existing?.id ?? null,
-          metadata: { reason: 'throttled' },
+          metadata: { reason: 'throttled', limiter: err.limiter },
         });
       } catch (auditError) {
         log.error({ err: auditError }, 'failed to audit throttled sign-in');
