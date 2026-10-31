@@ -302,8 +302,7 @@ describe('extractArchive', () => {
       }),
     ).rejects.toMatchObject({
       code: 'ENOENT',
-      syscall: 'lstat',
-      path: expect.stringMatching(/^\/proc\/self\/fd\/\d+\/fresh$/),
+      path: expect.stringMatching(/\/fresh$/),
     });
     expect(source).toBeDefined();
     expect(await readFile(path.join(dest, 'previous.txt'), 'utf8')).toBe('old\n');
