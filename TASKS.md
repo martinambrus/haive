@@ -922,11 +922,6 @@ T449 and T454 made the sign-in form and /repos/new keep pre-hydration input (unc
 
 Decide whether the class is worth a general mechanism (copy DOM values into state on hydration, a shared hook) or is left as is.
 
-### T466 · FNF[stale-outbox-rows] [verify-first] · dirty project-state outbox rows whose checkout is gone fail every sweep tick
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T06:52Z · last: 2026-10-31T06:52Z
-From the T349 fix-round review (2026-10-31). PRE-EXISTING, unsure, not traced. With 125 dirty `project_state_outbox` rows (and 21 dirty `plan_mirror_state` rows) left in a scratch database by a killed smoke, every sweep tick logged `ProjectStateWriteError` ENOENT per row (T349 fix-s2 evidence sweep-branch-worker-two-install.log ~:92+). Verify first whether rows whose checkout no longer exists can delay or starve healthy rows in production (worker plan-mirror-queue sweep, project-state/write.ts), and whether such a row is ever retired.
-
 ### T467 · FNF[form-body-buffering] [design] · both form readers buffer the whole multipart body before their size checks
 
 status: open
@@ -1006,6 +1001,7 @@ From the T466 review (2026-10-31). PRE-EXISTING, minor, theoretical.
 
 ## Done
 
+- T466 — verified first: a dirty outbox or plan-mirror row whose checkout is gone never starved healthy rows but redid 14-35 statements, failing opens and git spawns and logged a 2-3 KB warning on every 10 s tick forever (about 18-27 MB of log per row per day); now such a row is held before anything is read (checkoutMissing, a strict lstat), last_error says so, it stays dirty and is written on the first tick after the checkout is back; a plan-less mirror row still retires — PR #961 (f55d6d546), 2026-10-31; main CI green; checked live on the dev stack (plan page at 1280 and 375); follow-ups T477, T478, T479, T462 +1
 - T470 — every check of the smokes job (the Postgres-gated tests, the api, worker and migration smokes, the six Redis scripts) runs on !cancelled() && steps.migrate.conclusion == 'success', so one red check no longer skips the others while a failed setup step or a cancel still stops them; pinned by scripts/test/ci-step-independence.test.mjs; ci-smokes.md CI steps and Limits (about 275 s of headroom) updated — PR #960 (09c9d725a), 2026-10-31; main CI green, every check ran (PR run 41178244171, main run 41180026196); follow-ups T474, T475
 - T469 — the onboarding reset also takes back a git-data claim file only the sync base names (baseGitDataPaths; left behind, the record read refused and the next record write threw); 12, 01's lazy backfill and the manual bundle helper refuse a path that names git data — PR #959 (68af9d174), 2026-10-31; main CI green; follow-ups T472, T473
 - T461 — every carried_* fold reads the row after it holds it and folds from that read (a delta computed from a pre-transaction read lost a concurrent fold or idle write): resetRowsForRerun, the per-step and the task-level provider switch (now one transaction under T349's batch), resetStepAndDownstream, requeueAbandonedOrphan and writeFencedPark's first park — PR #958 (ffa1c2d0c), 2026-10-31; main CI green; follow-ups T471, T459 note, T364 item 28
