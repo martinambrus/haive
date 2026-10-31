@@ -53,7 +53,25 @@ let filesQueue: Array<() => Promise<StubResponse>> = [];
 let syncFailure: StubResponse | null = null;
 let bundleState: 'active' | 'syncing' | 'failed' = 'active';
 let bundleSource: 'zip' | 'git' = 'zip';
+let secondBundleState: 'active' | 'syncing' | null = null;
+let secondFilesFetches = 0;
+let pollReplies: Array<(body: unknown) => StubResponse> = [];
 let poll: () => void;
+
+function holdPollBody() {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  pollReplies.push((body) => ({
+    ...reply(body),
+    json: async () => {
+      await gate;
+      return structuredClone(body);
+    },
+  }));
+  return release;
+}
 
 function holdFiles() {
   let resolve!: (response: StubResponse) => void;
@@ -72,7 +90,7 @@ let syncError: string | null = null;
 async function fakeFetch(input: unknown) {
   const url = new URL(String(input), 'http://localhost');
   if (url.pathname.endsWith('/bundles')) {
-    return reply({
+    const body = {
       bundles: [
         {
           id: 'b1',
@@ -82,12 +100,20 @@ async function fakeFetch(input: unknown) {
           lastSyncError: syncError,
           itemCounts: { agent: 1 },
         },
+        ...(secondBundleState === null
+          ? []
+          : [{ id: 'b2', name: 'other', sourceType: 'git', status: secondBundleState }]),
       ],
-    });
+    };
+    return pollReplies.length > 0 ? pollReplies.shift()!(body) : reply(body);
   }
   if (url.pathname.endsWith('/bundles/b1/files')) {
     filesFetches += 1;
     return filesQueue.length > 0 ? filesQueue.shift()!() : (filesFailure ?? reply(filesBody));
+  }
+  if (url.pathname.endsWith('/bundles/b2/files')) {
+    secondFilesFetches += 1;
+    return reply(listing('other.md'));
   }
   if (url.pathname.endsWith('/bundles/b1/sync')) {
     if (syncFailure) return syncFailure;
@@ -117,6 +143,9 @@ beforeEach(() => {
   updaterReplay.enabled = false;
   bundleState = 'active';
   bundleSource = 'zip';
+  secondBundleState = null;
+  secondFilesFetches = 0;
+  pollReplies = [];
   filesQueue = [];
   syncFailure = null;
   syncError = null;
@@ -234,22 +263,30 @@ async function settle(view: Renderer) {
 
 async function mountLive() {
   let entries: Parameters<typeof BundleComposer>[0]['value'] = [];
-  const view = createRenderer(() => (
-    <BundleComposer
-      initialBundles={[]}
-      allowAddZip={false}
-      allowAddGit={false}
-      credentialOptions={[]}
-      repositoryId="r1"
-      value={entries}
-      onChange={(next) => {
-        entries = next;
-      }}
-    />
-  ));
+  let mounted = true;
+  const view = createRenderer(
+    () =>
+      mounted && (
+        <BundleComposer
+          initialBundles={[]}
+          allowAddZip={false}
+          allowAddGit={false}
+          credentialOptions={[]}
+          repositoryId="r1"
+          value={entries}
+          onChange={(next) => {
+            entries = next;
+          }}
+        />
+      ),
+  );
   await settle(view);
   return {
     view,
+    unmount: () => {
+      mounted = false;
+      view.draw();
+    },
     text: () => textOf(view.tree()),
     click: async (label: string) => {
       fire.click(findAll(view.tree(), (h) => h.tag === 'button' && textOf(h).includes(label))[0]!);
@@ -266,6 +303,61 @@ async function mountLive() {
 describe('file listings follow the final synced tree', () => {
   beforeEach(() => {
     bundleSource = 'git';
+    updaterReplay.enabled = true;
+  });
+
+  it('keeps another bundle’s in-flight listing and fetch count when only b2 finishes syncing', async () => {
+    bundleState = 'syncing';
+    secondBundleState = 'syncing';
+    const live = await mountLive();
+    const first = holdFiles();
+    await live.click('docs');
+    await live.click('other');
+    secondBundleState = 'active';
+    poll();
+    await settle(live.view);
+    expect(filesFetches).toBe(1);
+    expect(secondFilesFetches).toBe(2);
+    first.resolve(reply(listing('first.md')));
+    await settle(live.view);
+    expect(live.text()).toContain('first.md');
+    expect(live.text()).toContain('other.md');
+    expect(filesFetches).toBe(1);
+  });
+
+  it('starts no new file fetch on a second poll tick after a reload starts', async () => {
+    bundleState = 'syncing';
+    secondBundleState = 'syncing';
+    const live = await mountLive();
+    await live.click('docs');
+    const fresh = holdFiles();
+    await live.finishSync();
+    expect(filesFetches).toBe(2);
+    expect(live.text()).toContain('Loading files…');
+    // b2 keeps the interval polling even though b1 has finished.
+    poll();
+    await settle(live.view);
+    expect(filesFetches).toBe(2);
+    fresh.resolve(reply(listing('final.md')));
+    await settle(live.view);
+    expect(live.text()).toContain('final.md');
+  });
+
+  it('sends no file request after unmount, including a poll body already in flight', async () => {
+    bundleState = 'syncing';
+    const live = await mountLive();
+    await live.click('docs');
+    const release = holdPollBody();
+    bundleState = 'active';
+    poll();
+    await settle(live.view);
+    live.unmount();
+    poll();
+    await settle(live.view);
+    expect(filesFetches).toBe(1);
+    release();
+    await settle(live.view);
+    expect(filesFetches).toBe(1);
   });
 
   it('keeps the expanded listing when Resync is accepted', async () => {
