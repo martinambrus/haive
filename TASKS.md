@@ -403,12 +403,6 @@ Fix direction:
 - for self-hosted hosts, P14c's connect-time address guard.
   Decision needed: a corporate GitLab on a 10.x address is legitimate.
 
-### T348 · FNF[stalled-answered-form] · the allowance auto-resume's post-commit enqueue can strand a task (+1)
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T12:06Z · last: 2026-10-31T12:06Z
-PRE-EXISTING. In worker queues/usage-poll-queue.ts ~:612, ADVANCE_STEP is queued outside the transaction after autoResumeFailedStep. If that add is rejected, the task stays `running` with a `running` step and no job. The stalled sweep's redrivableRow never takes a running row.
-Fix: the stalled sweep re-drives a running task whose current row is running, with no live invocation and no queued job past the cutoff. Alternatively, write the advance through an outbox.
-
 ### T350 · FNF[module-runtime-status] · a module whose reactivation used every attempt shows active with no schema or jobs (+1)
 
 status: open · kind: design · was modular #174
@@ -631,17 +625,6 @@ status: open · was modular #257
 4. git-merge.ts ~:632, :636, :1356, :1373, :1419: resolvingPaths and `rev-list --parents` failures.
 5. (T375 review) _commit-diff.ts checkedOutCommit ~:133-161 is one more gitlink reader with its own failure contract.
    Fix: one shared reader module with an explicit failure contract. Do this after T396.
-
-### T385 · FNF[parks] · lost park poll chain never recovered; duplicate poll loops; schema park badge; pre-run park booked as idle (+5)
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T12:06Z · last: 2026-10-31T12:06Z
-
-1. stalled-redrive.ts ~:134-146 skips parked pending rows, and boot reads only waiting_cli and running rows. Fix: re-drive an overdue park.
-2. enqueueAdvance has no job id. Fix: a deterministic id per (task, step, epoch).
-3. REGRESSION from #205 (cosmetic): the slot badge says "runtime slot" for a schema park (web slot-wait-badge.tsx ~:8, :37).
-4. reofferParkedSteps books a pre-run park as idle (api lib/task-control.ts ~:144, :213).
-5. Resume on a Stop-failed, never-started loop row leaves started_at empty (api steps.ts ~:1283-1292).
-6. PRE-EXISTING: eight hand-off writes in handleResult return with no log when they lose their row or the task (worker task-queue.ts:1838, 1848, 1867, 1936, 1953, 1996, 2013, 2022), the same family as #263's resolveFixLoopGate warning. The log level for a routine Retry race needs choosing. From #263.
 
 ### T386 · FNF[upgrade-early-death-hold] · an upgrade that dies before recording its found state restores normal and lifts an admin's hold
 
@@ -1167,6 +1150,8 @@ The swallow rule in scripts/test/shell-source.mjs (`swallowedFailure`) rejects a
 
 ## Done
 
+- T348 — the stalled sweep re-drives a running step that no job drives and no run waits on (the allowance auto-resume's post-commit enqueue could strand it), leaves a step a pass of this process is on, and excludes live runs (neither ended nor superseded) in the statement that bumps the epoch, before the task lock — shipped with T385 in PR #972 (d47433f7e), 2026-10-31; main CI green
+- T385 — the stalled sweep re-drives a park whose poll chain stopped; a recovery re-drive's advance carries a BullMQ deduplication id per (task, step, round, epoch) (park ticks, continuations and the forward hand-off do not); a Retry's re-offer and a Stop book a park from before the run to carried_idle_ms; Resume, retry_ai and the fan-out Resume of a never-started row stamp started_at and carry its idle time; a module step parked for its schema setup shows "waiting: module setup" (structural columns only); handleResult logs why a hand-off write found no row; the test fake compares UUID values without case and evaluates the sweep's negated correlated EXISTS — PR #972 (d47433f7e), 2026-10-31; main CI green; badge checked live on the dev stack at 1280 and 390 px; delivered with sonnet-sonnet (driver) then codex-sonnet (2 fix rounds) plus session fixes (a merge-time CI step limit, a CodeQL test helper); follow-ups T498, T499, T500, T501, T507
 - T491 — the plan merge panel says how a merge it was watching ended (landed, cancelled by someone else, or failed with its scratch worktree kept and a link to Retry its task), never for a Discard it asked for itself; the panel and DELETE /plan/merge share a pinned ?taskId= contract; a Discard or answer that settles after the panel moved to another merge is dropped; a failed Discard after the page removed the merge restarts the recovery read and shows its error; the plan chat keeps one draft per node — PR #971 (bb2d4673c), 2026-10-31; main CI green; delivered with codex-sonnet (3 fix rounds, one from the PR's Codex review); follow-ups T497, T503, T506
 - T480 — the KB path validator refuses a git-data name (08, 09_3 and the legacy KB writer); 09_5, 09_5b and 11d read stored skill dirs and ids through a positive check (the catalog's skills dirs, single-segment ids) beside the git-data denylist, so no agent is dispatched or prompted for a refused dir, and a dropped dir or id sets one degradedNote per run; 07's agent targets and quarantine groups and 12's recorded agent dirs keep to the catalog, quarantine file names are validated, and 07's description and count leave out a refused group — PR #970 (1e02dd1fb), 2026-10-31; main CI green; delivered with codex-sonnet (2 fix rounds); follow-up T494
 - T478 — git and filesystem errors reach the plan page, the api's Save and Pull 409 bodies, repositories.status_message and 12's warnings without the server's absolute paths: one shared scrubber (`scrubErrorPaths`) hides absolute POSIX, drive and UNC paths and keeps the diagnosis and URLs (linear, one alternative per quote kind: CodeQL clean); convergent boot repairs rewrite stored mirror errors and errored repositories' messages (compare-and-swap, logged with counts and ids); one warn per sweep tick for a stuck row — PR #969 (f193c6b78), 2026-10-31; main CI green; delivered with codex-sonnet (2 fix rounds, session CodeQL fix); follow-up T490
