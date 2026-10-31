@@ -117,3 +117,12 @@ it('narrows each integration-capable hold to one optional file payload', () => {
     );
   }
 });
+
+it.each(['missing', 'not_git'] as const)(
+  'does not invent push prerequisites for a %s checkout',
+  (checkout) => {
+    expect(holdsFor({ ...clear, checkout, push: true, branch: null, origin: false })).toEqual([
+      { code: checkout === 'missing' ? 'checkout_missing' : 'not_git_checkout' },
+    ]);
+  },
+);

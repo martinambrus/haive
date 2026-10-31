@@ -102,6 +102,7 @@ export function holdsFor(facts: HaiveDataFacts): HaiveDataHold[] {
   ].sort();
   if (units.length) holds.push({ code: 'project_state_questions', units });
   if (
+    facts.checkout === 'ready' &&
     facts.push &&
     !facts.branch &&
     !facts.readHolds?.some(
@@ -110,6 +111,7 @@ export function holdsFor(facts: HaiveDataFacts): HaiveDataHold[] {
   )
     holds.push({ code: 'detached_head' });
   if (
+    facts.checkout === 'ready' &&
     facts.push &&
     !facts.origin &&
     !facts.readHolds?.some(
