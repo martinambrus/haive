@@ -22,6 +22,22 @@ import { isTaskDead } from '@/lib/step-banners';
 const POLL_MS = 2000;
 const DEAD_POLL_MS = 30_000;
 
+type MergeNotice = { taskId: string; text: string; retry?: boolean };
+
+function mergeOutcome(taskId: string, task: Task): MergeNotice | null {
+  if (!['completed', 'cancelled', 'failed'].includes(task.status)) return null;
+  return {
+    taskId,
+    text:
+      task.status === 'completed'
+        ? 'The remote was merged into your checkout and pushed.'
+        : task.status === 'cancelled'
+          ? 'This merge was cancelled elsewhere.'
+          : 'The merge failed. Its scratch worktree is kept so Retry on the task can resume it.',
+    retry: task.status === 'failed',
+  };
+}
+
 /**
  * The merge conversation, answered here rather than on the task page.
  *
@@ -58,11 +74,7 @@ export function PlanMergePanel({
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<{
-    taskId: string;
-    text: string;
-    retry?: boolean;
-  } | null>(null);
+  const [notice, setNotice] = useState<MergeNotice | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   // Refs, not poll dependencies: the page passes both inline and the poll calls them when it
   // settles, so depending on them would re-poll a parked merge on every page render.
@@ -82,6 +94,7 @@ export function PlanMergePanel({
   // idle conversation costs nothing.
   const taskId = merge?.taskId ?? null;
   // An answer or discard can settle after the page switches to another conversation.
+  const lastTaskIdRef = useRef(taskId);
   const displayedTaskIdRef = useRef(taskId);
   displayedTaskIdRef.current = taskId;
   const isStaleReply = (replyTaskId: string): boolean =>
@@ -96,13 +109,40 @@ export function PlanMergePanel({
     setDiscardedTaskId(null);
     setDeadTaskId(null);
     // An ended outcome survives the refresh to null, but belongs to no later conversation.
-    if (taskId !== null) setNotice(null);
+    if (taskId !== null) {
+      lastTaskIdRef.current = taskId;
+      setNotice(null);
+    }
   }, [taskId]);
 
   useEffect(() => {
     if (!taskId) {
       setLiveStep(null);
-      return;
+      const previousTaskId = lastTaskIdRef.current;
+      if (
+        !previousTaskId ||
+        notice?.taskId === previousTaskId ||
+        discardRequestedRef.current === previousTaskId
+      )
+        return;
+      // The page may see the end first, or the panel may have stopped at a form.
+      // Read the last task once when the page removes it, using the same status copy.
+      let cancelled = false;
+      void api
+        .get<{ task: Task }>(`/tasks/${previousTaskId}`)
+        .then((res) => {
+          if (cancelled || isStaleReply(previousTaskId) || isTaskDead(res.task)) return;
+          if (discardRequestedRef.current === previousTaskId) return;
+          const outcome = mergeOutcome(previousTaskId, res.task);
+          if (outcome) {
+            setNotice(outcome);
+            onSettledRef.current();
+          }
+        })
+        .catch(() => {});
+      return () => {
+        cancelled = true;
+      };
     }
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -121,16 +161,7 @@ export function PlanMergePanel({
         if (settled) {
           if (ended) {
             if (discardRequestedRef.current !== taskId) {
-              setNotice({
-                taskId,
-                text:
-                  res.task.status === 'completed'
-                    ? 'The remote was merged into your checkout and pushed.'
-                    : res.task.status === 'cancelled'
-                      ? 'This merge was cancelled elsewhere.'
-                      : 'The merge failed. Its scratch worktree is kept so Retry on the task can resume it.',
-                retry: res.task.status === 'failed',
-              });
+              setNotice(mergeOutcome(taskId, res.task));
             }
             onSettledRef.current();
           }
@@ -138,7 +169,7 @@ export function PlanMergePanel({
         }
         polledDead = taskDead;
       } catch {
-        return;
+        // A transient read failure retries at the same cadence.
       }
       if (!cancelled) timer = setTimeout(() => void poll(), polledDead ? DEAD_POLL_MS : POLL_MS);
     };

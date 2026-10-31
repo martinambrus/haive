@@ -588,6 +588,85 @@ describe('PlanMergePanel with a merge task', () => {
     expect(shown().find((el) => el.props.role === 'status')).toBeUndefined();
   });
 
+  it.each(['completed', 'cancelled', 'failed'])(
+    'recovers %s when the page removes a working merge before its poll returns',
+    async (status) => {
+      const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID));
+      const inFlight = deferred<unknown>();
+      net.get.mockReturnValueOnce(inFlight.promise);
+      await vi.advanceTimersByTimeAsync(2000);
+      respondWith(taskResponse(PLAN_MERGE_STEP_ID, { status }));
+      rerender(null);
+      await settle();
+      const outcome = shown().find((el) => el.props.role === 'status');
+      expect(outcome).toBeDefined();
+      expect(onSettled).toHaveBeenCalledTimes(1);
+      expect(taskFetches()).toBe(3);
+      inFlight.resolve(taskResponse(PLAN_MERGE_STEP_ID, { status: 'cancelled' }));
+      await settle();
+      expect(shown().find((el) => el.props.role === 'status')).toEqual(outcome);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(taskFetches()).toBe(3);
+    },
+  );
+
+  it.each(['completed', 'cancelled', 'failed'])(
+    'recovers %s after a parked merge ends elsewhere',
+    async (status) => {
+      const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+      expect(vi.getTimerCount()).toBe(0);
+      respondWith(taskResponse(PLAN_MERGE_STEP_ID, { status }));
+      rerender(null);
+      await settle();
+      expect(shown().find((el) => el.props.role === 'status')).toBeDefined();
+      expect(onSettled).toHaveBeenCalledTimes(1);
+      expect(taskFetches()).toBe(2);
+    },
+  );
+
+  it('retries a failed merge poll on its normal cadence', async () => {
+    await open(taskResponse(PLAN_MERGE_STEP_ID));
+    net.get.mockRejectedValueOnce(new Error('Temporary read failure'));
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(taskFetches()).toBe(2);
+    respondWith(taskResponse(PLAN_MERGE_STEP_ID, { status: 'failed' }));
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(taskFetches()).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(taskFetches()).toBe(3);
+    expect(shown().find((el) => el.props.role === 'status')).toBeDefined();
+    expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a recovered outcome if another merge is displayed before it returns', async () => {
+    const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+    const recovery = deferred<unknown>();
+    net.get.mockReturnValueOnce(recovery.promise);
+    rerender(null);
+    await settle();
+    rerender({ ...merge, taskId: 'task-2' });
+    await settle();
+    recovery.resolve(taskResponse(PLAN_MERGE_STEP_ID, { status: 'failed' }));
+    await settle();
+    expect(onSettled).not.toHaveBeenCalled();
+    expect(shown().find((el) => el.props.role === 'status')).toBeUndefined();
+  });
+
+  it('does not recover an outcome while a local Discard is pending', async () => {
+    vi.stubGlobal('window', { confirm: vi.fn(() => true) });
+    const request = deferred<{ ok: boolean; cancelled: boolean }>();
+    net.discardPlanMerge.mockReturnValueOnce(request.promise);
+    const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+    await press('Discard');
+    respondWith(taskResponse(PLAN_MERGE_STEP_ID, { status: 'cancelled' }));
+    rerender(null);
+    await settle();
+    expect(taskFetches()).toBe(1);
+    expect(shown().find((el) => el.props.role === 'status')).toBeUndefined();
+    request.resolve({ ok: true, cancelled: true });
+    await settle();
+  });
+
   it('keeps a locally requested discard quiet when the poll observes cancellation', async () => {
     vi.stubGlobal('window', { confirm: vi.fn(() => true) });
     net.discardPlanMerge.mockResolvedValue({ ok: true, cancelled: true, taskId: 'task-1' });
