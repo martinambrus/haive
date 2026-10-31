@@ -958,7 +958,7 @@ Since T466 a row whose checkout is gone costs 3-5 statements a tick, but every h
 
 ### T478 · FNF[snapshot-error-paths] · the plan page shows a raw filesystem error, with the server's absolute path, as the snapshot error (+1)
 
-status: open
+status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T12:30Z · last: 2026-10-31T12:30Z
 From the T466 review (2026-10-31). PRE-EXISTING, minor.
 
 `plan_mirror_state.last_error` stores the raw `err.message` of a failed flush (worker plan/mirror.ts ~:1714-1733; `safeErrorMessage`, shared logger/errors.ts ~:62-65, redacts only database query errors), and `GET /repositories/:id/plan/snapshot` serves it (api routes/plan.ts ~:429), so any filesystem error other than the held reasons shows an absolute path under the repository storage on the plan page (T466 replaced only the gone-checkout one). Direction: store a reason from a closed set (or the error class and the path relative to the repository) and log the full error.
