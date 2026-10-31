@@ -312,7 +312,8 @@ for any other. A file a rollback puts back whose template its
 snapshot does not render stays out of the applicable set, where upgrade-status reports it while it
 holds what its row records, so a file restored after RTK went off is offered for removal again. A
 rollback also puts back, live, every row the upgrade untracked (02's `untrackedRowIds`) while no
-live row records that path, touching nothing on disk.
+live row records that path, touching nothing on disk, except one at a path that names git data,
+which it skips with a warning.
 
 **One upgrade or rollback runs at a time, and a rollback undoes the newest upgrade once.** Both are
 `onboarding_upgrade` tasks, and two side by side apply and revert the same files: an upgrade parked
@@ -465,7 +466,9 @@ person's enabled providers or carries their provider ids or credentials. Shared
 directories from that set; shared directories are deduplicated. Unknown names remain in the record
 without acquiring destinations an older install does not know. An explicit `[]` is authoritative.
 
-The convergent boot repair `seedRepositoryCliTargets` runs before applicable sets are recomputed.
+The convergent boot repair `seedRepositoryCliTargets` runs after `supersedeGitDataArtifacts`, so a
+marker at a git-data path never supplies the membership it writes, and before applicable sets are
+recomputed.
 It uses the actual context/snapshot decoder, skipping malformed rows and snapshots with no
 membership information, but stopping at a recorded empty list. Membership comes from the newest
 valid snapshot that records it; an existing authoritative column stays as it is. Recovering the
@@ -623,8 +626,13 @@ kind, schema version, template and written hashes, Haive version), written by 12
 or `git~1` in any ASCII letter case, followed only by dots and spaces or by a `:` stream name, and
 `.git` with HFS+'s ignorable code points; a `\` separates segments as `/` does, and the check is linear in
 the path's length): a record never imports a claim to git data, 02's `safeDiskRel` refuses such a
-path as a backstop, and 01 neither lists nor reads a ledger row imported before the
-rule. A claim file at such a path that an earlier release wrote, under its own file name, does not
+path as a backstop (so do 04's restore and undo, its put-back of an untracked row skips one, and an
+answer to a claim question at one is `invalid`), and 01 neither lists nor reads a ledger row imported
+before the rule. The convergent boot data migration `supersedeGitDataArtifacts` (`data-migrations.ts`)
+retires every live row at such a path at every boot (`superseded_at` and `updated_at` only, so
+`ledgerImportedSince` still counts an imported marker), so none counts in the banner, the onboarded
+and admission verdicts or the CLI membership seed. A claim file at such a path that an earlier
+release wrote, under its own file name, does not
 refuse the record: the codec reads it apart (`gitDataClaims`), the sync keeps it in the base for the
 writer to remove at the next write (and marks the record due), and no merge, import or set-aside
 check reads it as a claim. Any other claim at a path no claim may name still refuses the whole
