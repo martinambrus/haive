@@ -31,6 +31,7 @@ vi.mock('@haive/shared', async (importOriginal) => ({
 }));
 
 import { schema } from '@haive/database';
+import { logger } from '@haive/shared';
 import { createFakeDb } from '@haive/database/testing';
 import { hardenGitArgs } from '@haive/shared/git-args';
 import type { HaiveDataStatus } from '@haive/shared/haive-data';
@@ -194,6 +195,39 @@ describe('GET /repositories/:id/haive-data', () => {
     });
     expect(h.queue).not.toHaveBeenCalled();
     expect(h.add).not.toHaveBeenCalled();
+  });
+
+  it('warns once per repository and failed read, then logs polls at debug', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const debug = vi.spyOn(logger, 'debug').mockImplementation(() => undefined);
+    try {
+      await status({ failArg: '--show-current' });
+      await status({ failArg: '--show-current' });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(debug).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ repositoryId: REPO }),
+        'Haive data status branch read failed',
+      );
+      expect(debug).toHaveBeenCalledWith(
+        expect.objectContaining({ repositoryId: REPO }),
+        'Haive data status branch read failed',
+      );
+      await status({ failArg: 'get-url' });
+      expect(warn).toHaveBeenCalledTimes(2);
+      fake.insert(schema.repositories, {
+        id: OTHER_REPO,
+        userId: USER,
+        name: 'other',
+        storagePath: root,
+      });
+      expect((await fetchStatus({ id: OTHER_REPO, failArg: '--show-current' })).status).toBe(200);
+      expect(warn).toHaveBeenCalledTimes(3);
+      expect(debug).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+      debug.mockRestore();
+    }
   });
 
   it('answers 404 for another user repository and reads nothing of it', async () => {

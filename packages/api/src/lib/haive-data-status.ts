@@ -201,13 +201,34 @@ export interface HaiveDataRepo {
   rootClaimedAt: Date | null;
 }
 
+// Polls retain full diagnostics at debug after the first warning. Bound the process-local memo
+// so visiting many repositories cannot retain their keys forever; evicted keys may warn again.
+const warnedReads = new Set<string>();
+const WARNED_READ_LIMIT = 256;
+
+function logReadFailure(repositoryId: string, what: string, err: unknown): void {
+  const code = err && typeof err === 'object' && 'code' in err ? err.code : null;
+  const key = JSON.stringify([
+    repositoryId,
+    what,
+    typeof code === 'string' || typeof code === 'number' ? code : null,
+  ]);
+  const message = `Haive data status ${what} read failed`;
+  if (warnedReads.has(key)) {
+    logger.debug({ err, repositoryId }, message);
+    return;
+  }
+  if (warnedReads.size >= WARNED_READ_LIMIT) warnedReads.delete(warnedReads.values().next().value!);
+  warnedReads.add(key);
+  logger.warn({ err, repositoryId }, message);
+}
+
 export async function readHaiveDataStatus(
   db: Pick<Database, 'select'>,
   repo: HaiveDataRepo,
 ): Promise<HaiveDataStatus> {
   const repoPath = repo.storagePath ?? repo.localPath;
-  const warn = (err: unknown, what: string) =>
-    logger.warn({ err, repositoryId: repo.id }, `Haive data status ${what} read failed`);
+  const warn = (err: unknown, what: string) => logReadFailure(repo.id, what, err);
   const readHolds: HaiveDataReadHold[] = [];
   let missing = !repoPath;
   if (repoPath) {
