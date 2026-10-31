@@ -76,11 +76,11 @@ app.onError((err, c) => {
 
 // DELETE /repositories/:id/plan/merge abandons the repository's open merge conversation (a
 // plan_merge task that is created, queued, running, paused or waiting for the user). It takes the
-// Cancel action's steps, except lifting a pause: it stops the task's live CLI runs, then decides
-// under the task's locks (cancelTaskIfOpen: a task that completed or was cancelled meanwhile is
-// left as it is) and queues the CANCEL job only when that cancel applied. A merge that is already
-// completed, cancelled or failed is no open conversation: the DELETE answers cancelled:false and
-// writes nothing (P5).
+// Cancel action's steps: it stops the task's live CLI runs, then decides under the task's locks
+// (cancelTaskIfOpen: a task that completed or was cancelled meanwhile is left as it is), ends the
+// task's pause and queues the CANCEL job only when that cancel applied (P7, P8). A merge that is
+// already completed, cancelled or failed is no open conversation: the DELETE answers
+// cancelled:false and writes nothing (P5).
 // P1 and P6 hold a step row in a second connection and observe the DELETE blocked on it, so they
 // also pin the order the DELETE takes its locks in: the task's step rows in id order, holding none
 // while it waits, before the task row.
@@ -575,6 +575,60 @@ describe.skipIf(!url)('DELETE /plan/merge beside a completion and a peer, on Pos
       expect((await taskOf(taskId)).status).toBe('cancelled');
       expect(await rowOf(B.id)).toMatchObject({ status: 'failed', errorMessage: 'Task cancelled' });
       expect(await rowOf(A.id)).toMatchObject({ status: 'failed', errorMessage: 'Task cancelled' });
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'P7: ends the pause of a paused merge the DELETE cancels, as the Cancel action does',
+    async () => {
+      // The step-retry endpoint has no status guard, so a cancelled task is still resumable, and a
+      // stale paused_at would park it again the moment someone revived it.
+      const { taskId } = await seedTask('running', ['running', 'pending'], {
+        pausedAt: new Date(),
+      });
+
+      const answer = await removeMerge();
+
+      expect.soft(answer, 'the answer').toEqual({
+        status: 200,
+        body: { ok: true, cancelled: true, taskId },
+      });
+      const task = await taskOf(taskId);
+      expect.soft(task.status, 'task status after the DELETE').toBe('cancelled');
+      expect.soft(task.pausedAt, 'paused_at after the DELETE').toBeNull();
+      expect
+        .soft(
+          cancelJobs().map((job) => job.payload),
+          'CANCEL jobs queued',
+        )
+        .toMatchObject([{ taskId, userId: USER }]);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'P8: keeps the pause of a paused merge that completed while the DELETE waited',
+    async () => {
+      // The DELETE cancelled nothing, so it clears nothing: the pause is the task's, not the DELETE's.
+      const pausedAt = new Date();
+      const { taskId, stepRowIds } = await seedTask('running', ['running'], { pausedAt });
+
+      const run = await interleave(
+        removeMerge,
+        { first: endStepRow(stepRowIds[0]!), second: completeTask(taskId) },
+        [],
+      );
+
+      expectClean(run);
+      expect.soft(run.result, 'the answer').toEqual({
+        status: 200,
+        body: { ok: true, cancelled: false },
+      });
+      const task = await taskOf(taskId);
+      expect.soft(task.status, 'task status after the DELETE').toBe('completed');
+      expect.soft(task.pausedAt, 'paused_at after the DELETE').toEqual(pausedAt);
+      expect.soft(cancelJobs(), 'CANCEL jobs queued').toEqual([]);
     },
     TEST_TIMEOUT,
   );

@@ -201,6 +201,13 @@ describe.skipIf(!url)('a task cancel or step abort beside another writer, on Pos
       .where(eq(schema.tasks.id, taskId));
     return row!.status;
   };
+  const pausedAtOf = async (taskId: string) => {
+    const [row] = await db
+      .select({ pausedAt: schema.tasks.pausedAt })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, taskId));
+    return row!.pausedAt;
+  };
   const stepsOf = (taskId: string) =>
     db
       .select({
@@ -492,4 +499,49 @@ describe.skipIf(!url)('a task cancel or step abort beside another writer, on Pos
     },
     30_000,
   );
+
+  it.each([
+    ['running', ['running', 'pending'], {}],
+    ['failed', ['failed'], { errorMessage: 'boom', completedAt: new Date() }],
+  ] as const)(
+    'X3: ends the pause of a paused %s task a step abort cancels, as the Cancel action does',
+    async (status, steps, over) => {
+      // The step-retry endpoint has no status guard, so a cancelled task is still resumable, and a
+      // stale paused_at would park it again the moment someone revived it.
+      const { taskId } = await seedTask(status, [...steps], { ...over, pausedAt: new Date() });
+
+      const answer = await abort(taskId, STEP).done;
+
+      expect.soft(answer).toMatchObject({
+        ok: true,
+        value: { status: 200, body: { ok: true, status: 'cancelled' } },
+      });
+      expect.soft(await taskStatus(taskId), 'task status after the abort').toBe('cancelled');
+      expect.soft(await pausedAtOf(taskId), 'paused_at after the abort').toBeNull();
+      await expectOneCancel(taskId);
+    },
+    30_000,
+  );
+
+  it('X4: keeps the pause of a paused task that completed while a step abort waited', async () => {
+    // The abort cancelled nothing, so it clears nothing: the pause is the task's, not the abort's.
+    const pausedAt = new Date();
+    const { taskId, stepRowIds } = await seedTask('running', ['running', 'pending'], { pausedAt });
+
+    const answer = await raceRequest(
+      'abort',
+      () => abort(taskId, STEP),
+      stepRowIds[0]!,
+      completeTask(taskId),
+    );
+
+    expect.soft(answer).toMatchObject({
+      ok: true,
+      value: { status: 200, body: { ok: true, status: 'completed' } },
+    });
+    expect.soft(await taskStatus(taskId), 'task status after the abort').toBe('completed');
+    expect.soft(await pausedAtOf(taskId), 'paused_at after the abort').toEqual(pausedAt);
+    expect.soft(await cancelEvents(taskId), 'task.cancelled events').toEqual([]);
+    expect.soft(cancelJobs(), 'CANCEL jobs queued').toEqual([]);
+  }, 30_000);
 });

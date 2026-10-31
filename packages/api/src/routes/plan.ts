@@ -67,7 +67,7 @@ import { loadUsableProvider, writeStepCliChoice } from '../lib/step-cli-choice.j
 import { loadOpenPlanAdvisories, OPEN_PLAN_TASK_STATES } from '../lib/plan-advisories.js';
 import { enqueuePlanMirrorRefresh, pullPlanMirror, savePlanMirror } from '../lib/plan-mirror.js';
 import { cancelTaskIfOpen, enqueueCancelJob } from '../lib/cancel-task.js';
-import { stopActiveCliInvocations } from '../lib/task-control.js';
+import { clearTaskPause, stopActiveCliInvocations } from '../lib/task-control.js';
 
 const exec = promisify(execFile);
 
@@ -1387,6 +1387,9 @@ planRoutes.delete('/:id/plan/merge', async (c) => {
   await stopActiveCliInvocations(db, task.id, { failTask: false });
   const result = await db.transaction((tx) => cancelTaskIfOpen(tx, task.id, { by: userId }));
   if (!result.cancelled) return c.json({ ok: true, cancelled: false });
+  // The pause goes with the cancel, as in the Cancel action: a cancelled task is still
+  // resumable, and a stale paused_at would park it again once it was revived.
+  await clearTaskPause(db, task.id);
   await enqueueCancelJob(task.id, userId);
   return c.json({ ok: true, cancelled: true, taskId: task.id });
 });
