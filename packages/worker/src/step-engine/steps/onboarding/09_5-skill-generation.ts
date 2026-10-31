@@ -1300,7 +1300,10 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     const refusalNote = skillTargetRefusalNote(storedDirs, storedIds);
     if (targetDirs.length === 0)
       return {
-        summary: 'The repository maintains no skill destinations.',
+        summary:
+          storedDirs.length > 0
+            ? 'Every stored skill destination was refused; no skills were applied.'
+            : 'The repository maintains no skill destinations.',
         ...(refusalNote ? { degradedNote: refusalNote } : {}),
         written: [],
         totalSubSkills: 0,

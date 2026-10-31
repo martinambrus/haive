@@ -198,7 +198,8 @@ export function withoutUnsafeSkillIds(
   });
 }
 
-/** A visible caveat alongside the existing mining/coverage note, including all-refused runs. */
+/** A visible caveat alongside the existing mining/coverage note, including all-refused runs.
+ *  Counts keep untrusted stored names out of the Markdown banner; logs retain the names. */
 export function skillTargetRefusalNote(
   dirs: readonly string[],
   ids: readonly string[] = [],

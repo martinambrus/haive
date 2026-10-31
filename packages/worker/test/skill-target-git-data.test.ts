@@ -680,6 +680,23 @@ describe('empty stored destinations with refused IDs', () => {
   });
 });
 
+describe('all-refused destination summaries', () => {
+  it.each([
+    { step: skillGenerationStep, detected: () => genDetect(REFUSED) },
+    { step: skillRepairStep, detected: () => repairDetect(REFUSED) },
+  ])('explains refused stored destinations: $step.metadata.id', async ({ step, detected }) => {
+    const out = await step.apply(ctxFor(recordingLogger()), applyArgs(detected()) as never);
+    expect(out.summary).toBe('Every stored skill destination was refused; no skills were applied.');
+  });
+
+  it.each([
+    { step: skillGenerationStep, detected: () => genDetect([]) },
+    { step: skillRepairStep, detected: () => repairDetect([]) },
+  ])('retains the explicit empty-list summary: $step.metadata.id', async ({ step, detected }) => {
+    const out = await step.apply(ctxFor(recordingLogger()), applyArgs(detected()) as never);
+    expect(out.summary).toBe('The repository maintains no skill destinations.');
+  });
+});
 describe('stored skill positive path validation', () => {
   beforeEach(() => vi.stubEnv('HAIVE_TEST_BYPASS_LLM', '0'));
   afterEach(() => vi.unstubAllEnvs());

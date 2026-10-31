@@ -454,7 +454,10 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
     const refusalNote = skillTargetRefusalNote(storedDirs, storedIds);
     if (targetDirs.length === 0)
       return {
-        summary: 'The repository maintains no skill destinations.',
+        summary:
+          storedDirs.length > 0
+            ? 'Every stored skill destination was refused; no skills were applied.'
+            : 'The repository maintains no skill destinations.',
         repaired: [],
         stillFailing: storedDirs.length > 0 ? storedIds : [],
         attempted: 0,
