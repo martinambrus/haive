@@ -612,9 +612,54 @@ describe('stored skill dispatch targets', () => {
     const prompt = skillGenerationStep.llm!.buildPrompt({ detected, formValues: {} } as never);
     expect(prompt).toContain(ORDINARY);
     for (const dir of REFUSED) expect(prompt).not.toContain(dir);
-    expect(prompt).not.toContain('- .git');
+    expect(prompt).not.toContain('.git');
   });
 });
+describe('09_5 stored loop IDs', () => {
+  const refusedIds = ['.git', 'nested/unsafe-loop-id'];
+
+  it('omits refused bundle IDs from the first loop prompt', () => {
+    const prompt = skillGenerationStep.loop!.buildIterationPrompt!({
+      detected: { ...genDetect([ORDINARY]), bundleSkills: refusedIds.map(skill) },
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+    for (const id of refusedIds) expect(prompt).not.toContain(id);
+  });
+
+  it('filters prior written IDs from the next loop prompt, output and README', async () => {
+    const log = recordingLogger();
+    const detected = genDetect([ORDINARY]);
+    const first = await skillGenerationStep.apply(ctxFor(log), applyArgs(detected) as never);
+    const prior = {
+      ...first,
+      written: [
+        ...first.written,
+        ...refusedIds.map((id) => ({ ...first.written[0]!, id, title: id, description: id })),
+      ],
+    };
+    const previousIterations = [{ applyOutput: prior }];
+    const prompt = skillGenerationStep.loop!.buildIterationPrompt!({
+      detected,
+      formValues: {},
+      iteration: 1,
+      previousIterations,
+    } as never);
+    expect(prompt).toContain('conventions');
+    for (const id of refusedIds) expect(prompt).not.toContain(id);
+    const out = await skillGenerationStep.apply(ctxFor(log), {
+      ...applyArgs(detected),
+      iteration: 1,
+      llmOutput: null,
+      previousIterations,
+    } as never);
+    expect(out.written.map((w) => w.id)).toEqual(['conventions']);
+    const readme = await readFile(path.join(repo, ORDINARY, 'README.md'), 'utf8');
+    for (const id of refusedIds) expect(readme).not.toContain(id);
+  });
+});
+
 describe('stored skill positive path validation', () => {
   beforeEach(() => vi.stubEnv('HAIVE_TEST_BYPASS_LLM', '0'));
   afterEach(() => vi.unstubAllEnvs());
