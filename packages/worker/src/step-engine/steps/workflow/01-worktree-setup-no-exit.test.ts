@@ -305,3 +305,22 @@ it('T397 D6 exit 128 retains the recorded base through detect and apply', async 
   );
   expect(out.baseBranch).toBe('develop');
 });
+
+it('exit 128 without a recorded base warns on the form and refuses apply', async () => {
+  const root = await mkRepo(true);
+  shim = await failGit(['rev-parse', '--abbrev-ref', 'HEAD'], { exit: 128 });
+  const ctx = mkCtx(root);
+  const d = await worktreeSetupStep.detect!(ctx);
+  expect(d.currentBranch).toBeNull();
+  expect(d.syncedBase).toBeNull();
+  expect(d.currentBranchError).toMatch(/could not read.*current branch/);
+  const found = notes(ctx, d);
+  expect(found).toHaveLength(1);
+  expect(found[0]).toMatchObject({ type: 'note', variant: 'warning' });
+  expect(found[0]!.body).toContain(d.currentBranchError!);
+  expect(found[0]!.body).toContain('recorded no base branch');
+  await expect(
+    worktreeSetupStep.apply(mkApplyCtx(root), applyArgs(d as unknown as Record<string, unknown>)),
+  ).rejects.toThrow(/recorded no base branch/);
+  await expectNothingCreated(root);
+});
