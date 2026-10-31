@@ -223,7 +223,7 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
     expect(await usableCheckout(dir)).toMatchObject({ unknown: expect.any(String) });
   });
 
-  it('a gitdir outside the checkout is unknown even when missing', async () => {
+  it('a missing gitdir named outside the checkout reads unknown, whichever check refuses it', async () => {
     const dir = await intact();
     await rm(path.join(dir, '.git'), { recursive: true });
     await writeFile(path.join(dir, '.git'), 'gitdir: ../missing.git\n');
@@ -255,7 +255,7 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
     expect(await usableCheckout(dir)).toEqual(needsRepair);
   });
 
-  it('a truncated gitfile cannot prove that its gitdir is absent', async () => {
+  it('a gitfile over the 4096-byte read bound reads unknown', async () => {
     const dir = await intact();
     await rm(path.join(dir, '.git'), { recursive: true });
     await writeFile(path.join(dir, '.git'), `gitdir: ${'a'.repeat(5000)}\n`);

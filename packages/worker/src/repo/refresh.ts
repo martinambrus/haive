@@ -73,14 +73,16 @@ const REPAIR_ADVICE =
   'Retry cannot help until the checkout is repaired; removing and re-adding the repository rebuilds it from its source.';
 
 /** A git work tree whose top level is `dest` itself and that has a commit to stand on.
- *  `unusable`: a different top level, HEAD exit 1, or, after `--show-cdup` exited non-zero, a `.git`
- *  that strict no-follow reads prove is not what git requires: absent; a directory without HEAD,
- *  with a HEAD that is neither a `ref:` line nor an object id, or without objects/ or refs/ (unless
- *  a commondir names their home); a file that does not start with `gitdir: `; or a file naming a
- *  gitdir inside `dest` that is absent.
- *  `unknown`: git gave no answer, or exited non-zero over a `.git` those reads cannot prove dead
- *  (a corrupt config, unreadable, linked or external metadata), or a HEAD read other than exit 0 or
- *  1. `repairNeeded` marks the ones where git answered with an exit status of its own.
+ *  `unusable`: a different top level, HEAD exit 1, `dest` itself absent or not a directory when git
+ *  gave no answer, or, after `--show-cdup` exited non-zero, a `.git` that strict no-follow reads
+ *  prove is not what git requires: absent; a directory without HEAD, with a HEAD that is neither a
+ *  `ref:` line nor an object id, or without objects/ or refs/ (unless a commondir names their
+ *  home); a file that does not start with `gitdir: `; or a file naming a gitdir inside `dest` that
+ *  is absent.
+ *  `unknown`: git gave no answer while `dest` is a directory, or exited non-zero over a `.git` those
+ *  reads cannot prove dead (a corrupt config, unreadable, linked or external metadata), or a HEAD
+ *  read other than exit 0 or 1. `repairNeeded` marks the ones where git answered with an exit
+ *  status of its own.
  *  Unknown must never trigger a rebuild: it moves the folder. */
 export async function usableCheckout(
   dest: string,

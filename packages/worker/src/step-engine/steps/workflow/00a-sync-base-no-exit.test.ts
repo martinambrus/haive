@@ -86,7 +86,7 @@ describe('00a-sync-base detect: the current branch read', () => {
   });
 });
 
-// T397: an ordinary git error is no answer either.
+// An ordinary git error is no answer either.
 it('rejects exit 128 from the current branch read', async () => {
   const dir = await makeRepo(true);
   shim = await failGit(['rev-parse', '--abbrev-ref', 'HEAD']);
