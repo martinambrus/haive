@@ -1,5 +1,5 @@
-import { execFile } from 'node:child_process';
-import { readdirSync, renameSync } from 'node:fs';
+import { execFile, execFileSync } from 'node:child_process';
+import { constants, mkdirSync, readdirSync, renameSync, symlinkSync, unlinkSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -11,6 +11,8 @@ const h = vi.hoisted(() => ({
   /** An error to throw instead of the `nth` (1-based, per call kind) call whose first argument is `target`. */
   fault: null as null | ((call: string, target: string, nth: number) => Error | undefined),
   calls: { open: 0, readdir: 0, lstat: 0, readlink: 0 },
+  /** The path and flags of every `open`, in order. */
+  opened: [] as Array<{ target: string; flags: number }>,
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -19,6 +21,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     const original = real[name] as (...args: unknown[]) => Promise<unknown>;
     return async (...args: unknown[]) => {
       h.calls[name] += 1;
+      if (name === 'open') h.opened.push({ target: String(args[0]), flags: Number(args[1]) });
       const error = h.fault?.(name, String(args[0]), h.calls[name]);
       if (error) throw error;
       return original(...args);
@@ -49,6 +52,7 @@ beforeEach(async () => {
   root = await mkdtemp(path.join(tmpdir(), 'safe-walk-limits-'));
   h.fault = null;
   h.calls = { open: 0, readdir: 0, lstat: 0, readlink: 0 };
+  h.opened = [];
 });
 afterEach(async () => {
   h.fault = null;
@@ -202,5 +206,71 @@ describe('the directory listing with sizes', () => {
 
     expect(listed).toHaveLength(3);
     expect(listed?.filter((entry) => entry.size !== null)).toHaveLength(1);
+  });
+});
+
+describe('a file that is replaced after its directory was read', () => {
+  const files = async () => {
+    await mkdir(path.join(root, 'tree'));
+    for (const name of ['f1', 'f2', 'f3']) await writeFile(path.join(root, 'tree', name), name);
+    await writeFile(path.join(root, 'larger'), 'x'.repeat(64));
+  };
+  // The directory entry said "regular file"; what the lstat then finds must say so too.
+  const replaceF2Before = (replacement: (file: string) => void) => {
+    const file = path.join(root, 'tree/f2');
+    const replaced = { count: 0 };
+    h.fault = (call, target) => {
+      if (call === 'lstat' && /\/fd\/\d+\/f2$/.test(target)) {
+        unlinkSync(file);
+        replacement(file);
+        replaced.count += 1;
+      }
+      return undefined;
+    };
+    return replaced;
+  };
+  const replacements: Array<[string, (file: string) => void]> = [
+    ['a link to a larger file', (file) => symlinkSync(path.join(root, 'larger'), file)],
+    ['a FIFO', (file) => execFileSync('mkfifo', [file])],
+    ['a directory', (file) => mkdirSync(file)],
+  ];
+
+  it.each(replacements)('is not listed by the walk when it becomes %s', async (_what, replace) => {
+    await files();
+    const replaced = replaceF2Before(replace);
+
+    expect(await collect(walkFilesNoFollow(root, 'tree'))).toEqual(['f1', 'f3']);
+    expect(replaced.count).toBe(1);
+  });
+
+  it.each(replacements)(
+    'has no size in the directory listing when it becomes %s',
+    async (_what, replace) => {
+      await files();
+      const replaced = replaceF2Before(replace);
+
+      const listed = await readdirSizesNoFollow(root, 'tree');
+
+      expect(listed?.map((entry) => [entry.name, entry.size]).sort()).toEqual([
+        ['f1', 2],
+        ['f2', null],
+        ['f3', 2],
+      ]);
+      expect(replaced.count).toBe(1);
+    },
+  );
+});
+
+describe('the open of a child directory', () => {
+  it('carries O_NOFOLLOW itself, since the held-path check after it would hide its absence', async () => {
+    await threeDirectories();
+
+    await collect(walkFilesNoFollow(root, 'tree'));
+
+    const children = h.opened.filter(({ target }) => /\/fd\/\d+\/[abc]$/.test(target));
+    expect(children).toHaveLength(3);
+    for (const { flags } of children) {
+      expect(flags & constants.O_NOFOLLOW).toBe(constants.O_NOFOLLOW);
+    }
   });
 });
