@@ -2625,7 +2625,7 @@ async function handleStartTask(
   }
   // START runs its first step itself rather than through an advance, so it takes that step's hold
   // too: a pass a Stop cut off can still be on the step when a Retry queues this START.
-  const release = await takeStepHold(`${ctx.taskId}:${first.metadata.id}:0`);
+  const release = await takeStepHold(stepHoldKey(ctx.taskId, first.metadata.id, 0));
   try {
     // The task is live, so a deactivation must count it; one already under way is waited out.
     const moduleDeactivation = await moduleDeactivationMessage(db, first.metadata.id, {
@@ -4186,6 +4186,14 @@ type TaskWorkerPayload =
 /** Steps whose advance this process is running, by task, step and round. */
 const advancingSteps = new Set<string>();
 
+const stepHoldKey = (taskId: string, stepId: string, round: number) =>
+  `${taskId}:${stepId}:${round}`;
+
+/** Whether a pass of this process is on the step. The stalled sweep leaves such a step alone: its
+ *  queue read cannot see a pass whose job Redis lost while the handler went on. */
+export const stepAdvanceHeld = (taskId: string, stepId: string, round: number): boolean =>
+  advancingSteps.has(stepHoldKey(taskId, stepId, round));
+
 /** How long an advance waits before trying a step another advance holds again. */
 const ADVANCE_DEFER_MS = 5_000;
 
@@ -4211,7 +4219,7 @@ export async function holdStepAdvance(
 ): Promise<(() => void) | null> {
   const { taskId, stepId, round } = job.data as TaskJobPayload;
   if (!stepId) return null;
-  const key = `${taskId}:${stepId}:${round ?? 0}`;
+  const key = stepHoldKey(taskId, stepId, round ?? 0);
   if (advancingSteps.has(key) && token) {
     let deferred = false;
     try {

@@ -42,6 +42,7 @@ import {
   recoverParkedStep,
   retrying,
   REDRIVE_RETRY_DELAYS_MS,
+  stepAdvanceHeld,
 } from './task-queue.js';
 
 /**
@@ -77,14 +78,18 @@ export interface StalledRedriveDeps {
   queuedTaskJobs: () => Promise<TaskQueueOwed | null>;
   /** Every invocation a cli-exec job still owes a run, or null when the queue could not be read. */
   queuedInvocationIds: () => Promise<Set<string> | null>;
+  /** Whether a pass of this process is on the step; defaults to the task worker's own hold. */
+  stepHeld?: (taskId: string, stepId: string, round: number) => boolean;
   redriveRetryDelaysMs?: number[];
 }
 
 export interface TaskQueueOwed {
-  /** Tasks a job still owes a step. A START owes none: it only claims a task still waiting to
-   *  start, so one a dead worker left `active` under its lock must not hold a running task. */
+  /** Tasks a job still owes a step. A START owes none to a lost hand-off: it only claims a task
+   *  still waiting to start, so one a dead worker left `active` under its lock must not hold a
+   *  task whose hand-off was lost. */
   steps: Set<string>;
-  /** Tasks a START is still queued for. */
+  /** Tasks a START is still queued for. It does hold a task parked or running on its first step,
+   *  which the job runs itself or hands to an advance. */
   starts: Set<string>;
 }
 
@@ -437,6 +442,8 @@ export async function redriveStalledTasks(
     // A START in the queue owns a task's first step, which it runs itself (its row is `running`, and
     // an apply that writes nothing can idle past the cutoff) or hands to an advance.
     if (queued.starts.has(c.taskId) && rowShape(c) !== 'handoff') continue;
+    // And a pass of this process whose job Redis lost: the queue read cannot see it, the hold can.
+    if ((deps.stepHeld ?? stepAdvanceHeld)(c.taskId, c.stepId, c.round)) continue;
     try {
       if (c.rowStatus === 'failed' && c.rowId !== null) {
         // Its job died between failing the step and failing the task, and every write refuses a

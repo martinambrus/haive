@@ -532,7 +532,12 @@ describe('the tasks the sweep takes, by task status and current row', () => {
     });
   }
 
-  async function advancedBy(seeds: Seed[], owed: string[] = [], starts: string[] = []) {
+  async function advancedBy(
+    seeds: Seed[],
+    owed: string[] = [],
+    starts: string[] = [],
+    held = false,
+  ) {
     const advances: { taskId: string; epoch: number }[] = [];
     await redriveStalledTasks(
       makeDb(await candidatesAmong(seeds), []),
@@ -541,6 +546,7 @@ describe('the tasks the sweep takes, by task status and current row', () => {
           advances.push({ taskId, epoch });
         },
         queuedTaskJobs: async () => ({ ...owesSteps(...owed), starts: new Set(starts) }),
+        stepHeld: () => held,
         ...noLostWork,
       },
       { staleMs: 300_000 },
@@ -662,6 +668,17 @@ describe('the tasks the sweep takes, by task status and current row', () => {
     it('leaves it to a START the queue holds for the task, which runs the first step itself', async () => {
       expect(await advancedBy([seed('task', 'running', reopened)], [], ['task'])).toEqual([]);
     });
+  });
+
+  it.each([
+    ['a running row', { status: 'running' }],
+    ['a parked row', { status: 'pending', waitingStartedAt: idle }],
+    ['a pending row', { status: 'pending' }],
+    ['a finished row', { status: 'done' }],
+    ['no current row', null],
+  ])('leaves a step a pass of this process is on, on %s', async (_name, row) => {
+    expect(await advancedBy([seed('task', 'running', row)], [], [], true)).toEqual([]);
+    expect(await advancedBy([seed('task', 'running', row)], [], [], false)).toHaveLength(1);
   });
 
   it('still leaves a running task that moved since the cutoff to the pass that moved it', async () => {

@@ -5,7 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { createDatabase, schema, type Database } from '@haive/database';
 import { configService, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
 import { markModuleSchemaReady, markModuleSchemaUnready } from '../src/modules/schema-ready.js';
-import { processTaskJob } from '../src/queues/task-queue.js';
+import { holdStepAdvance, processTaskJob } from '../src/queues/task-queue.js';
 import {
   redriveStalledTasks,
   type StalledRedriveDeps,
@@ -475,6 +475,29 @@ describe.skipIf(!url)('the stalled sweep and a park nothing drives, on Postgres'
       expect(advances, 'nothing was queued').toEqual([]);
       expect(seen).toMatchObject({ attempts: 0, failTask: 0, start: 0 });
       expect(await state(taskId), 'nothing was written').toEqual(before);
+    });
+  });
+
+  describe('a step a pass of this process is on, whose job Redis lost', () => {
+    it('P15: is left alone while the pass holds the step, and taken once the hold is released', async () => {
+      const { taskId } = await parked();
+      const before = await state(taskId);
+      const release = await holdStepAdvance(
+        {
+          id: randomUUID(),
+          data: { taskId, userId, stepId: S, round: ROUND },
+          moveToDelayed: async () => undefined,
+        },
+        undefined,
+      );
+      const held = rig();
+      await expect(redriveStalledTasks(db, held.deps, { staleMs: STALE_MS })).resolves.toBe(0);
+      expect(held.advances, 'nothing was queued while a pass held the step').toEqual([]);
+      expect(await state(taskId), 'and nothing was written').toEqual(before);
+      release!();
+      const free = rig();
+      await expect(redriveStalledTasks(db, free.deps, { staleMs: STALE_MS })).resolves.toBe(1);
+      expect(free.advances, 'the hold, not the row, was what protected it').toHaveLength(1);
     });
   });
 
