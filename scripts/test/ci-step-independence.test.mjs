@@ -891,39 +891,143 @@ describe('the gated row guards', () => {
   });
 });
 
+function redisDatabases(step) {
+  const texts = [...Object.values(step.env ?? {}), step.run ?? ''];
+  return [
+    ...new Set(
+      texts.flatMap((text) =>
+        [...text.matchAll(/redis:\/\/[^\s"'`\\;|&)]+/g)].map(([raw]) => {
+          const path = new URL(raw).pathname.replace(/^\//, '');
+          assert.match(path, /^\d*$/, `Redis database must be a literal number: ${raw}`);
+          return String(Number(path || '0'));
+        }),
+      ),
+    ),
+  ];
+}
+
 function checkRedisIsolation(job) {
   const index = job.steps.findIndex((step) => gatedRows(step) !== null);
   assert.ok(index >= 0, 'no gated step');
-  const databases = (steps) =>
-    steps.flatMap((step) =>
-      Object.values(step.env ?? {})
-        .filter((url) => url.startsWith('redis://'))
-        .map((url) => new URL(url).pathname || '/0'),
-    );
-  const gated = databases([job.steps[index]]);
-  const later = databases(job.steps.slice(index + 1));
-  assert.ok(gated.length > 0 && later.length > 0, 'both sets must contain Redis databases');
-  assert.deepEqual(
-    later.filter((db) => gated.includes(db)),
-    [],
-    'later steps share a gated Redis database',
-  );
+  // The job-wide default (database 0 today) is also used by general smokes. Reserve it
+  // once, alongside the gated databases; explicit later tests need their own databases.
+  const gated = [...redisDatabases({ env: job.env }), ...redisDatabases(job.steps[index])];
+  assert.ok(gated.length > 0, 'gated/job env must contain Redis databases');
+  const used = new Map(gated.map((db) => [db, 'gated step or job env']));
+  let laterCount = 0;
+  for (const step of job.steps.slice(index + 1)) {
+    const databases = redisDatabases(step);
+    laterCount += databases.length;
+    for (const db of databases) {
+      assert.ok(!used.has(db), `${label(step)} shares Redis database ${db} with ${used.get(db)}`);
+      used.set(db, label(step));
+    }
+  }
+  assert.ok(laterCount > 0, 'later steps must contain Redis databases');
 }
+
+// Select by the GATED list and Redis env values, independent of display names.
+function redisFixture(job) {
+  const index = job.steps.findIndex((step) => gatedRows(step) !== null);
+  const gated = job.steps[index];
+  const later = job.steps
+    .slice(index + 1)
+    .filter((step) => Object.values(step.env ?? {}).some((url) => url.startsWith('redis://')));
+  const url = (step) => Object.values(step.env).find((value) => value.startsWith('redis://'));
+  assert.ok(gated && later.length >= 2, 'the fixture needs gated and two later Redis steps');
+  return { gated, later, url };
+}
+
+const REDIS_MUTANTS = [
+  [
+    'a later step reusing a gated database',
+    (job) => {
+      const { gated, later, url } = redisFixture(job);
+      later[0].env.TEST_REDIS_URL = url(gated);
+    },
+  ],
+  [
+    'two later steps sharing a database',
+    (job) => {
+      const { later, url } = redisFixture(job);
+      later[1].env.TEST_REDIS_URL = url(later[0]);
+    },
+  ],
+  [
+    'a later database also reserved in job env',
+    (job) => {
+      const { later, url } = redisFixture(job);
+      job.env.SHARED_TEST_REDIS_URL = url(later[0]);
+    },
+  ],
+  [
+    'an inline run URL reusing a gated database',
+    (job) => {
+      const { gated, later, url } = redisFixture(job);
+      later[0].run += `\nexport TEST_REDIS_URL='${url(gated)}'`;
+    },
+  ],
+  [
+    'an inline run URL reusing a later database',
+    (job) => {
+      const { later, url } = redisFixture(job);
+      later[1].run += `\nexport TEST_REDIS_URL='${url(later[0])}'`;
+    },
+  ],
+  [
+    'a gated inline run URL reused by a later step',
+    (job) => {
+      const { gated, later, url } = redisFixture(job);
+      const shared = url(gated);
+      for (const [key, value] of Object.entries(gated.env)) {
+        if (value === shared) delete gated.env[key];
+      }
+      gated.run += `\nexport TEST_REDIS_URL='${shared}'`;
+      later[0].env.TEST_REDIS_URL = shared;
+    },
+  ],
+  ...['', '/'].map((path) => [
+    `an empty URL path (${JSON.stringify(path)}) reusing database 0`,
+    (job) => {
+      const { gated, later } = redisFixture(job);
+      delete job.env.REDIS_URL;
+      gated.env.TEST_REDIS_URL = `redis://localhost:6379${path}`;
+      later[0].env.TEST_REDIS_URL = 'redis://localhost:6379/0';
+    },
+  ]),
+];
 
 describe('gated Redis isolation', () => {
   const job = workflows['ci.yml'].jobs.smokes;
-  it('keeps later steps out of every gated Redis database', () => checkRedisIsolation(job));
-  it('rejects a later step reusing a gated Redis database', () => {
-    const mutant = structuredClone(job);
-    const gated = mutant.steps.findIndex((step) => gatedRows(step) !== null);
-    const later = mutant.steps.slice(gated + 1).find((step) => step.env);
-    later.env = {
-      TEST_REDIS_URL: Object.values(mutant.steps[gated].env).find((url) =>
-        url.startsWith('redis://'),
-      ),
-    };
-    assert.throws(() => checkRedisIsolation(mutant), assert.AssertionError);
+  it('keeps later steps out of gated, job-wide and other later databases', () =>
+    checkRedisIsolation(job));
+  it('accepts distinct databases supplied by job env and inline run URLs', () => {
+    const control = structuredClone(job);
+    const { gated, later } = redisFixture(control);
+    control.env.INTEGRATIONS_AUDIT_TEST_REDIS_URL = gated.env.INTEGRATIONS_AUDIT_TEST_REDIS_URL;
+    delete gated.env.INTEGRATIONS_AUDIT_TEST_REDIS_URL;
+    later[0].run += "\nexport EXTRA_REDIS_URL='redis://localhost:6379/1'";
+    checkRedisIsolation(control);
   });
+  it('reads omitted and slash-only paths as database 0', () => {
+    for (const path of ['', '/']) {
+      assert.deepEqual(redisDatabases({ env: { REDIS_URL: `redis://localhost:6379${path}` } }), [
+        '0',
+      ]);
+      assert.deepEqual(
+        redisDatabases({ run: `REDIS_URL="redis://localhost:6379${path}" pnpm test` }),
+        ['0'],
+      );
+    }
+  });
+  for (const [name, mutate] of REDIS_MUTANTS) {
+    it(`rejects ${name}`, () => {
+      checkRedisIsolation(job);
+      const mutant = structuredClone(job);
+      mutate(mutant);
+      assert.throws(() => checkRedisIsolation(mutant), assert.AssertionError);
+    });
+  }
 });
 
 function checkReleaseLimits(workflow) {
