@@ -52,7 +52,12 @@ import { HttpError, type AppEnv } from '../../context.js';
 import { admitNewWork, assertNewWorkAllowed } from '../../middleware/maintenance.js';
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
 import { refuseBesideLiveUpgrade, refuseReviveBesideLive } from '../upgrades.js';
-import { cancelLiveRuns, reofferParkedSteps, withoutGateAnswer } from '../../lib/task-control.js';
+import {
+  cancelLiveRuns,
+  reofferParkedSteps,
+  stopActiveCliInvocations,
+  withoutGateAnswer,
+} from '../../lib/task-control.js';
 import {
   cancelTaskIfOpen,
   enqueueCancelJob,
@@ -1562,6 +1567,10 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     // per-task DDEV runner, which survives a plain failure so recovery can reuse
     // it). The step stays failed; the task goes terminal. A task that completed or was cancelled
     // while the locks were awaited is left as it is: no second event, no second teardown.
+    if (task.status === 'completed' || task.status === 'cancelled') {
+      return c.json({ ok: true, status: task.status });
+    }
+    await stopActiveCliInvocations(db, id, { failTask: false });
     const result = await db.transaction((tx) => cancelTaskIfOpen(tx, id, { by: userId }));
     if (!result.cancelled) return c.json({ ok: true, status: result.status });
     await enqueueCancelJob(id, userId);
