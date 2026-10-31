@@ -800,6 +800,18 @@ describe('what holds a Save', () => {
 });
 
 describe('the last errors', () => {
+  it('redacts URL userinfo from every stored error', async () => {
+    const lastError = 'fetch https://user:fixture-password@example.test/repo.git failed';
+    fake.insert(schema.projectStateOutbox, { repositoryId: REPO, lastError });
+    fake.insert(schema.planMirrorState, { repositoryId: REPO, lastError });
+    fake.insert(schema.projectStateSync, { repositoryId: REPO, baseSnapshot: {}, lastError });
+    const body = await status();
+    for (const error of [body.record.lastError, body.record.syncError, body.snapshot.lastError]) {
+      expect(error).toBe('fetch https://example.test/repo.git failed');
+    }
+    expect(JSON.stringify(body)).not.toContain('fixture-password');
+  });
+
   it('scrubs an absolute path out of each, and reports the synced head', async () => {
     fake.insert(schema.projectStateOutbox, {
       repositoryId: REPO,

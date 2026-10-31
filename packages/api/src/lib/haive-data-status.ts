@@ -20,7 +20,7 @@ import {
 } from '@haive/shared/haive-data';
 import { scrubErrorPaths } from '@haive/shared/logger';
 import { PROJECT_STATE_DIR } from '@haive/shared/project-state';
-import { isAllowedGitRemoteUrl } from '@haive/shared/schemas';
+import { isAllowedGitRemoteUrl, redactGitText } from '@haive/shared/schemas';
 
 /* The facts below are the ones the worker's locked check builds (`factsAt`,
  * worker/src/project-state/save.ts), read without its locks and re-implemented here because the api
@@ -192,7 +192,7 @@ async function readFiles(repoPath: string): Promise<HaiveDataFile[] | null> {
 }
 
 const scrub = (text: string | null | undefined): string | null =>
-  text ? scrubErrorPaths(text) : null;
+  text ? redactGitText(scrubErrorPaths(text)) : null;
 
 export interface HaiveDataRepo {
   id: string;
