@@ -1189,13 +1189,14 @@ From the T397 fix round 4 (2026-10-31). Minor (UX); arrives with T397.
 
 After T397 a refresh that finds a `.git` git refuses (exit 128) but that no structural read proves dead ends `error` with a message saying Retry cannot help until the checkout is repaired and that removing and re-adding the repository rebuilds it. The repositories page still offers Retry for every `error` row, and it must not key on the message text (AGENTS.md: a message is display copy). Decision needed: a structural signal (for example an error code column on `repositories`, written with the status) that the page reads to hide Retry and offer remove-and-re-add, or keep Retry (it is harmless, three attempts) and only reword. Single.
 
-### T513 · FNF[test-env-hygiene] [verify-first] · two build-stamp tests fail outside CI's environment; api tests leave temporary directories behind (+1)
+### T513 · FNF[test-env-hygiene] [verify-first] · two build-stamp tests fail outside CI's environment; api tests leave temporary directories behind (+2)
 
 status: open
 From the T498 builder and the T365 fix round 2 (2026-10-31). PRE-EXISTING, minor (test hygiene only).
 
 1. `computeBuildStamp outside a checkout` ("with a release version", "with a release candidate", worker test/build-stamp.test.ts ~:312) answer `unknown` instead of `release:0.2.0` / `release:0.3.0-rc.1` on this host, on the unchanged base too and with the default TMPDIR (T498 evidence `buildstamp-BASE-unchanged-code.log`); CI is green. Find what the host differs in (a git checkout above the temporary directory, an environment variable) and make the test independent of it.
 2. api test/onboardable-source.test.ts ~:8 and test/repo-artifact-reset.test.ts ~:1829, ~:1849 create `mkdtemp` directories they never remove (seventeen left after one run). Remove them in `afterEach`.
+3. (T376 seventh review) `answeredWithin` has six copies (api test/auth-throttle.test.ts ~:211, repo-link-remote.test.ts ~:72, repository-security-audit-db.test.ts ~:66, integration-mcp-db.test.ts ~:514, integration-mcp-module-db.test.ts ~:407, integration-mcp-module-extras-db.test.ts ~:359); move it into the shared gated helper (`security-audit-db.ts`). Minor.
 
 ### T514 · FNF[sweep-redrive-budget] [design] · the stalled sweep re-drives a step with nothing live every cutoff, with no budget
 
@@ -1209,6 +1210,14 @@ From the T498 review (2026-10-31). PRE-EXISTING, minor. Same class as T498 item 
 
 1. api routes/tasks/index.ts ~:1210-1225: the auto-continue toggle queues an advance for the current form step with no epoch; `advanceChainHasMoved` (worker task-queue.ts ~:2772) drops one whose pointer moved, not one a Retry of the same step made stale.
 2. worker queues/_step-reset.ts ~:222-400 `autoResumeFailedStep` reopens a failed task without bumping the epoch, while every api reopen does (`moveTaskToStep`, api steps.ts ~:356), although its header says it mirrors them. A same-epoch job left from before the failure is not made stale by the auto-resume. Fix direction: bump the epoch with the reopen (and return it, so the poller's T498 stamp need not read it back).
+
+### T516 · FNF[relink-row-hold] [design] · writers of a repository row wait behind a relink that holds it across git, bounded only by the relink's own git deadlines (+1)
+
+status: open
+From the T376 seventh review (2026-10-31). REGRESSION of the T376 branch (origin/main's relink took the row only for its final update), minor to moderate, by reading and PostgreSQL semantics, not reproduced. Arrives with T376.
+
+1. The relink holds the repository row `FOR NO KEY UPDATE` across its git calls (api routes/repos.ts). T376 bounds four explicit row takes, but plain `UPDATE repositories` statements still queue behind it with no bound: repos.ts ~:240 (`addRepoJobOrMarkError`), ~:3138 (mark-onboarded stamp), ~:3410 (artifact reset), ~:3679 (refresh-tree), tooling-upgrades.ts ~:284, ~:780, and the root claims (database src/repo-root-claim.ts ~:102, ~:144, ~:192, taken by mark-onboarded, the onboarding-artifacts DELETE and every repository-root file save). Worker transactions take the task-creation and project-state keys and then the row `FOR UPDATE` unbounded (project-state/write.ts ~:714-727 and ~:1319-1392, 04-upgrade-rollback.ts ~:1092-1103, 12-post-onboarding.ts ~:424-434), so an api task start answers 409 busy while a relink holds the row. 02-upgrade-apply.ts ~:826-843 is the bounded exception. Today the wait ends with the relink's git deadlines (10 s plus a 2 s grace per call) and not at all for a git child in uninterruptible I/O (T508). Design direction from the review: serialize relinks with a per-repository advisory key taken in `boundedLockWait`, hold the row `FOR KEY SHARE` through git (it blocks the delete, which takes `FOR UPDATE`), and take `FOR NO KEY UPDATE` only for the final UPDATE; the audit metadata (`credentialsChanged`, `branchChanged`) then needs a re-read at the end. Note (session): `FOR KEY SHARE` removes the plain-UPDATE waits only; it still conflicts with the worker's and the four writers' `FOR UPDATE` takes, so those would need `FOR NO KEY UPDATE` or the bound.
+2. Test pin: api test/repository-lock-ratchet.test.ts lists helper names only, so a direct `.for('update')` select of `schema.repositories` outside `boundedLockWait` is pinned only by gated controls. Extend the AST walk to flag one.
 
 ## Done
 
