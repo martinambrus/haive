@@ -88,6 +88,24 @@ async function main(): Promise<void> {
       await new Promise((r) => setTimeout(r, 200));
     }
   };
+  const taskRow = async (taskId: string) => {
+    const [row] = await db.select().from(schema.tasks).where(eq(schema.tasks.id, taskId));
+    return row!;
+  };
+  const eventsOfType = (taskId: string, eventType: string) =>
+    db
+      .select({ id: schema.taskEvents.id })
+      .from(schema.taskEvents)
+      .where(and(eq(schema.taskEvents.taskId, taskId), eq(schema.taskEvents.eventType, eventType)));
+  /** The job has ended (completed), which a task with no finish record to wait for needs. */
+  const jobCompleted = async (jobId: string): Promise<void> => {
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      if ((await (await queue.getJob(jobId))?.getState()) === 'completed') return;
+      if (Date.now() > deadline) throw new Error('timeout waiting for the CANCEL job to complete');
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  };
   const registered = async (wt: string): Promise<boolean> =>
     (await git(local, ['worktree', 'list', '--porcelain'])).includes(`worktree ${wt}`);
   try {
@@ -179,6 +197,44 @@ async function main(): Promise<void> {
     const fourth = await mk('waiting_user');
     await cancel(fourth);
     out.olderFailedDiscarded = !(await registered(wt2));
+
+    // 5. The api commits the cancel before it queues the job, so the job finds the task cancelled: it
+    //    keeps the api's stamps, writes its own event and still discards the worktree.
+    const apiCancelledAt = new Date('2026-01-15T10:00:00.000Z');
+    const fifth = await mk('running');
+    await db
+      .update(schema.tasks)
+      .set({ status: 'cancelled', completedAt: apiCancelledAt, orchestrationEpoch: 1 })
+      .where(eq(schema.tasks.id, fifth));
+    await db
+      .insert(schema.taskEvents)
+      .values({ taskId: fifth, eventType: 'task.cancelled', payload: { by: userId } });
+    const wt5 = await openMergeInScratch();
+    await cancel(fifth);
+    const fifthRow = await taskRow(fifth);
+    out.apiCancelledDiscarded = !(await registered(wt5));
+    out.apiCancelledStampsKept =
+      fifthRow.status === 'cancelled' &&
+      fifthRow.completedAt?.getTime() === apiCancelledAt.getTime() &&
+      fifthRow.orchestrationEpoch === 1;
+    out.apiCancelledEvents = (await eventsOfType(fifth, 'task.cancelled')).length;
+
+    // 6. A CANCEL that lands after the merge completed leaves it completed and its worktree alone.
+    const sixth = await mk('running');
+    await db
+      .update(schema.tasks)
+      .set({ status: 'completed', completedAt: apiCancelledAt })
+      .where(eq(schema.tasks.id, sixth));
+    const wt6 = await openMergeInScratch();
+    const stray = await queue.add(TASK_JOB_NAMES.CANCEL, { taskId: sixth, userId });
+    await jobCompleted(stray.id!);
+    const sixthRow = await taskRow(sixth);
+    out.completedLeftAlone =
+      sixthRow.status === 'completed' &&
+      sixthRow.completedAt?.getTime() === apiCancelledAt.getTime() &&
+      (await eventsOfType(sixth, 'task.cancelled')).length === 0 &&
+      (await eventsOfType(sixth, 'task.cancel_finished')).length === 0;
+    out.completedKeptItsWorktree = await registered(wt6);
     console.log(JSON.stringify(out, null, 2));
     if (out.worktreeRegistered || out.worktreeDirExists) {
       throw new Error('the cancelled conversation left its scratch worktree behind');
@@ -188,6 +244,14 @@ async function main(): Promise<void> {
     }
     if (!out.newerFailedKept || !out.olderFailedDiscarded) {
       throw new Error('a newer failed conversation lost its worktree, or an older one kept it');
+    }
+    if (!out.apiCancelledDiscarded || !out.apiCancelledStampsKept || out.apiCancelledEvents !== 2) {
+      throw new Error(
+        'a conversation the api had cancelled kept its worktree, lost its stamps, or lacks the job event',
+      );
+    }
+    if (!out.completedLeftAlone || !out.completedKeptItsWorktree) {
+      throw new Error('a CANCEL for a completed conversation changed it or discarded its worktree');
     }
     console.log('PLAN_MERGE_CANCEL_OK');
   } catch (err) {
