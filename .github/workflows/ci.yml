@@ -307,6 +307,7 @@ jobs:
           shared test/integrations-resolution-db.test.ts INTEGRATIONS_RESOLUTION_TEST_URL integrations_resolution_test pg
           shared test/rtk-converge-db.test.ts RTK_CONVERGE_TEST_URL rtk_converge_test pg
           database test/integration-connection-keys.test.ts INTEGRATION_KEYS_TEST_URL integration_keys_test pg
+          database test/repo-credential-sign-in-account.test.ts REPO_CREDENTIAL_SIGN_IN_ACCOUNT_TEST_URL repo_credential_sign_in_account_test pg
           api test/admin-integrations-db.test.ts ADMIN_INTEGRATIONS_TEST_URL admin_integrations_test pg
           api test/refresh-rotation-db.test.ts AUTH_HARDENING_TEST_URL auth_hardening_test pg
           api test/password-change-cas-db.test.ts AUTH_HARDENING_TEST_URL auth_hardening_test pg
