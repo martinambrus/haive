@@ -131,7 +131,7 @@ describe.skipIf(!url)('Forced changes and throttled logins on Postgres', () => {
           ),
         );
         // Exercise a completion beyond expect.poll's default one-second budget.
-        h.auditDelayMs = known && !refused ? 1250 : 0;
+        h.auditDelayMs = known && !refused ? 5500 : 0;
         if (refused) await refuseAudit(db, h.actor, { anonymous: true });
         const res = await send('/auth/login', {
           email: known ? 'known@example.test' : 'absent@example.test',
@@ -152,7 +152,7 @@ describe.skipIf(!url)('Forced changes and throttled logins on Postgres', () => {
           });
           expect(JSON.stringify(rows)).not.toContain('example.test');
         }
-      });
+      }, 30_000);
     it(`forced password change: ${refused ? 'refusal keeps the gate and password' : 'records the forced change'}`, async () => {
       await db
         .update(schema.users)
