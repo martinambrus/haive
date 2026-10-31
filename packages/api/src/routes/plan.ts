@@ -1384,8 +1384,12 @@ planRoutes.get('/:id/plan/merge', async (c) => {
  *  live conversation holds it — the checkout has not moved, so there is nothing else to undo. */
 planRoutes.delete('/:id/plan/merge', async (c) => {
   const { userId, repositoryId } = await requireOwnedRepo(c);
+  const taskId = c.req.query('taskId');
   const task = await findOpenPlanMerge(repositoryId);
-  if (!task) return c.json({ ok: true, cancelled: false });
+  // A stale panel must not stop a newer conversation that opened since its last refresh.
+  if (!task || (taskId !== undefined && task.id !== taskId)) {
+    return c.json({ ok: true, cancelled: false });
+  }
   const db = getDb();
   // The Stop comes first, as in the Cancel action; the decision is then made under the task's
   // locks, not from the read above.

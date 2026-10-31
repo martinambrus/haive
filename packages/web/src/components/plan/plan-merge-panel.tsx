@@ -161,7 +161,7 @@ export function PlanMergePanel({
     setError(null);
     setNotice(null);
     try {
-      const result = await discardPlanMerge(repositoryId);
+      const result = await discardPlanMerge(repositoryId, merge.taskId);
       if (result.cancelled) {
         setDiscardedTaskId(taskId);
       } else {

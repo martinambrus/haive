@@ -452,7 +452,7 @@ describe('PlanMergePanel with a merge task', () => {
 
     await press('Discard');
 
-    expect(net.discardPlanMerge).toHaveBeenCalledWith('repo-1');
+    expect(net.discardPlanMerge).toHaveBeenCalledWith('repo-1', 'task-1');
     expect(onSettled).toHaveBeenCalledTimes(1);
     expect(labelled(CONFIRM)).toBeDefined();
     expect(host('textarea')).toBeDefined();
@@ -518,7 +518,7 @@ describe('PlanMergePanel with a merge task', () => {
 
     await press('Discard');
 
-    expect(net.discardPlanMerge).toHaveBeenCalledWith('repo-1');
+    expect(net.discardPlanMerge).toHaveBeenCalledWith('repo-1', 'task-1');
     expect(onSettled).toHaveBeenCalledTimes(1);
     expect(labelled(CONFIRM)).toBeUndefined();
     expect(host('textarea')).toBeUndefined();

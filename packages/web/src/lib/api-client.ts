@@ -2292,9 +2292,11 @@ export function getPlanMerge(repositoryId: string): Promise<{ merge: PlanMergeSt
 
 export function discardPlanMerge(
   repositoryId: string,
+  taskId?: string,
 ): Promise<{ ok: boolean; cancelled: boolean; taskId?: string }> {
+  const query = taskId === undefined ? '' : `?taskId=${encodeURIComponent(taskId)}`;
   return api.delete<{ ok: boolean; cancelled: boolean; taskId?: string }>(
-    `${planBase(repositoryId)}/merge`,
+    `${planBase(repositoryId)}/merge${query}`,
   );
 }
 
