@@ -944,7 +944,7 @@ From the T470 review (2026-10-31). PRE-EXISTING, minor to moderate.
 
 ### T476 · FNF[plan-merge-discard-result] · the plan merge panel reads a discard that cancelled nothing as discarded
 
-status: open
+status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T13:14Z · last: 2026-10-31T13:14Z
 From the T458 review (2026-10-31). PRE-EXISTING, minor (web).
 
 `DELETE /repositories/:id/plan/merge` answers `{ ok: true, cancelled: false }` when no merge is open or (since T458) when the merge completed while the request ran, but `discardPlanMerge` types its answer as `{ ok: boolean }` (web lib/api-client.ts ~:2293) and the panel's `discard` (components/plan/plan-merge-panel.tsx ~:141-155) hides the merge as discarded whatever it says, after a confirm that promises "nothing is lost". Direction: read `cancelled`; when false, say the merge had already ended and refresh the plan instead of reporting a discard.
