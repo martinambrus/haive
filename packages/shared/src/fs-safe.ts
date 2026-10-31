@@ -519,6 +519,70 @@ export async function readdirNoFollow(
   });
 }
 
+export interface WalkFilesOptions extends StrictOption {
+  /** Names excluded at every level, before entering a directory or examining a file. */
+  skipNames?: readonly string[];
+}
+
+/** Sorted depth-first regular files, relative to relDir, with sizes. Holds each directory while
+ * reading its entries instead of resolving each file from the anchor. Links are never followed;
+ * a missing or refused directory contributes nothing in lenient mode. Breaking iteration closes
+ * every held descriptor. Each lookup verifies the parent's held inode is still where expected. */
+export async function* walkFilesNoFollow(
+  anchor: string,
+  relDir: string,
+  opts: WalkFilesOptions = {},
+): AsyncGenerator<{ path: string; size: number }> {
+  const safe = toSafeRel(relDir);
+  const skip = new Set(opts.skipNames);
+  const root = await readResult(opts.strict, () => walkDir(anchor, safe, segments(safe)));
+  if (root === null) return;
+  async function* visit(
+    dir: HeldDir,
+    dirRel: string,
+    outputRel: string,
+  ): AsyncGenerator<{ path: string; size: number }> {
+    try {
+      const entries = await readResult(opts.strict, async () => {
+        await assertHeldAt(dir.fh, dir.real, anchor, dirRel, dirRel);
+        return readdir(fdPath(dir.fh.fd), { withFileTypes: true });
+      });
+      if (entries === null) return;
+      entries.sort((a, b) => a.name.localeCompare(b.name));
+      for (const entry of entries) {
+        if (skip.has(entry.name)) continue;
+        const held = await readResult(opts.strict, async () => {
+          await assertHeldAt(dir.fh, dir.real, anchor, dirRel, dirRel);
+          return true;
+        });
+        if (held === null) return;
+        const childRel = dirRel ? `${dirRel}/${entry.name}` : entry.name;
+        const childOutput = outputRel ? `${outputRel}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          const child = await readResult(opts.strict, async () => {
+            const fh = await open(at(dir.fh.fd, entry.name), O_PATH | O_DIRECTORY | O_NOFOLLOW);
+            const real = below(dir.real, entry.name);
+            try {
+              await assertHeldAt(fh, real, anchor, childRel, childRel);
+              return { fh, real };
+            } catch (err) {
+              await closeQuietly(fh);
+              throw err;
+            }
+          });
+          if (child !== null) yield* visit(child, childRel, childOutput);
+        } else if (entry.isFile()) {
+          const stats = await readResult(opts.strict, () => lstat(at(dir.fh.fd, entry.name)));
+          if (stats?.isFile()) yield { path: childOutput, size: Number(stats.size) };
+        }
+      }
+    } finally {
+      await closeQuietly(dir.fh);
+    }
+  }
+  yield* visit(root, safe, '');
+}
+
 export type EntryKind = 'file' | 'directory' | 'symlink' | 'other';
 
 export interface EntryInfo {

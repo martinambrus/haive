@@ -18,7 +18,7 @@ import {
 import {
   lstatNoFollow,
   openFileNoFollow,
-  readdirNoFollow,
+  walkFilesNoFollow,
   removeNoFollow,
   renameNoFollow,
 } from '@haive/shared/fs-safe';
@@ -987,35 +987,15 @@ async function listExtractedFiles(
 }> {
   const out: Array<{ path: string; size: number }> = [];
   let truncated = false;
-  const walk = async (relDir: string, rel: string): Promise<void> => {
-    // Lenient: a directory that cannot be listed — absent, unreadable, or a link standing where a
-    // directory should be — contributes nothing, which is exactly what the `catch` here did.
-    const entries = await readdirNoFollow(anchor, relDir);
-    if (entries === null) return;
-    entries.sort((a, b) => a.name.localeCompare(b.name));
-    for (const entry of entries) {
-      if (truncated) return;
-      if (entry.name === '.git') continue;
-      if (entry.name === '.DS_Store') continue;
-      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) {
-        await walk(`${relDir}/${entry.name}`, childRel);
-        continue;
-      }
-      // `readdir` LISTS a link, and the `stat` this replaced then followed it — so a link in the
-      // extracted tree was reported as a file of the target's size, which is not a file this
-      // bundle holds. The lstat answers for the entry itself.
-      if (!entry.isFile()) continue;
-      const info = await lstatNoFollow(anchor, `${relDir}/${entry.name}`);
-      if (info?.kind !== 'file') continue;
-      if (out.length >= FILES_LIST_CAP) {
-        truncated = true;
-        return;
-      }
-      out.push({ path: childRel, size: Number(info.stats.size) });
+  for await (const file of walkFilesNoFollow(anchor, rootRel, {
+    skipNames: ['.git', '.DS_Store'],
+  })) {
+    if (out.length >= FILES_LIST_CAP) {
+      truncated = true;
+      break;
     }
-  };
-  await walk(rootRel, '');
+    out.push(file);
+  }
   return { files: out, truncated, cap: FILES_LIST_CAP };
 }
 
