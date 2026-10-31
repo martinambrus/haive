@@ -142,7 +142,13 @@ function minimumMinutes(step) {
 // GitHub's named bash shell enables errexit; an explicit template must keep -e.
 function checkShell(shell, scope) {
   assert.ok(
-    shell === undefined || shell === 'bash' || shell === 'bash -e {0}',
+    shell === undefined ||
+      [
+        'bash',
+        'bash -e {0}',
+        'bash -eo pipefail {0}',
+        'bash --noprofile --norc -eo pipefail {0}',
+      ].includes(shell),
     `${scope} shell ${JSON.stringify(shell)} does not preserve the pinned bash errexit contract`,
   );
 }
@@ -985,12 +991,21 @@ describe('explicit shell errexit', () => {
       for (const shell of [
         'bash',
         'bash -e {0}',
+        'bash -eo pipefail {0}',
+        'bash --noprofile --norc -eo pipefail {0}',
+        'bash -o pipefail {0}',
+        'bash --noprofile --norc -o pipefail {0}',
         'sh',
         'python',
         'bash {0}',
         'bash --noprofile {0}',
       ]) {
-        const allowed = shell === 'bash' || shell === 'bash -e {0}';
+        const allowed = [
+          'bash',
+          'bash -e {0}',
+          'bash -eo pipefail {0}',
+          'bash --noprofile --norc -eo pipefail {0}',
+        ].includes(shell);
         it(`${allowed ? 'accepts' : 'rejects'} ${spec.id} ${scope} shell ${shell}`, () => {
           const workflow = structuredClone(workflows[spec.file]);
           const job = workflow.jobs[spec.id];
