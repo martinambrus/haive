@@ -2728,9 +2728,12 @@ repoRoutes.post('/:id/remote', async (c) => {
   const root = repo.storagePath ?? repo.localPath;
   if (!root) throw new HttpError(409, 'This repository has no resolvable path');
 
-  const bindingId = body.credentialsId ?? repo.credentialsSecretId;
-  if (bindingId) {
-    const cred = await db.query.repoCredentials.findFirst({
+  const requireFittingCredential = async (
+    executor: Pick<ReturnType<typeof getDb>, 'query'>,
+    bindingId: string | null | undefined,
+  ) => {
+    if (!bindingId) return;
+    const cred = await executor.query.repoCredentials.findFirst({
       where: and(
         eq(schema.repoCredentials.id, bindingId),
         eq(schema.repoCredentials.userId, userId),
@@ -2740,7 +2743,8 @@ repoRoutes.post('/:id/remote', async (c) => {
     if (!cred) throw new HttpError(404, 'Credentials not found');
     if (!credentialFitsGitRemote(cred, body.remoteUrl))
       throw new HttpError(400, 'The Git credential does not fit the remote');
-  }
+  };
+  await requireFittingCredential(db, body.credentialsId ?? repo.credentialsSecretId);
 
   const git = async (
     args: string[],
@@ -2828,6 +2832,7 @@ repoRoutes.post('/:id/remote', async (c) => {
         .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
         .for('update');
       if (!stored) throw new HttpError(404, 'Repository not found');
+      await requireFittingCredential(tx, body.credentialsId ?? stored.credentialsSecretId);
       const host = parseScpLikeGitUrl(body.remoteUrl)?.host ?? new URL(body.remoteUrl).hostname;
       event = {
         actorUserId: userId,

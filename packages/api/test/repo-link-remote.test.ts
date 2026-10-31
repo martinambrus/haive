@@ -142,3 +142,28 @@ it.each([false, true])(
     expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
   },
 );
+
+it('rechecks a retained credential binding changed between the initial and locked reads', async () => {
+  const fitting = '00000000-0000-4000-8000-0000000000c1';
+  const changed = '00000000-0000-4000-8000-0000000000c2';
+  fake.insert(schema.repoCredentials, { id: fitting, userId: USER, host: 'example.test' });
+  fake.insert(schema.repoCredentials, { id: changed, userId: USER, host: 'other.example.test' });
+  fake.patch(schema.repositories, REPO, { credentialsSecretId: fitting });
+  const transaction = fake.db.transaction.bind(fake.db);
+  vi.spyOn(fake.db, 'transaction').mockImplementation(async (fn) => {
+    fake.patch(schema.repositories, REPO, { credentialsSecretId: changed });
+    return transaction(fn);
+  });
+  h.git.mockResolvedValueOnce({ stdout: 'true\n', stderr: '' });
+  const response = await link();
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({
+    error: 'The Git credential does not fit the remote',
+  });
+  expect(h.git).toHaveBeenCalledTimes(1); // Only the pre-transaction checkout probe.
+  expect(fake.rows(schema.repositories)[0]).toMatchObject({
+    remoteUrl: null,
+    credentialsSecretId: changed,
+  });
+  expect(fake.rows(schema.auditEvents)).toEqual([]);
+});
