@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { namesGitData } from '@haive/shared/project-state';
 import { isNotUtf8Error, isPathContainmentError, updateFileNoFollow } from '@haive/shared/fs-safe';
 import { KB_DIR, LEGACY_KB_DIR } from '@haive/shared/knowledge-paths';
 
@@ -70,6 +71,9 @@ export function sanitizeKbRelPath(rel: string): RelPathCheck {
   const parts = normalized.split(/[\\/]/);
   if (parts.some((p) => p === '..' || p === '.')) {
     return { ok: false, reason: '"." or ".." segment not allowed' };
+  }
+  if (namesGitData(normalized)) {
+    return { ok: false, reason: 'path names git data' };
   }
   if (!normalized.endsWith('.md')) normalized += '.md';
   return { ok: true, normalized };
