@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { PLAN_CHAT_STEP_ID, PLAN_MERGE_STEP_ID, type PlanMergeState } from '@/lib/api-client';
 import { PlanChat } from './plan-chat';
 import { PlanMergePanel } from './plan-merge-panel';
+import { FormError } from '@/components/ui';
 
 // Hooks on a plain slot list, as in toast-stack.test.tsx: this package has no DOM environment.
 const rt = vi.hoisted(() => {
@@ -61,12 +62,14 @@ vi.mock('react', async (importOriginal) => ({
 const net = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
+  discardPlanMerge: vi.fn(),
   endPlanChat: vi.fn(),
   messages: undefined as unknown,
 }));
 vi.mock('@/lib/api-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api-client')>()),
   api: { get: net.get, post: net.post },
+  discardPlanMerge: net.discardPlanMerge,
   endPlanChat: net.endPlanChat,
   getPlanMessages: async () => net.messages,
   getPlanBuildClis: async () => ({ plannerCliProviderId: null }),
@@ -173,12 +176,14 @@ beforeEach(() => {
   vi.useFakeTimers();
   net.get.mockReset();
   net.post.mockReset().mockResolvedValue(undefined);
+  net.discardPlanMerge.mockReset();
   net.endPlanChat.mockReset().mockResolvedValue(undefined);
 });
 afterEach(() => {
   unmount();
   unmount = () => {};
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe('PlanChat with a live conversation', () => {
@@ -399,6 +404,40 @@ describe('PlanMergePanel with a merge task', () => {
   });
 
   const CONFIRM = 'Confirm — merge in and push';
+
+  it('reports a merge that already ended without treating it as discarded', async () => {
+    vi.stubGlobal('window', { confirm: vi.fn(() => true) });
+    net.discardPlanMerge.mockResolvedValue({ ok: true, cancelled: false });
+    await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+
+    await press('Discard');
+
+    expect(net.discardPlanMerge).toHaveBeenCalledWith('repo-1');
+    expect(onSettled).toHaveBeenCalledTimes(1);
+    expect(labelled(CONFIRM)).toBeDefined();
+    expect(host('textarea')).toBeDefined();
+    expect(pulsing()).toBe(false);
+    expect(shown().find((el) => el.type === FormError)?.props.message).toBe(
+      'The merge has already completed or closed. Nothing was discarded.',
+    );
+    expect(taskFetches()).toBe(1);
+  });
+
+  it('treats the merge as discarded only when DELETE cancelled it', async () => {
+    vi.stubGlobal('window', { confirm: vi.fn(() => true) });
+    net.discardPlanMerge.mockResolvedValue({ ok: true, cancelled: true, taskId: 'task-1' });
+    await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+
+    await press('Discard');
+
+    expect(net.discardPlanMerge).toHaveBeenCalledWith('repo-1');
+    expect(onSettled).toHaveBeenCalledTimes(1);
+    expect(labelled(CONFIRM)).toBeUndefined();
+    expect(host('textarea')).toBeUndefined();
+    expect(pulsing()).toBe(true);
+    expect(shown().find((el) => el.type === FormError)?.props.message).toBeNull();
+    expect(taskFetches()).toBe(2);
+  });
 
   it('shows a working merge as working: pulse and nothing to answer', async () => {
     await open(taskResponse(PLAN_MERGE_STEP_ID));

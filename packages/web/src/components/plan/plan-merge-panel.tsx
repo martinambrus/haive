@@ -144,8 +144,12 @@ export function PlanMergePanel({
     setBusy(true);
     setError(null);
     try {
-      await discardPlanMerge(repositoryId);
-      setDiscardedTaskId(taskId);
+      const result = await discardPlanMerge(repositoryId);
+      if (result.cancelled) {
+        setDiscardedTaskId(taskId);
+      } else {
+        setError('The merge has already completed or closed. Nothing was discarded.');
+      }
       onSettled();
     } catch (e) {
       setError((e as ApiError).message ?? 'Could not discard the merge');
