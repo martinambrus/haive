@@ -808,7 +808,7 @@ PRE-EXISTING, rechecked during T423 integration review. F1: dormant worker helpe
 
 ### T437 · FNF[legacy-repository-responses] · exclusions PATCH returns a legacy credentialed remote unchanged
 
-status: open · scope: queued broader finding, not approved implementation
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T00:45Z · last: 2026-10-31T00:45Z
 
 PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/routes/repos.ts`, PATCH `/:id/exclusions`, returns the updated repository `rest` without sanitizing `remoteUrl`. A legacy HTTP password remains in the browser response even though GET list/detail sanitize it. The current exclusions UI ignores the mutation payload and reloads GET, so this does not seed the origin editor or regress T340's editable-response correction. Apply the guarded response policy to raw repository mutation responses with actual-route controls, preserving stored configuration. Evidence: `.claude/tmp/board-run/T340/editable-ssh-fix/exclusions-gap-probe.test.ts` / `.log` and `codex-review-scanner-editable.md`; parent checked the actual writer and ignored-response consumer. No implementation started; follow after the approved batch only with authorization.
 
