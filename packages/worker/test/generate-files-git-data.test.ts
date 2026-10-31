@@ -370,3 +370,82 @@ describe('07 quarantine form with stored git-data groups', () => {
     expect(form!.fields.some((f) => f.id === 'quarantineUnmanagedAgents')).toBe(false);
   });
 });
+
+describe('07 stored quarantine filenames', () => {
+  const refusedNames = [
+    '.',
+    '..',
+    '',
+    'nested/bad.md',
+    'nested\\bad.md',
+    'bad\0.md',
+    '.git',
+    'git~1',
+    'wrong.toml',
+  ];
+
+  it.each(refusedNames)('moves only ok.md beside refused name %j', async (name) => {
+    await seed('.claude/agents/ok.md', 'ordinary body');
+    await seed('.claude/agents/keep.txt', 'directory stays');
+    const result = await applyWith(
+      detect([CLAUDE], { unmanagedAgentFiles: [{ dir: CLAUDE.dir, files: [name, 'ok.md'] }] }),
+      { quarantineUnmanagedAgents: true },
+    ).then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+
+    // In particular, '.' must never rename the agents directory itself.
+    expect.soft(await read('.claude/agents/keep.txt')).toBe('directory stays');
+    expect.soft(await read('.claude/agents-legacy/keep.txt')).toBeNull();
+    expect.soft(await read('.claude/agents-legacy/ok.md')).toBe('ordinary body');
+    if ('error' in result) throw result.error;
+    const { out, warnedRels } = result.value;
+    expect(out.quarantinedAgentFiles).toEqual([
+      { from: '.claude/agents/ok.md', to: '.claude/agents-legacy/ok.md' },
+    ]);
+    expect(out.skippedFiles).toEqual([`${CLAUDE.dir}/${name}`]);
+    expect(warnedRels).toEqual([`${CLAUDE.dir}/${name}`]);
+  });
+
+  it.each(refusedNames)('counts and names only ok.md beside refused name %j', async (name) => {
+    const form = await generateFilesStep.form!(
+      {} as StepContext,
+      detect([CLAUDE], { unmanagedAgentFiles: [{ dir: CLAUDE.dir, files: [name, 'ok.md'] }] }),
+    );
+    const field = form!.fields.find((f) => f.id === 'quarantineUnmanagedAgents');
+    expect(field?.label).toContain('Move 1 unmanaged');
+    expect(field?.description).toContain('`ok.md`');
+    expect(field?.description).not.toContain(`\`${name}\``);
+  });
+
+  it('offers no checkbox when every stored filename is refused', async () => {
+    const form = await generateFilesStep.form!(
+      {} as StepContext,
+      detect([CLAUDE], { unmanagedAgentFiles: [{ dir: CLAUDE.dir, files: refusedNames }] }),
+    );
+    expect(form!.fields.some((f) => f.id === 'quarantineUnmanagedAgents')).toBe(false);
+  });
+
+  it('uses the catalog extension for Codex quarantine names', async () => {
+    const target = deriveRenderTargets(['codex'], []).agentTargets[0]!;
+    await seed(`${target.dir}/ok.toml`, 'ordinary body');
+    await seed(`${target.dir}/wrong.md`, 'keep wrong extension');
+    const detected = detect([target], {
+      unmanagedAgentFiles: [{ dir: target.dir, files: ['wrong.md', 'ok.toml'] }],
+    });
+    const form = await generateFilesStep.form!({} as StepContext, detected);
+    const field = form!.fields.find((f) => f.id === 'quarantineUnmanagedAgents');
+    expect(field?.label).toContain('Move 1 unmanaged');
+    expect(field?.description).toContain('ok.toml');
+    expect(field?.description).not.toContain('wrong.md');
+    const { out, warnedRels } = await applyWith(detected, { quarantineUnmanagedAgents: true });
+    expect(await read(`${target.dir}/wrong.md`)).toBe('keep wrong extension');
+    expect(await read(`${target.dir}-legacy/ok.toml`)).toBe('ordinary body');
+    expect(out.quarantinedAgentFiles).toEqual([
+      { from: `${target.dir}/ok.toml`, to: `${target.dir}-legacy/ok.toml` },
+    ]);
+    expect(out.skippedFiles).toEqual([`${target.dir}/wrong.md`]);
+    expect(warnedRels).toEqual([`${target.dir}/wrong.md`]);
+  });
+});
