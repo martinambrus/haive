@@ -323,6 +323,7 @@ export async function commitRecorded(
   message: string,
   env: NodeJS.ProcessEnv,
   warnings?: string[],
+  onCommitted?: (sha: string) => void,
 ): Promise<string[]> {
   const run = (args: string[], extra?: NodeJS.ProcessEnv) =>
     gitExec(args, { cwd: repoPath, env: { ...env, ...extra }, maxBuffer: GIT_MAX_BUFFER });
@@ -369,6 +370,7 @@ export async function commitRecorded(
     ).stdout.trim();
     const subject = message.split('\n')[0]!;
     await run(['update-ref', '-m', `commit: ${subject}`, 'HEAD', commit, parent]);
+    onCommitted?.(commit);
     // The commit has landed; a real index another writer holds locked is retried, then reported.
     let synced = false;
     for (let attempt = 0; attempt < 6 && !synced; attempt += 1) {
