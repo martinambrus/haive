@@ -434,7 +434,7 @@ it('answers at the deadline although a grandchild still holds the git output pip
   }
 });
 
-it('lets a git call without a child process run past the deadline and the grace untouched', async () => {
+it('refuses a git call without a child process after the deadline and grace', async () => {
   let finish!: (result: { stdout: string; stderr: string }) => void;
   h.git.mockResolvedValueOnce({ stdout: 'true\n', stderr: '' }).mockReturnValueOnce(
     new Promise((resolve) => {
@@ -449,7 +449,7 @@ it('lets a git call without a child process run past the deadline and the grace 
   } finally {
     finish({ stdout: '', stderr: '' });
   }
-  expect((await answeredWithin(3_000, response)).status).toBe(200);
+  expect((await answeredWithin(3_000, response)).status).toBe(409);
   expect(vi.getTimerCount()).toBe(0);
 });
 
@@ -580,5 +580,58 @@ it.each([false, true])(
     } finally {
       errors.mockRestore();
     }
+  },
+);
+
+it.each(['rev-parse', 'snapshot'])(
+  'refuses a clean git exit delivered in the deadline turn (%s)',
+  async (stage) => {
+    const old = 'https://old.test/r';
+    fake.patch(schema.repositories, REPO, { remoteUrl: old });
+    let finish!: (value: { stdout: string; stderr: string }) => void;
+    const destroy = vi.fn();
+    // Git has exited 0, but execFile has not yet drained its output/fulfilled its promise.
+    // The deadline closes those pipes, then the successful completion arrives in that turn.
+    const kill = vi.fn(() => {
+      finish({ stdout: '', stderr: '' });
+      return false;
+    });
+    const pending = Object.assign(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+      {
+        child: { exitCode: 0, stdout: { destroy }, stderr: { destroy }, kill },
+      },
+    );
+    h.git.mockImplementation((_command, args: string[]) => {
+      if (args.includes('rev-parse'))
+        return stage === 'rev-parse' ? pending : Promise.resolve({ stdout: 'true', stderr: '' });
+      if (args.includes('remote') && args.includes('add')) return Promise.reject(fail(3, 'exists'));
+      if (args.includes('--get-all') && args.at(-1) === 'remote.origin.url') return pending;
+      return Promise.resolve({ stdout: '', stderr: '' });
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const response = Promise.resolve(link());
+    await until(
+      'the timed call started',
+      () => h.git.mock.calls.length === (stage === 'rev-parse' ? 1 : 3),
+    );
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    const answer = await answeredWithin(3_000, response);
+    expect(answer.status).toBe(409);
+    expect(await answer.text()).toContain(
+      stage === 'rev-parse' ? 'no answer' : 'Could not read the previous remote',
+    );
+    expect(kill).toHaveBeenCalledWith('SIGTERM');
+    expect(destroy).toHaveBeenCalledTimes(2);
+    expect(
+      h.git.mock.calls.some(
+        (call) => call[1].includes('--unset-all') || call[1].includes('--replace-all'),
+      ),
+    ).toBe(false);
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe(old);
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
   },
 );

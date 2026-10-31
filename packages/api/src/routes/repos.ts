@@ -2753,12 +2753,14 @@ repoRoutes.post('/:id/remote', async (c) => {
   ): Promise<{ ok: boolean; code: number; stdout: string; stderr: string }> => {
     let deadline: NodeJS.Timeout | undefined;
     let grace: NodeJS.Timeout | undefined;
+    let deadlineFired = false;
     try {
       const run = execGit('git', hardenGitArgs(args), {
         cwd: root,
         env: { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(root) },
       });
       deadline = setTimeout(() => {
+        deadlineFired = true;
         // As execFile's own timeout does: close both pipes before the signal, so a grandchild that
         // still holds them cannot keep the call pending once git is gone. `child` is read with `?.`
         // because a stubbed execFile has none.
@@ -2768,6 +2770,9 @@ repoRoutes.post('/:id/remote', async (c) => {
         grace = setTimeout(() => run.child?.kill('SIGKILL'), GIT_KILL_GRACE_MS);
       }, GIT_DEADLINE_MS);
       const { stdout, stderr } = await run;
+      // Closing the pipes can discard unread output even if git exited 0 in this turn.
+      // Never accept that truncated output as a snapshot of the previous remote.
+      if (deadlineFired) return { ok: false, code: -1, stdout: '', stderr: 'no answer' };
       return {
         ok: true,
         code: 0,
