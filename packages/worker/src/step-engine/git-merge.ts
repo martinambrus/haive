@@ -193,7 +193,7 @@ async function handBackPlan(dir: string): Promise<HandBack | null> {
 }
 
 /** The paths the worktree holds differently from commit `ref`, as git listed them. */
-async function differingFrom(dir: string, ref: string, strict = false): Promise<string[]> {
+async function differingFrom(dir: string, ref: string): Promise<string[]> {
   const res = await gitRun(
     dir,
     ['diff', '--name-only', '-z', '--no-renames', ref],
@@ -201,8 +201,7 @@ async function differingFrom(dir: string, ref: string, strict = false): Promise<
     LISTING,
   );
   if (res.code === 0) return nulPaths(res.stdout);
-  if (strict) throw new Error(`git diff failed: ${(res.stderr || res.stdout).trim()}`);
-  return [];
+  throw new Error(`git diff failed in ${dir}: ${(res.stderr || res.stdout).trim()}`);
 }
 
 /** What the set-aside moves out of the checkout, the state record's directories included: the worker writes it, and `restoreKeptMetadata` skips what it no longer owns. */
@@ -274,7 +273,7 @@ export async function handBackAfterMove(
   strict = false,
 ): Promise<void> {
   const plan = await handBackPlan(dir);
-  if (plan) await handBackWritten(plan, dir, await differingFrom(dir, before, strict), strict);
+  if (plan) await handBackWritten(plan, dir, await differingFrom(dir, before), strict);
 }
 
 /** git with `names`, as a latin1 listing holds them, in a NUL pathspec file: argv would carry a name
