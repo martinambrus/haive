@@ -56,6 +56,7 @@ import {
   cancelLiveRuns,
   clearTaskPause,
   reofferParkedSteps,
+  startIfNeverStarted,
   stopActiveCliInvocations,
   withoutGateAnswer,
 } from '../../lib/task-control.js';
@@ -1381,6 +1382,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           updatedAt: now,
         })
         .where(eq(schema.taskSteps.id, step.id));
+      await startIfNeverStarted(tx, step.id);
       const result = await moveTaskToStep(tx, id, step, leftActive, now);
       await tx.insert(schema.taskEvents).values({
         taskId: id,
@@ -1485,6 +1487,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           updatedAt: now,
         })
         .where(eq(schema.taskSteps.id, step.id));
+      await startIfNeverStarted(tx, step.id);
       const result = await moveTaskToStep(tx, id, step, leftActive, now);
       await tx.insert(schema.taskEvents).values({
         taskId: id,

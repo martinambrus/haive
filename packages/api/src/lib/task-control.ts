@@ -134,6 +134,24 @@ const parkFolded = {
     then least(2147483647 - ${schema.taskSteps.carriedIdleMs}, ${parkMs})::int else 0 end`,
 };
 
+/** Start the span of a step the caller has just re-opened (its closed gap is already credited to
+ *  idle_ms) when its close never had a run: started_at is NULL, as after a Stop of a park before the
+ *  run. Left NULL it bills no work at all; merely stamped, the pre-run wait and the closed gap sitting
+ *  in idle_ms would predate the span and clamp its work, so both move to carried_idle_ms, as
+ *  foldPark books a pre-run wait. Whether the row never started is decided here, on the row the
+ *  caller's update has locked, not from the caller's earlier read; a row with a started_at is not
+ *  written. */
+export async function startIfNeverStarted(tx: DbHandle, rowId: string): Promise<void> {
+  await tx
+    .update(schema.taskSteps)
+    .set({
+      startedAt: sql`now()`,
+      idleMs: 0,
+      carriedIdleMs: sql`${schema.taskSteps.carriedIdleMs} + least(2147483647 - ${schema.taskSteps.carriedIdleMs}, ${schema.taskSteps.idleMs})`,
+    })
+    .where(and(eq(schema.taskSteps.id, rowId), isNull(schema.taskSteps.startedAt)));
+}
+
 /** The worker's gate-answer test (`readFixLoopGateAction`). */
 const holdsGateAnswer = sql`jsonb_typeof(${schema.taskSteps.formValues} -> ${FIX_LOOP_ACTION_FIELD}::text) = 'string'`;
 /** SQL NULL, never `{}`: an empty object reads as an answered form. */

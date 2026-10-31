@@ -360,6 +360,7 @@ jobs:
           worker test/project-state-gone-checkout-db.test.ts GONE_CHECKOUT_STATE_TEST_URL gone_checkout_state_test pg
           worker test/plan-mirror-gone-checkout-db.test.ts GONE_CHECKOUT_PLAN_TEST_URL gone_checkout_plan_test pg
           api test/park-fold-db.test.ts PARK_FOLD_TEST_URL park_fold_test pg
+          api test/resume-never-started-db.test.ts RESUME_NEVER_STARTED_TEST_URL resume_never_started_test pg
           shared test/global-kb-identifier-tsv.test.ts HAIVE_GKB_TEST_DB_URL gkb_identifier_tsv_test pgvector
           shared test/global-kb-ensure-bound.test.ts HAIVE_GKB_TEST_DB_URL gkb_ensure_bound_test pgvector
           worker test/rag-schema.test.ts HAIVE_GKB_TEST_DB_URL rag_schema_test pgvector
