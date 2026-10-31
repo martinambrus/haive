@@ -25,7 +25,8 @@ import { isAllowedGitRemoteUrl, redactGitText } from '@haive/shared/schemas';
 /* The facts below are the ones the worker's locked check builds (`factsAt`,
  * worker/src/project-state/save.ts), read without its locks and re-implemented here because the api
  * must not import worker code. Both end in `holdsFor`, so a hold the page shows is a hold the Save
- * answers; a read that fails is a read hold, never "no hold". */
+ * answers; a read that fails is a read hold, never "no hold". API git reads time out at 5 s;
+ * the worker waits longer, so a slow read here fails safe with an unreadable hold. */
 
 const exec = promisify(execFile);
 
@@ -38,8 +39,8 @@ const RECORD_PATHSPECS = [
   `${PROJECT_STATE_DIR}/`,
 ].map((rel) => `:(literal)${rel}`);
 
-/** The hardened read of `gitRead` (routes/plan.ts), with the output left as git wrote it: a `-z`
- *  record can start or end with a space, and a trimmed read would shift it. */
+/** The hardened read of `gitRead` (routes/plan.ts), with the output left as git wrote it: the
+ *  first status record can start with a space, and a trimmed read would shift it. */
 async function gitRaw(
   cwd: string,
   args: string[],

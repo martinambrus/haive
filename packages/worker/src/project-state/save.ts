@@ -55,7 +55,8 @@ async function branchAt(repoPath: string): Promise<string | null> {
 }
 
 /** The caller supplies the repository row it has already read (FOR UPDATE in the final check).
- * Every query inside that final check stays on its transaction's connection. */
+ * Every query inside that final check stays on its transaction's connection.
+ * Keep the read-only mirror in api/src/lib/haive-data-status.ts in sync with these facts. */
 async function factsAt(
   conn: Database | Tx,
   repo: Repo,
