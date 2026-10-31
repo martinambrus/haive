@@ -48,15 +48,15 @@ const atCommand = (text) => commandOf(lastCommand(text) + ' _') === '_';
 // Whether the command being read runs its input as code.
 const readsCode = (text) => kindOf(commandOf(lastCommand(text))) === 'shell';
 
-// Whether the command being read runs its string arguments as code: bash -c, eval, ssh, su -c,
-// or a herestring fed to a shell.
+// Whether the command being read runs the string it is given as code: the string after bash -c
+// or su -c, any string after eval or ssh, or a herestring fed to a shell.
 function readsStrings(text) {
   const command = lastCommand(text);
   const herestring = /<<<\s*$/.test(command);
   const word = commandOf(command.replace(/<<<\s*$/, ''));
   return (
     kindOf(word) === 'shell' &&
-    (herestring || /^(?:eval|ssh)(?=\s|$)|\s-[a-zA-Z]*c[a-zA-Z]*(?=\s|$)/.test(word))
+    (herestring || /^(?:eval|ssh)(?=\s|$)|\s-[a-zA-Z]*c[a-zA-Z]*$/.test(word))
   );
 }
 
@@ -142,26 +142,38 @@ export function shellSource(
     }
     fail('arithmetic expression');
   };
-  // A delimiter is a shell word: quote removal applies even to mixed quoted/unquoted words.
-  const delimiterWord = (start) => {
+  // A shell word with its quotes removed: adjacent quoted and unquoted parts form one value, as for
+  // a heredoc delimiter or the command string of bash -c.
+  const shellWord = (start) => {
     let i = start;
-    let delimiter = '';
+    let value = '';
     let quotedWord = false;
     while (i < source.length && !/[\s;|&()<>]/.test(source[i])) {
-      if (source[i] === "'" || source[i] === '"') {
+      if (source.startsWith("$'", i)) {
+        const end = quoted(i + 1, "'", true);
+        value += source.slice(i + 2, end - 1);
+        quotedWord = true;
+        i = end;
+      } else if (source[i] === "'" || source[i] === '"') {
         const end = quoted(i, source[i]);
-        delimiter += source.slice(i + 1, end - 1);
+        const inner = source.slice(i + 1, end - 1);
+        value += source[i] === '"' ? inner.replace(/\\([$`"\\])/g, '$1') : inner;
         quotedWord = true;
         i = end;
       } else if (source[i] === '\\') {
         quotedWord = true;
         if (i + 1 >= source.length) fail('heredoc delimiter');
-        delimiter += source[i + 1];
+        value += source[i + 1];
         i += 2;
-      } else delimiter += source[i++];
+      } else value += source[i++];
     }
-    if (i === start) fail('heredoc delimiter');
-    return { delimiter, quotedWord, end: i };
+    return { value, quotedWord, end: i };
+  };
+  // Scan the shell word at start as code. Returns where the word ends.
+  const scanWord = (start) => {
+    const word = shellWord(start);
+    substitutions.push(shellSource(word.value, { maskQuotes, step }));
+    return word.end;
   };
   const isPipe = (i) => source[i] === '|' && source[i - 1] !== '|' && source[i + 1] !== '|';
   const scan = (start, stop = null, parameter = false, code = false) => {
@@ -170,6 +182,7 @@ export function shellSource(
     const heredocs = [];
     const cases = [];
     const strings = [];
+    let scanned = 0;
     while (i < source.length) {
       const char = source[i];
       if (char === '\\') {
@@ -184,9 +197,8 @@ export function shellSource(
         const literal = source.slice(quoteStart + 1, end - 1);
         const commandName = literal === 'true' && /(?:\|\||&&)\s*$/.test(result);
         if (maskQuotes && char !== '`') {
-          const text = char === '"' ? literal.replace(/\\([$`"\\])/g, '$1') : literal;
-          strings.push({ at: result.length, text });
-          if (readsStrings(result)) substitutions.push(shellSource(text, { maskQuotes, step }));
+          strings.push({ at: result.length, start: i });
+          if (i >= scanned && readsStrings(result)) scanned = scanWord(i);
         }
         result += maskQuotes ? (commandName ? literal : '_'.repeat(end - i)) : source.slice(i, end);
         i = end;
@@ -216,11 +228,13 @@ export function shellSource(
         const tabs = source[i + 2] === '-';
         let wordStart = i + 2 + Number(tabs);
         while (/[ \t]/.test(source[wordStart] ?? '')) wordStart++;
-        const word = delimiterWord(wordStart);
+        const word = shellWord(wordStart);
+        if (word.end === wordStart) fail('heredoc delimiter');
         const eol = source.indexOf('\n', word.end);
         const line = source.slice(word.end, eol === -1 ? undefined : eol);
         heredocs.push({
-          ...word,
+          delimiter: word.value,
+          quotedWord: word.quotedWord,
           tabs,
           consumer: code ? 'code' : heredocConsumer(source.slice(start, i), line),
         });
@@ -260,8 +274,9 @@ export function shellSource(
           .split(/[;&|\n]/, 1);
         if (kindOf(commandOf(next)) === 'shell') {
           const from = result.length - lastCommand(result).length;
-          for (const { at, text } of strings)
-            if (at >= from) substitutions.push(shellSource(text, { maskQuotes, step }));
+          let end = 0;
+          for (const { at, start } of strings)
+            if (at >= from && start >= end) end = scanWord(start);
         }
         result += char;
         i++;

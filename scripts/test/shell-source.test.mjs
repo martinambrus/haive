@@ -375,6 +375,28 @@ describe('strings that a shell runs as code', () => {
       rejects(script);
     });
   }
+  for (const script of [
+    "bash -c 'echo '\"'\"'a'\"'\"'; pnpm test || true'",
+    "echo 'echo '\"'\"'a'\"'\"'; x || true' | sh",
+    "eval 'a' 'b || true'",
+    "bash -c $'x || true'",
+  ]) {
+    it(`reads the whole word of ${JSON.stringify(script)}`, () => {
+      bashAccepts(script);
+      rejects(script);
+    });
+  }
+  for (const script of [
+    "bash -c 'echo it\\'\"'\"'s'",
+    "eval 'echo it\\'\\''s'",
+    "bash -c 'echo $1' _ \"it's\"",
+    "sh -c 'x' _ 'y || true'",
+  ]) {
+    it(`reads the strings of ${JSON.stringify(script)} as words, not as code in pieces`, () => {
+      bashAccepts(script);
+      assert.equal(swallowedFailure(script, { step }), null);
+    });
+  }
   it('sees errexit disabled in a string', () => rejects("bash -c 'set +e; pnpm test'", 'set +e'));
   it('sees a bare true in a string', () => rejects("sh -c 'pnpm test; true'", 'true'));
   for (const script of [
