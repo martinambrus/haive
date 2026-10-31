@@ -11,7 +11,8 @@ import { getTableConfig, PgJsonb, PgUUID, type PgTable } from 'drizzle-orm/pg-co
  * children lookup that ignored its filter would hand back a sibling archive's row and delete the
  * wrong folder. It supports exactly the conditions callers build — `and` and `or` of `eq` / `ne` /
  * `gt` / `lt` / `inArray` / `notInArray` / `isNull` / `isNotNull`, a NULL never matching the last five,
- * and a jsonb column's key that holds a string (`jsonb_typeof(column -> 'key') = 'string'`) —
+ * a jsonb column's key that holds a string (`jsonb_typeof(column -> 'key') = 'string'`),
+ * and `not(EXISTS (SELECT 1 FROM table WHERE inner_uuid = outer_uuid AND a IS NULL AND b IS NULL))` —
  * and throws on anything else, so a drizzle upgrade or a new query shape fails loudly instead of
  * matching every row. Of an update's SQL values it evaluates `<column> + <integer>` and
  * `greatest(<column> + <integer>, 0)` and stores any other as it is. The foreign-key cascade is
@@ -213,6 +214,49 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       const ch = node.queryChunks.filter((c) => text(c) !== '');
       if (ch.length === 1) return compile(ch[0]);
       if (ch.length === 3 && text(ch[0]) === '(' && text(ch[2]) === ')') return compile(ch[1]);
+      // Only NOT of this correlated EXISTS is supported: EXISTS is never NULL, unlike a
+      // comparison, so negating its boolean preserves SQL's three-valued NULL semantics.
+      if (ch.length === 2 && text(ch[0]) === 'not ' && is(ch[1], SQL)) {
+        const sub = ch[1].queryChunks.filter((c) => text(c) !== '');
+        const inner = sub[1];
+        if (
+          sub.length === 11 &&
+          text(sub[0]) === 'EXISTS (SELECT 1 FROM ' &&
+          list.includes(inner as PgTable) &&
+          /^\s+WHERE $/.test(text(sub[2]) ?? '') &&
+          is(sub[3], PgUUID) &&
+          text(sub[4]) === ' = ' &&
+          is(sub[5], PgUUID) &&
+          /^\s+AND $/.test(text(sub[6]) ?? '') &&
+          is(sub[7], Column) &&
+          /^ IS NULL\s+AND $/.test(text(sub[8]) ?? '') &&
+          is(sub[9], Column) &&
+          text(sub[10]) === ' IS NULL)'
+        ) {
+          const innerKeys = columnKeys(inner as PgTable);
+          const matchKey = innerKeys.get(sub[3]);
+          const outerKey = keyOf.get(sub[5]);
+          const nullKeyA = innerKeys.get(sub[7]);
+          const nullKeyB = innerKeys.get(sub[9]);
+          if (
+            matchKey !== undefined &&
+            outerKey !== undefined &&
+            nullKeyA !== undefined &&
+            nullKeyB !== undefined
+          ) {
+            return (row) =>
+              !tableRows(inner as PgTable).some(
+                (r) =>
+                  r[matchKey] != null &&
+                  row[outerKey] != null &&
+                  r[matchKey] === row[outerKey] &&
+                  r[nullKeyA] == null &&
+                  r[nullKeyB] == null,
+              );
+          }
+        }
+        return refuse();
+      }
       if (
         ch.length >= 3 &&
         ch.length % 2 === 1 &&
