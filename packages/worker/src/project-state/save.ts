@@ -57,10 +57,18 @@ async function factsAt(
   locked = false,
 ): Promise<HaiveDataFacts> {
   const repoPath = repo.storagePath ?? repo.localPath;
-  const missing = !repoPath || (await checkoutMissing(repoPath));
   const readHolds: NonNullable<HaiveDataFacts['readHolds']>[number][] = [];
+  let missing = !repoPath;
+  if (repoPath) {
+    try {
+      missing = await checkoutMissing(repoPath);
+    } catch (err) {
+      logger.warn({ err, repositoryId: repo.id }, 'Haive data checkout read failed');
+      readHolds.push({ code: 'checkout_unreadable' });
+    }
+  }
   let checkout: HaiveDataFacts['checkout'] = missing ? 'missing' : 'not_git';
-  if (!missing) {
+  if (!missing && readHolds.length === 0) {
     try {
       checkout = (await requireUsableGit(repoPath!)) ? 'ready' : 'not_git';
     } catch (err) {

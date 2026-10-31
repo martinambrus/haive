@@ -156,7 +156,11 @@ it('settles a resync when an unowned malformed RTK unit blocks only its writer',
     blocked: { code: 'unowned_malformed_rtk', file: '.haive-data/state/settings/rtk-enabled.json' },
   });
   expect(
-    await resyncHaiveProjections(fake.db, '00000000-0000-4000-8000-000000000001', '/fixture'),
+    await resyncHaiveProjections(
+      fake.db as unknown as Database,
+      '00000000-0000-4000-8000-000000000001',
+      '/fixture',
+    ),
   ).toBe(true);
   expect(mocks.write).toHaveBeenCalledOnce();
 });

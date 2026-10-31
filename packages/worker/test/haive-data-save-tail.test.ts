@@ -17,6 +17,7 @@ vi.mock('../src/project-state/commit.js', () => ({
   HaiveProjectionRefusal: class extends Error {},
 }));
 import * as push from '../src/repo/git-push.js';
+import * as checkout from '../src/repo/checkout-head.js';
 import * as workspace from '../src/repo/git-workspace.js';
 import * as operations from '../src/repo/git-operation.js';
 import * as mirror from '../src/plan/mirror.js';
@@ -452,3 +453,18 @@ it.each(['refresh', 'mirror'] as const)(
     expect(calls.commit).not.toHaveBeenCalled();
   },
 );
+
+it('maps an unreadable checkout parent to a read hold rather than a missing checkout', async () => {
+  vi.spyOn(checkout, 'checkoutMissing').mockRejectedValue(
+    Object.assign(new Error('parent unreadable'), { code: 'EACCES' }),
+  );
+  const probe = vi.spyOn(workspace, 'requireUsableGit');
+  expect(await saveHaiveData(payload)).toMatchObject({
+    outcome: 'refused',
+    committed: false,
+    refusal: { code: 'checkout_unreadable' },
+  });
+  expect(probe).not.toHaveBeenCalled();
+  expect(h.flush).not.toHaveBeenCalled();
+  expect(calls.commit).not.toHaveBeenCalled();
+});
