@@ -151,6 +151,26 @@ describe('heredoc bodies by consumer', () => {
       rejects(script);
     });
   }
+  for (const [open, close] of [
+    ['f() { ', '\n}'],
+    ['f () { ', '\n}'],
+    ['function f { ', '\n}'],
+    ['function f() { ', '\n}'],
+    ['case $x in a) ', '\n;; esac'],
+    ['case $x in (a|b) ', '\n;; esac'],
+    ['case $x in *) ', '\n;; esac'],
+  ]) {
+    it(`keeps the data of a heredoc inert after ${open}`, () => {
+      const script = `${open}cat <<'EOF'\nit's data\nEOF${close}`;
+      bashAccepts(script);
+      assert.equal(swallowedFailure(script), null);
+    });
+    it(`sees a swallow fed to bash after ${open}`, () => {
+      const script = `${open}bash <<'EOF'\npnpm test || true\nEOF${close}`;
+      bashAccepts(script);
+      rejects(script);
+    });
+  }
   it('keeps a body inert when a substitution only echoes it', () => {
     const script = 'echo "$(cat <<\'EOF\'\npnpm test || true\nEOF\n)"';
     bashAccepts(script);

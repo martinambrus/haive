@@ -1,9 +1,12 @@
 // Conservative lexical filter for workflow safety pins. Uncertain syntax fails closed.
 // Keep quoted strings for URL scans, and expose executable substitutions for command scans.
-// Prefixes that only run the command after them: reserved words, redirections, assignments,
-// paths and the wrappers sudo, env, timeout, xargs and docker exec.
+// Prefixes that only run the command after them: reserved words, function and case heads,
+// redirections, assignments, paths and the wrappers sudo, env, timeout, xargs and docker exec.
 const WRAPPERS = [
   /^(?:\(|\{(?=\s))\s*/,
+  /^(?:function\s+\w+(?:\s*\(\))?|\w+\s*\(\))\s*\{\s*/,
+  /^case\s+\S+\s+in\s+/,
+  /^\(?[^\s()|]+(?:\|[^\s()|]+)*\)\s*/,
   /^(?:if|then|elif|else|while|until|do|time|nohup|command|exec|builtin|!)\s+/,
   /^\d*[<>]+&?\s*[^\s<>]+\s*/,
   /^[A-Za-z_]\w*=(?:"[^"]*"|'[^']*'|[^\s"'])*\s+/,
