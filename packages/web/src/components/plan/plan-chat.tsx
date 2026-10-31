@@ -78,6 +78,7 @@ export function PlanChat({
   onPatched,
   onRead,
   unreadCount = 0,
+  drafts: savedDrafts,
 }: {
   repositoryId: string;
   nodeId: string;
@@ -90,10 +91,22 @@ export function PlanChat({
   /** Unread replies on this node at the moment it was opened — where the
    *  "new" divider goes. */
   unreadCount?: number;
+  /** Page-owned drafts survive the detail panel's loading, tab and selection unmounts.
+   *  Keys include the repository as well as the node. */
+  drafts?: Map<string, string>;
 }) {
   const [messages, setMessages] = useState<PlanMessage[]>([]);
   const [conversations, setConversations] = useState<PlanConversation[]>([]);
-  const [draft, setDraft] = useState('');
+  const localDrafts = useRef(new Map<string, string>());
+  const drafts = savedDrafts ?? localDrafts.current;
+  const draftKey = `${repositoryId}:${nodeId}`;
+  const draft = drafts.get(draftKey) ?? '';
+  const [, setDraftRevision] = useState(0);
+  function setDraft(text: string): void {
+    if (text) drafts.set(draftKey, text);
+    else drafts.delete(draftKey);
+    setDraftRevision((n) => n + 1);
+  }
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [providers, setProviders] = useState<CliProvider[]>([]);
@@ -306,7 +319,9 @@ export function PlanChat({
           ...(providerId ? { cliProviderId: providerId } : {}),
         });
       }
-      setDraft('');
+      // The request owns this node's submitted text, even if another node is now open.
+      // Keep any edits typed while it was sending.
+      if (drafts.get(draftKey) === draft) setDraft('');
       setPollRestart((n) => n + 1);
       await reloadMessages();
       onPatched();

@@ -68,6 +68,8 @@ const net = vi.hoisted(() => ({
   discardPlanMerge: vi.fn(),
   submitPlanMergeTurn: vi.fn(),
   endPlanChat: vi.fn(),
+  startPlanChat: vi.fn(),
+  submitPlanChatTurn: vi.fn(),
   messages: undefined as unknown,
 }));
 vi.mock('@/lib/api-client', async (importOriginal) => ({
@@ -76,6 +78,8 @@ vi.mock('@/lib/api-client', async (importOriginal) => ({
   discardPlanMerge: net.discardPlanMerge,
   submitPlanMergeTurn: net.submitPlanMergeTurn,
   endPlanChat: net.endPlanChat,
+  startPlanChat: net.startPlanChat,
+  submitPlanChatTurn: net.submitPlanChatTurn,
   getPlanMessages: async () => net.messages,
   getPlanBuildClis: async () => ({ plannerCliProviderId: null }),
   markPlanNodeRead: async () => undefined,
@@ -201,6 +205,14 @@ beforeEach(() => {
   net.discardPlanMerge.mockReset();
   net.submitPlanMergeTurn.mockReset().mockResolvedValue(undefined);
   net.endPlanChat.mockReset().mockResolvedValue(undefined);
+  net.startPlanChat.mockReset().mockResolvedValue({ taskId: 'task-1' });
+  net.submitPlanChatTurn.mockReset().mockResolvedValue(undefined);
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(() => {
+      throw new Error('Unexpected network call in plan component test');
+    }),
+  );
 });
 afterEach(() => {
   unmount();
@@ -361,6 +373,109 @@ describe('PlanChat with a live conversation', () => {
     expect(net.post).toHaveBeenCalledTimes(1);
     expect(net.post).toHaveBeenCalledWith('/tasks/task-1/action', { action: 'cancel' });
     expect(net.endPlanChat).not.toHaveBeenCalled();
+  });
+});
+
+describe('PlanChat drafts on different nodes', () => {
+  const props = { repositoryId: 'repo-1', nodeId: 'node-A', onPatched: vi.fn() };
+  beforeEach(() => {
+    net.messages = { messages: [], conversations: [] };
+    respondWith(null);
+  });
+
+  it('never sends A’s draft to B and restores each node’s own text', async () => {
+    const mounted = mount(PlanChat, props);
+    unmount = mounted;
+    await settle();
+    await typeDraft('Only for A');
+
+    mounted.rerender({ ...props, nodeId: 'node-B' });
+    await settle();
+    await press('Send');
+
+    expect(net.startPlanChat).not.toHaveBeenCalled();
+    expect(host('textarea')?.props.value).toBe('');
+    expect(labelled('Send')?.props.disabled).toBe(true);
+    await typeDraft('Only for B');
+    mounted.rerender(props);
+    await settle();
+    expect(host('textarea')?.props.value).toBe('Only for A');
+    mounted.rerender({ ...props, nodeId: 'node-B' });
+    await settle();
+    expect(host('textarea')?.props.value).toBe('Only for B');
+    await press('Send');
+    expect(net.startPlanChat).toHaveBeenCalledExactlyOnceWith('repo-1', 'node-B', {
+      message: 'Only for B',
+    });
+    expect(host('textarea')?.props.value).toBe('');
+    mounted.rerender(props);
+    await settle();
+    expect(host('textarea')?.props.value).toBe('Only for A');
+  });
+
+  it('restores drafts after the parent unmounts the chat, scoped to repository and node', async () => {
+    const drafts = new Map<string, string>();
+    const open = async (repositoryId: string, nodeId: string) => {
+      unmount = mount(PlanChat, { ...props, repositoryId, nodeId, drafts });
+      await settle();
+    };
+    await open('repo-1', 'node-A');
+    await typeDraft('A in repo 1');
+    unmount();
+    await open('repo-1', 'node-B');
+    expect(host('textarea')?.props.value).toBe('');
+    await typeDraft('B in repo 1');
+    unmount();
+    await open('repo-2', 'node-A');
+    expect(host('textarea')?.props.value).toBe('');
+    await typeDraft('A in repo 2');
+    unmount();
+    await open('repo-1', 'node-A');
+    expect(host('textarea')?.props.value).toBe('A in repo 1');
+    unmount();
+    await open('repo-1', 'node-B');
+    expect(host('textarea')?.props.value).toBe('B in repo 1');
+    unmount();
+    await open('repo-2', 'node-A');
+    expect(host('textarea')?.props.value).toBe('A in repo 2');
+  });
+
+  it.each(['success', 'failure'])(
+    'keeps B’s draft when A’s pending send ends with %s',
+    async (outcome) => {
+      const request = deferred<unknown>();
+      net.startPlanChat.mockReturnValueOnce(request.promise);
+      const mounted = mount(PlanChat, props);
+      unmount = mounted;
+      await settle();
+      await typeDraft('Only for A');
+      await press('Send');
+      mounted.rerender({ ...props, nodeId: 'node-B' });
+      await settle();
+      await typeDraft('Only for B');
+
+      if (outcome === 'success') request.resolve({ taskId: 'task-A' });
+      else request.reject(new Error('Send failed'));
+      await settle();
+
+      expect(host('textarea')?.props.value).toBe('Only for B');
+      mounted.rerender(props);
+      await settle();
+      expect(host('textarea')?.props.value).toBe(outcome === 'success' ? '' : 'Only for A');
+    },
+  );
+
+  it('keeps edits typed during a pending send on the same node', async () => {
+    const request = deferred<unknown>();
+    net.startPlanChat.mockReturnValueOnce(request.promise);
+    unmount = mount(PlanChat, props);
+    await settle();
+    await typeDraft('First message');
+    await press('Send');
+    await typeDraft('Next message');
+    request.resolve({ taskId: 'task-A' });
+    await settle();
+    expect(host('textarea')?.props.value).toBe('Next message');
   });
 });
 
