@@ -1733,7 +1733,9 @@ export async function recordPlanMirrorError(
   err: unknown,
 ): Promise<void> {
   const message = planMirrorErrorMessage(err);
-  logger.warn({ err, repositoryId }, 'plan snapshot error recorded');
+  if (!(err instanceof PlanMirrorHeldError) && message !== safeErrorMessage(err)) {
+    logger.warn({ err, repositoryId }, 'plan snapshot error recorded');
+  }
   await db
     .insert(schema.planMirrorState)
     .values({
