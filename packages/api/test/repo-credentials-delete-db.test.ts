@@ -379,6 +379,63 @@ describe.skipIf(!url)(
         LOCK_TEST_TIMEOUT,
       );
 
+      it(
+        'D6 takes the connection row before the credential row, so a disconnect that is running finishes first and its connection is not named',
+        async () => {
+          const credential = await makeCredential();
+          const connection = await makeConnection(credential.id);
+          const gate = Promise.withResolvers<void>();
+          const taken = Promise.withResolvers<number>();
+          // What a disconnect does: the connection row locked, then removed.
+          const disconnect = db.transaction(async (tx) => {
+            await tx
+              .select({ id: schema.integrationConnections.id })
+              .from(schema.integrationConnections)
+              .where(eq(schema.integrationConnections.id, connection.id))
+              .for('update');
+            const [backend] = await tx.execute<{ pid: number }>(
+              sql`select pg_backend_pid() as pid`,
+            );
+            taken.resolve(backend!.pid);
+            await gate.promise;
+            await tx
+              .delete(schema.integrationConnections)
+              .where(eq(schema.integrationConnections.id, connection.id));
+          });
+          const pid = await taken.promise;
+          const request = track(remove(credential.id));
+          let credentialFree: unknown[] = [];
+          try {
+            await waitUntilBlockedBy(pid, request);
+            await sleep(300);
+            expect(request.settled).toBe(false);
+            // A reconnect locks the connection and then the credential; a delete that held the credential
+            // while it waited for the connection would deadlock with it. NOWAIT fails if it does.
+            credentialFree = [
+              ...(await db.transaction((tx) =>
+                tx.execute(
+                  sql`select id from repo_credentials where id = ${credential.id} for update nowait`,
+                ),
+              )),
+            ];
+          } finally {
+            gate.resolve();
+            await Promise.allSettled([disconnect, request.response]);
+          }
+
+          const res = await request.response;
+
+          expect(credentialFree).toHaveLength(1);
+          expect(res.status).toBe(200);
+          expect(await credentialRow(credential.id)).toBeUndefined();
+          const rows = await auditRows();
+          expect(rows).toHaveLength(1);
+          expect(rows[0]!.metadata ?? {}).not.toHaveProperty('connectionId');
+          expect(rows[0]!.metadata ?? {}).not.toHaveProperty('providerId');
+        },
+        LOCK_TEST_TIMEOUT,
+      );
+
       it("D5 answers 404 for another user's credential and for one that does not exist, and writes no audit row", async () => {
         const other = await makeUser();
         const foreign = await makeCredential({ userId: other });

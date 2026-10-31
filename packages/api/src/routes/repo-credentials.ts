@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { eq, and, desc, isNotNull } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { schema, type DbTx } from '@haive/database';
 import {
   encrypt,
   generateDek,
@@ -107,6 +107,25 @@ const updateCredentialSchema = z
     path: ['gitEmail'],
   })
   .refine(identityIsWhole, { message: BOTH_OR_NEITHER, path: ['gitEmail'] });
+
+/** The connection that points at a credential of this user, its row locked. A reconnect locks its
+ *  connection before its credential, so the writers here take the two in that order as well. */
+const lockConnectionOf = (tx: DbTx, credentialId: string, userId: string) =>
+  tx
+    .select({
+      id: schema.integrationConnections.id,
+      providerId: schema.integrationConnections.providerId,
+      authMethod: schema.integrationConnections.authMethod,
+      accountLabel: schema.integrationConnections.accountLabel,
+    })
+    .from(schema.integrationConnections)
+    .where(
+      and(
+        eq(schema.integrationConnections.repoCredentialId, credentialId),
+        eq(schema.integrationConnections.ownerUserId, userId),
+      ),
+    )
+    .for('update');
 
 export const repoCredentialsRoutes = new Hono<AppEnv>();
 repoCredentialsRoutes.use('*', requireAuth);
@@ -269,6 +288,7 @@ repoCredentialsRoutes.put('/:id', async (c) => {
 
   // One lock from read to write, so an overlapping edit cannot change the row the check judged.
   const updated = await db.transaction(async (tx) => {
+    let [connection] = await lockConnectionOf(tx, id, userId);
     const [existing] = await tx
       .select({
         encryptedDek: schema.repoCredentials.encryptedDek,
@@ -287,15 +307,8 @@ repoCredentialsRoutes.put('/:id', async (c) => {
       apiBaseUrl: body.apiBaseUrl ?? existing.apiBaseUrl,
     });
 
-    const [connection] = await tx
-      .select({
-        id: schema.integrationConnections.id,
-        providerId: schema.integrationConnections.providerId,
-        authMethod: schema.integrationConnections.authMethod,
-        accountLabel: schema.integrationConnections.accountLabel,
-      })
-      .from(schema.integrationConnections)
-      .where(eq(schema.integrationConnections.repoCredentialId, id));
+    // One a link committed while this waited for the credential.
+    connection ??= (await lockConnectionOf(tx, id, userId))[0];
     if (connection) {
       const nextProvider = body.provider === undefined ? existing.provider : body.provider || null;
       const existingForge = credentialForgeProvider(existing.provider, existing.host);
@@ -353,19 +366,17 @@ repoCredentialsRoutes.delete('/:id', async (c) => {
   const id = c.req.param('id');
   const db = getDb();
   const audit = await db.transaction(async (tx) => {
+    // Locked, not just read: a disconnect running now removes the connection itself, and the audit
+    // row names only what this delete took.
+    let [connection] = await lockConnectionOf(tx, id, userId);
     const [locked] = await tx
       .select({ id: schema.repoCredentials.id })
       .from(schema.repoCredentials)
       .where(and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)))
       .for('update');
     if (!locked) throw new HttpError(404, 'Credential not found');
-    const [connection] = await tx
-      .select({
-        id: schema.integrationConnections.id,
-        providerId: schema.integrationConnections.providerId,
-      })
-      .from(schema.integrationConnections)
-      .where(eq(schema.integrationConnections.repoCredentialId, id));
+    // One a link committed while this waited for the credential.
+    connection ??= (await lockConnectionOf(tx, id, userId))[0];
     await tx
       .delete(schema.repoCredentials)
       .where(and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)));

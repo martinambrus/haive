@@ -427,6 +427,57 @@ describe.skipIf(!url)('editing a Git credential a connection points at, on Postg
     });
   });
 
+  describe('PUT /repo-credentials/:id takes the connection row before the credential row', () => {
+    it(
+      'E14 waits for a connection row someone else holds without holding the credential row',
+      async () => {
+        const credential = await makeCredential();
+        const connection = await makeConnection(credential.id, { accountLabel: 'before' });
+        const gate = Promise.withResolvers<void>();
+        const taken = Promise.withResolvers<number>();
+        // What a reconnect or a disconnect holds first.
+        const holder = db.transaction(async (tx) => {
+          await tx
+            .select({ id: schema.integrationConnections.id })
+            .from(schema.integrationConnections)
+            .where(eq(schema.integrationConnections.id, connection.id))
+            .for('update');
+          const [backend] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+          taken.resolve(backend!.pid);
+          await gate.promise;
+        });
+        const pid = await taken.promise;
+        const request = track(edit(credential.id, { label: 'after', host: 'github.com' }));
+        let credentialFree: unknown[] = [];
+        try {
+          await waitUntilBlockedBy(pid, request);
+          await sleep(300);
+          expect(request.settled).toBe(false);
+          // A delete or a reconnect takes the connection first and then the credential; an edit that
+          // held the credential while it waited for the connection would deadlock with it.
+          credentialFree = [
+            ...(await db.transaction((tx) =>
+              tx.execute(
+                sql`select id from repo_credentials where id = ${credential.id} for update nowait`,
+              ),
+            )),
+          ];
+        } finally {
+          gate.resolve();
+          await Promise.allSettled([holder, request.response]);
+        }
+
+        const res = await request.response;
+
+        expect(credentialFree).toHaveLength(1);
+        expect(res.status).toBe(200);
+        expect((await credentialRow(credential.id)).label).toBe('after');
+        expect((await connectionRow(connection.id)).accountLabel).toBe('after');
+      },
+      LOCK_TEST_TIMEOUT,
+    );
+  });
+
   describe('the connection label follows the credential label', () => {
     it('E9a renames a token connection with its credential and advances its updated_at', async () => {
       const credential = await makeCredential();
