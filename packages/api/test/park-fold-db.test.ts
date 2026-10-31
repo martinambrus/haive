@@ -48,7 +48,7 @@ vi.mock('@haive/shared', async (importOriginal) => {
 import { Hono } from 'hono';
 import { FIX_LOOP_ACTION_FIELD } from '@haive/shared';
 import { taskRoutes } from '../src/routes/tasks/index.js';
-import { reofferParkedSteps } from '../src/lib/task-control.js';
+import { reofferParkedSteps, settleActiveSteps } from '../src/lib/task-control.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
@@ -333,6 +333,58 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
         waitingStartedAt: ago(PARKED_FOR),
       });
 
+      expect(after.status).toBe('pending');
+      expect(after.waitingStartedAt).toBeNull();
+      expectMoved('idle_ms', before.idleMs, after.idleMs, PARKED_FOR);
+      expectMoved('carried_idle_ms', before.carriedIdleMs, after.carriedIdleMs, 'stays');
+    });
+  });
+
+  // A task Retry that never reached a step restarts through START and settles its rows (settleActiveSteps): it
+  // fails what is running and re-offers a parked form, as the step Retry above does. The re-offer cleared the
+  // park's marker without booking the wait, so the wait left both idle_ms and carried_idle_ms.
+  describe('a task Retry that never reached a step, which settles the parked rows before it restarts', () => {
+    const settle = async (taskId: string) => {
+      await settleActiveSteps(db, taskId);
+    };
+    // The cases of the shared matrix that start from a form; its pending seeds are failed by this writer, not re-offered.
+    const formCases: Case[] = [
+      ...foldCases('waiting_form').filter((c) => c.seed().status === 'waiting_form'),
+      {
+        name: `a waiting_form row with no marker and no started_at ${NO_WAIT}`,
+        seed: () => ({ status: 'waiting_form', startedAt: null }),
+        idle: 'stays',
+        carried: 'stays',
+      },
+    ];
+
+    it.each(formCases)('$name', async ({ seed, idle, carried }) => {
+      const task = await seedTask('failed', { currentStepId: null });
+      const row = await seedRow(task.id, seed());
+      const before = await rowOf(row.id);
+
+      await settle(task.id);
+
+      const after = await rowOf(row.id);
+      expect(after.status).toBe('pending');
+      expect(after.waitingStartedAt).toBeNull();
+      expectMoved('idle_ms', before.idleMs, after.idleMs, idle);
+      expectMoved('carried_idle_ms', before.carriedIdleMs, after.carriedIdleMs, carried);
+    });
+
+    it('books a form parked inside its run once through the route, which settles twice', async () => {
+      const task = await seedTask('failed', { currentStepId: null });
+      const row = await seedRow(task.id, {
+        status: 'waiting_form',
+        startedAt: ago(HOUR),
+        waitingStartedAt: ago(PARKED_FOR),
+      });
+      const before = await rowOf(row.id);
+
+      const res = await post(`/tasks/${task.id}/action`, { action: 'retry' });
+
+      expect(res.status, JSON.stringify(await res.clone().json())).toBe(200);
+      const after = await rowOf(row.id);
       expect(after.status).toBe('pending');
       expect(after.waitingStartedAt).toBeNull();
       expectMoved('idle_ms', before.idleMs, after.idleMs, PARKED_FOR);

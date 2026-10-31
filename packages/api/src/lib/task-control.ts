@@ -194,8 +194,9 @@ export async function reofferParkedSteps(
 }
 
 /** Leave none of a restarting task's steps active: fail the stuck ones and re-offer a parked form
- *  rather than fail it. A pass can move a row between those two writes, so every row of the task is
- *  locked first, in id order, and both land in one transaction. */
+ *  rather than fail it, booking its wait as `reofferParkedSteps` does: the claim finds the marker gone and
+ *  folds nothing. A pass can move a row between those two writes, so every row of the task is locked
+ *  first, in id order, and both land in one transaction. */
 export async function settleActiveSteps(
   db: ReturnType<typeof getDb>,
   taskId: string,
@@ -210,7 +211,13 @@ export async function settleActiveStepsIn(tx: DbHandle, taskId: string): Promise
   await failStuckSteps(tx, taskId, 'user', now, false);
   await tx
     .update(schema.taskSteps)
-    .set({ status: 'pending', waitingStartedAt: null, updatedAt: now, ...reofferGate })
+    .set({
+      status: 'pending',
+      ...parkFolded,
+      waitingStartedAt: null,
+      updatedAt: now,
+      ...reofferGate,
+    })
     .where(and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.status, 'waiting_form')));
 }
 
