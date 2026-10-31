@@ -66,6 +66,16 @@ before React attaches is still the native POST to the same page and drops what w
 own replay (a function `action`) would keep it but removes `method`, so it is not used. A form that
 carries a secret and is rendered on the server declares `method="post"` too.
 
+`NewRepoForm` (`/repos/new`) follows the same rule: its display name, branch and writable-copy box are
+uncontrolled and read with `FormData` before the first `await` (MEASURED with the script chunks held
+back: all of them were reset at the first re-render), and it declares `method="post"` because those
+fields now have names (a urlencoded POST to `/repos/new` is answered with the page, a multipart one with
+409, in dev and in the standalone build). The branch is also written through a ref, by the GitHub picker
+(its default branch, into an empty untouched field) and by a Source switch. The Source select stays
+controlled because it decides which sections render, so a Source chosen before attach is reset at the
+first re-render. `/tasks/new` loses its typed title, description and estimate the same way; it has no
+native submit before attach, because its submit button is `disabled` in the server HTML.
+
 ## Cookie transport boundary
 
 The current session transport requires the browser-facing web and API URLs to use **the same
