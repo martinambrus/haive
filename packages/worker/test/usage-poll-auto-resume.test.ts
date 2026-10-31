@@ -8,14 +8,18 @@ import { createFakeDb } from '@haive/database/testing';
 const h = vi.hoisted(() => ({
   queued: [] as { name: string; data: unknown }[],
   failNextAdd: null as Error | null,
+  refusals: 1,
+  tries: 0,
 }));
 
-vi.mock('../src/queues/task-queue.js', () => ({
+vi.mock('../src/queues/task-queue.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/queues/task-queue.js')>()),
   getTaskQueue: () => ({
     add: async (name: string, data: unknown) => {
+      h.tries++;
       if (h.failNextAdd) {
         const failure = h.failNextAdd;
-        h.failNextAdd = null;
+        if (--h.refusals === 0) h.failNextAdd = null;
         throw failure;
       }
       h.queued.push({ name, data });
@@ -124,9 +128,40 @@ function setup() {
 beforeEach(() => {
   h.queued = [];
   h.failNextAdd = null;
+  h.refusals = 1;
+  h.tries = 0;
 });
 
 describe('the allowance auto-resume of a task whose provider is back', () => {
+  it('retries a refused auto-resume add after the re-open and queues exactly one advance', async () => {
+    vi.useFakeTimers();
+    config('auto', 'normal');
+    const t = setup();
+    t.fake.patch(schema.tasks, TASK, { orchestrationEpoch: 7 });
+    h.failNextAdd = new Error('the queue refused the job');
+
+    try {
+      const resumed = checkProviderRecovery(t.db);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await resumed;
+
+      expect(h.tries).toBe(2);
+      expect(h.queued).toEqual([
+        {
+          name: TASK_JOB_NAMES.ADVANCE_STEP,
+          data: { taskId: TASK, userId: USER, stepId: 'fan-out', round: 0, epoch: 7 },
+        },
+      ]);
+      expect(t.task()).toMatchObject({
+        status: 'running',
+        allowanceAutoResumeCount: 1,
+        awaitingAllowanceProviderId: null,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('resumes it and queues its step while the system is normal', async () => {
     config('auto', 'normal');
     const t = setup();
@@ -539,11 +574,12 @@ describe('the provider recovery when one armed task fails on its own writes', ()
     ]);
   });
 
-  it('goes on to the next armed task when the queue refuses the advance of a resumed one', async () => {
+  it('goes on to the next armed task when the queue exhausts retries of the advance of a resumed one', async () => {
     config('auto', 'normal');
     const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
     const t = twoTasks();
     h.failNextAdd = dropped;
+    h.refusals = 3;
 
     await checkProviderRecovery(t.db);
 
