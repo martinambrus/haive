@@ -70,9 +70,9 @@ export function safeErrorMessage(err: unknown): string {
  *  Keep safeErrorMessage's ordinary-error contract unchanged for other diagnostic sinks. */
 export function scrubErrorPaths(err: unknown): string {
   return safeErrorMessage(err).replace(
-    /[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s"'`<>]+|(["'`])(?:[a-zA-Z]:[\\/]|\\\\|\/)[^\r\n]*?\1|(?<![\w./\\:-])(?:[a-zA-Z]:[\\/]|\\\\|\/)[^\s"'`<>:,;!?()[\]{}]*/g,
+    /[a-zA-Z][a-zA-Z0-9+.-]{0,31}:\/\/[^\s"'`<>]+|(["'`])(?:[a-zA-Z]:[\\/]|\\\\|\/)[^\r\n]*?\1|(?<![\w./\\:-])(?:[a-zA-Z]:[\\/]|\\\\|\/)[^\s"'`<>:,;!?()[\]{}]*/g,
     (token: string, quote: string | undefined) => {
-      if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(token)) return token;
+      if (/^[a-zA-Z][a-zA-Z0-9+.-]{0,31}:\/\//.test(token)) return token;
       return quote ? `${quote}[path]${quote}` : '[path]';
     },
   );
