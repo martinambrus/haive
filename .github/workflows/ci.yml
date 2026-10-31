@@ -213,12 +213,21 @@ jobs:
 
       # The same applier every install uses. On CI's empty database this exercises the FRESH
       # path — baseline plus every later migration — on every run.
+      #
+      # The last setup step: every step up to here keeps the default condition, so one that fails
+      # skips everything after it, and this one succeeds only if all of them did. Each check below
+      # runs on `!cancelled() && steps.migrate.conclusion == 'success'`: a failed check no longer
+      # skips the others (the job still fails with it), a failed setup step still stops them, and
+      # a run cancelled by a newer push stops. A check names this step and never a sibling; a step
+      # the checks need goes above this one. scripts/test/ci-step-independence.test.mjs pins it.
       - name: Apply database migrations
+        id: migrate
         run: pnpm --filter @haive/database migrate
 
       # A gated file skips green when its URL is unset, so each must report tests run and none skipped.
       # The database column is the name each file's own guard demands.
       - name: Postgres-gated tests
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
           PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}
@@ -358,51 +367,53 @@ jobs:
       # Every smoke:ci runs its smokes through scripts/run-smokes.mjs: each smoke has its own time
       # limit, a hung one is killed and named, and the rest still run.
       - name: Run api smokes
-        id: api-smokes
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         run: pnpm --filter @haive/api smoke:ci
 
-      # A failed api smoke must not hide the worker smokes. This step runs unless the api smokes
-      # were skipped (an earlier step failed, so nothing here could pass either) or the job was
-      # cancelled; the job still fails with the api step.
       - name: Run worker smokes
-        if: ${{ !cancelled() && steps.api-smokes.conclusion != 'skipped' }}
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         run: pnpm --filter @haive/worker smoke:ci
 
       - name: Agent pool script on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         run: pnpm --filter @haive/worker exec vitest run src/queues/cli-exec/agent-lease.test.ts
         env:
           HAIVE_LEASE_TEST_REDIS_URL: redis://localhost:6379/15
 
       - name: CLI job retention on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         run: pnpm --filter @haive/worker exec vitest run test/cli-job-retention.test.ts
         env:
           CLI_JOB_RETENTION_TEST_REDIS_URL: redis://localhost:6379/9
 
       - name: RAG sync lock on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         run: pnpm --filter @haive/shared exec vitest run test/rag-sync-lock.test.ts
         env:
           HAIVE_RAG_LOCK_TEST_REDIS_URL: redis://localhost:6379/14
 
       - name: Usage-auth stash script on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         run: pnpm --filter @haive/api exec vitest run test/cli-providers-usage-auth.test.ts
         env:
           USAGE_AUTH_TEST_REDIS_URL: redis://localhost:6379/12
 
       - name: Module activation watch on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         run: pnpm --filter @haive/worker exec vitest run test/module-activation-watch.test.ts
         env:
           MODULE_ACTIVATION_WATCH_TEST_REDIS_URL: redis://localhost:6379/11
 
       - name: Auth throttle script on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         run: pnpm --filter @haive/api exec vitest run test/auth-throttle.test.ts
         env:
           AUTH_THROTTLE_TEST_REDIS_URL: redis://localhost:6379/10
 
       # The migration runner's live-database coverage. Its own smoke:ci, since the worker's is
-      # worker-scoped; this package had no smoke of its own before. It runs on the same condition
-      # as the worker smokes.
+      # worker-scoped; this package had no smoke of its own before.
       - name: Run migration smokes
-        if: ${{ !cancelled() && steps.api-smokes.conclusion != 'skipped' }}
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         run: pnpm --filter @haive/database smoke:ci
 
   schema-parity:
