@@ -1,7 +1,7 @@
 import { lockRepositoryTasksKey } from '@haive/database';
 import { checkoutMatches, checkoutMissing, type NamedCheckout } from '../repo/checkout-head.js';
 import { admitWatchedCheckout } from '../project-state/watch-admission.js';
-import { safeErrorMessage } from '@haive/shared/logger';
+import { safeErrorDetails, safeErrorMessage } from '@haive/shared/logger';
 import { createHash } from 'node:crypto';
 import {
   readFileNoFollow,
@@ -1711,12 +1711,29 @@ export async function recordPlanReconcileFailure(
   await recordPlanMirrorError(db, repositoryId, err);
 }
 
+/** This column is displayed by the plan page. Keep useful held/import reasons, but do not
+ *  persist filesystem or git diagnostics that quote a server's absolute paths. Relative
+ *  snapshot names such as `.haive-data/plan.json` remain useful to the repository owner. */
+function planMirrorErrorMessage(err: unknown): string {
+  const message = safeErrorMessage(err);
+  if (!/(?:^|[^a-zA-Z0-9_.-])\/|[a-zA-Z]:[\\/]|\\\\/.test(message)) return message;
+  const { name, code } = safeErrorDetails(err);
+  const diagnostic =
+    typeof code === 'string' && /^[A-Z][A-Z0-9_]+$/.test(code)
+      ? code
+      : /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(name)
+        ? name
+        : 'Error';
+  return `Plan snapshot operation failed (${diagnostic}). Check repository access and retry; see worker logs for details.`;
+}
+
 export async function recordPlanMirrorError(
   db: Database,
   repositoryId: string,
   err: unknown,
 ): Promise<void> {
-  const message = safeErrorMessage(err);
+  const message = planMirrorErrorMessage(err);
+  logger.warn({ err, repositoryId }, 'plan snapshot error recorded');
   await db
     .insert(schema.planMirrorState)
     .values({
