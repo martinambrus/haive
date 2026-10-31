@@ -26,6 +26,7 @@ vi.mock('node:child_process', async (original) => {
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
 import { logger } from '@haive/shared';
+import { serializeError } from '@haive/shared/logger';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { hardenGitArgs } from '@haive/shared/git-args';
@@ -54,11 +55,11 @@ beforeEach(() => {
   h.entry.mockReset().mockResolvedValue({ kind: 'directory' });
   h.git.mockReset().mockResolvedValue({ stdout: '', stderr: '' });
 });
-const link = () =>
+const link = (remoteUrl = 'https://example.test/r') =>
   app.request(`/${REPO}/remote`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ remoteUrl: 'https://example.test/r' }),
+    body: JSON.stringify({ remoteUrl }),
   });
 const fail = (code: number | string, stderr: string) =>
   Object.assign(new Error(stderr), { code, stderr });
@@ -350,17 +351,25 @@ it('stops a timed-out git write with SIGTERM, so git removes its own lock file',
             '--file',
             config,
             'remote.origin.url',
-            'https://example.test/r',
+            'https://synthetic-user:synthetic-password@example.test/r',
           ]),
           options,
           outside,
         ),
   );
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-  const response = Promise.resolve(link());
+  const response = Promise.resolve(
+    link('https://synthetic-user:synthetic-password@example.test/r'),
+  );
   await until('git took its lock', () => existsSync(`${config}.lock`));
   await vi.advanceTimersByTimeAsync(DEADLINE_MS);
-  expect((await answeredWithin(3_000, response)).status).toBe(409);
+  const answer = await answeredWithin(3_000, response);
+  expect(answer.status).toBe(409);
+  const text = await answer.text();
+  expect(text).not.toMatch(
+    /https:|synthetic-user|synthetic-password|example\.test|Command failed|remote\.origin\.url/,
+  );
+  expect(text).toContain('SIGTERM');
   expect(existsSync(`${config}.lock`)).toBe(false);
   expect(child!.signalCode).toBe('SIGTERM');
   expect(vi.getTimerCount()).toBe(0);
@@ -520,3 +529,56 @@ it('answers with the failed restore, not the lost connection, when the callback 
     errors.mockRestore();
   }
 });
+
+it.each([false, true])(
+  'keeps a killed update argv out of the response and restore log (restore fails=%s)',
+  async (restoreFails) => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'relink-safe-error-'));
+    dirs.push(dir);
+    const config = path.join(dir, 'config');
+    execFileSync('mkfifo', [config]);
+    const old = 'https://old.test/r';
+    const submitted = 'https://synthetic-user:synthetic-password@example.test/r';
+    h.git.mockImplementation((_command, args: string[], options: ExecFileOptions) => {
+      if (args.includes('rev-parse')) return Promise.resolve({ stdout: 'true', stderr: '' });
+      if (args.includes('remote') && args.includes('add')) return Promise.reject(fail(3, 'exists'));
+      if (args.includes('--get-all'))
+        return args.at(-1) === 'remote.origin.url'
+          ? Promise.resolve({ stdout: old, stderr: '' })
+          : Promise.reject(fail(1, 'absent'));
+      if (args.at(-1) === 'https://example.test/r')
+        return startChild(
+          'git',
+          hardenGitArgs(['config', '--file', config, 'remote.origin.url', submitted]),
+          options,
+          dir,
+        );
+      if (args.at(-1) === old && restoreFails) return Promise.reject(fail(128, 'restore refused'));
+      return Promise.resolve({ stdout: '', stderr: '' });
+    });
+    const errors = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const response = Promise.resolve(link(submitted));
+      await until('git took its lock', () => existsSync(`${config}.lock`));
+      await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+      const answer = await answeredWithin(3_000, response);
+      expect(answer.status).toBe(restoreFails ? 500 : 409);
+      const text = await answer.text();
+      const logLines = JSON.stringify(
+        errors.mock.calls.map(([fields, msg]) => {
+          const record = fields as Record<string, unknown>;
+          return { ...record, err: serializeError(record.err), msg };
+        }),
+      );
+      expect(text + logLines).not.toMatch(
+        /https:|synthetic-user|synthetic-password|example\.test|Command failed|remote\.origin\.url/,
+      );
+      expect(errors).toHaveBeenCalledTimes(restoreFails ? 1 : 0);
+      if (!restoreFails) expect(text).toContain('SIGTERM');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      errors.mockRestore();
+    }
+  },
+);

@@ -2775,12 +2775,20 @@ repoRoutes.post('/:id/remote', async (c) => {
         stderr: stderr.toString().trim(),
       };
     } catch (err) {
-      const e = err as { code?: unknown; stdout?: string; stderr?: string; message?: string };
+      const e = err as {
+        code?: unknown;
+        signal?: NodeJS.Signals;
+        stdout?: string;
+        stderr?: string;
+      };
+      const code = typeof e.code === 'number' ? e.code : -1;
       return {
         ok: false,
-        code: typeof e.code === 'number' ? e.code : -1,
+        code,
         stdout: (e.stdout ?? '').toString().trim(),
-        stderr: (e.stderr || e.message || '').toString().trim(),
+        // execFile's message includes argv, which can contain credentials.
+        stderr:
+          (e.stderr ?? '').toString().trim() || (e.signal ? `signal ${e.signal}` : `exit ${code}`),
       };
     } finally {
       clearTimeout(deadline);
