@@ -9,7 +9,7 @@ if (url && !new URL(url).pathname.startsWith('/step_fold_preread_test'))
   );
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000f2');
-const h = vi.hoisted(() => ({ db: undefined as unknown }));
+const h = vi.hoisted(() => ({ db: undefined as unknown, thrown: undefined as unknown }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/queues.js', () => {
@@ -45,8 +45,11 @@ vi.mock('@haive/shared', async (importOriginal) => {
   };
 });
 
+import { Hono } from 'hono';
 import { PROVIDER_SENSITIVE_STEP_IDS } from '@haive/shared';
+import { taskRoutes } from '../src/routes/tasks/index.js';
 import { resetRowsForRerun } from '../src/routes/tasks/steps.js';
+import type { AppEnv } from '../src/context.js';
 
 // Every case seeds one step row with live idle_ms 4000 and user_active_ms 800 and carried work / idle /
 // user of 1000 / 200 / 50. A peer transaction on a second connection adds 7000 / 3000 / 500 to
@@ -79,6 +82,13 @@ const backendPid = async (tx: Tx): Promise<number> => {
   const [row] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
   return row!.pid;
 };
+
+const app = new Hono<AppEnv>();
+app.route('/tasks', taskRoutes);
+app.onError((err, c) => {
+  h.thrown = err;
+  return c.json({ error: 'the route threw' }, 500);
+});
 
 describe.skipIf(!url)(
   'carried_* folds beside a peer that changes the row after the writer read it, on Postgres',
@@ -228,6 +238,17 @@ describe.skipIf(!url)(
       return underTestOutcome.value;
     }
 
+    const patch = async (path: string, body: Record<string, unknown>) => {
+      h.thrown = undefined;
+      const res = await app.request(path, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (h.thrown !== undefined) throw h.thrown;
+      return { status: res.status, body: (await res.json()) as unknown };
+    };
+
     it(
       'F1: resetRowsForRerun folds the row as a peer left it while the reset waited, not the row its caller read',
       async () => {
@@ -247,6 +268,29 @@ describe.skipIf(!url)(
           idleMs: 0,
           userActiveMs: 0,
           carriedWorkMs: 1000 + 7000 + (60_000 - 6000),
+          carriedIdleMs: 200 + 3000 + 6000,
+          carriedUserActiveMs: 50 + 500 + 800,
+        });
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'F2: the per-step CLI switch folds the row as a peer left it while the switch waited, not the row it read first',
+      async () => {
+        const taskId = await seedTask('running');
+        await seedStep(taskId);
+
+        const response = await besidePeer(() =>
+          patch(`/tasks/${taskId}/steps/${STEP.stepId}/cli-provider`, { cliProviderId: null }),
+        );
+
+        expect(response).toMatchObject({ status: 200, body: { ok: true } });
+        expect(await finalRow()).toEqual({
+          status: 'pending',
+          idleMs: 0,
+          userActiveMs: 0,
+          carriedWorkMs: 1000 + 7000,
           carriedIdleMs: 200 + 3000 + 6000,
           carriedUserActiveMs: 50 + 500 + 800,
         });
