@@ -30,11 +30,20 @@ values from saved approvals while keeping that authority spelling; display label
 sanitized identity.
 
 Repository list/detail `remoteUrl` values and the plan snapshot's `originUrl` seed the origin
-editor, so they use `redactEditableGitUrl`: an allowed remote keeps its non-secret SSH login,
+editor, and the `POST /repos` and `PATCH /repos/:id/exclusions` responses answer with the same row,
+so all of them use `redactEditableGitUrl`: an allowed remote keeps its non-secret SSH login,
 explicit port and original address shape while dropping passwords, HTTP userinfo, query and
 fragment. A malformed or unsupported legacy value uses conservative display redaction instead
 of the transport helper's schemeless passthrough. Strict display redaction still governs labels
 and bundle summaries; the bundle composer creates a new URL rather than editing a summary's URL.
+A response never rewrites the stored column, so a legacy credentialed row keeps its stored value
+until its remote is relinked. No repository row the api answers carries `onboardingTooling` or
+`onboardingEnvironment`: the tooling holds the RAG connection string, the Ollama URL and the MCP
+servers' env values, so the list and detail leave both columns out of their projection and the
+create, upload, upload-complete and exclusions responses drop them from the returned row. A failed
+clone or refresh stores git's message in `repositories.status_message` through `scrubSecret`, which
+applies `redactGitText`, so git's echo of the remote keeps no userinfo, query or fragment
+(`repo-status-message-redaction.test.ts` pins it against real git).
 
 `redactGitText` scans URL authorities once instead of treating each quote or whitespace as a
 reliable cut. Scheme recognition uses a forward character scan at both the next-URL and ambiguous
