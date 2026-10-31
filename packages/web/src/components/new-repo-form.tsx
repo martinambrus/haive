@@ -113,12 +113,9 @@ const SOURCE_OPTIONS: { value: Source; label: string }[] = [
 
 export function NewRepoForm() {
   const router = useRouter();
-  const [name, setName] = useState('');
   const [source, setSource] = useState<Source>('local_path');
   const [localPath, setLocalPath] = useState<string | null>(null);
-  const [writable, setWritable] = useState(false);
   const [remoteUrl, setRemoteUrl] = useState('');
-  const [branch, setBranch] = useState('');
   const [credentialsId, setCredentialsId] = useState('');
   const [credentials, setCredentials] = useState<CredentialRow[]>([]);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
@@ -136,6 +133,7 @@ export function NewRepoForm() {
   const [manualUrl, setManualUrl] = useState(false);
   const [branchTouched, setBranchTouched] = useState(false);
   const repoListBlurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const branchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     api
@@ -184,6 +182,12 @@ export function NewRepoForm() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    // Uncontrolled: a value typed or ticked before React attaches is in the DOM but in no state,
+    // and a re-render resets a controlled input to its state. currentTarget is null after an await.
+    const fields = new FormData(event.currentTarget);
+    const name = String(fields.get('repoName') ?? '').trim();
+    const branch = String(fields.get('branch') ?? '').trim();
+    const writable = fields.has('writable');
     setError(null);
     setPending(true);
     try {
@@ -191,17 +195,17 @@ export function NewRepoForm() {
         if (!uploadFile) throw new Error('Pick an archive file (.zip, .tar, .tar.gz)');
         await chunkedUpload({
           file: uploadFile,
-          name: name.trim() || undefined,
-          branch: branch.trim() || undefined,
+          name: name || undefined,
+          branch: branch || undefined,
           onProgress: (pct) => setUploadProgress(pct),
         });
       } else {
         const body: Record<string, unknown> = { source };
-        if (name.trim()) body.name = name.trim();
+        if (name) body.name = name;
         if (source === 'blank') {
           // No URL and no path to derive from, so the name is the only identifying
           // input — the API rejects a blank repo without one.
-          if (!name.trim()) throw new Error('Give the new project a name');
+          if (!name) throw new Error('Give the new project a name');
         } else if (source === 'local_path') {
           if (!localPath) throw new Error('Pick a local directory containing a .git folder');
           body.localPath = localPath;
@@ -214,7 +218,7 @@ export function NewRepoForm() {
           body.remoteUrl = remoteUrl;
           if (credentialsId) body.credentialsId = credentialsId;
         }
-        if (branch.trim()) body.branch = branch.trim();
+        if (branch) body.branch = branch;
         await api.post<{ repository: Repository }>('/repos', body);
       }
       router.push('/repos');
@@ -236,18 +240,16 @@ export function NewRepoForm() {
           Pick a local checkout or clone from a remote. Both run in the background.
         </CardDescription>
       </CardHeader>
-      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+      {/* The inputs now have names, so a submit before React attaches `handleSubmit` would be a
+          GET that puts the display name, branch and writable choice in the URL, the history and
+          the access logs. Next answers a urlencoded POST on this route with the page itself (200,
+          MEASURED) and a multipart one with a 409, so never set `encType`. */}
+      <form method="post" onSubmit={handleSubmit} className="flex flex-col gap-4">
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="repo-name">
             {source === 'blank' ? 'Project name' : 'Display name (optional)'}
           </Label>
-          <Input
-            id="repo-name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            maxLength={255}
-            placeholder="my-project"
-          />
+          <Input id="repo-name" name="repoName" maxLength={255} placeholder="my-project" />
           <p className="text-xs text-neutral-500">
             {source === 'blank'
               ? 'Required for a blank project — there is no URL or folder to derive it from.'
@@ -263,14 +265,13 @@ export function NewRepoForm() {
             onChange={(e) => {
               setSource(e.target.value as Source);
               setLocalPath(null);
-              setWritable(false);
               setRemoteUrl('');
               // The sign-in panel unmounts with the source switch and cancels its
               // own poll, so there is no flow state left here to reset.
               setCredentialsId('');
               setManualUrl(false);
               setBranchTouched(false);
-              setBranch('');
+              if (branchRef.current) branchRef.current.value = '';
             }}
             className="h-10 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100"
           >
@@ -292,12 +293,7 @@ export function NewRepoForm() {
             )}
             <FilesystemBrowser onSelect={(p) => setLocalPath(p)} selectedPath={localPath} />
             <label className="mt-1 flex items-start gap-2 text-xs text-neutral-300">
-              <input
-                type="checkbox"
-                checked={writable}
-                onChange={(e) => setWritable(e.target.checked)}
-                className="mt-0.5"
-              />
+              <input type="checkbox" name="writable" className="mt-0.5" />
               <span>
                 Work on a writable copy.{' '}
                 <span className="text-neutral-500">
@@ -362,7 +358,9 @@ export function NewRepoForm() {
                               setRemoteUrl(r.cloneUrl);
                               setRepoFilter(r.fullName);
                               setRepoListOpen(false);
-                              if (!branchTouched && !branch) setBranch(r.defaultBranch);
+                              const field = branchRef.current;
+                              if (field && !branchTouched && !field.value)
+                                field.value = r.defaultBranch;
                             }}
                             className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs text-neutral-200 hover:bg-neutral-800"
                           >
@@ -520,11 +518,9 @@ export function NewRepoForm() {
           <Label htmlFor="repo-branch">Branch (optional)</Label>
           <Input
             id="repo-branch"
-            value={branch}
-            onChange={(e) => {
-              setBranch(e.target.value);
-              setBranchTouched(true);
-            }}
+            name="branch"
+            ref={branchRef}
+            onChange={() => setBranchTouched(true)}
             placeholder="main"
           />
         </div>
