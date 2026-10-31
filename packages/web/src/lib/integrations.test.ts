@@ -28,6 +28,7 @@ const connection = (over: Partial<IntegrationConnection> = {}): IntegrationConne
   grantedScopes: ['files.read'],
   status: 'connected',
   lastError: null,
+  refreshRefusedAt: null,
   repoCredentialId: null,
   expiresAt: null,
   createdAt: '2026-10-14T10:00:00.000Z',
@@ -78,10 +79,27 @@ describe('statusNote', () => {
     );
   });
 
-  it('ignores an error left over from an earlier failure once the status is connected', () => {
+  it('is the last error, as words, while a connected connection carries the refusal flag', () => {
+    expect(
+      statusNote(
+        connection({
+          status: 'connected',
+          refreshRefusedAt: '2026-10-30T09:00:00.000Z',
+          lastError: 'invalid_grant: refresh refused',
+        }),
+      ),
+    ).toBe('invalid_grant: refresh refused');
+  });
+
+  it('ignores an error left over from an earlier failure while a connected connection has no flag', () => {
     expect(
       statusNote(connection({ status: 'connected', lastError: 'invalid_grant: token revoked' })),
     ).toBeNull();
+  });
+
+  it('reads a payload that omits the flag (an older api) as not flagged', () => {
+    const older = { status: 'connected', lastError: 'invalid_grant: token revoked' };
+    expect(statusNote(older as Parameters<typeof statusNote>[0])).toBeNull();
   });
 
   it('has nothing to add when a failed connection carries no error', () => {

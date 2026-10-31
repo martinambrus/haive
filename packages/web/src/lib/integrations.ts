@@ -25,6 +25,7 @@ export interface IntegrationConnection {
   grantedScopes: string[];
   status: string;
   lastError: string | null;
+  refreshRefusedAt: string | null;
   repoCredentialId: string | null;
   expiresAt: string | null;
   createdAt: string;
@@ -62,11 +63,13 @@ export function statusBadge(status: string): {
   }
 }
 
-/** The words behind a failed status. `last_error` outlives the failure, so only the status says whether to show it. */
+/** The words behind a degraded connection. `last_error` outlives the failure it describes, so it is
+ *  shown only while a structural column says it is current: a failed status, or on a connected row
+ *  `refreshRefusedAt`, set while the provider's OAuth client refuses the refresh. */
 export function statusNote(
-  connection: Pick<IntegrationConnection, 'status' | 'lastError'>,
+  connection: Pick<IntegrationConnection, 'status' | 'lastError' | 'refreshRefusedAt'>,
 ): string | null {
-  if (connection.status === 'connected') return null;
+  if (connection.status === 'connected' && connection.refreshRefusedAt == null) return null;
   return connection.lastError?.trim() || null;
 }
 
