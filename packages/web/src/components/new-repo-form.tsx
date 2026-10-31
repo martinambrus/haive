@@ -270,6 +270,7 @@ export function NewRepoForm() {
               // The sign-in panel unmounts with the source switch and cancels its
               // own poll, so there is no flow state left here to reset.
               setCredentialsId('');
+              setOauthLabel(null);
               setManualUrl(false);
               setBranchTouched(false);
               if (branchRef.current) branchRef.current.value = '';
