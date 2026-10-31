@@ -209,8 +209,9 @@ export async function markPlanMirrorDirty(tx: DbOrTx, repositoryId: string): Pro
  * waits for each plan row a patch holds. A patch that holds a node row and only then inserts a
  * child (a node, an edge, a code link, the first mirror row) waits for the repository row in turn:
  * a cycle (40P01). Taken first, the patch and the delete exclude each other for the whole of both
- * transactions, and a patch that loses finds no repository: `not_found`. KEY SHARE conflicts with
- * nothing but FOR UPDATE and DELETE, so patches do not wait for each other.
+ * transactions, and a patch that loses finds no repository: `repository_gone`, a kind of its own
+ * because a caller that re-rolls a refused patch must not re-roll this one. KEY SHARE conflicts
+ * with nothing but FOR UPDATE and DELETE, so patches do not wait for each other.
  */
 async function lockRepositoryForPlanWrite(tx: DbOrTx, repositoryId: string): Promise<void> {
   const [repository] = await tx
@@ -219,7 +220,7 @@ async function lockRepositoryForPlanWrite(tx: DbOrTx, repositoryId: string): Pro
     .where(eq(schema.repositories.id, repositoryId))
     .for('key share');
   if (!repository) {
-    throw new PlanPatchError('not_found', `repository ${repositoryId} not found`);
+    throw new PlanPatchError('repository_gone', `repository ${repositoryId} not found`);
   }
 }
 
@@ -871,7 +872,8 @@ async function applyOps(
   // depend on which of the two looked at it.
   const patchOps = normalizeOpRefs(patch.ops);
   // Before the drop pre-flight and the first write, from the whole patch: an agent patch whose
-  // every create is dropped for a repository that is gone is `not_found`, not an empty success.
+  // every create is dropped for a repository that is gone is `repository_gone`, not an empty
+  // success.
   if (await mayInsertPlanRows(tx, patchOps, refs, repositoryId)) {
     await lockRepositoryForPlanWrite(tx, repositoryId);
   }

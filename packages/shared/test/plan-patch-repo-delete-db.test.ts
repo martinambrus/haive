@@ -44,7 +44,7 @@ if (url && !new URL(url).pathname.startsWith('/plan_patch_repo_delete_test'))
 //   P4     the patch inserts first: the delete waits for it
 //   P5     an update-only patch beside a long holder of the repositories row must not wait for it
 //   P6     a patch that inserts beside the same holder waits for it and then lands
-//   P7     a patch that starts after the delete ends as PlanPatchError not_found
+//   P7     a patch that starts after the delete ends as PlanPatchError repository_gone
 const BLIND_INDEX = 'plan-patch-repo-delete-test-user';
 const BLOCKED_WITHIN_MS = 10_000;
 const GUARD_MS = 20_000;
@@ -761,7 +761,7 @@ describe.skipIf(!url)('a plan patch beside a repository delete, on Postgres', ()
     ];
 
     it.each(cases)(
-      '%s is not_found',
+      '%s is repository_gone',
       async (_name, patchOf, optionsOf) => {
         const ids = await seedRepository();
         await peerDb.transaction((tx) => deleteRepository(tx, ids.repositoryId));
@@ -776,7 +776,7 @@ describe.skipIf(!url)('a plan patch beside a repository delete, on Postgres', ()
         expect(
           kind,
           `the patch against the deleted repository ended: ${describeOutcome(outcome)}`,
-        ).toBe('not_found');
+        ).toBe('repository_gone');
       },
       TEST_TIMEOUT,
     );
