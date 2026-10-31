@@ -338,6 +338,13 @@ describe('syntax bash accepts that the lexer must not throw on', () => {
       rejects(script);
     });
   }
+  for (const terminator of [';;', ';&', ';;&']) {
+    it(`reads the arm after the terminator ${terminator} inside a substitution`, () => {
+      const script = `echo "$(case "$v" in a) echo x ${terminator} b) pnpm test || true ;; esac)"`;
+      bashAccepts(script);
+      rejects(script);
+    });
+  }
   it('reads a case statement that starts an arm of another one', () => {
     const script = 'echo "$(case $a in x) case $b in y) pnpm test || true ;; esac ;; esac)"';
     bashAccepts(script);

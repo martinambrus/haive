@@ -1,5 +1,12 @@
-// Conservative lexical filter for workflow safety pins. Uncertain syntax fails closed.
-// Keep quoted strings for URL scans, and expose executable substitutions for command scans.
+// Conservative lexical filter for workflow safety pins. Uncertain syntax fails closed: it is read
+// as code, or the scan throws with the step name. Quoted strings are kept for URL scans, and
+// executable substitutions are exposed for command scans.
+//
+// Limits of any lexical scan, which the pins do not cover: a script written to a file and run
+// later (write-then-run); a heredoc or string whose consumer is not its command word, once the
+// wrappers below are stripped (a variable, a function, a launcher that is not listed); and shell
+// inside a `${{ 'literal shell' }}` expression, which GitHub evaluates before bash sees it.
+
 // Prefixes that only run the command after them: reserved words, function and case heads,
 // redirections, assignments, paths and the wrappers sudo, env, timeout, xargs and docker exec.
 const WRAPPERS = [
@@ -262,7 +269,7 @@ export function shellSource(
           if (consumer === 'code') result += '\n' + shellSource(body, { maskQuotes, step }) + '\n';
           else if (consumer === 'interpreter' && !maskQuotes) result += '\n' + body + '\n';
         }
-      } else if (!parameter && source.startsWith(';;', i)) {
+      } else if (!parameter && (source.startsWith(';;', i) || source.startsWith(';&', i))) {
         if (cases.length) cases.at(-1).pattern = true;
         result += ';;';
         i += 2;
@@ -294,7 +301,7 @@ export function shellSource(
       ) {
         const rest = source.slice(i);
         const word = /^[a-zA-Z_][a-zA-Z_0-9]*/.exec(rest)[0];
-        // A case word among arguments is no statement; at a command position anything may follow it.
+        // A case among arguments is no statement; at a command position anything may follow it.
         if (word === 'case' && (CASE.test(rest) || (/^case\s/.test(rest) && atCommand(result))))
           cases.push({ pattern: false });
         if (word === 'in' && cases.length) cases.at(-1).pattern = true;
@@ -365,8 +372,7 @@ export function swallowedFailure(source, options = {}) {
     if (/^esac\b/.test(command)) cases = Math.max(0, cases - 1);
     if (/^fi\b/.test(command)) branches = Math.max(0, branches - 1);
     if (/^if\b/.test(command)) branches++;
-    // A true branch is a conventional empty conditional body. A case pattern `true)`
-    // and an argument containing true are not standalone success commands either.
+    // The keyword or case pattern that opens a body is not the command in it.
     command = command.replace(/^(?:then|else|do)\b\s*/, '');
     if (cases) command = command.replace(/^(?:case\b.*?\bin\s+)?[^)]*\)\s*/, '');
     const disabled =
@@ -374,12 +380,12 @@ export function swallowedFailure(source, options = {}) {
         command,
       );
     if (disabled) return disabled[0];
+    // A bare true is the conventional empty body of a construct; anywhere else it hides a failure.
     if (
       branches === 0 &&
       loops === 0 &&
       functions === 0 &&
       cases === 0 &&
-      !(cases && /^true\)/.test(command)) &&
       /^true(?=\s|[)}]|$)/.test(command)
     )
       return 'true';
