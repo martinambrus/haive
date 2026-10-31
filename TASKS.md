@@ -897,7 +897,7 @@ From the T349 review (2026-10-31). PRE-EXISTING. A failed task whose repository 
 
 Also (T349 fix-round review, 2026-10-31, reasoned from the code, not reproduced): since T349 the delete takes the task-creation key a Retry takes, but a Retry already waiting on the key when the delete commits goes on: `checkRevive` returns null after the wait without reading the repository again (database repository-task-lock.ts ~:109-113), so the task is revived to `running` with a NULL repository. Whichever way this is decided, the Retry must read the repository again after its wait.
 
-### T462 · FNF[project-state-notices] [design] · the repository page cannot say a sync replaced or refused a value (+2)
+### T462 · FNF[project-state-notices] [design] · the repository page cannot say a sync replaced or refused a value (+3)
 
 status: open
 From the T445 review (2026-10-31; was T445 item 2). PRE-EXISTING.
@@ -905,6 +905,7 @@ From the T445 review (2026-10-31; was T445 item 2). PRE-EXISTING.
 1. A checkout value the sync refuses (over its cap, holding a region marker) is only logged (worker project-state/sync.ts ~:953, names only); since T445 a first sync's replaced units are only logged too. No api route serves `project_state_sync`, and project-state-conflicts.ts (~:59-77) lists pending two-answer questions only. Proposed by the T445 driver: one nullable jsonb column, declared last, on `project_state_sync` holding the refused units with their reasons (from `SettingCheck.reason`, which `intakeSettings`, shared settings.ts ~:253-286, drops today), written in the sync's own upsert (~:983-1004) and cleared by the next clean sync, served beside `conflicts` and shown as one banner gated on the array being non-empty. A replaced value is an event rather than a state, so it may stay log-only unless an acknowledged notice is wanted. Needs a migration, api and web tests and wording.
 2. Minor: the sync's warns (~:933, ~:953, and T445's first-sync warn) are emitted before the writer that called the sync may roll back (worker project-state/write.ts ~:818, throws at ~:848 and ~:850): one extra line for a sync that did not commit, repeated by the retry. A stored notice would replace them.
 3. Minor: shared plan/projection-merge.ts ~:289, the other `mergeProjectState` caller, drops `merge.overwritten` for a plan merge with no merge base (`--allow-unrelated-histories`, plan/merge.ts ~:232), per that resolver's documented "takes theirs" rule.
+4. (T466 review, 2026-10-31) PRE-EXISTING, minor: `project_state_outbox.last_error` is written (worker project-state/refresh.ts ~:24-42: a deferred, moved or missing checkout, a refused newer format) but nothing in api, web or shared reads it, so a held record is invisible to a person; the same notice could carry it.
 
 ### T464 · FNF[ssr-controlled-values] [design] · controlled inputs a page renders on the server lose what is typed before hydration
 
@@ -979,6 +980,27 @@ status: open
 From the T458 review (2026-10-31). PRE-EXISTING, minor (web).
 
 `DELETE /repositories/:id/plan/merge` answers `{ ok: true, cancelled: false }` when no merge is open or (since T458) when the merge completed while the request ran, but `discardPlanMerge` types its answer as `{ ok: boolean }` (web lib/api-client.ts ~:2293) and the panel's `discard` (components/plan/plan-merge-panel.tsx ~:141-155) hides the merge as discarded whatever it says, after a confirm that promises "nothing is lost". Direction: read `cancelled`; when false, say the merge had already ended and refresh the plan instead of reporting a discard.
+
+### T477 · FNF[sweep-held-slots] [design] · held outbox and mirror rows still take the sweep's 25 slots; the two sweeps share one job
+
+status: open
+From the T466 review (2026-10-31). PRE-EXISTING, minor.
+
+Since T466 a row whose checkout is gone costs 3-5 statements a tick, but every held row still takes one of the 25 batch slots (worker project-state/refresh.ts ~:182-183, queues/plan-mirror-queue.ts ~:608-614, ~:637-645), so a newer healthy row waits floor(N/25) ticks behind N held rows (MEASURED: N = 30 gave tick 2, N = 125 tick 6), and the mirror sweep runs before the outbox sweep in one job (`sweepAll`), so a slow mirror sweep delays outbox rows (14 dead rows of 20,000 nodes: sweeps of 3.6-5.3 s). `plan-canvas-smoke` C4 pins the rotation as designed. Direction (a decision): scan past held rows without counting them, or run the two sweeps as separate jobs.
+
+### T478 · FNF[snapshot-error-paths] · the plan page shows a raw filesystem error, with the server's absolute path, as the snapshot error
+
+status: open
+From the T466 review (2026-10-31). PRE-EXISTING, minor.
+
+`plan_mirror_state.last_error` stores the raw `err.message` of a failed flush (worker plan/mirror.ts ~:1714-1733; `safeErrorMessage`, shared logger/errors.ts ~:62-65, redacts only database query errors), and `GET /repositories/:id/plan/snapshot` serves it (api routes/plan.ts ~:429), so any filesystem error other than the held reasons shows an absolute path under the repository storage on the plan page (T466 replaced only the gone-checkout one). Direction: store a reason from a closed set (or the error class and the path relative to the repository) and log the full error.
+
+### T479 · FNF[extract-swap] · an archive extract that fails between its two renames loses the previous repository tree
+
+status: open
+From the T466 review (2026-10-31). PRE-EXISTING, minor, theoretical.
+
+`extractArchive` (worker repo/clone.ts ~:604-614) moves the old `dest` into the stage and then renames the new tree in; if the second rename fails or the process dies between the two, no repository directory is left, and the `finally` removes the stage with the old tree in it, although the doc comment (~:509-511) says a failure leaves the previous contents untouched. Direction: on a failed second rename move the old tree back before the `finally`, and say in the comment what a crash between the renames leaves.
 
 ## Done
 
