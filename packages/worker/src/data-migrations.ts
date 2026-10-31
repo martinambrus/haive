@@ -36,6 +36,7 @@ import {
   withGlobalKb,
 } from '@haive/shared/global-kb';
 import { loadPlanSkeletons } from '@haive/shared/plan';
+import { scrubErrorPaths } from '@haive/shared/logger';
 import { namesGitData, PROJECT_STATE_IMPORT_STEP_ID } from '@haive/shared/project-state';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { resolveToolingOllamaUrl } from '@haive/shared/rag';
@@ -90,6 +91,7 @@ export interface DataMigration {
  *  cannot be added without someone deciding whether it destroys anything, which is exactly the
  *  question that was previously answered by whichever function happened to hold a raw DELETE. */
 export const DATA_MIGRATIONS: DataMigration[] = [
+  { id: 'scrubPlanMirrorErrors', kind: 'convergent', run: scrubPlanMirrorErrors },
   { id: 'supersedeRemovedRtkArtifacts', kind: 'convergent', run: supersedeRemovedRtkArtifacts },
   { id: 'skipRemovedSteps', kind: 'convergent', run: skipRemovedSteps },
   { id: 'supersedePhantomAgentArtifacts', kind: 'convergent', run: supersedePhantomAgentArtifacts },
@@ -170,6 +172,33 @@ export const DATA_MIGRATIONS: DataMigration[] = [
     run: dropCopiedSecretLikeProviderEnv,
   },
 ];
+
+/** Repair display copy from older releases without changing mirror state or sweep ordering.
+ *  Re-run at boot so a restored backup converges too. Compare the text at UPDATE time to leave
+ *  a newer failure (or a successful flush's NULL) alone. Original diagnostics cannot be restored;
+ *  undoing the entry only stops future repairs, and normal retries still replace this copy. */
+export async function scrubPlanMirrorErrors(db: Database): Promise<void> {
+  const rows = await db
+    .select({
+      repositoryId: schema.planMirrorState.repositoryId,
+      lastError: schema.planMirrorState.lastError,
+    })
+    .from(schema.planMirrorState)
+    .where(isNotNull(schema.planMirrorState.lastError));
+  for (const row of rows) {
+    const message = scrubErrorPaths(row.lastError);
+    if (message === row.lastError) continue;
+    await db
+      .update(schema.planMirrorState)
+      .set({ lastError: message })
+      .where(
+        and(
+          eq(schema.planMirrorState.repositoryId, row.repositoryId),
+          eq(schema.planMirrorState.lastError, row.lastError!),
+        ),
+      );
+  }
+}
 
 /** Run one, and never let it take the process down with it.
  *
