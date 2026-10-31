@@ -36,7 +36,7 @@ import {
   withGlobalKb,
 } from '@haive/shared/global-kb';
 import { loadPlanSkeletons } from '@haive/shared/plan';
-import { PROJECT_STATE_IMPORT_STEP_ID } from '@haive/shared/project-state';
+import { namesGitData, PROJECT_STATE_IMPORT_STEP_ID } from '@haive/shared/project-state';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { resolveToolingOllamaUrl } from '@haive/shared/rag';
 import { TOOLING_ID_PATTERN } from './cli-executor/tool-usage.js';
@@ -80,7 +80,7 @@ let bundleQueue: Queue<BundleJobPayload> | null = null;
  *  rows the restored version expects. They run after the upgrade is committed. */
 type DataMigrationKind = 'convergent' | 'destructive';
 
-interface DataMigration {
+export interface DataMigration {
   id: string;
   kind: DataMigrationKind;
   run: (db: Database) => Promise<void>;
@@ -89,10 +89,19 @@ interface DataMigration {
 /** Every data fix, each declaring its own kind. There is deliberately NO default: a new entry
  *  cannot be added without someone deciding whether it destroys anything, which is exactly the
  *  question that was previously answered by whichever function happened to hold a raw DELETE. */
-const DATA_MIGRATIONS: DataMigration[] = [
+export const DATA_MIGRATIONS: DataMigration[] = [
   { id: 'supersedeRemovedRtkArtifacts', kind: 'convergent', run: supersedeRemovedRtkArtifacts },
   { id: 'skipRemovedSteps', kind: 'convergent', run: skipRemovedSteps },
   { id: 'supersedePhantomAgentArtifacts', kind: 'convergent', run: supersedePhantomAgentArtifacts },
+  // BEFORE seedRepositoryCliTargets and recomputeSyncedApplicableSets below: the seed writes a durable
+  // column from the newest live snapshot, and a marker at a git-data path must not be that row.
+  {
+    id: 'supersedeGitDataArtifacts',
+    kind: 'convergent',
+    run: async (db) => {
+      await supersedeGitDataArtifacts(db);
+    },
+  },
   {
     id: 'unclaimBackfilledEdits',
     kind: 'convergent',
@@ -857,6 +866,58 @@ async function supersedePhantomAgentArtifacts(db: Database): Promise<void> {
       ) > 0
       AND NOT jsonb_exists(form_values_snapshot -> 'acceptedAgentIds', replace(template_id, 'agent.', ''))
   `);
+}
+
+/** How many ids one UPDATE of `supersedeGitDataArtifacts` carries: postgres.js caps a statement at
+ *  65534 bind parameters, and an install can hold more rows than that. */
+const GIT_DATA_RETIRE_CHUNK = 1000;
+
+/** Retire the live ledger rows recorded at a path git reads as its own data: a literal `.git`
+ *  segment or an NTFS or HFS+ alias of one (`namesGitData`). An earlier release recorded some. The
+ *  readers that act on a path skip them (01 plans nothing for one, 02 and 04 refuse to write it, the
+ *  record writer drops its claim), but they stayed live, so the readers that only count rows still
+ *  counted them: the banner's installed version and first-upgrade test, the onboarded and admission
+ *  verdicts, and the CLI membership `seedRepositoryCliTargets` writes into a column.
+ *
+ *  Sets `superseded_at` and `updated_at` and nothing else, so `imported_at` still reaches
+ *  `ledgerImportedSince`. The rule is `namesGitData` itself, not a SQL port that would freeze a copy
+ *  of a rule already widened once; a SQL prefilter on `git` would also miss `.g<U+200C>it`, so the id
+ *  and path of every live row are read. It runs at every boot, not once: `project-state/resolve.ts`
+ *  and the rollback's untracked put-back can still record such a row from legacy state. Idempotent:
+ *  the `superseded_at IS NULL` guard makes a second run retire nothing, and two racing runs retire
+ *  each row once.
+ *
+ *  Undo: deploy a release without this entry (it would retire the rows again), then
+ *  `UPDATE onboarding_artifacts SET superseded_at = NULL, updated_at = now() WHERE id IN (...)` with
+ *  the ids logged here. Skipping that is safe too: a live row at such a path only ever counted. */
+export async function supersedeGitDataArtifacts(db: Database): Promise<string[]> {
+  const live = await db
+    .select({ id: schema.onboardingArtifacts.id, diskPath: schema.onboardingArtifacts.diskPath })
+    .from(schema.onboardingArtifacts)
+    .where(isNull(schema.onboardingArtifacts.supersededAt));
+  const stale = live.filter((row) => namesGitData(row.diskPath)).map((row) => row.id);
+  const now = new Date();
+  const retired: string[] = [];
+  for (let from = 0; from < stale.length; from += GIT_DATA_RETIRE_CHUNK) {
+    const rows = await db
+      .update(schema.onboardingArtifacts)
+      .set({ supersededAt: now, updatedAt: now })
+      .where(
+        and(
+          inArray(schema.onboardingArtifacts.id, stale.slice(from, from + GIT_DATA_RETIRE_CHUNK)),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      )
+      .returning({ id: schema.onboardingArtifacts.id });
+    retired.push(...rows.map((row) => row.id));
+  }
+  if (retired.length > 0) {
+    log.info(
+      { count: retired.length, ids: retired },
+      'retired ledger rows recorded at git-data paths',
+    );
+  }
+  return retired;
 }
 
 /** End a run superseded while it ran whose worker then died. Boot's orphan reconcile ends only runs
