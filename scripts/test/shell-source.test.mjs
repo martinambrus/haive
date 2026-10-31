@@ -106,3 +106,16 @@ describe('executable heredocs (item 4)', () => {
   it('keeps an interpreter name in an echo argument inert', () =>
     assert.equal(swallowedFailure("echo bash <<'EOF'\ncmd || true\nEOF"), null));
 });
+
+describe('mutation-sensitive lexical branches (item 5)', () => {
+  it('keeps a hash inside a word from hiding a later swallow', () =>
+    rejects('echo x#tag; cmd || true'));
+  it('strips tabs before finding a heredoc terminator and the later swallow', () =>
+    rejects("cat <<-'EOF'\n\tset +e\n\tEOF\ncmd || true"));
+  for (const prefix of ['then', 'else']) {
+    it(`checks errexit after ${prefix}`, () =>
+      rejects(`if check; then echo ready; ${prefix} set +e; fi`, 'set +e'));
+  }
+  it('does not confuse an option prefix with set +e', () =>
+    assert.equal(swallowedFailure('set +e_not_an_option'), null));
+});
