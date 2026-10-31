@@ -9,11 +9,26 @@ if (url && !new URL(url).pathname.startsWith('/park_fold_test'))
 const USER = '00000000-0000-4000-8000-0000000000f4';
 const BLIND_INDEX = 'park-fold-test-user';
 
-const h = vi.hoisted(() => ({ db: undefined as unknown }));
+const h = vi.hoisted(() => ({ db: undefined as unknown, jobs: [] as string[] }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../../worker/src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../../worker/src/redis.js', () => ({
+  getBullRedis: () => ({}),
+  getRedis: () => ({ scan: async () => ['0', []], del: async () => 0 }),
+}));
+vi.mock('bullmq', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('bullmq')>()),
+  Queue: class {
+    async add() {}
+  },
+}));
 vi.mock('../src/queues.js', () => {
-  const queue = () => ({ add: async () => undefined });
+  const queue = () => ({
+    add: async (name: string) => {
+      h.jobs.push(name);
+    },
+  });
   return {
     getTaskQueue: queue,
     getRepoQueue: queue,
@@ -46,7 +61,8 @@ vi.mock('@haive/shared', async (importOriginal) => {
 });
 
 import { Hono } from 'hono';
-import { FIX_LOOP_ACTION_FIELD } from '@haive/shared';
+import { FIX_LOOP_ACTION_FIELD, TASK_JOB_NAMES } from '@haive/shared';
+import { computeStepContribution } from '@haive/shared/timing';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { reofferParkedSteps, settleActiveSteps } from '../src/lib/task-control.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -228,6 +244,7 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
   });
 
   beforeEach(async () => {
+    h.jobs.length = 0;
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, USER));
   });
 
@@ -326,7 +343,7 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
       expectMoved('carried_idle_ms', before.carriedIdleMs, after.carriedIdleMs, PARKED_FOR);
     });
 
-    it('keeps booking a waiting_form row inside its run to idle_ms (pin)', async () => {
+    it('books a re-offered form wait to idle_ms within the span the worker claim must preserve', async () => {
       const { before, after } = await retry({
         status: 'waiting_form',
         startedAt: ago(HOUR),
@@ -372,7 +389,7 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
       expectMoved('carried_idle_ms', before.carriedIdleMs, after.carriedIdleMs, carried);
     });
 
-    it('books a form parked inside its run once through the route, which settles twice', async () => {
+    it('books a form wait once through both settles, within the span the worker claim must preserve', async () => {
       const task = await seedTask('failed', { currentStepId: null });
       const row = await seedRow(task.id, {
         status: 'waiting_form',
@@ -391,4 +408,142 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
       expectMoved('carried_idle_ms', before.carriedIdleMs, after.carriedIdleMs, 'stays');
     });
   });
+  // A re-offer keeps detection, schema and answers and resumes the same run. Its idle_ms
+  // belongs to that span; the worker claim must keep the span too, rather than subtract
+  // the old wait from a fresh start and freeze Work. Exercise the real claim after Retry.
+  it.each(['settle through START', 'reoffer'] as const)(
+    'A: %s preserves booked idle and advancing Work after the worker claim',
+    async (path) => {
+      const [repo] = await db
+        .insert(schema.repositories)
+        .values({
+          userId: USER,
+          name: 'claim-trace',
+          source: 'local_path',
+          localPath: '/tmp',
+          storagePath: '/tmp',
+          status: 'ready',
+        })
+        .returning();
+      await db
+        .insert(schema.taskTypeDefinitions)
+        .values({
+          slug: 'park_fold_trace',
+          displayName: 'park fold trace',
+          runListStrategy: 'static',
+          source: 'test',
+        })
+        .onConflictDoNothing();
+      const task = await seedTask('failed', {
+        currentStepId: null,
+        currentRound: 0,
+        repositoryId: repo!.id,
+        type: 'park_fold_trace',
+        runListSnapshot: [STEP],
+      });
+      const row = await seedRow(task.id, {
+        round: 0,
+        status: 'waiting_form',
+        startedAt: ago(HOUR),
+        waitingStartedAt: ago(PARKED_FOR),
+      });
+      const trace = (phase: string, r: typeof row, at = Date.now()) => {
+        const contribution = computeStepContribution(r, at);
+        console.log(
+          JSON.stringify({
+            path,
+            phase,
+            status: r.status,
+            startedAt: r.startedAt,
+            idleMs: r.idleMs,
+            carriedIdleMs: r.carriedIdleMs,
+            contribution,
+          }),
+        );
+        return contribution;
+      };
+      trace('0 parked', row);
+      if (path === 'settle through START') {
+        const response = await post(`/tasks/${task.id}/action`, { action: 'retry' });
+        expect(response.status).toBe(200);
+        expect(h.jobs).toContain(TASK_JOB_NAMES.START);
+      } else {
+        await reoffer(task.id);
+      }
+      const offered = await rowOf(row.id);
+      trace('1 after Retry', offered);
+      // Variable specifiers avoid making the API typecheck include the worker's sources.
+      const runnerPath = new URL('../../worker/src/step-engine/step-runner.ts', import.meta.url)
+        .pathname;
+      const { advanceStep } = await import(runnerPath);
+      let claimedAt = 0;
+      let after = offered;
+      const capture = async () => {
+        claimedAt = Date.now();
+        after = await rowOf(row.id);
+        return {};
+      };
+      const stepDef = {
+        metadata: {
+          id: STEP,
+          workflowType: 'workflow',
+          index: 8.5,
+          title: 'resume trace',
+          description: 'resume trace',
+          requiresCli: false,
+        },
+        detect: capture,
+        // Leave START parked on a form, so this trace needs no terminal cleanup or Docker.
+        form: () => ({
+          title: 'Trace',
+          fields: [{ name: 'answer', type: 'text', label: 'Answer', required: true }],
+        }),
+        apply: async () => ({}),
+      };
+      if (path === 'settle through START') {
+        const registryPath = new URL('../../worker/src/step-engine/registry.ts', import.meta.url)
+          .pathname;
+        (await import(registryPath)).stepRegistry.override(stepDef);
+        const queuePath = new URL('../../worker/src/queues/task-queue.ts', import.meta.url)
+          .pathname;
+        await (
+          await import(queuePath)
+        ).processTaskJob({
+          id: task.id,
+          name: TASK_JOB_NAMES.START,
+          data: { taskId: task.id, userId: USER },
+        });
+      } else {
+        const result = await advanceStep({
+          db,
+          taskId: task.id,
+          userId: USER,
+          repoPath: '/tmp',
+          workspacePath: '/tmp',
+          cliProviderId: null,
+          moduleDeactivation: null,
+          round: row.round,
+          runSeq: row.runSeq,
+          stepDef,
+        });
+        expect(result.status).toBe('waiting_form');
+      }
+      expect(after.status).toBe('running');
+      const workNow = trace('3 after worker claim', after, claimedAt);
+      const later = trace('4 five minutes after claim', after, claimedAt + 5 * MINUTE);
+      expect
+        .soft(later.workMs - workNow.workMs, 'Work advances for all five minutes after the claim')
+        .toBe(5 * MINUTE);
+      expect
+        .soft(after.startedAt, 're-offered run retains the start that contains its booked idle')
+        .toEqual(row.startedAt);
+      expect
+        .soft(later.workMs, 'old work and the next five minutes are both retained')
+        .toBeGreaterThan(54 * MINUTE);
+      expectMoved('idle_ms', row.idleMs, after.idleMs, PARKED_FOR);
+      expect(after.carriedIdleMs).toBe(row.carriedIdleMs);
+      expect(after.waitingStartedAt).toBeNull();
+    },
+    30_000,
+  );
 });
