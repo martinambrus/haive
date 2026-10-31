@@ -25,9 +25,14 @@ const WRAPPERS = [
   /^docker(?:-compose|\s+compose)?(?:\s+-\S+(?:\s+[^-\s]\S*)?)*\s+exec(?:\s+(?:-[euw]\s+\S+|--(?:env|user|workdir)\s+\S+|-\S+))*\s+\S+\s+/,
 ];
 
-// The text after the last separator: the simple command being read.
-const lastCommand = (text) =>
-  text.slice(Math.max(...[';', '&', '|', '\n'].map((char) => text.lastIndexOf(char))) + 1);
+// The text after the last separator: the simple command being read. A newline is a separator, so
+// only the last line is searched: a search over the whole text made long scripts quadratic.
+const lastCommand = (text) => {
+  const line = text.slice(text.lastIndexOf('\n') + 1);
+  return line.slice(
+    Math.max(line.lastIndexOf(';'), line.lastIndexOf('&'), line.lastIndexOf('|')) + 1,
+  );
+};
 
 // The command word and its arguments, once the wrappers are stripped.
 function commandOf(text) {
