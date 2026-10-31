@@ -436,7 +436,7 @@ function failedAfterMove(
   cause?: unknown,
 ): UnrecoverableError {
   const err = new UnrecoverableError(
-    `Not refreshed: ${aside ? `the previous folder was kept at ${aside}, but ` : ''}${problem}.`,
+    `Not refreshed: ${aside ? `the previous folder was kept next to the checkout as ${path.basename(aside)}, but ` : ''}${problem}.`,
   );
   if (cause !== undefined) err.cause = cause;
   return err;
@@ -512,7 +512,9 @@ async function rebuild(
     db,
     payload.repositoryId,
     dest,
-    aside ? `The previous folder was not a usable checkout; it was kept at ${aside}.` : null,
+    aside
+      ? `The previous folder was not a usable checkout; it was kept next to the checkout as ${path.basename(aside)}.`
+      : null,
   );
 }
 

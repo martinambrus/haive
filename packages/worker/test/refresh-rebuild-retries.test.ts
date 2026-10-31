@@ -173,7 +173,7 @@ async function endedAfterOneRun(job: Job, dest: string) {
   expect(found).toHaveLength(1);
   expect(h.persist).not.toHaveBeenCalled();
   expect(row.status).toBe('error');
-  expect(row.statusMessage).toContain(path.join(path.dirname(dest), found[0]!));
+  expect(row.statusMessage).toContain(`kept next to the checkout as ${found[0]!}`);
   expect(job.failedReason).toBe(row.statusMessage);
 }
 

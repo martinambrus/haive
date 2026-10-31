@@ -421,6 +421,8 @@ it('a usable source folder is still copied over an unusable checkout', async () 
     await git(payload.localPath!, ['rev-parse', 'HEAD']),
   );
   expect(row.status).toBe('ready');
+  expect(row.statusMessage).toContain(`kept next to the checkout as ${asides[0]}`);
+  expect(row.statusMessage).not.toContain(path.dirname(dest));
 });
 
 const asidesOf = async (dest: string) =>
@@ -459,10 +461,11 @@ it.each(['copy', 'clone'] as const)(
     const [aside, ...more] = await asidesOf(dest);
     expect(more).toEqual([]);
     expect(err).toBeInstanceOf(UnrecoverableError);
-    expect((err as Error).message).toContain(aside);
+    expect((err as Error).message).toContain(path.basename(aside!));
     expect((err as Error).message).toContain(cause.message);
     expect((err as Error).cause).toBe(cause);
     expect(row.status).toBe('error');
+    expect(row.statusMessage).toContain(`kept next to the checkout as ${path.basename(aside!)}`);
     expect(row.statusMessage).toBe((err as Error).message);
     expect(h.persist).not.toHaveBeenCalled();
     expect(await readFile(path.join(aside!, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
@@ -479,9 +482,10 @@ it.each(['copy', 'clone'] as const)(
     const [aside, ...more] = await asidesOf(dest);
     expect(more).toEqual([]);
     expect(err).toBeInstanceOf(UnrecoverableError);
-    expect((err as Error).message).toContain(aside);
+    expect((err as Error).message).toContain(path.basename(aside!));
     expect((err as Error).message).toMatch(/the rebuilt checkout is not usable\.$/);
     expect(row.status).toBe('error');
+    expect(row.statusMessage).toContain(`kept next to the checkout as ${path.basename(aside!)}`);
     expect(row.statusMessage).toBe((err as Error).message);
     expect(h.persist).not.toHaveBeenCalled();
     expect(await readFile(path.join(aside!, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
@@ -497,7 +501,7 @@ it('a rebuilt tree git gave no answer about ends the job unrecoverably too, and 
   const err = await runRefresh(remotePayload).catch((e: unknown) => e);
   const [aside] = await asidesOf(dest);
   expect(err).toBeInstanceOf(UnrecoverableError);
-  expect((err as Error).message).toContain(aside);
+  expect((err as Error).message).toContain(path.basename(aside!));
   expect((err as Error).message).toMatch(
     /the rebuilt checkout could not be examined \(.*SIGKILL.*\)\.$/,
   );
