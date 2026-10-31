@@ -1261,6 +1261,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
             updatedAt: now,
           })
           .where(eq(schema.taskSteps.id, step.id));
+        await startIfNeverStarted(tx, step.id);
         const bumped = await tx
           .update(schema.tasks)
           .set({

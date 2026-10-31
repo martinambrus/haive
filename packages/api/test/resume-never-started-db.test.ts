@@ -73,8 +73,9 @@ const SLACK = MINUTE;
 /** A loop step: the loop Resume arm needs one, and retry_ai takes any failed row. */
 const STEP = '07b-phase-4-validate';
 const CLOSED_FOR = 30 * MINUTE;
-const IDLE_BEFORE = 5000;
-const CARRIED_BEFORE = 7;
+/** What the row already held, each past SLACK so that a re-open which loses either one is seen. */
+const IDLE_BEFORE = 5 * MINUTE;
+const CARRIED_BEFORE = 7 * MINUTE;
 
 const ago = (ms: number) => new Date(Date.now() - ms);
 
@@ -98,6 +99,7 @@ describe.skipIf(!url)('re-opening a failed step that never started, on Postgres'
   const act = async (taskId: string, action: 'resume' | 'retry_ai') => {
     const res = await post(`/tasks/${taskId}/steps/${STEP}/action`, { action, round: 0 });
     expect(res.status, JSON.stringify(await res.clone().json())).toBe(200);
+    return res.json();
   };
   const stop = async (taskId: string) => {
     const res = await post(`/tasks/${taskId}/cancel-active-cli`);
@@ -182,15 +184,32 @@ describe.skipIf(!url)('re-opening a failed step that never started, on Postgres'
   });
 
   describe.each([
-    { arm: 'the loop Resume', action: 'resume' as const },
-    { arm: 'retry_ai', action: 'retry_ai' as const },
-  ])('$arm', ({ action }) => {
+    { arm: 'the loop Resume', action: 'resume' as const, fanOut: false },
+    { arm: 'retry_ai', action: 'retry_ai' as const, fanOut: false },
+    { arm: 'the fan-out Resume', action: 'resume' as const, fanOut: true },
+  ])('$arm', ({ action, fanOut }) => {
+    /** A step with a failed agent takes Resume's fan-out arm, which is checked ahead of the loop's. */
+    const seed = async (
+      taskId: string,
+      over: Partial<typeof schema.taskSteps.$inferInsert> = {},
+    ) => {
+      const row = await seedRow(taskId, over);
+      if (fanOut) {
+        await db.insert(schema.taskStepAgentMinings).values([
+          { taskStepId: row.id, agentId: 'peer-reviewer', status: 'done' },
+          { taskStepId: row.id, agentId: 'security-reviewer', status: 'failed' },
+        ]);
+      }
+      return row;
+    };
+
     it('starts a failed row that never started: started_at stamped, idle_ms moved with the closed gap into carried_idle_ms', async () => {
       const task = await seedTask('failed');
-      const row = await seedRow(task.id);
+      const row = await seed(task.id);
 
-      await act(task.id, action);
+      const body = await act(task.id, action);
 
+      if (fanOut) expect(body, 'the fan-out arm answered').toMatchObject({ retriedAgents: 1 });
       const after = await rowOf(row.id);
       expect(after.status).toBe('running');
       expect(after.endedAt).toBeNull();
@@ -212,7 +231,7 @@ describe.skipIf(!url)('re-opening a failed step that never started, on Postgres'
     it('keeps a failed row that had started as it is: started_at kept, the closed gap in idle_ms, carried_idle_ms untouched (pin)', async () => {
       const startedAt = ago(2 * HOUR);
       const task = await seedTask('failed');
-      const row = await seedRow(task.id, { startedAt });
+      const row = await seed(task.id, { startedAt });
 
       await act(task.id, action);
 
@@ -226,7 +245,7 @@ describe.skipIf(!url)('re-opening a failed step that never started, on Postgres'
 
     it('fills carried_idle_ms to 2147483647 for a closed gap past the int4 range instead of raising', async () => {
       const task = await seedTask('failed');
-      const row = await seedRow(task.id, { endedAt: ago(40 * DAY), carriedIdleMs: 0 });
+      const row = await seed(task.id, { endedAt: ago(40 * DAY), carriedIdleMs: 0 });
 
       await act(task.id, action);
 
@@ -239,7 +258,7 @@ describe.skipIf(!url)('re-opening a failed step that never started, on Postgres'
 
     it('fills a nearly full carried_idle_ms to 2147483647 instead of raising', async () => {
       const task = await seedTask('failed');
-      const row = await seedRow(task.id, { carriedIdleMs: INT4_MAX - 1000 });
+      const row = await seed(task.id, { carriedIdleMs: INT4_MAX - 1000 });
 
       await act(task.id, action);
 
@@ -253,7 +272,7 @@ describe.skipIf(!url)('re-opening a failed step that never started, on Postgres'
     it('decides never-started in SQL on the row it locks: a row started after the route read it keeps its started_at and bills the gap to idle_ms (pin)', async () => {
       const startedMeanwhile = ago(HOUR);
       const task = await seedTask('failed');
-      const row = await seedRow(task.id);
+      const row = await seed(task.id);
       beforeTransaction = async () => {
         await db
           .update(schema.taskSteps)
@@ -273,7 +292,7 @@ describe.skipIf(!url)('re-opening a failed step that never started, on Postgres'
     it('ends running with started_at set and the park in carried_idle_ms when a pre-run park is failed by a real Stop first', async () => {
       const parkedFor = 10 * MINUTE;
       const task = await seedTask('running');
-      const row = await seedRow(task.id, {
+      const row = await seed(task.id, {
         status: 'pending',
         errorMessage: null,
         endedAt: null,
