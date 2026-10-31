@@ -375,6 +375,8 @@ export async function commitRecorded(
       // entries on a repeat too, without creating a commit or touching unrelated staged work.
       if (options.repairUnchangedIndex && parent !== '') {
         // Only inspect the real index here. An already-clean no-op needs no index lock.
+        // A pathspec reaches into a directory standing at a named path (and, with none, into
+        // everything staged); only the names themselves are repaired, never what the person staged.
         const stale = (
           await run([
             'diff-index',
@@ -388,7 +390,7 @@ export async function commitRecorded(
           ])
         ).stdout
           .split('\0')
-          .filter(Boolean);
+          .filter((p) => named.has(p));
         if (stale.length === 0) return [];
         let synced = false;
         for (let attempt = 0; attempt < 6 && !synced; attempt++) {

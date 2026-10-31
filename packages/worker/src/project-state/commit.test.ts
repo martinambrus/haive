@@ -279,6 +279,32 @@ it('a no-op repairs only the named entries differing from HEAD', async () => {
   expect(writes[0]!.join(' ')).not.toContain('format.json');
   expect((await gitRun(dir, ['diff', '--cached', '--name-only'])).stdout).toBe('');
 });
+it.each<[string, string[], string]>([
+  [
+    'under a directory standing at a named path',
+    ['.haive/install.json'],
+    '.haive/install.json/mine.txt',
+  ],
+  ['when the plan names nothing', [], 'mine.txt'],
+])('a no-op repair leaves what the person staged %s', async (_where, add, staged) => {
+  const dir = await fixture();
+  await mkdir(join(dir, staged, '..'), { recursive: true });
+  await writeFile(join(dir, staged), 'personal\n');
+  await gitRun(dir, ['add', '-f', staged]);
+  const warnings: string[] = [];
+  const files = await commitRecorded(
+    dir,
+    { add, remove: [] },
+    'save',
+    identity,
+    warnings,
+    undefined,
+    { repairUnchangedIndex: true, waitForIndexRetry: async () => undefined },
+  );
+  expect(files).toEqual([]);
+  expect(warnings).toEqual([]);
+  expect((await gitRun(dir, ['diff', '--cached', '--name-only'])).stdout.trim()).toBe(staged);
+});
 
 it('refuses a previous record missing its format when a recognized file is present', async () => {
   const dir = await fixture();
