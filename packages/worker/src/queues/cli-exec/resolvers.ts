@@ -1123,6 +1123,8 @@ export async function resumeStepIfLinked(
   };
   const queue = getTaskQueue();
   await queue.add(TASK_JOB_NAMES.ADVANCE_STEP, taskPayload, {
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 5000 },
     removeOnComplete: 100,
     removeOnFail: 100,
   });

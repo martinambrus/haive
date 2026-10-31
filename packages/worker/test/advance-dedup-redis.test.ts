@@ -11,6 +11,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { QUEUE_NAMES, createBullRedisConnection } from '@haive/shared';
 import type { Database } from '@haive/database';
 import { closeCliExecQueue, getCliExecQueue } from '../src/queues/cli-exec/_shared.js';
+import { resumeStepIfLinked } from '../src/queues/cli-exec/resolvers.js';
 import { reviveDeadTasks } from '../src/queues/dead-task-boot.js';
 import { defaultDeps } from '../src/queues/stalled-redrive.js';
 import {
@@ -30,6 +31,9 @@ import type { StepDefinition } from '../src/step-engine/step-definition.js';
 // later add while the first job is retained as completed. Park ticks, continuations and the forward
 // hand-off pass no option, since a tick queues its successor while it is still active.
 //
+// The continuation a finished CLI run queues (`resumeStepIfLinked`) is checked here too, with no
+// deduplication id but with the retries and backoff every other advance producer uses.
+//
 // Opt-in: needs ADVANCE_DEDUP_TEST_REDIS_URL, a Redis of its own (never the app's REDIS_URL). Every
 // queue the code under test makes lives under a private key prefix, removed after each case.
 
@@ -42,6 +46,17 @@ const hoisted = vi.hoisted(() => {
   }
   return { prefix: `t385-dedup-${globalThis.crypto.randomUUID()}`, original };
 });
+
+// The three reads a continuation makes before it queues itself, answered without a database.
+vi.mock('../src/db.js', () => ({
+  getDb: () => ({
+    query: {
+      cliInvocations: { findFirst: async () => ({ supersededAt: null }) },
+      taskSteps: { findFirst: async () => ({ stepId: '07-phase-2-implement', round: 2 }) },
+      tasks: { findFirst: async () => ({ orchestrationEpoch: 5 }) },
+    },
+  }),
+}));
 
 vi.mock('bullmq', async (importOriginal) => {
   const real = await importOriginal<typeof import('bullmq')>();
@@ -405,6 +420,62 @@ describe.skipIf(!redisUrl)("the recovery re-drives' advance job id, on an isolat
       await reviveDeadTasks(deadTaskDb(t, t.epoch + 2));
       expect(spy, 'each pass revived the dead task once').toHaveBeenCalledTimes(3);
       expectOneIdPerTuple(dedupIds(spy));
+    });
+  });
+
+  describe('the continuation a finished CLI run queues', () => {
+    const continuation = (taskId: string) =>
+      resumeStepIfLinked(
+        {
+          invocationId: randomUUID(),
+          taskStepId: randomUUID(),
+          taskId,
+          userId: randomUUID(),
+        } as never,
+        true,
+        null,
+      );
+
+    it('C1: is stored with retries and an exponential backoff, and with no deduplication id', async () => {
+      const taskId = randomUUID();
+      await continuation(taskId);
+      const [job] = await jobsOf(taskId);
+      expect(job, 'the continuation was queued').toBeDefined();
+      expect(job!.data).toMatchObject({
+        taskId,
+        stepId: '07-phase-2-implement',
+        round: 2,
+        epoch: 5,
+      });
+      expect(job!.opts.attempts, 'it is retried like every other advance').toBe(3);
+      expect(job!.opts.backoff).toEqual({ type: 'exponential', delay: 5000 });
+      expect(job!.opts, 'it shares its epoch with the pass that queued it').not.toHaveProperty(
+        'deduplication',
+      );
+    });
+
+    it('C2: a first attempt that throws is retried, where it used to be failed for good', async () => {
+      const taskId = randomUUID();
+      let threw = 0;
+      const worker = startWorker(async () => {
+        threw++;
+        throw new Error('the first attempt failed');
+      });
+      try {
+        await continuation(taskId);
+        const [queued] = await jobsOf(taskId);
+        await waitFor(
+          async () => threw === 1 && (await queued!.getState()) !== 'active',
+          'the first attempt to end',
+        );
+        const job = (await getTaskQueue().getJob(queued!.id!))!;
+        expect(await job.getState(), 'a retry is scheduled, not a failure recorded').toBe(
+          'delayed',
+        );
+        expect(job.attemptsMade, 'one attempt was made').toBe(1);
+      } finally {
+        await worker.stop();
+      }
     });
   });
 });
