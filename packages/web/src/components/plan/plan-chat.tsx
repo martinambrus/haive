@@ -67,6 +67,9 @@ const HISTORY_PREVIEW = 3;
 /** How a conversation that can no longer take a turn ENDED. A plain completion
  *  needs no word — the date says everything — but a cancelled or failed one is
  *  a different fact about the same transcript and has to say so. */
+// Notify the currently mounted chat when an older instance settles its send.
+const draftListeners = new WeakMap<Map<string, string>, Set<() => void>>();
+
 const OUTCOME_NOTE: Record<string, string> = {
   cancelled: 'cancelled',
   failed: 'failed',
@@ -105,8 +108,20 @@ export function PlanChat({
   function setDraft(text: string): void {
     if (text) drafts.set(draftKey, text);
     else drafts.delete(draftKey);
-    setDraftRevision((n) => n + 1);
+    draftListeners.get(drafts)?.forEach((redraw) => redraw());
   }
+  useEffect(() => {
+    let listeners = draftListeners.get(drafts);
+    if (!listeners) {
+      listeners = new Set();
+      draftListeners.set(drafts, listeners);
+    }
+    const redraw = () => setDraftRevision((n) => n + 1);
+    listeners.add(redraw);
+    return () => {
+      listeners.delete(redraw);
+    };
+  }, [drafts]);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [providers, setProviders] = useState<CliProvider[]>([]);
@@ -308,6 +323,8 @@ export function PlanChat({
     if (!message) return;
     setSending(true);
     setError(null);
+    setDraft('');
+    let sent = false;
     try {
       if (liveTaskId && parked) {
         // The STEP writes this turn into the transcript. Sending it here as
@@ -319,13 +336,14 @@ export function PlanChat({
           ...(providerId ? { cliProviderId: providerId } : {}),
         });
       }
-      // The request owns this node's submitted text, even if another node is now open.
-      // Keep any edits typed while it was sending.
-      if (drafts.get(draftKey) === draft) setDraft('');
+      sent = true;
+      // Clear only the submitted node, even if a different node is now open.
+      setDraft('');
       setPollRestart((n) => n + 1);
       await reloadMessages();
       onPatched();
     } catch (err) {
+      if (!sent && !drafts.has(draftKey)) setDraft(draft);
       const text = err instanceof Error ? err.message : 'Failed to send';
       // 409 from the submit route means the step is no longer holding a form —
       // the conversation ended under us. Re-read so the next attempt starts a

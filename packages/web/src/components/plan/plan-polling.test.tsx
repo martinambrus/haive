@@ -31,11 +31,13 @@ const rt = vi.hoisted(() => {
 vi.mock('react', async (importOriginal) => ({
   ...(await importOriginal<typeof import('react')>()),
   useState: (initial: unknown) => {
+    const slots = rt.slots;
     const at = rt.at++;
     if (!(at in rt.slots)) {
       rt.slots[at] = typeof initial === 'function' ? (initial as () => unknown)() : initial;
     }
     const set = (update: unknown) => {
+      if (slots !== rt.slots) return; // React ignores state writes from an unmounted instance.
       const next =
         typeof update === 'function' ? (update as (v: unknown) => unknown)(rt.slots[at]) : update;
       if (Object.is(next, rt.slots[at])) return;
@@ -465,7 +467,7 @@ describe('PlanChat drafts on different nodes', () => {
     },
   );
 
-  it('keeps edits typed during a pending send on the same node', async () => {
+  it('empties the node after a successful send including edits during the request', async () => {
     const request = deferred<unknown>();
     net.startPlanChat.mockReturnValueOnce(request.promise);
     unmount = mount(PlanChat, props);
@@ -475,8 +477,57 @@ describe('PlanChat drafts on different nodes', () => {
     await typeDraft('Next message');
     request.resolve({ taskId: 'task-A' });
     await settle();
-    expect(host('textarea')?.props.value).toBe('Next message');
+    expect(host('textarea')?.props.value).toBe('');
   });
+});
+
+describe('PlanChat submitted drafts', () => {
+  const props = { repositoryId: 'repo-1', nodeId: 'node-A', onPatched: vi.fn() };
+  beforeEach(() => {
+    net.messages = { messages: [], conversations: [] };
+    respondWith(null);
+  });
+
+  it.each([false, true])(
+    'restores a failed send unless a newer draft exists (new: %s)',
+    async (edited) => {
+      const request = deferred<unknown>();
+      net.startPlanChat.mockReturnValueOnce(request.promise);
+      unmount = mount(PlanChat, props);
+      await settle();
+      await typeDraft('  Original message  ');
+      await press('Send');
+      expect(host('textarea')?.props.value).toBe('');
+      if (edited) await typeDraft('A newer draft');
+      request.reject(new Error('Send failed'));
+      await settle();
+      expect(host('textarea')?.props.value).toBe(edited ? 'A newer draft' : '  Original message  ');
+    },
+  );
+
+  it.each(['success', 'failure'])(
+    'consumes the draft before remounting during a pending send that ends in %s',
+    async (outcome) => {
+      const drafts = new Map<string, string>();
+      const request = deferred<unknown>();
+      net.startPlanChat.mockReturnValueOnce(request.promise);
+      unmount = mount(PlanChat, { ...props, drafts });
+      await settle();
+      await typeDraft('Submitted message');
+      await press('Send');
+      unmount();
+      unmount = mount(PlanChat, { ...props, drafts });
+      await settle();
+      expect(host('textarea')?.props.value).toBe('');
+      expect(labelled('Send')?.props.disabled).toBe(true);
+      if (outcome === 'success') {
+        await typeDraft('Edited after remount');
+        request.resolve({ taskId: 'task-A' });
+      } else request.reject(new Error('Send failed'));
+      await settle();
+      expect(host('textarea')?.props.value).toBe(outcome === 'success' ? '' : 'Submitted message');
+    },
+  );
 });
 
 describe('PlanMergePanel with a merge task', () => {
