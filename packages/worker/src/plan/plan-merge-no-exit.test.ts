@@ -48,11 +48,15 @@ async function git(dir: string, args: string[], allowFail = false): Promise<stri
   }
 }
 
-type Files = Record<string, string>;
+type Files = Record<string, string | null>;
 
 async function commitFiles(dir: string, files: Files): Promise<void> {
   for (const [file, body] of Object.entries(files)) {
     const full = path.join(dir, file);
+    if (body === null) {
+      await rm(full, { force: true });
+      continue;
+    }
     await mkdir(path.dirname(full), { recursive: true });
     await writeFile(full, body);
   }
@@ -219,5 +223,94 @@ it('T397 fix6b a failed fallback stage-number listing throws instead of answerin
   shim = await failGit(['ls-files', '-u', '-z', '--', `:(literal)${PLAN_JSON}`]);
   await expect(resolveHaiveProjectionConflicts(wt)).rejects.toThrow(
     /git ls-files.*failed.*simulated failure/,
+  );
+});
+
+const validPlan = (title: string) =>
+  JSON.stringify({
+    schemaVersion: 2,
+    nodes: [
+      {
+        id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        parentId: null,
+        ordinal: 0,
+        title,
+        kind: 'component',
+        body: null,
+        status: 'todo',
+        taskable: false,
+      },
+    ],
+    edges: [],
+    codeLinks: [],
+  });
+
+it.each([
+  { operation: 'checkout --theirs', args: ['checkout', '--theirs'], shape: 'fallback' },
+  { operation: 'add', args: ['add', '--'], shape: 'fallback' },
+  { operation: 'rm', args: ['rm', '-f'], shape: 'deleted' },
+  ...['merged', 'kept'].flatMap((shape) => [
+    { operation: 'hash-object', args: ['hash-object', '-w'], shape },
+    { operation: 'update-index', args: ['update-index', '--add'], shape },
+    { operation: 'checkout-index', args: ['checkout-index', '-f'], shape },
+  ]),
+])(
+  'T397 D7 projection $shape failure warns with path and operation: $operation',
+  async ({ operation, args, shape }) => {
+    const md = '.haive-data/plan.md';
+    const sides: [Files, Files, Files] =
+      shape === 'fallback'
+        ? planSides()
+        : shape === 'deleted'
+          ? [{ [md]: 'base' }, { [md]: 'ours' }, { [md]: null, other: 'theirs' }]
+          : [
+              { [PLAN_JSON]: validPlan('base') },
+              { [PLAN_JSON]: validPlan('ours') },
+              { [PLAN_JSON]: shape === 'kept' ? null : validPlan('theirs'), other: 'theirs' },
+            ];
+    const wt = await divergedPair(...sides);
+    await openConflict(wt);
+    const file = shape === 'deleted' ? md : PLAN_JSON;
+    const before = (await git(wt, ['ls-files', '-u', '--', file])).trim();
+    expect(before).not.toBe('');
+    const warning = vi.spyOn(logger, 'warn');
+    shim = await failGit(args);
+    const out = await resolveHaiveProjectionConflicts(wt);
+    expect(out.resolved).not.toContain(file);
+    expect(warning).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: file,
+        operation,
+        detail: expect.stringContaining('simulated failure'),
+      }),
+      expect.stringMatching(/projection.*failed/),
+    );
+    // A failed checkout-index follows the successful index resolution; it must still be reported.
+    if (operation !== 'checkout-index')
+      expect((await git(wt, ['ls-files', '-u', '--', file])).trim()).not.toBe('');
+  },
+);
+
+it('T397 D7 a failed markdown render write warns without claiming plan.json gave nothing', async () => {
+  const md = '.haive-data/plan.md';
+  const wt = await divergedPair(
+    { [PLAN_JSON]: validPlan('base'), [md]: 'base' },
+    { [PLAN_JSON]: validPlan('ours'), [md]: 'ours' },
+    { [PLAN_JSON]: validPlan('theirs'), [md]: 'theirs' },
+  );
+  await openConflict(wt);
+  const warning = vi.spyOn(logger, 'warn');
+  shim = await failGit(['hash-object', '-w'], { from: 2 });
+  const out = await resolveHaiveProjectionConflicts(wt);
+  expect(out.resolved).toContain(PLAN_JSON);
+  expect(out.resolved).not.toContain(md);
+  expect(out.warnings.join('\n')).not.toContain('gave nothing');
+  expect(warning).toHaveBeenCalledWith(
+    expect.objectContaining({
+      path: md,
+      operation: 'hash-object',
+      detail: expect.stringContaining('simulated failure'),
+    }),
+    expect.stringMatching(/projection.*failed/),
   );
 });

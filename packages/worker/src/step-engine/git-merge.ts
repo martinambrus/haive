@@ -199,9 +199,7 @@ async function handBackPlan(dir: string): Promise<HandBack | null> {
   const writer = process.getuid?.();
   if (writer !== 0 || isHostCheckout(dir)) return null;
   const { anchor, prefix } = workspaceAnchor(dir);
-  const tree = await lstatNoFollow(anchor, prefix.replace(/\/$/, ''), { strict: true }).catch(
-    () => null,
-  );
+  const tree = await lstatNoFollow(anchor, prefix.replace(/\/$/, ''), { strict: true });
   if (!tree) return null;
   return { anchor, prefix, writer, owner: { uid: SANDBOX_UID, gid: SANDBOX_GID } };
 }
