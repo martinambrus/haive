@@ -62,6 +62,10 @@ import { createFakeDb } from '@haive/database/testing';
 import { computeEmailBlindIndex, encryptEmail, secretsService } from '@haive/shared';
 import { hashPassword, verifyPassword } from '../src/auth/password.js';
 import { createApiApp } from '../src/index.js';
+import { AuthThrottleError } from '../src/lib/auth-throttle.js';
+
+// @ts-expect-error Every refusal must explicitly identify the rejecting limiter.
+new AuthThrottleError(new Response(null, { status: 429 }), true);
 
 vi.setConfig({ testTimeout: 120_000, hookTimeout: 60_000 });
 
