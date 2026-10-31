@@ -162,7 +162,7 @@ function checkJob(job, spec, workflow = workflows[spec.file]) {
   checkShell(job.defaults?.run?.shell, 'job');
   for (const step of steps) {
     checkShell(step.shell, label(step));
-    const matched = swallowedFailure(step.run ?? '');
+    const matched = swallowedFailure(step.run ?? '', { step: label(step) });
     assert.equal(
       matched,
       null,
@@ -711,7 +711,10 @@ for (const spec of JOBS) {
 }
 
 function redisDatabases(step) {
-  const texts = [...Object.values(step.env ?? {}), shellSource(step.run ?? '')];
+  const texts = [
+    ...Object.values(step.env ?? {}),
+    shellSource(step.run ?? '', { step: label(step) }),
+  ];
   return [
     ...new Set(
       texts.flatMap((text) =>
