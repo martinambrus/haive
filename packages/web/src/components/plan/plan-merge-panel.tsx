@@ -80,6 +80,9 @@ export function PlanMergePanel({
   // a terminal status — the same self-terminating shape the plan chat uses, so an
   // idle conversation costs nothing.
   const taskId = merge?.taskId ?? null;
+  // An answer or discard can settle after the page switches to another conversation.
+  const displayedTaskIdRef = useRef(taskId);
+  displayedTaskIdRef.current = taskId;
   const discarding = taskId !== null && discardedTaskId === taskId;
   const dead = taskId !== null && deadTaskId === taskId;
   useEffect(() => {
@@ -160,14 +163,16 @@ export function PlanMergePanel({
         decision,
         ...(decision === 'revise' ? { message: draft.trim() } : {}),
       });
+      if (displayedTaskIdRef.current !== merge.taskId) return;
       setDraft('');
       setLiveStep(null);
       setPollRestart((n) => n + 1); // resume polling: the step is running again
       onChanged();
     } catch (e) {
+      if (displayedTaskIdRef.current !== merge.taskId) return;
       setError((e as ApiError).message ?? 'Could not send that');
     } finally {
-      setBusy(false);
+      if (displayedTaskIdRef.current === merge.taskId) setBusy(false);
     }
   }
 
@@ -180,6 +185,7 @@ export function PlanMergePanel({
     setNotice(null);
     try {
       const result = await discardPlanMerge(repositoryId, merge.taskId);
+      if (displayedTaskIdRef.current !== merge.taskId) return;
       if (result.cancelled) {
         setDiscardedTaskId(taskId);
       } else {
@@ -190,9 +196,10 @@ export function PlanMergePanel({
       }
       onSettled();
     } catch (e) {
+      if (displayedTaskIdRef.current !== merge.taskId) return;
       setError((e as ApiError).message ?? 'Could not discard the merge');
     } finally {
-      setBusy(false);
+      if (displayedTaskIdRef.current === merge.taskId) setBusy(false);
     }
   }
 

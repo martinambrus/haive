@@ -120,6 +120,15 @@ function mount<P>(Component: (props: P) => ReactNode, props: P) {
 }
 
 const settle = () => vi.advanceTimersByTimeAsync(0);
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
 const taskFetches = () =>
   net.get.mock.calls.filter(([path]) => String(path).startsWith('/tasks/')).length;
 
@@ -485,6 +494,46 @@ describe('PlanMergePanel with a merge task', () => {
     expect(shown().find((el) => el.props.role === 'status')).toBeUndefined();
     expect(onSettled).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it.each([
+    ['answer', 'success'],
+    ['answer', 'error'],
+    ['discard', 'cancelled'],
+    ['discard', 'notice'],
+    ['discard', 'error'],
+  ])('ignores a late %s %s from the previous merge', async (action, result) => {
+    vi.stubGlobal('window', { confirm: vi.fn(() => true) });
+    const old = deferred<{ ok: boolean; cancelled: boolean }>();
+    const next = deferred<{ ok: boolean; cancelled: boolean }>();
+    const request = action === 'answer' ? net.submitPlanMergeTurn : net.discardPlanMerge;
+    request.mockImplementationOnce(() => old.promise).mockImplementationOnce(() => next.promise);
+    const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+    await press(action === 'answer' ? CONFIRM : 'Discard');
+    rerender({ ...merge, taskId: 'task-2' });
+    await settle();
+    await typeDraft('instructions for B');
+    await press(action === 'answer' ? CONFIRM : 'Discard');
+    const changedBefore = onChanged.mock.calls.length;
+    const settledBefore = onSettled.mock.calls.length;
+    const fetchedBefore = taskFetches();
+
+    if (result === 'error') old.reject({ message: 'Error from A' });
+    else old.resolve({ ok: true, cancelled: result === 'cancelled' });
+    await settle();
+
+    expect(shown().find((el) => el.type === FormError)?.props.message).toBeNull();
+    expect(host('textarea')?.props.value).toBe('instructions for B');
+    expect(host('textarea')?.props.disabled).toBe(true);
+    expect(labelled('Discard')?.props.disabled).toBe(true);
+    expect(onChanged).toHaveBeenCalledTimes(changedBefore);
+    expect(onSettled).toHaveBeenCalledTimes(settledBefore);
+    expect(taskFetches()).toBe(fetchedBefore);
+    rerender(null);
+    await settle();
+    expect(shown().find((el) => el.props.role === 'status')).toBeUndefined();
+    next.resolve({ ok: true, cancelled: false });
+    await settle();
   });
 
   it('keeps the already-ended notice after the page refresh removes the merge', async () => {
