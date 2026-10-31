@@ -7,6 +7,7 @@ import { HAIVE_DATA_FILES } from '@haive/shared';
 import { logger } from '@haive/shared/logger';
 import {
   chmodNoFollow,
+  isPathContainmentError,
   chownNoFollow,
   lstatNoFollow,
   readdirNoFollow,
@@ -41,6 +42,10 @@ import { REPO_IS_DATA_MERGE_LINES, safeRef, safeTitle } from './steps/_untrusted
 export async function mergeCommitted(worktreePath: string, branch: string): Promise<boolean> {
   const head = await revParse(worktreePath, 'MERGE_HEAD');
   if (head !== null) return false; // merge still open (not committed)
+  const location = workspaceAnchor(worktreePath);
+  if ((await lstatNoFollow(location.anchor, location.prefix.replace(/\/$/, ''))) === null)
+    return false; // a removed merge worktree must be reopened by the resolver
+
   const status = await gitRun(worktreePath, ['--no-optional-locks', 'status', '--porcelain']);
   if (status.code !== 0) {
     throw new Error(`git status failed in ${worktreePath}: ${gitDetail(status)}`);
@@ -1329,9 +1334,14 @@ export async function completeMergeHostSide(
   // than used as the anchor: every path git reported is walked a component at a time.
   const { anchor, prefix } = workspaceAnchor(worktreePath);
   for (const f of files) {
-    const content = await readTextNoFollow(anchor, `${prefix}${f}`, { strict: true });
-    if (content === null) continue; // deleted as part of the resolution
-    if (/^(<{7}|>{7})( |$)/m.test(content)) return false; // markers remain
+    try {
+      const content = await readTextNoFollow(anchor, `${prefix}${f}`, { strict: true });
+      if (content === null) continue; // deleted as part of the resolution
+      if (/^(<{7}|>{7})( |$)/m.test(content)) return false; // markers remain
+    } catch (err) {
+      if (isPathContainmentError(err)) return false; // bad fixer output costs one attempt
+      throw err;
+    }
   }
   // Only the paths the fixer was sent to resolve: the merge staged everything else itself, and what
   // else the tree holds is someone's own work or a fixer's stray change, neither of it the merge's.

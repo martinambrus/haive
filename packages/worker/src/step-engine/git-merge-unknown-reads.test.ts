@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -18,6 +18,18 @@ import {
   squashMergeCommit,
 } from './git-merge.js';
 
+const readFault = vi.hoisted(() => ({ file: '' }));
+vi.mock('@haive/shared/fs-safe', async (original) => {
+  const real = await original<typeof import('@haive/shared/fs-safe')>();
+  return {
+    ...real,
+    readTextNoFollow: async (...args: Parameters<typeof real.readTextNoFollow>) => {
+      if (readFault.file && args[1].endsWith(readFault.file))
+        throw Object.assign(new Error('simulated EIO'), { code: 'EIO' });
+      return real.readTextNoFollow(...args);
+    },
+  };
+});
 const exec = promisify(execFile);
 const IDENTITY: Record<string, string> = {
   GIT_AUTHOR_NAME: 'T',
@@ -49,6 +61,7 @@ const exists = (p: string) =>
 
 const dirs: string[] = [];
 afterEach(async () => {
+  readFault.file = '';
   vi.restoreAllMocks();
   for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true, maxRetries: 5 });
 });
@@ -445,4 +458,33 @@ describe('T397 merge completion failures are not an incomplete resolution', () =
       await expect(mergeCommitted(dir, 'feature/x')).rejects.toThrow(/git merge-base.*failed/);
     });
   });
+});
+
+it.each(['link', 'directory', 'fifo'])(
+  'T397 fix4 containment refusal costs one fixer attempt: %s',
+  async (kind) => {
+    const dir = await conflictOpen();
+    const file = path.join(dir, 'base.txt');
+    await rm(file);
+    if (kind === 'link') await symlink('/unread', file);
+    else if (kind === 'directory') await mkdir(file);
+    else await exec('mkfifo', [file]);
+    await expect(completeMergeHostSide(dir, IDENTITY, 'feature/x')).resolves.toBe(false);
+    expect(await mergeIsOpen(dir)).toBe(true);
+    await rm(file, { recursive: true, force: true });
+    await write(dir, 'base.txt', 'resolved\n');
+    expect(await completeMergeHostSide(dir, IDENTITY, 'feature/x')).toBe(true);
+  },
+);
+it('T397 fix4 a genuine IO failure still throws with the merge open', async () => {
+  const dir = await conflictOpen();
+  await write(dir, 'base.txt', 'resolved\n');
+  readFault.file = 'base.txt';
+  await expect(completeMergeHostSide(dir, IDENTITY, 'feature/x')).rejects.toThrow('simulated EIO');
+  expect(await mergeIsOpen(dir)).toBe(true);
+});
+it('T397 fix4 a vanished merge directory is not committed', async () => {
+  const dir = await conflictOpen();
+  await rm(dir, { recursive: true, force: true });
+  await expect(mergeCommitted(dir, 'feature/x')).resolves.toBe(false);
 });
