@@ -17,6 +17,7 @@ import {
   planConflictUnit,
 } from '../src/project-state/conflicts.js';
 import { PORTABLE_SETTING_NAMES } from '../src/project-state/settings.js';
+import { settingFileName } from '../src/project-state/index.js';
 
 describe('conflict units', () => {
   it('names the RTK question by one constant that is no render unit', () => {
@@ -104,7 +105,7 @@ describe('conflictUnitLabel', () => {
 describe('setting and environment units', () => {
   it('are conflict units: each portable setting file, the environment and a key of it', () => {
     for (const name of PORTABLE_SETTING_NAMES)
-      expect(isConflictUnit(`settings/${name}.json`)).toBe(true);
+      expect(isConflictUnit(settingFileName(name))).toBe(true);
     expect(isConflictUnit('project/environment.json')).toBe(true);
     expect(isConflictUnit('project/environment.json#confirmedValues')).toBe(true);
     expect(isSettingUnit('settings/lsp-servers.json')).toBe(true);
@@ -123,14 +124,30 @@ describe('setting and environment units', () => {
     }
   });
 
+  it('are the agent rules by their .md file alone', () => {
+    expect(isSettingUnit('settings/agent-rules.md')).toBe(true);
+    expect(isConflictUnit('settings/agent-rules.md')).toBe(true);
+    for (const other of [
+      'settings/agent-rules.json',
+      'settings/agent-rules.md#x',
+      'settings/rtk-version.md',
+      'settings/lsp-servers.md',
+      'settings/other.md',
+    ]) {
+      expect(isSettingUnit(other)).toBe(false);
+      expect(isConflictUnit(other)).toBe(false);
+    }
+  });
+
   it('hold an upgrade only for render, claim and RTK units', () => {
     expect(blocksUpgrade(RTK_ENABLED_UNIT)).toBe(true);
     expect(blocksUpgrade(RENDER_UNIT)).toBe(true);
     expect(blocksUpgrade(`${RENDER_UNIT}#framework`)).toBe(true);
     expect(blocksUpgrade(claimFileName('docs/a.md'))).toBe(true);
     for (const name of PORTABLE_SETTING_NAMES.filter((n) => n !== 'rtk-enabled')) {
-      expect(blocksUpgrade(`settings/${name}.json`)).toBe(false);
+      expect(blocksUpgrade(settingFileName(name))).toBe(false);
     }
+    expect(blocksUpgrade('settings/agent-rules.md')).toBe(false);
     expect(blocksUpgrade('project/environment.json')).toBe(false);
     expect(blocksUpgrade('project/environment.json#confirmedValues')).toBe(false);
     expect(blocksUpgrade('settings/app-auth.json')).toBe(false);
@@ -152,6 +169,7 @@ describe('setting and environment units', () => {
   it('are labelled as a person knows them', () => {
     expect(conflictUnitLabel('settings/lsp-servers.json')).toBe('Language servers');
     expect(conflictUnitLabel('settings/review-dimensions.json')).toBe('Review dimensions');
+    expect(conflictUnitLabel('settings/agent-rules.md')).toBe('AGENTS.md rules');
     expect(conflictUnitLabel('settings/scope-exclude-globs.json')).toBe(
       'Paths left out of the project scope',
     );
@@ -168,6 +186,7 @@ describe('setting and environment units', () => {
       conflictBody({ ...base, unit, resolution: null, resolvedAt: null });
     expect(body('project/environment.json#confirmedValues').key).toBe('confirmedValues');
     expect(body('settings/lsp-servers.json').key).toBeNull();
+    expect(body('settings/agent-rules.md').key).toBeNull();
   });
 });
 

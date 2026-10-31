@@ -1,7 +1,7 @@
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
 import {
-  buildCliRulesBlockFromProviders,
+  buildRepoCliRulesBlock,
   CLI_RULES_DISK_PATH,
   CLI_RULES_SCHEMA_VERSION,
   CLI_RULES_TEMPLATE_ID,
@@ -36,6 +36,7 @@ import {
   type BundleWithMeta,
   type LoaderLogger,
 } from './_custom-bundle-loader.js';
+import { readAgentRulesOverrideRaw } from './_agent-rules-override.js';
 import { renderContextFromColumn } from './_render-targets.js';
 import { resolveSkillTargetDirs } from './steps/onboarding/_helpers.js';
 import type { GenerateFilesDetect } from './steps/onboarding/07-generate-files.js';
@@ -144,12 +145,19 @@ export async function resolveRenderContext(
       rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
       source: schema.repositories.source,
       name: schema.repositories.name,
+      agentRulesOverride: schema.repositories.agentRulesOverride,
     })
     .from(schema.repositories)
     .where(eq(schema.repositories.id, args.repositoryId))
     .limit(1);
   const resolved = await resolveFromRepository(db, args, repo);
-  return resolved && { ...resolved, column: repo?.renderContext ?? null };
+  return (
+    resolved && {
+      ...resolved,
+      column: repo?.renderContext ?? null,
+      agentRulesOverride: repo?.agentRulesOverride ?? null,
+    }
+  );
 }
 
 async function resolveFromRepository(
@@ -169,7 +177,7 @@ async function resolveFromRepository(
         name: string | null;
       }
     | undefined,
-): Promise<Omit<ResolvedRenderContext, 'column'> | null> {
+): Promise<Omit<ResolvedRenderContext, 'column' | 'agentRulesOverride'> | null> {
   const { repositoryId, userId, liveRows, logger } = args;
   const column = readRenderContextColumn(repo?.renderContext);
   if (column.kind === 'refused') {
@@ -359,6 +367,9 @@ export interface ResolvedRenderContext {
   rtkLive: boolean;
   /** The render context column exactly as the read that resolved this context found it. */
   column: unknown;
+  /** The repository's rules override exactly as that same read found it: null for none, '' for an
+   *  explicitly empty one. 01 stamps its plan with it, and 02 refuses the plan once it moved. */
+  agentRulesOverride: string | null;
 }
 
 /** A context that recorded an RTK choice follows the repository's live one, so switching RTK off
@@ -368,7 +379,7 @@ function withLiveRtk(
   repo: { rtkEnabled: boolean } | undefined,
   recorded: TemplateRenderContext,
   recordedChoice: boolean,
-): Omit<ResolvedRenderContext, 'column'> {
+): Omit<ResolvedRenderContext, 'column' | 'agentRulesOverride'> {
   return recordedChoice && repo
     ? { renderCtx: { ...recorded, rtkEnabled: repo.rtkEnabled }, rtkLive: true }
     : { renderCtx: recorded, rtkLive: false };
@@ -419,20 +430,12 @@ export async function unionExpandedFor(
   }
 
   // Current-side expansion of the AGENTS.md cli-rules region. It is per-repo
-  // (built from the repo owner's current enabled providers, sorted by name),
-  // so it is not in the global manifest — recompute it here exactly the way
-  // step 12 and the API do, so a rules change surfaces as drift. A null block
-  // (no rules-bearing provider) means the region is obsolete: omit it so a live
+  // (the repository's rules override, else Haive's default rules; no provider's
+  // personal rules enter), so it is not in the global manifest — recompute it here
+  // exactly the way step 12 and the API do, so a rules change surfaces as drift. A
+  // null block (an empty override) means the region is obsolete: omit it so a live
   // row with no current match classifies as `obsolete` (region removal).
-  const ruleRows = await db
-    .select({
-      name: schema.cliProviders.name,
-      rulesContent: schema.cliProviders.rulesContent,
-      enabled: schema.cliProviders.enabled,
-    })
-    .from(schema.cliProviders)
-    .where(eq(schema.cliProviders.userId, userId));
-  const cliRulesBlock = buildCliRulesBlockFromProviders(ruleRows);
+  const cliRulesBlock = buildRepoCliRulesBlock(await readAgentRulesOverrideRaw(db, repositoryId));
   if (cliRulesBlock && !seen.has(CLI_RULES_DISK_PATH)) {
     const writtenHash = sha256Hex(normalizeContent(cliRulesBlock));
     out.push({

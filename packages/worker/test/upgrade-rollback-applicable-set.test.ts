@@ -50,8 +50,15 @@ const SNAPSHOT = { ...REFERENCE_CONTEXT, acceptedAgentIds: ['code-reviewer'] } a
   unknown
 >;
 
+// The owner's provider below holds rules of its own, which the set ignores: cli-rules follows the
+// repository's rules override alone. The set also holds the bundle items, and lacks the agent whose
+// removal the rollback undid.
 describe('R1: a rollback and the applicable set', () => {
-  it('writes the set its snapshot renders with the bundle items and cli-rules, without the agent whose removal it undid', async () => {
+  it.each([
+    ['an override', '- repository rule', true],
+    ['no override', null, true],
+    ['an empty override', '', false],
+  ])('writes the set its snapshot renders, for %s', async (_name, override, withRules) => {
     const repoPath = await mkdtemp(join(tmpdir(), 'upgrade-rollback-set-'));
     dirs.push(repoPath);
     const fake = createFakeDb({
@@ -69,6 +76,7 @@ describe('R1: a rollback and the applicable set', () => {
       source: 'blank',
       renderContext: null,
       applicableTemplateIds: null,
+      agentRulesOverride: override,
     });
     fake.insert(schema.cliProviders, {
       userId: USER,
@@ -143,7 +151,7 @@ describe('R1: a rollback and the applicable set', () => {
     expect(fake.rows(schema.repositories)[0]!.applicableTemplateIds).toEqual([
       'agent.code-reviewer',
       'agents-index',
-      'cli-rules',
+      ...(withRules ? ['cli-rules'] : []),
       `custom.${BUNDLE}.${ITEM}`,
       'workflow-config',
     ]);

@@ -238,6 +238,8 @@ interface Seed {
   lastError?: string;
   /** The repository's live RTK switch. */
   rtk?: boolean;
+  /** `repositories.agent_rules_override`: NULL unless given, which renders Haive's default rules. */
+  agentRulesOverride?: string | null;
 }
 
 const isWrite = (event: string) => /^(update|insert|delete) /.test(event);
@@ -292,6 +294,7 @@ async function setup(seed: Seed = {}) {
     rtkEnabled: seed.rtk ?? false,
     renderContext: jsonb(seed.column ?? null),
     applicableTemplateIds: seed.set ?? null,
+    agentRulesOverride: seed.agentRulesOverride ?? null,
     updatedAt: new Date(1000),
   });
   for (const [userId, name, enabled] of [
@@ -679,6 +682,69 @@ describe('D11: a set an earlier sync left behind its column is recomputed at boo
       expect(s.setOf()).toEqual(P);
     },
   );
+});
+
+describe('D1b: cli-rules is in the set as the repository renders it', () => {
+  const withoutRules = (set: string[]) => set.filter((id) => id !== 'cli-rules');
+
+  it('leaves it out of the set an applied sync writes when the override is empty', async () => {
+    const s = await setup({
+      column: column(BASE),
+      base: BASE,
+      set: P,
+      claims: BASE_CLAIMS,
+      agentRulesOverride: '',
+    });
+    await s.putRecord(TEAM);
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('applied');
+    expect(s.setOf()).toEqual(withoutRules(D1_SET));
+  });
+
+  it('holds it for an override with text, as for none', async () => {
+    const s = await setup({
+      column: column(BASE),
+      base: BASE,
+      set: P,
+      claims: BASE_CLAIMS,
+      agentRulesOverride: '- the repository rule',
+    });
+    await s.putRecord(TEAM);
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('applied');
+    expect(s.setOf()).toEqual(D1_SET);
+  });
+
+  it('is left out of the set a boot recompute writes when the override is empty', async () => {
+    const s = await setup({
+      column: column(TEAM),
+      base: TEAM,
+      set: P,
+      claims: BASE_CLAIMS,
+      agentRulesOverride: '',
+    });
+
+    await recomputeSyncedApplicableSets(s.fake.db as unknown as Database);
+
+    expect(s.setOf()).toEqual(withoutRules(D1_SET));
+  });
+
+  it('is left out of the set 01 writes when the override is empty', async () => {
+    const s = await setup({
+      column: column(BASE),
+      claims: BASE_CLAIMS,
+      set: null,
+      agentRulesOverride: '',
+    });
+
+    await s.plan();
+
+    expect(s.setOf()).toEqual(withoutRules(P));
+  });
 });
 
 describe('D2: 01 writes the set the sync wrote', () => {

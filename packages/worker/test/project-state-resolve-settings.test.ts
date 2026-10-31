@@ -385,3 +385,152 @@ describe('answering an ordinary rtk-enabled conflict', () => {
     expect(s.repo().rtkChoiceMadeAt ?? null).toBeNull();
   });
 });
+
+describe('answering an agent-rules question', () => {
+  const RULES = 'settings/agent-rules.md';
+  const BASE = '# House rules\n\n- Keep it small.\n';
+  const MINE = '# House rules\n\n- Keep it small.\n- Mine, first.\n- Mine, second.\n';
+  const THEIRS = '# House rules\n\n- Keep it small.\n\n```sh\nrm -rf build\n```\n';
+  const crlf = (text: string) => text.replace(/\n/g, '\r\n');
+  const rulesSeed = (over: Partial<Seed> = {}): Seed => ({
+    unit: RULES,
+    base: BASE,
+    local: MINE,
+    incoming: THEIRS,
+    file: THEIRS,
+    columns: { agentRulesOverride: MINE },
+    baseRecord: record({ 'agent-rules': BASE }),
+    ...over,
+  });
+
+  describe('keep mine', () => {
+    it('writes the multi-line text into the .md and the base, leaves the column, closes the row', async () => {
+      const s = await setup(rulesSeed());
+
+      const result = await s.answer('keep_mine');
+
+      expect(result).toMatchObject({ kind: 'resolved', written: [s.rel] });
+      expect(await s.file()).toBe(MINE);
+      expect(s.repo().agentRulesOverride).toBe(MINE);
+      expect(s.base().settings['agent-rules']).toBe(MINE);
+      expect(s.row()).toMatchObject({ resolution: 'keep_mine', resolvedBy: OWNER });
+    });
+
+    it('is met by no conflict and no write on the next sync', async () => {
+      const s = await setup(rulesSeed());
+      await s.answer('keep_mine');
+      await syncProjectStateFromCheckout(s.db, { repositoryId: REPO, repoPath: s.root });
+      const before = json({
+        r: s.fake.rows(schema.repositories),
+        s: s.fake.rows(schema.projectStateSync),
+      });
+
+      const next = await syncProjectStateFromCheckout(s.db, {
+        repositoryId: REPO,
+        repoPath: s.root,
+      });
+
+      expect(next.outcome).not.toBe('conflict');
+      expect(s.fake.rows(schema.projectStateConflicts).filter((r) => r.resolvedAt == null)).toEqual(
+        [],
+      );
+      expect(s.repo().agentRulesOverride).toBe(MINE);
+      expect(
+        json({ r: s.fake.rows(schema.repositories), s: s.fake.rows(schema.projectStateSync) }),
+      ).toEqual(before);
+    });
+
+    it('keeps the empty text: a 0-byte file, and the empty text in the base and the column', async () => {
+      const s = await setup(rulesSeed({ local: '', columns: { agentRulesOverride: '' } }));
+
+      const result = await s.answer('keep_mine');
+
+      expect(result).toMatchObject({ kind: 'resolved', written: [s.rel] });
+      expect(await s.file()).toBe('');
+      expect(s.repo().agentRulesOverride).toBe('');
+      expect(s.base().settings['agent-rules']).toBe('');
+    });
+
+    it('has no value to keep where the column holds none', async () => {
+      const s = await setup(rulesSeed({ local: undefined, columns: { agentRulesOverride: null } }));
+
+      expect(await s.answer('keep_mine')).toEqual({ kind: 'no_local' });
+      expect(s.row().resolvedAt).toBeNull();
+      expect(await s.file()).toBe(THEIRS);
+    });
+
+    it('writes the canonical bytes over a file that read as theirs with CRLF line ends', async () => {
+      const s = await setup(rulesSeed({ file: crlf(THEIRS) }));
+
+      const result = await s.answer('keep_mine');
+
+      expect(result).toMatchObject({ kind: 'resolved', written: [s.rel] });
+      expect(await s.file()).toBe(MINE);
+    });
+  });
+
+  describe('take theirs', () => {
+    it('applies the text to the column and the base, and leaves the file', async () => {
+      const s = await setup(rulesSeed());
+
+      const result = await s.answer('take_theirs');
+
+      expect(result).toMatchObject({ kind: 'resolved', written: [] });
+      expect(s.repo().agentRulesOverride).toBe(THEIRS);
+      expect(await s.file()).toBe(THEIRS);
+      expect(s.base().settings['agent-rules']).toBe(THEIRS);
+      expect(s.row()).toMatchObject({ resolution: 'take_theirs' });
+    });
+
+    it('takes the empty text as the empty text, never as NULL', async () => {
+      const s = await setup(rulesSeed({ incoming: '', file: '' }));
+
+      const result = await s.answer('take_theirs');
+
+      expect(result).toMatchObject({ kind: 'resolved', written: [] });
+      expect(s.repo().agentRulesOverride).toBe('');
+      expect(s.base().settings['agent-rules']).toBe('');
+    });
+
+    it('unsets the override where the other install reset it', async () => {
+      const s = await setup(rulesSeed({ incoming: undefined, file: null }));
+
+      expect((await s.answer('take_theirs')).kind).toBe('resolved');
+      expect(s.repo().agentRulesOverride ?? null).toBeNull();
+      expect(s.base().settings).toEqual({});
+    });
+
+    it('is not moved by a file that holds the same text with CRLF line ends', async () => {
+      const s = await setup(rulesSeed({ file: crlf(THEIRS) }));
+
+      const result = await s.answer('take_theirs');
+
+      expect(result).toMatchObject({ kind: 'resolved', written: [] });
+      expect(s.repo().agentRulesOverride).toBe(THEIRS);
+    });
+  });
+
+  describe('a file that moved', () => {
+    it('reads as moved, and re-asks against the file, when it no longer holds their text', async () => {
+      const s = await setup(rulesSeed({ file: 'edited by hand\n' }));
+
+      expect(await s.answer('keep_mine')).toEqual({ kind: 'moved' });
+      expect(s.row().resolvedAt).toBeNull();
+      expect(s.repo().agentRulesOverride).toBe(MINE);
+      expect(await s.file()).toBe('edited by hand\n');
+    });
+
+    it('reads as moved when the file is gone though their text was a value', async () => {
+      const s = await setup(rulesSeed({ file: null }));
+
+      expect(await s.answer('take_theirs')).toEqual({ kind: 'moved' });
+    });
+
+    it('reads as moved when the file holds a text the setting refuses', async () => {
+      const s = await setup(rulesSeed({ file: '# Rules\n\n<!-- haive:rules -->\n' }));
+
+      expect(await s.answer('take_theirs')).toEqual({ kind: 'moved' });
+      expect(s.repo().agentRulesOverride).toBe(MINE);
+    });
+  });
+});

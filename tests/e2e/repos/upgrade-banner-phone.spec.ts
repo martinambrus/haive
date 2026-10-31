@@ -31,7 +31,11 @@ test('the upgrade banner keeps its actions on a phone screen', async ({ page, sq
            content_hash as hash
     from template_manifest_cache where template_kind = 'agent' order by template_id limit 1`;
   if (!template) throw new Error('the template manifest cache is empty');
-  await sql`update repositories set applicable_template_ids = ${sql.array([template.id])}
+  // The empty override owes this repository no AGENTS.md rules block. Unset, it follows Haive's
+  // default rules and, recording no block, is owed that one as a new item: each step below would
+  // then also have the block to review.
+  await sql`update repositories set applicable_template_ids = ${sql.array([template.id])},
+                                    agent_rules_override = ''
             where id = ${repoId}`;
   const [onboarding] = await sql<{ id: string }[]>`
     insert into tasks (user_id, repository_id, type, title, status, completed_at)

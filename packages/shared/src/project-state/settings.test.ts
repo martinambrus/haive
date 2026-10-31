@@ -4,10 +4,13 @@ import {
   environmentColumnOf,
   environmentUnitOf,
   intakeSettings,
+  isUnsettableSetting,
+  normalizeAgentRulesOverride,
   normalizeEnvironment,
   normalizeSetting,
   portableSettingsOf,
   settingColumnUpdate,
+  settingsDifferingFrom,
   isPortableSettingName,
   toolingUnitFrom,
   toolingUnitOf,
@@ -16,6 +19,7 @@ import {
   withoutUnchosenRtk,
   type PortableSettingColumns,
 } from './settings.js';
+import { rawTextProblem } from './raw-text.js';
 
 const empty: PortableSettingColumns = {
   scopeExcludeGlobs: null,
@@ -25,6 +29,7 @@ const empty: PortableSettingColumns = {
   lspServerVersions: null,
   chromeDevtoolsMcpVersion: null,
   reviewDimensions: null,
+  agentRulesOverride: null,
 };
 
 describe('portableSettingsOf', () => {
@@ -37,11 +42,23 @@ describe('portableSettingsOf', () => {
       lspServerVersions: { vtsls: '1.0.0', pyright: null },
       chromeDevtoolsMcpVersion: '0.9.0',
       reviewDimensions: ['security'],
+      agentRulesOverride: '# Rules\n',
     });
 
     expect(Object.keys(settings).sort()).toEqual([...PORTABLE_SETTING_NAMES].sort());
     expect(settings['rtk-enabled']).toBe(false);
     expect(settings['lsp-server-versions']).toEqual({ vtsls: '1.0.0', pyright: null });
+    expect(settings['agent-rules']).toBe('# Rules\n');
+  });
+
+  it('keeps an empty rules override a value: NULL follows the default, any text is a choice', () => {
+    expect(portableSettingsOf({ ...empty, agentRulesOverride: '' })).toEqual({ 'agent-rules': '' });
+    expect(portableSettingsOf({ ...empty, agentRulesOverride: 'x' })).toEqual({
+      'agent-rules': 'x',
+    });
+    for (const none of [null, undefined, 7, false, {}, ['x']]) {
+      expect(portableSettingsOf({ ...empty, agentRulesOverride: none })).toEqual({});
+    }
   });
 
   it('leaves a column holding nothing out, so its file is not written', () => {
@@ -150,6 +167,114 @@ describe('normalizeSetting', () => {
     expect(ok('chrome-devtools-mcp-version', '')).toEqual({ ok: false });
     expect(ok('app-auth', {})).toEqual({ ok: false });
   });
+
+  it('keeps the rules override as normalised text, and says why it refuses one', () => {
+    expect(ok('agent-rules', 'a  \r\nb')).toEqual({ ok: true, value: 'a\nb\n' });
+    expect(ok('agent-rules', '')).toEqual({ ok: true, value: '' });
+    expect(ok('agent-rules', 7)).toEqual({ ok: false, reason: expect.stringMatching(/text/) });
+    expect(ok('agent-rules', 'x\n=======\n')).toEqual({
+      ok: false,
+      reason: expect.stringMatching(/conflict marker/),
+    });
+  });
+});
+
+describe('normalizeAgentRulesOverride', () => {
+  const CAP = 64 * 1024;
+  const normalized = (input: unknown) => normalizeAgentRulesOverride(input);
+
+  // [what the text has, what it is sent as, what is stored]
+  const ACCEPTED: Array<[string, string, string]> = [
+    ['no trailing newline', 'Rules', 'Rules\n'],
+    ['its one trailing newline', 'Rules\n', 'Rules\n'],
+    ['CRLF line ends', 'a\r\nb\r\n', 'a\nb\n'],
+    ['a lone CR for a line end', 'a\rb\r', 'a\nb\n'],
+    ['a BOM', '\uFEFFRules\n', 'Rules\n'],
+    ['two BOMs, both going or the stored text would change again', '\uFEFF\uFEFFRules', 'Rules\n'],
+    ['trailing spaces and tabs', 'a \t\nb\t \n', 'a\nb\n'],
+    ['three or more blank lines', 'a\n\n\n\n\nb\n', 'a\n\nb\n'],
+    ['its indentation and inner spaces', '  - a  b\n', '  - a  b\n'],
+    ['a fenced block', '```ts\nconst a = 1;\n```\n', '```ts\nconst a = 1;\n```\n'],
+    ['no text at all, an explicit empty override', '', ''],
+    ['only spaces and newlines', '   \n\t\n', ''],
+    ['only a BOM', '\uFEFF', ''],
+    ['only no-break space and a line separator', '\u00a0\u2028', ''],
+    ['a line of eight = (a rule, no marker)', 'Title\n========\n', 'Title\n========\n'],
+    ['a line of six =', 'Title\n======\n', 'Title\n======\n'],
+    ['seven < followed by a letter', '<<<<<<<x\n', '<<<<<<<x\n'],
+    ['seven = inside a line', 'a ======= b\n', 'a ======= b\n'],
+    ['a comment that is no Haive marker', '<!-- note -->\nx\n', '<!-- note -->\nx\n'],
+    ['the word haive without a comment', 'haive: yes\n', 'haive: yes\n'],
+    [
+      'text over the cap before its trailing spaces are dropped',
+      `${'a'.repeat(CAP - 1)}${' '.repeat(50)}\r\n`,
+      `${'a'.repeat(CAP - 1)}\n`,
+    ],
+    ['exactly the cap in bytes', 'a'.repeat(CAP - 1), `${'a'.repeat(CAP - 1)}\n`],
+    [
+      'exactly the cap in bytes, in multibyte characters',
+      `${'é'.repeat(CAP / 2 - 1)}a`,
+      `${'é'.repeat(CAP / 2 - 1)}a\n`,
+    ],
+  ];
+
+  it.each(ACCEPTED)('stores text with %s', (_what, input, stored) => {
+    expect(normalized(input)).toEqual({ ok: true, value: stored });
+  });
+
+  it('stores what it stored again unchanged, and only text the record can write', () => {
+    for (const [, input] of ACCEPTED) {
+      const first = normalized(input);
+      expect(first.ok).toBe(true);
+      if (!first.ok) continue;
+      expect(normalized(first.value)).toEqual(first);
+      expect(rawTextProblem(first.value)).toBeNull();
+    }
+  });
+
+  const REFUSED: Array<[string, unknown, RegExp]> = [
+    ['a number', 7, /text/],
+    ['null', null, /text/],
+    ['undefined', undefined, /text/],
+    ['a list', ['a'], /text/],
+    ['a NUL', 'a\u0000b', /NUL/],
+    ['a lone high surrogate', 'a\uD83D', /lone surrogate/],
+    ['a lone low surrogate', '\uDC00a', /lone surrogate/],
+    ['an opening Haive marker', '<!-- haive:cli-rules -->\nx\n', /Haive region marker/],
+    ['a closing Haive marker', 'x\n<!-- /haive:rtk-ref -->\n', /Haive region marker/],
+    ['a Haive marker spaced out', 'x <!--\n  /  haive:project-info -->', /Haive region marker/],
+    ['a setext underline of seven =', 'Title\n=======\n', /conflict marker/],
+    ['seven = alone', '=======', /conflict marker/],
+    ['seven = after CRLF', 'a\r\n=======\r\n', /conflict marker/],
+    ['seven = after a lone CR', 'a\r=======\rb', /conflict marker/],
+    ['seven = after U+2028', 'a\u2028=======\nb', /conflict marker/],
+    ['seven = after U+2029', 'a\u2029=======', /conflict marker/],
+    ['seven = once its trailing spaces are dropped', 'a\n=======  \n', /conflict marker/],
+    ['seven = once its trailing tab is dropped', 'a\n=======\t\n', /conflict marker/],
+    ['an ours marker', '<<<<<<< ours\n', /conflict marker/],
+    ['a theirs marker', '>>>>>>> theirs\n', /conflict marker/],
+    ['a base marker', '||||||| base\n', /conflict marker/],
+    ['a bare opening marker', 'x\n<<<<<<<\n', /conflict marker/],
+    ['one byte over the cap', 'a'.repeat(CAP), /64 KiB/],
+    ['two-byte characters, few of them but over the cap in bytes', 'é'.repeat(CAP / 2), /64 KiB/],
+    ['four-byte characters, over the cap in bytes', '😀'.repeat(CAP / 4), /64 KiB/],
+  ];
+
+  it.each(REFUSED)('refuses %s, saying why', (_what, input, reason) => {
+    expect(normalized(input)).toEqual({ ok: false, reason: expect.stringMatching(reason) });
+  });
+
+  it('finds a Haive marker in linear time after a long run of whitespace', () => {
+    const started = performance.now();
+    const refused = normalized(`<!--${'\u00a0'.repeat(100_000)}x`);
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(refused).toEqual({ ok: false, reason: expect.stringMatching(/64 KiB/) });
+  });
+
+  it('names the rule behind a refused marker line', () => {
+    const refused = normalized('x\n=======\n');
+    expect(!refused.ok && refused.reason).toMatch(/exactly seven =, <, > or \|/);
+  });
 });
 
 describe('settingColumnUpdate', () => {
@@ -169,6 +294,17 @@ describe('settingColumnUpdate', () => {
   it('writes nothing for an unknown name or a value no column holds', () => {
     expect(settingColumnUpdate('app-auth', { loginUrl: 'x' })).toBeNull();
     expect(settingColumnUpdate('lsp-servers', 'vtsls')).toBeNull();
+  });
+
+  it('writes the rules override as normalised text, and NULL (the default) for no value', () => {
+    expect(settingColumnUpdate('agent-rules', 'Be brief.\r\n')).toEqual({
+      agentRulesOverride: 'Be brief.\n',
+    });
+    expect(settingColumnUpdate('agent-rules', '')).toEqual({ agentRulesOverride: '' });
+    expect(isUnsettableSetting('agent-rules')).toBe(true);
+    expect(settingColumnUpdate('agent-rules', undefined)).toEqual({ agentRulesOverride: null });
+    expect(settingColumnUpdate('agent-rules', 7)).toBeNull();
+    expect(settingColumnUpdate('agent-rules', 'x\n=======\n')).toBeNull();
   });
 });
 
@@ -198,6 +334,40 @@ describe('intakeSettings', () => {
 
   it('ignores a name that is not portable', () => {
     expect(intakeSettings({ 'app-auth': {}, 'from-the-future': 1 }, {}).incoming).toEqual({});
+  });
+
+  it('takes the checkout’s rules normalised, an empty text included', () => {
+    for (const [text, stored] of [
+      ['a\r\n', 'a\n'],
+      ['', ''],
+    ] as const) {
+      const intake = intakeSettings({ 'agent-rules': text }, { 'agent-rules': 'mine\n' });
+      expect(intake.incoming).toEqual({ 'agent-rules': stored });
+      expect(intake.accepted).toEqual({ 'agent-rules': stored });
+      expect(intake.rejected).toEqual([]);
+    }
+  });
+
+  it('leaves rules no column could hold as this install has them', () => {
+    const intake = intakeSettings({ 'agent-rules': 'a\n=======\n' }, { 'agent-rules': 'mine\n' });
+    expect(intake.incoming).toEqual({ 'agent-rules': 'mine\n' });
+    expect(intake.accepted).toEqual({});
+    expect(intake.rejected).toEqual(['agent-rules']);
+  });
+
+  it('carries no rules where the checkout has none, so the merge sees them unset', () => {
+    const intake = intakeSettings({}, { 'agent-rules': 'mine\n' });
+    expect(Object.hasOwn(intake.incoming, 'agent-rules')).toBe(false);
+    expect(intake.rejected).toEqual([]);
+  });
+});
+
+describe('settingsDifferingFrom', () => {
+  it('tells an empty rules override from none, so the writer writes the empty file', () => {
+    expect(settingsDifferingFrom({ 'agent-rules': '' }, {}, new Set())).toEqual(['agent-rules']);
+    expect(settingsDifferingFrom({ 'agent-rules': '' }, { 'agent-rules': '' }, new Set())).toEqual(
+      [],
+    );
   });
 });
 

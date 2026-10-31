@@ -27,7 +27,6 @@ import {
   PROJECT_INFO_START,
   PROJECT_INFO_END,
   normalizeContent,
-  resolveEffectiveRules,
   sha256Hex,
   unmanagedAgentsDir,
 } from '@haive/shared';
@@ -35,6 +34,7 @@ import { agentFilePath } from '@haive/shared/project-state';
 import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
 import type { CliProviderName } from '../../../cli-adapters/types.js';
 import { mcpSettingsFileContent } from '../../../sandbox/mcp-config.js';
+import { readAgentRulesOverrideRaw } from '../../_agent-rules-override.js';
 import { FALLBACK_AGENT_TARGET } from '../../_render-targets.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
@@ -91,7 +91,7 @@ export interface GenerateFilesDetect {
   customAgentSpecs: AgentSpec[];
   lspLanguages: string[];
   mcpSettingsJson: string;
-  cliProviders: { name: CliProviderName; rulesContent: string }[];
+  cliProviders: { name: CliProviderName }[];
   /** Per-enabled-CLI target for agent file writes. One entry per unique
    *  `projectAgentsDir` — claude-code and zai share `.claude/agents` so
    *  collapse to a single entry. Amp has no file-based agents so it is
@@ -281,6 +281,11 @@ export interface GenerateFilesApply {
    *  existed must still be readable. It then carries no hash and the reset falls back to the
    *  path claim, which is exactly the behaviour that shipped before this field. */
   wroteFileHashes?: Record<string, string>;
+  /** The repository's rules override this run rendered the AGENTS.md region from: read live when it
+   *  wrote it, null for none (the default rules), '' for an empty one (no region). 12 records the
+   *  region from it, so what it records is what was written even if the override moved since.
+   *  OPTIONAL: outputs written before it must still parse, and absent reads as the default. */
+  agentRulesOverride?: string | null;
 }
 
 /** Table-style index listing every agent by `name` and `description`. Mirrors the
@@ -586,19 +591,15 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     const providerRows = await ctx.db
       .select({
         name: schema.cliProviders.name,
-        rulesContent: schema.cliProviders.rulesContent,
         enabled: schema.cliProviders.enabled,
       })
       .from(schema.cliProviders)
       .where(eq(schema.cliProviders.userId, ctx.userId));
+    // The names only: the AGENTS.md rules are the repository's, read live when apply writes them,
+    // never the rules of a provider. Sorted so the output does not depend on cli_providers row order.
     const cliProviders = providerRows
       .filter((p) => p.enabled)
-      .map((p) => ({ name: p.name, rulesContent: resolveEffectiveRules(p.rulesContent) }))
-      // Sort by provider name so the merged cli-rules block (and its hash) is
-      // deterministic regardless of cli_providers row order — required so the
-      // API's drift recompute matches the stored block byte-for-byte. Each
-      // provider's effective rules inherit DEFAULT_AGENT_RULES unless it carries
-      // an explicit override, so template edits flow into onboarding output.
+      .map((p) => ({ name: p.name }))
       .sort((a, b) => a.name.localeCompare(b.name));
 
     const rulesFiles = new Set<string>();
@@ -990,19 +991,27 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
 
     // Agent rules are consolidated into AGENTS.md — the single source of truth
     // every supported CLI reaches: codex/amp/antigravity read AGENTS.md
-    // natively, and claude-code/zai/gemini import it via `@AGENTS.md`. All
-    // enabled providers' rules are merged (trim-equal dedup) into one
-    // haive:cli-rules block appended after the project-info block above; each
-    // import-mode rules file (CLAUDE.md, GEMINI.md) becomes a lone `@AGENTS.md`.
+    // natively, and claude-code/zai/gemini import it via `@AGENTS.md`. The
+    // haive:cli-rules block appended after the project-info block above is the
+    // REPOSITORY's rules (its override, else the default rules), read live here so
+    // what is written is current by definition, and the same for everyone who
+    // onboards it; each import-mode rules file (CLAUDE.md, GEMINI.md) becomes a
+    // lone `@AGENTS.md`.
+    const rulesRepository = await ctx.db
+      .select({ repositoryId: schema.tasks.repositoryId })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, ctx.taskId))
+      .limit(1);
+    const rulesRepositoryId = rulesRepository[0]?.repositoryId ?? null;
+    const agentRulesOverride = rulesRepositoryId
+      ? await readAgentRulesOverrideRaw(ctx.db, rulesRepositoryId)
+      : null;
     const rulesPlan = planRulesFiles(
       detected.cliProviders.map((p) => {
         const adapter = cliAdapterRegistry.get(p.name);
-        return {
-          rulesContent: p.rulesContent,
-          rulesFile: adapter.rulesFile,
-          rulesFileMode: adapter.rulesFileMode,
-        };
+        return { rulesFile: adapter.rulesFile, rulesFileMode: adapter.rulesFileMode };
       }),
+      agentRulesOverride,
     );
     if (rulesPlan.agentsRulesBlock) {
       await appendOrCreate('AGENTS.md', rulesPlan.agentsRulesBlock, CLI_RULES_START, CLI_RULES_END);
@@ -1086,6 +1095,7 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       leftAsIs,
       agentCount: agents.length,
       ...(quarantinedAgentFiles.length > 0 ? { quarantinedAgentFiles } : {}),
+      agentRulesOverride,
       // LAST on purpose. `maybeEnqueueStepSummary` hands the step-summary model
       // `JSON.stringify(output, null, 2).slice(0, 4000)`, and ~90 paths against a 64-char digest
       // is more than twice that budget on its own — declared last, the slice cuts the hashes and

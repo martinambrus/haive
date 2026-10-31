@@ -20,6 +20,7 @@ import type { AppEnv } from '../src/context.js';
 
 const REPO = '00000000-0000-4000-8000-0000000000b1';
 const MARKER = 'render-context-marker-4f1c';
+const RULES_MARKER = 'agent-rules-override-marker-9b2e';
 
 const app = new Hono<AppEnv>();
 app.route('/', repoRoutes);
@@ -58,6 +59,7 @@ function setup() {
       lspLanguages: [],
       rtkChoiceRecorded: true,
     },
+    agentRulesOverride: `${RULES_MARKER}\n`,
   });
   const fetched: Record<string, unknown>[] = [];
   h.db = {
@@ -113,6 +115,21 @@ describe('listing repositories', () => {
     expect(fetched[0]).toHaveProperty('fileTree');
   });
 
+  it('leaves out the AGENTS.md rules override, up to 64 KiB, and does not fetch it', async () => {
+    const { fake, fetched } = setup();
+    expect(fake.rows(schema.repositories)[0]!.agentRulesOverride).toBe(`${RULES_MARKER}\n`);
+
+    const res = await app.request('/');
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const { repositories } = JSON.parse(text) as { repositories: Record<string, unknown>[] };
+    expect(repositories[0]).not.toHaveProperty('agentRulesOverride');
+    expect(text).not.toContain(RULES_MARKER);
+    expect(fetched).toHaveLength(1);
+    expect(fetched[0]).not.toHaveProperty('agentRulesOverride');
+  });
+
   it('still ships the top-level paths the list renders, read from the tree it leaves out', async () => {
     setup();
 
@@ -149,6 +166,21 @@ describe('reading one repository', () => {
     expect(fetched).toHaveLength(1);
     expect(fetched[0]).not.toHaveProperty('renderContext');
     expect(fetched[0]).not.toHaveProperty('fileTree');
+  });
+
+  it('leaves out the AGENTS.md rules override, up to 64 KiB, and does not fetch it', async () => {
+    const { fake, fetched } = setup();
+    expect(fake.rows(schema.repositories)[0]!.agentRulesOverride).toBe(`${RULES_MARKER}\n`);
+
+    const res = await app.request(`/${REPO}`);
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const { repository } = JSON.parse(text) as { repository: Record<string, unknown> };
+    expect(repository).not.toHaveProperty('agentRulesOverride');
+    expect(text).not.toContain(RULES_MARKER);
+    expect(fetched).toHaveLength(1);
+    expect(fetched[0]).not.toHaveProperty('agentRulesOverride');
   });
 
   it('still ships the fields its callers read', async () => {

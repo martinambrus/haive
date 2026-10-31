@@ -237,14 +237,14 @@ describe('renderProjectState and parseProjectState', () => {
 
   it('leave out and list files no kind claims, as a newer release may write them', () => {
     let files = renderProjectState(record());
-    files = withFile(files, 'settings/agent-rules.md', '# rules\n');
+    files = withFile(files, 'settings/other.md', '# rules\n');
     files = withFile(files, 'future/thing.json', '{}\n');
     files = withFile(files, 'artifacts/nested/x.json', '{}\n');
     const parsed = parseProjectState(files);
     expect(parsed.ok && parsed.ignored).toEqual([
       'artifacts/nested/x.json',
       'future/thing.json',
-      'settings/agent-rules.md',
+      'settings/other.md',
     ]);
   });
 
@@ -638,6 +638,132 @@ describe('parseProjectState reads a setting only under a record name', () => {
     );
     const parsed = parseProjectState(files);
     expect(parsed.ok).toBe(false);
+  });
+});
+
+describe('a text setting is its own Markdown file, written and read as given', () => {
+  const RULES = 'agent-rules';
+  const FILE = 'settings/agent-rules.md';
+  const withRules = (text: unknown): ProjectStateRecord => {
+    const r = record();
+    r.settings[RULES] = text;
+    return r;
+  };
+  const block = '```ts\nconst x = 1;\n```\n';
+  const fenced = block.repeat(Math.ceil((64 * 1024) / block.length)).slice(0, 64 * 1024);
+
+  it.each([
+    ['an empty text', ''],
+    ['a text without a newline', 'a'],
+    ['a text with its newline', 'a\n'],
+    ['64 KiB holding fences', fenced],
+    ['text the intake would normalise', '\uFEFFa \r\n\r\n\r\n\r\nb\t\r\n'],
+    ['text past the intake’s cap', 'x'.repeat(65 * 1024)],
+  ])('writes %s verbatim as the .md file, with no .json beside it', (_what, text) => {
+    const files = renderProjectState(withRules(text));
+    expect(files.has(FILE)).toBe(true);
+    expect(files.get(FILE)).toBe(text);
+    expect(files.has('settings/agent-rules.json')).toBe(false);
+  });
+
+  it.each([
+    ['an empty text', ''],
+    ['a text without a newline', 'a'],
+    ['a text with its newline', 'a\n'],
+    ['64 KiB holding fences', fenced],
+    ['CRLF and a BOM', '\uFEFFa\r\nb\r\n'],
+  ])('reads back %s, byte for byte', (_what, text) => {
+    const files = renderProjectState(withRules(text));
+    const parsed = parseProjectState(files);
+    expect(parsed).toMatchObject({ ok: true, ignored: [] });
+    if (!parsed.ok) return;
+    expect(parsed.record.settings[RULES]).toBe(text);
+    expect(renderProjectState(parsed.record)).toEqual(files);
+  });
+
+  it('keeps the other settings as JSON beside it', () => {
+    const files = renderProjectState(withRules('a\n'));
+    expect(files.get('settings/rtk-enabled.json')).toBe('false\n');
+    expect(files.has('settings/scope-exclude-globs.json')).toBe(true);
+  });
+
+  it('takes the value from the .md and lists a planted .json as ignored', () => {
+    const files = withFile(
+      renderProjectState(withRules('real\n')),
+      'settings/agent-rules.json',
+      '"planted"\n',
+    );
+    const parsed = parseProjectState(files);
+    expect(parsed).toMatchObject({ ok: true, ignored: ['settings/agent-rules.json'] });
+    expect(parsed.ok && parsed.record.settings[RULES]).toBe('real\n');
+  });
+
+  it('reads no setting off a .json alone: it is ignored, not the rules', () => {
+    const files = withFile(
+      renderProjectState(record()),
+      'settings/agent-rules.json',
+      '"planted"\n',
+    );
+    const parsed = parseProjectState(files);
+    expect(parsed).toMatchObject({ ok: true, ignored: ['settings/agent-rules.json'] });
+    expect(parsed.ok && Object.hasOwn(parsed.record.settings, RULES)).toBe(false);
+  });
+
+  it('lists a .md for a JSON setting, and one a newer release writes, as ignored', () => {
+    let files = renderProjectState(withRules('a\n'));
+    files = withFile(files, 'settings/rtk-version.md', '1.0.0\n');
+    files = withFile(files, 'settings/other.md', '# other\n');
+    const parsed = parseProjectState(files);
+    expect(parsed).toMatchObject({
+      ok: true,
+      ignored: ['settings/other.md', 'settings/rtk-version.md'],
+    });
+    expect(parsed.ok && parsed.record.settings[RULES]).toBe('a\n');
+    expect(parsed.ok && Object.hasOwn(parsed.record.settings, 'rtk-version')).toBe(false);
+  });
+
+  it.each([
+    ['a number', 7, `${FILE}: is not a string`],
+    ['a list', ['a'], `${FILE}: is not a string`],
+    ['null', null, `${FILE}: holds no value`],
+    ['a NUL', 'a\u0000b', `${FILE}: holds a NUL character`],
+    ['a lone surrogate', 'a\uD800', `${FILE}: holds a lone surrogate`],
+    ['a conflict marker line', 'x\n=======\ny\n', `${FILE}: holds merge conflict markers`],
+    ['a marker line after a CR', 'x\r<<<<<<< ours\r', `${FILE}: holds merge conflict markers`],
+  ])('refuses to write %s, naming the file', (_what, value, problem) => {
+    expect(() => renderProjectState(withRules(value))).toThrow(ProjectStateError);
+    expect(() => renderProjectState(withRules(value))).toThrow(problem);
+  });
+
+  it('refuses a .md holding a NUL, naming it', () => {
+    const files = withFile(renderProjectState(record()), FILE, 'a\u0000b');
+    expect(parseProjectState(files)).toEqual({
+      ok: false,
+      reason: 'invalid',
+      problems: [`${FILE}: holds a NUL character`],
+    });
+  });
+
+  it('refuses a .md holding a lone surrogate, naming it', () => {
+    const files = withFile(renderProjectState(record()), FILE, 'a\uD800');
+    expect(parseProjectState(files)).toEqual({
+      ok: false,
+      reason: 'invalid',
+      problems: [`${FILE}: holds a lone surrogate`],
+    });
+  });
+
+  it('refuses a .md holding conflict markers like any other file, naming it', () => {
+    const files = withFile(
+      renderProjectState(record()),
+      FILE,
+      '<<<<<<< ours\nmine\n=======\ntheirs\n>>>>>>> theirs\n',
+    );
+    expect(parseProjectState(files)).toEqual({
+      ok: false,
+      reason: 'invalid',
+      problems: [`${FILE}: holds merge conflict markers`],
+    });
   });
 });
 

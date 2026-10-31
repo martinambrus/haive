@@ -1,6 +1,7 @@
 import { sameValue, sortedSet } from './canonical.js';
 import { normalizeProjectState } from './codec.js';
 import { bundleFileName, claimFileName } from './names.js';
+import { settingFileName } from './raw-text.js';
 import {
   RENDER_SET_KEYS,
   SET_SETTINGS,
@@ -205,7 +206,7 @@ export function mergeProjectState(input: ProjectStateMergeInput): ProjectStateMe
     ...Object.keys(incoming.settings),
   ]);
   for (const name of names) {
-    const unit = `settings/${name}.json`;
+    const unit = settingFileName(name);
     const b = base?.settings[name];
     const value = SET_SETTINGS.has(name)
       ? mergeSetValue(unit, b, local.settings[name], incoming.settings[name], out)

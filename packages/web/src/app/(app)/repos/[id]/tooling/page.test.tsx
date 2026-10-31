@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
+import { DEFAULT_AGENT_RULES } from '@haive/shared/constants';
 import { Dialog } from '@/components/dialog';
 import { Button, FormError } from '@/components/ui';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
+import { MarkdownEditor } from '@/components/markdown/markdown-editor';
+import { MarkdownView } from '@/components/markdown/markdown-view';
 import { RepositoryIntegrations } from '@/components/integrations/repository-integrations';
 import RepoToolingPage from './page';
 
@@ -47,6 +51,8 @@ type El = ReactElement<{
   open?: boolean;
   message?: string | null;
   repositoryId?: string;
+  body?: string;
+  className?: string;
   onClick?: () => void;
   onChange?: (event: { target: { value?: string; checked?: boolean } }) => void;
   onOpenChange?: (open: boolean) => void;
@@ -114,6 +120,7 @@ const CONFIG = {
   ragEmbedDegradedReason: null,
   ragEmbedLexicalOnly: false,
   pendingRepoMcpServers: null,
+  agentRulesOverride: null,
 };
 
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -148,6 +155,7 @@ async function mount(config: Record<string, unknown> = {}) {
   };
   return {
     draw,
+    all,
     button,
     field,
     dialog,
@@ -862,5 +870,373 @@ describe('the integrations section of the tooling page', () => {
   it('is rendered for this repository once the tooling has loaded', async () => {
     const view = await mount();
     expect(view.integrations()?.props.repositoryId).toBe('repo-1');
+  });
+});
+
+type View = Awaited<ReturnType<typeof mount>>;
+type EditorEl = ReactElement<{
+  value: string;
+  disabled?: boolean;
+  autoFocus?: boolean;
+  onChange: (markdown: string) => void;
+  onBaseline?: (markdown: string) => void;
+}>;
+
+const SAVE_RULES = 'Save AGENTS.md rules';
+const RESET = 'Reset to default';
+const DEFAULT_RADIO = 'agent-rules-mode-default';
+const OVERRIDE_RADIO = 'agent-rules-mode-override';
+const STORED = '# Our rules\n\n- Be kind.\n';
+const NORMALIZED = '# A re-serialized form of the text\n';
+
+const editor = (view: View) =>
+  view.all().find((e) => e.type === MarkdownEditor) as unknown as EditorEl | undefined;
+const defaultBox = (view: View) =>
+  view.all().find((e) => e.type === MarkdownView && e.props.body === DEFAULT_AGENT_RULES);
+const notes = (view: View) =>
+  view
+    .all()
+    .filter((e) => e.type === InlineMarkdown)
+    .map((e) => e.props.body ?? '');
+const formErrors = (view: View) =>
+  view
+    .all()
+    .filter((e) => e.type === FormError)
+    .map((e) => e.props.message)
+    .filter(Boolean);
+const edit = (view: View, markdown: string) => {
+  editor(view)!.props.onChange(markdown);
+  view.draw();
+};
+const saveDisabled = (view: View) => view.button(SAVE_RULES)!.props.disabled === true;
+
+describe('the AGENTS.md rules section', () => {
+  describe('on load', () => {
+    it('follows the default for null: the default text read-only in a bounded box', async () => {
+      const view = await mount({ agentRulesOverride: null });
+      expect(view.field(DEFAULT_RADIO).props.checked).toBe(true);
+      expect(view.field(OVERRIDE_RADIO).props.checked).toBe(false);
+      const box = defaultBox(view);
+      expect(box).toBeDefined();
+      expect(box!.props.className).toMatch(/\bmax-h-/);
+      expect(box!.props.className).toContain('overflow-auto');
+      expect(editor(view)).toBeUndefined();
+    });
+
+    it('shows a stored text as an override held in the editor', async () => {
+      const view = await mount({ agentRulesOverride: STORED });
+      expect(view.field(OVERRIDE_RADIO).props.checked).toBe(true);
+      expect(view.field(DEFAULT_RADIO).props.checked).toBe(false);
+      expect(editor(view)!.props.value).toBe(STORED);
+      // An editor mounted with the page that took focus would scroll the page to this card.
+      expect(editor(view)!.props.autoFocus).toBe(false);
+      expect(defaultBox(view)).toBeUndefined();
+      expect(notes(view).some((n) => n.includes('empty override'))).toBe(false);
+    });
+
+    it('shows an explicit empty override as an override, with the empty note', async () => {
+      const view = await mount({ agentRulesOverride: '' });
+      expect(view.field(OVERRIDE_RADIO).props.checked).toBe(true);
+      expect(editor(view)!.props.value).toBe('');
+      expect(defaultBox(view)).toBeUndefined();
+      expect(notes(view)).toContain('An empty override writes no rules block into `AGENTS.md`.');
+    });
+
+    it('says a default follows Haive updates and an override does not', async () => {
+      const following = notes(await mount());
+      expect(following).toContain(
+        "This repository follows Haive's default rules and picks up their updates.",
+      );
+      const overridden = notes(await mount({ agentRulesOverride: STORED }));
+      expect(overridden).toContain(
+        "This repository no longer follows updates to Haive's default rules.",
+      );
+      expect(overridden.some((n) => n.includes('picks up their updates'))).toBe(false);
+    });
+
+    it.each([null, STORED, ''])(
+      'says once, whatever is stored (%j), how a change reaches AGENTS.md',
+      async (rules) => {
+        const said = notes(await mount({ agentRulesOverride: rules })).filter((n) =>
+          n.includes('next upgrade'),
+        );
+        expect(said).toHaveLength(1);
+        expect(said[0]).toContain('personal CLI rules');
+      },
+    );
+  });
+
+  describe('switching', () => {
+    it('starts an override from the default text and sends nothing', async () => {
+      const view = await mount();
+      view.tick(OVERRIDE_RADIO, true);
+      expect(view.field(OVERRIDE_RADIO).props.checked).toBe(true);
+      expect(editor(view)!.props.value).toBe(DEFAULT_AGENT_RULES);
+      expect(defaultBox(view)).toBeUndefined();
+      expect(api.patch).not.toHaveBeenCalled();
+    });
+
+    it('offers Reset to default only while overriding', async () => {
+      const view = await mount();
+      expect(view.button(RESET)).toBeUndefined();
+      view.tick(OVERRIDE_RADIO, true);
+      expect(view.button(RESET)).toBeDefined();
+    });
+
+    it('keeps an edited draft when the radio goes to Default and back', async () => {
+      const view = await mount();
+      view.tick(OVERRIDE_RADIO, true);
+      edit(view, 'My draft\n');
+      view.tick(DEFAULT_RADIO, true);
+      expect(defaultBox(view)).toBeDefined();
+      expect(editor(view)).toBeUndefined();
+      view.tick(OVERRIDE_RADIO, true);
+      expect(editor(view)!.props.value).toBe('My draft\n');
+      expect(api.patch).not.toHaveBeenCalled();
+    });
+
+    it('discards the draft on Reset to default and sends nothing until Save', async () => {
+      const view = await mount();
+      view.tick(OVERRIDE_RADIO, true);
+      edit(view, 'My draft\n');
+      await view.press(RESET);
+      expect(view.field(DEFAULT_RADIO).props.checked).toBe(true);
+      expect(defaultBox(view)).toBeDefined();
+      expect(api.patch).not.toHaveBeenCalled();
+      view.tick(OVERRIDE_RADIO, true);
+      expect(editor(view)!.props.value).toBe(DEFAULT_AGENT_RULES);
+    });
+
+    it('Reset to default on a stored override is a pending change, saved as null', async () => {
+      const view = await mount({ agentRulesOverride: STORED });
+      expect(saveDisabled(view)).toBe(true);
+      await view.press(RESET);
+      expect(view.field(DEFAULT_RADIO).props.checked).toBe(true);
+      expect(api.patch).not.toHaveBeenCalled();
+      expect(saveDisabled(view)).toBe(false);
+      api.patch.mockResolvedValueOnce({ agentRulesOverride: null });
+      await view.press(SAVE_RULES);
+      expect(api.patch).toHaveBeenCalledTimes(1);
+      expect(api.patch.mock.calls[0]![0]).toBe(TOOLING_PATH);
+      expect(lastBody()).toStrictEqual({ agentRulesOverride: null });
+      expect(view.field(DEFAULT_RADIO).props.checked).toBe(true);
+      expect(defaultBox(view)).toBeDefined();
+    });
+  });
+
+  describe('the rules Save', () => {
+    it('sends the text alone in Override mode', async () => {
+      const view = await mount();
+      api.patch.mockResolvedValueOnce({ agentRulesOverride: 'Custom\n' });
+      view.tick(OVERRIDE_RADIO, true);
+      edit(view, 'Custom\n');
+      await view.press(SAVE_RULES);
+      expect(api.patch).toHaveBeenCalledTimes(1);
+      expect(api.patch.mock.calls[0]![0]).toBe(TOOLING_PATH);
+      expect(lastBody()).toStrictEqual({ agentRulesOverride: 'Custom\n' });
+      expect(api.get).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends the pre-filled default verbatim, never the editor baseline', async () => {
+      const view = await mount();
+      api.patch.mockResolvedValueOnce({ agentRulesOverride: DEFAULT_AGENT_RULES });
+      view.tick(OVERRIDE_RADIO, true);
+      editor(view)!.props.onBaseline!(NORMALIZED);
+      view.draw();
+      await view.press(SAVE_RULES);
+      expect(lastBody()).toStrictEqual({ agentRulesOverride: DEFAULT_AGENT_RULES });
+    });
+
+    it('sends an explicit empty override as the empty string and keeps it an override', async () => {
+      const view = await mount();
+      api.patch.mockResolvedValueOnce({ agentRulesOverride: '' });
+      view.tick(OVERRIDE_RADIO, true);
+      edit(view, '');
+      expect(saveDisabled(view)).toBe(false);
+      await view.press(SAVE_RULES);
+      expect(lastBody()).toStrictEqual({ agentRulesOverride: '' });
+      expect(view.field(OVERRIDE_RADIO).props.checked).toBe(true);
+      expect(editor(view)!.props.value).toBe('');
+      expect(notes(view)).toContain('An empty override writes no rules block into `AGENTS.md`.');
+    });
+
+    it('shows the value the server stored, and restarts the editor from it', async () => {
+      const view = await mount();
+      api.patch.mockResolvedValueOnce({ agentRulesOverride: 'Raw text\n' });
+      view.tick(OVERRIDE_RADIO, true);
+      edit(view, 'Raw text  \r\n\r\n');
+      const before = editor(view)!.key;
+      await view.press(SAVE_RULES);
+      expect(editor(view)!.props.value).toBe('Raw text\n');
+      expect(editor(view)!.key).not.toBe(before);
+      expect(saveDisabled(view)).toBe(true);
+    });
+
+    it('shows an empty override when the server turned whitespace into the empty string', async () => {
+      const view = await mount();
+      api.patch.mockResolvedValueOnce({ agentRulesOverride: '' });
+      view.tick(OVERRIDE_RADIO, true);
+      edit(view, '   ');
+      await view.press(SAVE_RULES);
+      expect(view.field(OVERRIDE_RADIO).props.checked).toBe(true);
+      expect(editor(view)!.props.value).toBe('');
+      expect(defaultBox(view)).toBeUndefined();
+    });
+
+    it('says Saved. after a save and drops it on the next edit', async () => {
+      const view = await mount();
+      api.patch.mockResolvedValueOnce({ agentRulesOverride: 'A\n' });
+      view.tick(OVERRIDE_RADIO, true);
+      edit(view, 'A\n');
+      expect(view.text()).not.toContain('Saved.');
+      await view.press(SAVE_RULES);
+      expect(view.text().match(/Saved\./g)).toHaveLength(1);
+      edit(view, 'A\nB\n');
+      expect(view.text()).not.toContain('Saved.');
+    });
+
+    it('shows a failed save in its own error line and keeps the draft', async () => {
+      const view = await mount();
+      api.patch.mockRejectedValueOnce(new Error('Invalid AGENTS.md rules: holds a NUL character'));
+      view.tick(OVERRIDE_RADIO, true);
+      edit(view, 'Draft\n');
+      await view.press(SAVE_RULES);
+      expect(formErrors(view)).toEqual(['Invalid AGENTS.md rules: holds a NUL character']);
+      expect(view.error()).toBeNull();
+      expect(view.field(OVERRIDE_RADIO).props.checked).toBe(true);
+      expect(editor(view)!.props.value).toBe('Draft\n');
+      expect(view.text()).not.toContain('Saved.');
+      expect(saveDisabled(view)).toBe(false);
+    });
+
+    it('clears the error line when the next attempt succeeds', async () => {
+      const view = await mount();
+      api.patch.mockRejectedValueOnce(new Error('Invalid AGENTS.md rules: holds a NUL character'));
+      api.patch.mockResolvedValueOnce({ agentRulesOverride: 'Draft\n' });
+      view.tick(OVERRIDE_RADIO, true);
+      edit(view, 'Draft\n');
+      await view.press(SAVE_RULES);
+      await view.press(SAVE_RULES);
+      expect(formErrors(view)).toEqual([]);
+      expect(view.text()).toContain('Saved.');
+    });
+  });
+
+  describe('when Save is available', () => {
+    it.each([
+      ['following the default', null],
+      ['an override', STORED],
+      ['an explicit empty override', ''],
+    ])('is disabled while the rules are as loaded (%s)', async (_what, rules) => {
+      const view = await mount({ agentRulesOverride: rules });
+      expect(saveDisabled(view)).toBe(true);
+      await view.press(SAVE_RULES);
+      expect(api.patch).not.toHaveBeenCalled();
+    });
+
+    it('is enabled by a change of mode or of text', async () => {
+      const view = await mount({ agentRulesOverride: STORED });
+      edit(view, `${STORED}- More.\n`);
+      expect(saveDisabled(view)).toBe(false);
+      edit(view, STORED);
+      expect(saveDisabled(view)).toBe(true);
+      view.tick(DEFAULT_RADIO, true);
+      expect(saveDisabled(view)).toBe(false);
+    });
+
+    it('does not read the editor re-serializing the loaded text as an edit', async () => {
+      const view = await mount({ agentRulesOverride: STORED });
+      editor(view)!.props.onBaseline!(NORMALIZED);
+      view.draw();
+      edit(view, NORMALIZED);
+      expect(saveDisabled(view)).toBe(true);
+      edit(view, `${NORMALIZED}More.\n`);
+      expect(saveDisabled(view)).toBe(false);
+    });
+
+    it('does not let the baseline of an editor started from the default hide a change', async () => {
+      const view = await mount({ agentRulesOverride: '' });
+      view.tick(DEFAULT_RADIO, true);
+      view.tick(OVERRIDE_RADIO, true);
+      editor(view)!.props.onBaseline!(NORMALIZED);
+      view.draw();
+      edit(view, NORMALIZED);
+      expect(saveDisabled(view)).toBe(false);
+    });
+
+    it('is disabled while a save is out, which also locks the editor and the radios', async () => {
+      let finish!: (value: unknown) => void;
+      api.patch.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+      const view = await mount();
+      view.tick(OVERRIDE_RADIO, true);
+      view.button(SAVE_RULES)!.props.onClick!();
+      view.draw();
+      const saving = view.button('Saving...')!;
+      expect(saving.props.disabled).toBe(true);
+      expect(editor(view)!.props.disabled).toBe(true);
+      expect(view.field(OVERRIDE_RADIO).props.disabled).toBe(true);
+      expect(view.field(DEFAULT_RADIO).props.disabled).toBe(true);
+      expect(view.button(RESET)!.props.disabled).toBe(true);
+      saving.props.onClick!();
+      expect(api.patch).toHaveBeenCalledTimes(1);
+      finish({ agentRulesOverride: DEFAULT_AGENT_RULES });
+      await flush();
+      view.draw();
+      expect(saveDisabled(view)).toBe(true);
+      expect(editor(view)!.props.disabled).toBe(false);
+    });
+  });
+});
+
+describe('Save tooling and the AGENTS.md rules', () => {
+  const SAVE_TOOLING = 'Save tooling';
+  const sentNoRules = () => {
+    expect(lastBody()).not.toHaveProperty('agentRulesOverride');
+    expect(JSON.stringify(lastBody())).not.toContain('agentRules');
+  };
+
+  it.each([
+    ['following the default', null],
+    ['an override', '# Ours\n'],
+    ['an explicit empty override', ''],
+  ])('sends no agentRulesOverride while the repository is %s', async (_what, rules) => {
+    const view = await mount({ agentRulesOverride: rules });
+    await view.press(SAVE_TOOLING);
+    expect(api.patch).toHaveBeenCalledTimes(1);
+    expect(api.patch.mock.calls[0]![0]).toBe(TOOLING_PATH);
+    sentNoRules();
+  });
+
+  it('sends none while an override is started and edited but not saved', async () => {
+    const view = await mount();
+    view.tick(OVERRIDE_RADIO, true);
+    edit(view, 'Unsaved draft\n');
+    await view.press(SAVE_TOOLING);
+    sentNoRules();
+    expect(view.field(OVERRIDE_RADIO).props.checked).toBe(true);
+    expect(editor(view)!.props.value).toBe('Unsaved draft\n');
+    expect(saveDisabled(view)).toBe(false);
+  });
+
+  it('sends none while a stored override is switched back to Default but not saved', async () => {
+    const view = await mount({ agentRulesOverride: STORED });
+    await view.press(RESET);
+    await view.press(SAVE_TOOLING);
+    sentNoRules();
+    expect(view.field(DEFAULT_RADIO).props.checked).toBe(true);
+    expect(saveDisabled(view)).toBe(false);
+  });
+
+  it('sends none after the rules were saved either', async () => {
+    const view = await mount();
+    api.patch.mockResolvedValueOnce({ agentRulesOverride: 'Custom\n' });
+    view.tick(OVERRIDE_RADIO, true);
+    edit(view, 'Custom\n');
+    await view.press(SAVE_RULES);
+    api.patch.mockClear();
+    await view.press(SAVE_TOOLING);
+    expect(api.patch).toHaveBeenCalledTimes(1);
+    sentNoRules();
+    expect(editor(view)!.props.value).toBe('Custom\n');
   });
 });

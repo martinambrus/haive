@@ -7,6 +7,15 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import {
+  buildRepoCliRulesBlock,
+  CLI_RULES_END,
+  CLI_RULES_START,
+  CLI_RULES_TEMPLATE_ID,
+  extractRegion,
+  normalizeContent,
+  sha256Hex,
+} from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { postOnboardingStep } from '../src/step-engine/steps/onboarding/12-post-onboarding.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
@@ -39,9 +48,21 @@ const DETECT = {
 
 /** Step 12 on a repository onboarded with the DETECT above, whose artifact recording is made to fail
  *  after the render context exists: the database refuses the artifact rows. */
-async function setup(failure: 'none' | 'artifact-rows', detect: Record<string, unknown> = DETECT) {
+async function setup(
+  failure: 'none' | 'artifact-rows',
+  detect: Record<string, unknown> = DETECT,
+  rules: {
+    /** What 07's apply returned. */
+    output?: Record<string, unknown>;
+    /** `repositories.agent_rules_override` as it stands when 12 runs. */
+    liveOverride?: string | null;
+    /** The AGENTS.md on disk. */
+    agentsMd?: string;
+  } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), 'post-onboarding-record-'));
   dirs.push(root);
+  if (rules.agentsMd !== undefined) await writeFile(join(root, 'AGENTS.md'), rules.agentsMd);
   // No plan tables: the plan mirror warns and the record does not depend on it.
   const fake = createFakeDb({
     tasks: schema.tasks,
@@ -56,7 +77,13 @@ async function setup(failure: 'none' | 'artifact-rows', detect: Record<string, u
     projectStateOutbox: schema.projectStateOutbox,
     projectStateConflicts: schema.projectStateConflicts,
   });
-  fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'upload' });
+  fake.insert(schema.repositories, {
+    id: REPO,
+    userId: USER,
+    name: 'acme',
+    source: 'upload',
+    agentRulesOverride: rules.liveOverride ?? null,
+  });
   fake.insert(schema.tasks, {
     id: TASK,
     userId: USER,
@@ -72,6 +99,7 @@ async function setup(failure: 'none' | 'artifact-rows', detect: Record<string, u
     title: 'Generate files',
     status: 'done',
     detectOutput: detect,
+    ...(rules.output ? { output: rules.output } : {}),
   });
   if (failure === 'artifact-rows') {
     fake.hooks.beforeInsert = (table) => {
@@ -158,6 +186,68 @@ describe('12 writes the project state record whatever the artifact recording did
     await recordWritten(s.apply());
 
     expect(s.column()).toMatchObject({ rtkEnabled: false, rtkChoiceRecorded: false });
+  });
+});
+
+describe('12 records the cli-rules region from the override 07 wrote it from', () => {
+  const hashOf = (text: string) => sha256Hex(normalizeContent(text));
+  const regionOf = (override: string | null) => buildRepoCliRulesBlock(override) as string;
+  const agentsMd = (override: string | null) =>
+    `# Project\n\n${regionOf(override)}\nNotes of our own.\n`;
+  const cliRulesRows = (s: Awaited<ReturnType<typeof setup>>) =>
+    s.liveRows().filter((r) => r.templateId === CLI_RULES_TEMPLATE_ID);
+
+  it('records the region 07 wrote though the live override moved since, and says nothing of it', async () => {
+    const s = await setup('none', DETECT, {
+      output: { wroteFiles: [], skippedFiles: [], agentRulesOverride: '- the rule 07 wrote' },
+      liveOverride: '- a rule set after 07',
+      agentsMd: agentsMd('- the rule 07 wrote'),
+    });
+
+    const out = await recordWritten(s.apply());
+
+    expect(out.artifactRowsWritten).toBeGreaterThan(0);
+    expect(out.warnings.filter((w) => w.includes('onboarding-artifacts'))).toEqual([]);
+    const [row, ...more] = cliRulesRows(s);
+    expect(more).toEqual([]);
+    const onDisk = extractRegion(
+      await readFile(join(s.root, 'AGENTS.md'), 'utf8'),
+      CLI_RULES_START,
+      CLI_RULES_END,
+    );
+    expect(onDisk).not.toBeNull();
+    expect(row).toMatchObject({
+      diskPath: 'AGENTS.md',
+      source: 'onboarding',
+      writtenHash: hashOf(onDisk!),
+      templateContentHash: hashOf(onDisk!),
+    });
+    expect(row!.writtenHash).toBe(hashOf(regionOf('- the rule 07 wrote')));
+  });
+
+  it('reads the default rules from an output that carries no override', async () => {
+    const s = await setup('none', DETECT, {
+      output: { wroteFiles: [], skippedFiles: [] },
+      liveOverride: '- a rule set after 07',
+      agentsMd: agentsMd(null),
+    });
+
+    await recordWritten(s.apply());
+
+    expect(cliRulesRows(s).map((r) => r.writtenHash)).toEqual([hashOf(regionOf(null))]);
+  });
+
+  it('records no region for an empty override, and leaves a region standing there unclaimed', async () => {
+    const s = await setup('none', DETECT, {
+      output: { wroteFiles: [], skippedFiles: [], agentRulesOverride: '' },
+      liveOverride: '- a rule set after 07',
+      agentsMd: agentsMd(null),
+    });
+
+    const out = await recordWritten(s.apply());
+
+    expect(out.artifactRowsWritten).toBeGreaterThan(0);
+    expect(cliRulesRows(s)).toEqual([]);
   });
 });
 

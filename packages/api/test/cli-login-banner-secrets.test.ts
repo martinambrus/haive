@@ -13,6 +13,7 @@ const h = vi.hoisted(() => ({
   attach: vi.fn(),
   start: vi.fn(),
   remove: vi.fn(),
+  resize: vi.fn(),
   probe: vi.fn(),
   exec: vi.fn(),
   queueError: undefined as Error | undefined,
@@ -88,6 +89,7 @@ beforeEach(() => {
   h.attach.mockReset();
   h.start.mockReset().mockResolvedValue(undefined);
   h.remove.mockReset().mockResolvedValue(undefined);
+  h.resize.mockReset().mockResolvedValue(undefined);
   h.exec.mockReset().mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' });
   h.queueError = undefined;
   h.createError = undefined;
@@ -128,7 +130,7 @@ afterEach(async () => {
 async function start(query = '', attached = true, providerId = PROVIDER) {
   const server = new EventEmitter();
   const docker = {
-    getContainer: () => ({ start: h.start, remove: h.remove, resize: async () => {} }),
+    getContainer: () => ({ start: h.start, remove: h.remove, resize: h.resize }),
   } as unknown as Docker;
   installCliLoginBannerWebSocket(server as Server, { docker });
   // The shared upgrade guard listens on the socket and the session registry tracks req.socket.
@@ -424,6 +426,21 @@ describe('Claude OAuth token capture controls', () => {
     },
   );
 
+  const sgr0 = `${TOKEN}\x1b(B\x1b[m\r\n\r\n`;
+  it.each(Array.from({ length: sgr0.length - 1 }, (_, i) => i + 1))(
+    'a charset designation after the token leaves no extra character on it, split at offset %i',
+    async (offset) => {
+      await ready();
+      stream.emit('data', Buffer.from(sgr0.slice(0, offset)));
+      stream.emit('data', Buffer.from(sgr0.slice(offset)));
+      await settle();
+      expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === TOKEN).toBe(
+        true,
+      );
+      assertNoCredentialText(TOKEN, CODE);
+    },
+  );
+
   it('fix-round1 F1 clears an incomplete escape when the user pastes again', async () => {
     await ready();
     stream.emit('data', Buffer.from('\x1b]unfinished'));
@@ -665,7 +682,10 @@ describe('CLI login banner credential logging', () => {
       await start('', source !== 'queue');
       if (source === 'stream') stream.emit('error', err);
       if (source === 'probe')
-        stream.emit('data', Buffer.from('https://accounts.x.ai/oauth2/device\n\nSigned in\n'));
+        stream.emit(
+          'data',
+          Buffer.from(`https://accounts.x.ai/oauth2/device?user_code=${CODE}\n\nSigned in\n`),
+        );
       await settle();
       const sent = JSON.stringify(ws.send.mock.calls);
       expect(ws.send.mock.calls.some(([raw]) => JSON.parse(raw).type === 'error')).toBe(true);
@@ -696,7 +716,10 @@ describe('CLI login banner credential logging', () => {
     providerName = 'grok';
     h.probeError = 'synthetic non-Error rejection';
     await start();
-    stream.emit('data', Buffer.from('https://accounts.x.ai/oauth2/device\n\nSigned in\n'));
+    stream.emit(
+      'data',
+      Buffer.from(`https://accounts.x.ai/oauth2/device?user_code=${CODE}\n\nSigned in\n`),
+    );
     await settle();
     expect(
       ws.send.mock.calls.some(([raw]) => {
@@ -797,7 +820,10 @@ describe('CLI login banner credential logging', () => {
       await start('', source !== 'queue');
       if (source === 'stream') stream.emit('error', new Error(message));
       if (source === 'probe') {
-        stream.emit('data', Buffer.from('https://accounts.x.ai/oauth2/device\n\nSigned in\n'));
+        stream.emit(
+          'data',
+          Buffer.from(`https://accounts.x.ai/oauth2/device?user_code=${CODE}\n\nSigned in\n`),
+        );
       }
       await settle();
       expect(
@@ -940,6 +966,88 @@ describe('CLI login banner startup cleanup', () => {
   });
 });
 
+describe('CLI login banner antigravity PTY size', () => {
+  const SIZE = { h: 40, w: 120 };
+
+  it('sizes the PTY at 250 ms and again at 1200 ms while the session is alive', async () => {
+    providerName = 'antigravity';
+    await start();
+    await vi.advanceTimersByTimeAsync(249);
+    expect(h.resize).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.resize.mock.calls).toEqual([[SIZE]]);
+    await vi.advanceTimersByTimeAsync(949);
+    expect(h.resize.mock.calls.length).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.resize.mock.calls).toEqual([[SIZE], [SIZE]]);
+  });
+
+  it('closing the dialog before 250 ms leaves no timer and no resize', async () => {
+    providerName = 'antigravity';
+    await start();
+    ws.close();
+    await settle();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(h.resize).not.toHaveBeenCalled();
+  });
+
+  it('closing the dialog between 250 and 1200 ms leaves one resize and no timer', async () => {
+    providerName = 'antigravity';
+    await start();
+    await vi.advanceTimersByTimeAsync(250);
+    ws.close();
+    await settle();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(h.resize.mock.calls).toEqual([[SIZE]]);
+  });
+});
+
+describe('CLI login banner token paste', () => {
+  // The Enter is its own write 150 ms after the code, so the CLI's input registers the paste first.
+  // A write to a stream that has ended does not throw: it is an 'error' event on that stream.
+  function watchStream() {
+    const errors: unknown[] = [];
+    stream.on('error', (err) => errors.push(err));
+    const write = vi.spyOn(stream, 'write');
+    return {
+      codes: () => write.mock.calls.map(([chunk]) => chunk === CODE),
+      enters: () => write.mock.calls.filter(([chunk]) => chunk === '\r').length,
+      errors: () => errors.length,
+    };
+  }
+
+  it('writes the code, then Enter 150 ms later', async () => {
+    await start();
+    const seen = watchStream();
+    paste();
+    expect(seen.codes()).toEqual([true]);
+    await vi.advanceTimersByTimeAsync(149);
+    expect(seen.enters()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(seen.enters()).toBe(1);
+    expect(seen.errors()).toBe(0);
+  });
+
+  it.each(['the dialog closes', 'the stream ends'])(
+    'writes no Enter to the ended stream when %s before it is due',
+    async (when) => {
+      await start();
+      const seen = watchStream();
+      paste();
+      if (when === 'the stream ends') stream.emit('end');
+      else ws.close();
+      await settle();
+      expect(stream.writableEnded).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(150);
+      expect(seen.enters()).toBe(0);
+      expect(seen.errors()).toBe(0);
+    },
+  );
+});
+
 describe('CLI login banner auth URL chunking', () => {
   // Synthetic, ~200 characters, hard-wrapped at 80 columns the way the CLI's PTY prints it.
   const CLAUDE_URL =
@@ -950,9 +1058,11 @@ describe('CLI login banner auth URL chunking', () => {
     CLAUDE_URL.slice(i * 80, (i + 1) * 80),
   );
   const AMP_CODE = 'QRST-2468';
+  const CODEX_CODE = 'ABCD-12345';
 
   // `body` is the URL as printed (wraps and colour included) and `end` what has to follow it before
-  // it is known to be complete, so `done` is the offset into `raw` from which it is sent.
+  // it is known to be complete; `codeEnd` is where a device code printed in `rest` is. `done` is the
+  // offset into `raw` from which the frame is sent.
   const banner = (spec: {
     label: string;
     provider: CliProviderName;
@@ -963,10 +1073,21 @@ describe('CLI login banner auth URL chunking', () => {
     rest: string;
     tokenPaste?: boolean;
     deviceCode?: string;
+    codeEnd?: string;
   }) => {
     const body = spec.body ?? spec.url;
     const printed = spec.head + body + spec.end;
-    return { ...spec, body, raw: printed + spec.rest, done: printed.length };
+    const codePart =
+      spec.codeEnd === undefined
+        ? ''
+        : spec.rest.slice(0, spec.rest.indexOf(spec.codeEnd) + spec.codeEnd.length);
+    return {
+      ...spec,
+      body,
+      raw: printed + spec.rest,
+      codePart,
+      done: printed.length + codePart.length,
+    };
   };
   type Banner = ReturnType<typeof banner>;
 
@@ -986,8 +1107,10 @@ describe('CLI login banner auth URL chunking', () => {
     url: 'https://auth.openai.com/codex/device',
     head: '1. Open this link in your browser and sign in to your account\r\n   \x1b[94m',
     end: '\x1b[0m\r\n\r\n',
-    rest: '2. Enter this one-time code (expires in 15 minutes)\r\n   \x1b[94mABCD-12345\x1b[0m\r\n',
+    rest: `2. Enter this one-time code (expires in 15 minutes)\r\n   \x1b[94m${CODEX_CODE}\x1b[0m\r\n`,
     tokenPaste: false,
+    deviceCode: CODEX_CODE,
+    codeEnd: `${CODEX_CODE}\x1b[0m`,
   });
   const GROK = banner({
     label: 'grok device login',
@@ -1033,14 +1156,20 @@ describe('CLI login banner auth URL chunking', () => {
 
   const frames = () => ws.send.mock.calls.map(([raw]) => JSON.parse(raw));
   const authUrlFrames = () => frames().filter((frame) => frame.type === 'auth-url');
-  function expectOneAuthUrl(b: Banner) {
+  // `delivered` is the output the session was given: the frame carries the device code exactly when
+  // that output had it.
+  function expectOneAuthUrl(b: Banner, delivered = b.raw) {
     const sent = authUrlFrames();
     expect(sent.length).toBe(1);
     expect(sent[0]?.url?.length).toBe(b.url.length);
     expect(sent[0]?.url === b.url).toBe(true);
     expect(sent[0]?.tokenPaste).toBe(b.tokenPaste);
-    if (b.deviceCode) expect(sent[0]?.deviceCode === b.deviceCode).toBe(true);
+    if (b.deviceCode) {
+      const expected = delivered.includes(b.deviceCode) ? b.deviceCode : undefined;
+      expect(sent[0]?.deviceCode === expected).toBe(true);
+    }
     if (b.provider === 'grok') assertNoCredentialText(CODE);
+    if (b.provider === 'codex') assertNoCredentialText(CODEX_CODE);
   }
 
   const splits = banners.flatMap((b) =>
@@ -1071,6 +1200,7 @@ describe('CLI login banner auth URL chunking', () => {
     ['a blank line', '\n\n'],
     ['CRLF CRLF', '\r\n\r\n'],
     ['a closing colour then CRLF CRLF', '\x1b[39m\r\n\r\n'],
+    ['a charset designation then CRLF CRLF', '\x1b(B\r\n\r\n'],
     ['a prose line right after', '\nprose here\n'],
     ['prose on the same line', ' trailing prose'],
   ] as const;
@@ -1079,7 +1209,7 @@ describe('CLI login banner auth URL chunking', () => {
     async (c) => {
       providerName = c.provider;
       await start();
-      stream.emit('data', Buffer.from(c.head + c.url + c.tail));
+      stream.emit('data', Buffer.from(c.head + c.url + c.tail + c.codePart));
       expectOneAuthUrl(c);
     },
   );
@@ -1099,7 +1229,7 @@ describe('CLI login banner auth URL chunking', () => {
       expect(authUrlFrames().length).toBe(0);
       stream.emit('end');
       await settle();
-      expectOneAuthUrl(c);
+      expectOneAuthUrl(c, c.head + c.body + c.tail);
       const types = frames().map((frame) => frame.type);
       expect(types.indexOf('exit')).toBeGreaterThan(types.indexOf('auth-url'));
     },
@@ -1159,6 +1289,97 @@ describe('CLI login banner auth URL chunking', () => {
     await vi.advanceTimersByTimeAsync(5000);
     expect(authUrlFrames().length).toBe(1);
   });
+
+  const codexUrlOnly = CODEX.head + CODEX.body + CODEX.end;
+  const codexCutCode = CODEX.raw.slice(0, CODEX.raw.indexOf(CODEX_CODE) + CODEX_CODE.length - 1);
+
+  it('codex: a URL with no code line after it is sent without a code one second after it first appeared', async () => {
+    providerName = 'codex';
+    await start();
+    stream.emit('data', Buffer.from(codexUrlOnly));
+    await vi.advanceTimersByTimeAsync(999);
+    expect(authUrlFrames().length).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expectOneAuthUrl(CODEX, codexUrlOnly);
+  });
+
+  it('codex: output that stops inside the code sends the code as it stands one second after the URL first appeared', async () => {
+    providerName = 'codex';
+    await start();
+    stream.emit('data', Buffer.from(codexCutCode));
+    await vi.advanceTimersByTimeAsync(999);
+    expect(authUrlFrames().length).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(authUrlFrames().length).toBe(1);
+    expect(authUrlFrames()[0]?.deviceCode === CODEX_CODE.slice(0, -1)).toBe(true);
+    assertNoCredentialText(CODEX_CODE);
+  });
+
+  it('codex: the stream ending while the frame waits for the code sends it first, then exit', async () => {
+    providerName = 'codex';
+    await start();
+    stream.emit('data', Buffer.from(codexUrlOnly));
+    expect(authUrlFrames().length).toBe(0);
+    stream.emit('end');
+    await settle();
+    expectOneAuthUrl(CODEX, codexUrlOnly);
+    const types = frames().map((frame) => frame.type);
+    expect(types.indexOf('exit')).toBeGreaterThan(types.indexOf('auth-url'));
+  });
+
+  it('codex: one timer covers an open URL that later ends without a code, counted from its first sight', async () => {
+    providerName = 'codex';
+    await start();
+    const idle = vi.getTimerCount();
+    stream.emit('data', Buffer.from(CODEX.head + CODEX.body));
+    expect(vi.getTimerCount()).toBe(idle + 1);
+    await vi.advanceTimersByTimeAsync(600);
+    stream.emit('data', Buffer.from(CODEX.end));
+    expect(authUrlFrames().length).toBe(0);
+    expect(vi.getTimerCount()).toBe(idle + 1);
+    await vi.advanceTimersByTimeAsync(399);
+    expect(authUrlFrames().length).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expectOneAuthUrl(CODEX, codexUrlOnly);
+    expect(vi.getTimerCount()).toBe(idle);
+  });
+
+  it('codex: the wait is cleared when the code ends in time', async () => {
+    providerName = 'codex';
+    await start();
+    const idle = vi.getTimerCount();
+    stream.emit('data', Buffer.from(codexUrlOnly));
+    expect(vi.getTimerCount()).toBe(idle + 1);
+    await vi.advanceTimersByTimeAsync(500);
+    stream.emit('data', Buffer.from(CODEX.codePart));
+    expectOneAuthUrl(CODEX, codexUrlOnly + CODEX.codePart);
+    expect(vi.getTimerCount()).toBe(idle);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(authUrlFrames().length).toBe(1);
+  });
+
+  it('codex: closing the dialog while the frame waits for the code leaves no timer behind', async () => {
+    providerName = 'codex';
+    await start();
+    const idle = vi.getTimerCount();
+    stream.emit('data', Buffer.from(codexUrlOnly));
+    expect(vi.getTimerCount()).toBe(idle + 1);
+    ws.close();
+    await settle();
+    expect(vi.getTimerCount()).toBe(0);
+    stream.emit('data', Buffer.from('abc'));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([GROK, AMP_DEVICE])(
+    '$label: a code inside the URL does not hold the frame back',
+    async (b) => {
+      providerName = b.provider;
+      await start();
+      stream.emit('data', Buffer.from(b.head + b.body + b.end));
+      expectOneAuthUrl(b);
+    },
+  );
 
   it.each([CLAUDE, CODEX, GROK])(
     '$label: closing the dialog inside the URL leaves no timer behind',
@@ -1288,5 +1509,35 @@ describe('CLI login banner auth URL chunking', () => {
     expect(write).not.toHaveBeenCalledWith('\r');
     release();
     await settle();
+  });
+
+  it('antigravity: output with no URL in it presses Enter once, 1.5 s after it stops', async () => {
+    providerName = 'antigravity';
+    await start();
+    const write = vi.spyOn(stream, 'write');
+    stream.emit('data', Buffer.from('Select a login method\n'));
+    await vi.advanceTimersByTimeAsync(1499);
+    expect(write).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(write.mock.calls).toEqual([['\r']]);
+  });
+
+  it('antigravity: output after the session ended arms no menu-advance timer', async () => {
+    providerName = 'antigravity';
+    await start();
+    ws.close();
+    await settle();
+    expect(vi.getTimerCount()).toBe(0);
+    stream.emit('data', Buffer.from('Select a login method\n'));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('antigravity: oauth2 output after the session ended is not logged as not extracted', async () => {
+    providerName = 'antigravity';
+    await start();
+    ws.close();
+    await settle();
+    stream.emit('data', Buffer.from('oauth2 consent screen\n'));
+    expect(notExtracted()).toBe(0);
   });
 });

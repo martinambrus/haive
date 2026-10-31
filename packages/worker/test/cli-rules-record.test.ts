@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildCliRulesBlock,
+  buildRepoCliRulesBlock,
   CLI_RULES_END,
   CLI_RULES_START,
   extractRegion,
@@ -31,6 +32,18 @@ describe('cliRulesRegionRecord', () => {
       content: onDisk(older),
       templateContentHash: hash(older),
       writtenHash: hash(older),
+      haiveWritten: true,
+    });
+  });
+
+  it('claims the region of the default rules once the repository override moved to text', () => {
+    const defaults = buildRepoCliRulesBlock(null) as string;
+    const override = buildRepoCliRulesBlock('- the repository rule') as string;
+    expect(override).not.toBe(defaults);
+    expect(cliRulesRegionRecord(onDisk(defaults), override, new Set([hash(defaults)]))).toEqual({
+      content: onDisk(defaults),
+      templateContentHash: hash(defaults),
+      writtenHash: hash(defaults),
       haiveWritten: true,
     });
   });

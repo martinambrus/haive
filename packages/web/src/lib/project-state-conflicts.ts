@@ -32,6 +32,9 @@ export function inlineCode(raw: string): string {
 
 const STATE_DIR = '.haive-data/state';
 
+/** The record file of the AGENTS.md rules override, the one setting whose value is raw text. */
+const AGENT_RULES_UNIT = 'settings/agent-rules.md';
+
 /** The record file a question's answer writes: the unit's own, or the render file. */
 export const recordFileOf = (unit?: string): string => {
   if (unit === undefined) return RECORD_FILE;
@@ -133,12 +136,21 @@ function settingMarkdown(value: unknown): string | null {
   return null;
 }
 
+/** The other install's text is data: one fenced block, never live markdown, and its newlines stay. */
+function agentRulesMarkdown(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  return value === ''
+    ? 'An empty override: no rules block is written.'
+    : fencedCode(value, 'markdown');
+}
+
 export function conflictSideMarkdown(side: ConflictSideBody, unit?: string): string {
   if (!side.present) return 'Not set.';
   const plan = unit === undefined ? null : parsePlanConflictUnit(unit);
   if (plan) return planSideMarkdown(plan.field, side.value);
   if (unit !== undefined && isSettingUnit(unit)) {
-    const text = settingMarkdown(side.value);
+    const text =
+      unit === AGENT_RULES_UNIT ? agentRulesMarkdown(side.value) : settingMarkdown(side.value);
     if (text !== null) return text;
   }
   if (unit !== undefined && isClaimUnit(unit)) {

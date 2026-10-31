@@ -376,6 +376,7 @@ describe('GRID: the contexts 01 renders from, in full', () => {
       live: true,
     });
     expect(Object.keys(detected).sort()).toEqual([
+      'agentRulesOverride',
       'cliAdditions',
       'counts',
       'currentTemplateSetHash',

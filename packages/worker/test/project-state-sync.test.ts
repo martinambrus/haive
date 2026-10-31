@@ -2073,6 +2073,315 @@ describe('syncProjectStateFromCheckout: the portable settings and the environmen
   });
 });
 
+describe('syncProjectStateFromCheckout: the agent-rules text setting', () => {
+  const NAME = 'agent-rules';
+  const UNIT = 'settings/agent-rules.md';
+  const FILE = `${STATE_DIR}/${UNIT}`;
+  const T = '# House rules\n\n- Keep it small.\n';
+  const T2 = '# House rules\n\n- Keep it small.\n- Mine.\n';
+  const U = '# House rules\n\n- Keep it small.\n- Theirs.\n';
+  const rulesOf = (s: Setup): unknown => repoRow(s).agentRulesOverride ?? null;
+  const baseSettings = (s: Setup): Json =>
+    ((json(s.syncRow()?.baseSnapshot) as Json).settings ?? {}) as Json;
+  const seeded = (base: Record<string, unknown>): Seed => ({
+    column: column(BASE),
+    sync: { base: syncBase(base) },
+  });
+  const holding = (s: Setup, text: string | null) =>
+    s.fake.patch(schema.repositories, REPO, { agentRulesOverride: text });
+
+  it('imports nothing where neither the column nor the checkout holds it', async () => {
+    const s = await setup();
+    await s.putRecord(withSettings({ 'rtk-version': '0.1.0' }));
+
+    await s.run();
+
+    expect(rulesOf(s)).toBeNull();
+    expect(baseSettings(s)).toEqual({ 'rtk-version': '0.1.0' });
+    expect(s.pending()).toEqual([]);
+  });
+
+  it('first sync with no base: the checkout text goes to the column and the base, and the next sync writes nothing', async () => {
+    const s = await setup();
+    await s.putRecord(withSettings({ [NAME]: T }));
+
+    const first = await s.run();
+
+    expect(first.outcome).toBe('applied');
+    expect(rulesOf(s)).toBe(T);
+    expect(baseSettings(s)).toEqual({ [NAME]: T });
+    expect(dirtyMarks(s)).toEqual([]);
+    const before = s.dump();
+
+    const second = await s.run();
+
+    expect(second.outcome).toBe('unchanged');
+    expect(second.trace.filter(isWrite)).toEqual([]);
+    expect(s.dump()).toEqual(before);
+  });
+
+  it('first sync with no base: the checkout text wins over an override typed here, as for every setting', async () => {
+    const s = await setup();
+    holding(s, T2);
+    await s.putRecord(withSettings({ [NAME]: U }));
+
+    await s.run();
+
+    expect(rulesOf(s)).toBe(U);
+    expect(baseSettings(s)).toEqual({ [NAME]: U });
+    expect(s.pending()).toEqual([]);
+  });
+
+  it('imports the text where the base holds other settings only', async () => {
+    const s = await setup(seeded({ 'rtk-version': '0.1.0' }));
+    s.fake.patch(schema.repositories, REPO, { rtkVersion: '0.1.0' });
+    await s.putRecord(withSettings({ 'rtk-version': '0.1.0', [NAME]: T }));
+
+    await s.run();
+
+    expect(rulesOf(s)).toBe(T);
+    expect(baseSettings(s)).toEqual({ 'rtk-version': '0.1.0', [NAME]: T });
+    expect(s.pending()).toEqual([]);
+  });
+
+  it('unsets the override where the other install reset it and nobody changed it here', async () => {
+    const s = await setup(seeded({ [NAME]: T }));
+    holding(s, T);
+    await s.putRecord(withSettings({}));
+
+    await s.run();
+
+    expect(rulesOf(s)).toBeNull();
+    expect(baseSettings(s)).toEqual({});
+    expect(s.pending()).toEqual([]);
+  });
+
+  it('takes the other install’s edit where nobody changed the text here', async () => {
+    const s = await setup(seeded({ [NAME]: T }));
+    holding(s, T);
+    await s.putRecord(withSettings({ [NAME]: U }));
+
+    await s.run();
+
+    expect(rulesOf(s)).toBe(U);
+    expect(baseSettings(s)).toEqual({ [NAME]: U });
+    expect(s.pending()).toEqual([]);
+  });
+
+  it('keeps a change made here and asks the writer to bring the file to it', async () => {
+    const s = await setup(seeded({ [NAME]: T }));
+    holding(s, T2);
+    await s.putRecord(withSettings({ [NAME]: T }));
+
+    await s.run();
+
+    expect(rulesOf(s)).toBe(T2);
+    expect(baseSettings(s)).toEqual({ [NAME]: T });
+    expect(s.pending()).toEqual([]);
+    expect(dirtyMarks(s)).toHaveLength(1);
+  });
+
+  it('keeps a reset made here, and asks the writer to remove the file the base names', async () => {
+    const s = await setup(seeded({ [NAME]: T }));
+    await s.putRecord(withSettings({ [NAME]: T }));
+
+    await s.run();
+
+    expect(rulesOf(s)).toBeNull();
+    expect(baseSettings(s)).toEqual({ [NAME]: T });
+    expect(s.pending()).toEqual([]);
+    expect(dirtyMarks(s)).toHaveLength(1);
+  });
+
+  it('a text both installs changed is one pending question on the .md unit; ours stands, the base is kept, the file keeps theirs', async () => {
+    const s = await setup(seeded({ [NAME]: T }));
+    holding(s, T2);
+    await s.putRecord(withSettings({ [NAME]: U }));
+
+    const { outcome, trace } = await s.run();
+
+    expect(outcome).toBe('conflict');
+    expect(rulesOf(s)).toBe(T2);
+    const rows = s.pending();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      unit: UNIT,
+      base: { v: T },
+      local: { v: T2 },
+      incoming: { v: U },
+    });
+    expect(json(s.syncRow()?.baseSnapshot)).toEqual(syncBase({ [NAME]: T }));
+    expect(await readFile(join(s.root, FILE), 'utf8')).toBe(U);
+    expect(writesTo(trace, 'repositories')).toEqual(['update repositories']);
+
+    const again = await s.run();
+    expect(again.outcome).toBe('conflict');
+    expect(again.trace.filter(isWrite)).toEqual([]);
+  });
+
+  it('a change here against a reset there is a question whose incoming side is absent', async () => {
+    const s = await setup(seeded({ [NAME]: T }));
+    holding(s, T2);
+    await s.putRecord(withSettings({}));
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('conflict');
+    expect(rulesOf(s)).toBe(T2);
+    expect(s.pending()).toHaveLength(1);
+    expect(s.pending()[0]).toMatchObject({
+      unit: UNIT,
+      base: { v: T },
+      local: { v: T2 },
+      incoming: null,
+    });
+    expect(baseSettings(s)).toEqual({ [NAME]: T });
+  });
+
+  it('a pending question converges when the column comes to hold the checkout text', async () => {
+    const s = await setup(seeded({ [NAME]: T }));
+    holding(s, T2);
+    await s.putRecord(withSettings({ [NAME]: U }));
+    await s.run();
+    holding(s, U);
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('unchanged');
+    expect(s.pending()).toEqual([]);
+    expect(s.conflictRows().map((r) => r.resolution)).toEqual(['converged']);
+  });
+
+  it('issues no write where the column, the base and the checkout hold the same text', async () => {
+    const s = await setup();
+    await s.putRecord(withSettings({ [NAME]: T }));
+    await s.run();
+
+    const { outcome, trace } = await s.run();
+
+    expect(outcome).toBe('unchanged');
+    expect(writesTo(trace, 'repositories')).toEqual([]);
+    expect(trace.filter(isWrite)).toEqual([]);
+    expect(dirtyMarks(s)).toEqual([]);
+    expect(rulesOf(s)).toBe(T);
+  });
+
+  describe('an explicit empty override', () => {
+    it('is imported from a 0-byte file as the empty text, never as NULL, and the next sync writes nothing', async () => {
+      const s = await setup();
+      await s.putRecord(withSettings({ [NAME]: '' }));
+      expect(await readFile(join(s.root, FILE), 'utf8')).toBe('');
+
+      await s.run();
+
+      expect(repoRow(s).agentRulesOverride).toBe('');
+      expect(baseSettings(s)).toEqual({ [NAME]: '' });
+      const second = await s.run();
+      expect(second.outcome).toBe('unchanged');
+      expect(second.trace.filter(isWrite)).toEqual([]);
+      expect(repoRow(s).agentRulesOverride).toBe('');
+    });
+
+    it('stands where the other install still holds the base text, and the writer is asked for the 0-byte file', async () => {
+      const s = await setup(seeded({ [NAME]: T }));
+      holding(s, '');
+      await s.putRecord(withSettings({ [NAME]: T }));
+
+      await s.run();
+
+      expect(repoRow(s).agentRulesOverride).toBe('');
+      expect(baseSettings(s)).toEqual({ [NAME]: T });
+      expect(s.pending()).toEqual([]);
+      expect(dirtyMarks(s)).toHaveLength(1);
+    });
+
+    it('is taken from the other install where nobody changed the text here', async () => {
+      const s = await setup(seeded({ [NAME]: T }));
+      holding(s, T);
+      await s.putRecord(withSettings({ [NAME]: '' }));
+
+      await s.run();
+
+      expect(repoRow(s).agentRulesOverride).toBe('');
+      expect(baseSettings(s)).toEqual({ [NAME]: '' });
+      expect(s.pending()).toEqual([]);
+    });
+
+    it.each([
+      ['held here', '', U, { v: '' }, { v: U }],
+      ['held there', T2, '', { v: T2 }, { v: '' }],
+    ])('is a present side of a question when %s', async (_where, mine, theirs, local, incoming) => {
+      const s = await setup(seeded({ [NAME]: T }));
+      holding(s, mine);
+      await s.putRecord(withSettings({ [NAME]: theirs }));
+
+      const { outcome } = await s.run();
+
+      expect(outcome).toBe('conflict');
+      expect(s.pending()).toHaveLength(1);
+      expect(s.pending()[0]).toMatchObject({ unit: UNIT, base: { v: T }, local, incoming });
+      expect(repoRow(s).agentRulesOverride).toBe(mine);
+    });
+  });
+
+  describe.each([
+    ['over the size cap', `${'x'.repeat(64 * 1024)}\n`],
+    ['holding a Haive region marker', '# Rules\n\n<!-- haive:rules -->\n'],
+  ])('a checkout text %s', (_what, text) => {
+    it('is not imported: the text held here stands, the base keeps the old one, and the writer is asked for the file', async () => {
+      const s = await setup(seeded({ [NAME]: T }));
+      holding(s, T);
+      await s.putRecord(withSettings({ [NAME]: text }));
+
+      await s.run();
+
+      expect(rulesOf(s)).toBe(T);
+      expect(baseSettings(s)).toEqual({ [NAME]: T });
+      expect(s.pending()).toEqual([]);
+      expect(dirtyMarks(s)).toHaveLength(1);
+    });
+
+    it('is not imported where this install holds none either', async () => {
+      const s = await setup(seeded({ 'rtk-version': '0.1.0' }));
+      s.fake.patch(schema.repositories, REPO, { rtkVersion: '0.1.0' });
+      await s.putRecord(withSettings({ 'rtk-version': '0.1.0', [NAME]: text }));
+
+      await s.run();
+
+      expect(rulesOf(s)).toBeNull();
+      expect(baseSettings(s)).toEqual({ 'rtk-version': '0.1.0' });
+      expect(s.pending()).toEqual([]);
+    });
+  });
+
+  it.each([
+    ['CRLF line ends', T.replace(/\n/g, '\r\n')],
+    ['a leading BOM', `﻿${T}`],
+    ['no final newline', T.trimEnd()],
+  ])(
+    'a checkout file with %s imports the canonical text, and the writer rewrites it',
+    async (_what, bytes) => {
+      const s = await setup();
+      await s.putRecord(withSettings({}));
+      await s.put(FILE, bytes);
+
+      const { outcome } = await s.run();
+
+      expect(outcome).toBe('applied');
+      expect(rulesOf(s)).toBe(T);
+      expect(baseSettings(s)).toEqual({ [NAME]: T });
+      expect(s.pending()).toEqual([]);
+      expect(dirtyMarks(s)).toHaveLength(1);
+
+      await s.write(contextA(), true);
+
+      expect(await readFile(join(s.root, FILE), 'utf8')).toBe(T);
+      expect(rulesOf(s)).toBe(T);
+      expect(s.pending()).toEqual([]);
+    },
+  );
+});
+
 describe('syncProjectStateFromCheckout: invalid RTK ownership', () => {
   it.each([false, true])(
     'repairs invalid RTK from the recorded choice %s through the writer',

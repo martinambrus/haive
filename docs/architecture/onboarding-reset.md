@@ -14,11 +14,14 @@ filters on none), and removes `artifacts/<claimFileName(path)>` for each, with `
 `state/` in the empty-directory sweep. It removes `bundles/<bundleFileName(source)>` for the sources of
 the sync base's descriptors (read before that transaction deletes the sync row) and of the
 repository's custom bundles, with `bundles/` swept the same way. It removes `project/environment.json`
-and `settings/<name>.json` for every name this release writes (`PORTABLE_SETTING_NAMES`) and every
+and `settings/<name>.json` for every name this release writes (`PORTABLE_SETTING_NAMES`, whose
+`agent-rules` is the one Markdown file, `settings/agent-rules.md`) and every
 name the sync base holds, with `settings/` swept before `state/`: a settings file left without
-`format.json` makes the next sync refuse the checkout, where an emptied one reads as absent. A sync that read the checkout before the reset stands down
-(`superseded`, by `onboarding_reset_at`) and one that meets a reset holding the root claim defers,
-so neither writes the column, the ledger or a base back.
+`format.json` makes the next sync refuse the checkout, where an emptied one reads as absent. The
+AGENTS.md rules override itself survives the reset, as every portable setting column does, and the
+next 12 writes `settings/agent-rules.md` again from it. A sync that read the checkout before the
+reset stands down (`superseded`, by `onboarding_reset_at`) and one that meets a reset holding the
+root claim defers, so neither writes the column, the ledger or a base back.
 
 It also removes `cli/<provider>.json` for validated names recorded in the valid current explicit CLI
 contract or the sync base, read before either is cleared; prior base names still prove ownership

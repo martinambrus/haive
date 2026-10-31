@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PROJECT_STATE_LIMITS, recordReadable } from './limits.js';
+import { MAX_AGENT_RULES_BYTES, PROJECT_STATE_LIMITS, recordReadable } from './limits.js';
 
 const MIB = 1024 * 1024;
 const files = (entries: Record<string, string>) => new Map(Object.entries(entries));
@@ -13,6 +13,11 @@ describe('recordReadable', () => {
       maxFileBytes: MIB,
       maxTotalBytes: 16 * MIB,
     });
+  });
+
+  it('caps the rules override at 64 KiB, as a limit of its own beside the reader caps', () => {
+    expect(MAX_AGENT_RULES_BYTES).toBe(64 * 1024);
+    expect(MAX_AGENT_RULES_BYTES).toBeLessThan(PROJECT_STATE_LIMITS.maxFileBytes);
   });
 
   it('counts a directory as an entry, once, however many files it holds', () => {
