@@ -14,7 +14,12 @@ vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
 vi.mock('@haive/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared')>()),
   configService: { get: async () => null, getBoolean: async () => true },
-  userSecretsService: { get: async () => null, listForUser: async () => [] },
+  userSecretsService: {
+    get: async () => null,
+    listForUser: async () => [],
+    set: async () => undefined,
+    delete: async () => undefined,
+  },
 }));
 
 import { schema } from '@haive/database';
@@ -25,7 +30,12 @@ const { createApiApp } = await import('../src/index.js');
 
 const REPO = '00000000-0000-4000-8000-0000000000c1';
 const SAVED_AT = new Date('2026-01-01T00:00:00Z');
-const TABLES = { repositories: schema.repositories, projectStateOutbox: schema.projectStateOutbox };
+const TABLES = {
+  repositories: schema.repositories,
+  projectStateOutbox: schema.projectStateOutbox,
+  projectStateConflicts: schema.projectStateConflicts,
+  auditEvents: schema.auditEvents,
+};
 
 const web = createApiApp('http://localhost:3000');
 
@@ -107,5 +117,163 @@ describe('PATCH tooling reads its body', () => {
     expect((await patch()).status).toBe(400);
 
     expect(everything(fake)).toEqual(before);
+  });
+});
+
+/** A field of the right name and the wrong type. */
+const REFUSED: [field: string, value: unknown][] = [
+  ['rtkVersion', 5],
+  ['chromeDevtoolsMcpVersion', true],
+  ['secretMaskAllow', [5]],
+  ['secretMaskDenyExtend', [{}]],
+  ['secretMaskAllow', 'a.env'],
+  ['lspServers', 'pyright'],
+  ['lspServers', [5]],
+  ['lspServerVersions', { vtsls: 5 }],
+  ['lspServerVersions', ['x']],
+  ['reviewDimensions', 'security'],
+  ['reviewDimensions', [7]],
+  ['rtkEnabled', 'false'],
+  ['secretMaskEnabled', 1],
+  ['prWorkflowEnabled', 'yes'],
+  ['stepGuidanceEnabled', null],
+  ['appAuthUsername', 5],
+  ['appAuthPassword', {}],
+  ['repoMcpServersAction', 'bogus'],
+  ['ragEmbedAction', 'bogus'],
+  ['ragEmbedAction', ''],
+  ['ragEmbedAction', null],
+];
+
+describe('PATCH tooling refuses a field of the wrong type, names it, and writes nothing', () => {
+  it.each(REFUSED)('answers 400 naming %s for %j', async (field, value) => {
+    const fake = setup();
+    const before = everything(fake);
+
+    const res = await patch(JSON.stringify({ [field]: value }));
+
+    expect(res.status).toBe(400);
+    const answer = (await res.json()) as { error?: string; issues?: { path: string }[] };
+    expect(answer.error).toBe('Validation failed');
+    const paths = (answer.issues ?? []).map((issue) => issue.path);
+    expect(
+      paths.some((path) => path === field || path.startsWith(`${field}.`)),
+      JSON.stringify(paths),
+    ).toBe(true);
+    expect(everything(fake)).toEqual(before);
+  });
+
+  it('applies none of a body when one field of it is refused', async () => {
+    const fake = setup();
+    const before = everything(fake);
+
+    const res = await patch(JSON.stringify({ rtkEnabled: false, rtkVersion: 5 }));
+
+    expect(res.status).toBe(400);
+    expect(everything(fake)).toEqual(before);
+  });
+});
+
+/** The app-login object the Tooling page sends, complete, so the row keeps it as it is. */
+const PAGE_APP_AUTH = {
+  enabled: true,
+  loginUrl: 'https://app.test/login',
+  usernameSelector: '#user',
+  passwordSelector: '#pass',
+  submitSelector: 'button[type=submit]',
+  successCondition: { type: 'url_contains', value: '/home' },
+};
+
+/** Every field the Tooling page's Save can carry, built the way its handleSave builds them. */
+const PAGE_SAVE = {
+  rtkEnabled: false,
+  rtkVersion: null,
+  chromeDevtoolsMcpVersion: '0.9.0',
+  lspServers: ['vtsls', 'pyright'],
+  lspServerVersions: { vtsls: '1.0.0' },
+  secretMaskEnabled: false,
+  secretMaskAllow: ['a.env'],
+  secretMaskDenyExtend: ['b.key'],
+  prWorkflowEnabled: false,
+  stepGuidanceEnabled: false,
+  reviewDimensions: ['security', 'privacy-compliance'],
+  appAuth: PAGE_APP_AUTH,
+  appAuthUsername: 'user',
+  appAuthPassword: 'pw',
+};
+
+describe('PATCH tooling still accepts what the Tooling page sends', () => {
+  it('a whole Save, and stores every value of it', async () => {
+    const fake = setup();
+
+    const res = await patch(JSON.stringify(PAGE_SAVE));
+
+    expect(res.status).toBe(200);
+    expect(fake.rows(schema.repositories)[0]).toMatchObject({
+      rtkEnabled: false,
+      rtkVersion: null,
+      chromeDevtoolsMcpVersion: '0.9.0',
+      lspServers: ['vtsls', 'pyright'],
+      lspServerVersions: { vtsls: '1.0.0' },
+      secretMaskEnabled: false,
+      secretMaskAllow: ['a.env'],
+      secretMaskDenyExtend: ['b.key'],
+      prWorkflowEnabled: false,
+      stepGuidanceEnabled: false,
+      reviewDimensions: ['security', 'privacy-compliance'],
+      appAuth: PAGE_APP_AUTH,
+    });
+    expect(fake.rows(schema.auditEvents)).toMatchObject([
+      { action: 'repository.app_auth.update', metadata: { username: 'set', password: 'set' } },
+    ]);
+  });
+
+  it('the empty strings that clear the two stored login credentials', async () => {
+    const fake = setup();
+
+    const res = await patch(JSON.stringify({ appAuthUsername: '', appAuthPassword: '' }));
+
+    expect(res.status).toBe(200);
+    expect(fake.rows(schema.auditEvents)).toMatchObject([
+      {
+        action: 'repository.app_auth.update',
+        metadata: { username: 'cleared', password: 'cleared' },
+      },
+    ]);
+  });
+
+  it.each([
+    [
+      'versions cleared with null',
+      { rtkVersion: null, chromeDevtoolsMcpVersion: null },
+      { rtkVersion: null, chromeDevtoolsMcpVersion: null },
+    ],
+    [
+      'empty lists and an empty map',
+      {
+        lspServers: [],
+        lspServerVersions: {},
+        secretMaskAllow: [],
+        reviewDimensions: ['security'],
+      },
+      {
+        lspServers: [],
+        lspServerVersions: {},
+        secretMaskAllow: [],
+        reviewDimensions: ['security'],
+      },
+    ],
+    [
+      'a key it does not know, which is ignored',
+      { rtkVersion: '0.2.0', somethingNew: 1 },
+      { rtkVersion: '0.2.0' },
+    ],
+  ])('%s', async (_what, body, stored) => {
+    const fake = setup();
+
+    const res = await patch(JSON.stringify(body));
+
+    expect(res.status).toBe(200);
+    expect(fake.rows(schema.repositories)[0]).toMatchObject(stored);
   });
 });
