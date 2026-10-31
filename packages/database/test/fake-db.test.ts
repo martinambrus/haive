@@ -81,6 +81,31 @@ describe('the fake database', () => {
     expect(takes({ id: TASK })).toBe(false);
   });
 
+  it.each([
+    { label: 'upper-case parameter', rowId: USER, value: USER.toUpperCase() },
+    { label: 'upper-case row', rowId: USER.toUpperCase(), value: USER },
+  ])('compares UUID values without case: $label', ({ rowId, value }) => {
+    const fake = createFakeDb({ taskSteps: steps });
+    const takes = (condition: unknown) => fake.compileWhere(steps, condition)({ id: rowId });
+    expect(takes(eq(steps.id, value))).toBe(true);
+    expect(takes(ne(steps.id, value))).toBe(false);
+    expect(takes(inArray(steps.id, [value]))).toBe(true);
+    expect(takes(notInArray(steps.id, [value]))).toBe(false);
+    expect(takes(eq(steps.id, TASK2))).toBe(false);
+    expect(fake.compileWhere(steps, eq(steps.title, 'TITLE'))({ title: 'title' })).toBe(false);
+  });
+
+  it.each([
+    { label: 'upper-case inner', innerId: USER.toUpperCase(), outerId: USER },
+    { label: 'upper-case outer', innerId: USER, outerId: USER.toUpperCase() },
+  ])('correlates UUID values without case: $label', ({ innerId, outerId }) => {
+    const fake = createFakeDb({ taskSteps: steps, cliInvocations: runs });
+    fake.insert(runs, { taskStepId: innerId });
+    const takes = fake.compileWhere(steps, noLiveRun());
+    expect(takes({ id: outerId })).toBe(false);
+    expect(takes({ id: TASK2 })).toBe(true);
+  });
+
   it('composes the negated EXISTS with ordinary predicates', () => {
     const fake = createFakeDb({ taskSteps: steps, cliInvocations: runs });
     fake.insert(runs, { taskStepId: TASK });

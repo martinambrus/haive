@@ -197,11 +197,15 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
     beforeCommit: null,
   };
 
+  /** UUID text spells the same value in either case; other column types keep their case. */
+  const comparisonValue = (col: Column, value: unknown): unknown =>
+    is(col, PgUUID) && typeof value === 'string' ? value.toLowerCase() : value;
+
   const checkValue = (col: Column, value: unknown): unknown => {
     if (is(col, PgUUID) && typeof value === 'string' && !UUID.test(value)) {
       throw new Error(`invalid input syntax for type uuid: "${value}"`);
     }
-    return value;
+    return comparisonValue(col, value);
   };
 
   function compileWhere(table: PgTable, cond: unknown): Pred {
@@ -233,6 +237,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
           is(sub[9], Column) &&
           text(sub[10]) === ' IS NULL)'
         ) {
+          const matchColumn = sub[3];
           const innerKeys = columnKeys(inner as PgTable);
           const matchKey = innerKeys.get(sub[3]);
           const outerKey = keyOf.get(sub[5]);
@@ -249,7 +254,8 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
                 (r) =>
                   r[matchKey] != null &&
                   row[outerKey] != null &&
-                  r[matchKey] === row[outerKey] &&
+                  comparisonValue(matchColumn, r[matchKey]) ===
+                    comparisonValue(matchColumn, row[outerKey]) &&
                   r[nullKeyA] == null &&
                   r[nullKeyB] == null,
               );
@@ -309,7 +315,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
             return (row) =>
               row[key] instanceof Date && (row[key] as Date).getTime() === v.getTime();
           }
-          return (row) => row[key] === v;
+          return (row) => comparisonValue(col, row[key]) === v;
         }
         if (
           ch.length === 3 &&
@@ -323,10 +329,10 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
             row[key] != null &&
             v != null &&
             (above
-              ? (row[key] as number) > (v as number)
+              ? (comparisonValue(col, row[key]) as number) > (v as number)
               : below
-                ? (row[key] as number) < (v as number)
-                : row[key] !== v);
+                ? (comparisonValue(col, row[key]) as number) < (v as number)
+                : comparisonValue(col, row[key]) !== v);
         }
         if (
           ch.length === 3 &&
@@ -336,8 +342,8 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
         ) {
           const vs = new Set(val.map((p) => checkValue(col, (p as Param).value)));
           return text(op) === ' in '
-            ? (row) => vs.has(row[key])
-            : (row) => row[key] != null && !vs.has(row[key]);
+            ? (row) => vs.has(comparisonValue(col, row[key]))
+            : (row) => row[key] != null && !vs.has(comparisonValue(col, row[key]));
         }
       }
       return refuse();
