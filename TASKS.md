@@ -531,7 +531,7 @@ status: open · was modular #211
 
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+5)
 
-status: open · was modular #213
+status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T17:16Z · last: 2026-10-31T17:16Z · was modular #213
 Items 1-2 merged (#831). 3. PERF: the bundle file browser runs fs-safe lstat per file (5000 files took 8.8 s). Fix: a walk that holds directory descriptors. 4. new-repo-form.tsx shows only the first 100 matches, with no note. 5. github-oauth.ts:110-111 echoes an unbounded GitHub error body, and a body that echoed the request's token would reach the response and the error log (T378 review, fake-vendor repro). Reuse the forge excerpt helper. 6. The /user/repos loop makes one extra empty request. Fix: stop when the Link header has no rel="next". 7. (T454 review, 2026-10-31) PRE-EXISTING, minor, measured (identical before T454): the GitHub source's `oauthLabel` is never reset (web components/new-repo-form.tsx ~:125, ~:146, ~:271, ~:437), so GitHub, then another source, then GitHub again shows the manual URL input and Create refuses until a reload. 8. (T454 review) PRE-EXISTING, minor, by code reading: web filesystem-browser.tsx ~:96-99, the `flex-1` button has no `min-w-0`, so at 375 px a long directory name clips the Pick button (T454 judge/repos-new-375.png).
 
 ### T366 · FNF[shutdown-deadline] · the worker shutdown's per-part limits are summed by hand
