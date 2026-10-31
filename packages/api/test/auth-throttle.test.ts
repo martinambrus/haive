@@ -207,6 +207,21 @@ const statuses = async (sends: Promise<Response>[]) =>
   (await Promise.all(sends)).map((r) => r.status);
 const count = (list: number[], status: number) => list.filter((s) => s === status).length;
 
+/** The pending value, or an error naming the wait when `ms` pass first. */
+async function answeredWithin<T>(ms: number, pending: Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`no answer within ${ms} ms`)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 beforeAll(async () => {
   process.env.LOG_LEVEL = 'silent';
   passwordHash = await hashPassword(PASSWORD);
@@ -283,7 +298,11 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
         };
       });
       try {
-        const got = await statuses(Array.from({ length: 20 }, () => login(email, WRONG)));
+        // The audit insert is held until every response is in: a 429 that waits for it never comes.
+        const got = await answeredWithin(
+          5_000,
+          statuses(Array.from({ length: 20 }, () => login(email, WRONG))),
+        );
         expect(got).toEqual(Array(20).fill(429));
         expect(throttled()).toHaveLength(0);
         release();
@@ -359,9 +378,16 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
         };
       });
       try {
-        await expectRefused(() => login(victim, WRONG, { peer: peer(1) }));
+        // The audit insert is held until every response is in: a 429 that waits for it never comes.
+        await answeredWithin(
+          5_000,
+          expectRefused(() => login(victim, WRONG, { peer: peer(1) })),
+        );
         for (let i = 0; i < 19; i++)
-          await expectRefused(() => login(mail(`audit-new-${i}`), WRONG, { peer: peer(1) }));
+          await answeredWithin(
+            5_000,
+            expectRefused(() => login(mail(`audit-new-${i}`), WRONG, { peer: peer(1) })),
+          );
         release();
         await vi.waitFor(() => expect(throttled()).toHaveLength(1), { timeout: 15_000 });
         expect(lookup).not.toHaveBeenCalled();
