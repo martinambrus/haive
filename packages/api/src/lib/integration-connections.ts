@@ -145,26 +145,30 @@ export async function linkCredential(
     throw new HttpError(400, `${spec.displayName} has no Git credentials to use as a connection`);
   }
   await requireEnabled(db, spec);
-  const [credential] = await db
-    .select({
-      id: schema.repoCredentials.id,
-      label: schema.repoCredentials.label,
-      host: schema.repoCredentials.host,
-      provider: schema.repoCredentials.provider,
-    })
-    .from(schema.repoCredentials)
-    .where(
-      and(
-        eq(schema.repoCredentials.id, repoCredentialId),
-        eq(schema.repoCredentials.userId, userId),
-      ),
-    );
-  if (!credential) throw new HttpError(404, 'Credential not found');
-  if (credentialForgeProvider(credential.provider, credential.host) !== spec.id) {
-    throw new HttpError(400, `This is not a ${spec.displayName} credential (${credential.host})`);
-  }
   try {
     const { row, audit } = await db.transaction(async (tx) => {
+      const [credential] = await tx
+        .select({
+          id: schema.repoCredentials.id,
+          label: schema.repoCredentials.label,
+          host: schema.repoCredentials.host,
+          provider: schema.repoCredentials.provider,
+        })
+        .from(schema.repoCredentials)
+        .where(
+          and(
+            eq(schema.repoCredentials.id, repoCredentialId),
+            eq(schema.repoCredentials.userId, userId),
+          ),
+        )
+        .for('update');
+      if (!credential) throw new HttpError(404, 'Credential not found');
+      if (credentialForgeProvider(credential.provider, credential.host) !== spec.id) {
+        throw new HttpError(
+          400,
+          `This is not a ${spec.displayName} credential (${credential.host})`,
+        );
+      }
       const [inserted] = await tx
         .insert(schema.integrationConnections)
         .values({

@@ -11,7 +11,7 @@ import {
   forgeProviderSchema,
   secretsService,
 } from '@haive/shared';
-import { apiBaseFits } from '@haive/shared/forge';
+import { apiBaseFits, credentialForgeProvider } from '@haive/shared/forge';
 import { getIntegrationProvider } from '@haive/shared/integrations';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -272,6 +272,8 @@ repoCredentialsRoutes.put('/:id', async (c) => {
     const [existing] = await tx
       .select({
         encryptedDek: schema.repoCredentials.encryptedDek,
+        label: schema.repoCredentials.label,
+        host: schema.repoCredentials.host,
         provider: schema.repoCredentials.provider,
         apiBaseUrl: schema.repoCredentials.apiBaseUrl,
       })
@@ -284,6 +286,33 @@ repoCredentialsRoutes.put('/:id', async (c) => {
       provider: body.provider ?? existing.provider,
       apiBaseUrl: body.apiBaseUrl ?? existing.apiBaseUrl,
     });
+
+    const [connection] = await tx
+      .select({
+        id: schema.integrationConnections.id,
+        providerId: schema.integrationConnections.providerId,
+        authMethod: schema.integrationConnections.authMethod,
+        accountLabel: schema.integrationConnections.accountLabel,
+      })
+      .from(schema.integrationConnections)
+      .where(eq(schema.integrationConnections.repoCredentialId, id));
+    if (connection) {
+      const nextProvider = body.provider === undefined ? existing.provider : body.provider || null;
+      const existingForge = credentialForgeProvider(existing.provider, existing.host);
+      const nextForge = credentialForgeProvider(nextProvider, body.host);
+      if (
+        existing.host.toLowerCase() !== body.host ||
+        (nextForge !== existingForge && nextForge !== connection.providerId)
+      ) {
+        const providerName =
+          getIntegrationProvider(connection.providerId)?.displayName ?? connection.providerId;
+        throw new HttpError(
+          409,
+          `This Git credential is the connection to ${connection.accountLabel} on ${providerName}, so its host and forge provider cannot be changed; disconnect the connection first`,
+          'credential-backs-connection',
+        );
+      }
+    }
 
     if (masterKek !== null) {
       const dekHex = decryptDek(existing.encryptedDek, masterKek);
@@ -306,6 +335,12 @@ repoCredentialsRoutes.put('/:id', async (c) => {
         createdAt: schema.repoCredentials.createdAt,
         updatedAt: schema.repoCredentials.updatedAt,
       });
+    if (connection?.authMethod === 'token' && body.label !== existing.label) {
+      await tx
+        .update(schema.integrationConnections)
+        .set({ accountLabel: body.label, updatedAt: new Date() })
+        .where(eq(schema.integrationConnections.id, connection.id));
+    }
     await insertAuditEvent(tx, audit);
     return rows;
   });

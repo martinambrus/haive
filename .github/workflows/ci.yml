@@ -339,6 +339,7 @@ jobs:
           api test/admin-security-audit-db.test.ts ADMIN_SECURITY_AUDIT_TEST_URL admin_security_audit_test pg
           api test/repo-credentials-audit-db.test.ts REPO_CREDENTIALS_AUDIT_TEST_URL repo_credentials_audit_test pg
           api test/repo-credentials-delete-db.test.ts REPO_CREDENTIALS_DELETE_TEST_URL repo_credentials_delete_test pg
+          api test/repo-credentials-backing-edit-db.test.ts REPO_CREDENTIALS_BACKING_EDIT_TEST_URL repo_credentials_backing_edit_test pg
           api test/global-kb-config-audit-db.test.ts GLOBAL_KB_CONFIG_AUDIT_TEST_URL global_kb_config_audit_test pg
           worker test/step-integrations-stamp-db.test.ts STEP_INTEGRATIONS_STAMP_TEST_URL step_integrations_stamp_test pg
           worker test/step-integrations-dispatch-db.test.ts STEP_INTEGRATIONS_DISPATCH_TEST_URL step_integrations_dispatch_test pg

@@ -43,6 +43,7 @@ function setup(
 ) {
   const fake = createFakeDb({
     repoCredentials: schema.repoCredentials,
+    integrationConnections: schema.integrationConnections,
     auditEvents: schema.auditEvents,
   });
   const dek = generateDek();
@@ -599,6 +600,7 @@ describe('the row an edit reads, judges and updates', () => {
     expect(events).toEqual([
       'begin',
       'tx selects repo_credentials for update',
+      'tx selects integration_connections',
       'tx updates repo_credentials',
       'commit',
     ]);
@@ -623,6 +625,7 @@ describe('the row an edit reads, judges and updates', () => {
     expect(events).toEqual([
       'begin',
       'tx selects repo_credentials for update',
+      'tx selects integration_connections',
       'tx updates repo_credentials',
       'commit',
     ]);
