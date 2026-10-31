@@ -1005,7 +1005,7 @@ Since T474 the smokes job has a 45-minute limit and the gated step 25 minutes, w
 
 ### T489 · FNF[ci-step-independence-3] · the gated loop's verdict is unpinned; unguarded steps and jobs with no limits (+5)
 
-status: open
+status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T17:00Z · last: 2026-10-31T17:00Z
 From the T474 review (2026-10-31). PRE-EXISTING unless stated; minor to moderate.
 
 1. Moderate: the gated loop's verdict `exit "$failed"` (ci.yml ~:378) is unpinned; deleting it turns every failing gated test green. A stub-based pin that fails one vitest call would cover it.
