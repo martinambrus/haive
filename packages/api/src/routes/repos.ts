@@ -2139,6 +2139,11 @@ export interface OnboardingResetProvenance {
    *  Only the claim file is taken back. These paths never reach `writtenHashes`, which decides what
    *  a FILE claim is. */
   supersededGitDataPaths?: readonly string[];
+  /** The paths of the sync base's claims that name git data. An earlier release (a teammate's)
+   *  wrote the claim file; the sync read it in as no claim and never made a ledger row, so no row,
+   *  live or retired, names it. Only the claim file is taken back. These paths never reach
+   *  `writtenHashes`, which decides what a FILE claim is. */
+  baseGitDataPaths?: readonly string[];
 }
 
 /**
@@ -2608,10 +2613,12 @@ export async function resetOnboardingArtifacts(
   }
 
   for (const rel of ONBOARDING_RESET_FILES) await remove(rel, false);
-  // The claim file of a row retired at a git-data path too: no live row names it any more.
+  // The claim file of a row retired at a git-data path too, and of a git-data claim only the sync
+  // base names: no live row names them.
   for (const diskPath of new Set([
     ...writtenHashes.keys(),
     ...(provenance.supersededGitDataPaths ?? []),
+    ...(provenance.baseGitDataPaths ?? []),
   ])) {
     if (isCanonicalRepoPath(diskPath))
       await remove(`${PROJECT_STATE_DIR}/${claimFileName(diskPath)}`, false);
@@ -3142,9 +3149,17 @@ async function runOnboardingArtifactReset(
     .where(eq(schema.projectStateSync.repositoryId, id))
     .limit(1);
   const baseRecord = syncRow?.baseSnapshot as
-    { bundles?: unknown; settings?: unknown; cli?: unknown } | null | undefined;
+    { bundles?: unknown; settings?: unknown; cli?: unknown; claims?: unknown } | null | undefined;
   const baseBundles = baseRecord?.bundles;
   const baseSettings = baseRecord?.settings;
+  // Only a claim that names git data. The sync keeps one an earlier release wrote in the base,
+  // apart from the record, and never makes a ledger row for it; a claim at any other path is real.
+  const baseClaims = baseRecord?.claims;
+  const baseGitDataPaths = (Array.isArray(baseClaims) ? baseClaims : [])
+    .map((claim) => (claim as { path?: unknown } | null)?.path)
+    .filter(
+      (claimPath): claimPath is string => typeof claimPath === 'string' && namesGitData(claimPath),
+    );
   const settingNames =
     baseSettings !== null && typeof baseSettings === 'object' && !Array.isArray(baseSettings)
       ? Object.keys(baseSettings).filter(isRecordName)
@@ -3185,6 +3200,7 @@ async function runOnboardingArtifactReset(
       settingNames,
       cliNames: [...cliNames],
       supersededGitDataPaths,
+      baseGitDataPaths,
     },
   );
 

@@ -171,6 +171,42 @@ describe('the reset takes back the claim files of the rows it supersedes', () =>
     },
   );
 
+  it.each(['.git/config', '.git./config'])(
+    'removes the claim file of a git-data claim only the sync base names at %j, and the directories around it',
+    async (legacy) => {
+      const root = await repoRoot({ [claimFile(legacy)]: '{}\n' });
+
+      const { removed } = await resetOnboardingArtifacts(root, {
+        ...provenance(),
+        baseGitDataPaths: [legacy],
+      });
+
+      for (const rel of [claimFile(legacy), ARTIFACTS_DIR, STATE_DIR]) {
+        expect(await exists(root, rel), rel).toBe(false);
+        expect(removed, rel).toContain(rel);
+      }
+    },
+  );
+
+  it('leaves the claim file of a git-data path the sync base does not name, with its bytes', async () => {
+    const named = '.git/config';
+    const other = '.git/hooks/pre-commit';
+    const root = await repoRoot({
+      [claimFile(named)]: '{}\n',
+      [claimFile(other)]: '{"unsynced":true}\n',
+    });
+
+    const { removed } = await resetOnboardingArtifacts(root, {
+      ...provenance(),
+      baseGitDataPaths: [named],
+    });
+
+    expect(await exists(root, claimFile(named))).toBe(false);
+    expect(await readFile(path.join(root, claimFile(other)), 'utf8')).toBe('{"unsynced":true}\n');
+    expect(removed).not.toContain(ARTIFACTS_DIR);
+    expect(removed).not.toContain(STATE_DIR);
+  });
+
   it('leaves a claim file no live row names, and the directory around it', async () => {
     const teammate = '.claude/agents/teammate.md';
     const root = await repoRoot({
@@ -461,6 +497,66 @@ describe('resetting a repository through the route', () => {
       );
     }
     expect(await exists(root, ARTIFACTS_DIR)).toBe(true);
+  });
+
+  const baseClaim = (diskPath: string) => ({
+    path: diskPath,
+    templateId: 'agent.code-reviewer',
+    kind: 'agent',
+    schemaVersion: 1,
+    templateHash: 'a'.repeat(64),
+    writtenHash: 'b'.repeat(64),
+    haiveVersion: '1.0.0',
+  });
+
+  it('takes the claim file of a git-data claim only the sync base names off the checkout, and leaves a teammate’s claim at an ordinary path', async () => {
+    const legacy = '.git/hooks/pre-commit';
+    const teammate = '.claude/agents/teammate.md';
+    const root = await repoRoot({
+      [claimFile(legacy)]: '{}\n',
+      [claimFile(teammate)]: '{"unsynced":true}\n',
+    });
+    await setup(root, { claims: [baseClaim(legacy), baseClaim(teammate)] });
+
+    expect((await reset()).status).toBe(200);
+
+    expect(await exists(root, claimFile(legacy))).toBe(false);
+    expect(await readFile(path.join(root, claimFile(teammate)), 'utf8')).toBe(
+      '{"unsynced":true}\n',
+    );
+    expect(await exists(root, ARTIFACTS_DIR)).toBe(true);
+  });
+
+  it.each([
+    ['a string', 'x'],
+    ['null', null],
+    ['an object', { path: '.git/hooks/pre-commit' }],
+    ['a list with no claim in it', [null, 5, 'x', {}, { path: 7 }]],
+  ])(
+    'answers 200 and takes no claim file when the sync base’s claims are %s',
+    async (_name, claims) => {
+      const legacy = '.git/hooks/pre-commit';
+      const root = await repoRoot({ [claimFile(legacy)]: '{"unsynced":true}\n' });
+      await setup(root, { claims });
+
+      expect((await reset()).status).toBe(200);
+
+      expect(await readFile(path.join(root, claimFile(legacy)), 'utf8')).toBe(
+        '{"unsynced":true}\n',
+      );
+      expect(await exists(root, ARTIFACTS_DIR)).toBe(true);
+    },
+  );
+
+  it('takes the claim file of a git-data claim from a sync base list that also holds entries that are no claim', async () => {
+    const legacy = '.git/hooks/pre-commit';
+    const root = await repoRoot({ [claimFile(legacy)]: '{}\n' });
+    await setup(root, { claims: [null, 5, 'x', {}, { path: 7 }, baseClaim(legacy)] });
+
+    expect((await reset()).status).toBe(200);
+
+    expect(await exists(root, claimFile(legacy))).toBe(false);
+    expect(await exists(root, STATE_DIR)).toBe(false);
   });
 
   it('takes the descriptors of the sync base and of its local bundles off the checkout', async () => {
