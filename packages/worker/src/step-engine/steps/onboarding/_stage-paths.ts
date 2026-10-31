@@ -324,6 +324,7 @@ export async function commitRecorded(
   env: NodeJS.ProcessEnv,
   warnings?: string[],
   onCommitted?: (sha: string) => void,
+  options: { repairUnchangedIndex?: boolean } = {},
 ): Promise<string[]> {
   const run = (args: string[], extra?: NodeJS.ProcessEnv) =>
     gitExec(args, { cwd: repoPath, env: { ...env, ...extra }, maxBuffer: GIT_MAX_BUFFER });
@@ -366,17 +367,35 @@ export async function commitRecorded(
     if (changed.length === 0) {
       // A prior commit may have landed while the real index was locked. Repair its named
       // entries on a repeat too, without creating a commit or touching unrelated staged work.
-      if (parent !== '') {
+      if (options.repairUnchangedIndex && parent !== '') {
+        // Only inspect the real index here. An already-clean no-op needs no index lock.
+        const stale = (
+          await run([
+            'diff-index',
+            '--cached',
+            '--name-only',
+            '--no-renames',
+            '-z',
+            parent,
+            '--',
+            ...literal([...named]),
+          ])
+        ).stdout
+          .split('\0')
+          .filter(Boolean);
+        if (stale.length === 0) return [];
         let synced = false;
         for (let attempt = 0; attempt < 6 && !synced; attempt++) {
           if (attempt > 0) await new Promise((r) => setTimeout(r, 100 * 2 ** attempt));
-          synced = await syncRealIndex(run, parent, [...named]).then(
+          synced = await syncRealIndex(run, parent, stale).then(
             () => true,
             () => false,
           );
         }
         if (!synced)
-          warnings?.push(`the git index could not be synced for: ${[...named].join(', ')}`);
+          warnings?.push(
+            `the git index could not be synced for ${stale.length} paths: ${stale.slice(0, 10).join(', ')}`,
+          );
       }
       return [];
     }
@@ -398,7 +417,7 @@ export async function commitRecorded(
     }
     if (!synced) {
       warnings?.push(
-        `committed, but the git index could not be synced (locked, or HEAD kept moving), so these files may show as staged changes until you run \`git reset -- <file>\`: ${changed.join(', ')}`,
+        `committed, but the git index could not be synced (locked, or HEAD kept moving), so these files may show as staged changes until you run \`git reset -- <file>\`: ${changed.length} paths: ${changed.slice(0, 10).join(', ')}`,
       );
     }
     return changed;

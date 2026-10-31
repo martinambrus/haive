@@ -208,3 +208,37 @@ describe('commit read and repair controls', () => {
     expect((await gitRun(dir, ['diff', '--cached', '--name-only'])).stdout).toBe('');
   }, 15_000);
 });
+
+it('a clean no-op never writes the real index, even with a stale index.lock', async () => {
+  const dir = await fixture();
+  await record(dir);
+  await save(dir);
+  const before = await readFile(join(dir, '.git/index'));
+  await writeFile(join(dir, '.git/index.lock'), 'stale lock');
+  const exec = gitCommands.gitExec;
+  const writes: string[][] = [];
+  vi.spyOn(gitCommands, 'gitExec').mockImplementation(async (args, options) => {
+    if (args[0] === 'update-index' && !options?.env?.GIT_INDEX_FILE) writes.push(args);
+    return exec(args, options);
+  });
+  expect(await save(dir)).toMatchObject({ committed: false, indexSynced: true });
+  expect(writes).toEqual([]);
+  expect(await readFile(join(dir, '.git/index'))).toEqual(before);
+});
+it('a no-op repairs only the named entries differing from HEAD', async () => {
+  const dir = await fixture();
+  await record(dir, { 'rtk-version': '1' });
+  await save(dir);
+  await gitRun(dir, ['rm', '--cached', '.haive-data/state/settings/rtk-version.json']);
+  const exec = gitCommands.gitExec;
+  const writes: string[][] = [];
+  vi.spyOn(gitCommands, 'gitExec').mockImplementation(async (args, options) => {
+    if (args[0] === 'update-index' && !options?.env?.GIT_INDEX_FILE) writes.push(args);
+    return exec(args, options);
+  });
+  expect(await save(dir)).toMatchObject({ committed: false, indexSynced: true });
+  expect(writes).toHaveLength(1);
+  expect(writes[0]!.join(' ')).toContain('settings/rtk-version.json');
+  expect(writes[0]!.join(' ')).not.toContain('format.json');
+  expect((await gitRun(dir, ['diff', '--cached', '--name-only'])).stdout).toBe('');
+});

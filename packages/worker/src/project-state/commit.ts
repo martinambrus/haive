@@ -92,6 +92,7 @@ export async function commitHaiveProjections(args: {
     (sha) => {
       commitSha = sha;
     },
+    { repairUnchangedIndex: true },
   );
   for (const warning of warnings)
     logger.warn({ repoPath, warning }, 'Haive data commit index sync');
