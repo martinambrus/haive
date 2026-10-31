@@ -89,6 +89,8 @@ export interface ProjectStateSyncResult {
 }
 
 const MIB = 1024 * 1024;
+// A first sync can replace a claim per file: the list is cut, settings first; `count` is the total.
+const MAX_LOGGED_UNITS = 10;
 const {
   maxEntries: MAX_ENTRIES,
   maxFileBytes: MAX_FILE_BYTES,
@@ -510,6 +512,8 @@ interface PortableMerge {
   /** The checkout holds a valid RTK choice that importing records: the column is new, or this install had recorded none. */
   recordsRtkChoice: boolean;
   rejected: string[];
+  /** Units the merge, having no base, took from the checkout over a different value held here. */
+  overwritten: string[];
 }
 
 /** Merges the portable settings and the environment of the checkout into this install's columns. A
@@ -601,6 +605,7 @@ function mergePortable(
       settingsDifferingFrom(merge.merged.settings, checkout.settings, contestedNames).length > 0 ||
       (importable && !environmentContested && !sameValue(mergedEnvironment, checkout.environment)),
     rejected: intake.rejected,
+    overwritten: merge.overwritten,
     recordsRtkChoice,
   };
 }
@@ -997,6 +1002,14 @@ export async function syncProjectStateLocked(
       .insert(schema.projectStateSync)
       .values({ repositoryId, ...synced })
       .onConflictDoUpdate({ target: schema.projectStateSync.repositoryId, set: synced });
+  }
+
+  const replaced = [...portable.overwritten, ...merge.overwritten];
+  if (replaced.length > 0) {
+    logger.warn(
+      { repositoryId, count: replaced.length, units: replaced.slice(0, MAX_LOGGED_UNITS) },
+      "project state had no base: the checkout's value replaced the one held here for these units",
+    );
   }
 
   if (lastError !== null) return { outcome: 'conflict', reason: lastError };
