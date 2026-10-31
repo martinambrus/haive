@@ -69,13 +69,16 @@ export function safeErrorMessage(err: unknown): string {
  *  whitespace or diagnostic punctuation. The placeholder contains no path, so repairs converge.
  *  Keep safeErrorMessage's ordinary-error contract unchanged for other diagnostic sinks. The URL
  *  scheme is bounded to 32 characters: an unbounded one restarts at every letter of a long token,
- *  which is quadratic (a 200,000-character token took about 40 s). */
+ *  which is quadratic (a 200,000-character token took about 40 s). Each quote kind has its own
+ *  alternative whose body excludes that quote, rather than a lazy body closed by a backreference:
+ *  same matches, and no pattern CodeQL reads as polynomial (js/polynomial-redos). */
 export function scrubErrorPaths(err: unknown): string {
   return safeErrorMessage(err).replace(
-    /[a-zA-Z][a-zA-Z0-9+.-]{0,31}:\/\/[^\s"'`<>]+|(["'`])(?:[a-zA-Z]:[\\/]|\\\\|\/)[^\r\n]*?\1|(?<![\w./\\:-])(?:[a-zA-Z]:[\\/]|\\\\|\/)[^\s"'`<>:,;!?()[\]{}]*/g,
-    (token: string, quote: string | undefined) => {
+    /[a-zA-Z][a-zA-Z0-9+.-]{0,31}:\/\/[^\s"'`<>]+|"(?:[a-zA-Z]:[\\/]|\\\\|\/)[^"\r\n]*"|'(?:[a-zA-Z]:[\\/]|\\\\|\/)[^'\r\n]*'|`(?:[a-zA-Z]:[\\/]|\\\\|\/)[^`\r\n]*`|(?<![\w./\\:-])(?:[a-zA-Z]:[\\/]|\\\\|\/)[^\s"'`<>:,;!?()[\]{}]*/g,
+    (token: string) => {
       if (/^[a-zA-Z][a-zA-Z0-9+.-]{0,31}:\/\//.test(token)) return token;
-      return quote ? `${quote}[path]${quote}` : '[path]';
+      const quote = /^["'`]/.test(token) ? token[0] : '';
+      return `${quote}[path]${quote}`;
     },
   );
 }
