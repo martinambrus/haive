@@ -2800,8 +2800,12 @@ repoRoutes.post('/:id/remote', async (c) => {
   }
 
   let restore: (() => Promise<void>) | undefined;
+  let restoreFailure: Error | undefined;
   let event: AuditEvent | undefined;
   const restoreRemote = async (err: unknown): Promise<never> => {
+    // A restore that failed is the answer even when the transaction then rejects with
+    // another error, such as the lost connection that made the outer catch run.
+    if (restoreFailure) throw restoreFailure;
     if (restore) {
       try {
         const undo = restore;
@@ -2814,7 +2818,8 @@ repoRoutes.post('/:id/remote', async (c) => {
           { err: failure, repositoryId: id },
           'failed to restore origin after remote update failure',
         );
-        throw Object.assign(new HttpError(500, message), { cause: failure });
+        restoreFailure = Object.assign(new HttpError(500, message), { cause: failure });
+        throw restoreFailure;
       }
     }
     throw err;

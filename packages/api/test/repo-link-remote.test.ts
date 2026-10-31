@@ -300,3 +300,62 @@ it('kills a git child that ignores SIGTERM when its time is up', async () => {
     await response;
   }
 });
+
+it('answers with the failed restore, not the lost connection, when the callback cannot restore', async () => {
+  const old = 'https://old.test/r';
+  fake.patch(schema.repositories, REPO, { remoteUrl: old });
+  const failure = new Error('connection closed');
+  let drop!: (error: Error) => void;
+  const dropped = new Promise<never>((_resolve, reject) => {
+    drop = reject;
+  });
+  h.db = new Proxy(fake.db, {
+    get(target, key) {
+      if (key === 'transaction')
+        return (fn: (tx: any) => Promise<unknown>) =>
+          // postgres.js can reject on connection close before its callback finishes.
+          Promise.race([
+            target.transaction((tx) =>
+              fn(
+                new Proxy(tx, {
+                  get(t, prop) {
+                    if (prop === 'update')
+                      return () => ({
+                        set: () => ({
+                          where: async () => {
+                            drop(failure);
+                            throw failure;
+                          },
+                        }),
+                      });
+                    const value = Reflect.get(t, prop);
+                    return typeof value === 'function' ? value.bind(t) : value;
+                  },
+                }),
+              ),
+            ),
+            dropped,
+          ]);
+      const value = Reflect.get(target, key);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  h.git.mockImplementation(async (_command, args: string[]) => {
+    if (args.includes('rev-parse')) return { stdout: 'true', stderr: '' };
+    if (args.includes('remote') && args.includes('add')) throw fail(3, 'exists');
+    if (args.includes('--get-all')) {
+      if (args.at(-1) === 'remote.origin.url') return { stdout: old, stderr: '' };
+      throw fail(1, 'absent');
+    }
+    if (args.includes('--replace-all') && args.at(-1) === old) throw fail(128, 'restore refused');
+    return { stdout: '', stderr: '' };
+  });
+  const res = await link();
+  expect(res.status).toBe(500);
+  expect(await res.json()).toEqual({
+    error: 'Remote update failed and the previous remote could not be restored',
+    code: null,
+  });
+  expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe(old);
+  expect(fake.rows(schema.auditEvents)).toEqual([]);
+});
