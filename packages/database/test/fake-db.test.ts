@@ -93,6 +93,26 @@ describe('the fake database', () => {
   it('refuses other negations, EXISTS shapes, and columns outside their scope', () => {
     const fake = createFakeDb({ taskSteps: steps, cliInvocations: runs });
     const unsupported = [
+      not(sql`EXISTS (SELECT 2 FROM ${runs}
+        WHERE ${runs.taskStepId} = ${steps.id}
+          AND ${runs.endedAt} IS NULL
+          AND ${runs.supersededAt} IS NULL)`),
+      not(sql`EXISTS (SELECT 1 FROM ${runs}
+        HAVING ${runs.taskStepId} = ${steps.id}
+          AND ${runs.endedAt} IS NULL
+          AND ${runs.supersededAt} IS NULL)`),
+      not(sql`EXISTS (SELECT 1 FROM ${runs}
+        WHERE ${runs.taskStepId} <> ${steps.id}
+          AND ${runs.endedAt} IS NULL
+          AND ${runs.supersededAt} IS NULL)`),
+      not(sql`EXISTS (SELECT 1 FROM ${runs}
+        WHERE ${runs.taskStepId} = ${steps.id}
+          AND ${runs.endedAt} IS NOT NULL
+          AND ${runs.supersededAt} IS NULL)`),
+      not(sql`EXISTS (SELECT 1 FROM ${runs}
+        WHERE ${runs.taskStepId} = ${steps.id}
+          AND ${runs.endedAt} IS NULL
+          AND ${runs.supersededAt} IS NOT NULL)`),
       not(eq(steps.status, 'running')),
       sql`EXISTS (SELECT 1 FROM ${runs})`,
       not(sql`EXISTS (SELECT 1 FROM ${runs})`),
