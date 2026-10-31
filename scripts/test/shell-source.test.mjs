@@ -13,57 +13,74 @@ const bashAccepts = (script) => {
   assert.equal(status, 0, `bash rejects the control: ${stderr}`);
 };
 
-describe('fail-closed shell lexing (item 1)', () => {
-  for (const prefix of [
-    'read -r x <<< "$y"',
-    'echo $((1 << 2))',
-    '((x = 1 << 2))',
-    "echo $'it\\'s'",
-    'y=${x%% #*}',
-    'cat <<E.O.F\ndata\nE.O.F',
-    "cat <<E'O'F\ndata\nEOF",
-    'echo "$(case "$v" in a) echo ready ;; esac)"',
+describe('code stays visible after constructs the lexer skips whole', () => {
+  for (const [prefix, joins] of [
+    ['read -r x <<< "$y"', ['\n', '; ']],
+    ['echo $((1 << 2))', ['\n', '; ']],
+    ['((x = 1 << 2))', ['\n', '; ']],
+    ["echo $'it\\'s'", ['\n', '; ']],
+    ['y=${x%% #*}', ['\n', '; ']],
+    ['cat <<E.O.F\ndata\nE.O.F', ['\n']],
+    ["cat <<E'O'F\ndata\nEOF", ['\n']],
   ]) {
-    it(`sees a swallow after ${JSON.stringify(prefix)}`, () =>
-      rejects(`${prefix}\npnpm test || true`));
-    it(`sees errexit disabled after ${JSON.stringify(prefix)}`, () =>
-      rejects(`${prefix}\nset +e\npnpm test`, 'set +e'));
-    it(`sees Redis after ${JSON.stringify(prefix)}`, () =>
-      assert.ok(shellSource(`${prefix}\nexport X=${url}`, { step }).includes(url)));
+    for (const join of joins) {
+      const head = JSON.stringify(prefix + join);
+      it(`sees a swallow after ${head}`, () => rejects(`${prefix}${join}pnpm test || true`));
+      it(`sees errexit disabled after ${head}`, () =>
+        rejects(`${prefix}${join}set +e\npnpm test`, 'set +e'));
+      it(`sees Redis after ${head}`, () =>
+        assert.ok(shellSource(`${prefix}${join}export X=${url}`, { step }).includes(url)));
+    }
   }
   it('scans backticks inside double quotes', () => rejects('echo "ran `pnpm test || true`"'));
-  for (const script of [
-    "cat <<'EOF'\ndata",
-    'cat <<EOF',
-    "echo 'unfinished",
-    'echo "unfinished',
-    'echo `unfinished',
-    'echo "$(echo unfinished"',
+});
+
+describe('unterminated syntax throws with the step name', () => {
+  for (const [script, what] of [
+    ["cat <<'EOF'\ndata", 'heredoc "EOF"'],
+    ['cat <<EOF', 'heredoc'],
+    ['echo $(cat <<EOF)', 'heredoc'],
+    ["echo 'unfinished", 'quote'],
+    ['echo "unfinished', 'quote'],
+    ['echo `unfinished', 'quote'],
+    ['echo "$(echo unfinished"', 'quote'],
+    ['echo $(echo unfinished', 'command substitution'],
+    ['echo ${x:-unfinished', 'parameter expansion'],
+    ['echo $((1 + 2', 'arithmetic expression'],
+    ['echo $[1 + 2', 'arithmetic expression'],
   ]) {
-    it(`names the step for incomplete syntax ${JSON.stringify(script)}`, () => {
-      assert.throws(() => shellSource(script, { step }), /scanner-control: unterminated/);
+    it(`names the step for ${JSON.stringify(script)}`, () => {
+      assert.throws(
+        () => shellSource(script, { step }),
+        new RegExp(`^Error: scanner-control: unterminated ${what.replace(/"/g, '\\"')}$`),
+      );
     });
   }
 });
 
-describe('fallback shell separators (item 2)', () => {
+describe('fallback success followed by a separator', () => {
+  for (const [form, matched] of [
+    ['true', '|| true'],
+    [':', '|| :'],
+    ['exit 0', '|| exit 0'],
+    ['(exit 0)', '|| (exit 0)'],
+  ]) {
+    for (const separator of [';', '&', '|', ')', '}', ' &']) {
+      it(`rejects ${JSON.stringify(`cmd || ${form}${separator}`)}`, () =>
+        rejects(`cmd || ${form}${separator}`, matched));
+    }
+  }
   for (const script of [
     '(cmd || true)',
     'x=$(cmd || true)',
-    'cmd || true|cat',
-    'cmd || true &',
-    'cmd || :}',
-    'cmd || exit 0)',
+    'cmd || true;echo',
+    'cmd || true&echo',
   ]) {
-    it(`rejects ${script}`, () =>
-      rejects(
-        script,
-        script.includes('exit') ? '|| exit 0' : script.includes(':') ? '|| :' : '|| true',
-      ));
+    it(`rejects ${script}`, () => rejects(script));
   }
 });
 
-describe('conditional construct balance (item 3)', () => {
+describe('if, elif, else and fi balance for the bare true rule', () => {
   for (const script of [
     'if a; then x; elif b; then y; fi\npnpm test\ntrue',
     'if a; then x; elif b; then y; elif c; then z; else w; fi\ntrue',
@@ -240,6 +257,40 @@ describe('heredoc bodies by consumer', () => {
     bashAccepts(script);
     assert.throws(() => shellSource(script, { step }), /scanner-control: unterminated quote/);
   });
+});
+
+describe('case statements inside a substitution', () => {
+  for (const script of [
+    'echo "$(case "$v" in a) pnpm test || true ;; esac)"',
+    'echo "$(case "$v" in a) echo x ;; b) pnpm test || true ;; esac)"',
+    'echo "$(case "$v" in\na) echo x ;;\nb) pnpm test || true ;;\nesac)"',
+    'echo "$(case "$v" in (a) pnpm test || true ;; esac)"',
+    'echo "$(case "$v" in a|b) pnpm test || true ;; esac)"',
+    'echo "$(case "$v" in a) for y in 1 2; do :; done ;; b) pnpm test || true ;; esac)"',
+    'echo "$(case "$v" in a) echo x ;;& b) pnpm test || true ;; esac)"',
+  ]) {
+    it(`sees a swallow in the arm of ${JSON.stringify(script)}`, () => {
+      bashAccepts(script);
+      rejects(script);
+    });
+  }
+  it('sees errexit disabled in the arm of a case', () =>
+    rejects('echo "$(case "$v" in a) set +e ;; esac)"', 'set +e'));
+});
+
+describe('heredoc delimiter spelling', () => {
+  for (const [operator, indent] of [
+    ["<< 'EOF'", ''],
+    ["<<- 'EOF'", '\t'],
+    ["<<'EOF'", ''],
+    ['<< EOF', ''],
+  ]) {
+    it(`reads the body fed to bash through ${operator}`, () => {
+      const script = `bash ${operator}\n${indent}pnpm test || true\n${indent}EOF`;
+      bashAccepts(script);
+      rejects(script);
+    });
+  }
 });
 
 describe('unquoted heredoc bodies: only the expansions are code', () => {
@@ -428,7 +479,7 @@ describe('strings that a shell runs as code', () => {
   }
 });
 
-describe('mutation-sensitive lexical branches (item 5)', () => {
+describe('comments, tabs and prefixes of the lexer', () => {
   it('keeps a hash inside a word from hiding a later swallow', () =>
     rejects('echo x#tag; cmd || true'));
   it('strips tabs before finding a heredoc terminator and the later swallow', () =>
@@ -446,7 +497,7 @@ describe('mutation-sensitive lexical branches (item 5)', () => {
     assert.equal(swallowedFailure('set +e_not_an_option'), null));
 });
 
-describe('remaining failure masks (item 6)', () => {
+describe('quoted, parenthesised and prefixed failure masks', () => {
   for (const [script, matched] of [
     ['cmd || "true"', '|| true'],
     ["cmd || 'true'", '|| true'],
@@ -466,9 +517,21 @@ describe('remaining failure masks (item 6)', () => {
   ]) {
     it(`rejects ${JSON.stringify(script)}`, () => rejects(script, matched));
   }
+  for (const script of [
+    'set +x',
+    'set +u',
+    'set +xu',
+    'set +o pipefail',
+    'set +o errexitx',
+    'set -e',
+    'set -euo pipefail',
+  ]) {
+    it(`accepts ${JSON.stringify(script)}, which leaves errexit on`, () =>
+      assert.equal(swallowedFailure(script), null));
+  }
 });
 
-describe('shell control data and empty bodies (item 7)', () => {
+describe('expressions and empty construct bodies', () => {
   for (const script of [
     'echo ${{ inputs.flag || true }}',
     "echo ${{ format('}}', inputs.flag || true) }}",
