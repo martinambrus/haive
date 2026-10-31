@@ -38,10 +38,9 @@ export interface HaiveDataFacts {
   origin: boolean;
 }
 
-export type HaiveDataReadHold = {
-  code:
-    'checkout_unreadable' | 'git_operation_unreadable' | 'branch_unreadable' | 'origin_unreadable';
-};
+export type HaiveDataReadHold =
+  | { code: 'checkout_unreadable' | 'branch_unreadable' | 'origin_unreadable' }
+  | { code: 'git_operation_unreadable'; file?: string };
 export type HaiveDataFailure = {
   code:
     | 'save_failed'
@@ -54,15 +53,9 @@ export type HaiveDataFailure = {
 export type HaiveDataHold =
   | HaiveDataReadHold
   | {
-      code:
-        | 'checkout_missing'
-        | 'not_git_checkout'
-        | 'root_claim'
-        | 'write_pending'
-        | 'git_operation'
-        | 'detached_head'
-        | 'no_origin';
+      code: 'checkout_missing' | 'not_git_checkout' | 'root_claim' | 'detached_head' | 'no_origin';
     }
+  | { code: 'write_pending' | 'git_operation'; file?: string }
   | { code: 'checkout_held'; taskIds: string[] }
   | { code: 'plan_merge'; taskId: string }
   | { code: 'project_state_questions'; units: string[] };
@@ -84,12 +77,7 @@ export type HaiveDataRefusal =
   | { code: 'integration_held'; count: number }
   | { code: 'unowned_malformed_rtk'; file: string }
   | {
-      code:
-        | 'projection_not_owned'
-        | 'projection_rewritten'
-        | 'write_pending'
-        | 'git_operation'
-        | 'git_operation_unreadable';
+      code: 'projection_not_owned' | 'projection_rewritten';
       file: string;
     };
 

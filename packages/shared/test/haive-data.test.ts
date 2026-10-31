@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { holdsFor, haiveDataSaveRequestSchema, type HaiveDataFacts } from '../src/haive-data.js';
+import {
+  holdsFor,
+  haiveDataSaveRequestSchema,
+  type HaiveDataRefusal,
+  type HaiveDataFacts,
+} from '../src/haive-data.js';
 
 const clear: HaiveDataFacts = {
   checkout: 'ready',
@@ -92,4 +97,23 @@ it.each([
   ['origin_unreadable', { push: true, origin: false }],
 ] as const)('suppresses every dependent negative answer after %s', (code, change) => {
   expect(holdsFor({ ...clear, ...change, readHolds: [{ code }] })).toEqual([{ code }]);
+});
+
+it('narrows each integration-capable hold to one optional file payload', () => {
+  const fileFor = (refusal: HaiveDataRefusal) => {
+    switch (refusal.code) {
+      case 'git_operation':
+      case 'git_operation_unreadable':
+      case 'write_pending':
+        return refusal.file;
+      default:
+        return undefined;
+    }
+  };
+  for (const code of ['git_operation', 'git_operation_unreadable', 'write_pending'] as const) {
+    expect(fileFor({ code })).toBeUndefined();
+    expect(fileFor({ code, file: '.haive-data/state/file.json' })).toBe(
+      '.haive-data/state/file.json',
+    );
+  }
 });

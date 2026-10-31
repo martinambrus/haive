@@ -83,23 +83,26 @@ describe('the Haive data Save push seam', () => {
       skipped: ['unknown'],
     });
   });
-  it.each(['projection_not_owned', 'projection_rewritten', 'write_pending'] as const)(
-    'maps integration refusal %s without parsing its text',
-    async (code) => {
-      h.aside.mockResolvedValue({
-        outcome: 'refused',
-        code,
-        file: '.haive-data/state/unknown',
-        reason: 'any diagnostic in any language',
-      });
-      expect(await saveHaiveData(payload)).toMatchObject({
-        outcome: 'refused',
-        committed: true,
-        pushed: false,
-        refusal: { code, file: '.haive-data/state/unknown' },
-      });
-    },
-  );
+  it.each([
+    'projection_not_owned',
+    'projection_rewritten',
+    'write_pending',
+    'git_operation',
+    'git_operation_unreadable',
+  ] as const)('maps integration refusal %s without parsing its text', async (code) => {
+    h.aside.mockResolvedValue({
+      outcome: 'refused',
+      code,
+      file: '.haive-data/state/unknown',
+      reason: 'any diagnostic in any language',
+    });
+    expect(await saveHaiveData(payload)).toMatchObject({
+      outcome: 'refused',
+      committed: true,
+      pushed: false,
+      refusal: { code, file: '.haive-data/state/unknown' },
+    });
+  });
   it('does not recommit or push when a landed merge raises a project-state question', async () => {
     h.resync.mockImplementation(async () => {
       fake.insert(schema.projectStateConflicts, {
