@@ -327,3 +327,18 @@ it('T397 a failed commit log cannot report that no commits were found', async ()
     await shim.restore();
   }
 });
+
+it('T397 fix8 an unborn push gate has no branch and skips the log read', async () => {
+  const dir = await mkTmp('gate4-unborn-');
+  await git(dir, ['init', '-b', 'main']);
+  const shim = await failGit(['log']);
+  try {
+    const { ctx } = makeCtx(dir);
+    const detected = await gate4PushStep.detect!(ctx);
+    expect(detected.hasGit).toBe(true);
+    expect(detected.branch).toBeNull();
+    expect(detected.recentCommits).toBe('No commits found on this branch.');
+  } finally {
+    await shim.restore();
+  }
+});

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -13,10 +13,11 @@ const h = vi.hoisted(() => ({
   resync: vi.fn(),
   handBack: vi.fn(),
   metadata: vi.fn(),
+  kept: new Map<string, { bytes: Buffer; index: null }>(),
 }));
 vi.mock('../src/project-state/set-aside.js', async (original) => ({
   ...(await original<typeof import('../src/project-state/set-aside.js')>()),
-  setAsideHaiveProjections: async () => ({ outcome: 'set-aside', kept: new Map() }),
+  setAsideHaiveProjections: async () => ({ outcome: 'set-aside', kept: h.kept }),
   restoreProjectionsInTx: async () => ({ outcome: 'clean' }),
   putBackProjections: h.putBack,
   resyncHaiveProjections: h.resync,
@@ -42,6 +43,7 @@ let root: string;
 let shim: FakeGit | null = null;
 beforeEach(async () => {
   vi.clearAllMocks();
+  h.kept.clear();
   root = await mkdtemp(path.join(tmpdir(), 'refresh-reads-'));
 });
 afterEach(async () => {
@@ -55,11 +57,20 @@ const db = {
   transaction: async (fn: (tx: unknown) => unknown) => fn(db),
   select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),
 } as unknown as Database;
-async function fixture() {
+async function fixture(withPlan = false) {
   await git(root, ['init', '-b', 'main']);
+  if (withPlan) {
+    await mkdir(path.join(root, '.haive-data'));
+    await writeFile(path.join(root, '.haive-data/plan.md'), 'base\n');
+    await git(root, ['add', '.haive-data/plan.md']);
+  }
   await git(root, ['commit', '--allow-empty', '-m', 'one']);
   const dest = path.join(root, 'checkout');
   await git(root, ['clone', '.', dest]);
+  if (withPlan) {
+    await writeFile(path.join(root, '.haive-data/plan.md'), 'incoming\n');
+    await git(root, ['add', '.haive-data/plan.md']);
+  }
   await git(root, ['commit', '--allow-empty', '-m', 'two']);
   return {
     dest,
@@ -108,11 +119,12 @@ it('T397 a non-zero merge that moved HEAD re-syncs projections and reports failu
   expect(h.putBack).not.toHaveBeenCalled();
   expect(result).toMatch(/fast-forward.*failed/i);
 });
-it('T397 a failed post-merge HEAD read fails and never restores old projection bytes', async () => {
-  const { dest, payload } = await fixture();
+it('T397 fix8 a failed post-merge HEAD read leaves incoming projection bytes on disk', async () => {
+  const { dest, payload } = await fixture(true);
+  h.kept.set('.haive-data/plan.md', { bytes: Buffer.from('old pending\n'), index: null });
   shim = await failGit(['rev-parse', 'HEAD'], { from: 2 });
   await expect(fastForward(db, payload, dest)).rejects.toThrow(/HEAD/);
-  expect(h.putBack).not.toHaveBeenCalled();
+  expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('incoming\n');
 });
 it('T397 a refused fast-forward at the same HEAD restores projections', async () => {
   const { dest, payload } = await fixture();
@@ -133,4 +145,32 @@ it('T397 fix3 refresh finishes projection bookkeeping when hand-back throws afte
   expect(h.resync).toHaveBeenCalledOnce();
   expect(h.metadata).toHaveBeenCalledWith(dest, expect.any(Map));
   expect(h.putBack).not.toHaveBeenCalled();
+});
+
+it('T397 fix8 an empty FETCH_HEAD answer refuses before comparing or moving', async () => {
+  const { dest, payload } = await fixture();
+  const before = await git(dest, ['rev-parse', 'HEAD']);
+  shim = await failGit(['rev-parse', '--verify', 'FETCH_HEAD^{commit}'], { exit: 0 });
+  expect(await fastForward(db, payload, dest)).toMatch(/fetched commit \(empty answer\)/);
+  await shim.restore();
+  shim = null;
+  expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(before);
+});
+it('T397 fix8 a deepen failure has its own refusal and does not move HEAD', async () => {
+  const { dest, payload } = await fixture();
+  const before = await git(dest, ['rev-parse', 'HEAD']);
+  const base = await failGit(['merge-base'], { exit: 1 });
+  const shallow = await failGit(['rev-parse', '--is-shallow-repository'], {
+    exit: 0,
+    stdout: 'true\n',
+  });
+  const deepen = await failGit(['fetch', '--upload-pack=git-upload-pack', '--deepen=50']);
+  try {
+    expect(await fastForward(db, payload, dest)).toMatch(/could not deepen.*simulated failure/);
+  } finally {
+    await deepen.restore();
+    await shallow.restore();
+    await base.restore();
+  }
+  expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(before);
 });
