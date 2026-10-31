@@ -85,12 +85,10 @@ export type HaiveDataRefusal =
 /** Stable precedence, with details from structural state only, never diagnostic message text. */
 export function holdsFor(facts: HaiveDataFacts): HaiveDataHold[] {
   const holds: HaiveDataHold[] = [...(facts.readHolds ?? [])];
-  if (facts.checkout === 'missing') holds.push({ code: 'checkout_missing' });
-  if (
-    facts.checkout === 'not_git' &&
-    !facts.readHolds?.some((h) => h.code === 'checkout_unreadable')
-  )
-    holds.push({ code: 'not_git_checkout' });
+  // A checkout that could not be read says nothing about what it is: only the read hold stands.
+  const checkoutUnreadable = facts.readHolds?.some((h) => h.code === 'checkout_unreadable');
+  if (facts.checkout === 'missing' && !checkoutUnreadable) holds.push({ code: 'checkout_missing' });
+  if (facts.checkout === 'not_git' && !checkoutUnreadable) holds.push({ code: 'not_git_checkout' });
   if (facts.rootClaimLive) holds.push({ code: 'root_claim' });
   if (facts.holdingTaskIds.length)
     holds.push({ code: 'checkout_held', taskIds: [...facts.holdingTaskIds].sort() });

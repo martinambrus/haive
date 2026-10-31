@@ -99,6 +99,15 @@ it.each([
   expect(holdsFor({ ...clear, ...change, readHolds: [{ code }] })).toEqual([{ code }]);
 });
 
+it.each(['missing', 'not_git'] as const)(
+  'says nothing about what a checkout that could not be read is (%s)',
+  (checkout) => {
+    expect(holdsFor({ ...clear, checkout, readHolds: [{ code: 'checkout_unreadable' }] })).toEqual([
+      { code: 'checkout_unreadable' },
+    ]);
+  },
+);
+
 it('narrows each integration-capable hold to one optional file payload', () => {
   const fileFor = (refusal: HaiveDataRefusal) => {
     switch (refusal.code) {
