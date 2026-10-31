@@ -6,8 +6,8 @@ import { eq, sql } from 'drizzle-orm';
 import { DATA_MIGRATIONS } from '../src/data-migrations.js';
 
 const url = process.env.PLAN_ERROR_REPAIR_TEST_URL;
-if (url && !new URL(url).pathname.startsWith('/t478_plan_error_test')) {
-  throw new Error('Use a dedicated t478_plan_error_test database');
+if (url && !new URL(url).pathname.startsWith('/plan_error_repair_test')) {
+  throw new Error('Use a dedicated plan_error_repair_test database');
 }
 
 describe.skipIf(!url)('boot repair of stored plan error paths', () => {
@@ -100,4 +100,50 @@ describe.skipIf(!url)('boot repair of stored plan error paths', () => {
     expect(await rows()).toEqual(repaired);
     expect(lines).toEqual([]);
   });
+
+  it.each(["ENOENT: open '/srv/newer/repo/plan.json'", null])(
+    'leaves a newer error or successful clear alone after the read: %s',
+    async (newer) => {
+      const [repo] = await db
+        .insert(schema.repositories)
+        .values({
+          userId,
+          name: 'racing fixture',
+          source: 'blank',
+        })
+        .returning({ id: schema.repositories.id });
+      await db.insert(schema.planMirrorState).values({
+        repositoryId: repo!.id,
+        lastError: "EACCES: open '/srv/private/repo/plan.json'",
+      });
+      // Execute the actual SELECT, then change its text before the repair's UPDATE.
+      const racingDb = new Proxy(db, {
+        get(target, prop, receiver) {
+          if (prop !== 'select') return Reflect.get(target, prop, receiver);
+          return (fields: Parameters<Database['select']>[0]) => ({
+            from: (table: typeof schema.planMirrorState) => ({
+              where: async (condition: ReturnType<typeof eq>) => {
+                const selected = await target.select(fields).from(table).where(condition);
+                await db
+                  .update(schema.planMirrorState)
+                  .set({ lastError: newer })
+                  .where(eq(schema.planMirrorState.repositoryId, repo!.id));
+                return selected;
+              },
+            }),
+          });
+        },
+      });
+      const migrations = DATA_MIGRATIONS.filter((m) => m.id === 'scrubPlanMirrorErrors');
+      for (const migration of migrations) await migration.run(racingDb);
+      expect(migrations).toHaveLength(1);
+      const [row] = await db
+        .select()
+        .from(schema.planMirrorState)
+        .where(eq(schema.planMirrorState.repositoryId, repo!.id));
+      expect(row?.lastError).toBe(newer);
+      expect(lines).toEqual([]);
+      await db.delete(schema.repositories).where(eq(schema.repositories.id, repo!.id));
+    },
+  );
 });
