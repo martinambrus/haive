@@ -944,6 +944,14 @@ From the T463 review (2026-10-31). PRE-EXISTING, minor to moderate. `POST /repos
 status: open
 From the T421 review (2026-10-31). PRE-EXISTING, minor, conservative direction. worker/api onboarding-admission.ts `ledgerImportedSince` (~:128-144) counts every import marker imported after an upgrade, path-blind and including the superseded ones, so a marker at a git-data path that T421's boot migration retired still blocks that upgrade's rollback. Decide whether a retired git-data marker should count (it was never a real import) or the conservative block stays.
 
+### T469 · FNF[git-data-ledger-rows-2] · a reset leaves a git-data claim file no ledger row names; three writers record ledger rows with no path check (+1)
+
+status: open
+From the T421 fix-round review (2026-10-31). PRE-EXISTING, minor.
+
+1. api routes/repos.ts (~:2568-2574): a git-data claim file named by no ledger row on this install (for example a teammate's older-release file the sync read into the base; it never creates a row) is still left by an onboarding reset, and the record then reads refused, so the next record write throws (confirmed by a one-off run). Direction: also remove base claims that name git data; `baseRecord` (~:3100) is already read there.
+2. worker 12-post-onboarding.ts ~:456, 01-upgrade-plan.ts ~:397 and worker/scripts/reset-bundle-to-commit.ts ~:171 insert ledger rows with no path check; they hold only by the static catalog and the bundle-id grammar (the script is a manual dev helper). Add the same `namesGitData` refusal T421 gave the other writers.
+
 ## Done
 
 - T463 — a form read of a request that is not a form answers 400 invalid_form (formBodyErrors maps the TypeError class), the CLI login banner ignores a WebSocket frame that is not a JSON object, PUT /user-settings/ide and /ui-prefs refuse a settingsJson that is not an object, and five sources added 100755 are 100644 — PR #955 (98e0f3762), 2026-10-31; main CI green; follow-ups T467, T364 item 26 note
