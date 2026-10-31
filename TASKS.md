@@ -990,6 +990,24 @@ From the T466 review (2026-10-31). PRE-EXISTING, minor, theoretical.
 
 `extractArchive` (worker repo/clone.ts ~:604-614) moves the old `dest` into the stage and then renames the new tree in; if the second rename fails or the process dies between the two, no repository directory is left, and the `finally` removes the stage with the old tree in it, although the doc comment (~:509-511) says a failure leaves the previous contents untouched. Direction: on a failed second rename move the old tree back before the `finally`, and say in the comment what a crash between the renames leaves.
 
+### T480 · FNF[git-data-stored-dirs-2] · the KB path validator accepts a git-data name; 09_5, 09_5b and 11d still dispatch agents for a stored git-data dir (+4)
+
+status: open
+From the T473 review (2026-10-31). PRE-EXISTING, minor (stored or model-named input only).
+
+1. `sanitizeKbRelPath` (worker onboarding/_kb-write.ts ~:58-76) accepts `.git/hooks/x` and `.GIT./x` (measured), so 08 (~:2129, ~:2272, ~:2380, ~:2421, ~:2441), 09_3 `applyKbWrites` (~:124) and `_kb-legacy.ts` can write a model-named KB file under a git-data name inside `.haive-data/knowledge_base/` (12's stage plan drops it since T473). A refusal in the validator covers all three.
+2. 09_5 `skipIf` (~:1155), `selectAgents` (~:1226) and its prompt (~:897), 09_5b (~:417-420) and 11d (~:402-405) still read the unfiltered stored dirs and ids, so a CLI agent is dispatched (cost) for a stored git-data dir or id and the prompt names it as the skills dir; apply then refuses. Filter with `withoutGitDataDirs` where the dirs are read.
+3. A stored `skillTargetDirs` entry of `''` or `.` passes `withoutGitDataDirs` and fs-safe (measured): 09_5 (~:1454), 09_5b (~:562) and 11d (~:518) write a README at the repository root and create `<id>/` at its top; a stored skill id holding `/` joins into `<dir>/a/b` for the write and the remove (09_5b ~:524, 11d ~:260, ~:504). Recommended default (ASK only if it conflicts with a recorded decision): a positive check beside the denylist, the catalog's skills dirs and single-segment ids, as the reset already does (api repos.ts ~:1526-1530).
+4. The dir refusals of 09_5, 09_5b and 11d show only as a worker-log warning (09_5 repeats it on every loop pass), and 11d's all-dropped return (~:431) drops approved ops with no note. Recommended default: set `degradedNote` when a dir or id is dropped, once per step run.
+5. Cosmetic: 07's `unmanagedFilesDescription` (~:485) and the form's checkbox count (~:764) still list a quarantine group whose dir names git data, although apply skips it.
+
+### T481 · FNF[git-data-legacy-files] [design] · files an earlier release wrote under a git-data name stay, and an alias spelling on disk fails every later git add
+
+status: open
+From the T473 review (2026-10-31). PRE-EXISTING, minor (stored legacy or hand-edited input only).
+
+Since T469 and T473 no writer records or writes a path that names git data, but files an earlier release already wrote there (07's agent files under a stored `.git/hooks`-style target dir, skill trees under a stored skills dir) stay, nothing cleans them, and an alias spelling on disk (`.GIT./x`, `git~1/x`) still fails `git add -A` in 12's init branch (`12-post-onboarding.ts` ~:958) and any later whole-tree add with "invalid path". A cleanup removes files in the repository, so it needs a decision: find them (by the stored targets or a tree walk), report them, or remove them with an explicit confirmation.
+
 ## Done
 
 - T458 — the worker's CANCEL job decides under the task row's lock (markTaskCancelled): a completed or vanished task is left as it is with no teardown, an already-cancelled one keeps its stamps, anything else (failed included) is cancelled; DELETE /plan/merge and the step abort stop the live run, cancel through cancelTaskIfOpen and clear the pause only when the cancel applied, as Cancel does — PR #962 (f8eea8b66), 2026-10-31; main CI green incl. all smokes; live cancel/abort/discard UI paths not driven (they need a running CLI task or a conflicted remote pull); follow-ups T476, T309 +2, T364 +1, T460 note
