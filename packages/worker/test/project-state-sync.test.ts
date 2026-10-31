@@ -15,11 +15,12 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { eq, getTableName, is, SQL, StringChunk } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb, type FakeDbHandle } from '@haive/database/testing';
 import {
   CHECKOUT_HOLDING_TASK_STATUSES,
+  logger,
   normalizeContent,
   pendingImportedMcpServers,
   sha256Hex,
@@ -2380,6 +2381,213 @@ describe('syncProjectStateFromCheckout: the agent-rules text setting', () => {
       expect(s.pending()).toEqual([]);
     },
   );
+});
+
+describe('syncProjectStateFromCheckout: what a first sync replaces', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const RULES = 'settings/agent-rules.md';
+  const VERSION = 'settings/rtk-version.json';
+  const RENDER_UNITS = ['acceptedAgentIds', 'customAgentSpecs', 'framework', 'projectInfo'].map(
+    (key) => `project/render.json#${key}`,
+  );
+  const ENVIRONMENT_UNITS = ['confirmedValues', 'envDetectData'].map(
+    (key) => `project/environment.json#${key}`,
+  );
+  // One line each, so the escaping of a serialised call cannot hide a value from a search of it.
+  const HERE = { version: '7.7.7-typed-here', rules: 'Rules typed on this install.\n' };
+  const THERE = { version: '8.8.8-in-checkout', rules: 'Rules the teammate committed.\n' };
+
+  interface Replaced {
+    repositoryId: string;
+    count: number;
+    units: string[];
+  }
+  /** The warns that name replaced units, picked by that shape and never by their wording. */
+  const replaced = (warn: { mock: { calls: readonly (readonly unknown[])[] } }): Replaced[] =>
+    warn.mock.calls.flatMap(([fields]) =>
+      Array.isArray((fields as { units?: unknown } | undefined)?.units) ? [fields as Replaced] : [],
+    );
+  const watchWarn = () => vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  const typedHere = (s: Setup) =>
+    s.fake.patch(schema.repositories, REPO, {
+      rtkVersion: HERE.version,
+      agentRulesOverride: HERE.rules,
+    });
+  const inCheckout = () =>
+    withSettings({ 'rtk-version': THERE.version, 'agent-rules': THERE.rules });
+
+  it('names the settings it took from the checkout over a different value typed here, and no value', async () => {
+    const warn = watchWarn();
+    const s = await setup();
+    typedHere(s);
+    await s.putRecord(inCheckout());
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('applied');
+    expect(repoRow(s).rtkVersion).toBe(THERE.version);
+    expect(repoRow(s).agentRulesOverride).toBe(THERE.rules);
+    expect(replaced(warn)).toEqual([{ repositoryId: REPO, count: 2, units: [RULES, VERSION] }]);
+    const logged = JSON.stringify(warn.mock.calls);
+    expect(logged).toContain(RULES);
+    for (const value of [HERE.version, THERE.version, HERE.rules.trim(), THERE.rules.trim()]) {
+      expect(logged).not.toContain(value);
+    }
+  });
+
+  it('names the render and environment keys it took over a different value, and not a set that joined', async () => {
+    const warn = watchWarn();
+    const s = await setup({ column: column(BASE) });
+    s.fake.patch(schema.repositories, REPO, {
+      onboardingEnvironment: { schemaVersion: 1, ...envOf('typed-here', { a: 1 }) },
+    });
+    await s.putRecord({ ...record(TEAM), environment: envOf('in-checkout', { a: 2 }) });
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('applied');
+    expect(json(s.columnOf())).toMatchObject({ framework: TEAM.framework });
+    expect(json(repoRow(s).onboardingEnvironment)).toEqual({
+      schemaVersion: 1,
+      ...envOf('in-checkout', { a: 2 }),
+    });
+    const logged = replaced(warn);
+    expect(logged).toHaveLength(1);
+    const { repositoryId, count, units } = logged[0]!;
+    expect(repositoryId).toBe(REPO);
+    expect(count).toBe(6);
+    expect([...units].sort()).toEqual([...ENVIRONMENT_UNITS, ...RENDER_UNITS].sort());
+  });
+
+  it('cuts the list at ten units, the settings and the environment first, and counts them all', async () => {
+    const SETTING_UNITS = [
+      RULES,
+      'settings/chrome-devtools-mcp-version.json',
+      'settings/lsp-server-versions.json',
+      'settings/lsp-servers.json',
+      'settings/review-dimensions.json',
+      VERSION,
+    ];
+    const warn = watchWarn();
+    const s = await setup({ column: column(BASE) });
+    s.fake.patch(schema.repositories, REPO, {
+      rtkVersion: HERE.version,
+      chromeDevtoolsMcpVersion: '1.1.1-typed-here',
+      agentRulesOverride: HERE.rules,
+      reviewDimensions: ['security'],
+      lspServers: ['vtsls'],
+      lspServerVersions: { vtsls: '1.0.0' },
+      onboardingEnvironment: { schemaVersion: 1, ...envOf('typed-here', { a: 1 }) },
+    });
+    await s.putRecord({
+      ...withSettings(
+        {
+          'rtk-version': THERE.version,
+          'chrome-devtools-mcp-version': '2.2.2-in-checkout',
+          'agent-rules': THERE.rules,
+          'review-dimensions': ['maintainability'],
+          'lsp-servers': ['gopls'],
+          'lsp-server-versions': { vtsls: '2.0.0' },
+        },
+        envOf('in-checkout', { a: 2 }),
+      ),
+      render: TEAM,
+    });
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('applied');
+    const all = [...ENVIRONMENT_UNITS, ...SETTING_UNITS, ...RENDER_UNITS];
+    expect(all.length).toBeGreaterThan(10);
+    const logged = replaced(warn);
+    expect(logged).toHaveLength(1);
+    const { count, units } = logged[0]!;
+    expect(count).toBe(all.length);
+    expect(units).toHaveLength(10);
+    expect(new Set(units).size).toBe(10);
+    for (const unit of units) expect(all).toContain(unit);
+    // Only a render key may be cut: a ledger full of claims must not hide a setting.
+    for (const unit of [...ENVIRONMENT_UNITS, ...SETTING_UNITS]) expect(units).toContain(unit);
+  });
+
+  it('logs nothing on a second sync of the same files, whose base the first one wrote', async () => {
+    const warn = watchWarn();
+    const s = await setup();
+    typedHere(s);
+    await s.putRecord(inCheckout());
+    expect((await s.run()).outcome).toBe('applied');
+    expect(repoRow(s).rtkVersion).toBe(THERE.version);
+    warn.mockClear();
+
+    const second = await s.run();
+
+    expect(second.outcome).toBe('unchanged');
+    expect(replaced(warn)).toEqual([]);
+  });
+
+  it('logs nothing where this install holds no value, as on a clone', async () => {
+    const warn = watchWarn();
+    const s = await setup();
+    await s.putRecord({
+      ...withSettings(
+        { 'rtk-version': THERE.version, 'agent-rules': THERE.rules },
+        envOf('in-checkout', { a: 2 }),
+      ),
+      render: TEAM,
+    });
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('applied');
+    expect(repoRow(s).rtkVersion).toBe(THERE.version);
+    expect(json(s.columnOf())).toMatchObject({ framework: TEAM.framework });
+    expect(replaced(warn)).toEqual([]);
+  });
+
+  it('logs nothing where the value typed here is the checkout’s own', async () => {
+    const warn = watchWarn();
+    const s = await setup({ column: column(TEAM) });
+    s.fake.patch(schema.repositories, REPO, {
+      rtkVersion: THERE.version,
+      agentRulesOverride: THERE.rules,
+      onboardingEnvironment: { schemaVersion: 1, ...envOf('in-checkout', { a: 2 }) },
+    });
+    await s.putRecord({
+      ...withSettings(
+        { 'rtk-version': THERE.version, 'agent-rules': THERE.rules },
+        envOf('in-checkout', { a: 2 }),
+      ),
+      render: TEAM,
+    });
+
+    await s.run();
+
+    expect(s.syncRow()).toBeDefined();
+    expect(replaced(warn)).toEqual([]);
+  });
+
+  it('logs nothing for a first sync that is superseded, whose replacement is rolled back', async () => {
+    const warn = watchWarn();
+    const s = await setup();
+    typedHere(s);
+    await s.putRecord(inCheckout());
+    // The checkout moves once the sync is writing, after the checks that would stand it down early.
+    let moved = false;
+    s.hook.onWrite = async () => {
+      if (moved) return;
+      moved = true;
+      await s.put(`${STATE_DIR}/future/notes.json`, '{"moved":true}\n');
+    };
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('superseded');
+    expect(moved).toBe(true);
+    expect(repoRow(s).rtkVersion).toBe(HERE.version);
+    expect(s.syncRows()).toEqual([]);
+    expect(replaced(warn)).toEqual([]);
+  });
 });
 
 describe('syncProjectStateFromCheckout: invalid RTK ownership', () => {
