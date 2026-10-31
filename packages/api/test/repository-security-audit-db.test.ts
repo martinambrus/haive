@@ -23,6 +23,7 @@ const h = vi.hoisted(() => ({
   actor: '',
   gitHook: undefined as ((args: string[]) => Promise<void>) | undefined,
   lockTimeoutMs: 30_000,
+  ragProbe: undefined as (() => Promise<boolean>) | undefined,
 }));
 vi.mock('node:child_process', async (original) => {
   const actual = await original<typeof import('node:child_process')>();
@@ -38,6 +39,31 @@ vi.mock('node:child_process', async (original) => {
   };
 });
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+// These controls exercise Postgres row contention; the RAG writer lease is held in memory.
+vi.mock('../src/redis.js', () => ({ getRedis: () => ({}) }));
+vi.mock('@haive/shared/rag', async (original) => {
+  const actual = await original<typeof import('@haive/shared/rag')>();
+  return {
+    ...actual,
+    tryAcquireRagSyncLock: async () => ({ lost: false, release: async () => {} }),
+    resolveRagConnection: async (...args: Parameters<typeof actual.resolveRagConnection>) => {
+      if (!h.ragProbe) return actual.resolveRagConnection(...args);
+      return {
+        mode: 'external',
+        embeddingDimensions: 8,
+        pg: {
+          begin: async (run: (tx: unknown) => unknown) =>
+            run({
+              unsafe: async (statement: string) =>
+                statement.startsWith('SELECT') && (await h.ragProbe?.()) ? [{ found: 1 }] : [],
+            }),
+        },
+        close: async () => {},
+      };
+    },
+  };
+});
+
 vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
   get REPOSITORY_TASKS_LOCK_TIMEOUT_MS() {
@@ -133,6 +159,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
   afterEach(async () => {
     h.db = db;
     h.gitHook = undefined;
+    h.ragProbe = undefined;
     h.lockTimeoutMs = 30_000;
     await allowAudit(db);
     await db.execute(sql`DROP TRIGGER IF EXISTS refuse_remote_persist ON repositories`);
@@ -572,6 +599,99 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
     () => answeredBusyBehindRelink(() => sendSetting('tooling', { secretMaskEnabled: false })),
     30_000,
   );
+  it(
+    'answers a tooling rebuild 409 busy before its pending flag or any other write behind a held relink',
+    () =>
+      answeredBusyBehindRelink(() =>
+        sendSetting('tooling', {
+          ragEmbedAction: 'rebuild_index',
+          secretMaskEnabled: false,
+        }),
+      ),
+    30_000,
+  );
+  it('finishes a retry flag restore while a relink arrives during its second probe', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'remote-retry-'));
+    roots.push(root);
+    await git(root, ['init']);
+    await git(root, ['remote', 'add', 'origin', 'https://old.test/r']);
+    const degradedAt = new Date('2026-01-01T00:00:00Z');
+    await db
+      .update(schema.repositories)
+      .set({
+        localPath: root,
+        remoteUrl: 'https://old.test/r',
+        ragEmbedDegradedAt: degradedAt,
+        ragEmbedDegradedReason: 'pending fallback rows',
+        onboardingTooling: {
+          schemaVersion: 1,
+          tooling: {
+            ragMode: 'external',
+            ragConnectionString: 'postgres://unused.test/rag',
+            embeddingDimensions: 8,
+          },
+        },
+      })
+      .where(eq(schema.repositories.id, repository));
+    let reached = false;
+    let release!: () => void;
+    const resume = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.gitHook = async (args) => {
+      if (args.includes('--replace-all') && args.at(-1) === 'https://first.test/r') {
+        reached = true;
+        await resume;
+      }
+    };
+    let relink: Promise<Response> | undefined;
+    let probes = 0;
+    h.ragProbe = async () => {
+      if (++probes === 1) return false;
+      relink = Promise.resolve(
+        app.request(`/repos/${repository}/remote`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ remoteUrl: 'https://first.test/r' }),
+        }),
+      );
+      // On the old code the relink takes the row and holds it in git; on the fix it
+      // queues on the save's row. Either proves it has arrived before the flag restore.
+      await expect
+        .poll(
+          async () =>
+            reached ||
+            (
+              await db.execute(sql`
+        select 1 from pg_stat_activity a join pg_locks l on l.pid = a.pid
+        where a.datname = current_database() and not l.granted
+          and a.query like 'select %"repositories"%'
+      `)
+            ).length > 0,
+          { timeout: 3_000 },
+        )
+        .toBe(true);
+      return true;
+    };
+    const save = Promise.resolve(
+      sendSetting('tooling', { ragEmbedAction: 'retry', secretMaskEnabled: false }),
+    );
+    try {
+      const answer = await answeredWithin(5_000, save);
+      expect(answer.status).toBe(200);
+      expect(await answer.json()).toMatchObject({ degradationKept: true });
+      expect(await stored()).toMatchObject({
+        secretMaskEnabled: false,
+        ragEmbedDegradedAt: degradedAt,
+        ragEmbedDegradedReason: 'pending fallback rows',
+      });
+      expect(probes).toBe(2);
+    } finally {
+      release();
+      await Promise.all([save, relink]);
+    }
+    expect((await relink!).status).toBe(200);
+  }, 30_000);
   it(
     'answers an integrations allow-list save 409 busy within the lock bound while a relink holds the row',
     () =>

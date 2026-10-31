@@ -951,10 +951,15 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
           };
           // Stored before the reset: a reset that fails part-way leaves NULL hashes over the old vectors.
           assertRagLockHeld(lock);
-          await db
-            .update(schema.repositories)
-            .set(pending)
-            .where(eq(schema.repositories.id, repositoryId));
+          // The pending flag is the first write too: bound its implicit row lock.
+          await db.transaction((tx) =>
+            boundedLockWait(tx, () =>
+              tx
+                .update(schema.repositories)
+                .set(pending)
+                .where(eq(schema.repositories.id, repositoryId)),
+            ),
+          );
           reembedQueued = await forceRagReembed(db, repositoryId, lock);
           if (reembedQueued) Object.assign(updates, pending);
         }
@@ -1038,18 +1043,19 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
       if (PORTABLE_SETTING_UPDATE_KEYS.some((key) => key in updates)) {
         await markProjectStateDirty(tx, repositoryId);
       }
+      // Recheck after the clear while we still hold the row taken within the bound.
+      // A separate post-commit restore could queue behind a relink without a bound.
+      // Unfenced: a lease lost by expiry leaves no sync to restore the flag.
+      if (retryCleared && (await ragStoreAwaitsReembedBounded(db, repositoryId))) {
+        await tx
+          .update(schema.repositories)
+          .set(retryCleared)
+          .where(eq(schema.repositories.id, repositoryId));
+        degradationKept = true;
+      }
     });
     if (appAuthWrites.length > 0) logAuditEvent(appAuthEvent);
     if (changedFields.length > 0) logAuditEvent(securityEvent);
-    // A sync can write fallback rows between the probe and the clear; look once more after it.
-    // Unfenced: the save has committed, and a lock lost by expiry leaves no sync to restore the flag.
-    if (retryCleared && (await ragStoreAwaitsReembedBounded(db, repositoryId))) {
-      await db
-        .update(schema.repositories)
-        .set(retryCleared)
-        .where(eq(schema.repositories.id, repositoryId));
-      degradationKept = true;
-    }
     return c.json({
       repositoryId,
       ok: true,
