@@ -1160,6 +1160,13 @@ From the T385 F7 round 2 review (2026-10-31). PRE-EXISTING; minor (test fidelity
 2. `ne`, `inArray` and `notInArray` on timestamp columns compare Date objects by reference (~:335, ~:343-346; `eq` handles Date at ~:314-317): for an equal-time distinct Date, ne is true (PostgreSQL false), inArray false (true), notInArray true (false).
 3. Optional: the negated correlated EXISTS gate keeps 8 of 19 shape checks unpinned (`ch.length === 2`, `text(ch[0]) === 'not '`, `is(ch[1], SQL)`, `sub.length === 11`, `is(sub[3], PgUUID)`, `is(sub[5], PgUUID)`, `is(sub[7], Column)`, `is(sub[9], Column)`); no current input differs.
 
+### T508 · FNF[relink-commit-unknown] [design] · after a lost COMMIT acknowledgement the relink restores git blindly, leaving the row new and git old
+
+status: open
+From the T376 fifth review (2026-10-31). PRE-EXISTING on the T376 branch (80cb7aa97), documented, minor (needs a connection loss at COMMIT).
+
+The remote relink (api routes/repos.ts, the outer catch after `db.transaction`) restores git's remote after a COMMIT failure or a lost connection without learning whether the transaction committed. A COMMIT whose acknowledgement was lost leaves the row's `remote_url` and credential binding new, the `repository.remote.update` audit row present, and git on the old remote. Fix direction: after a connection-class error, read the row on a fresh connection and align git to it instead of restoring blindly. Related, third-party (needs approval, not started): postgres.js 3.4.9 keeps running an abandoned transaction callback after `onclose` rejects `begin`, and its `tx` handle can write through a connection the pool has re-opened (`index.js` ~:243-246, ~:291-296, ~:421-427), so a late `UPDATE` could land outside its transaction.
+
 ## Done
 
 - T480 — the KB path validator refuses a git-data name (08, 09_3 and the legacy KB writer); 09_5, 09_5b and 11d read stored skill dirs and ids through a positive check (the catalog's skills dirs, single-segment ids) beside the git-data denylist, so no agent is dispatched or prompted for a refused dir, and a dropped dir or id sets one degradedNote per run; 07's agent targets and quarantine groups and 12's recorded agent dirs keep to the catalog, quarantine file names are validated, and 07's description and count leave out a refused group — PR #970 (1e02dd1fb), 2026-10-31; main CI green; delivered with codex-sonnet (2 fix rounds); follow-up T494
