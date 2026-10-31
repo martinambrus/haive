@@ -22,11 +22,12 @@ vi.mock('@haive/shared/fs-safe', async (original) => {
 });
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { Hono } from 'hono';
-import { bundleRoutes } from '../src/routes/bundles.js';
+import { bundleRoutes, FILES_LIST_CAP } from '../src/routes/bundles.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
 const BUNDLE = '00000000-0000-4000-8000-0000000000c1';
+const DIRECTORIES = 10;
 const run = promisify(execFile);
 let storage: string | undefined;
 const sockets: Server[] = [];
@@ -38,15 +39,15 @@ afterEach(async () => {
   if (storage) await rm(storage, { recursive: true, force: true });
 });
 
-it('lists 5000 nested files identically without resolving each file from the anchor', async () => {
+it('lists a cap-sized tree of nested files identically without resolving each file from the anchor', async () => {
   storage = await mkdtemp(path.join(tmpdir(), 'bundle-walk-'));
   process.env.BUNDLE_STORAGE_ROOT = storage;
   const tree = path.join(storage, USER, BUNDLE, 'extracted');
   const expected: Array<{ path: string; size: number }> = [];
-  for (let d = 0; d < 10; d += 1) {
+  for (let d = 0; d < DIRECTORIES; d += 1) {
     const rel = `d${d}/nested/deep`;
     await mkdir(path.join(tree, rel), { recursive: true });
-    for (let i = 0; i < 500; i += 1) {
+    for (let i = 0; i < FILES_LIST_CAP / DIRECTORIES; i += 1) {
       const name = `f${String(i).padStart(4, '0')}`;
       await writeFile(path.join(tree, rel, name), 'hello');
       expected.push({ path: `${rel}/${name}`, size: 5 });
@@ -81,24 +82,9 @@ it('lists 5000 nested files identically without resolving each file from the anc
   app.route('/', bundleRoutes);
   app.onError(errorHandler);
   vi.mocked(lstatNoFollow).mockClear();
-  const start = performance.now();
   const response = await app.request(`/${BUNDLE}/files`);
   const body = await response.json();
-  const elapsedMs = performance.now() - start;
-  console.info(
-    JSON.stringify({ elapsedMs, anchorLstats: vi.mocked(lstatNoFollow).mock.calls.length }),
-  );
-  if (process.env.BUNDLE_WALK_EVIDENCE_PREFIX) {
-    await writeFile(
-      `${process.env.BUNDLE_WALK_EVIDENCE_PREFIX}-timing.txt`,
-      `Command: BUNDLE_WALK_EVIDENCE_PREFIX=${process.env.BUNDLE_WALK_EVIDENCE_PREFIX} pnpm --filter @haive/api test test/bundle-files-walk.test.ts\n${JSON.stringify({ elapsedMs, anchorLstats: vi.mocked(lstatNoFollow).mock.calls.length })}\n`,
-    );
-    await writeFile(
-      `${process.env.BUNDLE_WALK_EVIDENCE_PREFIX}-listing.txt`,
-      `Command: BUNDLE_WALK_EVIDENCE_PREFIX=${process.env.BUNDLE_WALK_EVIDENCE_PREFIX} pnpm --filter @haive/api test test/bundle-files-walk.test.ts\n${JSON.stringify(body, null, 2)}\n`,
-    );
-  }
   expect(response.status).toBe(200);
-  expect(body).toEqual({ files: expected, truncated: false, cap: 5000 });
+  expect(body).toEqual({ files: expected, truncated: false, cap: FILES_LIST_CAP });
   expect(vi.mocked(lstatNoFollow).mock.calls.length).toBeLessThanOrEqual(1);
 }, 60_000);
