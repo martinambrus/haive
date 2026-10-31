@@ -2867,11 +2867,17 @@ repoRoutes.post('/:id/remote', async (c) => {
           }
           const restoreExisting = async () => {
             for (const [key, values] of previous) {
-              const cleared = await git(['config', '--local', '--unset-all', key]);
-              if (!cleared.ok && cleared.code !== 5) throw new Error('remote restore failed');
-              for (const value of values) {
-                if (!(await git(['config', '--local', '--add', key, value])).ok)
+              const [first, ...rest] = values;
+              if (first === undefined) {
+                const cleared = await git(['config', '--local', '--unset-all', key]);
+                if (!cleared.ok && cleared.code !== 5) throw new Error('remote restore failed');
+              } else {
+                if (!(await git(['config', '--local', '--replace-all', key, first])).ok)
                   throw new Error('remote restore failed');
+                for (const value of rest) {
+                  if (!(await git(['config', '--local', '--add', key, value])).ok)
+                    throw new Error('remote restore failed');
+                }
               }
             }
           };

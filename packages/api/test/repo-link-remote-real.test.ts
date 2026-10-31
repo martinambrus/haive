@@ -285,6 +285,7 @@ exec ${quote(real)} "$@"
 
 it('logs both causes in one error when real git cannot restore a failed remote update', async () => {
   const { root, link, fake, app } = await setup();
+  await git(root, ['config', '--add', 'remote.origin.url', 'https://extra.test/r']);
   let routedError: Error | undefined;
   app.onError((err, c) => {
     routedError = err;
@@ -344,7 +345,9 @@ exec ${quote(real)} "$@"
     });
     expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
     expect(fake.rows(schema.auditEvents)).toEqual([]);
-    expect(await git(root, ['config', '--local', '--list'])).not.toContain('remote.origin.url=');
+    expect(await git(root, ['config', '--get-all', 'remote.origin.url'])).toBe(
+      'https://old.test/r',
+    );
     const diagnostics = errors.mock.calls.map(([fields]) => fields as { err?: unknown });
     expect(diagnostics).toHaveLength(1);
     const failure = diagnostics[0]!.err as AggregateError;
