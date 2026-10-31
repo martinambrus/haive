@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { readWorkflow } from './workflow.mjs';
+import { swallowedFailure } from './shell-source.mjs';
 
 // A step with no `if` carries an implicit success(): it is skipped once ANY step before it failed.
 // In the smokes job that let one red check hide every check after it, and the same shape sat in
@@ -157,19 +158,11 @@ function checkJob(job, spec, workflow = workflows[spec.file]) {
   assert.equal(job.defaults?.run?.shell, undefined, 'a job shell overrides runner errexit');
   for (const step of steps) {
     assert.equal(step.shell, undefined, `${label(step)} overrides runner errexit`);
-    const script = (step.run ?? '')
-      .split('\n')
-      .filter((line) => !line.trimStart().startsWith('#'))
-      .join('\n');
-    assert.doesNotMatch(
-      script,
-      /\|\|\s*(?:\\\s*)?(?:true\b|:(?:\s|$)|exit\s+0(?:\s|;|$))/,
-      `${label(step)} swallows a command failure`,
-    );
-    assert.doesNotMatch(
-      script,
-      /(?:^|[;\n])\s*(?:true\b|set\s+\+e(?:\s|;|$))/,
-      `${label(step)} hides failures with a success command or disabled errexit`,
+    const matched = swallowedFailure(step.run ?? '');
+    assert.equal(
+      matched,
+      null,
+      `${label(step)} swallows a command failure with ${JSON.stringify(matched)}`,
     );
   }
   // A failure that does not fail its step leaves the job green, or lets the checks run after it.
@@ -870,4 +863,71 @@ describe('release job limits', () => {
     mutant.jobs.new = { 'runs-on': 'ubuntu-latest', steps: [] };
     assert.throws(() => checkReleaseLimits(mutant), assert.AssertionError);
   });
+});
+
+// Exercise the real job rule, including shell data that looks like a success command.
+describe('shell failure detection', () => {
+  const spec = JOBS.find(({ id }) => id === 'smokes');
+  const job = workflows[spec.file].jobs[spec.id];
+  const withScript = (script) => {
+    const control = structuredClone(job);
+    const last = control.steps.findIndex((step) => step.id === spec.prerequisite);
+    control.steps[last + 2].run = script;
+    return control;
+  };
+  const accepted = [
+    "cat <<'BODY'\nset +e\nBODY",
+    'cat <<BODY\ntrue-positive.test.ts\nBODY',
+    'cat <<-BODY\n\tset +e\n\tBODY',
+    'cat <<ONE <<"TWO"\nset +e\nONE\n|| true\nTWO',
+    'echo "ready; true"',
+    'case "$v" in\ntrue) echo ready ;;\nesac',
+    'if check; then\ntrue\nelse\necho ready\nfi',
+    'if check\nthen\ntrue\nelse\necho ready\nfi',
+    'node -e "const v = process.env.X || true"',
+    'pnpm test # never add || true here',
+    '# never add set +e here\npnpm test',
+    '[ "$v" = "true" ]',
+    "jq -e '.a == true'",
+    'x=true',
+    'while true; do echo ready; break; done',
+    'pnpm test || exit 10',
+    'pnpm test && true',
+    'trueish',
+    'echo x#tag',
+    'echo "$(node -e \'const v = process.env.X || true\')"',
+    "echo '$(pnpm test || true)'",
+    'echo "\\$(pnpm test || true)"',
+  ];
+  for (const script of accepted) {
+    it(`accepts shell data/control: ${JSON.stringify(script)}`, () =>
+      checkJob(withScript(script), spec));
+  }
+  for (const [script, matched] of [
+    ['pnpm test || true', '|| true'],
+    ['pnpm test || :', '|| :'],
+    ['pnpm test || exit 0', '|| exit 0'],
+    ['pnpm test; true', 'true'],
+    ['(pnpm test; true)', 'true'],
+    ['pnpm test; true ignored', 'true'],
+    ['echo "$(pnpm test || true)"', '|| true'],
+    ['echo "$(echo \'ready)\'; pnpm test || true)"', '|| true'],
+    ['echo `pnpm test || true`', '|| true'],
+    ['pnpm test\ntrue', 'true'],
+    ['set +e\npnpm test', 'set +e'],
+    ['pnpm test || \\\n true', '|| true'],
+    ['echo "ready"; pnpm test || true # ignore', '|| true'],
+    ["cat <<'BODY'\nset +e\nBODY\npnpm test || true", '|| true'],
+  ]) {
+    it(`rejects shell failure mask: ${JSON.stringify(script)}`, () => {
+      assert.throws(
+        () => checkJob(withScript(script), spec),
+        (error) => {
+          assert.ok(error instanceof assert.AssertionError);
+          assert.ok(error.message.includes(JSON.stringify(matched)), error.message);
+          return true;
+        },
+      );
+    });
+  }
 });
