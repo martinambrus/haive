@@ -2750,7 +2750,13 @@ repoRoutes.post('/:id/remote', async (c) => {
 
   const git = async (
     args: string[],
-  ): Promise<{ ok: boolean; code: number; stdout: string; stderr: string }> => {
+  ): Promise<{
+    ok: boolean;
+    exitedClean: boolean;
+    code: number;
+    stdout: string;
+    stderr: string;
+  }> => {
     let deadline: NodeJS.Timeout | undefined;
     let grace: NodeJS.Timeout | undefined;
     let deadlineFired = false;
@@ -2772,9 +2778,11 @@ repoRoutes.post('/:id/remote', async (c) => {
       const { stdout, stderr } = await run;
       // Closing the pipes can discard unread output even if git exited 0 in this turn.
       // Never accept that truncated output as a snapshot of the previous remote.
-      if (deadlineFired) return { ok: false, code: -1, stdout: '', stderr: 'no answer' };
+      if (deadlineFired)
+        return { ok: false, exitedClean: true, code: -1, stdout: '', stderr: 'no answer' };
       return {
         ok: true,
+        exitedClean: true,
         code: 0,
         stdout: stdout.toString().trim(),
         stderr: stderr.toString().trim(),
@@ -2789,6 +2797,7 @@ repoRoutes.post('/:id/remote', async (c) => {
       const code = typeof e.code === 'number' ? e.code : -1;
       return {
         ok: false,
+        exitedClean: false,
         code,
         stdout: (e.stdout ?? '').toString().trim(),
         // execFile's message includes argv, which can contain credentials.
@@ -2892,9 +2901,10 @@ repoRoutes.post('/:id/remote', async (c) => {
           // Exit 3 identifies an existing remote. Replace all fetch URLs and clear push URLs
           // so both directions use the address being persisted to the repository row.
           const added = await git(['remote', 'add', 'origin', body.remoteUrl]);
-          if (added.ok)
+          // A clean exit proves a mutation applied even when its output missed the deadline.
+          if (added.exitedClean)
             restore = async () => {
-              if (!(await git(['remote', 'remove', 'origin'])).ok)
+              if (!(await git(['remote', 'remove', 'origin'])).exitedClean)
                 throw new Error('remote restore failed');
             };
           if (!added.ok) {
@@ -2913,12 +2923,13 @@ repoRoutes.post('/:id/remote', async (c) => {
                 const [first, ...rest] = values;
                 if (first === undefined) {
                   const cleared = await git(['config', '--local', '--unset-all', key]);
-                  if (!cleared.ok && cleared.code !== 5) throw new Error('remote restore failed');
+                  if (!cleared.exitedClean && cleared.code !== 5)
+                    throw new Error('remote restore failed');
                 } else {
-                  if (!(await git(['config', '--local', '--replace-all', key, first])).ok)
+                  if (!(await git(['config', '--local', '--replace-all', key, first])).exitedClean)
                     throw new Error('remote restore failed');
                   for (const value of rest) {
-                    if (!(await git(['config', '--local', '--add', key, value])).ok)
+                    if (!(await git(['config', '--local', '--add', key, value])).exitedClean)
                       throw new Error('remote restore failed');
                   }
                 }
@@ -2930,13 +2941,13 @@ repoRoutes.post('/:id/remote', async (c) => {
               '--unset-all',
               'remote.origin.pushurl',
             ]);
+            if (cleared.exitedClean || cleared.code === 5) restore = restoreExisting;
             if (!cleared.ok && cleared.code !== 5) {
               throw new HttpError(
                 409,
                 `Could not clear the remote's push URLs: ${cleared.stderr || cleared.stdout}`,
               );
             }
-            restore = restoreExisting;
             const updated = await git([
               'config',
               '--local',

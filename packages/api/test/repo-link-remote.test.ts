@@ -635,3 +635,84 @@ it.each(['rev-parse', 'snapshot'])(
     expect(vi.getTimerCount()).toBe(0);
   },
 );
+
+// A clean mutation still happened when its output pipes were closed at the deadline.
+it.each(['add', 'clear', 'restore', 'update'])(
+  'keeps git and the row consistent after a deadline-turn mutation (%s)',
+  async (stage) => {
+    const old = 'https://old.test/r';
+    const push = 'https://push.test/r';
+    const existing = stage !== 'add';
+    fake.patch(schema.repositories, REPO, { remoteUrl: existing ? old : null });
+    let urls = existing ? [old] : [];
+    let pushUrls = existing ? [push] : [];
+    let atDeadline = false;
+    let finish!: (value: { stdout: string; stderr: string }) => void;
+    const pending = Object.assign(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+      {
+        child: {
+          exitCode: 0,
+          kill: () => {
+            finish({ stdout: '', stderr: '' });
+            return false;
+          },
+        },
+      },
+    );
+    const events: string[] = [];
+    h.git.mockImplementation((_command, args: string[]) => {
+      const done = () => Promise.resolve({ stdout: '', stderr: '' });
+      const timed = () => {
+        atDeadline = true;
+        return pending;
+      };
+      if (args.includes('rev-parse')) return Promise.resolve({ stdout: 'true', stderr: '' });
+      if (args.includes('remote')) {
+        if (args.includes('remove')) {
+          urls = [];
+          events.push('remove');
+          return done();
+        }
+        if (existing) return Promise.reject(fail(3, 'exists'));
+        urls = [args.at(-1)!];
+        return timed();
+      }
+      const key = args.includes('--replace-all') ? args.at(-2) : args.at(-1);
+      if (args.includes('--get-all'))
+        return Promise.resolve({
+          stdout: (key === 'remote.origin.url' ? urls : pushUrls).join('\n'),
+          stderr: '',
+        });
+      if (args.includes('--unset-all')) {
+        if (key === 'remote.origin.url') urls = [];
+        else pushUrls = [];
+        return stage === 'clear' && !atDeadline ? timed() : done();
+      }
+      if (args.includes('--replace-all')) {
+        const value = args.at(-1)!;
+        if (value === 'https://example.test/r' && stage === 'restore')
+          return Promise.reject(fail(128, 'update refused'));
+        if (key === 'remote.origin.url') urls = [value];
+        else pushUrls = [value];
+        events.push(value);
+        if ((stage === 'restore' && value === old) || (stage === 'update' && !atDeadline))
+          return timed();
+      }
+      return done();
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const response = Promise.resolve(link());
+    await until('the mutation applied before its completion', () => atDeadline);
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    expect((await answeredWithin(3_000, response)).status).toBe(409);
+    expect(urls).toEqual(existing ? [old] : []);
+    expect(pushUrls).toEqual(existing ? [push] : []);
+    expect(events).toContain(existing ? old : 'remove');
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe(existing ? old : null);
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  },
+);
