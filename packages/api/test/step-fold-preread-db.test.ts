@@ -57,9 +57,17 @@ import type { AppEnv } from '../src/context.js';
 // peer, and the peer commits. The writer must fold the row as the peer left it (idle_ms 6000), so the
 // final carried_* is the seed, plus the peer's share, plus that fold. A writer that folds the row it
 // read before the peer's commit writes carried_* without the peer's share.
+// F2b and F3b seed a second row with the higher id. F3b's peer finishes the first row instead of folding it.
 const STEP = {
   id: '00000000-0000-4000-8000-0000000000a1',
   stepId: PROVIDER_SENSITIVE_STEP_IDS[0]!,
+  index: 1,
+} as const;
+// A second row with the higher id, so a batch taken in id order reaches STEP first and OTHER second.
+const OTHER = {
+  id: '00000000-0000-4000-8000-0000000000b1',
+  stepId: PROVIDER_SENSITIVE_STEP_IDS[1]!,
+  index: 2,
 } as const;
 const BLIND_INDEX = 'step-fold-preread-test-user';
 const BLOCKED_WITHIN_MS = 10_000;
@@ -120,7 +128,10 @@ describe.skipIf(!url)(
       await peer.$client.end({ timeout: 5 });
     });
 
-    const seedTask = async (status: TaskStatus) => {
+    const seedTask = async (
+      status: TaskStatus,
+      over: Partial<typeof schema.tasks.$inferInsert> = {},
+    ) => {
       const [task] = await db
         .insert(schema.tasks)
         .values({
@@ -129,21 +140,26 @@ describe.skipIf(!url)(
           title: 'step fold pre-read',
           status,
           orchestrationEpoch: 3,
+          ...over,
         })
         .returning({ id: schema.tasks.id });
       return task!.id;
     };
 
-    const seedStep = async (taskId: string, over: StepInsert = {}) => {
+    const seedStep = async (
+      taskId: string,
+      over: StepInsert = {},
+      which: typeof STEP | typeof OTHER = STEP,
+    ) => {
       const [row] = await db
         .insert(schema.taskSteps)
         .values({
-          id: STEP.id,
+          id: which.id,
           taskId,
-          stepId: STEP.stepId,
-          stepIndex: 1,
-          runSeq: 1,
-          title: STEP.stepId,
+          stepId: which.stepId,
+          stepIndex: which.index,
+          runSeq: which.index,
+          title: which.stepId,
           status: 'pending',
           idleMs: 4000,
           userActiveMs: 800,
@@ -156,7 +172,7 @@ describe.skipIf(!url)(
       return row!;
     };
 
-    const finalRow = async () => {
+    const finalRow = async (id: string = STEP.id) => {
       const [row] = await db
         .select({
           status: schema.taskSteps.status,
@@ -167,11 +183,23 @@ describe.skipIf(!url)(
           carriedUserActiveMs: schema.taskSteps.carriedUserActiveMs,
         })
         .from(schema.taskSteps)
-        .where(eq(schema.taskSteps.id, STEP.id));
-      return row;
+        .where(eq(schema.taskSteps.id, id));
+      return row!;
     };
 
-    async function besidePeer<T>(codeUnderTest: () => Promise<T>): Promise<T> {
+    const peerFolds = (id: string) => (tx: Tx) =>
+      tx.execute(sql`
+        update task_steps set
+          carried_work_ms = carried_work_ms + 7000,
+          carried_idle_ms = carried_idle_ms + 3000,
+          carried_user_active_ms = carried_user_active_ms + 500,
+          idle_ms = idle_ms + 2000
+        where id = ${id}`);
+
+    async function besidePeer<T>(
+      codeUnderTest: () => Promise<T>,
+      peerWrites: (tx: Tx) => Promise<unknown> = peerFolds(STEP.id),
+    ): Promise<T> {
       let peerHolds!: () => void;
       const holding = new Promise<void>((resolve) => (peerHolds = resolve));
       let proceed!: () => void;
@@ -181,13 +209,7 @@ describe.skipIf(!url)(
       const peerRun = settle(
         peer.transaction(async (tx) => {
           peerPid = await backendPid(tx);
-          await tx.execute(sql`
-            update task_steps set
-              carried_work_ms = carried_work_ms + 7000,
-              carried_idle_ms = carried_idle_ms + 3000,
-              carried_user_active_ms = carried_user_active_ms + 500,
-              idle_ms = idle_ms + 2000
-            where id = ${STEP.id}`);
+          await peerWrites(tx);
           holdsRow = true;
           peerHolds();
           await proceeding;
@@ -299,6 +321,33 @@ describe.skipIf(!url)(
     );
 
     it(
+      'F2b: the per-step CLI switch that moves the task folds the clicked row as a peer left it while its batch waited',
+      async () => {
+        const taskId = await seedTask('failed', { currentStepId: OTHER.stepId, currentRound: 0 });
+        await seedStep(taskId, { status: 'running', startedAt: new Date(Date.now() - 60_000) });
+        await seedStep(taskId, { status: 'failed' }, OTHER);
+
+        const response = await besidePeer(
+          () =>
+            patch(`/tasks/${taskId}/steps/${OTHER.stepId}/cli-provider`, { cliProviderId: null }),
+          peerFolds(OTHER.id),
+        );
+
+        expect(response).toMatchObject({ status: 200, body: { ok: true } });
+        expect(await finalRow(OTHER.id)).toEqual({
+          status: 'pending',
+          idleMs: 0,
+          userActiveMs: 0,
+          carriedWorkMs: 1000 + 7000,
+          carriedIdleMs: 200 + 3000 + 6000,
+          carriedUserActiveMs: 50 + 500 + 800,
+        });
+        expect((await finalRow(STEP.id)).status).toBe('pending');
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
       'F3: the task-level CLI switch folds the row as a peer left it while the switch waited, not the row it read first',
       async () => {
         const taskId = await seedTask('running');
@@ -320,6 +369,31 @@ describe.skipIf(!url)(
           carriedIdleMs: 200 + 3000 + 6000,
           carriedUserActiveMs: 50 + 500 + 800,
         });
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'F3b: a step that finished while the task-level switch waited is left as it is and not reported',
+      async () => {
+        const taskId = await seedTask('running');
+        await seedStep(taskId, { status: 'running', startedAt: new Date(Date.now() - 60_000) });
+        await seedStep(taskId, {}, OTHER);
+
+        const response = await besidePeer(
+          () => patch(`/tasks/${taskId}/cli-provider`, { cliProviderId: null }),
+          (tx) =>
+            tx.execute(
+              sql`update task_steps set status = 'done', ended_at = now() where id = ${STEP.id}`,
+            ),
+        );
+
+        expect(response).toMatchObject({
+          status: 200,
+          body: { ok: true, invalidatedSteps: [OTHER.stepId] },
+        });
+        expect((await finalRow(STEP.id)).status).toBe('done');
+        expect((await finalRow(OTHER.id)).status).toBe('pending');
       },
       TEST_TIMEOUT,
     );
