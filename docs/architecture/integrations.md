@@ -564,10 +564,15 @@ service's `executor`); "Use as connection" and every sign-in (`integration.conne
 write switch (`integration.write_switch`); a repository's allow-list (`repository.integrations.update`);
 and a repository's remote and its credential binding (`repository.remote.update`). The relink holds the
 repository row `FOR NO KEY UPDATE`, which still serializes it with another relink and with the settings
-routes' `FOR UPDATE` but does not block a new task's foreign-key insert while its git calls run; it inserts
-the audit row, changes git, then writes the column, and puts git's remote back when the transaction fails, inside
-the transaction for a failure its callback sees and after the callback has settled for a failure at COMMIT
-or a lost connection, so exactly one restore runs after the last git write.
+routes' `FOR UPDATE` but does not block a new task's foreign-key insert while its git calls run; the wait for
+that row is bounded (`boundedLockWait`), so a relink behind another answers 409 busy before any audit row or
+git write. It inserts the audit row, changes git, then writes the column. Each git call is cut at 10 s with
+SIGTERM, and with SIGKILL only if the child is still alive 2 s later: git removes its `config.lock` on
+SIGTERM and leaves it on SIGKILL (MEASURED), and a left lock fails every later write to that config. The route
+puts git's remote back when the transaction fails: inside the transaction for a failure its callback sees (a
+lost connection usually shows there too, as the next statement fails), and after the callback has settled
+for a failure at COMMIT or a callback that ends without noticing, so exactly one restore runs, after the last
+git write. A restore that fails is the answer the request gets, a lost connection notwithstanding.
 
 Disconnect (`integration.connection.disconnect`) is the one exception, on purpose: its row follows
 the vendor revoke, which cannot be undone and whose outcome (`revoked`) the row records, so it stays
