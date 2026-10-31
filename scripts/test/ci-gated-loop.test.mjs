@@ -17,11 +17,24 @@ function fixture(script, full = false) {
   assert.ok(list, 'gated harness: missing GATED list and target row');
   const rows = list.split('\n').filter(Boolean);
   assert.ok(rows.length >= 3, 'gated harness: needs three GATED rows including a target row');
-  const selected = full ? rows : rows.slice(0, 3);
-  const target = selected[0].split(/\s+/);
+  const target = rows[0].split(/\s+/);
   assert.equal(target.length, 5, 'gated harness: target row needs pkg, file, var, db and server');
   const [, file, , db] = target;
   assert.ok(file && db, 'gated harness: missing target file or database');
+  const selected = [];
+  for (const row of rows) {
+    const columns = row.split(/\s+/);
+    if (
+      full ||
+      !selected.some((chosen) => {
+        const prior = chosen.split(/\s+/);
+        return prior[1] === columns[1] || prior[3] === columns[3];
+      })
+    )
+      selected.push(row);
+    if (!full && selected.length === 3) break;
+  }
+  assert.ok(selected.length >= 3, 'gated harness: needs three distinct files and databases');
   return { script: script.replace(list, selected.join('\n')), rows: selected.length, file, db };
 }
 const small = fixture(fullScript);
@@ -31,25 +44,37 @@ function runGated(t, mode, script = small.script) {
   const dir = mkdtempSync(join(tmpdir(), 'haive-gated-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const stub = (name, source) =>
-    writeFileSync(join(dir, name), '#!/bin/bash\n' + source, { mode: 0o755 });
+    writeFileSync(
+      join(dir, name),
+      `#!/bin/bash
+has_arg() {
+  local expected="$1"; shift
+  for arg in "$@"; do
+    if [[ "$arg" == "$expected" ]]; then return 0; fi
+  done
+  return 1
+}
+` + source,
+      { mode: 0o755 },
+    );
   stub(
     'docker',
     `
-if [[ "$*" == *"SELECT 1"* ]]; then
-  if [[ "$MODE" == probe && "$*" == *"$TARGET_DB"* ]]; then exit 3; fi
-  if [[ "$MODE" == create && "$*" == *"$TARGET_DB"* ]]; then exit 0; fi
+if has_arg -tAc "$@"; then
+  if [[ "$MODE" == probe ]] && has_arg "SELECT 1 FROM pg_database WHERE datname = '$TARGET_DB'" "$@"; then exit 3; fi
+  if [[ "$MODE" == create ]] && has_arg "SELECT 1 FROM pg_database WHERE datname = '$TARGET_DB'" "$@"; then exit 0; fi
   echo 1
 fi
-if [[ "$MODE" == create && "$*" == *"CREATE DATABASE $TARGET_DB"* ]]; then exit 4; fi
+if [[ "$MODE" == create ]] && has_arg "CREATE DATABASE $TARGET_DB" "$@"; then exit 4; fi
 `,
   );
   stub(
     'pnpm',
     `
-if [[ "$MODE" == migrate && "$*" == *"@haive/database migrate"* && "$DATABASE_URL" == */$TARGET_DB ]]; then exit 5; fi
-if [[ "$*" == *"exec vitest run"* ]]; then
+if [[ "$MODE" == migrate && "$DATABASE_URL" == */$TARGET_DB ]] && has_arg @haive/database "$@" && has_arg migrate "$@"; then exit 5; fi
+if has_arg exec "$@" && has_arg vitest "$@" && has_arg run "$@"; then
   passed=1; pending=0; todo=0
-  if [[ "$*" == *"$TARGET_FILE"* ]]; then
+  if has_arg "$TARGET_FILE" "$@"; then
     case "$MODE" in pending) pending=1 ;; todo) todo=1 ;; empty) passed=0 ;; esac
   fi
   echo "$*" >> "$CALLS"
@@ -58,7 +83,7 @@ if [[ "$*" == *"exec vitest run"* ]]; then
       printf '{"numPassedTests":%s,"numFailedTests":0,"numPendingTests":%s,"numTodoTests":%s}' "$passed" "$pending" "$todo" > "\${arg#*=}" ;;
     esac
   done
-  if [[ "$MODE" == vitest && "$*" == *"$TARGET_FILE"* ]]; then exit 7; fi
+  if [[ "$MODE" == vitest ]] && has_arg "$TARGET_FILE" "$@"; then exit 7; fi
 fi
 `,
   );
@@ -211,4 +236,43 @@ describe('gated harness fixtures', () => {
     assert.throws(() => fixture("done <<'GATED'\nGATED\n"), /missing GATED list and target row/);
     assert.throws(() => fixture("done <<'GATED'\none\ntwo\nthree\nGATED\n"), /target row needs/);
   });
+});
+
+describe('independent gated harness targets (item 9)', () => {
+  it('selects three distinct files and databases when the first rows share either', (t) => {
+    const list = listPattern.exec(fullScript)[1];
+    const [first] = list.split('\n');
+    const sameDatabase = first.replace(small.file, small.file + '.another');
+    const sameFile = first.replace(small.db, small.db + '_another');
+    const selected = fixture(
+      fullScript.replace(list, [first, sameDatabase, sameFile, list].join('\n')),
+    );
+    const rows = listPattern
+      .exec(selected.script)[1]
+      .split('\n')
+      .map((row) => row.split(/\s+/));
+    assert.equal(new Set(rows.map((row) => row[1])).size, 3);
+    assert.equal(new Set(rows.map((row) => row[3])).size, 3);
+    const out = runGated(t, 'probe', selected.script);
+    assert.equal(out.status, 1, out.output);
+    assert.equal(out.calls.trim().split('\n').length, 2, out.output);
+  });
+  for (const mode of ['probe', 'create', 'migrate', 'vitest', 'pending', 'todo', 'empty']) {
+    it(`matches exact target arguments in ${mode} mode`, (t) => {
+      const rows = listPattern.exec(small.script)[1].split('\n');
+      const columns = rows[1].split(/\s+/);
+      columns[1] = small.file + '.suffix';
+      columns[3] = small.db + '_suffix';
+      rows[1] = columns.join(' ');
+      const script = small.script.replace(listPattern.exec(small.script)[1], rows.join('\n'));
+      const out = runGated(t, mode, script);
+      assert.equal(out.status, 1, out.output);
+      assert.equal((out.output.match(/::error::/g) ?? []).length, 1, out.output);
+      assert.equal(
+        out.calls.trim().split('\n').length,
+        mode === 'probe' || mode === 'create' || mode === 'migrate' ? 2 : 3,
+        out.output,
+      );
+    });
+  }
 });
