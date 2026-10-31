@@ -1156,15 +1156,18 @@ From the T489 fourth review (2026-10-31). PRE-EXISTING, minor (none of these occ
 
 The swallow rule in scripts/test/shell-source.mjs (`swallowedFailure`) rejects a fixed list of forms (`|| true`, `|| :`, `|| exit 0`, `set +e` and a few spellings), so every other way to mask a failure passes: `cmd || echo ...`, `cmd || { echo warn; }`, `cmd || { ...; exit 0; }`, `|| return 0`, `|| continue`, `|| break`, `|| exit "0"`, `|| exit 00`, `|| \true`, `|| command true`, `|| builtin :`, `|| /usr/bin/env true`, `|| $(true)`, `|| test 1`, `|| [ 1 ]`, `|| true>/dev/null`; and `set` changes in a later option group or position: `set -u +e`, `set -eu +e`, `set +x +e`, `set +eo pipefail`, `set -o pipefail +o errexit`, `(set +e)`, `if set +e`, `! set +e`, `time set +e`. Decision needed: judge the right side of `||` (allow only a handler that ends in a non-zero exit, or an explicit allow-list with a reason) instead of extending the list. Single.
 
-### T510 · FNF[fs-safe-resource-errors] · lenient fs-safe reads take running out of descriptors for an absent entry (+1)
+### T510 · FNF[fs-safe-resource-errors] · lenient fs-safe reads take running out of descriptors for an absent entry (+4)
 
 status: open
 From the T365 fix round 1 (2026-10-31), verified against cx-365. PRE-EXISTING.
 
 1. Consequential but silent: `readResult` (packages/shared/src/fs-safe.ts ~:304-319) returns `null` in lenient mode for every errno that is not a containment refusal, EMFILE and ENFILE included, unless the caller passes a `rethrow` set (only the T365 walks do). So `openFileNoFollow`, `readFileNoFollow`, `readdirNoFollow` and `lstatNoFollow`, called leniently by many worker steps, read a descriptor shortage as "the entry is not there" and act on it. Needs a caller audit before the default flips: list the lenient callers, decide per caller whether a resource error should throw, then make `RESOURCE_LIMITS` rethrow by default.
 2. Minor: the bundle file listing (api routes/bundles.ts ~:980-1015) bounds files, depth and descriptors but not directory count, so a bundle of millions of empty directories is walked to the end.
+3. (T365 review 3, by reading) Four lenient checks ahead of a strict read misread running out of descriptors, so T365's 500 for EMFILE/ENFILE never fires there. PRE-EXISTING, minor. api routes/tasks/files.ts ~:240-253 `openEditableKnowledgeFile` keeps its own containment mapping and answers 400 "File cannot be opened for editing" (rethrow `isResourceLimitError` before ~:253; the release is in a `finally`); routes/user-settings.ts ~:477-478 a lenient `lstatNoFollow` before the strict open answers 404 "Sound file missing on disk" (drop it and take the size from `fh.stat()` as tasks/files.ts ~:162-169 does); lib/upload-complete-claim.ts ~:174-176 `isWholeFile` reads it as "not whole" and the three complete routes answer 409 "archive size mismatch on disk" (a retry succeeds; the message is wrong); routes/tasks/_helpers.ts ~:1103 `resolveWorkspaceRoot` answers 409 "worktree ... was removed".
+4. (T365 review 3, design direction) api lib/fs-http.ts ~:33 still answers 400 "Path cannot be read" for every errno it does not map (EIO, ENOMEM, ESTALE, ETIMEDOUT), with no error line: a host fault blamed on the client. Allow-list the errnos that are about the path (EACCES, EPERM, ELOOP, ENAMETOOLONG, EISDIR) for the 400 and let the rest reach the 500. Minor.
+5. (T365 review 3, latent) shared fs-safe.ts ~:524 `readdirNoFollow`'s `maxEntries` overflow is a plain `Error` known only by its wording, which fs-safe.test.ts ~:176-178 matches; no production caller passes `maxEntries` yet. Give it a code (as `WalkDepthError` has) when a caller appears. Minor.
 
-### T511 · FNF[bounded-vendor-bodies] · vendor and user-supplied endpoint bodies are read whole before they are cut or parsed (+3)
+### T511 · FNF[bounded-vendor-bodies] · vendor and user-supplied endpoint bodies are read whole before they are cut or parsed (+4)
 
 status: open
 From the T365 fix round 1 (2026-10-31), verified against cx-365. PRE-EXISTING, memory only (no secret path). See also T496 (vendor-call deadlines).
@@ -1173,6 +1176,7 @@ From the T365 fix round 1 (2026-10-31), verified against cx-365. PRE-EXISTING, m
 2. Fixed vendor hosts: claude-oauth.ts ~:158-162, grok-oauth.ts ~:140-145, usage-window/fetchers/claude-code.ts ~:54 and codex.ts ~:75, cli-versions/model-prices.ts ~:96, cli-versions/ruby-versions.ts ~:94, cli-adapters/openrouter-compat.ts ~:165, sandbox/integrations-mcp-server.ts ~:51/~:76, sandbox/rag-mcp-server.ts ~:71-74.
 3. Two private chunked bounded-read copies (shared forge/base-forge.ts ~:106, api lib/module-vendor-client.ts ~:102) beside the exported `readForgeJson` and `readForgeErrorExcerpt` that T365 adds.
 4. Fix direction: reuse T365's `readForgeJson` / `readForgeErrorExcerpt` everywhere (bounded read, stream cancelled past the bound, fixed message without the body), after T365 lands.
+5. (T365 review 3) api github-oauth.ts ~:119: a bare `catch` words a timeout or network failure as "answered something other than a repository list". Key the message on the error class (timeout, abort, parse) instead. Minor.
 
 ### T512 · FNF[retry-cannot-help] [design] · the repositories page offers Retry on an errored repository whose message says Retry cannot help
 
