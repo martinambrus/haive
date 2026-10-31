@@ -359,12 +359,15 @@ export async function handleRefresh(
     async () => {
       const state = await usableCheckout(dest);
       if (typeof state === 'object') {
-        await persistDetection(
-          db,
-          payload.repositoryId,
-          dest,
-          `Not refreshed: the checkout could not be examined (${state.unknown}). Nothing was moved.`,
-        );
+        // Exit codes cannot distinguish corrupt config from a dead .git. Keep the
+        // checkout and its status until it can be examined; detection imports its mirror.
+        await db
+          .update(schema.repositories)
+          .set({
+            statusMessage: `Not refreshed: the checkout could not be examined (${state.unknown}). Nothing was moved.`,
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.repositories.id, payload.repositoryId));
         return;
       }
       const usable = state === 'usable';

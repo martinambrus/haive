@@ -102,3 +102,19 @@ it.each(['failed git-path', 'external git-dir'])(
     expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
   },
 );
+
+it('T397 fix5 an unknown checkout preserves its status without detection, import or rebuild', async () => {
+  const { dest, payload } = await fixture();
+  row.status = 'error';
+  const before = await git(dest, ['rev-parse', 'HEAD']);
+  shim = await failGit(['rev-parse', '--show-cdup']);
+  await handleRefresh(payload, db, root);
+  expect(h.persist).not.toHaveBeenCalled();
+  expect(h.seed).not.toHaveBeenCalled();
+  expect(row.status).toBe('error');
+  expect(row.statusMessage).toMatch(/^Not refreshed: the checkout could not be examined \(/);
+  await shim.restore();
+  shim = null;
+  expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(before);
+  expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
+});
