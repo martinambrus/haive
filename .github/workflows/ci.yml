@@ -650,9 +650,11 @@ jobs:
           done
 
       - name: Start worker, web
+        id: runtime
         run: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d worker web
 
       - name: Probe web root
+        if: ${{ !cancelled() && steps.runtime.conclusion == 'success' }}
         run: |
           for i in $(seq 1 60); do
             code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/ || echo 000)
@@ -674,6 +676,7 @@ jobs:
       # the only place the unprivileged-spawn branch (uid 65534) executes at all, since a non-root
       # process cannot setuid and silently keeps its own identity instead.
       - name: Extraction tests inside the worker image
+        if: ${{ !cancelled() && steps.runtime.conclusion == 'success' }}
         run: |
           docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T worker \
             sh -c 'cd /app/packages/worker && node_modules/.bin/vitest run --root . test/repo-extract.test.ts test/tool-spawn.test.ts test/bundle-ingest.test.ts src/attachments/expand-archives.test.ts src/step-engine/steps/plan/plan-inputs.test.ts'

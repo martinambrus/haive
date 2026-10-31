@@ -16,6 +16,24 @@ import { parsers } from 'prettier/plugins/yaml';
 const JOBS = [
   {
     file: 'ci.yml',
+    id: 'compose-boot',
+    prerequisite: 'runtime',
+    cleanup: ['always()', 'failure()', 'always()'],
+    setup: [
+      'actions/checkout',
+      'Seed .env for compose',
+      'Pull registry images',
+      'Build compose images',
+      'Start infrastructure',
+      'Wait for postgres + redis health',
+      'Apply database migrations (runs again under `up`, proving idempotence)',
+      'Start api (populates shared node_modules volume)',
+      'Probe api /health',
+      'Start worker, web',
+    ],
+  },
+  {
+    file: 'ci.yml',
     id: 'smokes',
     prerequisite: 'migrate',
     // Every check is cut by its own time limit (see RUN_SMOKES), not only by the job's.
@@ -134,7 +152,14 @@ const workflows = Object.fromEntries(
 const label = (node) => node.name ?? node.uses?.split('@')[0];
 
 function checkJob(job, spec) {
-  const { steps } = job;
+  const steps = spec.cleanup ? job.steps.slice(0, -spec.cleanup.length) : job.steps;
+  if (spec.cleanup) {
+    assert.deepEqual(
+      job.steps.slice(-spec.cleanup.length).map((step) => step.if),
+      spec.cleanup,
+      'diagnostics and cleanup keep their always()/failure() conditions',
+    );
+  }
   const expected = guard(spec);
   // A failure that does not fail its step leaves the job green, or lets the checks run after it.
   const swallowing = [job, ...steps].filter(
