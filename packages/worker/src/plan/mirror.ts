@@ -1,5 +1,5 @@
 import { lockRepositoryTasksKey } from '@haive/database';
-import { checkoutMatches, type NamedCheckout } from '../repo/checkout-head.js';
+import { checkoutMatches, checkoutMissing, type NamedCheckout } from '../repo/checkout-head.js';
 import { admitWatchedCheckout } from '../project-state/watch-admission.js';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { createHash } from 'node:crypto';
@@ -90,6 +90,8 @@ const ABSENT_HASH = 'absent';
 
 const HELD_GIT_OPERATION =
   'a merge or rebase is open in the checkout; nothing was written. The plan is written again once it finishes.';
+const HELD_NO_CHECKOUT =
+  "the repository's checkout directory is missing; nothing was written. The plan is written again once it is back.";
 const HELD_NO_BASE =
   "the checkout's plan.json holds changes Haive has not read in, and this plan has unwritten changes of its own with no earlier copy to tell them apart; Pull the plan to bring them in. Nothing was written.";
 const HELD_RACED =
@@ -1605,6 +1607,15 @@ export async function flushPlanMirrorForRepository(
   });
   const repoPath = repo?.storagePath ?? repo?.localPath ?? null;
   if (!repoPath) throw new Error('repository has no resolvable filesystem path');
+  // A repository with no plan falls through: its flush removes nothing and retires the row.
+  if (await checkoutMissing(repoPath)) {
+    const [node] = await db
+      .select({ id: schema.planNodes.id })
+      .from(schema.planNodes)
+      .where(eq(schema.planNodes.repositoryId, repositoryId))
+      .limit(1);
+    if (node) throw new PlanMirrorHeldError(HELD_NO_CHECKOUT);
+  }
   const files = await writePlanMirror(db, repositoryId, repoPath);
   return { files, repoPath };
 }

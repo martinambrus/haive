@@ -148,7 +148,7 @@ status: parked · reason: needs a fresh onboarding run (see T300)
 status: open
 A file under `.haive/worktrees` sharing an inode with a name in the writable checkout stays writable through the alias. Fix: a one-time background sweep (recorded per repository) that copy-replaces files whose st_nlink exceeds their names under that tree, via fs-safe. Measure the walk on a large repo first.
 
-### T309 · FNF[cancel-cap-2] · a capped cancel with no claim row never finishes (+7)
+### T309 · FNF[cancel-cap-2] · a capped cancel with no claim row never finishes (+8)
 
 status: open
 All PRE-EXISTING, low.
@@ -161,6 +161,7 @@ All PRE-EXISTING, low.
 6. No real-DB coverage for the refund on a refused enqueue or the sandbox guard; ~25 lines in stalled-redrive-smoke.ts.
 7. merge-resolver `halt` keys "own merge" on ref/sha, so a cancelled task's same-ref open merge reads as this step's (area: modular-haive-plan).
 8. (T458 review, 2026-10-31) PRE-EXISTING, minor: `runTaskJob`'s catch (worker task-queue.ts ~:4164) fails the open task of any job that throws, a CANCEL included, so a transient error in `markTaskCancelled` fails the task it was cancelling instead of leaving it for the cancel re-drive.
+9. (T458 fix round, 2026-10-31) PRE-EXISTING, minor: the Cancel action, the step abort and `DELETE /plan/merge` clear the pause after the cancel commits and before they queue the CANCEL job (api routes/tasks/index.ts ~:1297, steps.ts, plan.ts), so a database error in `clearTaskPause` answers 500 with the task cancelled, no job queued and, for the abort, no `step.abort` event; the stalled sweep queues the lost teardown five minutes later.
 
 ### T312 · FNF[rag-own-paths][verify-first] · customCodePaths can name missing directories
 
@@ -867,18 +868,9 @@ From the T452 review (2026-10-31). PRE-EXISTING, minor; reachable only when outp
 
 In api routes/cli-login-banner.ts `onStreamData` (~:876-882), a success or error line in a chunk that arrives after `cleanupSession` still reaches `detectAuthResult` and starts `runProbeAndSave`, which queues a probe job for a session that is gone: `canDetectAuth` (~:666) has no `cleanedUp` check, while `captureClaudeOauthToken` and `offerAuthUrl` do. Codex, grok and amp take this branch (grok measured by the T452 driver with a scratch test: probe jobs 0 -> 1 after `ws.close()` and a "Signed in" chunk). Decide whether a login that completes during teardown should still be verified (the CLI has stored its credentials either way, so a skipped probe leaves Haive's provider state stale until the next check). If not, one `if (session.cleanedUp) return;` at the top of `onStreamData` closes it and makes T452's gate on the antigravity URL step redundant.
 
-### T458 · FNF[cancel-status-guard] · the worker's CANCEL marks a task cancelled whatever its status; the plan merge's DELETE queues a CANCEL unchecked (+1)
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T03:22Z · last: 2026-10-31T03:22Z
-From the T349 review (2026-10-31). PRE-EXISTING, consequential. Cross-reference: T309 FNF[cancel-cap-2].
-
-1. worker queues/task-queue.ts `handleCancelTask` (~:3760-3773) sets `status = 'cancelled'` where only the id matches, so a CANCEL job that lands after the task completed (queued before the completion, or by a caller that never checked) turns a completed task into a cancelled one. T349 (PR pending) guards the api's single cancel and step abort (`cancelTaskIfOpen`: completed and cancelled are terminal, failed stays cancellable); the worker needs the same guard, with the decision made under the task row's lock.
-2. api routes/plan.ts `DELETE /plan/merge` (~:1379) queues a CANCEL with no check of the task's status when it runs. Route it through the same decision.
-3. Minor (T349 fix-round review): the step action `abort` cancels without the Stop that the Cancel action runs first (api routes/tasks/steps.ts ~:1565 vs routes/tasks/index.ts ~:1288), so a live CLI of the task is not stopped by it; check whether the web offers abort on a live step (web app/(app)/tasks/[id]/page.tsx ~:1354).
-
 ### T459 · FNF[lock-order-leftovers] · writers that still lock step, run or mining rows in scan order or against the Retry's order (+5)
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T08:50Z · last: 2026-10-31T08:50Z
 From the T349 review (2026-10-31). PRE-EXISTING; narrow windows unless stated. T349 makes every multi-row step writer take its rows through `lockStepRows` (one id-ordered batch after the run, mining and DAG statements); these sites were left.
 
 1. worker queues/task-queue.ts `requeueAbandonedOrphan` (~:3309-3355) updates the step row and then its runs, the reverse of a Retry (runs, then step rows); reachable from boot reconcile and the stalled sweep. Swap the two statements.
@@ -896,8 +888,9 @@ status: open
 From the T349 review (2026-10-31). PRE-EXISTING. A failed task whose repository was deleted still passes `checkRevive` (database repository-task-lock.ts ~:109), while the repository delete's `cancelOpenTasksForRepo` (api lib/cancel-task.ts ~:130) skips failed tasks; a Retry then sets it `running` with no repository and the worker's next advance throws. Decide: refuse that Retry (say why on the page), or have the delete cancel failed tasks too. Cross-reference T393, T394, T409.
 
 Also (T349 fix-round review, 2026-10-31, reasoned from the code, not reproduced): since T349 the delete takes the task-creation key a Retry takes, but a Retry already waiting on the key when the delete commits goes on: `checkRevive` returns null after the wait without reading the repository again (database repository-task-lock.ts ~:109-113), so the task is revived to `running` with a NULL repository. Whichever way this is decided, the Retry must read the repository again after its wait.
+Note (T458 fix round, 2026-10-31): the repository delete's cancel (`cancelOpenTasksForRepo`, api routes/repos.ts ~:3384) clears no pause, while Cancel, abort and the plan merge discard now do; if a revival of such a task stays possible, it would be parked again by the stale `paused_at`.
 
-### T462 · FNF[project-state-notices] [design] · the repository page cannot say a sync replaced or refused a value (+2)
+### T462 · FNF[project-state-notices] [design] · the repository page cannot say a sync replaced or refused a value (+3)
 
 status: open
 From the T445 review (2026-10-31; was T445 item 2). PRE-EXISTING.
@@ -905,6 +898,7 @@ From the T445 review (2026-10-31; was T445 item 2). PRE-EXISTING.
 1. A checkout value the sync refuses (over its cap, holding a region marker) is only logged (worker project-state/sync.ts ~:953, names only); since T445 a first sync's replaced units are only logged too. No api route serves `project_state_sync`, and project-state-conflicts.ts (~:59-77) lists pending two-answer questions only. Proposed by the T445 driver: one nullable jsonb column, declared last, on `project_state_sync` holding the refused units with their reasons (from `SettingCheck.reason`, which `intakeSettings`, shared settings.ts ~:253-286, drops today), written in the sync's own upsert (~:983-1004) and cleared by the next clean sync, served beside `conflicts` and shown as one banner gated on the array being non-empty. A replaced value is an event rather than a state, so it may stay log-only unless an acknowledged notice is wanted. Needs a migration, api and web tests and wording.
 2. Minor: the sync's warns (~:933, ~:953, and T445's first-sync warn) are emitted before the writer that called the sync may roll back (worker project-state/write.ts ~:818, throws at ~:848 and ~:850): one extra line for a sync that did not commit, repeated by the retry. A stored notice would replace them.
 3. Minor: shared plan/projection-merge.ts ~:289, the other `mergeProjectState` caller, drops `merge.overwritten` for a plan merge with no merge base (`--allow-unrelated-histories`, plan/merge.ts ~:232), per that resolver's documented "takes theirs" rule.
+4. (T466 review, 2026-10-31) PRE-EXISTING, minor: `project_state_outbox.last_error` is written (worker project-state/refresh.ts ~:24-42: a deferred, moved or missing checkout, a refused newer format) but nothing in api, web or shared reads it, so a held record is invisible to a person; the same notice could carry it.
 
 ### T464 · FNF[ssr-controlled-values] [design] · controlled inputs a page renders on the server lose what is typed before hydration
 
@@ -918,11 +912,6 @@ T449 and T454 made the sign-in form and /repos/new keep pre-hydration input (unc
 3. The Source select on /repos/new (web components/new-repo-form.tsx ~:263) stays controlled because it decides which sections render, so a Source chosen before attach is reset at the first re-render.
 
 Decide whether the class is worth a general mechanism (copy DOM values into state on hydration, a shared hook) or is left as is.
-
-### T466 · FNF[stale-outbox-rows] [verify-first] · dirty project-state outbox rows whose checkout is gone fail every sweep tick
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T06:52Z · last: 2026-10-31T06:52Z
-From the T349 fix-round review (2026-10-31). PRE-EXISTING, unsure, not traced. With 125 dirty `project_state_outbox` rows (and 21 dirty `plan_mirror_state` rows) left in a scratch database by a killed smoke, every sweep tick logged `ProjectStateWriteError` ENOENT per row (T349 fix-s2 evidence sweep-branch-worker-two-install.log ~:92+). Verify first whether rows whose checkout no longer exists can delay or starve healthy rows in production (worker plan-mirror-queue sweep, project-state/write.ts), and whether such a row is ever retired.
 
 ### T467 · FNF[form-body-buffering] [design] · both form readers buffer the whole multipart body before their size checks
 
@@ -951,7 +940,7 @@ api routes/repos.ts `resetOnboardingArtifacts` (~:2615-2625, the claim-file loop
 
 ### T473 · FNF[git-data-file-writers] · 07 writes agent files under a stored agent-target dir with no git-data refusal
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T08:12Z · last: 2026-10-31T08:12Z
 From the T469 review (2026-10-31). PRE-EXISTING, minor (reachable only from a stored legacy or hand-edited render context).
 
 worker 07-generate-files.ts writes `agentFilePath(target, agent.id)` (~:918) and `${target.dir}/README.md` (~:922) through `writeIfAllowed` (~:832, `writeFileNoFollow`) at the stored `detected.agentTargets[].dir`, a bare string (`agentTargetSchema.dir`, render-context.ts ~:7-11), with no git-data refusal; fs-safe has none either. 12 then stages 07's `wroteFiles` by name (_stage-paths.ts ~:145), and since T469 such a file gets no ledger row, so no reset or upgrade knows it. Direction: refuse a path that `namesGitData` beside `writeIfAllowed` (report it skipped) and keep it out of the stage plan, with a control per writer through a stored `agentTargets[].dir` of `.git/hooks` (T469's control shape).
@@ -980,8 +969,49 @@ From the T458 review (2026-10-31). PRE-EXISTING, minor (web).
 
 `DELETE /repositories/:id/plan/merge` answers `{ ok: true, cancelled: false }` when no merge is open or (since T458) when the merge completed while the request ran, but `discardPlanMerge` types its answer as `{ ok: boolean }` (web lib/api-client.ts ~:2293) and the panel's `discard` (components/plan/plan-merge-panel.tsx ~:141-155) hides the merge as discarded whatever it says, after a confirm that promises "nothing is lost". Direction: read `cancelled`; when false, say the merge had already ended and refresh the plan instead of reporting a discard.
 
+### T477 · FNF[sweep-held-slots] [design] · held outbox and mirror rows still take the sweep's 25 slots; the two sweeps share one job
+
+status: open
+From the T466 review (2026-10-31). PRE-EXISTING, minor.
+
+Since T466 a row whose checkout is gone costs 3-5 statements a tick, but every held row still takes one of the 25 batch slots (worker project-state/refresh.ts ~:182-183, queues/plan-mirror-queue.ts ~:608-614, ~:637-645), so a newer healthy row waits floor(N/25) ticks behind N held rows (MEASURED: N = 30 gave tick 2, N = 125 tick 6), and the mirror sweep runs before the outbox sweep in one job (`sweepAll`), so a slow mirror sweep delays outbox rows (14 dead rows of 20,000 nodes: sweeps of 3.6-5.3 s). `plan-canvas-smoke` C4 pins the rotation as designed. Direction (a decision): scan past held rows without counting them, or run the two sweeps as separate jobs.
+
+### T478 · FNF[snapshot-error-paths] · the plan page shows a raw filesystem error, with the server's absolute path, as the snapshot error
+
+status: open
+From the T466 review (2026-10-31). PRE-EXISTING, minor.
+
+`plan_mirror_state.last_error` stores the raw `err.message` of a failed flush (worker plan/mirror.ts ~:1714-1733; `safeErrorMessage`, shared logger/errors.ts ~:62-65, redacts only database query errors), and `GET /repositories/:id/plan/snapshot` serves it (api routes/plan.ts ~:429), so any filesystem error other than the held reasons shows an absolute path under the repository storage on the plan page (T466 replaced only the gone-checkout one). Direction: store a reason from a closed set (or the error class and the path relative to the repository) and log the full error.
+
+### T479 · FNF[extract-swap] · an archive extract that fails between its two renames loses the previous repository tree
+
+status: open
+From the T466 review (2026-10-31). PRE-EXISTING, minor, theoretical.
+
+`extractArchive` (worker repo/clone.ts ~:604-614) moves the old `dest` into the stage and then renames the new tree in; if the second rename fails or the process dies between the two, no repository directory is left, and the `finally` removes the stage with the old tree in it, although the doc comment (~:509-511) says a failure leaves the previous contents untouched. Direction: on a failed second rename move the old tree back before the `finally`, and say in the comment what a crash between the renames leaves.
+
+### T480 · FNF[git-data-stored-dirs-2] · the KB path validator accepts a git-data name; 09_5, 09_5b and 11d still dispatch agents for a stored git-data dir (+4)
+
+status: open
+From the T473 review (2026-10-31). PRE-EXISTING, minor (stored or model-named input only).
+
+1. `sanitizeKbRelPath` (worker onboarding/_kb-write.ts ~:58-76) accepts `.git/hooks/x` and `.GIT./x` (measured), so 08 (~:2129, ~:2272, ~:2380, ~:2421, ~:2441), 09_3 `applyKbWrites` (~:124) and `_kb-legacy.ts` can write a model-named KB file under a git-data name inside `.haive-data/knowledge_base/` (12's stage plan drops it since T473). A refusal in the validator covers all three.
+2. 09_5 `skipIf` (~:1155), `selectAgents` (~:1226) and its prompt (~:897), 09_5b (~:417-420) and 11d (~:402-405) still read the unfiltered stored dirs and ids, so a CLI agent is dispatched (cost) for a stored git-data dir or id and the prompt names it as the skills dir; apply then refuses. Filter with `withoutGitDataDirs` where the dirs are read.
+3. A stored `skillTargetDirs` entry of `''` or `.` passes `withoutGitDataDirs` and fs-safe (measured): 09_5 (~:1454), 09_5b (~:562) and 11d (~:518) write a README at the repository root and create `<id>/` at its top; a stored skill id holding `/` joins into `<dir>/a/b` for the write and the remove (09_5b ~:524, 11d ~:260, ~:504). Recommended default (ASK only if it conflicts with a recorded decision): a positive check beside the denylist, the catalog's skills dirs and single-segment ids, as the reset already does (api repos.ts ~:1526-1530).
+4. The dir refusals of 09_5, 09_5b and 11d show only as a worker-log warning (09_5 repeats it on every loop pass), and 11d's all-dropped return (~:431) drops approved ops with no note. Recommended default: set `degradedNote` when a dir or id is dropped, once per step run.
+5. Cosmetic: 07's `unmanagedFilesDescription` (~:485) and the form's checkbox count (~:764) still list a quarantine group whose dir names git data, although apply skips it.
+
+### T481 · FNF[git-data-legacy-files] [design] · files an earlier release wrote under a git-data name stay, and an alias spelling on disk fails every later git add
+
+status: open
+From the T473 review (2026-10-31). PRE-EXISTING, minor (stored legacy or hand-edited input only).
+
+Since T469 and T473 no writer records or writes a path that names git data, but files an earlier release already wrote there (07's agent files under a stored `.git/hooks`-style target dir, skill trees under a stored skills dir) stay, nothing cleans them, and an alias spelling on disk (`.GIT./x`, `git~1/x`) still fails `git add -A` in 12's init branch (`12-post-onboarding.ts` ~:958) and any later whole-tree add with "invalid path". A cleanup removes files in the repository, so it needs a decision: find them (by the stored targets or a tree walk), report them, or remove them with an explicit confirmation.
+
 ## Done
 
+- T458 — the worker's CANCEL job decides under the task row's lock (markTaskCancelled): a completed or vanished task is left as it is with no teardown, an already-cancelled one keeps its stamps, anything else (failed included) is cancelled; DELETE /plan/merge and the step abort stop the live run, cancel through cancelTaskIfOpen and clear the pause only when the cancel applied, as Cancel does — PR #962 (f8eea8b66), 2026-10-31; main CI green incl. all smokes; live cancel/abort/discard UI paths not driven (they need a running CLI task or a conflicted remote pull); follow-ups T476, T309 +2, T364 +1, T460 note
+- T466 — verified first: a dirty outbox or plan-mirror row whose checkout is gone never starved healthy rows but redid 14-35 statements, failing opens and git spawns and logged a 2-3 KB warning on every 10 s tick forever (about 18-27 MB of log per row per day); now such a row is held before anything is read (checkoutMissing, a strict lstat), last_error says so, it stays dirty and is written on the first tick after the checkout is back; a plan-less mirror row still retires — PR #961 (f55d6d546), 2026-10-31; main CI green; checked live on the dev stack (plan page at 1280 and 375); follow-ups T477, T478, T479, T462 +1
 - T470 — every check of the smokes job (the Postgres-gated tests, the api, worker and migration smokes, the six Redis scripts) runs on !cancelled() && steps.migrate.conclusion == 'success', so one red check no longer skips the others while a failed setup step or a cancel still stops them; pinned by scripts/test/ci-step-independence.test.mjs; ci-smokes.md CI steps and Limits (about 275 s of headroom) updated — PR #960 (09c9d725a), 2026-10-31; main CI green, every check ran (PR run 41178244171, main run 41180026196); follow-ups T474, T475
 - T469 — the onboarding reset also takes back a git-data claim file only the sync base names (baseGitDataPaths; left behind, the record read refused and the next record write threw); 12, 01's lazy backfill and the manual bundle helper refuse a path that names git data — PR #959 (68af9d174), 2026-10-31; main CI green; follow-ups T472, T473
 - T461 — every carried_* fold reads the row after it holds it and folds from that read (a delta computed from a pre-transaction read lost a concurrent fold or idle write): resetRowsForRerun, the per-step and the task-level provider switch (now one transaction under T349's batch), resetStepAndDownstream, requeueAbandonedOrphan and writeFencedPark's first park — PR #958 (ffa1c2d0c), 2026-10-31; main CI green; follow-ups T471, T459 note, T364 item 28

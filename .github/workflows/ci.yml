@@ -284,6 +284,7 @@ jobs:
           worker test/dead-task-boot.test.ts DEAD_TASK_BOOT_TEST_URL dead_task_boot_test pg
           worker test/upload-reaper-db.test.ts UPLOAD_REAPER_TEST_URL upload_reaper_test pg
           worker test/step-row-lock-order-db.test.ts WORKER_STEP_ROW_LOCK_ORDER_TEST_URL worker_step_row_lock_order_test pg
+          worker test/task-cancel-guard-db.test.ts WORKER_TASK_CANCEL_GUARD_TEST_URL worker_task_cancel_guard_test pg
           worker test/step-fold-preread-db.test.ts WORKER_STEP_FOLD_PREREAD_TEST_URL worker_step_fold_preread_test pg
           api test/terminal-attach-db.test.ts TERMINAL_ATTACH_TEST_URL terminal_attach_test pg
           api test/task-type-definition.test.ts TASK_TYPE_DEF_TEST_URL task_type_def_test pg
@@ -329,6 +330,7 @@ jobs:
           api test/task-cancel-guard-db.test.ts TASK_CANCEL_GUARD_TEST_URL task_cancel_guard_test pg
           api test/task-cancel-lock-order-db.test.ts TASK_CANCEL_LOCK_ORDER_TEST_URL task_cancel_lock_order_test pg
           api test/task-cancel-late-row-db.test.ts TASK_CANCEL_LATE_ROW_TEST_URL task_cancel_late_row_test pg
+          api test/plan-merge-cancel-db.test.ts PLAN_MERGE_CANCEL_TEST_URL plan_merge_cancel_test pg
           api test/step-row-lock-order-db.test.ts STEP_ROW_LOCK_ORDER_TEST_URL step_row_lock_order_test pg
           api test/step-fold-preread-db.test.ts STEP_FOLD_PREREAD_TEST_URL step_fold_preread_test pg
           api test/plan-advisory-delete-db.test.ts PLAN_ADVISORY_DELETE_TEST_URL plan_advisory_delete_test pg
@@ -352,6 +354,8 @@ jobs:
           api test/malformed-id-routes-db.test.ts MALFORMED_ID_ROUTES_TEST_URL malformed_id_routes_test pg
           api test/must-change-password-gate-db.test.ts MUST_CHANGE_PASSWORD_TEST_URL must_change_password_test pg
           worker test/git-data-ledger-rows-db.test.ts GIT_DATA_LEDGER_TEST_URL git_data_ledger_test pg
+          worker test/project-state-gone-checkout-db.test.ts GONE_CHECKOUT_STATE_TEST_URL gone_checkout_state_test pg
+          worker test/plan-mirror-gone-checkout-db.test.ts GONE_CHECKOUT_PLAN_TEST_URL gone_checkout_plan_test pg
           shared test/global-kb-identifier-tsv.test.ts HAIVE_GKB_TEST_DB_URL gkb_identifier_tsv_test pgvector
           shared test/global-kb-ensure-bound.test.ts HAIVE_GKB_TEST_DB_URL gkb_ensure_bound_test pgvector
           worker test/rag-schema.test.ts HAIVE_GKB_TEST_DB_URL rag_schema_test pgvector

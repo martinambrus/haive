@@ -13,6 +13,7 @@ const BLIND_INDEX = 'task-cancel-guard-test-user';
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   queued: [] as { name: string; payload: unknown }[],
+  killed: [] as string[],
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -30,7 +31,12 @@ vi.mock('../src/queues.js', () => {
     getUsagePollQueue: queue,
   };
 });
-vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
+vi.mock('../src/lib/sandbox-kill.js', () => ({
+  killTaskSandboxes: async (taskId: string) => {
+    h.killed.push(taskId);
+    return 0;
+  },
+}));
 vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/middleware/auth.js')>()),
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
@@ -109,6 +115,7 @@ describe.skipIf(!url)('a task cancel or step abort beside another writer, on Pos
 
   beforeEach(async () => {
     h.queued = [];
+    h.killed = [];
     requests = [];
     await db.delete(schema.users).where(eq(schema.users.emailBlindIndex, BLIND_INDEX));
     await db.insert(schema.users).values({
@@ -194,6 +201,13 @@ describe.skipIf(!url)('a task cancel or step abort beside another writer, on Pos
       .where(eq(schema.tasks.id, taskId));
     return row!.status;
   };
+  const pausedAtOf = async (taskId: string) => {
+    const [row] = await db
+      .select({ pausedAt: schema.tasks.pausedAt })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, taskId));
+    return row!.pausedAt;
+  };
   const stepsOf = (taskId: string) =>
     db
       .select({
@@ -214,6 +228,28 @@ describe.skipIf(!url)('a task cancel or step abort beside another writer, on Pos
           eq(schema.taskEvents.eventType, 'task.cancelled'),
         ),
       );
+  const eventsOf = (taskId: string) =>
+    db
+      .select({
+        eventType: schema.taskEvents.eventType,
+        taskStepId: schema.taskEvents.taskStepId,
+        payload: schema.taskEvents.payload,
+      })
+      .from(schema.taskEvents)
+      .where(eq(schema.taskEvents.taskId, taskId))
+      .orderBy(schema.taskEvents.eventType);
+  /** A CLI run of the step that nobody has ended. */
+  const seedLiveRun = (taskId: string, taskStepId: string) =>
+    db.insert(schema.cliInvocations).values({ taskId, taskStepId, mode: 'cli', prompt: 'work' });
+  const runsOf = (taskId: string) =>
+    db
+      .select({
+        exitCode: schema.cliInvocations.exitCode,
+        endedAt: schema.cliInvocations.endedAt,
+        supersededAt: schema.cliInvocations.supersededAt,
+      })
+      .from(schema.cliInvocations)
+      .where(eq(schema.cliInvocations.taskId, taskId));
   const cancelJobs = () => h.queued.filter((job) => job.name === TASK_JOB_NAMES.CANCEL);
   /** One `task.cancelled` event by the caller and one CANCEL job for the task. */
   const expectOneCancel = async (taskId: string) => {
@@ -368,10 +404,10 @@ describe.skipIf(!url)('a task cancel or step abort beside another writer, on Pos
   }, 30_000);
 
   it('leaves a task that completed while a step abort waited completed, with no event and no job', async () => {
-    // The abort has no stop phase, so its own locking is what waits for the racer: taking the task
-    // row before the step rows deadlocks with the racer's task write. On the unchanged code the abort
-    // writes the task row before it reaches the step row it waits for, so the racer's completion
-    // lands last and only the answer, the event and the job are wrong.
+    // The abort runs a Stop first, as the Cancel action does, so the Stop's step batch is what waits
+    // for the racer: the step rows are taken before the task row, and the cancel that follows is
+    // decided under the locks and finds the task completed. Taking the task row before the step rows
+    // would deadlock with the racer's task write.
     const { taskId, stepRowIds } = await seedTask('running', ['running', 'pending']);
 
     const answer = await raceRequest(
@@ -405,5 +441,107 @@ describe.skipIf(!url)('a task cancel or step abort beside another writer, on Pos
     expect(await taskStatus(taskId)).toBe('cancelled');
     expect((await stepsOf(taskId)).map((step) => step.status)).toEqual(['failed']);
     await expectOneCancel(taskId);
+  }, 30_000);
+
+  it('X1: stops the live run of the step a step abort is sent for, then cancels the task', async () => {
+    const { taskId, stepRowIds } = await seedTask('running', ['running', 'pending']);
+    await seedLiveRun(taskId, stepRowIds[0]!);
+
+    const answer = await abort(taskId, STEP).done;
+
+    expect.soft(answer).toMatchObject({
+      ok: true,
+      value: { status: 200, body: { ok: true, status: 'cancelled' } },
+    });
+    expect.soft(await taskStatus(taskId), 'task status after the abort').toBe('cancelled');
+    const [run] = await runsOf(taskId);
+    expect.soft(run?.exitCode, 'run exit code').toBe(137);
+    expect.soft(run?.endedAt, 'run ended_at').toBeInstanceOf(Date);
+    expect.soft(run?.supersededAt, 'run superseded_at').toBeInstanceOf(Date);
+    const ended = await stepsOf(taskId);
+    expect.soft(ended.map((step) => step.status)).toEqual(['failed', 'failed']);
+    // The stop fails the running step with its own text; only a row the cancel itself ends carries
+    // "Task cancelled".
+    expect
+      .soft(ended.map((step) => step.errorMessage))
+      .toEqual(['Stopped by user', 'Task cancelled']);
+    expect.soft(h.killed, 'tasks whose sandboxes were killed').toContain(taskId);
+    const aborts = (await eventsOf(taskId)).filter((event) => event.eventType === 'step.abort');
+    expect.soft(aborts, 'step.abort events').toMatchObject([{ taskStepId: stepRowIds[0] }]);
+    await expectOneCancel(taskId);
+  }, 30_000);
+
+  it.each(['completed', 'cancelled'] as const)(
+    'X2: leaves a %s task and its unended run alone when a step abort is sent for it',
+    async (status) => {
+      // A torn state: the task is over and a run row of it was never ended. The abort answers from
+      // the status it found, as the Cancel action does, before its Stop can reach the run.
+      const { taskId, stepRowIds } = await seedTask(
+        status,
+        [status === 'completed' ? 'done' : 'failed'],
+        { completedAt: new Date() },
+      );
+      await seedLiveRun(taskId, stepRowIds[0]!);
+
+      const answer = await abort(taskId, STEP).done;
+
+      expect.soft(answer).toMatchObject({
+        ok: true,
+        value: { status: 200, body: { ok: true, status } },
+      });
+      expect.soft(await taskStatus(taskId), 'task status after the abort').toBe(status);
+      expect
+        .soft(await runsOf(taskId), 'the run')
+        .toEqual([{ exitCode: null, endedAt: null, supersededAt: null }]);
+      expect.soft(h.killed, 'tasks whose sandboxes were killed').toEqual([]);
+      expect.soft(await eventsOf(taskId), 'events').toEqual([]);
+      expect.soft(cancelJobs(), 'CANCEL jobs queued').toEqual([]);
+    },
+    30_000,
+  );
+
+  it.each([
+    ['running', ['running', 'pending'], {}],
+    ['failed', ['failed'], { errorMessage: 'boom', completedAt: new Date() }],
+  ] as const)(
+    'X3: ends the pause of a paused %s task a step abort cancels, as the Cancel action does',
+    async (status, steps, over) => {
+      // The step-retry endpoint has no status guard, so a cancelled task is still resumable, and a
+      // stale paused_at would park it again the moment someone revived it.
+      const { taskId } = await seedTask(status, [...steps], { ...over, pausedAt: new Date() });
+
+      const answer = await abort(taskId, STEP).done;
+
+      expect.soft(answer).toMatchObject({
+        ok: true,
+        value: { status: 200, body: { ok: true, status: 'cancelled' } },
+      });
+      expect.soft(await taskStatus(taskId), 'task status after the abort').toBe('cancelled');
+      expect.soft(await pausedAtOf(taskId), 'paused_at after the abort').toBeNull();
+      await expectOneCancel(taskId);
+    },
+    30_000,
+  );
+
+  it('X4: keeps the pause of a paused task that completed while a step abort waited', async () => {
+    // The abort cancelled nothing, so it clears nothing: the pause is the task's, not the abort's.
+    const pausedAt = new Date();
+    const { taskId, stepRowIds } = await seedTask('running', ['running', 'pending'], { pausedAt });
+
+    const answer = await raceRequest(
+      'abort',
+      () => abort(taskId, STEP),
+      stepRowIds[0]!,
+      completeTask(taskId),
+    );
+
+    expect.soft(answer).toMatchObject({
+      ok: true,
+      value: { status: 200, body: { ok: true, status: 'completed' } },
+    });
+    expect.soft(await taskStatus(taskId), 'task status after the abort').toBe('completed');
+    expect.soft(await pausedAtOf(taskId), 'paused_at after the abort').toEqual(pausedAt);
+    expect.soft(await cancelEvents(taskId), 'task.cancelled events').toEqual([]);
+    expect.soft(cancelJobs(), 'CANCEL jobs queued').toEqual([]);
   }, 30_000);
 });
