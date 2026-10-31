@@ -506,6 +506,34 @@ describe('strings that a shell runs as code', () => {
   }
 });
 
+describe('a trailing && true after code that is scanned as a separate part', () => {
+  for (const script of [
+    "sh -c 'echo hi' && true",
+    'bash -c "echo hi" && echo x && true',
+    "eval 'echo hi' && true",
+    'echo "$(date)" && true',
+    'echo `date` && true',
+    'x="$(cmd && true)"',
+    'x="$(cmd && true)" && true',
+  ]) {
+    it(`accepts ${JSON.stringify(script)}`, () => {
+      bashAccepts(script);
+      assert.equal(swallowedFailure(script), null);
+    });
+  }
+  for (const script of [
+    "sh -c 'echo hi' && true\necho after",
+    'echo "$(date)" && true; echo after',
+  ]) {
+    it(`rejects ${JSON.stringify(script)}`, () => rejects(script, '&& true'));
+  }
+  it('keeps a bare true in the body of a construct when a heredoc body holds a substitution', () =>
+    assert.equal(
+      swallowedFailure("if x; then\n  bash <<'EOF'\necho `date`\nEOF\n  true\nfi"),
+      null,
+    ));
+});
+
 describe('comments, tabs and prefixes of the lexer', () => {
   it('keeps a hash inside a word from hiding a later swallow', () =>
     rejects('echo x#tag; cmd || true'));

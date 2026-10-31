@@ -273,9 +273,12 @@ export function shellSource(
           }
           if (!terminated) fail(`heredoc ${JSON.stringify(delimiter)}`);
           // Bash expands an unquoted body before its consumer reads it: those expansions run here.
-          if (!quotedWord)
-            result += '\n' + shellSource(body, { maskQuotes, step, prose: true }) + '\n';
-          if (consumer === 'code') result += '\n' + shellSource(body, { maskQuotes, step }) + '\n';
+          const inline = (options) =>
+            '\n' +
+            shellSource(body, { maskQuotes, step, ...options }).replaceAll('\0', '\n') +
+            '\n';
+          if (!quotedWord) result += inline({ prose: true });
+          if (consumer === 'code') result += inline();
           else if (consumer === 'interpreter' && !maskQuotes) result += '\n' + body + '\n';
         }
       } else if (!parameter && (source.startsWith(';;', i) || source.startsWith(';&', i))) {
@@ -353,11 +356,20 @@ export function shellSource(
     return result;
   };
   const result = prose ? expansions() : scan(0).text;
-  return result + (maskQuotes ? substitutions.map((code) => '\n' + code).join('') : '');
+  // Code that runs apart from the script (substitutions, strings given to a shell) follows it as
+  // parts of its own, so that what ends a script is judged for each part.
+  return result + (maskQuotes ? substitutions.map((code) => '\0' + code).join('') : '');
 }
 
 export function swallowedFailure(source, options = {}) {
-  const script = shellSource(source, { ...options, maskQuotes: true });
+  for (const script of shellSource(source, { ...options, maskQuotes: true }).split('\0')) {
+    const matched = swallowedBy(script);
+    if (matched) return matched;
+  }
+  return null;
+}
+
+function swallowedBy(script) {
   const fallback =
     /\|\|\s*(?:(?:\/(?:usr\/)?bin\/)?true(?=[\s;|&)}]|$)|:(?=[\s;|&)}]|$)|exit\s+0(?=[\s;|&)}]|$)|\(\s*exit\s+0\s*\)(?=[\s;|&)}]|$))/.exec(
       script,
