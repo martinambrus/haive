@@ -90,7 +90,8 @@ export async function usableCheckout(
     try {
       const there = await lstatNoFollow(path.dirname(dest), path.basename(dest), { strict: true });
       return there?.kind === 'directory' ? { unknown: whyNoAnswer(cdup) } : 'unusable';
-    } catch {
+    } catch (err) {
+      logger.warn({ err, dest }, 'checkout directory unreadable after git gave no answer');
       return { unknown: whyNoAnswer(cdup) };
     }
   }
@@ -139,8 +140,12 @@ export async function usableCheckout(
           }
         }
       }
-    } catch {
+    } catch (err) {
       // An unreadable entry cannot prove that rebuilding is safe.
+      logger.warn(
+        { err, dest },
+        'checkout structure unreadable after git failed; leaving it unknown',
+      );
     }
     return { unknown: whyNoAnswer(cdup), repairNeeded: true };
   }

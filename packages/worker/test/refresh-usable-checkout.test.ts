@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:f
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { logger } from '@haive/shared';
 import { usableCheckout } from '../src/repo/refresh.js';
 import { failGit, noGit, type FakeGit } from './support/fake-git.js';
 import { killGit } from './support/kill-git.js';
@@ -55,7 +56,12 @@ const needsRepair = { unknown: expect.any(String), repairNeeded: true };
 describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
   const dirs: string[] = [];
   let shim: FakeGit | null = null;
+  let warn: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  });
   afterEach(async () => {
+    vi.restoreAllMocks();
     eio.lstat = null;
     eio.read = null;
     await shim?.restore();
@@ -276,6 +282,13 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
     await writeFile(path.join(dir, 'real/meta.git/config'), '[core\n');
     expect(await cdupExit(dir)).toBe(128);
     expect(await usableCheckout(dir)).toEqual(needsRepair);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dest: dir,
+        err: expect.objectContaining({ name: 'PathContainmentError' }),
+      }),
+      expect.any(String),
+    );
   });
 
   it('a gitdir that goes through a link and back with .. is unknown, not absent', async () => {
@@ -314,6 +327,10 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
     shim = await killGit(['rev-parse', '--show-cdup']);
     eio.lstat = (anchor, rel) => anchor === path.dirname(dir) && rel === path.basename(dir);
     expect(await usableCheckout(dir)).toEqual({ unknown: expect.stringContaining('SIGKILL') });
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ dest: dir, err: expect.objectContaining({ code: 'EIO' }) }),
+      expect.any(String),
+    );
   });
 
   // Each row makes one strict read fail with EIO in a checkout that read as dead or as unproven
@@ -352,8 +369,20 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
       const dir = await arrange();
       eio[kind] = (anchor, at) => anchor === dir && at === rel;
       expect(await usableCheckout(dir)).toEqual(needsRepair);
+      // The failed read is logged with its own error: a lenient read would have returned null quietly.
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ dest: dir, err: expect.objectContaining({ code: 'EIO' }) }),
+        expect.any(String),
+      );
     },
   );
+
+  it('an unknown that no read failed for says nothing', async () => {
+    const dir = await intact();
+    await corruptConfig(dir);
+    expect(await usableCheckout(dir)).toEqual(needsRepair);
+    expect(warn).not.toHaveBeenCalled();
+  });
 
   it('an empty folder is unusable', async () => {
     expect(await usableCheckout(await tmp())).toBe('unusable');
