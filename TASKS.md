@@ -1033,6 +1033,20 @@ From the T459 review (2026-10-31). PRE-EXISTING, consequential (latency).
 
 The project-state writers take the repositories row FOR UPDATE (`watch-admission.ts` ~:24, `sync.ts` ~:733, through the write gate in write.ts ~:727-731) and keep it across file and git work: MEASURED by T459, 26-52 ms per foreground write with no claim files, 1.0-1.3 s with 150, and about 2 s per sweep write. Every child INSERT of the repository (a task start, a plan node, a mirror row) needs KEY SHARE on that row and waits as long. Decide whether the writers need FOR UPDATE (it also excludes the FK checks of every insert) or FOR NO KEY UPDATE (still excludes a delete and another writer), or a shorter hold.
 
+### T485 · FNF[credential-connection-leftovers] · credential and connection edges T341 left: a drifted row still reads connected, the delete dialog names only the connection (+6)
+
+status: open
+From the T341 review (2026-10-31). Minor; PRE-EXISTING unless stated.
+
+1. A reconnect into a linked credential stored under a replaced key throws (api lib/integration-sign-in.ts ~:95-96, `decryptDek` via ~:119), while an unreadable orphan is skipped (~:87-93).
+2. `usernameEncrypted` is never rewritten after a vendor login rename, while `account_label` follows (integration-sign-in.ts ~:95-107, ~:156).
+3. web components/repos/github-oauth-connect.tsx ~:33 `findGithubOauthCredential` keys on the label prefix; `repo_credentials.sign_in_account_id` (0216) is now the real marker but the credential list does not expose it, so a renamed sign-in credential is not pre-selected.
+4. The delete confirmation (web credential-delete-dialog.tsx) names only the connection; deleting also unlinks repositories (`repositories.credentials_secret_id` SET NULL) and custom bundles (`custom_bundles.git_credentials_id` SET NULL).
+5. Connections whose credential drifted to another host or forge before T341 still read `connected` (api `toConnectionSummary`, integration-sign-in.ts ~:40); the readers throw, the resolver skips them and a reconnect repoints. Recommended default: derive the state in the summary rather than repair rows.
+6. New with 0217, harmless: `needsReauth` (shared integrations/access-token.ts ~:158-161) leaves a stale `refresh_refused_at` (the status shows, and a sign-in clears it).
+7. Cosmetic: web credential-modal.tsx ~:19 `HOST_PRESETS` is a second hand-written host list (no codeberg.org); derive it from `AUTO_DETECT_HOSTS`.
+8. The 400 "That account does not fit this task's repository" (api integration-choice.ts ~:125) does not say the credential moved to another forge.
+
 ## Done
 
 - T473 — 07's writeIfAllowed and quarantine move, 09_5, 09_5b and 11d refuse a stored directory or skill id that names git data, listSkillDirs lists no git-data directory (a nested repository's .git in a skills directory was deleted by 09_5b's repair), and 12's stage plan hands git no recorded git-data path (an alias spelling made every Retry of 12 fail with invalid path) — PR #963 (868cae25f), 2026-10-31; main CI green; follow-ups T480, T481
