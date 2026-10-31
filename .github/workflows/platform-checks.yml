@@ -75,9 +75,14 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 10
     steps:
+      # The only setup step. Both checks run on `!cancelled() && steps.checkout.conclusion ==
+      # 'success'`, so a failed check no longer skips the other.
+      # scripts/test/ci-step-independence.test.mjs pins it.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
 
       - name: --help and an unknown option behave
+        if: ${{ !cancelled() && steps.checkout.conclusion == 'success' }}
         run: |
           set -euo pipefail
           sh install/install.sh --help | grep -q -- '--install-id'
@@ -86,6 +91,7 @@ jobs:
           fi
 
       - name: Preflight names Docker and changes nothing
+        if: ${{ !cancelled() && steps.checkout.conclusion == 'success' }}
         # No daemon can run here, so preflight MUST fail — the assertion is that it fails the
         # right way: naming Docker, pointing at Docker Desktop for this platform, and writing
         # nothing. Tolerant of which branch fires (binary absent vs daemon unreachable) because

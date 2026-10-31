@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const h = vi.hoisted(() => ({ db: undefined as unknown }));
@@ -24,7 +24,11 @@ import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { configService } from '@haive/shared';
 import { planRoutes } from '../src/routes/plan.js';
-import { enqueuePlanMirrorRefresh } from '../src/lib/plan-mirror.js';
+import {
+  enqueuePlanMirrorRefresh,
+  savePlanMirror,
+  pullPlanMirror,
+} from '../src/lib/plan-mirror.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
@@ -38,6 +42,8 @@ app.onError(errorHandler);
 beforeEach(() => {
   vi.clearAllMocks();
 });
+
+afterEach(() => vi.restoreAllMocks());
 
 describe('a plan write for a repository that was deleted meanwhile', () => {
   it('is a 404, not a 400 or a 500', async () => {
@@ -66,4 +72,80 @@ describe('a plan write for a repository that was deleted meanwhile', () => {
     expect(await response.json()).toMatchObject({ code: 'plan_repository_gone' });
     expect(enqueuePlanMirrorRefresh).not.toHaveBeenCalled();
   });
+});
+
+describe('deleting a plan after its repository disappears', () => {
+  it('maps the applier refusal to 404 and does not enqueue a refresh', async () => {
+    const fake = createFakeDb({
+      repositories: schema.repositories,
+      tasks: schema.tasks,
+      planNodes: schema.planNodes,
+      planNodeEdges: schema.planNodeEdges,
+      planMirrorState: schema.planMirrorState,
+    });
+    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo' });
+    fake.insert(schema.planNodes, {
+      id: FROM,
+      repositoryId: REPO,
+      parentId: null,
+      title: 'Plan',
+      path: `/${FROM}/`,
+      version: 1,
+    });
+    h.db = fake.db;
+    const transaction = fake.db.transaction.bind(fake.db);
+    // Ownership and the root have been read; the real applier first discovers the deletion.
+    const patch = vi.spyOn(fake.db, 'transaction').mockImplementationOnce(async (run) => {
+      await fake.db.delete(schema.repositories).where(eq(schema.repositories.id, REPO));
+      return transaction(run);
+    });
+    const response = await app.request(`/${REPO}/plan`, {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ confirm: 'repo' }),
+    });
+    expect(patch).toHaveBeenCalledOnce();
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ code: 'plan_repository_gone' });
+    expect(enqueuePlanMirrorRefresh).not.toHaveBeenCalled();
+  });
+});
+
+describe('snapshot action failure text', () => {
+  it.each(['save', 'pull'] as const)(
+    '%s hides server paths and preserves refusal wording',
+    async (action) => {
+      const fake = createFakeDb({ repositories: schema.repositories, tasks: schema.tasks });
+      fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo' });
+      h.db = fake.db;
+      vi.spyOn(configService, 'get').mockResolvedValue('true');
+      const operation = vi.mocked(action === 'save' ? savePlanMirror : pullPlanMirror);
+      for (const [raw, expected] of [
+        [
+          'git branch failed in /srv/private/repo: fatal: bad config',
+          'git branch failed in [path]: fatal: bad config',
+        ],
+        [
+          'a merge or rebase is open; finish it before saving the plan',
+          'a merge or rebase is open; finish it before saving the plan',
+        ],
+        [
+          "git push failed: unable to access 'https://github.com/o/r.git/': 403",
+          "git push failed: unable to access 'https://github.com/o/r.git/': 403",
+        ],
+      ]) {
+        operation.mockRejectedValueOnce(new Error(raw));
+        const response = await app.request(`/${REPO}/plan/snapshot/${action}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: '{}',
+        });
+        expect(response.status).toBe(409);
+        expect(await response.json()).toMatchObject({
+          error: expected,
+          code: `plan_snapshot_${action}_failed`,
+        });
+      }
+    },
+  );
 });

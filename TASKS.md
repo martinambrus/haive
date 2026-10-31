@@ -84,6 +84,8 @@ board. At session start, load the board's tasks you own or will work on into the
 - T270, T310, T318, T326 — design decisions (see each task).
 - T319 — go-ahead on the scope of set-aside batching (rewrites four helpers).
 - T323 item 4 — retention rule for `complete`/`consumed` upload rows.
+- T492, T493 — design decisions (see each task).
+- T376 — strict sign-in rows: with `audit_events` unwritable nobody can sign in, the administrator included (no break-glass). Keep strict (recommended: a database that cannot write blocks sessions anyway) or make sign-in rows best-effort.
 
 ---
 
@@ -101,7 +103,7 @@ All PRE-EXISTING.
 
 ### T120 · B5.1 · the Haive data panel
 
-status: open · kind: feature
+status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T16:20Z · last: 2026-10-31T16:20Z · kind: feature · plan: PR1a shared+worker save, PR1b api, PR2 web+docs
 GET /repos/:id/haive-data + POST .../save {push} via a worker SAVE job; generalise commitPlanSnapshotFiles to a path list; conflict report. Browser 375/768/1280.
 
 ### T121 · B5.2 · project state rides Haive's pushes
@@ -332,36 +334,6 @@ Recommendation: delete the route.
 
 status: open · was modular #127
 Plan I4, part d. Browser check at 1280, 768 and 390.
-
-### T341 · FNF[credential-connection-coupling] · deleting a Git credential silently deletes its connection; re-sign-in duplicates the credential (+13)
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T09:18Z · last: 2026-10-31T09:18Z
-All PRE-EXISTING.
-
-1. /settings/credentials deletes a credential without confirmation. The FK ON DELETE CASCADE (0192) then silently deletes the integration connection it backs.
-2. Disconnecting and signing in again creates a second Git credential (finishSignIn, api lib/integration-sign-in.ts).
-3. PUT /repo-credentials/:id can change the host or provider of a credential that backs a connection.
-4. credential-modal.tsx ~:187-189 spells out the auto-detect hosts in prose (cosmetic).
-5. The modal's help text does not state the API-base rule.
-6. resolveTarget's `fits` check (shared integrations/resolver.ts ~:154-158) never compares the credential's forge with the connection's providerId.
-7. A reconnect refreshes only the secret; an edited host or provider stays.
-8. After a forge-changing edit the connection still reads "connected".
-9. github-oauth.ts:74 compares the host case-sensitively.
-10. A refresh the OAuth client refused keeps the connection "connected"; last_error is never shown.
-11. A credential rename never updates the connection's account_label (integration-connections.ts:171).
-12. Only `credential.delete` is audited; the cascaded connection is not named in the audit row.
-    Fix:
-
-- confirm before delete and name the backing connection;
-- reuse a credential by (user, host, account);
-- refuse host or provider edits on a backing credential;
-- one help sentence for the API-base rule;
-- compare hosts case-insensitively;
-- show last_error;
-- sync account_label on rename.
-
-13. (T378 review) PRE-EXISTING, minor, dormant: a failed `finishSignIn` after the vendor issued tokens leaves them valid for a module provider that declares `revokeUrl` (api lib/integration-sign-in.ts ~:150-156, routes/integrations.ts ~:225-243, lib/integration-device.ts ~:149-162), and a device-only provider cannot declare one at all (shared modularity/integrations.ts ~:77-83; `revokeUrlOf` reads oauth2 only, api lib/integration-provider.ts ~:136-139), so even disconnect cannot revoke its tokens. No shipped provider declares one (T378 item 1 INVALID); re-open when the first does.
-14. (T378 review) PRE-EXISTING, minor, design: both web device sign-in clients end the attempt on any poll failure (web github-oauth-connect.tsx ~:141-145; lib/device-sign-in.ts ~:36 with use-device-sign-in.ts ~:60-67), so the api's "unavailable vendor keeps the record (502)" never helps a retry and a Redis blip ends a 15-minute sign-in. Pinned as intended by device-sign-in.test.ts ~:144-150; decide whether a 5xx should retry.
 
 ### T342 · FNF[mcp-token-file] · rag/ddev task tokens in the server env defeat the cli-merge skip (measure first) (+4)
 
@@ -618,7 +590,7 @@ Sites:
   On a timeout they return different things: partial stdout, [], null, or "timed out".
   Fix: one shared runDockerCommand(args, {timeoutMs}) returning {stdout, stderr, exit, timedOut}, plus a test that kills a hung child.
 
-### T373 · FNF[audit-strict-admin-actions] · module/task-type/upgrade-start actions still audit best-effort (+1)
+### T373 · FNF[audit-strict-admin-actions] · module/task-type/upgrade-start actions still audit best-effort (+6)
 
 status: open · was modular #246
 Sites:
@@ -631,10 +603,15 @@ Sites:
   Fix: the #212/#224 shape (audit row in the change's transaction; for external side effects, row first, rolled back on failure).
 
 1. A role-admin owner's Retry under an administrator's pause lifts it with no byAdmin event or audit row (api tasks/_helpers.ts ~:1181).
+2. Container-volume CLI logins write no audit row: the codex, grok, amp and antigravity successes all reach `runProbeAndSave` (api cli-login-banner.ts ~:1142-1179), which probes and sends `saved`; the CLI writes the credential into the auth volume, so the shape is a best-effort row after the success signal, as for an integration disconnect (integrations.md ~:554-566). PRE-EXISTING, consequential. From the T376 review (2026-10-31).
+3. A CLI provider sign-out removes the credential volumes with no row (api cli-providers.ts ~:709-724 queues the job; worker handlers.ts ~:1094 runs it). PRE-EXISTING, minor to moderate.
+4. `PATCH /cli-providers/:id` changes security-relevant non-secret fields with no row: `networkPolicy` and `egressDomains` (the sandbox egress allow-list), `wrapperContent`, `wrapperPath`, `executablePath`, `cliArgs`, `sandboxDockerfileExtra` and env names such as `ANTHROPIC_BASE_URL` (cli-providers.ts ~:455-511); the strict row fires only when env secrets are present. Record the changed field names, never code or values. PRE-EXISTING, moderate.
+5. `PUT /user-settings/password` checks the current password with no throttle and no failure row (user-settings.ts ~:108-109): the one password oracle outside the throttled `/auth/login`, open to any valid access cookie. PRE-EXISTING, moderate.
+6. A hand-made tooling PATCH that combines `ragEmbedAction` with a security field runs the RAG reset before the audited transaction, so a refused row leaves the reset done (tooling-upgrades.ts ~:946-958 vs ~:991); the page sends the action alone. PRE-EXISTING, minor.
 
 ### T376 · FNF[audit-security-gaps-2] · CLI provider key/token changes, password change, registration, repo security settings, sign-ins write no audit row (+5)
 
-status: open · (T377 landed as PR #886) · was modular #252
+status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T14:13Z · last: 2026-10-31T14:13Z
 
 1. cli-providers.ts ~:856, :923, :998, :1019; cli-login-banner.ts ~:930.
 2. Password change (user-settings.ts ~:127-170) and registration (auth.ts ~:61-170).
@@ -707,7 +684,7 @@ See worker task-queue.ts ~:1806-1813, ~:356. Decide per shape: fail the task, or
 
 ### T397 · FNF[failed-read-answers] · branch, count, refresh and merge-completion reads still turn a failed git into an answer (+16)
 
-status: open · was modular #279 (T396 landed as PR #884; re-check every item against T322/T325, PRs #877/#879, first)
+status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T13:48Z · last: 2026-10-31T13:48Z
 FIRST re-check each item on main: the #322 and #325 series fixed some of them.
 
 1. `rev-parse --abbrev-ref HEAD` sites: 00a ~:164, 11a ~:106, 12-worktree-cleanup ~:248, 12-post-onboarding ~:464, 13-onboarding-push ~:147, 99-run-app-ready ~:173, 01-plan-merge ~:727, :741.
@@ -925,16 +902,6 @@ From the T469 review (2026-10-31). PRE-EXISTING, minor (narrow window).
 
 api routes/repos.ts `resetOnboardingArtifacts` (~:2615-2625, the claim-file loop) takes back the claim files a live row, a retired git-data row (`supersededGitDataPaths`, T421) or a git-data claim in the sync base (`baseGitDataPaths`, T469) names. A git-data claim file that reached the checkout after the last sync (or that `applyRebase` dropped from the base, sync.ts ~:1131, until the next sync re-adds it) is in none of them, so it stays, and the record then reads `refused` ("format.json is missing") until someone removes it by hand: the sync cannot read it in once the reset removed `format.json`. Measured by the T469 driver (C4a/C4b). Direction (a decision, since it adds a read path to a destructive route): list `artifacts/` through the fs-safe primitives under a cap and take back each file the codec itself classes as a git-data claim (a canonical path that names git data and `claimFileName(path)` equal to the file name, codec.ts ~:374-379).
 
-### T474 · FNF[ci-step-independence-2] · other CI jobs still skip independent checks after a failed one; the smokes job has no per-step limits and about 275 s of headroom (+3)
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T11:06Z · last: 2026-10-31T11:06Z
-From the T470 review (2026-10-31). PRE-EXISTING, minor to moderate (the T470 hiding class in other jobs).
-
-1. A failed check skips an independent one after it: `schema-parity` "Compare migration corpus against push --force" (ci.yml ~:465) skips "Migration corpus reaches the production image" (~:475); `production-images` web leg ~:500 skips ~:505; platform-checks.yml `macos-preflight` ~:80 skips ~:88 (`compose-boot` ~:609-:630 is arguable). Give each the `!cancelled() && steps.<setup>.conclusion == 'success'` guard T470 gave the smokes job, with a pin in scripts/test/.
-2. No per-step `timeout-minutes` on the smokes job's "Postgres-gated tests" step (~:229, about 621 s) or the six Redis-script steps (~:375-410), so a hang there burns the job's 30 minutes and cancels every later check.
-3. The gated step's preamble runs `set -uo pipefail` without `-e` (~:238-241), so a failed web-kit or modules build or `gen-modules` does not fail the step by itself.
-4. The smokes job's 1800 s leaves about 275 s over a green run (the last 13 green main runs took 1221-1525 s, the newest the slowest), and a hung repo-refresh costs about 240 s of it: raise the job limit or split the job before a slower runner cancels green runs.
-
 ### T475 · FNF[ci-unit-tests-job] [design] · a format or typecheck failure skips the unit tests in lint-typecheck-test
 
 status: open
@@ -943,13 +910,6 @@ From the T470 review (2026-10-31). PRE-EXISTING, minor to moderate.
 `lint-typecheck-test` (ci.yml ~:55-110) runs Format check, Typecheck, Unit tests, Module scripts, Shellcheck and Installer boot-failure paths with no `if:`, so a 41 s format error hides the 591 s unit tests, and shellcheck and the installer test need only the checkout. A guard there would hold the job's red verdict until the unit tests end; the alternative is giving Unit tests their own job, which renames a required check (a decision for the owner). The e2e job's "Typecheck the suite" (~:677) before the stack boot is deliberate and stays.
 
 Notes (T474 review, 2026-10-31; PRE-EXISTING): `lint-typecheck-test` has a 20-minute limit (ci.yml ~:38, pinned at ci-browser-budget.test.mjs ~:44) against a slowest green run of 1017 s, leaving 183 s; and Module scripts, Shellcheck and Installer boot (~:71, ~:93, ~:108) run after the slow unit tests, so guarding only them would not delay the red verdict.
-
-### T476 · FNF[plan-merge-discard-result] · the plan merge panel reads a discard that cancelled nothing as discarded
-
-status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T13:14Z · last: 2026-10-31T13:14Z
-From the T458 review (2026-10-31). PRE-EXISTING, minor (web).
-
-`DELETE /repositories/:id/plan/merge` answers `{ ok: true, cancelled: false }` when no merge is open or (since T458) when the merge completed while the request ran, but `discardPlanMerge` types its answer as `{ ok: boolean }` (web lib/api-client.ts ~:2293) and the panel's `discard` (components/plan/plan-merge-panel.tsx ~:141-155) hides the merge as discarded whatever it says, after a confirm that promises "nothing is lost". Direction: read `cancelled`; when false, say the merge had already ended and refresh the plan instead of reporting a discard.
 
 ### T477 · FNF[sweep-held-slots] [design] · held outbox and mirror rows still take the sweep's 25 slots; the two sweeps share one job
 
@@ -967,16 +927,9 @@ From the T466 review (2026-10-31). PRE-EXISTING, minor.
 
 Also (T459 fix round, 2026-10-31; PRE-EXISTING, minor): `DELETE /repositories/:id/plan` (api routes/plan.ts ~:1038) calls `applyPlanPatch` outside the `try`/`planError` mapping, so a repository deleted meanwhile answers 500 instead of 404; and the header of shared plan/errors.ts (~:1-6) still says a worker step turns `invalid` into a `RetryableParseError`, which `_plan-prompt.ts` (~:274-285) no longer does.
 
-### T479 · FNF[extract-swap] · an archive extract that fails between its two renames loses the previous repository tree
-
-status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T12:36Z · last: 2026-10-31T12:36Z
-From the T466 review (2026-10-31). PRE-EXISTING, minor, theoretical.
-
-`extractArchive` (worker repo/clone.ts ~:604-614) moves the old `dest` into the stage and then renames the new tree in; if the second rename fails or the process dies between the two, no repository directory is left, and the `finally` removes the stage with the old tree in it, although the doc comment (~:509-511) says a failure leaves the previous contents untouched. Direction: on a failed second rename move the old tree back before the `finally`, and say in the comment what a crash between the renames leaves.
-
 ### T480 · FNF[git-data-stored-dirs-2] · the KB path validator accepts a git-data name; 09_5, 09_5b and 11d still dispatch agents for a stored git-data dir (+4)
 
-status: open
+status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T13:23Z · last: 2026-10-31T13:23Z
 From the T473 review (2026-10-31). PRE-EXISTING, minor (stored or model-named input only).
 
 1. `sanitizeKbRelPath` (worker onboarding/_kb-write.ts ~:58-76) accepts `.git/hooks/x` and `.GIT./x` (measured), so 08 (~:2129, ~:2272, ~:2380, ~:2421, ~:2441), 09_3 `applyKbWrites` (~:124) and `_kb-legacy.ts` can write a model-named KB file under a git-data name inside `.haive-data/knowledge_base/` (12's stage plan drops it since T473). A refusal in the validator covers all three.
@@ -991,6 +944,8 @@ status: open
 From the T473 review (2026-10-31). PRE-EXISTING, minor (stored legacy or hand-edited input only).
 
 Since T469 and T473 no writer records or writes a path that names git data, but files an earlier release already wrote there (07's agent files under a stored `.git/hooks`-style target dir, skill trees under a stored skills dir) stay, nothing cleans them, and an alias spelling on disk (`.GIT./x`, `git~1/x`) still fails `git add -A` in 12's init branch (`12-post-onboarding.ts` ~:958) and any later whole-tree add with "invalid path". A cleanup removes files in the repository, so it needs a decision: find them (by the stored targets or a tree walk), report them, or remove them with an explicit confirmation.
+
+Note (T480 review, 2026-10-31): the KB walkers still list a git-data-named page into prompts while 08's `scanExistingKb` now skips it: 09-qa.ts ~:93-114 and 09_5-skill-generation.ts ~:296-322 (also feeding 09_5b ~:388 and 11d ~:371 through `listKbFiles`), so a prompt can name a KB page `applyKbWrites` then refuses; reachable only with such a page already inside the KB (this task's leftovers).
 
 ### T482 · FNF[lock-order-leftovers-2] · second sweeps wait holding step rows; the late sweep refuses a benign hold; planner-dependent id lists (+6)
 
@@ -1070,8 +1025,43 @@ From the T474 review (2026-10-31). PRE-EXISTING unless stated; minor to moderate
 6. release.yml: no job has `timeout-minutes` (default 360 min), and a hung one holds the `release-<ref>` concurrency group (~:19-20).
 7. Known pin survivors: `|| true` inside a check's `run`, `fail-fast: true` on production-images (~:522), a job `defaults.run.shell`, a job `if: false`; step limits have no floor.
 
+### T490 · FNF[error-text-paths-2] [verify-first] · other surfaces still show raw worker error text with server paths (+4)
+
+status: open
+From the T478 fix rounds (2026-10-31). PRE-EXISTING, minor. T478 added `scrubErrorPaths` (@haive/shared logger) and passed the plan snapshot error, the plan Save/Pull 409 bodies, `repositories.status_message` and 12's plan-mirror warning through it.
+
+1. The set-remote responses keep raw filesystem and git diagnostics (api routes/repos.ts ~:2752); found from source, not exercised.
+2. Other step failure and warning sinks keep paths: worker step-engine/step-runner.ts ~:3722 and 12-post-onboarding.ts ~:808; found from source, not exercised.
+3. Stored 12 warnings in `task_steps.output` from before T478 keep their paths (not repaired; the task page shows them behind "Show output").
+4. The scrubber's known misses (errors.ts ~:73): it replaces `/proc/self/fd` in fs-safe's refusal text, HTTP route paths and glob tails, drops a sentence's final period with an unquoted path, and leaks the tail of an unquoted path with a space and a second path directly after a colon. Accepted for T478; revisit if a surface shows one.
+5. (T478 review 3) READY repositories keep server paths in `repositories.status_message`: the refresh job stores its refusal text with `status: 'ready'` (`persistDetection`, repo/clone.ts ~:251, called at repo/refresh.ts ~:306, ~:328, ~:341, ~:359): `git remote get-url origin failed in <checkout path>`, a HEAD read's git stderr, `... it was kept at <absolute aside path>.` (deliberate, so scrubbing it is a product decision) and `the checkout could not be examined (...)`; the repos page renders the column for every status. Item 1 is now verified by reading (repos.ts ~:2688-2795: `lstat` text and `git rev-parse`, `git remote add` and `git config` stderr in the 409).
+
+### T491 · FNF[plan-panel-outcomes] · a plan merge that ends by its own poll vanishes without a word; PlanChat keeps its draft across nodes (+3)
+
+status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T16:25Z · last: 2026-10-31T16:25Z
+From the T476 follow-up review (2026-10-31). Minor (UX); PRE-EXISTING unless stated.
+
+1. A panel whose merge ends by its own poll (completed, cancelled elsewhere, or FAILED) vanishes with no word: plan-merge-panel.tsx ~:108-112 calls `onSettled`, the refresh gets `merge: null` (the route lists open merges only, api plan.ts ~:447-459), and the panel renders nothing. For a FAILED merge it matters: it keeps its worktree for a Retry (plan-canvas.md), `plan_merge` tasks are hidden from the task list (api routes/tasks/index.ts ~:289-292), and the plan page shows no other trace. Direction: set the same task-tagged notice from the poll when it ends, with a failed-specific line naming Retry.
+2. New with T476, test-only: nothing ties the two ends of the `?taskId=` contract (the web test mocks `discardPlanMerge`, the api test builds its own URL), so renaming the key on one side stays green; a malformed or empty id is untested (it cannot 500).
+3. A `discard` or `answer` for merge A that settles after the page switched to merge B writes its error under B and a notice tagged A that appears when B ends; a ref to the current task id checked after the await would drop it. Theoretical.
+4. PlanChat keeps its `draft` across a node switch (web plan-chat.tsx ~:96, not among the node-change resets ~:139-146; unkeyed at plan-detail-panel.tsx ~:1010), and `send` posts it to the newly selected node (~:293-310). Read, not run; intent unclear.
+
+### T492 · FNF[house-rule-lapse-audit] [design] · a house rule's approval lapses with no audit row
+
+status: open
+Split out of T376 (item 6) on 2026-10-31. A content PATCH clears `enforcedHash` (api routes/global-kb.ts ~:1124-1127), the store trigger clears it when an active entry leaves `active` (shared global-kb/ensure-schema.ts ~:168-186) and DELETE /entries/:id removes an enforced entry; global-kb.md calls the lapse deliberate, only the trail is missing. The global KB is always a separate database, so a main `audit_events` row cannot share the store's transaction. Codex's prototype (branch `keep/376-item6-store-audit`, 322483948) adds a store-local `global_kb_audit_events` table and a lapse trigger with session-setting attribution: atomic, but invisible to the admin audit page (admin.ts reads `audit_events`). Options: (a) API lapses through `auditedChange` like Enforce and Un-enforce (main row first, store write inside, the documented commit window), other writers unrecorded; (b) the store-local trail plus an admin reader for it; (c) both. Recommended: (a), consistent with Enforce and visible to admins.
+
+### T493 · FNF[audit-retention] [design] · audit_events has no retention and the admin audit page counts the whole table
+
+status: open
+From the T376 review (2026-10-31, C1). `GET /admin/audit` runs `count(*)` and two `SELECT DISTINCT` over the whole table on every page view (api admin.ts ~:191-261), and `audit_events` keeps every row forever; since T376 every sign-in attempt writes one (throttled ones bounded per window). Decide a retention period (delete or archive), and bound the page's counts (an estimate, or indexed filters).
+
 ## Done
 
+- T476 — the plan merge panel reads the DELETE's `cancelled` answer: a discard that cancelled nothing keeps a neutral status notice (completed, cancelled or failed; nothing discarded) that survives the refresh, is cleared by the next merge, Discard or answer, and Discard stays disabled while its own discard settles; the panel sends the displayed task id (`?taskId=`) and the route cancels nothing when a different merge is open — PR #968 (0177599c3), 2026-10-31; main CI green; delivered with codex-sonnet (1 fix round, session Direct guard); follow-up T491
+- T479 — an archive extract whose swap fails restores the previous destination tree before the stage is removed (the old tree was deleted with the stage); a failed restore keeps the stage and logs the absolute path of the kept tree; a failed stage removal after a good swap warns instead of failing silently; the comment says what a crash between the two renames leaves — PR #966 (a1a74f596), 2026-10-31; main CI green; delivered with codex-sonnet (1 fix round); follow-ups T486, T487
+- T474 — schema-parity, the web checks of production-images and macos-preflight run each check on !cancelled() && steps.<setup>.conclusion == 'success'; the smokes job's gated step and Redis-script steps have their own limits (25, 10, 5 minutes) and the job 45 minutes, pinned by a budget model of the GATED list (907 s plus 7.5 s a row; fails at 134 and 160 rows); the gated step's errexit comes from the runner's bash -e (comment only) — PR #967 (6bad0f036), 2026-10-31; main CI green with every guarded check run (PR run and main); ci-smokes.md; follow-ups T488, T489, T475 notes
+- T341 — a credential delete confirms and names the connection the cascade takes (audited with its id), a re-sign-in takes back the account's earlier credential by (user, host, account id: repo_credentials.sign_in_account_id, 0216) instead of adding one, a backing credential's host or forge cannot be edited (409), the resolver and task choice compare a forge connection's credential forge, hosts compare case-insensitively, a refused OAuth refresh is recorded and shown (refresh_refused_at, 0217), a rename follows into the token connection's label, and delete and edit lock the connection before the credential (a late link NOWAIT, 503) — PR #965 (e880cf343), 2026-10-31; main CI green; checked live on the dev stack with throwaway credentials; follow-up T485; item 14 (device poll retry on 5xx) is an owner question
 - T459 — measured first: run and agent-row statements lock in heap order (Bitmap/Seq scans at 96k runs), so no scan-order deadlock and no id-ordered batch; fixed the six measured lock-tier cycles instead (requeueAbandonedOrphan runs first, fan-out Resume supersede before agent marks, the reopened form's agent rows before its step row, the late sweep's runs and agent rows NOWAIT to the existing 503, the CANCEL step sweep in a short lockStepRows transaction) and a plan patch that may insert takes the repository row FOR KEY SHARE first (repository_gone: 404, clarify fails at once; update-only patches take no lock, since a project-state write holds that row 0.4-2 s) — PR #964 (823b83cf1), 2026-10-31; main CI green incl. all smokes; follow-ups T482, T483, T484, T478 +1, T364 +1
 - T473 — 07's writeIfAllowed and quarantine move, 09_5, 09_5b and 11d refuse a stored directory or skill id that names git data, listSkillDirs lists no git-data directory (a nested repository's .git in a skills directory was deleted by 09_5b's repair), and 12's stage plan hands git no recorded git-data path (an alias spelling made every Retry of 12 fail with invalid path) — PR #963 (868cae25f), 2026-10-31; main CI green; follow-ups T480, T481
 - T458 — the worker's CANCEL job decides under the task row's lock (markTaskCancelled): a completed or vanished task is left as it is with no teardown, an already-cancelled one keeps its stamps, anything else (failed included) is cancelled; DELETE /plan/merge and the step abort stop the live run, cancel through cancelTaskIfOpen and clear the pause only when the cancel applied, as Cancel does — PR #962 (f8eea8b66), 2026-10-31; main CI green incl. all smokes; live cancel/abort/discard UI paths not driven (they need a running CLI task or a conflicted remote pull); follow-ups T476, T309 +2, T364 +1, T460 note

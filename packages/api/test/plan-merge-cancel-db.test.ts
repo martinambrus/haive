@@ -263,11 +263,14 @@ describe.skipIf(!url)('DELETE /plan/merge beside a completion and a peer, on Pos
     throw new Error('test setup: no scan order reached B before A');
   };
 
-  const removeMerge = async (): Promise<Answer> => {
+  const removeMerge = async (taskId?: string): Promise<Answer> => {
     h.thrown = undefined;
-    const res = await app.request(`/repositories/${repositoryId}/plan/merge`, {
-      method: 'DELETE',
-    });
+    const res = await app.request(
+      `/repositories/${repositoryId}/plan/merge${taskId === undefined ? '' : `?taskId=${encodeURIComponent(taskId)}`}`,
+      {
+        method: 'DELETE',
+      },
+    );
     if (h.thrown !== undefined) throw h.thrown;
     return { status: res.status, body: (await res.json()) as Record<string, unknown> };
   };
@@ -561,6 +564,37 @@ describe.skipIf(!url)('DELETE /plan/merge beside a completion and a peer, on Pos
     },
     TEST_TIMEOUT,
   );
+
+  it('P9: a stale displayed task cannot stop or cancel a newer merge', async () => {
+    const old = await seedTask('completed', ['done'], { completedAt: new Date() });
+    const current = await seedTask('running', ['running'], { pausedAt: new Date() });
+    await seedLiveRun(current.taskId, current.stepRowIds[0]!);
+    const before = await snapshot(current.taskId);
+
+    expect(await removeMerge(old.taskId)).toEqual({
+      status: 200,
+      body: { ok: true, cancelled: false },
+    });
+    expect(await snapshot(current.taskId)).toEqual(before);
+    expect(h.queued).toEqual([]);
+    expect(h.killed).toEqual([]);
+  });
+
+  it('P10: an explicitly named open merge is stopped then cancelled as before', async () => {
+    const { taskId, stepRowIds } = await seedTask('running', ['running'], { pausedAt: new Date() });
+    await seedLiveRun(taskId, stepRowIds[0]!);
+
+    expect(await removeMerge(taskId)).toEqual({
+      status: 200,
+      body: { ok: true, cancelled: true, taskId },
+    });
+    expect((await taskOf(taskId)).status).toBe('cancelled');
+    expect((await taskOf(taskId)).pausedAt).toBeNull();
+    expect((await rowOf(stepRowIds[0]!)).errorMessage).toBe('Stopped by user');
+    expect((await runsOf(taskId))[0]?.exitCode).toBe(137);
+    expect(h.killed).toEqual([taskId]);
+    expect(cancelJobs()).toHaveLength(1);
+  });
 
   it(
     'P6: over two pending open rows B and A, waits for A without holding B and cancels the merge',

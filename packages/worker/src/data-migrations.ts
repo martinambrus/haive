@@ -36,6 +36,7 @@ import {
   withGlobalKb,
 } from '@haive/shared/global-kb';
 import { loadPlanSkeletons } from '@haive/shared/plan';
+import { scrubErrorPaths } from '@haive/shared/logger';
 import { namesGitData, PROJECT_STATE_IMPORT_STEP_ID } from '@haive/shared/project-state';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { resolveToolingOllamaUrl } from '@haive/shared/rag';
@@ -90,6 +91,8 @@ export interface DataMigration {
  *  cannot be added without someone deciding whether it destroys anything, which is exactly the
  *  question that was previously answered by whichever function happened to hold a raw DELETE. */
 export const DATA_MIGRATIONS: DataMigration[] = [
+  { id: 'scrubPlanMirrorErrors', kind: 'convergent', run: scrubPlanMirrorErrors },
+  { id: 'scrubRepositoryErrors', kind: 'convergent', run: scrubRepositoryErrors },
   { id: 'supersedeRemovedRtkArtifacts', kind: 'convergent', run: supersedeRemovedRtkArtifacts },
   { id: 'skipRemovedSteps', kind: 'convergent', run: skipRemovedSteps },
   { id: 'supersedePhantomAgentArtifacts', kind: 'convergent', run: supersedePhantomAgentArtifacts },
@@ -170,6 +173,71 @@ export const DATA_MIGRATIONS: DataMigration[] = [
     run: dropCopiedSecretLikeProviderEnv,
   },
 ];
+
+/** Repair display copy from older releases without changing mirror state or sweep ordering.
+ *  Re-run at boot so a restored backup converges too. Compare the text at UPDATE time to leave
+ *  a newer failure (or a successful flush's NULL) alone. Original diagnostics cannot be restored;
+ *  undoing the entry only stops future repairs, and normal retries still replace this copy. */
+export async function scrubPlanMirrorErrors(db: Database): Promise<void> {
+  const rows = await db
+    .select({
+      repositoryId: schema.planMirrorState.repositoryId,
+      lastError: schema.planMirrorState.lastError,
+    })
+    .from(schema.planMirrorState)
+    .where(isNotNull(schema.planMirrorState.lastError));
+  const repaired: string[] = [];
+  for (const row of rows) {
+    const message = scrubErrorPaths(row.lastError);
+    if (message === row.lastError) continue;
+    const updated = await db
+      .update(schema.planMirrorState)
+      .set({ lastError: message })
+      .where(
+        and(
+          eq(schema.planMirrorState.repositoryId, row.repositoryId),
+          eq(schema.planMirrorState.lastError, row.lastError!),
+        ),
+      )
+      .returning({ repositoryId: schema.planMirrorState.repositoryId });
+    repaired.push(...updated.map((row) => row.repositoryId));
+  }
+  if (repaired.length > 0) {
+    log.info({ count: repaired.length, ids: repaired }, 'scrubbed stored plan mirror errors');
+  }
+}
+
+/** Repair historical repository failure copy only while the repository is still in error.
+ *  Compare the text read so a newer failure or recovery wins. Reverting this entry stops
+ *  future repairs; the removed paths cannot be restored, and retries replace the copy. */
+export async function scrubRepositoryErrors(db: Database): Promise<void> {
+  const rows = await db
+    .select({ id: schema.repositories.id, statusMessage: schema.repositories.statusMessage })
+    .from(schema.repositories)
+    .where(
+      and(eq(schema.repositories.status, 'error'), isNotNull(schema.repositories.statusMessage)),
+    );
+  const repaired: string[] = [];
+  for (const row of rows) {
+    const message = scrubErrorPaths(row.statusMessage);
+    if (message === row.statusMessage) continue;
+    const updated = await db
+      .update(schema.repositories)
+      .set({ statusMessage: message })
+      .where(
+        and(
+          eq(schema.repositories.id, row.id),
+          eq(schema.repositories.status, 'error'),
+          eq(schema.repositories.statusMessage, row.statusMessage!),
+        ),
+      )
+      .returning({ id: schema.repositories.id });
+    repaired.push(...updated.map((row) => row.id));
+  }
+  if (repaired.length > 0) {
+    log.info({ count: repaired.length, ids: repaired }, 'scrubbed stored repository errors');
+  }
+}
 
 /** Run one, and never let it take the process down with it.
  *
