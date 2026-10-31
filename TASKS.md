@@ -1038,7 +1038,7 @@ From the T478 fix rounds (2026-10-31). PRE-EXISTING, minor. T478 added `scrubErr
 
 ### T491 · FNF[plan-panel-outcomes] · a plan merge that ends by its own poll vanishes without a word; PlanChat keeps its draft across nodes (+3)
 
-status: open
+status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T16:25Z · last: 2026-10-31T16:25Z
 From the T476 follow-up review (2026-10-31). Minor (UX); PRE-EXISTING unless stated.
 
 1. A panel whose merge ends by its own poll (completed, cancelled elsewhere, or FAILED) vanishes with no word: plan-merge-panel.tsx ~:108-112 calls `onSettled`, the refresh gets `merge: null` (the route lists open merges only, api plan.ts ~:447-459), and the panel renders nothing. For a FAILED merge it matters: it keeps its worktree for a Retry (plan-canvas.md), `plan_merge` tasks are hidden from the task list (api routes/tasks/index.ts ~:289-292), and the plan page shows no other trace. Direction: set the same task-tagged notice from the poll when it ends, with a failed-specific line naming Retry.
