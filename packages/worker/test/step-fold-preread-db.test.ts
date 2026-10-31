@@ -1,8 +1,42 @@
+import { randomUUID } from 'node:crypto';
+import os from 'node:os';
 import { eq, sql } from 'drizzle-orm';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
+import { configService, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
-import { reconcileOrphanedSteps } from '../src/queues/task-queue.js';
+import { processTaskJob, reconcileOrphanedSteps } from '../src/queues/task-queue.js';
+import { stepRegistry } from '../src/step-engine/registry.js';
+import type { StepDefinition } from '../src/step-engine/step-definition.js';
+
+const h = vi.hoisted(() => ({ db: undefined as unknown, parkAtAdmission: false }));
+
+vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/redis.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/redis.js')>()),
+  getBullRedis: () => ({}),
+  getRedis: () => ({ scan: async () => ['0', []], del: async () => 0 }),
+}));
+vi.mock('../src/sandbox/runtime-admission.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/sandbox/runtime-admission.js')>()),
+  runtimeAdmission: async () => ({
+    decision: h.parkAtAdmission ? 'park' : 'proceed',
+    busyMb: 3000,
+    budgetMb: 4000,
+    myWeightMb: 2000,
+    position: 1,
+    waiting: 1,
+  }),
+  releaseRuntimeReservation: async () => undefined,
+}));
+vi.mock('bullmq', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('bullmq')>()),
+  Queue: class {
+    async add() {
+      return undefined;
+    }
+  },
+}));
 
 const url = process.env.WORKER_STEP_FOLD_PREREAD_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/worker_step_fold_preread_test'))
@@ -17,6 +51,8 @@ if (url && !new URL(url).pathname.startsWith('/worker_step_fold_preread_test'))
 // the row; the code under test starts, and the peer commits once the code under test is blocked on it. The
 // final carried_* must be the seed + the peer + the fold of the row the peer left.
 const STEP_ID = '02-fold-preread';
+const RUNTIME_STEP_ID = '03-fold-preread-runtime';
+const TYPE = 'fnf461_step_fold_preread';
 const BLIND_INDEX = 'worker-step-fold-preread-test-user';
 const BLOCKED_WITHIN_MS = 10_000;
 const TEST_TIMEOUT = 30_000;
@@ -44,10 +80,35 @@ const backendPid = async (tx: Tx): Promise<number> => {
   return row!.pid;
 };
 
+const stub = (id: string, index: number, needsRuntime?: 'app'): StepDefinition =>
+  ({
+    ...(needsRuntime ? { needsRuntime } : {}),
+    metadata: {
+      id,
+      workflowType: 'workflow' as WorkflowType,
+      index,
+      title: id,
+      description: 'step fold preread test stub',
+      requiresCli: false,
+    },
+    shouldRun: () => true,
+    apply: async () => ({}),
+  }) as StepDefinition;
+
+const job = (name: string, data: Record<string, unknown>) =>
+  ({
+    id: randomUUID(),
+    name,
+    data,
+    timestamp: Date.now(),
+    moveToDelayed: async () => undefined,
+  }) as unknown as Parameters<typeof processTaskJob>[0];
+
 describe.skipIf(!url)('worker step folds beside a peer that updates the row, on Postgres', () => {
   let db: Database;
   let peer: Database;
   let userId: string;
+  let repositoryId: string;
 
   beforeAll(async () => {
     db = createDatabase(url as string);
@@ -63,13 +124,41 @@ describe.skipIf(!url)('worker step folds beside a peer that updates the row, on 
       })
       .returning({ id: schema.users.id });
     userId = user!.id;
+    h.db = db;
+    const [repo] = await db
+      .insert(schema.repositories)
+      .values({
+        userId,
+        name: 'step-fold-preread',
+        source: 'local_path',
+        localPath: os.tmpdir(),
+        storagePath: os.tmpdir(),
+        status: 'ready',
+      })
+      .returning({ id: schema.repositories.id });
+    repositoryId = repo!.id;
+    await db
+      .insert(schema.taskTypeDefinitions)
+      .values({ slug: TYPE, displayName: TYPE, runListStrategy: 'static', source: 'test' })
+      .onConflictDoNothing();
+    stepRegistry.override(stub(STEP_ID, 1));
+    stepRegistry.override(stub(RUNTIME_STEP_ID, 2, 'app'));
   });
 
   beforeEach(async () => {
+    h.parkAtAdmission = false;
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
   });
 
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   afterAll(async () => {
+    await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
+    await db.delete(schema.taskTypeDefinitions).where(eq(schema.taskTypeDefinitions.slug, TYPE));
     await db.delete(schema.users).where(eq(schema.users.emailBlindIndex, BLIND_INDEX));
     await db.$client.end({ timeout: 5 });
     await peer.$client.end({ timeout: 5 });
@@ -250,6 +339,71 @@ describe.skipIf(!url)('worker step folds beside a peer that updates the row, on 
         lowest,
       );
       expect(carried.idle, 'carried idle after the peer and the fold').toBeLessThanOrEqual(highest);
+    },
+    TEST_TIMEOUT,
+  );
+
+  /** A task parked on `stepId` by an advance at the epoch the task is at, holding the one pending row seeded. */
+  const advanceOnPendingRow = async (
+    stepId: string,
+    taskOver: Partial<typeof schema.tasks.$inferInsert>,
+  ) => {
+    const taskId = await seedTask({
+      repositoryId,
+      type: TYPE,
+      currentStepId: stepId,
+      currentRound: 0,
+      runListSnapshot: [stepId],
+      ...taskOver,
+    });
+    const rowId = await seedRow(taskId, { stepId, status: 'pending' });
+    const advance = () =>
+      processTaskJob(
+        job(TASK_JOB_NAMES.ADVANCE_STEP, { taskId, userId, stepId, round: 0, epoch: 3 }),
+      );
+    return { rowId, advance };
+  };
+
+  it(
+    'G3: the pause park folds the row the peer left, not the row it read before its transaction',
+    async () => {
+      const { rowId, advance } = await advanceOnPendingRow(STEP_ID, { pausedAt: new Date() });
+
+      await whilePeerHoldsRow(rowId, advance);
+
+      const row = await rowOf(rowId);
+      expect(row).toMatchObject({ status: 'pending', startedAt: null, idleMs: 0, userActiveMs: 0 });
+      expect(row.waitingStartedAt).toBeInstanceOf(Date);
+      expect(row.statusMessage).toMatch(/^Paused/);
+      // A pending row with no run folds only its live idle and user, which the peer left at 6000 and 800: seed
+      // 1000/200/50 + peer 7000/3000/500 + fold 0/6000/800. The row read before the peer committed writes 1000/4200/850.
+      expect(carriedOf(row), 'carried_* after the peer and the fold').toEqual({
+        work: 8_000,
+        idle: 9_200,
+        user: 1_350,
+      });
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'G4: the runtime-admission park folds the row the peer left, not the row it read before its transaction',
+    async () => {
+      h.parkAtAdmission = true;
+      const { rowId, advance } = await advanceOnPendingRow(RUNTIME_STEP_ID, {});
+
+      await whilePeerHoldsRow(rowId, advance);
+
+      const row = await rowOf(rowId);
+      expect(row).toMatchObject({ status: 'pending', startedAt: null, idleMs: 0, userActiveMs: 0 });
+      expect(row.waitingStartedAt).toBeInstanceOf(Date);
+      expect(row.statusMessage).toMatch(/^Waiting for a free runtime slot/);
+      // The same row and the same fold as G3.
+      expect(carriedOf(row), 'carried_* after the peer and the fold').toEqual({
+        work: 8_000,
+        idle: 9_200,
+        user: 1_350,
+      });
     },
     TEST_TIMEOUT,
   );
