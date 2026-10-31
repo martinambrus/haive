@@ -139,12 +139,16 @@ function minimumMinutes(step) {
   return 2;
 }
 
-function checkJob(job, spec, workflow = workflows[spec.file]) {
-  assert.equal(
-    workflow.defaults?.run?.shell,
-    undefined,
-    'a workflow shell overrides runner errexit',
+// GitHub's named bash shell enables errexit; an explicit template must keep -e.
+function checkShell(shell, scope) {
+  assert.ok(
+    shell === undefined || shell === 'bash' || shell === 'bash -e {0}',
+    `${scope} shell ${JSON.stringify(shell)} does not preserve the pinned bash errexit contract`,
   );
+}
+
+function checkJob(job, spec, workflow = workflows[spec.file]) {
+  checkShell(workflow.defaults?.run?.shell, 'workflow');
   const steps = spec.cleanup ? job.steps.slice(0, -spec.cleanup.length) : job.steps;
   if (spec.cleanup) {
     assert.deepEqual(
@@ -155,9 +159,9 @@ function checkJob(job, spec, workflow = workflows[spec.file]) {
   }
   const expected = guard(spec);
   assert.equal(job.if, undefined, 'a job condition can skip all checks green');
-  assert.equal(job.defaults?.run?.shell, undefined, 'a job shell overrides runner errexit');
+  checkShell(job.defaults?.run?.shell, 'job');
   for (const step of steps) {
-    assert.equal(step.shell, undefined, `${label(step)} overrides runner errexit`);
+    checkShell(step.shell, label(step));
     const matched = swallowedFailure(step.run ?? '');
     assert.equal(
       matched,
@@ -959,5 +963,42 @@ describe('shell failure detection', () => {
         },
       );
     });
+  }
+});
+
+describe('explicit shell errexit', () => {
+  for (const spec of JOBS) {
+    for (const scope of ['workflow', 'job', 'step']) {
+      for (const shell of [
+        'bash',
+        'bash -e {0}',
+        'sh',
+        'python',
+        'bash {0}',
+        'bash --noprofile {0}',
+      ]) {
+        const allowed = shell === 'bash' || shell === 'bash -e {0}';
+        it(`${allowed ? 'accepts' : 'rejects'} ${spec.id} ${scope} shell ${shell}`, () => {
+          const workflow = structuredClone(workflows[spec.file]);
+          const job = workflow.jobs[spec.id];
+          if (scope === 'workflow') workflow.defaults = { run: { shell } };
+          else if (scope === 'job') job.defaults = { run: { shell } };
+          else {
+            const last = job.steps.findIndex((step) => step.id === spec.prerequisite);
+            job.steps[last + 1].shell = shell;
+          }
+          if (allowed) checkJob(job, spec, workflow);
+          else
+            assert.throws(
+              () => checkJob(job, spec, workflow),
+              (error) => {
+                assert.ok(error instanceof assert.AssertionError);
+                assert.ok(error.message.includes(JSON.stringify(shell)), error.message);
+                return true;
+              },
+            );
+        });
+      }
+    }
   }
 });
