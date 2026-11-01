@@ -103,10 +103,10 @@ All PRE-EXISTING.
 
 ### T120 · B5.1 · the Haive data panel
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T16:20Z · last: 2026-11-01T09:04Z· kind: feature · plan: PR1a shared+worker save, PR1b api, PR2 web+docs
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T16:20Z · last: 2026-11-01T09:59Z· kind: feature · plan: PR1a shared+worker save, PR1b api, PR2 web+docs
 GET /repos/:id/haive-data + POST .../save {push} via a worker SAVE job; generalise commitPlanSnapshotFiles to a path list; conflict report. Browser 375/768/1280.
 
-Continuation 2026-11-01: PR2 implementation/reviews/browser375/768/1280/fullweb2632 all pass; PR opening on feat/120-haive-data-routes; continuation evidence codex-resume-20261101/T120.
+Continuation 2026-11-01: PR2 #979 finalHEADc6f3f302e completes approved message/banner/confirmation controls, current-commit reviews clean, fullweb2644 and all final live375/768/1280/customSave/push/latehold checks pass; CI pending.
 
 ### T121 · B5.2 · project state rides Haive's pushes
 
@@ -603,7 +603,7 @@ Sites:
 
 ### T376 · FNF[audit-security-gaps-2] · CLI provider key/token changes, password change, registration, repo security settings, sign-ins write no audit row (+5)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T14:13Z · last: 2026-11-01T09:04Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T14:13Z · last: 2026-11-01T09:59Z
 
 1. cli-providers.ts ~:856, :923, :998, :1019; cli-login-banner.ts ~:930.
 2. Password change (user-settings.ts ~:127-170) and registration (auth.ts ~:61-170).
@@ -613,7 +613,7 @@ status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T14:13Z 
    Fix: the #218 shape, with gated tests.
 6. From the T374 review (2026-10-24), PRE-EXISTING, minor: a house rule's approval also lapses with no audit row and no admin: a content PATCH clears `enforcedHash` (api global-kb.ts ~:1124-1127), the store trigger clears it when an active entry leaves `active` (shared global-kb/ensure-schema.ts ~:168-186), and DELETE /entries/:id removes an enforced entry (~:1243-1270); PATCH and DELETE are requireAuth only. global-kb.md:79-85 calls the lapse deliberate, so the open question is only the trail: a `global_kb.house_rule.lapse` row in the same transaction.
 
-Continuation 2026-11-01: PR #978 open at cacdb9ce4 on remote feat/376-audit-security-gaps-2 (local fnf/376-audit-security-gaps-2); full shared/API/worker and gated audit controls green; exact-HEAD automated review/CI running.
+Continuation 2026-11-01: Merged PR #978 asd3b7b9b3 after clean review/allCI; mainCI containing merge pending. Item6 remains split out as T492 design; keep/376-item6-store-audit preserved.
 
 ### T379 · FNF[git-tree-readers] · gitlink readers and literal-pathspec helpers duplicated with different failure contracts (+4)
 
@@ -667,7 +667,7 @@ See worker task-queue.ts ~:1806-1813, ~:356. Decide per shape: fail the task, or
 
 ### T397 · FNF[failed-read-answers] · branch, count, refresh and merge-completion reads still turn a failed git into an answer (+16)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T13:48Z · last: 2026-11-01T09:04Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T13:48Z · last: 2026-11-01T09:59Z
 FIRST re-check each item on main: the #322 and #325 series fixed some of them.
 
 1. `rev-parse --abbrev-ref HEAD` sites: 00a ~:164, 11a ~:106, 12-worktree-cleanup ~:248, 12-post-onboarding ~:464, 13-onboarding-push ~:147, 99-run-app-ready ~:173, 01-plan-merge ~:727, :741.
@@ -685,7 +685,7 @@ FIRST re-check each item on main: the #322 and #325 series fixed some of them.
 13. (T418 review) PRE-EXISTING, minor: worker repo/clone.ts ~:773-774 blank-repository init ignores the `git add` and `git commit` exit statuses and logs "Blank repo init complete".
 14. (T418 review) PRE-EXISTING, minor: step-engine/dag-executor.ts ~:477-490 `commitIssueWork` ignores the `add -A` status and only warns when the issue commit fails; the level then fails as "produced no branch changes" without the git error.
 
-Continuation 2026-11-01: Final integration review clean through aa28e7735; docs committed, final API/worker/gated checks running; preserve manual-Retry and aside limitations.
+Continuation 2026-11-01: Merged PR #980 as6e63562d5 after clean review/allCI; local fullsuites and214-checkrefresh/realRedis smoke pass; mainCI pending.
 
 ### T399 · FNF[probe-stored-targets] · stored-target probes still reach any address for non-admins (+1)
 
@@ -874,13 +874,13 @@ From the T421 review (2026-10-31). PRE-EXISTING, minor, conservative direction. 
 
 ### T471 · FNF[stale-preread-fold-2] · idle_ms writes add to a value read before the write; the per-step switch decides on a pre-transaction status (+1)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T18:35Z · last: 2026-11-01T09:04Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T18:35Z · last: 2026-11-01T09:59Z
 From the T461 review (2026-10-31). PRE-EXISTING, minor.
 
 1. `idle_ms = step.idleMs + closedIdleMs` from a read made before the transaction, so a concurrent SQL write to `idle_ms` in between is written over: api routes/tasks/steps.ts ~:808 (form submit), ~:894 (merge clarify), ~:1520 (Skip), and worker pr-poll-queue.ts ~:260 (`advancePrWaitStep`, whose guard compares status and `waiting_started_at` only). The delta depends on `waiting_started_at`, so fold it in one SQL statement like `handleCancelTask`'s (`idle_ms + greatest(0, floor(extract(epoch from (now() - waiting_started_at)) * 1000))`) or read the row under its lock, as T461 did for `carried_*`.
 2. The per-step switch decides on the status read before its transaction (api routes/tasks/steps.ts ~:1820, the 409 when running or waiting_cli; ~:1836, `movesTask` and iterationCount) although the transaction now holds the row (`held`, ~:1909) and could re-check it. Not checked whether a pass can activate the row in that gap (the ownership fence drops a pass whose row was reset).
 
-Continuation 2026-11-01: Final timing correction6656fd1cb independently reviewed clean; docs7a5e35984; final full checks queued.
+Continuation 2026-11-01: PR #981 finalHEAD2d7955e37, current-commit reviews clean; fullDB179/API7029/worker14811/gates/scripts/typechecks/RetrySkip smoke pass; CI pending.
 
 ### T472 · FNF[git-data-claim-sweep] [design] · an onboarding reset leaves a git-data claim file that neither a ledger row nor the sync base names
 
