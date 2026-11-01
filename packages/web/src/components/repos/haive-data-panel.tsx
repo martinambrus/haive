@@ -192,7 +192,7 @@ export function HaiveDataPanel({ repositoryId }: { repositoryId: string }) {
   const busy = useRef(false);
   const refreshing = useRef(true);
   const mounted = useRef(true);
-  const base = `/repos/${encodeURIComponent(repositoryId)}/haive-data`;
+  const base = `/repositories/${encodeURIComponent(repositoryId)}/haive-data`;
 
   useEffect(() => {
     mounted.current = true;

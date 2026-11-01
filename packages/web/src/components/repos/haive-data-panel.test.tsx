@@ -81,7 +81,8 @@ describe('Haive data actions and status', () => {
     fire.click(saveButton);
     view.draw();
     expect(h.post).toHaveBeenCalledOnce();
-    expect(h.post).toHaveBeenCalledWith('/repos/repo/haive-data/save', {});
+    expect(h.get).toHaveBeenCalledWith('/repositories/repo/haive-data', expect.any(AbortSignal));
+    expect(h.post).toHaveBeenCalledWith('/repositories/repo/haive-data/save', {});
     expect(textOf(view.tree())).toContain('Saving');
     expect(isDisabled(button(view, 'save & push'))).toBe(true);
     finish(saved());
@@ -168,7 +169,7 @@ describe('Haive data actions and status', () => {
     await settle(view);
     await fire.click(button(view, 'save & push'));
     await settle(view);
-    expect(h.post).toHaveBeenCalledWith('/repos/repo/haive-data/save', { push: true });
+    expect(h.post).toHaveBeenCalledWith('/repositories/repo/haive-data/save', { push: true });
     const text = textOf(view.tree());
     for (const value of ['push_failed', '123abc', 'Not pushed', 'future.json', 'index'])
       expect(text).toContain(value);
