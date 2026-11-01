@@ -79,12 +79,7 @@ export type SetAsideResult =
       outcome: 'refused';
       file: string;
       reason: string;
-      code:
-        | 'projection_not_owned'
-        | 'projection_rewritten'
-        | 'write_pending'
-        | 'git_operation'
-        | 'git_operation_unreadable';
+      code: 'projection_not_owned' | 'projection_rewritten' | 'write_pending' | 'git_operation';
     }
   | { outcome: 'held'; holding: number };
 
