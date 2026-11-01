@@ -829,16 +829,6 @@ From the T463 review (2026-10-31). PRE-EXISTING, minor to moderate. `POST /repos
 status: parked · reason: diminishing returns (2026-11-01 scan): Minor conservative rollback refusal depends on retired legacy import markers; resume when resume when a retired marker blocks a needed rollback
 From the T421 review (2026-10-31). PRE-EXISTING, minor, conservative direction. worker/api onboarding-admission.ts `ledgerImportedSince` (~:128-144) counts every import marker imported after an upgrade, path-blind and including the superseded ones, so a marker at a git-data path that T421's boot migration retired still blocks that upgrade's rollback. Decide whether a retired git-data marker should count (it was never a real import) or the conservative block stays.
 
-### T471 · FNF[stale-preread-fold-2] · idle_ms writes add to a value read before the write; the per-step switch decides on a pre-transaction status (+1)
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T18:35Z · last: 2026-11-01T10:58Z
-From the T461 review (2026-10-31). PRE-EXISTING, minor.
-
-1. `idle_ms = step.idleMs + closedIdleMs` from a read made before the transaction, so a concurrent SQL write to `idle_ms` in between is written over: api routes/tasks/steps.ts ~:808 (form submit), ~:894 (merge clarify), ~:1520 (Skip), and worker pr-poll-queue.ts ~:260 (`advancePrWaitStep`, whose guard compares status and `waiting_started_at` only). The delta depends on `waiting_started_at`, so fold it in one SQL statement like `handleCancelTask`'s (`idle_ms + greatest(0, floor(extract(epoch from (now() - waiting_started_at)) * 1000))`) or read the row under its lock, as T461 did for `carried_*`.
-2. The per-step switch decides on the status read before its transaction (api routes/tasks/steps.ts ~:1820, the 409 when running or waiting_cli; ~:1836, `movesTask` and iterationCount) although the transaction now holds the row (`held`, ~:1909) and could re-check it. Not checked whether a pass can activate the row in that gap (the ownership fence drops a pass whose row was reset).
-
-Continuation 2026-11-01: PR #981 currentHEAD1bb29e150 exact-HEAD official review clean; final integrated DB179/API7059/worker14964/gates/scripts/typechecks pass. Isolated real-Git fixture fixes CI-only setup failure with temp vars unset; all PG controls and browser/visual CI now green. Worker smokes remain; merge and main CI still gated.
-
 ### T472 · FNF[git-data-claim-sweep] [design] · an onboarding reset leaves a git-data claim file that neither a ledger row nor the sync base names
 
 status: parked · reason: diminishing returns (2026-11-01 scan): Explicitly minor reset residue requires a narrow unsynced claim-file window; resume when resume when orphan claim files block a real onboarding reset
@@ -1240,6 +1230,8 @@ status: open · kind: design
 Queued design split from T521 item4; no additional implementation authorized. PRE-EXISTING, narrow compatibility issue. HOME handling was aligned in T120 PR1b, but XDG_CONFIG_HOME and GIT_CONFIG_* can still make API status readers and worker writers resolve different configuration. Decide whether the supported contract preserves selected ambient configuration for both or supplies an isolated explicit configuration. Establish a current caller/reproduction before changing global Git policy. Executable repository filters remain T387, not a member of this decision.
 
 ## Done
+
+- T471 — atomically fold parked waits and re-check held state; preserve retained-run timing and one form marker — PR #981 (3078d9758), 2026-11-01; exact-HEAD review, all PR checks and main CI41300414474 green; full database/API/worker suites and real Postgres/Redis controls pass; follow-ups T499/T515/T519
 
 - T120 — B5.1 Haive data status, Save/custom message, confirmed push and conflict resolution panel — PRs #973/#976/#979 (final79f5edd2d), 2026-11-01; all approved criteria,2644web tests, real browser375/768/1280 and same-history push passed; exact-HEAD review and PR/main CI green; empty-origin first-push limitation queued T521, Git config design T523
 
