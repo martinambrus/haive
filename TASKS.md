@@ -76,6 +76,8 @@ board. At session start, load the board's tasks you own or will work on into the
 
 Owner allowance policy 2026-11-01 (codex-queue): monitor actual reported Codex remaining allowance. At40% remaining or below, admit no new tasks; finish the tasks already in flight at the trigger, save the handoff, then pause until the owner resumes after reset. Do not mark the rest complete or unpark diminishing-return work. Meter/policy: `.claude/tmp/codex-run/queue-exec-20261101/allowance-status.json` and `allowance-policy.json`; initial reading45% remaining, reported reset2026-11-07 21:08 Paris.
 
+Execution PAUSED 2026-11-01 (codex-queue): the40% admission latch triggered at19:58:59UTC. All three then-active tasks T121/T122/T456 are delivered (PR988/PR987), main CI green and owned cleanup complete. Latest reported allowance38% remaining. No new Haive task may start until the owner resumes after reset. Queued and diminishing-return tasks remain unfinished; handoff `.claude/tmp/codex-run/HANDOFF.md`.
+
 Owner review-gate update 2026-11-01: Greptile will not run until November9. Skip Greptile requests and waits before2026-11-09; Codex review and CI remain required.
 
 T524's 2026-11-01 owner round answered 42 questions. Decisions are recorded on the affected task blocks; the durable local answer register is `.claude/tmp/codex-run/backlog-decisions-20261101/decisions.json`. No unanswered owner-policy question remains from this round.
@@ -83,7 +85,7 @@ T524's 2026-11-01 owner round answered 42 questions. Decisions are recorded on t
 - T402: operator script with dry run, before-image and undo. The owner subsequently requested indefinite development-record retention: transcripts changed from 90 to 0/forever through the audited admin API; prompts were already 0. Historical expiry estimates no longer govern this install. Missing old logs remain unrecoverable.
 - T300: one owned validation attempt before feature work; stop at 90 minutes or $50 notional usage, whichever comes first, or on an unexpected failure. No automatic retry loops.
 - T331: live Google OAuth intentionally remains parked; prepare setup instructions when its turn comes. T358 stays deferred until its first real provider-pinning consumer.
-- T293/T299 need T300 evidence; T298 additionally needs graded evaluation data. T332 needs T359; T335 needs T351/T352/T353; T275 needs the remaining T121/T122 work.
+- T299 needs T300 evidence; T293's code fix shipped in PR986 without a paid validation retry; T298 additionally needs graded evaluation data. T332 needs T359; T335 needs T351/T352/T353; T275's Track B dependency is complete (PR988); the broad audit remains parked under the bounded-work rule.
 - Routine diminishing-return work remains parked. Risk-bearing exceptions are verification candidates, not confirmed production bugs or permission for broad audits.
 - T487: ask at each Replace ZIP whether to preserve the old bundle until success or remove it first to free disk. Explain rollback loss for remove-first. This supersedes the initial keep-old-only answer.
 - T376's shipped strict sign-in audit behavior remains in force; no new break-glass or best-effort policy change was requested.
@@ -100,9 +102,9 @@ The owner chose new functionality first, with demonstrated operational bugs alon
 
 1. **P0 — protect time-limited evidence and trust boundaries.** T402 targeted dry-run inventory/script first (owner requested keep-forever retention, before-image/undo). Then T387's measured unsafe imported Git configuration. Other trust-boundary candidates (including T308/T347/T399/T450/T451/T508/T511) remain bounded P2 verification; escalate a confirmed security/data-loss consequence immediately. Completing every unconfirmed investigation is NOT a prerequisite for the functionality lane.
 2. **P1 — explicit prerequisites and a short enabling change.** T300's single 90-minute/$50-capped validation attempt BEFORE new feature implementation. T488's bounded CI-job split then shortens the repeated PR/main feedback cycle. T338 route removal and T467 endpoint retirement/body limit are bounded named security work.
-3. **P1 — finish the next functionality slice.** T121 then T122. Take demonstrated operational fixes alongside it: T521 member 5 (empty-origin push), T456 (invalid request unexpectedly upgrades all components), T434 (preserve working credentials), T362 (readiness after failed reset), T496 (vendor-call deadlines). Each needs its current failing control before implementation.
+3. **P1 — next after owner resumes.** T121/T122 shipped in PR988 and T456 in PR987. Resume with T521 member 5 (empty-origin push), then T434 (preserve working credentials), T362 (readiness after failed reset) and T496 (vendor-call deadlines), alongside the next approved functionality slice. Preserve each member-level scope fence and obtain its current failing control before implementation.
 4. **P2 — next product slices and bounded correctness work.** Integration reasons/create gate/picker/reconnect and visibility: T359/T356/T357/T332/T333/T339/T360/T361. Module/channel delivery: T330/T336/T337, then T351 build → T353 boot gate → T352 publish → T335 install/upgrade. Other open operational/UX/audit tasks follow their recorded policies; verification bundles are not blanket repairs. T319 batching rises only if its current measured gain is material.
-5. **P3 — evaluated retrieval and small polish.** T144/T145/T147 retain retrieval-evaluation gates; T298 needs graded data. T199 favicon and T446 documentation are ready but do not displace a feature slice. T275's broad review waits for T121/T122.
+5. **P3 — evaluated retrieval and small polish.** T144/T145/T147 retain retrieval-evaluation gates; T298 needs graded data. T199 favicon and T446 documentation are ready but do not displace a feature slice. T275's broad review remains parked; completing its dependencies does not activate a full audit.
 6. **P4 — intentionally parked work.** Resume only on the task's stated evidence/consumer trigger or a fresh explicit request. Do not reopen cosmetic, coverage-only, unused parser forms or generic helper consolidation merely because a neighboring task finished.
 
 Verification fence: one short pass, at most three supported cases per candidate, normally 30 minutes without product/model runs. If no concrete consequence is established, record that and park; request a larger scope only for a new consequential finding. Implementation keeps the existing one-build/two-fix-round preference, fresh paired review, feature-level full-suite cadence and PR/main gates. T524 itself performed no fixes or live runs. On2026-11-01 the owner subsequently authorized T402 plus continued execution of the reconciled ready queue, preserving deliberate parks and bounded verification gates.
@@ -209,8 +211,10 @@ A 0-row project store still holds a 275 MB HNSW index (_rag-connection.ts:69); n
 
 ### T275 · full-repo review pass after Track B
 
-status: blocked · blocked-by: T121,T122 · priority: P3
+status: parked · reason: diminishing returns · priority: P3
 A full-repository review in the style of the Codex PR reviews once Track B is merged; file findings by bundle.
+
+Reconciled 2026-11-01: Track B shipped in PR988. The dependency is resolved, but a broad full-repository audit remains parked under the owner's bounded-work/diminishing-returns rule. Resume only for an explicit owner request or a concrete bounded risk that warrants its scope; no automatic audit follows this delivery.
 
 ### T300 · live re-checks owed at the next real onboarding + workflow run
 
