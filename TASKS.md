@@ -119,12 +119,14 @@ User decision 2026-11-01: Retain complete/consumed upload metadata 90 days; prot
 
 ### T121 · B5.2 · project state rides Haive's pushes
 
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T17:33Z · last: 2026-11-01T18:33Z · kind: feature (user decision taken) · priority: P1
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T17:33Z · last: 2026-11-01T19:53Z · kind: feature (user decision taken) · priority: P1
 chore(haive) commit of dirty projections before the cleanup base push, 13, plan Save & push; PR path commits into the feature worktree; 12/03 commit default on when origin exists. Control: cleanup + push leaves origin without the record today.
 
 Execution 2026-11-01: paired with T122 per approved B5.2+B5.3 plan; one feature candidate, separate commits. Evidence `.claude/tmp/codex-run/queue-exec-20261101/T121-T122/`. T300 corrected validation stopped on confirmed T293; no more paid validation is included here.
 
 Progress 2026-11-01T18:33Z: Complete paired feature candidate087e8b253, separate coherent T121/T122 commits.218 real SQL/Git two-install checks/0gaps,450affectedworker/shared175/typechecks pass. Fresh xhigh review marks T121 paths complete, one valid T122 stored-missing-proof preservation P2; bounded fix1 before final candidate/PR. Evidence T121-T122/report.md and review.md.
+
+Progress 2026-11-01T19:53Z: PR988 exact f99f07611c reviewed full candidate green; core browser Plan push and normal B refresh/drift verified; supplementary B cold UI reset explicitly unverified, no further live reruns. Required exact-HEAD hosted review and all CI pending.
 
 ### T122 · B5.3 · review watermarks travel; Haive paths leave drift ranges
 
