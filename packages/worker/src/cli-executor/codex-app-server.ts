@@ -99,6 +99,18 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/** Request-local context evidence, shared by live capture and historical replay. */
+export function readCodexRequestContext(tokenUsage: unknown): {
+  peak: number | null;
+  window: number | null;
+} {
+  const usage = isRecord(tokenUsage) ? tokenUsage : {};
+  const last = isRecord(usage.last) ? usage.last : {};
+  const positive = (n: unknown): number | null =>
+    typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : null;
+  return { peak: positive(last.inputTokens), window: positive(usage.modelContextWindow) };
+}
+
 function describeError(error: unknown): string {
   if (isRecord(error) && typeof error.message === 'string' && error.message.trim()) {
     return error.message.trim();
@@ -437,12 +449,9 @@ export function createCodexAppServerSession(
       case 'thread/tokenUsage/updated': {
         if (typeof params.threadId === 'string' && params.threadId !== threadId) return;
         // codex input already includes the cached prefix, so a request's prompt is its input alone.
-        const last = isRecord(params.tokenUsage) ? params.tokenUsage.last : null;
-        if (isRecord(last) && typeof last.inputTokens === 'number' && last.inputTokens > peakPrompt)
-          peakPrompt = last.inputTokens;
-        const window = isRecord(params.tokenUsage) ? params.tokenUsage.modelContextWindow : null;
-        if (typeof window === 'number' && Number.isFinite(window) && window > 0)
-          contextWindow = window;
+        const requestContext = readCodexRequestContext(params.tokenUsage);
+        if (requestContext.peak !== null) peakPrompt = Math.max(peakPrompt, requestContext.peak);
+        if (requestContext.window !== null) contextWindow = requestContext.window;
         const total = isRecord(params.tokenUsage) ? params.tokenUsage.total : null;
         if (!isRecord(total)) return;
         // Same field meanings as `codex exec --json`'s turn.completed usage (input INCLUDES the
