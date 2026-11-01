@@ -1,6 +1,16 @@
 import { spawn } from 'node:child_process';
 import { readdirSync, rmSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { logger } from '@haive/shared';
@@ -8,6 +18,7 @@ import { removeNoFollow, renameNoFollow } from '@haive/shared/fs-safe';
 import JSZip from 'jszip';
 import { describe, expect, it, afterEach, beforeEach, vi } from 'vitest';
 import { extractArchive } from '../src/repo/clone.js';
+import { gitRun } from '../src/repo/git-exec.js';
 
 vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
   const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
@@ -80,14 +91,220 @@ afterEach(async () => {
   await rm(tmpRoot, { recursive: true, force: true });
 });
 
+const gitEnv = {
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_AUTHOR_NAME: 'fixture',
+  GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+  GIT_COMMITTER_NAME: 'fixture',
+  GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
+};
+async function g(cwd: string, ...args: string[]): Promise<string> {
+  const result = await gitRun(cwd, args, gitEnv);
+  expect(result.code, result.stderr).toBe(0);
+  return result.stdout.trim();
+}
+async function gitFixture(): Promise<string> {
+  const src = await buildFixtureSource(tmpRoot, 'git-project');
+  await g(src, 'init', '-q', '-b', 'main');
+  await writeFile(path.join(src, '.gitattributes'), '*.txt filter=imported\n');
+  await g(src, 'add', '-A');
+  await g(src, 'commit', '-qm', 'uploaded history');
+  return src;
+}
+async function packGitFixture(): Promise<void> {
+  await run('tar', ['-czf', path.join(tmpRoot, 'git.tar.gz'), '-C', tmpRoot, 'git-project']);
+}
+
 describe('extractArchive', () => {
+  it('preserves uploaded history while removing a filter before hardened host Git stages files', async () => {
+    expect((await stat(tmpRoot)).mode & 0o777).toBe(0o700);
+    const src = await gitFixture();
+    const head = await g(src, 'rev-parse', 'HEAD');
+    await g(src, 'branch', 'saved-branch');
+    await g(src, 'tag', 'saved-tag');
+    const refs = await g(src, 'show-ref');
+    await chmod(path.join(src, '.git/config'), 0o600);
+    await g(src, 'remote', 'add', 'origin', 'https://example.invalid/project.git');
+    await g(src, 'config', 'branch.main.remote', 'origin');
+    await g(src, 'config', 'branch.main.merge', 'refs/heads/main');
+    const marker = path.join(tmpRoot, 'filter-marker');
+    await g(src, 'config', 'filter.imported.clean', `echo executed > ${marker}; cat`);
+    await run('tar', ['-czf', path.join(tmpRoot, 'git.tar.gz'), '-C', tmpRoot, 'git-project']);
+    const report = await extractArchive(at('git.tar.gz'), 'tar.gz', at('out-git'), {
+      repositoryImport: true,
+    });
+    const dest = path.join(tmpRoot, 'out-git');
+    expect(await g(dest, 'rev-parse', 'HEAD')).toBe(head);
+    expect(await g(dest, 'show-ref')).toBe(refs);
+    expect(await g(dest, 'config', '--bool', 'core.bare')).toBe('false');
+    expect(await g(dest, 'rev-parse', '--is-bare-repository')).toBe('false');
+    expect((await stat(path.join(dest, '.git/config'))).mode & 0o777).toBe(0o600);
+    expect((await stat(path.join(dest, '.git/config'))).uid).toBe(process.getuid?.());
+    expect((await stat(path.join(dest, 'sub/a.txt'))).uid).toBe(process.getuid?.());
+    expect(await g(dest, 'config', 'branch.main.merge')).toBe('refs/heads/main');
+    expect(await g(dest, 'remote', 'get-url', 'origin')).toBe(
+      'https://example.invalid/project.git',
+    );
+    expect(await readFile(path.join(dest, 'sub/a.txt'), 'utf8')).toBe('hello\n');
+    await writeFile(path.join(dest, 'sub/a.txt'), 'changed\n');
+    await g(dest, 'add', '-A');
+    expect(await readdir(tmpRoot)).not.toContain('filter-marker');
+    expect(report.note).toContain('Git configuration');
+  });
+
+  it('uses Git grammar without following includes and retains only safe metadata', async () => {
+    const src = await gitFixture();
+    const included = path.join(tmpRoot, 'secret-include');
+    // Invalid syntax proves the parser never opens it, even for an unconditional include.
+    await writeFile(included, '[invalid secret-value');
+    await g(src, 'remote', 'add', 'origin', 'https://example.invalid/project.git');
+    await g(src, 'config', 'branch.feature/topic.remote', 'origin');
+    await g(src, 'config', 'branch.feature/topic.description', 'quotes " and \\ and\nnew line');
+    await g(src, 'config', 'user.name', 'Safe "User"');
+    const config = path.join(src, '.git/config');
+    await writeFile(
+      config,
+      (await readFile(config, 'utf8')) +
+        `
+[include]
+  path = ${included}
+[includeIf "gitdir:**"]
+  path = ${included}
+[filter "imported"]
+  clean = "secret-command"
+  smudge = "secret-command"
+  process = "secret-command"
+[merge "imported"]
+  driver = "secret-command"
+[remote "origin"]
+  vcs = "../secret-helper"
+  uploadpack = "secret-command"
+[protocol "secret-helper"]
+  allow = always
+[core]
+  hooksPath = "secret-command"
+  sshCommand = "secret-command"
+[credential]
+  helper = "secret-command"
+`,
+    );
+    await packGitFixture();
+    const report = await extractArchive(at('git.tar.gz'), 'tar.gz', at('out-git'), {
+      repositoryImport: true,
+    });
+    const dest = path.join(tmpRoot, 'out-git');
+    const sanitized = await readFile(path.join(dest, '.git/config'), 'utf8');
+    expect(sanitized).not.toContain('secret');
+    expect(report.note).not.toContain('secret');
+    expect(await g(dest, 'config', 'branch.feature/topic.description')).toBe(
+      'quotes " and \\ and\nnew line',
+    );
+    expect(await g(dest, 'config', 'user.name')).toBe('Safe "User"');
+    expect(await g(dest, 'remote', 'get-url', 'origin')).toBe(
+      'https://example.invalid/project.git',
+    );
+    // Parser argv consumes held input, never a pathname from the staged repository.
+    expect(
+      toolCalls.some(
+        (args) => args.includes('--no-includes') && args.includes('--file') && args.includes('-'),
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    'invalid-config',
+    'extension',
+    'partial',
+    'promisor-config',
+    'promisor-pack',
+    'worktree-config',
+    'worktrees',
+    'gitfile',
+    'alternates',
+    'shallow',
+    'missing-object',
+    'config-link',
+    'bare',
+  ])('refuses %s before replacing the old destination', async (shape) => {
+    const src = await gitFixture();
+    const config = path.join(src, '.git/config');
+    if (shape === 'invalid-config') await writeFile(config, '[invalid secret-value');
+    if (shape === 'extension')
+      await writeFile(
+        config,
+        (await readFile(config, 'utf8')) + '\n[extensions]\nunknown = secret-value\n',
+      );
+    if (shape === 'partial') await g(src, 'config', 'extensions.partialClone', 'origin');
+    if (shape === 'promisor-config') await g(src, 'config', 'remote.origin.promisor', 'true');
+    if (shape === 'promisor-pack')
+      await writeFile(path.join(src, '.git/objects/pack/pack-test.promisor'), '');
+    if (shape === 'worktree-config') await g(src, 'config', 'core.worktree', '/secret-value');
+    if (shape === 'worktrees')
+      await mkdir(path.join(src, '.git/worktrees/other'), { recursive: true });
+    if (shape === 'gitfile') {
+      await rm(path.join(src, '.git'), { recursive: true });
+      await writeFile(path.join(src, '.git'), 'gitdir: /secret-value');
+    }
+    if (shape === 'alternates')
+      await writeFile(path.join(src, '.git/objects/info/alternates'), '/secret-value\n');
+    if (shape === 'shallow')
+      await writeFile(path.join(src, '.git/shallow'), (await g(src, 'rev-parse', 'HEAD')) + '\n');
+    if (shape === 'missing-object') {
+      const head = await g(src, 'rev-parse', 'HEAD');
+      await rm(path.join(src, '.git/objects', head.slice(0, 2), head.slice(2)));
+    }
+    if (shape === 'config-link') {
+      await rm(config);
+      await symlink('/secret-value', config);
+    }
+    if (shape === 'bare') {
+      const entries = await readdir(path.join(src, '.git'));
+      for (const name of entries)
+        await renameNoFollow(tmpRoot, `git-project/.git/${name}`, `git-project/${name}`);
+      await rm(path.join(src, '.git'), { recursive: true });
+    }
+    await packGitFixture();
+    const dest = path.join(tmpRoot, 'old');
+    await mkdir(dest);
+    await writeFile(path.join(dest, 'keep.txt'), 'old bytes');
+    const previous = await stat(path.join(dest, 'keep.txt'));
+    const extraction = extractArchive(at('git.tar.gz'), 'tar.gz', at('old'), {
+      repositoryImport: true,
+    });
+    await expect(extraction).rejects.toThrow(
+      /Uploaded Git metadata.*Upload a complete standalone checkout/,
+    );
+    await expect(extraction).rejects.not.toThrow('secret-value');
+    expect(await readFile(path.join(dest, 'keep.txt'), 'utf8')).toBe('old bytes');
+    expect((await stat(path.join(dest, 'keep.txt'))).ino).toBe(previous.ino);
+    expect((await readdir(tmpRoot)).filter((name) => name.startsWith('.haive-extract-'))).toEqual(
+      [],
+    );
+  });
+
+  it('keeps Git-named files as data for generic attachment and bundle extraction', async () => {
+    const zip = new JSZip();
+    zip.file('.git/config', '[invalid syntax is still user data');
+    zip.file('README.md', 'user data');
+    await writeFile(
+      path.join(tmpRoot, 'data.zip'),
+      await zip.generateAsync({ type: 'nodebuffer' }),
+    );
+    const report = await extractArchive(at('data.zip'), 'zip', at('data'));
+    expect(await readFile(path.join(tmpRoot, 'data/.git/config'), 'utf8')).toBe(
+      '[invalid syntax is still user data',
+    );
+    expect(report.note).toBeNull();
+  });
+
   it('extracts .tar.gz and flattens single top-level directory', async () => {
     await buildFixtureSource(tmpRoot, 'my-project');
     const archivePath = path.join(tmpRoot, 'fixture.tar.gz');
     await run('tar', ['-czf', archivePath, '-C', tmpRoot, 'my-project']);
 
     const dest = path.join(tmpRoot, 'out');
-    await extractArchive(at('fixture.tar.gz'), 'tar.gz', at('out'));
+    await extractArchive(at('fixture.tar.gz'), 'tar.gz', at('out'), { repositoryImport: true });
 
     const entries = await readdir(dest);
     expect(entries.sort()).toEqual(['README.md', 'package.json', 'sub'].sort());

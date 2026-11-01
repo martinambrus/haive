@@ -59,6 +59,7 @@ import { buildCredentialHelper, OriginUrlError, scrubSecret } from './git-push.j
 import { EXTRACT_UID, FIRST_SLOT, childFd, runTool, toolReadable } from './tool-spawn.js';
 import { splitUploadPath } from './worktree-paths.js';
 import { gitRun as boundedGitRun } from './git-exec.js';
+import { sanitizeImportedGitConfig } from './import-git-config.js';
 
 /** Clone `url` into `dest`. When `auth` is supplied (an inline git credential
  *  helper from buildCredentialHelper), the token rides in env and git resolves
@@ -520,7 +521,7 @@ export async function extractArchive(
   archive: { anchor: string; rel: string },
   format: ArchiveFormat,
   dest: { anchor: string; rel: string },
-  opts: { keepLoneDir?: (name: string) => boolean } = {},
+  opts: { keepLoneDir?: (name: string) => boolean; repositoryImport?: boolean } = {},
 ): Promise<ExtractReport> {
   if (format !== 'zip' && format !== 'tar' && format !== 'tar.gz') {
     throw new Error(`unsupported archive format: ${format as string}`);
@@ -596,6 +597,21 @@ export async function extractArchive(
         }
       }
 
+      let gitNote: string | null = null;
+      if (opts.repositoryImport) {
+        // A link or other rejected member inside .git may be essential history/configuration.
+        // Refuse that upload instead of publishing a silently truncated Git repository.
+        const prefix = sourceRel === innerRel ? '' : `${sourceRel.slice(innerRel.length + 1)}/`;
+        if (
+          dropped.some(({ rel }) => rel === `${prefix}.git` || rel.startsWith(`${prefix}.git/`))
+        ) {
+          throw new Error(
+            'Uploaded Git metadata contains unsupported archive members. Upload a complete standalone checkout without links or special files in .git.',
+          );
+        }
+        gitNote = await sanitizeImportedGitConfig(anchor, sourceRel);
+      }
+
       // Hand the tree back to the worker's identity while it is still private, so the swapped result
       // is owned exactly as it was before this change. Best-effort: a non-root worker cannot, and the
       // sandbox ownership repair runs later anyway.
@@ -632,7 +648,7 @@ export async function extractArchive(
         }
         throw err;
       }
-      return { dropped, note: describeDrops(dropped) };
+      return { dropped, note: [describeDrops(dropped), gitNote].filter(Boolean).join(' ') || null };
     } finally {
       if (!preserveStage) {
         await removeNoFollow(anchor, stageRel, {
@@ -678,10 +694,15 @@ export async function handleExtract(
     });
     if (holding.length > 0)
       throw new Error('A task is using this repository. Retry once it finishes.');
-    const report = await extractArchive(archive, archiveFormat, {
-      anchor: repoStorageRoot,
-      rel: `${payload.userId}/${payload.repositoryId}`,
-    }).catch(async (err: unknown) => {
+    const report = await extractArchive(
+      archive,
+      archiveFormat,
+      {
+        anchor: repoStorageRoot,
+        rel: `${payload.userId}/${payload.repositoryId}`,
+      },
+      { repositoryImport: true },
+    ).catch(async (err: unknown) => {
       if (!(err instanceof MissingArchiveError)) throw err;
       // Cancel only this completed source, never an in-progress upload or another user's row.
       // The list can then hide Retry without interpreting status_message or probing the disk.
