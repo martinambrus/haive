@@ -697,7 +697,7 @@ User decision 2026-11-01: Keep maintenance/hold on unknown prior state; report u
 
 ### T387 · FNF[shipped-git-config] · an uploaded repo keeps its own .git/config, so host git still runs filter/merge drivers, the vcs trick and lazy fetch (+1)
 
-status: open · kind: security · user decision: resolved 2026-11-01 · priority: P0
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-11-01T13:55Z · last: 2026-11-01T13:55Z · priority: P0
 PRE-EXISTING, consequential. An upload keeps its whole .git (worker repo/clone.ts ~:547-683). `filter.<d>.*`, `merge.<d>.driver`, `remote.<n>.vcs` and lazy fetch all lack a `-c` lever. Measured: gitRun `add -A` runs the shipped filter.
 Decide: sanitise .git/config at import (allow-list keys), or refuse archives that carry .git.
 
@@ -706,6 +706,8 @@ Decide: sanitise .git/config at import (allow-list keys), or refuse archives tha
 Cross-reference (T429, 2026-10-30): the default `protocol.file.allow=never` on every hardened argv now refuses a promisor remote's lazy fetch from a local path or `file://` URL (row `file-transport-promisor-lazy-fetch`); an http or ssh promisor, the shipped filter/merge/vcs keys and the env-only levers stay open here, and an env `GIT_ALLOW_PROTOCOL` overrides the flag.
 
 User decision 2026-11-01: Preserve repository history; sanitize Git config to an explicit safe allowlist and refuse unsupported unsafe cases.
+
+Execution 2026-11-01: next authorized task while T402 has finished its driver build and is in read-only review. One driver at a time; local heavy checks serialized by queue-exec test-slot.py. Preserve uploaded history with safe configuration allowlisting/refusal, no ambient-policy redesign or unrelated host-Git audit.
 
 ### T389 · FNF[repo-loose-objects] · Haive's git no longer triggers auto-maintenance (#256), so busy repos accumulate loose objects
 
