@@ -76,7 +76,7 @@ board. At session start, load the board's tasks you own or will work on into the
 
 T524's 2026-11-01 owner round answered 42 questions. Decisions are recorded on the affected task blocks; the durable local answer register is `.claude/tmp/codex-run/backlog-decisions-20261101/decisions.json`. No unanswered owner-policy question remains from this round.
 
-- T402: operator script with dry run, before-image and undo. Verify exact candidate expiry now; this install retains logs 90 days and some retained logs can age out November4. The old approximately November30 date is not a safe universal deadline.
+- T402: operator script with dry run, before-image and undo. The owner subsequently requested indefinite development-record retention: transcripts changed from 90 to 0/forever through the audited admin API; prompts were already 0. Historical expiry estimates no longer govern this install. Missing old logs remain unrecoverable.
 - T300: one owned validation attempt before feature work; stop at 90 minutes or $50 notional usage, whichever comes first, or on an unexpected failure. No automatic retry loops.
 - T331: live Google OAuth intentionally remains parked; prepare setup instructions when its turn comes. T358 stays deferred until its first real provider-pinning consumer.
 - T293/T299 need T300 evidence; T298 additionally needs graded evaluation data. T332 needs T359; T335 needs T351/T352/T353; T275 needs the remaining T121/T122 work.
@@ -697,7 +697,7 @@ User decision 2026-11-01: Keep maintenance/hold on unknown prior state; report u
 
 ### T387 · FNF[shipped-git-config] · an uploaded repo keeps its own .git/config, so host git still runs filter/merge drivers, the vcs trick and lazy fetch (+1)
 
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T14:22Z · last: 2026-11-01T14:22Z · priority: P0
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T14:22Z · last: 2026-11-01T14:34Z · priority: P0
 PRE-EXISTING, consequential. An upload keeps its whole .git (worker repo/clone.ts ~:547-683). `filter.<d>.*`, `merge.<d>.driver`, `remote.<n>.vcs` and lazy fetch all lack a `-c` lever. Measured: gitRun `add -A` runs the shipped filter.
 Decide: sanitise .git/config at import (allow-list keys), or refuse archives that carry .git.
 
@@ -712,6 +712,8 @@ Execution 2026-11-01: next authorized task while T402 has finished its driver bu
 Stopped at explicit owner request: Driver interrupted; uncommitted implementation and controls preserved in cx-387; no delivery or live change. Evidence: .claude/tmp/codex-run/queue-exec-20261101/T387/. Resume only when requested.
 
 Resumed at owner request 2026-11-01T14:22Z: preserve existing implementation and evidence; finish T402 delivery first, then continue the agreed queue.
+
+Progress 2026-11-01T14:34Z: Driver committed00f1c56e5: focused85passed/1existing skip,32filesystem/process ratchets passed, supportedworker typecheckgreen. Fresh independent xhigh security review running; fullcandidate/PR/delivery remain. Evidence queue-exec-20261101/T387/.
 
 ### T389 · FNF[repo-loose-objects] · Haive's git no longer triggers auto-maintenance (#256), so busy repos accumulate loose objects
 
@@ -752,7 +754,7 @@ User decision 2026-11-01: Allow private endpoints only through an administrator-
 
 ### T402 · FNF[context-backfill] · repair historical context badges before their source logs expire
 
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T14:22Z · last: 2026-11-01T14:22Z · priority: P0
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T14:22Z · last: 2026-11-01T14:34Z · priority: P0
 Historical measurement:237 stored step badges,143 showing0% left; peaks were recoverable for232 of237 and windows for about97% of Claude Code runs. These are historical counts, not a current affected-row inventory. Older writers could use a run's cumulative input as one request's context, double-count Codex cache, or use a stale200k denominator; current writers are fixed but stored rows were not recomputed.
 
 User decision 2026-11-01: an idempotent operator script with dry run, before-image and undo. Reparse retained stream data to repair derived context telemetry; do not re-run agents, change billing/token totals or fabricate unknown peaks/windows. Fence against newer/reopened row versions and report unrecoverable or lower-bound data explicitly. No implementation or live backfill has started.
@@ -764,6 +766,8 @@ Execution authorized 2026-11-01: start T402, keep development analysis records i
 Stopped at explicit owner request: HEAD65f658dd0, focused tests and independent review green; full candidate interrupted during worker suite; no live backfill. Retention0/forever verified. Evidence: .claude/tmp/codex-run/queue-exec-20261101/T402/. Resume only when requested.
 
 Resumed at owner request 2026-11-01T14:22Z: preserve existing implementation and evidence; finish T402 delivery first, then continue the agreed queue.
+
+Progress 2026-11-01T14:34Z: Implementation fed6c5eb1 and independent source/docs/guard reviews complete. Complete inventory:3658 completed steps,528 proposed repairs (386 corrected request badges,142 unsupported legacy badges cleared);3062 missing/ambiguous skipped,68 already consistent. First full suite found only a naming-guard metadata false positive (14968passed); exact-tag exemption reviewed and corrected full suite running. No live backfill yet. Retention0/forever remains. Evidence queue-exec-20261101/T402/.
 
 ### T403 · FNF[context-window-truth] · wrapper CLIs report the binary's 200k default; killed runs fall to the static table
 
