@@ -1,3 +1,8 @@
+import { execFile } from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
@@ -189,6 +194,7 @@ const NO_WAIT = 'adds no wait (pin: a missing marker is a wait of 0, not headroo
 
 describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, on Postgres', () => {
   let db: Database;
+  const mergeDirs = new Set<string>();
 
   const post = (path: string, body?: unknown) =>
     app.request(path, {
@@ -263,7 +269,11 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, USER));
   });
 
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    for (const dir of mergeDirs) await rm(dir, { recursive: true, force: true });
+    mergeDirs.clear();
+  });
 
   afterAll(async () => {
     await db.delete(schema.users).where(eq(schema.users.emailBlindIndex, BLIND_INDEX));
@@ -639,7 +649,13 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
         stepDef,
       });
       expect(result.status).toBe('waiting_form');
+      let mergeDir: string | null = null;
       const reparkMerge = async () => {
+        if (mergeDir === null) {
+          mergeDir = await mkdtemp(join(tmpdir(), 'park-fold-merge-'));
+          mergeDirs.add(mergeDir);
+          await promisify(execFile)('git', ['init', '--quiet'], { cwd: mergeDir });
+        }
         const mergePath = new URL('../../worker/src/step-engine/merge-resolver.ts', import.meta.url)
           .pathname;
         const resolver = await import(mergePath);
@@ -661,8 +677,8 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
               phase: 'awaiting-guidance',
               baseBranch: 'main',
               featureBranch: 'feature',
-              mergeDir: process.env.TMPDIR,
-              sandboxMergeDir: process.env.TMPDIR,
+              mergeDir,
+              sandboxMergeDir: mergeDir,
               fixInvocationId: null,
               conflictRetries: 0,
               pendingQuestion: { uncertainty: 'Which side?' },
