@@ -383,11 +383,13 @@ Plan D4: git and registry install sources drive D1 and D3; the token is stored e
 
 ### T338 · FNF[task-cli-provider-route] · uncalled task-level PATCH /tasks/:id/cli-provider resets running rows without epoch or kill
 
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P1
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T16:07Z · last: 2026-11-01T16:07Z · priority: P1
 PRE-EXISTING. The route at api routes/tasks/index.ts ~:1599-1714 resets running and waiting_cli provider-sensitive rows to pending. It does not bump the orchestration epoch, kill the sandbox or supersede the run; the step-level route in steps.ts does all three. No web, e2e, script or test calls it.
 Recommendation: delete the route.
 
 User decision 2026-11-01: Delete the unused task-level switch route; preserve supported step-level switching.
+
+Execution 2026-11-01T16:07Z: paired with T467 as approved API route retirement work; distinct commits/criteria, one complete API candidate and fresh review. Preserve supported step-level CLI switching, chunked repository uploads and bounded sound upload. T300 corrected-attempt decision pending; no additional validation run authorized yet.
 
 ### T339 · I4d · task page Integrations tab (override, "Also for my later tasks", reset) (+2)
 
