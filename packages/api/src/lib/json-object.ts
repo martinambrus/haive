@@ -16,3 +16,22 @@ export function requireJsonObject<T extends object = Record<string, unknown>>(va
   if (!isJsonObject(value)) throw new HttpError(400, INVALID_BODY_MESSAGE, INVALID_BODY_CODE);
   return value as T;
 }
+
+/** Only a zero-length body is absent. Invalid JSON and non-object roots must never
+ *  become the defaults of a state-changing optional request. */
+export async function readOptionalJsonObject(request: {
+  text(): Promise<string>;
+}): Promise<Record<string, unknown>> {
+  const text = await request.text();
+  if (text.length === 0) return {};
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      throw new HttpError(400, 'The request body is not valid JSON', 'invalid_json');
+    }
+    throw err;
+  }
+  return requireJsonObject(value);
+}

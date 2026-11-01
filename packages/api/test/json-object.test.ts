@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { HttpError } from '../src/context.js';
-import { isJsonObject, requireJsonObject } from '../src/lib/json-object.js';
+import { isJsonObject, readOptionalJsonObject, requireJsonObject } from '../src/lib/json-object.js';
 
 const OBJECTS: [string, unknown][] = [
   ['an empty object', {}],
@@ -52,5 +52,40 @@ describe('requireJsonObject', () => {
 
     expect(err).toBeInstanceOf(HttpError);
     expect(err).toMatchObject({ status: 400, code: 'invalid_body' });
+  });
+});
+
+describe('readOptionalJsonObject', () => {
+  it.each([
+    ['', {}],
+    ['{}', {}],
+    ['{"components":["rtk"]}', { components: ['rtk'] }],
+  ] as const)('reads %j with empty-body defaults', async (text, expected) => {
+    expect(await readOptionalJsonObject({ text: async () => text })).toEqual(expected);
+  });
+
+  it.each(['{"components":', '  \n'])('refuses malformed document %j', async (text) => {
+    await expect(readOptionalJsonObject({ text: async () => text })).rejects.toMatchObject({
+      status: 400,
+      code: 'invalid_json',
+    });
+  });
+
+  it.each(['null', '[]', '"text"', '5', 'true'])('refuses non-object document %s', async (text) => {
+    await expect(readOptionalJsonObject({ text: async () => text })).rejects.toMatchObject({
+      status: 400,
+      code: 'invalid_body',
+    });
+  });
+
+  it('propagates a body-read failure instead of applying defaults', async () => {
+    const error = new Error('body read failed');
+    await expect(
+      readOptionalJsonObject({
+        text: async () => {
+          throw error;
+        },
+      }),
+    ).rejects.toBe(error);
   });
 });

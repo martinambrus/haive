@@ -259,6 +259,39 @@ describe('/ddev', () => {
     expect(h.jobs).toEqual([]);
   });
 
+  it.each(['', '{}'])('defaults logs options for body %j', async (body) => {
+    const res = await post('/ddev/logs', taskToken('ddev'), body);
+    expect(res.status).toBe(200);
+    expect(h.jobs).toEqual([
+      { taskId: 'task-1', action: 'logs', service: undefined, tail: undefined },
+    ]);
+  });
+
+  it.each([
+    ['truncated JSON', '{"tail":'],
+    ['whitespace JSON', '  '],
+    ['null root', 'null'],
+    ['list root', '[]'],
+    ['non-string service', '{"service":5}'],
+    ['non-number tail', '{"tail":"50"}'],
+    ['null tail', '{"tail":null}'],
+  ])('refuses logs with %s before enqueue', async (_name, body) => {
+    const res = await post('/ddev/logs', taskToken('ddev'), body);
+    expect(res.status).toBe(400);
+    expect(h.jobs).toEqual([]);
+  });
+
+  it.each([
+    [3000, 2000],
+    [0, undefined],
+    [-1, undefined],
+    [1.5, undefined],
+  ])('preserves logs tail normalization for %s', async (tail, expected) => {
+    const res = await post('/ddev/logs', taskToken('ddev'), JSON.stringify({ tail }));
+    expect(res.status).toBe(200);
+    expect(h.jobs).toEqual([expect.objectContaining({ tail: expected })]);
+  });
+
   it('passes the logs arguments through', async () => {
     const res = await post('/ddev/logs', taskToken('ddev'), '{"service":"db","tail":50}');
 

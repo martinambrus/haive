@@ -49,7 +49,7 @@ import {
 } from '@haive/shared/review';
 import { getDb } from '../db.js';
 import { boundedLockWait, REPOSITORY_BUSY } from '../lib/repository-busy.js';
-import { requireJsonObject } from '../lib/json-object.js';
+import { readOptionalJsonObject, requireJsonObject } from '../lib/json-object.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { getRedis } from '../redis.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -249,14 +249,10 @@ toolingUpgradeRoutes.post('/:id/tooling-upgrade', async (c) => {
   if (!repo) throw new HttpError(404, 'Repository not found');
 
   // Optional { components: string[] } restricts which to upgrade; absent = all.
-  let raw: unknown = {};
-  try {
-    raw = await c.req.json();
-  } catch {
-    // empty body → upgrade everything upgradeable
-  }
-  const parsed = requireJsonObject<{ components?: string[] }>(raw);
-  const requested = Array.isArray(parsed.components) ? new Set(parsed.components) : null;
+  const parsed = z
+    .object({ components: z.array(z.string()).optional() })
+    .parse(await readOptionalJsonObject(c.req));
+  const requested = parsed.components ? new Set(parsed.components) : null;
 
   const versionMap = await loadToolVersions(db);
   const applied: { component: string; from: string; to: string }[] = [];
