@@ -106,6 +106,7 @@ import {
   credentialFitsGitRemote,
   parseScpLikeGitUrl,
   redactEditableGitUrl,
+  redactGitText,
   redactGitUrl,
 } from '@haive/shared/schemas';
 import {
@@ -118,6 +119,7 @@ import {
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { logger, type RepoRagCleanupPayload, type RepoResourceCleanupPayload } from '@haive/shared';
 import { getDb } from '../db.js';
+import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
 import { enqueueCheckoutSync } from '../lib/plan-mirror.js';
@@ -1122,15 +1124,36 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
     Array.from(new Set(body.scopeExcludeGlobs.map(trimGlobSlashes).filter((p) => p.length > 0))),
   ).sort();
 
+  let event: AuditEvent | undefined;
   const updated = await db.transaction(async (tx) => {
+    // A relink holds this row through its git work: give up with 409 busy rather than queue behind it.
+    const [stored] = await boundedLockWait(tx, () =>
+      tx.select().from(schema.repositories).where(eq(schema.repositories.id, id)).for('update'),
+    );
+    if (!stored) throw new HttpError(404, 'Repository not found');
+    const previous = new Set(stored.scopeExcludeGlobs ?? []);
+    const wanted = new Set(scopeExcludeGlobs);
+    const addedCount = [...wanted].filter((glob) => !previous.has(glob)).length;
+    const removedCount = [...previous].filter((glob) => !wanted.has(glob)).length;
     const rows = await tx
       .update(schema.repositories)
       .set({ scopeExcludeGlobs, updatedAt: new Date() })
       .where(eq(schema.repositories.id, id))
       .returning();
     await markProjectStateDirty(tx, id);
+    if (addedCount || removedCount) {
+      event = {
+        actorUserId: userId,
+        action: 'repository.scope.update',
+        targetType: 'repository',
+        targetId: id,
+        metadata: { addedCount, removedCount },
+      };
+      await insertAuditEvent(tx, event);
+    }
     return rows;
   });
+  if (event) logAuditEvent(event);
   const {
     fileTree: _drop,
     renderContext: _context,
@@ -2660,12 +2683,15 @@ export async function resetOnboardingArtifacts(
   return { removed, cleaned, skipped, quarantined, vacatedPaths };
 }
 
-/** The repo's on-disk root, or a 404/409 explaining why there isn't one.
- *  Exported because the plan routes remove the committed `.haive-data/` mirror
- *  on delete and must resolve the root exactly as every other file route does —
- *  a second copy of this would be a second place for the storage/local
- *  fallback to drift. */
 const execGit = promisify(execFile);
+// A relink's git child still running after GIT_DEADLINE_MS gets SIGTERM, and SIGKILL only if it is
+// still running GIT_KILL_GRACE_MS later. SIGTERM lets git remove the lock file it holds (MEASURED
+// with git 2.43.0 and 2.54.0 on config writes held inside their lock windows: gone within 3 ms
+// after the signal), while SIGKILL leaves `.git/config.lock` behind and fails the restore and every later
+// relink. So SIGKILL is for a child that ignores SIGTERM, after a grace that is wide for git's
+// cleanup and short for a waiting request.
+const GIT_DEADLINE_MS = 10_000;
+const GIT_KILL_GRACE_MS = 2_000;
 
 /**
  * Bind a repository that has no origin to one.
@@ -2705,9 +2731,12 @@ repoRoutes.post('/:id/remote', async (c) => {
   const root = repo.storagePath ?? repo.localPath;
   if (!root) throw new HttpError(409, 'This repository has no resolvable path');
 
-  const bindingId = body.credentialsId ?? repo.credentialsSecretId;
-  if (bindingId) {
-    const cred = await db.query.repoCredentials.findFirst({
+  const requireFittingCredential = async (
+    executor: Pick<ReturnType<typeof getDb>, 'query'>,
+    bindingId: string | null | undefined,
+  ) => {
+    if (!bindingId) return;
+    const cred = await executor.query.repoCredentials.findFirst({
       where: and(
         eq(schema.repoCredentials.id, bindingId),
         eq(schema.repoCredentials.userId, userId),
@@ -2717,33 +2746,74 @@ repoRoutes.post('/:id/remote', async (c) => {
     if (!cred) throw new HttpError(404, 'Credentials not found');
     if (!credentialFitsGitRemote(cred, body.remoteUrl))
       throw new HttpError(400, 'The Git credential does not fit the remote');
-  }
+  };
+  await requireFittingCredential(db, body.credentialsId ?? repo.credentialsSecretId);
 
   const git = async (
     args: string[],
-  ): Promise<{ ok: boolean; code: number; stdout: string; stderr: string }> => {
+  ): Promise<{
+    ok: boolean;
+    exitedClean: boolean;
+    code: number;
+    stdout: string;
+    stderr: string;
+  }> => {
+    let deadline: NodeJS.Timeout | undefined;
+    let grace: NodeJS.Timeout | undefined;
+    let deadlineFired = false;
     try {
-      const { stdout, stderr } = await execGit('git', hardenGitArgs(args), {
+      const run = execGit('git', hardenGitArgs(args), {
         cwd: root,
         env: { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(root) },
-        timeout: 10_000,
       });
+      deadline = setTimeout(() => {
+        deadlineFired = true;
+        // As execFile's own timeout does: close both pipes before the signal, so a grandchild that
+        // still holds them cannot keep the call pending once git is gone. `child` is read with `?.`
+        // because a stubbed execFile has none.
+        run.child?.stdout?.destroy();
+        run.child?.stderr?.destroy();
+        run.child?.kill('SIGTERM');
+        grace = setTimeout(() => run.child?.kill('SIGKILL'), GIT_KILL_GRACE_MS);
+      }, GIT_DEADLINE_MS);
+      const { stdout, stderr } = await run;
+      // Closing the pipes can discard unread output even if git exited 0 in this turn.
+      // Never accept that truncated output as a snapshot of the previous remote.
+      if (deadlineFired)
+        return { ok: false, exitedClean: true, code: -1, stdout: '', stderr: 'no answer' };
       return {
         ok: true,
+        exitedClean: true,
         code: 0,
         stdout: stdout.toString().trim(),
         stderr: stderr.toString().trim(),
       };
     } catch (err) {
-      const e = err as { code?: unknown; stdout?: string; stderr?: string; message?: string };
+      const e = err as {
+        code?: unknown;
+        signal?: NodeJS.Signals;
+        stdout?: string;
+        stderr?: string;
+      };
+      const code = typeof e.code === 'number' ? e.code : -1;
       return {
         ok: false,
-        code: typeof e.code === 'number' ? e.code : -1,
+        exitedClean: false,
+        code,
         stdout: (e.stdout ?? '').toString().trim(),
-        stderr: (e.stderr || e.message || '').toString().trim(),
+        // execFile's message includes argv, which can contain credentials.
+        stderr:
+          (e.stderr ?? '').toString().trim() || (e.signal ? `signal ${e.signal}` : `exit ${code}`),
       };
+    } finally {
+      clearTimeout(deadline);
+      clearTimeout(grace);
     }
   };
+
+  // Keep snapshots intact for restoration; redact only text reported to the caller.
+  const gitFailureText = (result: { stderr: string; stdout: string }) =>
+    redactGitText(result.stderr || result.stdout || 'no answer');
 
   // Without its own .git entry, upward discovery would relink a parent checkout.
   const entry = await lstatNoFollow(root, '.git', { strict: true }).catch((err: unknown) => {
@@ -2760,7 +2830,7 @@ repoRoutes.post('/:id/remote', async (c) => {
   }
   const inside = await git(['rev-parse', '--is-inside-work-tree']);
   if (!inside.ok || !['true', 'false'].includes(inside.stdout)) {
-    const reason = inside.stderr || inside.stdout || 'no answer';
+    const reason = gitFailureText(inside);
     throw new HttpError(
       409,
       `This repository could not be examined: git rev-parse --is-inside-work-tree failed (exit ${inside.code}): ${reason}`,
@@ -2770,47 +2840,167 @@ repoRoutes.post('/:id/remote', async (c) => {
     throw new HttpError(409, 'This repository is not a Git checkout, so it cannot have a remote');
   }
 
-  // Exit 3 identifies an existing remote. Replace all fetch URLs and clear push URLs
-  // so both directions use the address being persisted to the repository row.
-  const added = await git(['remote', 'add', 'origin', body.remoteUrl]);
-  if (!added.ok) {
-    if (added.code !== 3) {
-      throw new HttpError(409, `Could not add the remote: ${added.stderr || added.stdout}`);
+  let restore: (() => Promise<void>) | undefined;
+  let restoreFailure: Error | undefined;
+  let event: AuditEvent | undefined;
+  const restoreRemote = async (err: unknown): Promise<never> => {
+    // A restore that failed is the answer even when the transaction then rejects with
+    // another error, such as the lost connection that made the outer catch run.
+    if (restoreFailure) throw restoreFailure;
+    if (restore) {
+      try {
+        const undo = restore;
+        restore = undefined;
+        await undo();
+      } catch (restoreError) {
+        const message = 'Remote update failed and the previous remote could not be restored';
+        const failure = new AggregateError([restoreError], message, { cause: err });
+        logger.error(
+          { err: failure, repositoryId: id },
+          'failed to restore origin after remote update failure',
+        );
+        restoreFailure = Object.assign(new HttpError(500, message), { cause: failure });
+        throw restoreFailure;
+      }
     }
-    const cleared = await git(['config', '--local', '--unset-all', 'remote.origin.pushurl']);
-    if (!cleared.ok && cleared.code !== 5) {
-      throw new HttpError(
-        409,
-        `Could not clear the remote's push URLs: ${cleared.stderr || cleared.stdout}`,
-      );
-    }
-    const updated = await git([
-      'config',
-      '--local',
-      '--replace-all',
-      'remote.origin.url',
-      body.remoteUrl,
-    ]);
-    if (!updated.ok) {
-      throw new HttpError(409, `Could not update the remote: ${updated.stderr || updated.stdout}`);
-    }
-  }
+    throw err;
+  };
+  // Keep the column aligned with Git: lock the repository row first (a wait past the
+  // repository lock bound answers 409 busy, before any Git write), insert its
+  // audit, change Git, then write the column. Callback-visible failures restore
+  // Git while that row is still locked, before a queued relink can snapshot it.
+  // COMMIT or connection-close failures may restore after the lock is released:
+  // a concurrent relink or a lost COMMIT acknowledgement can still race that fallback.
+  let callbackSettled: Promise<void> | undefined;
+  try {
+    await db.transaction(async (tx) => {
+      let settle!: () => void;
+      callbackSettled = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      try {
+        const [stored] = await boundedLockWait(tx, () =>
+          tx
+            .select()
+            .from(schema.repositories)
+            .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
+            .for('no key update'),
+        );
+        if (!stored) throw new HttpError(404, 'Repository not found');
+        await requireFittingCredential(tx, body.credentialsId ?? stored.credentialsSecretId);
+        const host = parseScpLikeGitUrl(body.remoteUrl)?.host ?? new URL(body.remoteUrl).hostname;
+        event = {
+          actorUserId: userId,
+          action: 'repository.remote.update',
+          targetType: 'repository',
+          targetId: id,
+          metadata: {
+            host,
+            credentialsChanged:
+              (body.credentialsId ?? stored.credentialsSecretId) !== stored.credentialsSecretId,
+            branchChanged: Boolean(body.branch && body.branch !== stored.branch),
+          },
+        };
+        await insertAuditEvent(tx, event);
+        try {
+          // Exit 3 identifies an existing remote. Replace all fetch URLs and clear push URLs
+          // so both directions use the address being persisted to the repository row.
+          const added = await git(['remote', 'add', 'origin', body.remoteUrl]);
+          // A clean exit proves a mutation applied even when its output missed the deadline.
+          if (added.exitedClean)
+            restore = async () => {
+              if (!(await git(['remote', 'remove', 'origin'])).exitedClean)
+                throw new Error('remote restore failed');
+            };
+          if (!added.ok) {
+            if (added.code !== 3) {
+              throw new HttpError(409, `Could not add the remote: ${gitFailureText(added)}`);
+            }
+            const previous: [string, string[]][] = [];
+            for (const key of ['remote.origin.url', 'remote.origin.pushurl']) {
+              const read = await git(['config', '--local', '--get-all', key]);
+              if (!read.ok && read.code !== 1)
+                throw new HttpError(
+                  409,
+                  `Could not read the previous remote: ${gitFailureText(read)}`,
+                );
+              previous.push([key, read.ok && read.stdout ? read.stdout.split('\n') : []]);
+            }
+            const restoreExisting = async () => {
+              for (const [key, values] of previous) {
+                const [first, ...rest] = values;
+                if (first === undefined) {
+                  const cleared = await git(['config', '--local', '--unset-all', key]);
+                  if (!cleared.exitedClean && cleared.code !== 5)
+                    throw new Error('remote restore failed');
+                } else {
+                  if (!(await git(['config', '--local', '--replace-all', key, first])).exitedClean)
+                    throw new Error('remote restore failed');
+                  for (const value of rest) {
+                    if (!(await git(['config', '--local', '--add', key, value])).exitedClean)
+                      throw new Error('remote restore failed');
+                  }
+                }
+              }
+            };
+            const cleared = await git([
+              'config',
+              '--local',
+              '--unset-all',
+              'remote.origin.pushurl',
+            ]);
+            if (cleared.exitedClean || cleared.code === 5) restore = restoreExisting;
+            if (!cleared.ok && cleared.code !== 5) {
+              throw new HttpError(
+                409,
+                `Could not clear the remote's push URLs: ${gitFailureText(cleared)}`,
+              );
+            }
+            const updated = await git([
+              'config',
+              '--local',
+              '--replace-all',
+              'remote.origin.url',
+              body.remoteUrl,
+            ]);
+            if (!updated.ok) {
+              throw new HttpError(409, `Could not update the remote: ${gitFailureText(updated)}`);
+            }
+          }
 
-  // The row is written only after git accepted the URL, so the column can never
-  // claim a remote the checkout does not have.
-  await db
-    .update(schema.repositories)
-    .set({
-      remoteUrl: body.remoteUrl,
-      ...(body.credentialsId ? { credentialsSecretId: body.credentialsId } : {}),
-      ...(body.branch ? { branch: body.branch } : {}),
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.repositories.id, id));
+          await tx
+            .update(schema.repositories)
+            .set({
+              remoteUrl: body.remoteUrl,
+              ...(body.credentialsId ? { credentialsSecretId: body.credentialsId } : {}),
+              ...(body.branch ? { branch: body.branch } : {}),
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.repositories.id, id));
+        } catch (err) {
+          await restoreRemote(err);
+        }
+      } finally {
+        settle();
+      }
+    });
+  } catch (err) {
+    // postgres.js can reject on connection close while the callback still awaits Git.
+    // Let its last write and any in-callback restore finish before the fallback runs.
+    await callbackSettled;
+    // A COMMIT with a lost acknowledgement can have applied; restoration is ambiguous.
+    await restoreRemote(err);
+  }
+  logAuditEvent(event!);
 
   return c.json({ ok: true, remoteUrl: body.remoteUrl, relinked: repo.remoteUrl !== null });
 });
 
+/** The repo's on-disk root, or a 404/409 explaining why there isn't one.
+ *  Exported because the plan routes remove the committed `.haive-data/` mirror
+ *  on delete and must resolve the root exactly as every other file route does —
+ *  a second copy of this would be a second place for the storage/local
+ *  fallback to drift. */
 export async function resolveRepoRoot(
   db: ReturnType<typeof getDb>,
   userId: string,
@@ -3327,19 +3517,22 @@ repoRoutes.delete('/:id', async (c) => {
     // would leave one `running` with the repository_id the delete cleared, and nothing cancels it.
     await boundedLockWait(tx, () => lockRepositoryTasksKey(tx, id));
     // Locked, so a clone or a reset that has not claimed the root yet claims it only after this
-    // commits, and finds no row: every writer of the root runs under that claim.
-    const repoRows = await tx
-      .select({
-        id: schema.repositories.id,
-        storagePath: schema.repositories.storagePath,
-        onboardingTooling: schema.repositories.onboardingTooling,
-        onboardingEnvironment: schema.repositories.onboardingEnvironment,
-        rootClaimedAt: schema.repositories.rootClaimedAt,
-        rootClaimKind: schema.repositories.rootClaimKind,
-      })
-      .from(schema.repositories)
-      .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
-      .for('update');
+    // commits, and finds no row: every writer of the root runs under that claim. The row's wait has
+    // its own bound: a relink holds the row through its git work, and the key above is held meanwhile.
+    const repoRows = await boundedLockWait(tx, () =>
+      tx
+        .select({
+          id: schema.repositories.id,
+          storagePath: schema.repositories.storagePath,
+          onboardingTooling: schema.repositories.onboardingTooling,
+          onboardingEnvironment: schema.repositories.onboardingEnvironment,
+          rootClaimedAt: schema.repositories.rootClaimedAt,
+          rootClaimKind: schema.repositories.rootClaimKind,
+        })
+        .from(schema.repositories)
+        .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
+        .for('update'),
+    );
     if (repoRows.length === 0) return;
     if (isRootClaimLive(repoRows[0]!.rootClaimedAt)) {
       throw new HttpError(

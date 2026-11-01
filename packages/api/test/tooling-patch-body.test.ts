@@ -224,6 +224,18 @@ describe('PATCH tooling still accepts what the Tooling page sends', () => {
     });
     expect(fake.rows(schema.auditEvents)).toMatchObject([
       { action: 'repository.app_auth.update', metadata: { username: 'set', password: 'set' } },
+      {
+        action: 'repository.security.update',
+        metadata: {
+          fields: [
+            'secretMaskEnabled',
+            'secretMaskAllow',
+            'secretMaskDenyExtend',
+            'appAuth',
+            'prWorkflowEnabled',
+          ],
+        },
+      },
     ]);
   });
 

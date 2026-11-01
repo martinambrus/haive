@@ -79,12 +79,7 @@ export type SetAsideResult =
       outcome: 'refused';
       file: string;
       reason: string;
-      code:
-        | 'projection_not_owned'
-        | 'projection_rewritten'
-        | 'write_pending'
-        | 'git_operation'
-        | 'git_operation_unreadable';
+      code: 'projection_not_owned' | 'projection_rewritten' | 'write_pending' | 'git_operation';
     }
   | { outcome: 'held'; holding: number };
 
@@ -138,7 +133,7 @@ async function openOperationRefusal(
   repoPath: string,
   file: string,
   unmerged: boolean,
-): Promise<Refused | null> {
+): Promise<Refused | { outcome: 'unreadable'; error: GitOperationUnreadableError } | null> {
   try {
     if (unmerged || (await gitOperationInProgress(repoPath))) {
       return refuse(
@@ -150,11 +145,7 @@ async function openOperationRefusal(
     return null;
   } catch (err) {
     if (!(err instanceof GitOperationUnreadableError)) throw err;
-    return refuse(
-      file,
-      `could not be checked for an open merge, rebase, cherry-pick or revert (${err.message.split('\n')[0]})`,
-      'git_operation_unreadable',
-    );
+    return { outcome: 'unreadable', error: err };
   }
 }
 
@@ -527,6 +518,7 @@ async function restoreJudged(
     mine[0] ?? dirty.paths[0] ?? '',
     dirty.unmerged,
   );
+  if (open?.outcome === 'unreadable') throw open.error;
   if (open) return open;
   const holding = guard.fence ? await guard.fence(tx) : 0;
   if (holding > 0) return { outcome: 'held', holding };
@@ -795,6 +787,7 @@ async function setAsideOnce(
   const holdingEarly = fence ? await fence(db) : 0;
   if (holdingEarly > 0) return { outcome: 'held', holding: holdingEarly };
   const open = await openOperationRefusal(repoPath, dirty.paths[0]!, dirty.unmerged);
+  if (open?.outcome === 'unreadable') throw open.error;
   if (open) return open;
   const stray = dirty.paths.find(
     (p) =>
@@ -874,6 +867,7 @@ export async function restoreProjectionsInTx(
   const dirty = await dirtyProjections(repoPath);
   if (dirty.paths.length === 0) return { outcome: 'clean' };
   const open = await openOperationRefusal(repoPath, dirty.paths[0]!, dirty.unmerged);
+  if (open?.outcome === 'unreadable') throw open.error;
   if (open) return open;
   const stray = dirty.paths.find(
     (p) =>

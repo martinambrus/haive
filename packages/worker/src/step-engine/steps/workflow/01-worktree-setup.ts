@@ -44,8 +44,8 @@ interface WorktreeDetect {
   /** The proposal is this task's own branch from an earlier apply, so a Retry re-enters its
    *  worktree. Absent on a detect stored before the field existed. */
   proposalIsOwnBranch?: boolean;
-  /** Why the checkout's branch could not be read, when its git run gave no answer. Absent on a
-   *  detect stored before the field existed. */
+  /** Why the checkout's branch read failed, unless a separate HEAD probe proved the repository
+   *  unborn. Absent on a detect stored before the field existed. */
   currentBranchError?: string | null;
 }
 
@@ -211,9 +211,14 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       };
     }
     const branch = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
-    const currentBranchError = gitGaveNoAnswer(branch)
-      ? `could not read the checkout's current branch: ${(branch.stderr || branch.stdout).trim()}`
-      : null;
+    const unborn =
+      branch.code !== 0 &&
+      !gitGaveNoAnswer(branch) &&
+      (await gitRun(ctx.repoPath, ['rev-parse', '-q', '--verify', 'HEAD'])).code === 1;
+    const currentBranchError =
+      branch.code !== 0 && !unborn
+        ? `could not read the checkout's current branch: ${(branch.stderr || branch.stdout).trim()}`
+        : null;
     const status = await gitRun(ctx.repoPath, ['--no-optional-locks', 'status', '--porcelain']);
     // Never PROPOSE a name that already exists here. `git worktree add <path> <branch>`
     // adopts an existing branch and its commits instead of forking the base 00a-sync-base

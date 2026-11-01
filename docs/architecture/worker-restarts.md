@@ -377,7 +377,8 @@ The key is the one a Retry of a task that is not an onboarding or an upgrade tak
 (those two take it with the repository row), so a Retry that committed first has left a `running`
 task, which the delete finds among the open ones and cancels. The delete waits for the key at most
 30 s (`boundedLockWait`) and otherwise answers 409 `The repository is busy, try again` with nothing
-written. The plan advisory route takes the same key, before its plan node row, since the delete
+written. Its repository-row take has a separate 30 s bound, so a relink holding that row cannot
+leave the delete waiting without a bound after it obtained the task-creation key. The plan advisory route takes the same key, before its plan node row, since the delete
 holds the key and cascades into the node rows. The cancel itself is described after this paragraph. A pass a Stop cut off
 mid-apply then releases what the failed task holds (`settleFailedTask`), as its own failure would
 have. The cancel poll also stops a

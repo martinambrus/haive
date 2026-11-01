@@ -156,11 +156,17 @@ export const onboardingPushStep: StepDefinition<OnboardingPushDetect, Onboarding
     };
 
     const cur = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
-    if (gitGaveNoAnswer(cur))
+    if (cur.code !== 0) {
+      // An unborn HEAD is an explicit absence (exit 1), not every failure of the branch read.
+      if (!gitGaveNoAnswer(cur)) {
+        const head = await gitRun(ctx.repoPath, ['rev-parse', '-q', '--verify', 'HEAD']);
+        if (head.code === 1) return empty;
+      }
       throw new Error(
         `could not read the checkout's current branch: ${(cur.stderr || cur.stdout).trim()}`,
       );
-    const currentBranch = cur.code === 0 ? cur.stdout.trim() : null;
+    }
+    const currentBranch = cur.stdout.trim();
     const base = currentBranch && currentBranch !== 'HEAD' ? currentBranch : null;
     let originUrl: string | null;
     try {
@@ -185,8 +191,13 @@ export const onboardingPushStep: StepDefinition<OnboardingPushDetect, Onboarding
     // pushed). When present we merge it in (the pull); when absent we self-merge <base>
     // (a no-op) so resolveMergePhase still proceeds to push and CREATE the branch.
     const originRef = `origin/${base}`;
-    const originRefExists =
-      (await gitRun(ctx.repoPath, ['rev-parse', '--verify', '--quiet', originRef])).code === 0;
+    const originRead = await gitRun(ctx.repoPath, ['rev-parse', '--verify', '--quiet', originRef]);
+    if (originRead.code !== 0 && originRead.code !== 1) {
+      throw new Error(
+        `git rev-parse ${originRef} failed in ${ctx.repoPath}: ${(originRead.stderr || originRead.stdout).trim()}`,
+      );
+    }
+    const originRefExists = originRead.code === 0;
     const branchName = originRefExists ? originRef : base;
     const behindBy = originRefExists
       ? await countCommits(ctx.repoPath, `${base}..${originRef}`)

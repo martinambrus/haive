@@ -19,6 +19,7 @@ const KEY_PREFIX = 'haive:auth-throttle:';
 export const AUTH_THROTTLE_SCRIPT = `
 local rejected = false
 local wait = 0
+local rejectedKey = ""
 for i = 1, #KEYS do
   redis.call('ZREMRANGEBYSCORE', KEYS[i], '-inf', ARGV[2])
   local limit = tonumber(ARGV[4 + i])
@@ -28,10 +29,13 @@ for i = 1, #KEYS do
     local idx = count - limit
     local oldest = redis.call('ZRANGE', KEYS[i], idx, idx, 'WITHSCORES')
     local free = tonumber(oldest[2]) + tonumber(ARGV[3]) - tonumber(ARGV[1])
-    if free > wait then wait = free end
+    if rejectedKey == "" or free > wait then
+      wait = free
+      rejectedKey = KEYS[i]
+    end
   end
 end
-if rejected then return {0, wait} end
+if rejected then return {0, wait, rejectedKey} end
 for i = 1, #KEYS do
   redis.call('ZADD', KEYS[i], ARGV[1], ARGV[4])
   redis.call('PEXPIRE', KEYS[i], ARGV[3])
@@ -162,7 +166,22 @@ async function bounded<T>(work: Promise<T>): Promise<T> {
   }
 }
 
-function refused(scope: Scope, waitMs: number): HTTPException {
+export class AuthThrottleError extends HTTPException {
+  constructor(
+    res: Response,
+    readonly auditAllowed: boolean,
+    readonly limiter: 'account' | 'address',
+  ) {
+    super(429, { res });
+  }
+}
+
+function refused(
+  scope: Scope,
+  waitMs: number,
+  auditAllowed: boolean,
+  limiter: 'account' | 'address',
+): AuthThrottleError {
   const seconds = Math.min(Math.max(1, Math.ceil(waitMs / 1000)), AUTH_THROTTLE_WINDOW_MS / 1000);
   const what = scope === 'login' ? 'sign-in' : 'registration';
   const res = Response.json(
@@ -173,7 +192,7 @@ function refused(scope: Scope, waitMs: number): HTTPException {
     },
     { status: 429, headers: { 'Retry-After': String(seconds) } },
   );
-  return new HTTPException(429, { res });
+  return new AuthThrottleError(res, auditAllowed, limiter);
 }
 
 export async function reserveAuthAttempt(
@@ -216,7 +235,7 @@ export async function reserveAuthAttempt(
         () => undefined,
       );
     outcome = await bounded(reservation);
-    if (!Array.isArray(outcome) || outcome.length !== 2) {
+    if (!Array.isArray(outcome) || (outcome.length !== 2 && outcome.length !== 3)) {
       throw new Error('unexpected reply from the throttle script');
     }
   } catch (err) {
@@ -224,8 +243,26 @@ export async function reserveAuthAttempt(
     late?.();
     return NOOP_ATTEMPT;
   }
-  const [admitted, waitMs] = outcome as [number, number];
-  if (Number(admitted) !== 1) throw refused(scope, Number(waitMs));
+  const [admitted, waitMs, rejectedKey] = outcome as [number, number, string?];
+  if (Number(admitted) !== 1) {
+    let auditAllowed = false;
+    if (scope === 'login' && rejectedKey && keys.includes(rejectedKey)) {
+      try {
+        auditAllowed =
+          (await bounded(
+            redis.set(`${rejectedKey}:audit`, '1', 'PX', AUTH_THROTTLE_WINDOW_MS, 'NX'),
+          )) === 'OK';
+      } catch (err) {
+        log.warn({ err }, 'throttled sign-in audit gate unavailable');
+      }
+    }
+    throw refused(
+      scope,
+      Number(waitMs),
+      auditAllowed,
+      rejectedKey === keys[0] ? 'account' : 'address',
+    );
+  }
   return {
     refund: async () => {
       try {

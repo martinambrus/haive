@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import {
   CirclePlus,
   Code2,
+  Database,
   Download,
   FolderMinus,
   Gauge,
@@ -501,6 +502,12 @@ function RepoCard(props: RepoCardProps) {
               label: 'Plan',
               icon: Map,
               href: `/repos/${repo.id}/plan`,
+            },
+            repo.status === 'ready' && {
+              key: 'haive-data',
+              label: 'Haive data',
+              icon: Database,
+              href: `/repos/${repo.id}/haive-data`,
             },
             repo.status === 'ready' && {
               key: 'estimates',

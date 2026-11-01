@@ -18,7 +18,8 @@ import {
   settingNameOfFile,
   type ProjectStateRecord,
 } from '@haive/shared/project-state';
-import { gitRun } from '../repo/git-exec.js';
+import { logger } from '@haive/shared/logger';
+import { gitRun, type GitRunResult } from '../repo/git-exec.js';
 import { unmergedPaths } from '../step-engine/git-merge.js';
 
 export interface ProjectionResolution {
@@ -44,12 +45,21 @@ async function readStages(worktreePath: string, path: string): Promise<Map<Stage
     BYTES,
   );
   const stages = new Map<Stage, Buffer>();
-  if (listing.code !== 0) return stages;
+  if (listing.code !== 0)
+    throw new Error(
+      `git ls-files -u failed in ${worktreePath}: ${(listing.stderr || listing.stdout).trim()}`,
+    );
   for (const entry of listing.stdout.split('\0')) {
     const m = /^\d+ ([0-9a-f]+) ([123])\t/.exec(entry);
     if (!m) continue;
     const blob = await gitRun(worktreePath, ['cat-file', 'blob', m[1]!], undefined, BYTES);
-    if (blob.code !== 0) return new Map();
+    if (blob.code !== 0) {
+      logger.warn(
+        { worktreePath, path, detail: (blob.stderr || blob.stdout).trim() },
+        'projection merge blob could not be read; leaving the path unmerged',
+      );
+      return new Map();
+    }
     stages.set(Number(m[2]) as Stage, Buffer.from(blob.stdout, 'latin1'));
   }
   return stages;
@@ -101,19 +111,35 @@ function mergeStages(stages: Map<Stage, Buffer>): PlanMirror | string {
   }
 }
 
+/** Writes may fail after an earlier index change; always name the operation that stopped resolution. */
+function writeFailed(
+  worktreePath: string,
+  path: string,
+  operation: string,
+  res: GitRunResult,
+): boolean {
+  if (res.code === 0) return false;
+  logger.warn(
+    { worktreePath, path, operation, detail: (res.stderr || res.stdout).trim() },
+    'projection merge operation failed',
+  );
+  return true;
+}
+
 async function writeResolved(worktreePath: string, path: string, bytes: Buffer): Promise<boolean> {
   const hashed = await gitRun(worktreePath, ['hash-object', '-w', '--stdin'], undefined, {
     input: bytes,
   });
-  if (hashed.code !== 0) return false;
+  if (writeFailed(worktreePath, path, 'hash-object', hashed)) return false;
   const staged = await gitRun(worktreePath, [
     'update-index',
     '--add',
     '--cacheinfo',
     `100644,${hashed.stdout.trim()},${path}`,
   ]);
-  if (staged.code !== 0) return false;
-  return (await gitRun(worktreePath, ['checkout-index', '-f', '--', path])).code === 0;
+  if (writeFailed(worktreePath, path, 'update-index', staged)) return false;
+  const checked = await gitRun(worktreePath, ['checkout-index', '-f', '--', path]);
+  return !writeFailed(worktreePath, path, 'checkout-index', checked);
 }
 
 const STATE_PREFIX = `${PROJECT_STATE_DIR}/`;
@@ -226,10 +252,13 @@ async function takeIncoming(worktreePath: string, path: string): Promise<boolean
   const stages = await readStageNumbers(worktreePath, path);
   if (stages.size === 0) return false;
   if (!stages.has(3)) {
-    return (await gitRun(worktreePath, ['rm', '-f', '-q', '--', literal(path)])).code === 0;
+    const removed = await gitRun(worktreePath, ['rm', '-f', '-q', '--', literal(path)]);
+    return !writeFailed(worktreePath, path, 'rm', removed);
   }
   const take = await gitRun(worktreePath, ['checkout', '--theirs', '--', literal(path)]);
-  return take.code === 0 && (await gitRun(worktreePath, ['add', '--', literal(path)])).code === 0;
+  if (writeFailed(worktreePath, path, 'checkout --theirs', take)) return false;
+  const added = await gitRun(worktreePath, ['add', '--', literal(path)]);
+  return !writeFailed(worktreePath, path, 'add', added);
 }
 
 async function readStageNumbers(worktreePath: string, path: string): Promise<Set<number>> {
@@ -239,17 +268,21 @@ async function readStageNumbers(worktreePath: string, path: string): Promise<Set
     undefined,
     BYTES,
   );
+  if (listing.code !== 0)
+    throw new Error(
+      `git ls-files -u failed in ${worktreePath}: ${(listing.stderr || listing.stdout).trim()}`,
+    );
   const stages = new Set<number>();
-  for (const entry of listing.code === 0 ? listing.stdout.split('\0') : []) {
+  for (const entry of listing.stdout.split('\0')) {
     const m = /^\d+ [0-9a-f]+ ([123])\t/.exec(entry);
     if (m) stages.add(Number(m[1]));
   }
   return stages;
 }
 
-async function unmergedInState(worktreePath: string): Promise<string[] | null> {
-  const all = await unmergedPaths(worktreePath);
-  return all === null ? null : all.filter((p) => p.startsWith(STATE_PREFIX));
+async function unmergedInState(worktreePath: string): Promise<string[]> {
+  const all = await unmergedPaths(worktreePath, true);
+  return all.filter((p) => p.startsWith(STATE_PREFIX));
 }
 
 async function indexedInState(worktreePath: string): Promise<string[]> {
@@ -326,7 +359,7 @@ export async function resolveHaiveProjectionConflicts(
   worktreePath: string,
 ): Promise<ProjectionResolution> {
   const out: ProjectionResolution = { resolved: [], warnings: [] };
-  const conflicted = new Set((await unmergedPaths(worktreePath)) ?? []);
+  const conflicted = new Set(await unmergedPaths(worktreePath, true));
   const jsonPath = HAIVE_DATA_FILES.plan;
   const mdPath = HAIVE_DATA_FILES.planMarkdown;
   let plan: PlanMirrorPayload | null = null;
@@ -346,7 +379,7 @@ export async function resolveHaiveProjectionConflicts(
     } catch (err) {
       why = err instanceof Error ? err.message : String(err);
     }
-    for (const left of (await unmergedInState(worktreePath)) ?? []) {
+    for (const left of await unmergedInState(worktreePath)) {
       why ??= 'the record was left unmerged';
       if (!(await takeIncoming(worktreePath, left))) {
         out.warnings.push(`${left}: could not be resolved`);
@@ -356,7 +389,7 @@ export async function resolveHaiveProjectionConflicts(
       out.warnings.push(`${PROJECT_STATE_DIR}: ${why}; took the incoming side`);
     }
     const left = await unmergedInState(worktreePath);
-    if (left !== null && left.length === 0) out.resolved.push(...inState);
+    if (left.length === 0) out.resolved.push(...inState);
   }
 
   if (conflicted.has(jsonPath)) {
@@ -366,7 +399,7 @@ export async function resolveHaiveProjectionConflicts(
       const merged = mergeStages(stages);
       if (typeof merged === 'string') {
         await fallBack(jsonPath, merged);
-        plan = parsePayload(stages.get(3)!);
+        if (out.resolved.includes(jsonPath)) plan = parsePayload(stages.get(3)!);
       } else if (
         await writeResolved(worktreePath, jsonPath, Buffer.from(serializePlanMirror(merged)))
       ) {
@@ -385,11 +418,11 @@ export async function resolveHaiveProjectionConflicts(
 
   // plan.md follows a resolved plan.json even where git merged it cleanly: it renders that file.
   if (conflicted.has(mdPath) || (plan !== null && out.resolved.includes(jsonPath))) {
-    if (
-      plan &&
-      (await writeResolved(worktreePath, mdPath, Buffer.from(renderPlanMarkdownFromMirror(plan))))
-    ) {
-      out.resolved.push(mdPath);
+    if (plan) {
+      if (
+        await writeResolved(worktreePath, mdPath, Buffer.from(renderPlanMarkdownFromMirror(plan)))
+      )
+        out.resolved.push(mdPath);
     } else {
       await fallBack(mdPath, 'plan.json gave nothing to render it from');
     }

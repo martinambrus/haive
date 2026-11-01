@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { failGit } from '../../test/support/fake-git.js';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN, safeKey } from './steps/_untrusted-repo.js';
@@ -1773,6 +1774,44 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       await rm(integrationDir, { recursive: true, force: true });
     }
   });
+
+  it.each(['add', 'status', 'commit'])(
+    'preserves the failed git %s error when committing an issue',
+    async (command) => {
+      const integrationDir = await setupConflictedIntegration(true);
+      const issueDir = await mkdtemp(path.join(tmpdir(), 'dag-issue-error-'));
+      let shim: Awaited<ReturnType<typeof failGit>> | null = null;
+      try {
+        await gitCode(integrationDir, ['merge', '--abort']);
+        await git(integrationDir, ['worktree', 'add', issueDir, 'main--ISSUE-1']);
+        await writeFile(path.join(issueDir, 'new.txt'), 'uncommitted\n');
+        const h = makeDagMergeWaitDb({
+          invocation: undefined,
+          integrationDir,
+          autoResolveConflicts: false,
+          issue: { mergeStatus: null, worktreePath: issueDir },
+        });
+        shim = await failGit(
+          command === 'status' ? ['--no-optional-locks', 'status'] : [command],
+          command === 'status' ? { from: 2 } : {},
+        );
+        await expect(
+          resolveDagPhase(
+            h.db as never,
+            dagExecuteStep as never,
+            { id: 'step1', status: 'running', round: 0 } as never,
+            mergeCtx(integrationDir),
+            dispatchingParams as never,
+          ),
+        ).rejects.toThrow(new RegExp(`git ${command}.*failed.*simulated failure`));
+        expect(h.issueUpdates.some((u) => u.mergeStatus === 'clean')).toBe(false);
+      } finally {
+        await shim?.restore();
+        await rm(issueDir, { recursive: true, force: true });
+        await rm(integrationDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('a merge git refused in the merge pass halts with its reason and sends no fixer', async () => {
     const integrationDir = await setupConflictedIntegration(true);

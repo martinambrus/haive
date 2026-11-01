@@ -33,6 +33,7 @@ app.onError(errorHandler);
 function setup(verifyCommands: Record<string, unknown> | null = null, userId = USER) {
   const fake = createFakeDb({
     repositories: schema.repositories,
+    auditEvents: schema.auditEvents,
     onboardingArtifacts: schema.onboardingArtifacts,
     projectStateOutbox: schema.projectStateOutbox,
     envTemplates: schema.envTemplates,

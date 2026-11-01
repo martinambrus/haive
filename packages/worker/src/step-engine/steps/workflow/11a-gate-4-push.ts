@@ -13,6 +13,7 @@ import {
   gitRun,
   pushBranch,
 } from '../../../repo/git-push.js';
+import { gitGaveNoAnswer } from '../../../repo/git-exec.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
 import { putBackProjections, warnStep } from '../../../project-state/branch-revert.js';
 
@@ -108,7 +109,16 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
     }
 
     const branchRes = await gitRun(workspacePath, ['rev-parse', '--abbrev-ref', 'HEAD']);
-    const branch = branchRes.code === 0 ? branchRes.stdout.trim() : null;
+    const unborn =
+      branchRes.code !== 0 &&
+      !gitGaveNoAnswer(branchRes) &&
+      (await gitRun(workspacePath, ['rev-parse', '-q', '--verify', 'HEAD'])).code === 1;
+    if (branchRes.code !== 0 && !unborn) {
+      throw new Error(
+        `could not read the checkout's current branch: ${(branchRes.stderr || branchRes.stdout).trim()}`,
+      );
+    }
+    const branch = unborn ? null : branchRes.stdout.trim();
 
     let originUrl: string | null = null;
     let originError: string | null = null;
@@ -120,11 +130,14 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
     }
     const hasOrigin = originUrl !== null;
 
-    const logRes = await gitRun(workspacePath, ['log', '--oneline', '-10']);
+    const logRes = unborn ? null : await gitRun(workspacePath, ['log', '--oneline', '-10']);
+    if (logRes && logRes.code !== 0) {
+      throw new Error(
+        `git log failed in ${workspacePath}: ${(logRes.stderr || logRes.stdout).trim()}`,
+      );
+    }
     const recentCommits =
-      logRes.code === 0 && logRes.stdout.trim().length > 0
-        ? logRes.stdout.trim().slice(0, 3000)
-        : 'No commits found on this branch.';
+      logRes?.stdout.trim().slice(0, 3000) || 'No commits found on this branch.';
 
     return {
       hasGit: true,

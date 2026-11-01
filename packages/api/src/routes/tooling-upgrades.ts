@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { Hono } from 'hono';
 import { and, desc, eq, isNull, or, sql, inArray } from 'drizzle-orm';
 import { isRootClaimLive, lockRepositoryTasksKey, schema } from '@haive/database';
@@ -47,7 +48,7 @@ import {
   normalizeReviewDimensionIds,
 } from '@haive/shared/review';
 import { getDb } from '../db.js';
-import { boundedLockWait } from '../lib/repository-busy.js';
+import { boundedLockWait, REPOSITORY_BUSY } from '../lib/repository-busy.js';
 import { requireJsonObject } from '../lib/json-object.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { getRedis } from '../redis.js';
@@ -767,6 +768,13 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     if (!read || !decided) {
       throw new HttpError(409, 'No imported MCP servers are waiting for a decision');
     }
+    const event: AuditEvent = {
+      actorUserId: userId,
+      action: 'repository.mcp_servers.decide',
+      targetType: 'repository',
+      targetId: repositoryId,
+      metadata: { decision: body.repoMcpServersAction },
+    };
     const written = await db.transaction(async (tx) => {
       const rows = await tx
         .update(schema.repositories)
@@ -781,7 +789,10 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
           ),
         )
         .returning({ id: schema.repositories.id });
-      if (rows.length > 0) await markProjectStateDirty(tx, repositoryId);
+      if (rows.length > 0) {
+        await markProjectStateDirty(tx, repositoryId);
+        await insertAuditEvent(tx, event);
+      }
       return rows;
     });
     if (written.length === 0) {
@@ -790,6 +801,7 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
         'The MCP server settings changed meanwhile; reload and decide again',
       );
     }
+    logAuditEvent(event);
     return c.json({ repositoryId, ok: true, reembedQueued: false });
   }
 
@@ -939,10 +951,15 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
           };
           // Stored before the reset: a reset that fails part-way leaves NULL hashes over the old vectors.
           assertRagLockHeld(lock);
-          await db
-            .update(schema.repositories)
-            .set(pending)
-            .where(eq(schema.repositories.id, repositoryId));
+          // The pending flag is the first write too: bound its implicit row lock.
+          await db.transaction((tx) =>
+            boundedLockWait(tx, () =>
+              tx
+                .update(schema.repositories)
+                .set(pending)
+                .where(eq(schema.repositories.id, repositoryId)),
+            ),
+          );
           reembedQueued = await forceRagReembed(db, repositoryId, lock);
           if (reembedQueued) Object.assign(updates, pending);
         }
@@ -958,16 +975,59 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
         appAuthWrites.map(({ suffix, value }) => [suffix, value ? 'set' : 'cleared']),
       ),
     };
+    const securityFields = [
+      'secretMaskEnabled',
+      'secretMaskAllow',
+      'secretMaskDenyExtend',
+      'agentRulesOverride',
+      'appAuth',
+      'verifyCommands',
+      'prWorkflowEnabled',
+    ] as const;
+    let changedFields: string[] = [];
+    const securityEvent: AuditEvent = {
+      actorUserId: userId,
+      action: 'repository.security.update',
+      targetType: 'repository',
+      targetId: repositoryId,
+      metadata: null,
+    };
     assertRagLockHeld(lock);
     await db.transaction(async (tx) => {
-      if (typeof body.rtkEnabled === 'boolean') {
-        const [stored] = await tx
-          .select({ rtkEnabled: schema.repositories.rtkEnabled })
+      // A relink holds this row through its git work: give up with 409 busy rather than queue behind it.
+      const [stored] = await boundedLockWait(tx, () =>
+        tx
+          .select()
           .from(schema.repositories)
           .where(eq(schema.repositories.id, repositoryId))
-          .for('update');
-        if (stored?.rtkEnabled !== body.rtkEnabled) updates.rtkChoiceMadeAt = new Date();
-      }
+          .for('update'),
+      );
+      if (!stored) throw new HttpError(404, 'Repository not found');
+      if (typeof body.rtkEnabled === 'boolean' && stored.rtkEnabled !== body.rtkEnabled)
+        updates.rtkChoiceMadeAt = new Date();
+      changedFields = securityFields.filter(
+        (field) => field in updates && !isDeepStrictEqual(stored[field], updates[field]),
+      );
+      securityEvent.metadata = {
+        fields: changedFields,
+        values: Object.fromEntries(
+          changedFields.map((field) => {
+            const value = updates[field as keyof typeof updates];
+            return [
+              field,
+              field === 'appAuth'
+                ? Boolean((value as { enabled?: boolean } | null)?.enabled)
+                : typeof value === 'boolean'
+                  ? value
+                  : Array.isArray(value)
+                    ? value.length
+                    : value && typeof value === 'object'
+                      ? Object.keys(value).length
+                      : value !== null,
+            ];
+          }),
+        ),
+      };
       await tx
         .update(schema.repositories)
         .set(updates)
@@ -978,21 +1038,35 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
         else await userSecretsService.delete(userId, key, tx);
       }
       if (appAuthWrites.length > 0) await insertAuditEvent(tx, appAuthEvent);
+      if (changedFields.length > 0) await insertAuditEvent(tx, securityEvent);
       if (updates.rtkEnabled === false) await convergeRtkQuestion(tx, repositoryId, userId);
       if (PORTABLE_SETTING_UPDATE_KEYS.some((key) => key in updates)) {
         await markProjectStateDirty(tx, repositoryId);
       }
     });
-    if (appAuthWrites.length > 0) logAuditEvent(appAuthEvent);
-    // A sync can write fallback rows between the probe and the clear; look once more after it.
-    // Unfenced: the save has committed, and a lock lost by expiry leaves no sync to restore the flag.
+    // External RAG I/O needs its own pool connection: probe only after the save commits,
+    // with no repository row lock held. Unfenced: expiry can leave no sync to restore the flag.
     if (retryCleared && (await ragStoreAwaitsReembedBounded(db, repositoryId))) {
-      await db
-        .update(schema.repositories)
-        .set(retryCleared)
-        .where(eq(schema.repositories.id, repositoryId));
-      degradationKept = true;
+      try {
+        await db.transaction((tx) =>
+          boundedLockWait(tx, () =>
+            tx
+              .update(schema.repositories)
+              .set(retryCleared!)
+              .where(eq(schema.repositories.id, repositoryId)),
+          ),
+        );
+        degradationKept = true;
+      } catch (err) {
+        if (!(err instanceof HttpError && err.status === 409 && err.message === REPOSITORY_BUSY))
+          throw err;
+        // The save already committed: keep its answer. If a relink holds the row,
+        // the flag stays cleared until the next sync rather than waiting without a bound.
+        logger.warn({ repositoryId }, 'retry degraded flag restore deferred by repository lock');
+      }
     }
+    if (appAuthWrites.length > 0) logAuditEvent(appAuthEvent);
+    if (changedFields.length > 0) logAuditEvent(securityEvent);
     return c.json({
       repositoryId,
       ok: true,

@@ -173,11 +173,17 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     if (!(await requireUsableGit(ctx.repoPath))) return empty;
 
     const cur = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
-    if (gitGaveNoAnswer(cur))
+    if (cur.code !== 0) {
+      // An unborn HEAD is an explicit absence (exit 1), not every failure of the branch read.
+      if (!gitGaveNoAnswer(cur)) {
+        const head = await gitRun(ctx.repoPath, ['rev-parse', '-q', '--verify', 'HEAD']);
+        if (head.code === 1) return empty;
+      }
       throw new Error(
         `could not read the checkout's current branch: ${(cur.stderr || cur.stdout).trim()}`,
       );
-    const currentBranch = cur.code === 0 ? cur.stdout.trim() : null;
+    }
+    const currentBranch = cur.stdout.trim();
     // Detached HEAD ('HEAD') has no branch to freshen — skip the sync, let 01 cope.
     const base = currentBranch && currentBranch !== 'HEAD' ? currentBranch : null;
 
@@ -537,6 +543,11 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         };
       }
 
+      const runFF = async () => {
+        const res = await ff();
+        return { ...res, after: onCurrent ? await headCommit(ctx.repoPath) : before };
+      };
+
       // Under both projection locks, so no sweep can rewrite a file between the check and the move. A
       // file found rewritten ends the transaction unmoved and goes back to the set-aside.
       const ffLocked = async (): Promise<{
@@ -544,8 +555,9 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         stderr: string;
         stdout: string;
         unmoved?: true;
+        after?: string;
       }> => {
-        if (!repositoryId) return ff();
+        if (!repositoryId) return runFF();
         for (let attempt = 1; ; attempt++) {
           // A claimed section: no merge in this checkout interleaves, and a cancelled pass is refused.
           const moved = await withMergeDirSection(ctx.db, owner, async (tx) => {
@@ -556,7 +568,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
             const holding = await fence(tx);
             return holding > 0
               ? { again, res: null, holding }
-              : { again, res: await ff(), holding };
+              : { again, res: await runFF(), holding };
           });
           if (moved.res) return moved.res;
           if (moved.holding > 0) {
@@ -596,7 +608,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       let res: Awaited<ReturnType<typeof ffLocked>>;
       try {
         res = await ffLocked();
-        if (res.code !== 0 && !res.unmoved) {
+        if (res.code !== 0 && !res.unmoved && res.after === before) {
           // The deepen is a network fetch: Haive's files go back first, and the retry sets them aside again.
           if (repositoryId && asided) {
             await putBackProjections(ctx.db, repositoryId, ctx.repoPath, kept, putBackSection);
@@ -634,14 +646,34 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         }
         throw err;
       }
-      if (onCurrent && res.code === 0) await handBackAfterMove(ctx.repoPath, before);
-      if (repositoryId && res.code === 0) {
-        await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
-        await restoreKeptMetadata(ctx.repoPath, kept);
+      const headMoved = onCurrent && !res.unmoved && res.after !== before;
+      if (headMoved) {
+        let handBackFailed = false;
+        try {
+          await handBackAfterMove(ctx.repoPath, before);
+        } catch (err) {
+          handBackFailed = true;
+          throw err;
+        } finally {
+          if (repositoryId) {
+            try {
+              await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
+            } catch (err) {
+              if (!handBackFailed) throw err;
+              ctx.logger.warn({ err }, 'projection resync failed after hand-back failure');
+            } finally {
+              await restoreKeptMetadata(ctx.repoPath, kept);
+            }
+          }
+        }
       } else if (repositoryId && asided) {
         await putBackProjections(ctx.db, repositoryId, ctx.repoPath, kept, putBackSection);
       }
       if (res.code !== 0) {
+        if (headMoved)
+          throw new Error(
+            `git fast-forward failed after moving the checkout: ${res.stderr || res.stdout}`,
+          );
         ctx.logger.warn(
           { base, stderr: res.stderr },
           'sync base: fast-forward failed; continuing with local base',

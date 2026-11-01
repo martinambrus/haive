@@ -36,6 +36,7 @@ const SAVED_AT = new Date('2026-01-01T00:00:00Z');
 
 const TABLES = {
   repositories: schema.repositories,
+  auditEvents: schema.auditEvents,
   tasks: schema.tasks,
   onboardingArtifacts: schema.onboardingArtifacts,
   projectStateOutbox: schema.projectStateOutbox,

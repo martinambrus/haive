@@ -12,6 +12,7 @@ const h = vi.hoisted(() => {
       throw new Error('Redis not initialized');
     }) as () => unknown,
     warn,
+    error: vi.fn(),
   };
 });
 
@@ -37,6 +38,7 @@ vi.mock('@haive/shared', async (importOriginal) => {
     {
       get: (_target, prop) => {
         if (prop === 'warn') return h.warn;
+        if (prop === 'error') return h.error;
         if (prop === 'child') return () => log;
         return () => undefined;
       },
@@ -54,11 +56,16 @@ vi.mock('@haive/shared', async (importOriginal) => {
   };
 });
 
+import { serializeError } from '@haive/shared/logger';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { computeEmailBlindIndex, encryptEmail, secretsService } from '@haive/shared';
 import { hashPassword, verifyPassword } from '../src/auth/password.js';
 import { createApiApp } from '../src/index.js';
+import { AuthThrottleError } from '../src/lib/auth-throttle.js';
+
+// @ts-expect-error Every refusal must explicitly identify the rejecting limiter.
+new AuthThrottleError(new Response(null, { status: 429 }), true);
 
 vi.setConfig({ testTimeout: 120_000, hookTimeout: 60_000 });
 
@@ -79,7 +86,11 @@ let fake: ReturnType<typeof makeFake>;
 const reg = { userCount: 1, existing: false, mode: 'closed' as 'closed' | 'open' };
 
 function makeFake() {
-  return createFakeDb({ users: schema.users, refreshTokens: schema.refreshTokens });
+  return createFakeDb({
+    users: schema.users,
+    refreshTokens: schema.refreshTokens,
+    auditEvents: schema.auditEvents,
+  });
 }
 
 function installDb() {
@@ -91,19 +102,22 @@ function installDb() {
       userInvites: { findFirst: async () => undefined },
     },
     select: () => ({ from: async () => [{ n: reg.userCount }] }),
-    insert: () => ({
-      values: () => ({
-        returning: async () => [
-          {
-            id: randomUUID(),
-            role: reg.userCount === 0 ? 'admin' : 'user',
-            status: 'active',
-            tokenVersion: 0,
-            createdAt: new Date(),
+    insert: (table: any) =>
+      table !== schema.users
+        ? fake.db.insert(table)
+        : {
+            values: () => ({
+              returning: async () => [
+                {
+                  id: randomUUID(),
+                  role: reg.userCount === 0 ? 'admin' : 'user',
+                  status: 'active',
+                  tokenVersion: 0,
+                  createdAt: new Date(),
+                },
+              ],
+            }),
           },
-        ],
-      }),
-    }),
     update: () => ({ set: () => ({ where: () => ({ returning: async () => [] }) }) }),
   };
   h.db = {
@@ -155,7 +169,12 @@ interface RefusedBody {
   retryAfterSeconds: number;
 }
 
-async function expectRefused(send: () => Promise<Response>, seconds?: number): Promise<number> {
+async function expectRefused(
+  send: () => Promise<Response>,
+  seconds?: number,
+  scope: Scope = 'login',
+): Promise<number> {
+  const before = fake.rows(schema.auditEvents).length;
   h.getDb.mockClear();
   vi.mocked(verifyPassword).mockClear();
   vi.mocked(hashPassword).mockClear();
@@ -168,7 +187,16 @@ async function expectRefused(send: () => Promise<Response>, seconds?: number): P
   expect(body.retryAfterSeconds).toBe(Number(header));
   expect(body.error).toContain(String(body.retryAfterSeconds));
   expect(res.headers.get('set-cookie')).toBeNull();
-  expect(h.getDb).not.toHaveBeenCalled();
+  if (scope === 'register') expect(h.getDb).not.toHaveBeenCalled();
+  else {
+    const added = fake.rows(schema.auditEvents).slice(before);
+    expect(added.length).toBeLessThanOrEqual(1);
+    for (const row of added)
+      expect(row).toMatchObject({
+        action: 'auth.login.throttled',
+        metadata: { reason: 'throttled' },
+      });
+  }
   expect(verifyPassword).not.toHaveBeenCalled();
   expect(hashPassword).not.toHaveBeenCalled();
   if (seconds !== undefined) expect(body.retryAfterSeconds).toBe(seconds);
@@ -178,6 +206,21 @@ async function expectRefused(send: () => Promise<Response>, seconds?: number): P
 const statuses = async (sends: Promise<Response>[]) =>
   (await Promise.all(sends)).map((r) => r.status);
 const count = (list: number[], status: number) => list.filter((s) => s === status).length;
+
+/** The pending value, or an error naming the wait when `ms` pass first. */
+async function answeredWithin<T>(ms: number, pending: Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`no answer within ${ms} ms`)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 beforeAll(async () => {
   process.env.LOG_LEVEL = 'silent';
@@ -193,6 +236,7 @@ beforeEach(() => {
   reg.mode = 'closed';
   installDb();
   h.warn.mockClear();
+  h.error.mockClear();
 });
 
 afterEach(() => {
@@ -225,6 +269,227 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
     T0 = Math.floor(Date.now() / 1000) * 1000 + 250;
     vi.useFakeTimers({ toFake: ['Date'] });
     at(0);
+  });
+
+  describe('audit bound', () => {
+    const throttled = () =>
+      fake.rows(schema.auditEvents).filter((r) => r.action === 'auth.login.throttled');
+    it('writes one row and does one lookup for a parallel burst on the rejected account key', async () => {
+      const email = mail('audit-account');
+      addUser(email);
+      for (let i = 0; i < 10; i++) await login(email, WRONG);
+      const lookup = vi.spyOn((h.db as any).query.users, 'findFirst');
+      lookup.mockClear();
+      const insert = (h.db as any).insert;
+      const writes: Promise<unknown>[] = [];
+      let release!: () => void;
+      const resume = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const delayedInsert = vi.spyOn(h.db as any, 'insert').mockImplementation((table) => {
+        const query = insert(table);
+        if (table !== schema.auditEvents) return query;
+        return {
+          values: (values: unknown) => {
+            const write = resume.then(() => query.values(values));
+            writes.push(write);
+            return write;
+          },
+        };
+      });
+      try {
+        // The audit insert is held until every response is in: a 429 that waits for it never comes.
+        const got = await answeredWithin(
+          5_000,
+          statuses(Array.from({ length: 20 }, () => login(email, WRONG))),
+        );
+        expect(got).toEqual(Array(20).fill(429));
+        expect(throttled()).toHaveLength(0);
+        release();
+        await vi.waitFor(() => expect(throttled()).toHaveLength(1), { timeout: 15_000 });
+        expect(lookup).toHaveBeenCalledTimes(1);
+        expect(throttled()[0]).toMatchObject({
+          targetId: fake.rows(schema.users)[0]!.id,
+          metadata: { reason: 'throttled', limiter: 'account' },
+        });
+        const gate = `${acctKey('login', email)}:audit`;
+        expect(await client.get(gate)).toBe('1');
+        expect(await client.pttl(gate)).toBeGreaterThan(0);
+        expect(await client.pttl(gate)).toBeLessThanOrEqual(60_000);
+        await client.del(gate);
+        at(61_000);
+        for (let i = 0; i < 10; i++) await login(email, WRONG);
+        await expectRefused(() => login(email, WRONG));
+        await vi.waitFor(() => expect(throttled()).toHaveLength(2), { timeout: 15_000 });
+      } finally {
+        release();
+        await Promise.all(writes);
+        delayedInsert.mockRestore();
+      }
+    });
+    it.each(['public peer', 'trusted proxy'])(
+      'targets the account on an account trip with a counted %s address',
+      async (source) => {
+        const email = mail(`account-with-address-${source.replaceAll(' ', '-')}`);
+        addUser(email);
+        const viaProxy = source === 'trusted proxy';
+        if (viaProxy) vi.stubEnv('HAIVE_TRUSTED_PROXIES', '10.1.2.3');
+        const address = viaProxy ? '10.5.5.5' : peer(7);
+        const opts = viaProxy
+          ? { peer: '10.1.2.3', headers: { 'x-forwarded-for': address } }
+          : { peer: address };
+        for (let i = 0; i < 10; i++) expect((await login(email, WRONG, opts)).status).toBe(401);
+        expect(await client.zcard(ipKey('login', address))).toBe(10);
+        const lookup = vi.spyOn((h.db as any).query.users, 'findFirst');
+        lookup.mockClear();
+        const response = await login(email, WRONG, opts);
+        expect(response.status).toBe(429);
+        await vi.waitFor(() => expect(throttled()).toHaveLength(1), { timeout: 15_000 });
+        expect(throttled()[0]).toMatchObject({
+          targetId: fake.rows(schema.users)[0]!.id,
+          metadata: { reason: 'throttled', limiter: 'account' },
+        });
+        expect(lookup).toHaveBeenCalledTimes(1);
+        expect(await client.get(`${acctKey('login', email)}:audit`)).toBe('1');
+        expect(await client.exists(`${ipKey('login', address)}:audit`)).toBe(0);
+      },
+    );
+    it('uses the rejected address key even for distinct login identifiers', async () => {
+      for (let i = 0; i < 30; i++) await login(mail(`audit-ip-${i}`), WRONG, { peer: peer(1) });
+      const victim = mail('audit-victim');
+      addUser(victim);
+      const lookup = vi.spyOn((h.db as any).query.users, 'findFirst');
+      lookup.mockClear();
+      const insert = (h.db as any).insert;
+      let release!: () => void;
+      const resume = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const writes: Promise<unknown>[] = [];
+      const held = vi.spyOn(h.db as any, 'insert').mockImplementation((table) => {
+        const query = insert(table);
+        if (table !== schema.auditEvents) return query;
+        return {
+          values: (values: unknown) => {
+            const write = resume.then(() => query.values(values));
+            writes.push(write);
+            return write;
+          },
+        };
+      });
+      try {
+        // The audit insert is held until every response is in: a 429 that waits for it never comes.
+        await answeredWithin(
+          5_000,
+          expectRefused(() => login(victim, WRONG, { peer: peer(1) })),
+        );
+        for (let i = 0; i < 19; i++)
+          await answeredWithin(
+            5_000,
+            expectRefused(() => login(mail(`audit-new-${i}`), WRONG, { peer: peer(1) })),
+          );
+        release();
+        await vi.waitFor(() => expect(throttled()).toHaveLength(1), { timeout: 15_000 });
+        expect(lookup).not.toHaveBeenCalled();
+        expect(throttled()[0]).toMatchObject({
+          targetId: null,
+          metadata: { reason: 'throttled', limiter: 'address' },
+        });
+        expect(throttled()).toHaveLength(1);
+        expect(await client.get(`${ipKey('login', peer(1))}:audit`)).toBe('1');
+      } finally {
+        release();
+        await Promise.all(writes);
+        held.mockRestore();
+      }
+    });
+    it('preserves 429 and skips the database when the Redis audit gate fails', async () => {
+      const email = mail('audit-gate-error');
+      for (let i = 0; i < 10; i++) await login(email, WRONG);
+      const set = vi.spyOn(client, 'set').mockRejectedValue(new Error('gate unavailable'));
+      h.getDb.mockClear();
+      try {
+        await expectRefused(() => login(email, WRONG), 60);
+        expect(h.getDb).not.toHaveBeenCalled();
+        expect(throttled()).toEqual([]);
+      } finally {
+        set.mockRestore();
+      }
+    });
+    it.each(['lookup', 'insert'])(
+      'logs one structured error and preserves 429 when the admitted audit %s fails',
+      async (stage) => {
+        const email = mail(`audit-error-${stage}`);
+        for (let i = 0; i < 10; i++) await login(email, WRONG);
+        const failure = Object.assign(new Error('bound synthetic-audit-secret'), {
+          query:
+            stage === 'lookup'
+              ? 'select id from users where email_blind_index = $1'
+              : 'insert into audit_events values ($1)',
+          params: ['synthetic-audit-secret'],
+        });
+        const blocked =
+          stage === 'lookup'
+            ? vi.spyOn((h.db as any).query.users, 'findFirst').mockRejectedValue(failure)
+            : vi.spyOn(h.db as any, 'insert').mockReturnValue({
+                values: async () => {
+                  throw failure;
+                },
+              });
+        try {
+          await expectRefused(() => login(email, WRONG), 60);
+          await vi.waitFor(() => expect(h.error).toHaveBeenCalledTimes(1), { timeout: 15_000 });
+          expect(h.error).toHaveBeenCalledWith(
+            stage === 'lookup'
+              ? { err: failure }
+              : { err: failure, action: 'auth.login.throttled' },
+            stage === 'lookup'
+              ? 'failed to audit throttled sign-in'
+              : 'failed to write audit event',
+          );
+          const [fields] = h.error.mock.calls[0]!;
+          const diagnostic = JSON.stringify({ ...fields, err: serializeError(fields.err) });
+          expect(diagnostic).not.toContain('synthetic-audit-secret');
+          expect(diagnostic).not.toContain(email);
+          expect(diagnostic).not.toContain(WRONG);
+          expect(throttled()).toEqual([]);
+        } finally {
+          blocked.mockRestore();
+        }
+      },
+    );
+    it.each(['lookup', 'insert'])(
+      'answers 429 promptly when the audit %s never settles',
+      async (stall) => {
+        const email = mail(`audit-stall-${stall}`);
+        for (let i = 0; i < 10; i++) await login(email, WRONG);
+        const never = new Promise<never>(() => {});
+        const blocked =
+          stall === 'lookup'
+            ? vi.spyOn((h.db as any).query.users, 'findFirst').mockReturnValue(never)
+            : vi.spyOn(h.db as any, 'insert').mockReturnValue({ values: () => never });
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const response = await Promise.race([
+            login(email, WRONG),
+            new Promise<never>((_resolve, reject) => {
+              timer = setTimeout(() => reject(new Error('429 waited for audit')), 1500);
+            }),
+          ]);
+          expect(response.status).toBe(429);
+          expect(response.headers.get('Retry-After')).toBe('60');
+          expect(throttled()).toEqual([]);
+        } finally {
+          clearTimeout(timer);
+          blocked.mockRestore();
+        }
+      },
+    );
+    it('register throttle never opens the database', async () => {
+      const email = mail('register-no-db');
+      for (let i = 0; i < 10; i++) await register(email);
+      await expectRefused(() => register(email), 60, 'register');
+    });
   });
 
   describe('TH-1 per account', () => {
@@ -370,7 +635,7 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
       for (let i = 5; i < 10; i++)
         expect((await register(email, { peer: peer(i) })).status).toBe(409);
       reg.existing = false;
-      await expectRefused(() => register(email, { peer: peer(10) }));
+      await expectRefused(() => register(email, { peer: peer(10) }), undefined, 'register');
       expect(await client.zcard(acctKey('register', email))).toBe(10);
       expect((await login(email, WRONG, { peer: peer(11) })).status).toBe(401);
       expect(await client.zcard(acctKey('login', email))).toBe(1);
@@ -507,7 +772,9 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
           { incoming: { socket: {} } },
         ),
       );
-      expect(await keys()).toEqual([acctKey('login', email)]);
+      expect(await keys()).toEqual(
+        [acctKey('login', email), `${acctKey('login', email)}:audit`].sort(),
+      );
     });
   });
 

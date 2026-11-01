@@ -4,6 +4,9 @@ import { logger } from '@haive/shared';
 
 const log = logger.child({ module: 'audit' });
 
+/** No authenticated actor. A fixed sentinel records no login identifier or derived fingerprint. */
+export const ANONYMOUS_AUDIT_ACTOR = '00000000-0000-0000-0000-000000000000';
+
 export interface AuditEvent {
   /** Who performed the action (plain uuid; no FK). */
   actorUserId: string;

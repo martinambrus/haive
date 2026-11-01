@@ -55,11 +55,13 @@ describe('gitOperationInProgress', () => {
     expect(await gitOperationInProgress(repo)).toBe(false);
   });
 
-  it('reads a git dir outside the checkout as an open operation, never anchoring there', async () => {
+  it('reports a git dir outside the checkout as unreadable, never anchoring there', async () => {
     const outside = mkdtempSync(join(tmpdir(), 'git-operation-gitdir-'));
     try {
       git(repo, 'init', '-q', '--separate-git-dir', join(outside, 'git'));
-      expect(await gitOperationInProgress(repo)).toBe(true);
+      await expect(gitOperationInProgress(repo)).rejects.toMatchObject({
+        name: 'GitOperationUnreadableError',
+      });
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
@@ -92,9 +94,11 @@ describe('gitOperationInProgress', () => {
     }
   });
 
-  it('keeps reading a folder with no .git inside a parent repository as an open operation', async () => {
+  it('rejects an operation check whose git directory is outside the checkout anchor', async () => {
     mkdirSync(join(repo, 'nested'));
-    expect(await gitOperationInProgress(join(repo, 'nested'))).toBe(true);
+    await expect(gitOperationInProgress(join(repo, 'nested'))).rejects.toMatchObject({
+      name: 'GitOperationUnreadableError',
+    });
   });
 });
 

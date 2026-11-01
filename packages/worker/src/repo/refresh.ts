@@ -1,9 +1,12 @@
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { UnrecoverableError } from 'bullmq';
 import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
 import {
   ensureDirNoFollow,
   lstatNoFollow,
   readdirNoFollow,
+  readFileNoFollow,
   removeNoFollow,
   renameNoFollow,
 } from '@haive/shared/fs-safe';
@@ -21,8 +24,10 @@ import {
   setAsideHaiveProjections,
   type KeptFiles,
 } from '../project-state/set-aside.js';
+import { headCommit } from '../plan/merge.js';
 import { seedPlanBaseFromCheckout } from '../plan/mirror.js';
 import { handBackAfterMove } from '../step-engine/git-merge.js';
+import { GitOperationUnreadableError } from './git-operation.js';
 import { GIT_TIMED_OUT, gitGaveNoAnswer, type GitRunResult } from './git-exec.js';
 import {
   buildCredentialHelper,
@@ -61,20 +66,110 @@ const holdingRefusal = (holding: number): string =>
 const whyNoAnswer = (res: GitRunResult): string =>
   res.noExit ?? (res.code === GIT_TIMED_OUT ? 'timed out' : `git exited ${res.code}`);
 
-/** A git work tree whose top level is `dest` itself and that has a commit to stand on. A git run
- *  that gave no answer is `unknown`, which must not read as "not usable": a rebuild moves the folder. */
+/** What a gitfile starts with, byte for byte. */
+const GITFILE_PREFIX = Buffer.from('gitdir: ');
+
+/** Said when git answered with an exit status of its own and no structure proves the checkout dead:
+ *  another Retry reads the same bytes and gets the same answer. */
+const REPAIR_ADVICE =
+  'Retry cannot help until the checkout is repaired. Removing the repository deletes this checkout, including any commit that was never pushed.';
+
+/** A git work tree whose top level is `dest` itself and that has a commit to stand on.
+ *  `unusable`: a different top level, HEAD exit 1, `dest` itself absent or not a directory when git
+ *  gave no answer, or, after `--show-cdup` exited non-zero, a `.git` that strict no-follow reads
+ *  prove is not what git requires: absent; a directory without HEAD, with a HEAD that is neither a
+ *  `ref:` line nor an object id, or without objects/ or refs/ (unless a commondir names their
+ *  home); a file that does not start with `gitdir: `; or a file naming a gitdir inside `dest` that
+ *  is absent.
+ *  `unknown`: git gave no answer while `dest` is a directory, or exited non-zero over a `.git` those
+ *  reads cannot prove dead (a corrupt config, unreadable, linked or external metadata), or a HEAD
+ *  read other than exit 0 or 1. `repairNeeded` marks the ones where git answered with an exit
+ *  status of its own.
+ *  Unknown must never trigger a rebuild: it moves the folder. */
 export async function usableCheckout(
   dest: string,
-): Promise<'usable' | 'unusable' | { unknown: string }> {
+): Promise<'usable' | 'unusable' | { unknown: string; repairNeeded?: true }> {
   const cdup = await gitRun(dest, ['rev-parse', '--show-cdup']);
   if (gitGaveNoAnswer(cdup)) {
-    const there = await lstatNoFollow(path.dirname(dest), path.basename(dest));
-    return there?.kind === 'directory' ? { unknown: whyNoAnswer(cdup) } : 'unusable';
+    try {
+      const there = await lstatNoFollow(path.dirname(dest), path.basename(dest), { strict: true });
+      return there?.kind === 'directory' ? { unknown: whyNoAnswer(cdup) } : 'unusable';
+    } catch (err) {
+      logger.warn({ err, dest }, 'checkout directory unreadable after git gave no answer');
+      return { unknown: whyNoAnswer(cdup) };
+    }
   }
-  if (cdup.code !== 0 || cdup.stdout.trim() !== '') return 'unusable';
+  if (cdup.code !== 0) {
+    // Exit codes cannot distinguish corrupt config from a dead .git. Rebuild only when strict
+    // no-follow reads prove that what git requires is missing or cannot be what it requires;
+    // everything else stays unknown.
+    try {
+      const entry = await lstatNoFollow(dest, '.git', { strict: true });
+      if (entry === null) return 'unusable';
+      if (entry.kind === 'directory') {
+        // git takes a HEAD that starts with `ref:` or with an object id; the first 40 bytes tell.
+        const head = await readFileNoFollow(dest, '.git/HEAD', { strict: true, maxBytes: 40 });
+        if (head === null) return 'unusable';
+        const start = head.data.toString('latin1');
+        if (!start.startsWith('ref:') && !/^[0-9a-f]{40}/i.test(start)) return 'unusable';
+        // A commondir file moves objects/ and refs/ to the directory it names.
+        if ((await lstatNoFollow(dest, '.git/commondir', { strict: true })) === null) {
+          for (const part of ['objects', 'refs']) {
+            if ((await lstatNoFollow(dest, `.git/${part}`, { strict: true })) === null) {
+              return 'unusable';
+            }
+          }
+        }
+      } else if (entry.kind === 'file') {
+        const read = await readFileNoFollow(dest, '.git', { strict: true, maxBytes: 4096 });
+        if (read && !read.data.subarray(0, GITFILE_PREFIX.length).equals(GITFILE_PREFIX)) {
+          return 'unusable';
+        }
+        const gitfile = read?.data.toString('utf8');
+        if (
+          read &&
+          !read.truncated &&
+          gitfile !== undefined &&
+          Buffer.from(gitfile).equals(read.data)
+        ) {
+          // Git removes trailing CR/LF from a gitfile; spaces belong to the directory name.
+          const gitdir = gitfile.slice(GITFILE_PREFIX.length).replace(/[\r\n]+$/, '');
+          // Git opens ".." through the file system, behind any link on the way; path.resolve
+          // collapses it by its text. A gitdir with one cannot be judged absent from its text.
+          if (!gitdir.split('/').includes('..')) {
+            const rel = path.relative(dest, path.resolve(dest, gitdir));
+            if (rel && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)) {
+              if ((await lstatNoFollow(dest, rel, { strict: true })) === null) return 'unusable';
+            }
+          }
+        }
+      }
+    } catch (err) {
+      // An unreadable entry cannot prove that rebuilding is safe.
+      logger.warn(
+        { err, dest },
+        'checkout structure unreadable after git failed; leaving it unknown',
+      );
+    }
+    // Git's own words tell a corrupt config from an ownership refusal. For the reader of the log
+    // only: nothing branches on them.
+    logger.warn(
+      { dest, stderr: cdup.stderr.trim().slice(0, 500) },
+      'git exited non-zero over a checkout nothing proves dead; leaving it unknown',
+    );
+    return { unknown: whyNoAnswer(cdup), repairNeeded: true };
+  }
+  if (cdup.stdout.trim() !== '') return 'unusable';
   const head = await gitRun(dest, ['rev-parse', '--verify', '--quiet', 'HEAD']);
   if (head.code === 0) return 'usable';
-  return head.code === 1 ? 'unusable' : { unknown: whyNoAnswer(head) };
+  if (head.code === 1) return 'unusable';
+  if (gitGaveNoAnswer(head)) return { unknown: whyNoAnswer(head) };
+  // For the reader of the log only: nothing branches on git's words.
+  logger.warn(
+    { dest, stderr: head.stderr.trim().slice(0, 500) },
+    'git exited other than 0 or 1 reading HEAD; leaving the checkout unknown',
+  );
+  return { unknown: whyNoAnswer(head), repairNeeded: true };
 }
 
 interface RefreshSource {
@@ -140,6 +235,12 @@ async function sourceFor(
   };
 }
 
+/** Only pre-move gates may answer this refusal, after their captured files are put back. */
+function unreadableOperationRefusal(err: unknown): string {
+  if (!(err instanceof GitOperationUnreadableError)) throw err;
+  return `Not refreshed: the checkout could not be checked for an open merge or rebase (${firstLine(err.message)}). The checkout was not moved.`;
+}
+
 /** Fast-forward the checkout to its source. Answers why it was left as it was, or null once it is
  *  up to date. `merge --ff-only` never drops a commit or overwrites a local change: git refuses. */
 export async function fastForward(
@@ -148,7 +249,9 @@ export async function fastForward(
   dest: string,
 ): Promise<string | null> {
   const head = await gitRun(dest, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
-  if (head.code !== 0) return 'Not refreshed: the checkout is not on a branch.';
+  if (head.code === 1) return 'Not refreshed: the checkout is not on a branch.';
+  if (head.code !== 0)
+    return `Not refreshed: could not read the checkout's branch (${firstLine(head.stderr || head.stdout)}).`;
   const branch = head.stdout.trim();
   let source: RefreshSource | null;
   try {
@@ -161,22 +264,30 @@ export async function fastForward(
   const fetchError = await source.fetch(branch, []);
   if (fetchError)
     return `Not refreshed: could not fetch ${branch} from ${source.label} (${fetchError}).`;
-  const target = (
-    await gitRun(dest, ['rev-parse', '--verify', 'FETCH_HEAD^{commit}'])
-  ).stdout.trim();
-  if (!target) return `Not refreshed: fetching ${branch} from ${source.label} brought no commit.`;
+  const fetchedHead = await gitRun(dest, ['rev-parse', '--verify', 'FETCH_HEAD^{commit}']);
+  if (fetchedHead.code !== 0)
+    return `Not refreshed: could not read the fetched commit (${firstLine(fetchedHead.stderr || fetchedHead.stdout)}).`;
+  const target = fetchedHead.stdout.trim();
+  if (!target) return `Not refreshed: could not read the fetched commit (empty answer).`;
 
   let base = await gitRun(dest, ['merge-base', 'HEAD', target]);
-  if (base.code !== 0) {
+  if (base.code === 1) {
     const shallow = await gitRun(dest, ['rev-parse', '--is-shallow-repository']);
+    if (shallow.code !== 0 || !['true', 'false'].includes(shallow.stdout.trim())) {
+      return `Not refreshed: could not read whether the checkout is shallow (${firstLine(shallow.stderr || shallow.stdout)}).`;
+    }
     if (shallow.stdout.trim() === 'true') {
-      await source.fetch(branch, ['--deepen=50']);
+      const deepenError = await source.fetch(branch, ['--deepen=50']);
+      if (deepenError)
+        return `Not refreshed: could not deepen ${branch} from ${source.label} (${deepenError}).`;
       base = await gitRun(dest, ['merge-base', 'HEAD', target]);
     }
   }
-  if (base.code !== 0) {
+  if (base.code === 1) {
     return `Not refreshed: this checkout and ${source.label} have no history in common.`;
   }
+  if (base.code !== 0)
+    return `Not refreshed: could not read the merge base (${firstLine(base.stderr || base.stdout)}).`;
 
   const counts = await gitRun(dest, ['rev-list', '--left-right', '--count', `HEAD...${target}`]);
   const [ahead, behind] = counts.stdout.trim().split(/\s+/).map(Number);
@@ -208,8 +319,12 @@ export async function fastForward(
     try {
       aside = await setAsideHaiveProjections(db, payload.repositoryId, dest, fence);
     } catch (err) {
-      if (asided) await putBackAfterFailure(db, payload.repositoryId, dest, kept, err);
-      throw err;
+      try {
+        if (asided) await putBackAfterFailure(db, payload.repositoryId, dest, kept, err);
+      } catch (recovered) {
+        return unreadableOperationRefusal(recovered);
+      }
+      return unreadableOperationRefusal(err);
     }
     if ((aside.outcome === 'refused' || aside.outcome === 'held') && asided) {
       await putBackProjections(db, payload.repositoryId, dest, kept);
@@ -228,23 +343,56 @@ export async function fastForward(
       moved = await db.transaction(async (tx) => {
         // Every task's start and every revival take this lock, so none lands between the fence and the move.
         await lockRepositoryTasksKey(tx, payload.repositoryId);
-        const check = await restoreProjectionsInTx(tx, payload.repositoryId, dest);
-        if (check.outcome !== 'clean') return { again: check, merge: null };
-        if ((await checkoutHoldingTasks(tx, payload.repositoryId)) > 0) {
-          return { again: check, merge: null };
+        let check;
+        try {
+          check = await restoreProjectionsInTx(tx, payload.repositoryId, dest);
+        } catch (err) {
+          if (err instanceof GitOperationUnreadableError) return { gateError: err };
+          throw err;
         }
-        return { again: check, merge: await gitRun(dest, ['merge', '--ff-only', target]) };
+        if (check.outcome !== 'clean') return { again: check, merge: null, after: null };
+        if ((await checkoutHoldingTasks(tx, payload.repositoryId)) > 0) {
+          return { again: check, merge: null, after: null };
+        }
+        const merge = await gitRun(dest, ['merge', '--ff-only', target]);
+        // A failed process may still have moved HEAD; only this read decides recovery.
+        return { again: check, merge, after: await headCommit(dest) };
       });
     } catch (err) {
       if (asided) await recoverAfterMoveFailure(db, payload.repositoryId, dest, kept, before, err);
       throw err;
     }
-    const { again, merge: merged } = moved;
+    if ('gateError' in moved) {
+      try {
+        if (asided)
+          await putBackAfterFailure(db, payload.repositoryId, dest, kept, moved.gateError);
+      } catch (recovered) {
+        return unreadableOperationRefusal(recovered);
+      }
+      return unreadableOperationRefusal(moved.gateError);
+    }
+    const { again, merge: merged, after } = moved;
     if (again.outcome === 'retry' && attempt < MOVE_ATTEMPTS) continue;
-    if (merged?.code === 0) {
-      await handBackAfterMove(dest, before);
-      await resyncHaiveProjections(db, payload.repositoryId, dest);
-      await restoreKeptMetadata(dest, kept);
+    if (after !== null && after !== before) {
+      let handBackFailed = false;
+      try {
+        await handBackAfterMove(dest, before);
+      } catch (err) {
+        handBackFailed = true;
+        throw err;
+      } finally {
+        try {
+          await resyncHaiveProjections(db, payload.repositoryId, dest);
+        } catch (err) {
+          if (!handBackFailed) throw err;
+          logger.warn(
+            { err, repositoryId: payload.repositoryId },
+            'projection resync failed after hand-back failure',
+          );
+        } finally {
+          await restoreKeptMetadata(dest, kept);
+        }
+      }
     } else if (asided) await putBackProjections(db, payload.repositoryId, dest, kept);
     if (again.outcome === 'refused') {
       return `Not refreshed: ${again.reason}. The checkout was not moved.`;
@@ -254,7 +402,9 @@ export async function fastForward(
     }
     if (merged === null) return 'Not refreshed: a task started using this repository meanwhile.';
     if (merged.code !== 0) {
-      return `Not refreshed: git refused the fast-forward (${firstLine(merged.stderr || merged.stdout)}).`;
+      return after === before
+        ? `Not refreshed: git refused the fast-forward (${firstLine(merged.stderr || merged.stdout)}).`
+        : `Refresh failed: the fast-forward moved the checkout but failed (${firstLine(merged.stderr || merged.stdout)}).`;
     }
     break;
   }
@@ -267,7 +417,7 @@ export async function fastForward(
 
 /** Move what stands at `rel` out of the way, keeping it. An empty directory holds nothing to keep. */
 async function moveAside(anchor: string, rel: string): Promise<string | null> {
-  const info = await lstatNoFollow(anchor, rel);
+  const info = await lstatNoFollow(anchor, rel, { strict: true });
   if (!info) return null;
   if (info.kind === 'directory' && ((await readdirNoFollow(anchor, rel)) ?? []).length === 0) {
     await removeNoFollow(anchor, rel);
@@ -276,6 +426,21 @@ async function moveAside(anchor: string, rel: string): Promise<string | null> {
   const asideRel = `${rel}.aside-${new Date().toISOString().replace(/[:.]/g, '-')}`;
   await renameNoFollow(anchor, rel, asideRel, { noReplace: true });
   return path.join(anchor, asideRel);
+}
+
+/** How a rebuild ends once the old folder has been moved aside. BullMQ runs a job that throws again,
+ *  `attempts` times, and each run would find what this one left at the checkout and move that
+ *  aside once more; an unrecoverable error ends the job, and a person's Retry starts a new one. */
+function failedAfterMove(
+  problem: string,
+  aside: string | null,
+  cause?: unknown,
+): UnrecoverableError {
+  const err = new UnrecoverableError(
+    `Not refreshed: ${aside ? `the previous folder was kept next to the checkout as ${path.basename(aside)}, but ` : ''}${problem}.`,
+  );
+  if (cause !== undefined) err.cause = cause;
+  return err;
 }
 
 /** A repository whose checkout is not usable: clone or copy it again, the old folder kept. */
@@ -292,22 +457,84 @@ async function rebuild(
     throw new Error('Nothing to refresh from: this repository has no remote.');
   }
   if (fromRemote) assertCloneUrl(fromRemote, 'refresh');
-  const aside = await moveAside(repoStorageRoot, rel);
+  // Everything the new tree comes from is proved before the old one is moved: a failure here
+  // leaves the checkout where it was.
+  if (fromFolder && !(await lstatNoFollow(fromFolder, '', { strict: true }))) {
+    throw new Error(
+      `Not refreshed: the folder this repository was imported from (${fromFolder}) is gone. Nothing was moved.`,
+    );
+  }
+  // A folder whose own .git is dead copies to a tree that is dead too, and the next refresh
+  // would move that aside once more: one full-size folder per refresh, for good.
   if (fromFolder) {
-    await ensureDirNoFollow(repoStorageRoot, rel);
-    await copyTree(fromFolder, dest);
-  } else {
-    await ensureDirNoFollow(repoStorageRoot, payload.userId);
-    const auth = payload.credentialsId
+    const source = await usableCheckout(fromFolder);
+    if (source === 'unusable') {
+      throw new Error(
+        `Not refreshed: the folder this repository was imported from (${fromFolder}) is not a usable git checkout. Nothing was moved.`,
+      );
+    }
+    if (source !== 'usable') {
+      throw new Error(
+        `Not refreshed: the folder this repository was imported from (${fromFolder}) could not be examined (${source.unknown}). Nothing was moved.` +
+          (source.repairNeeded ? ' Retry cannot help until that folder is repaired.' : ''),
+      );
+    }
+  }
+  const auth =
+    fromRemote && payload.credentialsId
       ? await buildCredentialHelper(db, payload.credentialsId, payload.userId, payload.remoteUrl)
       : undefined;
-    await gitClone(fromRemote!, dest, payload.branch, auth);
+  const aside = await moveAside(repoStorageRoot, rel);
+  // Publish a folder copy only after it finishes. A failed or interrupted copy must never
+  // leave a partial checkout that the next refresh could mistake for ready.
+  const stagingRel = fromFolder ? `${rel}.rebuild-${randomUUID()}` : null;
+  try {
+    if (fromFolder) {
+      await ensureDirNoFollow(repoStorageRoot, stagingRel!);
+      await copyTree(fromFolder, path.join(repoStorageRoot, stagingRel!));
+      await renameNoFollow(repoStorageRoot, stagingRel!, rel, { noReplace: true });
+    } else {
+      await ensureDirNoFollow(repoStorageRoot, payload.userId);
+      await gitClone(fromRemote!, dest, payload.branch, auth);
+    }
+  } catch (err) {
+    if (stagingRel) {
+      try {
+        await removeNoFollow(repoStorageRoot, stagingRel, { recursive: true });
+      } catch (cleanupErr) {
+        logger.warn(
+          { err: cleanupErr, stagingRel },
+          'unfinished refresh copy could not be removed',
+        );
+        throw failedAfterMove(
+          `the new checkout could not be built (${(err instanceof Error ? err.message : String(err)).trim()}); the unfinished copy was kept next to the checkout as ${path.basename(stagingRel)} because cleanup failed (${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)})`,
+          aside,
+          err,
+        );
+      }
+    }
+    throw failedAfterMove(
+      `the new checkout could not be built (${(err instanceof Error ? err.message : String(err)).trim()})`,
+      aside,
+      err,
+    );
+  }
+  const built = await usableCheckout(dest);
+  if (built !== 'usable') {
+    throw failedAfterMove(
+      built === 'unusable'
+        ? 'the rebuilt checkout is not usable'
+        : `the rebuilt checkout could not be examined (${built.unknown})`,
+      aside,
+    );
   }
   await persistDetection(
     db,
     payload.repositoryId,
     dest,
-    aside ? `The previous folder was not a usable checkout; it was kept at ${aside}.` : null,
+    aside
+      ? `The previous folder was not a usable checkout; it was kept next to the checkout as ${path.basename(aside)}.`
+      : null,
   );
 }
 
@@ -325,13 +552,12 @@ export async function handleRefresh(
     async () => {
       const state = await usableCheckout(dest);
       if (typeof state === 'object') {
-        await persistDetection(
-          db,
-          payload.repositoryId,
-          dest,
-          `Not refreshed: the checkout could not be examined (${state.unknown}). Nothing was moved.`,
+        // The queue starts at cloning. Throw so its catch records error and offers Retry;
+        // detection would import a mirror from a checkout we could not examine.
+        throw new Error(
+          `Not refreshed: the checkout could not be examined (${state.unknown}). Nothing was moved.` +
+            (state.repairNeeded ? ` ${REPAIR_ADVICE}` : ''),
         );
-        return;
       }
       const usable = state === 'usable';
       const holding = await checkoutHoldingTasks(db, payload.repositoryId);

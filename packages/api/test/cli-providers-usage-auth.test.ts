@@ -93,6 +93,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', h.fetch);
   vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue(KEK);
   fake = createFakeDb({
+    auditEvents: schema.auditEvents,
     cliProviders: schema.cliProviders,
     cliProviderSecrets: schema.cliProviderSecrets,
   });

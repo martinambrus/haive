@@ -402,6 +402,11 @@ jobs:
           shared test/global-kb-identifier-tsv.test.ts HAIVE_GKB_TEST_DB_URL gkb_identifier_tsv_test pgvector
           shared test/global-kb-ensure-bound.test.ts HAIVE_GKB_TEST_DB_URL gkb_ensure_bound_test pgvector
           worker test/rag-schema.test.ts HAIVE_GKB_TEST_DB_URL rag_schema_test pgvector
+          api test/cli-secrets-audit-db.test.ts CLI_SECRETS_AUDIT_TEST_URL cli_secrets_audit_test pg
+          api test/account-security-audit-db.test.ts ACCOUNT_SECURITY_AUDIT_TEST_URL account_security_audit_test pg
+          api test/login-audit-db.test.ts LOGIN_AUDIT_TEST_URL login_audit_test pg
+          api test/repository-security-audit-db.test.ts REPOSITORY_SECURITY_AUDIT_TEST_URL repository_security_audit_test pg
+          api test/forced-throttled-audit-db.test.ts FORCED_THROTTLED_AUDIT_TEST_URL forced_throttled_audit_test pg
           GATED
           exit "$failed"
 
@@ -441,6 +446,13 @@ jobs:
         run: pnpm --filter @haive/worker exec vitest run test/advance-dedup-redis.test.ts
         env:
           ADVANCE_DEDUP_TEST_REDIS_URL: redis://localhost:6379/6
+
+      - name: Repo refresh retries on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
+        run: pnpm --filter @haive/worker exec vitest run test/refresh-rebuild-retries.test.ts
+        env:
+          REFRESH_RETRIES_TEST_REDIS_URL: redis://localhost:6379/5
 
       - name: RAG sync lock on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}

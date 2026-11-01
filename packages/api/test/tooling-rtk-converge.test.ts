@@ -34,6 +34,7 @@ app.onError(errorHandler);
 function setup() {
   const fake = createFakeDb({
     repositories: schema.repositories,
+    auditEvents: schema.auditEvents,
     projectStateOutbox: schema.projectStateOutbox,
     projectStateConflicts: schema.projectStateConflicts,
     envTemplates: schema.envTemplates,
