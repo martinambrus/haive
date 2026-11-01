@@ -231,7 +231,7 @@ A full-repository review in the style of the Codex PR reviews once Track B is me
 
 ### T300 · live re-checks owed at the next real onboarding + workflow run
 
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T15:21Z · last: 2026-11-01T15:21Z · kind: capped validation · priority: P1
+status: parked · reason: capped attempt stopped at fixture setup failure; corrected attempt awaits owner decision · kind: capped validation · priority: P1
 Items 1-20 (each with its memory file): skills per CLI after 09_5; frontmatter YAML; agent_rules stamp; declared verify commands; invariants-doc lever; prompt guard/fence (07_7); onboarding artifacts; plan breadth refusals; agent isolation 1/2/4; fs-safe live verification; #169 DDEV runner boot-subpath; #241 Terminal cwd; AGENTS.md split citations; parked experiments (Astra vs Sol, container-cleanup race, global KB purge, haive_rag_ddevtest drop); T293; #287 EROFS on state; #800 mounts; #751 set-aside on a real merge; #806 put-back; #815 reindex spot-check; T375 gate 3 on a worktree holding an untracked nested repo, with and without a commit (#909); T395 Stop offered for a running task whose current row is pending, and the "Nothing was running to stop." notice (no such task on the dev install; pressing Stop changes a real task) (#908); T363 New Task with one failed upload, the plan starter and the task page Start, each with confirm yes and no (#913). Full list: task #300 text in the fnf-run ledger / memory. Also owed (T427): replay the raw attach bytes of one real `claude setup-token` run through the OAuth capture and pin its wrap, newline and escape shapes in a fixture.
 
 User decision 2026-11-01: schedule one dedicated capped validation run BEFORE feature work. Precise cap is being selected; one owned fixture/attempt, no automatic retry loops. A run does not by itself prove enough graded data for T298; report unverified members at the cap.
@@ -239,6 +239,8 @@ User decision 2026-11-01: schedule one dedicated capped validation run BEFORE fe
 Final budget: One owned fixture/attempt; stop at90 minutes or $50 notional usage, whichever comes first, or at an unexpected failure. No automatic retry loops. Run before new feature implementation as requested. Prioritize T293/T298/T299 evidence in one fresh onboarding/workflow attempt. Owned fixtures only; no unrelated Astra/Sol benchmarking, real-user Stop/authentication, global-KB purge or legacy database deletion is implied. If a cap or unexpected failure stops the run, report the unresolved checks rather than retrying or declaring them verified. T298 still needs graded evaluation evidence before similarity is enabled.
 
 Execution 2026-11-01T15:21Z: read-only preflight begins under the90minute/$50notional cap. One owned fixture/attempt; do not start live onboarding or spend on CLI/model probes until the session confirms final P0 worker source is loaded. No automatic retries; stop at cap or unexpected failure and preserve unverified members.
+
+Stopped 2026-11-01T15:52Z: selector fixture was checked before Git initialization, producing changedFiles:null and unreadable-change fallback. No product selector defect established; no onboarding/workflow or model calls ran (0invocations/$0notional). Owned task cancelled, own rule unenforced, records retained, watcher exited. All26checks remain unverified; original no-retry rule honored. A fresh owner decision is pending for one corrected attempt within unchanged16:51UTCdeadline/$50ceiling($40stop). Evidence T300/report.md/finalreceipt.json/member-results.json; do not treat scenario failure as demonstrated product bug.
 
 ### T298 · house rules PR8 · switch similarity on with per-rule floors
 
@@ -759,27 +761,6 @@ Decide which stored targets a non-admin may point at private addresses.
 1. The Ollama pull stream relays 200 chars of the remote error and has no size or time cap.
 
 User decision 2026-11-01: Allow private endpoints only through an administrator-controlled allowlist; explicit built-in services keep their trusted configuration.
-
-### T402 · FNF[context-backfill] · repair historical context badges before their source logs expire
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T14:22Z · last: 2026-11-01T14:57Z · priority: P0
-Historical measurement:237 stored step badges,143 showing0% left; peaks were recoverable for232 of237 and windows for about97% of Claude Code runs. These are historical counts, not a current affected-row inventory. Older writers could use a run's cumulative input as one request's context, double-count Codex cache, or use a stale200k denominator; current writers are fixed but stored rows were not recomputed.
-
-User decision 2026-11-01: an idempotent operator script with dry run, before-image and undo. Reparse retained stream data to repair derived context telemetry; do not re-run agents, change billing/token totals or fabricate unknown peaks/windows. Fence against newer/reopened row versions and report unrecoverable or lower-bound data explicitly. No implementation or live backfill has started.
-
-Read-only verification 2026-11-01: the installed `config:tasks:cliStreamLogRetentionDays` value is90 (the code default is0/forever). The sweep requires both the invocation's finalization and terminal task's completion to be older than the window. Across all6396 retained eligible logs, the earliest90-day expiry is2026-11-04T10:17:33.965; this does NOT identify the deadline for T402's exact subset. The old approximately November30 note is not a safe universal deadline. First deliver the targeted dry-run inventory and exact candidate-expiry report, then use the reviewed operator delivery path.
-
-Execution authorized 2026-11-01: start T402, keep development analysis records indefinitely, then continue the reconciled ready queue in priority order. Transcript retention changed through the audited admin API90→0 (keep forever), prompt retention already0; receipt .claude/tmp/codex-run/queue-exec-20261101/T402/retention-receipt.json, audit614007fa-a9e1-4306-8cf3-1783a6e18767. This supersedes the earlier do-not-change-retention-by-inference note: the owner explicitly requested this change. The current install no longer has a scheduled transcript/prompt expiry under these settings. Historical expiry measurements remain provenance.
-
-Stopped at explicit owner request: HEAD65f658dd0, focused tests and independent review green; full candidate interrupted during worker suite; no live backfill. Retention0/forever verified. Evidence: .claude/tmp/codex-run/queue-exec-20261101/T402/. Resume only when requested.
-
-Resumed at owner request 2026-11-01T14:22Z: preserve existing implementation and evidence; finish T402 delivery first, then continue the agreed queue.
-
-Progress 2026-11-01T14:34Z: Implementation fed6c5eb1 and independent source/docs/guard reviews complete. Complete inventory:3658 completed steps,528 proposed repairs (386 corrected request badges,142 unsupported legacy badges cleared);3062 missing/ambiguous skipped,68 already consistent. First full suite found only a naming-guard metadata false positive (14968passed); exact-tag exemption reviewed and corrected full suite running. No live backfill yet. Retention0/forever remains. Evidence queue-exec-20261101/T402/.
-
-Progress 2026-11-01T14:49Z: PR982 https://github.com/martinambrus/haive/pull/982 at fed6c5eb1: complete worker14969pass/4expected and scripts1073pass; exactHEAD GitHubCodex completed with no findings. PRCI pending. Live dryrun verified Claude205996/1m/79, missingClaude unchanged, ambiguous legacyCodex skipped. Noapply yet.
-
-Progress 2026-11-01T14:57Z: PR982 exactHEAD Codex clean;11completed CI checks pass, final End-to-end smokes running. Owner explicitly suspended Greptile untilNovember9, no wait required.
 
 ### T403 · FNF[context-window-truth] · wrapper CLIs report the binary's 200k default; killed runs fall to the static table
 
@@ -1515,6 +1496,7 @@ Split from T364 items1/13/14, 2026-11-01. This is three candidate ways validatio
 
 ## Done
 
+- T402 — repair historical context badges with reversible bounded operator;528 rows repaired,37 immutable before-images,0 further repairable rows; transcript/prompt retention0 forever — PR #982 (940878aa2),2026-11-01; exact-HEAD reviews, PRCI and mainCI41319760904 green; undo/digests verified; missing/ambiguous data preserved. Evidence .claude/tmp/codex-run/queue-exec-20261101/T402/.
 - T524 — reconcile backlog decisions, mixed bundles and priorities;42 owner questions answered, corrected T487 policy retained, T402 expiry verified — board-only commits b1305a4f2/965b87a7e/c6ccc177e and closure,2026-11-01; no product implementation or live validation run started; TASKS-only changes need no PR/CI
 
 - T471 — atomically fold parked waits and re-check held state; preserve retained-run timing and one form marker — PR #981 (3078d9758), 2026-11-01; exact-HEAD review, all PR checks and main CI41300414474 green; full database/API/worker suites and real Postgres/Redis controls pass; follow-ups T499/T515/T519
