@@ -117,19 +117,6 @@ All PRE-EXISTING.
 
 User decision 2026-11-01: Retain complete/consumed upload metadata 90 days; protect active or retry-needed rows. Item5 identity-hardening remains parked until reachable impact.
 
-### T122 · B5.3 · review watermarks travel; Haive paths leave drift ranges
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T17:33Z · last: 2026-11-01T20:23Z · kind: feature · priority: P1
-settings/review-watermarks.json, descendant wins via merge-base --is-ancestor; _external-drift drops .haive-data/state/** and plan files. Control: B re-reviews A's KB-reviewed commits today; empty after.
-
-Execution 2026-11-01: paired with T121, bounded portable watermark and drift-range feature; no unrelated queued repair or live model calls. Evidence `.claude/tmp/codex-run/queue-exec-20261101/T121-T122/`.
-
-Progress 2026-11-01T18:36Z: Complete candidate087e8b253 passed218 SQL/Git smoke and focused/typechecks. Fresh review found one introduced P2: missing stored proof was ordered incoming-newer without ancestry. Required fix1 now refuses/preserves proof across sync/answer/projection consumers; meaningful6-case old-source red and targeted11green reported. T456 awaits sole driver; no broad audit.
-
-Progress 2026-11-01T19:54Z: PR988 exact f99f07611c full candidate/native reviews green; actual B normal refresh imported independent KB and plan watermarks and rules; drift excludes Haive commits. Hosted exact-HEAD review/all CI pending; no more live fixture reruns.
-
-Progress 2026-11-01T20:23Z: PR988 corrected b13fbb2 independently clean after mandatory root-anchor/data-preservation fix3. Fullworker15037+4expected/959skip and exact SQL/Git218 checks/0gaps GREEN; actual browser/refresh prior proof retained with explicit supplemental B UI limit. Pushed new HEAD, fresh hosted review/all CI pending; admission latch closed, finish then pause.
-
 ### T286 · FNF[root-work] · a task at the root after 01 was skipped escapes the fences (+3)
 
 status: open · area: touches finishMerge — heads-up to modular-haive-plan first · #278 (fnf/278-merge-dir-reads) LANDED as PR #884 (c48df1953) 2026-10-24: git-operation.ts, set-aside.ts, git-merge.ts, merge-projections.ts, merge-baseline.ts and left-open-merge.ts are free · priority: P2
@@ -1437,6 +1424,8 @@ status: parked · reason: diminishing returns; comment only, no runtime conseque
 Source: route-retirement follow-up review 2026-11-01, packages/worker/src/step-engine/steps/index.ts:119. The unchanged startup-assertion JSDoc describes task-row invalidation through providerSensitive metadata, while the task-level switch route is being retired by T338. The assertion itself still correctly checks metadata/list equality. Preserve as low documentation debt; update only on the next related documentation/source touch. No extra implementation/review round or runtime audit is authorized by this note. Evidence .claude/tmp/codex-run/queue-exec-20261101/route-retirement/review-comments.md.
 
 ## Done
+
+- T122 — portable independent KB/plan review watermarks and filtered drift — PR #988 (42577ae961), 2026-11-01; exact-HEAD reviews/full candidate/PR CI/main CI41348129256 green; core browser/two-install acceptance with explicit supplemental-B-UI limit; corrected real-Git controls/fullworker15037 and SQL218 green; merged source loaded healthy with activity unchanged. Evidence .claude/tmp/codex-run/queue-exec-20261101/T121-T122/.
 
 - T121 — project state rides normal Haive pushes in a scoped commit — PR #988 (42577ae961), 2026-11-01; exact-HEAD reviews/full candidate/PR CI/main CI41348129256 green; core browser/two-install acceptance with explicit supplemental-B-UI limit; corrected real-Git controls/fullworker15037 and SQL218 green; merged source loaded healthy with activity unchanged. Evidence .claude/tmp/codex-run/queue-exec-20261101/T121-T122/.
 
