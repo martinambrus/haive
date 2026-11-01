@@ -151,12 +151,14 @@ All PRE-EXISTING.
 
 ### T293 · FNF[onboarding-kb][verify-first] · 09_3's KB corrections may fail on a root-owned KB
 
-status: blocked · blocked-by: T300 · priority: P1
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T16:55Z · last: 2026-11-01T16:55Z · priority: P1
 08-knowledge-acquisition.ts:2058 and its writes pass no owner, so a fresh KB may be root-owned and uid 1000 gets EACCES; 09_3's apply never checks the disk. Dev data disagrees in part. Verify on a fresh onboarding first; then pass the owner in 08, and make 09_3 diff the KB against the agent's claim.
 
 Validation scheduling decision 2026-11-01: attach to the dedicated capped T300 run before feature work; actual evidence/data prerequisites remain, and no successful live result is inferred.
 
 The owner scheduled one capped validation attempt; this block is an evidence dependency, not an unanswered policy question.
+
+Evidence gate satisfied 2026-11-01T16:55Z: ownedfreshonboarding reproduced actualuid1000EACCESagainstrootKBdir/files andunapplied09_3marked done/correctedCount1; agenthonestlyreturnedemptykbWrites. Implement boundedownershiphandoff+actualwriteverification, preservelegitnoop/skip, no globalchown/modeweakening or historicaldatarewrite. No morepaidT300attempt isauthorized; use capturedreceipt+isolatedroot regressioncontrols.
 
 ### T308 · FNF[worktree-aliases] · hard links planted into .haive/worktrees before #800 survive
 
@@ -231,7 +233,7 @@ A full-repository review in the style of the Codex PR reviews once Track B is me
 
 ### T300 · live re-checks owed at the next real onboarding + workflow run
 
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T16:32Z · last: 2026-11-01T16:32Z · kind: capped validation · priority: P1
+status: parked · reason: corrected capped attempt stopped after confirmed T293; remaining checks need a future authorized run · kind: capped validation · priority: P1
 Items 1-20 (each with its memory file): skills per CLI after 09_5; frontmatter YAML; agent_rules stamp; declared verify commands; invariants-doc lever; prompt guard/fence (07_7); onboarding artifacts; plan breadth refusals; agent isolation 1/2/4; fs-safe live verification; #169 DDEV runner boot-subpath; #241 Terminal cwd; AGENTS.md split citations; parked experiments (Astra vs Sol, container-cleanup race, global KB purge, haive_rag_ddevtest drop); T293; #287 EROFS on state; #800 mounts; #751 set-aside on a real merge; #806 put-back; #815 reindex spot-check; T375 gate 3 on a worktree holding an untracked nested repo, with and without a commit (#909); T395 Stop offered for a running task whose current row is pending, and the "Nothing was running to stop." notice (no such task on the dev install; pressing Stop changes a real task) (#908); T363 New Task with one failed upload, the plan starter and the task page Start, each with confirm yes and no (#913). Full list: task #300 text in the fnf-run ledger / memory. Also owed (T427): replay the raw attach bytes of one real `claude setup-token` run through the OAuth capture and pin its wrap, newline and escape shapes in a fixture.
 
 User decision 2026-11-01: schedule one dedicated capped validation run BEFORE feature work. Precise cap is being selected; one owned fixture/attempt, no automatic retry loops. A run does not by itself prove enough graded data for T298; report unverified members at the cap.
@@ -243,6 +245,8 @@ Execution 2026-11-01T15:21Z: read-only preflight begins under the90minute/$50not
 Stopped 2026-11-01T15:52Z: selector fixture was checked before Git initialization, producing changedFiles:null and unreadable-change fallback. No product selector defect established; no onboarding/workflow or model calls ran (0invocations/$0notional). Owned task cancelled, own rule unenforced, records retained, watcher exited. All26checks remain unverified; original no-retry rule honored. A fresh owner decision is pending for one corrected attempt within unchanged16:51UTCdeadline/$50ceiling($40stop). Evidence T300/report.md/finalreceipt.json/member-results.json; do not treat scenario failure as demonstrated product bug.
 
 Owner approval 2026-11-01T16:32Z: one corrected attempt in SAME retained fixture, normal onboarding before selector check; original16:51:08UTCdeadline and$50ceiling/$40stopthreshold unchanged. No further automatic retries. Initialattempt/stoprecords retained, no productdefect inferred. Local heavytests held during livephase.
+
+Corrected attempt stopped 2026-11-01T16:55Z: T293 reproduced during normal09_3. Agentuid1000 facedroot:root0755KBdirectory/0644files, honestfailedwrites/kbWrites[]; Haive stilldone/correctedCount1/noerror andunchangedKBhash.9finalizedinvocations/$1.0203736notional; stopped16:45:41 beforedeadline, no newround/retry/thirdattempt, allownedtasks cancelled/dataretained/rulecleared/watcherexited.1agent-rulesPASS,1T293FAIL,24UNVERIFIED(includingT298/T299; Git12notreached). Userfirstquestionapprovedexactlyonecorrectedattempt, nowconsumed. Evidence T300/corrected-report.md/corrected-finalreceipt.json/member-results.json; no morepaidvalidationwithoutnewapproval.
 
 ### T298 · house rules PR8 · switch similarity on with per-rule floors
 
