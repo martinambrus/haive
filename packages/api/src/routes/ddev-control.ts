@@ -1,4 +1,5 @@
 import { Hono, type Context } from 'hono';
+import { z } from 'zod';
 import {
   CONFIG_KEYS,
   configService,
@@ -8,6 +9,7 @@ import {
 } from '@haive/shared';
 import { verifyTaskToken } from '@haive/shared/task-token';
 import { HttpError, type AppEnv } from '../context.js';
+import { readOptionalJsonObject } from '../lib/json-object.js';
 import { sandboxBodyLimit } from '../middleware/sandbox-body-limit.js';
 import { getDdevControlQueue, getDdevControlQueueEvents } from '../queues.js';
 
@@ -72,13 +74,12 @@ ddevControlRoutes.post('/status', async (c) => {
 
 ddevControlRoutes.post('/logs', async (c) => {
   const taskId = taskIdFromBearer(c.req.header('Authorization'));
-  const body = (await c.req.json().catch(() => null)) as {
-    service?: unknown;
-    tail?: unknown;
-  } | null;
-  const service = typeof body?.service === 'string' ? body.service : undefined;
+  const body = z
+    .object({ service: z.string().optional(), tail: z.number().optional() })
+    .parse(await readOptionalJsonObject(c.req));
+  const service = body.service;
   const tail =
-    typeof body?.tail === 'number' && Number.isInteger(body.tail) && body.tail > 0
+    typeof body.tail === 'number' && Number.isInteger(body.tail) && body.tail > 0
       ? Math.min(body.tail, 2000)
       : undefined;
   return respond(c, await runAction(taskId, 'logs', { service, tail }));

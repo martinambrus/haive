@@ -29,6 +29,7 @@ const TASK = '00000000-0000-4000-8000-0000000000e1';
 const TABLES = {
   repositories: schema.repositories,
   projectStateOutbox: schema.projectStateOutbox,
+  auditEvents: schema.auditEvents,
   toolPackageVersions: schema.toolPackageVersions,
   customBundles: schema.customBundles,
   customBundleUploads: schema.customBundleUploads,
@@ -220,14 +221,15 @@ describe('a body that is a JSON object still reaches the handler', () => {
       expect(rtkVersion(fake)).toBe('0.3.0');
     });
 
-    it('upgrades only the components it is told to', async () => {
-      const fake = setup();
-
-      const res = await send(ROUTES.toolingUpgrade, '{"components":["chrome-devtools-mcp"]}');
-
-      expect(res.status).toBe(200);
-      expect(rtkVersion(fake)).toBe('0.1.0');
-    });
+    it.each([{ components: ['chrome-devtools-mcp'] }, { components: [] }])(
+      'upgrades only the selected components $components',
+      async ({ components }) => {
+        const fake = setup();
+        const res = await send(ROUTES.toolingUpgrade, JSON.stringify({ components }));
+        expect(res.status).toBe(200);
+        expect(rtkVersion(fake)).toBe('0.1.0');
+      },
+    );
   });
 });
 
@@ -273,26 +275,44 @@ describe('an empty or malformed body is answered as it was', () => {
   });
 
   describe(ROUTES.toolingUpgrade.name, () => {
-    it.each(UNREADABLE_BODIES)(
-      'still upgrades everything that is behind for %s',
-      async (_what, raw) => {
-        const fake = setup();
+    it('still upgrades everything that is behind for an empty body', async () => {
+      const fake = setup();
+      const res = await send(ROUTES.toolingUpgrade, '');
+      expect(res.status).toBe(200);
+      expect(rtkVersion(fake)).toBe('0.3.0');
+    });
 
-        const res = await send(ROUTES.toolingUpgrade, raw);
-
-        expect(res.status).toBe(200);
-        expect(rtkVersion(fake)).toBe('0.3.0');
-      },
-    );
+    it.each([
+      ['truncated selection', '{"components":["rtk"', 'invalid_json'],
+      ['whitespace document', '  \n', 'invalid_json'],
+      ['string selection', '{"components":"rtk"}', undefined],
+      ['null selection', '{"components":null}', undefined],
+      ['number selection', '{"components":5}', undefined],
+      ['non-string component', '{"components":[5]}', undefined],
+    ])('refuses %s before any pin, audit or outbox write', async (_what, raw, code) => {
+      const fake = setup();
+      const before = everything(fake);
+      const res = await send(ROUTES.toolingUpgrade, raw!);
+      const result = await answer(res);
+      expect.soft(result.status).toBe(400);
+      if (code) expect.soft(result.code).toBe(code);
+      expect.soft(everything(fake)).toEqual(before);
+    });
   });
 
   describe(ROUTES.planDelete.name, () => {
-    it.each(UNREADABLE_BODIES)('still asks for the repository name for %s', async (_what, raw) => {
+    it('still asks for the repository name for an empty body', async () => {
       setup();
-
-      const res = await send(ROUTES.planDelete, raw);
-
+      const res = await send(ROUTES.planDelete, '');
       expect(await answer(res)).toEqual({ status: 400, code: 'plan_delete_confirm_mismatch' });
+    });
+
+    it('refuses malformed JSON before any deletion', async () => {
+      const fake = setup();
+      const before = everything(fake);
+      const res = await send(ROUTES.planDelete, '{bad');
+      expect(await answer(res)).toEqual({ status: 400, code: 'invalid_json' });
+      expect(everything(fake)).toEqual(before);
     });
   });
 

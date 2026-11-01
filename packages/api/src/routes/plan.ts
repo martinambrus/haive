@@ -56,7 +56,7 @@ import {
 import { getDb } from '../db.js';
 import { appendPlanAnswer, humanPlanAction } from '@haive/shared/plan-resolution';
 import { resolveRepoRoot } from './repos.js';
-import { requireJsonObject } from '../lib/json-object.js';
+import { readOptionalJsonObject } from '../lib/json-object.js';
 import { planDeleteRefusal } from '../lib/plan-delete-refusal.js';
 import { requireAuth } from '../middleware/auth.js';
 import { admitNewWork, requireNewWorkAllowed } from '../middleware/maintenance.js';
@@ -477,7 +477,7 @@ async function refuseWhileMergeOpen(repositoryId: string): Promise<void> {
 planRoutes.post('/:id/plan/snapshot/save', async (c) => {
   const { userId, repositoryId } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
-  const body = planSnapshotSaveRequestSchema.parse(await c.req.json().catch(() => ({})));
+  const body = planSnapshotSaveRequestSchema.parse(await readOptionalJsonObject(c.req));
   // A merge conversation owns the scratch worktree and is the thing that will land
   // the remote; saving underneath it would race its checkout.
   await refuseWhileMergeOpen(repositoryId);
@@ -1016,7 +1016,7 @@ planRoutes.delete('/:id/plan', async (c) => {
       ),
     );
 
-  const body = requireJsonObject<{ confirm?: unknown }>(await c.req.json().catch(() => ({})));
+  const body = await readOptionalJsonObject(c.req);
   const refusal = planDeleteRefusal({
     confirm: body.confirm,
     repoName: repo.name,
@@ -1293,7 +1293,7 @@ planRoutes.post('/:id/plan/build', requireNewWorkAllowed, async (c) => {
 planRoutes.post('/:id/plan/sequence', requireNewWorkAllowed, async (c) => {
   const { userId, repositoryId, repo } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
-  const body = planSequenceRequestSchema.parse(await c.req.json().catch(() => ({})));
+  const body = planSequenceRequestSchema.parse(await readOptionalJsonObject(c.req));
   const root = await findPlanRoot(getDb(), repositoryId);
   if (!root) throw new HttpError(409, 'This repository has no plan to order yet');
   const cliProviderId = await resolveProvider(userId, repositoryId, body.cliProviderId);
@@ -1319,7 +1319,7 @@ planRoutes.post('/:id/plan/sequence', requireNewWorkAllowed, async (c) => {
 planRoutes.post('/:id/plan/merge', requireNewWorkAllowed, async (c) => {
   const { userId, repositoryId, repo } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
-  const body = planMergeStartRequestSchema.parse(await c.req.json().catch(() => ({})));
+  const body = planMergeStartRequestSchema.parse(await readOptionalJsonObject(c.req));
   const cliProviderId = await resolveProvider(userId, repositoryId, body.cliProviderId);
   // Under the lock a Save/Pull integration and a cancel's discard take around the scratch worktree.
   const taskId = await getDb().transaction(async (tx) => {
@@ -1454,7 +1454,7 @@ planRoutes.post('/:id/plan/nodes/:nodeId/advisory', requireNewWorkAllowed, async
   const { userId, repositoryId } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
   const nodeId = c.req.param('nodeId');
-  const body = planAdvisoryRequestSchema.parse(await c.req.json().catch(() => ({})));
+  const body = planAdvisoryRequestSchema.parse(await readOptionalJsonObject(c.req));
   const node = await requireNode(repositoryId, nodeId);
   const cliProviderId = await resolveProvider(userId, repositoryId, body.cliProviderId);
   const { taskId, created } = await getDb().transaction(async (tx) => {

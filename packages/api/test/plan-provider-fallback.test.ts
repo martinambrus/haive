@@ -9,7 +9,8 @@ vi.mock('../src/lib/plan-mirror.js', () => ({
   pullPlanMirror: vi.fn(),
   savePlanMirror: vi.fn(),
 }));
-vi.mock('../src/lib/spawn-plan-task.js', () => ({ spawnPlanTask: vi.fn() }));
+vi.mock('../src/lib/spawn-plan-task.js', () => ({ spawnPlanTask: vi.fn(async () => 'spawned') }));
+vi.mock('../src/lib/task-start.js', () => ({ enqueueStart: vi.fn() }));
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
     c.set('userId', USER);
@@ -21,6 +22,10 @@ vi.mock('../src/middleware/auth.js', () => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { configService } from '@haive/shared';
+import { spawnPlanTask } from '../src/lib/spawn-plan-task.js';
+import { enqueueStart } from '../src/lib/task-start.js';
+import { savePlanMirror } from '../src/lib/plan-mirror.js';
 import { planRoutes } from '../src/routes/plan.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -44,6 +49,7 @@ function setup(providers: readonly (readonly [string, boolean, Date])[] = DEFAUL
   const fake = createFakeDb({
     repositories: schema.repositories,
     tasks: schema.tasks,
+    planNodes: schema.planNodes,
     cliProviders: schema.cliProviders,
     userStepCliRolePreferences: schema.userStepCliRolePreferences,
   });
@@ -90,6 +96,8 @@ const planner = async () =>
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.spyOn(configService, 'get').mockResolvedValue('true');
+  vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 });
 
 describe('the plan CLI chosen when none is named', () => {
@@ -132,5 +140,91 @@ describe('the plan CLI chosen when none is named', () => {
     fake.patch(schema.cliProviders, FIXTURE, { enabled: false });
     fake.patch(schema.cliProviders, USED, { enabled: false });
     expect(await planner()).toBeNull();
+  });
+});
+
+const NODE = '00000000-0000-4000-8000-0000000000f1';
+const OPTIONAL_ACTIONS = [
+  {
+    path: 'snapshot/save',
+    field: { push: 'yes' },
+    valid: { push: true, commitMessage: 'Save selected plan' },
+    status: 200,
+  },
+  { path: 'sequence', field: { cliProviderId: 3 }, valid: { cliProviderId: USED }, status: 201 },
+  { path: 'merge', field: { cliProviderId: 3 }, valid: { cliProviderId: USED }, status: 201 },
+  {
+    path: `nodes/${NODE}/advisory`,
+    field: { question: 3 },
+    valid: { cliProviderId: USED, question: 'Which approach?' },
+    status: 201,
+  },
+];
+
+describe.each(OPTIONAL_ACTIONS)('optional plan body: $path', ({ path, field, valid, status }) => {
+  function fixture() {
+    const fake = setup();
+    fake.insert(schema.planNodes, {
+      id: NODE,
+      repositoryId: REPO,
+      parentId: null,
+      path: `/${NODE}/`,
+      title: 'Research',
+      kind: 'research',
+      status: 'todo',
+      version: 1,
+    });
+    vi.mocked(savePlanMirror).mockResolvedValue({ saved: true } as never);
+    return fake;
+  }
+  const send = (body: string) =>
+    app.request(`/${REPO}/plan/${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    });
+
+  it.each(['', '{}'])('preserves defaults for %j', async (body) => {
+    fixture();
+    const res = await send(body);
+    expect(await res.json()).toEqual(
+      path === 'snapshot/save' ? { saved: true } : { taskId: 'spawned' },
+    );
+    expect(res.status).toBe(status);
+  });
+
+  it('preserves explicitly selected options', async () => {
+    fixture();
+    const res = await send(JSON.stringify(valid));
+    expect(res.status).toBe(status);
+    if (path === 'snapshot/save') {
+      expect(savePlanMirror).toHaveBeenCalledWith(expect.objectContaining(valid));
+    } else {
+      expect(spawnPlanTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cliProviderId: USED,
+          ignoreSavedStepClis: true,
+          ...(path.endsWith('/advisory') ? { description: 'Which approach?' } : {}),
+        }),
+      );
+    }
+  });
+
+  it.each([
+    ['truncated JSON', '{"cliProviderId":'],
+    ['whitespace JSON', '  '],
+    ['null root', 'null'],
+    ['list root', '[]'],
+    ['wrong option type', JSON.stringify(field)],
+  ])('refuses %s before save, task creation or queue work', async (_name, body) => {
+    const fake = fixture();
+    const tables = [schema.repositories, schema.tasks, schema.planNodes];
+    const before = tables.map((table) => fake.rows(table));
+    const res = await send(body);
+    expect(res.status).toBe(400);
+    expect(savePlanMirror).not.toHaveBeenCalled();
+    expect(spawnPlanTask).not.toHaveBeenCalled();
+    expect(enqueueStart).not.toHaveBeenCalled();
+    expect(tables.map((table) => fake.rows(table))).toEqual(before);
   });
 });
