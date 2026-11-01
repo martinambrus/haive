@@ -655,9 +655,9 @@ describe('an open git operation', () => {
     expect((await status()).holds).toEqual(CLEAN_HOLDS);
   });
 
-  it('reads a git dir outside the checkout as an open operation', async () => {
+  it('reads a git dir outside the checkout as unreadable, as the save does', async () => {
     git('init', '-q', '--separate-git-dir', path.join(base, 'elsewhere.git'));
-    expect((await status()).holds.save).toEqual([{ code: 'git_operation' }]);
+    expect((await status()).holds.save).toEqual([{ code: 'git_operation_unreadable' }]);
   });
 
   it('reads the open operation as unreadable when git cannot say, never as none', async () => {
