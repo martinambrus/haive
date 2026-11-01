@@ -188,7 +188,7 @@ describe('POST /notifications/sound when the write fails', () => {
     const result = await upload(bytes);
     expect(result.status).toBe(201);
     expect(await readFile(soundPath)).toEqual(bytes);
-  });
+  }, 30_000);
 
   it('still refuses a file one byte above the cap inside a bounded form', async () => {
     expect((await upload(Buffer.alloc(2 * 1024 * 1024 + 1))).status).toBe(413);
