@@ -117,23 +117,6 @@ All PRE-EXISTING.
 
 User decision 2026-11-01: Retain complete/consumed upload metadata 90 days; protect active or retry-needed rows. Item5 identity-hardening remains parked until reachable impact.
 
-### T121 · B5.2 · project state rides Haive's pushes
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T17:33Z · last: 2026-11-01T20:43Z · kind: feature (user decision taken) · priority: P1
-chore(haive) commit of dirty projections before the cleanup base push, 13, plan Save & push; PR path commits into the feature worktree; 12/03 commit default on when origin exists. Control: cleanup + push leaves origin without the record today.
-
-Execution 2026-11-01: paired with T122 per approved B5.2+B5.3 plan; one feature candidate, separate commits. Evidence `.claude/tmp/codex-run/queue-exec-20261101/T121-T122/`. T300 corrected validation stopped on confirmed T293; no more paid validation is included here.
-
-Progress 2026-11-01T18:33Z: Complete paired feature candidate087e8b253, separate coherent T121/T122 commits.218 real SQL/Git two-install checks/0gaps,450affectedworker/shared175/typechecks pass. Fresh xhigh review marks T121 paths complete, one valid T122 stored-missing-proof preservation P2; bounded fix1 before final candidate/PR. Evidence T121-T122/report.md and review.md.
-
-Progress 2026-11-01T19:53Z: PR988 exact f99f07611c reviewed full candidate green; core browser Plan push and normal B refresh/drift verified; supplementary B cold UI reset explicitly unverified, no further live reruns. Required exact-HEAD hosted review and all CI pending.
-
-Progress 2026-11-01T19:59Z: ALLOWANCE PAUSE LATCH: actual remaining40% reached19:58:59UTC; no new tasks. Finish current T121/T122/T456 then pause until owner resumes. PR988 hosted two P1s require fix3: repository-root filesystem anchors and crossbranch record reconciliation; security/data preservation exception to round budget. Driver fixing with meaningful red/green, fresh review and corrected final gates required.
-
-Progress 2026-11-01T20:13Z: Required fix3 b13fbb2 corrects root-anchor security and crossbranch target-state loss; fresh xhigh independent review CLEAN. Meaningful old-source7fail/3positive, affected278green and worker typecheck. Corrected fullworker and SQL/Git candidate running. Finish current then allowance pause; admission latch closed40%.
-
-Progress 2026-11-01T20:43Z: PR988 MERGED42577ae96 after corrected b13fbb2 hosted/native clean reviews, all PR CI and 0 unresolved threads. Primary loaded merged source via supported libs/watchers; API/worker ready, hashes match, activity unchanged (4 waiting_user,0active CLI/queues). Main CI41348129256 pending; close bothT121/T122 only after green. Admission latch closed at40%, current39%; finish then pause.
-
 ### T122 · B5.3 · review watermarks travel; Haive paths leave drift ranges
 
 status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T17:33Z · last: 2026-11-01T20:23Z · kind: feature · priority: P1
@@ -1454,6 +1437,8 @@ status: parked · reason: diminishing returns; comment only, no runtime conseque
 Source: route-retirement follow-up review 2026-11-01, packages/worker/src/step-engine/steps/index.ts:119. The unchanged startup-assertion JSDoc describes task-row invalidation through providerSensitive metadata, while the task-level switch route is being retired by T338. The assertion itself still correctly checks metadata/list equality. Preserve as low documentation debt; update only on the next related documentation/source touch. No extra implementation/review round or runtime audit is authorized by this note. Evidence .claude/tmp/codex-run/queue-exec-20261101/route-retirement/review-comments.md.
 
 ## Done
+
+- T121 — project state rides normal Haive pushes in a scoped commit — PR #988 (42577ae961), 2026-11-01; exact-HEAD reviews/full candidate/PR CI/main CI41348129256 green; core browser/two-install acceptance with explicit supplemental-B-UI limit; corrected real-Git controls/fullworker15037 and SQL218 green; merged source loaded healthy with activity unchanged. Evidence .claude/tmp/codex-run/queue-exec-20261101/T121-T122/.
 
 - T456 — optional JSON bodies validate before effects; empty body retains defaults — PR #987 (a8fdd5ebb0), 2026-11-01; exact-HEAD reviews/full candidate/PR CI/main CI41343957973 green; actual browser/web-origin API acceptance:9 invalid400 no effects and3 valid200 controls; owned fixture removed; main CI green. Evidence .claude/tmp/codex-run/queue-exec-20261101/T456/.
 
