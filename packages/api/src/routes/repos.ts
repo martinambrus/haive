@@ -2686,8 +2686,8 @@ export async function resetOnboardingArtifacts(
 const execGit = promisify(execFile);
 // A relink's git child still running after GIT_DEADLINE_MS gets SIGTERM, and SIGKILL only if it is
 // still running GIT_KILL_GRACE_MS later. SIGTERM lets git remove the lock file it holds (MEASURED
-// with git 2.43.0, the host's, on a config write held inside its lock window: gone 1-3 ms after the
-// signal), while SIGKILL leaves `.git/config.lock` behind and fails the restore and every later
+// with git 2.43.0 and 2.54.0 on config writes held inside their lock windows: gone within 3 ms
+// after the signal), while SIGKILL leaves `.git/config.lock` behind and fails the restore and every later
 // relink. So SIGKILL is for a child that ignores SIGTERM, after a grace that is wide for git's
 // cleanup and short for a waiting request.
 const GIT_DEADLINE_MS = 10_000;

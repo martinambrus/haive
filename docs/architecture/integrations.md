@@ -570,13 +570,21 @@ and a repository's remote and its credential binding (`repository.remote.update`
 repository row `FOR NO KEY UPDATE`, which still serializes it with another relink and with the settings
 routes' `FOR UPDATE` but does not block a new task's foreign-key insert while its git calls run; the wait for
 that row is bounded (`boundedLockWait`), so a relink behind another answers 409 busy before any audit row or
-git write. It inserts the audit row, changes git, then writes the column. Each git call is cut at 10 s with
+git write. The general repository settings, tooling save, allow-list save and delete each bound their
+own row take too; the allow-list key and the delete's task-creation key have their own bounds. These
+waits are per statement, not one deadline for the whole request. Implicit row writers and worker
+`FOR UPDATE` takes still wait behind the relink's git work (T516). It inserts the audit row, changes git, then writes the column. Each git call is cut at 10 s with
 SIGTERM, and with SIGKILL only if the child is still alive 2 s later: git removes its `config.lock` on
-SIGTERM and leaves it on SIGKILL (MEASURED), and a left lock fails every later write to that config. The route
+SIGTERM and leaves it on SIGKILL (MEASURED with git 2.43.0 and 2.54.0), and a left lock fails every later write to that config. The route
 puts git's remote back when the transaction fails: inside the transaction for a failure its callback sees (a
 lost connection usually shows there too, as the next statement fails), and after the callback has settled
 for a failure at COMMIT or a callback that ends without noticing, so exactly one restore runs, after the last
-git write. A restore that fails is the answer the request gets, a lost connection notwithstanding.
+git write. A restore that fails is the answer the request gets, a lost connection notwithstanding. Once a git
+deadline fires, its output is never accepted as a snapshot, even if the child exits cleanly in that
+turn. A clean exit after a mutating deadline still triggers restoration. Reported git failures are
+redacted structurally, including git's own password placeholder; the raw snapshot stays private for
+restoration. A placeholder containing whitespace is a known redaction limit; neither measured git
+version emits that form.
 
 Disconnect (`integration.connection.disconnect`) is the one exception, on purpose: its row follows
 the vendor revoke, which cannot be undone and whose outcome (`revoked`) the row records, so it stays

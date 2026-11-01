@@ -134,8 +134,11 @@ confirmed for a whole expiry. Both syncs open their store through `fenceRagStore
 before every statement it sends, and they check it again before writing the degraded flag (also after
 the awaited NULL-hash read that gates its clear); the api checks it before each re-embed batch and each
 repository write. A sync that lost it fails with a retryable error, and the api answers 409, except
-after a tooling save has committed: its second probe then restores the degraded flag whether or not it
-still holds the lock, and answers 200 for the save that landed. A lock lost by expiry leaves no sync to
+after a tooling save has committed: its second probe runs outside that transaction, with no repository
+row lock held, then restores the degraded flag whether or not it still holds the RAG lock, and answers
+200 for the save that landed. The restore has its own bounded row wait. If a relink holds that row
+past the bound, the route logs the deferred restore and still answers 200: the flag can remain clear
+over pending hash rows until the next sync (T516). A lock lost by expiry leaves no sync to
 write the flag, and a flag restored needlessly is cleared by the next healthy sync. A statement
 already in flight when the lock is lost still lands: the store cannot see the lock, so closing that
 window would take a fencing token the store itself checks. A run with no repository id takes no lock.
@@ -161,7 +164,8 @@ check permits recovery without requiring a source edit. A clear also needs the s
 non-task row with a NULL `chunk_hash` (a fallback row or one reset for re-embed), and the tooling
 page's Retry runs the same bounded probe before it clears: rows awaiting re-embed, or a configured
 store that does not answer, keep the flag (`degradationKept`), while a missing internal database or
-index table counts as nothing awaiting. The probe opens an internal store only if it exists, since
+index table counts as nothing awaiting. A second probe after the save commits checks for rows that
+appeared after the first; its restore is bounded as described above. The probe opens an internal store only if it exists, since
 `resolveRagConnection` creates the database it is asked for. A degraded sync's first banner says
 that rows await re-embed (fallback vectors or a pending rebuild) when the store holds them, rather than "not searchable".
 
