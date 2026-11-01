@@ -21,6 +21,8 @@ vi.mock('../src/repo/credentials.js', () => ({
 import { gate4PushStep } from '../src/step-engine/steps/workflow/11a-gate-4-push.js';
 import { getDecryptedCredentials } from '../src/repo/credentials.js';
 
+import { failGit } from './support/fake-git.js';
+
 const exec = promisify(execFile);
 const BRANCH = 'feature/test';
 const tmpDirs: string[] = [];
@@ -304,4 +306,39 @@ describe('gate-4 push: apply', () => {
     expect(await bareHasBranch(bare!)).toBe(true);
     expect(sets).toHaveLength(0); // existing origin -> no repo-row write
   });
+});
+
+it('a failed branch read fails the push gate', async () => {
+  const { dir } = await makeRepo(false);
+  const shim = await failGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+  try {
+    await expect(gate4PushStep.detect!(makeCtx(dir).ctx)).rejects.toThrow(/current branch/);
+  } finally {
+    await shim.restore();
+  }
+});
+
+it('a failed commit log cannot report that no commits were found', async () => {
+  const { dir } = await makeRepo(false);
+  const shim = await failGit(['log']);
+  try {
+    await expect(gate4PushStep.detect!(makeCtx(dir).ctx)).rejects.toThrow(/git log failed/);
+  } finally {
+    await shim.restore();
+  }
+});
+
+it('an unborn push gate has no branch and skips the log read', async () => {
+  const dir = await mkTmp('gate4-unborn-');
+  await git(dir, ['init', '-b', 'main']);
+  const shim = await failGit(['log']);
+  try {
+    const { ctx } = makeCtx(dir);
+    const detected = await gate4PushStep.detect!(ctx);
+    expect(detected.hasGit).toBe(true);
+    expect(detected.branch).toBeNull();
+    expect(detected.recentCommits).toBe('No commits found on this branch.');
+  } finally {
+    await shim.restore();
+  }
 });

@@ -82,7 +82,7 @@ async function hasUsableGit(repoPath: string): Promise<boolean> {
 }
 
 /** `gitOperationInProgress` (worker repo/git-operation.ts): an entry of the git dir exists. A read
- *  that fails throws, and a git dir outside the checkout counts as open. */
+ *  that fails throws, and so does a git dir outside the checkout, which the anchor cannot inspect. */
 async function gitOperationOpen(repoPath: string): Promise<boolean> {
   for (const entry of GIT_OPERATION_STATE_ENTRIES) {
     const located = await gitRaw(repoPath, ['rev-parse', '--git-path', entry]);
@@ -90,7 +90,8 @@ async function gitOperationOpen(repoPath: string): Promise<boolean> {
     const where = located.stdout.toString().trim();
     if (!where) continue;
     const rel = path.isAbsolute(where) ? path.relative(repoPath, where) : where;
-    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return true;
+    if (rel === '' || rel === '..' || rel.startsWith('../') || path.isAbsolute(rel))
+      throw new Error(`${entry} is outside the checkout anchor`);
     if ((await lstatNoFollow(repoPath, rel, { strict: true })) !== null) return true;
   }
   return false;

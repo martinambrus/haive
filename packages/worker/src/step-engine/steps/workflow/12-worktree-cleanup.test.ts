@@ -4942,3 +4942,55 @@ it('merge_remove completes locally without any origin transport when detect refu
     await rm(parent, { recursive: true, force: true });
   }
 });
+
+it('a failed pre-push count fails without pushing or opening a sync round', async () => {
+  const { parent, wt } = await setupWorktree();
+  const bare = await pushParentMainToOrigin(parent);
+  try {
+    fetchProbe.intercept = (argv) =>
+      argv[0] === 'rev-list' && argv[1] === '--count'
+        ? { code: 128, stdout: '', stderr: 'fatal: missing object' }
+        : null;
+    const h = makeDb();
+    await expect(
+      resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove', pushBase: true }),
+        mkCtx(parent, h.db),
+        mkParams(h.db),
+      ),
+    ).rejects.toThrow(/git rev-list.*failed.*missing object/);
+    expect(fetchProbe.pushes).toEqual([]);
+    expect(h.getState()?.baseSyncRounds ?? 0).toBe(0);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+    await rm(bare, { recursive: true, force: true, maxRetries: 5 });
+  }
+});
+it('a failed conflict listing never dispatches a fixer with no paths', async () => {
+  const { parent, wt } = await setupWorktree();
+  try {
+    // Make the feature collide with the parent, then fail the listing after git opens the merge.
+    await writeFile(path.join(wt, 'base.txt'), 'feature conflict\n');
+    await git(wt, ['commit', '-am', 'feature conflict']);
+    await writeFile(path.join(parent, 'base.txt'), 'parent conflict\n');
+    await git(parent, ['commit', '-am', 'parent conflict']);
+    fetchProbe.intercept = (argv) =>
+      argv[0] === 'diff' && argv.includes('--diff-filter=U')
+        ? { code: 128, stdout: '', stderr: 'fatal: unreadable index' }
+        : null;
+    const h = makeDb();
+    await expect(
+      resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove' }),
+        mkCtx(parent, h.db),
+        mkParams(h.db),
+      ),
+    ).rejects.toThrow(/git diff.*failed/);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});

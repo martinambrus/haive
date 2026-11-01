@@ -709,9 +709,13 @@ async function fetchForSync(
 
 async function countAhead(cwd: string, range: string): Promise<number> {
   const res = await gitRun(cwd, ['rev-list', '--count', range]);
-  if (res.code !== 0) return 0;
-  const n = Number.parseInt(res.stdout.trim() || '0', 10);
-  return Number.isFinite(n) ? n : 0;
+  const n = Number(res.stdout.trim());
+  if (res.code !== 0 || res.stdout.trim() === '' || !Number.isSafeInteger(n) || n < 0) {
+    throw new Error(
+      `git rev-list --count ${range} failed in ${cwd}: ${(res.stderr || res.stdout).trim()}`,
+    );
+  }
+  return n;
 }
 
 /** Pre-push: bring the base up to date with origin before pushing, so the push is a
@@ -820,9 +824,9 @@ async function settleOwnFiles(
 ): Promise<{ merged: boolean; warnings: string[] }> {
   const { resolved, warnings } = await resolveHaiveProjectionConflicts(dir);
   if (resolved.length === 0) return { merged: false, warnings };
-  const left = await unmergedPaths(dir);
+  const left = await unmergedPaths(dir, true);
   return {
-    merged: left?.length === 0 && (await completeMergeHostSide(dir, env, feature)),
+    merged: left.length === 0 && (await completeMergeHostSide(dir, env, feature)),
     warnings,
   };
 }
@@ -845,7 +849,7 @@ async function noteOwnFileFallbacks(
 
 /** Unmerged paths in a mid-merge worktree (for the fix prompt). */
 async function conflictFiles(mergeDir: string): Promise<string[]> {
-  return (await unmergedPaths(mergeDir)) ?? [];
+  return unmergedPaths(mergeDir, true);
 }
 
 /** Outcome of dispatching the conflict-resolution agent. `already_live` means a

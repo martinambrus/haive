@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   PROJECT_STATE_DIR,
   emptyProjectState,
@@ -13,6 +13,9 @@ import type { ProjectStateRecord } from '@haive/shared/project-state';
 import { killGit, type KilledGit } from '../../test/support/kill-git.js';
 import { conflictedPaths, ensurePlanMergeWorktree, mergeOriginInto } from './merge.js';
 import { resolveHaiveProjectionConflicts } from './projection-merge.js';
+
+import { failGit } from '../../test/support/fake-git.js';
+import { logger } from '@haive/shared/logger';
 
 const exec = promisify(execFile);
 const IDENT = {
@@ -28,6 +31,7 @@ const dirs: string[] = [];
 let shim: KilledGit | null = null;
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await shim?.restore();
   shim = null;
   for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true });
@@ -44,11 +48,15 @@ async function git(dir: string, args: string[], allowFail = false): Promise<stri
   }
 }
 
-type Files = Record<string, string>;
+type Files = Record<string, string | null>;
 
 async function commitFiles(dir: string, files: Files): Promise<void> {
   for (const [file, body] of Object.entries(files)) {
     const full = path.join(dir, file);
+    if (body === null) {
+      await rm(full, { force: true });
+      continue;
+    }
     await mkdir(path.dirname(full), { recursive: true });
     await writeFile(full, body);
   }
@@ -160,11 +168,149 @@ describe('resolveHaiveProjectionConflicts on state reads that gave no answer', (
     expect(warning).toMatch(/took the incoming side/);
   });
 
-  it('does not claim the state files merged when the final listing failed', async () => {
+  it('fails when the final state conflict listing could not be read', async () => {
     const wt = await divergedPair(...stateSides());
     await openConflict(wt);
     shim = await killGit(DIFF_U, { after: 2 });
-    const out = await resolveHaiveProjectionConflicts(wt);
-    expect(out.resolved.filter((p) => p.startsWith(STATE_PREFIX))).toEqual([]);
+    await expect(resolveHaiveProjectionConflicts(wt)).rejects.toThrow(/git diff.*failed/);
   });
+});
+
+it('a failed initial conflict listing cannot answer no conflicts', async () => {
+  const wt = await divergedPair(...planSides());
+  await openConflict(wt);
+  shim = await killGit(DIFF_U);
+  await expect(resolveHaiveProjectionConflicts(wt)).rejects.toThrow(/git diff.*failed/);
+});
+it('a failed remaining-state listing cannot answer no conflicts', async () => {
+  const wt = await divergedPair(...stateSides());
+  await openConflict(wt);
+  shim = await killGit(DIFF_U, { after: 1 });
+  await expect(resolveHaiveProjectionConflicts(wt)).rejects.toThrow(/git diff.*failed/);
+});
+
+it('a failed plan stage listing throws instead of returning no stages', async () => {
+  const wt = await divergedPair(...planSides());
+  await openConflict(wt);
+  shim = await failGit(['ls-files', '-u', '-z', '--', PLAN_JSON]);
+  await expect(resolveHaiveProjectionConflicts(wt)).rejects.toThrow(
+    /git ls-files.*failed.*simulated failure/,
+  );
+});
+it('a failed blob warns and keeps the plan unmerged', async () => {
+  const wt = await divergedPair(...planSides());
+  await openConflict(wt);
+  const warning = vi.spyOn(logger, 'warn');
+  shim = await failGit(['cat-file', 'blob']);
+  const out = await resolveHaiveProjectionConflicts(wt);
+  expect(out.resolved).not.toContain(PLAN_JSON);
+  expect(warning).toHaveBeenCalledWith(
+    expect.objectContaining({
+      path: PLAN_JSON,
+      detail: expect.stringContaining('simulated failure'),
+    }),
+    expect.stringMatching(/blob.*could not be read/),
+  );
+  await shim.restore();
+  shim = null;
+  expect((await git(wt, ['ls-files', '-u', '--', PLAN_JSON])).trim()).not.toBe('');
+});
+
+it('a failed fallback stage-number listing throws instead of answering no stages', async () => {
+  const wt = await divergedPair(...planSides());
+  await openConflict(wt);
+  // Invalid JSON sides enter the fallback; only its literal-path listing fails.
+  shim = await failGit(['ls-files', '-u', '-z', '--', `:(literal)${PLAN_JSON}`]);
+  await expect(resolveHaiveProjectionConflicts(wt)).rejects.toThrow(
+    /git ls-files.*failed.*simulated failure/,
+  );
+});
+
+const validPlan = (title: string) =>
+  JSON.stringify({
+    schemaVersion: 2,
+    nodes: [
+      {
+        id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        parentId: null,
+        ordinal: 0,
+        title,
+        kind: 'component',
+        body: null,
+        status: 'todo',
+        taskable: false,
+      },
+    ],
+    edges: [],
+    codeLinks: [],
+  });
+
+it.each([
+  { operation: 'checkout --theirs', args: ['checkout', '--theirs'], shape: 'fallback' },
+  { operation: 'add', args: ['add', '--'], shape: 'fallback' },
+  { operation: 'rm', args: ['rm', '-f'], shape: 'deleted' },
+  ...['merged', 'kept'].flatMap((shape) => [
+    { operation: 'hash-object', args: ['hash-object', '-w'], shape },
+    { operation: 'update-index', args: ['update-index', '--add'], shape },
+    { operation: 'checkout-index', args: ['checkout-index', '-f'], shape },
+  ]),
+])(
+  'projection $shape failure warns with path and operation: $operation',
+  async ({ operation, args, shape }) => {
+    const md = '.haive-data/plan.md';
+    const sides: [Files, Files, Files] =
+      shape === 'fallback'
+        ? planSides()
+        : shape === 'deleted'
+          ? [{ [md]: 'base' }, { [md]: 'ours' }, { [md]: null, other: 'theirs' }]
+          : [
+              { [PLAN_JSON]: validPlan('base') },
+              { [PLAN_JSON]: validPlan('ours') },
+              { [PLAN_JSON]: shape === 'kept' ? null : validPlan('theirs'), other: 'theirs' },
+            ];
+    const wt = await divergedPair(...sides);
+    await openConflict(wt);
+    const file = shape === 'deleted' ? md : PLAN_JSON;
+    const before = (await git(wt, ['ls-files', '-u', '--', file])).trim();
+    expect(before).not.toBe('');
+    const warning = vi.spyOn(logger, 'warn');
+    shim = await failGit(args);
+    const out = await resolveHaiveProjectionConflicts(wt);
+    expect(out.resolved).not.toContain(file);
+    expect(warning).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: file,
+        operation,
+        detail: expect.stringContaining('simulated failure'),
+      }),
+      expect.stringMatching(/projection.*failed/),
+    );
+    // A failed checkout-index follows the successful index resolution; it must still be reported.
+    if (operation !== 'checkout-index')
+      expect((await git(wt, ['ls-files', '-u', '--', file])).trim()).not.toBe('');
+  },
+);
+
+it('a failed markdown render write warns without claiming plan.json gave nothing', async () => {
+  const md = '.haive-data/plan.md';
+  const wt = await divergedPair(
+    { [PLAN_JSON]: validPlan('base'), [md]: 'base' },
+    { [PLAN_JSON]: validPlan('ours'), [md]: 'ours' },
+    { [PLAN_JSON]: validPlan('theirs'), [md]: 'theirs' },
+  );
+  await openConflict(wt);
+  const warning = vi.spyOn(logger, 'warn');
+  shim = await failGit(['hash-object', '-w'], { from: 2 });
+  const out = await resolveHaiveProjectionConflicts(wt);
+  expect(out.resolved).toContain(PLAN_JSON);
+  expect(out.resolved).not.toContain(md);
+  expect(out.warnings.join('\n')).not.toContain('gave nothing');
+  expect(warning).toHaveBeenCalledWith(
+    expect.objectContaining({
+      path: md,
+      operation: 'hash-object',
+      detail: expect.stringContaining('simulated failure'),
+    }),
+    expect.stringMatching(/projection.*failed/),
+  );
 });

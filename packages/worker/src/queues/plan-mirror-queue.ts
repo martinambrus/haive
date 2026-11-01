@@ -360,7 +360,6 @@ async function mergeInScratch(
       };
     }
     const sha = await commitMerge(worktree, `Merge origin/${args.branch}`, args.identity);
-    if (!sha) throw new Error('the merge produced no commit to fast-forward onto');
     // The fast-forward needs the commit, not the worktree: remove it before taking the creation lock.
     removed = true;
     await removePlanMergeWorktree(args.repoPath);

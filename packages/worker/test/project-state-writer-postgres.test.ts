@@ -1997,7 +1997,7 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
       spy?.mockRestore();
     }
     expect.soft(allocations).toBe(0);
-    expect(await readFile(path)).toEqual(editor);
+    expect((await readFile(path)).equals(editor)).toBe(true);
     expect((await s.outbox())!.writeIntent).toBeTruthy();
   });
 

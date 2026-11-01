@@ -1,11 +1,12 @@
 import { execFile } from 'node:child_process';
-import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { failGit, noGit, type FakeGit } from '../../test/support/fake-git.js';
 import {
+  mergeCommitted,
   abortMerge,
   abortOtherMerge,
   captureFixBaseline,
@@ -17,6 +18,18 @@ import {
   squashMergeCommit,
 } from './git-merge.js';
 
+const readFault = vi.hoisted(() => ({ file: '' }));
+vi.mock('@haive/shared/fs-safe', async (original) => {
+  const real = await original<typeof import('@haive/shared/fs-safe')>();
+  return {
+    ...real,
+    readTextNoFollow: async (...args: Parameters<typeof real.readTextNoFollow>) => {
+      if (readFault.file && args[1].endsWith(readFault.file))
+        throw Object.assign(new Error('simulated EIO'), { code: 'EIO' });
+      return real.readTextNoFollow(...args);
+    },
+  };
+});
 const exec = promisify(execFile);
 const IDENTITY: Record<string, string> = {
   GIT_AUTHOR_NAME: 'T',
@@ -48,6 +61,7 @@ const exists = (p: string) =>
 
 const dirs: string[] = [];
 afterEach(async () => {
+  readFault.file = '';
   vi.restoreAllMocks();
   for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true, maxRetries: 5 });
 });
@@ -411,4 +425,98 @@ describe('D5 squashMergeCommit', () => {
     expect(await squashMergeCommit(dir, before, 'sq', IDENTITY, 'feature/x')).toBe(await sha(dir));
     expect((await git(dir, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2');
   });
+});
+
+describe('merge completion failures are not an incomplete resolution', () => {
+  it.each([
+    ['diff', '--no-ext-diff', '--no-textconv', '--name-only', '--diff-filter=U'],
+    ['ls-files', '-u'],
+    ['add'],
+    ['commit'],
+  ])('rejects a failed %j without committing', async (...argv) => {
+    const dir = await conflictOpen();
+    await write(dir, 'base.txt', 'resolved\n');
+    const before = await sha(dir);
+    await failing(argv, async () => {
+      await expect(completeMergeHostSide(dir, IDENTITY, 'feature/x')).rejects.toThrow(
+        /git .*failed/,
+      );
+    });
+    expect(await sha(dir)).toBe(before);
+    expect(await mergeIsOpen(dir)).toBe(true);
+    expect(await completeMergeHostSide(dir, IDENTITY, 'feature/x')).toBe(true);
+  });
+  it('a failed mergeCommitted status read throws rather than answering false', async () => {
+    const dir = await clean();
+    await failing(['--no-optional-locks', 'status'], async () => {
+      await expect(mergeCommitted(dir, 'feature/x')).rejects.toThrow(/git status.*failed/);
+    });
+  });
+  it('a failed ancestry read throws rather than answering false', async () => {
+    const dir = await clean();
+    await failing(['merge-base', '--is-ancestor'], async () => {
+      await expect(mergeCommitted(dir, 'feature/x')).rejects.toThrow(/git merge-base.*failed/);
+    });
+  });
+});
+
+it.each(['link', 'directory', 'fifo'])(
+  'containment refusal costs one fixer attempt: %s',
+  async (kind) => {
+    const dir = await conflictOpen();
+    const file = path.join(dir, 'base.txt');
+    await rm(file);
+    if (kind === 'link') await symlink('/unread', file);
+    else if (kind === 'directory') await mkdir(file);
+    else await exec('mkfifo', [file]);
+    await expect(completeMergeHostSide(dir, IDENTITY, 'feature/x')).resolves.toBe(false);
+    expect(await mergeIsOpen(dir)).toBe(true);
+    await rm(file, { recursive: true, force: true });
+    await write(dir, 'base.txt', 'resolved\n');
+    expect(await completeMergeHostSide(dir, IDENTITY, 'feature/x')).toBe(true);
+  },
+);
+it('a genuine IO failure still throws with the merge open', async () => {
+  const dir = await conflictOpen();
+  await write(dir, 'base.txt', 'resolved\n');
+  readFault.file = 'base.txt';
+  await expect(completeMergeHostSide(dir, IDENTITY, 'feature/x')).rejects.toThrow('simulated EIO');
+  expect(await mergeIsOpen(dir)).toBe(true);
+});
+it('a vanished merge directory is not committed', async () => {
+  const dir = await conflictOpen();
+  await rm(dir, { recursive: true, force: true });
+  await expect(mergeCommitted(dir, 'feature/x')).resolves.toBe(false);
+});
+
+async function linkedMergeDir() {
+  const root = await clean();
+  const real = path.join(root, 'real');
+  await mkdir(real);
+  await mkdir(path.join(root, '.haive'));
+  const dir = path.join(real, 'merge');
+  await git(root, ['worktree', 'add', '-b', 'linked-base', dir, 'HEAD']);
+  await symlink(real, path.join(root, '.haive/worktrees'));
+  return path.join(root, '.haive/worktrees/merge');
+}
+it('a merge directory behind a link is unreadable, not vanished', async () => {
+  const dir = await linkedMergeDir();
+  await expect(mergeCommitted(dir, 'feature/x')).rejects.toHaveProperty(
+    'name',
+    'PathContainmentError',
+  );
+});
+it('a failed stat cannot silently skip hand-back before a merge', async () => {
+  const asRoot = vi.spyOn(process, 'getuid').mockReturnValue(0);
+  try {
+    const dir = await linkedMergeDir();
+    const before = await sha(dir);
+    await expect(openMerge(dir, 'feature/x', ['--no-edit'], IDENTITY)).rejects.toHaveProperty(
+      'name',
+      'PathContainmentError',
+    );
+    expect(await sha(dir)).toBe(before);
+  } finally {
+    asRoot.mockRestore();
+  }
 });

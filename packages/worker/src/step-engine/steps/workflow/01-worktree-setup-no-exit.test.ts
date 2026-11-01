@@ -8,6 +8,7 @@ import { schema, type Database } from '@haive/database';
 import { configService } from '@haive/shared';
 import { worktreeSetupStep } from './01-worktree-setup.js';
 import type { StepApplyArgs, StepContext } from '../../step-definition.js';
+import { failGit } from '../../../../test/support/fake-git.js';
 import { killGit, type KilledGit } from '../../../../test/support/kill-git.js';
 
 const exec = promisify(execFile);
@@ -288,4 +289,38 @@ describe('01 worktree setup apply: a base that cannot be told', () => {
       );
     expect(err).not.toMatch(/recorded no base branch/);
   });
+});
+
+it('exit 128 retains the recorded base through detect and apply', async () => {
+  vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+  const root = await mkRepo(true);
+  await git(root, ['branch', 'develop']);
+  shim = await failGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+  const d = await worktreeSetupStep.detect!(mkCtx(root, DEVELOP_ROW));
+  expect(d.currentBranchError).toMatch(/could not read.*current branch/);
+  expect(notes(mkCtx(root, DEVELOP_ROW), d)).toHaveLength(0);
+  const out = await worktreeSetupStep.apply(
+    mkApplyCtx(root),
+    applyArgs(d as unknown as Record<string, unknown>),
+  );
+  expect(out.baseBranch).toBe('develop');
+});
+
+it('exit 128 without a recorded base warns on the form and refuses apply', async () => {
+  const root = await mkRepo(true);
+  shim = await failGit(['rev-parse', '--abbrev-ref', 'HEAD'], { exit: 128 });
+  const ctx = mkCtx(root);
+  const d = await worktreeSetupStep.detect!(ctx);
+  expect(d.currentBranch).toBeNull();
+  expect(d.syncedBase).toBeNull();
+  expect(d.currentBranchError).toMatch(/could not read.*current branch/);
+  const found = notes(ctx, d);
+  expect(found).toHaveLength(1);
+  expect(found[0]).toMatchObject({ type: 'note', variant: 'warning' });
+  expect(found[0]!.body).toContain(d.currentBranchError!);
+  expect(found[0]!.body).toContain('recorded no base branch');
+  await expect(
+    worktreeSetupStep.apply(mkApplyCtx(root), applyArgs(d as unknown as Record<string, unknown>)),
+  ).rejects.toThrow(/recorded no base branch/);
+  await expectNothingCreated(root);
 });

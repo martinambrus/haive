@@ -90,7 +90,6 @@ describe('the Haive data Save push seam', () => {
     'projection_rewritten',
     'write_pending',
     'git_operation',
-    'git_operation_unreadable',
   ] as const)('maps integration refusal %s without parsing its text', async (code) => {
     h.aside.mockResolvedValue({
       outcome: 'refused',
