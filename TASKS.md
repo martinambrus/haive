@@ -81,6 +81,7 @@ T524's 2026-11-01 owner round answered 42 questions. Decisions are recorded on t
 - T331: live Google OAuth intentionally remains parked; prepare setup instructions when its turn comes. T358 stays deferred until its first real provider-pinning consumer.
 - T293/T299 need T300 evidence; T298 additionally needs graded evaluation data. T332 needs T359; T335 needs T351/T352/T353; T275 needs the remaining T121/T122 work.
 - Routine diminishing-return work remains parked. Risk-bearing exceptions are verification candidates, not confirmed production bugs or permission for broad audits.
+- T487: ask at each Replace ZIP whether to preserve the old bundle until success or remove it first to free disk. Explain rollback loss for remove-first. This supersedes the initial keep-old-only answer.
 - T376's shipped strict sign-in audit behavior remains in force; no new break-glass or best-effort policy change was requested.
 
 ---
@@ -91,9 +92,9 @@ The prior seven-task delivery is complete. The following is the reconciled queue
 
 ## Execution priorities — owner decisions reconciled 2026-11-01
 
-The owner chose new functionality first, with demonstrated operational bugs alongside it, after concrete security/data-loss issues. A verification candidate is not a confirmed defect. Do not expand an executing task to its parked members or assume a new queue entry authorizes implementation now.
+The owner chose new functionality first, with demonstrated operational bugs alongside it, after concrete security/data-loss issues. A verification candidate is not a confirmed defect. Decisions dated2026-11-01 supersede older alternatives and needs-decision wording preserved in historical task evidence. Do not expand an executing task to its parked members or assume a new queue entry authorizes implementation now.
 
-1. **P0 — protect time-limited evidence and trust boundaries.** T402 targeted dry-run inventory/script first (compute the actual expiry, with before-image/undo). Then T387's measured unsafe imported Git configuration and T347/T399 endpoint policy; bounded risk verification T308/T450/T451/T508/T511. Fix confirmed consequential cases; stop if the scenario is not reachable.
+1. **P0 — protect time-limited evidence and trust boundaries.** T402 targeted dry-run inventory/script first (compute the actual expiry, with before-image/undo). Then T387's measured unsafe imported Git configuration. Other trust-boundary candidates (including T308/T347/T399/T450/T451/T508/T511) remain bounded P2 verification; escalate a confirmed security/data-loss consequence immediately. Completing every unconfirmed investigation is NOT a prerequisite for the functionality lane.
 2. **P1 — explicit prerequisites and a short enabling change.** T300's single 90-minute/$50-capped validation attempt BEFORE new feature implementation. T488's bounded CI-job split then shortens the repeated PR/main feedback cycle. T338 route removal and T467 endpoint retirement/body limit are bounded named security work.
 3. **P1 — finish the next functionality slice.** T121 then T122. Take demonstrated operational fixes alongside it: T521 member 5 (empty-origin push), T456 (invalid request unexpectedly upgrades all components), T434 (preserve working credentials), T362 (readiness after failed reset), T496 (vendor-call deadlines). Each needs its current failing control before implementation.
 4. **P2 — next product slices and bounded correctness work.** Integration reasons/create gate/picker/reconnect and visibility: T359/T356/T357/T332/T333/T339/T360/T361. Module/channel delivery: T330/T336/T337, then T351 build → T353 boot gate → T352 publish → T335 install/upgrade. Other open operational/UX/audit tasks follow their recorded policies; verification bundles are not blanket repairs. T319 batching rises only if its current measured gain is material.
@@ -101,12 +102,6 @@ The owner chose new functionality first, with demonstrated operational bugs alon
 6. **P4 — intentionally parked work.** Resume only on the task's stated evidence/consumer trigger or a fresh explicit request. Do not reopen cosmetic, coverage-only, unused parser forms or generic helper consolidation merely because a neighboring task finished.
 
 Verification fence: one short pass, at most three supported cases per candidate, normally 30 minutes without product/model runs. If no concrete consequence is established, record that and park; request a larger scope only for a new consequential finding. Implementation keeps the existing one-build/two-fix-round preference, fresh paired review, feature-level full-suite cadence and PR/main gates. No fixes or live runs have started under this reconciliation task.
-
-### T524 · backlog decisions, reconciliation and priorities
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-11-01T12:31Z · last: 2026-11-01T12:31Z · priority: P1
-User requested 2026-11-01: collect decisions for parked and design tasks, review diminishing-return classifications, reconcile resolved/mixed bundles, and reprioritize the queue. Explain T402 and its rolling log-expiry deadline. Record answers before dependent changes. Scope is board reconciliation and read-only verification; implementation of the resulting feature/bug queue is not started by this task.
-Evidence and decision inventory: .claude/tmp/codex-run/backlog-decisions-20261101/; previous full classification: .claude/tmp/codex-run/backlog-audit-202611/.
 
 ### T323 · FNF[uploads-3] · finished upload rows are never deleted; the reaper's removal is not identity-checked (+1)
 
@@ -163,7 +158,7 @@ The owner scheduled one capped validation attempt; this block is an evidence dep
 
 ### T308 · FNF[worktree-aliases] · hard links planted into .haive/worktrees before #800 survive
 
-status: open · priority: P0
+status: open · priority: P2
 A file under `.haive/worktrees` sharing an inode with a name in the writable checkout stays writable through the alias. Fix: a one-time background sweep (recorded per repository) that copy-replaces files whose st_nlink exceeds their names under that tree, via fs-safe. Measure the walk on a large repo first.
 
 ### T309 · FNF[cancel-cap-2] · a capped cancel with no claim row never finishes (+8)
@@ -456,7 +451,7 @@ User decision 2026-11-01: Block Start for unusable required tools; warn for opti
 
 ### T347 · FNF[forge-egress] · forge requests follow redirects and reach any credential host, internal addresses included
 
-status: open · kind: security · user decision: resolved 2026-11-01 · priority: P0
+status: open · kind: security · user decision: resolved 2026-11-01 · priority: P2
 PRE-EXISTING. BaseForgeProvider.request (shared forge/base-forge.ts) fetches with `redirect: 'follow'`. The host and API base of a self-hosted credential are typed in by the user.
 Measured: Authorization is dropped on a cross-origin hop.
 Fix direction:
@@ -739,7 +734,7 @@ See worker task-queue.ts ~:1806-1813, ~:356. Decide per shape: fail the task, or
 
 ### T399 · FNF[probe-stored-targets] · stored-target probes still reach any address for non-admins (+1)
 
-status: open · kind: security · user decision: resolved 2026-11-01 · priority: P0
+status: open · kind: security · user decision: resolved 2026-11-01 · priority: P2
 Sites: api global-kb.ts ~:623 (release-embed-model); the RAG store and embedder URL (rag.ts ~:324, tooling-upgrades.ts ~:727); forge calls (integration-mcp.ts ~:380-494); the worker counterparts.
 Decide which stored targets a non-admin may point at private addresses.
 
@@ -747,12 +742,14 @@ Decide which stored targets a non-admin may point at private addresses.
 
 User decision 2026-11-01: Allow private endpoints only through an administrator-controlled allowlist; explicit built-in services keep their trusted configuration.
 
-### T402 · FNF[context-backfill] · 237 stored steps keep the old 200k-window badge (143 read 0%)
+### T402 · FNF[context-backfill] · repair historical context badges before their source logs expire
 
 status: open · kind: data repair · user decision: resolved 2026-11-01 · priority: P0
-The data is recoverable from cli_invocations.stream_log: windows for about 97% of claude-code runs, peaks for 232 of 237 steps. Keep a before-image so the change can be undone.
+Historical measurement:237 stored step badges,143 showing0% left; peaks were recoverable for232 of237 and windows for about97% of Claude Code runs. These are historical counts, not a current affected-row inventory. Older writers could use a run's cumulative input as one request's context, double-count Codex cache, or use a stale200k denominator; current writers are fixed but stored rows were not recomputed.
 
-User decision 2026-11-01: Use an idempotent operator script with dry run, before-image and undo. Historical237/143counts need fresh targeted inventory; compute exact candidate expiry before applying. Current install retention90days; whole-install oldest eligible retained logs can expire Nov4, which does NOT establish the T402 subset deadline. Do not rely on rough Nov30note. Implementation and live backfill have not started.
+User decision 2026-11-01: an idempotent operator script with dry run, before-image and undo. Reparse retained stream data to repair derived context telemetry; do not re-run agents, change billing/token totals or fabricate unknown peaks/windows. Fence against newer/reopened row versions and report unrecoverable or lower-bound data explicitly. No implementation or live backfill has started.
+
+Read-only verification 2026-11-01: the installed `config:tasks:cliStreamLogRetentionDays` value is90 (the code default is0/forever). The sweep requires both the invocation's finalization and terminal task's completion to be older than the window. Across all6396 retained eligible logs, the earliest90-day expiry is2026-11-04T10:17:33.965; this does NOT identify the deadline for T402's exact subset. The old approximately November30 note is not a safe universal deadline. First deliver the targeted dry-run inventory and exact candidate-expiry report, then use the reviewed operator delivery path.
 
 ### T403 · FNF[context-window-truth] · wrapper CLIs report the binary's 200k default; killed runs fall to the static table
 
@@ -857,7 +854,7 @@ User decision 2026-11-01: Defer imported repository-rules overrides until the ru
 status: parked · reason: diminishing returns (2026-11-01 scan): Explicitly minor oversized-override edge requires unusually large rules; resume when resume when actual repository rules exceed Codex's readable limit · priority: P4
 From the T119 review (2026-10-30). Minor. shared project-state limits.ts ~:12 `MAX_AGENT_RULES_BYTES` is 64 KiB, while codex reads only the first 32 KiB of AGENTS.md (the reason AGENTS.md itself is kept under 32 KiB), so a large override silently truncates what codex sees, and the rest of the file after the block with it. Decide: a 24-32 KiB cap, or a size hint on the Tooling editor.
 
-### T446 · FNF[bundle-descriptor-removal] · an install removes a teammate's claim-less bundle descriptor, and its own upgrade commit can carry the removal
+### T446 · FNF[bundle-descriptor-removal] · document the chosen claim-based descriptor-removal rule in upgrade commits
 
 status: open · kind: documentation · user decision: resolved 2026-11-01 · priority: P3
 From the T119 review (2026-10-30). Verified 2026-10-31 by the T446 driver (evidence in .claude/tmp/sonnet-run/T446/): INTENDED by the documented rule in docs/architecture/onboarding-upgrades.md ~:662-671. A descriptor that the previous base names but no local bundle holds is kept while a claim names its source, and is removed and reported in `removed` once none does; it "can flap across pushes". Measured on real git with a two-install smoke harness (packages/worker/test/two-install-smoke.ts): B's record writer (worker project-state/write.ts ~:684-711, run by 12, 02, 04, the 10 s dirty sweep and the checkout watcher) removes A's claim-less descriptor; Haive's own 02+03 with the commit box ticked commits that removal; A writes the file again at its next record write. Nothing reads an unclaimed descriptor, and A's bundle row, storage, items and ledger are untouched, so nothing is lost.
@@ -868,13 +865,13 @@ User decision 2026-11-01: Keep current claim-based descriptor rule; document tha
 
 ### T450 · FNF[install-ownership-of-runners] · the runtime-runner reaper removes runners this install's database does not know, volumes included
 
-status: open · priority: P0
+status: open · priority: P2
 From the T441 review (2026-10-30). PRE-EXISTING, consequential on a host whose Docker daemon serves two installs; read from code, not reproduced. worker sandbox runtime-runner-reaper.ts ~:515-526 lists every `haive.ddev` and `haive.apprunner` container on the daemon with no install-ownership test; ~:64 (`if (!task) return 'orphan'`) treats a runner whose task this install's database does not know as an orphan, and `sweep` (~:342-366) and the preemption path (~:461-466) then run `docker rm -f -v` on it, its volumes included. Runners carry no `haive.install` label (only docker-runner.ts ~:422 stamps one). Fix direction: stamp `haive.install` on every runner at create, list by it, and leave an unlabeled runner alone (never reap what this install cannot prove it owns); keep docs/plans/solitary-partitioning-lampson.md's pending two-install check (S4) in step.
 
-### T451 · FNF[runner-liveness-probe] [design] · a failed docker inspect of a runner's existence still reads as "no"
+### T451 · FNF[runner-liveness-probe] [verify-first] · a failed docker inspect of a runner's existence still reads as "no"
 
-status: open · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P0
-From the T441 review (2026-10-30). PRE-EXISTING, minor. `isRunning` and `containerExists` read a failed `docker inspect` as "not running" or "absent" (worker sandbox ide-runner.ts ~:87-105, app-runner.ts ~:76-93, the same shape in ddev-runner.ts ~:888, callers not traced), and `startIdeRunner` (ide-runner.ts ~:259) and `startAppRunner` (app-runner.ts ~:154) open with an unconditional `docker rm -f -v`, so a transient failure of that first probe still recreates a live runner. T441 closed only the workspace-label probe. Needs a tri-state existence read and a decision per call site. Cross-reference: T371 [design] FNF[docker-spawn-dedup].
+status: open · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
+From the T441 review (2026-10-30). PRE-EXISTING, minor. `isRunning` and `containerExists` read a failed `docker inspect` as "not running" or "absent" (worker sandbox ide-runner.ts ~:87-105, app-runner.ts ~:76-93, the same shape in ddev-runner.ts ~:888, callers not traced), and `startIdeRunner` (ide-runner.ts ~:259) and `startAppRunner` (app-runner.ts ~:154) open with an unconditional `docker rm -f -v`, so a transient failure of that first probe still recreates a live runner. T441 closed only the workspace-label probe. Needs a tri-state existence read and a decision per call site. Cross-reference: T371 [verify-first] FNF[docker-spawn-dedup].
 
 Executable verification scope: Tri-state existence/inspect failure before destructive runner recreation; trace supported callers before a fault-injection control. No automatic full-bundle repair: prove a supported current consequence, then scope the fix; park the remainder.
 
@@ -952,7 +949,7 @@ Scope: retire the legacy repository-upload endpoint and update its public-route/
 status: parked · reason: diminishing returns (2026-11-01 scan): Minor conservative rollback refusal depends on retired legacy import markers; resume when resume when a retired marker blocks a needed rollback · priority: P4
 From the T421 review (2026-10-31). PRE-EXISTING, minor, conservative direction. worker/api onboarding-admission.ts `ledgerImportedSince` (~:128-144) counts every import marker imported after an upgrade, path-blind and including the superseded ones, so a marker at a git-data path that T421's boot migration retired still blocks that upgrade's rollback. Decide whether a retired git-data marker should count (it was never a real import) or the conservative block stays.
 
-### T472 · FNF[git-data-claim-sweep] [design] · an onboarding reset leaves a git-data claim file that neither a ledger row nor the sync base names
+### T472 · FNF[git-data-claim-sweep] [verify-first] · an onboarding reset leaves a git-data claim file that neither a ledger row nor the sync base names
 
 status: open · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
 From the T469 review (2026-10-31). PRE-EXISTING, minor (narrow window).
@@ -1242,9 +1239,9 @@ From the T385 F7 round 2 review (2026-10-31). PRE-EXISTING; minor (test fidelity
 2. `ne`, `inArray` and `notInArray` on timestamp columns compare Date objects by reference (~:335, ~:343-346; `eq` handles Date at ~:314-317): for an equal-time distinct Date, ne is true (PostgreSQL false), inArray false (true), notInArray true (false).
 3. Optional: the negated correlated EXISTS gate keeps 8 of 19 shape checks unpinned (`ch.length === 2`, `text(ch[0]) === 'not '`, `is(ch[1], SQL)`, `sub.length === 11`, `is(sub[3], PgUUID)`, `is(sub[5], PgUUID)`, `is(sub[7], Column)`, `is(sub[9], Column)`); no current input differs.
 
-### T508 · FNF[relink-commit-unknown] [design] · after a lost COMMIT acknowledgement the relink restores git blindly, leaving the row new and git old
+### T508 · FNF[relink-commit-unknown] [verify-first] · after a lost COMMIT acknowledgement the relink restores git blindly, leaving the row new and git old
 
-status: open · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P0
+status: open · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
 From the T376 fifth review (2026-10-31). PRE-EXISTING on the T376 branch (80cb7aa97), documented, minor (needs a connection loss at COMMIT).
 
 The remote relink (api routes/repos.ts, the outer catch after `db.transaction`) restores git's remote after a COMMIT failure or a lost connection without learning whether the transaction committed. A COMMIT whose acknowledgement was lost leaves the row's `remote_url` and credential binding new, the `repository.remote.update` audit row present, and git on the old remote. Fix direction: after a connection-class error, read the row on a fresh connection and align git to it instead of restoring blindly. Related, third-party (needs approval, not started): postgres.js 3.4.9 keeps running an abandoned transaction callback after `onclose` rejects `begin`, and its `tx` handle can write through a connection the pool has re-opened (`index.js` ~:243-246, ~:291-296, ~:421-427), so a late `UPDATE` could land outside its transaction.
@@ -1277,7 +1274,7 @@ Execution fence 2026-11-01: Start with a named current caller that mistakes a re
 
 ### T511 · FNF[bounded-vendor-bodies] · vendor and user-supplied endpoint bodies are read whole before they are cut or parsed (+4)
 
-status: open · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P0
+status: open · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
 From the T365 fix round 1 (2026-10-31), verified against cx-365. PRE-EXISTING, memory only (no secret path). See also T496 (vendor-call deadlines).
 
 1. User-supplied Ollama URLs: api routes/tooling.ts ~:89 and ~:191 (`resp.json()` of `/api/tags`, `/api/show`, bounded in time only); shared rag/embed.ts ~:108 (`resp.text()` then a cut), ~:111, ~:179, ~:210 (`resp.json()`); worker cli-adapters/ollama-probe.ts ~:107 (`resp.text()` of the error body).
@@ -1483,6 +1480,8 @@ Split from T364 items1/13/14, 2026-11-01. This is three candidate ways validatio
 3. From T364 item14: (T363 review) PRE-EXISTING, consequential: scripts/test/ci-gated-list.test.mjs ~:12 recognises a Postgres-gated test only by `pathname.startsWith(` or `CREATE|DROP DATABASE`, so a gated file with another guard idiom is invisible to the "every gated file has a GATED row" check and skips green in CI for ever (T363's DB file was the live case, fixed there). Fix: detect by `skipIf` plus a `*_URL` env var.
 
 ## Done
+
+- T524 — reconcile backlog decisions, mixed bundles and priorities;42 owner questions answered, corrected T487 policy retained, T402 expiry verified — board-only commits b1305a4f2/965b87a7e/c6ccc177e and closure,2026-11-01; no product implementation or live validation run started; TASKS-only changes need no PR/CI
 
 - T471 — atomically fold parked waits and re-check held state; preserve retained-run timing and one form marker — PR #981 (3078d9758), 2026-11-01; exact-HEAD review, all PR checks and main CI41300414474 green; full database/API/worker suites and real Postgres/Redis controls pass; follow-ups T499/T515/T519
 
