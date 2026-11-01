@@ -210,7 +210,7 @@ describe('POST /repos', () => {
   });
 });
 
-describe('POST /repos/upload', () => {
+describe('POST /repos/upload/:id/complete', () => {
   let storage: string;
   let previousRoot: string | undefined;
   beforeAll(async () => {
@@ -225,10 +225,21 @@ describe('POST /repos/upload', () => {
   });
 
   it('answers neither the tooling nor the environment', async () => {
-    const form = new FormData();
-    form.set('archive', new File([new Uint8Array([80, 75, 3, 4, 0, 1, 2, 3])], 'source.zip'));
-
-    const res = await app.request('/repos/upload', { method: 'POST', body: form });
+    const bytes = new Uint8Array([80, 75, 3, 4, 0, 1, 2, 3]);
+    const init = await send('/repos/upload/init', 'POST', {
+      filename: 'source.zip',
+      totalSize: bytes.length,
+      chunkSize: bytes.length,
+    });
+    expect(init.status).toBe(201);
+    const { session } = (await init.json()) as { session: { id: string } };
+    const chunk = await app.request(`/repos/upload/${session.id}/chunk`, {
+      method: 'PUT',
+      headers: { 'content-range': `bytes 0-${bytes.length - 1}/${bytes.length}` },
+      body: bytes,
+    });
+    expect(chunk.status).toBe(200);
+    const res = await app.request(`/repos/upload/${session.id}/complete`, { method: 'POST' });
 
     expect(res.status).toBe(201);
     const text = await res.text();

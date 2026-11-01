@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
@@ -28,7 +27,6 @@ import {
 } from '@haive/database';
 import {
   errno,
-  fileIdentity,
   isPathContainmentError,
   decodeUtf8Strict,
   isNotUtf8Error,
@@ -39,12 +37,10 @@ import {
   readFileNoFollow,
   readdirNoFollow,
   relUnder,
-  removeFileIfIdentityNoFollow,
   removeFileIfNoFollow,
   removeNoFollow,
   renameNoFollow,
   writeFileNoFollow,
-  type FileIdentity,
   type ReadResult,
 } from '@haive/shared/fs-safe';
 import { containmentHttpError } from '../lib/fs-http.js';
@@ -584,137 +580,6 @@ repoRoutes.post('/', requireNewWorkAllowed, async (c) => {
     },
     201,
   );
-});
-
-repoRoutes.post('/upload', requireNewWorkAllowed, async (c) => {
-  const userId = c.get('userId');
-  const db = getDb();
-
-  const form = await c.req.formData();
-  const nameField = form.get('name');
-  const branchField = form.get('branch');
-  const archiveField = form.get('archive');
-
-  if (nameField !== null && typeof nameField !== 'string') {
-    throw new HttpError(400, 'name must be a string');
-  }
-  if (typeof nameField === 'string' && nameField.length > 255) {
-    throw new HttpError(400, 'name must be at most 255 characters');
-  }
-  if (!(archiveField instanceof File)) {
-    throw new HttpError(400, 'archive file is required');
-  }
-  if (archiveField.size === 0) {
-    throw new HttpError(400, 'archive is empty');
-  }
-  if (archiveField.size > maxUploadBytes()) {
-    throw new HttpError(413, `archive exceeds ${maxUploadBytes()} bytes limit`);
-  }
-  const format = detectArchiveFormat(archiveField.name);
-  if (!format) {
-    throw new HttpError(400, 'unsupported archive format (allowed: .zip, .tar, .tar.gz, .tgz)');
-  }
-  const branch = typeof branchField === 'string' && branchField.length > 0 ? branchField : 'main';
-
-  const uploadRepoName = deriveRepoName({
-    name: nameField ?? undefined,
-    filename: archiveField.name,
-  });
-
-  const inserted = await db.transaction(async (tx) => {
-    await admitNewWork(tx);
-    return tx
-      .insert(schema.repositories)
-      .values({
-        userId,
-        name: uploadRepoName,
-        source: 'upload',
-        localPath: null,
-        remoteUrl: null,
-        branch,
-        status: 'cloning',
-        credentialsSecretId: null,
-      })
-      .returning();
-  });
-  const repo = inserted[0]!;
-
-  const storageRoot = await ensureUploadsDir(userId);
-  const ext = format === 'tar.gz' ? 'tar.gz' : format;
-  const archiveRel = `${uploadsRel(userId)}/${repo.id}.${ext}`;
-  const archivePath = path.join(storageRoot, archiveRel);
-
-  let fh: FileHandle | null = null;
-  let created: FileIdentity | null = null;
-  try {
-    // Created exclusively and streamed through that one descriptor, so the bytes cannot land
-    // anywhere but the inode this route made. `open(path, 'w')` truncated whatever stood at the
-    // name and followed a link there; the name embeds a fresh row id, so EEXIST is a collision to
-    // fail on rather than overwrite.
-    fh = await openFileNoFollow(storageRoot, archiveRel, 'create-exclusive', { fileMode: 0o644 });
-    created = await fileIdentity(fh);
-    const body = archiveField.stream() as unknown as ReadableStream<Uint8Array>;
-    // Counted as it arrives rather than stat'ed back off the path. The multipart `size` checked
-    // above is the client's claim, which is what this second check has always been guarding.
-    await writeBodyToHeld(
-      body,
-      fh,
-      maxUploadBytes(),
-      () => new HttpError(413, `archive exceeds ${maxUploadBytes()} bytes limit`),
-    );
-    await fh.close();
-  } catch (err) {
-    if (fh) {
-      // Removed while the descriptor is still open, so its inode number cannot have been reused.
-      if (created !== null) {
-        await removeFileIfIdentityNoFollow(storageRoot, archiveRel, created).catch(() => {});
-      }
-      await fh.close().catch(() => {});
-    }
-    await db.delete(schema.repositories).where(eq(schema.repositories.id, repo.id));
-    if (err instanceof HttpError) throw err;
-    throw new HttpError(500, `failed to write archive: ${(err as Error).message}`);
-  }
-
-  const queue = getRepoQueue();
-  const payload: RepoJobPayload = {
-    repositoryId: repo.id,
-    userId,
-    source: 'upload',
-    branch,
-    archivePath,
-    archiveFormat: format,
-  };
-  // One attempt only: a bad archive will fail the same way on retry, and the
-  // worker deletes the archive on success, so retrying would run against a
-  // missing file and mask the real error.
-  await addRepoJobOrMarkError(db, repo.id, async () => {
-    await db.insert(schema.repoUploads).values({
-      id: repo.id,
-      userId,
-      filename: archiveField.name,
-      archiveFormat: format,
-      totalSize: archiveField.size,
-      bytesReceived: archiveField.size,
-      chunkSize: Math.min(archiveField.size, 100 * 1024 * 1024),
-      archivePath,
-      status: 'complete',
-    });
-
-    return queue.add(REPO_JOB_NAMES.EXTRACT, payload, {
-      attempts: 1,
-      removeOnComplete: 100,
-      removeOnFail: 100,
-    });
-  });
-
-  const {
-    agentRulesOverride: _rules,
-    onboardingTooling: _tooling,
-    onboardingEnvironment: _environment,
-    ...rest
-  } = repo;
-  return c.json({ repository: rest }, 201);
 });
 
 function sessionFromRow(row: typeof schema.repoUploads.$inferSelect) {

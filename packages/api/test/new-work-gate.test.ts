@@ -1260,17 +1260,6 @@ describe('the routes that start a background job', () => {
       early: true,
     },
     {
-      name: 'POST /repositories/upload',
-      send: (app) => {
-        const form = new FormData();
-        form.set('archive', new File([new Uint8Array(Buffer.from('PK\nan archive'))], 'a.zip'));
-        return app.request('/repositories/upload', { method: 'POST', body: form });
-      },
-      status: 201,
-      jobs: [REPO_JOB_NAMES.EXTRACT],
-      early: true,
-    },
-    {
       name: 'POST /repositories/upload/:id/complete',
       prepare: async ({ fake, repoRoot }) =>
         fake.insert(schema.repoUploads, {
@@ -1568,7 +1557,7 @@ describe('the routes that start a background job', () => {
       expect(
         Object.fromEntries(starters().map(({ file, starts }) => [file, starts])),
         'a file starts a job: gate its routes with requireNewWorkAllowed and admitNewWork, add them to JOB_ROUTES, and count the site here',
-      ).toEqual({ 'routes/bundles.ts': 4, 'routes/cli-providers.ts': 3, 'routes/repos.ts': 4 });
+      ).toEqual({ 'routes/bundles.ts': 4, 'routes/cli-providers.ts': 3, 'routes/repos.ts': 3 });
     });
 
     it('takes the new-work fence in every file that starts one', () => {

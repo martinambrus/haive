@@ -54,6 +54,9 @@ repository's owner whose archive has not been recorded as unavailable. A blank p
 clone without a remote cannot be refreshed; the card replaces stale Retry copy with instructions
 to delete and create the repository again from a URL or folder. Root claims, holding tasks and
 live queue jobs remain temporary route refusals and do not hide Retry. An older list response
-without capability fields keeps the Retry action for compatibility. Single-shot `POST /upload`
-persists its completed `repo_uploads` source before enqueuing extraction, so a failed preparation
-can use the same retry path as a completed chunked upload. Archive retention is unchanged.
+without capability fields keeps the Retry action for compatibility. Repository archives use
+the chunked API: `POST /repos/upload/init`, `PUT /repos/upload/:id/chunk` with `Content-Range: bytes start-end/total`,
+then `POST /repos/upload/:id/complete`. Completion persists its `repo_uploads` source before
+enqueuing extraction, so a failed preparation can use Retry. The unused single-shot
+`POST /repos/upload` route is retired (404). Existing completed upload records remain valid
+Retry sources, and archive retention is unchanged.

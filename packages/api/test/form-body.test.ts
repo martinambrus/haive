@@ -17,7 +17,6 @@ vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
 }));
 vi.mock('@haive/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared')>()),
-  // POST /repos/upload reads the maintenance state past the cache (requireNewWorkAllowed).
   configService: {
     get: async () => null,
     getFresh: async () => null,
@@ -168,36 +167,36 @@ const everything = (fake: ReturnType<typeof setup>) =>
 const send = (route: string, { headers, body }: Sent) =>
   web.request(route, { method: 'POST', headers: { host: 'localhost:3001', ...headers }, body });
 
-describe.each([
-  { name: 'POST /repos/upload', route: '/repos/upload' },
-  { name: `POST ${SOUND_PATH}`, route: SOUND_PATH },
-])('$name through the whole app', ({ route }) => {
-  it.each([
-    ['a JSON body', JSON_BODY],
-    ['a garbage multipart body', GARBAGE_MULTIPART],
-  ])('answers 400 invalid_form for %s, and writes nothing', async (_what, sent) => {
-    const fake = setup();
-    const before = everything(fake);
+describe.each([{ name: `POST ${SOUND_PATH}`, route: SOUND_PATH }])(
+  '$name through the whole app',
+  ({ route }) => {
+    it.each([
+      ['a JSON body', JSON_BODY],
+      ['a garbage multipart body', GARBAGE_MULTIPART],
+    ])('answers 400 invalid_form for %s, and writes nothing', async (_what, sent) => {
+      const fake = setup();
+      const before = everything(fake);
 
-    const res = await send(route, sent);
+      const res = await send(route, sent);
 
-    // Soft, so a request that is refused wrongly AND wrote shows both.
-    expect.soft(await answer(res)).toEqual(REFUSED);
-    expect.soft(everything(fake)).toEqual(before);
-  });
+      // Soft, so a request that is refused wrongly AND wrote shows both.
+      expect.soft(await answer(res)).toEqual(REFUSED);
+      expect.soft(everything(fake)).toEqual(before);
+    });
 
-  it('lets a form without the file reach the handler, which answers its own 400', async () => {
-    const fake = setup();
-    const before = everything(fake);
-    const form = new FormData();
-    form.set('note', 'there is no file in this form');
+    it('lets a form without the file reach the handler, which answers its own 400', async () => {
+      const fake = setup();
+      const before = everything(fake);
+      const form = new FormData();
+      form.set('note', 'there is no file in this form');
 
-    const res = await send(route, { body: form });
+      const res = await send(route, { body: form });
 
-    expect.soft(await answer(res)).toEqual({ status: 400, code: null, named: true });
-    expect.soft(everything(fake)).toEqual(before);
-  });
-});
+      expect.soft(await answer(res)).toEqual({ status: 400, code: null, named: true });
+      expect.soft(everything(fake)).toEqual(before);
+    });
+  },
+);
 
 describe(`POST ${SOUND_PATH} with a real upload`, () => {
   let storage: string;
@@ -229,4 +228,12 @@ describe(`POST ${SOUND_PATH} with a real upload`, () => {
       { userId: USER, soundMime: 'audio/mpeg', soundFilename: 'chime.mp3' },
     ]);
   });
+});
+
+// The public API mount must retire the buffered upload as well as the isolated router.
+it('returns 404 for the retired repository upload through the app and keeps state', async () => {
+  const fake = setup();
+  const before = everything(fake);
+  expect((await send('/repos/upload', JSON_BODY)).status).toBe(404);
+  expect(everything(fake)).toEqual(before);
 });
