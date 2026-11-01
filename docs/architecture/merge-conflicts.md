@@ -3,10 +3,12 @@
 The DAG's level merge and the merge resolver (`12-worktree-cleanup`, `00a-sync-base`,
 `13-onboarding-push`) share the git core in `git-merge.ts`. Each fix agent edits the conflicted
 files, and the host verifies, stages and commits, so a fixer must never start from what an earlier one
-left. Seven rules keep it that way, each MEASURED on git 2.43 and 2.54:
+left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
 
 - **Unmerged paths are read with `-z`** (`unmergedPaths`). Without it git quotes a name holding a quote
   or a non-ASCII byte, the quoted name reads as a deleted file, and its conflict markers were committed.
+  A failed listing is unknown, never an empty conflict set: callers deciding a commit or an abort
+  require the read and throw; report-only callers retain the nullable result.
 - **A conflict is told from a refused merge by MERGE_HEAD naming the merged ref** (`openMerge`). A
   refusal (a local change or an untracked file in the way, a ref git cannot resolve) opens nothing and
   exits with the codes a conflict does, and used to send fixers into a tree with no merge in it. It
@@ -259,8 +261,8 @@ left. Seven rules keep it that way, each MEASURED on git 2.43 and 2.54:
   It used to return null for all of them: a MERGE_HEAD read that failed let the resolver set Haive's files
   aside into a tree with a merge open, `abortMerge` report nothing to abort, `openMerge` call a conflicted
   merge "refused", and `branch-revert` fall through to origin's older record. A directory that is not
-  there is absent too, decided by an fs-safe lstat and never by ENOENT alone, which a missing `git` gives
-  as well: a cross-branch merge reads the base worktree before it creates it, and a cancel records a
+  there is absent too, decided by a strict fs-safe lstat of the directory, or its basename under the
+  parent when it cannot itself be opened, and never by ENOENT alone, which a missing `git` gives as well: a cross-branch merge reads the base worktree before it creates it, and a cancel records a
   merge left open after it removed the DAG worktree, which a throw would leave without `task.cancel_finished`.
   Exit 1 also covers a ref git cannot read (a junk or unreadable ref file, a dangling ref asked as
   `^{commit}`): no exit code tells those apart, so they stay "absent". Reads that decide a write come before
@@ -275,7 +277,10 @@ left. Seven rules keep it that way, each MEASURED on git 2.43 and 2.54:
   caller has a branch for it: `halt` (the recorder of last resort, which must not reject on a git read; an
   unreadable feature ref keeps the claim, as null did), `prePushSync` (warns and pushes the pinned local
   base), `captureFixBaseline` (`{unavailable}` carrying git's text) and the check after `merge --abort`
-  (`{ok: false}`, so `abortMerge` still hands back what the abort rewrote).
+  (`{ok: false}`, so `abortMerge` still hands back what the abort rewrote). The hand-back must read
+  its pre-move HEAD and changed-path list: a failed read is reported rather than accepted as no
+  files to return. Projection conflict readers likewise distinguish a missing tree entry from a
+  failed tree/blob read, so an unreadable side cannot silently become a deletion.
 
 Haive's own files merge before any fixer or person sees a conflict. Right after the merge opens, and
 again when a Retry reopens it, the resolver runs `resolveHaiveProjectionConflicts` (the plan merge's
