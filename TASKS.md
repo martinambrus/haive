@@ -124,8 +124,10 @@ Execution 2026-11-01: paired with T122 per approved B5.2+B5.3 plan; one feature 
 
 ### T122 · B5.3 · review watermarks travel; Haive paths leave drift ranges
 
-status: open · kind: feature · priority: P1
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T17:33Z · last: 2026-11-01T17:33Z · kind: feature · priority: P1
 settings/review-watermarks.json, descendant wins via merge-base --is-ancestor; _external-drift drops .haive-data/state/** and plan files. Control: B re-reviews A's KB-reviewed commits today; empty after.
+
+Execution 2026-11-01: paired with T121, bounded portable watermark and drift-range feature; no unrelated queued repair or live model calls. Evidence `.claude/tmp/codex-run/queue-exec-20261101/T121-T122/`.
 
 ### T286 · FNF[root-work] · a task at the root after 01 was skipped escapes the fences (+3)
 
