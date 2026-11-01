@@ -415,8 +415,14 @@ and any other live row, and moves the task back through `moveTaskToStep` under a
 `failed`, so a Cancel that landed first stands (409) and nothing is reset. A `done` or `skipped`
 row is left as it is: its advance re-drives the hand-off it finished with. A park's wait is booked
 where the worker's `foldPark` books it: to `carried_idle_ms` when the row has no `started_at` (a park
-before the run), else to `idle_ms`, which may only hold a wait inside the current run; the Retry's
-re-offer of a parked row and a Stop do the same. A task that never
+before the run), else to `idle_ms`, which may only hold a wait inside the current run. A Stop keeps that placement.
+A Retry's re-offer and the START replay's settle instead close the retained run in that same
+transaction: after booking the wait they snapshot `computeStepContribution` at the same database
+timestamp, add Work, Idle and user-active time to the corresponding `carried_*` columns, and clear
+the live timing. The retained form keeps its prior Work, the unclaimed `pending` interval
+contributes nothing, and the worker claim opens a fresh span. They do not use
+`computeFoldContribution`, whose discarded-open-run rule reclassifies Work as Idle. Repeating the
+action cannot fold an unmarked pending row again; carried values saturate at int4 headroom. A task that never
 reached a step still restarts through START, and settles its rows again after its bump, since
 answering a parked form revives the task and can open a row in between. That settle locks every
 step row of the task, in id order, before it writes (`settleActiveSteps`): a pass that got in before the bump can still
@@ -543,6 +549,15 @@ job: status, `completed_at`, epoch + 1 and the event, in the same transaction. T
 row, so it takes no `lockStepRows` batch and never waits for a step row while it holds the task row (the cycle
 with a pass's claim: a step row, then the task row FOR SHARE); the step sweep after it takes its open rows
 through `lockStepRows` in a short transaction of its own and holds no task row.
+
+**A form's park marker is stamped once, in the UPDATE that parks it.** The standard runner,
+reopened-form path and merge resolver each write `waiting_started_at` with `waiting_form`.
+`handleResult` checks row ownership without stamping again, so a submit or clarify that read the
+park before the hand-off still matches it, and the hand-off cannot reopen a marker an accepted
+answer cleared. The answer routes compare the row's status and original marker under the row lock
+(`stillParkedAsRead`); a real re-park is refused with `step_form_not_waiting`. Legacy NULL markers
+remain answerable by status. Idle folds use the held current row or a single SQL update, never a
+pre-transaction idle value; CLI/provider switches likewise re-read their decision state under lock.
 
 A form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmit` drops one that
 lands on a form parked after the job was queued, such as a form a `ReopenStepFormError` reopened,
