@@ -53,6 +53,11 @@ import {
 import { resolveHaiveProjectionConflicts } from '../plan/projection-merge.js';
 import { seedPlanBaseFromCheckout } from '../plan/mirror.js';
 import {
+  prepareProjectStatePush,
+  commitProjectStatePush,
+  projectionPushIdentity,
+} from '../project-state/push.js';
+import {
   MOVE_ATTEMPTS,
   putBackAfterFailure,
   putBackProjections,
@@ -423,6 +428,13 @@ async function reachDone(
   // Pushes the commit a section read, so a pass that lost the dir cannot send another task's work.
   // Idempotent on re-entry: a completed push reports "up-to-date".
   if (state.pushAfterMerge && !state.pushed) {
+    const pushRepositoryId = await taskRepositoryId(db, params.taskId);
+    await prepareProjectStatePush(db, {
+      repositoryId: pushRepositoryId,
+      sourcePath: ctx.repoPath,
+      taskId: ctx.taskId,
+    });
+    const pushIdentity = await projectionPushIdentity(db, ctx.userId, pushRepositoryId);
     const pushing: MergeResolveState = {
       ...state,
       phase: 'pushing',
@@ -431,6 +443,20 @@ async function reachDone(
     };
     const sha = await inMergeDir(db, current, params, state.mergeDir, async (tx) => {
       await saveMergeState(tx, current.id, pushing);
+      // A pushing retry can outlive its transient base worktree. Recreate it from the
+      // already-landed base ref before carrying newly dirty state into that branch.
+      if (
+        state.mode === 'cross-branch' &&
+        !(await hasWorkspaceEntry(ctx.repoPath, relUnder(ctx.repoPath, state.mergeDir)))
+      )
+        await ensureBaseWorktree(ctx, state.mergeDir, state.baseBranch);
+      await commitProjectStatePush(tx, {
+        repositoryId: pushRepositoryId,
+        sourcePath: ctx.repoPath,
+        targetPath: state.mergeDir,
+        identity: pushIdentity,
+        taskId: ctx.taskId,
+      });
       const tip = await gitRun(ctx.repoPath, [
         'rev-parse',
         '--verify',

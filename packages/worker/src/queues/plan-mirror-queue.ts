@@ -1,3 +1,4 @@
+import { prepareProjectStatePush, commitProjectStatePush } from '../project-state/push.js';
 import { safeProcessor } from './safe-processor.js';
 import { Queue, Worker, type Job } from 'bullmq';
 import { and, asc, eq, inArray, isNull, lt } from 'drizzle-orm';
@@ -404,6 +405,8 @@ export interface SaveSeams {
   ): Promise<{ files: string[]; repoPath: string; message?: string; expectedBranch?: string }>;
   commit(scope: SaveScope): Promise<{ committed: boolean; commitSha: string | null }>;
   afterLanding(scope: SaveScope & { kept: KeptFiles }): Promise<void>;
+  /** Runs after integration has released its transaction/locks; never for a refused/conflicted move. */
+  beforePush?(scope: SaveScope): Promise<{ committed: boolean; commitSha: string | null } | null>;
 }
 
 const planSaveSeams: SaveSeams = {
@@ -414,11 +417,25 @@ const planSaveSeams: SaveSeams = {
   },
   commit: ({ repoPath, message, identity }) =>
     commitPlanSnapshotFiles({ repoPath, message, identity }),
+  async beforePush({ repo, repoPath, identity }) {
+    await prepareProjectStatePush(getDb(), { repositoryId: repo.id, sourcePath: repoPath });
+    // integrateOrigin has ended its transaction. The state commit takes its own ordered
+    // projection locks here, once, with no nested pool operation or merge-lock reacquisition.
+    return getDb().transaction((tx) =>
+      commitProjectStatePush(tx, {
+        repositoryId: repo.id,
+        sourcePath: repoPath,
+        targetPath: repoPath,
+        identity,
+      }),
+    );
+  },
   async afterLanding({ repo, repoPath, message, identity, kept }) {
     await reconcilePlanFromCheckout(getDb(), repo.id, repoPath);
     await flushPlanMirrorForRepository(getDb(), repo.id);
     await commitPlanSnapshotFiles({ repoPath, message, identity });
-    await resyncHaiveProjections(getDb(), repo.id, repoPath);
+    if (!(await resyncHaiveProjections(getDb(), repo.id, repoPath)))
+      throw new Error('project state re-sync failed before pushing');
     await restoreKeptMetadata(repoPath, kept);
   },
 };
@@ -452,7 +469,7 @@ export async function saveCore(
     const identity = Object.keys(resolved).length > 0 ? resolved : FALLBACK_GIT_IDENTITY;
     const message = payload.commitMessage?.trim() || prepared.message || 'docs: save project plan';
     const scope = { repo, payload, repoPath, message, identity };
-    const { committed, commitSha } = await seams.commit(scope);
+    let { committed, commitSha } = await seams.commit(scope);
 
     // The commit has landed: only a push needs the branch, so a failed read fails only a push.
     failureCode = 'branch_unreadable';
@@ -523,6 +540,11 @@ export async function saveCore(
         }
       } catch (err) {
         return await recoverAfterMoveFailure(getDb(), repo.id, repoPath, kept, before, err);
+      }
+      const carried = await seams.beforePush?.(scope);
+      if (carried?.committed) {
+        committed = true;
+        commitSha = carried.commitSha ?? commitSha;
       }
       failureCode = 'branch_tip_unreadable';
       const upstream = await gitRun(repoPath, ['rev-parse', '--abbrev-ref', '@{upstream}']);

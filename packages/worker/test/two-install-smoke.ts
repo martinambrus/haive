@@ -4244,7 +4244,9 @@ async function main(): Promise<void> {
       );
     }
 
-    // C14: a Save & push with nothing to land moves no checkout, so a task or a hand edit does not stop it.
+    // C14 (superseded by T121): push now also commits the portable state, even with no
+    // remote integration. An unreadable state file must therefore hold the push. The running
+    // workflow task alone still holds no no-op integration; its valid-state control is C14b.
     {
       const { y, origin } = await landing('c14');
       await editPlan(y, 0, 'Edited on B');
@@ -4256,16 +4258,42 @@ async function main(): Promise<void> {
         title: 'two-install-smoke',
         status: 'running',
       });
+      const remoteBefore = git(origin, 'rev-parse', 'main');
       const saved = await attempt(() =>
         save({ repositoryId: y.repositoryId, userId: y.userId, push: true }),
       );
       check(
-        'C14: a Save & push with nothing to land pushes past a running task and a hand-edited state file',
+        'C14: a Save & push with nothing to land preserves malformed state and refuses the new state commit',
+        saved.error !== null &&
+          saved.error.includes('nothing was pushed') &&
+          git(origin, 'rev-parse', 'main') === remoteBefore &&
+          (await fileOf(y, RECORD_RENDER)) === '{ edited by hand',
+        saved.error,
+      );
+    }
+
+    {
+      const { y, origin } = await landing('c14b');
+      await editPlan(y, 0, 'Edited on B');
+      await setRender(y, { lspLanguages: ['php'] });
+      await y.db.insert(schema.tasks).values({
+        userId: y.userId,
+        repositoryId: y.repositoryId,
+        type: 'workflow',
+        title: 'two-install-smoke',
+        status: 'running',
+      });
+      const pending = await fileOf(y, RECORD_RENDER);
+      const saved = await attempt(() =>
+        save({ repositoryId: y.repositoryId, userId: y.userId, push: true }),
+      );
+      check(
+        'C14b: valid dirty state rides a no-integration push past a running workflow task',
         saved.error === null &&
           saved.value?.pushed === true &&
           git(origin, 'rev-parse', 'main') === git(y.repoPath, 'rev-parse', 'HEAD') &&
-          (await fileOf(y, RECORD_RENDER)) === '{ edited by hand',
-        saved.error,
+          git(origin, 'show', `main:${RECORD_RENDER}`).trim() === pending.trim(),
+        saved.error ?? saved.value,
       );
     }
 

@@ -9,6 +9,25 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('plan Save records a failed move', () => {
+  it('T121 Save without push commits no project state', async () => {
+    await save({ ...payload, push: false });
+    expect(h.prepareProjectState).not.toHaveBeenCalled();
+    expect(h.commitProjectState).not.toHaveBeenCalled();
+  });
+  it('T121 Save and push commits state once after a successful integration', async () => {
+    await save(payload).catch(() => undefined); // the fixture deliberately has no real branch tip
+    expect(h.prepareProjectState).toHaveBeenCalledTimes(1);
+    expect(h.commitProjectState).toHaveBeenCalledTimes(1);
+    expect(h.commitProjectState.mock.calls[0]![1]).toMatchObject({
+      repositoryId: REPO,
+      sourcePath: '/repo',
+      targetPath: '/repo',
+    });
+    expect(h.commitProjectState.mock.invocationCallOrder[0]).toBeGreaterThan(
+      h.fetch.mock.invocationCallOrder[0]!,
+    );
+  });
+
   it.each(['integrate', 'reconcile', 'flush', 'commit', 'resync', 'metadata'] as const)(
     'records and rethrows the same error from %s',
     async (phase) => {

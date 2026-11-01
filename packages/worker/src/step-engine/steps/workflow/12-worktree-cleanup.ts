@@ -1,3 +1,8 @@
+import {
+  prepareProjectStatePush,
+  commitProjectStatePush,
+  projectionPushIdentity,
+} from '../../../project-state/push.js';
 import { desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -840,7 +845,7 @@ async function openPullRequestForCleanup(
   // Idempotency: a Retry after the PR was already opened must not open a second one.
   const existing = await ctx.db.query.tasks.findFirst({
     where: eq(schema.tasks.id, ctx.taskId),
-    columns: { prUrl: true },
+    columns: { prUrl: true, repositoryId: true },
   });
   const priorPrUrl = existing?.prUrl;
   if (priorPrUrl) {
@@ -872,6 +877,23 @@ async function openPullRequestForCleanup(
   await warnStep(
     ctx,
     await putBackProjections({ ctx, worktree: d.worktreePath, branch: d.branchName, target }),
+  );
+
+  const repositoryId = existing?.repositoryId ?? null;
+  await prepareProjectStatePush(ctx.db, {
+    repositoryId,
+    sourcePath: ctx.repoPath,
+    taskId: ctx.taskId,
+  });
+  const identity = await projectionPushIdentity(ctx.db, ctx.userId, repositoryId);
+  await ctx.db.transaction((tx) =>
+    commitProjectStatePush(tx, {
+      repositoryId,
+      sourcePath: ctx.repoPath,
+      targetPath: d.worktreePath!,
+      identity,
+      taskId: ctx.taskId,
+    }),
   );
 
   let provider: string;

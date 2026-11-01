@@ -1134,6 +1134,35 @@ describe('12 merge phase + apply (real git)', () => {
     }
   });
 
+  it('T121 cleanup pushes a separate chore(haive) commit of dirty portable state', async () => {
+    const { parent, wt } = await setupWorktree();
+    const bare = await pushParentMainToOrigin(parent);
+    try {
+      const files = stateFiles({}, { 'scope-exclude-globs': ['vendor/**'] });
+      for (const [rel, body] of Object.entries(files)) {
+        await mkdir(path.dirname(path.join(parent, rel)), { recursive: true });
+        await writeFile(path.join(parent, rel), body);
+      }
+      await writeFile(path.join(parent, 'personal.txt'), 'staged personal work\n');
+      const { merge, state } = await mergeThenApply(parent, det(wt, { hasOrigin: true }), {
+        action: 'merge_remove',
+        pushBase: true,
+        squashMerge: false,
+      });
+      expect(merge.resolved).toBe(true);
+      expect(state?.pushed).toBe(true);
+      expect(await at(bare, 'main', GLOBS)).toBe(files[GLOBS]);
+      expect(await git(bare, ['log', '-1', '--format=%s', 'main'])).toContain('chore(haive)');
+      expect(await at(bare, 'main', 'personal.txt')).toBeNull();
+      expect(await readFile(path.join(parent, 'personal.txt'), 'utf8')).toBe(
+        'staged personal work\n',
+      );
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
+    }
+  });
+
   it('push failure halts but preserves the local merge', async () => {
     const { parent, wt } = await setupWorktree();
     try {
@@ -2234,6 +2263,38 @@ describe('12 puts back the Haive files a task branch changed, before it lands or
       expect(await at(bare, 'feature/x', GLOBS)).toBe(await at(parent, forked, GLOBS));
       expect(await revOf(bare, 'feature/x')).toBe(await revOf(parent, 'feature/x'));
       expect(h.getWarning()).toContain(GLOBS);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
+    }
+  });
+
+  it('T121 create_pr carries dirty root state in the feature worktree commit', async () => {
+    const { parent, wt } = await setupWorktree(stateFiles({}, AT_FORK));
+    const bare = await pushParentMainToOrigin(parent);
+    try {
+      const wanted = stateFiles({}, BY_AGENT);
+      for (const [rel, text] of Object.entries(wanted)) {
+        await mkdir(path.dirname(path.join(parent, rel)), { recursive: true });
+        await writeFile(path.join(parent, rel), text);
+      }
+      const base = await revOf(parent, 'main');
+      const h = makeDb();
+      const out = await worktreeCleanupStep.apply(
+        mkCtx(parent, h.db),
+        applyArgs(
+          det(wt, {
+            hasOrigin: true,
+            originUrl: httpOrigin(bare),
+            prWorkflowAvailable: true,
+          }),
+          { action: 'create_pr', prCredentialId: 'cred-1', prBaseBranch: 'main', prTitle: 'Task' },
+        ),
+      );
+      expect(out.prUrl).toBe('https://forge.test/pr/1');
+      expect(await at(bare, 'feature/x', GLOBS)).toBe(wanted[GLOBS]);
+      expect(await revOf(parent, 'main')).toBe(base);
+      expect(await at(bare, 'main', GLOBS)).not.toBe(wanted[GLOBS]);
     } finally {
       await rm(parent, { recursive: true, force: true });
       await rm(bare, { recursive: true, force: true, maxRetries: 5 });

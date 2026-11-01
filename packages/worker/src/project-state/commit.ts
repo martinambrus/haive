@@ -29,6 +29,8 @@ export async function commitHaiveProjections(args: {
   repoPath: string;
   identity: Record<string, string>;
   message?: string;
+  /** Push boundaries carry the state in a separate commit from the plan snapshot. */
+  includePlan?: boolean;
   waitForIndexRetry?: (ms: number) => Promise<void>;
 }): Promise<HaiveProjectionCommit> {
   const { repoPath, repositoryId } = args;
@@ -102,7 +104,9 @@ export async function commitHaiveProjections(args: {
       plan.remove.push(name);
     }
   }
-  for (const rel of [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown]) {
+  for (const rel of args.includePlan === false
+    ? []
+    : [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown]) {
     const entry = await lstatNoFollow(repoPath, rel, { strict: true }).catch(unreadable);
     if (entry && entry.kind !== 'file') unreadable(new Error(`${rel} is not a regular file`));
     if (entry) plan.add.push(rel);

@@ -1004,6 +1004,31 @@ fork point is taken from the local base first: a record the local base holds ahe
 the branch's history, and origin's copy would undo it. A pass that finds the feature's merge already
 open puts nothing back, since that merge's tip must not move.
 
+**Portable project state rides existing push boundaries.** Workflow cleanup's base push,
+13's onboarding push, and plan Save & push first flush the root record through its journaled writer,
+then commit its recognized files in a separate `chore(haive): sync project state` commit. Saving a
+plan without pushing still commits only the plan. The plan push carries state in its final
+pre-push tail, after a successful integration has released its transaction, so a held/conflicted
+integration leaves pending state uncommitted as before. A push with no integration still needs a
+valid record: malformed state now holds that push instead of being ignored. A resumed plan-merge confirmation repeats the
+state commit before its push. Onboarding 12 and upgrade 03 default Commit on only when their origin
+is usable; Push remains an explicit opt-in. An absent or unreadable origin preserves the existing
+no-push outcome and warning behavior, and no-history repositories keep their initial-commit form.
+
+`project-state/push.ts` uses the existing project-state, task-creation and plan locks, refuses an
+undo journal, a dirty revision, a root claim, an open Git operation or an unanswered record question,
+and uses `commitHaiveProjections`' exact-name private-index commit. The merge resolver commits
+inside its fenced merge-dir section and pins that new tip for the network push. The PR path first
+puts back agent projection edits, then copies recognized root record units into the feature worktree
+and commits there, so the state reaches the PR. It does not move the root branch. The target's HEAD
+is the post-put-back baseline; each target file must still equal that blob or the desired source
+bytes (a retry). All files are preflighted before the first write and each replacement/removal is
+judged again on its parked bytes; creation is exclusive. Mutations and worktree Git-operation reads
+use the repository root as their no-follow anchor, preserving owner/mode, and the source's complete
+raw record is checked again before committing. The copy leaves the root writer's journal/base
+attached to the root, so a partial feature copy cannot acknowledge an unimported root record.
+Unknown names and unrelated staged blobs remain outside its commit.
+
 **The record carries the portable settings and the environment.** `portableSettingsOf`
 (`@haive/shared/project-state`, `settings.ts`) maps the repository row to `settings/<name>.json`:
 `scope-exclude-globs`, `rtk-enabled`, `rtk-version`, `lsp-servers`, `lsp-server-versions`,
