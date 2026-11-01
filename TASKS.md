@@ -1465,6 +1465,11 @@ Split from T364 items1/13/14, 2026-11-01. This is three candidate ways validatio
 
 3. From T364 item14: (T363 review) PRE-EXISTING, consequential: scripts/test/ci-gated-list.test.mjs ~:12 recognises a Postgres-gated test only by `pathname.startsWith(` or `CREATE|DROP DATABASE`, so a gated file with another guard idiom is invisible to the "every gated file has a GATED row" check and skips green in CI for ever (T363's DB file was the live case, fixed there). Fix: detect by `skipIf` plus a `*_URL` env var.
 
+### T529 · FNF[metadata-comment-polish] · stale worker metadata explanation after task-level route retirement
+
+status: parked · reason: diminishing returns; comment only, no runtime consequence · kind: documentation · priority: P4
+Source: route-retirement follow-up review 2026-11-01, packages/worker/src/step-engine/steps/index.ts:119. The unchanged startup-assertion JSDoc describes task-row invalidation through providerSensitive metadata, while the task-level switch route is being retired by T338. The assertion itself still correctly checks metadata/list equality. Preserve as low documentation debt; update only on the next related documentation/source touch. No extra implementation/review round or runtime audit is authorized by this note. Evidence .claude/tmp/codex-run/queue-exec-20261101/route-retirement/review-comments.md.
+
 ## Done
 
 - T488 — split PostgreSQL integration checks from API/worker/Redis smokes, preserving all115 rows and11otherchecks — PR #984 (af13ab26d),2026-11-01; exact-HEAD reviews, scripts1160 and PR/mainCIgreen; one observed pair30m47s combined versus concurrent16m08s(smokes)/14m31s(PG), not a general benchmark.
