@@ -93,6 +93,12 @@ board. At session start, load the board's tasks you own or will work on into the
 
 RESUMED 2026-10-30T16:26Z per user: ready tasks first through /sonnet-sonnet (owner sonnet-sonnet@DESKTOP-IUBG9OP); tasks that need a design decision wait for the user. Preserve parked decisions and dependencies.
 
+### T524 · backlog decisions, reconciliation and priorities
+
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-11-01T12:31Z · last: 2026-11-01T12:31Z
+User requested 2026-11-01: collect decisions for parked and design tasks, review diminishing-return classifications, reconcile resolved/mixed bundles, and reprioritize the queue. Explain T402 and its rolling log-expiry deadline. Record answers before dependent changes. Scope is board reconciliation and read-only verification; implementation of the resulting feature/bug queue is not started by this task.
+Evidence and decision inventory: .claude/tmp/codex-run/backlog-decisions-20261101/; previous full classification: .claude/tmp/codex-run/backlog-audit-202611/.
+
 ### T323 · FNF[uploads-3] · finished upload rows are never deleted; the reaper's removal is not identity-checked (+1)
 
 status: parked · reason: user's retention rule for item 4 · last: 2026-10-24T19:31Z · items 1-3 shipped in PR #892 (42ee32d7c)
