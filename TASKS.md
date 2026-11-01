@@ -155,7 +155,7 @@ All PRE-EXISTING.
 
 ### T293 · FNF[onboarding-kb][verify-first] · 09_3's KB corrections may fail on a root-owned KB
 
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T16:55Z · last: 2026-11-01T16:55Z · priority: P1
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T16:55Z · last: 2026-11-01T17:37Z · priority: P1
 08-knowledge-acquisition.ts:2058 and its writes pass no owner, so a fresh KB may be root-owned and uid 1000 gets EACCES; 09_3's apply never checks the disk. Dev data disagrees in part. Verify on a fresh onboarding first; then pass the owner in 08, and make 09_3 diff the KB against the agent's claim.
 
 Validation scheduling decision 2026-11-01: attach to the dedicated capped T300 run before feature work; actual evidence/data prerequisites remain, and no successful live result is inferred.
@@ -163,6 +163,8 @@ Validation scheduling decision 2026-11-01: attach to the dedicated capped T300 r
 The owner scheduled one capped validation attempt; this block is an evidence dependency, not an unanswered policy question.
 
 Evidence gate satisfied 2026-11-01T16:55Z: ownedfreshonboarding reproduced actualuid1000EACCESagainstrootKBdir/files andunapplied09_3marked done/correctedCount1; agenthonestlyreturnedemptykbWrites. Implement boundedownershiphandoff+actualwriteverification, preservelegitnoop/skip, no globalchown/modeweakening or historicaldatarewrite. No morepaidT300attempt isauthorized; use capturedreceipt+isolatedroot regressioncontrols.
+
+Progress 2026-11-01T17:37Z: Live T300 confirmed root-owned KB and deterministic false success after honest empty-write result. Fix1 at7d4ed698 has clean fresh xhigh review; root60 controls and focused115 pass. Full worker candidate running, then PR gates; no further paid onboarding attempt authorized. Evidence queue-exec-20261101/T293.
 
 ### T308 · FNF[worktree-aliases] · hard links planted into .haive/worktrees before #800 survive
 
