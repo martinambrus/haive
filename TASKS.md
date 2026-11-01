@@ -984,19 +984,6 @@ Since T474 the smokes job has a 45-minute limit and the gated step 25 minutes, w
 
 Update (T489 review, 2026-10-31): with the worker smokes step now limited to 15 min the crowding rule `907 + 7.5 x rows + 900 <= 2700` trips at 120 GATED rows (103 on 2026-10-31, growing about 4.5 a day), so the pin fires within days; raise the job limit or split the job when it does.
 
-### T489 · FNF[ci-step-independence-3] · the gated loop's verdict is unpinned; unguarded steps and jobs with no limits (+5)
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T17:00Z · last: 2026-11-01T08:36Z
-From the T474 review (2026-10-31). PRE-EXISTING unless stated; minor to moderate.
-
-1. Moderate: the gated loop's verdict `exit "$failed"` (ci.yml ~:378) is unpinned; deleting it turns every failing gated test green. A stub-based pin that fails one vitest call would cover it.
-2. `exists=$(docker exec ...)` (ci.yml ~:265) is the one unguarded command in the gated loop: under the runner's `bash -e` a failing docker exec ends the step at that row with no `::error::` and the remaining rows unrun.
-3. New with T474, unverified on a hosted runner: a step timeout signals only the shell, so hung children can outlive the step; the gated tests share Redis DBs 11-13 with later steps (ci.yml ~:248-250 vs ~:419, ~:426).
-4. compose-boot "Probe web root" (ci.yml ~:644) skips "Extraction tests inside the worker image" (~:665); left by T474 because the job ends in `always()`/`failure()` cleanup steps the setup-then-checks model has no slot for.
-5. schema-parity (15 min, ~:445), production-images (20 min, ~:519) and macos-preflight (10 min) rely on the job limit alone for a hang; `schema-parity.sh` and `ci-retry.sh` have no timeout; the smokes setup steps have none, so a hang there costs 45 minutes.
-6. release.yml: no job has `timeout-minutes` (default 360 min), and a hung one holds the `release-<ref>` concurrency group (~:19-20).
-7. Known pin survivors: `|| true` inside a check's `run`, `fail-fast: true` on production-images (~:522), a job `defaults.run.shell`, a job `if: false`; step limits have no floor.
-
 ### T490 · FNF[error-text-paths-2] [verify-first] · other surfaces still show raw worker error text with server paths (+8)
 
 status: open
@@ -1267,6 +1254,8 @@ Queued broader findings from T489 PR #975, review-6 and codex-rev-6/last.txt. PR
 5. The suffix rescan (~:23) can be quadratic for a long script. Keep the scanner proportional to the fixed first-party workflow corpus; avoid building a general shell parser.
 
 ## Done
+
+- T489 — CI steps and jobs have independent limits and guards; gated-loop failures remain loud; shell scanner reduced and pinned against real workflows — PR #975 (221514334), 2026-11-01; main CI green; follow-ups T520 and existing T509; no further scanner expansion without a real failing workflow
 
 - T348 — the stalled sweep re-drives a running step that no job drives and no run waits on (the allowance auto-resume's post-commit enqueue could strand it), leaves a step a pass of this process is on, and excludes live runs (neither ended nor superseded) in the statement that bumps the epoch, before the task lock — shipped with T385 in PR #972 (d47433f7e), 2026-10-31; main CI green
 - T385 — the stalled sweep re-drives a park whose poll chain stopped; a recovery re-drive's advance carries a BullMQ deduplication id per (task, step, round, epoch) (park ticks, continuations and the forward hand-off do not); a Retry's re-offer and a Stop book a park from before the run to carried_idle_ms; Resume, retry_ai and the fan-out Resume of a never-started row stamp started_at and carry its idle time; a module step parked for its schema setup shows "waiting: module setup" (structural columns only); handleResult logs why a hand-off write found no row; the test fake compares UUID values without case and evaluates the sweep's negated correlated EXISTS — PR #972 (d47433f7e), 2026-10-31; main CI green; badge checked live on the dev stack at 1280 and 390 px; delivered with sonnet-sonnet (driver) then codex-sonnet (2 fix rounds) plus session fixes (a merge-time CI step limit, a CodeQL test helper); follow-ups T498, T499, T500, T501, T507
