@@ -103,7 +103,7 @@ All PRE-EXISTING.
 
 ### T120 · B5.1 · the Haive data panel
 
-status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T16:20Z · last: 2026-10-31T16:20Z · kind: feature · plan: PR1a shared+worker save, PR1b api, PR2 web+docs
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T16:20Z · last: 2026-11-01T08:36Z · kind: feature · plan: PR1a shared+worker save, PR1b api, PR2 web+docs
 GET /repos/:id/haive-data + POST .../save {push} via a worker SAVE job; generalise commitPlanSnapshotFiles to a path list; conflict report. Browser 375/768/1280.
 
 ### T121 · B5.2 · project state rides Haive's pushes
@@ -526,7 +526,7 @@ status: open · was modular #211
 
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+5)
 
-status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T17:16Z · last: 2026-10-31T17:16Z · was modular #213
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T17:16Z · last: 2026-11-01T08:36Z · was modular #213
 Items 1-2 merged (#831). 3. PERF: the bundle file browser runs fs-safe lstat per file (5000 files took 8.8 s). Fix: a walk that holds directory descriptors. 4. new-repo-form.tsx shows only the first 100 matches, with no note. 5. github-oauth.ts:110-111 echoes an unbounded GitHub error body, and a body that echoed the request's token would reach the response and the error log (T378 review, fake-vendor repro). Reuse the forge excerpt helper. 6. The /user/repos loop makes one extra empty request. Fix: stop when the Link header has no rel="next". 7. (T454 review, 2026-10-31) PRE-EXISTING, minor, measured (identical before T454): the GitHub source's `oauthLabel` is never reset (web components/new-repo-form.tsx ~:125, ~:146, ~:271, ~:437), so GitHub, then another source, then GitHub again shows the manual URL input and Create refuses until a reload. 8. (T454 review) PRE-EXISTING, minor, by code reading: web filesystem-browser.tsx ~:96-99, the `flex-1` button has no `min-w-0`, so at 375 px a long directory name clips the Pick button (T454 judge/repos-new-375.png).
 
 ### T366 · FNF[shutdown-deadline] · the worker shutdown's per-part limits are summed by hand
@@ -606,7 +606,7 @@ Sites:
 
 ### T376 · FNF[audit-security-gaps-2] · CLI provider key/token changes, password change, registration, repo security settings, sign-ins write no audit row (+5)
 
-status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T14:13Z · last: 2026-10-31T14:13Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T14:13Z · last: 2026-11-01T08:36Z 
 
 1. cli-providers.ts ~:856, :923, :998, :1019; cli-login-banner.ts ~:930.
 2. Password change (user-settings.ts ~:127-170) and registration (auth.ts ~:61-170).
@@ -668,7 +668,7 @@ See worker task-queue.ts ~:1806-1813, ~:356. Decide per shape: fail the task, or
 
 ### T397 · FNF[failed-read-answers] · branch, count, refresh and merge-completion reads still turn a failed git into an answer (+16)
 
-status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T13:48Z · last: 2026-10-31T13:48Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T13:48Z · last: 2026-11-01T08:36Z 
 FIRST re-check each item on main: the #322 and #325 series fixed some of them.
 
 1. `rev-parse --abbrev-ref HEAD` sites: 00a ~:164, 11a ~:106, 12-worktree-cleanup ~:248, 12-post-onboarding ~:464, 13-onboarding-push ~:147, 99-run-app-ready ~:173, 01-plan-merge ~:727, :741.
@@ -873,7 +873,7 @@ From the T421 review (2026-10-31). PRE-EXISTING, minor, conservative direction. 
 
 ### T471 · FNF[stale-preread-fold-2] · idle_ms writes add to a value read before the write; the per-step switch decides on a pre-transaction status (+1)
 
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T18:35Z · last: 2026-10-31T18:35Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T18:35Z · last: 2026-11-01T08:36Z 
 From the T461 review (2026-10-31). PRE-EXISTING, minor.
 
 1. `idle_ms = step.idleMs + closedIdleMs` from a read made before the transaction, so a concurrent SQL write to `idle_ms` in between is written over: api routes/tasks/steps.ts ~:808 (form submit), ~:894 (merge clarify), ~:1520 (Skip), and worker pr-poll-queue.ts ~:260 (`advancePrWaitStep`, whose guard compares status and `waiting_started_at` only). The delta depends on `waiting_started_at`, so fold it in one SQL statement like `handleCancelTask`'s (`idle_ms + greatest(0, floor(extract(epoch from (now() - waiting_started_at)) * 1000))`) or read the row under its lock, as T461 did for `carried_*`.
@@ -986,7 +986,7 @@ Update (T489 review, 2026-10-31): with the worker smokes step now limited to 15 
 
 ### T489 · FNF[ci-step-independence-3] · the gated loop's verdict is unpinned; unguarded steps and jobs with no limits (+5)
 
-status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T17:00Z · last: 2026-10-31T17:00Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T17:00Z · last: 2026-11-01T08:36Z 
 From the T474 review (2026-10-31). PRE-EXISTING unless stated; minor to moderate.
 
 1. Moderate: the gated loop's verdict `exit "$failed"` (ci.yml ~:378) is unpinned; deleting it turns every failing gated test green. A stub-based pin that fails one vitest call would cover it.
@@ -1066,7 +1066,7 @@ From the T491 review (2026-10-31). `GET /plan/merge` lists open merges only (api
 
 ### T498 · FNF[stalled-redrive-2] · a waiting_cli row whose continuation add was lost is recovered only at boot (+3)
 
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T18:35Z · last: 2026-10-31T18:35Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T18:35Z · last: 2026-11-01T08:36Z 
 From the T385/T348 driver (2026-10-31), verified at 163cff3a3. Connected to the stalled sweep; PRE-EXISTING.
 
 1. Consequential (every CLI end produces one): a `waiting_cli` row whose runs all ended, with the continuation add lost (worker cli-exec/resolvers.ts ~:1125 has no `attempts`; caller `resumeStepIfLinked` ~:1071 from handlers.ts ~:501, ~:574), is never taken by the sweep (stalled-redrive.ts ~:188 `stalledRow` has no `waiting_cli`; the run-recovery arm ~:378 needs an old unstarted run); only boot recovers it (task-queue.ts ~:3792-3821). Same fences as the T348 shape.
