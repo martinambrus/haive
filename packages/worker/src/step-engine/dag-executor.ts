@@ -2797,6 +2797,17 @@ export async function resolveDagPhase(
         });
         dispatched += 1;
       }
+      // Nothing went out: each coder was refused (its issue now reads failed_unrecoverable) or lost
+      // its claim to another pass. Parking would wait on a barrier only a run can release, and this
+      // pass holds none, so the step would sit at waiting_cli with no job until the stalled sweep.
+      // Read the level again: (C) waits on a run another pass sent, (D) fails or escalates a refusal.
+      if (dispatched === 0) {
+        ctx.logger.info(
+          { level: curLevel.level, planId: plan.id },
+          'dag level sent no coder; reading the level again',
+        );
+        continue;
+      }
       await db
         .update(schema.taskDagLevels)
         .set({ phase: 'coding', updatedAt: new Date() })

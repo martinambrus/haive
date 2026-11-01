@@ -1035,6 +1035,9 @@ function makeDagMergeWaitDb(opts: {
   checkpointAfterFirstRead?: boolean;
   /** The same after this many reads, for a test that drives the phase more than once. */
   checkpointAfterReads?: number;
+  /** The issue row takes the patches written to it, as a table would, so a level read again sees
+   *  what the pass wrote. Off, the row stays as it was given. */
+  followIssueUpdates?: boolean;
 }) {
   let stepStatus = opts.stepRowStatus ?? 'running';
   let stepErrorMessage: string | null = null;
@@ -1171,7 +1174,10 @@ function makeDagMergeWaitDb(opts: {
           if (table === schema.taskDagIssues && patch && 'mergeStatus' in patch) {
             issueMergeStatus = patch.mergeStatus as string;
           }
-          if (table === schema.taskDagIssues) issueUpdates.push(patch);
+          if (table === schema.taskDagIssues) {
+            issueUpdates.push(patch);
+            if (opts.followIssueUpdates) Object.assign(issueRow, patch);
+          }
           if (table === schema.dagAgentRuns) agentRunUpdates.push(patch);
           if (table === schema.taskSteps) {
             if ('status' in patch) stepStatus = patch.status as string;
@@ -3718,6 +3724,85 @@ describe('every DAG ownership check stops a pass whose row a Retry took', () => 
       expect(h.invocationInserts).toHaveLength(1);
       expect(h.invocationInserts[0]!.prompt as string).not.toContain(TRUNCATION_RETRY_NOTICE);
       expect(h.invocationInserts[0]!.truncationRetry).toBe(false);
+    });
+  });
+
+  describe('a level whose coders are all refused or sent (section B)', () => {
+    /** One pending issue, a dispatcher that answers `plan`, and the phase driven once. */
+    async function dispatchLevel(plan: () => unknown) {
+      const integrationDir = await mkdtemp(path.join(tmpdir(), 'dag-section-b-level-'));
+      try {
+        const h = makeDagMergeWaitDb({
+          invocation: undefined,
+          integrationDir,
+          autoResolveConflicts: false,
+          issue: {
+            outcome: 'pending',
+            cliInvocationId: null,
+            errorMessage: null,
+            mergeStatus: null,
+          },
+          followIssueUpdates: true,
+        });
+        const enqueued: unknown[] = [];
+        vi.mocked(resolveTaskDispatch).mockImplementation(async () => plan() as never);
+        const outcome = await resolveDagPhase(
+          h.db as never,
+          dagExecuteStep as never,
+          { id: 'step1', status: 'running', round: 0 } as never,
+          {
+            taskId: 'task1',
+            userId: 'user1',
+            repoPath: integrationDir,
+            sandboxWorkdir: integrationDir,
+            logger: logger.child({ test: 'dag-section-b-level' }),
+            emitProgress: async () => {},
+            db: h.db,
+          } as unknown as StepContext,
+          {
+            userId: 'user1',
+            taskId: 'task1',
+            cliProviderId: null,
+            ignoreSavedStepClis: false,
+            providers: [{ id: 'p1', enabled: true }],
+            deps: { enqueueCliInvocation: async (payload: unknown) => void enqueued.push(payload) },
+          } as never,
+        );
+        return { h, outcome, enqueued };
+      } finally {
+        await rm(integrationDir, { recursive: true, force: true });
+      }
+    }
+
+    it('does not park the step on a barrier no run can release: it fails, naming the refusal', async () => {
+      const { h, outcome, enqueued } = await dispatchLevel(() => ({
+        mode: 'skip',
+        invocation: null,
+        reason: 'every provider is at capacity',
+      }));
+      expect(enqueued, 'no coder went out').toEqual([]);
+      expect(h.invocationInserts, 'and no run was recorded').toEqual([]);
+      expect(h.issueUpdates).toContainEqual(
+        expect.objectContaining({
+          outcome: 'failed_unrecoverable',
+          errorMessage: expect.stringContaining('every provider is at capacity'),
+        }),
+      );
+      expect(outcome).toMatchObject({
+        resolved: false,
+        result: {
+          status: 'failed',
+          error: expect.stringContaining('no cli provider available: every provider'),
+        },
+      });
+      expect(h.getStepStatus()).toBe('failed');
+    });
+
+    it('still parks the step on the coder it sent', async () => {
+      const { h, outcome, enqueued } = await dispatchLevel(workingDispatchPlan);
+      expect(enqueued, 'the coder went out').toHaveLength(1);
+      expect(outcome).toMatchObject({ resolved: false, result: { status: 'waiting_cli' } });
+      expect(h.getStepStatus()).toBe('waiting_cli');
     });
   });
 });

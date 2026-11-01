@@ -92,9 +92,13 @@ running or parked row is an epoch bump and an advance, never a reset and never a
 (the producers it repairs rely on the passes, agent rows and fix context the row keeps): the epoch
 stales a stamped job queued earlier, while an unstamped one (a form submit, the usage poller's own) is
 serialised by `holdStepAdvance` and re-enters by status. The "redrove a stalled task" line carries
-`shape`: `parked`, `running` or `handoff`. A `waiting_cli` row whose runs all ended with the
-continuation's add lost (`resumeStepIfLinked`, `cli-exec/resolvers.ts`) is still recovered only at
-boot.
+`shape`: `parked`, `running`, `waiting_cli` or `handoff`. A `waiting_cli` row whose runs have all
+ended is a candidate too (`idleWaitingCliRow`): the run that ended last queues the step's
+continuation (`resumeStepIfLinked`, `cli-exec/resolvers.ts`), and a queue that refused it, or a
+Redis restored without it, leaves a parked step with nothing to wait for. Its cutoff counts from the
+end of the row's last run as well as from the row's own stamp, since the cli-exec handler stamps the
+row (`markCliParkBegin`) only after the end has committed, and not at all when the park marker is
+already set or the stamp throws.
 
 **Every recovery re-drive carries a deduplication id**, `advance-<task>-<step>-<round>-<epoch>`
 (`enqueueRedrive`, the default enqueue of the sweep, the boot reconcile and a dead task's revival):
@@ -103,7 +107,15 @@ frees a deduplication id when its job completes, fails or is removed (MEASURED o
 plain custom jobId stays with a completed job (`removeOnComplete: 100`) and silently drops a later add
 of it. Park ticks, continuations and the forward hand-off carry none: they share one epoch, and a
 successor added while its predecessor is active would collapse onto it (BullMQ collapses onto an
-active job) and end the chain or lose a fan-out agent's wake-up.
+active job) and end the chain or lose a fan-out agent's wake-up. A recovery enqueue the queue
+refuses is asked again in the process (`retrying`, after 1 s and then 3 s), and so are three adds
+that carry no deduplication id: the continuation, the usage poller's auto-resume advance and the
+pull-request poller's finalize advance. A retry of one of those after a lost reply can queue a
+second advance, which is absorbed: `holdStepAdvance` serialises it behind the first, a row already
+`done` is a duplicate delivery that re-drives the chain only when `advanceChainHasMoved` shows it
+never moved past the row, and a stamped job is dropped once the epoch has moved. A continuation
+still refused after its retries waits for the sweep's cutoff; the pull-request poller's waits one
+3-minute tick, since every tick re-drives a merged task still parked (`pollTask`).
 
 **An answer whose advance was lost is re-driven.** The submit route saves a form's answers, clears
 its `waiting_started_at` and queues the advance; when that advance never reaches the queue, the row
@@ -138,8 +150,10 @@ current step with a run recorded before the cutoff that no cli-exec job owes, no
 running and no task-queue job, is recovered exactly as boot recovers a parked step
 (`recoverParkedStep`), bounded by `bornBefore`: only runs started or recorded before the cutoff are
 ended, since a live worker may be starting younger ones. A step whose old runs all still have a job
-(a pause, the per-task cap and the runtime reserve all hold jobs `delayed`) is left to them. The
-lost run never started, so its re-dispatch charges no orphan budget.
+(a pause, the per-task cap and the runtime reserve all hold jobs `delayed`) is left to them, and so
+is a step a pass of this process holds (`stepAdvanceHeld`): a continuation that dispatches a next
+wave records the run, sets the workspace up and only then queues it, with the row still
+`waiting_cli`. The lost run never started, so its re-dispatch charges no orphan budget.
 
 A `cancelled` task with a `task.cancelled` event five minutes old and no `task.cancel_finished` (the api commits the cancel before it queues the teardown) gets a CANCEL from the same sweep (`redriveCancelledTasks`), unless one is waiting, active or delayed; a finished or failed one in history does not count, since the finish record is what says the teardown ran, and the teardown is idempotent. The sweep waits for the newest `task.cancelled` event to be five minutes old, and the CANCEL job writes one of its own on every run that is not ignored (`markTaskCancelled`), so a teardown that keeps failing is re-driven at most once per five minutes (smoke case `rerunning-cancel`, `stalled-redrive-smoke.ts`). Each re-drive is a `task.cancel_redriven` event, and a task stops being re-driven after three (`CANCEL_REDRIVE_MAX`); cancellations older than seven days are not re-driven, since many predate the finish record. A task the re-drive no longer retries but that still holds a merge dir claim is given up instead (`abandonCancelledTeardowns`, started by the same sweep without being awaited, one pass at a time, since its dir locks can wait behind a long merge): capped with its last re-drive older than the cutoff, or with its `task.cancelled` event older than seven days whatever its re-drive count. Giving up keeps the CANCEL teardown's guard: it supersedes the task's runs, kills its cli sandboxes and goes on only when the listing shows none left, or the task keeps its claims for the next pass. Then it reports the merges left open (a failure stops there, with nothing released, and the next pass tries again), writes a `task.cancel_finished` event with `abandoned: true` and its reason (`re-drive cap reached` or `cancelled before the re-drive window`), and only then runs the claim release, the plan-merge discard and the re-sync, each logged and passed over when it fails. The event comes before the release because it is what frees the dir: a cancelled task with that record holds no claim (`liveClaimHolder`), so a pass cut off after it leaves only stale rows that the next claimer takes over. A re-drive whose CANCEL the queue refuses gives its `task.cancel_redriven` event back, so a queue outage never counts toward the cap. A task with a CANCEL waiting, active or delayed is left to it.
 
@@ -278,7 +292,8 @@ advance already running may be a barrier check that parks without seeing what th
 queued for. It replaced a guard that let a second advance skip only while the row read `running`,
 which no continuation does any more. An advance that cannot be deferred (no job token, or the move
 failed) waits for the holder in this process instead: running beside it is what the hold prevents,
-and failing the attempt could lose it, since a continuation is queued with no retries. The hold is
+and failing the attempt could lose it, since its three attempts (backed off 5 s, then 10 s) run out
+long before a holder's apply does. The hold is
 taken outside the job's own catch, since that
 catch fails the task, and it is per process, like the queue's single worker. A deferred advance can
 then run after the pass it waited behind failed the step, so an advance on a `failed` task is

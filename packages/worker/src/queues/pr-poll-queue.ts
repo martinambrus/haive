@@ -16,6 +16,7 @@ import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import { ForgeRateLimitError, resolveForgeContext, resolveForgeProvider } from '../forge/index.js';
 import { pruneJobSchedulers } from './job-scheduler-prune.js';
+import { REDRIVE_RETRY_DELAYS_MS, retrying } from './task-queue.js';
 
 const log = logger.child({ module: 'pr-poll' });
 
@@ -272,22 +273,24 @@ async function advancePrWaitStep(db: Database, task: PrWaitTask): Promise<void> 
     )
     .returning({ id: schema.taskSteps.id });
   if (closed.length === 0) return;
-  await getTaskQueue().add(
-    TASK_JOB_NAMES.ADVANCE_STEP,
-    {
-      taskId: task.id,
-      userId: task.userId,
-      stepId: '13-pr-wait',
-      round: stepRow.round,
-      formValues: {},
-    },
-    {
-      attempts: 3,
-      backoff: { type: 'exponential', delay: 5000 },
-      removeOnComplete: 100,
-      removeOnFail: 100,
-    },
-  );
+  await retrying(async () => {
+    await getTaskQueue().add(
+      TASK_JOB_NAMES.ADVANCE_STEP,
+      {
+        taskId: task.id,
+        userId: task.userId,
+        stepId: '13-pr-wait',
+        round: stepRow.round,
+        formValues: {},
+      },
+      {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5000 },
+        removeOnComplete: 100,
+        removeOnFail: 100,
+      },
+    );
+  }, REDRIVE_RETRY_DELAYS_MS);
   log.info({ taskId: task.id }, 'auto-finalizing the PR-wait step on merge');
 }
 

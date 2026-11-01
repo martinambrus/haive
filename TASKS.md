@@ -103,7 +103,7 @@ All PRE-EXISTING.
 
 ### T120 · B5.1 · the Haive data panel
 
-status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T16:20Z · last: 2026-10-31T16:20Z · kind: feature · plan: PR1a shared+worker save, PR1b api, PR2 web+docs
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T16:20Z · last: 2026-11-01T08:36Z · kind: feature · plan: PR1a shared+worker save, PR1b api, PR2 web+docs
 GET /repos/:id/haive-data + POST .../save {push} via a worker SAVE job; generalise commitPlanSnapshotFiles to a path list; conflict report. Browser 375/768/1280.
 
 ### T121 · B5.2 · project state rides Haive's pushes
@@ -526,7 +526,7 @@ status: open · was modular #211
 
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+5)
 
-status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T17:16Z · last: 2026-10-31T17:16Z · was modular #213
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T17:16Z · last: 2026-11-01T08:36Z · was modular #213
 Items 1-2 merged (#831). 3. PERF: the bundle file browser runs fs-safe lstat per file (5000 files took 8.8 s). Fix: a walk that holds directory descriptors. 4. new-repo-form.tsx shows only the first 100 matches, with no note. 5. github-oauth.ts:110-111 echoes an unbounded GitHub error body, and a body that echoed the request's token would reach the response and the error log (T378 review, fake-vendor repro). Reuse the forge excerpt helper. 6. The /user/repos loop makes one extra empty request. Fix: stop when the Link header has no rel="next". 7. (T454 review, 2026-10-31) PRE-EXISTING, minor, measured (identical before T454): the GitHub source's `oauthLabel` is never reset (web components/new-repo-form.tsx ~:125, ~:146, ~:271, ~:437), so GitHub, then another source, then GitHub again shows the manual URL input and Create refuses until a reload. 8. (T454 review) PRE-EXISTING, minor, by code reading: web filesystem-browser.tsx ~:96-99, the `flex-1` button has no `min-w-0`, so at 375 px a long directory name clips the Pick button (T454 judge/repos-new-375.png).
 
 ### T366 · FNF[shutdown-deadline] · the worker shutdown's per-part limits are summed by hand
@@ -606,7 +606,7 @@ Sites:
 
 ### T376 · FNF[audit-security-gaps-2] · CLI provider key/token changes, password change, registration, repo security settings, sign-ins write no audit row (+5)
 
-status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T14:13Z · last: 2026-10-31T14:13Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T14:13Z · last: 2026-11-01T08:36Z
 
 1. cli-providers.ts ~:856, :923, :998, :1019; cli-login-banner.ts ~:930.
 2. Password change (user-settings.ts ~:127-170) and registration (auth.ts ~:61-170).
@@ -668,7 +668,7 @@ See worker task-queue.ts ~:1806-1813, ~:356. Decide per shape: fail the task, or
 
 ### T397 · FNF[failed-read-answers] · branch, count, refresh and merge-completion reads still turn a failed git into an answer (+16)
 
-status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T13:48Z · last: 2026-10-31T13:48Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T13:48Z · last: 2026-11-01T08:36Z
 FIRST re-check each item on main: the #322 and #325 series fixed some of them.
 
 1. `rev-parse --abbrev-ref HEAD` sites: 00a ~:164, 11a ~:106, 12-worktree-cleanup ~:248, 12-post-onboarding ~:464, 13-onboarding-push ~:147, 99-run-app-ready ~:173, 01-plan-merge ~:727, :741.
@@ -873,7 +873,7 @@ From the T421 review (2026-10-31). PRE-EXISTING, minor, conservative direction. 
 
 ### T471 · FNF[stale-preread-fold-2] · idle_ms writes add to a value read before the write; the per-step switch decides on a pre-transaction status (+1)
 
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T18:35Z · last: 2026-10-31T18:35Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T18:35Z · last: 2026-11-01T08:36Z
 From the T461 review (2026-10-31). PRE-EXISTING, minor.
 
 1. `idle_ms = step.idleMs + closedIdleMs` from a read made before the transaction, so a concurrent SQL write to `idle_ms` in between is written over: api routes/tasks/steps.ts ~:808 (form submit), ~:894 (merge clarify), ~:1520 (Skip), and worker pr-poll-queue.ts ~:260 (`advancePrWaitStep`, whose guard compares status and `waiting_started_at` only). The delta depends on `waiting_started_at`, so fold it in one SQL statement like `handleCancelTask`'s (`idle_ms + greatest(0, floor(extract(epoch from (now() - waiting_started_at)) * 1000))`) or read the row under its lock, as T461 did for `carried_*`.
@@ -984,19 +984,6 @@ Since T474 the smokes job has a 45-minute limit and the gated step 25 minutes, w
 
 Update (T489 review, 2026-10-31): with the worker smokes step now limited to 15 min the crowding rule `907 + 7.5 x rows + 900 <= 2700` trips at 120 GATED rows (103 on 2026-10-31, growing about 4.5 a day), so the pin fires within days; raise the job limit or split the job when it does.
 
-### T489 · FNF[ci-step-independence-3] · the gated loop's verdict is unpinned; unguarded steps and jobs with no limits (+5)
-
-status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T17:00Z · last: 2026-10-31T17:00Z
-From the T474 review (2026-10-31). PRE-EXISTING unless stated; minor to moderate.
-
-1. Moderate: the gated loop's verdict `exit "$failed"` (ci.yml ~:378) is unpinned; deleting it turns every failing gated test green. A stub-based pin that fails one vitest call would cover it.
-2. `exists=$(docker exec ...)` (ci.yml ~:265) is the one unguarded command in the gated loop: under the runner's `bash -e` a failing docker exec ends the step at that row with no `::error::` and the remaining rows unrun.
-3. New with T474, unverified on a hosted runner: a step timeout signals only the shell, so hung children can outlive the step; the gated tests share Redis DBs 11-13 with later steps (ci.yml ~:248-250 vs ~:419, ~:426).
-4. compose-boot "Probe web root" (ci.yml ~:644) skips "Extraction tests inside the worker image" (~:665); left by T474 because the job ends in `always()`/`failure()` cleanup steps the setup-then-checks model has no slot for.
-5. schema-parity (15 min, ~:445), production-images (20 min, ~:519) and macos-preflight (10 min) rely on the job limit alone for a hang; `schema-parity.sh` and `ci-retry.sh` have no timeout; the smokes setup steps have none, so a hang there costs 45 minutes.
-6. release.yml: no job has `timeout-minutes` (default 360 min), and a hung one holds the `release-<ref>` concurrency group (~:19-20).
-7. Known pin survivors: `|| true` inside a check's `run`, `fail-fast: true` on production-images (~:522), a job `defaults.run.shell`, a job `if: false`; step limits have no floor.
-
 ### T490 · FNF[error-text-paths-2] [verify-first] · other surfaces still show raw worker error text with server paths (+8)
 
 status: open
@@ -1066,7 +1053,7 @@ From the T491 review (2026-10-31). `GET /plan/merge` lists open merges only (api
 
 ### T498 · FNF[stalled-redrive-2] · a waiting_cli row whose continuation add was lost is recovered only at boot (+3)
 
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T18:35Z · last: 2026-10-31T18:35Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T18:35Z · last: 2026-11-01T08:36Z
 From the T385/T348 driver (2026-10-31), verified at 163cff3a3. Connected to the stalled sweep; PRE-EXISTING.
 
 1. Consequential (every CLI end produces one): a `waiting_cli` row whose runs all ended, with the continuation add lost (worker cli-exec/resolvers.ts ~:1125 has no `attempts`; caller `resumeStepIfLinked` ~:1071 from handlers.ts ~:501, ~:574), is never taken by the sweep (stalled-redrive.ts ~:188 `stalledRow` has no `waiting_cli`; the run-recovery arm ~:378 needs an old unstarted run); only boot recovers it (task-queue.ts ~:3792-3821). Same fences as the T348 shape.
@@ -1244,7 +1231,31 @@ From the T365 close-out (PR #974, 2026-11-01). PRE-EXISTING, minor, found by rea
 2. The interval (~:320-322) starts a new `fetchOnce` while a slow one still waits, so two polls can both see a sync end and each reload the listing before the next render (T365 Codex review 7). Fix direction: skip a tick while a poll is in flight, or record handled transitions per bundle.
 3. Theoretical: `toggleExpanded` (~:215) decides "load needed" from its render closure's `filesByBundle`, while the poll's drop is dispatched from a promise continuation on React's Default lane, so a click between that continuation and its render can skip the reload (T365 review 6, D6-2). Fix direction: a loader driven by an effect on the expanded and dropped state.
 
+### T519 · FNF[redrive-connected-leftovers] · recovery follow-up controls and PR poller failure reporting (+4)
+
+status: open
+Queued connected findings from T498 PR #977; not part of the authorized seven-task delivery. PRE-EXISTING unless stated; minor.
+
+1. worker step-engine/dag-executor.ts ~:2791-2794: the claim-lost half of the new no-coder re-read path has no direct pin. Existing recovery behavior is reviewed; extend a control when changing that path.
+2. worker queues/pr-poll-queue.ts ~:127-135: early re-drive runs outside try/catch; runPrPollTick discards Promise.allSettled results, hiding a failure. Catch/log per-task refusal or inspect settled results.
+3. worker step-engine/dag-executor.ts ~:2726-2739: refusal UPDATE lacks an outcome='pending' guard; add the same CAS guard as sibling settlement.
+4. worker queues/task-queue.ts retrying: warning says boot re-drive for non-boot callers; cosmetic, name the enqueue operation.
+5. worker queues/usage-poll-queue.ts: provider-recovery polling pays up to four seconds per refused task, serially. Consider a bounded batch if measured latency matters.
+
+### T520 · FNF[shell-scanner-limits] · CI shell scanner cannot see several unused wrapper forms (+4)
+
+status: parked · reason: diminishing returns; none of these shapes occurs in the scanned workflows; resume when a real workflow needs one or a masking failure is measured
+Queued broader findings from T489 PR #975, review-6 and codex-rev-6/last.txt. PRE-EXISTING, minor; no additional implementation authorized.
+
+1. scripts/test/shell-source.mjs: generated shell input such as bash -c "$(cat <<'EOF'...)" or bash < <(cat <<...) is not inspected as executable shell.
+2. Combined bash -ce / sh -ce options hide the command string.
+3. su -lc and absolute /usr/bin/ssh wrappers are not recognized.
+4. Escaped whitespace before # can be mistaken for a comment (~:154).
+5. The suffix rescan (~:23) can be quadratic for a long script. Keep the scanner proportional to the fixed first-party workflow corpus; avoid building a general shell parser.
+
 ## Done
+
+- T489 — CI steps and jobs have independent limits and guards; gated-loop failures remain loud; shell scanner reduced and pinned against real workflows — PR #975 (221514334), 2026-11-01; main CI green; follow-ups T520 and existing T509; no further scanner expansion without a real failing workflow
 
 - T348 — the stalled sweep re-drives a running step that no job drives and no run waits on (the allowance auto-resume's post-commit enqueue could strand it), leaves a step a pass of this process is on, and excludes live runs (neither ended nor superseded) in the statement that bumps the epoch, before the task lock — shipped with T385 in PR #972 (d47433f7e), 2026-10-31; main CI green
 - T385 — the stalled sweep re-drives a park whose poll chain stopped; a recovery re-drive's advance carries a BullMQ deduplication id per (task, step, round, epoch) (park ticks, continuations and the forward hand-off do not); a Retry's re-offer and a Stop book a park from before the run to carried_idle_ms; Resume, retry_ai and the fan-out Resume of a never-started row stamp started_at and carry its idle time; a module step parked for its schema setup shows "waiting: module setup" (structural columns only); handleResult logs why a hand-off write found no row; the test fake compares UUID values without case and evaluates the sweep's negated correlated EXISTS — PR #972 (d47433f7e), 2026-10-31; main CI green; badge checked live on the dev stack at 1280 and 390 px; delivered with sonnet-sonnet (driver) then codex-sonnet (2 fix rounds) plus session fixes (a merge-time CI step limit, a CodeQL test helper); follow-ups T498, T499, T500, T501, T507
