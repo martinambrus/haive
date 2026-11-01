@@ -284,13 +284,23 @@ describe('the fake database', () => {
     const a = fake.insert(t, row('a.md', { sizeBytes: 3 }));
     fake.insert(t, row('b.md', { sizeBytes: 7 }));
 
+    const at = fake.now().getTime();
     const back = await fake.db
       .update(t)
       .set({ sizeBytes: sql`${t.sizeBytes} + 1`, description: 'bumped' })
       .where(eq(t.id, a.id as string))
-      .returning({ size: t.sizeBytes });
+      .returning({
+        size: t.sizeBytes,
+        foldedAt: sql<number>`floor(extract(epoch from now()) * 1000)`.mapWith(Number),
+      });
 
-    expect(back).toEqual([{ size: 4 }]);
+    expect(back).toEqual([{ size: 4, foldedAt: at }]);
+    await expect(fake.db.select({ unsupported: sql`now()` }).from(t)).rejects.toThrow(
+      /not a column/,
+    );
+    await expect(fake.db.select({ foreign: schema.tasks.id }).from(t)).rejects.toThrow(
+      /not a column/,
+    );
     expect(fake.rows(t).map((r) => [r.sizeBytes, r.description])).toEqual([
       [4, 'bumped'],
       [7, null],
@@ -816,5 +826,72 @@ describe('clamped integer SQL updates', () => {
     expect(fake.rows(table).map((row) => row.attachedWsCount)).toEqual([0, 7]);
     await Promise.all([update(1), update(1)]);
     expect(fake.rows(table).map((row) => row.attachedWsCount)).toEqual([2, 7]);
+  });
+});
+
+describe('the clamped park wait SET expressions', () => {
+  const steps = schema.taskSteps;
+  const park = sql`greatest(0, floor(extract(epoch from (now() - ${steps.waitingStartedAt})) * 1000))`;
+  const preRun = sql`${steps.startedAt} IS NULL`;
+  const folded = {
+    idleMs: sql`${steps.idleMs} + case when ${preRun} then 0
+      else least(2147483647 - ${steps.idleMs}, ${park})::int end`,
+    carriedIdleMs: sql`${steps.carriedIdleMs} + case when ${preRun}
+      then least(2147483647 - ${steps.carriedIdleMs}, ${park})::int else 0 end`,
+  };
+  it.each([
+    { beforeRun: false, marker: -60_000, idle: 100, carried: 200, expected: [60_100, 200] },
+    { beforeRun: true, marker: -60_000, idle: 100, carried: 200, expected: [100, 60_200] },
+    { beforeRun: false, marker: null, idle: 100, carried: 200, expected: [100, 200] },
+    { beforeRun: true, marker: 60_000, idle: 100, carried: 200, expected: [100, 200] },
+    {
+      beforeRun: false,
+      marker: -60_000,
+      idle: 2147483600,
+      carried: 200,
+      expected: [2147483647, 200],
+    },
+    {
+      beforeRun: true,
+      marker: -60_000,
+      idle: 100,
+      carried: 2147483600,
+      expected: [100, 2147483647],
+    },
+    { beforeRun: false, marker: -60_000, idle: null, carried: null, expected: [null, null] },
+  ])(
+    'books the selected branch at its headroom: $beforeRun/$marker/$idle/$carried',
+    async ({ beforeRun, marker, idle, carried, expected }) => {
+      const fake = createFakeDb({ taskSteps: steps });
+      const row = fake.insert(steps, { idleMs: idle, carriedIdleMs: carried });
+      const at = fake.now().getTime();
+      fake.patch(steps, row.id as string, {
+        startedAt: beforeRun ? null : new Date(at - 120_000),
+        waitingStartedAt: marker === null ? null : new Date(at + marker),
+      });
+      const [after] = await fake.db
+        .update(steps)
+        .set(folded)
+        .where(eq(steps.id, row.id as string))
+        .returning({
+          idle: steps.idleMs,
+          carried: steps.carriedIdleMs,
+          at: sql<number>`floor(extract(epoch from now()) * 1000)`.mapWith(Number),
+        });
+      expect(after).toEqual({ idle: expected[0], carried: expected[1], at });
+    },
+  );
+
+  it('leaves a park fold referencing another table opaque, as other unsupported SET SQL', async () => {
+    const fake = createFakeDb({ taskSteps: steps });
+    const row = fake.insert(steps, { idleMs: 10 });
+    const foreign = sql`${schema.tasks.startedAt} IS NULL`;
+    const expression = sql`${steps.idleMs} + case when ${foreign} then 0
+      else least(2147483647 - ${steps.idleMs}, ${park})::int end`;
+    await fake.db
+      .update(steps)
+      .set({ idleMs: expression })
+      .where(eq(steps.id, row.id as string));
+    expect(fake.rows(steps)[0]!.idleMs).toBe(expression);
   });
 });

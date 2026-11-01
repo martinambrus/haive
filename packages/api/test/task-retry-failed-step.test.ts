@@ -152,11 +152,17 @@ describe('a task Retry re-runs the step the task stopped on', () => {
       statusMessage: 'Waiting for a free runtime slot',
       detectOutput: { seen: true },
     });
+    const at = t.fake.now().getTime();
+    t.fake.patch(schema.taskSteps, TARGET_ROW, { waitingStartedAt: new Date(at - 60_000) });
     const res = await t.retry();
     expect(res.status).toBe(200);
     expect(t.step(TARGET_ROW)).toMatchObject({
       status: 'pending',
       waitingStartedAt: null,
+      startedAt: null,
+      idleMs: 0,
+      carriedWorkMs: 0,
+      carriedIdleMs: 60_000,
       statusMessage: null,
       detectOutput: { seen: true },
     });
@@ -173,10 +179,26 @@ describe('a task Retry re-runs the step the task stopped on', () => {
       detectOutput: { seen: true },
       formSchema: form,
     });
+    const at = t.fake.now().getTime();
+    t.fake.patch(schema.taskSteps, TARGET_ROW, {
+      startedAt: new Date(at - 300_000),
+      waitingStartedAt: new Date(at - 60_000),
+      idleMs: 2_000,
+      userActiveMs: 400,
+      carriedWorkMs: 1_000,
+      carriedIdleMs: 3_000,
+      carriedUserActiveMs: 100,
+    });
     expect((await t.retry()).status).toBe(200);
     expect(t.step(TARGET_ROW)).toMatchObject({
       status: 'pending',
       waitingStartedAt: null,
+      startedAt: null,
+      idleMs: 0,
+      userActiveMs: 0,
+      carriedWorkMs: 239_000,
+      carriedIdleMs: 65_000,
+      carriedUserActiveMs: 500,
       formSchema: form,
       detectOutput: { seen: true },
     });

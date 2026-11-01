@@ -16,7 +16,10 @@ import { getTableConfig, PgJsonb, PgUUID, type PgTable } from 'drizzle-orm/pg-co
  * or the same with `AND (a >= value OR b >= value)` in place of the two IS NULL tests —
  * and throws on anything else, so a drizzle upgrade or a new query shape fails loudly instead of
  * matching every row. Of an update's SQL values it evaluates `<column> + <integer>` and
- * `greatest(<column> + <integer>, 0)` and stores any other as it is. The foreign-key cascade is
+ * `greatest(<column> + <integer>, 0)` and the two clamped pre-run/started park wait folds.
+ * The millisecond `now()` projection reads the current logical clock (advanced by test setup
+ * and insert stamps), without modelling transaction-clock isolation. Other SET SQL stays as
+ * given; an unknown projection still throws. The foreign-key cascade is
  * read off the schema.
  *
  * A transaction keeps an undo log, so a throw takes back exactly what IT wrote and a nested one is
@@ -176,6 +179,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
   const seq = new WeakMap<FakeRow, number>();
   let inserted = 0;
   let tick = 0;
+  const clockMs = (): number => Date.UTC(2026, 1, 1) + tick * 1000;
   const now = (): Date => new Date(Date.UTC(2026, 1, 1) + (tick += 1) * 1000);
   const lockTails = new Map<string, Promise<void>>();
 
@@ -411,6 +415,42 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
         if (key !== undefined) return [k, (row) => Math.max(0, Number(row[key]) + delta)];
       }
       const key = is(ch[0], Column) ? keyOf.get(ch[0]) : undefined;
+      // The two park folds: keep a started run's wait in idle, a pre-run wait in carry.
+      // Match only these column-safe shapes; other SET SQL still stays opaque below.
+      const pre = is(ch[2], SQL) ? ch[2].queryChunks.filter((c) => text(c) !== '') : [];
+      const wait = is(ch[6], SQL) ? ch[6].queryChunks.filter((c) => text(c) !== '') : [];
+      const startKey = is(pre[0], Column) ? keyOf.get(pre[0]) : undefined;
+      const waitKey = is(wait[1], Column) ? keyOf.get(wait[1]) : undefined;
+      const branch = text(ch[3])?.replace(/\s+/g, ' ').trim();
+      const beforeRun = branch === 'then least(2147483647 -';
+      if (
+        ch.length === 8 &&
+        key !== undefined &&
+        ch[4] === ch[0] &&
+        text(ch[1]) === ' + case when ' &&
+        text(ch[5]) === ', ' &&
+        pre.length === 2 &&
+        startKey !== undefined &&
+        text(pre[1]) === ' IS NULL' &&
+        wait.length === 3 &&
+        waitKey !== undefined &&
+        text(wait[0]) === 'greatest(0, floor(extract(epoch from (now() - ' &&
+        text(wait[2]) === ')) * 1000))' &&
+        ((beforeRun && text(ch[7]) === ')::int else 0 end') ||
+          (branch === 'then 0 else least(2147483647 -' && text(ch[7]) === ')::int end'))
+      ) {
+        return [
+          k,
+          (row) => {
+            const prior = row[key];
+            if (prior == null) return null;
+            if ((row[startKey] == null) !== beforeRun) return prior;
+            const at = row[waitKey];
+            const elapsed = at instanceof Date ? Math.max(0, clockMs() - at.getTime()) : 0;
+            return Number(prior) + Math.min(2147483647 - Number(prior), elapsed);
+          },
+        ];
+      }
       const step = /^ \+ (\d+)$/.exec(text(ch[1]) ?? '');
       if (ch.length !== 2 || key === undefined || !step) return [k, () => v];
       return [k, (row) => Number(row[key]) + Number(step[1])];
@@ -418,13 +458,22 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
     return (row) => Object.fromEntries(parts.map(([k, value]) => [k, value(row)]));
   }
 
-  /** A row shaped as `select({ alias: column })` and `returning({ alias: column })` shape it. */
+  /** Column aliases and the supported millisecond clock in select/returning projections. */
   function project(table: PgTable, fields: Record<string, unknown>, row: FakeRow): FakeRow {
     const keyOf = columnKeys(table);
     return Object.fromEntries(
       Object.entries(fields).map(([alias, col]) => {
         const key = keyOf.get(col);
         if (key === undefined) {
+          // Only the millisecond clock projection used by a retained run's timing snapshot.
+          // Read the existing logical clock without advancing it for every returned row.
+          if (
+            is(col, SQL) &&
+            col.queryChunks.length === 1 &&
+            text(col.queryChunks[0]) === 'floor(extract(epoch from now()) * 1000)'
+          ) {
+            return [alias, clockMs()];
+          }
           throw new Error(`fake db: "${alias}" is not a column of ${getTableName(table)}`);
         }
         return [alias, row[key]];
