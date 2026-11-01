@@ -87,13 +87,6 @@ const CASES: Case[] = [
     live: { status: 200, queued: [TASK_JOB_NAMES.START] },
   },
   {
-    name: 'task cli-provider',
-    task: { status: 'waiting_user', currentStepId: STEP },
-    step: { status: 'waiting_form' },
-    request: patch(`/${TASK}/cli-provider`, { cliProviderId: null }),
-    live: { status: 200, queued: [] },
-  },
-  {
     name: 'step submit',
     task: { status: 'waiting_user', currentStepId: STEP },
     step: { status: 'waiting_form' },
@@ -339,16 +332,6 @@ describe('a cancelled or completed task that kept its dead_at is not dead', () =
   );
 
   it.each(['cancelled', 'completed'])(
-    'answers a task cli-provider change on a %s task with its own refusal, not task_dead',
-    async (status) => {
-      setup(ended(status), true);
-      const res = await send(patch(`/${TASK}/cli-provider`, { cliProviderId: null }));
-      expect(res.status).toBe(409);
-      expect(await res.json()).not.toMatchObject({ code: 'task_dead' });
-    },
-  );
-
-  it.each(['cancelled', 'completed'])(
     'answers Start on a %s task as a start that did not happen, not task_dead',
     async (status) => {
       setup(ended(status), true);
@@ -382,5 +365,19 @@ describe('markQueuedForStart', () => {
     const fake = created(false);
     expect(await markQueuedForStart(fake.db as never, TASK)).toMatchObject({ status: 'queued' });
     expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'queued' });
+  });
+});
+
+// The task-level switch could reset a live step without fencing its worker. Only the
+// supported step-level route may change a running task's provider choice.
+describe('retired task-level provider switch', () => {
+  it.each(['running', 'waiting_cli'])('returns 404 without touching a %s step', async (status) => {
+    const t = setup({ task: { status: 'running', currentStepId: STEP }, step: { status } }, false);
+    const before = t.snapshot();
+    const res = await send(patch(`/${TASK}/cli-provider`, { cliProviderId: null }));
+    expect(res.status).toBe(404);
+    expect(t.snapshot()).toEqual(before);
+    expect(h.add).not.toHaveBeenCalled();
+    expect(h.kill).not.toHaveBeenCalled();
   });
 });

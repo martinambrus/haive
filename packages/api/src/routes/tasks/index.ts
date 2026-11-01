@@ -26,7 +26,6 @@ import {
 import { isTaskClass, knownTaskTypes, typesForClass } from '@haive/shared/stats';
 import {
   buildEstimationAccuracy,
-  computeFoldContribution,
   computeTaskTiming,
   configService,
   CONFIG_KEYS,
@@ -40,7 +39,6 @@ import {
   PAUSED_FILTER_TOKEN,
   renameTaskRequestSchema,
   resolveTaskCliProviderId,
-  setCliProviderRequestSchema,
   setSummaryCliRequestSchema,
   STEER_IN_CHANNEL_PREFIX,
   taskActionRequestSchema,
@@ -90,7 +88,6 @@ import {
   settleActiveStepsIn,
   stopActiveCliInvocations,
   supersedeLiveRuns,
-  withoutGateAnswer,
 } from '../../lib/task-control.js';
 import { repriceTaskCliJobs } from '../../lib/reprice-cli-jobs.js';
 import {
@@ -1732,112 +1729,6 @@ taskRoutes.patch('/:id/summary-cli', async (c) => {
   });
 
   return c.json({ ok: true });
-});
-
-taskRoutes.patch('/:id/cli-provider', async (c) => {
-  const userId = c.get('userId');
-  const id = c.req.param('id');
-  const body = setCliProviderRequestSchema.parse(await c.req.json());
-  const db = getDb();
-
-  const task = await db.query.tasks.findFirst({
-    where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
-  });
-  if (!task) throw new HttpError(404, 'Task not found');
-  if (task.status === 'completed' || task.status === 'cancelled') {
-    throw new HttpError(409, `Cannot change provider for ${task.status} task`);
-  }
-  refuseDeadTask(task);
-
-  if (body.cliProviderId) await loadUsableProvider(db, userId, body.cliProviderId);
-
-  await db
-    .update(schema.tasks)
-    .set({
-      cliProviderId: body.cliProviderId,
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.tasks.id, id));
-
-  await appendTaskEvent(db, id, null, 'task.cli_provider_changed', {
-    cliProviderId: body.cliProviderId,
-    by: userId,
-  });
-
-  // Invalidate cached detect output on provider-sensitive steps so the next
-  // advance re-detects against the new CLI's metadata (skills dir, agents
-  // dir, etc.). Terminal (done/failed/skipped/cancelled) steps are left
-  // alone — rewriting history would be confusing. A saved fix-loop gate answer
-  // is dropped (a pending row refuses every write); any other answer is kept.
-  // Select the steps to invalidate under their row locks, in one transaction, so each finishing
-  // run's timing is folded into carried_* from the row as it stands, before zeroing (mirrors the
-  // retry / worker reset — a plain reset discards the prior run and undercounts effort). foldSit
-  // counts a failed step's fail->retry wait as idle. Per-row update because each contributes
-  // differently; this path also zeroes user_active_ms (the old blanket update omitted it, leaving
-  // a stale value that the fold now carries over correctly).
-  const providerSensitiveIds = [...(await loadStepFlags(db)).values()]
-    .filter((f) => f.providerSensitive)
-    .map((f) => f.stepId);
-  const invalidated = await db.transaction(async (tx) => {
-    // Read under the row locks, in id order: a fold or idle write that landed before they were
-    // granted is in it, and a row that left these statuses meanwhile is not returned.
-    const held = await tx
-      .select()
-      .from(schema.taskSteps)
-      .where(
-        and(
-          eq(schema.taskSteps.taskId, id),
-          inArray(schema.taskSteps.stepId, providerSensitiveIds),
-          inArray(schema.taskSteps.status, ['pending', 'running', 'waiting_form', 'waiting_cli']),
-        ),
-      )
-      .orderBy(schema.taskSteps.id)
-      .for('no key update');
-    const invalidateNow = new Date();
-    for (const r of held) {
-      // computeFoldContribution, not computeStepContribution: the filter above includes `running`,
-      // so a step orphaned by a worker restart (started_at set, ended_at null) would otherwise
-      // carry its whole dead start->now span into carried_work_ms. It applies foldSit for a
-      // failed step internally, so behaviour is unchanged for every closed row. This is the same
-      // fix 79d5bac made at the other three fold sites (_step-reset.ts, steps.ts retry and
-      // per-step switch-cli); this task-level provider switch was missed.
-      const contrib = computeFoldContribution(r, invalidateNow.getTime());
-      await tx
-        .update(schema.taskSteps)
-        .set({
-          status: 'pending',
-          detectOutput: null,
-          formSchema: null,
-          formValues: withoutGateAnswer,
-          statusMessage: null,
-          startedAt: null,
-          endedAt: null,
-          errorMessage: null,
-          idleMs: 0,
-          waitingStartedAt: null,
-          userActiveMs: 0,
-          carriedWorkMs: r.carriedWorkMs + contrib.workMs,
-          carriedIdleMs: r.carriedIdleMs + contrib.idleMs,
-          carriedUserActiveMs: r.carriedUserActiveMs + contrib.userActiveMs,
-          updatedAt: invalidateNow,
-        })
-        .where(eq(schema.taskSteps.id, r.id));
-    }
-    return held;
-  });
-
-  if (invalidated.length > 0) {
-    await appendTaskEvent(db, id, null, 'task.provider_sensitive_steps_invalidated', {
-      stepIds: invalidated.map((r) => r.stepId),
-      cliProviderId: body.cliProviderId,
-    });
-  }
-
-  return c.json({
-    ok: true,
-    cliProviderId: body.cliProviderId,
-    invalidatedSteps: invalidated.map((r) => r.stepId),
-  });
 });
 
 taskRoutes.get('/:id/events', async (c) => {

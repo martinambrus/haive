@@ -91,7 +91,7 @@ export interface StepMetadata {
 
 /** Step IDs whose StepDefinition sets `metadata.providerSensitive = true`.
  *  Duplicated here because the api package needs this list to invalidate
- *  cached detectOutput on `PATCH /tasks/:id/cli-provider`, and the worker's
+ *  cached detectOutput on per-step CLI switches, and the worker's
  *  step registry is not importable from api without a circular dep.
  *
  *  Keep in sync with the `providerSensitive: true` flags on StepDefinition
