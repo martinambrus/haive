@@ -3,7 +3,9 @@ import { KB_DIR } from '@haive/shared/knowledge-paths';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from './_helpers.js';
 import { parseJsonLoose } from '../_fenced-json.js';
-import { applyKbWrites, type KbWrite } from './_kb-write.js';
+import { applyKbWrites, sanitizeKbRelPath, type KbWrite } from './_kb-write.js';
+import { handOverKnowledgeBase, snapshotKnowledgeBase } from './_kb-agent-files.js';
+import { updateOwnedStep } from '../../step-ownership.js';
 import type { KnowledgeQaResolveApply } from './09_2-qa-resolve.js';
 
 /* ------------------------------------------------------------------ */
@@ -44,6 +46,8 @@ interface UnansweredItem {
 }
 
 export interface QaReviewDetect {
+  /** Captured after this dispatch wins, before its agent can edit any KB page. */
+  kbBefore?: Record<string, string>;
   reviewable: ReviewItem[];
   unanswered: UnansweredItem[];
   /** Proposed writes for the agent's own questions (source `user`) — written
@@ -69,6 +73,7 @@ interface Correction {
   originalAnswer: string;
   source: 'kb' | 'code';
   citedFile?: string;
+  targetRelPath?: string;
   userAnswer: string;
 }
 
@@ -114,6 +119,7 @@ export function collectReview(
       originalAnswer: r.answer,
       source: r.source,
       ...(r.citedFile ? { citedFile: r.citedFile } : {}),
+      ...(r.proposedWrite ? { targetRelPath: r.proposedWrite.relPath } : {}),
       userAnswer: val,
     });
   }
@@ -280,7 +286,11 @@ function buildPrompt(args: LlmBuildArgs): string {
     '```',
     '- relPath: the knowledge base file you wrote.',
     '- section: the H2 heading you added or edited.',
+    '- Include "question": "the exact question" on each kbWrites item to identify which answer it saved.',
     '- Use an empty kbWrites array only if you genuinely wrote nothing.',
+    '- If an item is already correct and needs no edit, explicitly add',
+    '  "kbUnchanged": [{ "question": "the exact question", "relPath": "the existing KB file", "reason": "why no edit was needed" }].',
+    '- A blocked or failed edit is NOT already correct: return no write for it and report the failure.',
     '- Your FINAL message MUST be the ```json block — never narration or a tool result.',
   ].join('\n');
 }
@@ -290,7 +300,8 @@ function buildPrompt(args: LlmBuildArgs): string {
 /* ------------------------------------------------------------------ */
 
 interface ReviewWriteSummary {
-  kbWrites: { relPath: string; section: string }[];
+  kbWrites: { relPath: string; section: string; question?: string }[];
+  kbUnchanged: { question: string; relPath: string; reason: string }[];
 }
 
 /** Parse the agent's write summary. LENIENT by design: the agent writes the KB
@@ -308,18 +319,105 @@ export function parseQaReviewOutput(raw: unknown): ReviewWriteSummary {
   } else if (typeof source === 'object' && source !== null) {
     parsed = source;
   }
-  if (!parsed || typeof parsed !== 'object') return { kbWrites: [] };
+  if (!parsed || typeof parsed !== 'object') return { kbWrites: [], kbUnchanged: [] };
   const list = (parsed as Record<string, unknown>).kbWrites;
-  if (!Array.isArray(list)) return { kbWrites: [] };
-  const kbWrites: { relPath: string; section: string }[] = [];
-  for (const item of list as unknown[]) {
+  const kbWrites: ReviewWriteSummary['kbWrites'] = [];
+  for (const item of Array.isArray(list) ? list : []) {
     if (!item || typeof item !== 'object') continue;
     const v = item as Record<string, unknown>;
     if (typeof v.relPath !== 'string' || v.relPath.length === 0) continue;
     const section = typeof v.section === 'string' ? v.section : '';
-    kbWrites.push({ relPath: v.relPath, section });
+    kbWrites.push({
+      relPath: v.relPath,
+      section,
+      ...(typeof v.question === 'string' ? { question: v.question } : {}),
+    });
   }
-  return { kbWrites };
+  const kbUnchanged: ReviewWriteSummary['kbUnchanged'] = [];
+  const unchanged = (parsed as Record<string, unknown>).kbUnchanged;
+  for (const item of Array.isArray(unchanged) ? unchanged : []) {
+    if (!item || typeof item !== 'object') continue;
+    const v = item as Record<string, unknown>;
+    if (
+      typeof v.question === 'string' &&
+      typeof v.relPath === 'string' &&
+      typeof v.reason === 'string' &&
+      v.reason.trim()
+    ) {
+      kbUnchanged.push({ question: v.question, relPath: v.relPath, reason: v.reason });
+    }
+  }
+  return { kbWrites, kbUnchanged };
+}
+
+/** A summary is a declaration, never proof that the agent could write. Compare
+ * real KB bytes before any deterministic append can hide an unapplied correction.
+ * An unparseable summary still succeeds when the required real edits are present. */
+async function verifiedAgentWrites(
+  ctx: StepContext,
+  detected: QaReviewDetect,
+  review: ReviewResult,
+  raw: unknown,
+) {
+  const needed = [...review.corrections, ...review.newAnswers];
+  if (needed.length === 0)
+    return { written: [], skipped: [], correctedCount: 0, newlyAnsweredCount: 0 };
+  const fail = (): never => {
+    throw new Error(
+      'Knowledge base correction not applied: required KB edits could not be verified. Inspect the agent result and KB permissions before retrying.',
+    );
+  };
+  if (!detected.kbBefore) fail();
+  const before = detected.kbBefore!;
+  const after = await snapshotKnowledgeBase(ctx.repoPath);
+  const changed = Object.keys(after).filter((rel) => after[rel] !== before[rel]);
+  const summary = parseQaReviewOutput(raw);
+  const normalize = (rel: string): string => {
+    const check = sanitizeKbRelPath(rel);
+    if (!check.ok) return fail();
+    return `${KB_DIR}/${check.normalized.replaceAll('\\', '/')}`;
+  };
+  const savedQuestions = new Set<string>();
+  const written = summary.kbWrites.map((write) => {
+    const relPath = normalize(write.relPath);
+    if (!changed.includes(relPath)) fail();
+    if (write.question) savedQuestions.add(write.question);
+    return { relPath, section: write.section };
+  });
+  // The agent's direct side effects survive an unusable response; do not re-roll
+  // a successful writer merely because it forgot the summary.
+  for (const relPath of changed) {
+    if (!written.some((w) => w.relPath === relPath)) written.push({ relPath, section: '' });
+  }
+  const unchanged = new Map<string, ReviewWriteSummary['kbUnchanged'][number]>();
+  for (const item of summary.kbUnchanged) {
+    if (!needed.some((n) => n.question === item.question)) continue;
+    const rel = normalize(item.relPath);
+    if (!after[rel] || before[rel] !== after[rel]) fail();
+    unchanged.set(item.question, { ...item, relPath: rel });
+  }
+  for (const correction of review.corrections) {
+    const noop = unchanged.get(correction.question);
+    const target = correction.source === 'kb' ? correction.citedFile : correction.targetRelPath;
+    if (correction.source === 'kb' && target) {
+      const rel = normalize(target);
+      if (noop ? noop.relPath !== rel : !changed.includes(rel)) fail();
+    } else if (
+      !noop &&
+      !savedQuestions.has(correction.question) &&
+      (!target || !changed.includes(normalize(target)))
+    )
+      fail();
+  }
+  for (const answer of review.newAnswers) {
+    if (!unchanged.has(answer.question) && !savedQuestions.has(answer.question)) fail();
+  }
+  return {
+    written,
+    skipped: [...unchanged.values()].map(({ relPath, reason }) => ({ relPath, reason })),
+    correctedCount: review.corrections.filter((c) => !unchanged.has(c.question)).length,
+    newlyAnsweredCount: review.newAnswers.filter((a) => !unchanged.has(a.question)).length,
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -402,6 +500,14 @@ export const knowledgeQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApply
 
   llm: {
     requiredCapabilities: ['tool_use'],
+    prepareWorkspace: async ({ ctx, detected }) => {
+      ctx.throwIfCancelled();
+      await handOverKnowledgeBase(ctx.repoPath);
+      const d = detected as QaReviewDetect;
+      d.kbBefore = await snapshotKnowledgeBase(ctx.repoPath);
+      ctx.throwIfCancelled();
+      await updateOwnedStep(ctx.db, ctx.taskStepId, { detectOutput: d });
+    },
     buildPrompt,
     timeoutMs: 60 * 60 * 1000,
     // Skip the LLM entirely when the user confirmed everything and answered no
@@ -421,6 +527,9 @@ export const knowledgeQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApply
     const detected = args.detected as QaReviewDetect;
     const values = args.formValues as Record<string, unknown>;
     const review = collectReview(detected, values);
+    ctx.throwIfCancelled();
+    const verified = await verifiedAgentWrites(ctx, detected, review, args.llmOutput);
+    ctx.throwIfCancelled();
 
     // Deterministic writes: confirmed code-derived proposals + agent-question
     // answers (source user). Confirmed kb-derived answers are already in the KB.
@@ -431,28 +540,27 @@ export const knowledgeQaReviewStep: StepDefinition<QaReviewDetect, QaReviewApply
       new Date().toISOString(),
     );
 
-    // Corrections / new answers were written by the agent directly; record its
-    // summary for the done card (best-effort — the writes themselves already ran).
-    const llmWrites =
-      args.llmOutput === undefined ? [] : parseQaReviewOutput(args.llmOutput).kbWrites;
+    // Deterministic appends may create files too; hand them to later KB agents.
+    await handOverKnowledgeBase(ctx.repoPath);
+    const llmWrites = verified.written;
 
     ctx.logger.info(
       {
         kbWritten: written.length + llmWrites.length,
         kbSkipped: skipped.length,
         confirmedCount: review.confirmedCount,
-        correctedCount: review.corrections.length,
-        newlyAnsweredCount: review.newAnswers.length,
+        correctedCount: verified.correctedCount,
+        newlyAnsweredCount: verified.newlyAnsweredCount,
       },
       'qa-review apply complete',
     );
 
     return {
       kbWritten: [...written, ...llmWrites],
-      kbSkipped: skipped,
+      kbSkipped: [...skipped, ...verified.skipped],
       confirmedCount: review.confirmedCount,
-      correctedCount: review.corrections.length,
-      newlyAnsweredCount: review.newAnswers.length,
+      correctedCount: verified.correctedCount,
+      newlyAnsweredCount: verified.newlyAnsweredCount,
       stillUnansweredCount: detected.unanswered.length - review.newAnswers.length,
     };
   },

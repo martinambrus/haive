@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { chown, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -808,3 +809,59 @@ describe('buildKnowledgePrompt — the existing-file list is closed', () => {
     expect(withExisting([])).not.toContain('That list is COMPLETE');
   });
 });
+
+// Runs in the existing root worker container against a private OS-temp fixture.
+describe.skipIf(process.getuid?.() !== 0)(
+  'KB ownership handoff under the root worker (T293)',
+  () => {
+    it('hands generated KB pages, nested directories and INDEX to the sandbox user without changing modes', async () => {
+      await chown(tmpRoot, 1000, 1000);
+      const result = await knowledgeAcquisitionStep.apply(makeCtx(tmpRoot), {
+        iteration: 0,
+        previousIterations: [],
+        detected: detectedStack(null, null),
+        formValues: { selectedTopics: ['deployment', 'node'] },
+        llmOutput: [
+          {
+            id: 'deployment',
+            title: 'Deployment',
+            sections: [{ heading: 'Deployment', body: 'Deploy it.' }],
+          },
+          {
+            id: 'node',
+            title: 'Node patterns',
+            category: 'tech_pattern',
+            tech: 'nodejs',
+            sections: [{ heading: 'Patterns', body: 'Use modules.' }],
+          },
+        ],
+      });
+      expect(result.written).toHaveLength(2);
+      const page = path.join(tmpRoot, '.haive-data/knowledge_base/deployment.md');
+      const dir = path.dirname(page);
+      for (const target of [
+        dir,
+        page,
+        path.join(dir, 'INDEX.md'),
+        path.join(dir, 'TECH_PATTERNS'),
+        path.join(dir, 'TECH_PATTERNS/nodejs'),
+        path.join(dir, 'TECH_PATTERNS/nodejs/INDEX.md'),
+      ]) {
+        const info = await stat(target);
+        expect({ uid: info.uid, gid: info.gid }).toEqual({ uid: 1000, gid: 1000 });
+        expect(info.mode & 0o777).toBe(info.isDirectory() ? 0o755 : 0o644);
+      }
+      execFileSync(
+        process.execPath,
+        [
+          '-e',
+          'require("node:fs").appendFileSync(process.argv[1], "\\nAgent correction\\n"); require("node:fs").writeFileSync(process.argv[2], "New page");',
+          page,
+          path.join(dir, 'agent.md'),
+        ],
+        { uid: 1000, gid: 1000 },
+      );
+      expect(await readFile(page, 'utf8')).toContain('Agent correction');
+    });
+  },
+);

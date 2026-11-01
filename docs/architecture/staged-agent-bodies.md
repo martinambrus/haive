@@ -47,3 +47,28 @@ per-item dispatch. `06_5-agent-discovery` has that shape on paper (`custom[].bod
 agent definition) and is deliberately NOT converted — MEASURED across every run on this
 install it emits ZERO custom agents, so the path is dead and the large output is its
 `skipped`/`declined` reasoning instead.
+
+The published project KB needs the same ownership handoff as the drafts. After 08 files
+its local pages (including stubs, placements and the generated index), `handOverKnowledgeBase`
+hands only `KB_DIR` and its real children to the sandbox identity. The root worker uses
+`SANDBOX_UID`/`SANDBOX_GID`; an unprivileged host worker retains the repository owner's identity,
+as draft preparation does. It preserves bytes and ordinary permission bits, follows no links,
+refuses hard-link aliases, and excludes git data. It never hands over state, secrets or the rest
+of the checkout. 09_3 does this again in `prepareWorkspace`, so a Retry can repair KB files an
+older 08 left root-owned. MEASURED in fresh onboarding: six files were root:root 0644 inside a
+root:root 0755 KB directory; the corrector ran as node 1000 on a read-write mount, failed its
+edit and honestly returned `kbWrites: []`.
+
+09_3 verifies the correction before appending confirmed/passthrough proposals. Its winning
+dispatch stores hashes of real markdown KB pages in owned `detect_output` immediately before
+enqueue; every redispatch refreshes them. Apply compares the actual bytes, excluding the
+generated top-level index, and refuses unchanged/missing declared writes and unapplied
+corrections. A KB-sourced correction must change its cited page; a code-sourced one can use its
+proposed target or a different fitting page. For a new target the write summary names the exact question beside a
+verified changed page. A missing summary can still record real edits to known targets. Explicit
+`kbUnchanged` items identify an already-correct question and an existing unchanged page; they
+appear in `kbSkipped` and add no corrected/newly-answered count. Untouched confirmations and
+questions the person leaves unanswered need no agent writes. Unreadable state or a legacy
+in-flight run with no baseline fails verification, keeping its edits and using the normal step
+failure path; it does not automatically reroll a side-effecting agent. Global KB promotions and
+staged-body resolution retain their separate contracts.
