@@ -130,12 +130,14 @@ Progress 2026-11-01T19:53Z: PR988 exact f99f07611c reviewed full candidate green
 
 ### T122 · B5.3 · review watermarks travel; Haive paths leave drift ranges
 
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T17:33Z · last: 2026-11-01T18:36Z · kind: feature · priority: P1
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T17:33Z · last: 2026-11-01T19:54Z · kind: feature · priority: P1
 settings/review-watermarks.json, descendant wins via merge-base --is-ancestor; _external-drift drops .haive-data/state/** and plan files. Control: B re-reviews A's KB-reviewed commits today; empty after.
 
 Execution 2026-11-01: paired with T121, bounded portable watermark and drift-range feature; no unrelated queued repair or live model calls. Evidence `.claude/tmp/codex-run/queue-exec-20261101/T121-T122/`.
 
 Progress 2026-11-01T18:36Z: Complete candidate087e8b253 passed218 SQL/Git smoke and focused/typechecks. Fresh review found one introduced P2: missing stored proof was ordered incoming-newer without ancestry. Required fix1 now refuses/preserves proof across sync/answer/projection consumers; meaningful6-case old-source red and targeted11green reported. T456 awaits sole driver; no broad audit.
+
+Progress 2026-11-01T19:54Z: PR988 exact f99f07611c full candidate/native reviews green; actual B normal refresh imported independent KB and plan watermarks and rules; drift excludes Haive commits. Hosted exact-HEAD review/all CI pending; no more live fixture reruns.
 
 ### T286 · FNF[root-work] · a task at the root after 01 was skipped escapes the fences (+3)
 
