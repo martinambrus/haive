@@ -1,5 +1,6 @@
+import { portableSettingsOf } from '@haive/shared/project-state';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -209,11 +210,60 @@ describe('resolveExternalDrift watermark check', () => {
       },
     }) as unknown as StepContext;
 
-  it('a watermark that is not in the history is a first run', async () => {
+  it('a missing watermark cannot mark unseen history reviewed', async () => {
     const dir = await repo();
     const drift = await resolveExternalDrift(ctxFor(dir, 'f'.repeat(40)), 'kb');
-    expect(drift.firstRun).toBe(true);
+    expect(drift.firstRun).toBe(false);
+    expect(drift.measured).toBe(false);
+  });
+
+  const rangeCtx = (dir: string, since: string) => {
+    const ctx = ctxFor(dir, since);
+    const query = { from: () => query, where: () => Promise.resolve([]), innerJoin: () => query };
+    (ctx.db as unknown as { select: unknown }).select = () => query;
+    return ctx;
+  };
+
+  it('T122 shared KB progress leaves an empty duplicate-review range', async () => {
+    const dir = await repo();
+    const old = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+    const reviewed = await commit(dir, 'reviewed.txt', 'reviewed\n', 'A reviewed this change');
+    const settings = portableSettingsOf({
+      scopeExcludeGlobs: null,
+      rtkEnabled: null,
+      rtkVersion: null,
+      lspServers: null,
+      lspServerVersions: null,
+      chromeDevtoolsMcpVersion: null,
+      reviewDimensions: null,
+      agentRulesOverride: null,
+      kbSyncedCommit: reviewed,
+    });
+    const imported = (settings['review-watermarks'] as { kbSyncedCommit?: string } | undefined)
+      ?.kbSyncedCommit;
+    const drift = await resolveExternalDrift(rangeCtx(dir, imported ?? old), 'kb');
+    expect(drift.commits).toEqual([]);
     expect(drift.measured).toBe(true);
+  });
+
+  it('T122 excludes state and plan paths while retaining code and KB from mixed commits', async () => {
+    const dir = await repo();
+    const old = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+    await mkdir(path.join(dir, '.haive-data/state/settings'), { recursive: true });
+    await commit(dir, '.haive-data/state/settings/review-watermarks.json', '{}\n', 'state only');
+    await commit(dir, '.haive-data/plan.json', '{}\n', 'plan only');
+    await writeFile(path.join(dir, '.haive-data/plan.md'), '# Plan\n');
+    await commit(dir, 'real-code.ts', 'export const code = 1;\n', 'mixed code and projection');
+    await mkdir(path.join(dir, '.haive-data/knowledge_base'), { recursive: true });
+    await commit(dir, '.haive-data/knowledge_base/overview.md', '# KB\n', 'KB remains real drift');
+    const drift = await resolveExternalDrift(rangeCtx(dir, old), 'kb');
+    expect(drift.commits.map((c) => c.subject)).toEqual([
+      'KB remains real drift',
+      'mixed code and projection',
+    ]);
+    expect(drift.changedPaths.sort()).toEqual(
+      ['.haive-data/knowledge_base/overview.md', 'real-code.ts'].sort(),
+    );
   });
 
   it('a watermark check that gave no answer is unmeasured, not a first run', async () => {

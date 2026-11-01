@@ -1,3 +1,8 @@
+import {
+  watermarkKeyOfUnit,
+  REVIEW_WATERMARK_SETTING,
+  reviewWatermarks,
+} from '@haive/shared/project-state';
 import type { NamedCheckout } from '../repo/checkout-head.js';
 import { admitWatchedCheckout } from './watch-admission.js';
 import { randomUUID } from 'node:crypto';
@@ -325,6 +330,14 @@ export function overlaySettings(
 ): Record<string, unknown> {
   const out = { ...settings };
   for (const row of pending.filter((r) => isSettingUnit(r.unit))) {
+    const watermark = watermarkKeyOfUnit(row.unit);
+    if (watermark) {
+      const value = { ...reviewWatermarks(out[REVIEW_WATERMARK_SETTING]) };
+      if (row[side] === undefined) delete value[watermark];
+      else value[watermark] = row[side] as string;
+      out[REVIEW_WATERMARK_SETTING] = value;
+      continue;
+    }
     const name = settingNameOfFile(row.unit)!;
     if (row[side] === undefined) delete out[name];
     else out[name] = row[side];
@@ -613,6 +626,8 @@ export async function writeProjectStateColumn(
           chromeDevtoolsMcpVersion: schema.repositories.chromeDevtoolsMcpVersion,
           reviewDimensions: schema.repositories.reviewDimensions,
           agentRulesOverride: schema.repositories.agentRulesOverride,
+          kbSyncedCommit: schema.repositories.kbSyncedCommit,
+          planSyncedCommit: schema.repositories.planSyncedCommit,
           onboardingEnvironment: schema.repositories.onboardingEnvironment,
           onboardingTooling: schema.repositories.onboardingTooling,
           rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
@@ -828,7 +843,7 @@ export async function writeProjectStateColumn(
           expectedCheckout,
         });
         if (['refused', 'held', 'deferred', 'superseded'].includes(imported.outcome)) {
-          throw new ProjectStateMovedError();
+          throw new ProjectStateMovedError(imported.reason);
         }
         // An imported context is newer than the context this caller supplied. Commit the import,
         // then ask the caller to plan again rather than undoing it in the record.
@@ -1509,7 +1524,9 @@ async function recordLocalSide(
       await settle(
         row,
         isSettingUnit(row.unit)
-          ? settings[settingNameOfFile(row.unit)!]
+          ? watermarkKeyOfUnit(row.unit)
+            ? reviewWatermarks(settings[REVIEW_WATERMARK_SETTING])?.[watermarkKeyOfUnit(row.unit)!]
+            : settings[settingNameOfFile(row.unit)!]
           : row.unit === ENVIRONMENT_UNIT
             ? environment
             : (environment as Record<string, unknown> | null)?.[

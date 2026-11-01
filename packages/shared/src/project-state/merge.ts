@@ -1,3 +1,8 @@
+import {
+  REVIEW_WATERMARK_KEYS,
+  reviewWatermarks,
+  REVIEW_WATERMARK_UNIT,
+} from './review-watermarks.js';
 import { sameValue, sortedSet } from './canonical.js';
 import { normalizeProjectState } from './codec.js';
 import { bundleFileName, claimFileName } from './names.js';
@@ -38,6 +43,8 @@ export interface ProjectStateMergeInput {
    *  sides changed is settled by the bytes: the side whose `writtenHash` they hold wins, incoming when
    *  they hold both. */
   diskHash?: (path: string) => string | null;
+  /** Verified Git ancestry; omitted means differing values remain a question. */
+  watermarkOrder?: (local: string, incoming: string) => 'local' | 'incoming' | 'incomparable';
 }
 
 interface Outcome {
@@ -208,6 +215,32 @@ export function mergeProjectState(input: ProjectStateMergeInput): ProjectStateMe
   for (const name of names) {
     const unit = settingFileName(name);
     const b = base?.settings[name];
+    if (name === 'review-watermarks') {
+      const localMarks = reviewWatermarks(local.settings[name]) ?? {};
+      const incomingMarks = reviewWatermarks(incoming.settings[name]) ?? {};
+      const baseMarks = reviewWatermarks(b) ?? {};
+      const merged = { ...localMarks };
+      for (const key of REVIEW_WATERMARK_KEYS) {
+        const l = localMarks[key],
+          i = incomingMarks[key];
+        if (!i || l === i) continue;
+        if (!l) {
+          merged[key] = i;
+          continue;
+        }
+        const order = input.watermarkOrder?.(l, i) ?? 'incomparable';
+        if (order === 'incoming') merged[key] = i;
+        else if (order === 'incomparable')
+          out.conflicts.push({
+            unit: `${REVIEW_WATERMARK_UNIT}#${key}`,
+            base: baseMarks[key],
+            local: l,
+            incoming: i,
+          });
+      }
+      if (Object.keys(merged).length) settings[name] = merged;
+      continue;
+    }
     const value = SET_SETTINGS.has(name)
       ? mergeSetValue(unit, b, local.settings[name], incoming.settings[name], out)
       : mergeUnit(unit, b, local.settings[name], incoming.settings[name], out);

@@ -1,3 +1,4 @@
+import { watermarkKeyOfUnit } from './review-watermarks.js';
 import { sameValue } from './canonical.js';
 import { settingNameOfFile } from './raw-text.js';
 import { isPortableSettingName, type PortableSettingName } from './settings.js';
@@ -26,6 +27,7 @@ export const isEnvironmentUnit = (unit: string): boolean =>
 /** The unit of one portable setting: its file in the record. */
 export const isSettingUnit = (unit: string): boolean => {
   const name = settingNameOfFile(unit);
+  if (watermarkKeyOfUnit(unit)) return true;
   return name !== null && isPortableSettingName(name);
 };
 
@@ -78,6 +80,7 @@ const SETTING_LABELS = {
   'chrome-devtools-mcp-version': 'Chrome DevTools MCP version',
   'review-dimensions': 'Review dimensions',
   'agent-rules': 'AGENTS.md rules',
+  'review-watermarks': 'Knowledge base and plan review progress',
 } as const satisfies Record<PortableSettingName, string>;
 
 const ENVIRONMENT_KEY_LABELS: Readonly<Record<string, string>> = {
@@ -97,6 +100,11 @@ export const CONFLICT_KEY_LABELS: Readonly<Record<string, string>> = {
 export function conflictUnitLabel(unit: string, claimPath?: string | null): string {
   const plan = parsePlanConflictUnit(unit);
   if (plan && isPlanUnit(unit)) return `Plan: ${plan.field} of a node`;
+  const watermark = watermarkKeyOfUnit(unit);
+  if (watermark)
+    return watermark === 'kbSyncedCommit'
+      ? 'Knowledge base review progress'
+      : 'Plan review progress';
   if (isSettingUnit(unit)) return SETTING_LABELS[settingNameOfFile(unit) as PortableSettingName];
   if (unit === ENVIRONMENT_UNIT) return 'The project environment';
   if (unit.startsWith(`${ENVIRONMENT_UNIT}#`)) {

@@ -1,3 +1,12 @@
+import {
+  reviewWatermarkOrder,
+  ReviewWatermarkGitError,
+} from '../project-state/review-watermarks.js';
+import {
+  watermarkKeyOfUnit,
+  REVIEW_WATERMARK_SETTING,
+  reviewWatermarks,
+} from '@haive/shared/project-state';
 import { isUtf8 } from 'node:buffer';
 import { HAIVE_DATA_FILES, type PlanMirror, type PlanMirrorPayload } from '@haive/shared';
 import { planMirrorPayloadSchema, planMirrorV2Schema } from '@haive/shared/schemas';
@@ -226,6 +235,12 @@ function takeIncomingUnits(
         else copy[key] = value;
         (out as unknown as Record<string, unknown>)[field] = copy;
       }
+    } else if (watermarkKeyOfUnit(unit)) {
+      const key = watermarkKeyOfUnit(unit)!;
+      out.settings[REVIEW_WATERMARK_SETTING] = {
+        ...reviewWatermarks(out.settings[REVIEW_WATERMARK_SETTING]),
+        [key]: reviewWatermarks(incoming.settings[REVIEW_WATERMARK_SETTING])?.[key],
+      };
     } else if (setting !== null) {
       const value = incoming.settings[setting];
       if (value === undefined) delete out.settings[setting];
@@ -319,7 +334,12 @@ async function mergeStateRecord(worktreePath: string): Promise<void> {
   const theirs = readRecord(await readStateTree(worktreePath, 'MERGE_HEAD'), 'incoming');
   const local = ours.record ?? emptyProjectState();
   const incoming = theirs.record ?? emptyProjectState();
-  const merge = mergeProjectState({ base: base?.record ?? null, local, incoming });
+  const watermarkOrder = await reviewWatermarkOrder(
+    worktreePath,
+    local.settings[REVIEW_WATERMARK_SETTING],
+    incoming.settings[REVIEW_WATERMARK_SETTING],
+  );
+  const merge = mergeProjectState({ base: base?.record ?? null, local, incoming, watermarkOrder });
   const files = renderProjectState(
     takeIncomingUnits(
       merge.merged,
@@ -377,6 +397,7 @@ export async function resolveHaiveProjectionConflicts(
     try {
       await mergeStateRecord(worktreePath);
     } catch (err) {
+      if (err instanceof ReviewWatermarkGitError) throw err;
       why = err instanceof Error ? err.message : String(err);
     }
     for (const left of await unmergedInState(worktreePath)) {

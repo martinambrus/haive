@@ -43,6 +43,8 @@ describe('portableSettingsOf', () => {
       chromeDevtoolsMcpVersion: '0.9.0',
       reviewDimensions: ['security'],
       agentRulesOverride: '# Rules\n',
+      kbSyncedCommit: 'a'.repeat(40),
+      planSyncedCommit: 'b'.repeat(40),
     });
 
     expect(Object.keys(settings).sort()).toEqual([...PORTABLE_SETTING_NAMES].sort());
@@ -463,5 +465,21 @@ describe('the onboarding tooling unit', () => {
   it('reads a checkout’s value only when it is an object', () => {
     expect(toolingUnitFrom({ ragMode: 'none' })).toEqual({ ragMode: 'none' });
     for (const value of [null, [], 'x', 1, undefined]) expect(toolingUnitFrom(value)).toBeNull();
+  });
+});
+
+describe('T122 portable review progress', () => {
+  it('round-trips independently chosen KB and plan commits through the settings columns', () => {
+    const kb = 'a'.repeat(40),
+      plan = 'b'.repeat(40);
+    const setting = portableSettingsOf({ ...empty, kbSyncedCommit: kb, planSyncedCommit: plan })[
+      'review-watermarks'
+    ];
+    expect(setting).toEqual({ kbSyncedCommit: kb, planSyncedCommit: plan });
+    expect(settingColumnUpdate('review-watermarks', setting)).toEqual({
+      kbSyncedCommit: kb,
+      planSyncedCommit: plan,
+    });
+    expect(normalizeSetting('review-watermarks', { kbSyncedCommit: 'main' }).ok).toBe(false);
   });
 });

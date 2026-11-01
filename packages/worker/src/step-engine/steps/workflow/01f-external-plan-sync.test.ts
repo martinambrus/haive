@@ -42,6 +42,9 @@ const POINT = 'cccccccccccccccccccccccccccccccccccccccc';
 function fakeDb(): { db: Database; stamps: Record<string, unknown>[] } {
   const stamps: Record<string, unknown>[] = [];
   const db = {
+    execute: async () => [],
+    select: () => ({ from: () => ({ where: () => ({ for: async () => [{}] }) }) }),
+    insert: () => ({ values: () => ({ onConflictDoUpdate: async () => undefined }) }),
     update: () => ({
       set: (values: Record<string, unknown>) => ({
         where: async () => {

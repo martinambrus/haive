@@ -1029,10 +1029,31 @@ raw record is checked again before committing. The copy leaves the root writer's
 attached to the root, so a partial feature copy cannot acknowledge an unimported root record.
 Unknown names and unrelated staged blobs remain outside its commit.
 
+**KB and plan review progress travels independently.** `settings/review-watermarks.json` carries
+`kbSyncedCommit` and `planSyncedCommit`, using the existing nullable repository columns, codec,
+writer, sync, answer and outbox. There is no format or schema bump. Their writers mark the outbox
+in the same transaction as the column update. A descendant watermark wins in either direction,
+proved by `git merge-base --is-ancestor`; exit 1 alone means false and unreadable Git refuses the
+import/merge. Incoming missing objects or commits outside HEAD's ancestry refuse the import while preserving
+the incoming file, local columns, base and outbox. The refusal asks for a fetch or deliberate
+repair; Haive performs neither automatically. Missing files never erase review progress. Incomparable values produce an
+ordinary question for that key (`settings/review-watermarks.json#kbSyncedCommit` or
+`#planSyncedCommit`); the other key can advance and upgrades remain available. An answer preserves
+its sibling key and never moves a watermark back over a later descendant review. Local completion
+stamps obey the same monotonic ancestry rule.
+
+External drift drops `.haive-data/state/**` and exactly `.haive-data/plan.json` and `plan.md` from
+its path lists and drops commits touching only those projections. Mixed commits retain their real
+project paths; KB and learnings remain visible. A stored missing/foreign watermark leaves the
+range unmeasured and cannot start tracking over unseen commits. A repository with no watermark
+retains its first-run policy. The two-install smoke demonstrates the duplicate range before import,
+an empty KB range afterwards while the plan range remains independent, ancestor retention, outbox
+rendering and an incomparable-key answer.
+
 **The record carries the portable settings and the environment.** `portableSettingsOf`
 (`@haive/shared/project-state`, `settings.ts`) maps the repository row to `settings/<name>.json`:
 `scope-exclude-globs`, `rtk-enabled`, `rtk-version`, `lsp-servers`, `lsp-server-versions`,
-`chrome-devtools-mcp-version`, `review-dimensions` and `agent-rules`, and nothing else. `app_auth`
+`chrome-devtools-mcp-version`, `review-dimensions`, `agent-rules` and `review-watermarks`, and nothing else. `app_auth`
 and `verify_commands` stay on the machine, since a committed login URL or command would be typed or
 run on a teammate's. `agent-rules`, the repository's AGENTS.md rules override
 (`agent_rules_override`), is the one setting whose file is its value: `settings/agent-rules.md`
@@ -1088,8 +1109,8 @@ payloads leave the column out, as they do the render context, since it can be la
 **The sync imports the settings and the environment, and asks when both installs changed one.**
 `mergePortable` (`project-state/sync.ts`) merges the columns (local), the checkout's files (incoming)
 and the base's settings and environment three ways, in the sync's own transaction, and writes the
-columns it moved. A set (`scope-exclude-globs`) moves member by member; every other setting is one
-value; the environment merges per key (`project/environment.json#envDetectData`, `#confirmedValues`).
+columns it moved. A set (`scope-exclude-globs`) moves member by member; review watermarks move independently
+by commit ancestry; every other setting is one value; the environment merges per key (`project/environment.json#envDetectData`, `#confirmedValues`).
 A value is normalised before it merges, by the rules of the routes that store it
 (`normalizeSetting`, shared: `stripManagedKnowledgeGlobs` and sorting for the scope list, the LSP key
 set, `normalizeReviewDimensionIds`, trimmed non-empty versions, `normalizeAgentRulesOverride` for

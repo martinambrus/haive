@@ -4074,3 +4074,59 @@ it('a later membership-less snapshot cannot erase older recorded zero-provider f
   expect((await s.run()).outcome).toBe('unchanged');
   expect(s.columnOf()).toEqual(before);
 });
+
+describe('T122 unavailable review proof', () => {
+  it.each(['missing', 'foreign'] as const)(
+    'refuses %s incoming proof without changing columns, base, outbox or bytes',
+    async (kind) => {
+      const s = await setup(synced(BASE));
+      const env = {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'T',
+        GIT_AUTHOR_EMAIL: 't@local',
+        GIT_COMMITTER_NAME: 'T',
+        GIT_COMMITTER_EMAIL: 't@local',
+      };
+      const git = (...args: string[]) =>
+        execFileSync('git', args, { cwd: s.root, env, stdio: 'pipe' }).toString().trim();
+      git('init', '-q', '-b', 'main');
+      git('commit', '-qm', 'base', '--allow-empty');
+      const known = git('rev-parse', 'HEAD');
+      let incoming = 'f'.repeat(40);
+      if (kind === 'foreign') {
+        git('checkout', '-q', '--orphan', 'foreign');
+        git('commit', '-qm', 'foreign', '--allow-empty');
+        incoming = git('rev-parse', 'HEAD');
+        git('checkout', '-q', 'main');
+      }
+      s.fake.patch(schema.repositories, REPO, { kbSyncedCommit: known, planSyncedCommit: known });
+      s.fake.insert(schema.projectStateOutbox, {
+        repositoryId: REPO,
+        revision: 5,
+        writtenRevision: 4,
+        writeIntent: null,
+      });
+      await s.putRecord({
+        ...record(TEAM),
+        settings: { 'review-watermarks': { kbSyncedCommit: incoming, planSyncedCommit: known } },
+      });
+      const columns = json(s.fake.rows(schema.repositories));
+      const base = json(s.syncRow()!.baseSnapshot);
+      const outbox = json(s.fake.rows(schema.projectStateOutbox));
+      const bytes = await readFile(
+        join(s.root, STATE_DIR, 'settings/review-watermarks.json'),
+        'utf8',
+      );
+      expect((await s.run()).outcome).toBe('refused');
+      expect(json(s.fake.rows(schema.repositories))).toEqual(columns);
+      expect(s.syncRow()!.baseSnapshot).toEqual(base);
+      expect(json(s.fake.rows(schema.projectStateOutbox))).toEqual(outbox);
+      expect(
+        await readFile(join(s.root, STATE_DIR, 'settings/review-watermarks.json'), 'utf8'),
+      ).toBe(bytes);
+      expect(s.syncRow()!.lastError).toContain(
+        kind === 'missing' ? 'fetch its commit history' : 'another history',
+      );
+    },
+  );
+});

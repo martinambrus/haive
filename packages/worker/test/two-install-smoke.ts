@@ -1,3 +1,8 @@
+import { prepareProjectStatePush, commitProjectStatePush } from '../src/project-state/push.js';
+import {
+  resolveExternalDrift,
+  stampExternalWatermark,
+} from '../src/step-engine/steps/workflow/_external-drift.js';
 import { fixtureBase, httpOrigin, networkGitArgs } from './support/smoke-git-http.js';
 /**
  * Two installations, each with its own database, sharing one git remote: A onboards a repository
@@ -32,6 +37,7 @@ import {
 } from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import {
+  blocksUpgrade,
   bundleFileName,
   claimFileName,
   emptyProjectState,
@@ -4777,6 +4783,200 @@ async function main(): Promise<void> {
             'codex',
           ]),
       );
+    }
+
+    // B5.3: real independent databases share review progress through a Git record, without models.
+    {
+      const reviewOrigin = path.join(tmp, 'review-origin.git');
+      const reviewSeed = path.join(tmp, 'review-seed');
+      git(tmp, 'init', '-q', '--bare', '-b', 'main', reviewOrigin);
+      git(tmp, 'clone', '-q', httpOrigin(reviewOrigin), reviewSeed);
+      await writeFile(path.join(reviewSeed, 'code.txt'), 'base\n');
+      for (const [rel, text] of renderProjectState(recordOf(contextA!))) {
+        await mkdir(path.dirname(path.join(reviewSeed, '.haive-data/state', rel)), {
+          recursive: true,
+        });
+        await writeFile(path.join(reviewSeed, '.haive-data/state', rel), text);
+      }
+      git(reviewSeed, 'add', '-A');
+      git(reviewSeed, 'commit', '-qm', 'review base');
+      git(reviewSeed, 'push', '-q', 'origin', 'HEAD:main');
+      const reviewUserA = randomUUID();
+      landUsers.push(reviewUserA);
+      const ra = await cloneInstall(
+        'A',
+        dbA,
+        path.join(tmp, 'review-a'),
+        httpOrigin(reviewOrigin),
+        reviewUserA,
+      );
+      const rb = await cloneInstall('B', dbB, path.join(tmp, 'review-b'), httpOrigin(reviewOrigin));
+      const original = git(ra.repoPath, 'rev-parse', 'HEAD');
+      await stampExternalWatermark(rb.db, rb.repositoryId, 'kb', original);
+      await stampExternalWatermark(rb.db, rb.repositoryId, 'plan', original);
+      await writeFile(path.join(ra.repoPath, 'code.txt'), 'reviewed one\n');
+      git(ra.repoPath, 'commit', '-qam', 'first reviewed project change');
+      const first = git(ra.repoPath, 'rev-parse', 'HEAD');
+      await writeFile(path.join(ra.repoPath, 'code.txt'), 'reviewed two\n');
+      git(ra.repoPath, 'commit', '-qam', 'second reviewed project change');
+      const reviewed = git(ra.repoPath, 'rev-parse', 'HEAD');
+      git(ra.repoPath, 'push', '-q', 'origin', 'HEAD:main');
+      git(rb.repoPath, 'pull', '-q', '--ff-only');
+      const [reviewTask] = await rb.db
+        .insert(schema.tasks)
+        .values({
+          userId: rb.userId,
+          repositoryId: rb.repositoryId,
+          type: 'workflow',
+          title: 'review range only',
+          status: 'completed',
+        })
+        .returning({ id: schema.tasks.id });
+      const driftCtx = ctxFor(rb, reviewTask!.id, randomUUID());
+      const before = await resolveExternalDrift(driftCtx, 'kb');
+      check(
+        'B5.3 red control: without A review progress B repeats both project commits',
+        before.commits.length === 2,
+        before,
+      );
+      await stampExternalWatermark(ra.db, ra.repositoryId, 'kb', reviewed);
+      await stampExternalWatermark(ra.db, ra.repositoryId, 'plan', first);
+      const identity = {
+        GIT_AUTHOR_NAME: 't',
+        GIT_AUTHOR_EMAIL: 't@example.com',
+        GIT_COMMITTER_NAME: 't',
+        GIT_COMMITTER_EMAIL: 't@example.com',
+      };
+      await prepareProjectStatePush(ra.db, {
+        repositoryId: ra.repositoryId,
+        sourcePath: ra.repoPath,
+      });
+      await ra.db.transaction((tx) =>
+        commitProjectStatePush(tx, {
+          repositoryId: ra.repositoryId,
+          sourcePath: ra.repoPath,
+          targetPath: ra.repoPath,
+          identity,
+        }),
+      );
+      git(ra.repoPath, 'push', '-q', 'origin', 'HEAD:main');
+      git(rb.repoPath, 'pull', '-q', '--ff-only');
+      await syncProjectStateFromCheckout(rb.db, {
+        repositoryId: rb.repositoryId,
+        repoPath: rb.repoPath,
+      });
+      const kb = await resolveExternalDrift(driftCtx, 'kb');
+      const plan = await resolveExternalDrift(driftCtx, 'plan');
+      check(
+        'B5.3 shared KB watermark eliminates duplicate review while plan stays independent',
+        kb.measured &&
+          kb.commits.length === 0 &&
+          plan.commits.length === 1 &&
+          plan.commits[0]?.sha === reviewed,
+        { kb, plan },
+      );
+      const watermarkPath = path.join(
+        rb.repoPath,
+        '.haive-data/state/settings/review-watermarks.json',
+      );
+      await writeFile(
+        watermarkPath,
+        JSON.stringify({ kbSyncedCommit: first, planSyncedCommit: original }) + '\n',
+      );
+      await syncProjectStateFromCheckout(rb.db, {
+        repositoryId: rb.repositoryId,
+        repoPath: rb.repoPath,
+      });
+      let [progress] = await rb.db
+        .select({
+          kb: schema.repositories.kbSyncedCommit,
+          plan: schema.repositories.planSyncedCommit,
+        })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, rb.repositoryId));
+      check(
+        'B5.3 incoming ancestor watermarks never rewind either column',
+        progress?.kb === reviewed && progress.plan === first,
+        progress,
+      );
+      await stampExternalWatermark(rb.db, rb.repositoryId, 'kb', original);
+      [progress] = await rb.db
+        .select({
+          kb: schema.repositories.kbSyncedCommit,
+          plan: schema.repositories.planSyncedCommit,
+        })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, rb.repositoryId));
+      check(
+        'B5.3 stale local review completion never rewinds a descendant watermark',
+        progress?.kb === reviewed,
+        progress,
+      );
+      await sweepDirtyProjectStates(rb.db);
+      const rendered = JSON.parse(await readFile(watermarkPath, 'utf8')) as Record<string, unknown>;
+      check(
+        'B5.3 outbox re-renders the descendant review progress',
+        rendered.kbSyncedCommit === reviewed && rendered.planSyncedCommit === first,
+        rendered,
+      );
+
+      // Both commits are known ancestors of HEAD but incomparable with each other: ask, key by key.
+      git(rb.repoPath, 'checkout', '-q', '-b', 'left-review');
+      await writeFile(path.join(rb.repoPath, 'left.txt'), 'left\n');
+      git(rb.repoPath, 'add', 'left.txt');
+      git(rb.repoPath, 'commit', '-qm', 'left review');
+      const left = git(rb.repoPath, 'rev-parse', 'HEAD');
+      git(rb.repoPath, 'checkout', '-q', '-b', 'right-review', 'main');
+      await writeFile(path.join(rb.repoPath, 'right.txt'), 'right\n');
+      git(rb.repoPath, 'add', 'right.txt');
+      git(rb.repoPath, 'commit', '-qm', 'right review');
+      const right = git(rb.repoPath, 'rev-parse', 'HEAD');
+      git(rb.repoPath, 'checkout', '-q', 'main');
+      git(rb.repoPath, 'merge', '-q', '--no-edit', 'left-review', 'right-review');
+      await stampExternalWatermark(rb.db, rb.repositoryId, 'kb', left);
+      await writeFile(
+        watermarkPath,
+        JSON.stringify({ kbSyncedCommit: right, planSyncedCommit: first }) + '\n',
+      );
+      await syncProjectStateFromCheckout(rb.db, {
+        repositoryId: rb.repositoryId,
+        repoPath: rb.repoPath,
+      });
+      const [question] = await rb.db
+        .select()
+        .from(schema.projectStateConflicts)
+        .where(
+          and(
+            eq(schema.projectStateConflicts.repositoryId, rb.repositoryId),
+            isNull(schema.projectStateConflicts.resolvedAt),
+          ),
+        );
+      check(
+        'B5.3 incomparable same-key reviews ask without holding an upgrade',
+        question?.unit === 'settings/review-watermarks.json#kbSyncedCommit' &&
+          !blocksUpgrade(question.unit),
+        question?.unit,
+      );
+      if (question) {
+        const answered = await resolveProjectStateConflict(rb.db, {
+          repositoryId: rb.repositoryId,
+          userId: rb.userId,
+          conflictId: question.id,
+          answer: 'take_theirs',
+        });
+        [progress] = await rb.db
+          .select({
+            kb: schema.repositories.kbSyncedCommit,
+            plan: schema.repositories.planSyncedCommit,
+          })
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, rb.repositoryId));
+        check(
+          'B5.3 taking an incomparable KB answer preserves the plan review watermark',
+          answered.kind === 'resolved' && progress?.kb === right && progress.plan === first,
+          { answered, progress },
+        );
+      }
     }
 
     for (const name of Object.keys(KNOWN_GAPS)) {

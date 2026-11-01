@@ -1,3 +1,7 @@
+import { HAIVE_DATA_FILES } from '@haive/shared';
+import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
+import { lockProjectState } from '../../../project-state/write.js';
+import { watermarkAncestor } from '../../../project-state/review-watermarks.js';
 import { and, eq, isNotNull, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { StepContext } from '../../step-definition.js';
@@ -204,6 +208,12 @@ export function parseCommitLog(stdout: string): { commit: ExternalCommit; paths:
   return out;
 }
 
+/** Projection-only commits need no code/KB review; mixed commits retain their project paths. */
+export const isDriftProjection = (path: string): boolean =>
+  path.startsWith('.haive-data/state/') ||
+  path === HAIVE_DATA_FILES.plan ||
+  path === HAIVE_DATA_FILES.planMarkdown;
+
 /**
  * What landed on this repository since the given watermark was stamped.
  *
@@ -250,15 +260,39 @@ export async function resolveExternalDrift(
 
   const since = (kind === 'kb' ? repo?.kbSyncedCommit : repo?.planSyncedCommit) ?? null;
 
-  // A watermark that is no longer in this repository's history — a force-push, a rewritten
-  // branch, a repository re-imported under the same row — cannot bound a range. Treated as
-  // a first run rather than an error: stamping the branch point restarts tracking, where
-  // failing would leave the repository permanently unable to catch up.
+  // Missing/foreign review proof cannot mark this checkout's commits reviewed. Refuse to
+  // advance until its history is available or the watermark is deliberately repaired.
   const known = since ? await hasCommit(worktreePath, since) : false;
   if (known === null) {
     return { ...empty('git could not check the recorded watermark'), branchPoint, since };
   }
-  if (!since || !known) {
+  if (since && !known)
+    return {
+      ...empty('the recorded watermark is unavailable; review progress was not advanced'),
+      branchPoint,
+      since,
+    };
+  if (since) {
+    try {
+      if (!(await watermarkAncestor(worktreePath, since, branchPoint))) {
+        if (await watermarkAncestor(worktreePath, branchPoint, since))
+          return {
+            ...empty('already reviewed through this branch point'),
+            branchPoint,
+            since,
+            measured: true,
+          };
+        return {
+          ...empty('the recorded watermark belongs to another history'),
+          branchPoint,
+          since,
+        };
+      }
+    } catch {
+      return { ...empty('git could not compare the recorded watermark'), branchPoint, since };
+    }
+  }
+  if (!since) {
     return {
       ...NOTHING,
       repositoryId,
@@ -286,7 +320,14 @@ export async function resolveExternalDrift(
   }
 
   const own = await haiveOwnShas(ctx.db, repositoryId);
-  const external = parseCommitLog(stdout).filter((c) => !own.has(c.commit.sha));
+  const external = parseCommitLog(stdout)
+    .filter((c) => !own.has(c.commit.sha))
+    .map((c) => ({
+      ...c,
+      projectionOnly: c.paths.length > 0 && c.paths.every(isDriftProjection),
+      paths: c.paths.filter((path) => !isDriftProjection(path)),
+    }))
+    .filter((c) => !c.projectionOnly);
   if (external.length === 0) {
     return {
       ...empty('every commit in this range was made by Haive'),
@@ -320,13 +361,37 @@ export async function stampExternalWatermark(
   kind: DriftKind,
   sha: string,
 ): Promise<void> {
-  await db
-    .update(schema.repositories)
-    .set({
-      ...(kind === 'kb' ? { kbSyncedCommit: sha } : { planSyncedCommit: sha }),
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.repositories.id, repositoryId));
+  await db.transaction(async (tx) => {
+    await lockProjectState(tx, repositoryId);
+    const [repo] = await tx
+      .select({
+        kbSyncedCommit: schema.repositories.kbSyncedCommit,
+        planSyncedCommit: schema.repositories.planSyncedCommit,
+        storagePath: schema.repositories.storagePath,
+        localPath: schema.repositories.localPath,
+      })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, repositoryId))
+      .for('update');
+    if (!repo) throw new Error('repository disappeared before its review watermark update');
+    const previous = kind === 'kb' ? repo.kbSyncedCommit : repo.planSyncedCommit;
+    if (previous === sha) return;
+    if (previous) {
+      const repoPath = repo.storagePath ?? repo.localPath;
+      if (!repoPath) throw new Error('review watermark history is unavailable');
+      if (await watermarkAncestor(repoPath, sha, previous)) return;
+      if (!(await watermarkAncestor(repoPath, previous, sha)))
+        throw new Error('review watermark histories differ');
+    }
+    await tx
+      .update(schema.repositories)
+      .set({
+        ...(kind === 'kb' ? { kbSyncedCommit: sha } : { planSyncedCommit: sha }),
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.repositories.id, repositoryId));
+    await markProjectStateDirty(tx, repositoryId);
+  });
 }
 
 /** The commit list as prompt lines, with the omission stated the way `changedFilesBlock`
