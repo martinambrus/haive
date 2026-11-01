@@ -231,7 +231,7 @@ A full-repository review in the style of the Codex PR reviews once Track B is me
 
 ### T300 · live re-checks owed at the next real onboarding + workflow run
 
-status: parked · reason: capped attempt stopped at fixture setup failure; corrected attempt awaits owner decision · kind: capped validation · priority: P1
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T16:32Z · last: 2026-11-01T16:32Z · kind: capped validation · priority: P1
 Items 1-20 (each with its memory file): skills per CLI after 09_5; frontmatter YAML; agent_rules stamp; declared verify commands; invariants-doc lever; prompt guard/fence (07_7); onboarding artifacts; plan breadth refusals; agent isolation 1/2/4; fs-safe live verification; #169 DDEV runner boot-subpath; #241 Terminal cwd; AGENTS.md split citations; parked experiments (Astra vs Sol, container-cleanup race, global KB purge, haive_rag_ddevtest drop); T293; #287 EROFS on state; #800 mounts; #751 set-aside on a real merge; #806 put-back; #815 reindex spot-check; T375 gate 3 on a worktree holding an untracked nested repo, with and without a commit (#909); T395 Stop offered for a running task whose current row is pending, and the "Nothing was running to stop." notice (no such task on the dev install; pressing Stop changes a real task) (#908); T363 New Task with one failed upload, the plan starter and the task page Start, each with confirm yes and no (#913). Full list: task #300 text in the fnf-run ledger / memory. Also owed (T427): replay the raw attach bytes of one real `claude setup-token` run through the OAuth capture and pin its wrap, newline and escape shapes in a fixture.
 
 User decision 2026-11-01: schedule one dedicated capped validation run BEFORE feature work. Precise cap is being selected; one owned fixture/attempt, no automatic retry loops. A run does not by itself prove enough graded data for T298; report unverified members at the cap.
@@ -241,6 +241,8 @@ Final budget: One owned fixture/attempt; stop at90 minutes or $50 notional usage
 Execution 2026-11-01T15:21Z: read-only preflight begins under the90minute/$50notional cap. One owned fixture/attempt; do not start live onboarding or spend on CLI/model probes until the session confirms final P0 worker source is loaded. No automatic retries; stop at cap or unexpected failure and preserve unverified members.
 
 Stopped 2026-11-01T15:52Z: selector fixture was checked before Git initialization, producing changedFiles:null and unreadable-change fallback. No product selector defect established; no onboarding/workflow or model calls ran (0invocations/$0notional). Owned task cancelled, own rule unenforced, records retained, watcher exited. All26checks remain unverified; original no-retry rule honored. A fresh owner decision is pending for one corrected attempt within unchanged16:51UTCdeadline/$50ceiling($40stop). Evidence T300/report.md/finalreceipt.json/member-results.json; do not treat scenario failure as demonstrated product bug.
+
+Owner approval 2026-11-01T16:32Z: one corrected attempt in SAME retained fixture, normal onboarding before selector check; original16:51:08UTCdeadline and$50ceiling/$40stopthreshold unchanged. No further automatic retries. Initialattempt/stoprecords retained, no productdefect inferred. Local heavytests held during livephase.
 
 ### T298 · house rules PR8 · switch similarity on with per-rule floors
 
