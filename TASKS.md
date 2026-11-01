@@ -101,13 +101,6 @@ All PRE-EXISTING.
 4. PARKED (user): `complete` rows in repo_uploads/custom_bundle_uploads and `consumed` db_uploads rows are never deleted — needs a retention rule.
 5. Latent, minor: the reaper removes a path without checking it is still the file it lstat'ed (upload-reaper.ts removeFile); fs-safe's lstatNoFollow returns numeric Stats, so dev/ino cannot be compared losslessly. Cannot bite today (upload names are fresh UUIDs). Fix: a bigint lstat identity export in fs-safe, compared before the unlink.
 
-### T120 · B5.1 · the Haive data panel
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T16:20Z · last: 2026-11-01T09:59Z· kind: feature · plan: PR1a shared+worker save, PR1b api, PR2 web+docs
-GET /repos/:id/haive-data + POST .../save {push} via a worker SAVE job; generalise commitPlanSnapshotFiles to a path list; conflict report. Browser 375/768/1280.
-
-Continuation 2026-11-01: PR2 #979 finalHEADc6f3f302e completes approved message/banner/confirmation controls, current-commit reviews clean, fullweb2644 and all final live375/768/1280/customSave/push/latehold checks pass; CI pending.
-
 ### T121 · B5.2 · project state rides Haive's pushes
 
 status: open · kind: feature (user decision taken)
@@ -1247,6 +1240,8 @@ status: open · kind: design
 Queued design split from T521 item4; no additional implementation authorized. PRE-EXISTING, narrow compatibility issue. HOME handling was aligned in T120 PR1b, but XDG_CONFIG_HOME and GIT_CONFIG_* can still make API status readers and worker writers resolve different configuration. Decide whether the supported contract preserves selected ambient configuration for both or supplies an isolated explicit configuration. Establish a current caller/reproduction before changing global Git policy. Executable repository filters remain T387, not a member of this decision.
 
 ## Done
+
+- T120 — B5.1 Haive data status, Save/custom message, confirmed push and conflict resolution panel — PRs #973/#976/#979 (final79f5edd2d), 2026-11-01; all approved criteria,2644web tests, real browser375/768/1280 and same-history push passed; exact-HEAD review and PR/main CI green; empty-origin first-push limitation queued T521, Git config design T523
 
 - T376 — audit credential/security changes and successful/failed sign-ins with transactional controls — PR #978 (d3b7b9b33), 2026-11-01; exact-HEAD review and PR/main CI green; item6 remains deferred as T492, prototype branch preserved; follow-ups T508/T516/T522
 
