@@ -167,11 +167,16 @@ warnings use `record.dirty`, `record.writePending` and `snapshot.dirty`; diagnos
 never raises one. The file list describes the working copy against HEAD, with staging reported
 separately; `files: null` means unavailable. Matching HEAD does not prove a push; the page reports
 push success only for its latest save action. It refreshes after an action and polls status
-without queuing work.
+without queuing work. A pending project-question banner links to this page from other repository
+surfaces; the page hides that self-link while retaining the question answers.
 
 `POST /repositories/:id/haive-data/save` waits for the worker's `save-haive-data` result. Save
-sends `{}` (an absent JSON body is refused); Save & push sends `{push: true}`. Save flushes the
-record and plan, then commits recognized record files and the plan pair through
+uses `{}` for the default message (an absent JSON body is refused); Save & push uses `{push: true}`.
+The labelled commit-message field accepts an optional custom message, validated by the shared request
+schema and sent as `commitMessage`; blank or the default keeps the worker's
+`chore(haive): save Haive data`. Save & push asks for confirmation before it sends the request,
+because the push includes existing commits on the current branch; Cancel queues nothing. Save flushes
+the record and plan, then commits recognized record files and the plan pair through
 `commitHaiveProjections` (`worker/src/project-state/commit.ts`). Unknown projection names are
 skipped, including names the status list shows. Save & push also integrates origin and pushes
 the current branch's existing commits. A normal 200 can carry `refused`, `conflict` or `failed`:
