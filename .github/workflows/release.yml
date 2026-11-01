@@ -32,6 +32,8 @@ jobs:
     # runner costs the same as amd64. macOS is a first-class RUN-IT target
     # (frictionless-bootstrapping-otter), so arm64 is a requirement rather than a nicety.
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+    # Recent releases took 0.3-5.3 minutes; leave room for a cold cache.
+    timeout-minutes: 40
     permissions:
       contents: read
       packages: write
@@ -124,6 +126,7 @@ jobs:
     name: Publish ${{ matrix.service }} manifest
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       packages: write
@@ -185,6 +188,7 @@ jobs:
     name: Publish the release manifest
     needs: merge
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write # creates the GitHub Release
       packages: read
