@@ -158,8 +158,10 @@ The owner scheduled one capped validation attempt; this block is an evidence dep
 
 ### T308 · FNF[worktree-aliases] · hard links planted into .haive/worktrees before #800 survive
 
-status: open · priority: P2
+status: open · priority: P2 · gate: bounded verification
 A file under `.haive/worktrees` sharing an inode with a name in the writable checkout stays writable through the alias. Fix: a one-time background sweep (recorded per repository) that copy-replaces files whose st_nlink exceeds their names under that tree, via fs-safe. Measure the walk on a large repo first.
+
+Execution fence 2026-11-01: first establish an affected legacy/current supported case in owned fixtures. The recorded risk is not a confirmed production incident and does not make completing an unbounded inventory a prerequisite for new functionality. Escalate a reproduced security/data-loss consequence.
 
 ### T309 · FNF[cancel-cap-2] · a capped cancel with no claim row never finishes (+8)
 
@@ -865,8 +867,10 @@ User decision 2026-11-01: Keep current claim-based descriptor rule; document tha
 
 ### T450 · FNF[install-ownership-of-runners] · the runtime-runner reaper removes runners this install's database does not know, volumes included
 
-status: open · priority: P2
+status: open · priority: P2 · gate: bounded verification
 From the T441 review (2026-10-30). PRE-EXISTING, consequential on a host whose Docker daemon serves two installs; read from code, not reproduced. worker sandbox runtime-runner-reaper.ts ~:515-526 lists every `haive.ddev` and `haive.apprunner` container on the daemon with no install-ownership test; ~:64 (`if (!task) return 'orphan'`) treats a runner whose task this install's database does not know as an orphan, and `sweep` (~:342-366) and the preemption path (~:461-466) then run `docker rm -f -v` on it, its volumes included. Runners carry no `haive.install` label (only docker-runner.ts ~:422 stamps one). Fix direction: stamp `haive.install` on every runner at create, list by it, and leave an unlabeled runner alone (never reap what this install cannot prove it owns); keep docs/plans/solitary-partitioning-lampson.md's pending two-install check (S4) in step.
+
+Execution fence 2026-11-01: first establish an affected legacy/current supported case in owned fixtures. The recorded risk is not a confirmed production incident and does not make completing an unbounded inventory a prerequisite for new functionality. Escalate a reproduced security/data-loss consequence.
 
 ### T451 · FNF[runner-liveness-probe] [verify-first] · a failed docker inspect of a runner's existence still reads as "no"
 
