@@ -697,7 +697,7 @@ User decision 2026-11-01: Keep maintenance/hold on unknown prior state; report u
 
 ### T387 · FNF[shipped-git-config] · an uploaded repo keeps its own .git/config, so host git still runs filter/merge drivers, the vcs trick and lazy fetch (+1)
 
-status: parked · reason: user requested stop 2026-11-01 · priority: P0
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T14:22Z · last: 2026-11-01T14:22Z · priority: P0
 PRE-EXISTING, consequential. An upload keeps its whole .git (worker repo/clone.ts ~:547-683). `filter.<d>.*`, `merge.<d>.driver`, `remote.<n>.vcs` and lazy fetch all lack a `-c` lever. Measured: gitRun `add -A` runs the shipped filter.
 Decide: sanitise .git/config at import (allow-list keys), or refuse archives that carry .git.
 
@@ -710,6 +710,8 @@ User decision 2026-11-01: Preserve repository history; sanitize Git config to an
 Execution 2026-11-01: next authorized task while T402 has finished its driver build and is in read-only review. One driver at a time; local heavy checks serialized by queue-exec test-slot.py. Preserve uploaded history with safe configuration allowlisting/refusal, no ambient-policy redesign or unrelated host-Git audit.
 
 Stopped at explicit owner request: Driver interrupted; uncommitted implementation and controls preserved in cx-387; no delivery or live change. Evidence: .claude/tmp/codex-run/queue-exec-20261101/T387/. Resume only when requested.
+
+Resumed at owner request 2026-11-01T14:22Z: preserve existing implementation and evidence; finish T402 delivery first, then continue the agreed queue.
 
 ### T389 · FNF[repo-loose-objects] · Haive's git no longer triggers auto-maintenance (#256), so busy repos accumulate loose objects
 
@@ -750,7 +752,7 @@ User decision 2026-11-01: Allow private endpoints only through an administrator-
 
 ### T402 · FNF[context-backfill] · repair historical context badges before their source logs expire
 
-status: parked · reason: user requested stop 2026-11-01 · priority: P0
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T14:22Z · last: 2026-11-01T14:22Z · priority: P0
 Historical measurement:237 stored step badges,143 showing0% left; peaks were recoverable for232 of237 and windows for about97% of Claude Code runs. These are historical counts, not a current affected-row inventory. Older writers could use a run's cumulative input as one request's context, double-count Codex cache, or use a stale200k denominator; current writers are fixed but stored rows were not recomputed.
 
 User decision 2026-11-01: an idempotent operator script with dry run, before-image and undo. Reparse retained stream data to repair derived context telemetry; do not re-run agents, change billing/token totals or fabricate unknown peaks/windows. Fence against newer/reopened row versions and report unrecoverable or lower-bound data explicitly. No implementation or live backfill has started.
@@ -760,6 +762,8 @@ Read-only verification 2026-11-01: the installed `config:tasks:cliStreamLogReten
 Execution authorized 2026-11-01: start T402, keep development analysis records indefinitely, then continue the reconciled ready queue in priority order. Transcript retention changed through the audited admin API90→0 (keep forever), prompt retention already0; receipt .claude/tmp/codex-run/queue-exec-20261101/T402/retention-receipt.json, audit614007fa-a9e1-4306-8cf3-1783a6e18767. This supersedes the earlier do-not-change-retention-by-inference note: the owner explicitly requested this change. The current install no longer has a scheduled transcript/prompt expiry under these settings. Historical expiry measurements remain provenance.
 
 Stopped at explicit owner request: HEAD65f658dd0, focused tests and independent review green; full candidate interrupted during worker suite; no live backfill. Retention0/forever verified. Evidence: .claude/tmp/codex-run/queue-exec-20261101/T402/. Resume only when requested.
+
+Resumed at owner request 2026-11-01T14:22Z: preserve existing implementation and evidence; finish T402 delivery first, then continue the agreed queue.
 
 ### T403 · FNF[context-window-truth] · wrapper CLIs report the binary's 200k default; killed runs fall to the static table
 
