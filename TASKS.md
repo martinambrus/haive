@@ -831,13 +831,13 @@ From the T421 review (2026-10-31). PRE-EXISTING, minor, conservative direction. 
 
 ### T471 · FNF[stale-preread-fold-2] · idle_ms writes add to a value read before the write; the per-step switch decides on a pre-transaction status (+1)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T18:35Z · last: 2026-11-01T09:59Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T18:35Z · last: 2026-11-01T10:58Z
 From the T461 review (2026-10-31). PRE-EXISTING, minor.
 
 1. `idle_ms = step.idleMs + closedIdleMs` from a read made before the transaction, so a concurrent SQL write to `idle_ms` in between is written over: api routes/tasks/steps.ts ~:808 (form submit), ~:894 (merge clarify), ~:1520 (Skip), and worker pr-poll-queue.ts ~:260 (`advancePrWaitStep`, whose guard compares status and `waiting_started_at` only). The delta depends on `waiting_started_at`, so fold it in one SQL statement like `handleCancelTask`'s (`idle_ms + greatest(0, floor(extract(epoch from (now() - waiting_started_at)) * 1000))`) or read the row under its lock, as T461 did for `carried_*`.
 2. The per-step switch decides on the status read before its transaction (api routes/tasks/steps.ts ~:1820, the 409 when running or waiting_cli; ~:1836, `movesTask` and iterationCount) although the transaction now holds the row (`held`, ~:1909) and could re-check it. Not checked whether a pass can activate the row in that gap (the ownership fence drops a pass whose row was reset).
 
-Continuation 2026-11-01: PR #981 finalHEAD2d7955e37, current-commit reviews clean; fullDB179/API7029/worker14811/gates/scripts/typechecks/RetrySkip smoke pass; CI pending.
+Continuation 2026-11-01: PR #981 currentHEAD1bb29e150 exact-HEAD official review clean; final integrated DB179/API7059/worker14964/gates/scripts/typechecks pass. Isolated real-Git fixture fixes CI-only setup failure with temp vars unset; all PG controls and browser/visual CI now green. Worker smokes remain; merge and main CI still gated.
 
 ### T472 · FNF[git-data-claim-sweep] [design] · an onboarding reset leaves a git-data claim file that neither a ledger row nor the sync base names
 
