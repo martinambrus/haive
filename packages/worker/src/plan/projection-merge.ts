@@ -1,6 +1,7 @@
 import {
   reviewWatermarkOrder,
   ReviewWatermarkGitError,
+  ReviewWatermarkUnavailableError,
 } from '../project-state/review-watermarks.js';
 import {
   watermarkKeyOfUnit,
@@ -397,7 +398,8 @@ export async function resolveHaiveProjectionConflicts(
     try {
       await mergeStateRecord(worktreePath);
     } catch (err) {
-      if (err instanceof ReviewWatermarkGitError) throw err;
+      if (err instanceof ReviewWatermarkGitError || err instanceof ReviewWatermarkUnavailableError)
+        throw err;
       why = err instanceof Error ? err.message : String(err);
     }
     for (const left of await unmergedInState(worktreePath)) {

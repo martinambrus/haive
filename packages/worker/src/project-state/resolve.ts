@@ -585,7 +585,13 @@ async function answerSettingsQuestion(
       },
     );
     if (accepted[watermark] === undefined) return { kind: 'invalid' };
-    const order = await reviewWatermarkOrder(repoPath, { [watermark]: mine }, accepted);
+    const order = await reviewWatermarkOrder(repoPath, { [watermark]: mine }, accepted).catch(
+      (err: unknown) => {
+        if (err instanceof ReviewWatermarkUnavailableError) return null;
+        throw err;
+      },
+    );
+    if (order === null) return { kind: 'invalid' };
     // A later review may have passed the question while it was open. An answer never rewinds it.
     if (typeof mine === 'string' && order(mine, accepted[watermark]!) === 'local') chosen = mine;
     update = settingColumnUpdate(REVIEW_WATERMARK_SETTING, {

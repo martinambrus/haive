@@ -1036,7 +1036,12 @@ in the same transaction as the column update. A descendant watermark wins in eit
 proved by `git merge-base --is-ancestor`; exit 1 alone means false and unreadable Git refuses the
 import/merge. Incoming missing objects or commits outside HEAD's ancestry refuse the import while preserving
 the incoming file, local columns, base and outbox. The refusal asks for a fetch or deliberate
-repair; Haive performs neither automatically. Missing files never erase review progress. Incomparable values produce an
+repair; Haive performs neither automatically. A differing nonempty incoming value must not replace
+stored proof whose object is missing either: that comparison refuses until its history is fetched
+or deliberately repaired. A stored value known to be a descendant still stands even in an older
+checkout; an incomparable stored value with no common history refuses instead of becoming
+a repair-by-import. The same refusal preserves pending answers and Git projection conflicts rather
+than falling back to the incoming side. Missing files never erase review progress. Incomparable values produce an
 ordinary question for that key (`settings/review-watermarks.json#kbSyncedCommit` or
 `#planSyncedCommit`); the other key can advance and upgrades remain available. An answer preserves
 its sibling key and never moves a watermark back over a later descendant review. Local completion

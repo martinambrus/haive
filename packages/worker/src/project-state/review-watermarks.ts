@@ -61,13 +61,28 @@ export async function reviewWatermarkOrder(repoPath: string, local: unknown, inc
     const l = ours[key],
       i = theirs[key];
     if (!l || !i || l === i) continue;
-    const order = !(await knownCommit(repoPath, l))
+    if (!(await knownCommit(repoPath, l)))
+      throw new ReviewWatermarkUnavailableError(
+        `Stored review watermark ${key} is unavailable; fetch its commit history and retry. Incoming files and local review progress were preserved.`,
+      );
+    const order = (await watermarkAncestor(repoPath, l, i))
       ? 'incoming'
-      : (await watermarkAncestor(repoPath, l, i))
-        ? 'incoming'
-        : (await watermarkAncestor(repoPath, i, l))
-          ? 'local'
-          : 'incomparable';
+      : (await watermarkAncestor(repoPath, i, l))
+        ? 'local'
+        : 'incomparable';
+    // Neither ancestry direction proves an order. Retain the ordinary question for a
+    // known fork; only an explicit absence of common history proves foreign stored data.
+    if (order === 'incomparable') {
+      const common = await gitRun(repoPath, ['merge-base', l, i]);
+      if (common.code === 1)
+        throw new ReviewWatermarkUnavailableError(
+          `Stored review watermark ${key} belongs to another history; repair the stored watermark or checkout and retry. Incoming files and local review progress were preserved.`,
+        );
+      if (common.code !== 0 || !common.stdout.trim())
+        throw new ReviewWatermarkGitError(
+          `review watermark common history could not be read: ${(common.stderr || common.stdout).trim()}`,
+        );
+    }
     orders.set(`${l}:${i}`, order);
   }
   return (local: string, incoming: string) => orders.get(`${local}:${incoming}`) ?? 'incomparable';

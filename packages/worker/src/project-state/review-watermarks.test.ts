@@ -43,6 +43,11 @@ describe('review watermark Git proof', () => {
     expect(
       (await reviewWatermarkOrder(dir, { kbSyncedCommit: two }, { kbSyncedCommit: one }))(two, one),
     ).toBe('local');
+    await git(dir, ['checkout', '-q', '--detach', one]);
+    expect(
+      (await reviewWatermarkOrder(dir, { kbSyncedCommit: two }, { kbSyncedCommit: one }))(two, one),
+    ).toBe('local');
+    await git(dir, ['checkout', '-q', 'main']);
     await expect(
       reviewWatermarkIntake(dir, { kbSyncedCommit: 'f'.repeat(40), planSyncedCommit: one }),
     ).rejects.toThrow('fetch its commit history');
@@ -53,6 +58,35 @@ describe('review watermark Git proof', () => {
       'another history',
     );
   });
+  it('R1 keeps a known divergent fork incomparable instead of treating it as foreign', async () => {
+    const { dir, one, two } = await fixture();
+    await git(dir, ['checkout', '-q', '-b', 'fork', one]);
+    await writeFile(path.join(dir, 'code'), 'fork');
+    await git(dir, ['commit', '-qam', 'fork']);
+    const fork = await git(dir, ['rev-parse', 'HEAD']);
+    expect(
+      (await reviewWatermarkOrder(dir, { kbSyncedCommit: two }, { kbSyncedCommit: fork }))(
+        two,
+        fork,
+      ),
+    ).toBe('incomparable');
+  });
+  it.each(['missing', 'foreign'] as const)(
+    'R1 refuses differing incoming progress when stored proof is %s',
+    async (kind) => {
+      const { dir, one } = await fixture();
+      let stored = 'f'.repeat(40);
+      if (kind === 'foreign') {
+        await git(dir, ['checkout', '-q', '--orphan', 'foreign']);
+        await git(dir, ['commit', '-qm', 'foreign']);
+        stored = await git(dir, ['rev-parse', 'HEAD']);
+        await git(dir, ['checkout', '-q', 'main']);
+      }
+      await expect(
+        reviewWatermarkOrder(dir, { kbSyncedCommit: stored }, { kbSyncedCommit: one }),
+      ).rejects.toThrow(kind === 'missing' ? 'fetch its commit history' : 'another history');
+    },
+  );
   it.each([128, 124, -1])(
     'refuses an unreadable ancestry result %s instead of treating it as false',
     async (code) => {

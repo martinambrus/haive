@@ -1,3 +1,4 @@
+import { gitRun } from '../src/repo/git-exec.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -533,4 +534,48 @@ describe('answering an agent-rules question', () => {
       expect(s.repo().agentRulesOverride).toBe(MINE);
     });
   });
+});
+
+it('R1 refuses taking known incoming progress over unavailable stored proof', async () => {
+  const stored = 'f'.repeat(40);
+  const s = await setup({
+    unit: 'settings/review-watermarks.json#kbSyncedCommit',
+    local: stored,
+    columns: { kbSyncedCommit: stored },
+    file: '{}',
+  });
+  const identity = {
+    GIT_AUTHOR_NAME: 'T',
+    GIT_AUTHOR_EMAIL: 't@local',
+    GIT_COMMITTER_NAME: 'T',
+    GIT_COMMITTER_EMAIL: 't@local',
+  };
+  expect((await gitRun(s.root, ['init', '-q', '-b', 'main'], identity)).code).toBe(0);
+  expect(
+    (await gitRun(s.root, ['commit', '--allow-empty', '-qm', 'known incoming'], identity)).code,
+  ).toBe(0);
+  const incoming = (await gitRun(s.root, ['rev-parse', 'HEAD'])).stdout.trim();
+  s.fake.patch(schema.repositories, REPO, { planSyncedCommit: incoming });
+  s.fake.patch(schema.projectStateConflicts, s.id, { incoming: conflictSide(incoming) });
+  await writeFile(
+    join(s.root, s.rel),
+    JSON.stringify({ kbSyncedCommit: incoming, planSyncedCommit: incoming }),
+  );
+  const before = json({
+    repo: s.repo(),
+    base: s.base(),
+    row: s.row(),
+    outbox: s.fake.rows(schema.projectStateOutbox),
+  });
+  const bytes = await s.file();
+  expect(await s.answer('take_theirs')).toEqual({ kind: 'invalid' });
+  expect(
+    json({
+      repo: s.repo(),
+      base: s.base(),
+      row: s.row(),
+      outbox: s.fake.rows(schema.projectStateOutbox),
+    }),
+  ).toEqual(before);
+  expect(await s.file()).toBe(bytes);
 });
