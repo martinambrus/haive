@@ -93,3 +93,62 @@ describe('GitHub repository picker truncation note', () => {
     expect(textOf(root())).not.toContain('most recently pushed');
   });
 });
+
+describe('GitHub picker visible result limit', () => {
+  it('shows the matched count above 100 and removes the note when typing narrows it', async () => {
+    reposBody = {
+      repos: Array.from({ length: 137 }, (_, i) => ({
+        fullName: `acme/r${String(i).padStart(3, '0')}`,
+        cloneUrl: `https://github.com/acme/r${i}.git`,
+        defaultBranch: 'main',
+        private: false,
+      })),
+      truncated: false,
+    };
+    const { view, root } = await mountOauth();
+    const picker = () => findAll(root(), (h) => h.props.id === 'repo-picker')[0]!;
+    (picker().props.onFocus as () => void)();
+    view.draw();
+    expect(
+      findAll(root(), (h) => h.tag === 'button' && textOf(h).startsWith('acme/r')),
+    ).toHaveLength(100);
+    expect(textOf(root())).toContain('Showing 100 of 137 matches. Type to narrow the list.');
+    fire.type(picker(), 'r13');
+    view.draw();
+    expect(
+      findAll(root(), (h) => h.tag === 'button' && textOf(h).startsWith('acme/r')),
+    ).toHaveLength(7);
+    expect(textOf(root())).not.toContain('Type to narrow the list.');
+  });
+
+  // 100 matches all fit, 101 do not: the note appears exactly when a match is left out. It is a
+  // count label, not prose, so it is a plain span like the "most recently pushed" note and never
+  // goes through the markdown renderer.
+  it.each([
+    [100, null],
+    [101, 'Showing 100 of 101 matches. Type to narrow the list.'],
+    [137, 'Showing 100 of 137 matches. Type to narrow the list.'],
+  ])('with %i matches lists 100 rows and the note %j as a span', async (count, note) => {
+    reposBody = {
+      repos: Array.from({ length: count }, (_, i) => ({
+        fullName: `acme/r${String(i).padStart(3, '0')}`,
+        cloneUrl: `https://github.com/acme/r${i}.git`,
+        defaultBranch: 'main',
+        private: false,
+      })),
+      truncated: false,
+    };
+    const { view, root } = await mountOauth();
+    (findAll(root(), (h) => h.props.id === 'repo-picker')[0]!.props.onFocus as () => void)();
+    view.draw();
+    expect(
+      findAll(root(), (h) => h.tag === 'button' && textOf(h).startsWith('acme/r')),
+    ).toHaveLength(100);
+    const notes = findAll(
+      root(),
+      (h) => h.tag === 'span' && textOf(h).startsWith('Showing 100 of'),
+    );
+    expect(notes.map((span) => textOf(span))).toEqual(note === null ? [] : [note]);
+    expect(textOf(root()).includes('Type to narrow the list.')).toBe(note !== null);
+  });
+});

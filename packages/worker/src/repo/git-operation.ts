@@ -1,5 +1,6 @@
 import { isAbsolute, relative } from 'node:path';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
+import { GIT_OPERATION_STATE_ENTRIES } from '@haive/shared/git-args';
 import { gitRun } from './git-exec.js';
 import { gitWorkspaceStatus } from './git-workspace.js';
 
@@ -16,14 +17,7 @@ export class GitOperationUnreadableError extends Error {
  *  directory but no REBASE_HEAD. A checkout with no `.git` has none; a read that fails in one that has
  *  a `.git` is unknown and throws. */
 export async function gitOperationInProgress(repoPath: string): Promise<boolean> {
-  for (const ref of [
-    'MERGE_HEAD',
-    'REBASE_HEAD',
-    'rebase-merge',
-    'rebase-apply',
-    'CHERRY_PICK_HEAD',
-    'REVERT_HEAD',
-  ]) {
+  for (const ref of GIT_OPERATION_STATE_ENTRIES) {
     const located = await gitRun(repoPath, ['rev-parse', '--git-path', ref]);
     if (located.code !== 0) {
       if ((await gitWorkspaceStatus(repoPath)) === 'absent') return false;

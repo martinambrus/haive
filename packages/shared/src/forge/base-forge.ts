@@ -78,7 +78,7 @@ export abstract class BaseForgeProvider implements ForgeProvider {
     }
 
     if (!res.ok) {
-      const detail = await readBodyText(res, wireSecrets(ctx.token, auth));
+      const detail = await readForgeErrorExcerpt(res, ctx.token, auth);
       throw mapHttpError(this.name, res.status, res.headers, detail, method, path);
     }
 
@@ -156,13 +156,36 @@ function redactSecrets(text: string, secrets: readonly string[], cut: boolean): 
   return out;
 }
 
-async function readBodyText(res: Response, secrets: readonly string[]): Promise<string> {
+/** A bounded vendor error excerpt, scrubbed before truncation so an echoed credential cannot
+ * enter a response or a logged error. Also removes a partial secret at the read boundary. */
+export async function readForgeErrorExcerpt(
+  res: Response,
+  token: string,
+  auth: Record<string, string> = {},
+): Promise<string> {
+  const secrets = wireSecrets(token, auth);
   try {
     const { text, truncated } = await readBounded(res, ERROR_BODY_MAX_BYTES);
     const t = redactSecrets(text, secrets, truncated).trim();
     return t.length > 500 ? `${t.slice(0, 500)}…` : t;
   } catch {
     return '';
+  }
+}
+
+/** A success body parsed as JSON, read up to `maxBytes` and then cancelled, so a vendor's answer cannot
+ *  grow without bound. Throws a ForgeError with a fixed message, never the body, for an answer over
+ *  the bound or one that is not JSON. */
+export async function readForgeJson(
+  res: Response,
+  maxBytes: number = FORGE_RESPONSE_MAX_BYTES,
+): Promise<unknown> {
+  const { text, truncated } = await readBounded(res, maxBytes);
+  if (truncated) throw new ForgeError(`response is larger than ${maxBytes} bytes`);
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new ForgeError('response is not JSON');
   }
 }
 

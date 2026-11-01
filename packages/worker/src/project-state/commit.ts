@@ -22,8 +22,8 @@ export interface HaiveProjectionCommit {
   skipped: string[];
 }
 
-/** Names from valid records only. Never give git a directory pathspec: unknown files beside
- * Haive's belong to their owner, including their staged blobs and tracked deletions. */
+/** Names from valid records only. Never mutate the index through a directory pathspec: unknown
+ * files beside Haive's belong to their owner, including their staged blobs and tracked deletions. */
 export async function commitHaiveProjections(args: {
   repositoryId: string;
   repoPath: string;
@@ -70,6 +70,36 @@ export async function commitHaiveProjections(args: {
         if (unknown.has(rel)) skipped.add(`${PROJECT_STATE_DIR}/${rel}`);
         else plan.remove.push(`${PROJECT_STATE_DIR}/${rel}`);
       }
+    }
+    // A deletion committed while the real index was locked leaves an addition there. Neither
+    // HEAD nor the current record remembers that name on a repeat Save, so recover it from the
+    // real index. The directory pathspec is read-only; repairs still name individual projections.
+    const additions = await gitRun(repoPath, [
+      'diff-index',
+      '--cached',
+      '--diff-filter=A',
+      '--no-renames',
+      '--name-only',
+      '-z',
+      parent,
+      '--',
+      `:(literal)${PROJECT_STATE_DIR}/`,
+    ]).catch(unreadable);
+    if (additions.code !== 0)
+      unreadable(new Error(`git index read failed: ${additions.stderr || additions.stdout}`));
+    for (const name of additions.stdout.split('\0').filter(Boolean)) {
+      const rel = name.slice(PROJECT_STATE_DIR.length + 1);
+      if (current.has(rel)) continue;
+      // Probe the codec with empty bytes: a known name is parsed (and may be invalid),
+      // while an unknown name is ignored. Never read or claim the person's staged blob.
+      const classified = parseProjectState(
+        new Map([
+          ['format.json', current.get('format.json')!],
+          [rel, ''],
+        ]),
+      );
+      if (classified.ok && classified.ignored.includes(rel)) continue;
+      plan.remove.push(name);
     }
   }
   for (const rel of [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown]) {

@@ -312,7 +312,7 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 - [Review dimensions](docs/architecture/review-dimensions.md): the 14 dimensions, repository
   policy and task override. `REVIEW_DIMENSIONS`.
 
-- [Error diagnostics](docs/architecture/error-diagnostics.md): bound query errors, logs, queue transport and stored failure text. `safeErrorMessage`, `safeErrorForTransport`.
+- [Error diagnostics](docs/architecture/error-diagnostics.md): bound query errors, logs, queue transport, stored failure text, repository-path reads. `safeErrorMessage`, `safeErrorForTransport`.
 
 ### Spend and statistics
 

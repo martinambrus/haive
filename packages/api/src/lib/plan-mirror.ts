@@ -6,6 +6,7 @@ import {
   type PlanMirrorJobPayload,
   type PlanMirrorJobResult,
 } from '@haive/shared';
+import type { HaiveDataSavePayload, HaiveDataSaveResult } from '@haive/shared/haive-data';
 import { getPlanMirrorQueue, getPlanMirrorQueueEvents } from '../queues.js';
 
 /** Best-effort page hint; the complete periodic scan is the durable backstop. */
@@ -83,4 +84,22 @@ export async function savePlanMirror(args: {
     { removeOnComplete: 100, removeOnFail: 100 },
   );
   return job.waitUntilFinished(getPlanMirrorQueueEvents(), 120_000) as Promise<PlanMirrorJobResult>;
+}
+
+/** The Haive data Save waits for the worker for the same reason the plan Save does. The worker
+ *  answers every outcome, a refusal and a failure included, as a result, and the job throws only for
+ *  a payload it cannot read or an error nobody expected. */
+export async function saveHaiveData(payload: HaiveDataSavePayload): Promise<HaiveDataSaveResult> {
+  const queue = getPlanMirrorQueue();
+  const job = await queue.add(
+    PLAN_MIRROR_JOB_NAMES.SAVE_HAIVE_DATA,
+    {
+      repositoryId: payload.repositoryId,
+      userId: payload.userId,
+      push: payload.push,
+      ...(payload.commitMessage ? { commitMessage: payload.commitMessage } : {}),
+    } satisfies HaiveDataSavePayload,
+    { removeOnComplete: 100, removeOnFail: 100 },
+  );
+  return job.waitUntilFinished(getPlanMirrorQueueEvents(), 120_000) as Promise<HaiveDataSaveResult>;
 }

@@ -1235,6 +1235,15 @@ From the T365 sixth review (2026-10-31). PRE-EXISTING, minor (development only).
 
 1. web components/sidebar-nav.tsx ~:116-120 (`toggleFilter`) and ~:128-132 (`toggleCollapsed`) call `void patchUiPrefs(...)` inside a `setState` updater, the shape T365 removed from the bundle composer. React's StrictMode (on in next.config.mjs) calls an updater twice in development, so each click sends two PATCHes; harmless because `patchUiPrefs` writes an absolute value (api-client.ts ~:2360-2364), and use-persisted-toggle.ts ~:41-58 documents the same trade on purpose. Fix direction: compute the next value from the closure and PATCH after the `set` call.
 
+### T518 · FNF[composer-poll-races] · the bundle composer's poll can write back a stale answer, overlap itself, and miss a reload after a click
+
+status: open
+From the T365 close-out (PR #974, 2026-11-01). PRE-EXISTING, minor, found by reading: web components/bundle-composer.tsx, lines as on main after #974.
+
+1. `fetchOnce` (~:256-318) compares a poll answer computed at request time with the value it reads after its awaits, so a poll in flight when the person accepts a Resync or Replace ZIP writes the older server status over the newer local `syncing` and starts the listing reload early (T365 review 6). A Codex round that fixed it was cut off by a crash; its partial patch is `.claude/tmp/codex-run/T365/codex-7/interrupted-uncommitted.patch` on the machine that ran it. Fix direction: drop an answer whose request started before the last local status change (a counter bumped on Resync and Replace).
+2. The interval (~:320-322) starts a new `fetchOnce` while a slow one still waits, so two polls can both see a sync end and each reload the listing before the next render (T365 Codex review 7). Fix direction: skip a tick while a poll is in flight, or record handled transitions per bundle.
+3. Theoretical: `toggleExpanded` (~:215) decides "load needed" from its render closure's `filesByBundle`, while the poll's drop is dispatched from a promise continuation on React's Default lane, so a click between that continuation and its render can skip the reload (T365 review 6, D6-2). Fix direction: a loader driven by an effect on the expanded and dropped state.
+
 ## Done
 
 - T348 — the stalled sweep re-drives a running step that no job drives and no run waits on (the allowance auto-resume's post-commit enqueue could strand it), leaves a step a pass of this process is on, and excludes live runs (neither ended nor superseded) in the statement that bumps the epoch, before the task lock — shipped with T385 in PR #972 (d47433f7e), 2026-10-31; main CI green

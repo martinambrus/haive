@@ -49,14 +49,8 @@ export function planMergeWorktreePath(repoPath: string): string {
  * Mirrors `ensureBaseWorktree` in merge-resolver.ts — prune, ask git whether the path
  * is registered, remove a stale directory, then add.
  */
-/** The task states a conversation is live in: the ones `findOpenPlanMerge` (api) counts. */
-export const PLAN_MERGE_LIVE_STATUSES = [
-  'created',
-  'queued',
-  'running',
-  'paused',
-  'waiting_user',
-] as const;
+/** The task states a conversation is live in, the one list `findOpenPlanMerge` (api) reads too. */
+export { PLAN_MERGE_LIVE_STATUSES } from '@haive/shared';
 
 export async function ensurePlanMergeWorktree(repoPath: string): Promise<string> {
   const worktreePath = planMergeWorktreePath(repoPath);
