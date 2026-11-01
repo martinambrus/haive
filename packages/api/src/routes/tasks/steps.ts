@@ -25,6 +25,7 @@ import {
   resetDagCurrentLevelForRetry,
   CLOSED_GAP_INTO_IDLE_MS,
   CLEAR_STEP_USAGE_STAMP,
+  OPEN_WAIT_INTO_IDLE_MS,
   type Database,
   ZERO_MERGE_RETRIES,
 } from '@haive/database';
@@ -95,6 +96,42 @@ async function admitAnswer(tx: DbHandle, taskId: string): Promise<boolean> {
   if (row?.status !== 'failed') return false;
   await admitNewWork(tx);
   return true;
+}
+
+/** The 409 for a form that is not waiting for an answer. The plan chat and the merge panel key on its code. */
+function formNotWaiting(what: 'form submission' | 'clarification', stepId: string): HttpError {
+  return new HttpError(409, `No step awaiting ${what} for id ${stepId}`, 'step_form_not_waiting');
+}
+
+function notResumable(): HttpError {
+  return new HttpError(
+    409,
+    'Resume is only available for a multi-iteration step — use Retry instead',
+    'not_resumable',
+  );
+}
+
+function refuseLiveFanout(count: number): void {
+  if (count > 0) {
+    throw new HttpError(
+      409,
+      `${count} terminal(s) are still running — wait for the fan-out to finish, or use Stop & retry to reset the whole step`,
+      'fanout_in_flight',
+    );
+  }
+}
+
+/** An open wait must still have the marker read by the handler: a closer or a re-park took that wait.
+ *  A NULL marker can be an already answered wait (or a legacy unmarked park), so only the status
+ *  is checked there. This keeps accepting a duplicate read after an answer closed the wait. */
+function stillParkedAsRead(step: { id: string; waitingStartedAt: Date | null }) {
+  return and(
+    eq(schema.taskSteps.id, step.id),
+    eq(schema.taskSteps.status, 'waiting_form'),
+    step.waitingStartedAt
+      ? eq(schema.taskSteps.waitingStartedAt, step.waitingStartedAt)
+      : undefined,
+  );
 }
 
 /** An admitted answer makes the task live in its own transaction, where a drain's count sees it. */
@@ -824,32 +861,28 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     .orderBy(desc(schema.taskSteps.round))
     .limit(1);
   const step = stepRows[0];
-  if (!step)
-    throw new HttpError(
-      409,
-      `No step awaiting form submission for id ${stepId}`,
-      'step_form_not_waiting',
-    );
+  if (!step) throw formNotWaiting('form submission', stepId);
   const normalized = normalizeStepFormValues(stepId, body.values);
   if (!normalized.success) throw new HttpError(400, normalized.issues.join('; '));
   const values = normalized.data;
 
   const now = new Date();
-  // Close the idle (waiting-for-input) period: fold the time since the step
-  // entered waiting_form into idle_ms so the active-work timer excludes it.
-  const closedIdleMs = step.waitingStartedAt
-    ? Math.max(0, now.getTime() - step.waitingStartedAt.getTime())
-    : 0;
   const writeAnswer = async (tx: DbHandle) => {
-    await tx
+    const answered = await tx
       .update(schema.taskSteps)
       .set({
         formValues: values,
-        idleMs: step.idleMs + closedIdleMs,
+        // Close the idle (waiting-for-input) period: fold the time since the step entered
+        // waiting_form into idle_ms so the active-work timer excludes it. In SQL, on the locked row.
+        idleMs: OPEN_WAIT_INTO_IDLE_MS,
         waitingStartedAt: null,
         updatedAt: now,
       })
-      .where(eq(schema.taskSteps.id, step.id));
+      .where(stillParkedAsRead(step))
+      .returning({ id: schema.taskSteps.id });
+    // Another closer took the row after it was read (a pass, Skip, a Retry, the PR poller): the answer, its
+    // event and the advance are not this one's to add, and the throw rolls the transaction back.
+    if (answered.length === 0) throw formNotWaiting('form submission', stepId);
 
     await appendTaskEvent(tx, id, step.id, 'step.form_submitted', {
       stepId,
@@ -913,17 +946,9 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
     .orderBy(desc(schema.taskSteps.round))
     .limit(1);
   const step = stepRows[0];
-  if (!step)
-    throw new HttpError(
-      409,
-      `No step awaiting clarification for id ${stepId}`,
-      'step_form_not_waiting',
-    );
+  if (!step) throw formNotWaiting('clarification', stepId);
 
   const now = new Date();
-  const closedIdleMs = step.waitingStartedAt
-    ? Math.max(0, now.getTime() - step.waitingStartedAt.getTime())
-    : 0;
   await db.transaction(async (tx) => {
     const reopens = await admitAnswer(tx, id);
     await refuseReviveBesideLive(tx, id);
@@ -934,10 +959,13 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
       eventType: MERGE_CLARIFICATION_ANSWERED_EVENT,
       payload: { answer: body.answer },
     });
-    await tx
+    const answered = await tx
       .update(schema.taskSteps)
-      .set({ idleMs: step.idleMs + closedIdleMs, waitingStartedAt: null, updatedAt: now })
-      .where(eq(schema.taskSteps.id, step.id));
+      .set({ idleMs: OPEN_WAIT_INTO_IDLE_MS, waitingStartedAt: null, updatedAt: now })
+      .where(stillParkedAsRead(step))
+      .returning({ id: schema.taskSteps.id });
+    // As in the submit: a row another closer took is refused, and the throw rolls back the answer event above.
+    if (answered.length === 0) throw formNotWaiting('clarification', stepId);
 
     await appendTaskEvent(tx, id, step.id, 'step.clarified', { stepId });
     if (!reopens) return;
@@ -957,6 +985,13 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
 
   return c.json({ ok: true, queued: true });
 });
+
+/** Skip applies to a row that is failed or parked on its form. */
+function refuseSkipOutsideParked(row: { status: string }): void {
+  if (row.status !== 'failed' && row.status !== 'waiting_form') {
+    throw new HttpError(409, `Cannot skip step in status ${row.status}`);
+  }
+}
 
 stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
   const userId = c.get('userId');
@@ -1191,13 +1226,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           inArray(schema.taskStepAgentMinings.status, ['pending', 'running']),
         ),
       );
-    if (liveAgents.length > 0) {
-      throw new HttpError(
-        409,
-        `${liveAgents.length} terminal(s) are still running — wait for the fan-out to finish, or use Stop & retry to reset the whole step`,
-        'fanout_in_flight',
-      );
-    }
+    refuseLiveFanout(liveAgents.length);
     const failedAgents = await db
       .select({ id: schema.taskStepAgentMinings.id })
       .from(schema.taskStepAgentMinings)
@@ -1236,6 +1265,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         [step.id, ...downstream.map((r) => r.id)],
       );
       let newEpoch = task.orchestrationEpoch;
+      let retriedAgents = 0;
       const activatedMeanwhile = await db.transaction(async (tx) => {
         await admitNewWork(tx);
         await refuseReviveBesideLive(tx, id);
@@ -1244,20 +1274,44 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         // rows: a Retry's sweep takes the runs and then deletes the agent rows, so holding an agent
         // row while waiting for a run closes a cycle with it.
         await supersedeBlockingInvocation(tx, step.id, now);
-        await tx
+        const marked = await tx
           .update(schema.taskStepAgentMinings)
           .set({ userRetryRequestedAt: now, updatedAt: now })
           .where(
-            inArray(
-              schema.taskStepAgentMinings.id,
-              failedAgents.map((a) => a.id),
+            and(
+              inArray(
+                schema.taskStepAgentMinings.id,
+                failedAgents.map((a) => a.id),
+              ),
+              eq(schema.taskStepAgentMinings.status, 'failed'),
             ),
-          );
+          )
+          .returning({ id: schema.taskStepAgentMinings.id });
         // Downstream ONLY. The clicked step keeps its detectOutput / formSchema / formValues /
         // iterations / output and — the whole point — the `done` rows of the agents that
         // succeeded, which resetRowsForRerun would have deleted. A row still active outside that
         // set is reset too, as Retry resets one: the resume moves the task away from it.
         await resetRowsForRerun(tx, id, [...downstreamToReset, ...leftActive], now);
+        const [held] = await tx
+          .select()
+          .from(schema.taskSteps)
+          .where(eq(schema.taskSteps.id, step.id))
+          .for('no key update');
+        if (!held) throw new HttpError(404, 'Step not found');
+        // The cascade was selected for this status (a degraded done row resets downstream).
+        // Recheck the fan-out after the batch's lock too: a peer may have restarted its agents.
+        const liveNow = await tx
+          .select({ id: schema.taskStepAgentMinings.id })
+          .from(schema.taskStepAgentMinings)
+          .where(
+            and(
+              eq(schema.taskStepAgentMinings.taskStepId, step.id),
+              inArray(schema.taskStepAgentMinings.status, ['pending', 'running']),
+            ),
+          );
+        refuseLiveFanout(liveNow.length);
+        if (held.status !== step.status || marked.length === 0) throw notResumable();
+        retriedAgents = marked.length;
         await tx
           .update(schema.taskSteps)
           .set({
@@ -1301,7 +1355,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           payload: {
             stepId,
             round: step.round,
-            retriedAgents: failedAgents.length,
+            retriedAgents,
             cascadedSteps: downstreamToReset.length,
             leftActive: [...leftActive, ...late].map((r) => ({ stepId: r.stepId, round: r.round })),
             note: body.note ?? null,
@@ -1342,16 +1396,10 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           removeOnFail: 100,
         },
       );
-      return c.json({ ok: true, status: 'running', retriedAgents: failedAgents.length });
+      return c.json({ ok: true, status: 'running', retriedAgents });
     }
     const isLoopStep = ((await loadStepFlags(db)).get(stepId)?.cliRoles?.length ?? 0) > 0;
-    if (step.iterationCount <= 0 && !isLoopStep) {
-      throw new HttpError(
-        409,
-        'Resume is only available for a multi-iteration step — use Retry instead',
-        'not_resumable',
-      );
-    }
+    if (step.status !== 'failed' || (step.iterationCount <= 0 && !isLoopStep)) throw notResumable();
     // A row still active elsewhere is reset, as a Retry resets one: the resume moves the task back
     // to this step, and a row left active makes the worker refuse the advance queued below.
     const leftActive = rowsLeftActive(
@@ -1359,6 +1407,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       [step.id],
     );
     const now = new Date();
+    let resumedFromIteration = step.iterationCount;
     const moved = await db.transaction(async (tx) => {
       await admitNewWork(tx);
       await refuseReviveBesideLive(tx, id);
@@ -1377,6 +1426,15 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         );
       // The clicked row joins the rows it resets in one id-ordered batch.
       await lockRowsForMove(tx, id, leftActive, now);
+      const [held] = await tx
+        .select()
+        .from(schema.taskSteps)
+        .where(eq(schema.taskSteps.id, step.id))
+        .for('no key update');
+      if (!held) throw new HttpError(404, 'Step not found');
+      if (held.status !== 'failed' || (held.iterationCount <= 0 && !isLoopStep))
+        throw notResumable();
+      resumedFromIteration = held.iterationCount;
       // Preserve detectOutput / formSchema / formValues / iterations / iterationCount
       // / output so advanceStep skips detect + form and the loop resumes at
       // upcomingIteration = iterations.length with the now-selected provider.
@@ -1401,7 +1459,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         eventType: 'step.resume',
         payload: {
           stepId,
-          fromIteration: step.iterationCount,
+          fromIteration: resumedFromIteration,
           leftActive: result.leftActive.map((r) => ({ stepId: r.stepId, round: r.round })),
           note: body.note ?? null,
         },
@@ -1434,7 +1492,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         removeOnFail: 100,
       },
     );
-    return c.json({ ok: true, status: 'running', resumedFromIteration: step.iterationCount });
+    return c.json({ ok: true, status: 'running', resumedFromIteration });
   }
 
   if (body.action === 'retry_ai') {
@@ -1456,10 +1514,6 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       )
       .orderBy(desc(schema.cliInvocations.createdAt))
       .limit(1);
-    const aiFixContext = {
-      priorError: step.errorMessage ?? '',
-      priorOutput: (lastInv[0]?.rawOutput ?? '').slice(-2000),
-    };
     // Moves the task back to this step, so what it leaves active elsewhere is reset as a Retry
     // resets it.
     const leftActive = rowsLeftActive(
@@ -1483,6 +1537,15 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         );
       // The clicked row joins the rows it resets in one id-ordered batch.
       await lockRowsForMove(tx, id, leftActive, now);
+      const [held] = await tx
+        .select()
+        .from(schema.taskSteps)
+        .where(eq(schema.taskSteps.id, step.id))
+        .for('no key update');
+      if (!held) throw new HttpError(404, 'Step not found');
+      if (held.status !== 'failed') {
+        throw new HttpError(409, 'retry_ai is only available on a failed step');
+      }
       await tx
         .update(schema.taskSteps)
         .set({
@@ -1493,7 +1556,10 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           // Re-opening a closed row: bill the gap since it closed as idle, not work.
           idleMs: CLOSED_GAP_INTO_IDLE_MS,
           statusMessage: null,
-          aiFixContext,
+          aiFixContext: {
+            priorError: held.errorMessage ?? '',
+            priorOutput: (lastInv[0]?.rawOutput ?? '').slice(-2000),
+          },
           mergeResolveState: ZERO_MERGE_RETRIES,
           updatedAt: now,
         })
@@ -1542,9 +1608,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     if (!isStepSkippable(await loadTaskStepFlags(db, task), stepId, task)) {
       throw new HttpError(409, 'This step cannot be skipped');
     }
-    if (step.status !== 'failed' && step.status !== 'waiting_form') {
-      throw new HttpError(409, `Cannot skip step in status ${step.status}`);
-    }
+    refuseSkipOutsideParked(step);
     // The walk resumes after this step, so what the task leaves active elsewhere is reset as a
     // Retry resets it: kept active, it makes the worker refuse the advance queued below.
     const leftActive = rowsLeftActive(
@@ -1552,14 +1616,21 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       [step.id],
     );
     const now = new Date();
-    const closedIdleMs = step.waitingStartedAt
-      ? Math.max(0, now.getTime() - step.waitingStartedAt.getTime())
-      : 0;
     const moved = await db.transaction(async (tx) => {
       await admitNewWork(tx);
       await refuseReviveBesideLive(tx, id);
       // The clicked row joins the rows it resets in one id-ordered batch.
       await lockRowsForMove(tx, id, leftActive, now);
+      // A pass can activate the clicked row between the handler's read of its status and this lock. This
+      // read waited for the pass, so it sees it: the row is neither in `leftActive` nor among the rows
+      // activated meanwhile, so a Skip that marked it skipped would leave its sandbox running.
+      const [held] = await tx
+        .select({ status: schema.taskSteps.status })
+        .from(schema.taskSteps)
+        .where(eq(schema.taskSteps.id, step.id))
+        .for('no key update');
+      if (!held) throw new HttpError(404, 'Step not found');
+      refuseSkipOutsideParked(held);
       await tx
         .update(schema.taskSteps)
         .set({
@@ -1567,7 +1638,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           ...CLEAR_STEP_USAGE_STAMP,
           errorMessage: null,
           endedAt: now,
-          idleMs: step.idleMs + closedIdleMs,
+          idleMs: OPEN_WAIT_INTO_IDLE_MS,
           waitingStartedAt: null,
           updatedAt: now,
         })
@@ -1793,6 +1864,41 @@ stepRoutes.get('/:id/steps/:stepId/cli-invocations', async (c) => {
   return c.json({ invocations, historyTotal, totalCount: ranking.length });
 });
 
+const cannotSwitchWhile = (status: string) =>
+  new HttpError(409, `Cannot change provider while step is ${status}`);
+
+/** The switch resets the step's row, so it is refused while the step's CLI may still be running. */
+function refuseSwitchWhileLive(row: { status: string }): void {
+  if (isLive(row)) throw cannotSwitchWhile(row.status);
+}
+
+/** What the switch does with a row. Only a row at its first pass (no loop iteration yet) that is pending, parked on
+ *  its form or failed has its cached detect/form invalidated, so the next advance re-detects against the
+ *  newly-preferred CLI's metadata (`reruns`). A finished row is left as it is, and so is a mid-loop one, so that
+ *  swapping the CLI before Resume keeps the completed passes and the form instead of restarting the step. A parked
+ *  or failed row is also re-run on the new CLI, which takes the task back to it as a Retry does (`movesTask`); a
+ *  pending one is only invalidated. */
+function switchActionOf(row: { status: string; iterationCount: number }) {
+  const reruns =
+    row.iterationCount === 0 &&
+    (row.status === 'pending' || row.status === 'waiting_form' || row.status === 'failed');
+  return { reruns, movesTask: reruns && row.status !== 'pending' };
+}
+
+/** The transaction's check of the row it holds against the handler's decision from its earlier read: a pass that
+ *  ran the row meanwhile (claimed it, took up its form, finished it, parked a form on it, ran its next iteration)
+ *  leaves it where that read would not have reset it. Refused as a live row is, since the reset would undo the
+ *  pass's work or leave a row no advance claims. A row that went from parked or failed back to pending is still
+ *  reset, and moves the task to it; one that was pending must still be, since a parked or failed row needs the move
+ *  the handler did not take. */
+function refuseSwitchOnChangedRow(
+  held: { status: string; iterationCount: number },
+  movesTask: boolean,
+): void {
+  const now = switchActionOf(held);
+  if (!now.reruns || (now.movesTask && !movesTask)) throw cannotSwitchWhile(held.status);
+}
+
 stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
@@ -1874,9 +1980,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     });
     return c.json({ ok: true, stepId, role, cliProviderId: body.cliProviderId });
   }
-  if (step.status === 'running' || step.status === 'waiting_cli') {
-    throw new HttpError(409, `Cannot change provider while step is ${step.status}`);
-  }
+  refuseSwitchWhileLive(step);
 
   if (role !== 'default') {
     await writeStepCliChoice(db, choice);
@@ -1890,8 +1994,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     return c.json({ ok: true, stepId, role, cliProviderId: body.cliProviderId });
   }
 
-  const movesTask =
-    step.iterationCount === 0 && (step.status === 'waiting_form' || step.status === 'failed');
+  const { reruns, movesTask } = switchActionOf(step);
   if (movesTask) await assertNewWorkAllowed();
 
   const saveChoice = async (handle: Database | DbHandle) => {
@@ -1907,19 +2010,13 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
       by: userId,
     });
   };
-  // A re-run saves the choice inside its fenced admission, so a refused one changes nothing.
-  if (!movesTask) await saveChoice(db);
+  // A re-run saves the choice inside its transaction, after its check of the row it holds, so a
+  // refused one changes nothing: a row that never enters the transaction saves it here.
+  if (!reruns) await saveChoice(db);
 
-  // Invalidate the step's cached detect/form so the next advance re-detects
-  // against the newly-preferred CLI's metadata. Skipped if step is terminal, and
-  // for a mid-loop step (iterationCount > 0) so swapping the CLI before Resume
-  // keeps the completed passes + the form instead of restarting the step.
   let redrive: { epoch: number; leftActive: (typeof schema.taskSteps.$inferSelect)[] } | null =
     null;
-  if (
-    step.iterationCount === 0 &&
-    (step.status === 'pending' || step.status === 'waiting_form' || step.status === 'failed')
-  ) {
+  if (reruns) {
     // A failed or parked step is re-run on the new CLI, which takes the task back to it as a
     // Retry does, so what the task leaves active elsewhere is reset. A pending row is only
     // invalidated: the task has either not reached it, where an advance queued from here would
@@ -1969,6 +2066,9 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
         .where(eq(schema.taskSteps.id, step.id))
         .for('no key update');
       if (!held) throw new HttpError(404, 'Step not found');
+      // A pass can run the row between the handler's read of it and this lock. This read waited for the
+      // pass, so it sees where it left the row.
+      refuseSwitchOnChangedRow(held, movesTask);
       const contrib = computeFoldContribution(held, now.getTime());
       await tx
         .update(schema.taskSteps)
@@ -1991,8 +2091,10 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
           updatedAt: now,
         })
         .where(eq(schema.taskSteps.id, step.id));
-      if (!movesTask) return null;
-      const moved = await moveTaskToStep(tx, id, { ...step, stepId }, leftActive, now);
+      const moved = movesTask
+        ? await moveTaskToStep(tx, id, { ...step, stepId }, leftActive, now)
+        : null;
+      // After the step row and, when the task moves, the task row, as a pass and a Retry take them.
       await saveChoice(tx);
       return moved;
     });

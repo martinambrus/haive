@@ -5,11 +5,17 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { createDatabase, schema, type Database } from '@haive/database';
 import { configService, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
+import { closePrPollQueue, runPrPollTick } from '../src/queues/pr-poll-queue.js';
 import { processTaskJob, reconcileOrphanedSteps } from '../src/queues/task-queue.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 
-const h = vi.hoisted(() => ({ db: undefined as unknown, parkAtAdmission: false }));
+const h = vi.hoisted(() => ({
+  db: undefined as unknown,
+  parkAtAdmission: false,
+  /** What the task queue was asked to enqueue. */
+  adds: [] as { name: string; data: unknown }[],
+}));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/redis.js', async (importOriginal) => ({
@@ -32,9 +38,10 @@ vi.mock('../src/sandbox/runtime-admission.js', async (importOriginal) => ({
 vi.mock('bullmq', async (importOriginal) => ({
   ...(await importOriginal<typeof import('bullmq')>()),
   Queue: class {
-    async add() {
-      return undefined;
+    async add(name: string, data: unknown) {
+      h.adds.push({ name, data });
     }
+    async close() {}
   },
 }));
 
@@ -59,6 +66,9 @@ const TEST_TIMEOUT = 30_000;
 
 const OTHER_STEP_ID = '03-the-task-moved-here';
 const ORPHAN_AGE_MS = 10 * 60_000;
+const PR_WAIT_STEP_ID = '13-pr-wait';
+const PR_PARKED_FOR_MS = 10 * 60_000;
+const INT4_MAX = 2_147_483_647;
 
 const SEED = { work: 1000, idle: 200, user: 50, liveIdle: 4000, liveUser: 800 } as const;
 const PEER = { work: 7000, idle: 3000, user: 500, liveIdle: 2000 } as const;
@@ -147,13 +157,15 @@ describe.skipIf(!url)('worker step folds beside a peer that updates the row, on 
 
   beforeEach(async () => {
     h.parkAtAdmission = false;
+    h.adds.length = 0;
     vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
     vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
+    await closePrPollQueue();
   });
 
   afterAll(async () => {
@@ -404,6 +416,99 @@ describe.skipIf(!url)('worker step folds beside a peer that updates the row, on 
         idle: 9_200,
         user: 1_350,
       });
+    },
+    TEST_TIMEOUT,
+  );
+
+  /** A merged pull request whose task waits on `13-pr-wait`, the form the poller answers with `{}`; null
+   *  `parkedForMs` is a form whose wait is already closed. */
+  const seedParkedPrWait = async (parkedForMs: number | null, over: StepInsert = {}) => {
+    const taskId = await seedTask({
+      status: 'waiting_pr',
+      prProvider: 'github',
+      prNumber: '7',
+      prUrl: 'https://github.com/acme/app/pull/7',
+      prState: 'merged',
+      prFinalizeMode: 'auto',
+    });
+    const parkedAt = parkedForMs === null ? null : new Date(Date.now() - parkedForMs);
+    const rowId = await seedRow(taskId, {
+      stepId: PR_WAIT_STEP_ID,
+      status: 'waiting_form',
+      waitingStartedAt: parkedAt,
+      ...over,
+    });
+    return { taskId, rowId, parkedAt };
+  };
+
+  const advanceJobs = () => h.adds.filter((add) => add.name === TASK_JOB_NAMES.ADVANCE_STEP);
+
+  it(
+    'G5: the PR poller adds the wait to the idle_ms the peer left, not to the one it read before its update',
+    async () => {
+      vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+      const { taskId, rowId, parkedAt } = await seedParkedPrWait(PR_PARKED_FOR_MS);
+
+      let before = 0;
+      await whilePeerHoldsRow(rowId, () => {
+        before = Date.now();
+        return runPrPollTick(db);
+      });
+      const after = Date.now();
+
+      const row = await rowOf(rowId);
+      expect(row).toMatchObject({ status: 'waiting_form', formValues: {}, waitingStartedAt: null });
+      // seed 4000 + the peer's 2000 + the wait up to the update. The idle_ms read before the peer committed
+      // writes 4000 plus the wait.
+      const seeded = SEED.liveIdle + PEER.liveIdle;
+      expect(row.idleMs, 'idle_ms after the peer and the wait').toBeGreaterThanOrEqual(
+        seeded + (before - parkedAt!.getTime()),
+      );
+      expect(row.idleMs, 'idle_ms after the peer and the wait').toBeLessThanOrEqual(
+        seeded + (after - parkedAt!.getTime()),
+      );
+      expect(advanceJobs()).toEqual([
+        {
+          name: TASK_JOB_NAMES.ADVANCE_STEP,
+          data: { taskId, userId, stepId: PR_WAIT_STEP_ID, round: 0, formValues: {} },
+        },
+      ]);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'G6: the PR poller keeps the idle time within its integer column',
+    async () => {
+      vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+      const { rowId } = await seedParkedPrWait(PR_PARKED_FOR_MS, { idleMs: INT4_MAX - 1_000 });
+
+      await runPrPollTick(db);
+
+      expect(await rowOf(rowId)).toMatchObject({
+        idleMs: INT4_MAX,
+        formValues: {},
+        waitingStartedAt: null,
+      });
+      expect(advanceJobs()).toHaveLength(1);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'G7: the PR poller adds nothing to the idle time on a re-drive, once the wait is closed',
+    async () => {
+      vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+      const { rowId } = await seedParkedPrWait(null);
+
+      await runPrPollTick(db);
+
+      expect(await rowOf(rowId)).toMatchObject({
+        idleMs: SEED.liveIdle,
+        formValues: {},
+        waitingStartedAt: null,
+      });
+      expect(advanceJobs()).toHaveLength(1);
     },
     TEST_TIMEOUT,
   );

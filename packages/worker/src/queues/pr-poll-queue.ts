@@ -10,7 +10,7 @@ import {
   logger,
   type TaskJobPayload,
 } from '@haive/shared';
-import { schema, type Database } from '@haive/database';
+import { OPEN_WAIT_INTO_IDLE_MS, schema, type Database } from '@haive/database';
 import { gitRemoteIdentity, isAllowedGitRemoteUrl } from '@haive/shared/schemas';
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
@@ -29,7 +29,6 @@ const POLL_JOB_NAME = 'pr-poll-tick';
 const POLL_CONCURRENCY = 4;
 const BACKOFF_BASE_MS = 5 * 60 * 1000;
 const BACKOFF_MAX_MS = 60 * 60 * 1000;
-const INT4_MAX = 2_147_483_647;
 
 /** Per-host 429 backoff, kept in-process (the poll worker is a singleton, cleared on
  *  restart where a fresh boot poll is fine). */
@@ -246,19 +245,17 @@ async function advancePrWaitStep(db: Database, task: PrWaitTask): Promise<void> 
       eq(schema.taskSteps.status, 'waiting_form'),
     ),
     orderBy: [desc(schema.taskSteps.round)],
-    columns: { id: true, round: true, idleMs: true, waitingStartedAt: true },
+    columns: { id: true, round: true, waitingStartedAt: true },
   });
   if (!stepRow) return;
   const now = new Date();
-  const closedIdleMs = stepRow.waitingStartedAt
-    ? Math.max(0, now.getTime() - stepRow.waitingStartedAt.getTime())
-    : 0;
   const closed = await db
     .update(schema.taskSteps)
     .set({
       formValues: {},
-      // idle_ms is an int4: a wait past ~24.8 days must not make this update throw and wedge the task.
-      idleMs: Math.min(stepRow.idleMs + closedIdleMs, INT4_MAX),
+      // Closed in SQL on the locked row, clamped to the int4 column: a wait past ~24.8 days must not make
+      // this update throw and wedge the task, and an idle_ms write since the read above is kept.
+      idleMs: OPEN_WAIT_INTO_IDLE_MS,
       waitingStartedAt: null,
       updatedAt: now,
     })

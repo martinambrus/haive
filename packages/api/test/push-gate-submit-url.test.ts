@@ -13,6 +13,7 @@ vi.mock('../src/middleware/auth.js', () => ({
   },
   requireAdmin: async (_c: unknown, next: () => Promise<void>) => next(),
 }));
+import { is, SQL } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -55,11 +56,15 @@ const submit = (values: unknown, stepId = STEP) =>
     body: JSON.stringify({ values }),
   });
 const durable = () =>
-  JSON.stringify({
-    steps: fake.rows(schema.taskSteps),
-    events: fake.rows(schema.taskEvents),
-    jobs: h.add.mock.calls,
-  });
+  JSON.stringify(
+    {
+      steps: fake.rows(schema.taskSteps),
+      events: fake.rows(schema.taskEvents),
+      jobs: h.add.mock.calls,
+    },
+    // The fake keeps an SQL value (the idle_ms fold) as the expression, which refers back to its table.
+    (_key, value: unknown) => (is(value, SQL) ? '[sql]' : value),
+  );
 it.each([
   ['https://fixture-user:fixture-password@example.test:443/repo', 'https://example.test:443/repo'],
   ['ssh://git:fixture-password@example.test:22/repo', 'ssh://git@example.test:22/repo'],

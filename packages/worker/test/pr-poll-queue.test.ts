@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { OPEN_WAIT_INTO_IDLE_MS, schema, type Database } from '@haive/database';
 import { configService, TASK_JOB_NAMES } from '@haive/shared';
 
 const h = vi.hoisted(() => ({
@@ -34,7 +34,6 @@ const USER_ID = '22222222-2222-4222-8222-222222222222';
 const STEP_ROW_ID = '33333333-3333-4333-8333-333333333333';
 const NOW = new Date('2026-10-16T12:00:00.000Z');
 const TEN_MINUTES_MS = 10 * 60_000;
-const INT4_MAX = 2_147_483_647;
 
 const MERGED_TASK = {
   id: TASK_ID,
@@ -51,14 +50,12 @@ const MERGED_TASK = {
 interface ParkedStep {
   id: string;
   round: number;
-  idleMs: number;
   waitingStartedAt: Date | null;
 }
 
 const parkedSinceTenMinutes = (over: Partial<ParkedStep> = {}): ParkedStep => ({
   id: STEP_ROW_ID,
   round: 0,
-  idleMs: 5_000,
   waitingStartedAt: new Date(NOW.getTime() - TEN_MINUTES_MS),
   ...over,
 });
@@ -99,6 +96,8 @@ describe('the PR poller finalizing a merged pull request', () => {
     await closePrPollQueue();
   });
 
+  // The fold's arithmetic is SQL, so test/step-fold-preread-db.test.ts runs it on Postgres: the wait, a peer's
+  // idle_ms write kept, the int4 clamp and a closed wait adding nothing.
   it('closes the open wait in the update that writes the form, as the submit route does', async () => {
     const { db, writes } = makeDb(parkedSinceTenMinutes());
     await runPrPollTick(db);
@@ -106,7 +105,7 @@ describe('the PR poller finalizing a merged pull request', () => {
     expect(writes[0]!.table).toBe(schema.taskSteps);
     expect(writes[0]!.values.formValues).toEqual({});
     expect(writes[0]!.values.waitingStartedAt).toBeNull();
-    expect(writes[0]!.values.idleMs).toBe(5_000 + TEN_MINUTES_MS);
+    expect(writes[0]!.values.idleMs).toBe(OPEN_WAIT_INTO_IDLE_MS);
     expect(h.adds).toEqual([
       {
         name: TASK_JOB_NAMES.ADVANCE_STEP,
@@ -127,7 +126,7 @@ describe('the PR poller finalizing a merged pull request', () => {
     expect(h.tries).toBe(2);
     expect(writes).toHaveLength(1);
     expect(writes[0]!.values.waitingStartedAt).toBeNull();
-    expect(writes[0]!.values.idleMs).toBe(5_000 + TEN_MINUTES_MS);
+    expect(writes[0]!.values.idleMs).toBe(OPEN_WAIT_INTO_IDLE_MS);
     expect(h.adds).toEqual([
       {
         name: TASK_JOB_NAMES.ADVANCE_STEP,
@@ -136,19 +135,11 @@ describe('the PR poller finalizing a merged pull request', () => {
     ]);
   });
 
-  it('adds nothing to the idle time on a re-drive, once the wait is closed', async () => {
+  it('finalizes a re-drive whose wait is already closed, queueing the advance', async () => {
     const { db, writes } = makeDb(parkedSinceTenMinutes({ waitingStartedAt: null }));
     await runPrPollTick(db);
     expect(writes).toHaveLength(1);
-    expect(writes[0]!.values.idleMs).toBe(5_000);
     expect(writes[0]!.values.waitingStartedAt).toBeNull();
-    expect(h.adds).toHaveLength(1);
-  });
-
-  it('keeps the idle time within its integer column', async () => {
-    const { db, writes } = makeDb(parkedSinceTenMinutes({ idleMs: INT4_MAX - 1_000 }));
-    await runPrPollTick(db);
-    expect(writes[0]!.values.idleMs).toBe(INT4_MAX);
     expect(h.adds).toHaveLength(1);
   });
 

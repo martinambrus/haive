@@ -13,6 +13,7 @@ import {
   ne,
   notInArray,
   or,
+  sql,
 } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { schema, hasPgCode, isUniqueViolation, type StepIterationEntry } from '@haive/database';
@@ -2863,7 +2864,10 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       await foldCliParkOnResume(db, current.id);
       const claimed = await openPendingStep(db, taskId, params.epoch, current.id, {
         status: 'running',
-        startedAt: new Date(),
+        // Re-offers carry their prior run's timing and clear started_at before the
+        // pending gap, so this opens a fresh span. Keep any existing start on a
+        // pending row; its idle_ms belongs inside that span.
+        startedAt: sql`coalesce(${schema.taskSteps.startedAt}, now())`,
         // Clear any queued/parked message (e.g. "waiting for a free runtime slot") so it does
         // not linger once the step actually runs; the run's own emitProgress takes over.
         statusMessage: null,

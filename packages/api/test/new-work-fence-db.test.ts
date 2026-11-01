@@ -969,7 +969,7 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
         retrier.release();
         answerer.release();
         const status = (await answer).status;
-        return { task, retry: await retry, answer: answerer.aborted ?? status };
+        return { task, step, retry: await retry, answer: answerer.aborted ?? status };
       } finally {
         retrier.release();
         answerer.release();
@@ -979,12 +979,20 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
       }
     };
 
+    // The answer waits for the Retry's lock on the row. The Retry re-offers the parked form, so the answer finds it
+    // no longer parked and is refused as a form that is not waiting: it writes nothing onto the pending row and
+    // queues no advance beside the Retry's, and neither side deadlocks.
     describe.each(ANSWERS)('$route', ({ route, body }) => {
-      it('commits both, whichever of them waits for the other', async () => {
-        const { task, retry, answer } = await race(route, body);
+      it('commits the Retry and refuses the answer that waited behind it, without a second advance', async () => {
+        const { task, step, retry, answer } = await race(route, body);
 
-        expect({ retry, answer }).toEqual({ retry: 'committed', answer: 200 });
+        expect({ retry, answer }).toEqual({ retry: 'committed', answer: 'step_form_not_waiting' });
         expect(await statusOf(task.id)).toBe('running');
+        expect(h.queued).toEqual([TASK_JOB_NAMES.ADVANCE_STEP]);
+        const row = await db.query.taskSteps.findFirst({
+          where: eq(schema.taskSteps.id, step.id),
+        });
+        expect(row?.formValues).toBeNull();
       }, 20_000);
     });
 

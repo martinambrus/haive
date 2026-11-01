@@ -1,5 +1,11 @@
 import { and, eq, inArray, notInArray, sql, type SQL } from 'drizzle-orm';
-import { CLEAR_STEP_USAGE_STAMP, lockStepRows, schema, type DbTx } from '@haive/database';
+import {
+  CLEAR_STEP_USAGE_STAMP,
+  lockStepRows,
+  OPEN_WAIT_INTO_IDLE_MS,
+  schema,
+  type DbTx,
+} from '@haive/database';
 import {
   logger,
   TASK_JOB_NAMES,
@@ -84,13 +90,11 @@ export async function cancelTaskRow(
         // only counts as idle while ended_at is null. Stamping ended_at without folding therefore
         // reclassifies the WHOLE recorded park from idle back into WORK (measured: 111h across 20
         // cancelled steps). Fold it into idle_ms and clear the marker in the SAME statement, so
-        // the row is never terminal with an unfolded park. Expression mirrors foldCliParkOnResume
-        // (worker cli-park-timing.ts); GREATEST ignores NULLs in Postgres, so an unparked
-        // pending/running row adds 0 rather than NULL. The least() clamp is required, not
-        // defensive: idle_ms is int4, so a step parked longer than ~24.8 days (this DB has
-        // waiting_form rows parked 40+) would raise "integer out of range" and abort the cancel.
-        idleMs: sql`${schema.taskSteps.idleMs} + least(2147483647 - ${schema.taskSteps.idleMs},
-          greatest(0, floor(extract(epoch from (now() - ${schema.taskSteps.waitingStartedAt})) * 1000)))::int`,
+        // the row is never terminal with an unfolded park. OPEN_WAIT_INTO_IDLE_MS (@haive/database)
+        // adds 0 to an unparked pending/running row, and its int4 clamp is required, not defensive:
+        // a step parked longer than ~24.8 days (this DB has waiting_form rows parked 40+) would
+        // raise "integer out of range" and abort the cancel.
+        idleMs: OPEN_WAIT_INTO_IDLE_MS,
         waitingStartedAt: null,
         updatedAt: now,
       })

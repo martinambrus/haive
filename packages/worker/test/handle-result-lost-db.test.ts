@@ -214,7 +214,11 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
     ]);
   };
 
-  const FORM = { row: { status: 'waiting_form' }, result: waitingForm } as const;
+  // The producer stamps the marker in its park UPDATE; the hand-off preserves it.
+  const FORM = {
+    row: { status: 'waiting_form', waitingStartedAt: new Date() },
+    result: waitingForm,
+  } as const;
   const CLI = { row: { status: 'running' }, result: waitingCli } as const;
   const OSCILLATION = {
     row: { status: 'done', round: 2 },
@@ -327,7 +331,16 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
   const hand = (site: Site, c: Case) => handleResult(db, c.ctx, S, site.result(c.row));
 
   const setRow = (c: Case, set: Partial<StepInsert>) =>
-    db.update(schema.taskSteps).set(set).where(eq(schema.taskSteps.id, c.row.id));
+    db
+      .update(schema.taskSteps)
+      .set({
+        ...set,
+        // These stand in for Retry / Skip / Stop, whose real writes close the marker.
+        ...(set.status && ['pending', 'skipped', 'failed'].includes(set.status)
+          ? { waitingStartedAt: null }
+          : {}),
+      })
+      .where(eq(schema.taskSteps.id, c.row.id));
   const setTask = (c: Case, set: Partial<TaskInsert>) =>
     db.update(schema.tasks).set(set).where(eq(schema.tasks.id, c.taskId));
   const stopTask = (c: Case) =>
