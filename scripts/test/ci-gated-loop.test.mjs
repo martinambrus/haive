@@ -7,7 +7,7 @@ import { describe, it } from 'node:test';
 import { readWorkflow } from './workflow.mjs';
 
 const listPattern = /<<'GATED'\n([\s\S]+?)\nGATED(?:\n|$)/;
-const gatedStep = readWorkflow('ci.yml').jobs.smokes.steps.find((step) =>
+const gatedStep = readWorkflow('ci.yml').jobs['postgres-gated'].steps.find((step) =>
   listPattern.test(step.run ?? ''),
 );
 assert.ok(gatedStep, 'ci.yml must contain a step with a GATED list');
