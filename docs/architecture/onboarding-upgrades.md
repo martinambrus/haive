@@ -158,6 +158,36 @@ path and leave the deletion out. A merge or cherry-pick in progress is refused, 
 step loudly, as `--only` did. The first commit of a
 repository 12 or 03 had to `git init` is the one exception, as above.
 
+**The Haive data page exposes pending writes and explicit commits.** A ready repository's
+Haive data action opens `/repos/:id/haive-data` (`web/src/components/repos/haive-data-panel.tsx`).
+The API serves `GET /repositories/:id/haive-data` read-only: it queues no refresh, and the
+worker rechecks the action's holds under its locks when Save runs. `holds.save` and `holds.push`
+come from the shared `holdsFor` policy. Dirty projections alone do not hold Save. Pending-write
+warnings use `record.dirty`, `record.writePending` and `snapshot.dirty`; diagnostic text alone
+never raises one. The file list describes the working copy against HEAD, with staging reported
+separately; `files: null` means unavailable. Matching HEAD does not prove a push; the page reports
+push success only for its latest save action. It refreshes after an action and polls status
+without queuing work. A pending project-question banner links to this page from other repository
+surfaces; the page hides that self-link while retaining the question answers.
+
+`POST /repositories/:id/haive-data/save` waits for the worker's `save-haive-data` result. Save
+uses `{}` for the default message (an absent JSON body is refused); Save & push uses `{push: true}`.
+The labelled commit-message field accepts an optional custom message, validated by the shared request
+schema and sent as `commitMessage`; blank or the default keeps the worker's
+`chore(haive): save Haive data`. Save & push asks for confirmation before it sends the request,
+because the push includes existing commits on the current branch; Cancel queues nothing. Save flushes
+the record and plan, then commits recognized record files and the plan pair through
+`commitHaiveProjections` (`worker/src/project-state/commit.ts`). Unknown projection names are
+skipped, including names the status list shows. Save & push also integrates origin and pushes
+the current branch's existing commits. A normal 200 can carry `refused`, `conflict` or `failed`:
+the page reads `refusal.code`, including `record_absent` even when status offered no hold, and
+keeps `committed`, `commitSha` and `pushed` separate so a later failure does not hide a commit.
+`indexSynced: false` warns that real-index repair did not complete; another Save can retry
+that repair. It retains the name-only trade-off above: a recognized state name absent from HEAD
+and the record may be unstaged even when the staged blob is the person's. Remote conflicts use
+an explicit [merge conversation](plan-canvas.md), and the page reuses the project and plan
+question banners for their separate answers.
+
 **The cli-rules row records the region on disk, not the render.** 07 leaves an existing region
 alone unless its overwrite flag is on, so `12-post-onboarding` reads the region back and records
 it through `cliRulesRegionRecord` (`steps/onboarding/_rules-files.ts`): the region's bytes exactly
