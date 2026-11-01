@@ -261,8 +261,9 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   It used to return null for all of them: a MERGE_HEAD read that failed let the resolver set Haive's files
   aside into a tree with a merge open, `abortMerge` report nothing to abort, `openMerge` call a conflicted
   merge "refused", and `branch-revert` fall through to origin's older record. A directory that is not
-  there is absent too, decided by a strict fs-safe lstat of the directory, or its basename under the
-  parent when it cannot itself be opened, and never by ENOENT alone, which a missing `git` gives as well: a cross-branch merge reads the base worktree before it creates it, and a cancel records a
+  there is absent too, decided by the current fs-safe lstat of the directory rather than by the
+  git process's ENOENT alone, which a missing `git` gives as well. This lstat remains lenient, so an
+  unreadable directory can also take the absent branch; that remaining read limit is tracked in T495: a cross-branch merge reads the base worktree before it creates it, and a cancel records a
   merge left open after it removed the DAG worktree, which a throw would leave without `task.cancel_finished`.
   Exit 1 also covers a ref git cannot read (a junk or unreadable ref file, a dangling ref asked as
   `^{commit}`): no exit code tells those apart, so they stay "absent". Reads that decide a write come before
