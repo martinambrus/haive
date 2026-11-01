@@ -338,33 +338,98 @@ describe('knowledgeQaReviewStep.apply', () => {
     ).rejects.toThrow(/not applied/i);
   });
 
-  it('records an explicit already-correct item without claiming a correction', async () => {
-    await writeFile(path.join(kbDir, 'AUTH.md'), '# Auth\n\nAlready correct.\n');
-    const detected = detect({
-      reviewable: [detect().reviewable[1]!],
-      passthrough: [],
-      kbBefore: await snapshotKnowledgeBase(tmpRoot),
-    });
-    const out = await knowledgeQaReviewStep.apply(makeCtx(), {
-      iteration: 0,
-      previousIterations: [],
-      detected,
-      formValues: { review__1: 'Already correct.' },
-      llmOutput: fence({
-        kbWrites: [],
-        kbUnchanged: [
-          {
-            question: 'Where is auth configured?',
-            relPath: 'AUTH.md',
-            reason: 'Existing KB already contains the owner clarification.',
-          },
-        ],
-      }),
-    });
-    expect(out.correctedCount).toBe(0);
-    expect(out.kbWritten).toEqual([]);
-    expect(out.kbSkipped).toHaveLength(1);
-  });
+  it.each([false, true])(
+    'records an explicit already-correct item without counting it (shared page edited: %s)',
+    async (editOtherAnswer) => {
+      const original =
+        '# Auth\n\n## Configuration\n\nAlready correct.\n\n## Delivery\n\nOld delivery.\n';
+      await writeFile(path.join(kbDir, 'AUTH.md'), original);
+      const reviewable = [detect().reviewable[1]!];
+      if (editOtherAnswer)
+        reviewable.push({
+          ...detect().reviewable[0]!,
+          source: 'kb',
+          citedFile: '.haive-data/knowledge_base/AUTH.md',
+          proposedWrite: undefined,
+        });
+      const detected = detect({
+        reviewable,
+        passthrough: [],
+        kbBefore: await snapshotKnowledgeBase(tmpRoot),
+      });
+      if (editOtherAnswer)
+        await writeFile(
+          path.join(kbDir, 'AUTH.md'),
+          original.replace('Old delivery.', 'Corrected delivery.'),
+        );
+      const out = await knowledgeQaReviewStep.apply(makeCtx(), {
+        iteration: 0,
+        previousIterations: [],
+        detected,
+        formValues: {
+          review__1: 'Already correct.',
+          ...(editOtherAnswer ? { review__0: 'Corrected delivery.' } : {}),
+        },
+        llmOutput: fence({
+          kbWrites: editOtherAnswer
+            ? [{ relPath: 'AUTH.md', section: 'Delivery', question: 'How does delivery work?' }]
+            : [],
+          kbUnchanged: [
+            {
+              question: 'Where is auth configured?',
+              relPath: 'AUTH.md',
+              reason: 'Existing KB already contains the owner clarification.',
+            },
+          ],
+        }),
+      });
+      expect(out.correctedCount).toBe(editOtherAnswer ? 1 : 0);
+      expect(out.newlyAnsweredCount).toBe(0);
+      expect(out.kbWritten).toEqual(
+        editOtherAnswer
+          ? [{ relPath: '.haive-data/knowledge_base/AUTH.md', section: 'Delivery' }]
+          : [],
+      );
+      expect(out.kbSkipped).toEqual([
+        {
+          relPath: '.haive-data/knowledge_base/AUTH.md',
+          reason: 'Existing KB already contains the owner clarification.',
+        },
+      ]);
+    },
+  );
+
+  it.each(['created', 'removed'] as const)(
+    'rejects an already-correct claim for a page %s during the dispatch',
+    async (change) => {
+      if (change === 'removed') await writeFile(path.join(kbDir, 'AUTH.md'), '# Auth\n');
+      const detected = detect({
+        reviewable: [detect().reviewable[1]!],
+        passthrough: [],
+        kbBefore: await snapshotKnowledgeBase(tmpRoot),
+      });
+      if (change === 'removed') await rm(path.join(kbDir, 'AUTH.md'));
+      else await writeFile(path.join(kbDir, 'AUTH.md'), '# Auth\n');
+      await expect(
+        knowledgeQaReviewStep.apply(makeCtx(), {
+          iteration: 0,
+          previousIterations: [],
+          detected,
+          formValues: { review__1: 'Already correct.' },
+          llmOutput: fence({
+            kbWrites: [],
+            kbUnchanged: [
+              {
+                question: 'Where is auth configured?',
+                relPath: 'AUTH.md',
+                reason: 'Already correct.',
+              },
+            ],
+          }),
+        }),
+      ).rejects.toThrow(/not applied/i);
+    },
+  );
 
   it('prepares and persists a fresh baseline on each won dispatch', async () => {
     const ctx = makeCtx();

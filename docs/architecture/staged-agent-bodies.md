@@ -68,8 +68,9 @@ generated top-level index, and refuses unchanged/missing declared writes and una
 corrections. A KB-sourced correction must change its cited page; a code-sourced one can use its
 proposed target or a different fitting page. For a new target the write summary names the exact question beside a
 verified changed page. A missing summary can still record real edits to known targets. Explicit
-`kbUnchanged` items identify an already-correct question and an existing unchanged page; they
-appear in `kbSkipped` and add no corrected/newly-answered count. Untouched confirmations and
+`kbUnchanged` items identify an already-correct question on a page present before and after the
+dispatch; another answer may edit that same page. They appear in `kbSkipped` and add no
+corrected/newly-answered count. Untouched confirmations and
 questions the person leaves unanswered need no agent writes. Unreadable state or a legacy
 in-flight run with no baseline fails verification, keeping its edits and using the normal step
 failure path; it does not automatically reroll a side-effecting agent. Global KB promotions and

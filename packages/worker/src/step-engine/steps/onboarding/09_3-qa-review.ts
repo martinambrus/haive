@@ -393,7 +393,9 @@ async function verifiedAgentWrites(
   for (const item of summary.kbUnchanged) {
     if (!needed.some((n) => n.question === item.question)) continue;
     const rel = normalize(item.relPath);
-    if (!after[rel] || before[rel] !== after[rel]) fail();
+    // The answer can already be correct while another question edits the same page.
+    // It must still be a real page this dispatch read, rather than a new or missing one.
+    if (!before[rel] || !after[rel]) fail();
     unchanged.set(item.question, { ...item, relPath: rel });
   }
   for (const correction of review.corrections) {
