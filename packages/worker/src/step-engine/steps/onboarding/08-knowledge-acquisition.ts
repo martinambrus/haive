@@ -13,6 +13,7 @@ import type { DetectResult, FormSchema } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import { LEGACY_IMPORT_SUBDIR, migrateLegacyKnowledge } from './_kb-legacy.js';
 import { sanitizeKbRelPath } from './_kb-write.js';
+import { handOverKnowledgeBase } from './_kb-agent-files.js';
 import type { LlmBuildArgs, StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput, loadRunStartedAt } from './_helpers.js';
@@ -2478,6 +2479,10 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
           `(${missingPages.slice(0, 5).join(', ')})`,
       );
     }
+
+    // Later Q&A correctors edit these pages as the sandbox user, not as this root worker.
+    ctx.throwIfCancelled();
+    await handOverKnowledgeBase(ctx.repoPath);
 
     // The drafts have been filed; keep them only when something could not be read, since
     // that is the one case where the files on disk are the evidence a human needs and a

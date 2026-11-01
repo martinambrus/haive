@@ -1,4 +1,15 @@
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import {
+  chown,
+  link,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -9,6 +20,7 @@ import {
   parseQaReviewOutput,
   type QaReviewDetect,
 } from '../src/step-engine/steps/onboarding/09_3-qa-review.js';
+import { snapshotKnowledgeBase } from '../src/step-engine/steps/onboarding/_kb-agent-files.js';
 
 function detect(overrides: Partial<QaReviewDetect> = {}): QaReviewDetect {
   return {
@@ -157,7 +169,11 @@ describe('knowledgeQaReviewStep.apply', () => {
       sandboxWorkdir: '/repo',
       cliProviderId: null,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      db: undefined as any,
+      db: {
+        update: () => ({
+          set: () => ({ where: () => ({ returning: async () => [{ id: 's' }] }) }),
+        }),
+      } as any,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       logger: { info() {}, warn() {}, error() {}, debug() {} } as any,
       async emitProgress() {},
@@ -168,6 +184,7 @@ describe('knowledgeQaReviewStep.apply', () => {
   }
 
   it('writes confirmed code proposals + passthrough deterministically (LLM skipped)', async () => {
+    await rm(kbDir, { recursive: true });
     const out = await knowledgeQaReviewStep.apply(makeCtx(), {
       iteration: 0,
       previousIterations: [],
@@ -185,15 +202,78 @@ describe('knowledgeQaReviewStep.apply', () => {
     expect(out.stillUnansweredCount).toBe(1);
   });
 
-  it('records the agent write summary for corrected answers', async () => {
+  it('keeps an absent KB marker absent when unanswered questions are skipped', async () => {
+    await rm(kbDir, { recursive: true });
     const out = await knowledgeQaReviewStep.apply(makeCtx(), {
       iteration: 0,
       previousIterations: [],
-      detected: detect(),
+      detected: detect({ reviewable: [], passthrough: [] }),
+      formValues: { unanswered__0: '__skip__' },
+      llmOutput: undefined,
+    });
+    expect(out.kbWritten).toEqual([]);
+    expect(out.stillUnansweredCount).toBe(1);
+    await expect(stat(kbDir)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it.each(['captured', 'missing'] as const)(
+    'fails an unapplied owner correction when the agent honestly reports no writes (T293, %s baseline)',
+    async (baseline) => {
+      await writeFile(path.join(kbDir, 'AUTH.md'), '# Auth\n\nOld answer.\n');
+      const ctx = makeCtx();
+      const detected = detect({ passthrough: [] });
+      if (baseline === 'captured') {
+        await knowledgeQaReviewStep.llm!.prepareWorkspace!({ ctx, detected, formValues: {} });
+        expect(detected.kbBefore).toEqual(await snapshotKnowledgeBase(tmpRoot));
+        expect(detected.kbBefore?.['.haive-data/knowledge_base/AUTH.md']).toBeDefined();
+      }
+      await expect(
+        knowledgeQaReviewStep.apply(ctx, {
+          iteration: 0,
+          previousIterations: [],
+          detected,
+          formValues: { review__1: 'The owner supplied the corrected answer.' },
+          // Captured normal corrector result after EACCES, not a claimed edit.
+          llmOutput: fence({ kbWrites: [] }),
+        }),
+      ).rejects.toThrow(/not applied|unapplied/i);
+      expect(await readFile(path.join(kbDir, 'AUTH.md'), 'utf8')).toContain('Old answer.');
+    },
+  );
+
+  it('fails a claimed write whose KB bytes did not change', async () => {
+    await writeFile(path.join(kbDir, 'AUTH.md'), '# Auth\n\nOld answer.\n');
+    await expect(
+      knowledgeQaReviewStep.apply(makeCtx(), {
+        iteration: 0,
+        previousIterations: [],
+        detected: detect({ passthrough: [], kbBefore: await snapshotKnowledgeBase(tmpRoot) }),
+        formValues: { review__1: 'Updated answer.' },
+        llmOutput: fence({
+          kbWrites: [{ relPath: '.haive-data/knowledge_base/AUTH.md', section: 'Auth' }],
+        }),
+      }),
+    ).rejects.toThrow(/not applied|unapplied|baseline/i);
+  });
+
+  it('records verified direct edits for corrected and newly answered items', async () => {
+    const detected = detect({ kbBefore: await snapshotKnowledgeBase(tmpRoot) });
+    await writeFile(
+      path.join(kbDir, 'BUSINESS_LOGIC.md'),
+      '# Delivery\n\nCorrected plus new answer.\n',
+    );
+    const out = await knowledgeQaReviewStep.apply(makeCtx(), {
+      iteration: 0,
+      previousIterations: [],
+      detected,
       formValues: { review__0: 'Corrected.', unanswered__0: 'A new answer.' },
       llmOutput: fence({
         kbWrites: [
-          { relPath: '.haive-data/knowledge_base/BUSINESS_LOGIC.md', section: 'Delivery' },
+          {
+            relPath: '.haive-data/knowledge_base/BUSINESS_LOGIC.md',
+            section: 'Delivery',
+            question: 'Why a nightly cron?',
+          },
         ],
       }),
     });
@@ -205,5 +285,301 @@ describe('knowledgeQaReviewStep.apply', () => {
     expect(out.kbWritten.map((w) => w.relPath)).toContain(
       '.haive-data/knowledge_base/BUSINESS_LOGIC.md',
     );
+  });
+  it('keeps real direct edits when the summary is unparseable', async () => {
+    const detected = detect({
+      reviewable: [detect().reviewable[1]!],
+      passthrough: [],
+      kbBefore: await snapshotKnowledgeBase(tmpRoot),
+    });
+    await writeFile(path.join(kbDir, 'AUTH.md'), '# Auth\n\nCorrected.\n');
+    const out = await knowledgeQaReviewStep.apply(makeCtx(), {
+      iteration: 0,
+      previousIterations: [],
+      detected,
+      formValues: { review__1: 'Corrected.' },
+      llmOutput: 'The edit is complete.',
+    });
+    expect(out.correctedCount).toBe(1);
+    expect(out.kbWritten).toEqual([{ relPath: '.haive-data/knowledge_base/AUTH.md', section: '' }]);
+  });
+
+  it('accepts a code-derived correction saved to a different fitting KB page', async () => {
+    const detected = detect({ passthrough: [], kbBefore: await snapshotKnowledgeBase(tmpRoot) });
+    await mkdir(path.join(kbDir, 'QA'));
+    await writeFile(path.join(kbDir, 'QA/delivery.md'), '# Delivery\n\nCorrected.\n');
+    const out = await knowledgeQaReviewStep.apply(makeCtx(), {
+      iteration: 0,
+      previousIterations: [],
+      detected,
+      formValues: { review__0: 'Corrected.' },
+      llmOutput: fence({
+        kbWrites: [
+          { relPath: 'QA/delivery.md', section: 'Delivery', question: 'How does delivery work?' },
+        ],
+      }),
+    });
+    expect(out.correctedCount).toBe(1);
+    expect(out.kbWritten[0]!.relPath).toBe('.haive-data/knowledge_base/QA/delivery.md');
+  });
+
+  it('rejects an unrelated edit when the cited KB page still needs correction', async () => {
+    await writeFile(path.join(kbDir, 'AUTH.md'), '# Old auth\n');
+    const detected = detect({ passthrough: [], kbBefore: await snapshotKnowledgeBase(tmpRoot) });
+    await writeFile(path.join(kbDir, 'OTHER.md'), '# Other change\n');
+    await expect(
+      knowledgeQaReviewStep.apply(makeCtx(), {
+        iteration: 0,
+        previousIterations: [],
+        detected,
+        formValues: { review__1: 'Correct auth.' },
+        llmOutput: fence({ kbWrites: [{ relPath: 'OTHER.md', section: 'Other' }] }),
+      }),
+    ).rejects.toThrow(/not applied/i);
+  });
+
+  it.each([false, true])(
+    'records an explicit already-correct item without counting it (shared page edited: %s)',
+    async (editOtherAnswer) => {
+      const original =
+        '# Auth\n\n## Configuration\n\nAlready correct.\n\n## Delivery\n\nOld delivery.\n';
+      await writeFile(path.join(kbDir, 'AUTH.md'), original);
+      const reviewable = [detect().reviewable[1]!];
+      if (editOtherAnswer)
+        reviewable.push({
+          ...detect().reviewable[0]!,
+          source: 'kb',
+          citedFile: '.haive-data/knowledge_base/AUTH.md',
+          proposedWrite: undefined,
+        });
+      const detected = detect({
+        reviewable,
+        passthrough: [],
+        kbBefore: await snapshotKnowledgeBase(tmpRoot),
+      });
+      if (editOtherAnswer)
+        await writeFile(
+          path.join(kbDir, 'AUTH.md'),
+          original.replace('Old delivery.', 'Corrected delivery.'),
+        );
+      const out = await knowledgeQaReviewStep.apply(makeCtx(), {
+        iteration: 0,
+        previousIterations: [],
+        detected,
+        formValues: {
+          review__1: 'Already correct.',
+          ...(editOtherAnswer ? { review__0: 'Corrected delivery.' } : {}),
+        },
+        llmOutput: fence({
+          kbWrites: editOtherAnswer
+            ? [{ relPath: 'AUTH.md', section: 'Delivery', question: 'How does delivery work?' }]
+            : [],
+          kbUnchanged: [
+            {
+              question: 'Where is auth configured?',
+              relPath: 'AUTH.md',
+              reason: 'Existing KB already contains the owner clarification.',
+            },
+          ],
+        }),
+      });
+      expect(out.correctedCount).toBe(editOtherAnswer ? 1 : 0);
+      expect(out.newlyAnsweredCount).toBe(0);
+      expect(out.kbWritten).toEqual(
+        editOtherAnswer
+          ? [{ relPath: '.haive-data/knowledge_base/AUTH.md', section: 'Delivery' }]
+          : [],
+      );
+      expect(out.kbSkipped).toEqual([
+        {
+          relPath: '.haive-data/knowledge_base/AUTH.md',
+          reason: 'Existing KB already contains the owner clarification.',
+        },
+      ]);
+    },
+  );
+
+  it.each(['created', 'removed'] as const)(
+    'rejects an already-correct claim for a page %s during the dispatch',
+    async (change) => {
+      if (change === 'removed') await writeFile(path.join(kbDir, 'AUTH.md'), '# Auth\n');
+      const detected = detect({
+        reviewable: [detect().reviewable[1]!],
+        passthrough: [],
+        kbBefore: await snapshotKnowledgeBase(tmpRoot),
+      });
+      if (change === 'removed') await rm(path.join(kbDir, 'AUTH.md'));
+      else await writeFile(path.join(kbDir, 'AUTH.md'), '# Auth\n');
+      await expect(
+        knowledgeQaReviewStep.apply(makeCtx(), {
+          iteration: 0,
+          previousIterations: [],
+          detected,
+          formValues: { review__1: 'Already correct.' },
+          llmOutput: fence({
+            kbWrites: [],
+            kbUnchanged: [
+              {
+                question: 'Where is auth configured?',
+                relPath: 'AUTH.md',
+                reason: 'Already correct.',
+              },
+            ],
+          }),
+        }),
+      ).rejects.toThrow(/not applied/i);
+    },
+  );
+
+  it('prepares and persists a fresh baseline on each won dispatch', async () => {
+    const ctx = makeCtx();
+    const saved: unknown[] = [];
+    ctx.db = {
+      update: () => ({
+        set: (patch: { detectOutput: QaReviewDetect }) => {
+          saved.push(structuredClone(patch.detectOutput));
+          return { where: () => ({ returning: async () => [{ id: 's' }] }) };
+        },
+      }),
+    } as unknown as typeof ctx.db;
+    const detected = detect();
+    await writeFile(path.join(kbDir, 'AUTH.md'), '# Before\n');
+    await knowledgeQaReviewStep.llm!.prepareWorkspace!({ ctx, detected, formValues: {} });
+    const before = { ...detected.kbBefore };
+    await writeFile(path.join(kbDir, 'AUTH.md'), '# Retry baseline\n');
+    await knowledgeQaReviewStep.llm!.prepareWorkspace!({ ctx, detected, formValues: {} });
+    expect(detected.kbBefore).not.toEqual(before);
+    expect(detected.kbBefore).toEqual(await snapshotKnowledgeBase(tmpRoot));
+    expect(saved).toHaveLength(2);
+    expect(saved[0]).toMatchObject({ kbBefore: before });
+    expect(saved[1]).toMatchObject({ kbBefore: detected.kbBefore });
+  });
+
+  it('does not prepare files or persist a baseline after cancellation', async () => {
+    const ctx = makeCtx();
+    ctx.throwIfCancelled = () => {
+      throw new Error('task cancelled');
+    };
+    const detected = detect();
+    await expect(
+      knowledgeQaReviewStep.llm!.prepareWorkspace!({ ctx, detected, formValues: {} }),
+    ).rejects.toThrow('task cancelled');
+    expect(detected.kbBefore).toBeUndefined();
+  });
+
+  it('leaves symlink targets outside the KB alone and refuses hard-link aliases', async () => {
+    const outside = path.join(tmpRoot, 'private.md');
+    await writeFile(outside, 'Private content');
+    const outsideOwner = (await stat(outside)).uid;
+    await symlink(outside, path.join(kbDir, 'alias.md'));
+    await knowledgeQaReviewStep.llm!.prepareWorkspace!({
+      ctx: makeCtx(),
+      detected: detect(),
+      formValues: {},
+    });
+    expect(await readFile(outside, 'utf8')).toBe('Private content');
+    expect((await stat(outside)).uid).toBe(outsideOwner);
+    await link(outside, path.join(kbDir, 'hard.md'));
+    await expect(
+      knowledgeQaReviewStep.llm!.prepareWorkspace!({
+        ctx: makeCtx(),
+        detected: detect(),
+        formValues: {},
+      }),
+    ).rejects.toThrow(/aliased/i);
+    expect(await readFile(outside, 'utf8')).toBe('Private content');
+    expect((await stat(outside)).uid).toBe(outsideOwner);
+  });
+
+  it.skipIf(process.getuid?.() !== 0)(
+    'repairs existing root KB ownership for a correction retry',
+    async () => {
+      await chown(tmpRoot, 1000, 1000);
+      const protectedFiles = [
+        '.haive-data/state/record.json',
+        '.git/config',
+        '.haive-data/knowledge_base/.git/config',
+      ];
+      for (const rel of protectedFiles) {
+        await mkdir(path.dirname(path.join(tmpRoot, rel)), { recursive: true });
+        await writeFile(path.join(tmpRoot, rel), 'Protected bytes', { mode: 0o600 });
+      }
+      const page = path.join(kbDir, 'AUTH.md');
+      await writeFile(page, '# Auth\n', { mode: 0o644 });
+      const agentWrite = () =>
+        execFileSync(
+          process.execPath,
+          [
+            '-e',
+            'require("node:fs").appendFileSync(process.argv[1], "Corrected");require("node:fs").mkdirSync(process.argv[2]);',
+            page,
+            path.join(kbDir, 'QA'),
+          ],
+          { uid: 1000, gid: 1000, stdio: 'pipe' },
+        );
+      expect(agentWrite).toThrow(); // Captured 0644/0755 permission failure before handoff.
+      const detected = detect({ passthrough: [] });
+      await knowledgeQaReviewStep.llm!.prepareWorkspace!({
+        ctx: makeCtx(),
+        detected,
+        formValues: {},
+      });
+      for (const rel of protectedFiles) {
+        const info = await stat(path.join(tmpRoot, rel));
+        expect(info.uid).toBe(0);
+        expect(info.mode & 0o777).toBe(0o600);
+        expect(await readFile(path.join(tmpRoot, rel), 'utf8')).toBe('Protected bytes');
+      }
+      expect((await stat(page)).uid).toBe(1000);
+      expect((await stat(page)).mode & 0o777).toBe(0o644);
+      expect((await stat(kbDir)).mode & 0o777).toBe(0o755);
+      agentWrite();
+      const out = await knowledgeQaReviewStep.apply(makeCtx(), {
+        iteration: 0,
+        previousIterations: [],
+        detected,
+        formValues: { review__1: 'Corrected.' },
+        llmOutput: fence({ kbWrites: [{ relPath: 'AUTH.md', section: 'Auth' }] }),
+      });
+      expect(out.correctedCount).toBe(1);
+      expect(await readFile(page, 'utf8')).toContain('Corrected');
+    },
+  );
+
+  it('does not count a newly answered item just because another answer changed a KB page', async () => {
+    const detected = detect({ kbBefore: await snapshotKnowledgeBase(tmpRoot) });
+    await writeFile(path.join(kbDir, 'BUSINESS_LOGIC.md'), '# Corrected delivery only\n');
+    await expect(
+      knowledgeQaReviewStep.apply(makeCtx(), {
+        iteration: 0,
+        previousIterations: [],
+        detected,
+        formValues: { review__0: 'Corrected.', unanswered__0: 'Still needs saving.' },
+        llmOutput: fence({
+          kbWrites: [
+            {
+              relPath: 'BUSINESS_LOGIC.md',
+              section: 'Delivery',
+              question: 'How does delivery work?',
+            },
+          ],
+        }),
+      }),
+    ).rejects.toThrow(/not applied/i);
+  });
+
+  it('refuses a missing claimed page and paths outside the KB', async () => {
+    const detected = detect({ kbBefore: await snapshotKnowledgeBase(tmpRoot) });
+    for (const relPath of ['AUTH.md', '../../outside.md']) {
+      await expect(
+        knowledgeQaReviewStep.apply(makeCtx(), {
+          iteration: 0,
+          previousIterations: [],
+          detected,
+          formValues: { review__1: 'Correct auth.' },
+          llmOutput: fence({ kbWrites: [{ relPath, section: 'Auth' }] }),
+        }),
+      ).rejects.toThrow(/not applied/i);
+    }
   });
 });
