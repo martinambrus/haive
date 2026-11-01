@@ -29,7 +29,7 @@ app.route('/', repoRoutes);
 app.onError(errorHandler);
 let fake: ReturnType<typeof createFakeDb>;
 beforeEach(() => {
-  fake = createFakeDb({ repositories: schema.repositories });
+  fake = createFakeDb({ repositories: schema.repositories, auditEvents: schema.auditEvents });
   fake.insert(schema.repositories, {
     id: REPO,
     userId: USER,

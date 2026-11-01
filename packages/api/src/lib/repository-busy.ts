@@ -12,7 +12,7 @@ export async function boundedLockWait<T>(tx: DbTx, take: () => Promise<T>): Prom
     result = await take();
   } catch (err) {
     if (!isLockNotAvailable(err)) throw err;
-    logger.warn({ err }, 'a task start gave up waiting for the repository lock');
+    logger.warn({ err }, 'a request gave up waiting for a repository lock');
     throw new HttpError(409, REPOSITORY_BUSY);
   }
   // Later writes in this transaction wait on other rows by design; the bound covers the lock only.

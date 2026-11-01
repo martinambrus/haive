@@ -16,9 +16,7 @@ import {
   extractDeviceCode,
   extractWrappedUrl,
   logger,
-  secretsService,
   stripAnsi,
-  upsertProviderSecret,
   type CliLoginCreateJobPayload,
   type CliLoginCreateResult,
   type CliProbeJobPayload,
@@ -26,6 +24,7 @@ import {
   type CliProviderName,
 } from '@haive/shared';
 import { getDb } from '../db.js';
+import { saveCliLoginSecret } from '../lib/cli-login-secret.js';
 import { isJsonObject } from '../lib/json-object.js';
 import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
 import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
@@ -1101,26 +1100,7 @@ function stopCaptureWatchdog(session: BannerSession): void {
  *  auth state. The probe spec already forwards provider.envVars to claude. */
 async function saveOauthTokenAndProbe(session: BannerSession, oauthToken: string): Promise<void> {
   try {
-    await upsertProviderSecret(getDb(), {
-      providerId: session.providerId,
-      name: 'CLAUDE_CODE_OAUTH_TOKEN',
-      value: oauthToken,
-      masterKek: await secretsService.getMasterKek(),
-      onExisting: 'overwrite',
-    });
-    // If a stale copy was ever written to envVars (pre-secrets migration),
-    // scrub it so it doesn't shadow the canonical encrypted secret.
-    const db = getDb();
-    const existing = await db.query.cliProviders.findFirst({
-      where: eq(schema.cliProviders.id, session.providerId),
-    });
-    if (existing?.envVars && 'CLAUDE_CODE_OAUTH_TOKEN' in existing.envVars) {
-      const { CLAUDE_CODE_OAUTH_TOKEN: _drop, ...rest } = existing.envVars;
-      await db
-        .update(schema.cliProviders)
-        .set({ envVars: rest, updatedAt: new Date() })
-        .where(eq(schema.cliProviders.id, session.providerId));
-    }
+    await saveCliLoginSecret(getDb(), session.userId, session.providerId, oauthToken);
     log.info({ providerId: session.providerId }, 'oauth token saved to encrypted secret');
     const result = await enqueueProbe(
       session.providerId,

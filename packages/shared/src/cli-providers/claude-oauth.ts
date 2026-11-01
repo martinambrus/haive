@@ -148,9 +148,13 @@ export function isClaudeRefreshRejected(err: unknown): boolean {
 
 // OAuth2 token endpoints are form-encoded per RFC 6749. (Some OSS impls POST JSON and it
 // also works; the body PARAMS are the invariant, the content-type is the volatile bit.)
-async function postToken(params: Record<string, string>): Promise<ClaudeOauthTokens> {
+export async function postToken(
+  params: Record<string, string>,
+  deadlineMs = 15_000,
+): Promise<ClaudeOauthTokens> {
   const res = await fetch(CLAUDE_OAUTH_TOKEN_URL, {
     method: 'POST',
+    signal: AbortSignal.timeout(deadlineMs),
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
     body: new URLSearchParams(params).toString(),
   });

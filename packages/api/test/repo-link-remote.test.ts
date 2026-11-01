@@ -1,4 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { existsSync, readFileSync } from 'node:fs';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
+import { execFileSync, type ChildProcess, type ExecFileOptions } from 'node:child_process';
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const h = vi.hoisted(() => ({ db: undefined as unknown, git: vi.fn(), entry: vi.fn() }));
 vi.mock('@haive/shared/fs-safe', async (original) => ({
@@ -19,8 +25,11 @@ vi.mock('node:child_process', async (original) => {
 });
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
+import { logger } from '@haive/shared';
+import { serializeError } from '@haive/shared/logger';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { hardenGitArgs } from '@haive/shared/git-args';
 import { repoRoutes } from '../src/routes/repos.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -32,6 +41,7 @@ let fake: ReturnType<typeof createFakeDb>;
 beforeEach(() => {
   fake = createFakeDb({
     repositories: schema.repositories,
+    auditEvents: schema.auditEvents,
     repoCredentials: schema.repoCredentials,
   });
   fake.insert(schema.repositories, {
@@ -45,22 +55,92 @@ beforeEach(() => {
   h.entry.mockReset().mockResolvedValue({ kind: 'directory' });
   h.git.mockReset().mockResolvedValue({ stdout: '', stderr: '' });
 });
-const link = () =>
+const link = (remoteUrl = 'https://example.test/r') =>
   app.request(`/${REPO}/remote`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ remoteUrl: 'https://example.test/r' }),
+    body: JSON.stringify({ remoteUrl }),
   });
 const fail = (code: number | string, stderr: string) =>
   Object.assign(new Error(stderr), { code, stderr });
+
+// The controls that fake the clock still wait on real children, so these keep the real timers.
+const realSetTimeout = setTimeout;
+const realClearTimeout = clearTimeout;
+const sleep = (ms: number) => new Promise<void>((resolve) => realSetTimeout(resolve, ms));
+
+/** The pending value, or an error naming the wait when `ms` pass first. */
+async function answeredWithin<T>(ms: number, pending: Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) => {
+        timer = realSetTimeout(() => reject(new Error(`no answer within ${ms} ms`)), ms);
+      }),
+    ]);
+  } finally {
+    realClearTimeout(timer);
+  }
+}
+
+/** Resolves once `ready()` holds, or fails naming what never happened. */
+async function until(what: string, ready: () => boolean): Promise<void> {
+  for (let waited = 0; !ready(); waited += 10) {
+    if (waited >= 3_000) throw new Error(`${what} did not happen within 3000 ms`);
+    await sleep(10);
+  }
+}
+
+// The relink's git child gets 10 s before SIGTERM, then 2 s before SIGKILL.
+const DEADLINE_MS = 10_000;
+const GRACE_MS = 2_000;
+let realExecFile!: typeof import('node:child_process').execFile;
+let child: ChildProcess | undefined;
+const dirs: string[] = [];
+beforeAll(async () => {
+  ({ execFile: realExecFile } =
+    await vi.importActual<typeof import('node:child_process')>('node:child_process'));
+});
+afterEach(async () => {
+  vi.useRealTimers();
+  child?.kill('SIGKILL');
+  child = undefined;
+  for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
+});
+
+/** A real child run in place of the route's git, with the options the route passed except its
+ *  directory, which is fake. A deadline left to execFile (`timeout`) is cut to 200 ms, since the
+ *  fake clock does not drive it; the route's own timers are driven by the fake clock. Not async:
+ *  the route reads `.child` off the promise. */
+const startChild = (command: string, args: string[], options: ExecFileOptions, cwd: string) => {
+  const run = promisify(realExecFile)(command, args, {
+    ...options,
+    cwd,
+    ...(options.timeout ? { timeout: 200 } : {}),
+  });
+  child = run.child;
+  return run;
+};
+const alive = (c: ChildProcess) => c.exitCode === null && c.signalCode === null;
+const running = (pid: number) => {
+  try {
+    return process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+};
+
 describe('link origin uses git exit codes', () => {
   it('updates after exit 3 regardless of human wording', async () => {
     h.git
       .mockResolvedValueOnce({ stdout: 'true\n', stderr: '' })
-      .mockRejectedValueOnce(fail(3, 'different language'));
+      .mockRejectedValueOnce(fail(3, 'different language'))
+      .mockResolvedValueOnce({ stdout: 'https://old.test/r', stderr: '' })
+      .mockRejectedValueOnce(fail(1, 'no push URL'));
     expect((await link()).status).toBe(200);
-    expect(h.git.mock.calls[2]![1]).toContain('--unset-all');
-    expect(h.git.mock.calls[3]![1]).toContain('--replace-all');
+    expect(h.git.mock.calls[4]![1]).toContain('--unset-all');
+    expect(h.git.mock.calls[5]![1]).toContain('--replace-all');
     expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe('https://example.test/r');
   });
   it('does not mistake an unrelated failure with already-exists words for exit 3', async () => {
@@ -75,6 +155,8 @@ describe('link origin uses git exit codes', () => {
     h.git
       .mockResolvedValueOnce({ stdout: 'true\n', stderr: '' })
       .mockRejectedValueOnce(fail(3, 'remote origin already exists'))
+      .mockResolvedValueOnce({ stdout: 'https://old.test/r', stderr: '' })
+      .mockRejectedValueOnce(fail(1, 'no push URL'))
       .mockResolvedValueOnce({ stdout: '', stderr: '' })
       .mockRejectedValueOnce(fail(128, 'broken config'));
     const res = await link();
@@ -86,17 +168,26 @@ describe('link origin uses git exit codes', () => {
 it.each([0, 5])('accepts push URL cleanup exit %s', async (code) => {
   h.git
     .mockResolvedValueOnce({ stdout: 'true\n', stderr: '' })
-    .mockRejectedValueOnce(fail(3, 'different language'));
+    .mockRejectedValueOnce(fail(3, 'different language'))
+    .mockResolvedValueOnce({ stdout: 'https://old.test/r', stderr: '' })
+    .mockRejectedValueOnce(fail(1, 'no push URL'));
   if (code === 5) h.git.mockRejectedValueOnce(fail(5, 'missing key'));
   expect((await link()).status).toBe(200);
-  expect(h.git.mock.calls[2]![1]).toContain('--unset-all');
+  expect(h.git.mock.calls[4]![1]).toContain('--unset-all');
 });
 it('does not persist a relink whose push URL cleanup failed', async () => {
   h.git
     .mockResolvedValueOnce({ stdout: 'true\n', stderr: '' })
     .mockRejectedValueOnce(fail(3, 'different language'))
+    .mockResolvedValueOnce({ stdout: 'https://old.test/r', stderr: '' })
+    .mockRejectedValueOnce(fail(1, 'no push URL'))
     .mockRejectedValueOnce(fail(128, 'different language'));
-  expect((await link()).status).toBe(409);
+  const response = await link();
+  expect(response.status).toBe(409);
+  expect(await response.text()).toContain("Could not clear the remote's push URLs");
+  expect(h.git.mock.calls.at(-1)![1]).toEqual(
+    expect.arrayContaining(['--unset-all', 'remote.origin.pushurl']),
+  );
   expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
 });
 
@@ -126,5 +217,577 @@ it.each([false, true])(
     expect(res.status).toBe(400);
     expect(h.git).not.toHaveBeenCalled();
     expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+  },
+);
+
+it('rechecks a retained credential binding changed between the initial and locked reads', async () => {
+  const fitting = '00000000-0000-4000-8000-0000000000c1';
+  const changed = '00000000-0000-4000-8000-0000000000c2';
+  fake.insert(schema.repoCredentials, { id: fitting, userId: USER, host: 'example.test' });
+  fake.insert(schema.repoCredentials, { id: changed, userId: USER, host: 'other.example.test' });
+  fake.patch(schema.repositories, REPO, { credentialsSecretId: fitting });
+  const transaction = fake.db.transaction.bind(fake.db);
+  vi.spyOn(fake.db, 'transaction').mockImplementation(async (fn) => {
+    fake.patch(schema.repositories, REPO, { credentialsSecretId: changed });
+    return transaction(fn);
+  });
+  h.git.mockResolvedValueOnce({ stdout: 'true\n', stderr: '' });
+  const response = await link();
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({
+    error: 'The Git credential does not fit the remote',
+  });
+  expect(h.git).toHaveBeenCalledTimes(1); // Only the pre-transaction checkout probe.
+  expect(fake.rows(schema.repositories)[0]).toMatchObject({
+    remoteUrl: null,
+    credentialsSecretId: changed,
+  });
+  expect(fake.rows(schema.auditEvents)).toEqual([]);
+});
+
+it('waits for a disconnected transaction callback before restoring the remote', async () => {
+  const old = 'https://old.test/r';
+  const next = 'https://example.test/r';
+  fake.patch(schema.repositories, REPO, { remoteUrl: old });
+  let checkout = old;
+  const events: string[] = [];
+  let reached!: () => void;
+  let release!: () => void;
+  let disconnect!: (error: Error) => void;
+  const atWrite = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  const resume = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const dropped = new Promise<never>((_resolve, reject) => {
+    disconnect = reject;
+  });
+  const failure = new Error('connection closed');
+  let callback!: Promise<unknown>;
+  h.db = new Proxy(fake.db, {
+    get(target, key) {
+      if (key === 'transaction')
+        return (fn: (tx: any) => Promise<unknown>) => {
+          callback = target.transaction((tx) =>
+            fn(
+              new Proxy(tx, {
+                get(t, prop) {
+                  if (prop === 'update')
+                    return () => ({
+                      set: () => ({
+                        where: async () => {
+                          throw failure;
+                        },
+                      }),
+                    });
+                  const value = Reflect.get(t, prop);
+                  return typeof value === 'function' ? value.bind(t) : value;
+                },
+              }),
+            ),
+          );
+          // postgres.js can reject on connection close before its callback finishes.
+          return Promise.race([callback, dropped]);
+        };
+      const value = Reflect.get(target, key);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  h.git.mockImplementation(async (_command, args: string[]) => {
+    if (args.includes('rev-parse')) return { stdout: 'true', stderr: '' };
+    if (args.includes('remote') && args.includes('add')) throw fail(3, 'exists');
+    if (args.includes('--get-all')) {
+      if (args.at(-1) === 'remote.origin.url') return { stdout: checkout, stderr: '' };
+      throw fail(1, 'absent');
+    }
+    if (args.includes('--replace-all')) {
+      const value = args.at(-1)!;
+      if (value === next) {
+        reached();
+        await resume;
+      }
+      checkout = value;
+      events.push(value === next ? 'write finished' : 'restored');
+    }
+    return { stdout: '', stderr: '' };
+  });
+  const response = Promise.resolve(link());
+  try {
+    await atWrite;
+    disconnect(failure);
+    // Drain the rejection continuation while the git child remains held.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  } finally {
+    release();
+  }
+  await callback.catch(() => undefined);
+  expect((await response).status).toBe(500);
+  expect(events).toEqual(['write finished', 'restored']);
+  expect(checkout).toBe(old);
+  expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe(old);
+  expect(fake.rows(schema.auditEvents)).toEqual([]);
+});
+
+it('stops a timed-out git write with SIGTERM, so git removes its own lock file', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'relink-lock-'));
+  dirs.push(dir);
+  // git locks `config` as `config.lock`, then opens the old file to read it. A FIFO with no writer
+  // holds that read, and with it the write inside its lock window. Inside a repository git reads
+  // `.git/config` before it locks, so the route's own `remote add` cannot be held there: a real
+  // `config --file` write, run outside any repository, stands in for it.
+  const config = path.join(dir, 'repo', '.git', 'config');
+  await mkdir(path.dirname(config), { recursive: true });
+  execFileSync('mkfifo', [config]);
+  const outside = path.join(dir, 'outside');
+  await mkdir(outside);
+  h.git.mockImplementation((_command, args: string[], options: ExecFileOptions) =>
+    args.includes('rev-parse')
+      ? Promise.resolve({ stdout: 'true', stderr: '' })
+      : startChild(
+          'git',
+          hardenGitArgs([
+            'config',
+            '--file',
+            config,
+            'remote.origin.url',
+            'https://synthetic-user:synthetic-password@example.test/r',
+          ]),
+          options,
+          outside,
+        ),
+  );
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const response = Promise.resolve(
+    link('https://synthetic-user:synthetic-password@example.test/r'),
+  );
+  await until('git took its lock', () => existsSync(`${config}.lock`));
+  await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+  const answer = await answeredWithin(3_000, response);
+  expect(answer.status).toBe(409);
+  const text = await answer.text();
+  expect(text).not.toMatch(
+    /https:|synthetic-user|synthetic-password|example\.test|Command failed|remote\.origin\.url/,
+  );
+  expect(text).toContain('SIGTERM');
+  expect(existsSync(`${config}.lock`)).toBe(false);
+  expect(child!.signalCode).toBe('SIGTERM');
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('kills a git child that traps SIGTERM once the grace after the deadline is over', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'relink-trap-'));
+  dirs.push(dir);
+  const told = path.join(dir, 'told-to-stop');
+  const ready = path.join(dir, 'ready');
+  // A git that notes SIGTERM and carries on.
+  const script = `trap ': > "$1"' TERM; : > "$2"; while :; do sleep 0.05; done`;
+  h.git.mockImplementation((_command, args: string[], options: ExecFileOptions) =>
+    args.includes('rev-parse')
+      ? Promise.resolve({ stdout: 'true', stderr: '' })
+      : startChild('sh', ['-c', script, 'sh', told, ready], options, dir),
+  );
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const response = Promise.resolve(link());
+  await until('the child trapped SIGTERM', () => existsSync(ready));
+  await vi.advanceTimersByTimeAsync(DEADLINE_MS - 1);
+  expect(existsSync(told)).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  await until('the deadline sent SIGTERM', () => existsSync(told));
+  await sleep(100);
+  expect(alive(child!)).toBe(true);
+  await vi.advanceTimersByTimeAsync(GRACE_MS - 1);
+  await sleep(100);
+  expect(alive(child!)).toBe(true);
+  await vi.advanceTimersByTimeAsync(1);
+  expect((await answeredWithin(3_000, response)).status).toBe(409);
+  expect(child!.signalCode).toBe('SIGKILL');
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('answers at the deadline although a grandchild still holds the git output pipes', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'relink-pipes-'));
+  dirs.push(dir);
+  const pidFile = path.join(dir, 'grandchild-pid');
+  const ready = path.join(dir, 'ready');
+  // A git that leaves a background process holding its output pipes, then waits to be stopped.
+  const script = `sleep 30 & echo $! > "$1"; : > "$2"; exec sleep 100`;
+  h.git.mockImplementation((_command, args: string[], options: ExecFileOptions) =>
+    args.includes('rev-parse')
+      ? Promise.resolve({ stdout: 'true', stderr: '' })
+      : startChild('sh', ['-c', script, 'sh', pidFile, ready], options, dir),
+  );
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const response = Promise.resolve(link());
+  let grandchild = 0;
+  try {
+    await until('the grandchild took the pipes', () => existsSync(ready));
+    grandchild = Number(readFileSync(pidFile, 'utf8'));
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    expect((await answeredWithin(3_000, response)).status).toBe(409);
+    expect(running(grandchild)).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    if (grandchild) process.kill(grandchild, 'SIGKILL');
+    child?.kill('SIGKILL');
+    await response;
+  }
+});
+
+it('refuses a git call without a child process after the deadline and grace', async () => {
+  let finish!: (result: { stdout: string; stderr: string }) => void;
+  h.git.mockResolvedValueOnce({ stdout: 'true\n', stderr: '' }).mockReturnValueOnce(
+    new Promise((resolve) => {
+      finish = resolve;
+    }),
+  );
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const response = Promise.resolve(link());
+  try {
+    await until('the remote add started', () => h.git.mock.calls.length === 2);
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS + GRACE_MS);
+  } finally {
+    finish({ stdout: '', stderr: '' });
+  }
+  expect((await answeredWithin(3_000, response)).status).toBe(409);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it.each([
+  ['answers', undefined],
+  ['fails', fail(128, 'broken config')],
+])('leaves no timer behind when git %s in time', async (_outcome, failure) => {
+  h.git.mockResolvedValueOnce({ stdout: 'true\n', stderr: '' });
+  if (failure) h.git.mockRejectedValueOnce(failure);
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  expect((await link()).status).toBe(failure ? 409 : 200);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('answers with the failed restore, not the lost connection, when the callback cannot restore', async () => {
+  const old = 'https://old.test/r';
+  fake.patch(schema.repositories, REPO, { remoteUrl: old });
+  const failure = new Error('connection closed');
+  let drop!: (error: Error) => void;
+  const dropped = new Promise<never>((_resolve, reject) => {
+    drop = reject;
+  });
+  h.db = new Proxy(fake.db, {
+    get(target, key) {
+      if (key === 'transaction')
+        return (fn: (tx: any) => Promise<unknown>) =>
+          // postgres.js can reject on connection close before its callback finishes.
+          Promise.race([
+            target.transaction((tx) =>
+              fn(
+                new Proxy(tx, {
+                  get(t, prop) {
+                    if (prop === 'update')
+                      return () => ({
+                        set: () => ({
+                          where: async () => {
+                            drop(failure);
+                            throw failure;
+                          },
+                        }),
+                      });
+                    const value = Reflect.get(t, prop);
+                    return typeof value === 'function' ? value.bind(t) : value;
+                  },
+                }),
+              ),
+            ),
+            dropped,
+          ]);
+      const value = Reflect.get(target, key);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  h.git.mockImplementation(async (_command, args: string[]) => {
+    if (args.includes('rev-parse')) return { stdout: 'true', stderr: '' };
+    if (args.includes('remote') && args.includes('add')) throw fail(3, 'exists');
+    if (args.includes('--get-all')) {
+      if (args.at(-1) === 'remote.origin.url') return { stdout: old, stderr: '' };
+      throw fail(1, 'absent');
+    }
+    if (args.includes('--replace-all') && args.at(-1) === old) throw fail(128, 'restore refused');
+    return { stdout: '', stderr: '' };
+  });
+  const errors = vi.spyOn(logger, 'error').mockImplementation(() => {});
+  try {
+    const res = await link();
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({
+      error: 'Remote update failed and the previous remote could not be restored',
+      code: null,
+    });
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe(old);
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+    // The callback's restore logged its failure; the outer restore returned that same failure.
+    expect(errors).toHaveBeenCalledTimes(1);
+  } finally {
+    errors.mockRestore();
+  }
+});
+
+it.each([false, true])(
+  'keeps a killed update argv out of the response and restore log (restore fails=%s)',
+  async (restoreFails) => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'relink-safe-error-'));
+    dirs.push(dir);
+    const config = path.join(dir, 'config');
+    execFileSync('mkfifo', [config]);
+    const old = 'https://old.test/r';
+    const submitted = 'https://synthetic-user:synthetic-password@example.test/r';
+    h.git.mockImplementation((_command, args: string[], options: ExecFileOptions) => {
+      if (args.includes('rev-parse')) return Promise.resolve({ stdout: 'true', stderr: '' });
+      if (args.includes('remote') && args.includes('add')) return Promise.reject(fail(3, 'exists'));
+      if (args.includes('--get-all'))
+        return args.at(-1) === 'remote.origin.url'
+          ? Promise.resolve({ stdout: old, stderr: '' })
+          : Promise.reject(fail(1, 'absent'));
+      if (args.at(-1) === 'https://example.test/r')
+        return startChild(
+          'git',
+          hardenGitArgs(['config', '--file', config, 'remote.origin.url', submitted]),
+          options,
+          dir,
+        );
+      if (args.at(-1) === old && restoreFails) return Promise.reject(fail(128, 'restore refused'));
+      return Promise.resolve({ stdout: '', stderr: '' });
+    });
+    const errors = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const response = Promise.resolve(link(submitted));
+      await until('git took its lock', () => existsSync(`${config}.lock`));
+      await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+      const answer = await answeredWithin(3_000, response);
+      expect(answer.status).toBe(restoreFails ? 500 : 409);
+      const text = await answer.text();
+      const logLines = JSON.stringify(
+        errors.mock.calls.map(([fields, msg]) => {
+          const record = fields as Record<string, unknown>;
+          return { ...record, err: serializeError(record.err), msg };
+        }),
+      );
+      expect(text + logLines).not.toMatch(
+        /https:|synthetic-user|synthetic-password|example\.test|Command failed|remote\.origin\.url/,
+      );
+      expect(errors).toHaveBeenCalledTimes(restoreFails ? 1 : 0);
+      if (!restoreFails) expect(text).toContain('SIGTERM');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      errors.mockRestore();
+    }
+  },
+);
+
+it.each(['rev-parse', 'snapshot'])(
+  'refuses a clean git exit delivered in the deadline turn (%s)',
+  async (stage) => {
+    const old = 'https://old.test/r';
+    fake.patch(schema.repositories, REPO, { remoteUrl: old });
+    let finish!: (value: { stdout: string; stderr: string }) => void;
+    const destroy = vi.fn();
+    // Git has exited 0, but execFile has not yet drained its output/fulfilled its promise.
+    // The deadline closes those pipes, then the successful completion arrives in that turn.
+    const kill = vi.fn(() => {
+      finish({ stdout: '', stderr: '' });
+      return false;
+    });
+    const pending = Object.assign(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+      {
+        child: { exitCode: 0, stdout: { destroy }, stderr: { destroy }, kill },
+      },
+    );
+    h.git.mockImplementation((_command, args: string[]) => {
+      if (args.includes('rev-parse'))
+        return stage === 'rev-parse' ? pending : Promise.resolve({ stdout: 'true', stderr: '' });
+      if (args.includes('remote') && args.includes('add')) return Promise.reject(fail(3, 'exists'));
+      if (args.includes('--get-all') && args.at(-1) === 'remote.origin.url') return pending;
+      return Promise.resolve({ stdout: '', stderr: '' });
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const response = Promise.resolve(link());
+    await until(
+      'the timed call started',
+      () => h.git.mock.calls.length === (stage === 'rev-parse' ? 1 : 3),
+    );
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    const answer = await answeredWithin(3_000, response);
+    expect(answer.status).toBe(409);
+    expect(await answer.text()).toContain(
+      stage === 'rev-parse' ? 'no answer' : 'Could not read the previous remote',
+    );
+    expect(kill).toHaveBeenCalledWith('SIGTERM');
+    expect(destroy).toHaveBeenCalledTimes(2);
+    expect(
+      h.git.mock.calls.some(
+        (call) => call[1].includes('--unset-all') || call[1].includes('--replace-all'),
+      ),
+    ).toBe(false);
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe(old);
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  },
+);
+
+// A clean mutation still happened when its output pipes were closed at the deadline.
+it.each(['add', 'clear', 'restore', 'update'])(
+  'keeps git and the row consistent after a deadline-turn mutation (%s)',
+  async (stage) => {
+    const old = 'https://old.test/r';
+    const push = 'https://push.test/r';
+    const existing = stage !== 'add';
+    fake.patch(schema.repositories, REPO, { remoteUrl: existing ? old : null });
+    let urls = existing ? [old] : [];
+    let pushUrls = existing ? [push] : [];
+    let atDeadline = false;
+    let finish!: (value: { stdout: string; stderr: string }) => void;
+    const pending = Object.assign(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+      {
+        child: {
+          exitCode: 0,
+          kill: () => {
+            finish({ stdout: '', stderr: '' });
+            return false;
+          },
+        },
+      },
+    );
+    const events: string[] = [];
+    h.git.mockImplementation((_command, args: string[]) => {
+      const done = () => Promise.resolve({ stdout: '', stderr: '' });
+      const timed = () => {
+        atDeadline = true;
+        return pending;
+      };
+      if (args.includes('rev-parse')) return Promise.resolve({ stdout: 'true', stderr: '' });
+      if (args.includes('remote')) {
+        if (args.includes('remove')) {
+          urls = [];
+          events.push('remove');
+          return done();
+        }
+        if (existing) return Promise.reject(fail(3, 'exists'));
+        urls = [args.at(-1)!];
+        return timed();
+      }
+      const key = args.includes('--replace-all') ? args.at(-2) : args.at(-1);
+      if (args.includes('--get-all'))
+        return Promise.resolve({
+          stdout: (key === 'remote.origin.url' ? urls : pushUrls).join('\n'),
+          stderr: '',
+        });
+      if (args.includes('--unset-all')) {
+        if (key === 'remote.origin.url') urls = [];
+        else pushUrls = [];
+        return stage === 'clear' && !atDeadline ? timed() : done();
+      }
+      if (args.includes('--replace-all')) {
+        const value = args.at(-1)!;
+        if (value === 'https://example.test/r' && stage === 'restore')
+          return Promise.reject(fail(128, 'update refused'));
+        if (key === 'remote.origin.url') urls = [value];
+        else pushUrls = [value];
+        events.push(value);
+        if ((stage === 'restore' && value === old) || (stage === 'update' && !atDeadline))
+          return timed();
+      }
+      return done();
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const response = Promise.resolve(link());
+    await until('the mutation applied before its completion', () => atDeadline);
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    expect((await answeredWithin(3_000, response)).status).toBe(409);
+    expect(urls).toEqual(existing ? [old] : []);
+    expect(pushUrls).toEqual(existing ? [push] : []);
+    expect(events).toContain(existing ? old : 'remove');
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe(existing ? old : null);
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  },
+);
+
+it.each(['exit', 'spawn', 'sync'])(
+  'reports only a safe exit fallback for an exec failure (%s)',
+  async (failure) => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'relink-exec-fallback-'));
+    dirs.push(dir);
+    const sensitive =
+      'https://synthetic-user:synthetic-password@example.test/r?tok=synthetic-token';
+    h.git.mockImplementation((_command, args: string[], options: ExecFileOptions) => {
+      if (args.includes('rev-parse')) return Promise.resolve({ stdout: 'true', stderr: '' });
+      if (failure === 'exit') return startChild('sh', ['-c', 'exit 23', sensitive], options, dir);
+      if (failure === 'spawn')
+        return startChild(path.join(dir, 'missing-git'), [sensitive], options, dir);
+      // execFile throws before returning a promise, and its message quotes this argument.
+      return startChild('git', ['remote', 'add', 'origin', sensitive + '\0argument'], options, dir);
+    });
+    const answer = await link();
+    expect(answer.status).toBe(409);
+    expect(await answer.json()).toEqual({
+      error: `Could not add the remote: exit ${failure === 'exit' ? 23 : -1}`,
+      code: null,
+    });
+    expect(h.git).toHaveBeenCalledTimes(2);
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+  },
+);
+
+it.each(['probe', 'add', 'snapshot', 'clear', 'update'])(
+  'redacts URL credentials from real child stderr at the relink %s stage',
+  async (stage) => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'relink-stderr-'));
+    dirs.push(dir);
+    const old = 'https://old.test/r';
+    fake.patch(schema.repositories, REPO, { remoteUrl: old });
+    h.git.mockImplementation((_command, args: string[], options: ExecFileOptions) => {
+      const failing =
+        (stage === 'probe' && args.includes('rev-parse')) ||
+        (stage === 'add' && args.includes('remote') && args.includes('add')) ||
+        (stage === 'snapshot' && args.includes('--get-all')) ||
+        (stage === 'clear' && args.includes('--unset-all')) ||
+        (stage === 'update' &&
+          args.includes('--replace-all') &&
+          args.at(-1) === 'https://example.test/r');
+      if (failing)
+        return startChild(
+          'sh',
+          [
+            '-c',
+            `printf '%s\\n' "$1" >&2; exit 128`,
+            'sh',
+            "fatal: URL 'https://synthetic-user:synthetic-password@host/r?tok=synthetic-token#synthetic-fragment' uses plaintext credentials",
+          ],
+          options,
+          dir,
+        );
+      if (args.includes('rev-parse')) return Promise.resolve({ stdout: 'true', stderr: '' });
+      if (args.includes('remote') && args.includes('add')) return Promise.reject(fail(3, 'exists'));
+      if (args.includes('--get-all'))
+        return args.at(-1) === 'remote.origin.url'
+          ? Promise.resolve({ stdout: old, stderr: '' })
+          : Promise.reject(fail(1, 'absent'));
+      return Promise.resolve({ stdout: '', stderr: '' });
+    });
+    const answer = await link();
+    expect(answer.status).toBe(409);
+    const body = await answer.text();
+    expect(body).toContain("fatal: URL 'https://host/r' uses plaintext credentials");
+    expect(body).not.toMatch(
+      /synthetic-user|synthetic-password|synthetic-token|synthetic-fragment|tok=/,
+    );
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe(old);
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
   },
 );

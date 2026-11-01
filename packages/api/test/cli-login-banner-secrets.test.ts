@@ -97,6 +97,9 @@ beforeEach(() => {
   h.probeGate = undefined;
   providerName = 'claude-code';
   h.db = {
+    transaction: async (fn: (tx: unknown) => unknown) => fn(h.db),
+    insert: () => ({ values: async () => {} }),
+    select: () => ({ from: () => ({ where: () => ({ for: async () => [{ envVars: {} }] }) }) }),
     query: {
       users: { findFirst: async () => ({ id: 'user', status: 'active', tokenVersion: 0 }) },
       cliProviders: { findFirst: async () => ({ id: PROVIDER, name: providerName, envVars: {} }) },
@@ -1590,4 +1593,20 @@ describe('CLI login banner auth URL chunking', () => {
     stream.emit('data', Buffer.from('oauth2 consent screen\n'));
     expect(notExtracted()).toBe(0);
   });
+});
+
+it('an audit refusal fails the captured login before credential storage or its probe', async () => {
+  await start();
+  stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
+  paste();
+  (h.db as { insert: () => never }).insert = () => {
+    throw new Error('audit refused');
+  };
+  stream.emit('data', Buffer.from(`${TOKEN}\n\n`));
+  stream.emit('end');
+  await settle();
+  expect(h.save).not.toHaveBeenCalled();
+  expect(h.probe).not.toHaveBeenCalled();
+  expect(ws.send.mock.calls.some(([raw]) => JSON.parse(raw).type === 'error')).toBe(true);
+  expect(ws.send.mock.calls.some(([raw]) => JSON.parse(raw).type === 'saved')).toBe(false);
 });

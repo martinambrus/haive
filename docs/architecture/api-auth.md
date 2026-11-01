@@ -76,7 +76,7 @@ bucket and reserves a member in all of them or in none, so parallel attempts can
 is recorded. A refused attempt adds nothing, so the only lockout is the window sliding past; it answers
 429 with `Retry-After` and `{error, code: 'rate_limited', retryAfterSeconds}` (the web form shows `error`
 verbatim, and a browser cannot read `Retry-After` cross-origin, so the wait is in the sentence), and has
-touched neither the database nor bcrypt. A success removes its own member: only failures cost budget, because the e2e suite
+run no bcrypt; its only database work is the audit row below, written after the answer. A success removes its own member: only failures cost budget, because the e2e suite
 registers about 22 users a minute from one address and a count-all budget would have flaked it. The
 throttle runs after the body is validated and before any bcrypt or database work. If Redis is not ready,
 rejects, or does not answer within 400 ms the attempt is admitted and one warning is logged: the shared
@@ -97,6 +97,19 @@ use: RFC 1918, loopback, link-local, unique-local and the other special ranges) 
 bucket is neither counted nor enforced and only the account bucket applies. An address a trusted proxy supplied
 through `X-Forwarded-For` is counted even when it is private, because the operator configured that proxy and
 the address is then a real client. A public peer keeps the bucket.
+
+**Sign-ins, registrations and password changes leave audit rows.** A successful sign-in writes
+`auth.login.success` in the transaction that stores its refresh token, and a failed one
+`auth.login.failure` (`reason: 'invalid_credentials'`, the account as target when the email matched) before
+the 401, so a row the database refuses answers 500, never a session or a 401 without its row. Registration
+(`user.register`: `role`, `invited`, `firstRun`) and a password change (`user.password.change`, `forced` for
+the must-change flow) write theirs in the change's own transaction, so a refused row undoes the account or the
+new hash. A throttled sign-in writes `auth.login.throttled` with `limiter: 'account' | 'address'`, the limiter
+whose bucket refused it, and names the account only when the account limiter refused. It is written at most
+once per refused bucket per window (a `SET NX` key `<bucket>:audit` that expires with the window) and never
+makes the 429 wait: the lookup and the insert run after the answer, and a failure is logged (`failed to audit
+throttled sign-in`), not raised, because a stalled database must not slow a refusal. A refused registration
+writes no row.
 
 Accepted limits. Someone who knows an email can keep its bucket full for as long as they keep sending, and the
 owner then gets 429 even with the right password; behind the default bridge there is no address to tell the

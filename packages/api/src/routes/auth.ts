@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { Hono } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 import { count, eq, and, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -15,6 +16,13 @@ import {
   secretsService,
 } from '@haive/shared';
 import { getDb } from '../db.js';
+import {
+  ANONYMOUS_AUDIT_ACTOR,
+  insertAuditEvent,
+  recordAuditEvent,
+  logAuditEvent,
+  type AuditEvent,
+} from '../lib/audit.js';
 import { hashPassword, verifyPassword } from '../auth/password.js';
 import {
   signAccessToken,
@@ -25,7 +33,7 @@ import {
 import { setAuthCookies, clearAuthCookies, getRefreshCookie } from '../auth/cookies.js';
 import { checkInvite, hashInviteToken } from '../lib/invites.js';
 import { decideRegistration } from '../lib/registration.js';
-import { reserveAuthAttempt } from '../lib/auth-throttle.js';
+import { AuthThrottleError, reserveAuthAttempt } from '../lib/auth-throttle.js';
 import { requireAuthAllowingPasswordChange } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
@@ -79,6 +87,7 @@ authRoutes.post('/register', async (c) => {
 
   // Hashing is deliberately outside the transaction below: bcrypt takes ~100ms and the transaction
   // holds a lock every other registration queues behind.
+  let registrationEvent: AuditEvent;
   const user = await db.transaction(async (tx) => {
     // Serialise the count-then-insert. Without it two simultaneous first-registrations both read
     // zero users and BOTH become admin — the one race this feature has, and it is invisible in
@@ -171,11 +180,20 @@ authRoutes.post('/register', async (c) => {
       }
     }
 
+    registrationEvent = {
+      actorUserId: inserted[0]!.id,
+      action: 'user.register',
+      targetType: 'user',
+      targetId: inserted[0]!.id,
+      metadata: { role, invited: invite !== null, firstRun: decision.firstRun },
+    };
+    await insertAuditEvent(tx, registrationEvent);
     if (decision.firstRun) {
       log.info({ userId: inserted[0]!.id }, 'first account created — anointed as administrator');
     }
-    return inserted[0]!;
+    return { ...inserted[0]!, firstRun: decision.firstRun };
   });
+  logAuditEvent(registrationEvent!);
   const { accessToken, refreshToken, expiresAt } = await issueTokens(
     user.id,
     user.role,
@@ -230,14 +248,50 @@ authRoutes.post('/login', async (c) => {
   const fieldKey = await configService.getEncryptionKey();
   const pepper = await secretsService.getEmailBlindIndexPepper();
   const blindIndex = computeEmailBlindIndex(body.email, pepper);
-  const attempt = await reserveAuthAttempt(c, 'login', blindIndex);
-  const db = getDb();
+  let attempt;
+  try {
+    attempt = await reserveAuthAttempt(c, 'login', blindIndex);
+  } catch (err) {
+    if (!(err instanceof HTTPException) || err.status !== 429) throw err;
+    if (err instanceof AuthThrottleError && err.auditAllowed) {
+      void (async () => {
+        const db = getDb();
+        const existing =
+          err.limiter === 'account'
+            ? await db.query.users.findFirst({
+                where: eq(schema.users.emailBlindIndex, blindIndex),
+                columns: { id: true },
+              })
+            : undefined;
+        await recordAuditEvent(db, {
+          actorUserId: ANONYMOUS_AUDIT_ACTOR,
+          action: 'auth.login.throttled',
+          targetType: 'user',
+          targetId: existing?.id ?? null,
+          metadata: { reason: 'throttled', limiter: err.limiter },
+        });
+      })().catch((auditError: unknown) => {
+        log.error({ err: auditError }, 'failed to audit throttled sign-in');
+      });
+    }
+    throw err;
+  }
 
+  const db = getDb();
   const user = await db.query.users.findFirst({
     where: eq(schema.users.emailBlindIndex, blindIndex),
   });
   const ok = await verifyPassword(body.password, user?.passwordHash ?? DUMMY_PASSWORD_HASH);
   if (!user || user.status !== 'active' || !ok) {
+    const event: AuditEvent = {
+      actorUserId: ANONYMOUS_AUDIT_ACTOR,
+      action: 'auth.login.failure',
+      targetType: 'user',
+      targetId: user?.id ?? null,
+      metadata: { reason: 'invalid_credentials' },
+    };
+    await insertAuditEvent(db, event);
+    logAuditEvent(event);
     throw new HttpError(401, 'Invalid credentials');
   }
 
@@ -246,11 +300,21 @@ authRoutes.post('/login', async (c) => {
     user.role,
     user.tokenVersion,
   );
-  await db.insert(schema.refreshTokens).values({
-    userId: user.id,
-    tokenHash: hashRefreshToken(refreshToken),
-    expiresAt,
+  const event: AuditEvent = {
+    actorUserId: user.id,
+    action: 'auth.login.success',
+    targetType: 'user',
+    targetId: user.id,
+  };
+  await db.transaction(async (tx) => {
+    await tx.insert(schema.refreshTokens).values({
+      userId: user.id,
+      tokenHash: hashRefreshToken(refreshToken),
+      expiresAt,
+    });
+    await insertAuditEvent(tx, event);
   });
+  logAuditEvent(event);
   setAuthCookies(c, accessToken, refreshToken);
   await attempt.refund();
 

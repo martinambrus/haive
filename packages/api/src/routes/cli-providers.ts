@@ -43,6 +43,7 @@ import {
   parseClaudeAuthCode,
 } from '@haive/shared/claude-oauth';
 import { getDb } from '../db.js';
+import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { getRedis } from '../redis.js';
 import { requireAuth } from '../middleware/auth.js';
 import {
@@ -53,6 +54,14 @@ import {
 import { getCliExecQueue, getUsagePollQueue } from '../queues.js';
 import { enqueueCliVersionRefresh } from '../lib/cli-version-refresh.js';
 import { loadPollableJob } from '../lib/cli-job-poll.js';
+
+function secretAuditMetadata(names: Iterable<string>): {
+  secretCount: number;
+  secretNames: string[];
+} {
+  const sorted = [...new Set(names)].sort();
+  return { secretCount: sorted.length, secretNames: sorted.slice(0, 50) };
+}
 
 async function loadOwnedProvider(db: Database, userId: string, providerId: string) {
   const provider = await db.query.cliProviders.findFirst({
@@ -353,6 +362,7 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
   const split = body.envVars ? splitSecretLikeEnv(body.envVars) : null;
   const model = body.model?.trim() || null;
   const provisioningModel = shouldProvisionOllamaModel({ name: body.name, model });
+  let secretEvent: AuditEvent | undefined;
   const inserted = await db.transaction(async (tx) => {
     await admitNewWork(tx);
     const rows = await tx
@@ -394,10 +404,24 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
         onExisting: 'overwrite',
       });
     }
+    if (Object.keys(split?.secrets ?? {}).length > 0) {
+      secretEvent = {
+        actorUserId: userId,
+        action: 'cli_provider.secret.set',
+        targetType: 'cli_provider',
+        targetId: rows[0]!.id,
+        metadata: {
+          source: 'environment',
+          ...secretAuditMetadata(Object.keys(split?.secrets ?? {})),
+        },
+      };
+      await insertAuditEvent(tx, secretEvent);
+    }
     return rows;
   });
 
   const created = inserted[0]!;
+  if (secretEvent) logAuditEvent(secretEvent);
   await enqueueBuildForProvider(created.id, userId);
   if (provisioningModel) await enqueueOllamaProvisionForProvider(created.id, userId);
   return c.json(
@@ -509,6 +533,18 @@ cliProviderRoutes.patch('/:id', async (c) => {
     }
   }
 
+  const secretEvent: AuditEvent | undefined = Object.keys(split?.secrets ?? {}).length
+    ? {
+        actorUserId: userId,
+        action: 'cli_provider.secret.set',
+        targetType: 'cli_provider',
+        targetId: id,
+        metadata: {
+          source: 'environment',
+          ...secretAuditMetadata(Object.keys(split?.secrets ?? {})),
+        },
+      }
+    : undefined;
   const updated = await db.transaction(async (tx) => {
     if (startsJob) await admitNewWork(tx);
     const rows = await tx
@@ -525,9 +561,11 @@ cliProviderRoutes.patch('/:id', async (c) => {
         onExisting: 'overwrite',
       });
     }
+    if (secretEvent) await insertAuditEvent(tx, secretEvent);
     return rows;
   });
   const updatedRow = updated[0]!;
+  if (secretEvent) logAuditEvent(secretEvent);
 
   if (provisioningModel) await enqueueOllamaProvisionForProvider(id, userId);
   const modelStatusOverride = provisioningModel
@@ -553,11 +591,22 @@ cliProviderRoutes.delete('/:id', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
-  const result = await db
-    .delete(schema.cliProviders)
-    .where(and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)))
-    .returning({ id: schema.cliProviders.id, imageTag: schema.cliProviders.sandboxImageTag });
-  if (result.length === 0) throw new HttpError(404, 'CLI provider not found');
+  const event: AuditEvent = {
+    actorUserId: userId,
+    action: 'cli_provider.delete',
+    targetType: 'cli_provider',
+    targetId: id,
+  };
+  const result = await db.transaction(async (tx) => {
+    const result = await tx
+      .delete(schema.cliProviders)
+      .where(and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)))
+      .returning({ id: schema.cliProviders.id, imageTag: schema.cliProviders.sandboxImageTag });
+    if (result.length === 0) throw new HttpError(404, 'CLI provider not found');
+    await insertAuditEvent(tx, event);
+    return result;
+  });
+  logAuditEvent(event);
   const imageTag = result[0]!.imageTag;
   if (imageTag) {
     const payload: SandboxImageRemoveJobPayload = { providerId: id, imageTag };
@@ -719,6 +768,7 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
   // A source saved before the split still holds secret-looking keys in envVars; the clone does not.
   const split = splitSecretLikeEnv(source.envVars ?? {});
   const provisioningModel = shouldProvisionOllamaModel(source);
+  let cloneEvent: AuditEvent;
   const created = await db.transaction(async (tx) => {
     await admitNewWork(tx);
     const inserted = await tx
@@ -777,9 +827,24 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
         });
       }
     }
+    cloneEvent = {
+      actorUserId: userId,
+      action: 'cli_provider.clone',
+      targetType: 'cli_provider',
+      targetId: row.id,
+      metadata: {
+        sourceProviderId: source.id,
+        ...secretAuditMetadata([
+          ...sourceSecrets.map((s) => s.secretName),
+          ...Object.keys(split.secrets),
+        ]),
+      },
+    };
+    await insertAuditEvent(tx, cloneEvent);
     return row;
   });
 
+  logAuditEvent(cloneEvent!);
   await enqueueBuildForProvider(created.id, userId);
   if (provisioningModel) await enqueueOllamaProvisionForProvider(created.id, userId);
   return c.json(
@@ -830,13 +895,26 @@ cliProviderRoutes.post('/:providerId/secrets', async (c) => {
     ),
     columns: { id: true },
   });
-  const secret = await upsertProviderSecret(db, {
-    providerId,
-    name: body.secretName,
-    value: body.value,
-    masterKek: await secretsService.getMasterKek(),
-    onExisting: 'overwrite',
+  const event: AuditEvent = {
+    actorUserId: userId,
+    action: 'cli_provider.secret.set',
+    targetType: 'cli_provider',
+    targetId: providerId,
+    metadata: { source: 'manual', secretName: body.secretName },
+  };
+  const masterKek = await secretsService.getMasterKek();
+  const secret = await db.transaction(async (tx) => {
+    await insertAuditEvent(tx, event);
+    const secret = await upsertProviderSecret(tx, {
+      providerId,
+      name: body.secretName,
+      value: body.value,
+      masterKek,
+      onExisting: 'overwrite',
+    });
+    return secret;
   });
+  logAuditEvent(event);
   return existing ? c.json({ secret }) : c.json({ secret }, 201);
 });
 
@@ -913,25 +991,38 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
     );
   }
   const { verifier } = JSON.parse(taken) as { verifier: string };
-  let tokens;
-  try {
-    tokens = await exchangeClaudeAuthCode(code, verifier, state);
-  } catch (err) {
-    throw new HttpError(400, err instanceof Error ? err.message : 'Token exchange failed');
-  }
-  if (!claudeTokensHaveUsageScope(tokens)) {
-    throw new HttpError(
-      400,
-      'The granted token is missing the user:profile scope required for usage tracking.',
-    );
-  }
-  await upsertProviderSecret(db, {
-    providerId,
-    name: CLAUDE_USAGE_OAUTH_SECRET,
-    value: JSON.stringify(tokens),
-    masterKek: await secretsService.getMasterKek(),
-    onExisting: 'overwrite',
+  const event: AuditEvent = {
+    actorUserId: userId,
+    action: 'cli_provider.secret.set',
+    targetType: 'cli_provider',
+    targetId: providerId,
+    metadata: { source: 'usage_oauth', secretName: CLAUDE_USAGE_OAUTH_SECRET },
+  };
+  const masterKek = await secretsService.getMasterKek();
+  const tokens = await db.transaction(async (tx) => {
+    await insertAuditEvent(tx, event);
+    let tokens;
+    try {
+      tokens = await exchangeClaudeAuthCode(code, verifier, state);
+    } catch (err) {
+      throw new HttpError(400, err instanceof Error ? err.message : 'Token exchange failed');
+    }
+    if (!claudeTokensHaveUsageScope(tokens)) {
+      throw new HttpError(
+        400,
+        'The granted token is missing the user:profile scope required for usage tracking.',
+      );
+    }
+    await upsertProviderSecret(tx, {
+      providerId,
+      name: CLAUDE_USAGE_OAUTH_SECRET,
+      value: JSON.stringify(tokens),
+      masterKek,
+      onExisting: 'overwrite',
+    });
+    return tokens;
   });
+  logAuditEvent(event);
   // Kick an immediate usage poll so the header meter refreshes within seconds instead of
   // waiting for the ~5-min repeatable tick: the freshly rotated token clears the worker's
   // dead-token gate and this poll overwrites the needs_reconnect snapshot with a live one.
@@ -963,19 +1054,32 @@ cliProviderRoutes.delete('/:providerId/usage-auth', async (c) => {
   const providerId = c.req.param('providerId');
   const db = getDb();
   await loadOwnedProvider(db, userId, providerId);
-  await db
-    .delete(schema.cliProviderSecrets)
-    .where(
-      and(
-        eq(schema.cliProviderSecrets.providerId, providerId),
-        eq(schema.cliProviderSecrets.secretName, CLAUDE_USAGE_OAUTH_SECRET),
-      ),
-    );
-  // Drop the last usage snapshot too: with no token the poller will never touch this row
-  // again, so a stale meter / needs_reconnect chip would otherwise linger indefinitely.
-  await db
-    .delete(schema.usageWindowSnapshots)
-    .where(eq(schema.usageWindowSnapshots.providerId, providerId));
+  const event: AuditEvent = {
+    actorUserId: userId,
+    action: 'cli_provider.secret.delete',
+    targetType: 'cli_provider',
+    targetId: providerId,
+    metadata: { source: 'usage_oauth', secretName: CLAUDE_USAGE_OAUTH_SECRET },
+  };
+  const deleted = await db.transaction(async (tx) => {
+    const rows = await tx
+      .delete(schema.cliProviderSecrets)
+      .where(
+        and(
+          eq(schema.cliProviderSecrets.providerId, providerId),
+          eq(schema.cliProviderSecrets.secretName, CLAUDE_USAGE_OAUTH_SECRET),
+        ),
+      )
+      .returning({ id: schema.cliProviderSecrets.id });
+    if (rows.length > 0) await insertAuditEvent(tx, event);
+    // Drop the last usage snapshot too: with no token the poller will never touch this row
+    // again, so a stale meter / needs_reconnect chip would otherwise linger indefinitely.
+    await tx
+      .delete(schema.usageWindowSnapshots)
+      .where(eq(schema.usageWindowSnapshots.providerId, providerId));
+    return rows.length > 0;
+  });
+  if (deleted) logAuditEvent(event);
   return c.json({ connected: false });
 });
 
@@ -986,15 +1090,26 @@ cliProviderRoutes.delete('/:providerId/secrets/:secretName', async (c) => {
   const db = getDb();
   await loadOwnedProvider(db, userId, providerId);
 
-  const result = await db
-    .delete(schema.cliProviderSecrets)
-    .where(
-      and(
-        eq(schema.cliProviderSecrets.providerId, providerId),
-        eq(schema.cliProviderSecrets.secretName, secretName),
-      ),
-    )
-    .returning({ id: schema.cliProviderSecrets.id });
-  if (result.length === 0) throw new HttpError(404, 'Secret not found');
+  const event: AuditEvent = {
+    actorUserId: userId,
+    action: 'cli_provider.secret.delete',
+    targetType: 'cli_provider',
+    targetId: providerId,
+    metadata: { source: 'manual', secretName },
+  };
+  await db.transaction(async (tx) => {
+    const result = await tx
+      .delete(schema.cliProviderSecrets)
+      .where(
+        and(
+          eq(schema.cliProviderSecrets.providerId, providerId),
+          eq(schema.cliProviderSecrets.secretName, secretName),
+        ),
+      )
+      .returning({ id: schema.cliProviderSecrets.id });
+    if (result.length === 0) throw new HttpError(404, 'Secret not found');
+    await insertAuditEvent(tx, event);
+  });
+  logAuditEvent(event);
   return c.json({ ok: true });
 });

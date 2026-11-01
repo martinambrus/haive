@@ -34,7 +34,7 @@ app.route('/', cliProviderRoutes);
 app.onError(errorHandler);
 
 function setup(sandboxImageTag: string | null) {
-  const fake = createFakeDb({ cliProviders: schema.cliProviders });
+  const fake = createFakeDb({ auditEvents: schema.auditEvents, cliProviders: schema.cliProviders });
   fake.insert(schema.cliProviders, {
     id: PROVIDER,
     userId: USER,

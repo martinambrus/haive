@@ -15,6 +15,8 @@ vi.mock('../src/middleware/auth.js', () => ({
   },
 }));
 import { Hono } from 'hono';
+import { logger } from '@haive/shared';
+import { serializeError } from '@haive/shared/logger';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { hardenGitArgs } from '@haive/shared/git-args';
@@ -34,7 +36,7 @@ async function setup(nested = false) {
   dirs.push(root);
   await git(root, ['init']);
   await git(root, ['remote', 'add', 'origin', 'https://old.test/r']);
-  const fake = createFakeDb({ repositories: schema.repositories });
+  const fake = createFakeDb({ repositories: schema.repositories, auditEvents: schema.auditEvents });
   if (nested) await ensureDirNoFollow(root, 'nested');
   fake.insert(schema.repositories, {
     id: REPO,
@@ -185,6 +187,31 @@ it('relink clears planted push URLs and extra fetch URLs in real git', async () 
   );
   expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe('https://new.test/r');
 });
+
+it('redacts the real credentialsInUrl die diagnostic from the relink 409', async () => {
+  const { root, link, fake } = await setup();
+  const remote = 'https://synthuser:synthpass@example.invalid/r?tok=1#fixture-fragment';
+  await git(root, ['config', '--replace-all', 'remote.origin.url', remote]);
+  await git(root, ['config', 'transfer.credentialsInUrl', 'die']);
+  // Prove this Git emits the sensitive diagnostic before exercising the same
+  // real child through the route. No shim supplies the response text.
+  const stderr = await git(root, ['remote', 'add', 'origin', 'https://new.test/r']).then(
+    () => '',
+    (err: { stderr?: string }) => err.stderr ?? '',
+  );
+  for (const value of ['synthuser', 'tok=', 'fixture-fragment'])
+    expect(stderr.includes(value), 'plain Git echoes the configured remote').toBe(true);
+
+  const response = await link();
+  expect(response.status).toBe(409);
+  const text = await response.text();
+  expect(text).toContain('https://example.invalid/r');
+  for (const value of ['synthuser', 'synthpass', '<redacted>', 'tok=', 'fixture-fragment'])
+    expect(text.includes(value)).toBe(false);
+  expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+  expect(fake.rows(schema.auditEvents)).toEqual([]);
+  expect((await git(root, ['config', '--get', 'remote.origin.url'])) === remote).toBe(true);
+});
 it('does not relink the parent of a nested non-repository', async () => {
   const { root, link, fake } = await setup(true);
   expect((await link()).status).toBe(409);
@@ -279,4 +306,126 @@ exec ${quote(real)} "$@"
   expect(await git(root, ['remote', 'get-url', 'origin'])).toBe('https://old.test/r');
   expect(await git(root, ['remote', 'get-url', '--push', 'origin'])).toBe('https://planted.test/r');
   expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+});
+
+it('logs both causes in one error when real git cannot restore a failed remote update', async () => {
+  const { root, link, fake, app } = await setup();
+  await git(root, ['config', '--add', 'remote.origin.url', 'https://extra.test/r']);
+  let routedError: Error | undefined;
+  app.onError((err, c) => {
+    routedError = err;
+    return errorHandler(err, c);
+  });
+  const original = Object.assign(new Error('bound synthetic-secret'), {
+    query: 'update repositories set remote_url = $1',
+    params: ['synthetic-secret'],
+  });
+  h.db = new Proxy(fake.db, {
+    get(target, key) {
+      if (key === 'transaction')
+        return (fn: (tx: any) => Promise<unknown>) =>
+          target.transaction((tx) =>
+            fn(
+              new Proxy(tx, {
+                get(t, prop) {
+                  if (prop === 'update')
+                    return () => ({
+                      set: () => ({
+                        where: async () => {
+                          throw original;
+                        },
+                      }),
+                    });
+                  const value = Reflect.get(t, prop);
+                  return typeof value === 'function' ? value.bind(t) : value;
+                },
+              }),
+            ),
+          );
+      const value = Reflect.get(target, key);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const shim = await mkdtemp(path.join(tmpdir(), 'remote-restore-fail-'));
+  dirs.push(shim);
+  const real = (await exec('sh', ['-c', 'command -v git'])).stdout.trim();
+  const quote = (text: string) => "'" + text.replaceAll("'", "'\\''") + "'";
+  await writeFile(
+    path.join(shim, 'git'),
+    `#!/bin/sh
+for arg in "$@"; do if [ "$arg" = --add ]; then exit 128; fi; done
+exec ${quote(real)} "$@"
+`,
+  );
+  await chmod(path.join(shim, 'git'), 0o755);
+  const saved = process.env.PATH;
+  const errors = vi.spyOn(logger, 'error').mockImplementation(() => {});
+  process.env.PATH = `${shim}:${saved}`;
+  try {
+    const response = await link();
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({
+      error: 'Remote update failed and the previous remote could not be restored',
+      code: null,
+    });
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+    expect(await git(root, ['config', '--get-all', 'remote.origin.url'])).toBe(
+      'https://old.test/r',
+    );
+    const diagnostics = errors.mock.calls.map(([fields]) => fields as { err?: unknown });
+    expect(diagnostics).toHaveLength(1);
+    const failure = diagnostics[0]!.err as AggregateError;
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect(failure.cause).toBe(original);
+    expect(failure.errors).toHaveLength(1);
+    expect(failure.errors[0]).toBeInstanceOf(Error);
+    expect(failure.errors[0].message).toBe('remote restore failed');
+    expect(routedError?.cause).toBe(failure);
+    expect(errors.mock.calls[0]![0]).toMatchObject({ repositoryId: REPO });
+    expect(JSON.stringify(diagnostics.map(({ err }) => serializeError(err)))).not.toContain(
+      'synthetic-secret',
+    );
+  } finally {
+    process.env.PATH = saved;
+    errors.mockRestore();
+  }
+});
+
+it('restores fetch and push URLs when replace-all fails after push URL cleanup', async () => {
+  const { root, link, fake } = await setup();
+  await git(root, ['config', '--add', 'remote.origin.url', 'https://extra.test/r']);
+  await git(root, ['config', '--add', 'remote.origin.pushurl', 'https://push.test/r']);
+  await git(root, ['config', '--add', 'remote.origin.pushurl', 'https://push2.test/r']);
+  const shim = await mkdtemp(path.join(tmpdir(), 'remote-replace-fail-'));
+  dirs.push(shim);
+  const real = (await exec('sh', ['-c', 'command -v git'])).stdout.trim();
+  const quote = (text: string) => "'" + text.replaceAll("'", "'\\''") + "'";
+  await writeFile(
+    path.join(shim, 'git'),
+    `#!/bin/sh
+for arg in "$@"; do if [ "$arg" = 'https://new.test/r' ]; then
+  for flag in "$@"; do if [ "$flag" = --replace-all ]; then exit 128; fi; done
+fi; done
+exec ${quote(real)} "$@"
+`,
+  );
+  await chmod(path.join(shim, 'git'), 0o755);
+  const saved = process.env.PATH;
+  process.env.PATH = `${shim}:${saved}`;
+  try {
+    const response = await link();
+    expect(response.status).toBe(409);
+    expect(await response.text()).toContain('Could not update the remote');
+  } finally {
+    process.env.PATH = saved;
+  }
+  expect(await git(root, ['config', '--get-all', 'remote.origin.url'])).toBe(
+    'https://old.test/r\nhttps://extra.test/r',
+  );
+  expect(await git(root, ['config', '--get-all', 'remote.origin.pushurl'])).toBe(
+    'https://push.test/r\nhttps://push2.test/r',
+  );
+  expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+  expect(fake.rows(schema.auditEvents)).toEqual([]);
 });

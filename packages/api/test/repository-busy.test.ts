@@ -1,7 +1,8 @@
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { Hono } from 'hono';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { REPOSITORY_TASKS_LOCK_TIMEOUT_MS } from '@haive/database';
+import { logger } from '@haive/shared';
 import { HttpError, type AppEnv } from '../src/context.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { REPOSITORY_BUSY, boundedLockWait } from '../src/lib/repository-busy.js';
@@ -56,6 +57,24 @@ describe('boundedLockWait', () => {
     expect(err).toBeInstanceOf(HttpError);
     expect(err).toMatchObject({ status: 409, message: REPOSITORY_BUSY });
     expect(log).toEqual(["SET LOCAL lock_timeout = '30000ms'", 'take']);
+  });
+
+  it('logs the timeout without naming any one caller', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      const { tx } = stubTx();
+      const timeout = lockTimeout();
+      await boundedLockWait(tx, async () => {
+        throw timeout;
+      }).catch(() => undefined);
+      expect(warn).toHaveBeenCalledTimes(1);
+      const [fields, message] = warn.mock.calls[0]!;
+      expect(fields).toEqual({ err: timeout });
+      // Task starts, plan routes, upgrades, repository deletes, tooling saves and relinks all take this wait.
+      expect(message).not.toMatch(/task/i);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it.each([new Error('boom'), new HttpError(404, 'Not found')])(

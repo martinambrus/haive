@@ -27,6 +27,37 @@ it('redacts every URL in command errors with the same helper', () => {
   expect(redactGitText(message)).toContain('https://example.test/r');
 });
 
+it.each([
+  ['fatal', ''],
+  ['warning', ''],
+  ['fatal', '#fixture-fragment'],
+])('redacts Git credentialsInUrl diagnostics: case %#', (prefix, fragment) => {
+  const input = `${prefix}: URL 'https://synthuser:<redacted>@example.invalid/r?tok=1${fragment}' uses plaintext credentials`;
+  expect(redactGitText(input)).toBe(
+    `${prefix}: URL 'https://example.invalid/r' uses plaintext credentials`,
+  );
+});
+
+it.each(['<hidden>', '>hidden<', '`hidden`'])(
+  'redacts structural userinfo delimiters regardless of placeholder wording: case %#',
+  (placeholder) => {
+    expect(redactGitText(`https://synthuser:${placeholder}@example.invalid/r?tok=1#fragment`)).toBe(
+      'https://example.invalid/r',
+    );
+  },
+);
+
+it.each([
+  ['https://u:pw@host/r?tok=1', 'https://host/r'],
+  ['<https://host/r>', '<https://host/r>'],
+  ['see https://host then contact x@y', 'see https://host/ then contact x@y'],
+  ['see "https://host" then contact x@y', 'see "https://host/" then contact x@y'],
+  ['see <https://host> then contact x@y', 'see <https://host/> then contact x@y'],
+  ['see `https://host` then contact x@y', 'see `https://host/` then contact x@y'],
+])('preserves diagnostic URL boundaries: case %#', (input, expected) => {
+  expect(redactGitText(input)).toBe(expected);
+});
+
 // Assertions deliberately compare booleans so a red control never prints a secret.
 it.each(["'", '"', '<', '>', '`', '?', '#'])(
   'redacts delimiter case %# without consuming prose',

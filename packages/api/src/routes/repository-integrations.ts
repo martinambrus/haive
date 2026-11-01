@@ -3,7 +3,9 @@ import { z } from 'zod';
 import { and, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { getDb, type Database } from '../db.js';
+import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { requireOwnConnections } from '../lib/integration-choice.js';
+import { boundedLockWait } from '../lib/repository-busy.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
@@ -51,10 +53,27 @@ repositoryIntegrationRoutes.put('/:id/integrations', async (c) => {
   const wanted = new Set(body.connectionIds);
   await requireOwnConnections(db, userId, [...wanted]);
 
+  let event: AuditEvent | undefined;
+  const makeEvent = (added: string[], removed: string[]): AuditEvent => ({
+    actorUserId: userId,
+    action: 'repository.integrations.update',
+    targetType: 'repository',
+    targetId: repositoryId,
+    metadata: { restricted: body.restricted, added, removed },
+  });
   await db.transaction(async (tx) => {
-    await tx.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${`integration-allow-list:${repositoryId}`}, 0))`,
-    );
+    // Bound the advisory key too: a concurrent save may hold it while waiting on a relink's row.
+    const [stored] = await boundedLockWait(tx, async () => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`integration-allow-list:${repositoryId}`}, 0))`,
+      );
+      return tx
+        .select({ restricted: schema.repositories.integrationsRestricted })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, repositoryId))
+        .for('update');
+    });
+    if (!stored) throw new HttpError(404, 'Repository not found');
     const current = new Set(
       (
         await tx
@@ -91,6 +110,11 @@ repositoryIntegrationRoutes.put('/:id/integrations', async (c) => {
           ne(schema.repositories.integrationsRestricted, body.restricted),
         ),
       );
+    if (added.length || removed.length || stored.restricted !== body.restricted) {
+      event = makeEvent(added, removed);
+      await insertAuditEvent(tx, event);
+    }
   });
+  if (event) logAuditEvent(event);
   return c.json({ restricted: body.restricted, connectionIds: [...wanted] });
 });
