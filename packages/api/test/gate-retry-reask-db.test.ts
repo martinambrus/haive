@@ -92,7 +92,6 @@ const GATE_SCHEMA = {
 const NON_GATE_SCHEMA = { title: 't', fields: [{ type: 'text', id: 'note', label: 'Note' }] };
 const ANSWER = { fixLoopAction: 'continue', fixLoopInstruction: 'try the other branch' };
 const STEP = '08b-test-management';
-const STEP_SENSITIVE = '07_5-verify-files';
 
 describe.skipIf(!url)('Retry over a fix-loop gate row on Postgres', () => {
   let db: Database;
@@ -330,65 +329,6 @@ describe.skipIf(!url)('Retry over a fix-loop gate row on Postgres', () => {
       expect(res.status).toBe(200);
       const after = await rowOf(row.id);
       expect(after.formValues).toEqual({ note: 'keep me' });
-    });
-  });
-
-  describe('PATCH /tasks/:id/cli-provider (task-level switch)', () => {
-    const sensitive = (taskId: string, runSeq: number, over = {}) =>
-      seedRow(taskId, { stepId: STEP_SENSITIVE, stepIndex: 7.5, runSeq, round: runSeq, ...over });
-
-    it('drops a gate answer from a waiting form and lists the reset step', async () => {
-      const task = await seedTask('running');
-      const row = await sensitive(task.id, 11);
-
-      const res = await patch(`/tasks/${task.id}/cli-provider`, { cliProviderId: null });
-
-      expect(res.status).toBe(200);
-      expect(((await res.json()) as { invalidatedSteps: string[] }).invalidatedSteps).toEqual([
-        STEP_SENSITIVE,
-      ]);
-      const after = await rowOf(row.id);
-      expect(after.status).toBe('pending');
-      expect(after.formSchema).toBeNull();
-      expect(after.formValues).toBeNull();
-    });
-
-    it('drops a gate answer left on an unparked pending row', async () => {
-      const task = await seedTask('running');
-      const row = await sensitive(task.id, 12, { status: 'pending', formSchema: null });
-
-      const res = await patch(`/tasks/${task.id}/cli-provider`, { cliProviderId: null });
-
-      expect(res.status).toBe(200);
-      expect((await rowOf(row.id)).formValues).toBeNull();
-    });
-
-    it('keeps another form answer, and a non-string fixLoopAction', async () => {
-      const task = await seedTask('running');
-      const note = await sensitive(task.id, 13, {
-        formSchema: NON_GATE_SCHEMA,
-        formValues: { note: 'keep me' },
-      });
-      const numeric = await sensitive(task.id, 14, { formValues: { fixLoopAction: 3 } });
-
-      const res = await patch(`/tasks/${task.id}/cli-provider`, { cliProviderId: null });
-
-      expect(res.status).toBe(200);
-      expect((await rowOf(note.id)).formValues).toEqual({ note: 'keep me' });
-      expect((await rowOf(numeric.id)).formValues).toEqual({ fixLoopAction: 3 });
-    });
-
-    it('leaves a done row on a sensitive step untouched', async () => {
-      const task = await seedTask('running');
-      const row = await sensitive(task.id, 15, { status: 'done', endedAt: new Date() });
-
-      const res = await patch(`/tasks/${task.id}/cli-provider`, { cliProviderId: null });
-
-      expect(res.status).toBe(200);
-      expect(((await res.json()) as { invalidatedSteps: string[] }).invalidatedSteps).toEqual([]);
-      const after = await rowOf(row.id);
-      expect(after.status).toBe('done');
-      expect(after.formValues).toEqual(ANSWER);
     });
   });
 });

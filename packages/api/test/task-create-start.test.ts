@@ -444,23 +444,23 @@ describe('disabled providers on task writes', () => {
       expect(h.add).not.toHaveBeenCalled();
     },
   );
-  it.each([
-    ['cli-provider', { cliProviderId: CLI }],
-    ['summary-cli', { summaryCliProviderId: CLI }],
-  ])('rejects a disabled provider on %s updates', async (route, body) => {
-    const t = setup();
-    t.fake.insert(schema.cliProviders, { id: CLI, userId: USER, enabled: false });
-    t.fake.insert(schema.tasks, { id: DRAFT, userId: USER, status: 'running' });
-    const res = await app.request(`/${DRAFT}/${route}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    expect(res.status).toBe(400);
-    expect(await res.json()).toMatchObject({ code: 'cli_provider_disabled' });
-    expect(t.fake.rows(schema.tasks)[0]?.cliProviderId).not.toBe(CLI);
-    expect(t.fake.rows(schema.tasks)[0]?.summaryCliProviderId).not.toBe(CLI);
-  });
+  it.each([['summary-cli', { summaryCliProviderId: CLI }]])(
+    'rejects a disabled provider on %s updates',
+    async (route, body) => {
+      const t = setup();
+      t.fake.insert(schema.cliProviders, { id: CLI, userId: USER, enabled: false });
+      t.fake.insert(schema.tasks, { id: DRAFT, userId: USER, status: 'running' });
+      const res = await app.request(`/${DRAFT}/${route}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ code: 'cli_provider_disabled' });
+      expect(t.fake.rows(schema.tasks)[0]?.cliProviderId).not.toBe(CLI);
+      expect(t.fake.rows(schema.tasks)[0]?.summaryCliProviderId).not.toBe(CLI);
+    },
+  );
 });
 
 describe('provider admission guards', () => {

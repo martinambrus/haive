@@ -252,7 +252,7 @@ step's own. An answer that reopens the task (continue, or accept with a next ste
 records the answer and points the task at its next step in one transaction, under the new-work fence
 and then the repository lock when the task had failed, so a refused or overtaken reopen leaves the
 gate parked with nothing recorded. The refused answer stays saved on its row. A task Retry, a settle
-and a CLI switch (of one step or of the whole task) that reset a row to `pending` drop it
+and a per-step CLI switch that reset a row to `pending` drop it
 (`withoutGateAnswer`, `api/src/lib/task-control.ts`), because every write to a `pending` row is
 refused: a kept answer was a no-op that the stalled sweep re-drove for good. A Retry and a settle
 also set `pause_form_on_retry` on such a row, since a source step that auto-submits its defaults
@@ -478,9 +478,7 @@ statement scans them, each hold one row and want the other's (40P01). `lockStepR
 every other writer but not with the KEY SHARE a pass's run insert holds on the row (a FOR UPDATE would). The takers are
 `resetRowsForRerun` (the whole task), `retryTaskAtStep`, a Stop (`supersedeLiveRuns`), `settleActiveSteps`,
 `reofferParkedSteps` (its parked rows), the loop Resume, `retry_ai`, Skip and a CLI switch when a row is left
-active (`lockRowsForMove`: the sweep and the DAG reset, then the batch, before the clicked row is written), the
-task-level provider switch (`PATCH /tasks/:id/cli-provider`: its provider-sensitive open rows, read and folded in
-the one transaction), the cancel core below, and on the worker `resetStepAndDownstream` (its reset rows) and `foldOtherTaskParks` (its
+active (`lockRowsForMove`: the sweep and the DAG reset, then the batch, before the clicked row is written), the cancel core below, and on the worker `resetStepAndDownstream` (its reset rows) and `foldOtherTaskParks` (its
 parked rows, in a transaction opened only when a plain read finds one). The CANCEL job's step sweep takes its
 open rows through `lockStepRows` in a short transaction of its own, then runs the same UPDATE; no task row is
 held there, since `markTaskCancelled` committed before it. The batch goes behind the transaction's sweeps of
@@ -499,7 +497,7 @@ or agent row of such a late row that a pass or a Stop holds, and to an action th
 Resume with nothing to reset, the loop Resume, `retry_ai`, Skip or a CLI switch with no row left active), which
 holds only the rows it writes itself; the `step-retry-claim-race` smoke pins both (scenarios 5 and 5b). The
 second sweep at the end of the reset still waits: it matches only runs created since the first one. A writer
-that folds a row's run into `carried_*` (`resetRowsForRerun`, the per-step and task-level provider switches,
+that folds a row's run into `carried_*` (`resetRowsForRerun`, the per-step provider switch,
 `resetStepAndDownstream`, the first park of `writeFencedPark` (`foldRun`), `requeueAbandonedOrphan`) reads the
 row after it holds it and folds from that read: its caller's earlier read predates the lock, and a fold or idle
 write that landed since would be written over. `requeueAbandonedOrphan` locks the step's open runs before it
@@ -611,3 +609,5 @@ checkout, so the checkout-holder checks skip it.
 **Display.** A dead task reads as stopped, not running. The Running and "Waiting for slot" filters leave it out, its
 clocks and its list row's timing stop at `dead_at`, it shows no slot wait, and an open plan chat or merge panel
 refreshes once when it first sees the task dead, then re-checks every 30 s so a revive is noticed.
+
+The unused task-level `PATCH /tasks/:id/cli-provider` route is retired. Change a task's CLI through the step-level picker, which preserves the recovery and ownership fences above. Task creation and summary-provider settings remain supported.

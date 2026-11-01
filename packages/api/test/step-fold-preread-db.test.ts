@@ -72,7 +72,7 @@ import type { AppEnv } from '../src/context.js';
 // peer, and the peer commits. The writer must fold the row as the peer left it (idle_ms 6000), so the
 // final carried_* is the seed, plus the peer's share, plus that fold. A writer that folds the row it
 // read before the peer's commit writes carried_* without the peer's share.
-// F2b and F3b seed a second row with the higher id. F3b's peer finishes the first row instead of folding it.
+// F2b seeds a second row with the higher id.
 const STEP = {
   id: '00000000-0000-4000-8000-0000000000a1',
   stepId: PROVIDER_SENSITIVE_STEP_IDS[0]!,
@@ -392,57 +392,6 @@ describe.skipIf(!url)(
           carriedUserActiveMs: 50 + 500 + 800,
         });
         expect((await finalRow(STEP.id)).status).toBe('pending');
-      },
-      TEST_TIMEOUT,
-    );
-
-    it(
-      'F3: the task-level CLI switch folds the row as a peer left it while the switch waited, not the row it read first',
-      async () => {
-        const taskId = await seedTask('running');
-        await seedStep(taskId);
-
-        const response = await besidePeer(() =>
-          patch(`/tasks/${taskId}/cli-provider`, { cliProviderId: null }),
-        );
-
-        expect(response).toMatchObject({
-          status: 200,
-          body: { ok: true, invalidatedSteps: [STEP.stepId] },
-        });
-        expect(await finalRow()).toEqual({
-          status: 'pending',
-          idleMs: 0,
-          userActiveMs: 0,
-          carriedWorkMs: 1000 + 7000,
-          carriedIdleMs: 200 + 3000 + 6000,
-          carriedUserActiveMs: 50 + 500 + 800,
-        });
-      },
-      TEST_TIMEOUT,
-    );
-
-    it(
-      'F3b: a step that finished while the task-level switch waited is left as it is and not reported',
-      async () => {
-        const taskId = await seedTask('running');
-        await seedStep(taskId, { status: 'running', startedAt: new Date(Date.now() - 60_000) });
-        await seedStep(taskId, {}, OTHER);
-
-        const response = await besidePeer(
-          () => patch(`/tasks/${taskId}/cli-provider`, { cliProviderId: null }),
-          (tx) =>
-            tx.execute(
-              sql`update task_steps set status = 'done', ended_at = now() where id = ${STEP.id}`,
-            ),
-        );
-
-        expect(response).toMatchObject({
-          status: 200,
-          body: { ok: true, invalidatedSteps: [OTHER.stepId] },
-        });
-        expect((await finalRow(STEP.id)).status).toBe('done');
-        expect((await finalRow(OTHER.id)).status).toBe('pending');
       },
       TEST_TIMEOUT,
     );

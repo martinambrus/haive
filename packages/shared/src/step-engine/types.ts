@@ -46,11 +46,9 @@ export interface StepMetadata {
    *  per-role dropdowns without importing the worker step registry. */
   cliRoles?: readonly CliRoleDescriptor[];
   /** True when `detect()` resolves CLI-specific paths or metadata from the
-   *  CliProviderMetadata catalog. Switching `task.cliProviderId` invalidates
-   *  cached `detectOutput` on these steps so the next advance re-detects.
-   *  Must match the id listed in PROVIDER_SENSITIVE_STEP_IDS — the API package
-   *  reads that constant to know which task_steps rows to invalidate on
-   *  provider change (it does not have access to the worker step registry). */
+   *  CliProviderMetadata catalog. Mirror built-in step flags in
+   *  PROVIDER_SENSITIVE_STEP_IDS so the API can expose this metadata without
+   *  importing the worker step registry. */
   providerSensitive?: boolean;
   /** When true, the user-facing Skip step action is permitted for this step.
    *  Skip is otherwise disabled across the workflow; only steps that opt in may be
@@ -90,9 +88,9 @@ export interface StepMetadata {
 }
 
 /** Step IDs whose StepDefinition sets `metadata.providerSensitive = true`.
- *  Duplicated here because the api package needs this list to invalidate
- *  cached detectOutput on `PATCH /tasks/:id/cli-provider`, and the worker's
- *  step registry is not importable from api without a circular dep.
+ *  Duplicated here because the api package exposes provider-sensitive step
+ *  metadata, and the worker's step registry is not importable from api
+ *  without a circular dep.
  *
  *  Keep in sync with the `providerSensitive: true` flags on StepDefinition
  *  metadata blocks. A worker startup assertion verifies the match. */

@@ -168,17 +168,35 @@ describe.skipIf(!url)('upload retry against Postgres', () => {
     expect((await app.request(`/${repoId}/refresh-tree`, { method: 'POST' })).status).toBe(409);
     expect(h.add).not.toHaveBeenCalled();
   });
-  it('persists a single-shot upload source that drives a later failed-upload retry', async () => {
+  it('persists a chunked upload source that drives a later failed-upload retry', async () => {
     const storage = await mkdtemp(path.join(tmpdir(), 'upload-source-'));
     const previous = process.env.REPO_STORAGE_ROOT;
     process.env.REPO_STORAGE_ROOT = storage;
     try {
       const bytes = new Uint8Array([80, 75, 3, 4, 0, 1, 2, 3]);
-      const form = new FormData();
-      form.set('archive', new File([bytes], 'source.zip'));
-      form.set('name', 'Single shot');
-      form.set('branch', 'fixture-branch');
-      const res = await app.request('/upload', { method: 'POST', body: form });
+      const init = await app.request('/upload/init', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          filename: 'source.zip',
+          totalSize: bytes.length,
+          chunkSize: bytes.length,
+          name: 'Chunked upload',
+          branch: 'fixture-branch',
+        }),
+      });
+      expect(init.status).toBe(201);
+      const { session } = (await init.json()) as { session: { id: string; chunkSize: number } };
+      const chunk = await app.request(`/upload/${session.id}/chunk`, {
+        method: 'PUT',
+        headers: {
+          'content-range': `bytes 0-${bytes.length - 1}/${bytes.length}`,
+          'content-type': 'application/octet-stream',
+        },
+        body: bytes,
+      });
+      expect(chunk.status).toBe(200);
+      const res = await app.request(`/upload/${session.id}/complete`, { method: 'POST' });
       expect(res.status).toBe(201);
       const { repository } = (await res.json()) as { repository: { id: string } };
       const expectedPath = path.join(storage, '_uploads', h.userId, `${repository.id}.zip`);
@@ -193,7 +211,7 @@ describe.skipIf(!url)('upload retry against Postgres', () => {
         archivePath: expectedPath,
         totalSize: bytes.length,
         bytesReceived: bytes.length,
-        chunkSize: bytes.length,
+        chunkSize: session.chunkSize,
         status: 'complete',
       });
       expect(await readFile(expectedPath)).toEqual(Buffer.from(bytes));

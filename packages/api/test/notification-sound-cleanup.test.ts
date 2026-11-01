@@ -44,8 +44,7 @@ import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
 // A sound whose write fails leaves what stands at its name as it was: the person's previous sound,
-// or a file put there meanwhile. The write is failed at FileHandle.prototype.write by its bytes, as
-// repo-upload-cleanup.test.ts does.
+// or a file put there meanwhile. The write is failed at FileHandle.prototype.write by its bytes.
 
 const app = new Hono<AppEnv>();
 app.route('/', userSettingsRoutes);
@@ -183,6 +182,64 @@ describe('POST /notifications/sound when the write fails', () => {
     });
     return lstat(file);
   }
+
+  it('accepts the full 2 MiB file cap including multipart overhead', async () => {
+    const bytes = Buffer.alloc(2 * 1024 * 1024, 65);
+    const result = await upload(bytes);
+    expect(result.status).toBe(201);
+    expect(await readFile(soundPath)).toEqual(bytes);
+  }, 30_000);
+
+  it('still refuses a file one byte above the cap inside a bounded form', async () => {
+    expect((await upload(Buffer.alloc(2 * 1024 * 1024 + 1))).status).toBe(413);
+    expect(await staged()).toEqual([]);
+    expect(fake.rows(schema.userNotificationSettings)).toEqual([]);
+  });
+
+  it.each([false, true])(
+    'bounds raw multipart bytes before parsing (chunked=%s)',
+    async (chunked) => {
+      const encoder = new TextEncoder();
+      let pulled = 0;
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            pulled += 1;
+            if (pulled === 1)
+              controller.enqueue(
+                encoder.encode(
+                  '--sound-boundary\r\nContent-Disposition: form-data; name="sound"; filename="chime.mp3"\r\nContent-Type: audio/mpeg\r\n\r\n',
+                ),
+              );
+            else if (pulled <= 100) controller.enqueue(new Uint8Array(64 * 1024));
+            else {
+              controller.enqueue(encoder.encode('\r\n--sound-boundary--\r\n'));
+              controller.close();
+            }
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      const res = await app.request(
+        new Request('http://localhost/notifications/sound', {
+          method: 'POST',
+          headers: {
+            'content-type': 'multipart/form-data; boundary=sound-boundary',
+            ...(chunked ? { 'transfer-encoding': 'chunked' } : {}),
+          },
+          body,
+          duplex: 'half',
+        } as RequestInit),
+      );
+      expect.soft(res.status).toBe(413);
+      expect
+        .soft(await res.json())
+        .toMatchObject({ code: 'sound_upload_too_large', error: expect.any(String) });
+      expect.soft(pulled).toBeLessThan(40);
+      expect(await staged()).toEqual([]);
+      expect(fake.rows(schema.userNotificationSettings)).toEqual([]);
+    },
+  );
 
   it('E3 keeps a different file put at the sound’s name when the write fails part-way', async () => {
     const other = path.join(storage, 'other.mp3');

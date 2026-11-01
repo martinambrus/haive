@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import { and, eq, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -389,74 +390,91 @@ userSettingsRoutes.put('/notifications', async (c) => {
   return c.json({ ok: true });
 });
 
-userSettingsRoutes.post('/notifications/sound', async (c) => {
-  const userId = c.get('userId');
-  const db = getDb();
+userSettingsRoutes.post(
+  '/notifications/sound',
+  // Bound raw bytes before formData buffers multipart parts. Keep the documented file cap
+  // available by allowing a small fixed envelope for the boundary and part headers.
+  bodyLimit({
+    maxSize: MAX_SOUND_BYTES + 64 * 1024,
+    onError: (c) =>
+      c.json(
+        {
+          code: 'sound_upload_too_large',
+          error:
+            'Sound upload is too large. Choose an audio file of at most 2 MiB and submit it without extra form fields.',
+        },
+        413,
+      ),
+  }),
+  async (c) => {
+    const userId = c.get('userId');
+    const db = getDb();
 
-  const form = await c.req.formData();
-  const soundField = form.get('sound');
-  if (!(soundField instanceof File)) throw new HttpError(400, 'sound file is required');
-  if (soundField.size === 0) throw new HttpError(400, 'sound file is empty');
-  if (soundField.size > MAX_SOUND_BYTES) {
-    throw new HttpError(413, `sound exceeds ${MAX_SOUND_BYTES} bytes limit`);
-  }
-  const resolved = resolveSoundType(soundField.name, soundField.type);
-  if (!resolved) {
-    throw new HttpError(
-      400,
-      'unsupported audio type (allowed: mp3, wav, ogg, webm, m4a, aac, flac)',
+    const form = await c.req.formData();
+    const soundField = form.get('sound');
+    if (!(soundField instanceof File)) throw new HttpError(400, 'sound file is required');
+    if (soundField.size === 0) throw new HttpError(400, 'sound file is empty');
+    if (soundField.size > MAX_SOUND_BYTES) {
+      throw new HttpError(413, `sound exceeds ${MAX_SOUND_BYTES} bytes limit`);
+    }
+    const resolved = resolveSoundType(soundField.name, soundField.type);
+    if (!resolved) {
+      throw new HttpError(
+        400,
+        'unsupported audio type (allowed: mp3, wav, ogg, webm, m4a, aac, flac)',
+      );
+    }
+
+    const existing = await db.query.userNotificationSettings.findFirst({
+      where: eq(schema.userNotificationSettings.userId, userId),
+      columns: { soundPath: true },
+    });
+
+    const anchor = await ensureUploadsDir(userId);
+    const soundRel = `${uploadsRel(userId)}/notification-sound.${resolved.ext}`;
+    const soundPath = path.join(anchor, soundRel);
+
+    // The name is FIXED per extension, so a re-upload replaces the previous sound: written to a temp
+    // beside it and renamed over it only on success; a link at the name is replaced, not followed.
+    try {
+      await writeFileNoFollow(anchor, soundRel, Buffer.from(await soundField.arrayBuffer()), {
+        mode: 'replace-atomic',
+        fileMode: 0o644,
+        replaceLeafLink: true,
+      });
+    } catch (err) {
+      throw new HttpError(500, `failed to write sound: ${(err as Error).message}`);
+    }
+
+    // Replacing e.g. an .mp3 with a .wav leaves the old file behind — remove it.
+    if (existing?.soundPath && existing.soundPath !== soundPath) {
+      await removeSoundFile(userId, existing.soundPath);
+    }
+
+    const soundFilename = soundField.name.slice(0, 255);
+    await db
+      .insert(schema.userNotificationSettings)
+      .values({ userId, soundPath, soundMime: resolved.mime, soundFilename })
+      .onConflictDoUpdate({
+        target: schema.userNotificationSettings.userId,
+        set: { soundPath, soundMime: resolved.mime, soundFilename, updatedAt: new Date() },
+      });
+
+    const row = await db.query.userNotificationSettings.findFirst({
+      where: eq(schema.userNotificationSettings.userId, userId),
+      columns: { soundEnabled: true, usageAlertEnabled: true },
+    });
+    return c.json(
+      {
+        soundEnabled: row?.soundEnabled ?? true,
+        usageAlertEnabled: row?.usageAlertEnabled ?? true,
+        hasCustomSound: true,
+        soundFilename,
+      },
+      201,
     );
-  }
-
-  const existing = await db.query.userNotificationSettings.findFirst({
-    where: eq(schema.userNotificationSettings.userId, userId),
-    columns: { soundPath: true },
-  });
-
-  const anchor = await ensureUploadsDir(userId);
-  const soundRel = `${uploadsRel(userId)}/notification-sound.${resolved.ext}`;
-  const soundPath = path.join(anchor, soundRel);
-
-  // The name is FIXED per extension, so a re-upload replaces the previous sound: written to a temp
-  // beside it and renamed over it only on success; a link at the name is replaced, not followed.
-  try {
-    await writeFileNoFollow(anchor, soundRel, Buffer.from(await soundField.arrayBuffer()), {
-      mode: 'replace-atomic',
-      fileMode: 0o644,
-      replaceLeafLink: true,
-    });
-  } catch (err) {
-    throw new HttpError(500, `failed to write sound: ${(err as Error).message}`);
-  }
-
-  // Replacing e.g. an .mp3 with a .wav leaves the old file behind — remove it.
-  if (existing?.soundPath && existing.soundPath !== soundPath) {
-    await removeSoundFile(userId, existing.soundPath);
-  }
-
-  const soundFilename = soundField.name.slice(0, 255);
-  await db
-    .insert(schema.userNotificationSettings)
-    .values({ userId, soundPath, soundMime: resolved.mime, soundFilename })
-    .onConflictDoUpdate({
-      target: schema.userNotificationSettings.userId,
-      set: { soundPath, soundMime: resolved.mime, soundFilename, updatedAt: new Date() },
-    });
-
-  const row = await db.query.userNotificationSettings.findFirst({
-    where: eq(schema.userNotificationSettings.userId, userId),
-    columns: { soundEnabled: true, usageAlertEnabled: true },
-  });
-  return c.json(
-    {
-      soundEnabled: row?.soundEnabled ?? true,
-      usageAlertEnabled: row?.usageAlertEnabled ?? true,
-      hasCustomSound: true,
-      soundFilename,
-    },
-    201,
-  );
-});
+  },
+);
 
 userSettingsRoutes.delete('/notifications/sound', async (c) => {
   const userId = c.get('userId');
