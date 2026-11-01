@@ -187,6 +187,31 @@ it('relink clears planted push URLs and extra fetch URLs in real git', async () 
   );
   expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe('https://new.test/r');
 });
+
+it('redacts the real credentialsInUrl die diagnostic from the relink 409', async () => {
+  const { root, link, fake } = await setup();
+  const remote = 'https://synthuser:synthpass@example.invalid/r?tok=1#fixture-fragment';
+  await git(root, ['config', '--replace-all', 'remote.origin.url', remote]);
+  await git(root, ['config', 'transfer.credentialsInUrl', 'die']);
+  // Prove this Git emits the sensitive diagnostic before exercising the same
+  // real child through the route. No shim supplies the response text.
+  const stderr = await git(root, ['remote', 'add', 'origin', 'https://new.test/r']).then(
+    () => '',
+    (err: { stderr?: string }) => err.stderr ?? '',
+  );
+  for (const value of ['synthuser', 'tok=', 'fixture-fragment'])
+    expect(stderr.includes(value), 'plain Git echoes the configured remote').toBe(true);
+
+  const response = await link();
+  expect(response.status).toBe(409);
+  const text = await response.text();
+  expect(text).toContain('https://example.invalid/r');
+  for (const value of ['synthuser', 'synthpass', '<redacted>', 'tok=', 'fixture-fragment'])
+    expect(text.includes(value)).toBe(false);
+  expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+  expect(fake.rows(schema.auditEvents)).toEqual([]);
+  expect((await git(root, ['config', '--get', 'remote.origin.url'])) === remote).toBe(true);
+});
 it('does not relink the parent of a nested non-repository', async () => {
   const { root, link, fake } = await setup(true);
   expect((await link()).status).toBe(409);

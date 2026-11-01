@@ -257,9 +257,17 @@ export function redactGitText(text: string): string {
       } catch {
         // An invalid authority is ambiguous: look for its @ before accepting a cut.
       }
-      if (!ordinaryAuthority) {
+      // Git can replace a password with text containing URL-invalid characters.
+      // Even a valid prefix (e.g. https://user:) then belongs to userinfo if an @
+      // follows before the authority ends. An ordinary URL still stops at a
+      // whitespace/quote boundary, so a later prose email is never its userinfo.
+      if (!ordinaryAuthority || /[<>`]/.test(text[end] ?? '')) {
         const next = findUrlScheme(text, authorityStart);
-        const bound = Math.min(slash < 0 ? text.length : slash, next?.start ?? text.length);
+        let bound = Math.min(slash < 0 ? text.length : slash, next?.start ?? text.length);
+        if (ordinaryAuthority) {
+          const boundary = text.slice(end, bound).search(/[\s'"]/);
+          if (boundary >= 0) bound = end + boundary;
+        }
         // Never search earlier authorities again when this interval has no @.
         const relativeAt = text.slice(authorityStart, bound).lastIndexOf('@');
         if (relativeAt >= 0) {
