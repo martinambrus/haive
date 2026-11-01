@@ -74,6 +74,8 @@ board. At session start, load the board's tasks you own or will work on into the
 
 ## Decisions and prerequisites
 
+Owner review-gate update 2026-11-01: Greptile will not run until November9. Skip Greptile requests and waits before2026-11-09; Codex review and CI remain required.
+
 T524's 2026-11-01 owner round answered 42 questions. Decisions are recorded on the affected task blocks; the durable local answer register is `.claude/tmp/codex-run/backlog-decisions-20261101/decisions.json`. No unanswered owner-policy question remains from this round.
 
 - T402: operator script with dry run, before-image and undo. The owner subsequently requested indefinite development-record retention: transcripts changed from 90 to 0/forever through the audited admin API; prompts were already 0. Historical expiry estimates no longer govern this install. Missing old logs remain unrecoverable.
@@ -697,7 +699,7 @@ User decision 2026-11-01: Keep maintenance/hold on unknown prior state; report u
 
 ### T387 · FNF[shipped-git-config] · an uploaded repo keeps its own .git/config, so host git still runs filter/merge drivers, the vcs trick and lazy fetch (+1)
 
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T14:22Z · last: 2026-11-01T14:49Z · priority: P0
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T14:22Z · last: 2026-11-01T14:57Z · priority: P0
 PRE-EXISTING, consequential. An upload keeps its whole .git (worker repo/clone.ts ~:547-683). `filter.<d>.*`, `merge.<d>.driver`, `remote.<n>.vcs` and lazy fetch all lack a `-c` lever. Measured: gitRun `add -A` runs the shipped filter.
 Decide: sanitise .git/config at import (allow-list keys), or refuse archives that carry .git.
 
@@ -716,6 +718,8 @@ Resumed at owner request 2026-11-01T14:22Z: preserve existing implementation and
 Progress 2026-11-01T14:34Z: Driver committed00f1c56e5: focused85passed/1existing skip,32filesystem/process ratchets passed, supportedworker typecheckgreen. Fresh independent xhigh security review running; fullcandidate/PR/delivery remain. Evidence queue-exec-20261101/T387/.
 
 Progress 2026-11-01T14:49Z: Root-worker acceptance caught a supported-import refusal before delivery: Git auxiliary validators canonicalized its held Git directory through the private0700stage. Narrow invocation-only correction passed39root-worker controls, preserving non-bare history/mode/owner and missing-object refusal/rollback. Host checks/typecheck/fixcommit then freshreview/fullcandidate remain; no permission or globalconfig change.
+
+Progress 2026-11-01T14:57Z: Correction81656199e fresh xhigh review clean. Exact-HEAD root-worker39tests passed again; corrected fullworker/scripts candidate running. Verification skips optional acceleration-cache validators but retains actual object/ref/reflog/index connectivity; no private-stage permission relaxation.
 
 ### T389 · FNF[repo-loose-objects] · Haive's git no longer triggers auto-maintenance (#256), so busy repos accumulate loose objects
 
@@ -756,7 +760,7 @@ User decision 2026-11-01: Allow private endpoints only through an administrator-
 
 ### T402 · FNF[context-backfill] · repair historical context badges before their source logs expire
 
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T14:22Z · last: 2026-11-01T14:49Z · priority: P0
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T14:22Z · last: 2026-11-01T14:57Z · priority: P0
 Historical measurement:237 stored step badges,143 showing0% left; peaks were recoverable for232 of237 and windows for about97% of Claude Code runs. These are historical counts, not a current affected-row inventory. Older writers could use a run's cumulative input as one request's context, double-count Codex cache, or use a stale200k denominator; current writers are fixed but stored rows were not recomputed.
 
 User decision 2026-11-01: an idempotent operator script with dry run, before-image and undo. Reparse retained stream data to repair derived context telemetry; do not re-run agents, change billing/token totals or fabricate unknown peaks/windows. Fence against newer/reopened row versions and report unrecoverable or lower-bound data explicitly. No implementation or live backfill has started.
@@ -772,6 +776,8 @@ Resumed at owner request 2026-11-01T14:22Z: preserve existing implementation and
 Progress 2026-11-01T14:34Z: Implementation fed6c5eb1 and independent source/docs/guard reviews complete. Complete inventory:3658 completed steps,528 proposed repairs (386 corrected request badges,142 unsupported legacy badges cleared);3062 missing/ambiguous skipped,68 already consistent. First full suite found only a naming-guard metadata false positive (14968passed); exact-tag exemption reviewed and corrected full suite running. No live backfill yet. Retention0/forever remains. Evidence queue-exec-20261101/T402/.
 
 Progress 2026-11-01T14:49Z: PR982 https://github.com/martinambrus/haive/pull/982 at fed6c5eb1: complete worker14969pass/4expected and scripts1073pass; exactHEAD GitHubCodex completed with no findings. PRCI pending. Live dryrun verified Claude205996/1m/79, missingClaude unchanged, ambiguous legacyCodex skipped. Noapply yet.
+
+Progress 2026-11-01T14:57Z: PR982 exactHEAD Codex clean;11completed CI checks pass, final End-to-end smokes running. Owner explicitly suspended Greptile untilNovember9, no wait required.
 
 ### T403 · FNF[context-window-truth] · wrapper CLIs report the binary's 200k default; killed runs fall to the static table
 
