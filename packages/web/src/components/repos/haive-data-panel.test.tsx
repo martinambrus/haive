@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HaiveDataSaveResult, HaiveDataStatus } from '@haive/shared/haive-data';
+import { api } from '@/lib/api-client';
 import { HaiveDataPanel } from './haive-data-panel';
 import {
   buttons,
@@ -15,14 +16,14 @@ vi.mock('react', async (original) => ({
   ...(await import('../../../test/render-tree')).reactHooks,
 }));
 vi.mock('next/link', () => ({ default: 'a' }));
+vi.mock('next/navigation', () => ({ useRouter: () => ({ push: h.push }) }));
 vi.mock('@/components/project-state-conflicts-banner', () => ({
   ProjectStateConflictsBanner: () => null,
 }));
 vi.mock('@/components/markdown/markdown-view', () => ({
   MarkdownView: ({ body }: { body: string }) => <div data-markdown>{body}</div>,
 }));
-const h = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
-vi.mock('@/lib/api-client', () => ({ api: { get: h.get, post: h.post } }));
+const h = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), push: vi.fn() }));
 
 const clean = (): HaiveDataStatus => ({
   checkout: 'ready',
@@ -56,6 +57,8 @@ const settle = async (view: Renderer) => {
 const button = (view: Renderer, name: string) => buttons(view.tree(), name)[0]!;
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.spyOn(api, 'get').mockImplementation(h.get);
+  vi.spyOn(api, 'post').mockImplementation(h.post);
   h.get.mockResolvedValue(clean());
   h.post.mockResolvedValue(saved());
 });
@@ -203,5 +206,104 @@ describe('Haive data actions and status', () => {
     await settle(view);
     expect(textOf(view.tree())).toContain('File status unavailable');
     expect(textOf(view.tree())).not.toContain('Status unavailable');
+  });
+
+  it('explicitly starts a merge without plan nodes and navigates to the task using the real API helper', async () => {
+    h.get.mockResolvedValue({ ...clean(), files: [] });
+    let finish!: (value: { taskId: string }) => void;
+    h.post
+      .mockResolvedValueOnce(
+        saved({
+          outcome: 'conflict',
+          conflict: { paths: ['app.ts'], autoResolved: [], unrelated: false },
+        }),
+      )
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      );
+    const view = createRenderer(() => <HaiveDataPanel repositoryId="repo" />);
+    await settle(view);
+    await fire.click(button(view, 'save & push'));
+    await settle(view);
+    // Receiving the conflict or refreshing must never spend tokens automatically.
+    expect(h.post).toHaveBeenCalledTimes(1);
+    const staleResolve = button(view, 'resolve with an agent');
+    fire.click(button(view, 'refresh'));
+    fire.click(staleResolve);
+    expect(h.post).toHaveBeenCalledTimes(1);
+    await settle(view);
+    const resolve = button(view, 'resolve with an agent');
+    expect(resolve).toBeDefined();
+    const save = button(view, 'save');
+    const refresh = button(view, 'refresh');
+    const pending = fire.click(resolve);
+    fire.click(resolve);
+    fire.click(save);
+    fire.click(refresh);
+    view.draw();
+    expect(h.post).toHaveBeenCalledTimes(2);
+    expect(h.post).toHaveBeenLastCalledWith('/repositories/repo/plan/merge', {});
+    expect(isDisabled(button(view, 'save'))).toBe(true);
+    expect(isDisabled(button(view, 'refresh'))).toBe(true);
+    expect(textOf(view.tree())).toContain('Starting merge');
+    finish({ taskId: 'merge-task' });
+    await pending;
+    await settle(view);
+    expect(h.push).toHaveBeenCalledExactlyOnceWith('/tasks/merge-task');
+  });
+
+  it('shows a rejected merge start and permits an explicit retry', async () => {
+    h.post
+      .mockResolvedValueOnce(
+        saved({
+          outcome: 'conflict',
+          conflict: { paths: ['app.ts'], autoResolved: [], unrelated: false },
+        }),
+      )
+      .mockRejectedValueOnce(new Error('No CLI provider available'))
+      .mockResolvedValueOnce({ taskId: 'retry-task' });
+    const view = createRenderer(() => <HaiveDataPanel repositoryId="repo" />);
+    await settle(view);
+    await fire.click(button(view, 'save & push'));
+    await settle(view);
+    expect(button(view, 'resolve with an agent')).toBeDefined();
+    await fire.click(button(view, 'resolve with an agent'));
+    await settle(view);
+    expect(textOf(view.tree())).toContain('No CLI provider available');
+    expect(h.push).not.toHaveBeenCalled();
+    expect(isDisabled(button(view, 'resolve with an agent'))).toBe(false);
+    await fire.click(button(view, 'resolve with an agent'));
+    await settle(view);
+    expect(h.push).toHaveBeenCalledExactlyOnceWith('/tasks/retry-task');
+    expect(textOf(view.tree())).not.toContain('No CLI provider available');
+  });
+
+  it('does not navigate back to a merge after the person leaves the page', async () => {
+    let finish!: (value: { taskId: string }) => void;
+    h.post
+      .mockResolvedValueOnce(
+        saved({
+          outcome: 'conflict',
+          conflict: { paths: ['app.ts'], autoResolved: [], unrelated: false },
+        }),
+      )
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      );
+    let visible = true;
+    const view = createRenderer(() => (visible ? <HaiveDataPanel repositoryId="repo" /> : null));
+    await settle(view);
+    await fire.click(button(view, 'save & push'));
+    await settle(view);
+    fire.click(button(view, 'resolve with an agent'));
+    visible = false;
+    view.draw();
+    finish({ taskId: 'late-task' });
+    await settle(view);
+    expect(h.push).not.toHaveBeenCalled();
   });
 });

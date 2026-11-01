@@ -2,12 +2,13 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import type {
   HaiveDataRefusal,
   HaiveDataSaveResult,
   HaiveDataStatus,
 } from '@haive/shared/haive-data';
-import { api } from '@/lib/api-client';
+import { api, startPlanMerge } from '@/lib/api-client';
 import { Button, Card } from '@/components/ui';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { ProjectStateConflictsBanner } from '@/components/project-state-conflicts-banner';
@@ -83,10 +84,18 @@ function FileList({ paths }: { paths: string[] }) {
 
 function SaveResult({
   result,
-  repositoryId,
+  resolveDisabled,
+  startingMerge,
+  mergeTaskId,
+  mergeError,
+  onResolve,
 }: {
   result: HaiveDataSaveResult;
-  repositoryId: string;
+  resolveDisabled: boolean;
+  startingMerge: boolean;
+  mergeTaskId: string | null;
+  mergeError: string | null;
+  onResolve: () => void;
 }) {
   const title = {
     saved: 'Save completed',
@@ -138,8 +147,8 @@ function SaveResult({
           <MarkdownView
             body={
               result.conflict.unrelated
-                ? 'The local and remote branches have unrelated histories. Resolve their merge from the Plan page, then retry.'
-                : 'Resolve the remote merge from the Plan page, then retry.'
+                ? 'The local and remote branches have unrelated histories. Start a merge conversation to resolve them with an agent. This uses your configured CLI and may spend tokens.'
+                : 'Start a merge conversation to resolve these files with an agent. This uses your configured CLI and may spend tokens.'
             }
           />
           <FileList paths={result.conflict.paths} />
@@ -149,12 +158,18 @@ function SaveResult({
               <FileList paths={result.conflict.autoResolved} />
             </details>
           )}
-          <Link
-            href={`/repos/${encodeURIComponent(repositoryId)}/plan`}
-            className="text-sm text-indigo-300 hover:underline"
-          >
-            Open Plan
-          </Link>
+          {mergeError && (
+            <div role="alert">
+              <MarkdownView body={mergeError} />
+            </div>
+          )}
+          {mergeTaskId ? (
+            <TaskLink id={mergeTaskId} />
+          ) : (
+            <Button disabled={resolveDisabled} onClick={onResolve}>
+              {startingMerge ? 'Starting merge…' : 'Resolve with an agent'}
+            </Button>
+          )}
         </div>
       )}
     </Card>
@@ -163,15 +178,28 @@ function SaveResult({
 
 /** Key this component by repository id so a late save cannot display on another repository. */
 export function HaiveDataPanel({ repositoryId }: { repositoryId: string }) {
+  const router = useRouter();
   const [status, setStatus] = useState<HaiveDataStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [result, setResult] = useState<HaiveDataSaveResult | null>(null);
   const [saving, setSaving] = useState<'save' | 'push' | null>(null);
+  const [startingMerge, setStartingMerge] = useState(false);
+  const [mergeTaskId, setMergeTaskId] = useState<string | null>(null);
+  const [mergeError, setMergeError] = useState<string | null>(null);
   const [refresh, setRefresh] = useState(0);
   const busy = useRef(false);
+  const refreshing = useRef(true);
+  const mounted = useRef(true);
   const base = `/repos/${encodeURIComponent(repositoryId)}/haive-data`;
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -188,39 +216,62 @@ export function HaiveDataPanel({ repositoryId }: { repositoryId: string }) {
       } finally {
         if (!controller.signal.aborted) {
           setLoading(false);
+          refreshing.current = false;
           timer = setTimeout(() => void read(), 5_000);
         }
       }
     }
-    if (!saving) void read();
+    if (!saving && !startingMerge) void read();
     return () => {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [base, refresh, saving]);
+  }, [base, refresh, saving, startingMerge]);
 
   const reload = () => {
+    if (busy.current) return;
+    refreshing.current = true;
     setLoading(true);
     setRefresh((n) => n + 1);
   };
   async function save(push: boolean) {
-    if (busy.current) return;
+    if (busy.current || refreshing.current) return;
     busy.current = true;
     setSaving(push ? 'push' : 'save');
     setResult(null);
     setSaveError(null);
+    setMergeError(null);
+    setMergeTaskId(null);
     try {
       // An absent body is invalid JSON; the default Save deliberately sends {}.
       setResult(await api.post<HaiveDataSaveResult>(`${base}/save`, push ? { push: true } : {}));
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : 'Could not save Haive data');
     } finally {
+      busy.current = false;
       reload();
       setSaving(null);
-      busy.current = false;
     }
   }
-  const disabled = loading || !status || !!loadError || saving !== null;
+  async function resolveMerge() {
+    if (busy.current || refreshing.current || mergeTaskId || !result?.conflict) return;
+    busy.current = true;
+    setStartingMerge(true);
+    setMergeError(null);
+    try {
+      const { taskId } = await startPlanMerge(repositoryId, {});
+      setMergeTaskId(taskId);
+      if (mounted.current) router.push(`/tasks/${encodeURIComponent(taskId)}`);
+    } catch (err) {
+      setMergeError(err instanceof Error ? err.message : 'Could not start the merge conversation');
+    } finally {
+      busy.current = false;
+      reload();
+      setStartingMerge(false);
+    }
+  }
+  const disabled = loading || !status || !!loadError || saving !== null || startingMerge;
+  const mergeOpen = status?.holds.push.some((hold) => hold.code === 'plan_merge') ?? false;
   const changed = status?.files?.filter((file) => file.change !== 'unchanged').length;
 
   return (
@@ -240,7 +291,11 @@ export function HaiveDataPanel({ repositoryId }: { repositoryId: string }) {
           >
             Save &amp; push
           </Button>
-          <Button variant="secondary" disabled={loading || saving !== null} onClick={reload}>
+          <Button
+            variant="secondary"
+            disabled={loading || saving !== null || startingMerge}
+            onClick={reload}
+          >
             Refresh
           </Button>
         </div>
@@ -255,7 +310,7 @@ export function HaiveDataPanel({ repositoryId }: { repositoryId: string }) {
             />
           </div>
         )}
-        {loading && !saving && (
+        {loading && !saving && !startingMerge && (
           <div role="status">
             <MarkdownView body="Loading Haive data…" />
           </div>
@@ -290,7 +345,16 @@ export function HaiveDataPanel({ repositoryId }: { repositoryId: string }) {
           </div>
         )}
       </Card>
-      {result && <SaveResult result={result} repositoryId={repositoryId} />}
+      {result && (
+        <SaveResult
+          result={result}
+          resolveDisabled={disabled || mergeOpen}
+          startingMerge={startingMerge}
+          mergeTaskId={mergeTaskId}
+          mergeError={mergeError}
+          onResolve={() => void resolveMerge()}
+        />
+      )}
       {status && (
         <>
           <Card className="min-w-0 space-y-3">
