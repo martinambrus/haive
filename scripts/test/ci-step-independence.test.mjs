@@ -36,23 +36,8 @@ const JOBS = [
     prerequisite: 'migrate',
     // Every check is cut by its own time limit (see RUN_SMOKES), not only by the job's.
     bounded: true,
-    // MEASURED, volatile (59 green runs from 2026-10-30 through main run 41198565486): a green run
-    // spent at most 907 s outside the gated step, which took about 7.5 s a row of its GATED list
-    // on the slowest runners. A green run is modelled as that: 907 s plus 7.5 s a row. The job's
-    // limit keeps `marginSeconds` over it, so that a slower runner does not cancel a green run, and
-    // stays within twice it, so that a hung run still ends soon. A check that hangs to its limit
-    // leaves the checks after it room: its limit on top of everything else a green run spends
-    // (907 s for the gated step, a whole green run for any other check). The gated step's limit
-    // stays `slowRunnerFactor` times its modelled time. The list keeps growing, so these fail at a
-    // row count: measure again, then raise the limits or split the gated tests into their own job.
-    // Only the list is modelled: the 907 s grew from 629 s in the week to 2026-10-31 (the worker
-    // smokes and the auth throttle script), so measure it again whenever a green run nears the limit.
-    budget: {
-      outsideGatedSeconds: 907,
-      secondsPerRow: 7.5,
-      slowRunnerFactor: 1.5,
-      marginSeconds: 600,
-    },
+    // Historical 907 s outside GATED plus the observed 62 s maximum setup repeated by the split.
+    budget: { outsideGatedSeconds: 969, secondsPerRow: 0, marginSeconds: 600 },
     // The setup in order, ending at the step with the id above. A check placed in it would stop
     // all the others when it failed, so a new setup step is added here on purpose.
     setup: [
@@ -62,6 +47,31 @@ const JOBS = [
       'Install dependencies',
       'Build shared + database',
       'Configure redis maxmemory-policy',
+      'Build web-kit + modules and generate registrations',
+      'migrate',
+    ],
+  },
+  {
+    file: 'ci.yml',
+    id: 'postgres-gated',
+    allStepsBounded: true,
+    prerequisite: 'migrate',
+    bounded: true,
+    // Keep the historical 7.5 s/row model; 120 s allows duplicate setup and module builds.
+    budget: {
+      outsideGatedSeconds: 120,
+      secondsPerRow: 7.5,
+      slowRunnerFactor: 1.5,
+      marginSeconds: 600,
+    },
+    setup: [
+      'actions/checkout',
+      'Setup pnpm',
+      'Setup Node.js',
+      'Install dependencies',
+      'Build shared + database',
+      'Configure redis maxmemory-policy',
+      'Build web-kit + modules and generate registrations',
       'migrate',
     ],
   },
@@ -106,9 +116,13 @@ const gatedRows = (check) => {
 // secondsPerRow for each row of the list that step loops over.
 function model(checks, { outsideGatedSeconds, secondsPerRow }) {
   const gatedChecks = checks.filter((check) => gatedRows(check) !== null);
-  assert.equal(gatedChecks.length, 1, "the job has exactly one check with a <<'GATED' list");
+  assert.equal(
+    gatedChecks.length,
+    secondsPerRow ? 1 : 0,
+    'the job has its assigned GATED list count',
+  );
   const [gated] = gatedChecks;
-  const rows = gatedRows(gated);
+  const rows = gated ? gatedRows(gated) : 0;
   return {
     gated,
     rows,
@@ -280,10 +294,11 @@ function checkJob(job, spec, workflow = workflows[spec.file]) {
       0,
       `a check that runs to its limit leaves the checks after it too little of the job's ${limit} s: ${crowding.map(label).join('; ')}`,
     );
-    assert.ok(
-      Number(gated['timeout-minutes']) * 60 >= slowRunnerFactor * gatedSeconds,
-      `the gated step's limit of ${Number(gated['timeout-minutes']) * 60} s is under ${slowRunnerFactor} times the ${gatedSeconds} s its ${rows} rows are modelled to take, so a slower runner would end a green run`,
-    );
+    if (gated)
+      assert.ok(
+        Number(gated['timeout-minutes']) * 60 >= slowRunnerFactor * gatedSeconds,
+        `the gated step's limit of ${Number(gated['timeout-minutes']) * 60} s is under ${slowRunnerFactor} times the ${gatedSeconds} s its ${rows} rows are modelled to take, so a slower runner would end a green run`,
+      );
   }
 }
 
@@ -358,14 +373,18 @@ const MUTANTS = [
   [
     'survivor: a check swallowing failure with || true',
     ({ steps }, last) => {
-      const step = steps.slice(last + 1).find((step) => step.run && gatedRows(step) === null);
+      const step =
+        steps.slice(last + 1).find((step) => step.run && gatedRows(step) === null) ??
+        steps[last + 1];
       step.run = `(${step.run.trim()}) || true`;
     },
   ],
   ...['|| :', '|| exit 0', '; true', '\nset +e'].map((suffix) => [
     `survivor: a check swallowing failure with ${suffix.trim()}`,
     ({ steps }, last) => {
-      const step = steps.slice(last + 1).find((step) => step.run && gatedRows(step) === null);
+      const step =
+        steps.slice(last + 1).find((step) => step.run && gatedRows(step) === null) ??
+        steps[last + 1];
       step.run = suffix.includes('set +e')
         ? `set +e\n${step.run}`
         : `(${step.run.trim()}) ${suffix}`;
@@ -451,7 +470,8 @@ const MUTANTS = [
     'a check that waits on a sibling check',
     ({ steps }, last) => {
       steps[last + 1].id = 'first-check';
-      steps[last + 2].if = "${{ !cancelled() && steps.first-check.conclusion != 'skipped' }}";
+      (steps[last + 2] ?? steps[last + 1]).if =
+        "${{ !cancelled() && steps.first-check.conclusion != 'skipped' }}";
     },
   ],
   [
@@ -565,7 +585,7 @@ const MUTANTS = [
       const chain = steps.slice(last + 1).find((step) => RUN_SMOKES.test(step.run?.trim() ?? ''));
       chain['timeout-minutes'] = '0';
     },
-    (spec) => spec.bounded,
+    (spec) => spec.id === 'smokes',
   ],
   ...[
     [
@@ -600,7 +620,7 @@ const MUTANTS = [
       const room = Number(job['timeout-minutes']) * 60 - spec.budget.outsideGatedSeconds;
       gated['timeout-minutes'] = String(Math.floor(room / 60) + 1);
     },
-    (spec) => spec.budget,
+    (spec) => spec.id === 'postgres-gated',
   ],
   [
     'another check limit one minute over what the job limit absorbs',
@@ -614,7 +634,7 @@ const MUTANTS = [
         Math.floor((Number(job['timeout-minutes']) * 60 - greenSeconds) / 60) + 1,
       );
     },
-    (spec) => spec.budget,
+    (spec) => spec.id === 'smokes',
   ],
   [
     'a job limit under the margin when no step limit crowds it',
@@ -624,9 +644,10 @@ const MUTANTS = [
       for (const check of checks) {
         if (check['timeout-minutes'] !== undefined) check['timeout-minutes'] = '1';
       }
-      gated['timeout-minutes'] = String(
-        Math.ceil((spec.budget.slowRunnerFactor * gatedSeconds) / 60),
-      );
+      if (gated)
+        gated['timeout-minutes'] = String(
+          Math.ceil((spec.budget.slowRunnerFactor * gatedSeconds) / 60),
+        );
       job['timeout-minutes'] = String(
         Math.ceil((greenSeconds + spec.budget.marginSeconds) / 60) - 1,
       );
@@ -639,7 +660,7 @@ const MUTANTS = [
       const { gated } = model(steps.slice(last + 1), spec.budget);
       steps.push({ ...gated, name: 'Second gated tests' });
     },
-    (spec) => spec.budget,
+    (spec) => spec.id === 'postgres-gated',
   ],
   [
     'a gated step limit under its modelled time on a slower runner',
@@ -649,7 +670,7 @@ const MUTANTS = [
         Math.ceil((spec.budget.slowRunnerFactor * gatedSeconds) / 60) - 1,
       );
     },
-    (spec) => spec.budget,
+    (spec) => spec.id === 'postgres-gated',
   ],
   [
     'a GATED list that has outgrown the step limit',
@@ -664,7 +685,7 @@ const MUTANTS = [
         `${'\nx'.repeat(capacity + 1 - rows)}\nGATED$1`,
       );
     },
-    (spec) => spec.budget,
+    (spec) => spec.id === 'postgres-gated',
   ],
   [
     'a new check that is not a smoke chain and has no time limit',
@@ -735,23 +756,24 @@ function redisDatabases(step) {
 }
 
 function checkRedisIsolation(job) {
-  const index = job.steps.findIndex((step) => gatedRows(step) !== null);
-  assert.ok(index >= 0, 'no gated step');
+  const gatedIndex = job.steps.findIndex((step) => gatedRows(step) !== null);
+  const index = gatedIndex >= 0 ? gatedIndex : job.steps.findIndex((step) => step.id === 'migrate');
+  assert.ok(index >= 0, 'no last setup step');
   // The job-wide default (database 0 today) is also used by general smokes. Reserve it
   // once, alongside the gated databases; explicit later tests need their own databases.
-  const gated = [...redisDatabases({ env: job.env }), ...redisDatabases(job.steps[index])];
+  const gated = [
+    ...redisDatabases({ env: job.env }),
+    ...(gatedIndex >= 0 ? redisDatabases(job.steps[index]) : []),
+  ];
   assert.ok(gated.length > 0, 'gated/job env must contain Redis databases');
   const used = new Map(gated.map((db) => [db, 'gated step or job env']));
-  let laterCount = 0;
   for (const step of job.steps.slice(index + 1)) {
     const databases = redisDatabases(step);
-    laterCount += databases.length;
     for (const db of databases) {
       assert.ok(!used.has(db), `${label(step)} shares Redis database ${db} with ${used.get(db)}`);
       used.set(db, label(step));
     }
   }
-  assert.ok(laterCount > 0, 'later steps must contain Redis databases');
 }
 
 // Select by the GATED list and Redis env values, independent of display names.
@@ -826,7 +848,22 @@ const REDIS_MUTANTS = [
 ];
 
 describe('gated Redis isolation', () => {
-  const job = workflows['ci.yml'].jobs.smokes;
+  const smokeJob = workflows['ci.yml'].jobs.smokes;
+  const postgresJob = workflows['ci.yml'].jobs['postgres-gated'];
+  // Preserve the existing collision controls using the former combined shape as a fixture.
+  const job = {
+    ...structuredClone(postgresJob),
+    steps: [
+      ...postgresJob.steps,
+      ...smokeJob.steps.slice(smokeJob.steps.findIndex((step) => step.id === 'migrate') + 1),
+    ],
+  };
+  for (const [id, actual] of [
+    ['smokes', smokeJob],
+    ['postgres-gated', postgresJob],
+  ]) {
+    it(`keeps Redis isolated within the ${id} service`, () => checkRedisIsolation(actual));
+  }
   it('keeps later steps out of gated, job-wide and other later databases', () =>
     checkRedisIsolation(job));
   it('accepts distinct databases supplied by job env and inline run URLs', () => {
@@ -1028,5 +1065,89 @@ describe('explicit shell errexit', () => {
         });
       }
     }
+  }
+});
+
+// Keep the existing public check while the serial Postgres list gets its own runner/services.
+function checkSmokeSplit(workflow) {
+  const smokes = workflow.jobs.smokes;
+  const postgres = workflow.jobs['postgres-gated'];
+  assert.ok(postgres, 'Postgres-gated tests need a separate postgres-gated job');
+  assert.equal(smokes.name, 'End-to-end smokes');
+  assert.equal(postgres.name, 'Postgres-gated tests');
+  for (const [job, services] of [
+    [smokes, ['postgres', 'redis']],
+    [postgres, ['postgres', 'pgvector', 'redis']],
+  ]) {
+    assert.equal(job.needs, undefined, 'the split jobs start independently');
+    assert.equal(job.strategy, undefined, 'GATED files remain serial within one job');
+    assert.deepEqual(Object.keys(job.services), services, 'each job owns its required services');
+    assert.equal(job.services.postgres.image, 'postgres:18-alpine');
+    assert.equal(job.services.redis.image, 'redis:8.4-alpine');
+    assert.equal(job.env.DATABASE_URL, 'postgres://haive:haive_dev_password@localhost:5432/haive');
+    assert.equal(job.env.REDIS_URL, 'redis://localhost:6379');
+    const migrate = job.steps.findIndex((step) => step.id === 'migrate');
+    assert.ok(migrate >= 0, 'each job applies migrations before its checks');
+    const setup = job.steps
+      .slice(0, migrate + 1)
+      .map((step) => step.run ?? '')
+      .join('\n');
+    for (const command of [
+      'pnpm --filter @haive/database build',
+      'pnpm --filter @haive/shared build',
+      'pnpm --filter @haive/web-kit build',
+      "pnpm --filter './modules/*' build",
+      'node scripts/gen-modules.mjs',
+      'redis-cli CONFIG SET maxmemory-policy noeviction',
+      'pnpm --filter @haive/database migrate',
+    ])
+      assert.ok(setup.includes(command), `both jobs need setup command: ${command}`);
+  }
+  assert.equal(postgres.services.pgvector.image, 'pgvector/pgvector:pg18');
+  const holders = Object.entries(workflow.jobs).flatMap(([id, job]) =>
+    (job.steps ?? []).filter((step) => gatedRows(step) !== null).map(() => id),
+  );
+  assert.deepEqual(
+    holders,
+    ['postgres-gated'],
+    'exactly one serial GATED loop belongs to the new job',
+  );
+  assert.deepEqual(
+    smokes.steps.slice(smokes.steps.findIndex((step) => step.id === 'migrate') + 1).map(label),
+    [
+      'Run api smokes',
+      'Run worker smokes',
+      'Agent pool script on a real Redis',
+      'CLI job retention on a real Redis',
+      'Recovery re-drive advance ids on a real Redis',
+      'Repo refresh retries on a real Redis',
+      'RAG sync lock on a real Redis',
+      'Usage-auth stash script on a real Redis',
+      'Module activation watch on a real Redis',
+      'Auth throttle script on a real Redis',
+      'Run migration smokes',
+    ],
+    'all existing smoke/Redis/migration checks stay in the public smokes job exactly once',
+  );
+}
+
+describe('independent Postgres CI split', () => {
+  it('separates the serial GATED list and repeats the prerequisites each runner needs', () =>
+    checkSmokeSplit(workflows['ci.yml']));
+  for (const id of ['smokes', 'postgres-gated']) {
+    it(`rejects missing module prerequisites in ${id}`, () => {
+      const mutant = structuredClone(workflows['ci.yml']);
+      const build = mutant.jobs[id].steps.find(
+        (step) => step.name === 'Build web-kit + modules and generate registrations',
+      );
+      build.run = 'echo omitted';
+      assert.throws(() => checkSmokeSplit(mutant), /need setup command/);
+    });
+    it(`rejects a ${id} job waiting for the other job`, () => {
+      const mutant = structuredClone(workflows['ci.yml']);
+      assert.ok(mutant.jobs[id], `missing ${id} job`);
+      mutant.jobs[id].needs = id === 'smokes' ? 'postgres-gated' : 'smokes';
+      assert.throws(() => checkSmokeSplit(mutant), /start independently/);
+    });
   }
 });

@@ -141,12 +141,176 @@ jobs:
   smokes:
     name: End-to-end smokes
     runs-on: ubuntu-latest
-    # The longest CI job grows with the GATED list (about 7.5 s a row). Its 45 minutes must
-    # cover a modelled green run plus a non-gated check's limit (worker smokes: 15 minutes).
-    # For the gated step, count its 25-minute limit plus the 907 s outside it. The budget pin
-    # leaves later checks room after either hang and fails when the list outgrows these limits.
-    # Measure again before raising them; docs/architecture/ci-smokes.md (Limits) has the measurements.
-    timeout-minutes: 45
+    # 969 s modelled green (historical 907 s outside GATED + 62 s repeated prerequisites)
+    # plus the largest check limit (worker: 900 s), rounded up with room for later checks.
+    timeout-minutes: 32
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: haive
+          POSTGRES_PASSWORD: haive_dev_password
+          POSTGRES_DB: haive
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U haive -d haive"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:8.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://haive:haive_dev_password@localhost:5432/haive
+      REDIS_URL: redis://localhost:6379
+      CONFIG_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      JWT_SECRET: ci-smoke-jwt-secret-not-real-just-for-smoke-tests-padding
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
+
+      - name: Setup pnpm
+        timeout-minutes: 2
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10.34.5
+
+      - name: Setup Node.js
+        timeout-minutes: 2
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+          cache: pnpm
+
+      - name: Install dependencies
+        timeout-minutes: 5
+        run: pnpm install --frozen-lockfile
+
+      - name: Build shared + database
+        timeout-minutes: 3
+        run: |
+          pnpm --filter @haive/database build
+          pnpm --filter @haive/shared build
+
+      - name: Configure redis maxmemory-policy
+        timeout-minutes: 2
+        run: |
+          docker exec ${{ job.services.redis.id }} redis-cli CONFIG SET maxmemory-policy noeviction
+
+      - name: Build web-kit + modules and generate registrations
+        timeout-minutes: 5
+        run: |
+          pnpm --filter @haive/web-kit build
+          pnpm --filter './modules/*' build
+          node scripts/gen-modules.mjs
+
+      # The same applier every install uses. On CI's empty database this exercises the FRESH
+      # path — baseline plus every later migration — on every run.
+      #
+      # The last setup step: every step up to here keeps the default condition, so one that fails
+      # skips everything after it, and this one succeeds only if all of them did. Each check below
+      # runs on `!cancelled() && steps.migrate.conclusion == 'success'`: a failed check no longer
+      # skips the others (the job still fails with it), a failed setup step still stops them, and
+      # a run cancelled by a newer push stops. A check names this step and never a sibling; a step
+      # the checks need goes above this one. scripts/test/ci-step-independence.test.mjs pins it.
+      - name: Apply database migrations
+        timeout-minutes: 3
+        id: migrate
+        run: pnpm --filter @haive/database migrate
+
+      # api smokes first: they are seconds each, so a broken route surfaces before the
+      # worker suite spends most of the job's budget. smoke:terminal is
+      # excluded from smoke:ci — it needs a docker daemon and pulls an image, the same
+      # reason the worker job leaves smoke:sub-agent out of its own smoke:ci.
+      # Every smoke:ci runs its smokes through scripts/run-smokes.mjs: each smoke has its own time
+      # limit, a hung one is killed and named, and the rest still run.
+      - name: Run api smokes
+        timeout-minutes: 5
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        run: pnpm --filter @haive/api smoke:ci
+
+      - name: Run worker smokes
+        timeout-minutes: 15
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        run: pnpm --filter @haive/worker smoke:ci
+
+      - name: Agent pool script on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
+        run: pnpm --filter @haive/worker exec vitest run src/queues/cli-exec/agent-lease.test.ts
+        env:
+          HAIVE_LEASE_TEST_REDIS_URL: redis://localhost:6379/15
+
+      - name: CLI job retention on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
+        run: pnpm --filter @haive/worker exec vitest run test/cli-job-retention.test.ts
+        env:
+          CLI_JOB_RETENTION_TEST_REDIS_URL: redis://localhost:6379/9
+
+      - name: Recovery re-drive advance ids on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
+        run: pnpm --filter @haive/worker exec vitest run test/advance-dedup-redis.test.ts
+        env:
+          ADVANCE_DEDUP_TEST_REDIS_URL: redis://localhost:6379/6
+
+      - name: Repo refresh retries on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
+        run: pnpm --filter @haive/worker exec vitest run test/refresh-rebuild-retries.test.ts
+        env:
+          REFRESH_RETRIES_TEST_REDIS_URL: redis://localhost:6379/5
+
+      - name: RAG sync lock on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
+        run: pnpm --filter @haive/shared exec vitest run test/rag-sync-lock.test.ts
+        env:
+          HAIVE_RAG_LOCK_TEST_REDIS_URL: redis://localhost:6379/14
+
+      - name: Usage-auth stash script on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
+        run: pnpm --filter @haive/api exec vitest run test/cli-providers-usage-auth.test.ts
+        env:
+          USAGE_AUTH_TEST_REDIS_URL: redis://localhost:6379/8
+
+      - name: Module activation watch on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
+        run: pnpm --filter @haive/worker exec vitest run test/module-activation-watch.test.ts
+        env:
+          MODULE_ACTIVATION_WATCH_TEST_REDIS_URL: redis://localhost:6379/7
+
+      - name: Auth throttle script on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 10
+        run: pnpm --filter @haive/api exec vitest run test/auth-throttle.test.ts
+        env:
+          AUTH_THROTTLE_TEST_REDIS_URL: redis://localhost:6379/10
+
+      # The migration runner's live-database coverage. Its own smoke:ci, since the worker's is
+      # worker-scoped; this package had no smoke of its own before.
+      - name: Run migration smokes
+        timeout-minutes: 5
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        run: pnpm --filter @haive/database smoke:ci
+
+  postgres-gated:
+    name: Postgres-gated tests
+    runs-on: ubuntu-latest
+    # 120 s setup allowance plus 7.5 s per GATED row; retain the 25-minute check limit.
+    # 30 minutes covers that whole limit plus setup and keeps >=600 s over modelled green.
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:18-alpine
@@ -222,6 +386,13 @@ jobs:
         run: |
           docker exec ${{ job.services.redis.id }} redis-cli CONFIG SET maxmemory-policy noeviction
 
+      - name: Build web-kit + modules and generate registrations
+        timeout-minutes: 5
+        run: |
+          pnpm --filter @haive/web-kit build
+          pnpm --filter './modules/*' build
+          node scripts/gen-modules.mjs
+
       # The same applier every install uses. On CI's empty database this exercises the FRESH
       # path — baseline plus every later migration — on every run.
       #
@@ -237,34 +408,20 @@ jobs:
         run: pnpm --filter @haive/database migrate
 
       # A gated file skips green when its URL is unset, so each must report tests run and none skipped.
-      # The database column is the name each file's own guard demands.
-      #
-      # Every step in smokes, schema-parity, production-images and macos-preflight has its own
-      # timeout-minutes below its job's limit. A timed-out check fails while later checks can run;
-      # a timed-out setup step stops its dependent checks by design.
-      # Limits retain slack above measured green runs.
-      # scripts/test/ci-step-independence.test.mjs pins every step's limit and floor in these
-      # four jobs, plus the smokes budget that leaves room for checks after a timed-out sibling.
-      #
-      # The script's `set -uo pipefail` leaves errexit on: a step with no `shell:` runs as `bash -e {0}`,
-      # so a failed build before the loop ends the step and no gated file runs on it.
+      # The database column is the name each file's own guard demands. Files remain serial.
+      # Setup, including module builds, ends at migrate; a failed setup never runs the list.
       - name: Postgres-gated tests
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         timeout-minutes: 25
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
           PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}
-          # Redis map: gated 11-13; later 7-10, 14, 15; 1-6 free (job default 0).
-          # Keep gated and later databases disjoint, and later steps distinct, so writes from
-          # a process left behind by a timed-out step cannot affect another check's database.
+          # This job owns its Redis service: gated databases 11-13, job default 0.
           INTEGRATIONS_BROKER_TEST_REDIS_URL: redis://localhost:6379/13
           MODULE_PURGE_API_TEST_REDIS_URL: redis://localhost:6379/12
           INTEGRATIONS_AUDIT_TEST_REDIS_URL: redis://localhost:6379/11
         run: |
           set -uo pipefail
-          pnpm --filter @haive/web-kit build
-          pnpm --filter './modules/*' build
-          node scripts/gen-modules.mjs
           failed=0
           while IFS=' ' read -r pkg file var db server; do
             [ -n "$pkg" ] || continue
@@ -410,85 +567,6 @@ jobs:
           api test/forced-throttled-audit-db.test.ts FORCED_THROTTLED_AUDIT_TEST_URL forced_throttled_audit_test pg
           GATED
           exit "$failed"
-
-      # api smokes first: they are seconds each, so a broken route surfaces before the
-      # worker suite spends most of the job's budget. smoke:terminal is
-      # excluded from smoke:ci — it needs a docker daemon and pulls an image, the same
-      # reason the worker job leaves smoke:sub-agent out of its own smoke:ci.
-      # Every smoke:ci runs its smokes through scripts/run-smokes.mjs: each smoke has its own time
-      # limit, a hung one is killed and named, and the rest still run.
-      - name: Run api smokes
-        timeout-minutes: 5
-        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
-        run: pnpm --filter @haive/api smoke:ci
-
-      - name: Run worker smokes
-        timeout-minutes: 15
-        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
-        run: pnpm --filter @haive/worker smoke:ci
-
-      - name: Agent pool script on a real Redis
-        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
-        timeout-minutes: 5
-        run: pnpm --filter @haive/worker exec vitest run src/queues/cli-exec/agent-lease.test.ts
-        env:
-          HAIVE_LEASE_TEST_REDIS_URL: redis://localhost:6379/15
-
-      - name: CLI job retention on a real Redis
-        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
-        timeout-minutes: 5
-        run: pnpm --filter @haive/worker exec vitest run test/cli-job-retention.test.ts
-        env:
-          CLI_JOB_RETENTION_TEST_REDIS_URL: redis://localhost:6379/9
-
-      - name: Recovery re-drive advance ids on a real Redis
-        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
-        timeout-minutes: 5
-        run: pnpm --filter @haive/worker exec vitest run test/advance-dedup-redis.test.ts
-        env:
-          ADVANCE_DEDUP_TEST_REDIS_URL: redis://localhost:6379/6
-
-      - name: Repo refresh retries on a real Redis
-        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
-        timeout-minutes: 5
-        run: pnpm --filter @haive/worker exec vitest run test/refresh-rebuild-retries.test.ts
-        env:
-          REFRESH_RETRIES_TEST_REDIS_URL: redis://localhost:6379/5
-
-      - name: RAG sync lock on a real Redis
-        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
-        timeout-minutes: 5
-        run: pnpm --filter @haive/shared exec vitest run test/rag-sync-lock.test.ts
-        env:
-          HAIVE_RAG_LOCK_TEST_REDIS_URL: redis://localhost:6379/14
-
-      - name: Usage-auth stash script on a real Redis
-        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
-        timeout-minutes: 5
-        run: pnpm --filter @haive/api exec vitest run test/cli-providers-usage-auth.test.ts
-        env:
-          USAGE_AUTH_TEST_REDIS_URL: redis://localhost:6379/8
-
-      - name: Module activation watch on a real Redis
-        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
-        timeout-minutes: 5
-        run: pnpm --filter @haive/worker exec vitest run test/module-activation-watch.test.ts
-        env:
-          MODULE_ACTIVATION_WATCH_TEST_REDIS_URL: redis://localhost:6379/7
-
-      - name: Auth throttle script on a real Redis
-        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
-        timeout-minutes: 10
-        run: pnpm --filter @haive/api exec vitest run test/auth-throttle.test.ts
-        env:
-          AUTH_THROTTLE_TEST_REDIS_URL: redis://localhost:6379/10
-
-      # The migration runner's live-database coverage. Its own smoke:ci, since the worker's is
-      # worker-scoped; this package had no smoke of its own before.
-      - name: Run migration smokes
-        timeout-minutes: 5
-        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
-        run: pnpm --filter @haive/database smoke:ci
 
   schema-parity:
     name: Schema parity (migrations == push)

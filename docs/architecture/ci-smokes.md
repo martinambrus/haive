@@ -22,28 +22,40 @@ The smoke limits are CI numbers, MEASURED over the 16 green runs of 2026-10-31 t
 smokes took at most 19 s, repo-refresh 176-291 s (limit 480) and two-install 50-85 s (limit 240). A new smoke needs an
 override only if it can take more than about 40 s; one that exceeds its limit fails by name.
 
-A hung smoke or step costs its limit in place of its usual time, so the job's limit has to cover a green run and the
-largest hang. The gated tests grow the job: they take about 7.5 s a row of the GATED list on the slowest runners (the
-list had 79 rows on 2026-10-30 and 96 on 2026-10-31), and a green run spent at most 907 s outside them. MEASURED over
-the 59 green runs of the `smokes` job from 2026-10-30 through main run 41198565486: the job took 995-1591 s (the
-slowest, run 41189804819, was a main push) and the gated step 378-704 s. `budget` in the pin models a green run as 907 s
-plus 7.5 s a row (that covers every push run measured, at 79-96 rows) and holds three things:
+A hung smoke or step costs its limit in place of its usual time, so each job's limit has to cover a green run and the
+largest hang. The former combined `smokes` job is now two independent jobs: `smokes` retains the check name
+**End-to-end smokes** (api/worker/migration smokes and Redis scripts), and `postgres-gated` adds **Postgres-gated tests**.
+The latter owns the unchanged, ordered GATED list (115 rows at the split on 2026-11-01); files still run serially.
+Neither job waits for the other, shares a service or passes database state/artifacts to it. Each has its own Postgres
+and Redis; only `postgres-gated` needs pgvector. Both build shared/database, web-kit and modules, generate module
+registrations, set Redis to noeviction and apply the migrations before running checks. The module preparation used
+to live inside the gated check but supplied the later smokes too; moving it into both setups preserves that prerequisite.
 
-- The job's limit is at least 600 s over a modelled green run and at most twice it. It is 45 minutes (2700 s): 1109 s
-  over the slowest run seen, where 30 minutes left 209 s. Today a runner 1.5 times slower than that run (2386 s) would
-  still finish; the pin itself holds 600 s.
-- A check that runs to its limit leaves the checks after it room. The gated step's 25 minutes on top of the 907 s
-  outside it is 2407 s, 293 s under the limit; any other check's limit goes on top of a whole green run.
-- The gated step's limit is at least 1.5 times its modelled time. 25 minutes is 2.1 times the step's slowest green run
-  and holds 133 rows; the job's margin lasts to 159 rows. The pin fails one row later, at 134 and at 160: measure
-  again, then raise the limits, or move the gated tests into their own job.
+The limits use the previous measurements, not a claimed measurement of the split. MEASURED over the 59 green runs
+of the combined `smokes` job from 2026-10-30 through main run 41198565486: the job took 995-1591 s, its gated step
+378-704 s, and at most 907 s was spent outside that step. The gated files cost about 7.5 s per row on the slowest
+runners (79-96 rows in those runs). Repeated setup/services cost 54 s median, 62 s maximum. The existing `budget` pin
+now models each split job with those historical numbers and explicit setup allowances:
 
-Only the list is modelled. The 907 s grew from 629 s in the week to 2026-10-31 (the worker smokes and the auth throttle
-script grew), and the pin cannot see that: measure it again whenever a green run comes within 600 s of the limit.
+- `smokes`: 907 + 62 = 969 s modelled green. Its 32-minute limit (1920 s) leaves 951 s over that model and covers
+  the largest check's entire 900 s limit plus modelled green (1869 s), so later checks still have room after a hang.
+  The extra 62 s conservatively allows moving module preparation from the old gated step into this job's setup.
+- `postgres-gated`: 120 s setup/module allowance + 7.5 s per row = 982.5 s at 115 rows. Its 30-minute limit (1800 s)
+  leaves 817.5 s over modelled green and covers the unchanged 25-minute gated step limit plus setup (1620 s).
+  The 120 s allowance rounds up the historical 62 s setup maximum to include module preparation.
+- Both jobs retain at least 600 s over modelled green, stay within twice that model and leave room for a check's
+  whole time limit plus the rest of a green run. The gated step also retains at least 1.5 times its modelled row time:
+  its 25 minutes holds 133 rows and fails the pin at 134; the new job's 600 s margin lasts through 144 rows.
+  Measure again before raising a limit when those pins fail.
 
-A split into two jobs would shorten the critical path (this job is the longest of the CI jobs in every run: 995-1591 s
-against 584-927 s for e2e and 579-1017 s for lint and unit tests) but repeats the setup, services included (54 s median,
-62 s at most), conflicts with every open change to the GATED list and adds a job name, so a raise was chosen.
+The old model at 115 rows was 907 + 862.5 = 1769.5 s in one job. The split's expected critical path is the larger
+of 969 s and 982.5 s (about 16.4 minutes rather than 29.5), subject to runner scheduling and repeated setup. This is
+a projection; only green Actions runs of the split can establish the improvement. Other jobs may become the critical
+path: historical e2e took 584-927 s and lint/unit tests 579-1017 s. Total runner work increases with duplicated setup.
+
+Only GATED row growth is modelled dynamically. The 907 s grew from 629 s in the week to 2026-10-31 (worker smokes and
+the auth throttle script), and the pin cannot see future growth outside the list: measure each split job again whenever
+a green run comes within 600 s of its limit, including whether the new setup allowances remain adequate.
 
 A check that is not a `smoke:ci` chain has its own `timeout-minutes`, set well above its slowest green run (MEASURED over
 the same runs): the Postgres-gated tests 378-704 s (25 minutes), the auth throttle script 90-149 s (10 minutes), the
@@ -57,11 +69,11 @@ out falsely, and Ctrl-C works there.
 
 ## CI steps
 
-In the `smokes` job of `.github/workflows/ci.yml` every step up to `Apply database migrations` (id `migrate`) is setup
-and keeps the default condition, so a failed one skips everything after it. Every step after it is an independent
+In the `smokes` and `postgres-gated` jobs of `.github/workflows/ci.yml` every step up to `Apply database migrations`
+(id `migrate`) is setup and keeps the default condition, so a failed one skips everything after it. Every step after it is an independent
 check, run on `if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}`: a failed check (the Postgres-gated
-tests, an api smoke, a Redis script) does not skip the others, the job still fails with it, and a run cancelled by a
-newer push stops. A check names `migrate` and never a sibling; a step the checks need goes above `migrate`. A
+tests in their own job, an api smoke, a Redis script) does not skip the others, the job still fails with it, and a run
+cancelled by a newer push stops. A check names `migrate` and never a sibling; a step the checks need goes above `migrate`. A
 mistyped step id reads as empty and a mistyped status never matches; either skips the check with the job still green. A
 red run no longer ends early, so it takes about as long as a green one.
 
@@ -69,8 +81,9 @@ A check that is not a `smoke:ci` chain also has a `timeout-minutes`. A step that
 as failed, not cancelled, so `!cancelled()` stays true) and the checks after it still run; without one a hang burns
 the job's limit and cancels them.
 
-The gated step runs as the runner's default `bash -e {0}`: its `set -uo pipefail` adds -u and pipefail and leaves -e
-on, so a failed web-kit build, modules build or `gen-modules` ends the step before any gated file runs.
+Both jobs build web-kit/modules and run `gen-modules` in a setup step before `migrate`, using the runner's default
+`bash -e {0}`. A failed build therefore stops the checks. The gated loop's `set -uo pipefail` adds -u and pipefail
+and leaves -e on; its explicit per-row failure accumulation still lets later rows run before the final failing exit.
 
 Four more jobs have the same shape, with the id of their last setup step in the guard: `compose-boot` (`runtime`; its
 three cleanup steps keep `always()`, `failure()`, `always()`), `schema-parity` (`build`), the web checks of
@@ -79,13 +92,13 @@ three cleanup steps keep `always()`, `failure()`, `always()`), `schema-parity` (
 `e2e` is one pipeline ending in cleanup steps, and `lint-typecheck-test` would hold its red verdict until its slowest
 check ends if guarded.
 
-`scripts/test/ci-step-independence.test.mjs` pins the setup steps of each of the five jobs (a new one is added to its
+`scripts/test/ci-step-independence.test.mjs` pins the setup steps of each of the six jobs (a new one is added to its
 `setup` list), the exact guard on every check, the cleanup conditions of `compose-boot`, that the `production-images`
 matrix still has the `web` leg and no `exclude`, and that nothing in the jobs sets `continue-on-error`, which would
-leave a failed step green or let the checks run after a failed setup step. It also pins that no step of the five jobs
-(cleanup steps excepted) swallows a command failure (see Workflow scanners). For the `smokes` job it also pins that
+leave a failed step green or let the checks run after a failed setup step. It also pins that no step of the six jobs
+(cleanup steps excepted) swallows a command failure (see Workflow scanners). For both split jobs it also pins that
 every check that is not a `smoke:ci` chain has a `timeout-minutes` of whole minutes, that the Redis databases do not
-clash, and the job's limits (`budget`, see Limits): a modelled green run grows with the rows of the GATED list, so the
+clash, and each job's limits (`budget`, see Limits): a modelled green run grows with the rows of the GATED list, so the
 pin fails when the list outgrows the gated step's limit or the job's. `scripts/test/run-smokes.test.mjs` pins the
 runner and that every `smoke:ci` goes through it.
 
@@ -119,8 +132,9 @@ shell text inside a `${{ 'literal' }}` expression, text returned to a shell (`ba
 with a path (`/usr/bin/ssh`), and an escaped space before `#` (read as a comment). No workflow script has any of these
 today.
 
-The Redis rule in `checkRedisIsolation`: the job-wide `REDIS_URL` (database 0), the databases of the gated step and
-each later check need distinct literal databases; a Redis URL whose database is not a literal number fails the pin. The
-databases are the `*_REDIS_URL` values in `ci.yml`; read them there. A clash fails the pin naming both steps (main's
+The Redis rule in `checkRedisIsolation` applies within each job's own Redis service: the job-wide `REDIS_URL`
+(database 0), the databases of the gated step when present and each later check need distinct literal databases;
+a Redis URL whose database is not a literal number fails the pin. The databases are the `*_REDIS_URL` values in `ci.yml`; read them there. A clash fails the pin naming both steps (main's
 recovery re-drive script and the usage-auth script both sat on database 8 until it caught them), and a new Redis check
-takes a database no other step uses.
+takes a database no other step in its job uses. The existing collision negative controls also retain a fixture of the
+former combined shape; the live jobs are checked separately.

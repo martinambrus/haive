@@ -35,6 +35,10 @@ const listedFiles = rows
   .sort();
 
 describe('the Postgres-gated list in ci.yml', () => {
+  it('lists every file exactly once', () => {
+    assert.equal(new Set(listedFiles).size, listedFiles.length, 'duplicate GATED test row');
+  });
+
   it('has a row for every gated test file', () => {
     assert.deepEqual(
       gatedFiles.filter((file) => !listedFiles.includes(file)),
