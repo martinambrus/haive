@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
   chownNoFollow,
-  ensureDirNoFollow,
   lstatNoFollow,
   readFileNoFollow,
   readdirNoFollow,
@@ -37,13 +36,15 @@ async function kbEntries(repoPath: string): Promise<{ rel: string; directory: bo
  * worker without chown privileges retains its repository owner's identity, like
  * prepareAgentWritableDir. No modes or other repository trees are changed. */
 export async function handOverKnowledgeBase(repoPath: string): Promise<void> {
+  // KB_DIR is an onboarding marker. Ownership handoff must not create it when
+  // the caller wrote nothing; actual KB writers create their own destinations.
+  if ((await lstatNoFollow(repoPath, KB_DIR, { strict: true })) === null) return;
   const root = await lstatNoFollow(repoPath, '', { strict: true });
   if (!root) throw new Error('repository root is unavailable');
   const owner =
     process.getuid?.() === 0
       ? { uid: SANDBOX_UID, gid: SANDBOX_GID }
       : { uid: root.stats.uid, gid: root.stats.gid };
-  await ensureDirNoFollow(repoPath, KB_DIR, { owner });
   for (const { rel, directory } of await kbEntries(repoPath)) {
     const info = await lstatNoFollow(repoPath, rel, { strict: true });
     if (

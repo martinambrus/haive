@@ -50,7 +50,9 @@ install it emits ZERO custom agents, so the path is dead and the large output is
 
 The published project KB needs the same ownership handoff as the drafts. After 08 files
 its local pages (including stubs, placements and the generated index), `handOverKnowledgeBase`
-hands only `KB_DIR` and its real children to the sandbox identity. The root worker uses
+hands only an existing `KB_DIR` and its real children to the sandbox identity. A missing KB
+stays absent: ownership handoff creates no onboarding marker on a no-write path. Actual KB
+writers still create their own destinations. The root worker uses
 `SANDBOX_UID`/`SANDBOX_GID`; an unprivileged host worker retains the repository owner's identity,
 as draft preparation does. It preserves bytes and ordinary permission bits, follows no links,
 refuses hard-link aliases, and excludes git data. It never hands over state, secrets or the rest

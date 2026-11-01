@@ -184,6 +184,7 @@ describe('knowledgeQaReviewStep.apply', () => {
   }
 
   it('writes confirmed code proposals + passthrough deterministically (LLM skipped)', async () => {
+    await rm(kbDir, { recursive: true });
     const out = await knowledgeQaReviewStep.apply(makeCtx(), {
       iteration: 0,
       previousIterations: [],
@@ -201,20 +202,44 @@ describe('knowledgeQaReviewStep.apply', () => {
     expect(out.stillUnansweredCount).toBe(1);
   });
 
-  it('fails an unapplied owner correction when the agent honestly reports no writes (T293)', async () => {
-    await writeFile(path.join(kbDir, 'AUTH.md'), '# Auth\n\nOld answer.\n');
-    await expect(
-      knowledgeQaReviewStep.apply(makeCtx(), {
-        iteration: 0,
-        previousIterations: [],
-        detected: detect({ passthrough: [] }),
-        formValues: { review__1: 'The owner supplied the corrected answer.' },
-        // Captured normal corrector result after EACCES, not a claimed edit.
-        llmOutput: fence({ kbWrites: [] }),
-      }),
-    ).rejects.toThrow(/not applied|unapplied/i);
-    expect(await readFile(path.join(kbDir, 'AUTH.md'), 'utf8')).toContain('Old answer.');
+  it('keeps an absent KB marker absent when unanswered questions are skipped', async () => {
+    await rm(kbDir, { recursive: true });
+    const out = await knowledgeQaReviewStep.apply(makeCtx(), {
+      iteration: 0,
+      previousIterations: [],
+      detected: detect({ reviewable: [], passthrough: [] }),
+      formValues: { unanswered__0: '__skip__' },
+      llmOutput: undefined,
+    });
+    expect(out.kbWritten).toEqual([]);
+    expect(out.stillUnansweredCount).toBe(1);
+    await expect(stat(kbDir)).rejects.toMatchObject({ code: 'ENOENT' });
   });
+
+  it.each(['captured', 'missing'] as const)(
+    'fails an unapplied owner correction when the agent honestly reports no writes (T293, %s baseline)',
+    async (baseline) => {
+      await writeFile(path.join(kbDir, 'AUTH.md'), '# Auth\n\nOld answer.\n');
+      const ctx = makeCtx();
+      const detected = detect({ passthrough: [] });
+      if (baseline === 'captured') {
+        await knowledgeQaReviewStep.llm!.prepareWorkspace!({ ctx, detected, formValues: {} });
+        expect(detected.kbBefore).toEqual(await snapshotKnowledgeBase(tmpRoot));
+        expect(detected.kbBefore?.['.haive-data/knowledge_base/AUTH.md']).toBeDefined();
+      }
+      await expect(
+        knowledgeQaReviewStep.apply(ctx, {
+          iteration: 0,
+          previousIterations: [],
+          detected,
+          formValues: { review__1: 'The owner supplied the corrected answer.' },
+          // Captured normal corrector result after EACCES, not a claimed edit.
+          llmOutput: fence({ kbWrites: [] }),
+        }),
+      ).rejects.toThrow(/not applied|unapplied/i);
+      expect(await readFile(path.join(kbDir, 'AUTH.md'), 'utf8')).toContain('Old answer.');
+    },
+  );
 
   it('fails a claimed write whose KB bytes did not change', async () => {
     await writeFile(path.join(kbDir, 'AUTH.md'), '# Auth\n\nOld answer.\n');
