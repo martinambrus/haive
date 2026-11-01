@@ -155,23 +155,6 @@ All PRE-EXISTING.
 2. _rules-files.ts stripRtkBlocks (~180) / appendRtkBlock (~336) await 02's DB insert while AGENTS.md/CLAUDE.md is parked; record before the park.
 3. plan/mirror.ts ~287/~316 await git while plan.json is parked — deliberate; item 1 covers it.
 
-### T293 · FNF[onboarding-kb][verify-first] · 09_3's KB corrections may fail on a root-owned KB
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T16:55Z · last: 2026-11-01T17:57Z · priority: P1
-08-knowledge-acquisition.ts:2058 and its writes pass no owner, so a fresh KB may be root-owned and uid 1000 gets EACCES; 09_3's apply never checks the disk. Dev data disagrees in part. Verify on a fresh onboarding first; then pass the owner in 08, and make 09_3 diff the KB against the agent's claim.
-
-Validation scheduling decision 2026-11-01: attach to the dedicated capped T300 run before feature work; actual evidence/data prerequisites remain, and no successful live result is inferred.
-
-The owner scheduled one capped validation attempt; this block is an evidence dependency, not an unanswered policy question.
-
-Evidence gate satisfied 2026-11-01T16:55Z: ownedfreshonboarding reproduced actualuid1000EACCESagainstrootKBdir/files andunapplied09_3marked done/correctedCount1; agenthonestlyreturnedemptykbWrites. Implement boundedownershiphandoff+actualwriteverification, preservelegitnoop/skip, no globalchown/modeweakening or historicaldatarewrite. No morepaidT300attempt isauthorized; use capturedreceipt+isolatedroot regressioncontrols.
-
-Progress 2026-11-01T17:37Z: Live T300 confirmed root-owned KB and deterministic false success after honest empty-write result. Fix1 at7d4ed698 has clean fresh xhigh review; root60 controls and focused115 pass. Full worker candidate running, then PR gates; no further paid onboarding attempt authorized. Evidence queue-exec-20261101/T293.
-
-Progress 2026-11-01T17:45Z: PR986 full worker14999+4expected passed, but GitHub Codex found valid introduced shared-page no-op rejection; required fix round2 underway. T121/T122 checkpointed to keep one driver. Preserve actual failure/permissions controls, no semantic section parser or extra paid T300 attempt. Evidence fix-2.md and github-finding-verdict.json.
-
-Progress 2026-11-01T17:57Z: Fix2 at74e359dd resolves valid shared-page regression; meaningful old-source red,83focused and fresh xhigh review clean. Complete corrected worker15002pass+4expected. PR986 updated, P2thread replied/resolved; fresh new-HEAD hosted Codex requested, then CI. No new paid onboarding.
-
 ### T308 · FNF[worktree-aliases] · hard links planted into .haive/worktrees before #800 survive
 
 status: open · priority: P2 · gate: bounded verification
@@ -1468,6 +1451,8 @@ status: parked · reason: diminishing returns; comment only, no runtime conseque
 Source: route-retirement follow-up review 2026-11-01, packages/worker/src/step-engine/steps/index.ts:119. The unchanged startup-assertion JSDoc describes task-row invalidation through providerSensitive metadata, while the task-level switch route is being retired by T338. The assertion itself still correctly checks metadata/list equality. Preserve as low documentation debt; update only on the next related documentation/source touch. No extra implementation/review round or runtime audit is authorized by this note. Evidence .claude/tmp/codex-run/queue-exec-20261101/route-retirement/review-comments.md.
 
 ## Done
+
+- T293 — hand KB files to the sandbox identity and verify actual corrections without false success — PR #986 (0e20ea848b), 2026-11-01; exact-HEAD reviews/full candidate/PR CI/main CI41335516748 green; actual root fixture controls and loaded-source validation passed; post-fix live model run not repeated. Evidence .claude/tmp/codex-run/queue-exec-20261101/T293/.
 
 - T467 — retire buffered repository uploads and bound raw sound uploads, preserving supported chunked Retry sources — PR #985 (d86a7f014d), 2026-11-01; exact-HEAD reviews/full candidate/PR CI/main CI41334261157 green; scoped live acceptance passed. Evidence .claude/tmp/codex-run/queue-exec-20261101/route-retirement/.
 
