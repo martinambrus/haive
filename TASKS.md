@@ -876,21 +876,6 @@ Before React attaches `handleSubmit`, a click on Sign in (web components/auth-fo
 
 Also (T454 review, 2026-10-31): `/repos/new` has the same pre-attach click (web components/new-repo-form.tsx ~:247, `method="post"` since T454); whatever replay mechanism is chosen here should cover every server-rendered form, not the sign-in form alone.
 
-### T456 · FNF[api-optional-body-defaults] · a malformed or empty body becomes `{}` and succeeds where the body is optional (+1)
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T18:23Z · last: 2026-11-01T19:54Z · kind: reproduced operational bug · user decision: resolved 2026-11-01 · priority: P1
-From the T447 review (2026-10-30). PRE-EXISTING; consequential for the caller.
-
-Where a route reads an optional body with `.json().catch(() => ({}))` or a try/catch, a malformed or truncated body is read as "no options" and the request succeeds with the defaults: api routes/tooling-upgrades.ts ~:250-256 (a truncated `{"components":["rtk"` upgrades ALL components), plan.ts ~:469 (snapshot save), ~:1285 (sequence: the task runs on the default CLI), ~:1311 (merge start: same), ~:1439 (advisory: the question is dropped), ddev-control.ts ~:75 (null-safe, but a malformed body returns the default logs; read-only). Decide the policy (for example: an empty body means the defaults, a malformed one is a 400, which needs the text read rather than the parse error caught) and apply it to every such route.
-
-Also (T455 review, 2026-10-31; consequential, reproduced by the T455 reviewer): POST tooling-upgrade with `components` of the wrong type (a string, `null`, a number) reads as absent and upgrades every component (api routes/tooling-upgrades.ts ~:258). A present field of the wrong type must be refused whatever the empty-body policy is.
-
-User decision 2026-11-01: Empty body uses defaults; malformed JSON and wrong types return 400. A wrongly typed components field is always refused.
-
-Execution 2026-11-01T18:23Z: approved P1 operational lane, disjoint from T121/T122 awaiting feature review. Enforce the existing owner policy on named optional-body callers; no generic API audit or new unrelated route behavior. Evidence `.claude/tmp/codex-run/queue-exec-20261101/T456/`.
-
-Progress 2026-11-01T19:54Z: PR987 merged a8fdd5ebb after native/hosted clean reviews and all PR gates; full API7110 passed. Main CI41343957973 pending; owned metadata-only live web/API acceptance in progress, no model/enqueue/real settings changes.
-
 ### T457 · FNF[cli-login-post-cleanup-chunks] [design] · a sign-in line that arrives after the login session ended still starts a probe
 
 status: parked · reason: diminishing returns (2026-11-01 scan): Minor teardown-only probe scheduling; desired completion behavior remains undecided; resume when resume when late probes cause observed incorrect provider state · priority: P4
@@ -1463,6 +1448,8 @@ status: parked · reason: diminishing returns; comment only, no runtime conseque
 Source: route-retirement follow-up review 2026-11-01, packages/worker/src/step-engine/steps/index.ts:119. The unchanged startup-assertion JSDoc describes task-row invalidation through providerSensitive metadata, while the task-level switch route is being retired by T338. The assertion itself still correctly checks metadata/list equality. Preserve as low documentation debt; update only on the next related documentation/source touch. No extra implementation/review round or runtime audit is authorized by this note. Evidence .claude/tmp/codex-run/queue-exec-20261101/route-retirement/review-comments.md.
 
 ## Done
+
+- T456 — optional JSON bodies validate before effects; empty body retains defaults — PR #987 (a8fdd5ebb0), 2026-11-01; exact-HEAD reviews/full candidate/PR CI/main CI41343957973 green; actual browser/web-origin API acceptance:9 invalid400 no effects and3 valid200 controls; owned fixture removed; main CI green. Evidence .claude/tmp/codex-run/queue-exec-20261101/T456/.
 
 - T293 — hand KB files to the sandbox identity and verify actual corrections without false success — PR #986 (0e20ea848b), 2026-11-01; exact-HEAD reviews/full candidate/PR CI/main CI41335516748 green; actual root fixture controls and loaded-source validation passed; post-fix live model run not repeated. Evidence .claude/tmp/codex-run/queue-exec-20261101/T293/.
 
