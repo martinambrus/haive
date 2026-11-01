@@ -58,6 +58,8 @@ const NOT_A_RESOURCE = [
   /haive-(?:custom|integrations)\b/,
   // The advisory lock key admission and a state write meet on: scoped to the install's own Postgres.
   /haive-new-work-fence\b/,
+  // Versioned context-backup format tag, never a Docker/Postgres resource name.
+  /^haive-context-backfill-v1$/,
 ];
 
 function sourceFiles(dir: string): string[] {
