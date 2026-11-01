@@ -524,11 +524,6 @@ status: open · was modular #211
 30. (T459 review, 2026-10-31) PRE-EXISTING, minor: no route-level late-sweep control for loop Resume, `retry_ai`, Skip, the CLI switch or the fan-out Resume (only the Retry route has one); no control for the second sweeps or for the fan-out Resume with downstream rows; the hand-rolled unit fakes absorb the new lock selects and cannot see their removal (the gated controls do).
 31. (T376 sixth review, PRE-EXISTING, test hygiene) eight older gated files create a refusal trigger with a plain `CREATE TRIGGER`, no `DROP TRIGGER IF EXISTS` and no leftover guard in `beforeAll`: admin-security-audit-db.test.ts ~:42, admin-config-pool-db.test.ts ~:212, integrations-audit-db.test.ts ~:76/~:92, maintenance-routes-db.test.ts ~:145, repo-credentials-audit-db.test.ts ~:40, tooling-app-auth-atomic-db.test.ts ~:53, integrations-broker.test.ts ~:1352, module-deactivation-db.test.ts ~:1181 (global-kb's `refuse_store_write` is dropped only in `afterEach`). A killed run fails the next run once in a persistent database; T376 fixed its five files with `CREATE OR REPLACE FUNCTION` plus `DROP TRIGGER IF EXISTS`.
 
-### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+5)
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T17:16Z · last: 2026-11-01T08:36Z · was modular #213
-Items 1-2 merged (#831). 3. PERF: the bundle file browser runs fs-safe lstat per file (5000 files took 8.8 s). Fix: a walk that holds directory descriptors. 4. new-repo-form.tsx shows only the first 100 matches, with no note. 5. github-oauth.ts:110-111 echoes an unbounded GitHub error body, and a body that echoed the request's token would reach the response and the error log (T378 review, fake-vendor repro). Reuse the forge excerpt helper. 6. The /user/repos loop makes one extra empty request. Fix: stop when the Link header has no rel="next". 7. (T454 review, 2026-10-31) PRE-EXISTING, minor, measured (identical before T454): the GitHub source's `oauthLabel` is never reset (web components/new-repo-form.tsx ~:125, ~:146, ~:271, ~:437), so GitHub, then another source, then GitHub again shows the manual URL input and Create refuses until a reload. 8. (T454 review) PRE-EXISTING, minor, by code reading: web filesystem-browser.tsx ~:96-99, the `flex-1` button has no `min-w-0`, so at 375 px a long directory name clips the Pick button (T454 judge/repos-new-375.png).
-
 ### T366 · FNF[shutdown-deadline] · the worker shutdown's per-part limits are summed by hand
 
 status: parked · kind: design · was modular #219 · reason: diminishing returns (2026-11-01 scan): Internal shutdown-budget refactoring; no demonstrated deadline failure; resume when resume when measured shutdown exceeds Docker's grace period
@@ -1254,6 +1249,8 @@ Queued broader findings from T489 PR #975, review-6 and codex-rev-6/last.txt. PR
 5. The suffix rescan (~:23) can be quadratic for a long script. Keep the scanner proportional to the fixed first-party workflow corpus; avoid building a general shell parser.
 
 ## Done
+
+- T365 — bounded repository and bundle pickers, actionable bounded failures, sync-completion cache invalidation — PR #974 (ea016541a), 2026-11-01; main CI green; live dev Resync fetched new commit and refreshed expanded files without reload; picker verified at375/768/1280 with synthetic vendor results; follow-ups T517/T518
 
 - T489 — CI steps and jobs have independent limits and guards; gated-loop failures remain loud; shell scanner reduced and pinned against real workflows — PR #975 (221514334), 2026-11-01; main CI green; follow-ups T520 and existing T509; no further scanner expansion without a real failing workflow
 
