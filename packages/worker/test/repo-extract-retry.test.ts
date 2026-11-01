@@ -87,6 +87,26 @@ describe('extract upload retry', () => {
     await expect(readFile(payload.archivePath!)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('refuses unsafe Git metadata before publishing or detecting an uploaded repository', async () => {
+    await mkdir(path.dirname(payload.archivePath!), { recursive: true });
+    const zip = new JSZip();
+    zip.file('.git', 'gitdir: /private-secret-value');
+    zip.file('README.md', '# untrusted new tree');
+    await writeFile(payload.archivePath!, await zip.generateAsync({ type: 'nodebuffer' }));
+    const dest = path.join(root, USER, REPO);
+    await mkdir(dest, { recursive: true });
+    await writeFile(path.join(dest, 'keep.txt'), 'previous checkout');
+    await expect(handleExtract(payload, fake.db as never, root)).rejects.toThrow(
+      /Uploaded Git metadata is unsafe or unsupported/,
+    );
+    expect(await readdir(dest)).toEqual(['keep.txt']);
+    expect(await readFile(path.join(dest, 'keep.txt'), 'utf8')).toBe('previous checkout');
+    expect(fake.rows(schema.repositories)[0]!.status).toBe('cloning');
+    expect(fake.rows(schema.repoUploads)[0]!.status).toBe('complete');
+    expect(await readFile(payload.archivePath!)).not.toHaveLength(0);
+    expect(claim.release).toHaveBeenCalledTimes(1);
+  });
+
   it('records a missing archive and tells the user to delete and upload again', async () => {
     await expect(handleExtract(payload, fake.db as never, root)).rejects.toThrow(
       /delete.*repository.*upload.*again/i,
