@@ -399,7 +399,7 @@ Plan D4: git and registry install sources drive D1 and D3; the token is stored e
 
 ### T338 · FNF[task-cli-provider-route] · uncalled task-level PATCH /tasks/:id/cli-provider resets running rows without epoch or kill
 
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T16:07Z · last: 2026-11-01T17:48Z · priority: P1
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T16:07Z · last: 2026-11-01T18:01Z · priority: P1
 PRE-EXISTING. The route at api routes/tasks/index.ts ~:1599-1714 resets running and waiting_cli provider-sensitive rows to pending. It does not bump the orchestration epoch, kill the sandbox or supersede the run; the step-level route in steps.ts does all three. No web, e2e, script or test calls it.
 Recommendation: delete the route.
 
@@ -410,6 +410,8 @@ Execution 2026-11-01T16:07Z: paired with T467 as approved API route retirement w
 Progress 2026-11-01T17:37Z: PR985 retires unused task-level route; supported step switching retained. Fresh native review and original GitHub Codex clean. CI12/13 passed, correcting only exact-cap sound-test timeout in99efcf0b after fresh focused review; corrected full API candidate queued. Evidence queue-exec-20261101/route-retirement.
 
 Progress 2026-11-01T17:48Z: Corrected complete API candidate99efcf0b passes7048 tests. New-HEAD GitHub Codex clean; all native reviews clean. PR985 now awaits remaining hosted CI only, no Greptile wait. Supported step switching remains covered; paired T467 source unchanged by test-timeout correction.
+
+Progress 2026-11-01T18:01Z: PR985 merged d86a7f014ddc44898f2127329fbc8a7eb9448c34 after new-HEAD Codex clean/all13CIgreen/zero unresolved threads. Main-branch CI pending before final closure and owned cleanup. Code complete; no further implementation or Greptile wait.
 
 ### T339 · I4d · task page Integrations tab (override, "Also for my later tasks", reset) (+2)
 
