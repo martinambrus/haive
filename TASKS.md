@@ -1050,19 +1050,6 @@ User decision 2026-11-01: Ask the user at Replace ZIP: keep old until replacemen
 
 This explicitly SUPERSEDES the earlier keep-old-only answer. Ask at each Replace ZIP operation, explain the disk-space/rollback trade-off, and require a deliberate mode choice before destructive removal. Never silently infer remove-first from low disk space. The UI must distinguish the uploaded archive and extracted tree when presenting what will be removed.
 
-### T488 · FNF[ci-smokes-split] · the smokes job grows about 7.5 s per gated test row; its budget pin fails at 134 rows
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T14:59Z · last: 2026-11-01T14:59Z · kind: CI improvement · priority: P1
-From the T474 review (2026-10-31). Latent, consequential once it bites.
-
-Since T474 the smokes job has a 45-minute limit and the gated step 25 minutes, with a pin that models a green run as 907 s plus 7.5 s per GATED row and fails at 134 rows (step) and 160 rows (job margin); the list had 79 rows on 2026-10-30 and 98 on 2026-10-31. Options: give the gated tests their own job (the critical path falls toward the next job's 579-1017 s; main is not protected, so a rename is free), run the gated files in parallel, or put each file under its own limit; a final step that warns when the elapsed time is within 600 s of the limit would make the budget self-monitoring.
-
-Update (T489 review, 2026-10-31): with the worker smokes step now limited to 15 min the crowding rule `907 + 7.5 x rows + 900 <= 2700` trips at 120 GATED rows (103 on 2026-10-31, growing about 4.5 a day), so the pin fires within days; raise the job limit or split the job when it does.
-
-User decision 2026-11-01: Unpark bounded CI splitting: actual PR/main feedback was about30minutes with108PGrows; preserve every required gate and avoid parser expansion.
-
-Execution 2026-11-01T14:59Z: approved independent CI split while T402/T387 delivery gates run; product functionality still follows the capped T300 validation attempt. Base fed6c5eb1 includes T402s new GATED row; do not open/merge this PR until PR982 is merged. Preserve every required gate, database/Redis isolation and bounded scanner scope.
-
 ### T490 · FNF[error-text-paths-2] [verify-first] · other surfaces still show raw worker error text with server paths (+8)
 
 status: open · gate: bounded verification · priority: P2
@@ -1474,6 +1461,7 @@ Split from T364 items1/13/14, 2026-11-01. This is three candidate ways validatio
 
 ## Done
 
+- T488 — split PostgreSQL integration checks from API/worker/Redis smokes, preserving all115 rows and11otherchecks — PR #984 (af13ab26d),2026-11-01; exact-HEAD reviews, scripts1160 and PR/mainCIgreen; one observed pair30m47s combined versus concurrent16m08s(smokes)/14m31s(PG), not a general benchmark.
 - T387 — sanitize new uploaded Git config before publication; preserve history and refuse unsupported metadata — PR #983 (0cdffe9d2),2026-11-01; fresh source/correction reviews, root39/worker14981/scripts1073 and PR/mainCI green; ambient-only lever coverage remains T523. Evidence .claude/tmp/codex-run/queue-exec-20261101/T387/.
 - T402 — repair historical context badges with reversible bounded operator;528 rows repaired,37 immutable before-images,0 further repairable rows; transcript/prompt retention0 forever — PR #982 (940878aa2),2026-11-01; exact-HEAD reviews, PRCI and mainCI41319760904 green; undo/digests verified; missing/ambiguous data preserved. Evidence .claude/tmp/codex-run/queue-exec-20261101/T402/.
 - T524 — reconcile backlog decisions, mixed bundles and priorities;42 owner questions answered, corrected T487 policy retained, T402 expiry verified — board-only commits b1305a4f2/965b87a7e/c6ccc177e and closure,2026-11-01; no product implementation or live validation run started; TASKS-only changes need no PR/CI
