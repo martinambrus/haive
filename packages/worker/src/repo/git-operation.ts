@@ -1,9 +1,10 @@
 import { isAbsolute, relative } from 'node:path';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
+import { GIT_OPERATION_STATE_ENTRIES } from '@haive/shared/git-args';
 import { gitRun } from './git-exec.js';
 import { gitWorkspaceStatus } from './git-workspace.js';
 
-/** A checkout with a `.git` whose merge or rebase state could not be read. */
+/** A checkout with a `.git` whose merge, rebase, cherry-pick or revert state could not be read. */
 export class GitOperationUnreadableError extends Error {
   constructor(message: string) {
     super(message);
@@ -11,12 +12,12 @@ export class GitOperationUnreadableError extends Error {
   }
 }
 
-/** Whether a merge or rebase is open: its state entry in the git dir exists. `rev-parse --verify`
+/** Whether a merge, rebase, cherry-pick or revert is open: its state entry in the git dir exists. `rev-parse --verify`
  *  would also resolve a branch or tag named MERGE_HEAD; a rebase stopped at an `exec` has its state
  *  directory but no REBASE_HEAD. A checkout with no `.git` has none; a read that fails in one that has
  *  a `.git` is unknown and throws. */
 export async function gitOperationInProgress(repoPath: string): Promise<boolean> {
-  for (const ref of ['MERGE_HEAD', 'REBASE_HEAD', 'rebase-merge', 'rebase-apply']) {
+  for (const ref of GIT_OPERATION_STATE_ENTRIES) {
     const located = await gitRun(repoPath, ['rev-parse', '--git-path', ref]);
     if (located.code !== 0) {
       if ((await gitWorkspaceStatus(repoPath)) === 'absent') return false;

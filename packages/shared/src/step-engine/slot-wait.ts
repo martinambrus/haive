@@ -64,10 +64,12 @@ export const STALE_PARK_MS = 120_000;
 /** Step statuses an AGENT park can be sitting in.
  *
  *  `waiting_cli` is the obvious one — resolveLlmPhase writes it to the row before parking.
- *  `running` is the mining/DAG fan-out: its barrier reports `waiting_cli` upward but returns
- *  the step row untouched, so a step blocked on N queued mining agents keeps the `running` it
- *  had while apply() dispatched them. Testing the status alone therefore missed every
- *  fan-out park — nine tasks at once on a saturated host — and listed them as working.
+ *  `running` is the mining/DAG fan-out between its barrier and the hand-off: the barrier
+ *  reports `waiting_cli` upward and returns the step row as it read it, and the hand-off
+ *  (`handleResult`, task-queue.ts) then writes `waiting_cli` to a row still reading `running`.
+ *  Until that write lands a step blocked on N queued mining agents reads `running`. The
+ *  hand-off did not always write it, and a status-only test then missed every fan-out park —
+ *  nine tasks at once on a saturated host — and listed them as working.
  *
  *  The status is only half the test and the weaker half; the other half (a live invocation
  *  with NONE started, via queuedInvocationStepRowIds) is what actually proves the wait, and

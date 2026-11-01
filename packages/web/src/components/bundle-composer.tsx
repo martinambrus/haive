@@ -153,7 +153,12 @@ export function BundleComposer({
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [filesByBundle, setFilesByBundle] = useState<Record<string, BundleFilesState>>({});
 
+  const fileGenerations = useRef<Record<string, number>>({});
+  const expandedIdsRef = useRef(expandedIds);
+  expandedIdsRef.current = expandedIds;
+
   const loadBundleFiles = async (bundleId: string): Promise<void> => {
+    const generation = fileGenerations.current[bundleId] ?? 0;
     setFilesByBundle((prev) => ({
       ...prev,
       [bundleId]: { loading: true, files: [], truncated: false, cap: 0, error: null },
@@ -162,47 +167,66 @@ export function BundleComposer({
       const res = await fetch(`${API_BASE_URL}/bundles/${bundleId}/files`, {
         credentials: 'include',
       });
-      if (!res.ok) throw new Error(`files fetch failed (${res.status})`);
+      if (!res.ok) {
+        // The api says why in `error` (a bundle nested too deeply to list, for one); the status is
+        // the fallback for an answer that names nothing.
+        const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
+        // An empty reason would store a falsy error and render the listing as an empty bundle.
+        const reason = typeof body?.error === 'string' ? body.error.trim() : '';
+        throw new Error(reason || `files fetch failed (${res.status})`);
+      }
       const data = (await res.json()) as {
         files: BundleFileEntry[];
         truncated: boolean;
         cap: number;
       };
-      setFilesByBundle((prev) => ({
-        ...prev,
-        [bundleId]: {
-          loading: false,
-          files: data.files,
-          truncated: data.truncated,
-          cap: data.cap,
-          error: null,
-        },
-      }));
+      setFilesByBundle((prev) =>
+        generation !== (fileGenerations.current[bundleId] ?? 0)
+          ? prev
+          : {
+              ...prev,
+              [bundleId]: {
+                loading: false,
+                files: data.files,
+                truncated: data.truncated,
+                cap: data.cap,
+                error: null,
+              },
+            },
+      );
     } catch (err) {
-      setFilesByBundle((prev) => ({
-        ...prev,
-        [bundleId]: {
-          loading: false,
-          files: [],
-          truncated: false,
-          cap: 0,
-          error: err instanceof Error ? err.message : String(err),
-        },
-      }));
+      setFilesByBundle((prev) =>
+        generation !== (fileGenerations.current[bundleId] ?? 0)
+          ? prev
+          : {
+              ...prev,
+              [bundleId]: {
+                loading: false,
+                files: [],
+                truncated: false,
+                cap: 0,
+                error: err instanceof Error ? err.message : String(err),
+              },
+            },
+      );
     }
   };
 
   const toggleExpanded = (bundleId: string): void => {
+    const opening = !expandedIds.has(bundleId);
     setExpandedIds((prev) => {
       const next = new Set(prev);
       if (next.has(bundleId)) {
         next.delete(bundleId);
       } else {
         next.add(bundleId);
-        if (!filesByBundle[bundleId]) void loadBundleFiles(bundleId);
       }
       return next;
     });
+    // A listing that failed is asked again rather than kept until a reload.
+    if (opening && (!filesByBundle[bundleId] || filesByBundle[bundleId].error !== null)) {
+      void loadBundleFiles(bundleId);
+    }
   };
 
   // Hydrate the initial value once when the field mounts and the form's
@@ -221,6 +245,8 @@ export function BundleComposer({
   valueRef.current = value;
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
+  const loadBundleFilesRef = useRef(loadBundleFiles);
+  loadBundleFilesRef.current = loadBundleFiles;
 
   useEffect(() => {
     let cancelled = false;
@@ -255,6 +281,22 @@ export function BundleComposer({
           itemCount: (b.itemCounts?.agent ?? 0) + (b.itemCounts?.skill ?? 0),
         }));
         const current = valueRef.current;
+        // Ingestion changes the tree after acceptance. Drop only when it becomes final,
+        // and fence out requests that started against the previous tree.
+        for (const bundle of next) {
+          if (
+            bundle.status !== 'syncing' &&
+            current.some((v) => v.id === bundle.id && v.status === 'syncing')
+          ) {
+            fileGenerations.current[bundle.id] = (fileGenerations.current[bundle.id] ?? 0) + 1;
+            setFilesByBundle((prev) => {
+              const remaining = { ...prev };
+              delete remaining[bundle.id];
+              return remaining;
+            });
+            if (expandedIdsRef.current.has(bundle.id)) void loadBundleFilesRef.current(bundle.id);
+          }
+        }
         const same =
           next.length === current.length &&
           next.every((n, i) => {
@@ -366,12 +408,6 @@ export function BundleComposer({
       onChange(
         value.map((v) => (v.id === entry.id ? { ...v, status: 'syncing', itemCount: 0 } : v)),
       );
-      // Drop cached file listing — it'll re-fetch on next expand.
-      setFilesByBundle((prev) => {
-        const next = { ...prev };
-        delete next[entry.id];
-        return next;
-      });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -579,10 +615,10 @@ export function BundleComposer({
                     {fileState?.loading && (
                       <p className="text-xs text-neutral-500">Loading files…</p>
                     )}
-                    {fileState?.error && (
+                    {fileState && fileState.error !== null && (
                       <p className="text-xs text-red-400">Error: {fileState.error}</p>
                     )}
-                    {fileState && !fileState.loading && !fileState.error && (
+                    {fileState && !fileState.loading && fileState.error === null && (
                       <>
                         {fileState.files.length === 0 ? (
                           <p className="text-xs text-neutral-500">

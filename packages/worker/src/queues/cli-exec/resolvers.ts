@@ -67,7 +67,7 @@ import {
   writeMcpFileIntoTaskVolume,
 } from '../../sandbox/task-auth-volume.js';
 import { getDb } from '../../db.js';
-import { getTaskQueue } from '../task-queue.js';
+import { getTaskQueue, REDRIVE_RETRY_DELAYS_MS, retrying } from '../task-queue.js';
 import { CliLoginRequiredError, log } from './_shared.js';
 import { sandboxWorktreePath, splitRepoSubpath } from '../../repo/worktree-paths.js';
 import { resolveSandboxImageTag } from './images.js';
@@ -1122,8 +1122,14 @@ export async function resumeStepIfLinked(
     round: stepRow?.round,
   };
   const queue = getTaskQueue();
-  await queue.add(TASK_JOB_NAMES.ADVANCE_STEP, taskPayload, {
-    removeOnComplete: 100,
-    removeOnFail: 100,
-  });
+  // Asked again in the process when the queue refuses it, as every recovery enqueue is: the run is
+  // recorded as ended by now, so a failure left to the caller waits for the stalled sweep's cutoff.
+  await retrying(async () => {
+    await queue.add(TASK_JOB_NAMES.ADVANCE_STEP, taskPayload, {
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 5000 },
+      removeOnComplete: 100,
+      removeOnFail: 100,
+    });
+  }, REDRIVE_RETRY_DELAYS_MS);
 }

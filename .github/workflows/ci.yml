@@ -141,11 +141,11 @@ jobs:
   smokes:
     name: End-to-end smokes
     runs-on: ubuntu-latest
-    # The longest of the CI jobs, and it grows with every gated test (about 7.5 s a row of the GATED
-    # list). 45 minutes keeps more than 600 s over a green run and room for a run in which the gated
-    # tests end at their 25 minutes, so the checks after a hung step still run. The budget in
-    # scripts/test/ci-step-independence.test.mjs fails when the list outgrows these limits;
-    # docs/architecture/ci-smokes.md (Limits) has the measurements.
+    # The longest CI job grows with the GATED list (about 7.5 s a row). Its 45 minutes must
+    # cover a modelled green run plus a non-gated check's limit (worker smokes: 15 minutes).
+    # For the gated step, count its 25-minute limit plus the 907 s outside it. The budget pin
+    # leaves later checks room after either hang and fails when the list outgrows these limits.
+    # Measure again before raising them; docs/architecture/ci-smokes.md (Limits) has the measurements.
     timeout-minutes: 45
     services:
       postgres:
@@ -192,27 +192,33 @@ jobs:
       NODE_ENV: test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
 
       - name: Setup pnpm
+        timeout-minutes: 2
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.34.5
 
       - name: Setup Node.js
+        timeout-minutes: 2
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 26
           cache: pnpm
 
       - name: Install dependencies
+        timeout-minutes: 5
         run: pnpm install --frozen-lockfile
 
       - name: Build shared + database
+        timeout-minutes: 3
         run: |
           pnpm --filter @haive/database build
           pnpm --filter @haive/shared build
 
       - name: Configure redis maxmemory-policy
+        timeout-minutes: 2
         run: |
           docker exec ${{ job.services.redis.id }} redis-cli CONFIG SET maxmemory-policy noeviction
 
@@ -226,17 +232,19 @@ jobs:
       # a run cancelled by a newer push stops. A check names this step and never a sibling; a step
       # the checks need goes above this one. scripts/test/ci-step-independence.test.mjs pins it.
       - name: Apply database migrations
+        timeout-minutes: 3
         id: migrate
         run: pnpm --filter @haive/database migrate
 
       # A gated file skips green when its URL is unset, so each must report tests run and none skipped.
       # The database column is the name each file's own guard demands.
       #
-      # This step and the six Redis script steps below carry a timeout-minutes, so that one that
-      # hangs ends at its own limit and the checks after it still run, instead of burning the job's
-      # limit and cancelling them. Each limit is well above the step's slowest green run (the
-      # measurements are in docs/architecture/ci-smokes.md). scripts/test/ci-step-independence.test.mjs
-      # pins that every check that is not a smoke:ci chain has one.
+      # Every step in smokes, schema-parity, production-images and macos-preflight has its own
+      # timeout-minutes below its job's limit. A timed-out check fails while later checks can run;
+      # a timed-out setup step stops its dependent checks by design.
+      # Limits retain slack above measured green runs.
+      # scripts/test/ci-step-independence.test.mjs pins every step's limit and floor in these
+      # four jobs, plus the smokes budget that leaves room for checks after a timed-out sibling.
       #
       # The script's `set -uo pipefail` leaves errexit on: a step with no `shell:` runs as `bash -e {0}`,
       # so a failed build before the loop ends the step and no gated file runs on it.
@@ -246,6 +254,9 @@ jobs:
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
           PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}
+          # Redis map: gated 11-13; later 7-10, 14, 15; 1-6 free (job default 0).
+          # Keep gated and later databases disjoint, and later steps distinct, so writes from
+          # a process left behind by a timed-out step cannot affect another check's database.
           INTEGRATIONS_BROKER_TEST_REDIS_URL: redis://localhost:6379/13
           MODULE_PURGE_API_TEST_REDIS_URL: redis://localhost:6379/12
           INTEGRATIONS_AUDIT_TEST_REDIS_URL: redis://localhost:6379/11
@@ -262,7 +273,8 @@ jobs:
             url="postgres://haive:haive_dev_password@localhost:$port/$db"
             report="$RUNNER_TEMP/$db.json"
             rm -f "$report"
-            exists=$(docker exec "$container" psql -U haive -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$db'")
+            exists=$(docker exec "$container" psql -U haive -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$db'") \
+              || { echo "::error::database probe failed for $file ($db)"; failed=1; echo "::endgroup::"; continue; }
             if [ "$exists" != 1 ]; then
               docker exec "$container" psql -U haive -d postgres -c "CREATE DATABASE $db" \
                 || { echo "::error::could not create $db"; failed=1; echo "::endgroup::"; continue; }
@@ -381,6 +393,7 @@ jobs:
           api test/must-change-password-gate-db.test.ts MUST_CHANGE_PASSWORD_TEST_URL must_change_password_test pg
           worker test/git-data-ledger-rows-db.test.ts GIT_DATA_LEDGER_TEST_URL git_data_ledger_test pg
           worker test/project-state-gone-checkout-db.test.ts GONE_CHECKOUT_STATE_TEST_URL gone_checkout_state_test pg
+          worker test/haive-data-save-db.test.ts HAIVE_DATA_SAVE_TEST_URL haive_data_save_test pg
           worker test/plan-mirror-gone-checkout-db.test.ts GONE_CHECKOUT_PLAN_TEST_URL gone_checkout_plan_test pg
           worker test/repo-error-repair-db.test.ts REPO_ERROR_REPAIR_TEST_URL repo_error_repair_test pg
           worker test/plan-error-repair-db.test.ts PLAN_ERROR_REPAIR_TEST_URL plan_error_repair_test pg
@@ -399,10 +412,12 @@ jobs:
       # Every smoke:ci runs its smokes through scripts/run-smokes.mjs: each smoke has its own time
       # limit, a hung one is killed and named, and the rest still run.
       - name: Run api smokes
+        timeout-minutes: 5
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         run: pnpm --filter @haive/api smoke:ci
 
       - name: Run worker smokes
+        timeout-minutes: 15
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         run: pnpm --filter @haive/worker smoke:ci
 
@@ -425,7 +440,7 @@ jobs:
         timeout-minutes: 5
         run: pnpm --filter @haive/worker exec vitest run test/advance-dedup-redis.test.ts
         env:
-          ADVANCE_DEDUP_TEST_REDIS_URL: redis://localhost:6379/8
+          ADVANCE_DEDUP_TEST_REDIS_URL: redis://localhost:6379/6
 
       - name: RAG sync lock on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
@@ -439,14 +454,14 @@ jobs:
         timeout-minutes: 5
         run: pnpm --filter @haive/api exec vitest run test/cli-providers-usage-auth.test.ts
         env:
-          USAGE_AUTH_TEST_REDIS_URL: redis://localhost:6379/12
+          USAGE_AUTH_TEST_REDIS_URL: redis://localhost:6379/8
 
       - name: Module activation watch on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         timeout-minutes: 5
         run: pnpm --filter @haive/worker exec vitest run test/module-activation-watch.test.ts
         env:
-          MODULE_ACTIVATION_WATCH_TEST_REDIS_URL: redis://localhost:6379/11
+          MODULE_ACTIVATION_WATCH_TEST_REDIS_URL: redis://localhost:6379/7
 
       - name: Auth throttle script on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
@@ -458,6 +473,7 @@ jobs:
       # The migration runner's live-database coverage. Its own smoke:ci, since the worker's is
       # worker-scoped; this package had no smoke of its own before.
       - name: Run migration smokes
+        timeout-minutes: 5
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         run: pnpm --filter @haive/database smoke:ci
 
@@ -486,25 +502,30 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
 
       - name: Setup pnpm
+        timeout-minutes: 2
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.34.5
 
       - name: Setup Node.js
+        timeout-minutes: 2
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 26
           cache: pnpm
 
       - name: Install dependencies
+        timeout-minutes: 5
         run: pnpm install --frozen-lockfile
 
       # The last setup step. Both checks below run on `!cancelled() && steps.build.conclusion ==
       # 'success'`, as the smokes job's do on `migrate`: a failed check no longer skips the other,
       # a failed setup step still stops both. scripts/test/ci-step-independence.test.mjs pins it.
       - name: Build shared + database
+        timeout-minutes: 3
         id: build
         run: |
           pnpm --filter @haive/database build
@@ -514,6 +535,7 @@ jobs:
       # because ubuntu-latest ships a client older than PG18 and pg_dump refuses a newer server.
       # Same reason the smokes job reaches redis through `docker exec <service id>`.
       - name: Compare migration corpus against push --force
+        timeout-minutes: 3
         if: ${{ !cancelled() && steps.build.conclusion == 'success' }}
         run: bash packages/database/scripts/schema-parity.sh
         env:
@@ -525,6 +547,7 @@ jobs:
       # corpus into a shipped image — and the updater in steadfast-committing-gray runs the
       # runner from exactly that image, with no source tree to fall back on.
       - name: Migration corpus reaches the production image
+        timeout-minutes: 10
         if: ${{ !cancelled() && steps.build.conclusion == 'success' }}
         run: |
           scripts/ci-retry.sh docker build --target production -f packages/api/Dockerfile -t haive-api-prod-check .
@@ -546,20 +569,24 @@ jobs:
         service: [worker, web]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
 
       # The setup ends at this step: the web checks below run on `!cancelled() &&
       # steps.build.conclusion == 'success' && matrix.service == 'web'`, so a failed check no
       # longer skips the other. scripts/test/ci-step-independence.test.mjs pins it.
       - name: Build the production stage
+        timeout-minutes: 15
         id: build
         run: scripts/ci-retry.sh docker build --target production -f packages/${{ matrix.service }}/Dockerfile -t haive-${{ matrix.service }}-prod-check .
 
       - name: The built production web image boots and enforces anonymous routing
+        timeout-minutes: 3
         if: ${{ !cancelled() && steps.build.conclusion == 'success' && matrix.service == 'web' }}
         run: node scripts/check-web-image.mjs haive-web-prod-check
 
       # A channel build proves which modules an image carries from this file before it pushes anything.
       - name: The web image names the modules compiled into it
+        timeout-minutes: 2
         if: ${{ !cancelled() && steps.build.conclusion == 'success' && matrix.service == 'web' }}
         run: |
           docker run --rm --network none --entrypoint cat haive-web-prod-check /app/packages/web/modules.generated.json |
@@ -661,9 +688,11 @@ jobs:
           done
 
       - name: Start worker, web
+        id: runtime
         run: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d worker web
 
       - name: Probe web root
+        if: ${{ !cancelled() && steps.runtime.conclusion == 'success' }}
         run: |
           for i in $(seq 1 60); do
             code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/ || echo 000)
@@ -685,6 +714,7 @@ jobs:
       # the only place the unprivileged-spawn branch (uid 65534) executes at all, since a non-root
       # process cannot setuid and silently keeps its own identity instead.
       - name: Extraction tests inside the worker image
+        if: ${{ !cancelled() && steps.runtime.conclusion == 'success' }}
         run: |
           docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T worker \
             sh -c 'cd /app/packages/worker && node_modules/.bin/vitest run --root . test/repo-extract.test.ts test/tool-spawn.test.ts test/bundle-ingest.test.ts src/attachments/expand-archives.test.ts src/step-engine/steps/plan/plan-inputs.test.ts'

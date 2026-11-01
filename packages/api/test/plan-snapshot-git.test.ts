@@ -113,7 +113,7 @@ interface Snapshot {
   originUrl: string | null;
 }
 
-async function snapshot(failArg: string | null = null): Promise<Snapshot> {
+async function snapshot(failArg: string | null = null, captureEnv = false): Promise<Snapshot> {
   const fake = createFakeDb({
     repositories: schema.repositories,
     planMirrorState: schema.planMirrorState,
@@ -122,6 +122,17 @@ async function snapshot(failArg: string | null = null): Promise<Snapshot> {
   fake.insert(schema.planMirrorState, { repositoryId: REPO, revision: 1, writtenRevision: 1 });
   h.db = fake.db;
   await installShim(failArg);
+  if (captureEnv)
+    await writeFile(
+      path.join(shimDir, 'git'),
+      `#!${process.execPath}
+const { appendFileSync } = require('node:fs');
+const { spawnSync } = require('node:child_process');
+appendFileSync(${JSON.stringify(logFile)}, JSON.stringify(Object.keys(process.env).sort()) + '\\n');
+const result = spawnSync(${JSON.stringify(REAL_GIT)}, process.argv.slice(2), { stdio: 'inherit' });
+process.exit(result.status ?? 1);
+`,
+    );
   process.env.PATH = `${shimDir}:${savedPath}`;
   try {
     const res = await app.request(`/${REPO}/plan/snapshot`);
@@ -137,6 +148,51 @@ async function ran(sub: string): Promise<boolean> {
 }
 
 describe('the plan snapshot git state', () => {
+  it('reads a tilde include through HOME and uses its origin setting', async () => {
+    git('remote', 'remove', 'origin');
+    expect(await snapshot()).toMatchObject({
+      gitAvailable: true,
+      hasOrigin: false,
+      originUrl: null,
+    });
+    const home = path.join(base, 'home');
+    await mkdir(home);
+    await writeFile(
+      path.join(home, 'included.cfg'),
+      '[remote "origin"]\n\turl = https://included.example.test/repo.git\n',
+    );
+    git('config', 'include.path', '~/included.cfg');
+    vi.stubEnv('HOME', home);
+    try {
+      expect(await snapshot()).toMatchObject({
+        gitAvailable: true,
+        tracked: true,
+        uncommitted: false,
+        committed: true,
+        branch: 'main',
+        hasOrigin: true,
+        originUrl: 'https://included.example.test/repo.git',
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('passes only PATH, HOME and the ceiling to every git child', async () => {
+    expect(await snapshot(null, true)).toMatchObject({
+      gitAvailable: true,
+      branch: 'main',
+      hasOrigin: true,
+    });
+    const environments = (await readFile(logFile, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(environments.length).toBeGreaterThan(0);
+    for (const keys of environments)
+      expect(keys).toEqual(['GIT_CEILING_DIRECTORIES', 'HOME', 'PATH']);
+  });
+
   it.each([
     ['git@gitserver:repo', 'git@gitserver:repo'],
     [

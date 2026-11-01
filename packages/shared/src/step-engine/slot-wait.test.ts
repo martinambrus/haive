@@ -96,8 +96,9 @@ describe('deriveSlotWait', () => {
   });
 
   it('reports an agent-slot wait for a RUNNING step whose fan-out is entirely queued', () => {
-    // The mining / DAG fan-out barrier reports waiting_cli upward but leaves the step row
-    // on `running`, so a step blocked on N queued agents used to read as working.
+    // The mining / DAG fan-out barrier reports waiting_cli upward without writing it to the step
+    // row, which reads `running` until the hand-off writes it: a step blocked on N queued agents
+    // must not read as working meanwhile.
     const row = step({ id: 'row-fanout', stepId: '03-phase-0a-discovery', status: 'running' });
     const got = derive(
       {

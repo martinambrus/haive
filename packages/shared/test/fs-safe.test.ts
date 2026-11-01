@@ -16,6 +16,7 @@ import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   isPathContainmentError,
+  isResourceLimitError,
   lstatNoFollow,
   openDirNoFollow,
   openFileNoFollow,
@@ -323,5 +324,18 @@ describe('openDirNoFollow', () => {
     }
     expect((await stat(path.join(root, 'a/dir-moved/written'))).isFile()).toBe(true);
     await expect(stat(path.join(outside, 'written'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+});
+
+describe('isResourceLimitError', () => {
+  it('names running out of descriptors and nothing about the path', () => {
+    for (const code of ['EMFILE', 'ENFILE']) {
+      expect(isResourceLimitError(Object.assign(new Error(code), { code }))).toBe(true);
+    }
+    for (const code of ['ENOENT', 'EACCES', 'ENOTDIR', 'ELOOP']) {
+      expect(isResourceLimitError(Object.assign(new Error(code), { code }))).toBe(false);
+    }
+    expect(isResourceLimitError(new Error('EMFILE'))).toBe(false);
+    expect(isResourceLimitError(null)).toBe(false);
   });
 });

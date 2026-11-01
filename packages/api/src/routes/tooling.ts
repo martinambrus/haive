@@ -1,3 +1,4 @@
+import { readForgeErrorExcerpt } from '@haive/shared/forge';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
@@ -266,7 +267,8 @@ tooling.post('/pull-ollama-model', async (c) => {
       });
 
       if (!resp.ok) {
-        const text = await resp.text().catch(() => '');
+        // A user-supplied URL: only a bounded excerpt of its error body is read (no credential here).
+        const text = await readForgeErrorExcerpt(resp, '');
         await stream.writeSSE({
           data: JSON.stringify({
             error: `Ollama returned HTTP ${resp.status}: ${text.slice(0, 200)}`,

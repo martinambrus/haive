@@ -37,6 +37,7 @@ import { usageWindowRoutes } from './routes/usage-window.js';
 import { upgradeRoutes } from './routes/upgrades.js';
 import { toolingUpgradeRoutes } from './routes/tooling-upgrades.js';
 import { planRoutes } from './routes/plan.js';
+import { haiveDataRoutes } from './routes/haive-data.js';
 import { repositoryIntegrationRoutes } from './routes/repository-integrations.js';
 import { userSettingsRoutes } from './routes/user-settings.js';
 import { installBrowserVncWebSocket } from './routes/browser-vnc.js';
@@ -131,6 +132,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.route('/repositories', upgradeRoutes);
   app.route('/repositories', toolingUpgradeRoutes);
   app.route('/repositories', planRoutes);
+  app.route('/repositories', haiveDataRoutes);
   app.route('/repositories', repositoryIntegrationRoutes);
   app.route('/ide', ideRoutes);
 

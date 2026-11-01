@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { decrypt, decryptDek, secretsService } from '@haive/shared';
+import { readForgeErrorExcerpt, readForgeJson } from '@haive/shared/forge';
 import { VENDOR_CALL_TIMEOUT_MS } from '@haive/shared/integrations';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -107,12 +108,12 @@ githubOauthRoutes.get('/repos', async (c) => {
       throw new HttpError(401, 'GitHub token rejected. Re-authenticate via "Sign in with GitHub".');
     }
     if (!res.ok) {
-      const errBody = await res.text().catch(() => '');
+      const errBody = await readForgeErrorExcerpt(res, token);
       throw new HttpError(502, `GitHub /user/repos failed (HTTP ${res.status}): ${errBody}`);
     }
     let batch: GithubRepoApi[];
     try {
-      const parsed: unknown = await res.json();
+      const parsed = await readForgeJson(res);
       if (!Array.isArray(parsed)) throw new Error('not a list');
       batch = parsed as GithubRepoApi[];
     } catch {
@@ -122,8 +123,9 @@ githubOauthRoutes.get('/repos', async (c) => {
       );
     }
     repos.push(...batch);
-    if (batch.length < REPOS_PER_PAGE) break;
-    if (page === REPOS_PAGE_CAP) truncated = /rel="next"/.test(res.headers.get('link') ?? '');
+    const hasNext = /rel="next"/.test(res.headers.get('link') ?? '');
+    if (!hasNext) break;
+    if (page === REPOS_PAGE_CAP) truncated = true;
   }
 
   return c.json({

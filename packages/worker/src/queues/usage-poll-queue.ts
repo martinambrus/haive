@@ -36,7 +36,7 @@ import { harvestInTaskCredentials } from '../usage-window/credential-harvest.js'
 import { refreshExpiringCliCredentials } from '../usage-window/credential-refresh.js';
 import { authDenialSeverity, nextAuthStrike } from '../usage-window/types.js';
 import type { UsageFetchContext, UsageFetchOutcome } from '../usage-window/types.js';
-import { getTaskQueue } from './task-queue.js';
+import { getTaskQueue, REDRIVE_RETRY_DELAYS_MS, retrying } from './task-queue.js';
 import { MaintenanceStateUnreadable, NewWorkHeld, readMaintenanceState } from './_revive-check.js';
 import { autoResumeFailedStep } from './_step-reset.js';
 import { pruneJobSchedulers } from './job-scheduler-prune.js';
@@ -611,21 +611,42 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
           continue;
         }
         if (resumed) {
-          await getTaskQueue().add(
-            TASK_JOB_NAMES.ADVANCE_STEP,
-            {
-              taskId: task.id,
-              userId: task.userId,
-              stepId: task.currentStepId,
-              round: task.currentRound ?? 0,
-            },
-            {
-              attempts: 3,
-              backoff: { type: 'exponential', delay: 5000 },
-              removeOnComplete: 100,
-              removeOnFail: 100,
-            },
-          );
+          // Keep the narrowed step id across the enqueue callback.
+          const stepId = task.currentStepId;
+          // Stamped with the epoch the re-open left the task at, so that a Retry or a re-drive that
+          // moves it on before the job is picked up drops the job as stale; an unstamped one is
+          // exempt from that drop and re-enters the step by its status. A read that fails costs the
+          // stamp and never the advance: the re-open has committed and nothing else queues this job.
+          const reopened = await db.query.tasks
+            .findFirst({
+              where: eq(schema.tasks.id, task.id),
+              columns: { orchestrationEpoch: true },
+            })
+            .catch((err: unknown) => {
+              log.warn(
+                { taskId: task.id, providerId: task.providerId, err },
+                'provider recovered; the task epoch could not be read, so the auto-resume advance is queued without one',
+              );
+              return undefined;
+            });
+          await retrying(async () => {
+            await getTaskQueue().add(
+              TASK_JOB_NAMES.ADVANCE_STEP,
+              {
+                taskId: task.id,
+                userId: task.userId,
+                stepId,
+                round: task.currentRound ?? 0,
+                epoch: reopened?.orchestrationEpoch,
+              },
+              {
+                attempts: 3,
+                backoff: { type: 'exponential', delay: 5000 },
+                removeOnComplete: 100,
+                removeOnFail: 100,
+              },
+            );
+          }, REDRIVE_RETRY_DELAYS_MS);
           log.info(
             { taskId: task.id, providerId: task.providerId, attempt: task.autoResumeCount + 1 },
             'provider recovered; auto-resumed',

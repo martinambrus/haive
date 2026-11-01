@@ -4210,9 +4210,9 @@ const ADVANCE_WAIT_MS = 500;
  *
  * A job that cannot be deferred (no token, or the move itself failed) waits here for the holder
  * instead. Running beside it is what the hold exists to prevent, and failing the attempt could lose
- * the advance, since a continuation is queued with no retries. Answers the release, or null for a
- * job with no step to hold. In-process, like the queue's single worker: a worker that died holds
- * nothing.
+ * the advance, since its retries (3, backed off 5 s then 10 s) run out long before a holder's apply
+ * does. Answers the release, or null for a job with no step to hold. In-process, like the queue's
+ * single worker: a worker that died holds nothing.
  */
 export async function holdStepAdvance(
   job: Pick<Job<TaskWorkerPayload>, 'id' | 'data' | 'moveToDelayed'>,

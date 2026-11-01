@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
-import { parsers } from 'prettier/plugins/yaml';
+import { readWorkflow } from './workflow.mjs';
+import { shellSource, swallowedFailure } from './shell-source.mjs';
 
 // A step with no `if` carries an implicit success(): it is skipped once ANY step before it failed.
 // In the smokes job that let one red check hide every check after it, and the same shape sat in
@@ -13,7 +13,26 @@ import { parsers } from 'prettier/plugins/yaml';
 const JOBS = [
   {
     file: 'ci.yml',
+    id: 'compose-boot',
+    prerequisite: 'runtime',
+    cleanup: ['always()', 'failure()', 'always()'],
+    setup: [
+      'actions/checkout',
+      'Seed .env for compose',
+      'Pull registry images',
+      'Build compose images',
+      'Start infrastructure',
+      'Wait for postgres + redis health',
+      'Apply database migrations (runs again under `up`, proving idempotence)',
+      'Start api (populates shared node_modules volume)',
+      'Probe api /health',
+      'runtime',
+    ],
+  },
+  {
+    file: 'ci.yml',
     id: 'smokes',
+    allStepsBounded: true,
     prerequisite: 'migrate',
     // Every check is cut by its own time limit (see RUN_SMOKES), not only by the job's.
     bounded: true,
@@ -43,34 +62,31 @@ const JOBS = [
       'Install dependencies',
       'Build shared + database',
       'Configure redis maxmemory-policy',
-      'Apply database migrations',
+      'migrate',
     ],
   },
   {
     file: 'ci.yml',
     id: 'schema-parity',
+    allStepsBounded: true,
     prerequisite: 'build',
-    setup: [
-      'actions/checkout',
-      'Setup pnpm',
-      'Setup Node.js',
-      'Install dependencies',
-      'Build shared + database',
-    ],
+    setup: ['actions/checkout', 'Setup pnpm', 'Setup Node.js', 'Install dependencies', 'build'],
   },
   {
     file: 'ci.yml',
     id: 'production-images',
+    allStepsBounded: true,
     prerequisite: 'build',
     // The checks run on the web leg of the matrix only; the worker leg is the build alone.
     leg: "matrix.service == 'web'",
-    setup: ['actions/checkout', 'Build the production stage'],
+    setup: ['actions/checkout', 'build'],
   },
   {
     file: 'platform-checks.yml',
     id: 'macos-preflight',
+    allStepsBounded: true,
     prerequisite: 'checkout',
-    setup: ['actions/checkout'],
+    setup: ['checkout'],
   },
 ];
 
@@ -104,35 +120,61 @@ function model(checks, { outsideGatedSeconds, secondsPerRow }) {
 const guard = ({ prerequisite, leg }) =>
   `\${{ !cancelled() && steps.${prerequisite}.conclusion == 'success'${leg ? ` && ${leg}` : ''} }}`;
 
-// The YAML parser declared through Prettier, as ci-browser-budget.test.mjs reads it, so
-// indentation and comments cannot satisfy the checks. Scalars stay strings.
-function value(node) {
-  if (!node) return null;
-  if ('value' in node) return node.value;
-  if (node.type === 'mapping') {
-    const entries = node.children.map((item) => item.children.map(value));
-    assert.equal(new Set(entries.map(([key]) => key)).size, entries.length, 'duplicate YAML key');
-    return Object.fromEntries(entries);
-  }
-  if (node.type === 'sequence' || node.type === 'flowSequence') return node.children.map(value);
-  assert.equal(node.children.length, 1, `unsupported YAML node ${node.type}`);
-  return value(node.children[0]);
-}
-
 const workflows = Object.fromEntries(
-  [...new Set(JOBS.map(({ file }) => file))].map((file) => {
-    const ast = parsers.yaml.parse(
-      readFileSync(new URL(`../../.github/workflows/${file}`, import.meta.url), 'utf8'),
-    );
-    return [file, value(ast.children[0].children.find((node) => node.type === 'documentBody'))];
-  }),
+  [...new Set([...JOBS.map(({ file }) => file), 'release.yml'])].map((file) => [
+    file,
+    readWorkflow(file),
+  ]),
 );
 
-const label = (node) => node.name ?? node.uses?.split('@')[0];
+const label = (node) => node.id ?? node.name ?? node.uses?.split('@')[0];
 
-function checkJob(job, spec) {
-  const { steps } = job;
+// Floors retain slack above the latest measured maxima: worker smokes 624 s (at least 1.25x),
+// throttle 144 s (at least 1.5x), Docker builds 93 s (cold cache/retries), other steps 14 s.
+function minimumMinutes(step) {
+  const run = step.run?.trim() ?? '';
+  if (run === 'pnpm --filter @haive/worker smoke:ci') return 13;
+  if (/\bdocker build\b/.test(run)) return 5;
+  if (run.includes('test/auth-throttle.test.ts')) return 4;
+  return 2;
+}
+
+// GitHub's named bash shell enables errexit; an explicit template must keep -e.
+function checkShell(shell, scope) {
+  assert.ok(
+    shell === undefined ||
+      [
+        'bash',
+        'bash -e {0}',
+        'bash -eo pipefail {0}',
+        'bash --noprofile --norc -eo pipefail {0}',
+      ].includes(shell),
+    `${scope} shell ${JSON.stringify(shell)} does not preserve the pinned bash errexit contract`,
+  );
+}
+
+function checkJob(job, spec, workflow = workflows[spec.file]) {
+  checkShell(workflow.defaults?.run?.shell, 'workflow');
+  const steps = spec.cleanup ? job.steps.slice(0, -spec.cleanup.length) : job.steps;
+  if (spec.cleanup) {
+    assert.deepEqual(
+      job.steps.slice(-spec.cleanup.length).map((step) => step.if),
+      spec.cleanup,
+      'diagnostics and cleanup keep their always()/failure() conditions',
+    );
+  }
   const expected = guard(spec);
+  assert.equal(job.if, undefined, 'a job condition can skip all checks green');
+  checkShell(job.defaults?.run?.shell, 'job');
+  for (const step of steps) {
+    checkShell(step.shell, label(step));
+    const matched = swallowedFailure(step.run ?? '', { step: label(step) });
+    assert.equal(
+      matched,
+      null,
+      `${label(step)} swallows a command failure with ${JSON.stringify(matched)}`,
+    );
+  }
   // A failure that does not fail its step leaves the job green, or lets the checks run after it.
   const swallowing = [job, ...steps].filter(
     (node) => (node['continue-on-error'] ?? 'false') !== 'false',
@@ -143,6 +185,7 @@ function checkJob(job, spec) {
     `continue-on-error hides a failure: ${swallowing.map(label).join('; ')}`,
   );
   if (spec.leg) {
+    assert.equal(job.strategy?.['fail-fast'], 'false', 'matrix fail-fast cancels unrelated legs');
     // The checks of a matrix leg never run, and the job stays green, when the matrix loses it.
     const [, key, leg] = /^matrix\.(\w+) == '([^']+)'$/.exec(spec.leg);
     assert.ok(
@@ -190,6 +233,24 @@ function checkJob(job, spec) {
       `a check is a smoke:ci chain or has a timeout-minutes of whole minutes, so that a hang ends it and not the job: ${unbounded.map(label).join('; ')}`,
     );
   }
+  if (spec.allStepsBounded) {
+    assert.match(job['timeout-minutes'] ?? '', WHOLE_MINUTES, 'the job needs a whole-minute limit');
+    for (const step of steps) {
+      assert.match(
+        step['timeout-minutes'] ?? '',
+        WHOLE_MINUTES,
+        `${step.id ?? label(step)} needs a timeout-minutes of whole minutes`,
+      );
+      assert.ok(
+        Number(step['timeout-minutes']) >= minimumMinutes(step),
+        `${label(step)} needs at least ${minimumMinutes(step)} minutes above measured runtimes`,
+      );
+      assert.ok(
+        Number(step['timeout-minutes']) < Number(job['timeout-minutes']),
+        `${label(step)} needs a step limit below the job limit so a hang cannot consume the whole job`,
+      );
+    }
+  }
   if (spec.budget) {
     const { outsideGatedSeconds, slowRunnerFactor, marginSeconds } = spec.budget;
     const { gated, rows, gatedSeconds, greenSeconds } = model(checks, spec.budget);
@@ -229,6 +290,133 @@ function checkJob(job, spec) {
 // Each mutant breaks one rule of a job that passes, and checkJob has to refuse it. They are
 // written against the position of the prerequisite step (last), so they fit every job above.
 const MUTANTS = [
+  ...['deleted', 'expression'].map((kind) => [
+    `a whole-minute job limit ${kind}`,
+    (job) => {
+      if (kind === 'deleted') delete job['timeout-minutes'];
+      else job['timeout-minutes'] = '${{ vars.LIMIT }}';
+    },
+    (spec) => spec.allStepsBounded && !spec.budget,
+    /the job needs a whole-minute limit/,
+  ]),
+
+  [
+    'a matrix defaulting to fail-fast',
+    (job) => {
+      delete job.strategy['fail-fast'];
+    },
+    (spec) => spec.leg !== undefined,
+  ],
+  [
+    'a prerequisite id replaced with a different id',
+    ({ steps }, last) => {
+      steps[last].id = 'wrong-setup';
+    },
+  ],
+  ...['0', '1'].map((limit) => [
+    `a setup step limit below the floor (${limit})`,
+    ({ steps }) => {
+      steps[0]['timeout-minutes'] = limit;
+    },
+    (spec) => spec.allStepsBounded,
+  ]),
+  ...['setup', 'check'].flatMap((kind) =>
+    [0, 1].map((extra) => [
+      `a ${kind} step limit ${extra ? 'above' : 'equal to'} its job limit`,
+      (job, last) => {
+        job.steps[kind === 'setup' ? 0 : last + 1]['timeout-minutes'] = String(
+          Number(job['timeout-minutes']) + extra,
+        );
+      },
+      (spec) => spec.allStepsBounded,
+    ]),
+  ),
+  [
+    'a worker smoke limit below measured slack',
+    ({ steps }) => {
+      steps.find((step) => step.run?.trim() === 'pnpm --filter @haive/worker smoke:ci')[
+        'timeout-minutes'
+      ] = '12';
+    },
+    (spec) => spec.id === 'smokes',
+  ],
+  [
+    'an auth throttle limit below measured slack',
+    ({ steps }) => {
+      steps.find((step) => step.run?.includes('test/auth-throttle.test.ts'))['timeout-minutes'] =
+        '3';
+    },
+    (spec) => spec.id === 'smokes',
+  ],
+  [
+    'a Docker build limit below cold-cache slack',
+    ({ steps }) => {
+      steps.find((step) => /\bdocker build\b/.test(step.run ?? ''))['timeout-minutes'] = '4';
+    },
+    (spec) => ['schema-parity', 'production-images'].includes(spec.id),
+  ],
+  [
+    'survivor: a check swallowing failure with || true',
+    ({ steps }, last) => {
+      const step = steps.slice(last + 1).find((step) => step.run && gatedRows(step) === null);
+      step.run = `(${step.run.trim()}) || true`;
+    },
+  ],
+  ...['|| :', '|| exit 0', '; true', '\nset +e'].map((suffix) => [
+    `survivor: a check swallowing failure with ${suffix.trim()}`,
+    ({ steps }, last) => {
+      const step = steps.slice(last + 1).find((step) => step.run && gatedRows(step) === null);
+      step.run = suffix.includes('set +e')
+        ? `set +e\n${step.run}`
+        : `(${step.run.trim()}) ${suffix}`;
+    },
+  ]),
+  [
+    'survivor: matrix fail-fast enabled',
+    (job) => {
+      job.strategy['fail-fast'] = 'true';
+    },
+    (spec) => spec.leg !== undefined,
+  ],
+  [
+    'survivor: a job shell overriding runner errexit',
+    (job) => {
+      job.defaults = { run: { shell: 'bash {0}' } };
+    },
+  ],
+  [
+    'survivor: a check shell overriding runner errexit',
+    ({ steps }, last) => {
+      steps[last + 1].shell = 'bash {0}';
+    },
+  ],
+  [
+    'survivor: a job disabled with if false',
+    (job) => {
+      job.if = 'false';
+    },
+  ],
+  ...['0', '1'].map((limit) => [
+    `survivor: step limit below the floor (${limit})`,
+    ({ steps }, last) => {
+      steps[last + 1]['timeout-minutes'] = limit;
+    },
+    (spec) => spec.allStepsBounded && !spec.budget,
+  ]),
+  [
+    'a setup step with no time limit',
+    ({ steps }) => {
+      delete steps[0]['timeout-minutes'];
+    },
+    (spec) => spec.allStepsBounded,
+  ],
+  [
+    'a check with no explicit step limit',
+    ({ steps }, last) => {
+      delete steps[last + 1]['timeout-minutes'];
+    },
+    (spec) => spec.allStepsBounded,
+  ],
   [
     'a check without a guard',
     ({ steps }, last) => {
@@ -500,7 +688,19 @@ for (const spec of JOBS) {
       checkJob(job, spec);
     });
 
-    for (const [name, mutate, applies] of MUTANTS) {
+    it('identifies the prerequisite by id when its display name changes', () => {
+      const renamed = structuredClone(job);
+      renamed.steps.find((step) => step.id === spec.prerequisite).name = 'Different wording';
+      checkJob(renamed, spec);
+    });
+
+    it('rejects a workflow shell overriding runner errexit', () => {
+      const mutant = structuredClone(workflows[spec.file]);
+      mutant.defaults = { run: { shell: 'bash {0}' } };
+      assert.throws(() => checkJob(mutant.jobs[spec.id], spec, mutant), assert.AssertionError);
+    });
+
+    for (const [name, mutate, applies, expectedError] of MUTANTS) {
       if (applies && !applies(spec)) continue;
       it(`rejects ${name}`, () => {
         checkJob(job, spec);
@@ -510,8 +710,323 @@ for (const spec of JOBS) {
           mutant.steps.findIndex((step) => step.id === spec.prerequisite),
           spec,
         );
-        assert.throws(() => checkJob(mutant, spec), assert.AssertionError);
+        assert.throws(() => checkJob(mutant, spec), expectedError ?? assert.AssertionError);
       });
     }
   });
 }
+
+function redisDatabases(step) {
+  const texts = [
+    ...Object.values(step.env ?? {}),
+    shellSource(step.run ?? '', { step: label(step) }),
+  ];
+  return [
+    ...new Set(
+      texts.flatMap((text) =>
+        [...text.matchAll(/rediss?:\/\/[^\s"'`\\;|&)]+/g)].map(([raw]) => {
+          const path = new URL(raw).pathname.replace(/^\//, '');
+          assert.match(path, /^\d*$/, `Redis database must be a literal number: ${raw}`);
+          return String(Number(path || '0'));
+        }),
+      ),
+    ),
+  ];
+}
+
+function checkRedisIsolation(job) {
+  const index = job.steps.findIndex((step) => gatedRows(step) !== null);
+  assert.ok(index >= 0, 'no gated step');
+  // The job-wide default (database 0 today) is also used by general smokes. Reserve it
+  // once, alongside the gated databases; explicit later tests need their own databases.
+  const gated = [...redisDatabases({ env: job.env }), ...redisDatabases(job.steps[index])];
+  assert.ok(gated.length > 0, 'gated/job env must contain Redis databases');
+  const used = new Map(gated.map((db) => [db, 'gated step or job env']));
+  let laterCount = 0;
+  for (const step of job.steps.slice(index + 1)) {
+    const databases = redisDatabases(step);
+    laterCount += databases.length;
+    for (const db of databases) {
+      assert.ok(!used.has(db), `${label(step)} shares Redis database ${db} with ${used.get(db)}`);
+      used.set(db, label(step));
+    }
+  }
+  assert.ok(laterCount > 0, 'later steps must contain Redis databases');
+}
+
+// Select by the GATED list and Redis env values, independent of display names.
+function redisFixture(job) {
+  const index = job.steps.findIndex((step) => gatedRows(step) !== null);
+  const gated = job.steps[index];
+  const later = job.steps
+    .slice(index + 1)
+    .filter((step) => Object.values(step.env ?? {}).some((url) => /^rediss?:\/\//.test(url)));
+  const url = (step) => Object.values(step.env).find((value) => /^rediss?:\/\//.test(value));
+  assert.ok(gated && later.length >= 2, 'the fixture needs gated and two later Redis steps');
+  return { gated, later, url };
+}
+
+const REDIS_MUTANTS = [
+  [
+    'a later step reusing a gated database',
+    (job) => {
+      const { gated, later, url } = redisFixture(job);
+      later[0].env.TEST_REDIS_URL = url(gated);
+    },
+  ],
+  [
+    'two later steps sharing a database',
+    (job) => {
+      const { later, url } = redisFixture(job);
+      later[1].env.TEST_REDIS_URL = url(later[0]);
+    },
+  ],
+  [
+    'a later database also reserved in job env',
+    (job) => {
+      const { later, url } = redisFixture(job);
+      job.env.SHARED_TEST_REDIS_URL = url(later[0]);
+    },
+  ],
+  [
+    'an inline run URL reusing a gated database',
+    (job) => {
+      const { gated, later, url } = redisFixture(job);
+      later[0].run += `\nexport TEST_REDIS_URL='${url(gated)}'`;
+    },
+  ],
+  [
+    'an inline run URL reusing a later database',
+    (job) => {
+      const { later, url } = redisFixture(job);
+      later[1].run += `\nexport TEST_REDIS_URL='${url(later[0])}'`;
+    },
+  ],
+  [
+    'a gated inline run URL reused by a later step',
+    (job) => {
+      const { gated, later, url } = redisFixture(job);
+      const shared = url(gated);
+      for (const [key, value] of Object.entries(gated.env)) {
+        if (value === shared) delete gated.env[key];
+      }
+      gated.run += `\nexport TEST_REDIS_URL='${shared}'`;
+      later[0].env.TEST_REDIS_URL = shared;
+    },
+  ],
+  ...['', '/'].map((path) => [
+    `an empty URL path (${JSON.stringify(path)}) reusing database 0`,
+    (job) => {
+      const { gated, later } = redisFixture(job);
+      delete job.env.REDIS_URL;
+      gated.env.TEST_REDIS_URL = `redis://localhost:6379${path}`;
+      later[0].env.TEST_REDIS_URL = 'redis://localhost:6379/0';
+    },
+  ]),
+];
+
+describe('gated Redis isolation', () => {
+  const job = workflows['ci.yml'].jobs.smokes;
+  it('keeps later steps out of gated, job-wide and other later databases', () =>
+    checkRedisIsolation(job));
+  it('accepts distinct databases supplied by job env and inline run URLs', () => {
+    const control = structuredClone(job);
+    const { gated, later } = redisFixture(control);
+    control.env.INTEGRATIONS_AUDIT_TEST_REDIS_URL = gated.env.INTEGRATIONS_AUDIT_TEST_REDIS_URL;
+    delete gated.env.INTEGRATIONS_AUDIT_TEST_REDIS_URL;
+    later[0].run += "\nexport EXTRA_REDIS_URL='redis://localhost:6379/1'";
+    checkRedisIsolation(control);
+  });
+  it('reads omitted and slash-only paths as database 0', () => {
+    for (const path of ['', '/']) {
+      assert.deepEqual(redisDatabases({ env: { REDIS_URL: `redis://localhost:6379${path}` } }), [
+        '0',
+      ]);
+      assert.deepEqual(
+        redisDatabases({ run: `REDIS_URL="redis://localhost:6379${path}" pnpm test` }),
+        ['0'],
+      );
+    }
+  });
+  it('ignores Redis URLs in whole-line comments, trailing comments and heredoc bodies', () => {
+    const control = structuredClone(job);
+    const { gated, later, url } = redisFixture(control);
+    const shared = url(gated);
+    later[0].run += `\n# was ${shared} before\npnpm test # was ${shared.replace('redis:', 'rediss:')} before\ncat <<'BODY'\n${shared}\nBODY`;
+    checkRedisIsolation(control);
+  });
+  it('reads distinct rediss URLs in env and quoted inline commands', () => {
+    assert.deepEqual(
+      redisDatabases({
+        env: { REDIS_URL: 'rediss://localhost:6379/1' },
+        run: "export X='rediss://localhost:6379/2'",
+      }),
+      ['1', '2'],
+    );
+    const control = structuredClone(job);
+    const { later } = redisFixture(control);
+    later[0].run += "\nexport EXTRA_REDIS_URL='rediss://localhost:6379/1'";
+    checkRedisIsolation(control);
+  });
+  for (const location of ['env', 'run']) {
+    it(`rejects a rediss collision in ${location}`, () => {
+      const mutant = structuredClone(job);
+      const { gated, later, url } = redisFixture(mutant);
+      const shared = url(gated).replace('redis:', 'rediss:');
+      if (location === 'env') later[0].env.TEST_REDIS_URL = shared;
+      else later[0].run += `\nexport TEST_REDIS_URL='${shared}'`;
+      assert.throws(() => checkRedisIsolation(mutant), /shares Redis database/);
+    });
+  }
+  for (const [name, mutate] of REDIS_MUTANTS) {
+    it(`rejects ${name}`, () => {
+      checkRedisIsolation(job);
+      const mutant = structuredClone(job);
+      mutate(mutant);
+      assert.throws(() => checkRedisIsolation(mutant), assert.AssertionError);
+    });
+  }
+});
+
+function checkReleaseLimits(workflow) {
+  for (const [id, job] of Object.entries(workflow.jobs)) {
+    assert.match(job['timeout-minutes'] ?? '', WHOLE_MINUTES, `${id} has no job limit`);
+  }
+  for (const [id, minutes] of Object.entries({ build: '40', merge: '10', release: '15' })) {
+    assert.equal(
+      workflow.jobs[id]?.['timeout-minutes'],
+      minutes,
+      `${id} keeps its measured budget`,
+    );
+  }
+}
+
+describe('release job limits', () => {
+  const release = workflows['release.yml'];
+  it('bounds every job holding the release concurrency group', () => checkReleaseLimits(release));
+  for (const id of ['build', 'merge', 'release']) {
+    it(`rejects an unbounded ${id} job`, () => {
+      const mutant = structuredClone(release);
+      delete mutant.jobs[id]['timeout-minutes'];
+      assert.throws(() => checkReleaseLimits(mutant), assert.AssertionError);
+    });
+  }
+  it('rejects a newly added job with no limit', () => {
+    const mutant = structuredClone(release);
+    mutant.jobs.new = { 'runs-on': 'ubuntu-latest', steps: [] };
+    assert.throws(() => checkReleaseLimits(mutant), assert.AssertionError);
+  });
+});
+
+// Exercise the real job rule, including shell data that looks like a success command.
+describe('shell failure detection', () => {
+  const spec = JOBS.find(({ id }) => id === 'smokes');
+  const job = workflows[spec.file].jobs[spec.id];
+  const withScript = (script) => {
+    const control = structuredClone(job);
+    const last = control.steps.findIndex((step) => step.id === spec.prerequisite);
+    control.steps[last + 2].run = script;
+    return control;
+  };
+  const accepted = [
+    "cat <<'BODY'\nset +e\nBODY",
+    "cat <<'BODY'\ntrue-positive.test.ts\nBODY",
+    "cat <<-'BODY'\n\tset +e\n\tBODY",
+    'cat <<"ONE" <<"TWO"\nset +e\nONE\n|| true\nTWO',
+    'echo "ready; true"',
+    'case "$v" in\ntrue) echo ready ;;\nesac',
+    'if check; then\ntrue\nelse\necho ready\nfi',
+    'if check\nthen\ntrue\nelse\necho ready\nfi',
+    'node -e "const v = process.env.X || true"',
+    'pnpm test # never add || true here',
+    '# never add set +e here\npnpm test',
+    '[ "$v" = "true" ]',
+    "jq -e '.a == true'",
+    'x=true',
+    'while true; do echo ready; break; done',
+    'pnpm test || exit 10',
+    'pnpm test && true',
+    'trueish',
+    'echo x#tag',
+    'echo "$(node -e \'const v = process.env.X || true\')"',
+    "echo '$(pnpm test || true)'",
+    'echo "\\$(pnpm test || true)"',
+  ];
+  for (const script of accepted) {
+    it(`accepts shell data/control: ${JSON.stringify(script)}`, () =>
+      checkJob(withScript(script), spec));
+  }
+  for (const [script, matched] of [
+    ['pnpm test || true', '|| true'],
+    ['pnpm test || :', '|| :'],
+    ['pnpm test || exit 0', '|| exit 0'],
+    ['pnpm test; true', 'true'],
+    ['(pnpm test; true)', 'true'],
+    ['pnpm test; true ignored', 'true'],
+    ['echo "$(pnpm test || true)"', '|| true'],
+    ['echo "$(echo \'ready)\'; pnpm test || true)"', '|| true'],
+    ['echo `pnpm test || true`', '|| true'],
+    ['pnpm test\ntrue', 'true'],
+    ['set +e\npnpm test', 'set +e'],
+    ['pnpm test || \\\n true', '|| true'],
+    ['echo "ready"; pnpm test || true # ignore', '|| true'],
+    ["cat <<'BODY'\nset +e\nBODY\npnpm test || true", '|| true'],
+  ]) {
+    it(`rejects shell failure mask: ${JSON.stringify(script)}`, () => {
+      assert.throws(
+        () => checkJob(withScript(script), spec),
+        (error) => {
+          assert.ok(error instanceof assert.AssertionError);
+          assert.ok(error.message.includes(JSON.stringify(matched)), error.message);
+          return true;
+        },
+      );
+    });
+  }
+});
+
+describe('explicit shell errexit', () => {
+  for (const spec of JOBS) {
+    for (const scope of ['workflow', 'job', 'step']) {
+      for (const shell of [
+        'bash',
+        'bash -e {0}',
+        'bash -eo pipefail {0}',
+        'bash --noprofile --norc -eo pipefail {0}',
+        'bash -o pipefail {0}',
+        'bash --noprofile --norc -o pipefail {0}',
+        'sh',
+        'python',
+        'bash {0}',
+        'bash --noprofile {0}',
+      ]) {
+        const allowed = [
+          'bash',
+          'bash -e {0}',
+          'bash -eo pipefail {0}',
+          'bash --noprofile --norc -eo pipefail {0}',
+        ].includes(shell);
+        it(`${allowed ? 'accepts' : 'rejects'} ${spec.id} ${scope} shell ${shell}`, () => {
+          const workflow = structuredClone(workflows[spec.file]);
+          const job = workflow.jobs[spec.id];
+          if (scope === 'workflow') workflow.defaults = { run: { shell } };
+          else if (scope === 'job') job.defaults = { run: { shell } };
+          else {
+            const last = job.steps.findIndex((step) => step.id === spec.prerequisite);
+            job.steps[last + 1].shell = shell;
+          }
+          if (allowed) checkJob(job, spec, workflow);
+          else
+            assert.throws(
+              () => checkJob(job, spec, workflow),
+              (error) => {
+                assert.ok(error instanceof assert.AssertionError);
+                assert.ok(error.message.includes(JSON.stringify(shell)), error.message);
+                return true;
+              },
+            );
+        });
+      }
+    }
+  }
+});

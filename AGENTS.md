@@ -58,7 +58,7 @@ repo, bundle, runtime/ide ensure, ddev control, usage and PR polling, and plan m
 - `plan-mirror-queue` reconciles the repository-backed plan snapshot: a `refresh` rewrites
   `.haive-data/plan.{json,md}`, a `save` also commits and optionally pushes, and a 10s
   scheduled sweep drains `plan_mirror_state` rows whose `written_revision < revision`. A flush holds
-  (writes nothing, row stays dirty, `last_error` says why) while a merge or rebase is open, and
+  (writes nothing, row stays dirty, `last_error` says why) while a merge, rebase, cherry-pick or revert is open, and
   reads in a `plan.json` it has not read (`synced_hash`) by a three-way reconcile before it writes
   (see [Plan canvas](docs/architecture/plan-canvas.md)). The same
   sweep rewrites `.haive-data/state/` for `project_state_outbox` rows the same way (write only, never
@@ -312,7 +312,7 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 - [Review dimensions](docs/architecture/review-dimensions.md): the 14 dimensions, repository
   policy and task override. `REVIEW_DIMENSIONS`.
 
-- [Error diagnostics](docs/architecture/error-diagnostics.md): bound query errors, logs, queue transport and stored failure text. `safeErrorMessage`, `safeErrorForTransport`.
+- [Error diagnostics](docs/architecture/error-diagnostics.md): bound query errors, logs, queue transport, stored failure text, repository-path reads. `safeErrorMessage`, `safeErrorForTransport`.
 
 ### Spend and statistics
 

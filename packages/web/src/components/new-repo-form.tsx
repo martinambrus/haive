@@ -32,6 +32,8 @@ interface GithubRepo {
 }
 
 const UPLOAD_CHUNK_SIZE = 5 * 1024 * 1024; // 5 MiB
+/** Most repositories the picker lists at once; the rest are reached by typing. */
+const REPO_LIST_LIMIT = 100;
 
 interface UploadSession {
   id: string;
@@ -269,6 +271,7 @@ export function NewRepoForm() {
               // The sign-in panel unmounts with the source switch and cancels its
               // own poll, so there is no flow state left here to reset.
               setCredentialsId('');
+              setOauthLabel(null);
               setManualUrl(false);
               setBranchTouched(false);
               if (branchRef.current) branchRef.current.value = '';
@@ -349,29 +352,38 @@ export function NewRepoForm() {
                             <div className="px-3 py-2 text-xs text-neutral-500">No matches.</div>
                           );
                         }
-                        return filtered.slice(0, 100).map((r) => (
-                          <button
-                            key={r.fullName}
-                            type="button"
-                            onMouseDown={(e) => e.preventDefault()}
-                            onClick={() => {
-                              setRemoteUrl(r.cloneUrl);
-                              setRepoFilter(r.fullName);
-                              setRepoListOpen(false);
-                              const field = branchRef.current;
-                              if (field && !branchTouched && !field.value)
-                                field.value = r.defaultBranch;
-                            }}
-                            className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs text-neutral-200 hover:bg-neutral-800"
-                          >
-                            <span className="font-mono">{r.fullName}</span>
-                            {r.private && (
-                              <span className="rounded bg-amber-900/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-amber-300">
-                                private
+                        return (
+                          <>
+                            {filtered.length > REPO_LIST_LIMIT && (
+                              <span className="block px-3 py-2 text-xs text-neutral-500">
+                                {`Showing ${Math.min(filtered.length, REPO_LIST_LIMIT)} of ${filtered.length} matches. Type to narrow the list.`}
                               </span>
                             )}
-                          </button>
-                        ));
+                            {filtered.slice(0, REPO_LIST_LIMIT).map((r) => (
+                              <button
+                                key={r.fullName}
+                                type="button"
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => {
+                                  setRemoteUrl(r.cloneUrl);
+                                  setRepoFilter(r.fullName);
+                                  setRepoListOpen(false);
+                                  const field = branchRef.current;
+                                  if (field && !branchTouched && !field.value)
+                                    field.value = r.defaultBranch;
+                                }}
+                                className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs text-neutral-200 hover:bg-neutral-800"
+                              >
+                                <span className="font-mono">{r.fullName}</span>
+                                {r.private && (
+                                  <span className="rounded bg-amber-900/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-amber-300">
+                                    private
+                                  </span>
+                                )}
+                              </button>
+                            ))}
+                          </>
+                        );
                       })()}
                     </div>
                   )}

@@ -1090,6 +1090,7 @@ describe('commitRecorded commits what it staged in a private index', () => {
   it('commits nothing when the named files already match HEAD', async () => {
     const repo = await seededRepo({ 'README.md': 'r\n' });
     const before = await git(repo, ['rev-parse', 'HEAD']);
+    const staged = await git(repo, ['ls-files', '--stage']);
     const done = await commitRecorded(
       repo,
       { add: ['README.md'], remove: ['absent.md'] },
@@ -1098,7 +1099,38 @@ describe('commitRecorded commits what it staged in a private index', () => {
     );
     expect(done).toEqual([]);
     expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(before);
+    expect(await git(repo, ['ls-files', '--stage'])).toBe(staged);
   });
+
+  it.each(['12-post-onboarding', '03-upgrade-commit'])(
+    '%s no-op preserves the real index',
+    async (step) => {
+      const repo = await seededRepo({ 'README.md': 'r\n' });
+      await git(repo, ['rm', '--cached', 'README.md']);
+      const before = await git(repo, ['ls-files', '--stage']);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      if (step === '12-post-onboarding') {
+        await postOnboardingStep.apply(mkCtx(repo, { wroteFiles: ['README.md'] }), {
+          detected: { hasGit: true } as never,
+          formValues: { commit: true, commitMessage: 'chore: none' },
+          iteration: 0,
+          previousIterations: [],
+        });
+      } else {
+        stepOutputs.current = {
+          '02-upgrade-apply': { output: { writtenPaths: ['README.md'], deletedPaths: [] } },
+        };
+        await upgradeCommitStep.apply(mkCtx(repo), {
+          detected: { hasGit: true } as never,
+          formValues: { commit: true, commitMessage: 'chore: none' },
+          iteration: 0,
+          previousIterations: [],
+        });
+      }
+      expect(await git(repo, ['ls-files', '--stage'])).toBe(before);
+      expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
+    },
+  );
 
   it('R2-4: a commit during a merge is still refused', async () => {
     const repo = await seededRepo({ 'README.md': 'r\n' });

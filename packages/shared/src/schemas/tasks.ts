@@ -400,6 +400,16 @@ export const CHECKOUT_HOLDING_TASK_STATUSES = [
   'waiting_pr',
 ] as const;
 
+/** The task states a plan merge conversation is live in. The api's open-merge check, the Haive
+ *  data status and the worker's Save hold all read this one list, so they cannot disagree. */
+export const PLAN_MERGE_LIVE_STATUSES = [
+  'created',
+  'queued',
+  'running',
+  'paused',
+  'waiting_user',
+] as const;
+
 /** Filter token for "running but queued behind a capacity cap" — a DERIVED state, not a
  *  task status (see deriveSlotWait), so it cannot be expanded into a status IN (...) list.
  *  expandTaskStatusFilter returns null for it and the api branches on this constant to add
