@@ -256,3 +256,30 @@ describe('the branch field, written through its ref', () => {
     expect(field.value).toBe('');
   });
 });
+
+it.each(['git_https', 'local_path', 'upload', 'blank'])(
+  'restores the GitHub picker and credential after switching through %s',
+  async (otherSource) => {
+    const view = await mount('github_oauth');
+    expect(byId(view, 'repo-picker')).toBeDefined();
+    fire.type(byId(view, 'repo-source'), otherSource);
+    await settle(view);
+    fire.type(byId(view, 'repo-source'), 'github_oauth');
+    await settle(view);
+    const picker = byId(view, 'repo-picker');
+    expect(picker).toBeDefined();
+    (picker.props.onFocus as () => void)();
+    view.draw();
+    fire.click(
+      findAll(view.tree(), (host) => host.tag === 'button' && textOf(host) === ACME.fullName)[0]!,
+    );
+    view.draw();
+    await submit(view, {});
+    expect(h.post).toHaveBeenCalledExactlyOnceWith('/repos', {
+      source: 'github_oauth',
+      remoteUrl: ACME.cloneUrl,
+      credentialsId: 'c1',
+    });
+    expect(alerts(view)).toEqual([]);
+  },
+);

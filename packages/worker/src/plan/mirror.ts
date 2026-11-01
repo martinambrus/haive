@@ -1,3 +1,4 @@
+import { planMirrorErrorsSuppressed } from './error-scope.js';
 import { lockRepositoryTasksKey } from '@haive/database';
 import { checkoutMatches, checkoutMissing, type NamedCheckout } from '../repo/checkout-head.js';
 import { admitWatchedCheckout } from '../project-state/watch-admission.js';
@@ -66,6 +67,16 @@ export interface PlanMirrorChanges {
 /** A flush that wrote nothing on purpose; the row stays dirty and `last_error` says why. */
 export class PlanMirrorHeldError extends Error {
   override readonly name = 'PlanMirrorHeldError';
+  constructor(
+    message: string,
+    readonly code:
+      | 'plan_mirror_held'
+      | 'git_operation'
+      | 'checkout_missing'
+      | 'checkout_changed' = 'plan_mirror_held',
+  ) {
+    super(message);
+  }
 }
 
 // A plan this size is far past any real plan; a larger file is held rather than buffered.
@@ -89,7 +100,7 @@ const hashBytes = (bytes: string | Buffer): string =>
 const ABSENT_HASH = 'absent';
 
 const HELD_GIT_OPERATION =
-  'a merge or rebase is open in the checkout; nothing was written. The plan is written again once it finishes.';
+  'a merge, rebase, cherry-pick or revert is open in the checkout; nothing was written. The plan is written again once it finishes.';
 const HELD_NO_CHECKOUT =
   "the repository's checkout directory is missing; nothing was written. The plan is written again once it is back.";
 const HELD_NO_BASE =
@@ -297,10 +308,13 @@ export async function removePlanJsonIfUnchanged(
     { maxBytes: PLAN_JSON_MAX_BYTES },
   );
   if (outcome === 'kept') {
-    throw new PlanMirrorHeldError(operation ? HELD_GIT_OPERATION : HELD_MOVED);
+    throw new PlanMirrorHeldError(
+      operation ? HELD_GIT_OPERATION : HELD_MOVED,
+      operation ? 'git_operation' : 'checkout_changed',
+    );
   }
   if (outcome === 'absent' && (await gitOperationInProgress(repoPath))) {
-    throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
+    throw new PlanMirrorHeldError(HELD_GIT_OPERATION, 'git_operation');
   }
 }
 
@@ -327,17 +341,22 @@ export async function writePlanJsonIfUnchanged(
     { maxBytes: PLAN_JSON_MAX_BYTES },
   );
   if (outcome === 'kept') {
-    throw new PlanMirrorHeldError(operation ? HELD_GIT_OPERATION : HELD_MOVED);
+    throw new PlanMirrorHeldError(
+      operation ? HELD_GIT_OPERATION : HELD_MOVED,
+      operation ? 'git_operation' : 'checkout_changed',
+    );
   }
   if (outcome === 'rewritten') return;
-  if (await gitOperationInProgress(repoPath)) throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
+  if (await gitOperationInProgress(repoPath))
+    throw new PlanMirrorHeldError(HELD_GIT_OPERATION, 'git_operation');
   try {
     await writeFileNoFollow(repoPath, HAIVE_DATA_FILES.plan, bytes, {
       mode: 'create-exclusive',
       createParents: true,
     });
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST') throw new PlanMirrorHeldError(HELD_MOVED);
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST')
+      throw new PlanMirrorHeldError(HELD_MOVED, 'checkout_changed');
     throw err;
   }
 }
@@ -357,7 +376,8 @@ async function writePlanMirrorLocked(
     state = await loadMirrorState(db, repositoryId);
   }
 
-  if (await gitOperationInProgress(repoPath)) throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
+  if (await gitOperationInProgress(repoPath))
+    throw new PlanMirrorHeldError(HELD_GIT_OPERATION, 'git_operation');
   let rendered = await renderPlanMirrorFiles(db, repositoryId);
   const onDiskRead = await readPlanJson(repoPath);
   if (onDiskRead === 'too-large') throw new PlanMirrorHeldError(heldUnreadable(PLAN_TOO_LARGE));
@@ -628,7 +648,7 @@ export async function importPlanMirror(
       await lockRepositoryTasksKey(tx, repositoryId);
       await lockPlanMirror(tx, repositoryId);
       if (!(await admitWatchedCheckout(tx, repositoryId, storagePath, expectedCheckout)))
-        throw new PlanMirrorHeldError(HELD_MOVED);
+        throw new PlanMirrorHeldError(HELD_MOVED, 'checkout_changed');
     }
     await tx.insert(schema.planNodes).values(
       ordered.map((n) => ({
@@ -749,7 +769,8 @@ export async function reconcilePlanFromCheckout(
   repoPath: string,
   opts: { requireStamp?: boolean; expectedCheckout?: NamedCheckout } = {},
 ): Promise<PlanPullOutcome> {
-  if (await gitOperationInProgress(repoPath)) throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
+  if (await gitOperationInProgress(repoPath))
+    throw new PlanMirrorHeldError(HELD_GIT_OPERATION, 'git_operation');
   return db.transaction(async (tx) => {
     if (opts.expectedCheckout) await lockRepositoryTasksKey(tx, repositoryId);
     await lockPlanMirror(tx, repositoryId);
@@ -757,7 +778,7 @@ export async function reconcilePlanFromCheckout(
       opts.expectedCheckout &&
       !(await admitWatchedCheckout(tx, repositoryId, repoPath, opts.expectedCheckout))
     )
-      throw new PlanMirrorHeldError(HELD_MOVED);
+      throw new PlanMirrorHeldError(HELD_MOVED, 'checkout_changed');
     let bytes: Buffer | null;
     try {
       const read = await readPlanJson(repoPath);
@@ -773,20 +794,23 @@ export async function reconcilePlanFromCheckout(
   });
 }
 
-/** The lock does not hold git off the checkout: what was read must still be there, and no merge or
- *  rebase may have opened since, or the bytes read in may be ones an abort takes back. */
+/** The lock does not hold git off the checkout: what was read must still be there, and no merge,
+ *  rebase, cherry-pick or revert may have opened since, or the bytes read in may be ones an abort
+ *  takes back. */
 async function assertCheckoutStillHolds(
   repoPath: string,
   bytes: Buffer,
   expectedCheckout?: NamedCheckout,
 ): Promise<void> {
   if (expectedCheckout && !(await checkoutMatches(repoPath, expectedCheckout)))
-    throw new PlanMirrorHeldError(HELD_MOVED);
-  if (await gitOperationInProgress(repoPath)) throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
+    throw new PlanMirrorHeldError(HELD_MOVED, 'checkout_changed');
+  if (await gitOperationInProgress(repoPath))
+    throw new PlanMirrorHeldError(HELD_GIT_OPERATION, 'git_operation');
   const now = await readPlanJson(repoPath);
-  if (!Buffer.isBuffer(now) || !now.equals(bytes)) throw new PlanMirrorHeldError(HELD_MOVED);
+  if (!Buffer.isBuffer(now) || !now.equals(bytes))
+    throw new PlanMirrorHeldError(HELD_MOVED, 'checkout_changed');
   if (expectedCheckout && !(await checkoutMatches(repoPath, expectedCheckout)))
-    throw new PlanMirrorHeldError(HELD_MOVED);
+    throw new PlanMirrorHeldError(HELD_MOVED, 'checkout_changed');
 }
 
 const UNRELATED_ROOT =
@@ -1614,7 +1638,7 @@ export async function flushPlanMirrorForRepository(
       .from(schema.planNodes)
       .where(eq(schema.planNodes.repositoryId, repositoryId))
       .limit(1);
-    if (node) throw new PlanMirrorHeldError(HELD_NO_CHECKOUT);
+    if (node) throw new PlanMirrorHeldError(HELD_NO_CHECKOUT, 'checkout_missing');
   }
   const files = await writePlanMirror(db, repositoryId, repoPath);
   return { files, repoPath };
@@ -1716,6 +1740,7 @@ export async function recordPlanMirrorError(
   repositoryId: string,
   err: unknown,
 ): Promise<void> {
+  if (planMirrorErrorsSuppressed()) return;
   const message = scrubErrorPaths(err);
   await db
     .insert(schema.planMirrorState)

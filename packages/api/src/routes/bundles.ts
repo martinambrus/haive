@@ -8,6 +8,7 @@ import {
   BUNDLE_JOB_NAMES,
   createGitBundleRequestSchema,
   initBundleUploadRequestSchema,
+  logger,
   type ArchiveFormat,
   type BundleJobPayload,
   type BundleSummary,
@@ -16,9 +17,9 @@ import {
   type CustomBundleSourceType,
 } from '@haive/shared';
 import {
-  lstatNoFollow,
+  isWalkDepthError,
   openFileNoFollow,
-  readdirNoFollow,
+  walkFilesNoFollow,
   removeNoFollow,
   renameNoFollow,
 } from '@haive/shared/fs-safe';
@@ -987,35 +988,15 @@ async function listExtractedFiles(
 }> {
   const out: Array<{ path: string; size: number }> = [];
   let truncated = false;
-  const walk = async (relDir: string, rel: string): Promise<void> => {
-    // Lenient: a directory that cannot be listed — absent, unreadable, or a link standing where a
-    // directory should be — contributes nothing, which is exactly what the `catch` here did.
-    const entries = await readdirNoFollow(anchor, relDir);
-    if (entries === null) return;
-    entries.sort((a, b) => a.name.localeCompare(b.name));
-    for (const entry of entries) {
-      if (truncated) return;
-      if (entry.name === '.git') continue;
-      if (entry.name === '.DS_Store') continue;
-      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) {
-        await walk(`${relDir}/${entry.name}`, childRel);
-        continue;
-      }
-      // `readdir` LISTS a link, and the `stat` this replaced then followed it — so a link in the
-      // extracted tree was reported as a file of the target's size, which is not a file this
-      // bundle holds. The lstat answers for the entry itself.
-      if (!entry.isFile()) continue;
-      const info = await lstatNoFollow(anchor, `${relDir}/${entry.name}`);
-      if (info?.kind !== 'file') continue;
-      if (out.length >= FILES_LIST_CAP) {
-        truncated = true;
-        return;
-      }
-      out.push({ path: childRel, size: Number(info.stats.size) });
+  for await (const file of walkFilesNoFollow(anchor, rootRel, {
+    skipNames: ['.git', '.DS_Store'],
+  })) {
+    if (out.length >= FILES_LIST_CAP) {
+      truncated = true;
+      break;
     }
-  };
-  await walk(rootRel, '');
+    out.push(file);
+  }
   return { files: out, truncated, cap: FILES_LIST_CAP };
 }
 
@@ -1028,11 +1009,18 @@ bundleRoutes.get('/:id/files', async (c) => {
   // A stored root this route cannot place reads as an empty tree, the same answer a missing
   // directory already gave — the listing is a convenience, not a contract about what exists.
   if (rootRel === null) return c.json({ files: [], truncated: false, cap: FILES_LIST_CAP });
-  const exists = await lstatNoFollow(anchor, rootRel);
-  if (exists?.kind !== 'directory') {
-    return c.json({ files: [], truncated: false, cap: FILES_LIST_CAP });
-  }
-  const result = await listExtractedFiles(anchor, rootRel);
+  // A tree nested past the walk's depth is the bundle's own property, not a fault: say so (409
+  // with a code, as the routes answer a stored object's state that blocks a request) instead of an
+  // opaque 500, and as a warning rather than an unhandled error.
+  const result = await listExtractedFiles(anchor, rootRel).catch((err: unknown) => {
+    if (!isWalkDepthError(err)) throw err;
+    logger.warn({ userId, bundleId }, 'bundle tree is nested too deeply to list');
+    throw new HttpError(
+      409,
+      'This bundle is nested too deeply to list its files',
+      'bundle_too_deep',
+    );
+  });
   return c.json(result);
 });
 

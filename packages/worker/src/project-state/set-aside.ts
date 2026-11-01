@@ -75,7 +75,17 @@ export type KeptFiles = Map<string, KeptFile>;
 export type SetAsideResult =
   | { outcome: 'clean' }
   | { outcome: 'set-aside'; paths: string[]; kept: KeptFiles }
-  | { outcome: 'refused'; file: string; reason: string }
+  | {
+      outcome: 'refused';
+      file: string;
+      reason: string;
+      code:
+        | 'projection_not_owned'
+        | 'projection_rewritten'
+        | 'write_pending'
+        | 'git_operation'
+        | 'git_operation_unreadable';
+    }
   | { outcome: 'held'; holding: number };
 
 /** What the check inside the caller's move transaction finds; it writes nothing, so a dirty file is
@@ -95,7 +105,12 @@ const ABSENT_PLAN_HASH = 'absent';
 
 type Refused = Extract<SetAsideResult, { outcome: 'refused' }>;
 
-const refuse = (file: string, why: string): Refused => ({
+const refuse = (
+  file: string,
+  why: string,
+  code: Refused['code'] = 'projection_not_owned',
+): Refused => ({
+  code,
   outcome: 'refused',
   file,
   reason: `${file} ${why}`,
@@ -114,6 +129,7 @@ async function pendingStateWrite(db: DbOrTx, repositoryId: string): Promise<Refu
     ? refuse(
         PROJECT_STATE_DIR,
         'is waiting for project settings recovery; retry after recovery finishes',
+        'write_pending',
       )
     : null;
 }
@@ -125,14 +141,19 @@ async function openOperationRefusal(
 ): Promise<Refused | null> {
   try {
     if (unmerged || (await gitOperationInProgress(repoPath))) {
-      return refuse(file, 'is part of a merge or rebase that is still open');
+      return refuse(
+        file,
+        'is part of a merge, rebase, cherry-pick or revert that is still open',
+        'git_operation',
+      );
     }
     return null;
   } catch (err) {
     if (!(err instanceof GitOperationUnreadableError)) throw err;
     return refuse(
       file,
-      `could not be checked for an open merge or rebase (${err.message.split('\n')[0]})`,
+      `could not be checked for an open merge, rebase, cherry-pick or revert (${err.message.split('\n')[0]})`,
+      'git_operation_unreadable',
     );
   }
 }
@@ -529,7 +550,7 @@ async function restoreJudged(
   await restoreFaults.beforeRestore?.();
   const raced = await restoreFromHead(repoPath, mine, kept);
   if (typeof raced === 'string') return { changed: raced };
-  if (raced !== null) return refuse(raced.path, raced.reason);
+  if (raced !== null) return refuse(raced.path, raced.reason, 'projection_rewritten');
   await restoreFaults.afterRestore?.();
   await after?.(tx);
   return null;
@@ -752,7 +773,11 @@ export async function setAsideHaiveProjections(
     busy = result.changed;
   }
   return stop(
-    refuse(busy, 'was rewritten again while it was set aside; the move was not attempted, retry'),
+    refuse(
+      busy,
+      'was rewritten again while it was set aside; the move was not attempted, retry',
+      'projection_rewritten',
+    ),
   );
 }
 
@@ -884,7 +909,7 @@ async function isDirty(
 
 /** After a move of the checkout: reads the new head's record and plan in, then writes what this install
  *  still has pending over them. A step that fails here leaves its mark raised, so the sweep retries it.
- *  Whether both halves re-synced: false while a merge or rebase is open, when either threw, or when the
+ *  Whether both halves re-synced: false while a merge, rebase, cherry-pick or revert is open, when either threw, or when the
  *  state sync was held, superseded or refused or its pending write did not run. A sync deferred to a
  *  live onboarding or upgrade counts as done: that task re-syncs when it ends. */
 export async function resyncHaiveProjections(
@@ -892,7 +917,7 @@ export async function resyncHaiveProjections(
   repositoryId: string,
   repoPath: string,
 ): Promise<boolean> {
-  // A merge or rebase still open holds an intermediate record: nothing is read in until it ends.
+  // A merge, rebase, cherry-pick or revert still open holds an intermediate record: nothing is read in until it ends.
   try {
     if (await gitOperationInProgress(repoPath)) return false;
   } catch (err) {

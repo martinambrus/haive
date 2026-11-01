@@ -516,8 +516,12 @@ title's `minLength: 1` is published too.
   Basic form and any 12-character piece of a long token cut by the limit.
 - **Bounded vendor answers**: a success body is read up to `FORGE_RESPONSE_MAX_BYTES` (8 MiB; an
   open-PR lookup on Gitea or Bitbucket Server lists a whole page of pull requests with their bodies),
-  an error body up to 4 KiB, and the stream is cancelled past either. This is in the shared
-  `BaseForgeProvider`, so the worker's forge calls are bounded too.
+  an error body up to 4 KiB, and the stream is cancelled past either. The shared `BaseForgeProvider`
+  reads its success bodies through its own bounded reader and its error bodies through
+  `readForgeErrorExcerpt` (`@haive/shared/forge`), so the worker's forge calls are bounded too. The
+  api uses `readForgeJson` for GitHub's repository pages (`github-oauth.ts`: one bounded read per
+  page, paging stopped when GitHub sends no next link) and `readForgeErrorExcerpt` for an Ollama
+  pull's error body (`tooling.ts`).
 - **One scrub** (`redactSecrets`, `api/src/lib/module-vendor-client.ts`) removes the secrets from every
   vendor answer before a module executor sees it, and from every error text, every module result and
   every forge success text the broker answers, in every spelling a vendor's encoder may echo: each
