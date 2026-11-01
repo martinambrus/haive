@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { api } from '@/lib/api-client';
 import { blocksUpgrade } from '@haive/shared/project-state-conflicts';
 import { Badge, Button } from '@/components/ui';
@@ -42,6 +43,7 @@ export interface ProjectStateConflictsViewProps {
   onAnswer: (conflict: ProjectStateConflictBody, answer: ProjectStateAnswer) => void;
   /** `plan` shows the questions about plan nodes; `project` (the default) every other one. */
   scope?: ConflictScope;
+  haiveDataHref?: string;
 }
 
 export type ConflictScope = 'project' | 'plan';
@@ -63,6 +65,7 @@ export function ProjectStateConflictsView({
   pendingIds,
   onAnswer,
   scope = 'project',
+  haiveDataHref,
 }: ProjectStateConflictsViewProps) {
   if (conflicts.length === 0 && !notice) return null;
   const plan = scope === 'plan';
@@ -85,6 +88,11 @@ export function ProjectStateConflictsView({
             }
           />
         </div>
+      )}
+      {conflicts.length > 0 && !plan && haiveDataHref && (
+        <Link href={haiveDataHref} className="text-sm text-indigo-300 hover:underline">
+          Open Haive data
+        </Link>
       )}
       {notice && <InlineMarkdown body={notice} className="text-xs text-emerald-400" />}
       {conflicts.map((c) => {
@@ -152,6 +160,8 @@ type AnsweredConflict = Pick<ProjectStateConflictBody, 'unit' | 'base' | 'local'
 export interface ProjectStateConflictsBannerProps {
   repositoryId: string;
   scope?: ConflictScope;
+  /** Hide the destination link when this banner is already on the Haive data page. */
+  showHaiveDataLink?: boolean;
   /** Called once an answer has landed, for a page that shows what the answer changed. */
   onAnswered?: () => void;
   /** Re-reads the questions this often, for a page where background work can ask new ones. */
@@ -163,6 +173,7 @@ export function ProjectStateConflictsBanner({
   scope = 'project',
   onAnswered,
   pollMs,
+  showHaiveDataLink = true,
 }: ProjectStateConflictsBannerProps) {
   const [conflicts, setConflicts] = useState<ProjectStateConflictBody[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -357,6 +368,9 @@ export function ProjectStateConflictsBanner({
       )}
       <ProjectStateConflictsView
         conflicts={conflicts}
+        haiveDataHref={
+          showHaiveDataLink ? `/repos/${encodeURIComponent(repositoryId)}/haive-data` : undefined
+        }
         notice={resolutionNotice(
           answered,
           rtkAnswered,

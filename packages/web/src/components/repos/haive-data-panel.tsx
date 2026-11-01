@@ -8,8 +8,10 @@ import type {
   HaiveDataSaveResult,
   HaiveDataStatus,
 } from '@haive/shared/haive-data';
+import { haiveDataSaveRequestSchema } from '@haive/shared/haive-data';
 import { api, startPlanMerge } from '@/lib/api-client';
-import { Button, Card } from '@/components/ui';
+import { Button, Card, Input, Label } from '@/components/ui';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { ProjectStateConflictsBanner } from '@/components/project-state-conflicts-banner';
 
@@ -44,6 +46,8 @@ const reasons: Record<HaiveDataRefusal['code'], string> = {
   projection_not_owned: 'A changed file could not be recognized as Haive data.',
   projection_rewritten: 'A file changed during the save. Refresh and try again.',
 };
+
+const DEFAULT_COMMIT_MESSAGE = 'chore(haive): save Haive data';
 
 function Reason({ reason }: { reason: HaiveDataRefusal }) {
   return (
@@ -185,6 +189,20 @@ export function HaiveDataPanel({ repositoryId }: { repositoryId: string }) {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [result, setResult] = useState<HaiveDataSaveResult | null>(null);
   const [saving, setSaving] = useState<'save' | 'push' | null>(null);
+  const [commitMessage, setCommitMessage] = useState(DEFAULT_COMMIT_MESSAGE);
+  const [confirmPush, setConfirmPush] = useState(false);
+  const pushConfirmation = useRef(false);
+  const statusRef = useRef(status);
+  statusRef.current = status;
+  const trimmedMessage = commitMessage.trim();
+  const customMessage =
+    trimmedMessage && trimmedMessage !== DEFAULT_COMMIT_MESSAGE ? trimmedMessage : undefined;
+  const messageCheck = haiveDataSaveRequestSchema.safeParse(
+    customMessage ? { commitMessage: customMessage } : {},
+  );
+  const messageError = messageCheck.success
+    ? null
+    : (messageCheck.error.issues[0]?.message ?? 'Invalid commit message');
   const [startingMerge, setStartingMerge] = useState(false);
   const [mergeTaskId, setMergeTaskId] = useState<string | null>(null);
   const [mergeError, setMergeError] = useState<string | null>(null);
@@ -234,8 +252,35 @@ export function HaiveDataPanel({ repositoryId }: { repositoryId: string }) {
     setLoading(true);
     setRefresh((n) => n + 1);
   };
+  const askToPush = () => {
+    if (
+      busy.current ||
+      refreshing.current ||
+      !statusRef.current ||
+      loadError ||
+      messageError ||
+      statusRef.current.holds.push.length
+    )
+      return;
+    pushConfirmation.current = true;
+    setConfirmPush(true);
+  };
+  const closePushConfirmation = () => {
+    pushConfirmation.current = false;
+    setConfirmPush(false);
+  };
   async function save(push: boolean) {
-    if (busy.current || refreshing.current) return;
+    if (
+      busy.current ||
+      refreshing.current ||
+      !statusRef.current ||
+      loadError ||
+      messageError ||
+      statusRef.current.holds[push ? 'push' : 'save'].length
+    )
+      return;
+    if (push !== pushConfirmation.current) return;
+    closePushConfirmation();
     busy.current = true;
     setSaving(push ? 'push' : 'save');
     setResult(null);
@@ -244,7 +289,12 @@ export function HaiveDataPanel({ repositoryId }: { repositoryId: string }) {
     setMergeTaskId(null);
     try {
       // An absent body is invalid JSON; the default Save deliberately sends {}.
-      setResult(await api.post<HaiveDataSaveResult>(`${base}/save`, push ? { push: true } : {}));
+      setResult(
+        await api.post<HaiveDataSaveResult>(`${base}/save`, {
+          ...(push ? { push: true } : {}),
+          ...(customMessage ? { commitMessage: customMessage } : {}),
+        }),
+      );
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : 'Could not save Haive data');
     } finally {
@@ -254,7 +304,14 @@ export function HaiveDataPanel({ repositoryId }: { repositoryId: string }) {
     }
   }
   async function resolveMerge() {
-    if (busy.current || refreshing.current || mergeTaskId || !result?.conflict) return;
+    if (
+      busy.current ||
+      refreshing.current ||
+      pushConfirmation.current ||
+      mergeTaskId ||
+      !result?.conflict
+    )
+      return;
     busy.current = true;
     setStartingMerge(true);
     setMergeError(null);
@@ -270,7 +327,8 @@ export function HaiveDataPanel({ repositoryId }: { repositoryId: string }) {
       setStartingMerge(false);
     }
   }
-  const disabled = loading || !status || !!loadError || saving !== null || startingMerge;
+  const unavailable = loading || !status || !!loadError || saving !== null || startingMerge;
+  const disabled = unavailable || confirmPush || !!messageError;
   const mergeOpen = status?.holds.push.some((hold) => hold.code === 'plan_merge') ?? false;
   const changed = status?.files?.filter((file) => file.change !== 'unchanged').length;
 
@@ -278,6 +336,27 @@ export function HaiveDataPanel({ repositoryId }: { repositoryId: string }) {
     <div className="min-w-0 space-y-5">
       <Card className="min-w-0 space-y-4">
         <MarkdownView body="Save writes the current project state record and plan snapshot, then commits recognized Haive files. Unknown files may be skipped. Save & push also integrates remote changes and pushes the current branch, including its existing commits." />
+        <div className="space-y-2">
+          <Label htmlFor="haive-data-commit-message">Commit message</Label>
+          <Input
+            id="haive-data-commit-message"
+            value={commitMessage}
+            maxLength={500}
+            aria-invalid={!!messageError}
+            aria-describedby={messageError ? 'haive-data-message-error' : undefined}
+            disabled={
+              unavailable ||
+              confirmPush ||
+              (!!status?.holds.save.length && !!status?.holds.push.length)
+            }
+            onChange={(event) => setCommitMessage(event.target.value)}
+          />
+          {messageError && (
+            <div id="haive-data-message-error" role="alert">
+              <MarkdownView body={messageError} />
+            </div>
+          )}
+        </div>
         <div className="flex flex-wrap gap-2">
           <Button
             disabled={disabled || !!status?.holds.save.length}
@@ -285,15 +364,12 @@ export function HaiveDataPanel({ repositoryId }: { repositoryId: string }) {
           >
             Save
           </Button>
-          <Button
-            disabled={disabled || !!status?.holds.push.length}
-            onClick={() => void save(true)}
-          >
+          <Button disabled={disabled || !!status?.holds.push.length} onClick={askToPush}>
             Save &amp; push
           </Button>
           <Button
             variant="secondary"
-            disabled={loading || saving !== null || startingMerge}
+            disabled={loading || saving !== null || startingMerge || confirmPush}
             onClick={reload}
           >
             Refresh
@@ -435,15 +511,45 @@ export function HaiveDataPanel({ repositoryId }: { repositoryId: string }) {
       )}
       <ProjectStateConflictsBanner
         repositoryId={repositoryId}
+        showHaiveDataLink={false}
         onAnswered={reload}
         pollMs={10_000}
       />
       <ProjectStateConflictsBanner
         repositoryId={repositoryId}
         scope="plan"
+        showHaiveDataLink={false}
         onAnswered={reload}
         pollMs={10_000}
       />
+      <Dialog
+        open={confirmPush}
+        onOpenChange={(open) => {
+          if (!open && !busy.current) closePushConfirmation();
+        }}
+      >
+        <DialogContent role="dialog" aria-modal="true" aria-labelledby="haive-data-push-title">
+          <DialogHeader>
+            <DialogTitle id="haive-data-push-title">Save and push Haive data?</DialogTitle>
+          </DialogHeader>
+          <MarkdownView body="This saves recognized Haive data, integrates remote changes, and pushes the current branch, including its existing commits. Confirm to send these commits to origin." />
+          {status?.branch && <code className="block break-all text-sm">{status.branch}</code>}
+          {status?.holds.push.map((reason) => (
+            <Reason key={reason.code} reason={reason} />
+          ))}
+          <div className="mt-4 flex flex-wrap justify-end gap-2">
+            <Button variant="secondary" onClick={closePushConfirmation}>
+              Cancel
+            </Button>
+            <Button
+              disabled={unavailable || !!messageError || !!status?.holds.push.length}
+              onClick={() => void save(true)}
+            >
+              Confirm Save &amp; push
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

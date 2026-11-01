@@ -4,6 +4,7 @@ import { api } from '@/lib/api-client';
 import { HaiveDataPanel } from './haive-data-panel';
 import {
   buttons,
+  controls,
   createRenderer,
   fire,
   isDisabled,
@@ -17,6 +18,11 @@ vi.mock('react', async (original) => ({
 }));
 vi.mock('next/link', () => ({ default: 'a' }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: h.push }) }));
+vi.mock('@/components/dialog', async (original) => ({
+  ...(await original<typeof import('@/components/dialog')>()),
+  Dialog: ({ open, children }: { open: boolean; children: import('react').ReactNode }) =>
+    open ? <div role="dialog">{children}</div> : null,
+}));
 vi.mock('@/components/project-state-conflicts-banner', () => ({
   ProjectStateConflictsBanner: () => null,
 }));
@@ -55,6 +61,12 @@ const settle = async (view: Renderer) => {
   for (let i = 0; i < 3; i++) await view.flush();
 };
 const button = (view: Renderer, name: string) => buttons(view.tree(), name)[0]!;
+const pushAndConfirm = async (view: Renderer) => {
+  fire.click(button(view, 'save & push'));
+  view.draw();
+  fire.click(button(view, 'confirm save & push'));
+  await settle(view);
+};
 beforeEach(() => {
   vi.resetAllMocks();
   vi.spyOn(api, 'get').mockImplementation(h.get);
@@ -125,6 +137,7 @@ describe('Haive data actions and status', () => {
     await settle(view);
     expect(isDisabled(button(view, 'save'))).toBe(false);
     expect(isDisabled(button(view, 'save & push'))).toBe(true);
+    expect(isDisabled(controls(view.tree(), 'commit message')[0]!)).toBe(false);
     await fire.click(button(view, 'save'));
     await settle(view);
     expect(textOf(view.tree())).toContain('record_absent');
@@ -141,6 +154,7 @@ describe('Haive data actions and status', () => {
     expect(isDisabled(button(view, 'save'))).toBe(true);
     expect(isDisabled(button(view, 'save & push'))).toBe(true);
     expect(textOf(view.tree())).toContain('Write pending recovery');
+    expect(isDisabled(controls(view.tree(), 'commit message')[0]!)).toBe(true);
     expect(textOf(view.tree())).toContain('old sync error');
   });
 
@@ -150,8 +164,7 @@ describe('Haive data actions and status', () => {
     );
     const view = createRenderer(() => <HaiveDataPanel repositoryId="repo" />);
     await settle(view);
-    await fire.click(button(view, 'save & push'));
-    await settle(view);
+    await pushAndConfirm(view);
     expect(textOf(view.tree())).toContain('No new commit needed');
     expect(textOf(view.tree())).toContain('Pushed to origin.');
   });
@@ -167,8 +180,7 @@ describe('Haive data actions and status', () => {
     );
     const view = createRenderer(() => <HaiveDataPanel repositoryId="repo" />);
     await settle(view);
-    await fire.click(button(view, 'save & push'));
-    await settle(view);
+    await pushAndConfirm(view);
     expect(h.post).toHaveBeenCalledWith('/repositories/repo/haive-data/save', { push: true });
     const text = textOf(view.tree());
     for (const value of ['push_failed', '123abc', 'Not pushed', 'future.json', 'index'])
@@ -186,8 +198,7 @@ describe('Haive data actions and status', () => {
       .mockRejectedValueOnce(new Error('Request failed'));
     const view = createRenderer(() => <HaiveDataPanel repositoryId="repo" />);
     await settle(view);
-    await fire.click(button(view, 'save & push'));
-    await settle(view);
+    await pushAndConfirm(view);
     expect(textOf(view.tree())).toContain('app.ts');
     expect(textOf(view.tree())).toContain('unrelated');
     await fire.click(button(view, 'save'));
@@ -226,8 +237,7 @@ describe('Haive data actions and status', () => {
       );
     const view = createRenderer(() => <HaiveDataPanel repositoryId="repo" />);
     await settle(view);
-    await fire.click(button(view, 'save & push'));
-    await settle(view);
+    await pushAndConfirm(view);
     // Receiving the conflict or refreshing must never spend tokens automatically.
     expect(h.post).toHaveBeenCalledTimes(1);
     const staleResolve = button(view, 'resolve with an agent');
@@ -267,8 +277,7 @@ describe('Haive data actions and status', () => {
       .mockResolvedValueOnce({ taskId: 'retry-task' });
     const view = createRenderer(() => <HaiveDataPanel repositoryId="repo" />);
     await settle(view);
-    await fire.click(button(view, 'save & push'));
-    await settle(view);
+    await pushAndConfirm(view);
     expect(button(view, 'resolve with an agent')).toBeDefined();
     await fire.click(button(view, 'resolve with an agent'));
     await settle(view);
@@ -298,13 +307,115 @@ describe('Haive data actions and status', () => {
     let visible = true;
     const view = createRenderer(() => (visible ? <HaiveDataPanel repositoryId="repo" /> : null));
     await settle(view);
-    await fire.click(button(view, 'save & push'));
-    await settle(view);
+    await pushAndConfirm(view);
     fire.click(button(view, 'resolve with an agent'));
     visible = false;
     view.draw();
     finish({ taskId: 'late-task' });
     await settle(view);
     expect(h.push).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('sends an edited, trimmed commit message with push=%s', async (push) => {
+    const view = createRenderer(() => <HaiveDataPanel repositoryId="repo" />);
+    await settle(view);
+    const input = controls(view.tree(), 'commit message')[0];
+    expect(input).toBeDefined();
+    fire.type(input!, '  chore: share updated project settings  ');
+    view.draw();
+    fire.click(button(view, push ? 'save & push' : 'save'));
+    view.draw();
+    if (push) fire.click(button(view, 'confirm save & push'));
+    await settle(view);
+    expect(h.post).toHaveBeenCalledExactlyOnceWith('/repositories/repo/haive-data/save', {
+      ...(push ? { push: true } : {}),
+      commitMessage: 'chore: share updated project settings',
+    });
+  });
+
+  it('confirms pushing existing commits, sends nothing on cancel, and guards duplicate confirmation', async () => {
+    let finish!: (value: HaiveDataSaveResult) => void;
+    h.post.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const view = createRenderer(() => <HaiveDataPanel repositoryId="repo" />);
+    await settle(view);
+    fire.click(button(view, 'save & push'));
+    view.draw();
+    expect(h.post).not.toHaveBeenCalled();
+    expect(textOf(view.tree())).toContain('existing commits');
+    const staleConfirm = button(view, 'confirm save & push');
+    fire.click(button(view, 'cancel'));
+    view.draw();
+    fire.click(staleConfirm);
+    expect(h.post).not.toHaveBeenCalled();
+    fire.click(button(view, 'save & push'));
+    view.draw();
+    const confirm = button(view, 'confirm save & push');
+    fire.click(confirm);
+    fire.click(confirm);
+    view.draw();
+    expect(h.post).toHaveBeenCalledExactlyOnceWith('/repositories/repo/haive-data/save', {
+      push: true,
+    });
+    finish(saved({ pushed: true }));
+    await settle(view);
+  });
+
+  it.each(['', '   ', 'chore(haive): save Haive data'])(
+    'uses the default request for message %j',
+    async (message) => {
+      const view = createRenderer(() => <HaiveDataPanel repositoryId="repo" />);
+      await settle(view);
+      fire.type(controls(view.tree(), 'commit message')[0]!, message);
+      view.draw();
+      fire.click(button(view, 'save'));
+      await settle(view);
+      expect(h.post).toHaveBeenCalledExactlyOnceWith('/repositories/repo/haive-data/save', {});
+    },
+  );
+
+  it.each(['x'.repeat(501), 'message\0suffix'])(
+    'refuses messages outside the API limits',
+    async (message) => {
+      const view = createRenderer(() => <HaiveDataPanel repositoryId="repo" />);
+      await settle(view);
+      fire.type(controls(view.tree(), 'commit message')[0]!, message);
+      view.draw();
+      expect(isDisabled(button(view, 'save'))).toBe(true);
+      expect(isDisabled(button(view, 'save & push'))).toBe(true);
+      expect(h.post).not.toHaveBeenCalled();
+      // Invalid input remains editable so the person can correct it.
+      expect(isDisabled(controls(view.tree(), 'commit message')[0]!)).toBe(false);
+    },
+  );
+
+  it('rechecks holds that arrive while the confirmation is open', async () => {
+    vi.useFakeTimers();
+    try {
+      const view = createRenderer(() => <HaiveDataPanel repositoryId="repo" />);
+      await vi.advanceTimersByTimeAsync(0);
+      view.draw();
+      fire.click(button(view, 'save & push'));
+      view.draw();
+      const staleConfirm = button(view, 'confirm save & push');
+      const held = clean();
+      held.holds.push = [{ code: 'no_origin' }];
+      h.get.mockResolvedValue(held);
+      await vi.advanceTimersByTimeAsync(5000);
+      view.draw();
+      expect(isDisabled(button(view, 'confirm save & push'))).toBe(true);
+      fire.click(staleConfirm);
+      expect(h.post).not.toHaveBeenCalled();
+      fire.click(button(view, 'cancel'));
+      view.draw();
+      expect(isDisabled(button(view, 'save & push'))).toBe(true);
+      expect(isDisabled(button(view, 'save'))).toBe(false);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 });
