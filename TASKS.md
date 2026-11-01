@@ -117,8 +117,10 @@ User decision 2026-11-01: Retain complete/consumed upload metadata 90 days; prot
 
 ### T121 · B5.2 · project state rides Haive's pushes
 
-status: open · kind: feature (user decision taken) · priority: P1
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T17:33Z · last: 2026-11-01T17:33Z · kind: feature (user decision taken) · priority: P1
 chore(haive) commit of dirty projections before the cleanup base push, 13, plan Save & push; PR path commits into the feature worktree; 12/03 commit default on when origin exists. Control: cleanup + push leaves origin without the record today.
+
+Execution 2026-11-01: paired with T122 per approved B5.2+B5.3 plan; one feature candidate, separate commits. Evidence `.claude/tmp/codex-run/queue-exec-20261101/T121-T122/`. T300 corrected validation stopped on confirmed T293; no more paid validation is included here.
 
 ### T122 · B5.3 · review watermarks travel; Haive paths leave drift ranges
 
