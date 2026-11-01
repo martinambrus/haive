@@ -489,7 +489,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
     });
     const queuedGitCalls: string[][] = [];
     h.gitHook = async (args) => {
-      if (args.includes('https://queued.test/r')) queuedGitCalls.push(args);
+      if (args.some((arg) => arg === 'https://queued.test/r')) queuedGitCalls.push(args);
       if (args.includes('--replace-all') && args.at(-1) === 'https://first.test/r') {
         reached = true;
         await resume;
