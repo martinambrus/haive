@@ -1,29 +1,10 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
-import { parsers } from 'prettier/plugins/yaml';
+import { readWorkflow } from './workflow.mjs';
 
 const command = 'pnpm exec playwright test -c tests/e2e/harness/web-runtime/web-runtime.config.ts';
 
-// Use the YAML parser already declared through Prettier, so indentation, comments and unrelated
-// job names cannot satisfy the checks. Keep scalars as strings, including numeric YAML values.
-function value(node) {
-  if (!node) return null;
-  if ('value' in node) return node.value;
-  if (node.type === 'mapping') {
-    const entries = node.children.map((item) => item.children.map(value));
-    assert.equal(new Set(entries.map(([key]) => key)).size, entries.length, 'duplicate YAML key');
-    return Object.fromEntries(entries);
-  }
-  if (node.type === 'sequence' || node.type === 'flowSequence') return node.children.map(value);
-  assert.equal(node.children.length, 1, `unsupported YAML node ${node.type}`);
-  return value(node.children[0]);
-}
-
-const ast = parsers.yaml.parse(
-  readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8'),
-);
-const workflow = value(ast.children[0].children.find((node) => node.type === 'documentBody'));
+const workflow = readWorkflow('ci.yml');
 
 function required(jobOrStep) {
   assert.equal(jobOrStep.if, undefined, 'browser coverage must not be conditionally skipped');
