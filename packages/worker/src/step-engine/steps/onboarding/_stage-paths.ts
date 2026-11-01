@@ -227,23 +227,27 @@ export async function stageNamed(
   add: readonly string[],
   remove: readonly string[],
   env?: NodeJS.ProcessEnv,
+  options: { filesystemAnchor?: string; gitCwd?: string } = {},
 ): Promise<void> {
+  const anchor = options.filesystemAnchor ?? repoPath;
   // Only a file or a link is named: a directory standing at a recorded path would be added whole.
   const files: string[] = [];
   for (const rel of add) {
-    const entry = await lstatNoFollow(repoPath, rel);
+    const entry = await lstatNoFollow(anchor, relUnder(anchor, path.join(repoPath, rel)), {
+      strict: options.filesystemAnchor !== undefined,
+    });
     if (entry && (entry.kind === 'file' || entry.kind === 'symlink')) files.push(rel);
   }
   if (files.length > 0) {
     await gitExec(['add', '-f', '--', ...literal(files)], {
-      cwd: repoPath,
+      cwd: options.gitCwd ?? repoPath,
       env,
       maxBuffer: GIT_MAX_BUFFER,
     });
   }
   if (remove.length > 0) {
     await gitExec(['rm', '--cached', '--ignore-unmatch', '-q', '--', ...literal(remove)], {
-      cwd: repoPath,
+      cwd: options.gitCwd ?? repoPath,
       env,
       maxBuffer: GIT_MAX_BUFFER,
     });
@@ -325,33 +329,42 @@ export async function commitRecorded(
   warnings?: string[],
   onCommitted?: (sha: string) => void,
   options: {
+    /** A contained worktree keeps filesystem traversal rooted at its repository. */
+    filesystemAnchor?: string;
+    /** Held-directory cwd for Git, kept open by the caller through this operation. */
+    gitCwd?: string;
+    expectedHead?: string;
     repairUnchangedIndex?: boolean;
     waitForIndexRetry?: (ms: number) => Promise<void>;
   } = {},
 ): Promise<string[]> {
+  const anchor = options.filesystemAnchor ?? repoPath;
+  const cwd = options.gitCwd ?? repoPath;
   const run = (args: string[], extra?: NodeJS.ProcessEnv) =>
-    gitExec(args, { cwd: repoPath, env: { ...env, ...extra }, maxBuffer: GIT_MAX_BUFFER });
+    gitExec(args, { cwd, env: { ...env, ...extra }, maxBuffer: GIT_MAX_BUFFER });
   const waitForIndexRetry =
     options.waitForIndexRetry ??
     ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   for (const mark of ['MERGE_HEAD', 'CHERRY_PICK_HEAD']) {
-    const open = await gitRun(repoPath, ['rev-parse', '-q', '--verify', mark]);
+    const open = await gitRun(cwd, ['rev-parse', '-q', '--verify', mark]);
     const name = mark.split('_')[0]!.toLowerCase();
     if (open.code === 0) throw new Error(`cannot do a partial commit during a ${name}`);
     if (open.code !== 1) throw new Error(`could not check for a ${name}: git exited ${open.code}`);
   }
-  const head = await gitRun(repoPath, ['rev-parse', '-q', '--verify', 'HEAD^{commit}']);
+  const head = await gitRun(cwd, ['rev-parse', '-q', '--verify', 'HEAD^{commit}']);
   if (head.code !== 0 && head.code !== 1) {
     throw new Error(
       `could not read HEAD before partial commit: ${(head.stderr || head.stdout).trim()} (git exited ${head.code})`,
     );
   }
   const parent = head.code === 0 ? head.stdout.trim() : '';
+  if (options.expectedHead !== undefined && parent !== options.expectedHead)
+    throw new Error('project state push HEAD changed before its commit');
   const indexFile = path.join(tmpdir(), `${randomUUID()}.index`);
   const temp = { GIT_INDEX_FILE: indexFile };
   try {
     if (parent !== '') await run(['read-tree', parent], temp);
-    await stageNamed(repoPath, plan.add, plan.remove, { ...env, ...temp });
+    await stageNamed(repoPath, plan.add, plan.remove, { ...env, ...temp }, options);
     // A name that became a directory after its check is added whole; put whatever lies under it back.
     const named = new Set([...plan.add, ...plan.remove]);
     const listed = await run(['ls-files', '-z', '--', ...literal([...named])], temp);
@@ -360,7 +373,12 @@ export async function commitRecorded(
     // A removal recreated after its check would be committed as a deletion; keep HEAD's entry instead.
     const recreated: string[] = [];
     for (const rel of plan.remove) {
-      if ((await lstatNoFollow(repoPath, rel)) !== null) recreated.push(rel);
+      if (
+        (await lstatNoFollow(anchor, relUnder(anchor, path.join(repoPath, rel)), {
+          strict: options.filesystemAnchor !== undefined,
+        })) !== null
+      )
+        recreated.push(rel);
     }
     const strays = [...children, ...turned, ...recreated];
     if (strays.length > 0) {
@@ -371,7 +389,7 @@ export async function commitRecorded(
         temp,
       );
     }
-    const changed = await stagedChanges(repoPath, [...named], {
+    const changed = await stagedChanges(cwd, [...named], {
       ...env,
       ...temp,
     });

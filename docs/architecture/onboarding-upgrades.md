@@ -1019,15 +1019,27 @@ no-push outcome and warning behavior, and no-history repositories keep their ini
 undo journal, a dirty revision, a root claim, an open Git operation or an unanswered record question,
 and uses `commitHaiveProjections`' exact-name private-index commit. The merge resolver commits
 inside its fenced merge-dir section and pins that new tip for the network push. The PR path first
-puts back agent projection edits, then copies recognized root record units into the feature worktree
-and commits there, so the state reaches the PR. It does not move the root branch. The target's HEAD
-is the post-put-back baseline; each target file must still equal that blob or the desired source
-bytes (a retry). All files are preflighted before the first write and each replacement/removal is
-judged again on its parked bytes; creation is exclusive. Mutations and worktree Git-operation reads
-use the repository root as their no-follow anchor, preserving owner/mode, and the source's complete
-raw record is checked again before committing. The copy leaves the root writer's journal/base
-attached to the root, so a partial feature copy cannot acknowledge an unimported root record.
-Unknown names and unrelated staged blobs remain outside its commit.
+puts back agent projection edits, then carries pending root state into the feature worktree and
+commits there, so the state reaches the PR without moving the root branch. A cross-branch merge's
+landed base and a PR feature's HEAD can each hold portable changes the root does not: the push tail
+merges the root's current record and the target HEAD record through `mergeProjectState`, using
+`git merge-base` of the captured source/target tips as their common record. An absent base record
+is an empty common record, not first-import permission to replace a side. Target-only settings and
+claims survive; divergent scalar/claim units refuse before any copy with their conflict names.
+No target record is imported into the wrong-branch root. The existing caller reports the refusal
+and retains pending state for repair/retry; the push helper creates no question or local sync base.
+
+Each known target file must still equal its captured target HEAD blob or the merged desired bytes
+(a retry). All known names, including uncommitted additions, are preflighted before the first write.
+Each replacement/removal is judged again on its parked bytes and creation is exclusive. Every host
+read, stage probe and mutation keeps the repository root as its no-follow anchor, with the target
+as a relative path. The contained worktree directory is opened through that root and kept alive
+through the awaited commit; Git uses its held `/proc/<worker-pid>/fd/<fd>` cwd, so replacing the
+worktree's name cannot redirect a later subprocess. The Git-operation check is only an operation
+hold, not this containment proof. Source bytes and both captured tips are checked again; the
+private-index committer also refuses a changed expected parent before its CAS commit. The root
+writer's journal/base stays attached to the root, so a partial feature copy cannot acknowledge an
+unimported root record. Unknown names and unrelated staged blobs remain outside its commit.
 
 **KB and plan review progress travels independently.** `settings/review-watermarks.json` carries
 `kbSyncedCommit` and `planSyncedCommit`, using the existing nullable repository columns, codec,

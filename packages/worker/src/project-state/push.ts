@@ -9,6 +9,9 @@ import {
   PROJECT_STATE_LIMITS,
   readRenderContextColumn,
   sameValue,
+  emptyProjectState,
+  mergeProjectState,
+  renderProjectState,
 } from '@haive/shared/project-state';
 import {
   removeFileIfNoFollow,
@@ -16,6 +19,7 @@ import {
   writeFileNoFollow,
   relUnder,
   lstatNoFollow,
+  openDirNoFollow,
 } from '@haive/shared/fs-safe';
 import { lockPlanMirror } from '../plan/mirror.js';
 import { readStateTree } from '../plan/projection-merge.js';
@@ -23,6 +27,7 @@ import { gitOperationInProgress } from '../repo/git-operation.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { commitHaiveProjections, type HaiveProjectionCommit } from './commit.js';
 import { readStateFiles } from './sync.js';
+import { reviewWatermarkOrder } from './review-watermarks.js';
 import { lockProjectState, writeProjectStateColumn, refuseReleasedCheckout } from './write.js';
 
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
@@ -84,10 +89,14 @@ export async function projectionPushIdentity(
 
 /** Worktree Git state lives in the repository's .git/worktrees directory. Inspect it from
  * the repository anchor; an external/poisoned gitfile is refused by relUnder/no-follow. */
-async function targetOperationOpen(sourcePath: string, targetPath: string): Promise<boolean> {
+async function targetOperationOpen(
+  sourcePath: string,
+  targetPath: string,
+  gitCwd: string,
+): Promise<boolean> {
   if (sourcePath === targetPath) return gitOperationInProgress(sourcePath);
   for (const mark of GIT_OPERATION_STATE_ENTRIES) {
-    const located = await gitRun(targetPath, [
+    const located = await gitRun(gitCwd, [
       'rev-parse',
       '--path-format=absolute',
       '--git-path',
@@ -106,8 +115,9 @@ async function targetOperationOpen(sourcePath: string, targetPath: string): Prom
 /** Called inside the caller's checkout/merge section. Take the projection locks before reading
  * either tree, and hold them through the scoped commit. No pool queries occur in this section.
  * A feature worktree has already had agent projection edits put back to its fork point. Only a
- * target file still equal to that worktree's HEAD (or this attempt's desired bytes, for retries)
- * may be replaced. Unknown names and uncommitted feature edits are never copied over. */
+ * target file still equal to that worktree's HEAD (or the three-way merged desired bytes, for
+ * retries) may be replaced. Target-only state survives; divergent units refuse before copying.
+ * Unknown names and uncommitted feature edits are never copied over. */
 export async function commitProjectStatePush(
   tx: Tx,
   args: {
@@ -168,78 +178,147 @@ export async function commitProjectStatePush(
     if (questions.some((row) => !row.unit.startsWith('plan/')))
       throw new Error('project state push held by unanswered question');
   }
-  if (
-    (await gitOperationInProgress(sourcePath)) ||
-    (await targetOperationOpen(sourcePath, targetPath))
-  )
-    throw new Error('project state push held by open git operation');
-  const source = await readStateFiles(sourcePath, { boundedDirectoryReads: true });
-  if (!source?.size) return null; // Older/no-record repositories retain their existing push behavior.
-  const parsed = parseProjectState(source);
-  if (!parsed.ok) throw new Error('project state push refused an invalid record');
-  if (sourcePath !== targetPath) {
-    const previous = await readStateTree(targetPath, 'HEAD');
-    const target =
-      (await readStateFiles(targetPath, { boundedDirectoryReads: true })) ??
-      new Map<string, string>();
-    const old = previous.size ? parseProjectState(previous) : null;
-    if (old && !old.ok) throw new Error('feature project state record is refused');
-    const ignored = new Set(parsed.ignored);
-    const oldIgnored = new Set(old?.ok ? old.ignored : []);
-    const names = new Set([...source.keys()].filter((rel) => !ignored.has(rel)));
-    for (const rel of previous.keys()) if (!oldIgnored.has(rel)) names.add(rel);
-    // Preflight all known units before the first target mutation. Partial copies after a crash
-    // are retried at the desired bytes; the source journal/base remains attached to the root.
-    for (const rel of names) {
-      const actual = target.get(rel);
-      if (actual !== previous.get(rel) && actual !== source.get(rel))
-        throw new Error(`feature project state changed: ${rel}`);
-    }
-    for (const rel of names) {
-      const before = target.get(rel);
-      const desired = source.get(rel);
-      if (before === desired) continue;
-      const path = relUnder(sourcePath, `${targetPath}/${PROJECT_STATE_DIR}/${rel}`);
-      const cap = { maxBytes: PROJECT_STATE_LIMITS.maxFileBytes };
-      if (desired === undefined) {
-        if (
-          (await removeFileIfNoFollow(
+  // Open the worktree from the trusted root before any target Git/read operation. Git uses
+  // this held directory too, so replacing its name cannot redirect a later subprocess cwd.
+  const held =
+    sourcePath === targetPath
+      ? null
+      : await openDirNoFollow(sourcePath, relUnder(sourcePath, targetPath));
+  let expectedTargetHead: string | undefined;
+  const gitTarget = held ? `/proc/${process.pid}/fd/${held.fd}` : targetPath;
+  try {
+    if (
+      (await gitOperationInProgress(sourcePath)) ||
+      (await targetOperationOpen(sourcePath, targetPath, gitTarget))
+    )
+      throw new Error('project state push held by open git operation');
+    const source = await readStateFiles(sourcePath, { boundedDirectoryReads: true });
+    if (!source?.size) return null; // Older/no-record repositories retain their existing push behavior.
+    const parsed = parseProjectState(source);
+    if (!parsed.ok) throw new Error('project state push refused an invalid record');
+    if (sourcePath !== targetPath) {
+      const sourceTip = await sourceHead(sourcePath);
+      const targetTip = await sourceHead(gitTarget);
+      const previous = await readStateTree(gitTarget, targetTip);
+      const target =
+        (await readStateFiles(targetPath, {
+          boundedDirectoryReads: true,
+          filesystemAnchor: sourcePath,
+        })) ?? new Map<string, string>();
+      const actualRecord = target.size ? parseProjectState(target) : null;
+      if (actualRecord && !actualRecord.ok)
+        throw new Error('feature project state record is refused');
+      const old = previous.size ? parseProjectState(previous) : null;
+      if (old && !old.ok) throw new Error('feature project state record is refused');
+      // The root is the pending local side, not an unconditional replacement for another
+      // branch's landed record. Merge at the actual Git ancestor; an absent ancestor record
+      // is an empty common record, never first-import permission to overwrite either side.
+      const common = await gitRun(gitTarget, ['merge-base', targetTip, sourceTip]);
+      if (common.code !== 0 || !common.stdout.trim())
+        throw new Error(
+          'project state push cannot read a common history; repair the checkout before retrying',
+        );
+      const baseFiles = await readStateTree(gitTarget, common.stdout.trim());
+      const base = baseFiles.size ? parseProjectState(baseFiles) : null;
+      if (base && !base.ok) throw new Error('project state push base record is refused');
+      const incoming = old?.ok ? old.record : emptyProjectState();
+      const watermarkOrder = await reviewWatermarkOrder(
+        gitTarget,
+        parsed.record.settings['review-watermarks'],
+        incoming.settings['review-watermarks'],
+      );
+      const merged = mergeProjectState({
+        base: base?.ok ? base.record : emptyProjectState(),
+        local: parsed.record,
+        incoming,
+        watermarkOrder,
+      });
+      if (merged.conflicts.length)
+        throw new Error(
+          `project state push conflict; reconcile the branch record before retrying: ${merged.conflicts.map((c) => c.unit).join(', ')}`,
+        );
+      const desiredFiles = renderProjectState(merged.merged);
+      const oldIgnored = new Set(old?.ok ? old.ignored : []);
+      const names = new Set(desiredFiles.keys());
+      for (const rel of previous.keys()) if (!oldIgnored.has(rel)) names.add(rel);
+      const actualIgnored = new Set(actualRecord?.ok ? actualRecord.ignored : []);
+      for (const rel of target.keys()) if (!actualIgnored.has(rel)) names.add(rel);
+      if (
+        (await sourceHead(sourcePath)) !== sourceTip ||
+        (await sourceHead(gitTarget)) !== targetTip
+      )
+        throw new Error('project state push HEAD changed before its copy');
+      // Preflight all known units before the first target mutation. Partial copies after a crash
+      // are retried at the desired bytes; the source journal/base remains attached to the root.
+      for (const rel of names) {
+        const actual = target.get(rel);
+        if (actual !== previous.get(rel) && actual !== desiredFiles.get(rel))
+          throw new Error(`feature project state changed: ${rel}`);
+      }
+      for (const rel of names) {
+        const before = target.get(rel);
+        const desired = desiredFiles.get(rel);
+        if (before === desired) continue;
+        const path = relUnder(sourcePath, `${targetPath}/${PROJECT_STATE_DIR}/${rel}`);
+        const cap = { maxBytes: PROJECT_STATE_LIMITS.maxFileBytes };
+        if (desired === undefined) {
+          if (
+            (await removeFileIfNoFollow(
+              sourcePath,
+              path,
+              (bytes) => bytes.equals(Buffer.from(before!)),
+              cap,
+            )) !== 'removed'
+          )
+            throw new Error(`feature project state changed: ${rel}`);
+        } else if (before === undefined) {
+          await writeFileNoFollow(sourcePath, path, desired, {
+            mode: 'create-exclusive',
+            createParents: true,
+          });
+        } else if (
+          (await rewriteFileIfNoFollow(
             sourcePath,
             path,
-            (bytes) => bytes.equals(Buffer.from(before!)),
+            (bytes) => (bytes.equals(Buffer.from(before)) ? Buffer.from(desired) : null),
             cap,
-          )) !== 'removed'
-        )
+          )) !== 'rewritten'
+        ) {
           throw new Error(`feature project state changed: ${rel}`);
-      } else if (before === undefined) {
-        await writeFileNoFollow(sourcePath, path, desired, {
-          mode: 'create-exclusive',
-          createParents: true,
-        });
-      } else if (
-        (await rewriteFileIfNoFollow(
-          sourcePath,
-          path,
-          (bytes) => (bytes.equals(Buffer.from(before)) ? Buffer.from(desired) : null),
-          cap,
-        )) !== 'rewritten'
-      ) {
-        throw new Error(`feature project state changed: ${rel}`);
+        }
       }
-    }
-    if (
-      !sameValue(
-        [...source].sort(),
-        [...((await readStateFiles(sourcePath, { boundedDirectoryReads: true })) ?? [])].sort(),
+      if (
+        !sameValue(
+          [...source].sort(),
+          [...((await readStateFiles(sourcePath, { boundedDirectoryReads: true })) ?? [])].sort(),
+        )
       )
-    )
-      throw new Error('source project state changed before its push');
+        throw new Error('source project state changed before its push');
+      if (
+        (await sourceHead(sourcePath)) !== sourceTip ||
+        (await sourceHead(gitTarget)) !== targetTip
+      )
+        throw new Error('project state push HEAD changed before its commit');
+      expectedTargetHead = targetTip;
+    }
+    return await commitHaiveProjections({
+      repositoryId: repositoryId ?? '',
+      repoPath: targetPath,
+      filesystemAnchor: sourcePath,
+      gitCwd: gitTarget,
+      expectedHead: expectedTargetHead,
+      identity,
+      message: 'chore(haive): sync project state',
+      includePlan: false,
+    });
+  } finally {
+    await held?.close();
   }
-  return commitHaiveProjections({
-    repositoryId: repositoryId ?? '',
-    repoPath: targetPath,
-    identity,
-    message: 'chore(haive): sync project state',
-    includePlan: false,
-  });
+}
+
+async function sourceHead(sourcePath: string): Promise<string> {
+  const head = await gitRun(sourcePath, ['rev-parse', '--verify', 'HEAD^{commit}']);
+  if (head.code !== 0 || !head.stdout.trim())
+    throw new Error('source project state HEAD is unreadable');
+  return head.stdout.trim();
 }

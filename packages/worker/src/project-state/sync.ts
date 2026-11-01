@@ -14,7 +14,12 @@ import { isRootClaimLive, lockRepositoryTasksKey, schema, type Database } from '
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger } from '@haive/shared';
 import { convergeRtkQuestion } from '@haive/shared/rtk-enabled';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
-import { isPathContainmentError, readFileNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
+import {
+  isPathContainmentError,
+  readFileNoFollow,
+  readdirNoFollow,
+  relUnder,
+} from '@haive/shared/fs-safe';
 import {
   PORTABLE_SETTING_NAMES,
   PROJECT_STATE_DIR,
@@ -134,14 +139,16 @@ const gone = (rel: string): Refusal =>
  *  so the whole tree is read, and the caps stop the walk as it goes: a planted tree is not read on. */
 export async function readStateFiles(
   repoPath: string,
-  options: { boundedDirectoryReads?: boolean } = {},
+  options: { boundedDirectoryReads?: boolean; filesystemAnchor?: string } = {},
 ): Promise<Map<string, string> | null> {
+  const anchor = options.filesystemAnchor ?? repoPath;
+  const rooted = (rel: string) => relUnder(anchor, `${repoPath}/${stateRel(rel)}`);
   const files = new Map<string, string>();
   const pending = [''];
   let entries = 0;
   let bytes = 0;
   for (let dir = pending.pop(); dir !== undefined; dir = pending.pop()) {
-    const listing = await readdirNoFollow(repoPath, stateRel(dir), {
+    const listing = await readdirNoFollow(anchor, rooted(dir), {
       strict: true,
       ...(options.boundedDirectoryReads ? { maxEntries: MAX_ENTRIES - entries } : {}),
     });
@@ -163,7 +170,7 @@ export async function readStateFiles(
         const what = entry.isSymbolicLink() ? 'a link' : 'not a regular file or directory';
         throw new Refusal(`${stateRel(rel)} is ${what}`);
       }
-      const read = await readFileNoFollow(repoPath, stateRel(rel), {
+      const read = await readFileNoFollow(anchor, rooted(rel), {
         strict: true,
         maxBytes: MAX_FILE_BYTES,
       });
