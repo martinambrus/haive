@@ -601,20 +601,6 @@ Sites:
 5. `PUT /user-settings/password` checks the current password with no throttle and no failure row (user-settings.ts ~:108-109): the one password oracle outside the throttled `/auth/login`, open to any valid access cookie. PRE-EXISTING, moderate.
 6. A hand-made tooling PATCH that combines `ragEmbedAction` with a security field runs the RAG reset before the audited transaction, so a refused row leaves the reset done (tooling-upgrades.ts ~:946-958 vs ~:991); the page sends the action alone. PRE-EXISTING, minor.
 
-### T376 · FNF[audit-security-gaps-2] · CLI provider key/token changes, password change, registration, repo security settings, sign-ins write no audit row (+5)
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T14:13Z · last: 2026-11-01T09:59Z
-
-1. cli-providers.ts ~:856, :923, :998, :1019; cli-login-banner.ts ~:930.
-2. Password change (user-settings.ts ~:127-170) and registration (auth.ts ~:61-170).
-3. tooling-upgrades.ts ~:644, repos.ts ~:2488, repository-integrations.ts ~:45-96.
-4. DECIDED: audit successful and failed sign-ins; nothing for token refresh or logout.
-5. Throttled (429) attempts and the forced password change.
-   Fix: the #218 shape, with gated tests.
-6. From the T374 review (2026-10-24), PRE-EXISTING, minor: a house rule's approval also lapses with no audit row and no admin: a content PATCH clears `enforcedHash` (api global-kb.ts ~:1124-1127), the store trigger clears it when an active entry leaves `active` (shared global-kb/ensure-schema.ts ~:168-186), and DELETE /entries/:id removes an enforced entry (~:1243-1270); PATCH and DELETE are requireAuth only. global-kb.md:79-85 calls the lapse deliberate, so the open question is only the trail: a `global_kb.house_rule.lapse` row in the same transaction.
-
-Continuation 2026-11-01: Merged PR #978 asd3b7b9b3 after clean review/allCI; mainCI containing merge pending. Item6 remains split out as T492 design; keep/376-item6-store-audit preserved.
-
 ### T379 · FNF[git-tree-readers] · gitlink readers and literal-pathspec helpers duplicated with different failure contracts (+4)
 
 status: parked · was modular #257 · reason: diminishing returns (2026-11-01 scan): Reader duplication and contract cleanup have no concrete consequence established in this entry; resume when resume when a reader failure demonstrates lost or incorrect state
@@ -664,28 +650,6 @@ Decide: Stop enqueues a settle, or the backstop sweep settles promptly.
 
 status: parked · kind: design · was modular #276 · reason: diminishing returns (2026-11-01 scan): Stop behavior concerns exceptional missing, finished, or already-answered current rows; resume when resume when these shapes obstruct a real Stop request
 See worker task-queue.ts ~:1806-1813, ~:356. Decide per shape: fail the task, or answer a named 409.
-
-### T397 · FNF[failed-read-answers] · branch, count, refresh and merge-completion reads still turn a failed git into an answer (+16)
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-31T13:48Z · last: 2026-11-01T09:59Z
-FIRST re-check each item on main: the #322 and #325 series fixed some of them.
-
-1. `rev-parse --abbrev-ref HEAD` sites: 00a ~:164, 11a ~:106, 12-worktree-cleanup ~:248, 12-post-onboarding ~:464, 13-onboarding-push ~:147, 99-run-app-ready ~:173, 01-plan-merge ~:727, :741.
-2. Count reads return 0 on failure: 13-onboarding-push ~:96-101, ~:161-162; merge-resolver countAhead ~:686-691.
-3. refresh.ts usableCheckout ~:55-59 and related reads.
-4. Copy and UX nits.
-5. CONSEQUENTIAL: refresh.ts ~:215 and 00a ~:572-578 read a non-zero `merge --ff-only` as "not moved". Apply the HEAD==before check.
-6. completeMergeHostSide (git-merge.ts ~:1287) returns false on failure.
-7. `unmergedPaths(...) ?? []` in projection-merge.ts ~:249, :321 and merge-resolver ~:824.
-8. differingFrom returns [] on failure.
-9. commitMerge returns null if the post-commit HEAD read fails.
-10. git-operation.ts ~:31: a git dir outside the checkout.
-11. PRE-EXISTING, minor (found by the T388 driver, 2026-10-24): repo/refresh.ts ~:149-158 reads any non-zero `merge-base HEAD <target>` as "no history in common" (exit 1 is the only "none"; 128 is no answer), and ~:151 reads a failed `--is-shallow-repository` as not shallow. Fix: exit-1-only, else "could not be compared".
-12. PRE-EXISTING classification, minor (T370 review, 2026-10-24): set-aside `openOperationRefusal` (project-state/set-aside.ts ~:104-120, used by restoreJudged, setAsideOnce, restoreProjectionsInTx) turns a GitOperationUnreadableError into `refused` ("could not be checked for an open merge or rebase"), so callers read a git that gave no answer as a refusal; since T370 (PlanMirrorRefusal) the early Pull set-aside no longer records it in last_error. Fix: a separate unreadable outcome the callers treat as a failure.
-13. (T418 review) PRE-EXISTING, minor: worker repo/clone.ts ~:773-774 blank-repository init ignores the `git add` and `git commit` exit statuses and logs "Blank repo init complete".
-14. (T418 review) PRE-EXISTING, minor: step-engine/dag-executor.ts ~:477-490 `commitIssueWork` ignores the `add -A` status and only warns when the issue commit fails; the level then fails as "produced no branch changes" without the git error.
-
-Continuation 2026-11-01: Merged PR #980 as6e63562d5 after clean review/allCI; local fullsuites and214-checkrefresh/realRedis smoke pass; mainCI pending.
 
 ### T399 · FNF[probe-stored-targets] · stored-target probes still reach any address for non-admins (+1)
 
@@ -1283,6 +1247,10 @@ status: open · kind: design
 Queued design split from T521 item4; no additional implementation authorized. PRE-EXISTING, narrow compatibility issue. HOME handling was aligned in T120 PR1b, but XDG_CONFIG_HOME and GIT_CONFIG_* can still make API status readers and worker writers resolve different configuration. Decide whether the supported contract preserves selected ambient configuration for both or supplies an isolated explicit configuration. Establish a current caller/reproduction before changing global Git policy. Executable repository filters remain T387, not a member of this decision.
 
 ## Done
+
+- T376 — audit credential/security changes and successful/failed sign-ins with transactional controls — PR #978 (d3b7b9b33), 2026-11-01; exact-HEAD review and PR/main CI green; item6 remains deferred as T492, prototype branch preserved; follow-ups T508/T516/T522
+
+- T397 — preserve failed Git reads as unknown/errors across refresh, merge completion and workflow steps — PR #980 (6e63562d5), 2026-11-01; exact-HEAD review and PR/main CI green; full suites and isolated 214-check refresh/Redis smoke pass; follow-ups T486/T495
 
 - T498 — recover lost waiting_cli continuations without reboot; preserve epoch/hold/live-run fences, re-read a DAG level with no coder dispatched, retry continuation/poller enqueues — PR #977 (0e0077525), 2026-11-01; exact-HEAD automated Codex review clean; all PR checks and main CI green; follow-up T519 and existing T499/T500/T515
 
