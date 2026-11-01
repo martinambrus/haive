@@ -701,30 +701,6 @@ Needs a marker that tells an older updater's run apart from a new run that died 
 
 User decision 2026-11-01: Keep maintenance/hold on unknown prior state; report uncertainty instead of silently restoring normal
 
-### T387 · FNF[shipped-git-config] · an uploaded repo keeps its own .git/config, so host git still runs filter/merge drivers, the vcs trick and lazy fetch (+1)
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T14:22Z · last: 2026-11-01T14:57Z · priority: P0
-PRE-EXISTING, consequential. An upload keeps its whole .git (worker repo/clone.ts ~:547-683). `filter.<d>.*`, `merge.<d>.driver`, `remote.<n>.vcs` and lazy fetch all lack a `-c` lever. Measured: gitRun `add -A` runs the shipped filter.
-Decide: sanitise .git/config at import (allow-list keys), or refuse archives that carry .git.
-
-1. Env-only levers (GIT_ALLOW_PROTOCOL, GIT_NO_LAZY_FETCH) reach only gitRun and gitExec.
-
-Cross-reference (T429, 2026-10-30): the default `protocol.file.allow=never` on every hardened argv now refuses a promisor remote's lazy fetch from a local path or `file://` URL (row `file-transport-promisor-lazy-fetch`); an http or ssh promisor, the shipped filter/merge/vcs keys and the env-only levers stay open here, and an env `GIT_ALLOW_PROTOCOL` overrides the flag.
-
-User decision 2026-11-01: Preserve repository history; sanitize Git config to an explicit safe allowlist and refuse unsupported unsafe cases.
-
-Execution 2026-11-01: next authorized task while T402 has finished its driver build and is in read-only review. One driver at a time; local heavy checks serialized by queue-exec test-slot.py. Preserve uploaded history with safe configuration allowlisting/refusal, no ambient-policy redesign or unrelated host-Git audit.
-
-Stopped at explicit owner request: Driver interrupted; uncommitted implementation and controls preserved in cx-387; no delivery or live change. Evidence: .claude/tmp/codex-run/queue-exec-20261101/T387/. Resume only when requested.
-
-Resumed at owner request 2026-11-01T14:22Z: preserve existing implementation and evidence; finish T402 delivery first, then continue the agreed queue.
-
-Progress 2026-11-01T14:34Z: Driver committed00f1c56e5: focused85passed/1existing skip,32filesystem/process ratchets passed, supportedworker typecheckgreen. Fresh independent xhigh security review running; fullcandidate/PR/delivery remain. Evidence queue-exec-20261101/T387/.
-
-Progress 2026-11-01T14:49Z: Root-worker acceptance caught a supported-import refusal before delivery: Git auxiliary validators canonicalized its held Git directory through the private0700stage. Narrow invocation-only correction passed39root-worker controls, preserving non-bare history/mode/owner and missing-object refusal/rollback. Host checks/typecheck/fixcommit then freshreview/fullcandidate remain; no permission or globalconfig change.
-
-Progress 2026-11-01T14:57Z: Correction81656199e fresh xhigh review clean. Exact-HEAD root-worker39tests passed again; corrected fullworker/scripts candidate running. Verification skips optional acceleration-cache validators but retains actual object/ref/reflog/index connectivity; no private-stage permission relaxation.
-
 ### T389 · FNF[repo-loose-objects] · Haive's git no longer triggers auto-maintenance (#256), so busy repos accumulate loose objects
 
 status: parked · kind: design · was modular #270 · reason: diminishing returns (2026-11-01 scan): Loose-object growth is unmeasured; no current operational impact established; resume when resume when measured repository growth warrants safe maintenance · priority: P4
@@ -1442,6 +1418,8 @@ Queued design split from T521 item4; no additional implementation authorized. PR
 
 User decision 2026-11-01: Use one explicit isolated Haive Git configuration for API readers and worker writers, allowing only deliberately supported settings.
 
+T387 closure scope 2026-11-01: new archive imports now sanitize config/refuse partial or unsafe layouts. Its original env-only-lever observation (GIT_ALLOW_PROTOCOL/GIT_NO_LAZY_FETCH propagation) is not claimed fixed for other host Git callers; preserve it as context for this explicit configuration-policy decision. Existing current-caller/reproduction gate remains, with no new broad audit or retroactive repository sweep implied.
+
 ### T525 · FNF[recovery-polish] · optional recovery coverage, display and diagnostic leftovers
 
 status: parked · reason: diminishing returns · user confirmed 2026-11-01 · priority: P4
@@ -1496,6 +1474,7 @@ Split from T364 items1/13/14, 2026-11-01. This is three candidate ways validatio
 
 ## Done
 
+- T387 — sanitize new uploaded Git config before publication; preserve history and refuse unsupported metadata — PR #983 (0cdffe9d2),2026-11-01; fresh source/correction reviews, root39/worker14981/scripts1073 and PR/mainCI green; ambient-only lever coverage remains T523. Evidence .claude/tmp/codex-run/queue-exec-20261101/T387/.
 - T402 — repair historical context badges with reversible bounded operator;528 rows repaired,37 immutable before-images,0 further repairable rows; transcript/prompt retention0 forever — PR #982 (940878aa2),2026-11-01; exact-HEAD reviews, PRCI and mainCI41319760904 green; undo/digests verified; missing/ambiguous data preserved. Evidence .claude/tmp/codex-run/queue-exec-20261101/T402/.
 - T524 — reconcile backlog decisions, mixed bundles and priorities;42 owner questions answered, corrected T487 policy retained, T402 expiry verified — board-only commits b1305a4f2/965b87a7e/c6ccc177e and closure,2026-11-01; no product implementation or live validation run started; TASKS-only changes need no PR/CI
 
