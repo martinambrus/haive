@@ -932,23 +932,6 @@ T449 and T454 made the sign-in form and /repos/new keep pre-hydration input (unc
 
 Decide whether the class is worth a general mechanism (copy DOM values into state on hydration, a shared hook) or is left as is.
 
-### T467 · FNF[form-body-buffering] · both form readers buffer the whole multipart body before their size checks
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T16:07Z · last: 2026-11-01T18:01Z · priority: P1
-From the T463 review (2026-10-31). PRE-EXISTING, minor to moderate. `POST /repos/upload` (api routes/repos.ts ~:575, size check ~:592, default cap 2 GiB) and the notification sound upload (routes/user-settings.ts ~:386, check ~:390, cap 2 MiB) call `c.req.formData()`, which reads the whole body into memory before the route's own size check runs, and neither route sets a `bodyLimit`. `/repos/upload` is a documented route (docs/architecture/repository-refresh.md ~:34) with no web caller: decide whether to cap it with a streaming limit or retire it; the sound upload needs a `bodyLimit` at its own cap.
-
-User decision 2026-11-01: Retire the unused documented repository-upload route; keep notification-sound uploads with a bounded body.
-
-Scope: retire the legacy repository-upload endpoint and update its public-route/docs/tests references; preserve the supported upload flows. The sound endpoint remains supported with its own bounded body. This supersedes the recommended keep-route option.
-
-Execution 2026-11-01T16:07Z: paired with T338 as approved API route retirement work; distinct commits/criteria, one complete API candidate and fresh review. Preserve supported step-level CLI switching, chunked repository uploads and bounded sound upload. T300 corrected-attempt decision pending; no additional validation run authorized yet.
-
-Progress 2026-11-01T17:38Z: PR985 retires single-shot repo upload; supported chunked completion/Retry passes realPG17 checks. Sound raw body bound retains exact2MiB file allowance. CI correction changes only one test budget30seconds; focused12 and fresh review clean. Full corrected API candidate then fresh Codex/CI. T529 cosmetic startup explanation remains parked.
-
-Progress 2026-11-01T17:49Z: Corrected final API candidate99efcf0b passes7048 tests; 17 realPG chunked Retry-source controls and raw bounded-body negatives retained. Fresh native correction review and new-HEAD hosted Codex clean. PR985 awaits CI; no further cosmetic/test expansion.
-
-Progress 2026-11-01T18:01Z: PR985 merged d86a7f014ddc44898f2127329fbc8a7eb9448c34 after final7048APIpass, fresh native and hosted reviews,all13CIgreen. MainCI then scoped live negative acceptance/source loading and cleanup remain; retained chunked Retry-source path is unchanged.
-
 ### T468 · FNF[ledger-imported-since-path] [design] · a retired git-data import marker still blocks an upgrade's rollback
 
 status: parked · reason: diminishing returns (2026-11-01 scan): Minor conservative rollback refusal depends on retired legacy import markers; resume when resume when a retired marker blocks a needed rollback · priority: P4
@@ -1481,6 +1464,8 @@ status: parked · reason: diminishing returns; comment only, no runtime conseque
 Source: route-retirement follow-up review 2026-11-01, packages/worker/src/step-engine/steps/index.ts:119. The unchanged startup-assertion JSDoc describes task-row invalidation through providerSensitive metadata, while the task-level switch route is being retired by T338. The assertion itself still correctly checks metadata/list equality. Preserve as low documentation debt; update only on the next related documentation/source touch. No extra implementation/review round or runtime audit is authorized by this note. Evidence .claude/tmp/codex-run/queue-exec-20261101/route-retirement/review-comments.md.
 
 ## Done
+
+- T467 — retire buffered repository uploads and bound raw sound uploads, preserving supported chunked Retry sources — PR #985 (d86a7f014d), 2026-11-01; exact-HEAD reviews/full candidate/PR CI/main CI41334261157 green; scoped live acceptance passed. Evidence .claude/tmp/codex-run/queue-exec-20261101/route-retirement/.
 
 - T338 — remove the unused task-level CLI switch while preserving step switching — PR #985 (d86a7f014d), 2026-11-01; exact-HEAD reviews/full candidate/PR CI/main CI41334261157 green; scoped live acceptance passed. Evidence .claude/tmp/codex-run/queue-exec-20261101/route-retirement/.
 
