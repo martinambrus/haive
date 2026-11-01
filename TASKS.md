@@ -74,7 +74,7 @@ board. At session start, load the board's tasks you own or will work on into the
 
 ## Questions waiting on the user
 
-- T402 — context backfill: a numbered migration or a deploy script; stream_log expires ~2026-11-30.
+- T402 — delivery decision RESOLVED: operator script with dry run,before-image andundo; compute exact candidate expiry instead of relying on the historical approximate deadline.
 - T338 — the uncalled task-level cli-provider route: delete it (recommended) or fence it.
 - T346 — should the custom-tool start hint block the start or only warn.
 - T347 — forge egress: are private self-hosted forges on internal addresses allowed.
@@ -101,11 +101,13 @@ Evidence and decision inventory: .claude/tmp/codex-run/backlog-decisions-2026110
 
 ### T323 · FNF[uploads-3] · finished upload rows are never deleted; the reaper's removal is not identity-checked (+1)
 
-status: parked · reason: user's retention rule for item 4 · last: 2026-10-24T19:31Z · items 1-3 shipped in PR #892 (42ee32d7c)
+status: open · kind: fix · user decision: resolved 2026-11-01
 All PRE-EXISTING.
 
 4. PARKED (user): `complete` rows in repo_uploads/custom_bundle_uploads and `consumed` db_uploads rows are never deleted — needs a retention rule.
 5. Latent, minor: the reaper removes a path without checking it is still the file it lstat'ed (upload-reaper.ts removeFile); fs-safe's lstatNoFollow returns numeric Stats, so dev/ino cannot be compared losslessly. Cannot bite today (upload names are fresh UUIDs). Fix: a bigint lstat identity export in fs-safe, compared before the unlink.
+
+User decision 2026-11-01: Retain complete/consumed upload metadata90days; protect active or retry-needed rows. Item5 identity-hardening remains parked until reachable impact.
 
 ### T121 · B5.2 · project state rides Haive's pushes
 
@@ -146,6 +148,8 @@ All PRE-EXISTING.
 status: parked · reason: needs a fresh onboarding run (see T300)
 08-knowledge-acquisition.ts:2058 and its writes pass no owner, so a fresh KB may be root-owned and uid 1000 gets EACCES; 09_3's apply never checks the disk. Dev data disagrees in part. Verify on a fresh onboarding first; then pass the owner in 08, and make 09_3 diff the KB against the agent's claim.
 
+Validation scheduling decision 2026-11-01: attach to the dedicated capped T300 run before feature work; actual evidence/data prerequisites remain, and no successful live result is inferred.
+
 ### T308 · FNF[worktree-aliases] · hard links planted into .haive/worktrees before #800 survive
 
 status: open
@@ -153,7 +157,7 @@ A file under `.haive/worktrees` sharing an inode with a name in the writable che
 
 ### T309 · FNF[cancel-cap-2] · a capped cancel with no claim row never finishes (+8)
 
-status: parked · reason: diminishing returns (2026-11-01 scan): Entire bundle describes low-severity cancellation cleanup, reporting, and coverage leftovers; resume when resume when cancellation leftovers cause an observed operational problem
+status: open · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01
 All PRE-EXISTING, low.
 
 1. abandonCancelledTeardowns selects only tasks with merge_dir_claims rows; a DAG-mode capped cancel never gets cancel_finished, and worktreeSharer keeps counting it. Select also recorded mid-merge / DAG activeConflict within the re-drive window.
@@ -165,6 +169,8 @@ All PRE-EXISTING, low.
 7. merge-resolver `halt` keys "own merge" on ref/sha, so a cancelled task's same-ref open merge reads as this step's (area: modular-haive-plan).
 8. (T458 review, 2026-10-31) PRE-EXISTING, minor: `runTaskJob`'s catch (worker task-queue.ts ~:4164) fails the open task of any job that throws, a CANCEL included, so a transient error in `markTaskCancelled` fails the task it was cancelling instead of leaving it for the cancel re-drive.
 9. (T458 fix round, 2026-10-31) PRE-EXISTING, minor: the Cancel action, the step abort and `DELETE /plan/merge` clear the pause after the cancel commits and before they queue the CANCEL job (api routes/tasks/index.ts ~:1297, steps.ts, plan.ts), so a database error in `clearTaskPause` answers 500 with the task cancelled, no job queued and, for the abort, no `step.abort` event; the stalled sweep queues the lost teardown five minutes later.
+
+Executable verification scope: Cancellation completion/capacity and starvation: prioritize1/4/8/9; cosmetic, isolated coverage and cleanup members remain deferred. No automatic full-bundle repair: prove a supported current consequence, then scope the fix; park the remainder.
 
 ### T312 · FNF[rag-own-paths][verify-first] · customCodePaths can name missing directories
 
@@ -206,7 +212,7 @@ A 0-row project store still holds a 275 MB HNSW index (_rag-connection.ts:69); n
 
 ### T275 · full-repo review pass after Track B
 
-status: blocked · blocked-by: T117-T122
+status: blocked · blocked-by: T121,T122
 A full-repository review in the style of the Codex PR reviews once Track B is merged; file findings by bundle.
 
 ### T300 · live re-checks owed at the next real onboarding + workflow run
@@ -214,55 +220,75 @@ A full-repository review in the style of the Codex PR reviews once Track B is me
 status: parked · reason: needs a real onboarding + workflow run (LLM tokens; check running tasks first)
 Items 1-20 (each with its memory file): skills per CLI after 09_5; frontmatter YAML; agent_rules stamp; declared verify commands; invariants-doc lever; prompt guard/fence (07_7); onboarding artifacts; plan breadth refusals; agent isolation 1/2/4; fs-safe live verification; #169 DDEV runner boot-subpath; #241 Terminal cwd; AGENTS.md split citations; parked experiments (Astra vs Sol, container-cleanup race, global KB purge, haive_rag_ddevtest drop); T293; #287 EROFS on state; #800 mounts; #751 set-aside on a real merge; #806 put-back; #815 reindex spot-check; T375 gate 3 on a worktree holding an untracked nested repo, with and without a commit (#909); T395 Stop offered for a running task whose current row is pending, and the "Nothing was running to stop." notice (no such task on the dev install; pressing Stop changes a real task) (#908); T363 New Task with one failed upload, the plan starter and the task page Start, each with confirm yes and no (#913). Full list: task #300 text in the fnf-run ledger / memory. Also owed (T427): replay the raw attach bytes of one real `claude setup-token` run through the OAuth capture and pin its wrap, newline and escape shapes in a fixture.
 
+User decision 2026-11-01: schedule one dedicated capped validation run BEFORE feature work. Precise cap is being selected; one owned fixture/attempt, no automatic retry loops. A run does not by itself prove enough graded data for T298; report unverified members at the cap.
+
 ### T298 · house rules PR8 · switch similarity on with per-rule floors
 
 status: parked · reason: needs graded data (an ENFORCED `files` rule + workflow tasks reaching 07)
+
+Validation scheduling decision 2026-11-01: attach to the dedicated capped T300 run before feature work; actual evidence/data prerequisites remain, and no successful live result is inferred.
 
 ### T299 · verify-first · house rules PR7a zero-token live check
 
 status: parked · reason: diminishing returns (2026-11-01 scan): Verification-only check; no established current failure; resume when resume during the next relevant house-rules validation
 Read .claude/tmp/house-rules/ledger for a PR7a live-check entry; if absent, run it per the house_rules_series memory against repo hr6-live-d7 (3e2c0533), then decide whether hr6-live-d7 is still needed.
 
+Validation scheduling decision 2026-11-01: attach to the dedicated capped T300 run before feature work; actual evidence/data prerequisites remain, and no successful live result is inferred.
+
 ### T199 · /favicon.ico answers 404 on every page
 
-status: parked · reason: user's choice of icon
+status: open · kind: feature · user decision: resolved 2026-11-01
 Add an icon via the Next app-router convention (src/app/icon.svg or favicon.ico).
+
+User decision 2026-11-01: Use a simple Haive H favicon.
 
 ### T270 · FNF[plan] · a child insert can take a parent's path from before a concurrent move
 
-status: parked · kind: design · reason: user decision
+status: open · kind: fix · user decision: resolved 2026-11-01
 applyPlanPatch's loadNode reads the parent path unlocked (shared/src/plan/apply-patch.ts:415). FOR SHARE on the parent is not enough (a move rewrites descendants in one UPDATE). Direction: a per-repository plan-patch advisory lock first in applyOps; lock-order analysis owed.
+
+User decision 2026-11-01: Serialize conflicting edits; bound waits and return explicit retryable busy responses. Lock-order analysis remains required.
 
 ### T310 · FNF[kept-metadata-moves] · captured owner/mode lost when a re-sync does not finish
 
-status: parked · kind: design · reason: user decision
+status: open · kind: fix · user decision: resolved 2026-11-01
 A: six non-merge move paths drop the kept map after a re-sync that may have returned false. B: projection writers create files as root (verify on dev). C: persisted keptMetadata never settled again. D: reachDone / settleGoneMerge after a failed re-sync. Options: inherit owner from parent dir; persist the kept map per repo; retry the re-sync before restoring.
+
+User decision 2026-11-01: Preserve captured owner/mode until recovery completes; never silently discard metadata.
 
 ### T317 · FNF[rtk-first-import] · a stamped RTK choice loses to the first record import
 
-status: parked · kind: design · reason: user decision (recommended: yes, stamped wins)
+status: open · kind: fix · user decision: resolved 2026-11-01
 sync.ts:514 (`row !== null`) and :528; pinned by project-state-sync.test.ts:1850 and onboarding-upgrades.md. Fix if approved: drop `row !== null`, flip the test.
+
+User decision 2026-11-01: A stamped local RTK choice wins against first imported record.
 
 ### T318 · FNF[task-lock-wait-2] · remaining unbounded waits on start paths (+5)
 
-status: parked · kind: design · reason: user decision
+status: open · kind: fix · user decision: resolved 2026-11-01
 
 1. /clarify takes the creation lock for a live task (api tasks/steps.ts:821). 2. Worker revival wait unbounded (_revive-check.ts:86); needs a soft-fail path first. 3. reviveDeadTask takes no creation lock. 4. mergeInScratch uses the pool inside the plan-merge transaction. 5. New-work fence and the advisory start's plan_nodes lock wait unbounded. 6. Ten waiting starts can starve the api pool for 30 s.
 
+User decision 2026-11-01: Bound conflicting task-start waits and report a clear retryable busy response; do not proceed from stale state.
+
 ### T319 · FNF[set-aside-batch] · set-aside spends 20-24 git spawns per dirty path (+1)
 
-status: parked · reason: user go-ahead on scope
+status: open · kind: performance · user decision: resolved 2026-11-01
 
 1. set-aside.ts:264/:281/:474/:574 per-path git reads (prototype: 6,620 spawns → 20). 2. readStateTree one cat-file per file (projection-merge.ts:157); batch with `cat-file --batch`.
 
+User decision 2026-11-01: Re-measure current batching gain and keep scope bounded; behind functionality unless current delay is material.
+
 ### T326 · FNF[house-rules-unread] · a failed fingerprint read skips modifiedAfterCheck
 
-status: parked · kind: design · reason: user decision on the gate wording
+status: open · kind: fix · user decision: resolved 2026-11-01
 house-rules-dispatch.ts:45 → _gate-house-rules.ts:283: a null fingerprint means the gate cannot tell files changed after the check; add an explicit "unread" marker.
+
+User decision 2026-11-01: Show could-not-verify explicitly and require acknowledgement when a fingerprint cannot be read.
 
 ### T329 · FNF[cancel-merge-commit] · cancel reports a merge left COMMITTED on local base + one-click undo (+2)
 
-status: open · blocked-by: peer B3.1c (merge-resolver hunks) · was modular #3
+status: open · was modular #3
 DECIDED by the user 2026-10-12: cancel reports a merge left COMMITTED on the local base, plus a one-click Undo. The Undo resets only if the base is still at that merge commit and no claim is live. Never auto-undo.
 Two PRs:
 
@@ -272,6 +298,8 @@ Two PRs:
 
 1. (PRE-EXISTING) A cancel between the merge commit and reachDone leaves merged:false, so onboarding-reset provenance (api repos.ts ~:1103-1150) misses a merge that is on the base. A's baseShaAfter makes this cheap to fix.
 2. (PRE-EXISTING) A cancelled task's failed step 12 still says "retry the push", although a cancelled task cannot be retried. The comment at api routes/tasks/index.ts ~:1201-1203 wrongly says step retry has no status guard (steps.ts guards it).
+
+Dependency reconciliation 2026-11-01: B3.1c landed and modular-haive-plan is paused with no files held; old peer-ownership notes are not a current blocker. Existing user-decided report/explicitUndo semantics remain.
 
 ### T330 · M12 · module lifecycle L3: dependents preflight urgent/graceful (+J9)
 
@@ -286,9 +314,11 @@ From the modularity plan, docs/plans/twinkling-frolicking-toast.md (M12, J9).
 status: parked: needs a real GCP OAuth client from the user · was modular #42
 Plan I7: REST by default, remote MCP opt-in. Blocked until the user provides an OAuth client.
 
+User decision 2026-11-01: keep live Google connection parked; prepare setup instructions when its turn comes. A live OAuth client is still an external prerequisite; never request a secret in chat.
+
 ### T332 · J7 · reconnect park (deactivated provider) / dead (uninstalled)
 
-status: open · blocked-by: T359 (I6c reasons) · was modular #47
+status: blocked · blocked-by: T359 · was modular #47
 Plan J7: a single owner keyed on the connection's `status`. A step that needs a deactivated provider PARKS with a reconnect banner; an uninstalled provider makes the task DEAD.
 
 ### T333 · J8 · composer shows integration requirements + provider install state
@@ -312,7 +342,7 @@ All PRE-EXISTING.
 
 ### T335 · D2b · channel install/upgrade (+3)
 
-status: open · was modular #104
+status: blocked · blocked-by: T351,T352,T353 · was modular #104
 Plan D2: installer flags, an install-local docker config for private pulls, and a host upgrade that reads the channel. Depends on T351-T353.
 
 ### T336 · D3 · haive-builder image + run-overlay image vars + pre-flight rebuild + per-customer builder (+1)
@@ -327,9 +357,11 @@ Plan D4: git and registry install sources drive D1 and D3; the token is stored e
 
 ### T338 · FNF[task-cli-provider-route] · uncalled task-level PATCH /tasks/:id/cli-provider resets running rows without epoch or kill
 
-status: parked: user decision (delete the route vs make it safe) · was modular #123
+status: open · kind: fix · user decision: resolved 2026-11-01
 PRE-EXISTING. The route at api routes/tasks/index.ts ~:1599-1714 resets running and waiting_cli provider-sensitive rows to pending. It does not bump the orchestration epoch, kill the sandbox or supersede the run; the step-level route in steps.ts does all three. No web, e2e, script or test calls it.
 Recommendation: delete the route.
+
+User decision 2026-11-01: Delete the unused task-level switch route; preserve supported step-level switching.
 
 ### T339 · I4d · task page Integrations tab (override, "Also for my later tasks", reset) (+2)
 
@@ -489,41 +521,43 @@ status: open · kind: design · was modular #203
 
 2. QUEUED broader finding, PRE-EXISTING; not authorized for T118 or the design fix above: at 375px on an onboarded repository, the New Task header with Re-run onboarding + Cancel overflows horizontally and squeezes the description into a narrow column. `packages/web/src/app/(app)/tasks/new/page.tsx:817` uses a non-wrapping header/action row. Fix direction: responsive stacking/wrapping with a viewport control for both actions. Source is byte-identical to main; evidence `.claude/tmp/board-run/T118/browser-reset-cli/before-reset-375.png` and `T118/fnf-mobile-header.json`. Leave queued when T118 pauses.
 
-### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+30)
+### T364 · FNF[test-coverage-gaps] · optional coverage controls after correctness and test-hygiene splits
 
-status: open · was modular #211
+status: parked · reason: diminishing returns · user confirmed routine coverage stays parked, 2026-11-01
 
-1. recordAuditEvent catches a failed insert, so route tests over a fake DB pass with the audit lost. Fix: a shared helper that fails a test on a logged audit failure.
+1. MOVED to T528 for bounded verification of a concrete false-green case; not generic coverage work.
 2. task-create-path.test.ts has no case where the type is refused inside the create transaction.
 3. No real-store test covers withVectorWidthLock (api global-kb.ts ~:298).
 4. No gated audit test asserts the pino audit line is absent on a refusal and present once on success. The device-poll and /github-oauth/poll routes lack refused-audit tests.
 5. The "Stop lands inside an ADVANCE or START pass" windows are covered only by an uncommitted script. Promote it to a gated smoke.
 6. GET /usage-window has no route test, and the fake DB has no innerJoin.
 7. Two flush and sweep test files use fake-DB Proxy workarounds, and K5/M11c count git reads. Replace both with behaviour assertions.
-8. worker repo/worktree-changes.test.ts:191 failed once in a full run under load (expected 1, got 0); 65 replays could not reproduce. Flake, cause unknown.
+8. MOVED to parked T513 (test environment/hygiene); re-open only when blocking dependable validation.
 9. PRE-EXISTING: a gate row healed by 0210 with no saved schema (the old per-step switch nulls formSchema, steps.ts:1855) has no real-worker check, only the SQL test. Also 0210.sql:14 sets pause_form_on_retry on no-schema rows too, which costs one extra stop at that step's form; narrow it to `pause_form_on_retry OR form_schema IS NOT NULL` if wanted. From #263 (PR #887).
 10. From the T407 review (2026-10-24), PRE-EXISTING, minor: no runner-level test pins that `applyArgs.llmInvocationId` is the run that produced `llmOutput` for a post-form LLM step (worker step-runner.ts ~:3148, ~:3231; only the preForm path is pinned, step-runner-auto-continue.test.ts ~:296-339). Plan chat attribution, 07b, 08c2, 07_7 and prompt steps rest on it.
 11. Same source, minor: the "no agents directory" branch (provider amp) has no test: the `_active-agents-target.ts` null return, 07_5-verify-files.ts ~:57-64, 11-final-review.ts ~:86-93, `collectReviewFindings(repo, null)`.
 12. (T378 review) PRE-EXISTING, minor: `useDeviceSignIn` has no test of its own; the attempt counter, the unmount bump (web lib/use-device-sign-in.ts ~:25-30) and its `live()` guards are exercised only through `runDeviceSignIn` with an injected `live`.
-13. (T306 review) PRE-EXISTING, minor to moderate (class hazard): database testing/fake-db.ts ~:169 throws a plain Error for a table the fake was not given, which a route turns into a 500 or a caught failure, so a test that expects a throw or a 500 can pass on the miss (proven for revive-beside-live, fixed in T306; not scanned for others). Fix: a sentinel error class and an afterEach check of misses.
-14. (T363 review) PRE-EXISTING, consequential: scripts/test/ci-gated-list.test.mjs ~:12 recognises a Postgres-gated test only by `pathname.startsWith(` or `CREATE|DROP DATABASE`, so a gated file with another guard idiom is invisible to the "every gated file has a GATED row" check and skips green in CI for ever (T363's DB file was the live case, fixed there). Fix: detect by `skipIf` plus a `*_URL` env var.
+13. MOVED to T528 for bounded verification of a concrete false-green case; not generic coverage work.
+14. MOVED to T528 for bounded verification of a concrete false-green case; not generic coverage work.
 15. (T363 review) PRE-EXISTING, minor: no e2e spec creates a task with attachments or presses Start on a created task (the only Start click is Run app, tests/e2e/tasks/new-task-type.spec.ts ~:232), so the attachments confirm flow is checked by hand only.
 16. FIXED by PR #941 (f07e4ecec, 2026-10-30: the capacity test has its own 120 s bound). (T431 review, 2026-10-30) PRE-EXISTING, moderate: worker test/upload-reaper.test.ts ~:1412 (T323 "keeps remembered failures at capacity across repeated passes", 1001 sequential orphan files) times out at the 20 s test timeout in a full worker-package run, and its leftover fails the next test (~:1444, expected 2, got 3). Red at base 0a7b8d405 in 3 of 3 local full runs; passes alone (238/238); CI's unit job is green. Give it its own timeout or a smaller fixture, and isolate its state from the next test.
-17. (T119 review, 2026-10-30) PRE-EXISTING, minor: worker scripts upgrade-claims-smoke.ts ~:382,387,392,781 find the conflict radio by its human label, because `conflictFieldId` (02-upgrade-apply.ts ~:402) is not exported; export it and key the smoke on the id. Item 16's upload-reaper timeout also showed in T119's full worker run.
-18. (T119 review, 2026-10-30) PRE-EXISTING, minor: the two-install smoke fixture's shared record names agents nobody wrote, so a fresh clone's plan offers 3 unrelated entries; make the fixture's record match what its installs wrote.
-19. (T401 review, 2026-10-30) PRE-EXISTING, minor: tests/e2e/helpers/auth.ts ~:46 `recordRegisteredUser` is module-private, so a user minted by `POST /admin/users` (as in forced-password.spec.ts) is unknown to the global teardown and the `users` fixture; a timed-out run leaks it until the CI database is dropped. Export it (or a registration helper for admin-minted users) and record such users.
+17. MOVED to parked T513 (test environment/hygiene); re-open only when blocking dependable validation.
+18. MOVED to parked T513 (test environment/hygiene); re-open only when blocking dependable validation.
+19. MOVED to parked T513 (test environment/hygiene); re-open only when blocking dependable validation.
 20. (T429 review, 2026-10-30) PRE-EXISTING, minor: nothing enforces that `allowFileTransport` is the one opt-in of the default `protocol.file.allow=never`: a caller's own later `-c protocol.file.allow=always`, or a `GIT_ALLOW_PROTOCOL` that lists `file` in a production source, lifts it silently (shared git-args.ts ~:130-132 passes the caller's argv verbatim; the env takes precedence, MEASURED). Production has none (only git-push.ts ~:147,155 set `http:https:ssh`). Pin it with a source-scan guard like git-exec-guard.test.ts.
-21. (T119 fix review, 2026-10-30) PRE-EXISTING, minor: api test/repo-artifact-reset.test.ts ~:1829,1849 create temp dirs under `os.tmpdir()` and never remove them; clean them up in an `afterEach`.
-22. (T448 review, 2026-10-30) PRE-EXISTING, minor: the UI-login e2e specs click submit right after `fill` with no hydration signal (tests/e2e/auth/forms.spec.ts ~:32,69,99,124 and harness/session-recovery/session-ordering.spec.ts); a click that beats hydration is a native navigation (a POST since T448), so the race remains. Wait for a hydration marker before submitting. Since T449 (PR #946) only a click that beats hydration remains, and its helpers `holdScripts`, `reactAttached` and `waitForReact` (tests/e2e/auth/prehydration-submit.spec.ts ~:89-107) now live in tests/e2e/helpers/hydration.ts (moved by T454) for this fix to import.
-23. (main CI on 02a25e357, 2026-10-30) PRE-EXISTING since T118, flaky: worker test/onboarding-recorded-membership.test.ts `tree()` (~:287) reads every file under the fixture repository, `.git` included, right after the fixture's `git commit` (~:340-345, ~:442-445), and the detached `git maintenance run --auto` that commit starts creates and removes `.git/objects/maintenance.lock` in between: `ENOENT ... open '.../.git/objects/maintenance.lock'` (run 41136606433). Give the fixture's git calls `-c maintenance.auto=false` (or skip that lock in the walk), and grep the other tests that walk a git fixture after a commit for the same race.
+21. MOVED to parked T513 (test environment/hygiene); re-open only when blocking dependable validation.
+22. MOVED to parked T513 (test environment/hygiene); re-open only when blocking dependable validation.
+23. MOVED to parked T513 (test environment/hygiene); re-open only when blocking dependable validation.
 24. (T349 review, 2026-10-31) PRE-EXISTING, minor: of the four step actions that write the clicked row before they move the task (loop Resume, `retry_ai`, the CLI switch, Skip), only Skip has a committed lock-order control; no case tells `cancelStillOpen` locking every row of the task from locking only the open ones; and the cancel route's control (K7) now passes from the Stop batch alone, so the step abort's (K8) is the only one that pins `cancelStillOpen`.
 25. (T445 review, 2026-10-31) PRE-EXISTING, minor: since T445 the node-free guard fails on Node globals read as values, but it covers only the project-state subpath the web imports; shared naming/index.ts ~:63 (`process.env` as a default parameter) and forge/bitbucket-cloud.ts ~:33 (`Buffer.from`) are unguarded. The web never calls them today. Extend the guard to every shared subpath the web bundles.
 26. (T455 review, 2026-10-31) PRE-EXISTING, hardening: nothing enforces T455's `requireJsonObject` guard, so a new `(await c.req.json()) as {...}` in an api route brings the `null`-body 500 back. A ratchet test over api routes (as `fs-ratchet.test.ts` does for path-based fs calls) would catch it; it should also cover WebSocket `message` listeners that read a field off a parsed frame (the CLI login banner's was one, fixed by T463).
-27. (T454 review, 2026-10-31) PRE-EXISTING, minor, dev hosts only: tests/e2e/repos/create.spec.ts ~:17 `findFirstGitDir` counts hidden git directories while the UI hides them, so the local_path case fails on a host with e.g. `~/.nvm` (identical before T454).
+27. MOVED to parked T513 (test environment/hygiene); re-open only when blocking dependable validation.
 28. (T461 review, 2026-10-31) PRE-EXISTING, minor: no test covers the 404 the per-step CLI switch answers for a step row that vanished (api routes/tasks/steps.ts ~:1914).
 29. (T458 review, 2026-10-31) PRE-EXISTING, minor: no cancel-route case (api plan-merge-cancel-db.test.ts, task-cancel-guard-db.test.ts) for a `waiting_user` merge or task; packages/api/test/task-cancel-lock-order-db.test.ts ~:67-70 still describes the pre-T349 bulk UPDATE in the present tense.
 30. (T459 review, 2026-10-31) PRE-EXISTING, minor: no route-level late-sweep control for loop Resume, `retry_ai`, Skip, the CLI switch or the fan-out Resume (only the Retry route has one); no control for the second sweeps or for the fan-out Resume with downstream rows; the hand-rolled unit fakes absorb the new lock selects and cannot see their removal (the gated controls do).
-31. (T376 sixth review, PRE-EXISTING, test hygiene) eight older gated files create a refusal trigger with a plain `CREATE TRIGGER`, no `DROP TRIGGER IF EXISTS` and no leftover guard in `beforeAll`: admin-security-audit-db.test.ts ~:42, admin-config-pool-db.test.ts ~:212, integrations-audit-db.test.ts ~:76/~:92, maintenance-routes-db.test.ts ~:145, repo-credentials-audit-db.test.ts ~:40, tooling-app-auth-atomic-db.test.ts ~:53, integrations-broker.test.ts ~:1352, module-deactivation-db.test.ts ~:1181 (global-kb's `refuse_store_write` is dropped only in `afterEach`). A killed run fails the next run once in a persistent database; T376 fixed its five files with `CREATE OR REPLACE FUNCTION` plus `DROP TRIGGER IF EXISTS`.
+31. MOVED to parked T513 (test environment/hygiene); re-open only when blocking dependable validation.
+
+Reconciliation: T528 owns the potentially false-green members; T513 owns environment/fixture flakes. Item16 was already fixed by PR #941. Remaining coverage-only members are not an authorized blanket testing project.
 
 ### T366 · FNF[shutdown-deadline] · the worker shutdown's per-part limits are summed by hand
 
@@ -611,6 +645,8 @@ status: parked · was modular #257 · reason: diminishing returns (2026-11-01 sc
 5. (T375 review) _commit-diff.ts checkedOutCommit ~:133-161 is one more gitlink reader with its own failure contract.
    Fix: one shared reader module with an explicit failure contract. Do this after T396.
 
+User reconciliation 2026-11-01: helper/read-contract consolidation (members1/2/5) stays parked. Failed-read members3/4 transfer to T495 correctness verification and must be deduplicated against its members4/5/6/7/8 and the completed T397 work; no second refactoring batch.
+
 ### T386 · FNF[upgrade-early-death-hold] · an upgrade that dies before recording its found state restores normal and lifts an admin's hold
 
 status: open · kind: design · was modular #267
@@ -660,8 +696,10 @@ Decide which stored targets a non-admin may point at private addresses.
 
 ### T402 · FNF[context-backfill] · 237 stored steps keep the old 200k-window badge (143 read 0%)
 
-status: parked: user decision (numbered migration vs idempotent deploy script) · DEADLINE ~2026-11-30 (stream_log 90-day expiry) · was modular #284
+status: open · kind: data repair · user decision: resolved 2026-11-01
 The data is recoverable from cli_invocations.stream_log: windows for about 97% of claude-code runs, peaks for 232 of 237 steps. Keep a before-image so the change can be undone.
+
+User decision 2026-11-01: Use an idempotent operator script with dry run,before-image andundo. Historical237/143counts need fresh targeted inventory; compute exact candidate expiry before applying. Current install retention90days; whole-install oldest eligible retained logs can expire Nov4, which does NOT establish the T402 subset deadline. Do not rely on rough Nov30note. Implementation and live backfill have not started.
 
 ### T403 · FNF[context-window-truth] · wrapper CLIs report the binary's 200k default; killed runs fall to the static table
 
@@ -752,12 +790,14 @@ From the T119 review (2026-10-30). Introduced by T119, fails closed. worker onbo
 status: parked · reason: diminishing returns (2026-11-01 scan): Explicitly minor oversized-override edge requires unusually large rules; resume when resume when actual repository rules exceed Codex's readable limit
 From the T119 review (2026-10-30). Minor. shared project-state limits.ts ~:12 `MAX_AGENT_RULES_BYTES` is 64 KiB, while codex reads only the first 32 KiB of AGENTS.md (the reason AGENTS.md itself is kept under 32 KiB), so a large override silently truncates what codex sees, and the rest of the file after the block with it. Decide: a 24-32 KiB cap, or a size hint on the Tooling editor.
 
-### T446 · FNF[bundle-descriptor-removal] [design] [parked: user] · an install removes a teammate's claim-less bundle descriptor, and its own upgrade commit can carry the removal
+### T446 · FNF[bundle-descriptor-removal] · an install removes a teammate's claim-less bundle descriptor, and its own upgrade commit can carry the removal
 
-status: open (parked: user decision)
+status: open · kind: documentation · user decision: resolved 2026-11-01
 From the T119 review (2026-10-30). Verified 2026-10-31 by the T446 driver (evidence in .claude/tmp/sonnet-run/T446/): INTENDED by the documented rule in docs/architecture/onboarding-upgrades.md ~:662-671. A descriptor that the previous base names but no local bundle holds is kept while a claim names its source, and is removed and reported in `removed` once none does; it "can flap across pushes". Measured on real git with a two-install smoke harness (packages/worker/test/two-install-smoke.ts): B's record writer (worker project-state/write.ts ~:684-711, run by 12, 02, 04, the 10 s dirty sweep and the checkout watcher) removes A's claim-less descriptor; Haive's own 02+03 with the commit box ticked commits that removal; A writes the file again at its next record write. Nothing reads an unclaimed descriptor, and A's bundle row, storage, items and ledger are untouched, so nothing is lost.
 
 Question for the owner: keep the rule (recommended, adding to the docs that 12 and 03 stage the removal when their commit box is ticked), or make a claim-less descriptor team-wide. Option 2: a descriptor exists only while a claim names its source. Option 3: the sync adds a checkout descriptor to the base only if a local bundle, a claim or the previous base names it. The flip lists are in the driver report. If flipped, also make the two-install smoke assert the rule across installs: it commits B's deletion (~:2477) and `treesDiffer` skips `bundles/` (~:2879).
+
+User decision 2026-11-01: Keep current claim-based descriptor rule; document that12/03 can commit automatic descriptor removal. No team-wide descriptor policy change.
 
 ### T450 · FNF[install-ownership-of-runners] · the runtime-runner reaper removes runners this install's database does not know, volumes included
 
@@ -766,8 +806,10 @@ From the T441 review (2026-10-30). PRE-EXISTING, consequential on a host whose D
 
 ### T451 · FNF[runner-liveness-probe] [design] · a failed docker inspect of a runner's existence still reads as "no"
 
-status: parked · reason: diminishing returns (2026-11-01 scan): Explicitly minor transient-probe recovery edge; callers remain untraced; resume when resume when failed inspection demonstrably recreates a live runner
+status: open · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01
 From the T441 review (2026-10-30). PRE-EXISTING, minor. `isRunning` and `containerExists` read a failed `docker inspect` as "not running" or "absent" (worker sandbox ide-runner.ts ~:87-105, app-runner.ts ~:76-93, the same shape in ddev-runner.ts ~:888, callers not traced), and `startIdeRunner` (ide-runner.ts ~:259) and `startAppRunner` (app-runner.ts ~:154) open with an unconditional `docker rm -f -v`, so a transient failure of that first probe still recreates a live runner. T441 closed only the workspace-label probe. Needs a tri-state existence read and a decision per call site. Cross-reference: T371 [design] FNF[docker-spawn-dedup].
+
+Executable verification scope: Tri-state existence/inspect failure before destructive runner recreation; trace supported callers before a fault-injection control. No automatic full-bundle repair: prove a supported current consequence, then scope the fix; park the remainder.
 
 ### T453 · FNF[auth-prehydration-click] [design] · a click or Enter on the sign-in form before React attaches drops what was typed
 
@@ -837,10 +879,12 @@ From the T421 review (2026-10-31). PRE-EXISTING, minor, conservative direction. 
 
 ### T472 · FNF[git-data-claim-sweep] [design] · an onboarding reset leaves a git-data claim file that neither a ledger row nor the sync base names
 
-status: parked · reason: diminishing returns (2026-11-01 scan): Explicitly minor reset residue requires a narrow unsynced claim-file window; resume when resume when orphan claim files block a real onboarding reset
+status: open · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01
 From the T469 review (2026-10-31). PRE-EXISTING, minor (narrow window).
 
 api routes/repos.ts `resetOnboardingArtifacts` (~:2615-2625, the claim-file loop) takes back the claim files a live row, a retired git-data row (`supersededGitDataPaths`, T421) or a git-data claim in the sync base (`baseGitDataPaths`, T469) names. A git-data claim file that reached the checkout after the last sync (or that `applyRebase` dropped from the base, sync.ts ~:1131, until the next sync re-adds it) is in none of them, so it stays, and the record then reads `refused` ("format.json is missing") until someone removes it by hand: the sync cannot read it in once the reset removed `format.json`. Measured by the T469 driver (C4a/C4b). Direction (a decision, since it adds a read path to a destructive route): list `artifacts/` through the fs-safe primitives under a cap and take back each file the codec itself classes as a git-data claim (a canonical path that names git data and `claimFileName(path)` equal to the file name, codec.ts ~:374-379).
+
+Executable verification scope: Reproduce the recorded unsynced-claim reset refusal; cleanup must recognize owned codec-valid claims and preserve unknown files. No automatic full-bundle repair: prove a supported current consequence, then scope the fix; park the remainder.
 
 ### T475 · FNF[ci-unit-tests-job] [design] · a format or typecheck failure skips the unit tests in lint-typecheck-test
 
@@ -869,7 +913,7 @@ Note (T480 review, 2026-10-31): the KB walkers still list a git-data-named page 
 
 ### T482 · FNF[lock-order-leftovers-2] · second sweeps wait holding step rows; the late sweep refuses a benign hold; planner-dependent id lists (+6)
 
-status: parked · reason: diminishing returns (2026-11-01 scan): Bundle explicitly classifies remaining lock edges and accepted refusal trade-offs as minor; resume when resume when a concrete lock cycle disrupts normal task actions
+status: open · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01
 From the T459 review (2026-10-31). Minor; items 1 and 4-7 PRE-EXISTING, item 2 an accepted trade-off of T459.
 
 1. The second sweeps still wait while holding step rows (and the task row, for a Stop): api routes/tasks/steps.ts ~:252, worker `_step-reset.ts` ~:171, api lib/task-control.ts ~:66. A young live agent run held by `releaseStepAgents` can close a cycle with them; a Stop must not fail, so NOWAIT is no answer there.
@@ -879,6 +923,8 @@ From the T459 review (2026-10-31). Minor; items 1 and 4-7 PRE-EXISTING, item 2 a
 5. `id IN (...)` statements are planner-dependent (api steps.ts ~:1236-1245, worker `_step-reset.ts` ~:327, task-queue.ts ~:3553-3563, step-runner.ts ~:1531, data-migrations.ts ~:298): a Bitmap Heap Scan at T459's seed (ctid order), a plain pkey Index Scan would lock in id order. No named peer.
 6. Theoretical: the provider delete (api cli-providers.ts ~:557) runs `ON DELETE SET NULL` over every run and agent row of the provider in heap order; a Retry holding the task row and sweeping a run the delete holds could close a cycle. Not reproduced.
 7. Two passes that each `insertOwnedRun` a fan-out run for one step hold KEY SHARE on the step row and then both want it FOR UPDATE (worker step-ownership.ts ~:111-119): measured 40P01; the second waiter survives.
+
+Executable verification scope: Reproduce consequential reachable lock cycles before changing locking; accepted brief-busy trade-offs, speculative peers and coverage-only cases stay deferred. No automatic full-bundle repair: prove a supported current consequence, then scope the fix; park the remainder.
 
 ### T483 · FNF[plan-delete-cycle] [design] · update-only plan writers can still deadlock with a repository delete
 
@@ -926,6 +972,8 @@ From the T479 review (2026-10-31). PRE-EXISTING, minor (needs a crash between tw
 
 8. T397 round7 introduces a unique <repoId>.rebuild-<uuid> staging sibling for folder refreshes. A kill or refused cleanup retains it, and repository deletion/sweeps do not list it. REGRESSION-adjacent retention limit, minor; include these exact owned siblings in this task's eventual report/sweep design, never remove the only copy blindly. Item4's partial folder-destination defect is fixed by staging; the equivalent remote clone path still writes directly at dest and remains open. A clone checkout failing after HEAD resolves may then be accepted as usable on Retry (code trace verified, git interruption order still unmeasured).
 
+Reconciled 2026-11-01: item2 is RESOLVED by T397: failedAfterMove names the kept aside on rebuild failure. Item4 is RESOLVED for folder copies by staging; the remote-clone equivalent remains a verification candidate as item8 records. Never count the folder case as an open defect or sweep the only remaining copy. Retention/reporting design remains open.
+
 ### T487 · FNF[bundle-replace-zip-tree] [design] · Replace ZIP deletes a bundle's extracted tree before the ingest that could fail
 
 status: open
@@ -933,14 +981,16 @@ From the T479 follow-up review (2026-10-31). PRE-EXISTING, minor.
 
 The Replace ZIP route (api routes/bundles.ts ~:895-907; the removal at ~:906, inside the bundle-then-upload transaction) deletes the bundle's `extracted/` tree before it enqueues the ingest job (`attempts: 1`, ~:921), so the worker's `extractArchive` finds no destination and a corrupt replacement zip leaves a failed bundle (bundle-ingest.ts ~:173-176) whose item rows stay (worker-restarts.md ~:130-131) with no tree behind them. Since T479 the swap restores the previous tree on failure, so the route's removal no longer buys atomicity; but the comment at bundles.ts ~:896-897 ties it to the stale-complete guard and the docs record it as intended. Decide whether the route keeps the tree and lets the swap replace it.
 
-### T488 · FNF[ci-smokes-split] [design] · the smokes job grows about 7.5 s per gated test row; its budget pin fails at 134 rows
+### T488 · FNF[ci-smokes-split] · the smokes job grows about 7.5 s per gated test row; its budget pin fails at 134 rows
 
-status: parked · reason: diminishing returns (2026-11-01 scan): Capacity risk is latent and already protected by an explicit budget pin; resume when resume when the budget pin trips or measured runs approach limits
+status: open · kind: CI improvement · user decision: resolved 2026-11-01
 From the T474 review (2026-10-31). Latent, consequential once it bites.
 
 Since T474 the smokes job has a 45-minute limit and the gated step 25 minutes, with a pin that models a green run as 907 s plus 7.5 s per GATED row and fails at 134 rows (step) and 160 rows (job margin); the list had 79 rows on 2026-10-30 and 98 on 2026-10-31. Options: give the gated tests their own job (the critical path falls toward the next job's 579-1017 s; main is not protected, so a rename is free), run the gated files in parallel, or put each file under its own limit; a final step that warns when the elapsed time is within 600 s of the limit would make the budget self-monitoring.
 
 Update (T489 review, 2026-10-31): with the worker smokes step now limited to 15 min the crowding rule `907 + 7.5 x rows + 900 <= 2700` trips at 120 GATED rows (103 on 2026-10-31, growing about 4.5 a day), so the pin fires within days; raise the job limit or split the job when it does.
+
+User decision 2026-11-01: Unpark bounded CI splitting: actual PR/main feedback was about30minutes with108PGrows; preserve every required gate and avoid parser expansion.
 
 ### T490 · FNF[error-text-paths-2] [verify-first] · other surfaces still show raw worker error text with server paths (+8)
 
@@ -998,6 +1048,8 @@ From the T397 review (2026-10-31). Same class as T397 (git's exit code, never it
 
 12. T397 final review: git-merge.ts revParse (~:86-94) accepts GIT_NO_EXIT/ENOENT as absence when its lenient lstatNoFollow returns null, including non-absence filesystem failures. PRE-EXISTING, connected; the prior doc claim that this was a strict probe was corrected. Fix direction: strict stat with a missing-anchor proof, preserving genuine absent-worktree behavior. No change to the current seven-task scope.
 
+Reconciled 2026-11-01: item9's failed-HEAD-read defect is RESOLVED by T397 (current _stage-paths.ts344-349 permits only exit0/1); remaining open-operation helper duplication is refactoring and stays parked with T379. Failed-read candidates imported from T379 require deduplication and a current supported reproduction before repair. No full twelve-item audit by default.
+
 ### T496 · FNF[vendor-call-deadlines] · the worker's usage poll awaits vendor calls with no deadline (+1)
 
 status: open
@@ -1011,29 +1063,33 @@ From the T376 follow-up review (2026-10-31). PRE-EXISTING, moderate; the same cl
 status: open
 From the T491 review (2026-10-31). `GET /plan/merge` lists open merges only (api plan.ts ~:447-459) and `plan_merge` tasks are hidden from the task list (tasks/index.ts ~:289-292), so once the page that saw the failure is gone, a FAILED merge (which keeps its worktree for a Retry) cannot be found from the plan page. Options: the route also returns the newest failed merge not followed by a successful one, shown with its Retry link; or a plan-page notice from the task events. Recommended: the first.
 
-### T499 · FNF[parks-accounting] · a Retry's re-offered form keeps its started_at and books its wait to idle_ms (+6)
+### T499 · FNF[parks-accounting] · verify whether a parked current row beside another active row can stall recovery
 
-status: open
+status: open · gate: bounded verification · executable members: 4
 From the T385/T348 driver (2026-10-31). PRE-EXISTING, minor.
 
-1. `reofferParkedSteps` (api task-control.ts ~:167-194) books a re-offered `waiting_form` row's wait to `idle_ms` and keeps its `started_at`; the next claim restamps `started_at` (worker step-runner.ts ~:2866), so the wait predates the new span and clamps its work. Book every re-offered row to `carried_idle_ms` and change the pin in park-fold-db.test.ts.
-2. The worker's `autoResumeFailedStep` (_step-reset.ts ~:338-350) re-opens a row without `startIfNeverStarted`; the helper would move into @haive/database first. Not reachable in practice.
-3. Other writers still book a pre-run park the old way (terminal rows, nothing mis-billed): api lib/cancel-task.ts ~:92, worker task-queue.ts ~:3993, api task-control.ts ~:207-215 `settleActiveStepsIn`.
+1. RESOLVED by T471, PR #981 (3078d9758): the retained run is carried, its live span is cleared, and the next claim opens a fresh span. Both reoffer and START-settle paths have passing real-Postgres controls.
+2. MOVED to T525 (parked optional recovery coverage/display/diagnostics); original evidence retained there.
+3. MOVED to T525 (parked optional recovery coverage/display/diagnostics); original evidence retained there.
 4. A parked current row beside another `running`, `waiting_cli` or `waiting_form` row: every advance is dropped by the other-step guard (task-queue.ts ~:2813-2859), `foldAbandonedPark` unparks the row and the sweep re-drives it every 5 minutes with an epoch bump (T385 adds an overdue park as one more way in). See also T393/T394.
-5. Cosmetic: slot-wait-badge.tsx ~:40 unreachable fallback "Queued for a slot"; the "Waiting for slot" filter wording now also lists module-setup parks (web tasks/page.tsx ~:498, shared schemas/tasks.ts ~:440-441, api tasks/index.ts ~:250); cli-park-timing.ts ~:15 still calls the marker the runtime park's signature; stalled-redrive.test.ts ~:463-469 titles read as sweep rules though they test `redrivableRow`; the handleResult 'deferred' enqueue is pinned by no control (it must stay free of the dedup id); a module step that declared `needsRuntime` reads as module (slot-wait.ts ~:126).
-6. (T498 review) The stalled sweep's new `waiting_cli` re-drive does not restamp the park marker as boot does (`foldOrphanedCliParkOnBoot`, worker cli-park-timing.ts ~:216-243): a row with no marker (the handler died between the run-end write and `markCliParkBegin`) bills the gap until the re-drive as work (shared timing.ts ~:77-85). Statistics only, minor.
-7. (T471 fix round 1) Since T471 a full task Retry that restarts through START (`settleActiveStepsIn`, api task-control.ts) also books a parked form's wait with `...parkFolded`, so item 1's display (the claim re-stamps `started_at` and the booked `idle_ms` is subtracted from the new span: work reads 0 against idle 601251 five minutes into the replay, T471/fix-1/trace-item7-claim-after-fix.log) now reaches that path too. Minor, display only.
+5. MOVED to T525 (parked optional recovery coverage/display/diagnostics); original evidence retained there.
+6. MOVED to T525 (parked optional recovery coverage/display/diagnostics); original evidence retained there.
+7. RESOLVED by T471, PR #981 (3078d9758): the retained run is carried, its live span is cleared, and the next claim opens a fresh span. Both reoffer and START-settle paths have passing real-Postgres controls.
+
+Reconciled 2026-11-01: only member4 remains a candidate for execution. Reproduce it through a supported producer before changing recovery; a synthetic impossible row is not enough. Members1/7 are resolved,2/3/5/6 are parked in T525.
 
 ### T500 · FNF[handoff-silent-writes] · three handleResult neighbours write silently or re-fail a stopped task (+4)
 
-status: parked · reason: diminishing returns (2026-11-01 scan): Entire bundle is explicitly minor failure logging, attribution, and stale-run cleanup; resume when resume when these leftovers demonstrably block task recovery
+status: open · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01
 From the T385/T348 driver (2026-10-31). PRE-EXISTING, minor. Same family as T385 item 6 (the lost hand-off log).
 
-1. `markTaskDeadOnStep` (worker task-queue.ts ~:812-829) does not log a lost write.
-2. The revise selfLoop `markTaskFailed` (~:2323-2330) ignores its return.
+1. MOVED to T525 (parked optional recovery coverage/display/diagnostics); original evidence retained there.
+2. MOVED to T525 (parked optional recovery coverage/display/diagnostics); original evidence retained there.
 3. `routableFixLoopTarget` (~:882-905) calls `writeTaskFailed` (~:670), which is epoch-fenced only; a Stop fails a task without moving the epoch, so a source row left `done` lets it re-fail a Stop-failed task and rewrite `error_message` and `completed_at`.
 4. (T498 builder, by reading) When `enqueueCliInvocation` throws in worker step-runner.ts (~:1175, ~:1363), the run it recorded stays live on the failed row; the `prepareWorkspace` failure path just above (~:1164-1174) supersedes its run, these two do not. PRE-EXISTING, minor.
-5. (T498 review) worker queues/cli-exec/handlers.ts ~:501-502: in the failure path `await resumeStepIfLinked(...)` runs before `throw err`, so a refused continuation add replaces the CLI's own error in the job's failure record. Keep the CLI error (attach the add failure as its cause, or log it and rethrow the original). PRE-EXISTING, minor.
+5. MOVED to T525 (parked optional recovery coverage/display/diagnostics); original evidence retained there.
+
+Executable verification scope: Only members3/4: Stop-failed state overwritten and live run left after enqueue failure. Members1/2/5 moved to parked T525. No automatic full-bundle repair: prove a supported current consequence, then scope the fix; park the remainder.
 
 ### T501 · FNF[redrive-apply-idempotence] [verify-first] · is apply() idempotent for a re-driven running deterministic step?
 
@@ -1089,7 +1145,7 @@ From the T385 F7 round 2 review (2026-10-31). PRE-EXISTING; minor (test fidelity
 
 ### T508 · FNF[relink-commit-unknown] [design] · after a lost COMMIT acknowledgement the relink restores git blindly, leaving the row new and git old
 
-status: parked · reason: diminishing returns (2026-11-01 scan): Explicitly minor transaction-loss and process-death scenarios require new reconciliation machinery; resume when resume when relink drift is reproduced under realistic connection failures
+status: open · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01
 From the T376 fifth review (2026-10-31). PRE-EXISTING on the T376 branch (80cb7aa97), documented, minor (needs a connection loss at COMMIT).
 
 The remote relink (api routes/repos.ts, the outer catch after `db.transaction`) restores git's remote after a COMMIT failure or a lost connection without learning whether the transaction committed. A COMMIT whose acknowledgement was lost leaves the row's `remote_url` and credential binding new, the `repository.remote.update` audit row present, and git on the old remote. Fix direction: after a connection-class error, read the row on a fresh connection and align git to it instead of restoring blindly. Related, third-party (needs approval, not started): postgres.js 3.4.9 keeps running an abandoned transaction callback after `onclose` rejects `begin`, and its `tx` handle can write through a connection the pool has re-opened (`index.js` ~:243-246, ~:291-296, ~:421-427), so a late `UPDATE` could land outside its transaction.
@@ -1097,6 +1153,8 @@ The remote relink (api routes/repos.ts, the outer catch after `db.transaction`) 
 Also (T376 sixth review, by reading): the relink has no hard deadline and no process-death recovery. A git child in uninterruptible I/O (a `localPath` repository on 9p) survives SIGKILL, so the request, the repository row lock and a pooled connection stay held; and an api restart or crash between BEGIN and COMMIT leaves git on the new URL with the row old and no audit row. The reconcile-on-read direction above repairs the drift; a hard deadline on the helper that fails the request and logs the stuck pid bounds the hold.
 
 T376 review9 carry-forward: a mutating git child killed after its config rename but before exit returns exitedClean:false, so restoration may not be armed (repos.ts ~:2791-2807). PRE-EXISTING, narrow; internal git ordering unmeasured. Share the reconcile-to-database direction above rather than another branch-local restore rule.
+
+Executable verification scope: Bounded COMMIT-acknowledgement and process-death drift reproduction, then a reconciliation design. Third-party dependency changes require their own reviewed scope; no broad transaction rewrite. No automatic full-bundle repair: prove a supported current consequence, then scope the fix; park the remainder.
 
 ### T509 · FNF[swallow-rule-shape] [design] · the CI swallow pin lists failure-masking shapes instead of judging what follows `||`
 
@@ -1118,7 +1176,7 @@ From the T365 fix round 1 (2026-10-31), verified against cx-365. PRE-EXISTING.
 
 ### T511 · FNF[bounded-vendor-bodies] · vendor and user-supplied endpoint bodies are read whole before they are cut or parsed (+4)
 
-status: parked · reason: diminishing returns (2026-11-01 scan): Memory-only bounded-read hardening and helper duplication lack a demonstrated consequential failure; resume when resume when oversized responses cause measured memory pressure or outages
+status: open · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01
 From the T365 fix round 1 (2026-10-31), verified against cx-365. PRE-EXISTING, memory only (no secret path). See also T496 (vendor-call deadlines).
 
 1. User-supplied Ollama URLs: api routes/tooling.ts ~:89 and ~:191 (`resp.json()` of `/api/tags`, `/api/show`, bounded in time only); shared rag/embed.ts ~:108 (`resp.text()` then a cut), ~:111, ~:179, ~:210 (`resp.json()`); worker cli-adapters/ollama-probe.ts ~:107 (`resp.text()` of the error body).
@@ -1127,6 +1185,8 @@ From the T365 fix round 1 (2026-10-31), verified against cx-365. PRE-EXISTING, m
 4. Fix direction: reuse T365's `readForgeJson` / `readForgeErrorExcerpt` everywhere (bounded read, stream cancelled past the bound, fixed message without the body), after T365 lands.
 5. (T365 review 3) api github-oauth.ts ~:119: a bare `catch` words a timeout or network failure as "answered something other than a repository list". Key the message on the error class (timeout, abort, parse) instead. Minor.
 
+Executable verification scope: Prioritize user-supplied endpoint bodies and a safe bounded over-limit reproduction. Trusted-vendor generalization, helper deduplication and error wording remain deferred. No automatic full-bundle repair: prove a supported current consequence, then scope the fix; park the remainder.
+
 ### T512 · FNF[retry-cannot-help] [design] · the repositories page offers Retry on an errored repository whose message says Retry cannot help
 
 status: open
@@ -1134,7 +1194,7 @@ From the T397 fix round 4 (2026-10-31). Minor (UX); arrives with T397.
 
 After T397 a refresh that finds a `.git` git refuses (exit 128) but that no structural read proves dead ends `error` with a message saying Retry cannot help until the checkout is repaired and that removing and re-adding the repository rebuilds it. The repositories page still offers Retry for every `error` row, and it must not key on the message text (AGENTS.md: a message is display copy). Decision needed: a structural signal (for example an error code column on `repositories`, written with the status) that the page reads to hide Retry and offer remove-and-re-add, or keep Retry (it is harmless, three attempts) and only reword. Single.
 
-### T513 · FNF[test-env-hygiene] [verify-first] · two build-stamp tests fail outside CI's environment; api tests leave temporary directories behind (+4)
+### T513 · FNF[test-env-hygiene] · test environment, fixture cleanup and measured flake leftovers
 
 status: parked · reason: diminishing returns (2026-11-01 scan): Entire bundle concerns test environment dependence, temporary files, duplication, and load-sensitive fixtures; resume when resume when these failures block required CI or dependable local validation
 From the T498 builder and the T365 fix round 2 (2026-10-31). PRE-EXISTING, minor (test hygiene only).
@@ -1146,6 +1206,24 @@ From the T498 builder and the T365 fix round 2 (2026-10-31). PRE-EXISTING, minor
 
 5. T376's concurrent allow-list PUT bound control (api repository-security-audit-db.test.ts) failed once under load and passed alone/later; its 2000/300/1000ms wall budgets are timing-sensitive. PRE-EXISTING test limit, reproduce before changing deadlines.
 
+6. From T364 item8: worker repo/worktree-changes.test.ts:191 failed once in a full run under load (expected 1, got 0); 65 replays could not reproduce. Flake, cause unknown.
+
+7. From T364 item17: (T119 review, 2026-10-30) PRE-EXISTING, minor: worker scripts upgrade-claims-smoke.ts ~:382,387,392,781 find the conflict radio by its human label, because `conflictFieldId` (02-upgrade-apply.ts ~:402) is not exported; export it and key the smoke on the id. Item 16's upload-reaper timeout also showed in T119's full worker run.
+
+8. From T364 item18: (T119 review, 2026-10-30) PRE-EXISTING, minor: the two-install smoke fixture's shared record names agents nobody wrote, so a fresh clone's plan offers 3 unrelated entries; make the fixture's record match what its installs wrote.
+
+9. From T364 item19: (T401 review, 2026-10-30) PRE-EXISTING, minor: tests/e2e/helpers/auth.ts ~:46 `recordRegisteredUser` is module-private, so a user minted by `POST /admin/users` (as in forced-password.spec.ts) is unknown to the global teardown and the `users` fixture; a timed-out run leaks it until the CI database is dropped. Export it (or a registration helper for admin-minted users) and record such users.
+
+10. From T364 item21: (T119 fix review, 2026-10-30) PRE-EXISTING, minor: api test/repo-artifact-reset.test.ts ~:1829,1849 create temp dirs under `os.tmpdir()` and never remove them; clean them up in an `afterEach`.
+
+11. From T364 item22: (T448 review, 2026-10-30) PRE-EXISTING, minor: the UI-login e2e specs click submit right after `fill` with no hydration signal (tests/e2e/auth/forms.spec.ts ~:32,69,99,124 and harness/session-recovery/session-ordering.spec.ts); a click that beats hydration is a native navigation (a POST since T448), so the race remains. Wait for a hydration marker before submitting. Since T449 (PR #946) only a click that beats hydration remains, and its helpers `holdScripts`, `reactAttached` and `waitForReact` (tests/e2e/auth/prehydration-submit.spec.ts ~:89-107) now live in tests/e2e/helpers/hydration.ts (moved by T454) for this fix to import.
+
+12. From T364 item23: (main CI on 02a25e357, 2026-10-30) PRE-EXISTING since T118, flaky: worker test/onboarding-recorded-membership.test.ts `tree()` (~:287) reads every file under the fixture repository, `.git` included, right after the fixture's `git commit` (~:340-345, ~:442-445), and the detached `git maintenance run --auto` that commit starts creates and removes `.git/objects/maintenance.lock` in between: `ENOENT ... open '.../.git/objects/maintenance.lock'` (run 41136606433). Give the fixture's git calls `-c maintenance.auto=false` (or skip that lock in the walk), and grep the other tests that walk a git fixture after a commit for the same race.
+
+13. From T364 item27: (T454 review, 2026-10-31) PRE-EXISTING, minor, dev hosts only: tests/e2e/repos/create.spec.ts ~:17 `findFirstGitDir` counts hidden git directories while the UI hides them, so the local_path case fails on a host with e.g. `~/.nvm` (identical before T454).
+
+14. From T364 item31: (T376 sixth review, PRE-EXISTING, test hygiene) eight older gated files create a refusal trigger with a plain `CREATE TRIGGER`, no `DROP TRIGGER IF EXISTS` and no leftover guard in `beforeAll`: admin-security-audit-db.test.ts ~:42, admin-config-pool-db.test.ts ~:212, integrations-audit-db.test.ts ~:76/~:92, maintenance-routes-db.test.ts ~:145, repo-credentials-audit-db.test.ts ~:40, tooling-app-auth-atomic-db.test.ts ~:53, integrations-broker.test.ts ~:1352, module-deactivation-db.test.ts ~:1181 (global-kb's `refuse_store_write` is dropped only in `afterEach`). A killed run fails the next run once in a persistent database; T376 fixed its five files with `CREATE OR REPLACE FUNCTION` plus `DROP TRIGGER IF EXISTS`.
+
 ### T514 · FNF[sweep-redrive-budget] [design] · the stalled sweep re-drives a step with nothing live every cutoff, with no budget
 
 status: parked · reason: diminishing returns (2026-11-01 scan): Minor defensive redrive scenario has no known looping producer; resume when resume when a real step repeatedly redrives without progress
@@ -1153,13 +1231,15 @@ From the T498 review (2026-10-31). PRE-EXISTING design, minor. No sweep shape co
 
 ### T515 · FNF[advance-epochs] · two advances still carry no epoch: the auto-continue toggle's, and the one after an auto-resume that bumped none (+3)
 
-status: parked · reason: diminishing returns (2026-11-01 scan): Entire bundle is explicitly pre-existing and minor stale-job or duplicate-submit behavior; resume when resume when stale advances produce a consequential task-state error
+status: open · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01
 From the T498 review (2026-10-31). PRE-EXISTING, minor. Same class as T498 item 4 (the usage poller's advance now carries the task's epoch).
 
 1. api routes/tasks/index.ts ~:1210-1225: the auto-continue toggle queues an advance for the current form step with no epoch; `advanceChainHasMoved` (worker task-queue.ts ~:2772) drops one whose pointer moved, not one a Retry of the same step made stale.
 2. worker queues/_step-reset.ts ~:222-400 `autoResumeFailedStep` reopens a failed task without bumping the epoch, while every api reopen does (`moveTaskToStep`, api steps.ts ~:356), although its header says it mirrors them. A same-epoch job left from before the failure is not made stale by the auto-resume. Fix direction: bump the epoch with the reopen (and return it, so the poller's T498 stamp need not read it back).
 3. (T471 fix round 1) A second submit to a parked form whose wait is already closed (`waiting_form`, NULL marker, not yet picked up) is accepted: it writes its form values over the first answer's and queues another advance (pinned as accepted by T471's control C3). PRE-EXISTING, minor. Fix direction: an answered marker the submit can test, or refuse when the step already has form values for this round.
 4. (T498 fix round 1) The PR-wait auto-finalize advance (worker queues/pr-poll-queue.ts ~:276) carries no epoch either; since T498 it is at least retried in the process. PRE-EXISTING, minor.
+
+Executable verification scope: Current epoch/stale-submit producers and accepted-answer race. User decided first accepted answer stands; identical retries are harmless and conflicting replacements are refused. No automatic full-bundle repair: prove a supported current consequence, then scope the fix; park the remainder.
 
 ### T516 · FNF[relink-row-hold] [design] · writers of a repository row wait behind a relink that holds it across git, bounded only by the relink's own git deadlines (+3)
 
@@ -1188,16 +1268,18 @@ From the T365 close-out (PR #974, 2026-11-01). PRE-EXISTING, minor, found by rea
 2. The interval (~:320-322) starts a new `fetchOnce` while a slow one still waits, so two polls can both see a sync end and each reload the listing before the next render (T365 Codex review 7). Fix direction: skip a tick while a poll is in flight, or record handled transitions per bundle.
 3. Theoretical: `toggleExpanded` (~:215) decides "load needed" from its render closure's `filesByBundle`, while the poll's drop is dispatched from a promise continuation on React's Default lane, so a click between that continuation and its render can skip the reload (T365 review 6, D6-2). Fix direction: a loader driven by an effect on the expanded and dropped state.
 
-### T519 · FNF[redrive-connected-leftovers] · recovery follow-up controls and PR poller failure reporting (+4)
+### T519 · FNF[redrive-connected-leftovers] · verify PR-poller error visibility and refusal settlement guards
 
-status: open
+status: open · gate: bounded verification · executable members: 2,3
 Queued connected findings from T498 PR #977; not part of the authorized seven-task delivery. PRE-EXISTING unless stated; minor.
 
-1. COVERAGE ONLY for the new T498 path, not a confirmed production defect: worker step-engine/dag-executor.ts ~:2791-2794 claim-lost half has no direct pin. Existing recovery behavior is reviewed; extend a control when changing that path.
+1. MOVED to T525 (parked optional recovery coverage/display/diagnostics); original evidence retained there.
 2. worker queues/pr-poll-queue.ts ~:127-135: early re-drive runs outside try/catch; runPrPollTick discards Promise.allSettled results, hiding a failure. Catch/log per-task refusal or inspect settled results.
 3. worker step-engine/dag-executor.ts ~:2726-2739: refusal UPDATE lacks an outcome='pending' guard; add the same CAS guard as sibling settlement.
-4. worker queues/task-queue.ts retrying: warning says boot re-drive for non-boot callers; cosmetic, name the enqueue operation.
-5. worker queues/usage-poll-queue.ts: provider-recovery polling pays up to four seconds per refused task, serially. Consider a bounded batch if measured latency matters.
+4. MOVED to T525 (parked optional recovery coverage/display/diagnostics); original evidence retained there.
+5. MOVED to T525 (parked optional recovery coverage/display/diagnostics); original evidence retained there.
+
+Reconciled 2026-11-01: no automatic follow-up coverage or cosmetic changes. Members1/4/5 moved to parked T525; verify current caller reach and consequence for2/3 before implementation.
 
 ### T520 · FNF[shell-scanner-limits] · CI shell scanner cannot see several unused wrapper forms (+4)
 
@@ -1210,17 +1292,19 @@ Queued broader findings from T489 PR #975, review-6 and codex-rev-6/last.txt. PR
 4. Escaped whitespace before # can be mistaken for a comment (~:154).
 5. The suffix rescan (~:23) can be quadratic for a long script. Keep the scanner proportional to the fixed first-party workflow corpus; avoid building a general shell parser.
 
-### T521 · FNF[haive-save-leftovers] · Save index synchronization and staging have narrow gaps (+4)
+### T521 · FNF[haive-save-leftovers] · first Save & push to an empty origin fails before committing
 
-status: open
+status: open · kind: reproduced operational bug · executable member: 5
 Queued connected findings from T120 PR1b reviews, not additional authorized implementation. PRE-EXISTING, minor; raw reports under .claude/tmp/codex-run/T120/.
 
-1. onboarding/_stage-paths.ts known-path staging can retain stale index entries during a committing-path save. Recompute the owned path set and compare held HEAD before declaring index sync complete.
-2. project-state/commit.ts plan-file removal/no-op repair (~:105) rebuilds deletion intent from current disk and HEAD, so a prior removed projection can be absent from both after an index-sync failure; verify plan.json/plan.md removal retries separately from the fixed state-record case.
-3. syncRealIndex completion can still report indexSynced after HEAD changes immediately after its guard (~:297). Re-check the accepted commit boundary before reporting success; no stronger atomicity is currently promised.
+1. MOVED to T526; not part of the measured empty-origin fix.
+2. MOVED to T526; not part of the measured empty-origin fix.
+3. MOVED to T527; not part of the measured empty-origin fix.
 4. DESIGN MOVED to T523, outside this execution bundle: ambient XDG_CONFIG_HOME/GIT_CONFIG_* handling. Executable git filters are already T387. Known-name staged-only additions remain an accepted name-only repair trade-off documented in onboarding-upgrades.md.
 
 5. Measured by T120-live against the existing worker: first Save & push to a completely empty origin fails before committing, because plan/merge.ts fetchOrigin (~:105-111) explicitly fetches refs/heads/<branch> and treats its absence as integration_failed; integrateOrigin invokes it before divergence can classify a missing remote branch (plan-mirror-queue.ts ~:258, project-state/save.ts ~:328). Same-history initialized origins push successfully. PRE-EXISTING, connected; distinguish a genuinely absent remote branch from a transport/read error without weakening other refusals. Raw browser/backend evidence in .claude/tmp/codex-run/codex-resume-20261101/T120-live/empty-remote-failure.png and report.md. No broader fix authorized.
+
+Reconciled 2026-11-01: member5 alone is the next fix scope. Members1/2 are separate verification candidates in T526;3 is parked in T527;4 was already split as design T523. Preserve the distinction between an absent remote branch and a failed remote read.
 
 ### T522 · FNF[git-text-redaction-limits] · unusual URL delimiters and pathless query-at-signs evade text redaction (+1)
 
@@ -1234,6 +1318,58 @@ Queued connected findings from T376 review10, verified with synthetic pure-node 
 
 status: open · kind: design
 Queued design split from T521 item4; no additional implementation authorized. PRE-EXISTING, narrow compatibility issue. HOME handling was aligned in T120 PR1b, but XDG_CONFIG_HOME and GIT_CONFIG_* can still make API status readers and worker writers resolve different configuration. Decide whether the supported contract preserves selected ambient configuration for both or supplies an isolated explicit configuration. Establish a current caller/reproduction before changing global Git policy. Executable repository filters remain T387, not a member of this decision.
+
+### T525 · FNF[recovery-polish] · optional recovery coverage, display and diagnostic leftovers
+
+status: parked · reason: diminishing returns · user confirmed 2026-11-01
+Split from T499/T500/T519 so correctness work does not automatically authorize these members. Resume a member only for a demonstrated production consequence, a blocking required check, or a related change that makes its control necessary. Original member IDs are preserved below; do not execute this as a blanket cleanup batch.
+
+1. From T499 item2: The worker's `autoResumeFailedStep` (_step-reset.ts ~:338-350) re-opens a row without `startIfNeverStarted`; the helper would move into @haive/database first. Not reachable in practice.
+
+2. From T499 item3: Other writers still book a pre-run park the old way (terminal rows, nothing mis-billed): api lib/cancel-task.ts ~:92, worker task-queue.ts ~:3993, api task-control.ts ~:207-215 `settleActiveStepsIn`.
+
+3. From T499 item5: Cosmetic: slot-wait-badge.tsx ~:40 unreachable fallback "Queued for a slot"; the "Waiting for slot" filter wording now also lists module-setup parks (web tasks/page.tsx ~:498, shared schemas/tasks.ts ~:440-441, api tasks/index.ts ~:250); cli-park-timing.ts ~:15 still calls the marker the runtime park's signature; stalled-redrive.test.ts ~:463-469 titles read as sweep rules though they test `redrivableRow`; the handleResult 'deferred' enqueue is pinned by no control (it must stay free of the dedup id); a module step that declared `needsRuntime` reads as module (slot-wait.ts ~:126).
+
+4. From T499 item6: (T498 review) The stalled sweep's new `waiting_cli` re-drive does not restamp the park marker as boot does (`foldOrphanedCliParkOnBoot`, worker cli-park-timing.ts ~:216-243): a row with no marker (the handler died between the run-end write and `markCliParkBegin`) bills the gap until the re-drive as work (shared timing.ts ~:77-85). Statistics only, minor.
+
+5. From T500 item1: `markTaskDeadOnStep` (worker task-queue.ts ~:812-829) does not log a lost write.
+
+6. From T500 item2: The revise selfLoop `markTaskFailed` (~:2323-2330) ignores its return.
+
+7. From T500 item5: (T498 review) worker queues/cli-exec/handlers.ts ~:501-502: in the failure path `await resumeStepIfLinked(...)` runs before `throw err`, so a refused continuation add replaces the CLI's own error in the job's failure record. Keep the CLI error (attach the add failure as its cause, or log it and rethrow the original). PRE-EXISTING, minor.
+
+8. From T519 item1: COVERAGE ONLY for the new T498 path, not a confirmed production defect: worker step-engine/dag-executor.ts ~:2791-2794 claim-lost half has no direct pin. Existing recovery behavior is reviewed; extend a control when changing that path.
+
+9. From T519 item4: worker queues/task-queue.ts retrying: warning says boot re-drive for non-boot callers; cosmetic, name the enqueue operation.
+
+10. From T519 item5: worker queues/usage-poll-queue.ts: provider-recovery polling pays up to four seconds per refused task, serially. Consider a bounded batch if measured latency matters.
+
+### T526 · FNF[save-index-candidates] · verify stale staging and plan-deletion index-repair retries
+
+status: open · gate: bounded verification
+Split from T521 items1/2, 2026-11-01. Establish a current supported reproduction and preserve unrelated staged changes before implementation; do not expand to generic Git/index cleanup.
+
+1. From T521 item1: onboarding/_stage-paths.ts known-path staging can retain stale index entries during a committing-path save. Recompute the owned path set and compare held HEAD before declaring index sync complete.
+
+2. From T521 item2: project-state/commit.ts plan-file removal/no-op repair (~:105) rebuilds deletion intent from current disk and HEAD, so a prior removed projection can be absent from both after an index-sync failure; verify plan.json/plan.md removal retries separately from the fixed state-record case.
+
+### T527 · FNF[save-index-guard-gap] · a concurrent HEAD move can follow the index-sync completion guard
+
+status: parked · reason: diminishing returns · user confirmed routine/theoretical work stays parked, 2026-11-01
+Split from T521 item3. Existing synchronization promises a checked boundary, not a permanently atomic filesystem/Git transaction. Resume only for a caller-backed stronger contract or a supported reproduction with an incorrect user-visible result.
+
+1. From T521 item3: syncRealIndex completion can still report indexSynced after HEAD changes immediately after its guard (~:297). Re-check the accepted commit boundary before reporting success; no stronger atomicity is currently promised.
+
+### T528 · FNF[validation-false-green] · verify whether current checks can pass after a lost audit, missing fake table or unlisted gated file
+
+status: open · gate: bounded verification
+Split from T364 items1/13/14, 2026-11-01. This is three candidate ways validation could hide a defect, not three confirmed current false-green tests. First find a current failing control that goes green for the wrong reason. Stop and park if bounded verification finds no current case; no general fake-database framework or scanner expansion.
+
+1. From T364 item1: recordAuditEvent catches a failed insert, so route tests over a fake DB pass with the audit lost. Fix: a shared helper that fails a test on a logged audit failure.
+
+2. From T364 item13: (T306 review) PRE-EXISTING, minor to moderate (class hazard): database testing/fake-db.ts ~:169 throws a plain Error for a table the fake was not given, which a route turns into a 500 or a caught failure, so a test that expects a throw or a 500 can pass on the miss (proven for revive-beside-live, fixed in T306; not scanned for others). Fix: a sentinel error class and an afterEach check of misses.
+
+3. From T364 item14: (T363 review) PRE-EXISTING, consequential: scripts/test/ci-gated-list.test.mjs ~:12 recognises a Postgres-gated test only by `pathname.startsWith(` or `CREATE|DROP DATABASE`, so a gated file with another guard idiom is invisible to the "every gated file has a GATED row" check and skips green in CI for ever (T363's DB file was the live case, fixed there). Fix: detect by `skipIf` plus a `*_URL` env var.
 
 ## Done
 
