@@ -681,7 +681,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
           type: 'checkbox',
           id: 'commit',
           label: 'Initialize git, then stage and commit',
-          default: false,
+          default: detected.hasOrigin,
         },
         {
           type: 'text',
@@ -697,7 +697,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
         type: 'checkbox',
         id: 'commit',
         label: 'Stage and commit generated workflow files',
-        default: false,
+        default: detected.hasOrigin,
       });
     }
 

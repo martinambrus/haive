@@ -1004,10 +1004,73 @@ fork point is taken from the local base first: a record the local base holds ahe
 the branch's history, and origin's copy would undo it. A pass that finds the feature's merge already
 open puts nothing back, since that merge's tip must not move.
 
+**Portable project state rides existing push boundaries.** Workflow cleanup's base push,
+13's onboarding push, and plan Save & push first flush the root record through its journaled writer,
+then commit its recognized files in a separate `chore(haive): sync project state` commit. Saving a
+plan without pushing still commits only the plan. The plan push carries state in its final
+pre-push tail, after a successful integration has released its transaction, so a held/conflicted
+integration leaves pending state uncommitted as before. A push with no integration still needs a
+valid record: malformed state now holds that push instead of being ignored. A resumed plan-merge confirmation repeats the
+state commit before its push. Onboarding 12 and upgrade 03 default Commit on only when their origin
+is usable; Push remains an explicit opt-in. An absent or unreadable origin preserves the existing
+no-push outcome and warning behavior, and no-history repositories keep their initial-commit form.
+
+`project-state/push.ts` uses the existing project-state, task-creation and plan locks, refuses an
+undo journal, a dirty revision, a root claim, an open Git operation or an unanswered record question,
+and uses `commitHaiveProjections`' exact-name private-index commit. The merge resolver commits
+inside its fenced merge-dir section and pins that new tip for the network push. The PR path first
+puts back agent projection edits, then carries pending root state into the feature worktree and
+commits there, so the state reaches the PR without moving the root branch. A cross-branch merge's
+landed base and a PR feature's HEAD can each hold portable changes the root does not: the push tail
+merges the root's current record and the target HEAD record through `mergeProjectState`, using
+`git merge-base` of the captured source/target tips as their common record. An absent base record
+is an empty common record, not first-import permission to replace a side. Target-only settings and
+claims survive; divergent scalar/claim units refuse before any copy with their conflict names.
+No target record is imported into the wrong-branch root. The existing caller reports the refusal
+and retains pending state for repair/retry; the push helper creates no question or local sync base.
+
+Each known target file must still equal its captured target HEAD blob or the merged desired bytes
+(a retry). All known names, including uncommitted additions, are preflighted before the first write.
+Each replacement/removal is judged again on its parked bytes and creation is exclusive. Every host
+read, stage probe and mutation keeps the repository root as its no-follow anchor, with the target
+as a relative path. The contained worktree directory is opened through that root and kept alive
+through the awaited commit; Git uses its held `/proc/<worker-pid>/fd/<fd>` cwd, so replacing the
+worktree's name cannot redirect a later subprocess. The Git-operation check is only an operation
+hold, not this containment proof. Source bytes and both captured tips are checked again; the
+private-index committer also refuses a changed expected parent before its CAS commit. The root
+writer's journal/base stays attached to the root, so a partial feature copy cannot acknowledge an
+unimported root record. Unknown names and unrelated staged blobs remain outside its commit.
+
+**KB and plan review progress travels independently.** `settings/review-watermarks.json` carries
+`kbSyncedCommit` and `planSyncedCommit`, using the existing nullable repository columns, codec,
+writer, sync, answer and outbox. There is no format or schema bump. Their writers mark the outbox
+in the same transaction as the column update. A descendant watermark wins in either direction,
+proved by `git merge-base --is-ancestor`; exit 1 alone means false and unreadable Git refuses the
+import/merge. Incoming missing objects or commits outside HEAD's ancestry refuse the import while preserving
+the incoming file, local columns, base and outbox. The refusal asks for a fetch or deliberate
+repair; Haive performs neither automatically. A differing nonempty incoming value must not replace
+stored proof whose object is missing either: that comparison refuses until its history is fetched
+or deliberately repaired. A stored value known to be a descendant still stands even in an older
+checkout; an incomparable stored value with no common history refuses instead of becoming
+a repair-by-import. The same refusal preserves pending answers and Git projection conflicts rather
+than falling back to the incoming side. Missing files never erase review progress. Incomparable values produce an
+ordinary question for that key (`settings/review-watermarks.json#kbSyncedCommit` or
+`#planSyncedCommit`); the other key can advance and upgrades remain available. An answer preserves
+its sibling key and never moves a watermark back over a later descendant review. Local completion
+stamps obey the same monotonic ancestry rule.
+
+External drift drops `.haive-data/state/**` and exactly `.haive-data/plan.json` and `plan.md` from
+its path lists and drops commits touching only those projections. Mixed commits retain their real
+project paths; KB and learnings remain visible. A stored missing/foreign watermark leaves the
+range unmeasured and cannot start tracking over unseen commits. A repository with no watermark
+retains its first-run policy. The two-install smoke demonstrates the duplicate range before import,
+an empty KB range afterwards while the plan range remains independent, ancestor retention, outbox
+rendering and an incomparable-key answer.
+
 **The record carries the portable settings and the environment.** `portableSettingsOf`
 (`@haive/shared/project-state`, `settings.ts`) maps the repository row to `settings/<name>.json`:
 `scope-exclude-globs`, `rtk-enabled`, `rtk-version`, `lsp-servers`, `lsp-server-versions`,
-`chrome-devtools-mcp-version`, `review-dimensions` and `agent-rules`, and nothing else. `app_auth`
+`chrome-devtools-mcp-version`, `review-dimensions`, `agent-rules` and `review-watermarks`, and nothing else. `app_auth`
 and `verify_commands` stay on the machine, since a committed login URL or command would be typed or
 run on a teammate's. `agent-rules`, the repository's AGENTS.md rules override
 (`agent_rules_override`), is the one setting whose file is its value: `settings/agent-rules.md`
@@ -1063,8 +1126,8 @@ payloads leave the column out, as they do the render context, since it can be la
 **The sync imports the settings and the environment, and asks when both installs changed one.**
 `mergePortable` (`project-state/sync.ts`) merges the columns (local), the checkout's files (incoming)
 and the base's settings and environment three ways, in the sync's own transaction, and writes the
-columns it moved. A set (`scope-exclude-globs`) moves member by member; every other setting is one
-value; the environment merges per key (`project/environment.json#envDetectData`, `#confirmedValues`).
+columns it moved. A set (`scope-exclude-globs`) moves member by member; review watermarks move independently
+by commit ancestry; every other setting is one value; the environment merges per key (`project/environment.json#envDetectData`, `#confirmedValues`).
 A value is normalised before it merges, by the rules of the routes that store it
 (`normalizeSetting`, shared: `stripManagedKnowledgeGlobs` and sorting for the scope list, the LSP key
 set, `normalizeReviewDimensionIds`, trimmed non-empty versions, `normalizeAgentRulesOverride` for

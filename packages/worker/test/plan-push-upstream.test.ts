@@ -27,6 +27,12 @@ const h = vi.hoisted(() => ({
   detectOrigin: vi.fn(),
   realDetectOrigin: null as unknown as (cwd: string) => Promise<boolean>,
 }));
+// This pin/upstream fixture has no project-state record or real DB/filesystem. Keep
+// that projection boundary inert; its integration has separate push/SQL coverage.
+vi.mock('../src/project-state/push.js', () => ({
+  prepareProjectStatePush: async () => {},
+  commitProjectStatePush: async () => null,
+}));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/secrets/user-git-identity.js', () => ({ resolveGitEnv: async () => ({}) }));
 vi.mock('../src/repo/git-workspace.js', () => ({

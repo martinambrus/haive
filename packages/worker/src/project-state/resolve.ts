@@ -1,3 +1,14 @@
+import {
+  REVIEW_WATERMARK_SETTING,
+  watermarkKeyOfUnit,
+  reviewWatermarks,
+  type ReviewWatermarks,
+} from '@haive/shared/project-state';
+import {
+  reviewWatermarkIntake,
+  reviewWatermarkOrder,
+  ReviewWatermarkUnavailableError,
+} from './review-watermarks.js';
 import { boundQueryError, safeErrorMessage } from '@haive/shared/logger';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
@@ -461,7 +472,8 @@ async function readRecordFile(repoPath: string, rel: string, isText: boolean): P
   }
 }
 
-const settingNameOf = (unit: string): string => settingNameOfFile(unit)!;
+const settingNameOf = (unit: string): string =>
+  watermarkKeyOfUnit(unit) ? REVIEW_WATERMARK_SETTING : settingNameOfFile(unit)!;
 
 /** What the checkout's file holds for the unit, as the sync reads it: normalised, `undefined` where
  *  the file or the key is not there, `null` where the file is no valid value of the unit. */
@@ -470,7 +482,9 @@ function fileValueOf(unit: string, file: RecordFile): unknown {
   if (file.kind === 'unreadable') return null;
   if (isSettingUnit(unit)) {
     const checked = normalizeSetting(settingNameOf(unit), file.value);
-    return checked.ok ? checked.value : null;
+    if (!checked.ok) return null;
+    const watermark = watermarkKeyOfUnit(unit);
+    return watermark ? reviewWatermarks(checked.value)?.[watermark] : checked.value;
   }
   const parsed = environmentSchema.safeParse(file.value);
   if (!parsed.success) return null;
@@ -504,6 +518,7 @@ async function answerSettingsQuestion(
   },
 ): Promise<ProjectStateResolveResult> {
   const environmental = isEnvironmentUnit(row.unit);
+  const watermark = watermarkKeyOfUnit(row.unit);
   const rel = `${PROJECT_STATE_DIR}/${row.unit.split('#')[0]}`;
   const incoming = conflictSideValue(row.incoming);
   const name = settingNameOfFile(row.unit);
@@ -522,6 +537,8 @@ async function answerSettingsQuestion(
       chromeDevtoolsMcpVersion: schema.repositories.chromeDevtoolsMcpVersion,
       reviewDimensions: schema.repositories.reviewDimensions,
       agentRulesOverride: schema.repositories.agentRulesOverride,
+      kbSyncedCommit: schema.repositories.kbSyncedCommit,
+      planSyncedCommit: schema.repositories.planSyncedCommit,
       onboardingEnvironment: schema.repositories.onboardingEnvironment,
     })
     .from(schema.repositories)
@@ -530,11 +547,14 @@ async function answerSettingsQuestion(
   if (!columns) return { kind: 'not_found' };
   const environment = environmentUnitOf(columns.onboardingEnvironment);
   const key = row.unit.includes('#') ? row.unit.slice(ENVIRONMENT_UNIT.length + 1) : null;
-  const mine = environmental
-    ? key === null
-      ? environment
-      : (environment as Record<string, unknown> | null)?.[key]
-    : portableSettingsOf(columns)[settingNameOf(row.unit)];
+  const mineSetting = portableSettingsOf(columns)[settingNameOf(row.unit)];
+  const mine = watermark
+    ? reviewWatermarks(mineSetting)?.[watermark]
+    : environmental
+      ? key === null
+        ? environment
+        : (environment as Record<string, unknown> | null)?.[key]
+      : portableSettingsOf(columns)[settingNameOf(row.unit)];
   if (answer === 'keep_mine' && (mine === undefined || mine === null)) return { kind: 'no_local' };
 
   const sync = await loadSyncRow(tx, repositoryId);
@@ -557,6 +577,27 @@ async function answerSettingsQuestion(
       if (!next) return { kind: 'invalid' };
       update = { onboardingEnvironment: environmentColumnOf(normalizeEnvironment(next)) };
     }
+  } else if (watermark && answer === 'take_theirs') {
+    const accepted = await reviewWatermarkIntake(repoPath, { [watermark]: chosen }).catch(
+      (err: unknown) => {
+        if (err instanceof ReviewWatermarkUnavailableError) return {} as ReviewWatermarks;
+        throw err;
+      },
+    );
+    if (accepted[watermark] === undefined) return { kind: 'invalid' };
+    const order = await reviewWatermarkOrder(repoPath, { [watermark]: mine }, accepted).catch(
+      (err: unknown) => {
+        if (err instanceof ReviewWatermarkUnavailableError) return null;
+        throw err;
+      },
+    );
+    if (order === null) return { kind: 'invalid' };
+    // A later review may have passed the question while it was open. An answer never rewinds it.
+    if (typeof mine === 'string' && order(mine, accepted[watermark]!) === 'local') chosen = mine;
+    update = settingColumnUpdate(REVIEW_WATERMARK_SETTING, {
+      ...reviewWatermarks(mineSetting),
+      [watermark]: chosen,
+    });
   } else if (answer === 'take_theirs') {
     const checked = chosen === undefined ? null : normalizeSetting(settingNameOf(row.unit), chosen);
     if (checked !== null && !checked.ok) return { kind: 'invalid' };
@@ -570,7 +611,17 @@ async function answerSettingsQuestion(
     try {
       const planned = environmental
         ? { ...emptyProjectState(), environment: plannedEnvironment }
-        : { ...emptyProjectState(), settings: { [settingNameOf(row.unit)]: chosen } };
+        : {
+            ...emptyProjectState(),
+            settings: {
+              [settingNameOf(row.unit)]: watermark
+                ? {
+                    ...reviewWatermarks(file.kind === 'file' ? file.value : null),
+                    [watermark]: chosen,
+                  }
+                : chosen,
+            },
+          };
       fileText = renderProjectState(planned).get(rel.slice(PROJECT_STATE_DIR.length + 1)) ?? null;
     } catch (err) {
       if (err instanceof ProjectStateError) return { kind: 'invalid' };
@@ -588,6 +639,7 @@ async function answerSettingsQuestion(
       .where(eq(schema.repositories.id, repositoryId));
   }
 
+  if (watermark) await markProjectStateDirty(tx, repositoryId);
   const [closed] = await tx
     .update(schema.projectStateConflicts)
     .set({ resolution: answer, resolvedAt: now, resolvedBy: userId })
@@ -607,7 +659,12 @@ async function answerSettingsQuestion(
         settings: Object.fromEntries(
           Object.entries({
             ...(snapshot.settings ?? {}),
-            [settingNameOf(row.unit)]: chosen,
+            [settingNameOf(row.unit)]: watermark
+              ? {
+                  ...reviewWatermarks(snapshot.settings?.[REVIEW_WATERMARK_SETTING]),
+                  [watermark]: chosen,
+                }
+              : chosen,
           }).filter(([, value]) => value !== undefined),
         ),
       };

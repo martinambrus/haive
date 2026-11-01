@@ -166,6 +166,12 @@ The action reports pending/errors, prevents concurrent starts or saves and leave
 on success. A live `plan_merge` hold links to the existing task instead. These are separate from
 the project-state and plan-field questions, which use their existing answer banners.
 
+A plan Save & push also flushes and commits dirty portable project state in a separate
+`chore(haive)` commit before the push, including after a landed integration and when a conflicted
+Save resumes through the plan-merge confirmation. Its state commit uses the projection locks and
+refusals described in [Onboarding template versioning](onboarding-upgrades.md); Save without push
+keeps its plan-only commit behavior.
+
 The mirror (`worker/src/plan/mirror.ts`) writes `.haive-data/plan.json` + `plan.md` from every plan-step apply and from `12-post-onboarding`; `persistDetection` imports it on clone. Both files are canonical, so the same plan writes the same bytes on every install. `serializePlanMirror` orders the nodes in tree pre-order (siblings by ordinal, then id), the edges by from, to and kind, and the code links by node, path, symbol and role, and plan.md lists a node's links in that edge order. The rows' read order is not: a seq scan and an index scan on `plan_nodes_repo_parent_ordinal_idx` return a root and its first child, both ordinal 0, in opposite orders, and a second install's Save once committed that reorder.
 
 **A move of the checkout Haive drives (00a's fast-forward, refresh, a plan Pull, Save & push and the `01-plan-merge` confirm) sets a dirty `plan.json` and `plan.md` aside first.** `plan.json` must hash to `synced_hash` and the database must hold a plan, else the move is refused naming it; `plan.md` is never judged. The mirror's revision is bumped before the files return to HEAD, and the re-sync after the move reconciles the new head's plan.json against `synced_snapshot` and flushes (`setAsideHaiveProjections`, `resyncHaiveProjections`; [Onboarding template versioning](onboarding-upgrades.md)).

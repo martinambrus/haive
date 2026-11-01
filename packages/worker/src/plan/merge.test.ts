@@ -908,6 +908,31 @@ describe('mergeOriginInto: the project state record merges three-way', () => {
   const base = recordOf();
   const theirsSpec = [{ id: 'agent-a', description: 'A' }];
 
+  it('R1 preserves unmerged state instead of falling back over unavailable stored proof', async () => {
+    const setting = { 'review-watermarks': { kbSyncedCommit: 'f'.repeat(40) } };
+    const { local, wt } = await relatedFilesPair(
+      stateFiles(base),
+      stateFiles(recordOf({ render: baseRender({ framework: 'drupal' }), settings: setting })),
+      stateFiles(recordOf({ render: baseRender({ framework: 'laravel' }), settings: setting })),
+    );
+    const known = (await git(local, ['merge-base', 'main', 'origin/main'])).trim();
+    await git(local, ['checkout', '-q', '-b', 'valid-incoming', 'origin/main']);
+    await write(
+      local,
+      `${STATE_PREFIX}settings/review-watermarks.json`,
+      JSON.stringify({ kbSyncedCommit: known }),
+    );
+    await commitAll(local, 'known incoming watermark');
+    await git(local, ['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+    await git(local, ['checkout', '-q', 'main']);
+    const head = (await git(wt, ['rev-parse', 'HEAD'])).trim();
+    await expect(mergeOriginInto(wt, 'main', false, COMMIT_ENV)).rejects.toThrow(
+      'fetch its commit history',
+    );
+    expect(await unmergedUnderState(wt)).not.toBe('');
+    expect((await git(wt, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+  });
+
   it('carries both sides changes to different keys of one file', async () => {
     // customAgentSpecs and framework are adjacent lines of render.json, so git reports a conflict.
     const { local, wt } = await relatedFilesPair(

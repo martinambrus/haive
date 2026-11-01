@@ -13,3 +13,4 @@ export * from './foreign.js';
 export * from './limits.js';
 export * from './settings.js';
 export * from './raw-text.js';
+export * from './review-watermarks.js';

@@ -4074,3 +4074,93 @@ it('a later membership-less snapshot cannot erase older recorded zero-provider f
   expect((await s.run()).outcome).toBe('unchanged');
   expect(s.columnOf()).toEqual(before);
 });
+
+describe('T122 unavailable review proof', () => {
+  it.each([
+    { side: 'incoming', kind: 'missing' },
+    { side: 'incoming', kind: 'foreign' },
+    { side: 'stored', kind: 'missing' },
+    { side: 'stored', kind: 'foreign' },
+  ] as const)(
+    'refuses $kind $side proof without changing columns, base, outbox or bytes',
+    async ({ side, kind }) => {
+      const s = await setup(synced(BASE));
+      const env = {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'T',
+        GIT_AUTHOR_EMAIL: 't@local',
+        GIT_COMMITTER_NAME: 'T',
+        GIT_COMMITTER_EMAIL: 't@local',
+      };
+      const git = (...args: string[]) =>
+        execFileSync('git', args, { cwd: s.root, env, stdio: 'pipe' }).toString().trim();
+      git('init', '-q', '-b', 'main');
+      git('commit', '-qm', 'base', '--allow-empty');
+      const known = git('rev-parse', 'HEAD');
+      let unavailable = 'f'.repeat(40);
+      if (kind === 'foreign') {
+        git('checkout', '-q', '--orphan', 'foreign');
+        git('commit', '-qm', 'foreign', '--allow-empty');
+        unavailable = git('rev-parse', 'HEAD');
+        git('checkout', '-q', 'main');
+      }
+      const incoming = side === 'incoming' ? unavailable : known;
+      const stored = side === 'stored' ? unavailable : known;
+      s.fake.patch(schema.repositories, REPO, { kbSyncedCommit: stored, planSyncedCommit: known });
+      s.fake.insert(schema.projectStateOutbox, {
+        repositoryId: REPO,
+        revision: 5,
+        writtenRevision: 4,
+        writeIntent: null,
+      });
+      await s.putRecord({
+        ...record(TEAM),
+        settings: { 'review-watermarks': { kbSyncedCommit: incoming, planSyncedCommit: known } },
+      });
+      const columns = json(s.fake.rows(schema.repositories));
+      const base = json(s.syncRow()!.baseSnapshot);
+      const outbox = json(s.fake.rows(schema.projectStateOutbox));
+      const bytes = await readFile(
+        join(s.root, STATE_DIR, 'settings/review-watermarks.json'),
+        'utf8',
+      );
+      expect((await s.run()).outcome).toBe('refused');
+      expect(json(s.fake.rows(schema.repositories))).toEqual(columns);
+      expect(s.syncRow()!.baseSnapshot).toEqual(base);
+      expect(json(s.fake.rows(schema.projectStateOutbox))).toEqual(outbox);
+      expect(
+        await readFile(join(s.root, STATE_DIR, 'settings/review-watermarks.json'), 'utf8'),
+      ).toBe(bytes);
+      expect(s.syncRow()!.lastError).toContain(
+        kind === 'missing' ? 'fetch its commit history' : 'another history',
+      );
+    },
+  );
+});
+
+it('R1 accepts the first valid KB import while preserving independent plan progress', async () => {
+  const s = await setup(synced(BASE));
+  const env = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'T',
+    GIT_AUTHOR_EMAIL: 't@local',
+    GIT_COMMITTER_NAME: 'T',
+    GIT_COMMITTER_EMAIL: 't@local',
+  };
+  const git = (...args: string[]) =>
+    execFileSync('git', args, { cwd: s.root, env, stdio: 'pipe' }).toString().trim();
+  git('init', '-q', '-b', 'main');
+  git('commit', '-qm', 'one', '--allow-empty');
+  const plan = git('rev-parse', 'HEAD');
+  git('commit', '-qm', 'two', '--allow-empty');
+  const kb = git('rev-parse', 'HEAD');
+  s.fake.patch(schema.repositories, REPO, { kbSyncedCommit: null, planSyncedCommit: plan });
+  await s.putRecord({
+    ...record(BASE),
+    settings: { 'review-watermarks': { kbSyncedCommit: kb, planSyncedCommit: plan } },
+  });
+  expect((await s.run()).outcome).toBe('applied');
+  const repo = s.fake.rows(schema.repositories).find((row) => row.id === REPO)!;
+  expect(repo.kbSyncedCommit).toBe(kb);
+  expect(repo.planSyncedCommit).toBe(plan);
+});

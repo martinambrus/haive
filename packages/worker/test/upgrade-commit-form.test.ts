@@ -10,6 +10,12 @@ describe('03-upgrade-commit form', () => {
     expect(schema!.fields.map((f) => f.id)).toEqual(['commit', 'commitMessage']);
   });
 
+  it.each([true, false])('T121 commit defaults follow usable origin: %s', (hasOrigin) => {
+    const form = upgradeCommitStep.form!(ctx, { hasGit: true, hasOrigin });
+    expect(form!.fields.find((f) => f.id === 'commit')).toMatchObject({ default: hasOrigin });
+    expect(form!.fields.some((f) => f.id === 'pushToOrigin')).toBe(false);
+  });
+
   // A repo whose onboarding never committed carries no git history; without the init
   // the commit path dies with "fatal: not a git repository".
   it('offers git init when the repo has no history', () => {

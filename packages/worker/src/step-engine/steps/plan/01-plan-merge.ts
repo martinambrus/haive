@@ -1,3 +1,4 @@
+import { prepareProjectStatePush, commitProjectStatePush } from '../../../project-state/push.js';
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, gt, inArray, ne, or } from 'drizzle-orm';
 import { lockRepositoryTasksKey, schema } from '@haive/database';
@@ -717,6 +718,20 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       where: eq(schema.repositories.id, d.repositoryId),
       columns: { credentialsSecretId: true, remoteUrl: true },
     });
+    await prepareProjectStatePush(ctx.db, {
+      repositoryId,
+      sourcePath: ctx.repoPath,
+      taskId: ctx.taskId,
+    });
+    await ctx.db.transaction((tx) =>
+      commitProjectStatePush(tx, {
+        repositoryId,
+        sourcePath: ctx.repoPath,
+        targetPath: ctx.repoPath,
+        identity,
+        taskId: ctx.taskId,
+      }),
+    );
     const upstream = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', '@{upstream}']);
     const head = await gitRun(ctx.repoPath, [
       'rev-parse',

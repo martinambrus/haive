@@ -14,7 +14,9 @@ type Hook =
   | 'resync'
   | 'metadata'
   | 'putBack'
-  | 'record';
+  | 'record'
+  | 'prepareProjectState'
+  | 'commitProjectState';
 
 const h: { db: unknown; head: string } & Record<Hook, Mock> = vi.hoisted(() => ({
   db: null as unknown,
@@ -29,10 +31,16 @@ const h: { db: unknown; head: string } & Record<Hook, Mock> = vi.hoisted(() => (
   metadata: vi.fn(),
   putBack: vi.fn(),
   record: vi.fn(),
+  prepareProjectState: vi.fn(),
+  commitProjectState: vi.fn(),
 }));
 
 export { h };
 
+vi.mock('../../src/project-state/push.js', () => ({
+  prepareProjectStatePush: h.prepareProjectState,
+  commitProjectStatePush: h.commitProjectState,
+}));
 vi.mock('../../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../../src/secrets/user-git-identity.js', () => ({ resolveGitEnv: async () => ({}) }));
 vi.mock('../../src/repo/refresh.js', () => ({ checkoutHoldingTasks: async () => 0 }));

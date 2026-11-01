@@ -46,6 +46,10 @@ async function scratch(): Promise<string> {
 function fakeDb(): { db: Database; stamps: Record<string, unknown>[] } {
   const stamps: Record<string, unknown>[] = [];
   const db = {
+    transaction: async (fn: (tx: unknown) => unknown) => fn(db),
+    execute: async () => [],
+    select: () => ({ from: () => ({ where: () => ({ for: async () => [{}] }) }) }),
+    insert: () => ({ values: () => ({ onConflictDoUpdate: async () => undefined }) }),
     update: () => ({
       set: (values: Record<string, unknown>) => ({
         where: async () => {

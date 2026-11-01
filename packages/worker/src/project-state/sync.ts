@@ -1,10 +1,25 @@
+import {
+  REVIEW_WATERMARK_KEYS,
+  REVIEW_WATERMARK_UNIT,
+  reviewWatermarks,
+} from '@haive/shared/project-state';
+import {
+  reviewWatermarkIntake,
+  reviewWatermarkOrder,
+  ReviewWatermarkUnavailableError,
+} from './review-watermarks.js';
 import { isUtf8 } from 'node:buffer';
 import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
 import { isRootClaimLive, lockRepositoryTasksKey, schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger } from '@haive/shared';
 import { convergeRtkQuestion } from '@haive/shared/rtk-enabled';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
-import { isPathContainmentError, readFileNoFollow, readdirNoFollow } from '@haive/shared/fs-safe';
+import {
+  isPathContainmentError,
+  readFileNoFollow,
+  readdirNoFollow,
+  relUnder,
+} from '@haive/shared/fs-safe';
 import {
   PORTABLE_SETTING_NAMES,
   PROJECT_STATE_DIR,
@@ -124,14 +139,16 @@ const gone = (rel: string): Refusal =>
  *  so the whole tree is read, and the caps stop the walk as it goes: a planted tree is not read on. */
 export async function readStateFiles(
   repoPath: string,
-  options: { boundedDirectoryReads?: boolean } = {},
+  options: { boundedDirectoryReads?: boolean; filesystemAnchor?: string } = {},
 ): Promise<Map<string, string> | null> {
+  const anchor = options.filesystemAnchor ?? repoPath;
+  const rooted = (rel: string) => relUnder(anchor, `${repoPath}/${stateRel(rel)}`);
   const files = new Map<string, string>();
   const pending = [''];
   let entries = 0;
   let bytes = 0;
   for (let dir = pending.pop(); dir !== undefined; dir = pending.pop()) {
-    const listing = await readdirNoFollow(repoPath, stateRel(dir), {
+    const listing = await readdirNoFollow(anchor, rooted(dir), {
       strict: true,
       ...(options.boundedDirectoryReads ? { maxEntries: MAX_ENTRIES - entries } : {}),
     });
@@ -153,7 +170,7 @@ export async function readStateFiles(
         const what = entry.isSymbolicLink() ? 'a link' : 'not a regular file or directory';
         throw new Refusal(`${stateRel(rel)} is ${what}`);
       }
-      const read = await readFileNoFollow(repoPath, stateRel(rel), {
+      const read = await readFileNoFollow(anchor, rooted(rel), {
         strict: true,
         maxBytes: MAX_FILE_BYTES,
       });
@@ -520,7 +537,8 @@ interface PortableMerge {
 /** Merges the portable settings and the environment of the checkout into this install's columns. A
  *  base that holds none (no sync row, or one an earlier release wrote) merges as no base at all, so
  *  the checkout's value wins over a column nobody chose, such as RTK's default. */
-function mergePortable(
+async function mergePortable(
+  repoPath: string,
   repo: Parameters<typeof portableSettingsOf>[0] & {
     onboardingEnvironment: unknown;
     renderContext: unknown;
@@ -528,7 +546,7 @@ function mergePortable(
   },
   checkout: { settings: Record<string, unknown>; environment: ProjectEnvironment | null },
   row: { baseSnapshot: unknown } | null,
-): PortableMerge {
+): Promise<PortableMerge> {
   const previous = (row?.baseSnapshot ?? {}) as Partial<ProjectStateRecord>;
   const rtkRecorded = isRtkChoiceRecorded(
     (repo.renderContext as { rtkChoiceRecorded?: unknown } | null)?.rtkChoiceRecorded === true,
@@ -552,6 +570,18 @@ function mergePortable(
   ) {
     intake.incoming['rtk-enabled'] = localSettings['rtk-enabled'];
   }
+  if (intake.accepted['review-watermarks'] !== undefined) {
+    const accepted = await reviewWatermarkIntake(repoPath, intake.accepted['review-watermarks']);
+    // Absence cannot roll review progress back. Invalid/missing foreign proof is never imported.
+    intake.incoming['review-watermarks'] = Object.keys(accepted).length
+      ? accepted
+      : localSettings['review-watermarks'];
+  }
+  const watermarkOrder = await reviewWatermarkOrder(
+    repoPath,
+    localSettings['review-watermarks'],
+    intake.incoming['review-watermarks'],
+  );
   const recordsRtkChoice =
     intake.accepted['rtk-enabled'] !== undefined && (repo.renderContext == null || !rtkRecorded);
   const checkoutEnvironment = checkout.environment && normalizeEnvironment(checkout.environment);
@@ -563,6 +593,7 @@ function mergePortable(
   const hasBase =
     row !== null && (Object.keys(previousSettings).length > 0 || previousEnvironment !== null);
   const merge = mergeProjectState({
+    watermarkOrder,
     base: hasBase ? record(previousSettings, previousEnvironment) : null,
     local: record(localSettings, localEnvironment),
     incoming: record(intake.incoming, checkoutEnvironment ?? localEnvironment),
@@ -580,6 +611,21 @@ function mergePortable(
     ) {
       Object.assign(updates, settingColumnUpdate(name, merged) ?? {});
     }
+    if (name === 'review-watermarks') {
+      const kept = {
+        ...reviewWatermarks(
+          intake.rejected.includes(name) ? previousSettings[name] : intake.accepted[name],
+        ),
+      };
+      const old = reviewWatermarks(previousSettings[name]);
+      for (const key of REVIEW_WATERMARK_KEYS)
+        if (contested.has(`${REVIEW_WATERMARK_UNIT}#${key}`)) {
+          if (old?.[key]) kept[key] = old[key];
+          else delete kept[key];
+        }
+      if (Object.keys(kept).length) baseSettings[name] = kept;
+      continue;
+    }
     const kept =
       contested.has(settingFileName(name)) || intake.rejected.includes(name)
         ? previousSettings[name]
@@ -591,7 +637,12 @@ function mergePortable(
     updates.onboardingEnvironment = environmentColumnOf(mergedEnvironment);
   }
   const contestedNames = new Set(
-    PORTABLE_SETTING_NAMES.filter((name) => contested.has(settingFileName(name))),
+    PORTABLE_SETTING_NAMES.filter(
+      (name) =>
+        contested.has(settingFileName(name)) ||
+        (name === 'review-watermarks' &&
+          merge.conflicts.some(({ unit }) => unit.startsWith(`${REVIEW_WATERMARK_UNIT}#`))),
+    ),
   );
   return {
     conflicts: merge.conflicts,
@@ -733,6 +784,8 @@ export async function syncProjectStateLocked(
       chromeDevtoolsMcpVersion: schema.repositories.chromeDevtoolsMcpVersion,
       reviewDimensions: schema.repositories.reviewDimensions,
       agentRulesOverride: schema.repositories.agentRulesOverride,
+      kbSyncedCommit: schema.repositories.kbSyncedCommit,
+      planSyncedCommit: schema.repositories.planSyncedCommit,
       onboardingEnvironment: schema.repositories.onboardingEnvironment,
       onboardingTooling: schema.repositories.onboardingTooling,
       rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
@@ -841,7 +894,13 @@ export async function syncProjectStateLocked(
   });
   const claimConflicts = merge.conflicts.filter(({ unit }) => isClaimUnit(unit));
   const renderConflicts = merge.conflicts.filter(({ unit }) => !isClaimUnit(unit));
-  const portable = mergePortable(repo, checkout, row);
+  let portable: PortableMerge;
+  try {
+    portable = await mergePortable(repoPath, repo, checkout, row);
+  } catch (err) {
+    if (err instanceof ReviewWatermarkUnavailableError) return refuse(err.message);
+    throw err;
+  }
   const merged = merge.merged.render;
   let wrote = false;
   let columnAfter: unknown = column;
@@ -953,7 +1012,13 @@ export async function syncProjectStateLocked(
     if (!outbox || outbox.writtenRevision >= outbox.revision)
       await markProjectStateDirty(tx, repositoryId);
   }
-  if (portable.stale || toolingStale || checkout.gitDataClaims.length > 0) {
+  if (
+    portable.stale ||
+    toolingStale ||
+    checkout.gitDataClaims.length > 0 ||
+    'kbSyncedCommit' in portable.updates ||
+    'planSyncedCommit' in portable.updates
+  ) {
     await markProjectStateDirty(tx, repositoryId);
   }
   if (portable.rejected.length > 0) {

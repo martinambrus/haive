@@ -1,3 +1,4 @@
+import { reviewWatermarks } from './review-watermarks.js';
 import { stripManagedKnowledgeGlobs, trimGlobSlashes } from '../knowledge-paths.js';
 import { normalizeReviewDimensionIds } from '../review/dimensions.js';
 import { normalizeContent } from '../templates/normalize-content.js';
@@ -26,6 +27,7 @@ export const PORTABLE_SETTING_NAMES = [
   'chrome-devtools-mcp-version',
   'review-dimensions',
   'agent-rules',
+  'review-watermarks',
 ] as const;
 
 export type PortableSettingName = (typeof PORTABLE_SETTING_NAMES)[number];
@@ -40,6 +42,8 @@ export interface PortableSettingColumns {
   chromeDevtoolsMcpVersion: unknown;
   reviewDimensions: unknown;
   agentRulesOverride: unknown;
+  kbSyncedCommit?: unknown;
+  planSyncedCommit?: unknown;
 }
 
 const isStringList = (value: unknown): value is string[] =>
@@ -69,6 +73,11 @@ export function portableSettingsOf(row: PortableSettingColumns): Record<string, 
   if (isStringList(row.reviewDimensions)) settings['review-dimensions'] = row.reviewDimensions;
   // '' is an explicit override, so a column holds nothing only when it is not text.
   if (typeof row.agentRulesOverride === 'string') settings['agent-rules'] = row.agentRulesOverride;
+  const watermarks = reviewWatermarks({
+    kbSyncedCommit: row.kbSyncedCommit,
+    planSyncedCommit: row.planSyncedCommit,
+  });
+  if (watermarks && Object.keys(watermarks).length) settings['review-watermarks'] = watermarks;
   return settings;
 }
 
@@ -142,6 +151,7 @@ const COLUMN_OF = {
   'chrome-devtools-mcp-version': 'chromeDevtoolsMcpVersion',
   'review-dimensions': 'reviewDimensions',
   'agent-rules': 'agentRulesOverride',
+  'review-watermarks': 'kbSyncedCommit',
 } as const satisfies Record<(typeof PORTABLE_SETTING_NAMES)[number], keyof PortableSettingColumns>;
 
 export const isPortableSettingName = (name: string): boolean =>
@@ -227,6 +237,10 @@ export function normalizeSetting(name: string, value: unknown): SettingCheck {
       const ids = isStringList(value) ? normalizeReviewDimensionIds(value) : [];
       return ids.length === 0 ? { ok: false } : valid(ids);
     }
+    case 'review-watermarks': {
+      const watermarks = reviewWatermarks(value);
+      return watermarks ? valid(watermarks) : { ok: false };
+    }
     case 'agent-rules': {
       const checked = normalizeAgentRulesOverride(value);
       return checked.ok ? valid(checked.value) : checked;
@@ -244,6 +258,15 @@ export function settingColumnUpdate(
   value: unknown,
 ): Partial<Record<keyof PortableSettingColumns, unknown>> | null {
   if (!isPortableSettingName(name)) return null;
+  if (name === 'review-watermarks') {
+    const checked = value === undefined ? {} : reviewWatermarks(value);
+    return checked
+      ? {
+          kbSyncedCommit: checked.kbSyncedCommit ?? null,
+          planSyncedCommit: checked.planSyncedCommit ?? null,
+        }
+      : null;
+  }
   const column = COLUMN_OF[name as keyof typeof COLUMN_OF];
   if (value === undefined) return isUnsettableSetting(name) ? { [column]: null } : null;
   const checked = normalizeSetting(name, value);

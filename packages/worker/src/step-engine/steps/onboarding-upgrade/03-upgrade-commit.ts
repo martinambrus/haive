@@ -24,6 +24,7 @@ import {
   readAgentsRulesRegion,
 } from '../onboarding/_rules-files.js';
 import { safeDiskRel } from './02-upgrade-apply.js';
+import { detectOrigin } from '../../../repo/git-push.js';
 import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
 import { gitExec, gitGaveNoAnswer, gitRun } from '../../../repo/git-exec.js';
 
@@ -158,6 +159,8 @@ interface UpgradeCommitDetect {
    *  onboarding never committed. The commit path then runs `git init` first; without
    *  it `git add` dies with "fatal: not a git repository". */
   hasGit: boolean;
+  hasOrigin?: boolean;
+  originError?: string;
 }
 
 interface UpgradeCommitOutput {
@@ -186,11 +189,24 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
     // Classify rather than requireUsableGit: a corrupt `.git` must not fail this step
     // for a user who only wants to skip the commit and finish the upgrade. The commit
     // path re-checks and throws there.
-    return { hasGit: (await gitWorkspaceStatus(ctx.repoPath)) === 'ok' };
+    const hasGit = (await gitWorkspaceStatus(ctx.repoPath)) === 'ok';
+    try {
+      return { hasGit, hasOrigin: hasGit && (await detectOrigin(ctx.repoPath)) };
+    } catch (err) {
+      return { hasGit, hasOrigin: false, originError: safeErrorMessage(err) };
+    }
   },
 
   form(_ctx, detected): FormSchema {
     const fields: FormField[] = [];
+    if (detected.originError)
+      fields.push({
+        type: 'note',
+        id: 'originError',
+        label: 'Origin unavailable',
+        body: detected.originError,
+        variant: 'warning',
+      });
 
     // No git history (onboarding never committed): committing has to create the
     // repository first. The initial commit deliberately holds the WHOLE working tree,
@@ -214,7 +230,7 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
           type: 'checkbox',
           id: 'commit',
           label: 'Initialize git, then stage and commit',
-          default: false,
+          default: detected.hasOrigin === true,
         },
         {
           type: 'text',
@@ -230,7 +246,7 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
         type: 'checkbox',
         id: 'commit',
         label: 'Stage and commit upgrade changes',
-        default: false,
+        default: detected.hasOrigin === true,
       });
     }
 

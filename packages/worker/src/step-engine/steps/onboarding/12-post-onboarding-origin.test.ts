@@ -150,6 +150,18 @@ describe('12-post-onboarding origin read', () => {
     );
   });
 
+  it.each(['none', 'unreadable', 'good'] as const)(
+    'T121 commit defaults on only with usable origin: %s',
+    async (origin) => {
+      const ctx = ctxFor(await repo(origin));
+      const detected = await postOnboardingStep.detect!(ctx);
+      const fields = postOnboardingStep.form!(ctx, detected)!.fields;
+      expect(fields.find((f) => f.id === 'commit')).toMatchObject({ default: origin === 'good' });
+      if (origin === 'good')
+        expect(fields.find((f) => f.id === 'pushToOrigin')).toMatchObject({ default: false });
+    },
+  );
+
   it('still records artifacts and requests no push when applied after an unreadable origin', async () => {
     const ctx = await ctxForRecording(await repo('unreadable'));
     const detected = await postOnboardingStep.detect!(ctx);
