@@ -147,7 +147,12 @@ index is not written, except for the one caller that opts in, the Haive data Sav
 its no-op sets in the real index only the named entries that differ from `HEAD` there, which repairs a sync
 that failed after an earlier commit, leaves a staged entry below a named path alone, and writes nothing
 when none differ. A failed sync is retried with backoff and warned about with the count and at most ten
-paths. A pathspec is `:(literal)`
+paths. The Save also takes back a deletion it committed while the real index was locked: an
+addition staged under `.haive-data/state/` that neither `HEAD` nor the current record holds is
+removed from the index when the state codec recognizes its name (`commit.ts`). It is classified by
+name only and the staged blob is never read, so a file the person staged there under a recognized
+name is unstaged too, though it stays on disk. That is accepted, since the directory is Haive's.
+A pathspec is `:(literal)`
 and the changed list is read with `--no-renames`, since a detected rename would name only the new
 path and leave the deletion out. A merge or cherry-pick in progress is refused, which fails the
 step loudly, as `--only` did. The first commit of a
