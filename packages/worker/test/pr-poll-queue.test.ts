@@ -7,6 +7,8 @@ import { configService, TASK_JOB_NAMES } from '@haive/shared';
 const h = vi.hoisted(() => ({
   /** What the task queue was asked to enqueue. */
   adds: [] as { name: string; data: unknown }[],
+  refusals: 0,
+  tries: 0,
 }));
 
 vi.mock('../src/redis.js', async (importOriginal) => ({
@@ -17,6 +19,8 @@ vi.mock('bullmq', async (importOriginal) => ({
   ...(await importOriginal<typeof import('bullmq')>()),
   Queue: class {
     async add(name: string, data: unknown) {
+      h.tries++;
+      if (h.refusals-- > 0) throw new Error('the queue refused the job');
       h.adds.push({ name, data });
     }
     async close() {}
@@ -83,6 +87,8 @@ function makeDb(step: ParkedStep | undefined, matched: { id: string }[] = [{ id:
 describe('the PR poller finalizing a merged pull request', () => {
   beforeEach(() => {
     h.adds.length = 0;
+    h.refusals = 0;
+    h.tries = 0;
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(NOW);
     vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
@@ -99,6 +105,27 @@ describe('the PR poller finalizing a merged pull request', () => {
     expect(writes).toHaveLength(1);
     expect(writes[0]!.table).toBe(schema.taskSteps);
     expect(writes[0]!.values.formValues).toEqual({});
+    expect(writes[0]!.values.waitingStartedAt).toBeNull();
+    expect(writes[0]!.values.idleMs).toBe(5_000 + TEN_MINUTES_MS);
+    expect(h.adds).toEqual([
+      {
+        name: TASK_JOB_NAMES.ADVANCE_STEP,
+        data: { taskId: TASK_ID, userId: USER_ID, stepId: '13-pr-wait', round: 0, formValues: {} },
+      },
+    ]);
+  });
+
+  it('retries a refused auto-finalize add after closing the wait and queues exactly one advance', async () => {
+    vi.useFakeTimers();
+    const { db, writes } = makeDb(parkedSinceTenMinutes());
+    h.refusals = 1;
+
+    const finalized = runPrPollTick(db);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await finalized;
+
+    expect(h.tries).toBe(2);
+    expect(writes).toHaveLength(1);
     expect(writes[0]!.values.waitingStartedAt).toBeNull();
     expect(writes[0]!.values.idleMs).toBe(5_000 + TEN_MINUTES_MS);
     expect(h.adds).toEqual([

@@ -505,10 +505,12 @@ export async function findQueuedInvocationStepIds(
  *  waiting for capacity. Mirrors deriveSlotWait rule-for-rule as fed by
  *  findQueuedInvocationStepIds (runtime park = pending + a live wait marker; agent park =
  *  waiting_cli OR running, plus an unstarted invocation and NOTHING running — see that helper
- *  for why a fan-out step needs the second half). `running` belongs here because the mining /
- *  DAG fan-out barrier reports `waiting_cli` upward without writing it to the step row, so a
- *  step blocked on N queued agents keeps `running` and a status-only test listed it as
- *  working. Kept in lockstep with AGENT_PARK_STATUSES in @haive/shared's deriveSlotWait —
+ *  for why a fan-out step needs the second half). `running` stays here for the moment between a
+ *  mining / DAG fan-out barrier and the hand-off: the barrier reports `waiting_cli` upward
+ *  without writing it to the step row, and the hand-off (`handleResult`) then writes it to a row
+ *  still reading `running`. Before the hand-off wrote it a step blocked on N queued agents kept
+ *  `running` and a status-only test listed it as working. Kept in lockstep with
+ *  AGENT_PARK_STATUSES in @haive/shared's deriveSlotWait —
  *  when these two disagree the badge and the filter contradict each other. Scoped to
  *  current_step_id/current_round for the same reason the helper is — a stale marker on an
  *  older round must not make a working task look queued. Caller adds the

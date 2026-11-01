@@ -5,6 +5,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { createDatabase, schema, type Database } from '@haive/database';
 import { configService, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
 import { autoResumeFailedStep } from '../src/queues/_step-reset.js';
+import { resumeStepIfLinked } from '../src/queues/cli-exec/resolvers.js';
+import { markCliParkBegin } from '../src/queues/cli-park-timing.js';
 import { holdStepAdvance, processTaskJob } from '../src/queues/task-queue.js';
 import {
   redriveStalledTasks,
@@ -15,15 +17,19 @@ import {
 import { stepRegistry } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 
-// The stalled sweep and a running row nothing drives (T385 item 1's twin, and T348): a task whose
-// current row is `running` is re-driven once both stamps are older than the cutoff, the task queue
+// The stalled sweep and a running or waiting_cli row nothing drives (T385 item 1's twin, T348 and
+// T498): a task whose current row is `running`, or `waiting_cli` with every run ended (its
+// continuation add lost), is re-driven once both stamps are older than the cutoff, the task queue
 // owes it no job (a START included: it runs the first step inline) and the row has no live run
 // (a cli_invocations row of the row with ended_at and superseded_at NULL, started or not), by the same
-// fence. Real Postgres, fake queue deps, real clock offsets.
+// fence. A waiting_cli row also waits out the cutoff from the end of its last run, and the run
+// recovery of a parked step leaves a step a pass of this process is on. Real Postgres, fake queue
+// deps, real clock offsets.
 
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   adds: [] as { name: string; data: Record<string, unknown>; opts: Record<string, unknown> }[],
+  addRefused: false,
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -36,6 +42,7 @@ vi.mock('bullmq', async (importOriginal) => ({
   ...(await importOriginal<typeof import('bullmq')>()),
   Queue: class {
     async add(name: string, data: Record<string, unknown>, opts?: Record<string, unknown>) {
+      if (h.addRefused) throw new Error('the queue refused the job');
       h.adds.push({ name, data, opts: opts ?? {} });
     }
   },
@@ -104,6 +111,8 @@ const none = (): TaskQueueOwed => ({ steps: new Set(), starts: new Set() });
 function rig(
   opts: {
     queued?: () => Promise<TaskQueueOwed | null> | TaskQueueOwed | null;
+    /** The runs a cli-exec job still owes, or null when that queue cannot be read. */
+    owed?: () => Set<string> | null;
     enqueue?: (advance: Advance) => Promise<void>;
     retryDelaysMs?: number[];
   } = {},
@@ -129,13 +138,13 @@ function rig(
       seen.seam++;
       return opts.queued ? await opts.queued() : none();
     },
-    queuedInvocationIds: async () => new Set<string>(),
+    queuedInvocationIds: async () => (opts.owed ? opts.owed() : new Set<string>()),
     redriveRetryDelaysMs: opts.retryDelaysMs ?? [],
   };
   return { deps, advances, failed, seen };
 }
 
-describe.skipIf(!url)('the stalled sweep and a running row nothing drives, on Postgres', () => {
+describe.skipIf(!url)('the stalled sweep and a running or waiting_cli row, on Postgres', () => {
   const EMAIL_INDEX = 'stalled-running-test-user';
   let db: Database;
   let userId: string;
@@ -332,6 +341,7 @@ describe.skipIf(!url)('the stalled sweep and a running row nothing drives, on Po
 
   beforeEach(async () => {
     h.adds.length = 0;
+    h.addRefused = false;
     calls.detect = calls.apply = 0;
     vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
     vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
@@ -587,8 +597,8 @@ describe.skipIf(!url)('the stalled sweep and a running row nothing drives, on Po
       },
       {
         id: 'L6',
-        why: 'the row is waiting_cli, which has its own path',
-        seed: async () => (await running({}, { status: 'waiting_cli' })).taskId,
+        why: 'the row is waiting_cli and a started run is live on it',
+        seed: () => live('cli', true, { status: 'waiting_cli' }),
       },
       {
         id: 'L7',
@@ -893,7 +903,7 @@ describe.skipIf(!url)('the stalled sweep and a running row nothing drives, on Po
       ).toHaveLength(1);
     });
 
-    it('E2: an advance with no epoch (as the usage poller queues one) after the re-driven pass is dropped too', async () => {
+    it('E2: an advance with no epoch (as a form submit queues one) after the re-driven pass is dropped too', async () => {
       const { taskId } = await running();
       const { deps, advances } = rig();
       await expect(
@@ -929,6 +939,652 @@ describe.skipIf(!url)('the stalled sweep and a running row nothing drives, on Po
 
       await processTaskJob(job(TASK_JOB_NAMES.ADVANCE_STEP, { ...advances[0]! }));
       expect(calls.apply, 'the re-driven job ran the step once').toBe(1);
+    });
+  });
+
+  /** A task on a step parked on its CLI, both stamps overdue and the row marked as `markCliParkBegin`
+   *  leaves it when the last run ended (the wait is open, the row stamped then). */
+  const parkedOnCli = (
+    taskOver: Partial<typeof schema.tasks.$inferInsert> = {},
+    rowOver: Partial<typeof schema.taskSteps.$inferInsert> = {},
+  ) =>
+    running(taskOver, {
+      status: 'waiting_cli',
+      statusMessage: 'Waiting for AI analysis...',
+      waitingStartedAt: ago(OVERDUE),
+      ...rowOver,
+    });
+  const endedRun = (
+    taskId: string,
+    rowId: string,
+    over: Partial<typeof schema.cliInvocations.$inferInsert> = {},
+  ) =>
+    seedRun(taskId, rowId, {
+      exitCode: 0,
+      startedAt: ago(OVERDUE + MIN),
+      endedAt: ago(OVERDUE),
+      ...over,
+    });
+
+  describe('a waiting_cli row whose runs have all ended, and whose continuation add was lost', () => {
+    it('W1: is re-driven once, at the next epoch, and the sweep writes nothing', async () => {
+      const { taskId, rowId } = await parkedOnCli();
+      await endedRun(taskId, rowId);
+      const before = await state(taskId);
+      // A job queued for ANOTHER task, and a START for a third, hold nothing of this one.
+      const { deps, advances, seen } = rig({
+        queued: () => ({ steps: new Set([randomUUID()]), starts: new Set([randomUUID()]) }),
+      });
+      await expect(
+        redriveStalledTasks(db, deps, { staleMs: STALE_MS }),
+        'the sweep took the parked row whose only run ended',
+      ).resolves.toBe(1);
+      expect(seen.seam, 'the queue was read once').toBe(1);
+      await expectRedriven(taskId, before, advances);
+    });
+
+    it('W2: is re-driven when its only run was superseded', async () => {
+      const { taskId, rowId } = await parkedOnCli();
+      await seedRun(taskId, rowId, { startedAt: ago(9 * MIN), supersededAt: ago(8 * MIN) });
+      const before = await state(taskId);
+      const { deps, advances } = rig();
+      await expect(redriveStalledTasks(db, deps, { staleMs: STALE_MS })).resolves.toBe(1);
+      await expectRedriven(taskId, before, advances);
+    });
+
+    it('W3: is re-driven when it has no run at all', async () => {
+      const { taskId } = await parkedOnCli();
+      const before = await state(taskId);
+      const { deps, advances } = rig();
+      await expect(redriveStalledTasks(db, deps, { staleMs: STALE_MS })).resolves.toBe(1);
+      await expectRedriven(taskId, before, advances);
+    });
+
+    it('W4: is re-driven when it is a fan-out row whose agents all ended, writing nothing to the row or its agents', async () => {
+      const { taskId, rowId } = await parkedOnCli();
+      const first = await endedRun(taskId, rowId, { mode: 'agent_mining' });
+      const second = await endedRun(taskId, rowId, { mode: 'agent_mining', exitCode: 1 });
+      await db.insert(schema.taskStepAgentMinings).values([
+        { taskStepId: rowId, agentId: 'agent-done', status: 'done', cliInvocationId: first },
+        { taskStepId: rowId, agentId: 'agent-failed', status: 'failed', cliInvocationId: second },
+      ]);
+      const before = await state(taskId);
+      expect(before.minings, 'the fan-out seeds are in place').toHaveLength(2);
+      const { deps, advances } = rig();
+      await expect(redriveStalledTasks(db, deps, { staleMs: STALE_MS })).resolves.toBe(1);
+      await expectRedriven(taskId, before, advances);
+    });
+
+    it('W5: is re-driven when the row carries no park marker, since the marker is not what makes it stuck', async () => {
+      const { taskId, rowId } = await parkedOnCli({}, { waitingStartedAt: null });
+      await endedRun(taskId, rowId);
+      const before = await state(taskId);
+      const { deps, advances } = rig();
+      await expect(redriveStalledTasks(db, deps, { staleMs: STALE_MS })).resolves.toBe(1);
+      await expectRedriven(taskId, before, advances);
+    });
+
+    it('W6: is re-driven at boot (staleMs 0) though both stamps are fresh, when no job exists', async () => {
+      const { taskId, rowId } = await parkedOnCli(
+        { updatedAt: ago(5_000) },
+        { updatedAt: ago(5_000) },
+      );
+      await endedRun(taskId, rowId);
+      const before = await state(taskId);
+      const { deps, advances } = rig();
+      await expect(redriveStalledTasks(db, deps, { staleMs: 0 })).resolves.toBe(1);
+      await expectRedriven(taskId, before, advances);
+    });
+
+    it('W6b: is re-driven at boot (staleMs 0) though its last run ended seconds ago, since boot has no worker to hand it back', async () => {
+      const { taskId, rowId } = await parkedOnCli(
+        { updatedAt: ago(5_000) },
+        { updatedAt: ago(5_000) },
+      );
+      await endedRun(taskId, rowId, { endedAt: ago(5_000) });
+      const before = await state(taskId);
+      const { deps, advances } = rig();
+      await expect(redriveStalledTasks(db, deps, { staleMs: 0 })).resolves.toBe(1);
+      await expectRedriven(taskId, before, advances);
+    });
+
+    it('WP1: leaves a row whose last run just ended to its continuation, since the end of a run stamps the row', async () => {
+      const { taskId, rowId } = await parkedOnCli({}, { waitingStartedAt: null });
+      await endedRun(taskId, rowId, { endedAt: new Date() });
+      // What the cli-exec handler does as the last run ends, ahead of queueing the continuation.
+      await markCliParkBegin(db, rowId);
+      const before = await state(taskId);
+      expect(
+        ms(before.steps[0]!.updatedAt),
+        'the row was stamped as the run ended, so the cutoff counts from there',
+      ).toBeGreaterThan(Date.now() - FRESH);
+      const { deps, advances } = rig();
+      await expect(redriveStalledTasks(db, deps, { staleMs: STALE_MS })).resolves.toBe(0);
+      expect(advances).toEqual([]);
+      expect(await state(taskId), 'and nothing was written').toEqual(before);
+    });
+
+    // The handler stamps the row as a side effect of the run's end (WP1), after the end commits and
+    // not at all when the marker is already set or the stamp throws. The cutoff must not rest on it:
+    // it counts from the end of the row's last run too.
+    it.each([
+      { what: 'ended', run: { endedAt: new Date() }, aged: { endedAt: ago(OVERDUE) } },
+      {
+        what: 'was superseded',
+        run: { endedAt: ago(OVERDUE), supersededAt: new Date() },
+        aged: { supersededAt: ago(OVERDUE) },
+      },
+    ])(
+      'WP2: leaves a row whose last run just $what to its continuation, though nothing has stamped the row yet',
+      async ({ run, aged }) => {
+        const { taskId, rowId } = await parkedOnCli();
+        const runId = await endedRun(taskId, rowId, run);
+        const before = await state(taskId);
+        expect(
+          ms(before.steps[0]!.updatedAt),
+          'the row was not stamped as the run ended: its own stamp is overdue',
+        ).toBeLessThan(Date.now() - STALE_MS);
+        const { deps, advances, seen } = rig();
+        await expect(
+          redriveStalledTasks(db, deps, { staleMs: STALE_MS }),
+          'the sweep left the row to the continuation that is on its way',
+        ).resolves.toBe(0);
+        expect(seen.seam, 'the candidate read already left it: the queue was never read').toBe(0);
+        expect(advances).toEqual([]);
+        expect(await state(taskId), 'and nothing was written').toEqual(before);
+
+        // It only waits: a run that ended (or was superseded) before the cutoff is a lost continuation.
+        await db.update(schema.cliInvocations).set(aged).where(eq(schema.cliInvocations.id, runId));
+        const later = rig();
+        await expect(
+          redriveStalledTasks(db, later.deps, { staleMs: STALE_MS }),
+          'the sweep took the row once the run ended before the cutoff',
+        ).resolves.toBe(1);
+        expect(later.advances).toHaveLength(1);
+      },
+    );
+
+    it('W7: is what a refused continuation add leaves behind, and the sweep takes it', async () => {
+      const { taskId, rowId } = await parkedOnCli();
+      const runId = await endedRun(taskId, rowId);
+      // Every ask is refused, so the add's own retries (REDRIVE_RETRY_DELAYS_MS: 1 s, then 3 s) run
+      // out before the refusal reaches the caller.
+      h.addRefused = true;
+      await expect(
+        resumeStepIfLinked(
+          { invocationId: runId, taskStepId: rowId, taskId, userId } as unknown as Parameters<
+            typeof resumeStepIfLinked
+          >[0],
+          true,
+          null,
+        ),
+        'the run ended and its continuation could not be queued',
+      ).rejects.toThrow('the queue refused the job');
+      h.addRefused = false;
+      expect(h.adds, 'no job exists for the task').toEqual([]);
+      const before = await state(taskId);
+      expect(before.steps[0]).toMatchObject({ status: 'waiting_cli' });
+      const { deps, advances } = rig();
+      await expect(
+        redriveStalledTasks(db, deps, { staleMs: STALE_MS }),
+        'the stranded row is taken between boots',
+      ).resolves.toBe(1);
+      await expectRedriven(taskId, before, advances);
+    });
+  });
+
+  describe('a waiting_cli row the sweep leaves alone', () => {
+    interface Alone {
+      id: string;
+      why: string;
+      seed: () => Promise<string>;
+      queued?: (taskId: string) => TaskQueueOwed | null;
+      owed?: () => Set<string> | null;
+      staleMs?: number;
+    }
+    /** The runs a cli-exec job owes, for the cases that say so. */
+    const owedRuns = new Set<string>();
+    beforeEach(() => owedRuns.clear());
+    const withRun = async (
+      over: Partial<typeof schema.cliInvocations.$inferInsert>,
+      taskOver: Partial<typeof schema.tasks.$inferInsert> = {},
+      rowOver: Partial<typeof schema.taskSteps.$inferInsert> = {},
+    ) => {
+      const { taskId, rowId } = await parkedOnCli(taskOver, rowOver);
+      const runId = await seedRun(taskId, rowId, over);
+      return { taskId, runId };
+    };
+    const statuses = ['waiting_user', 'waiting_pr', 'failed', 'paused'] as const;
+    const ALONE: Alone[] = [
+      {
+        id: 'WL1',
+        why: 'a started cli run is live on the row: a worker is behind the step',
+        seed: async () => (await withRun({ startedAt: ago(8 * MIN) })).taskId,
+      },
+      {
+        id: 'WL2',
+        why: 'a started agent run is live beside an ended one',
+        seed: async () => {
+          const { taskId, rowId } = await parkedOnCli();
+          await endedRun(taskId, rowId, { mode: 'agent_mining' });
+          await seedRun(taskId, rowId, { mode: 'agent_mining', startedAt: ago(8 * MIN) });
+          return taskId;
+        },
+      },
+      {
+        id: 'WL3',
+        why: 'an unstarted run is live and a cli-exec job still owes it',
+        seed: async () => {
+          const { taskId, runId } = await withRun({});
+          owedRuns.add(runId);
+          return taskId;
+        },
+        owed: () => owedRuns,
+      },
+      {
+        id: 'WL4',
+        why: 'an unstarted run was recorded within the cutoff, which a live worker may still be starting',
+        seed: async () => (await withRun({ createdAt: new Date() })).taskId,
+      },
+      {
+        id: 'WL5',
+        why: 'an unstarted run is live and the cli-exec queue cannot be read',
+        seed: async () => (await withRun({})).taskId,
+        owed: () => null,
+      },
+      {
+        id: 'WL6',
+        why: 'the queue holds a job for the task',
+        seed: async () => (await parkedOnCli()).taskId,
+        queued: (taskId) => ({ steps: new Set([taskId]), starts: new Set() }),
+      },
+      {
+        id: 'WL7',
+        why: 'the queue holds a START for the task, whose job runs the first step inline',
+        seed: async () => (await parkedOnCli()).taskId,
+        queued: (taskId) => ({ steps: new Set(), starts: new Set([taskId]) }),
+      },
+      {
+        id: 'WL8',
+        why: 'its row stamp is fresh: the run just ended and its continuation is on its way',
+        seed: async () => (await parkedOnCli({}, { updatedAt: ago(FRESH) })).taskId,
+      },
+      {
+        id: 'WL9',
+        why: 'its own stamp is fresh',
+        seed: async () => (await parkedOnCli({ updatedAt: ago(FRESH) })).taskId,
+      },
+      {
+        id: 'WL10',
+        why: 'the task is dead',
+        seed: async () => (await parkedOnCli({ deadAt: ago(OVERDUE) })).taskId,
+      },
+      ...statuses.map((status, index) => ({
+        id: `WL11.${index + 1}`,
+        why: `the task is ${status}, not running`,
+        seed: async () => (await parkedOnCli({ status })).taskId,
+      })),
+      {
+        id: 'WL12',
+        why: 'the task queue cannot be read',
+        seed: async () => (await parkedOnCli()).taskId,
+        queued: () => null,
+      },
+      {
+        id: 'WL13',
+        why: 'boot finds a live run on the row',
+        seed: async () =>
+          (
+            await withRun(
+              { startedAt: ago(8 * MIN) },
+              { updatedAt: ago(5_000) },
+              { updatedAt: ago(5_000) },
+            )
+          ).taskId,
+        staleMs: 0,
+      },
+      {
+        id: 'WL14',
+        why: 'boot finds its job still queued',
+        seed: async () =>
+          (await parkedOnCli({ updatedAt: ago(5_000) }, { updatedAt: ago(5_000) })).taskId,
+        queued: (taskId) => ({ steps: new Set([taskId]), starts: new Set() }),
+        staleMs: 0,
+      },
+      {
+        id: 'WL15',
+        why: 'boot finds its START queued',
+        seed: async () =>
+          (await parkedOnCli({ updatedAt: ago(5_000) }, { updatedAt: ago(5_000) })).taskId,
+        queued: (taskId) => ({ steps: new Set(), starts: new Set([taskId]) }),
+        staleMs: 0,
+      },
+    ];
+
+    it.each(ALONE)('$id: takes nothing when $why', async ({ seed, queued, owed, staleMs }) => {
+      const taskId = await seed();
+      const before = await state(taskId);
+      const { deps, advances, failed, seen } = rig({
+        ...(queued ? { queued: () => queued(taskId) } : {}),
+        ...(owed ? { owed } : {}),
+      });
+      await expect(redriveStalledTasks(db, deps, { staleMs: staleMs ?? STALE_MS })).resolves.toBe(
+        0,
+      );
+      expect(advances, 'nothing was queued').toEqual([]);
+      expect(failed, 'no task was failed').toEqual([]);
+      expect(seen.start, 'no START was queued').toBe(0);
+      expect(await state(taskId), 'nothing was written').toEqual(before);
+    });
+
+    it.each([
+      { mode: 'cli' as const, started: true },
+      { mode: 'agent_mining' as const, started: true },
+      { mode: 'dag_parallel' as const, started: true },
+    ])('WL16: a live $mode run never enters the task-locking fence', async ({ mode }) => {
+      const { taskId } = await withRun({ mode, startedAt: ago(8 * MIN) });
+      const before = await state(taskId);
+      const transaction = vi.spyOn(db, 'transaction');
+      const { deps, advances } = rig();
+      try {
+        await expect(redriveStalledTasks(db, deps, { staleMs: STALE_MS })).resolves.toBe(0);
+        expect(
+          transaction,
+          'no candidate reached the fence, so no task row was locked',
+        ).not.toHaveBeenCalled();
+        expect(advances).toEqual([]);
+        expect(await state(taskId)).toEqual(before);
+      } finally {
+        transaction.mockRestore();
+      }
+    });
+  });
+
+  describe('a waiting_cli step a pass of this process is on, whose job Redis lost', () => {
+    it('WH1: is left alone while the pass holds the step, and taken once the hold is released', async () => {
+      const { taskId, rowId } = await parkedOnCli();
+      await endedRun(taskId, rowId);
+      const before = await state(taskId);
+      const release = await holdStepAdvance(
+        {
+          id: randomUUID(),
+          data: { taskId, userId, stepId: S, round: ROUND },
+          moveToDelayed: async () => undefined,
+        },
+        undefined,
+      );
+      const held = rig();
+      await expect(redriveStalledTasks(db, held.deps, { staleMs: STALE_MS })).resolves.toBe(0);
+      expect(held.advances, 'nothing was queued while a pass held the step').toEqual([]);
+      expect(await state(taskId), 'and nothing was written').toEqual(before);
+      release!();
+      const free = rig();
+      await expect(redriveStalledTasks(db, free.deps, { staleMs: STALE_MS })).resolves.toBe(1);
+      expect(free.advances, 'the hold, not the row, was what protected it').toHaveLength(1);
+    });
+  });
+
+  describe('the fence of a waiting_cli row, against what happens between the candidate read and the fence', () => {
+    interface Race {
+      id: string;
+      what: string;
+      epoch: number;
+      mutate: (taskId: string, rowId: string) => Promise<unknown>;
+    }
+    const onTask = (taskId: string) => eq(schema.tasks.id, taskId);
+    const onRow = (rowId: string) => eq(schema.taskSteps.id, rowId);
+    const RACES: Race[] = [
+      {
+        id: 'WQ1',
+        what: 'a pass records an unstarted run for the next wave',
+        epoch: E,
+        mutate: async (taskId, rowId) => {
+          await seedRun(taskId, rowId, { createdAt: new Date() });
+        },
+      },
+      {
+        id: 'WQ2',
+        what: 'a started run is recorded for the row',
+        epoch: E,
+        mutate: async (taskId, rowId) => {
+          await seedRun(taskId, rowId, {
+            mode: 'agent_mining',
+            createdAt: new Date(),
+            startedAt: new Date(),
+          });
+        },
+      },
+      {
+        id: 'WQ3',
+        what: 'a pass writes the row',
+        epoch: E,
+        mutate: (_t, rowId) =>
+          db.update(schema.taskSteps).set({ updatedAt: new Date() }).where(onRow(rowId)),
+      },
+      {
+        id: 'WQ4',
+        what: 'the continuation finishes the step',
+        epoch: E,
+        mutate: (_t, rowId) =>
+          db
+            .update(schema.taskSteps)
+            .set({ status: 'done', endedAt: new Date(), updatedAt: new Date() })
+            .where(onRow(rowId)),
+      },
+      {
+        id: 'WQ5',
+        what: 'a Resume moves the epoch',
+        epoch: E + 1,
+        mutate: (taskId) =>
+          db
+            .update(schema.tasks)
+            .set({ orchestrationEpoch: E + 1 })
+            .where(onTask(taskId)),
+      },
+      {
+        id: 'WQ6',
+        what: 'the pointer moves to another step',
+        epoch: E,
+        mutate: (taskId) =>
+          db.update(schema.tasks).set({ currentStepId: OTHER }).where(onTask(taskId)),
+      },
+      {
+        id: 'WQ7',
+        what: 'the task is stamped',
+        epoch: E,
+        mutate: (taskId) =>
+          db.update(schema.tasks).set({ updatedAt: new Date() }).where(onTask(taskId)),
+      },
+      {
+        id: 'WQ8',
+        what: 'a Stop fails the task',
+        epoch: E,
+        mutate: (taskId) =>
+          db
+            .update(schema.tasks)
+            .set({ status: 'failed', errorMessage: 'Stopped by user' })
+            .where(onTask(taskId)),
+      },
+      {
+        id: 'WQ9',
+        what: 'the task is marked dead',
+        epoch: E,
+        mutate: (taskId) =>
+          db.update(schema.tasks).set({ deadAt: new Date() }).where(onTask(taskId)),
+      },
+      {
+        id: 'WQ10',
+        what: 'a run of the row ends and the handler has not stamped the row yet',
+        epoch: E,
+        mutate: async (taskId, rowId) => {
+          await seedRun(taskId, rowId, { startedAt: ago(MIN), endedAt: new Date() });
+        },
+      },
+      {
+        id: 'WQ11',
+        what: 'a run of the row is superseded',
+        epoch: E,
+        mutate: (_t, rowId) =>
+          db
+            .update(schema.cliInvocations)
+            .set({ supersededAt: new Date() })
+            .where(eq(schema.cliInvocations.taskStepId, rowId)),
+      },
+    ];
+
+    it.each(RACES)('$id: no bump and no enqueue when $what', async ({ mutate, epoch }) => {
+      const { taskId, rowId } = await parkedOnCli();
+      await endedRun(taskId, rowId);
+      const { deps, advances, seen } = rig({
+        queued: async () => {
+          await mutate(taskId, rowId);
+          return none();
+        },
+      });
+      const redriven = await redriveStalledTasks(db, deps, { staleMs: STALE_MS });
+      expect(seen.seam, 'the candidate was read and the race window was reached').toBe(1);
+      expect(redriven, 'the fence refused').toBe(0);
+      expect(advances, 'nothing was queued').toEqual([]);
+      expect(await epochOf(taskId), 'no epoch bump of the sweep').toBe(epoch);
+    });
+  });
+
+  describe('throttle and failure of a waiting_cli re-drive', () => {
+    it('WF1: a second pass right after a re-drive does nothing', async () => {
+      const { taskId, rowId } = await parkedOnCli();
+      await endedRun(taskId, rowId);
+      const { deps, advances } = rig();
+      await expect(redriveStalledTasks(db, deps, { staleMs: STALE_MS })).resolves.toBe(1);
+      await expect(redriveStalledTasks(db, deps, { staleMs: STALE_MS })).resolves.toBe(0);
+      expect(advances, 'one advance in all').toHaveLength(1);
+      expect(await epochOf(taskId), 'one bump in all').toBe(E + 1);
+    });
+
+    it('WF2: an enqueue that keeps failing hands the epoch back, and the next overdue pass re-drives', async () => {
+      const { taskId, rowId } = await parkedOnCli();
+      await endedRun(taskId, rowId);
+      let refusing = true;
+      const { deps, advances, seen } = rig({
+        retryDelaysMs: [0, 0],
+        enqueue: async () => {
+          if (refusing) throw new Error('the queue refused the job');
+        },
+      });
+      await expect(redriveStalledTasks(db, deps, { staleMs: STALE_MS })).resolves.toBe(0);
+      expect(seen.attempts, 'the sweep tried to queue the re-drive').toBeGreaterThanOrEqual(1);
+      expect(await epochOf(taskId), 'the epoch is the one the sweep read').toBe(E);
+
+      refusing = false;
+      await db
+        .update(schema.tasks)
+        .set({ updatedAt: ago(OVERDUE) })
+        .where(eq(schema.tasks.id, taskId));
+      await expect(redriveStalledTasks(db, deps, { staleMs: STALE_MS })).resolves.toBe(1);
+      expect(advances).toEqual([{ taskId, userId, stepId: S, round: ROUND, epoch: E + 1 }]);
+    });
+  });
+
+  describe('the re-driven job of a waiting_cli row, run by the real handler', () => {
+    it('WE1: resumes the step once and hands off; the continuation that turns up late, at the old epoch, is dropped', async () => {
+      const { taskId, rowId } = await parkedOnCli(
+        {},
+        {
+          detectOutput: {},
+          formSchema: { title: S, fields: [] },
+          formValues: {},
+        },
+      );
+      await endedRun(taskId, rowId);
+      const { deps, advances } = rig();
+      await expect(
+        redriveStalledTasks(db, deps, { staleMs: STALE_MS }),
+        'the sweep took the parked row',
+      ).resolves.toBe(1);
+      const redrive = advances[0]!;
+      expect(redrive).toEqual({ taskId, userId, stepId: S, round: ROUND, epoch: E + 1 });
+
+      await processTaskJob(job(TASK_JOB_NAMES.ADVANCE_STEP, { ...redrive }));
+      expect(calls.apply, 'the re-driven job resumed the step: its apply ran once').toBe(1);
+      const finished = (await state(taskId)).steps.find((step) => step.stepId === S);
+      expect(finished?.status).toBe('done');
+      const handoffs = h.adds.filter((add) => add.name === TASK_JOB_NAMES.ADVANCE_STEP);
+      expect(handoffs, 'one hand-off, to the next step of the run list').toHaveLength(1);
+      expect(handoffs[0]!.data).toMatchObject({ taskId, stepId: OTHER });
+
+      // The continuation the lost add would have been, stamped with the epoch the sweep replaced.
+      await processTaskJob(
+        job(TASK_JOB_NAMES.ADVANCE_STEP, { taskId, userId, stepId: S, round: ROUND, epoch: E }),
+      );
+      expect(calls.apply, 'the old-epoch job was dropped: the step did not run again').toBe(1);
+      expect(
+        h.adds.filter((add) => add.name === TASK_JOB_NAMES.ADVANCE_STEP),
+        'and it handed nothing off',
+      ).toHaveLength(1);
+    });
+  });
+
+  describe('the run recovery of a parked step, beside a pass of this process', () => {
+    /** The T385 arm: a parked step whose recorded run no cli-exec job owes any more. */
+    const lostRun = async () => {
+      const { taskId, rowId } = await parkedOnCli();
+      const runId = await seedRun(taskId, rowId, {});
+      return { taskId, rowId, runId };
+    };
+    const hold = (taskId: string) =>
+      holdStepAdvance(
+        {
+          id: randomUUID(),
+          data: { taskId, userId, stepId: S, round: ROUND },
+          moveToDelayed: async () => undefined,
+        },
+        undefined,
+      );
+    const runOf = async (runId: string) =>
+      (
+        await db.select().from(schema.cliInvocations).where(eq(schema.cliInvocations.id, runId))
+      )[0]!;
+
+    it('A1 (control): recovers the step when no pass holds it: the lost run is ended and the step re-driven at the next epoch', async () => {
+      const { taskId, runId } = await lostRun();
+      const { deps, advances } = rig();
+      await expect(
+        redriveStalledTasks(db, deps, { staleMs: STALE_MS }),
+        'the arm took the step whose run no job owes',
+      ).resolves.toBe(1);
+      expect((await runOf(runId)).endedAt, 'the never-queued run was ended').not.toBeNull();
+      expect(await epochOf(taskId)).toBe(E + 1);
+      expect(advances).toEqual([{ taskId, userId, stepId: S, round: ROUND, epoch: E + 1 }]);
+    });
+
+    it('A2: leaves the step alone while a pass of this process holds it, whose job Redis lost: no run ended, no bump, no advance', async () => {
+      const { taskId, runId } = await lostRun();
+      const before = await state(taskId);
+      const release = await hold(taskId);
+      try {
+        const { deps, advances } = rig();
+        await expect(redriveStalledTasks(db, deps, { staleMs: STALE_MS })).resolves.toBe(0);
+        expect((await runOf(runId)).endedAt, 'the pass would have lost the run').toBeNull();
+        expect(await epochOf(taskId), 'and been aborted at its next poll by a bump').toBe(E);
+        expect(advances).toEqual([]);
+        expect(await state(taskId), 'and nothing was written').toEqual(before);
+      } finally {
+        release!();
+      }
+    });
+
+    it('A3: recovers the step once the pass lets go', async () => {
+      const { taskId, runId } = await lostRun();
+      const release = await hold(taskId);
+      const held = rig();
+      await expect(redriveStalledTasks(db, held.deps, { staleMs: STALE_MS })).resolves.toBe(0);
+      release!();
+      const free = rig();
+      await expect(redriveStalledTasks(db, free.deps, { staleMs: STALE_MS })).resolves.toBe(1);
+      expect(
+        (await runOf(runId)).endedAt,
+        'the hold, not the run, was what protected it',
+      ).not.toBeNull();
+      expect(free.advances).toHaveLength(1);
     });
   });
 });
