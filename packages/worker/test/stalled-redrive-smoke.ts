@@ -283,7 +283,7 @@ async function main(): Promise<void> {
       )[0]!.id;
     const addRun = async (
       taskId: string,
-      opts: { mining?: boolean; createdAt?: Date; startedAt?: Date } = {},
+      opts: { mining?: boolean; createdAt?: Date; startedAt?: Date; endedAt?: Date } = {},
     ) => {
       const [run] = await db
         .insert(schema.cliInvocations)
@@ -294,6 +294,7 @@ async function main(): Promise<void> {
           prompt: 'stalled-redrive-smoke',
           createdAt: opts.createdAt ?? longAgo,
           startedAt: opts.startedAt ?? null,
+          endedAt: opts.endedAt ?? null,
         })
         .returning({ id: schema.cliInvocations.id });
       return run!.id;
@@ -317,6 +318,14 @@ async function main(): Promise<void> {
       await addRun(miningTaskId, { mining: true }),
     ];
     const miningOwedId = await addRun(miningTaskId, { mining: true });
+
+    // A step parked on its CLI whose runs have all ended: the continuation the last one queued was lost.
+    const endedRunTaskId = await parked('ended-run');
+    await addRun(endedRunTaskId, { startedAt: longAgo, endedAt: longAgo });
+    const endedRunQueuedTaskId = await parked('ended-run-queued');
+    await addRun(endedRunQueuedTaskId, { startedAt: longAgo, endedAt: longAgo });
+    const startedRunTaskId = await parked('started-run');
+    await addRun(startedRunTaskId, { startedAt: longAgo });
 
     // A step re-opened as running (a Resume, retry_ai, the allowance auto-resume) whose advance never
     // reached the queue; one with a run still to wait for; one a START is queued for (it runs the
@@ -433,6 +442,7 @@ async function main(): Promise<void> {
         return {
           steps: new Set([
             withJobTaskId,
+            endedRunQueuedTaskId,
             answeredFormQueuedTaskId,
             waitingUserAnsweredQueuedTaskId,
             waitingPrAnsweredQueuedTaskId,
@@ -484,7 +494,27 @@ async function main(): Promise<void> {
       'a running row the queue holds a START for is left alone',
       (await epochOf(reopenedStartTaskId)) === 3,
     );
-    check('a stale waiting_cli row is left alone', (await epochOf(waitingCliTaskId)) === 3);
+    check(
+      'a stale waiting_cli row with no run left to wait for is re-driven',
+      (await epochOf(waitingCliTaskId)) === 4,
+    );
+    const endedRunAdvances = advances.filter((a) => a.taskId === endedRunTaskId);
+    check(
+      'a waiting_cli row whose runs all ended, its continuation lost, is re-driven once at the new epoch',
+      (await epochOf(endedRunTaskId)) === 4 &&
+        endedRunAdvances.length === 1 &&
+        endedRunAdvances[0]?.stepId === 'smoke-step' &&
+        endedRunAdvances[0]?.epoch === 4,
+      { epoch: await epochOf(endedRunTaskId), endedRunAdvances },
+    );
+    check(
+      'a waiting_cli row whose runs all ended and whose task the queue still owes a job is left alone',
+      (await epochOf(endedRunQueuedTaskId)) === 3,
+    );
+    check(
+      'a waiting_cli row with a started run is left alone',
+      (await epochOf(startedRunTaskId)) === 3,
+    );
     check(
       'a waiting_user task with a stale pending row is left alone',
       (await epochOf(waitingUserTaskId)) === 3,

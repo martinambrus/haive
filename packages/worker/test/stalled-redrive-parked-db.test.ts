@@ -443,8 +443,8 @@ describe.skipIf(!url)('the stalled sweep and a park nothing drives, on Postgres'
         why: 'the parked row belongs to ANOTHER step than the one the task points at',
         seed: async () => {
           const taskId = await seedTask();
-          // The row the pointer addresses is one no sweep clause takes (waiting_cli, no run to recover).
-          await seedRow(taskId, { status: 'waiting_cli', waitingStartedAt: null });
+          // The row the pointer addresses is one no sweep clause takes (a parked form, which waits for a person).
+          await seedRow(taskId, { status: 'waiting_form' });
           await seedRow(taskId, { stepId: OTHER, stepIndex: 2 });
           return taskId;
         },

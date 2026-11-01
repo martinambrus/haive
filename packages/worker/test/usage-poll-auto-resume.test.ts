@@ -8,14 +8,18 @@ import { createFakeDb } from '@haive/database/testing';
 const h = vi.hoisted(() => ({
   queued: [] as { name: string; data: unknown }[],
   failNextAdd: null as Error | null,
+  refusals: 1,
+  tries: 0,
 }));
 
-vi.mock('../src/queues/task-queue.js', () => ({
+vi.mock('../src/queues/task-queue.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/queues/task-queue.js')>()),
   getTaskQueue: () => ({
     add: async (name: string, data: unknown) => {
+      h.tries++;
       if (h.failNextAdd) {
         const failure = h.failNextAdd;
-        h.failNextAdd = null;
+        if (--h.refusals === 0) h.failNextAdd = null;
         throw failure;
       }
       h.queued.push({ name, data });
@@ -124,9 +128,40 @@ function setup() {
 beforeEach(() => {
   h.queued = [];
   h.failNextAdd = null;
+  h.refusals = 1;
+  h.tries = 0;
 });
 
 describe('the allowance auto-resume of a task whose provider is back', () => {
+  it('retries a refused auto-resume add after the re-open and queues exactly one advance', async () => {
+    vi.useFakeTimers();
+    config('auto', 'normal');
+    const t = setup();
+    t.fake.patch(schema.tasks, TASK, { orchestrationEpoch: 7 });
+    h.failNextAdd = new Error('the queue refused the job');
+
+    try {
+      const resumed = checkProviderRecovery(t.db);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await resumed;
+
+      expect(h.tries).toBe(2);
+      expect(h.queued).toEqual([
+        {
+          name: TASK_JOB_NAMES.ADVANCE_STEP,
+          data: { taskId: TASK, userId: USER, stepId: 'fan-out', round: 0, epoch: 7 },
+        },
+      ]);
+      expect(t.task()).toMatchObject({
+        status: 'running',
+        allowanceAutoResumeCount: 1,
+        awaitingAllowanceProviderId: null,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('resumes it and queues its step while the system is normal', async () => {
     config('auto', 'normal');
     const t = setup();
@@ -136,6 +171,44 @@ describe('the allowance auto-resume of a task whose provider is back', () => {
     expect(t.task()).toMatchObject({ status: 'running', allowanceAutoResumeCount: 1 });
     expect(h.queued).toMatchObject([
       { name: TASK_JOB_NAMES.ADVANCE_STEP, data: { taskId: TASK, stepId: 'fan-out' } },
+    ]);
+  });
+
+  it('stamps the advance with the epoch the task stands at, so one a Retry or a re-drive left behind is dropped as stale', async () => {
+    config('auto', 'normal');
+    const t = setup();
+    t.fake.patch(schema.tasks, TASK, { orchestrationEpoch: 7 });
+
+    await checkProviderRecovery(t.db);
+
+    expect(t.task()).toMatchObject({ status: 'running', orchestrationEpoch: 7 });
+    expect(h.queued).toMatchObject([
+      {
+        name: TASK_JOB_NAMES.ADVANCE_STEP,
+        data: { taskId: TASK, userId: USER, stepId: 'fan-out', round: 0, epoch: 7 },
+      },
+    ]);
+  });
+
+  it('keeps the epoch of each task it resumes in one poll apart', async () => {
+    config('auto', 'normal');
+    const t = setup();
+    t.fake.patch(schema.tasks, TASK, { orchestrationEpoch: 7 });
+    t.fake.insert(schema.tasks, { ...t.task(), id: NEXT_TASK, orchestrationEpoch: 11 });
+    t.fake.insert(schema.taskSteps, {
+      id: NEXT_ROW,
+      taskId: NEXT_TASK,
+      stepId: 'fan-out',
+      round: 0,
+      status: 'failed',
+    });
+    t.next.push({ ...t.armed, id: NEXT_TASK });
+
+    await checkProviderRecovery(t.db);
+
+    expect(h.queued).toMatchObject([
+      { data: { taskId: TASK, epoch: 7 } },
+      { data: { taskId: NEXT_TASK, epoch: 11 } },
     ]);
   });
 
@@ -306,6 +379,80 @@ describe('the allowance auto-resume when the stored state cannot be read', () =>
   });
 });
 
+describe('the allowance auto-resume when the epoch of the re-opened task cannot be read', () => {
+  afterEach(() => vi.restoreAllMocks());
+  const unreadable = new Error('connection terminated unexpectedly');
+  const epochOf = (job: { data: unknown } | undefined) =>
+    (job?.data as { epoch?: number } | undefined)?.epoch;
+
+  /** The poller's db, with the read of a task's row failing for the first `fails` reads. The re-open
+   *  has committed by then, so a throw there would lose the advance the task is waiting for. */
+  function epochUnreadable(t: ReturnType<typeof setup>, fails: number): Database {
+    let left = fails;
+    return {
+      ...t.db,
+      query: {
+        ...t.db.query,
+        tasks: {
+          ...t.db.query.tasks,
+          findFirst: async (opts: unknown) => {
+            if (left-- > 0) throw unreadable;
+            return (t.db.query.tasks.findFirst as (o: unknown) => Promise<unknown>)(opts);
+          },
+        },
+      },
+    } as unknown as Database;
+  }
+
+  it('queues the advance unstamped and warns, rather than lose it to the read', async () => {
+    config('auto', 'normal');
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const t = setup();
+
+    await checkProviderRecovery(epochUnreadable(t, 1));
+
+    expect(t.task(), 'the task was re-opened').toMatchObject({
+      status: 'running',
+      allowanceAutoResumeCount: 1,
+    });
+    expect(h.queued, 'and its advance was queued').toMatchObject([
+      {
+        name: TASK_JOB_NAMES.ADVANCE_STEP,
+        data: { taskId: TASK, userId: USER, stepId: 'fan-out', round: 0 },
+      },
+    ]);
+    expect(epochOf(h.queued[0]), 'with no epoch to carry').toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: TASK, err: unreadable }),
+      expect.any(String),
+    );
+    expect(error, 'the failed read is no failed recovery').not.toHaveBeenCalled();
+  });
+
+  it('stamps the next task it resumes with its own epoch', async () => {
+    config('auto', 'normal');
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const t = setup();
+    t.fake.insert(schema.tasks, { ...t.task(), id: NEXT_TASK, orchestrationEpoch: 11 });
+    t.fake.insert(schema.taskSteps, {
+      id: NEXT_ROW,
+      taskId: NEXT_TASK,
+      stepId: 'fan-out',
+      round: 0,
+      status: 'failed',
+    });
+    t.next.push({ ...t.armed, id: NEXT_TASK });
+
+    await checkProviderRecovery(epochUnreadable(t, 1));
+
+    expect(h.queued).toHaveLength(2);
+    expect(h.queued[0]).toMatchObject({ data: { taskId: TASK } });
+    expect(epochOf(h.queued[0])).toBeUndefined();
+    expect(h.queued[1]).toMatchObject({ data: { taskId: NEXT_TASK, epoch: 11 } });
+  });
+});
+
 describe('the allowance auto-resume when resuming one task throws', () => {
   afterEach(() => vi.restoreAllMocks());
 
@@ -427,11 +574,12 @@ describe('the provider recovery when one armed task fails on its own writes', ()
     ]);
   });
 
-  it('goes on to the next armed task when the queue refuses the advance of a resumed one', async () => {
+  it('goes on to the next armed task when the queue exhausts retries of the advance of a resumed one', async () => {
     config('auto', 'normal');
     const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
     const t = twoTasks();
     h.failNextAdd = dropped;
+    h.refusals = 3;
 
     await checkProviderRecovery(t.db);
 

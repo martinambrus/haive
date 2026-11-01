@@ -24,6 +24,7 @@ import {
   planSequenceRequestSchema,
   planSnapshotSaveRequestSchema,
   logger,
+  PLAN_MERGE_LIVE_STATUSES,
   resolveDefaultCliProvider,
   updatePlanNodeRequestSchema,
   resolvePlanNodeRequestSchema,
@@ -160,7 +161,11 @@ async function gitRead(
     const { stdout } = await exec('git', hardenGitArgs(args), {
       cwd,
       timeout: 5_000,
-      env: { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(cwd) },
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        GIT_CEILING_DIRECTORIES: path.dirname(cwd),
+      },
     });
     return { ok: true, stdout: stdout.toString().trim(), code: 0 };
   } catch (err) {
@@ -452,7 +457,7 @@ async function findOpenPlanMerge(
     where: and(
       eq(schema.tasks.repositoryId, repositoryId),
       eq(schema.tasks.type, 'plan_merge'),
-      inArray(schema.tasks.status, [...OPEN_TASK_STATES]),
+      inArray(schema.tasks.status, [...PLAN_MERGE_LIVE_STATUSES]),
     ),
     columns: { id: true, status: true, cliProviderId: true, createdAt: true },
   });

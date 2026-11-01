@@ -159,3 +159,17 @@ export function isBranchName(name: string): boolean {
     .split('/')
     .every((part) => part !== '' && !part.startsWith('.') && !part.endsWith('.lock'));
 }
+
+/** The entries of a git dir that exist while a merge, rebase, cherry-pick or revert is open, in the
+ *  order they are read. Each is located with `git rev-parse --git-path <entry>` and looked up
+ *  directly: `rev-parse --verify` would also resolve a branch or tag of the same name, and a rebase
+ *  stopped at an `exec` has its state directory but no REBASE_HEAD. The worker's check and the api's
+ *  Haive data status both read this list, so they cannot disagree about what counts as open. */
+export const GIT_OPERATION_STATE_ENTRIES: readonly string[] = [
+  'MERGE_HEAD',
+  'REBASE_HEAD',
+  'rebase-merge',
+  'rebase-apply',
+  'CHERRY_PICK_HEAD',
+  'REVERT_HEAD',
+];
