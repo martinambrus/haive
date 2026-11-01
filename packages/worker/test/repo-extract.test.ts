@@ -118,6 +118,7 @@ async function packGitFixture(): Promise<void> {
 
 describe('extractArchive', () => {
   it('preserves uploaded history while removing a filter before hardened host Git stages files', async () => {
+    expect((await stat(tmpRoot)).mode & 0o777).toBe(0o700);
     const src = await gitFixture();
     const head = await g(src, 'rev-parse', 'HEAD');
     await g(src, 'branch', 'saved-branch');
@@ -136,7 +137,10 @@ describe('extractArchive', () => {
     const dest = path.join(tmpRoot, 'out-git');
     expect(await g(dest, 'rev-parse', 'HEAD')).toBe(head);
     expect(await g(dest, 'show-ref')).toBe(refs);
+    expect(await g(dest, 'config', '--bool', 'core.bare')).toBe('false');
+    expect(await g(dest, 'rev-parse', '--is-bare-repository')).toBe('false');
     expect((await stat(path.join(dest, '.git/config'))).mode & 0o777).toBe(0o600);
+    expect((await stat(path.join(dest, '.git/config'))).uid).toBe(process.getuid?.());
     expect((await stat(path.join(dest, 'sub/a.txt'))).uid).toBe(process.getuid?.());
     expect(await g(dest, 'config', 'branch.main.merge')).toBe('refs/heads/main');
     expect(await g(dest, 'remote', 'get-url', 'origin')).toBe(

@@ -36,7 +36,13 @@ settings, linked-worktree metadata, shallow history, alternate object stores and
 configuration/packs. A dropped archive member under the candidate's `.git` refuses the upload
 rather than silently discarding part of its history. A bounded `fsck --connectivity-only`
 checks the sanitized candidate's held Git directory before publication; missing objects fail
-without fetching. Parser, structure and connectivity failures use fixed, actionable wording,
+without fetching. It changes directory through the held descriptor and uses `--git-dir=.`:
+MEASURED in the root worker on Git 2.54.0, an absolute `/proc/self/fd/N` gitdir was resolved back
+through the root-owned 0700 stage parent and refused uid 65534 access. Git's optional commit-graph
+and multi-pack-index validators also re-open canonical paths, so this connectivity-only invocation
+disables those acceleration-cache reads/validators and checks the actual objects, refs, reflogs
+and index instead. The stored non-bare config, ownership, permissions and private stage stay as
+they were. Parser, structure and connectivity failures use fixed, actionable wording,
 retain the previous destination and keep the source archive for Retry. Source-only uploads
 remain supported. Generic bundle/attachment extraction keeps Git-named files as data and does
 not opt in; external/local-folder repositories are never sanitized in place. The filter marker

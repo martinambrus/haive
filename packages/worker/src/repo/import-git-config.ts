@@ -151,14 +151,22 @@ export async function sanitizeImportedGitConfig(
 
     // A missing object is a refusal, never permission to fetch from an uploaded promisor. The
     // config now has no promisor/transport programs, and no pack promises survived the check above.
+    // Git must stay in the held metadata directory: resolving its absolute path as uid 65534
+    // cannot traverse the root worker's 0700 stage parent. The optional commit-graph/MIDX
+    // validators also re-open canonical paths, so check connectivity from the objects directly,
+    // with those acceleration caches disabled for this invocation only.
     const gitDir = await openDirNoFollow(anchor, gitRel);
     try {
       await runTool(
         'git',
         hardenGitArgs([
           '-C',
-          '/',
-          `--git-dir=${childFd(FIRST_SLOT)}`,
+          childFd(FIRST_SLOT),
+          '--git-dir=.',
+          '-c',
+          'core.commitGraph=false',
+          '-c',
+          'core.multiPackIndex=false',
           'fsck',
           '--connectivity-only',
           '--no-dangling',
