@@ -928,12 +928,14 @@ Decide whether the class is worth a general mechanism (copy DOM values into stat
 
 ### T467 · FNF[form-body-buffering] · both form readers buffer the whole multipart body before their size checks
 
-status: open · kind: security · user decision: resolved 2026-11-01 · priority: P1
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-01T16:07Z · last: 2026-11-01T16:07Z · priority: P1
 From the T463 review (2026-10-31). PRE-EXISTING, minor to moderate. `POST /repos/upload` (api routes/repos.ts ~:575, size check ~:592, default cap 2 GiB) and the notification sound upload (routes/user-settings.ts ~:386, check ~:390, cap 2 MiB) call `c.req.formData()`, which reads the whole body into memory before the route's own size check runs, and neither route sets a `bodyLimit`. `/repos/upload` is a documented route (docs/architecture/repository-refresh.md ~:34) with no web caller: decide whether to cap it with a streaming limit or retire it; the sound upload needs a `bodyLimit` at its own cap.
 
 User decision 2026-11-01: Retire the unused documented repository-upload route; keep notification-sound uploads with a bounded body.
 
 Scope: retire the legacy repository-upload endpoint and update its public-route/docs/tests references; preserve the supported upload flows. The sound endpoint remains supported with its own bounded body. This supersedes the recommended keep-route option.
+
+Execution 2026-11-01T16:07Z: paired with T338 as approved API route retirement work; distinct commits/criteria, one complete API candidate and fresh review. Preserve supported step-level CLI switching, chunked repository uploads and bounded sound upload. T300 corrected-attempt decision pending; no additional validation run authorized yet.
 
 ### T468 · FNF[ledger-imported-since-path] [design] · a retired git-data import marker still blocks an upgrade's rollback
 
