@@ -1,6 +1,17 @@
-import { and, eq, inArray, isNotNull, isNull, notInArray, or, sql } from 'drizzle-orm';
+import {
+  and,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  notInArray,
+  or,
+  sql,
+  getTableColumns,
+} from 'drizzle-orm';
 import { CLEAR_STEP_USAGE_STAMP, lockStepRows, schema } from '@haive/database';
 import { FIX_LOOP_ACTION_FIELD } from '@haive/shared';
+import { computeStepContribution } from '@haive/shared/timing';
 import { getDb } from '../db.js';
 import { killTaskSandboxes } from './sandbox-kill.js';
 
@@ -161,6 +172,38 @@ const reofferGate = {
   pauseFormOnRetry: sql`${schema.taskSteps.pauseFormOnRetry} OR coalesce(${holdsGateAnswer}, false)`,
 };
 
+/** Close the run of rows just re-offered under the caller's ordered locks. The park update
+ *  has already booked and cleared the wait. Snapshot at that statement's database clock so its
+ *  Work and idle use the same boundary. This keeps prior Work: computeFoldContribution instead
+ *  reclassifies an open, discarded run as idle, which is not what a retained form means here.
+ *  Clearing the live timing excludes the pending gap; the worker claim opens its next span. */
+async function carryReofferedRuns(
+  tx: DbHandle,
+  rows: (typeof schema.taskSteps.$inferSelect & { foldedAt: number })[],
+): Promise<void> {
+  const carry = (prior: number, added: number) => Math.min(2147483647, prior + added);
+  for (const row of rows) {
+    const contribution = computeStepContribution(row, row.foldedAt);
+    await tx
+      .update(schema.taskSteps)
+      .set({
+        carriedWorkMs: carry(row.carriedWorkMs, contribution.workMs),
+        carriedIdleMs: carry(row.carriedIdleMs, contribution.idleMs),
+        carriedUserActiveMs: carry(row.carriedUserActiveMs, contribution.userActiveMs),
+        startedAt: null,
+        endedAt: null,
+        idleMs: 0,
+        userActiveMs: 0,
+      })
+      .where(eq(schema.taskSteps.id, row.id));
+  }
+}
+
+const reofferedTiming = {
+  ...getTableColumns(schema.taskSteps),
+  foldedAt: sql<number>`floor(extract(epoch from now()) * 1000)`.mapWith(Number),
+};
+
 /** Put a restarting task's parked rows, other than `exclude`, back to `pending` with what they
  *  held: a form keeps its schema and answers, a runtime park its detection. A fix-loop gate loses
  *  its saved decision and stops at its form, so the gate asks again. */
@@ -179,7 +222,7 @@ export async function reofferParkedSteps(
     ...(exclude.length > 0 ? [notInArray(schema.taskSteps.id, [...exclude])] : []),
   );
   await lockStepRows(tx, parked);
-  return tx
+  const rows = await tx
     .update(schema.taskSteps)
     .set({
       status: 'pending',
@@ -190,12 +233,14 @@ export async function reofferParkedSteps(
       ...reofferGate,
     })
     .where(parked)
-    .returning({ id: schema.taskSteps.id });
+    .returning(reofferedTiming);
+  await carryReofferedRuns(tx, rows);
+  return rows.map(({ id }) => ({ id }));
 }
 
 /** Leave none of a restarting task's steps active: fail the stuck ones and re-offer a parked form
- *  rather than fail it, booking its wait as `reofferParkedSteps` does: the claim finds the marker gone and
- *  folds nothing. A pass can move a row between those two writes, so every row of the task is locked
+ *  rather than fail it, carrying its prior timing as `reofferParkedSteps` does: the claim opens a
+ *  new span and folds no wait. A pass can move a row between those two writes, so every row of the task is locked
  *  first, in id order, and both land in one transaction. */
 export async function settleActiveSteps(
   db: ReturnType<typeof getDb>,
@@ -209,7 +254,7 @@ export async function settleActiveStepsIn(tx: DbHandle, taskId: string): Promise
   const now = new Date();
   await lockStepRows(tx, eq(schema.taskSteps.taskId, taskId));
   await failStuckSteps(tx, taskId, 'user', now, false);
-  await tx
+  const rows = await tx
     .update(schema.taskSteps)
     .set({
       status: 'pending',
@@ -218,7 +263,9 @@ export async function settleActiveStepsIn(tx: DbHandle, taskId: string): Promise
       updatedAt: now,
       ...reofferGate,
     })
-    .where(and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.status, 'waiting_form')));
+    .where(and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.status, 'waiting_form')))
+    .returning(reofferedTiming);
+  await carryReofferedRuns(tx, rows);
 }
 
 /** A plain read, never `.for()`: a Stop writes the task row after the step rows, as a Retry does,

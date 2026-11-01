@@ -2864,9 +2864,9 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       await foldCliParkOnResume(db, current.id);
       const claimed = await openPendingStep(db, taskId, params.epoch, current.id, {
         status: 'running',
-        // A Retry re-offers a form with its run and booked idle intact. Keep that
-        // span; a fresh start would subtract the old wait from the new run's Work.
-        // A reset or a pre-run park has NULL here and starts a new span as before.
+        // Re-offers carry their prior run's timing and clear started_at before the
+        // pending gap, so this opens a fresh span. Keep any existing start on a
+        // pending row; its idle_ms belongs inside that span.
         startedAt: sql`coalesce(${schema.taskSteps.startedAt}, now())`,
         // Clear any queued/parked message (e.g. "waiting for a free runtime slot") so it does
         // not linger once the step actually runs; the run's own emitProgress takes over.

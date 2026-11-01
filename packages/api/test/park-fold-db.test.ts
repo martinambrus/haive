@@ -62,7 +62,7 @@ vi.mock('@haive/shared', async (importOriginal) => {
 
 import { Hono } from 'hono';
 import { FIX_LOOP_ACTION_FIELD, TASK_JOB_NAMES } from '@haive/shared';
-import { computeStepContribution } from '@haive/shared/timing';
+import { computeTaskTiming } from '@haive/shared/timing';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { reofferParkedSteps, settleActiveSteps } from '../src/lib/task-control.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -101,24 +101,40 @@ const expectMoved = (column: string, before: number, after: number, moves: Moves
 
 type Case = { name: string; seed: () => RowInsert; idle: Moves; carried: Moves };
 
+/** Re-offer closes the span, so both its stored idle and its live wait move to carry. */
+const expectCarriedIdle = (
+  before: { idleMs: number; carriedIdleMs: number },
+  after: { idleMs: number; carriedIdleMs: number; startedAt: Date | null },
+  wait: Moves,
+) => {
+  expect(after.startedAt).toBeNull();
+  expect(after.idleMs).toBe(0);
+  const prior = before.idleMs + before.carriedIdleMs;
+  if (wait === 'fills' || prior + (typeof wait === 'number' ? wait : 0) >= INT4_MAX) {
+    expect(after.carriedIdleMs).toBe(INT4_MAX);
+  } else {
+    expectMoved('carried_idle_ms', prior, after.carriedIdleMs, wait);
+  }
+};
+
 /** The park-fold matrix shared by the two writers. `started` is the status a row that is inside its
  *  run carries while it holds a marker: the writer's own (a form for a Retry's re-offer, a CLI
  *  step for a Stop). */
 const foldCases = (started: 'waiting_form' | 'waiting_cli'): Case[] => [
   {
-    name: 'a row parked before its run (pending, marker, started_at NULL) books its wait to carried_idle_ms and leaves idle_ms alone',
+    name: 'a row parked before its run (pending, marker, started_at NULL) preserves its wait',
     seed: () => ({ status: 'pending', startedAt: null, waitingStartedAt: ago(PARKED_FOR) }),
     idle: 'stays',
     carried: PARKED_FOR,
   },
   {
-    name: `a ${started} row (marker, started_at set) books its wait to idle_ms and leaves carried_idle_ms alone (pin)`,
+    name: `a ${started} row (marker, started_at set) preserves its wait (pin)`,
     seed: () => ({ status: started, startedAt: ago(HOUR), waitingStartedAt: ago(PARKED_FOR) }),
     idle: PARKED_FOR,
     carried: 'stays',
   },
   {
-    name: 'a pending row holding a marker AND a started_at is booked by started_at, to idle_ms (pin)',
+    name: 'a pending row holding a marker AND a started_at preserves its wait (pin)',
     seed: () => ({ status: 'pending', startedAt: ago(HOUR), waitingStartedAt: ago(PARKED_FOR) }),
     idle: PARKED_FOR,
     carried: 'stays',
@@ -146,7 +162,7 @@ const foldCases = (started: 'waiting_form' | 'waiting_cli'): Case[] => [
     carried: 'fills',
   },
   {
-    name: `a ${started} wait past the int4 range fills idle_ms to 2147483647 and leaves carried_idle_ms alone (pin)`,
+    name: `a ${started} wait past the int4 range fills the idle counter to 2147483647 (pin)`,
     seed: () => ({
       status: started,
       startedAt: ago(HOUR),
@@ -157,7 +173,7 @@ const foldCases = (started: 'waiting_form' | 'waiting_cli'): Case[] => [
     carried: 'stays',
   },
   {
-    name: `a ${started} wait on a nearly full idle_ms fills it to 2147483647 instead of raising (pin)`,
+    name: `a ${started} wait on a nearly full idle_ms saturates without raising (pin)`,
     seed: () => ({
       status: started,
       startedAt: ago(HOUR),
@@ -169,8 +185,7 @@ const foldCases = (started: 'waiting_form' | 'waiting_cli'): Case[] => [
   },
 ];
 
-const NO_WAIT =
-  'adds nothing to either column (pin: a missing marker is a wait of 0, not headroom)';
+const NO_WAIT = 'adds no wait (pin: a missing marker is a wait of 0, not headroom)';
 
 describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, on Postgres', () => {
   let db: Database;
@@ -307,8 +322,12 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
       const after = await rowOf(row.id);
       expect(after.status).toBe(endsAs);
       expect(after.waitingStartedAt).toBeNull();
-      expectMoved('idle_ms', before.idleMs, after.idleMs, idle);
-      expectMoved('carried_idle_ms', before.carriedIdleMs, after.carriedIdleMs, carried);
+      if (endsAs === 'pending') {
+        expectCarriedIdle(before, after, idle === 'stays' ? carried : idle);
+      } else {
+        expectMoved('idle_ms', before.idleMs, after.idleMs, idle);
+        expectMoved('carried_idle_ms', before.carriedIdleMs, after.carriedIdleMs, carried);
+      }
     });
   });
 
@@ -341,11 +360,10 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
 
       expect(after.status).toBe('pending');
       expect(after.waitingStartedAt).toBeNull();
-      expectMoved('idle_ms', before.idleMs, after.idleMs, 'stays');
-      expectMoved('carried_idle_ms', before.carriedIdleMs, after.carriedIdleMs, PARKED_FOR);
+      expectCarriedIdle(before, after, PARKED_FOR);
     });
 
-    it('books a re-offered form wait to idle_ms within the span the worker claim must preserve', async () => {
+    it('carries the re-offered form wait and closes the prior span before the claim', async () => {
       const { before, after } = await retry({
         status: 'waiting_form',
         startedAt: ago(HOUR),
@@ -354,8 +372,7 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
 
       expect(after.status).toBe('pending');
       expect(after.waitingStartedAt).toBeNull();
-      expectMoved('idle_ms', before.idleMs, after.idleMs, PARKED_FOR);
-      expectMoved('carried_idle_ms', before.carriedIdleMs, after.carriedIdleMs, 'stays');
+      expectCarriedIdle(before, after, PARKED_FOR);
     });
   });
 
@@ -387,11 +404,10 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
       const after = await rowOf(row.id);
       expect(after.status).toBe('pending');
       expect(after.waitingStartedAt).toBeNull();
-      expectMoved('idle_ms', before.idleMs, after.idleMs, idle);
-      expectMoved('carried_idle_ms', before.carriedIdleMs, after.carriedIdleMs, carried);
+      expectCarriedIdle(before, after, idle === 'stays' ? carried : idle);
     });
 
-    it('books a form wait once through both settles, within the span the worker claim must preserve', async () => {
+    it('carries a form wait once through both settles and closes the prior span', async () => {
       const task = await seedTask('failed', { currentStepId: null });
       const row = await seedRow(task.id, {
         status: 'waiting_form',
@@ -406,15 +422,14 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
       const after = await rowOf(row.id);
       expect(after.status).toBe('pending');
       expect(after.waitingStartedAt).toBeNull();
-      expectMoved('idle_ms', before.idleMs, after.idleMs, PARKED_FOR);
-      expectMoved('carried_idle_ms', before.carriedIdleMs, after.carriedIdleMs, 'stays');
+      expectCarriedIdle(before, after, PARKED_FOR);
     });
   });
-  // A re-offer keeps detection, schema and answers and resumes the same run. Its idle_ms
-  // belongs to that span; the worker claim must keep the span too, rather than subtract
-  // the old wait from a fresh start and freeze Work. Exercise the real claim after Retry.
+  // A re-offer keeps detection, schema and answers, carries the prior timing, and leaves
+  // no run open during the pending gap. Evaluate a 30-minute queue delay without sleeping,
+  // then exercise the real claim: prior Work stays and only the new execution ticks.
   it.each(['settle through START', 'reoffer'] as const)(
-    'A: %s preserves booked idle and advancing Work after the worker claim',
+    'A: %s preserves prior Work, excludes a 30-minute pending gap, and books the wait once',
     async (path) => {
       const [repo] = await db
         .insert(schema.repositories)
@@ -448,9 +463,12 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
         status: 'waiting_form',
         startedAt: ago(HOUR),
         waitingStartedAt: ago(PARKED_FOR),
+        userActiveMs: 600,
+        carriedWorkMs: MINUTE,
+        carriedUserActiveMs: 200,
       });
       const trace = (phase: string, r: typeof row, at = Date.now()) => {
-        const contribution = computeStepContribution(r, at);
+        const contribution = computeTaskTiming([r], at);
         console.log(
           JSON.stringify({
             path,
@@ -464,7 +482,7 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
         );
         return contribution;
       };
-      trace('0 parked', row);
+      const before = trace('0 parked', row);
       if (path === 'settle through START') {
         const response = await post(`/tasks/${task.id}/action`, { action: 'retry' });
         expect(response.status).toBe(200);
@@ -473,7 +491,22 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
         await reoffer(task.id);
       }
       const offered = await rowOf(row.id);
-      trace('1 after Retry', offered);
+      const offeredAt = Date.now();
+      const offeredTiming = trace('1 after Retry', offered, offeredAt);
+      const delayed = trace('2 after a 30-minute pending gap', offered, offeredAt + 30 * MINUTE);
+      expect
+        .soft(delayed, 'pending queue time changes neither Work nor booked wait')
+        .toEqual(offeredTiming);
+      expect.soft(offered.startedAt, 'the old run closes before the pending gap').toBeNull();
+      expect.soft(offered.idleMs, 'the previous run idle moves to carried timing').toBe(0);
+      expect
+        .soft(offered.userActiveMs, 'the previous focused time moves to carried timing')
+        .toBe(0);
+      // A repeated settle/re-offer sees an unmarked pending row and carries nothing again.
+      if (path === 'settle through START') await settleActiveSteps(db, task.id);
+      else await reoffer(task.id);
+      const repeated = await rowOf(row.id);
+      expect(computeTaskTiming([repeated], offeredAt + 30 * MINUTE)).toEqual(delayed);
       // Variable specifiers avoid making the API typecheck include the worker's sources.
       const runnerPath = new URL('../../worker/src/step-engine/step-runner.ts', import.meta.url)
         .pathname;
@@ -536,14 +569,30 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
       expect
         .soft(later.workMs - workNow.workMs, 'Work advances for all five minutes after the claim')
         .toBe(5 * MINUTE);
+      expect.soft(after.startedAt, 'the claim opens a fresh execution span').not.toBeNull();
       expect
-        .soft(after.startedAt, 're-offered run retains the start that contains its booked idle')
-        .toEqual(row.startedAt);
+        .soft(after.startedAt!.getTime())
+        .toBeGreaterThan(row.startedAt!.getTime() + 30 * MINUTE);
+      expect
+        .soft(workNow.workMs, 'the prior Work is preserved through carry and claim')
+        .toBeGreaterThan(before.workMs - SLACK);
+      expect
+        .soft(workNow.workMs, 'the pending gap adds no Work')
+        .toBeLessThan(before.workMs + SLACK);
       expect
         .soft(later.workMs, 'old work and the next five minutes are both retained')
         .toBeGreaterThan(54 * MINUTE);
-      expectMoved('idle_ms', row.idleMs, after.idleMs, PARKED_FOR);
-      expect(after.carriedIdleMs).toBe(row.carriedIdleMs);
+      expect(after.idleMs).toBe(0);
+      expectMoved(
+        'carried_idle_ms',
+        row.carriedIdleMs,
+        after.carriedIdleMs,
+        row.idleMs + PARKED_FOR,
+      );
+      expect(after.carriedWorkMs).toBe(offered.carriedWorkMs);
+      expect(after.carriedIdleMs).toBe(offered.carriedIdleMs);
+      expect(after.carriedUserActiveMs).toBe(800);
+      expect(after.userActiveMs).toBe(0);
       expect(after.waitingStartedAt).toBeNull();
     },
     30_000,
