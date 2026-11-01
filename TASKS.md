@@ -1240,7 +1240,7 @@ From the T365 close-out (PR #974, 2026-11-01). PRE-EXISTING, minor, found by rea
 status: open
 Queued connected findings from T498 PR #977; not part of the authorized seven-task delivery. PRE-EXISTING unless stated; minor.
 
-1. worker step-engine/dag-executor.ts ~:2791-2794: the claim-lost half of the new no-coder re-read path has no direct pin. Existing recovery behavior is reviewed; extend a control when changing that path.
+1. COVERAGE ONLY for the new T498 path, not a confirmed production defect: worker step-engine/dag-executor.ts ~:2791-2794 claim-lost half has no direct pin. Existing recovery behavior is reviewed; extend a control when changing that path.
 2. worker queues/pr-poll-queue.ts ~:127-135: early re-drive runs outside try/catch; runPrPollTick discards Promise.allSettled results, hiding a failure. Catch/log per-task refusal or inspect settled results.
 3. worker step-engine/dag-executor.ts ~:2726-2739: refusal UPDATE lacks an outcome='pending' guard; add the same CAS guard as sibling settlement.
 4. worker queues/task-queue.ts retrying: warning says boot re-drive for non-boot callers; cosmetic, name the enqueue operation.
@@ -1265,7 +1265,7 @@ Queued connected findings from T120 PR1b reviews, not additional authorized impl
 1. onboarding/_stage-paths.ts known-path staging can retain stale index entries during a committing-path save. Recompute the owned path set and compare held HEAD before declaring index sync complete.
 2. project-state/commit.ts plan-file removal/no-op repair (~:105) rebuilds deletion intent from current disk and HEAD, so a prior removed projection can be absent from both after an index-sync failure; verify plan.json/plan.md removal retries separately from the fixed state-record case.
 3. syncRealIndex completion can still report indexSynced after HEAD changes immediately after its guard (~:297). Re-check the accepted commit boundary before reporting success; no stronger atomicity is currently promised.
-4. Git readers/writers differ in ambient XDG_CONFIG_HOME/GIT_CONFIG_* handling. HOME was restored in PR1b; a hermetic shared configuration contract needs a separate design. Executable git filters are already T387; do not duplicate that task. Known-name staged-only additions are an accepted name-only repair trade-off documented in onboarding-upgrades.md.
+4. DESIGN MOVED to T523, outside this execution bundle: ambient XDG_CONFIG_HOME/GIT_CONFIG_* handling. Executable git filters are already T387. Known-name staged-only additions remain an accepted name-only repair trade-off documented in onboarding-upgrades.md.
 
 5. Measured by T120-live against the existing worker: first Save & push to a completely empty origin fails before committing, because plan/merge.ts fetchOrigin (~:105-111) explicitly fetches refs/heads/<branch> and treats its absence as integration_failed; integrateOrigin invokes it before divergence can classify a missing remote branch (plan-mirror-queue.ts ~:258, project-state/save.ts ~:328). Same-history initialized origins push successfully. PRE-EXISTING, connected; distinguish a genuinely absent remote branch from a transport/read error without weakening other refusals. Raw browser/backend evidence in .claude/tmp/codex-run/codex-resume-20261101/T120-live/empty-remote-failure.png and report.md. No broader fix authorized.
 
@@ -1276,6 +1276,11 @@ Queued connected findings from T376 review10, verified with synthetic pure-node 
 
 1. shared schemas/git-url.ts ~:252-270: an ordinary prefix ending in colon followed by whitespace/quotes or a placeholder with inner whitespace can keep username and trailing query text. Structural ambiguity with prose needs a caller-backed design; do not match a literal placeholder word.
 2. Authority search ends at slash/next scheme but not ?/#, so a pathless URL with @ in its query can misidentify the host and show a query suffix as host. Terminate authority at URL grammar boundaries. Existing git remotes in measured paths carry a path; establish actual caller reach before a new fix round.
+
+### T523 · FNF[git-config-environment] [design] · API readers and worker writers do not share one explicit ambient Git configuration policy
+
+status: open · kind: design
+Queued design split from T521 item4; no additional implementation authorized. PRE-EXISTING, narrow compatibility issue. HOME handling was aligned in T120 PR1b, but XDG_CONFIG_HOME and GIT_CONFIG_* can still make API status readers and worker writers resolve different configuration. Decide whether the supported contract preserves selected ambient configuration for both or supplies an isolated explicit configuration. Establish a current caller/reproduction before changing global Git policy. Executable repository filters remain T387, not a member of this decision.
 
 ## Done
 
