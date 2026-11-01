@@ -74,6 +74,8 @@ board. At session start, load the board's tasks you own or will work on into the
 
 ## Decisions and prerequisites
 
+Owner allowance policy 2026-11-01 (codex-queue): monitor actual reported Codex remaining allowance. At40% remaining or below, admit no new tasks; finish the tasks already in flight at the trigger, save the handoff, then pause until the owner resumes after reset. Do not mark the rest complete or unpark diminishing-return work. Meter/policy: `.claude/tmp/codex-run/queue-exec-20261101/allowance-status.json` and `allowance-policy.json`; initial reading45% remaining, reported reset2026-11-07 21:08 Paris.
+
 Owner review-gate update 2026-11-01: Greptile will not run until November9. Skip Greptile requests and waits before2026-11-09; Codex review and CI remain required.
 
 T524's 2026-11-01 owner round answered 42 questions. Decisions are recorded on the affected task blocks; the durable local answer register is `.claude/tmp/codex-run/backlog-decisions-20261101/decisions.json`. No unanswered owner-policy question remains from this round.
