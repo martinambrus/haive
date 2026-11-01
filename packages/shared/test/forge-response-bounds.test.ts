@@ -5,6 +5,7 @@ import {
   ForgeError,
   ForgeNotFoundError,
   GithubForgeProvider,
+  readForgeJson,
   type ForgeContext,
 } from '../src/forge/index.js';
 
@@ -175,5 +176,44 @@ describe('the size of a forge error body', () => {
     expect(err).toBeInstanceOf(ForgeAuthError);
     expect((err as ForgeError).status).toBe(401);
     expect((err as ForgeError).message).not.toContain('connection reset');
+  });
+});
+
+describe('a forge success body read as JSON on its own', () => {
+  const KIB = 1024;
+
+  it('parses a body of exactly the bound, however it is chunked', async () => {
+    const json = JSON.stringify({ ok: true });
+    const padded = Buffer.from(`${json}${' '.repeat(KIB - json.length)}`);
+    const { res, seen } = streamed(padded, 100);
+
+    expect(await readForgeJson(res, KIB)).toEqual({ ok: true });
+    expect(seen.cancelled).toBe(false);
+  });
+
+  it('refuses a body one byte over the bound, names the bound and cancels the stream', async () => {
+    const { res, seen } = streamed(Buffer.alloc(KIB + 1, 0x20), 256);
+
+    const err = await rejection(readForgeJson(res, KIB));
+
+    expect(err).toBeInstanceOf(ForgeError);
+    expect((err as ForgeError).message).toBe(`response is larger than ${KIB} bytes`);
+    expect(seen).toEqual({ pulls: 5, cancelled: true });
+  });
+
+  it('bounds a body at the success cap by default', async () => {
+    const { res, seen } = streamed(Buffer.alloc(CAP + 1, 0x20), 64 * 1024);
+
+    expect(await rejection(readForgeJson(res))).toBeInstanceOf(ForgeError);
+    expect(seen).toEqual({ pulls: 129, cancelled: true });
+  });
+
+  it('answers a body that is not JSON with a fixed message that does not echo it', async () => {
+    const { res } = streamed(Buffer.from('<html>secret-token-123</html>'), 8);
+
+    const err = await rejection(readForgeJson(res, KIB));
+
+    expect(err).toBeInstanceOf(ForgeError);
+    expect((err as ForgeError).message).toBe('response is not JSON');
   });
 });

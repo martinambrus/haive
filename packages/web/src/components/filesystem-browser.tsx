@@ -93,7 +93,8 @@ export function FilesystemBrowser({ initialPath, onSelect, selectedPath }: Files
                 type="button"
                 onClick={() => entry.isDirectory && setPath(entry.path)}
                 disabled={!entry.isDirectory}
-                className="flex flex-1 items-center gap-2 text-left disabled:cursor-default"
+                title={entry.name}
+                className="flex min-w-0 flex-1 items-center gap-2 text-left disabled:cursor-default"
               >
                 <span className="text-neutral-500">{entry.isDirectory ? 'dir' : 'file'}</span>
                 <span className="truncate text-neutral-200">{entry.name}</span>
