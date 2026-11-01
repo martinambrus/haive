@@ -726,11 +726,12 @@ export type TaskStatus =
 export type StepStatus =
   'pending' | 'running' | 'waiting_form' | 'waiting_cli' | 'done' | 'failed' | 'skipped';
 
-/** Which capacity cap a running-but-queued task is parked behind: 'runtime' = the runtime
- *  admission gate (no free DDEV/app runner slot), 'agent' = its CLI job is enqueued but no
- *  parallel-agent slot has picked it up. Local mirror of @haive/shared's SlotWait — the web
- *  package intentionally keeps its own copies of API types. */
-export type SlotWaitKind = 'runtime' | 'agent';
+/** What a running-but-parked task is waiting on: 'runtime' = the runtime admission gate (no
+ *  free DDEV/app runner slot), 'agent' = its CLI job is enqueued but no parallel-agent slot
+ *  has picked it up, 'module' = a module step waiting for its module's schema setup (no slot
+ *  involved). Local mirror of @haive/shared's SlotWait — the web package intentionally keeps
+ *  its own copies of API types. */
+export type SlotWaitKind = 'runtime' | 'agent' | 'module';
 
 export interface SlotWait {
   kind: SlotWaitKind;
@@ -2290,8 +2291,14 @@ export function getPlanMerge(repositoryId: string): Promise<{ merge: PlanMergeSt
   return api.get<{ merge: PlanMergeState | null }>(`${planBase(repositoryId)}/merge`);
 }
 
-export function discardPlanMerge(repositoryId: string): Promise<{ ok: boolean }> {
-  return api.delete<{ ok: boolean }>(`${planBase(repositoryId)}/merge`);
+export function discardPlanMerge(
+  repositoryId: string,
+  taskId?: string,
+): Promise<{ ok: boolean; cancelled: boolean; taskId?: string }> {
+  const query = taskId === undefined ? '' : `?taskId=${encodeURIComponent(taskId)}`;
+  return api.delete<{ ok: boolean; cancelled: boolean; taskId?: string }>(
+    `${planBase(repositoryId)}/merge${query}`,
+  );
 }
 
 /** Answer the merge form: confirm lands and pushes, revise runs another pass. */

@@ -1,5 +1,4 @@
 import { readTextNoFollow, removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
-import { namesGitData } from '@haive/shared/project-state';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DetectResult, SkillEntry } from '@haive/shared';
@@ -15,7 +14,10 @@ import {
 import {
   loadPreviousStepOutput,
   resolveTaskSkillTargetDirs,
-  withoutGitDataDirs,
+  filterCatalogSkillDirs,
+  isSkillPathId,
+  withoutUnsafeSkillIds,
+  skillTargetRefusalNote,
 } from './_helpers.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { buildSkillContractBlocks } from './_skill-prompt.js';
@@ -417,42 +419,51 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
     async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const det = detected as SkillRepairDetect;
-      const primary = (det.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR])[0];
+      const primary = filterCatalogSkillDirs(
+        det.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR],
+      )[0];
       if (primary === undefined) return [];
       const fileTree = det.__fileTree ?? '';
-      return det.failingSkills.map((f) => ({
-        agentId: f.skillId.slice(0, 120),
-        agentTitle: f.skillId,
-        prompt: buildSkillRepairPrompt({
-          skillId: f.skillId,
-          issues: f.issues,
-          skillMdExcerpt: f.skillMdExcerpt,
-          framework: det.framework,
-          language: det.language,
-          kbFiles: det.kbFiles,
-          fileTree,
-          scopeExclude: det.__scopeExclude ?? [],
-          skillsDir: primary,
-          maxSub: f.maxSub,
-          bodyLen: f.bodyLen,
-          shrunk: f.shrunk,
-        }),
-      }));
+      return det.failingSkills
+        .filter((entry) => isSkillPathId(entry.skillId))
+        .map((f) => ({
+          agentId: f.skillId.slice(0, 120),
+          agentTitle: f.skillId,
+          prompt: buildSkillRepairPrompt({
+            skillId: f.skillId,
+            issues: f.issues,
+            skillMdExcerpt: f.skillMdExcerpt,
+            framework: det.framework,
+            language: det.language,
+            kbFiles: det.kbFiles,
+            fileTree,
+            scopeExclude: det.__scopeExclude ?? [],
+            skillsDir: primary,
+            maxSub: f.maxSub,
+            bodyLen: f.bodyLen,
+            shrunk: f.shrunk,
+          }),
+        }));
     },
   },
 
   async apply(ctx, args): Promise<SkillRepairApply> {
     const detected = args.detected as SkillRepairDetect;
-    const targetDirs = withoutGitDataDirs(
-      detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR],
-      ctx.logger,
-    );
+    const storedDirs = detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR];
+    const storedIds = detected.failingSkills.map((f) => f.skillId);
+    const targetDirs = filterCatalogSkillDirs(storedDirs, ctx.logger);
+    withoutUnsafeSkillIds(storedIds, ctx.logger);
+    const refusalNote = skillTargetRefusalNote(storedDirs, storedIds);
     if (targetDirs.length === 0)
       return {
-        summary: 'The repository maintains no skill destinations.',
+        summary:
+          storedDirs.length > 0
+            ? 'Every stored skill destination was refused; no skills were applied.'
+            : 'The repository maintains no skill destinations.',
         repaired: [],
-        stillFailing: [],
+        stillFailing: storedDirs.length > 0 ? storedIds : [],
         attempted: 0,
+        ...(refusalNote ? { degradedNote: refusalNote } : {}),
       };
     const results = args.agentMiningResults ?? [];
 
@@ -468,17 +479,13 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
 
     for (const failing of detected.failingSkills) {
       // The id is a directory name below, removed and rewritten: a stored one may name git data.
-      if (namesGitData(failing.skillId)) {
-        ctx.logger.warn(
-          { skillId: failing.skillId },
-          'did not repair a skill whose name names git data',
-        );
+      if (!isSkillPathId(failing.skillId)) {
         stillFailing.push(failing.skillId);
         outcomes.push({
           agentId: failing.skillId,
           agentTitle: null,
           status: 'failed',
-          errorMessage: 'its name names git data',
+          errorMessage: 'its ID is not a single non-git-data path segment',
         });
         continue;
       }
@@ -574,7 +581,9 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
       },
       'skill repair apply complete',
     );
-    const degradedNote = miningLossNote('skill repair', outcomes);
+    const degradedNote =
+      [refusalNote, miningLossNote('skill repair', outcomes)].filter(Boolean).join(' ') ||
+      undefined;
     // Lifted verbatim into the step's "What the agent did" panel by `resolveCuratedSummary`, so
     // this recap costs no CLI call. `degradedNote` is a separate column written beside it on the
     // same finalize, so the caveat is deliberately not repeated here — what this says is what the

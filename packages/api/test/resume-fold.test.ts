@@ -29,9 +29,10 @@ const SOURCES = [
 ];
 const SQL_SOURCE = 'packages/database/src/closed-gap.ts';
 
-/** Every `.set({ ... })` payload in the file, via brace matching (nested objects included). */
-function extractSetBlocks(src: string): string[] {
-  const blocks: string[] = [];
+/** Every `.set({ ... })` payload in the file, via brace matching (nested objects included), with
+ *  the offset of the brace that closes it. */
+function extractSetSpans(src: string): { body: string; end: number }[] {
+  const spans: { body: string; end: number }[] = [];
   const marker = '.set({';
   let i = src.indexOf(marker);
   while (i !== -1) {
@@ -44,11 +45,13 @@ function extractSetBlocks(src: string): string[] {
         if (depth === 0) break;
       }
     }
-    blocks.push(src.slice(i + marker.length, j));
+    spans.push({ body: src.slice(i + marker.length, j), end: j });
     i = src.indexOf(marker, j);
   }
-  return blocks;
+  return spans;
 }
+
+const extractSetBlocks = (src: string): string[] => extractSetSpans(src).map((s) => s.body);
 
 /** Step-row updates that clear ended_at, across every scanned source. Split by whether they also
  *  clear started_at: that is the RESET shape (a fresh run, folded into carried_* by
@@ -104,6 +107,26 @@ describe('re-opening a closed step credits the closed gap to idle_ms', () => {
       const text = await readFile(path.join(repoRoot, src), 'utf8');
       expect(text).not.toContain('const CLOSED_GAP_INTO_IDLE_MS');
       expect(text).toContain("from '@haive/database'");
+    }
+  });
+});
+
+describe('re-opening a closed step that never started starts it', () => {
+  // A step failed while parked before its run has no started_at. Re-opened as it is, it would bill
+  // no work at all, and a stamp alone would leave the credited gap predating its span.
+  it('every api re-open site is followed by startIfNeverStarted', async () => {
+    const text = await readFile(path.join(repoRoot, SOURCES[0]!), 'utf8');
+    const reopens = extractSetSpans(text).filter(
+      (s) => s.body.includes('endedAt: null') && !s.body.includes('startedAt: null'),
+    );
+    // resume (fan-out arm), resume (loop arm), retry_ai.
+    expect(reopens).toHaveLength(3);
+    const call = 'await startIfNeverStarted(tx, step.id);';
+    for (const { end } of reopens) {
+      // The first `;` after the payload ends the update itself; the call is the next statement.
+      const rest = text.slice(end);
+      const next = rest.slice(rest.indexOf(';') + 1).trimStart();
+      expect(next.slice(0, call.length), 'the statement after a re-open of a step row').toBe(call);
     }
   });
 });

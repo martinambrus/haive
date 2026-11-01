@@ -64,11 +64,31 @@ export async function markProjectStatesDirtyAtBoot(db: Database): Promise<void> 
   `);
 }
 
+export type ProjectStateRefreshOutcome =
+  | { outcome: 'written' | 'missing' | 'absent' | 'superseded' }
+  | {
+      outcome: 'held';
+      reason: 'git_operation' | 'recovery' | 'checkout' | 'sync';
+      code?: 'write_pending' | 'git_operation';
+    }
+  | { outcome: 'blocked'; code: 'unowned_malformed_rtk'; file: string }
+  | { outcome: 'refused'; reason: 'record' | 'context' };
+
+/** Compatibility for callers which accept a stable writer blockage as a completed refresh. */
 export async function refreshProjectState(
   db: Database,
   repositoryId: string,
   expectedCheckout?: NamedCheckout,
 ): Promise<boolean> {
+  const { outcome } = await refreshProjectStateOutcome(db, repositoryId, expectedCheckout);
+  return outcome === 'written' || outcome === 'blocked';
+}
+
+export async function refreshProjectStateOutcome(
+  db: Database,
+  repositoryId: string,
+  expectedCheckout?: NamedCheckout,
+): Promise<ProjectStateRefreshOutcome> {
   const [repo] = await db
     .select({
       storagePath: schema.repositories.storagePath,
@@ -78,27 +98,27 @@ export async function refreshProjectState(
     .where(eq(schema.repositories.id, repositoryId))
     .limit(1);
   const repoPath = repo?.storagePath ?? repo?.localPath ?? null;
-  if (!repoPath) return false;
+  if (!repoPath) return { outcome: 'absent' };
   // The row stays dirty: that is the signal to write the record once the checkout is back.
   if (await checkoutMissing(repoPath)) {
     await setOutboxError(db, repositoryId, NOT_WRITTEN.missing, true);
-    return false;
+    return { outcome: 'missing' };
   }
-  if (await gitOperationInProgress(repoPath)) return false;
+  if (await gitOperationInProgress(repoPath)) return { outcome: 'held', reason: 'git_operation' };
 
   try {
     await recoverProjectStateWrite(db, repositoryId, repoPath, expectedCheckout);
   } catch (err) {
     if (err instanceof ProjectStateRecoveryHeldError) {
       await setOutboxError(db, repositoryId, err.message);
-      return false;
+      return { outcome: 'held', reason: 'recovery' };
     }
     if (err instanceof ProjectStateCheckoutHeldError) {
       // Operational metadata only: a refused writer must not change revisions, intent or state.
       await setOutboxError(db, repositoryId, NOT_WRITTEN.deferred, true);
-      return false;
+      return { outcome: 'held', reason: 'checkout' };
     }
-    if (err instanceof ProjectStateMovedError) return false;
+    if (err instanceof ProjectStateMovedError) return { outcome: 'superseded' };
     throw err;
   }
   const synced = await syncProjectStateFromCheckout(db, {
@@ -107,14 +127,17 @@ export async function refreshProjectState(
     refuseDuringGitOperation: true,
     expectedCheckout,
   });
-  if (synced.outcome === 'held') return false;
+  if (synced.outcome === 'held')
+    return { outcome: 'held', reason: 'sync', ...(synced.code ? { code: synced.code } : {}) };
   if (synced.outcome === 'refused') {
     await setOutboxError(db, repositoryId, synced.reason ?? 'the checkout record was refused');
-    return false;
+    return { outcome: 'refused', reason: 'record' };
   }
   if (synced.outcome === 'deferred' || synced.outcome === 'superseded') {
     await setOutboxError(db, repositoryId, NOT_WRITTEN[synced.outcome]);
-    return false;
+    return synced.outcome === 'superseded'
+      ? { outcome: 'superseded' }
+      : { outcome: 'held', reason: 'checkout' };
   }
 
   const [after] = await db
@@ -126,17 +149,17 @@ export async function refreshProjectState(
     .where(eq(schema.repositories.id, repositoryId))
     .limit(1);
   const read = readRenderContextColumn(after?.renderContext ?? null);
-  if (read.kind === 'absent') return false;
+  if (read.kind === 'absent') return { outcome: 'absent' };
   if (read.kind === 'refused') {
     await setOutboxError(
       db,
       repositoryId,
       `the render context is not valid: ${read.problems.join('; ')}`,
     );
-    return false;
+    return { outcome: 'refused', reason: 'context' };
   }
   try {
-    await writeProjectStateColumn(db, {
+    const written = await writeProjectStateColumn(db, {
       repositoryId,
       repoPath,
       column: read.column,
@@ -147,16 +170,17 @@ export async function refreshProjectState(
       expectedCheckout,
       refuseWhileHeld: true,
     });
+    if (written?.blocked) return { outcome: 'blocked', ...written.blocked };
   } catch (err) {
     if (err instanceof ProjectStateCheckoutHeldError) {
       // Operational metadata only: a refused writer must not change revisions, intent or state.
       await setOutboxError(db, repositoryId, NOT_WRITTEN.deferred, true);
-      return false;
+      return { outcome: 'held', reason: 'checkout' };
     }
-    if (err instanceof ProjectStateMovedError) return false;
+    if (err instanceof ProjectStateMovedError) return { outcome: 'superseded' };
     throw err;
   }
-  return true;
+  return { outcome: 'written' };
 }
 
 /** Rewrites the record of each repository whose outbox row is dirty. Writes only; the commit is

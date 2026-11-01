@@ -14,9 +14,8 @@ import {
 import { isReadOnlyLocalRepo } from '@haive/shared';
 import {
   isPathContainmentError,
-  lstatNoFollow,
   openFileNoFollow,
-  readdirNoFollow,
+  readdirSizesNoFollow,
   readFileNoFollow,
   relUnder,
   replaceHeldBytes,
@@ -74,26 +73,18 @@ fileRoutes.get('/:id/files', async (c) => {
   const rel = workspaceRel(anchor, root, requested);
   const dir = resolve(anchor, rel);
 
-  const entries = await readdirNoFollow(anchor, rel, { strict: true }).catch(containmentHttpError);
+  const entries = await readdirSizesNoFollow(anchor, rel).catch(containmentHttpError);
   if (entries === null) throw new HttpError(404, 'Directory not found or unreadable');
 
-  const result = await Promise.all(
-    entries.map(async (entry) => {
-      // `lstat`, so a linked entry reports its own size and is neither file nor directory — the
-      // listing describes what is there rather than what it points at, and the routes below refuse
-      // to open it. `Dirent` already answers the kind without following anything.
-      const info = entry.isFile()
-        ? await lstatNoFollow(anchor, rel === '' ? entry.name : `${rel}/${entry.name}`)
-        : null;
-      return {
-        name: entry.name,
-        path: join(dir, entry.name),
-        isDirectory: entry.isDirectory(),
-        hidden: entry.name.startsWith('.'),
-        size: info?.kind === 'file' ? info.stats.size : null,
-      };
-    }),
-  );
+  // A linked entry is neither file nor directory and has no size — the listing describes what is
+  // there rather than what it points at, and the routes below refuse to open it.
+  const result = entries.map((entry) => ({
+    name: entry.name,
+    path: join(dir, entry.name),
+    isDirectory: entry.isDirectory,
+    hidden: entry.name.startsWith('.'),
+    size: entry.size,
+  }));
 
   result.sort((a, b) => {
     if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;

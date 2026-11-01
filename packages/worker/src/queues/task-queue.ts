@@ -877,11 +877,13 @@ export async function markTaskDeadFromJob(
   if (marked) await resyncAfterTaskEnd(db, taskId);
 }
 
-/** The step a fix round re-enters, or null after failing the task because it cannot be reached. */
+/** The step a fix round re-enters, or null: after failing the task because it cannot be reached, or,
+ *  with `onLost` called first, because the source row or the task was taken. */
 async function routableFixLoopTarget(
   db: Database,
   ctx: ResolvedTaskContext,
   sourceRowId: string,
+  onLost?: () => Promise<void>,
 ): Promise<StepDefinition | null> {
   const resolved = resolveFixLoopTarget({
     taskType: ctx.workflowType,
@@ -902,6 +904,7 @@ async function routableFixLoopTarget(
     return true;
   });
   if (failed) await settleFailedTask(db, ctx.taskId);
+  else await onLost?.();
   return null;
 }
 
@@ -1364,7 +1367,7 @@ export async function enqueueAdvance(
   stepId: string,
   round = 0,
   epoch?: number,
-  opts?: { delayMs?: number },
+  opts?: { delayMs?: number; deduplicate?: boolean },
 ): Promise<void> {
   const queue = getTaskQueue();
   await queue.add(
@@ -1376,9 +1379,27 @@ export async function enqueueAdvance(
       removeOnComplete: 100,
       removeOnFail: 100,
       ...(opts?.delayMs ? { delay: opts.delayMs } : {}),
+      ...(opts?.deduplicate
+        ? { deduplication: { id: `advance-${taskId}-${stepId}-${round}-${epoch}` } }
+        : {}),
     },
   );
 }
+
+/** The advance of a recovery re-drive (the stalled sweep, boot recovery, a dead task's revival):
+ *  each bumped the epoch for this one enqueue, so the id belongs to it alone, and an add retried
+ *  after the first one was lost on the way back collapses onto that job instead of queueing a
+ *  second. BullMQ frees a deduplication id when its job completes, fails or is removed. A plain
+ *  jobId would not: the completed job is kept (removeOnComplete) and an add of its id is dropped
+ *  silently. Not for a park tick, a continuation or a hand-off, which share one epoch: a successor
+ *  added while its predecessor is active would collapse onto it and end the chain. */
+export const enqueueRedrive = (
+  taskId: string,
+  userId: string,
+  stepId: string,
+  round: number,
+  epoch: number,
+): Promise<void> => enqueueAdvance(taskId, userId, stepId, round, epoch, { deduplicate: true });
 
 /** Queue a START as the api's task routes do; the claim makes a duplicate one a no-op. */
 export async function enqueueStart(taskId: string, userId: string): Promise<void> {
@@ -1766,6 +1787,90 @@ async function writeOwnedRow(
   }
 }
 
+/** Where handleResult's hand-off can lose a fenced write, and whether the write was on the pass's
+ *  row, which is then read too: the fix target can lose either and reads both. */
+const LOST_HANDOFF_READS_ROW = {
+  waiting_form_row: true,
+  waiting_form_task: false,
+  waiting_cli_task: false,
+  oscillation_row: true,
+  oscillation_task: false,
+  round_cap_row: true,
+  round_cap_task: false,
+  fix_target: true,
+} as const;
+
+type LostHandoffSite = keyof typeof LOST_HANDOFF_READS_ROW;
+
+const ROW_TAKEN: Partial<Record<string, string>> = {
+  pending: 'row_reset',
+  skipped: 'row_skipped',
+  failed: 'row_stopped',
+};
+
+const TASK_ENDED: Partial<Record<string, string>> = {
+  failed: 'task_failed',
+  cancelled: 'task_cancelled',
+  completed: 'task_completed',
+};
+
+const LOST_HANDOFF = 'step result not handed off: a fenced write found no row to update';
+
+/** Says why a hand-off write found nothing to update. A Retry, a Skip, a Stop, a Cancel or a dead
+ *  mark that took the row or the task is routine (info); a row or task that is gone, or a loss
+ *  nothing explains, is not (warn). The columns alone decide the level and the reason: the first
+ *  that applies of the row's status, the task's status, its epoch, a dead mark. The task's status
+ *  comes before its epoch because a Cancel moves the epoch too. Never throws: the hand-off returns
+ *  either way, and a read that fails must not fail a healthy task. */
+async function logLostHandoff(
+  db: Database,
+  ctx: ResolvedTaskContext,
+  stepId: string,
+  rowId: string,
+  site: LostHandoffSite,
+): Promise<void> {
+  const at = { taskId: ctx.taskId, stepId, rowId, site };
+  try {
+    const task = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, ctx.taskId),
+      columns: { status: true, orchestrationEpoch: true, deadAt: true },
+    });
+    const row =
+      task && LOST_HANDOFF_READS_ROW[site]
+        ? await db.query.taskSteps.findFirst({
+            where: eq(schema.taskSteps.id, rowId),
+            columns: { status: true },
+          })
+        : undefined;
+    const seen = {
+      rowStatus: row?.status,
+      taskStatus: task?.status,
+      jobEpoch: ctx.orchestrationEpoch,
+      taskEpoch: task?.orchestrationEpoch,
+    };
+    const routine =
+      (row ? ROW_TAKEN[row.status] : undefined) ??
+      (task ? TASK_ENDED[task.status] : undefined) ??
+      (task && task.orchestrationEpoch !== ctx.orchestrationEpoch ? 'epoch_moved' : undefined) ??
+      (task?.deadAt ? 'task_dead' : undefined);
+    if (routine) {
+      logger.info({ ...at, reason: routine, ...seen }, LOST_HANDOFF);
+      return;
+    }
+    const reason = !task
+      ? 'task_gone'
+      : LOST_HANDOFF_READS_ROW[site] && !row
+        ? 'row_gone'
+        : 'unexplained';
+    logger.warn({ ...at, reason, ...seen }, LOST_HANDOFF);
+  } catch (err) {
+    logger.warn(
+      { err, ...at, reason: 'read_failed', jobEpoch: ctx.orchestrationEpoch },
+      'step result not handed off: why could not be read',
+    );
+  }
+}
+
 async function taskEpochMoved(db: Database, ctx: ResolvedTaskContext): Promise<boolean> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, ctx.taskId),
@@ -1793,6 +1898,7 @@ export async function handleResult(
     );
     return;
   }
+  const logLost = (site: LostHandoffSite) => logLostHandoff(db, ctx, stepId, result.row.id, site);
   switch (result.status) {
     case 'deferred': {
       await enqueueAdvance(
@@ -1899,7 +2005,10 @@ export async function handleResult(
     case 'waiting_form': {
       // Stamp the start of the idle (waiting-for-input) period so the step's
       // active-work timer can exclude it. Folded into idle_ms on form submit.
-      if (!(await writeOwnedRow(db, result.row.id, { waitingStartedAt: new Date() }))) return;
+      if (!(await writeOwnedRow(db, result.row.id, { waitingStartedAt: new Date() }))) {
+        await logLost('waiting_form_row');
+        return;
+      }
       const parked = await markTaskWaiting(
         db,
         ctx.taskId,
@@ -1909,7 +2018,10 @@ export async function handleResult(
         stepDef.parkTaskStatus,
         { epoch: ctx.orchestrationEpoch },
       );
-      if (!parked) return;
+      if (!parked) {
+        await logLost('waiting_form_task');
+        return;
+      }
       await appendEvent(db, ctx.taskId, result.row.id, 'step.waiting_form', { stepId });
       return;
     }
@@ -1928,7 +2040,10 @@ export async function handleResult(
         })
         .where(taskWriteTarget(ctx.taskId, { epoch: ctx.orchestrationEpoch }))
         .returning({ id: schema.tasks.id });
-      if (!marked) return;
+      if (!marked) {
+        await logLost('waiting_cli_task');
+        return;
+      }
       // Assert the parked status on the ROW first. It can still read `running` here, which makes
       // the park below a silent no-op (markCliParkBegin is guarded on status = waiting_cli): a
       // first run or a form submission flips the row to `running` (step-runner.ts), and the
@@ -1997,7 +2112,10 @@ export async function handleResult(
             endedAt: null,
             waitingStartedAt: new Date(),
           });
-          if (!parked) return;
+          if (!parked) {
+            await logLost('oscillation_row');
+            return;
+          }
           await recordFixLoopRequest(db, ctx.taskId, result.row.id, {
             diagnosis: result.diagnosis,
             sourceStepId: result.sourceStepId,
@@ -2014,7 +2132,10 @@ export async function handleResult(
             'waiting_user',
             { epoch: ctx.orchestrationEpoch },
           );
-          if (!waiting) return;
+          if (!waiting) {
+            await logLost('oscillation_task');
+            return;
+          }
           await appendEvent(db, ctx.taskId, result.row.id, 'fix_loop.oscillation_detected', {
             sourceStepId: result.sourceStepId,
             conflictingStepId: osc.conflictingStepId,
@@ -2057,7 +2178,10 @@ export async function handleResult(
           endedAt: null,
           waitingStartedAt: new Date(),
         });
-        if (!parked) return;
+        if (!parked) {
+          await logLost('round_cap_row');
+          return;
+        }
         await recordFixLoopRequest(db, ctx.taskId, result.row.id, {
           diagnosis: result.diagnosis,
           sourceStepId: result.sourceStepId,
@@ -2074,7 +2198,10 @@ export async function handleResult(
           'waiting_user',
           { epoch: ctx.orchestrationEpoch },
         );
-        if (!waiting) return;
+        if (!waiting) {
+          await logLost('round_cap_task');
+          return;
+        }
         await appendEvent(db, ctx.taskId, result.row.id, 'fix_loop.escalated', {
           sourceStepId: result.sourceStepId,
           rounds: cap,
@@ -2082,7 +2209,9 @@ export async function handleResult(
         });
         return;
       }
-      const target = await routableFixLoopTarget(db, ctx, result.row.id);
+      const target = await routableFixLoopTarget(db, ctx, result.row.id, () =>
+        logLost('fix_target'),
+      );
       if (!target) return;
       // If a prior attempt at this round left a terminal row (e.g. a reaped/failed CLI
       // whose invocation was never superseded — a worker reload mid-CLI), reset it so the
@@ -2496,7 +2625,7 @@ async function handleStartTask(
   }
   // START runs its first step itself rather than through an advance, so it takes that step's hold
   // too: a pass a Stop cut off can still be on the step when a Retry queues this START.
-  const release = await takeStepHold(`${ctx.taskId}:${first.metadata.id}:0`);
+  const release = await takeStepHold(stepHoldKey(ctx.taskId, first.metadata.id, 0));
   try {
     // The task is live, so a deactivation must count it; one already under way is waited out.
     const moduleDeactivation = await moduleDeactivationMessage(db, first.metadata.id, {
@@ -3655,7 +3784,10 @@ export async function recoverParkedStep(
 
 export async function reconcileOrphanedSteps(
   db: Database,
-  deps: ReconcileDeps = { enqueueAdvance, queuedInvocationIds: readQueuedInvocationIds },
+  deps: ReconcileDeps = {
+    enqueueAdvance: enqueueRedrive,
+    queuedInvocationIds: readQueuedInvocationIds,
+  },
 ): Promise<void> {
   const stuckCli = await db
     .select({
@@ -4054,6 +4186,14 @@ type TaskWorkerPayload =
 /** Steps whose advance this process is running, by task, step and round. */
 const advancingSteps = new Set<string>();
 
+const stepHoldKey = (taskId: string, stepId: string, round: number) =>
+  `${taskId}:${stepId}:${round}`;
+
+/** Whether a pass of this process is on the step. The stalled sweep leaves such a step alone: its
+ *  queue read cannot see a pass whose job Redis lost while the handler went on. */
+export const stepAdvanceHeld = (taskId: string, stepId: string, round: number): boolean =>
+  advancingSteps.has(stepHoldKey(taskId, stepId, round));
+
 /** How long an advance waits before trying a step another advance holds again. */
 const ADVANCE_DEFER_MS = 5_000;
 
@@ -4079,7 +4219,7 @@ export async function holdStepAdvance(
 ): Promise<(() => void) | null> {
   const { taskId, stepId, round } = job.data as TaskJobPayload;
   if (!stepId) return null;
-  const key = `${taskId}:${stepId}:${round ?? 0}`;
+  const key = stepHoldKey(taskId, stepId, round ?? 0);
   if (advancingSteps.has(key) && token) {
     let deferred = false;
     try {
