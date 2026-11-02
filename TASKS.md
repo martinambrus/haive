@@ -74,9 +74,9 @@ board. At session start, load the board's tasks you own or will work on into the
 
 ## Decisions and prerequisites
 
-Owner allowance policy 2026-11-01 (codex-queue): monitor actual reported Codex remaining allowance. At40% remaining or below, admit no new tasks; finish the tasks already in flight at the trigger, save the handoff, then pause until the owner resumes after reset. Do not mark the rest complete or unpark diminishing-return work. Meter/policy: `.claude/tmp/codex-run/queue-exec-20261101/allowance-status.json` and `allowance-policy.json`; initial reading45% remaining, reported reset2026-11-07 21:08 Paris.
+Owner allowance policy 2026-11-02 (codex-queue): the owner resumed execution and has an available reset. The previous40% cutoff is superseded. Monitor actual weekly allowance; use3% remaining as the near-zero admission checkpoint, finish active tasks, save handoff and pause for the owner to apply the reset. Do not reset automatically. Preserve prior evidence and parked-task fences.
 
-Execution PAUSED 2026-11-01 (codex-queue): the40% admission latch triggered at19:58:59UTC. All three then-active tasks T121/T122/T456 are delivered (PR988/PR987), main CI green and owned cleanup complete. Latest reported allowance38% remaining. No new Haive task may start until the owner resumes after reset. Queued and diminishing-return tasks remain unfinished; handoff `.claude/tmp/codex-run/HANDOFF.md`.
+Execution RESUMED 2026-11-02 by owner instruction. The prior40% checkpoint completed T121/T122/T456. Current weekly meter12% remaining; near-zero checkpoint3%. Continue the approved queue from T521 member5 only. Historical pause receipt is retained locally.
 
 Owner review-gate update 2026-11-01: Greptile will not run until November9. Skip Greptile requests and waits before2026-11-09; Codex review and CI remain required.
 
@@ -1341,7 +1341,7 @@ Queued broader findings from T489 PR #975, review-6 and codex-rev-6/last.txt. PR
 
 ### T521 · FNF[haive-save-leftovers] · first Save & push to an empty origin fails before committing
 
-status: open · kind: reproduced operational bug · executable member: 5 · priority: P1
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T07:05Z · last: 2026-11-02T07:05Z · kind: reproduced operational bug · executable member: 5 · priority: P1
 Queued connected findings from T120 PR1b reviews, not additional authorized implementation. PRE-EXISTING, minor; raw reports under .claude/tmp/codex-run/T120/.
 
 1. MOVED to T526; not part of the measured empty-origin fix.
@@ -1352,6 +1352,8 @@ Queued connected findings from T120 PR1b reviews, not additional authorized impl
 5. Measured by T120-live against the existing worker: first Save & push to a completely empty origin fails before committing, because plan/merge.ts fetchOrigin (~:105-111) explicitly fetches refs/heads/<branch> and treats its absence as integration_failed; integrateOrigin invokes it before divergence can classify a missing remote branch (plan-mirror-queue.ts ~:258, project-state/save.ts ~:328). Same-history initialized origins push successfully. PRE-EXISTING, connected; distinguish a genuinely absent remote branch from a transport/read error without weakening other refusals. Raw browser/backend evidence in .claude/tmp/codex-run/codex-resume-20261101/T120-live/empty-remote-failure.png and report.md. No broader fix authorized.
 
 Reconciled 2026-11-01: member 5 alone is the next fix scope. Members1/2 are separate verification candidates in T526;3 is parked in T527;4 was already split as design T523. Preserve the distinction between an absent remote branch and a failed remote read.
+
+Execution 2026-11-02: member5 only, bounded empty-origin first-push fix. Evidence `.claude/tmp/codex-run/queue-exec-20261101/T521/`. No rejoining T523/T526/T527 or broader Git cleanup. Fresh failing control, paired review and all delivery gates required.
 
 ### T522 · FNF[git-text-redaction-limits] · unusual URL delimiters and pathless query-at-signs evade text redaction (+1)
 
