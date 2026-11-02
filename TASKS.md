@@ -320,11 +320,13 @@ Dependency reconciliation 2026-11-01: B3.1c landed and modular-haive-plan is pau
 
 ### T330 · M12 · module lifecycle L3: dependents preflight urgent/graceful (+J9)
 
-status: open · was modular #35 · priority: P2
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T17:12Z · last: 2026-11-02T17:12Z · was modular #35 · priority: P2
 From the modularity plan, docs/plans/twinkling-frolicking-toast.md (M12, J9).
 
 - U1 and U2 shipped: urgent deactivation and the dependents dialog.
 - Remaining: the graceful path through the maintenance primitives, and J9, the preflight that lists dependents (snapshot module.<m>.* ids plus grants).
+
+User decision 2026-11-02: drain only tasks dependent on this module; unrelated work stays available. Existing dependent tasks finish before the module turns off. Reuse maintenance admission/locking semantics without an instance-wide maintenance window.
 
 ### T331 · I7 · modules/integration-google (Drive, Docs, Gmail)
 
