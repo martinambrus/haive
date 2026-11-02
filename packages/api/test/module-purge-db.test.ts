@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { eq, inArray, like, sql } from 'drizzle-orm';
+import { and, eq, inArray, like, sql } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { Redis } from 'ioredis';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -659,6 +659,50 @@ describe.skipIf(!url || !redisUrl)('POST /modules/:id/purge on Postgres and Redi
       expect(after.integrations).toEqual(initial.integrations);
       expect(after.modules).toEqual(initial.modules);
       expect(after.purges).toEqual(initial.purges);
+      expect((await purge()).status).toBe(200);
+    });
+
+    it('refuses promptly while a disconnect holds an owned account FOR UPDATE, and retries after it releases', async () => {
+      const f = await ownedFixture();
+      const initial = await snapshot();
+      let pending: Promise<Response> | undefined;
+      try {
+        await db.transaction(async (tx) => {
+          // Disconnect locks the owned row before its DELETE takes ROW EXCLUSIVE.
+          // This ROW SHARE holder is compatible with the purge's table fence.
+          // The server-side idle bound is a backup if the test's race cannot finish.
+          await tx.execute(sql`SET LOCAL idle_in_transaction_session_timeout = '5s'`);
+          await tx
+            .select()
+            .from(schema.integrationConnections)
+            .where(
+              and(
+                eq(schema.integrationConnections.id, f.owned.id),
+                eq(schema.integrationConnections.ownerUserId, ACTOR),
+              ),
+            )
+            .for('update');
+          pending = Promise.resolve(purge());
+          const response = await Promise.race([pending, sleep(1_000).then(() => null)]);
+          expect(
+            response,
+            'Purge must refuse without waiting for the disconnect row lock',
+          ).not.toBeNull();
+          expect([response!.status, (await json(response!)).code]).toEqual([
+            502,
+            'module_purge_incomplete',
+          ]);
+          const during = await snapshot();
+          expect(during.integrations).toEqual(initial.integrations);
+          expect(during.modules).toEqual(initial.modules);
+          expect(during.types).toEqual(initial.types);
+          expect(during.purges).toEqual(initial.purges);
+        });
+      } finally {
+        // A failing prompt-refusal assertion rolls back the holder before this await,
+        // allowing the old purge to finish too; no actor can leak into the next case.
+        await pending;
+      }
       expect((await purge()).status).toBe(200);
     });
 
