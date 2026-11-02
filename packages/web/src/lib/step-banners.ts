@@ -58,6 +58,15 @@ export interface StepBannerRow {
   errorMessage: string | null;
   /** Runtime-slot park marker. Non-null iff the step is queued for capacity right now. */
   waitingStartedAt: Date | string | null;
+  integrationWait?: {
+    causes: readonly {
+      requirementId: string;
+      categoryId: string | null;
+      providerId: string | null;
+      connectionId: string | null;
+      reason: string;
+    }[];
+  } | null;
 }
 
 /** Copy for the amber "queued for a runtime slot" panel, or null when the step is not parked.
@@ -80,6 +89,22 @@ export function parkBanner(
   // statusMessage guard is skipped here for the same reason: under pause the step is provably
   // waiting whether or not the park ever wrote its line.
   if (opts.paused) return { text: PAUSED_WAIT_TEXT };
+  if (step.integrationWait?.causes.length) {
+    const causes = step.integrationWait.causes.map((cause) => {
+      const target = codeSpan(cause.providerId ?? cause.categoryId ?? 'integration');
+      const requirement = codeSpan(cause.requirementId);
+      if (cause.reason === 'connection-unavailable')
+        return `The selected account for ${requirement} (${target}) needs reconnecting.`;
+      if (cause.reason === 'provider-deactivated')
+        return `The provider for ${requirement} (${target}) has a deactivated module. Ask an administrator to reactivate it.`;
+      if (cause.reason === 'provider-disabled')
+        return `The provider for ${requirement} (${target}) is disabled. Ask an administrator to enable it.`;
+      return `The integration ${requirement} (${target}) is unavailable.`;
+    });
+    return {
+      text: `${causes.join(' ')} Open [Settings → Integrations](/settings/integrations) to check the selected account. This step resumes automatically when its requirements resolve.`,
+    };
+  }
   if (!step.statusMessage) return null;
   return { text: step.statusMessage };
 }
@@ -245,6 +270,7 @@ export interface DeadTaskRow {
   status: string;
   /** Absent on an api that predates the column, which reads as alive. */
   deadAt?: Date | string | null;
+  deadReason?: string | null;
 }
 
 export interface DeadStepRow {
@@ -319,7 +345,11 @@ export function deadBanner(
     );
   }
   if (sentences.length === 0) {
-    sentences.push(`${DEAD_LEAD} a step it needs is no longer available. You can only cancel it.`);
+    sentences.push(
+      task.deadReason
+        ? `${DEAD_LEAD} ${task.deadReason}`
+        : `${DEAD_LEAD} a step it needs is no longer available. You can only cancel it.`,
+    );
   }
   return { text: sentences.join('\n\n') };
 }

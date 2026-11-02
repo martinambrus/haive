@@ -96,6 +96,7 @@ export async function cancelTaskRow(
         // raise "integer out of range" and abort the cancel.
         idleMs: OPEN_WAIT_INTO_IDLE_MS,
         waitingStartedAt: null,
+        integrationWait: null,
         updatedAt: now,
       })
       .where(

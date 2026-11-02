@@ -4,7 +4,7 @@ import { Badge } from '@/components/ui';
 import type { SlotWait } from '@/lib/api-client';
 import { SlotWaitBadge } from './slot-wait-badge';
 
-const KINDS = ['runtime', 'agent', 'module'] as const;
+const KINDS = ['runtime', 'agent', 'module', 'integration'] as const;
 
 const render = (over: Partial<SlotWait> = {}) =>
   renderToStaticMarkup(
@@ -40,6 +40,7 @@ describe('SlotWaitBadge', () => {
     ['runtime', 'waiting: runtime slot'],
     ['agent', 'waiting: agent slot'],
     ['module', 'waiting: module setup'],
+    ['integration', 'waiting: integration'],
   ] as const)('labels a %s wait', (kind, label) => {
     expect(textOf(render({ kind }))).toBe(label);
   });
@@ -48,6 +49,7 @@ describe('SlotWaitBadge', () => {
     ['runtime', 'Queued for a free runtime slot'],
     ['agent', 'Queued for a free agent slot'],
     ['module', "Waiting for its module's setup to finish"],
+    ['integration', 'Waiting for a required integration to become available'],
   ] as const)(
     'titles a %s wait with its own sentence when the worker sent no message',
     (kind, title) => {

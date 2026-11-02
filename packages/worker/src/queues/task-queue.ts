@@ -1,3 +1,11 @@
+import {
+  resolveDispatchIntegrations,
+  stepIntegrationRequirements,
+  invalidRequirementsFailure,
+  hasIntegrationContinuation,
+  clearIntegrationWaitCause,
+  type IntegrationBlock,
+} from '../step-engine/step-integrations.js';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { safeProcessor } from './safe-processor.js';
 import { removeNoFollow } from '@haive/shared/fs-safe';
@@ -13,6 +21,7 @@ import {
   lt,
   ne,
   notInArray,
+  or,
   sql,
   type SQL,
 } from 'drizzle-orm';
@@ -526,16 +535,28 @@ class ParkOvertaken extends Error {}
  *  The row first, as a Retry takes rows before the task. `foldRun`, for a step's first park, adds the
  *  run the row holds to its carried_* first (`foldRunIntoCarried`), in the same transaction. */
 async function writeFencedPark(
-  db: Database,
+  db: Database | DbHandle,
   ctx: ResolvedTaskContext,
   rowId: string,
-  patch: PgUpdateSetSource<typeof schema.taskSteps>,
+  requestedPatch: PgUpdateSetSource<typeof schema.taskSteps>,
   pointer: { stepId: string; stepIndex: number; round: number } | null,
-  opts: { foldRun?: boolean } = {},
+  opts: { foldRun?: boolean; clearIntegrationCause?: boolean } = {},
 ): Promise<boolean> {
   const fence = { epoch: ctx.orchestrationEpoch };
   try {
     await db.transaction(async (tx) => {
+      const patch = { ...requestedPatch };
+      if (opts.clearIntegrationCause) {
+        // A pending CLI switch resets the envelope without changing the task epoch.
+        // Transform the held current value, never the caller's unlocked park snapshot.
+        const [held] = await tx
+          .select({ integrationWait: schema.taskSteps.integrationWait })
+          .from(schema.taskSteps)
+          .where(eq(schema.taskSteps.id, rowId))
+          .for('no key update');
+        if (!held) throw new ParkOvertaken();
+        patch.integrationWait = clearIntegrationWaitCause(held.integrationWait);
+      }
       if (opts.foldRun) await foldRunIntoCarried(tx, rowId);
       await tx.update(schema.taskSteps).set(patch).where(eq(schema.taskSteps.id, rowId));
       const holds = pointer
@@ -561,6 +582,108 @@ async function writeFencedPark(
     if (err instanceof ParkOvertaken) return false;
     throw err;
   }
+}
+
+/** Integration parks share the existing delayed advance and stalled-redrive owner. */
+export async function parkForIntegrations(
+  db: Database,
+  ctx: ResolvedTaskContext,
+  stepDef: StepDefinition,
+  row: typeof schema.taskSteps.$inferSelect,
+  block: IntegrationBlock,
+): Promise<boolean> {
+  const causes = block.wait.causes
+    .map(
+      (c) =>
+        `${c.requirementId} (${[c.categoryId, c.providerId].filter((id) => id !== null).join(' / ') || 'integration'}): ${c.reason}`,
+    )
+    .join('; ');
+  const message =
+    block.kind === 'dead'
+      ? `A required integration provider is not installed: ${causes}. Ask an administrator to restore its module and restart the worker.`
+      : `Waiting for required integrations: ${causes}. Check Settings → Integrations to reconnect or choose an account; ask an administrator to enable or reactivate its provider. This step resumes automatically when its requirements resolve.`;
+  const landed = await db.transaction(async (tx) => {
+    // Read after the lock: duplicate blocks must neither fold a park twice nor overwrite
+    // a Stop/Skip, a Retry's unmarked pending row, or an invocation dispatched since.
+    const [held] = await tx
+      .select()
+      .from(schema.taskSteps)
+      .where(
+        and(
+          eq(schema.taskSteps.id, row.id),
+          or(
+            inArray(schema.taskSteps.status, ['running', 'waiting_cli']),
+            and(
+              eq(schema.taskSteps.status, 'pending'),
+              isNotNull(schema.taskSteps.integrationWait),
+            ),
+          ),
+          sql`NOT EXISTS (SELECT 1 FROM ${schema.cliInvocations} WHERE ${schema.cliInvocations.taskStepId} = ${row.id}
+        AND ${schema.cliInvocations.endedAt} IS NULL AND ${schema.cliInvocations.supersededAt} IS NULL)`,
+        ),
+      )
+      .for('no key update');
+    if (!held) return false;
+    const [task] = await tx
+      .select({ id: schema.tasks.id })
+      .from(schema.tasks)
+      .where(
+        and(
+          taskWriteTarget(ctx.taskId, { epoch: ctx.orchestrationEpoch }),
+          isNull(schema.tasks.deadAt),
+        ),
+      )
+      .for('share');
+    if (!task) return false;
+    const already = held.status === 'pending' && held.waitingStartedAt !== null;
+    const holds = await writeFencedPark(
+      tx,
+      ctx,
+      held.id,
+      {
+        status: 'pending',
+        integrationWait: { ...block.wait, continuation: true },
+        ...(already
+          ? {}
+          : {
+              startedAt: null,
+              endedAt: null,
+              idleMs: 0,
+              userActiveMs: 0,
+              waitingStartedAt: new Date(),
+            }),
+        statusMessage: message,
+        updatedAt: new Date(),
+      },
+      ctx.currentStepId === stepDef.metadata.id && ctx.currentRound === row.round
+        ? null
+        : { stepId: stepDef.metadata.id, stepIndex: row.stepIndex, round: row.round },
+      { foldRun: !already },
+    );
+    if (!holds) return false;
+    if (block.kind === 'dead')
+      return markTaskDead(tx, ctx.taskId, message, {
+        epoch: ctx.orchestrationEpoch,
+        stepId: stepDef.metadata.id,
+        round: row.round,
+      });
+    return true;
+  });
+  if (!landed) return false;
+  if (block.kind === 'dead') {
+    await killCliSandboxesForTask(ctx.taskId);
+    await resyncAfterTaskEnd(db, ctx.taskId);
+  } else {
+    await enqueueAdvance(
+      ctx.taskId,
+      ctx.userId,
+      stepDef.metadata.id,
+      row.round,
+      ctx.orchestrationEpoch,
+      { delayMs: 30_000 },
+    );
+  }
+  return true;
 }
 
 async function foldRunIntoCarried(tx: DbTx, rowId: string): Promise<void> {
@@ -1901,6 +2024,10 @@ export async function handleResult(
   }
   const logLost = (site: LostHandoffSite) => logLostHandoff(db, ctx, stepId, result.row.id, site);
   switch (result.status) {
+    case 'integration_blocked': {
+      await parkForIntegrations(db, ctx, stepDef, result.row, result.block);
+      return;
+    }
     case 'deferred': {
       await enqueueAdvance(
         ctx.taskId,
@@ -3020,6 +3147,24 @@ async function handleAdvanceStep(
   // dropped rather than converted into a second park loop.
   const fresh = existing == null || existing.status === 'pending';
   const pause = fresh ? await resolvePause(db, ctx.taskId) : null;
+  if (
+    !pause &&
+    existing?.status === 'pending' &&
+    hasIntegrationContinuation(existing.integrationWait) &&
+    invalidRequirementsFailure(stepDef) === null
+  ) {
+    const resolution = await resolveDispatchIntegrations(
+      db,
+      ctx.taskId,
+      stepIntegrationRequirements(stepDef),
+    );
+    if (!resolution.ok && resolution.blocked) {
+      await parkForIntegrations(db, ctx, stepDef, existing, resolution.blocked);
+      return;
+    }
+    // A resolved account or an unrelated hard failure goes through the runner's current
+    // resolver. Never use the account captured when the wait began.
+  }
   const schemaWait = pause ? null : await moduleSchemaWaitMessage(db, payload.stepId);
   if (schemaWait !== null && !fresh) {
     // A started row keeps its status (a pending park would ask shouldRun again on resume),
@@ -3082,6 +3227,7 @@ async function handleAdvanceStep(
         row.id,
         { statusMessage: message, updatedAt: new Date() },
         payload.stepId !== ctx.currentStepId || round !== ctx.currentRound ? pointer : null,
+        { clearIntegrationCause: !pause },
       );
     } else {
       // First park: fold whatever the row carried into carried_* (an OPEN span reclassifies to
@@ -3103,7 +3249,7 @@ async function handleAdvanceStep(
           updatedAt: new Date(),
         },
         pointer,
-        { foldRun: true },
+        { foldRun: true, clearIntegrationCause: !pause },
       );
     }
     if (!holds) {
@@ -3235,6 +3381,7 @@ async function handleAdvanceStep(
           row.id,
           { statusMessage: parkMessage, updatedAt: new Date() },
           payload.stepId !== ctx.currentStepId || round !== ctx.currentRound ? pointer : null,
+          { clearIntegrationCause: true },
         );
       } else {
         // First park: re-queue the step to a clean PENDING state, not just a message. A step
@@ -3267,7 +3414,7 @@ async function handleAdvanceStep(
             updatedAt: new Date(),
           },
           pointer,
-          { foldRun: true },
+          { foldRun: true, clearIntegrationCause: true },
         );
       }
       if (!holds) {
@@ -3994,6 +4141,7 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
         // usually folded it already, and a second pass adds 0 because the NULL marker is a wait of 0.
         idleMs: OPEN_WAIT_INTO_IDLE_MS,
         waitingStartedAt: null,
+        integrationWait: null,
         updatedAt: now,
       })
       .where(open);

@@ -38,7 +38,33 @@ export const INTEGRATION_ACCOUNT_CHANGED_REASON = 'integration-account-changed';
 
 export type DispatchIntegrations =
   | { ok: true; bindings: IntegrationBinding[]; resolutions: IntegrationResolution[] }
-  | { ok: false; failure: string };
+  | { ok: false; failure: string; blocked?: IntegrationBlock };
+
+type IntegrationWaitState = NonNullable<typeof schema.taskSteps.$inferSelect.integrationWait>;
+
+/** Legacy cause-bearing parks predate the explicit continuation bit. */
+export function hasIntegrationContinuation(wait: IntegrationWaitState | null | undefined): boolean {
+  return wait?.continuation === true || (wait?.causes.length ?? 0) > 0;
+}
+
+/** Settle only the active cause when another hold takes over this interrupted dispatch. */
+export function clearIntegrationWaitCause(
+  wait: IntegrationWaitState | null | undefined,
+): IntegrationWaitState | null {
+  return hasIntegrationContinuation(wait) ? { causes: [], continuation: true } : null;
+}
+
+export interface IntegrationBlock {
+  kind: 'wait' | 'dead';
+  wait: NonNullable<typeof schema.taskSteps.$inferSelect.integrationWait>;
+}
+
+export class IntegrationBlockedError extends Error {
+  constructor(readonly block: IntegrationBlock) {
+    super('Required integrations are unavailable');
+    this.name = 'IntegrationBlockedError';
+  }
+}
 
 let catalog: ReadonlyMap<string, ComposableStepEntry> = new Map();
 
@@ -132,6 +158,37 @@ const bindingsOf = (resolutions: readonly IntegrationResolution[]): IntegrationB
       : [],
   );
 
+/** Only named, actionable resolution states park; repository/pin/tool/key errors still fail. */
+export function integrationBlock(
+  resolutions: readonly IntegrationResolution[],
+): IntegrationBlock | undefined {
+  const required = resolutions.filter((r) => r.status === 'unresolved' && !r.optional);
+  if (required.length === 0) return undefined;
+  const waitable = new Set([
+    'connection-unavailable',
+    'provider-deactivated',
+    'provider-disabled',
+    'provider-missing',
+  ]);
+  const causes = required.flatMap((r) =>
+    r.status === 'unresolved' && waitable.has(r.reason)
+      ? [
+          {
+            requirementId: r.requirementId,
+            categoryId: r.categoryId,
+            providerId: r.providerId,
+            connectionId: r.connectionId,
+            reason: r.reason,
+          } as NonNullable<typeof schema.taskSteps.$inferSelect.integrationWait>['causes'][number],
+        ]
+      : [],
+  );
+  // A missing provider is dead even when another requirement has an unrelated hard failure.
+  if (causes.some((c) => c.reason === 'provider-missing'))
+    return { kind: 'dead', wait: { causes } };
+  return causes.length === required.length ? { kind: 'wait', wait: { causes } } : undefined;
+}
+
 function unresolvedFailure(resolutions: readonly IntegrationResolution[]): string | null {
   const lost = resolutions.flatMap((resolution) =>
     resolution.status === 'unresolved' && !resolution.optional
@@ -157,7 +214,8 @@ export async function resolveDispatchIntegrations(
   }
   const resolutions = await resolveStepIntegrations(db, { taskId }, requirements);
   const unresolved = unresolvedFailure(resolutions);
-  if (unresolved !== null) return { ok: false, failure: unresolved };
+  if (unresolved !== null)
+    return { ok: false, failure: unresolved, blocked: integrationBlock(resolutions) };
   const bindings = bindingsOf(resolutions);
   if (bindings.length === 0) return { ok: true, bindings, resolutions };
   if (!process.env.CONFIG_ENCRYPTION_KEY) {
@@ -183,12 +241,14 @@ export async function insertStampedRun(
   values: typeof schema.cliInvocations.$inferInsert,
   requirements: readonly IntegrationRequirement[],
   named: ReadonlyMap<string, string | null> = new Map(),
-): Promise<typeof schema.cliInvocations.$inferSelect | { failure: string }> {
+): Promise<
+  typeof schema.cliInvocations.$inferSelect | { failure: string; blocked?: IntegrationBlock }
+> {
   return db.transaction(async (tx) => {
     await lockTaskIntegrations(tx, taskId);
     const resolutions = await resolveStepIntegrations(tx, { taskId }, requirements);
     const unresolved = unresolvedFailure(resolutions);
-    if (unresolved !== null) return { failure: unresolved };
+    if (unresolved !== null) return { failure: unresolved, blocked: integrationBlock(resolutions) };
     const bindings = bindingsOf(resolutions);
     const changed = [...named]
       .filter(

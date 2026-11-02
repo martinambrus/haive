@@ -332,15 +332,18 @@ step's are its pinned entry's, and one that no longer parses fails the step
 declaration none of the step's dispatches can carry (no `llm` or `agentMining` phase without a
 `toolProfile`). Only a dispatch whose spec leaves `toolProfile` unset resolves; recaps, the AI-fix
 agent, merges and the DAG never do. One resolution per dispatch, shared by every agent of a fan-out:
-a required requirement that does not resolve fails the step `integration-unresolved` naming it, its
-category and the reason (an optional one is dropped), a requirement that pins a provider is refused
+a required requirement is classified by its named reason (an optional unresolved one is dropped).
+`connection-unavailable` (the selected account's structural status is not `connected`),
+`provider-deactivated` and `provider-disabled` park durably; `provider-missing` makes the task dead.
+Other unresolved reasons (`needs-choice`, `no-connection`, `no-provider`, repository/allow-list
+refusals) keep the named `integration-unresolved` failure and Retry path. A requirement that pins a provider is refused
 `integration-provider-pinned` until pins land (J6e), and a missing signing key or tool names the
 broker could not list fail
 `integrations-no-signing-key` and `integration-tools-unlistable`. The run is written by
 `insertStampedRun`: one transaction that takes `lockTaskIntegrations` (the lock the choice PUT and
 DELETE take first), resolves again, records the grants from that resolution and inserts the run
-stamped with its bindings; a required binding lost since the first resolution writes nothing and
-fails the step, and so does an account a prompt step's template names (`{{integration:<id>.account}}`)
+stamped with its bindings; a required binding lost since the first resolution writes no run, grant or
+job and takes the same wait/dead/failure classification, and so does an account a prompt step's template names (`{{integration:<id>.account}}`)
 that now resolves to another connection than the prompt was built on, or appeared or went away
 (`integration-account-changed`). A dispatch whose first resolution bound nothing (every requirement
 optional and unresolved) inserts its run unstamped with no second resolution, so the prompt's
@@ -356,6 +359,52 @@ is on, never the account; a prompt step's template names it only through
 `{{integration:<id>.account}}` (see [Task types](task-types.md)). The prompt and the CLI choice come from the first resolution and the stamp
 from the second; tools/list follows the stamp, so a choice change landing between the two can only
 leave the prompt naming tools the agent is not offered.
+
+**Reconnect and provider waits (J7).** The step's nullable `integration_wait` (0218) stores typed
+causes with requirement, category, provider and connection ids from the resolver. Its separate
+`continuation: true` bit records that this interrupted dispatch already passed its entry precondition;
+it stays true when runtime capacity or module schema setup takes over and clears the active `causes`
+array. Legacy nonempty-cause rows also identify an entered continuation, so no data migration is
+needed. A cause-free continuation is not a reconnect wait. The envelope never stores a token, invents
+a provider for an unserved category, or writes connection `status`: refresh and sign-in
+remain the auth-health owners. Deactivation does not say the account's tokens are bad. No vendor
+refresh or login runs while checking a wait.
+
+The existing fenced park owner writes `pending`, the shared idle marker and the typed cause in one
+transaction, with the task still `running`; its 30 s delayed advance checks the current requirements,
+choices/grants, account status and live provider/module state before runtime admission or step work.
+A resolved wait re-enters the runner, which resolves again before dispatch and under the stamp lock;
+a task override changed meanwhile takes effect there, never from the captured wait account. Optional
+unresolved requirements remain nonblocking. The park retains detection, answers and iterations and
+does not ask `shouldRun` again on its integration continuation. Mining reservations retain their own
+stored prompts and unspent counters: the existing reserved-agent recovery sends them after recovery,
+including a follow-up wave, without creating a new agent retry owner.
+
+A park takes the step row first and reads it after the lock, refuses a Retry's unmarked pending row,
+a Stop/Skip, a changed epoch, a terminal or dead task, and any live invocation. Duplicate blocks keep
+the same idle marker and do not fold a park twice. Pause takes precedence; a runtime or schema
+wait that wins after recovery clears only the active integration cause and keeps the continuation bit, so the next
+pending tick cannot ask `shouldRun` again and skip unfinished work or reserved follow-up agents.
+The existing stale-park sweep repairs a lost delayed advance at boot and after its cutoff.
+Reset/Retry, terminal settlement and successful claim clear the whole `integration_wait` envelope.
+Runtime/schema cause transfer reads that envelope under the park transaction's step-row lock;
+a pending CLI switch can reset it at the same epoch, so copying the earlier unlocked park snapshot
+would resurrect the cleared continuation and suppress a fresh entry check. Pause leaves the column
+untouched. Row-before-task locking and the timing fold remain in the same park transaction.
+Banner/badge readers require pending status plus idle marker and a nonempty active cause array: stale
+copy or an ended task cannot advertise a reconnect wait. The banner points to Settings and names the
+requirement/provider state; the `integration` wait badge is shared by the task header and list.
+
+Missing providers use the existing dead-task owner, guards and boot revival, including run supersede
+and the new-work fence. The boot dead-task pass also resolves the current step's required integrations,
+so it cannot revive merely because that step still exists. It revives only once no required target is
+`provider-missing`; a restored but deactivated provider then parks on its own actionable state. Installing
+a module requires a worker restart, which is the recheck trigger. An uninstalled module category with
+no selected provider is named by category alone; an own stored choice/grant supplies provider evidence
+when present. Other hard failures (provider pins, signing key, tool names, invalid pinned requirements,
+account changed while building a named prompt) keep their prior refusal paths. A saved wait whose
+pinned requirements no longer parse reaches that hard failure even when a valid sibling is still
+blocked; the park/dead recovery readers never promote unsupported provider pins to provider deaths.
 
 **Repository allow-list.** `repositories.integrations_restricted` plus repository grants (category
 NULL) listing the allowed accounts. It fails closed on the flag, never on whether entries exist: entries

@@ -1,7 +1,8 @@
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createDatabase, schema, type Database } from '@haive/database';
-import type { CliExecJobPayload } from '@haive/shared';
+import { createDatabase, schema, ZERO_MERGE_RETRIES, type Database } from '@haive/database';
+import { TASK_JOB_NAMES, deriveSlotWait, type CliExecJobPayload } from '@haive/shared';
+import { computeFoldContribution } from '@haive/shared/timing';
 import {
   lockTaskIntegrations,
   registerModuleIntegrations,
@@ -11,9 +12,11 @@ import {
 import type { ComposableStepEntry, IntegrationRequirement } from '@haive/shared/modularity';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 import type { DispatchRequest } from '../src/orchestrator/dispatcher.js';
-import type { StepDefinition } from '../src/step-engine/step-definition.js';
+import { MiningWaveError, type StepDefinition } from '../src/step-engine/step-definition.js';
+import { markModuleSchemaReady, markModuleSchemaUnready } from '../src/modules/schema-ready.js';
 import {
   insertStampedRun,
+  invalidRequirementsFailure,
   resolveDispatchIntegrations,
   setComposableCatalog,
 } from '../src/step-engine/step-integrations.js';
@@ -42,7 +45,16 @@ if (url && !new URL(url).pathname.startsWith('/step_integrations_module_provider
 
 const h = vi.hoisted(() => {
   process.env.LOG_LEVEL ??= 'error';
-  return { requests: [] as unknown[] };
+  return {
+    requests: [] as unknown[],
+    parkJobs: [] as { name: string; data: unknown; opts: { delay?: number } }[],
+    db: undefined as unknown,
+    beforeRequest: null as null | (() => Promise<void>),
+    runtimePark: false,
+    runtimeParkReadArmed: false,
+    afterRuntimeParkRead: null as
+      null | ((row: { id: string; integrationWait: unknown }) => Promise<void>),
+  };
 });
 
 vi.mock('@haive/shared', async (importOriginal) => ({
@@ -69,11 +81,76 @@ vi.mock('../src/orchestrator/dispatcher.js', async (importOriginal) => {
     ...actual,
     resolveTaskDispatch: async (...args: Parameters<typeof actual.resolveTaskDispatch>) => {
       h.requests.push(args[2]);
+      await h.beforeRequest?.();
       return actual.resolveTaskDispatch(...args);
     },
   };
 });
 
+vi.mock('../src/sandbox/runtime-admission.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  runtimeAdmission: async () => {
+    if (h.runtimePark && h.afterRuntimeParkRead) h.runtimeParkReadArmed = true;
+    return {
+      decision: h.runtimePark ? 'park' : 'proceed',
+      busyMb: 1024,
+      budgetMb: 1024,
+      myWeightMb: 1024,
+      position: 1,
+      waiting: 1,
+    };
+  },
+  releaseRuntimeReservation: async () => undefined,
+}));
+vi.mock('../src/step-engine/step-runner.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/step-engine/step-runner.js')>();
+  return {
+    ...actual,
+    upsertRow: async (...args: Parameters<typeof actual.upsertRow>) => {
+      const row = await actual.upsertRow(...args);
+      if (h.runtimeParkReadArmed && h.afterRuntimeParkRead) {
+        const reset = h.afterRuntimeParkRead;
+        h.runtimeParkReadArmed = false;
+        h.afterRuntimeParkRead = null;
+        await reset(row); // The real SELECT has completed; the park still holds this unlocked snapshot.
+      }
+      return row;
+    },
+  };
+});
+vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/redis.js', () => ({ getBullRedis: () => ({}), getRedis: () => ({}) }));
+vi.mock('bullmq', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('bullmq')>()),
+  Queue: class {
+    async add(name: string, data: unknown, opts: { delay?: number }) {
+      h.parkJobs.push({ name, data, opts });
+    }
+  },
+}));
+vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  cleanupTaskAuthVolumes: async () => ({ removed: [], failed: [] }),
+  syncRefreshedAuthToUserVolumes: async () => undefined,
+}));
+vi.mock('../src/sandbox/sandbox-kill.js', () => ({
+  killCliSandboxesForTask: async () => undefined,
+  listCliSandboxesForTask: async () => [],
+}));
+vi.mock('../src/project-state/set-aside.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  resyncAfterTaskEnd: async () => undefined,
+}));
+
+import { pinnedPromptStep } from './support/prompt-step-integrations.js';
+import {
+  parkForIntegrations,
+  processTaskJob,
+  setContainerCleanupRunner,
+} from '../src/queues/task-queue.js';
+import { reviveDeadTasks } from '../src/queues/dead-task-boot.js';
+import { stepRegistry } from '../src/step-engine/registry.js';
+import type { ResolvedTaskContext } from '../src/queues/run-list.js';
 import { advanceStep } from '../src/step-engine/step-runner.js';
 
 const MODULE_PROVIDER = 'module.fx.crm';
@@ -138,6 +215,16 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
 
   beforeAll(async () => {
     db = createDatabase(url as string);
+    h.db = db;
+    await db
+      .insert(schema.modules)
+      .values({
+        moduleId: 'fx',
+        packageName: '@haive/module-fx',
+        name: 'Module fx',
+        installedVersion: '1.0.0',
+      })
+      .onConflictDoNothing();
     await db
       .insert(schema.integrationProviderConfigs)
       .values({ providerId: MODULE_PROVIDER, enabled: true })
@@ -148,14 +235,27 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
   });
 
   afterAll(async () => {
+    setContainerCleanupRunner(null);
     await deleteUsers(db, users);
     await db
       .delete(schema.integrationProviderConfigs)
       .where(eq(schema.integrationProviderConfigs.providerId, MODULE_PROVIDER));
+    await db.delete(schema.modules).where(eq(schema.modules.moduleId, 'fx'));
     await db.$client.end({ timeout: 5 });
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    setContainerCleanupRunner(async () => 0);
+    h.runtimePark = false;
+    h.runtimeParkReadArmed = false;
+    h.afterRuntimeParkRead = null;
+    markModuleSchemaReady('fx');
+    await db
+      .update(schema.modules)
+      .set({ deactivatedAt: null })
+      .where(eq(schema.modules.moduleId, 'fx'));
+    h.parkJobs.length = 0;
+    h.beforeRequest = null;
     savedKey = process.env.CONFIG_ENCRYPTION_KEY;
     process.env.CONFIG_ENCRYPTION_KEY = SIGNING_KEY;
     enqueued.length = 0;
@@ -164,6 +264,7 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
   });
 
   afterEach(() => {
+    markModuleSchemaReady('fx');
     registerModuleIntegrations([]);
     if (savedKey === undefined) delete process.env.CONFIG_ENCRYPTION_KEY;
     else process.env.CONFIG_ENCRYPTION_KEY = savedKey;
@@ -344,6 +445,738 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
     providerId: 'github',
     connectionId,
     access: 'read',
+  });
+
+  describe('[J7] durable reconnect/provider waits', () => {
+    const rowOf = async (taskId: string) =>
+      (await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, taskId)))[0]!;
+    const taskOf = async (taskId: string) =>
+      (await db.select().from(schema.tasks).where(eq(schema.tasks.id, taskId)))[0]!;
+    async function park(
+      w: { taskId: string; userId: string },
+      def: StepDefinition,
+      result: Awaited<ReturnType<typeof advance>>,
+    ) {
+      expect(result.status).toBe('integration_blocked');
+      if (result.status !== 'integration_blocked')
+        throw new Error('expected typed integration block');
+      await db
+        .update(schema.tasks)
+        .set({ currentStepId: def.metadata.id })
+        .where(eq(schema.tasks.id, w.taskId));
+      const ctx = {
+        taskId: w.taskId,
+        userId: w.userId,
+        orchestrationEpoch: 0,
+        currentStepId: def.metadata.id,
+        currentRound: 0,
+      } as ResolvedTaskContext;
+      expect(await parkForIntegrations(db, ctx, def, result.row, result.block)).toBe(true);
+      return ctx;
+    }
+    const expectNoDispatch = async (taskId: string) => {
+      expect(await runsOf(db, taskId)).toEqual([]);
+      expect(await grantsOf(db, taskId)).toEqual([]);
+      expect(enqueued).toEqual([]);
+    };
+
+    it('parks the selected unhealthy account without fallback, then stamps the CURRENT override exactly once', async () => {
+      const w = await moduleWorld();
+      const second = await seedModuleConnection(w.userId);
+      await db.insert(schema.taskIntegrationChoices).values({
+        taskId: w.taskId,
+        categoryId: MODULE_CATEGORY,
+        providerId: MODULE_PROVIDER,
+        connectionId: w.moduleConnectionId,
+      });
+      await db
+        .update(schema.integrationConnections)
+        .set({ status: 'needs_reauth' })
+        .where(eq(schema.integrationConnections.id, w.moduleConnectionId));
+      const id = declare([DOCS_REQUIRED]);
+      const def = llmStep(id);
+      const first = await advance(w, def);
+      expect(first).toMatchObject({
+        status: 'integration_blocked',
+        block: {
+          kind: 'wait',
+          wait: {
+            causes: [
+              {
+                connectionId: w.moduleConnectionId,
+                providerId: MODULE_PROVIDER,
+                reason: 'connection-unavailable',
+              },
+            ],
+          },
+        },
+      });
+      await expectNoDispatch(w.taskId);
+      const ctx = await park(w, def, first);
+      const parked = await rowOf(w.taskId);
+      expect(parked.status).toBe('pending');
+      expect(parked.waitingStartedAt).not.toBeNull();
+      expect(parked.integrationWait?.causes[0]?.connectionId).toBe(w.moduleConnectionId);
+      expect(h.parkJobs[0]?.opts.delay).toBe(30_000);
+      if (first.status !== 'integration_blocked') throw new Error('block missing');
+      await Promise.all([
+        parkForIntegrations(db, ctx, def, first.row, first.block),
+        parkForIntegrations(db, ctx, def, first.row, first.block),
+      ]);
+      expect((await rowOf(w.taskId)).waitingStartedAt).toEqual(parked.waitingStartedAt);
+      expect((await rowOf(w.taskId)).carriedIdleMs).toBe(parked.carriedIdleMs);
+      // The task-page choice owner may choose another account while parked. No captured account wins.
+      await db.transaction(async (tx) => {
+        await lockTaskIntegrations(tx, w.taskId);
+        await tx
+          .update(schema.taskIntegrationChoices)
+          .set({ connectionId: second })
+          .where(eq(schema.taskIntegrationChoices.taskId, w.taskId));
+      });
+      expect((await advance(w, def)).status).toBe('waiting_cli');
+      expect((await rowOf(w.taskId)).integrationWait).toBeNull();
+      expect((await runsOf(db, w.taskId))[0]?.integrations).toMatchObject([
+        { connectionId: second },
+      ]);
+      await advance(w, def);
+      expect(await runsOf(db, w.taskId)).toHaveLength(1);
+      expect(enqueued).toHaveLength(1);
+      expect(await parkForIntegrations(db, ctx, def, first.row, first.block)).toBe(false);
+      expect(
+        (
+          await db
+            .select()
+            .from(schema.integrationConnections)
+            .where(eq(schema.integrationConnections.id, w.moduleConnectionId))
+        )[0]?.status,
+      ).toBe('needs_reauth');
+    });
+
+    it('provider deactivation parks without changing auth health, and reactivation allows dispatch', async () => {
+      const w = await moduleWorld();
+      const id = declare([DOCS_REQUIRED]);
+      const def = llmStep(id);
+      await db
+        .update(schema.modules)
+        .set({ deactivatedAt: new Date() })
+        .where(eq(schema.modules.moduleId, 'fx'));
+      const result = await advance(w, def);
+      expect(result).toMatchObject({
+        status: 'integration_blocked',
+        block: { kind: 'wait', wait: { causes: [{ reason: 'provider-deactivated' }] } },
+      });
+      await park(w, def, result);
+      await expectNoDispatch(w.taskId);
+      expect(
+        (
+          await db
+            .select()
+            .from(schema.integrationConnections)
+            .where(eq(schema.integrationConnections.id, w.moduleConnectionId))
+        )[0]?.status,
+      ).toBe('connected');
+      await db
+        .update(schema.modules)
+        .set({ deactivatedAt: null })
+        .where(eq(schema.modules.moduleId, 'fx'));
+      expect((await advance(w, def)).status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('rechecks provider state at the locked stamp boundary and retains reserved mining prompts for recovery', async () => {
+      const w = await moduleWorld();
+      const id = declare([DOCS_REQUIRED]);
+      const def = miningStep(id);
+      h.beforeRequest = async () => {
+        await db
+          .update(schema.modules)
+          .set({ deactivatedAt: new Date() })
+          .where(eq(schema.modules.moduleId, 'fx'));
+      };
+      const result = await advance(w, def);
+      expect(result).toMatchObject({ status: 'integration_blocked', block: { kind: 'wait' } });
+      await expectNoDispatch(w.taskId);
+      await park(w, def, result);
+      const rows = await db
+        .select()
+        .from(schema.taskStepAgentMinings)
+        .where(eq(schema.taskStepAgentMinings.taskStepId, result.row.id));
+      expect(rows).toHaveLength(AGENTS.length);
+      // Attempts starts at 1 when reserved (schema default); a blocked dispatch must
+      // neither link a run nor spend another attempt. Recovery keeps that same first attempt.
+      expect(
+        rows
+          .map((r) => ({
+            agentId: r.agentId,
+            status: r.status,
+            cliInvocationId: r.cliInvocationId,
+            dispatchPrompt: r.dispatchPrompt,
+            attempts: r.attempts,
+          }))
+          .sort((a, b) => a.agentId.localeCompare(b.agentId)),
+      ).toEqual(
+        AGENTS.map((agentId) => ({
+          agentId,
+          status: 'pending',
+          cliInvocationId: null,
+          dispatchPrompt: `Review ${agentId}.`,
+          attempts: 1,
+        })),
+      );
+      h.beforeRequest = null;
+      await db
+        .update(schema.modules)
+        .set({ deactivatedAt: null })
+        .where(eq(schema.modules.moduleId, 'fx'));
+      expect((await advance(w, def)).status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(AGENTS.length);
+      expect(await runsOf(db, w.taskId)).toHaveLength(AGENTS.length);
+      const recovered = await db
+        .select()
+        .from(schema.taskStepAgentMinings)
+        .where(eq(schema.taskStepAgentMinings.taskStepId, result.row.id));
+      expect(recovered.map((r) => r.attempts)).toEqual(rows.map((r) => r.attempts));
+    });
+
+    it('ordinary queue ticks park an admin prompt, respect pause, recheck current provider state and dispatch once after recovery', async () => {
+      const w = await moduleWorld();
+      const type = 'j7-queue-tick';
+      const id = `custom.${type}.audit`;
+      const { stored } = pinnedPromptStep([DOCS_REQUIRED], { id });
+      await db
+        .insert(schema.taskTypeDefinitions)
+        .values({
+          slug: type,
+          displayName: type,
+          source: 'admin',
+          runListStrategy: 'static',
+          stepIds: [id],
+        })
+        .onConflictDoNothing();
+      try {
+        await db
+          .update(schema.repositories)
+          .set({ localPath: '/var/tmp/haive-codex-332' })
+          .where(eq(schema.repositories.id, w.repositoryId));
+        await db
+          .update(schema.tasks)
+          .set({
+            type,
+            currentStepId: id,
+            runListSnapshot: [id],
+            customSteps: stored,
+            cliProviderId: w.claude.id,
+          })
+          .where(eq(schema.tasks.id, w.taskId));
+        await db
+          .update(schema.integrationConnections)
+          .set({ status: 'needs_reauth' })
+          .where(eq(schema.integrationConnections.id, w.moduleConnectionId));
+        let seq = 0;
+        const tick = () =>
+          processTaskJob(
+            {
+              id: `j7-tick-${++seq}`,
+              name: TASK_JOB_NAMES.ADVANCE_STEP,
+              data: { taskId: w.taskId, userId: w.userId, stepId: id, round: 0, epoch: 0 },
+              timestamp: Date.now(),
+            } as never,
+            'test-token',
+          );
+        await tick();
+        const parked = await rowOf(w.taskId);
+        expect(parked).toMatchObject({
+          status: 'pending',
+          integrationWait: {
+            causes: [{ reason: 'connection-unavailable', connectionId: w.moduleConnectionId }],
+          },
+        });
+        expect(parked.waitingStartedAt).not.toBeNull();
+        expect(
+          h.parkJobs.filter((j) => j.name === TASK_JOB_NAMES.ADVANCE_STEP).at(-1)?.opts.delay,
+        ).toBe(30_000);
+        expect(await runsOf(db, w.taskId)).toEqual([]);
+        // Reconnect is represented solely by the auth owner's status transition; a pause still wins.
+        await db
+          .update(schema.tasks)
+          .set({ pausedAt: new Date() })
+          .where(eq(schema.tasks.id, w.taskId));
+        await db
+          .update(schema.integrationConnections)
+          .set({ status: 'connected' })
+          .where(eq(schema.integrationConnections.id, w.moduleConnectionId));
+        await tick();
+        expect(await runsOf(db, w.taskId)).toEqual([]);
+        expect((await rowOf(w.taskId)).waitingStartedAt).toEqual(parked.waitingStartedAt);
+        // A different live structural block now applies; recovery may not trust the old account-only cause.
+        await db.update(schema.tasks).set({ pausedAt: null }).where(eq(schema.tasks.id, w.taskId));
+        await db
+          .update(schema.modules)
+          .set({ deactivatedAt: new Date() })
+          .where(eq(schema.modules.moduleId, 'fx'));
+        await tick();
+        expect((await rowOf(w.taskId)).integrationWait?.causes[0]?.reason).toBe(
+          'provider-deactivated',
+        );
+        expect(await runsOf(db, w.taskId)).toEqual([]);
+        await db
+          .update(schema.modules)
+          .set({ deactivatedAt: null })
+          .where(eq(schema.modules.moduleId, 'fx'));
+        await tick();
+        expect((await rowOf(w.taskId)).integrationWait).toBeNull();
+        expect((await runsOf(db, w.taskId))[0]?.integrations).toMatchObject([
+          { connectionId: w.moduleConnectionId },
+        ]);
+        await tick();
+        expect(await runsOf(db, w.taskId)).toHaveLength(1);
+      } finally {
+        await db.delete(schema.tasks).where(eq(schema.tasks.id, w.taskId));
+        await db
+          .delete(schema.taskTypeDefinitions)
+          .where(eq(schema.taskTypeDefinitions.slug, type));
+      }
+    });
+
+    it.each(['runtime', 'schema'] as const)(
+      '[J7 fix1] preserves an interrupted follow-up wave when %s takes over a resolved integration wait',
+      async (hold) => {
+        const w = await moduleWorld();
+        const type = `j7-takeover-${hold}`;
+        const id = declare([DOCS_REQUIRED]);
+        const tailId = `${id}-tail`;
+        const originalPrompt = 'Finish the reserved follow-up from the first wave.';
+        let canEnter = true;
+        const shouldRun = vi.fn(async () => canEnter);
+        const def: StepDefinition = {
+          ...miningStep(id, {
+            selectAgents: async () => [
+              { agentId: 'first-wave', agentTitle: 'First wave', prompt: 'Do the first wave.' },
+            ],
+          }),
+          needsRuntime: 'app',
+        };
+        def.shouldRun = shouldRun;
+        def.apply = async () => {
+          canEnter = false; // Work has happened; re-asking the entry precondition would now skip it.
+          await db
+            .update(schema.integrationConnections)
+            .set({ status: 'needs_reauth' })
+            .where(eq(schema.integrationConnections.id, w.moduleConnectionId));
+          throw new MiningWaveError([
+            { agentId: 'follow-up', agentTitle: 'Follow-up', prompt: originalPrompt },
+          ]);
+        };
+        stepRegistry.register(def);
+        stepRegistry.register({
+          metadata: metadata(tailId),
+          apply: async () => ({}),
+        } as StepDefinition);
+        await db
+          .insert(schema.taskTypeDefinitions)
+          .values({
+            slug: type,
+            displayName: type,
+            source: 'admin',
+            runListStrategy: 'static',
+            stepIds: [id, tailId],
+          })
+          .onConflictDoNothing();
+        try {
+          await db
+            .update(schema.repositories)
+            .set({ localPath: '/var/tmp/haive-codex-332' })
+            .where(eq(schema.repositories.id, w.repositoryId));
+          await db
+            .update(schema.tasks)
+            .set({
+              type,
+              currentStepId: id,
+              runListSnapshot: [id, tailId],
+              cliProviderId: w.claude.id,
+            })
+            .where(eq(schema.tasks.id, w.taskId));
+          let seq = 0;
+          const tick = () =>
+            processTaskJob(
+              {
+                id: `j7-${hold}-${++seq}`,
+                name: TASK_JOB_NAMES.ADVANCE_STEP,
+                data: { taskId: w.taskId, userId: w.userId, stepId: id, round: 0, epoch: 0 },
+                timestamp: Date.now(),
+              } as never,
+              'test-token',
+            );
+          await tick();
+          const first = (await runsOf(db, w.taskId))[0]!;
+          expect(first.integrations).toMatchObject([{ connectionId: w.moduleConnectionId }]);
+          // Deliver the first wave's persisted result, without starting a CLI or sandbox.
+          await db
+            .update(schema.cliInvocations)
+            .set({ endedAt: new Date(), exitCode: 0 })
+            .where(eq(schema.cliInvocations.id, first.id));
+          await db
+            .update(schema.taskStepAgentMinings)
+            .set({ status: 'done', output: {}, endedAt: new Date() })
+            .where(eq(schema.taskStepAgentMinings.cliInvocationId, first.id));
+          await tick();
+          const parked = await rowOf(w.taskId);
+          expect(parked.status).toBe('pending');
+          expect(parked.integrationWait?.causes[0]?.reason).toBe('connection-unavailable');
+          const entryCalls = shouldRun.mock.calls.length;
+          expect(entryCalls).toBeGreaterThan(0);
+          const agents = () =>
+            db
+              .select()
+              .from(schema.taskStepAgentMinings)
+              .where(eq(schema.taskStepAgentMinings.taskStepId, parked.id));
+          const reserved = (await agents()).find((r) => r.agentId === 'follow-up')!;
+          expect(reserved).toMatchObject({
+            status: 'pending',
+            cliInvocationId: null,
+            dispatchPrompt: originalPrompt,
+            attempts: 1,
+          });
+          await db
+            .update(schema.integrationConnections)
+            .set({ status: 'connected' })
+            .where(eq(schema.integrationConnections.id, w.moduleConnectionId));
+          if (hold === 'runtime') h.runtimePark = true;
+          else markModuleSchemaUnready('fx');
+          await tick();
+          const held = await rowOf(w.taskId);
+          expect(held.status).toBe('pending');
+          expect(held.waitingStartedAt).toEqual(parked.waitingStartedAt);
+          expect(held.carriedIdleMs).toBe(parked.carriedIdleMs);
+          if (hold === 'schema') {
+            // Assert the visible state before any assertion about new implementation fields.
+            expect(
+              deriveSlotWait({
+                taskStatus: 'running',
+                currentStepId: id,
+                currentRound: 0,
+                steps: [held],
+                queuedInvocationStepRowIds: new Set(),
+                paused: false,
+                nowMs: Date.now(),
+              })?.kind,
+            ).toBe('module');
+            expect(held.statusMessage).toContain('schema is being set up');
+          } else expect(held.statusMessage).toContain('free runtime slot');
+          h.runtimePark = false;
+          markModuleSchemaReady('fx');
+          await tick();
+          // On old source the runtime park erases continuation identity: this is skipped,
+          // the task moves to its tail, and the follow-up reservation is stranded.
+          expect((await rowOf(w.taskId)).status).toBe('waiting_cli');
+          expect(shouldRun).toHaveBeenCalledTimes(entryCalls);
+          const runs = await runsOf(db, w.taskId);
+          expect(runs).toHaveLength(2);
+          const follow = runs.find((r) => r.id !== first.id)!;
+          expect(follow.prompt).toContain(originalPrompt);
+          expect(follow.integrations).toEqual(first.integrations);
+          expect((await agents()).find((r) => r.agentId === 'follow-up')).toMatchObject({
+            attempts: reserved.attempts,
+            cliInvocationId: follow.id,
+          });
+          expect((await rowOf(w.taskId)).integrationWait).toBeNull();
+          await tick();
+          expect(await runsOf(db, w.taskId)).toHaveLength(2);
+          expect(shouldRun).toHaveBeenCalledTimes(entryCalls);
+        } finally {
+          markModuleSchemaReady('fx');
+          await db.delete(schema.tasks).where(eq(schema.tasks.id, w.taskId));
+          await db
+            .delete(schema.taskTypeDefinitions)
+            .where(eq(schema.taskTypeDefinitions.slug, type));
+        }
+      },
+    );
+
+    it('[J7 fix2] honors a same-epoch pending CLI reset committed after the runtime park snapshot', async () => {
+      const w = await moduleWorld();
+      const type = 'j7-runtime-reset-race';
+      const id = declare([DOCS_REQUIRED]);
+      const tailId = `${id}-tail`;
+      let canEnter = true;
+      const shouldRun = vi.fn(async () => canEnter);
+      const detect = vi.fn(async () => {
+        canEnter = false;
+        return { prepared: true };
+      });
+      const def: StepDefinition = { ...miningStep(id), needsRuntime: 'app' };
+      def.shouldRun = shouldRun;
+      def.detect = detect;
+      stepRegistry.register(def);
+      // A skipped reset row hands off to a fake queued tail rather than completing/tearing down a runtime.
+      stepRegistry.register({
+        metadata: metadata(tailId),
+        apply: async () => ({}),
+      } as StepDefinition);
+      await db
+        .insert(schema.taskTypeDefinitions)
+        .values({
+          slug: type,
+          displayName: type,
+          source: 'admin',
+          runListStrategy: 'static',
+          stepIds: [id, tailId],
+        })
+        .onConflictDoNothing();
+      try {
+        await db
+          .update(schema.repositories)
+          .set({ localPath: '/var/tmp/haive-codex-332' })
+          .where(eq(schema.repositories.id, w.repositoryId));
+        await db
+          .update(schema.tasks)
+          .set({
+            type,
+            currentStepId: id,
+            runListSnapshot: [id, tailId],
+            cliProviderId: w.claude.id,
+          })
+          .where(eq(schema.tasks.id, w.taskId));
+        await db
+          .update(schema.integrationConnections)
+          .set({ status: 'needs_reauth' })
+          .where(eq(schema.integrationConnections.id, w.moduleConnectionId));
+        let seq = 0;
+        const tick = () =>
+          processTaskJob(
+            {
+              id: `j7-reset-race-${++seq}`,
+              name: TASK_JOB_NAMES.ADVANCE_STEP,
+              data: { taskId: w.taskId, userId: w.userId, stepId: id, round: 0, epoch: 0 },
+              timestamp: Date.now(),
+            } as never,
+            'test-token',
+          );
+        await tick();
+        const parked = await rowOf(w.taskId);
+        expect(parked).toMatchObject({
+          status: 'pending',
+          iterationCount: 0,
+          integrationWait: { continuation: true },
+        });
+        const reserved = () =>
+          db
+            .select()
+            .from(schema.taskStepAgentMinings)
+            .where(eq(schema.taskStepAgentMinings.taskStepId, parked.id));
+        expect(await reserved()).toHaveLength(AGENTS.length);
+        expect(await runsOf(db, w.taskId)).toEqual([]);
+        const entryCalls = shouldRun.mock.calls.length;
+        const epoch = (await taskOf(w.taskId)).orchestrationEpoch;
+        await db
+          .update(schema.integrationConnections)
+          .set({ status: 'connected' })
+          .where(eq(schema.integrationConnections.id, w.moduleConnectionId));
+        let resets = 0;
+        h.afterRuntimeParkRead = async (snapshot) => {
+          expect(snapshot.id).toBe(parked.id);
+          expect(snapshot.integrationWait).not.toBeNull();
+          // Execute the pending default-role CLI switch's reset shape from api/routes/tasks/steps.ts:
+          // runs -> reservations -> held row; iteration zero/pending keeps movesTask=false and epoch.
+          // Auth/preference persistence is the unchanged API boundary, not part of this SQL race fixture.
+          await db.transaction(async (tx) => {
+            const now = new Date();
+            await tx
+              .update(schema.cliInvocations)
+              .set({ supersededAt: now })
+              .where(
+                and(
+                  eq(schema.cliInvocations.taskStepId, parked.id),
+                  isNull(schema.cliInvocations.supersededAt),
+                ),
+              );
+            await tx
+              .delete(schema.taskStepAgentMinings)
+              .where(eq(schema.taskStepAgentMinings.taskStepId, parked.id));
+            const [held] = await tx
+              .select()
+              .from(schema.taskSteps)
+              .where(eq(schema.taskSteps.id, parked.id))
+              .for('no key update');
+            expect(held).toMatchObject({ status: 'pending', iterationCount: 0 });
+            const contribution = computeFoldContribution(held!, now.getTime());
+            await tx
+              .update(schema.taskSteps)
+              .set({
+                status: 'pending',
+                detectOutput: null,
+                formSchema: null,
+                formValues: null,
+                statusMessage: null,
+                startedAt: null,
+                endedAt: null,
+                errorMessage: null,
+                mergeResolveState: ZERO_MERGE_RETRIES,
+                idleMs: 0,
+                waitingStartedAt: null,
+                integrationWait: null,
+                userActiveMs: 0,
+                carriedWorkMs: held!.carriedWorkMs + contribution.workMs,
+                carriedIdleMs: held!.carriedIdleMs + contribution.idleMs,
+                carriedUserActiveMs: held!.carriedUserActiveMs + contribution.userActiveMs,
+                updatedAt: now,
+              })
+              .where(eq(schema.taskSteps.id, parked.id));
+          });
+          expect((await rowOf(w.taskId)).integrationWait).toBeNull();
+          expect(await reserved()).toEqual([]);
+          expect((await taskOf(w.taskId)).orchestrationEpoch).toBe(epoch);
+          resets += 1;
+        };
+        h.runtimePark = true;
+        await tick(); // Suspends only the park's upsertRow read, runs the reset, then writes the stale park.
+        expect(resets).toBe(1);
+        expect(await reserved()).toEqual([]);
+        const afterPark = await rowOf(w.taskId);
+        expect((await taskOf(w.taskId)).orchestrationEpoch).toBe(epoch);
+        h.runtimePark = false;
+        await tick();
+        // The reset made this a fresh entry. On db68 the stale park resurrects continuation:true,
+        // so shouldRun is suppressed and a brand-new mining run is dispatched instead of skipping.
+        expect((await rowOf(w.taskId)).status).toBe('skipped');
+        expect(shouldRun.mock.calls.length).toBeGreaterThan(entryCalls);
+        expect(detect).toHaveBeenCalledTimes(1);
+        expect(afterPark.integrationWait).toBeNull();
+        expect(await runsOf(db, w.taskId)).toEqual([]);
+      } finally {
+        h.afterRuntimeParkRead = null;
+        h.runtimeParkReadArmed = false;
+        await db.delete(schema.tasks).where(eq(schema.tasks.id, w.taskId));
+        await db
+          .delete(schema.taskTypeDefinitions)
+          .where(eq(schema.taskTypeDefinitions.slug, type));
+      }
+    });
+
+    it('a saved wait with a newly invalid requirement fails by name even while its valid sibling still needs reconnecting', async () => {
+      const w = await moduleWorld();
+      const type = 'j7-invalid-wait';
+      const id = `custom.${type}.audit`;
+      const { stored, stepDef } = pinnedPromptStep(
+        [DOCS_REQUIRED, { id: 'broken', category: MODULE_CATEGORY, access: 'admin' }],
+        { id },
+      );
+      expect(invalidRequirementsFailure(stepDef)).toMatch(/^integration-requirement-invalid:/);
+      await db
+        .insert(schema.taskTypeDefinitions)
+        .values({
+          slug: type,
+          displayName: type,
+          source: 'admin',
+          runListStrategy: 'static',
+          stepIds: [id],
+        })
+        .onConflictDoNothing();
+      try {
+        await db
+          .update(schema.repositories)
+          .set({ localPath: '/var/tmp/haive-codex-332' })
+          .where(eq(schema.repositories.id, w.repositoryId));
+        await db
+          .update(schema.tasks)
+          .set({
+            type,
+            currentStepId: id,
+            runListSnapshot: [id],
+            customSteps: stored,
+            cliProviderId: w.claude.id,
+          })
+          .where(eq(schema.tasks.id, w.taskId));
+        await db
+          .update(schema.integrationConnections)
+          .set({ status: 'needs_reauth' })
+          .where(eq(schema.integrationConnections.id, w.moduleConnectionId));
+        const resolution = await resolveDispatchIntegrations(db, w.taskId, [DOCS_REQUIRED]);
+        expect(resolution).toMatchObject({ ok: false, blocked: { kind: 'wait' } });
+        if (resolution.ok || !resolution.blocked)
+          throw new Error('fixture must have a reconnect-blocked valid sibling');
+        await seedStepRow(db, w.taskId, {
+          stepId: id,
+          status: 'pending',
+          waitingStartedAt: new Date(),
+          integrationWait: resolution.blocked.wait,
+        });
+        await processTaskJob(
+          {
+            id: 'j7-invalid-wait',
+            name: TASK_JOB_NAMES.ADVANCE_STEP,
+            data: { taskId: w.taskId, userId: w.userId, stepId: id, round: 0, epoch: 0 },
+            timestamp: Date.now(),
+          } as never,
+          'test-token',
+        );
+        expect(await rowOf(w.taskId)).toMatchObject({
+          status: 'failed',
+          integrationWait: null,
+          errorMessage: expect.stringMatching(/^integration-requirement-invalid:/),
+        });
+        expect((await taskOf(w.taskId)).status).toBe('failed');
+        expect(await runsOf(db, w.taskId)).toEqual([]);
+        expect(h.parkJobs.filter((j) => j.name === TASK_JOB_NAMES.ADVANCE_STEP)).toEqual([]);
+      } finally {
+        await db.delete(schema.tasks).where(eq(schema.tasks.id, w.taskId));
+        await db
+          .delete(schema.taskTypeDefinitions)
+          .where(eq(schema.taskTypeDefinitions.slug, type));
+      }
+    });
+
+    it('a missing required provider is structurally dead until the current requirement resolves again', async () => {
+      const w = await moduleWorld();
+      const id = declare([DOCS_REQUIRED]);
+      const def = llmStep(id);
+      stepRegistry.register(def);
+      registerModuleIntegrations([]);
+      const result = await advance(w, def);
+      expect(result).toMatchObject({ status: 'integration_blocked', block: { kind: 'dead' } });
+      await park(w, def, result);
+      expect((await taskOf(w.taskId)).deadAt).not.toBeNull();
+      await expectNoDispatch(w.taskId);
+      const recovery = {
+        enqueueStart: vi.fn(async () => undefined),
+        enqueueAdvance: vi.fn(async () => undefined),
+        redriveRetryDelaysMs: [],
+      };
+      expect((await reviveDeadTasks(db, recovery)).revived).toBe(0);
+      expect(recovery.enqueueAdvance).not.toHaveBeenCalled();
+      registerModuleIntegrations([fxModule(DOCS_CATEGORIES)]);
+      expect((await reviveDeadTasks(db, recovery)).revived).toBe(1);
+      expect((await taskOf(w.taskId)).deadAt).toBeNull();
+      expect(recovery.enqueueAdvance).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(['failed', 'cancelled', 'completed'] as const)(
+      'a %s task cannot be reparked or resurrected by a stale integration block',
+      async (status) => {
+        const w = await moduleWorld();
+        const id = declare([DOCS_REQUIRED]);
+        const def = llmStep(id);
+        await db
+          .update(schema.integrationConnections)
+          .set({ status: 'needs_reauth' })
+          .where(eq(schema.integrationConnections.id, w.moduleConnectionId));
+        const result = await advance(w, def);
+        expect(result.status).toBe('integration_blocked');
+        if (result.status !== 'integration_blocked') return;
+        await db.update(schema.tasks).set({ status }).where(eq(schema.tasks.id, w.taskId));
+        const ctx = {
+          taskId: w.taskId,
+          userId: w.userId,
+          orchestrationEpoch: 0,
+          currentStepId: id,
+          currentRound: 0,
+        } as ResolvedTaskContext;
+        expect(await parkForIntegrations(db, ctx, def, result.row, result.block)).toBe(false);
+        expect((await taskOf(w.taskId)).status).toBe(status);
+        expect((await rowOf(w.taskId)).integrationWait).toBeNull();
+        expect(h.parkJobs).toHaveLength(0);
+      },
+    );
   });
 
   describe('[M1] resolveDispatchIntegrations', () => {

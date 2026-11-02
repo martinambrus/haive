@@ -277,6 +277,7 @@ export async function resetRowsForRerun(
         endedAt: null,
         idleMs: 0,
         waitingStartedAt: null,
+        integrationWait: null,
         userActiveMs: 0,
         carriedWorkMs: r.carriedWorkMs + contrib.workMs,
         carriedIdleMs: r.carriedIdleMs + contrib.idleMs,
@@ -876,6 +877,7 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
         // waiting_form into idle_ms so the active-work timer excludes it. In SQL, on the locked row.
         idleMs: OPEN_WAIT_INTO_IDLE_MS,
         waitingStartedAt: null,
+        integrationWait: null,
         updatedAt: now,
       })
       .where(stillParkedAsRead(step))
@@ -1640,6 +1642,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           endedAt: now,
           idleMs: OPEN_WAIT_INTO_IDLE_MS,
           waitingStartedAt: null,
+          integrationWait: null,
           updatedAt: now,
         })
         .where(eq(schema.taskSteps.id, step.id));
@@ -2084,6 +2087,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
           mergeResolveState: ZERO_MERGE_RETRIES,
           idleMs: 0,
           waitingStartedAt: null,
+          integrationWait: null,
           userActiveMs: 0,
           carriedWorkMs: held.carriedWorkMs + contrib.workMs,
           carriedIdleMs: held.carriedIdleMs + contrib.idleMs,
