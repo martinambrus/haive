@@ -78,6 +78,8 @@ Owner allowance policy 2026-11-02 (codex-queue): the owner resumed execution and
 
 Execution RESUMED 2026-11-02 by owner instruction. The prior40% checkpoint completed T121/T122/T456. Current weekly meter12% remaining; near-zero checkpoint3%. Continue the approved queue from T521 member5 only. Historical pause receipt is retained locally.
 
+Owner resource update 2026-11-02: the C-drive test reserve is5GiB by explicit owner instruction, superseding the inherited20GiB. Keep4GiB RAM reserve and serialize heavy checks. Saved runner policy: `.claude/tmp/codex-run/queue-exec-20261101/resource-policy.json`. Do not prune project volumes or unknown/user data.
+
 Owner review-gate update 2026-11-01: Greptile will not run until November9. Skip Greptile requests and waits before2026-11-09; Codex review and CI remain required.
 
 T524's 2026-11-01 owner round answered 42 questions. Decisions are recorded on the affected task blocks; the durable local answer register is `.claude/tmp/codex-run/backlog-decisions-20261101/decisions.json`. No unanswered owner-policy question remains from this round.
