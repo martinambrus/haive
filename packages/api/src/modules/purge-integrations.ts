@@ -114,20 +114,27 @@ export async function deleteModuleIntegrations(
   moduleId: string,
 ): Promise<ModuleIntegrationCounts> {
   const p = moduleIntegrationPredicates(moduleId);
-  const deleted = async (
-    table: Parameters<Transaction['delete']>[0],
-    predicate: ReturnType<typeof sql>,
-  ) => {
+  const deleted = async (statement: ReturnType<typeof sql>) => {
     const result = await tx.execute(
-      sql`WITH deleted AS (DELETE FROM ${table} WHERE ${predicate} RETURNING 1) SELECT count(*)::int AS n FROM deleted`,
+      sql`WITH deleted AS (${statement} RETURNING 1) SELECT count(*)::int AS n FROM deleted`,
     );
     return Number(result[0]!.n);
   };
-  const grants = await deleted(schema.integrationGrants, p.grants);
-  const taskChoices = await deleted(schema.taskIntegrationChoices, p.taskChoices);
-  const preferences = await deleted(schema.integrationCategoryPreferences, p.preferences);
-  const userSettings = await deleted(schema.integrationUserSettings, p.userSettings);
-  const providerConfigs = await deleted(schema.integrationProviderConfigs, p.providerConfigs);
-  const connections = await deleted(schema.integrationConnections, p.connections);
+  const grants = await deleted(tx.delete(schema.integrationGrants).where(p.grants).getSQL());
+  const taskChoices = await deleted(
+    tx.delete(schema.taskIntegrationChoices).where(p.taskChoices).getSQL(),
+  );
+  const preferences = await deleted(
+    tx.delete(schema.integrationCategoryPreferences).where(p.preferences).getSQL(),
+  );
+  const userSettings = await deleted(
+    tx.delete(schema.integrationUserSettings).where(p.userSettings).getSQL(),
+  );
+  const providerConfigs = await deleted(
+    tx.delete(schema.integrationProviderConfigs).where(p.providerConfigs).getSQL(),
+  );
+  const connections = await deleted(
+    tx.delete(schema.integrationConnections).where(p.connections).getSQL(),
+  );
   return { providerConfigs, connections, userSettings, preferences, taskChoices, grants };
 }
