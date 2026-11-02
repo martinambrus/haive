@@ -540,13 +540,25 @@ async function writeFencedPark(
   rowId: string,
   patch: PgUpdateSetSource<typeof schema.taskSteps>,
   pointer: { stepId: string; stepIndex: number; round: number } | null,
-  opts: { foldRun?: boolean } = {},
+  opts: { foldRun?: boolean; clearIntegrationCause?: boolean } = {},
 ): Promise<boolean> {
   const fence = { epoch: ctx.orchestrationEpoch };
   try {
     await db.transaction(async (tx) => {
+      const currentPatch = { ...patch };
+      if (opts.clearIntegrationCause) {
+        // A pending CLI switch resets the envelope without changing the task epoch.
+        // Transform the held current value, never the caller's unlocked park snapshot.
+        const [held] = await tx
+          .select({ integrationWait: schema.taskSteps.integrationWait })
+          .from(schema.taskSteps)
+          .where(eq(schema.taskSteps.id, rowId))
+          .for('no key update');
+        if (!held) throw new ParkOvertaken();
+        currentPatch.integrationWait = clearIntegrationWaitCause(held.integrationWait);
+      }
       if (opts.foldRun) await foldRunIntoCarried(tx, rowId);
-      await tx.update(schema.taskSteps).set(patch).where(eq(schema.taskSteps.id, rowId));
+      await tx.update(schema.taskSteps).set(currentPatch).where(eq(schema.taskSteps.id, rowId));
       const holds = pointer
         ? await markTaskRunningWithStep(
             tx,
@@ -3213,14 +3225,9 @@ async function handleAdvanceStep(
         db,
         ctx,
         row.id,
-        {
-          statusMessage: message,
-          integrationWait: pause
-            ? row.integrationWait
-            : clearIntegrationWaitCause(row.integrationWait),
-          updatedAt: new Date(),
-        },
+        { statusMessage: message, updatedAt: new Date() },
         payload.stepId !== ctx.currentStepId || round !== ctx.currentRound ? pointer : null,
+        { clearIntegrationCause: !pause },
       );
     } else {
       // First park: fold whatever the row carried into carried_* (an OPEN span reclassifies to
@@ -3239,13 +3246,10 @@ async function handleAdvanceStep(
           waitingStartedAt: new Date(),
           userActiveMs: 0,
           statusMessage: message,
-          integrationWait: pause
-            ? row.integrationWait
-            : clearIntegrationWaitCause(row.integrationWait),
           updatedAt: new Date(),
         },
         pointer,
-        { foldRun: true },
+        { foldRun: true, clearIntegrationCause: !pause },
       );
     }
     if (!holds) {
@@ -3375,12 +3379,9 @@ async function handleAdvanceStep(
           db,
           ctx,
           row.id,
-          {
-            statusMessage: parkMessage,
-            integrationWait: clearIntegrationWaitCause(row.integrationWait),
-            updatedAt: new Date(),
-          },
+          { statusMessage: parkMessage, updatedAt: new Date() },
           payload.stepId !== ctx.currentStepId || round !== ctx.currentRound ? pointer : null,
+          { clearIntegrationCause: true },
         );
       } else {
         // First park: re-queue the step to a clean PENDING state, not just a message. A step
@@ -3410,11 +3411,10 @@ async function handleAdvanceStep(
             waitingStartedAt: new Date(),
             userActiveMs: 0,
             statusMessage: parkMessage,
-            integrationWait: clearIntegrationWaitCause(row.integrationWait),
             updatedAt: new Date(),
           },
           pointer,
-          { foldRun: true },
+          { foldRun: true, clearIntegrationCause: true },
         );
       }
       if (!holds) {

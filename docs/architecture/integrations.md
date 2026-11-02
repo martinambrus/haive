@@ -387,6 +387,10 @@ wait that wins after recovery clears only the active integration cause and keeps
 pending tick cannot ask `shouldRun` again and skip unfinished work or reserved follow-up agents.
 The existing stale-park sweep repairs a lost delayed advance at boot and after its cutoff.
 Reset/Retry, terminal settlement and successful claim clear the whole `integration_wait` envelope.
+Runtime/schema cause transfer reads that envelope under the park transaction's step-row lock;
+a pending CLI switch can reset it at the same epoch, so copying the earlier unlocked park snapshot
+would resurrect the cleared continuation and suppress a fresh entry check. Pause leaves the column
+untouched. Row-before-task locking and the timing fold remain in the same park transaction.
 Banner/badge readers require pending status plus idle marker and a nonempty active cause array: stale
 copy or an ended task cannot advertise a reconnect wait. The banner points to Settings and names the
 requirement/provider state; the `integration` wait badge is shared by the task header and list.

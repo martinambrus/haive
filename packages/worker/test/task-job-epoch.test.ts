@@ -111,6 +111,8 @@ const h = vi.hoisted(() => {
     existingRow: null as Record<string, unknown> | null,
     /** The row a park writes to, as upsertRow answers it. */
     parkRow: {} as Record<string, unknown>,
+    /** The envelope seen under the park transaction's row lock, independent of the older snapshot. */
+    currentIntegrationWait: null as null | { causes: unknown[]; continuation?: true },
     /** What the runtime-admission gate answers. */
     admission: { decision: 'admit' } as Record<string, unknown>,
     /** Reads that confirm the job still holds the task. */
@@ -228,6 +230,11 @@ const db = {
               return [];
             },
             for: async () => {
+              if (name === 'task_steps' && fields && 'integrationWait' in fields) {
+                return h.state.sourceOwned
+                  ? [{ integrationWait: h.state.currentIntegrationWait }]
+                  : [];
+              }
               if (name === 'modules') {
                 h.state.moduleReads += 1;
                 return h.state.moduleReads > 1 && h.state.laterModuleRows
@@ -482,6 +489,7 @@ afterEach(() => {
   h.state.pausedAt = null;
   h.state.existingRow = null;
   h.state.parkRow = {};
+  h.state.currentIntegrationWait = null;
   h.state.admission = { decision: 'admit' };
   h.state.taskHolds = [];
   h.state.stepPatches = [];
@@ -1502,12 +1510,15 @@ describe('a park or a step start that a Retry or a Stop overtakes', () => {
         h.state.stepPatches.some((p) => String(p.statusMessage ?? '').startsWith('Paused')),
       ).toBe(true);
     });
-    it('parks the step and keeps polling while the job holds the task', async () => {
+    it('parks without copying a stale integration envelope after a reset', async () => {
       h.state.readsAnswer = true;
       h.state.pausedAt = new Date();
-      h.state.parkRow = unparked;
+      h.state.parkRow = { ...unparked, integrationWait: { causes: [], continuation: true } };
       await processTaskJob(job('epoch-chain-first'), 'tok');
       expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: true });
+      // Pause owns neither the current cause nor the entry decision. Omitting this column
+      // preserves a same-epoch reset's NULL rather than writing the stale snapshot back.
+      for (const patch of h.state.stepPatches) expect(patch).not.toHaveProperty('integrationWait');
       parkQueued(30_000);
     });
 
@@ -1636,13 +1647,23 @@ describe('a park or a step start that a Retry or a Stop overtakes', () => {
       expect(shouldRun).not.toHaveBeenCalled();
     });
 
-    it('re-parks a step already parked by refreshing only its message and heartbeat', async () => {
+    it('re-parks a schema wait using current integration state without resetting its marker', async () => {
       h.state.readsAnswer = true;
-      h.state.parkRow = { ...unparked, waitingStartedAt: new Date() };
+      h.state.parkRow = {
+        ...unparked,
+        waitingStartedAt: new Date(),
+        integrationWait: { causes: [], continuation: true },
+      };
+      h.state.currentIntegrationWait = null; // The pending CLI reset committed after the snapshot.
       unready();
       await processTaskJob(job(stepId), 'tok');
       expect(parkPatches()).toHaveLength(1);
-      expect(Object.keys(parkPatches()[0]!).sort()).toEqual(['statusMessage', 'updatedAt']);
+      expect(Object.keys(parkPatches()[0]!).sort()).toEqual([
+        'integrationWait',
+        'statusMessage',
+        'updatedAt',
+      ]);
+      expect(parkPatches()[0]?.integrationWait).toBeNull();
       expect(h.state.taskHolds).toEqual([{ epochs: [5], landed: true }]);
       parkQueued(5_000);
     });
