@@ -116,6 +116,7 @@ import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { TaskLeftMergeBanner } from '@/components/task-left-merge-banner';
 import { PersistedDetails } from '@/components/persisted-details';
 import { SlotWaitBadge } from '@/components/slot-wait-badge';
+import { TaskIntegrations } from '@/components/integrations/task-integrations';
 import { TaskToolUsagePanel } from '@/components/task-tool-usage-table';
 import {
   describeCostSource,
@@ -548,7 +549,7 @@ function primaryRecovery(
   return { step: failedStep, action: 'retry', label: 'Retry', title: RETRY_TITLE };
 }
 
-type Tab = 'steps' | 'clis' | 'editor' | 'terminal' | 'activity' | 'attachments';
+type Tab = 'integrations' | 'steps' | 'clis' | 'editor' | 'terminal' | 'activity' | 'attachments';
 
 // Mirrors @haive/api TaskProviderUsage (kept local per the barrel-avoidance rule).
 interface TaskProviderUsage {
@@ -704,6 +705,10 @@ function DeadTaskBanner({ text }: { text: string }) {
 export default function TaskDetailPage() {
   const params = useParams<{ id: string }>();
   const id = params.id;
+  // Route changes and overlapping polls must not restore an older task/status.
+  const taskReadScope = useRef({ id, applied: 0 });
+  if (taskReadScope.current.id !== id) taskReadScope.current = { id, applied: 0 };
+  const taskReadSequence = useRef(0);
 
   const [task, setTask] = useState<Task | null>(null);
   const [costDisplay, setCostDisplay] = useState<CostDisplay>(USD_DISPLAY);
@@ -818,8 +823,14 @@ export default function TaskDetailPage() {
   }, [hasTask]);
 
   const reload = useCallback(async () => {
+    const request = ++taskReadSequence.current;
+    const scope = taskReadScope.current;
+    const current = () =>
+      scope === taskReadScope.current && scope.id === id && request > scope.applied;
     try {
       const data = await api.get<TaskDetailResponse>(`/tasks/${id}`);
+      if (!current()) return;
+      scope.applied = request;
       setTask(data.task);
       setSteps(data.steps);
       setDeadSteps(data.dead?.steps ?? []);
@@ -837,7 +848,10 @@ export default function TaskDetailPage() {
       // recovers from it. Without this the first failure stuck forever.
       setError(null);
     } catch (err) {
-      setError((err as Error).message ?? 'Failed to load task');
+      if (current()) {
+        scope.applied = request;
+        setError((err as Error).message ?? 'Failed to load task');
+      }
     }
   }, [id]);
 
@@ -2116,6 +2130,9 @@ export default function TaskDetailPage() {
         <TabButton active={tab === 'steps'} onClick={() => setTab('steps')}>
           Steps
         </TabButton>
+        <TabButton active={tab === 'integrations'} onClick={() => setTab('integrations')}>
+          Integrations
+        </TabButton>
         <TabButton active={tab === 'clis'} onClick={() => setTab('clis')}>
           CLIs
         </TabButton>
@@ -2136,6 +2153,10 @@ export default function TaskDetailPage() {
           Attachments
         </TabButton>
       </div>
+
+      {tab === 'integrations' && task.id === id && (
+        <TaskIntegrations taskId={task.id} status={task.status} dead={taskDead} />
+      )}
 
       {tab === 'steps' && (
         <div ref={stepsContainerRef} className="flex flex-col gap-3">

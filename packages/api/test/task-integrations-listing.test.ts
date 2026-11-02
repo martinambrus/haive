@@ -1,19 +1,45 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const h = vi.hoisted(() => ({ db: undefined as unknown }));
+const h = vi.hoisted(() => ({
+  db: undefined as unknown,
+  choices: new Map<string, { providerId: string; connectionId: string | null }>(),
+  grants: new Map<string, string>(),
+}));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
-vi.mock('@haive/shared/integrations', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@haive/shared/integrations')>()),
-  resolveTaskCategories: async (_db: unknown, args: { categories: readonly string[] }) =>
-    args.categories.map((category) => ({ category, status: 'unresolved', reason: 'no-provider' })),
-}));
+vi.mock('@haive/shared/integrations', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@haive/shared/integrations')>();
+  return {
+    ...actual,
+    // This unit fixture supplies account context; keep real registry/state reads so the
+    // category filters and no-modules-table-read control still exercise production code.
+    // Real context SQL and ownership remain covered by integration-choice-routes-db.test.ts.
+    loadResolverContext: async (db: Database): Promise<ResolverContext> => {
+      const states = await actual.loadIntegrationStates(db);
+      return {
+        ownerUserId: USER,
+        repository: null,
+        providers: actual.listIntegrationProviders().map((provider) => ({
+          id: provider.id,
+          categories: provider.categories,
+          state: states.providers.get(provider.id) ?? 'disabled',
+        })),
+        categoryStates: states.categories,
+        connections: [],
+        choices: h.choices,
+        grants: h.grants,
+        preferences: new Map(),
+        defaults: new Map(),
+      };
+    },
+  };
+});
 
 import { Hono } from 'hono';
 import type { PgTable } from 'drizzle-orm/pg-core';
-import { schema } from '@haive/database';
+import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { registerModuleIntegrations } from '@haive/shared/integrations';
+import { registerModuleIntegrations, type ResolverContext } from '@haive/shared/integrations';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { taskIntegrationRoutes } from '../src/routes/tasks/integrations.js';
 import type { AppEnv } from '../src/context.js';
@@ -41,20 +67,25 @@ const moduleOf = (id: string, providers: Record<string, string[]>, categoryIds: 
   },
 });
 
-function setup(options: { withModules: boolean; chosen?: string[] }) {
+function setup(options: { withModules: boolean; chosen?: string[]; granted?: string[] }) {
+  h.choices = new Map(
+    (options.chosen ?? []).map((categoryId) => [
+      categoryId,
+      { providerId: 'module.fx.crm', connectionId: null },
+    ]),
+  );
+  h.grants = new Map(
+    (options.granted ?? []).map((categoryId) => [
+      categoryId,
+      '00000000-0000-4000-8000-0000000000c1',
+    ]),
+  );
   const fake = createFakeDb({
     tasks: schema.tasks,
-    taskIntegrationChoices: schema.taskIntegrationChoices,
+    integrationProviderConfigs: schema.integrationProviderConfigs,
     ...(options.withModules ? { modules: schema.modules } : {}),
   });
   fake.insert(schema.tasks, { id: TASK, userId: USER, status: 'running' });
-  for (const categoryId of options.chosen ?? []) {
-    fake.insert(schema.taskIntegrationChoices, {
-      taskId: TASK,
-      categoryId,
-      providerId: 'module.fx.crm',
-    });
-  }
   const reads: PgTable[] = [];
   const select = fake.db.select.bind(fake.db);
   fake.db.select = (fields) => {
@@ -78,8 +109,8 @@ function setup(options: { withModules: boolean; chosen?: string[] }) {
 async function listed(): Promise<string[]> {
   const res = await app.request(`/tasks/${TASK}/integrations`);
   expect(res.status).toBe(200);
-  const body = (await res.json()) as { categories: Array<{ category: string }> };
-  return body.categories.map((entry) => entry.category);
+  const body = (await res.json()) as { categories: Array<{ categoryId: string }> };
+  return body.categories.map((entry) => entry.categoryId);
 }
 
 describe('GET /tasks/:id/integrations', () => {
@@ -119,6 +150,12 @@ describe('GET /tasks/:id/integrations', () => {
     deactivate('fx');
 
     expect(await listed()).toEqual(['forge', 'mail', 'rich-documents']);
+  });
+
+  it('keeps the category of a retained grant after its module provider disappears', async () => {
+    setup({ withModules: false, granted: ['module.gone.docs'] });
+
+    expect(await listed()).toEqual(['forge', 'module.gone.docs']);
   });
 
   it('keeps the category of an existing choice, whoever served it', async () => {

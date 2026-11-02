@@ -2799,6 +2799,45 @@ export const getRepositoryIntegrations = (repositoryId: string) =>
 export const saveRepositoryIntegrations = (repositoryId: string, body: RepositoryIntegrationList) =>
   api.put<RepositoryIntegrationList>(repositoryIntegrationsPath(repositoryId), body);
 
+/** Public, token-free task account controls; reason/source strings tolerate newer servers. */
+export interface TaskIntegrationResolution {
+  categoryId: string;
+  status: 'resolved' | 'unresolved';
+  providerId: string | null;
+  connectionId: string | null;
+  source?: string;
+  reason?: string;
+  candidates: string[];
+  skipped: { tier: string; providerId: string; why: string }[];
+}
+export interface TaskIntegrationOverride {
+  categoryId: string;
+  providerId: string | null;
+  connectionId: string | null;
+}
+export interface TaskIntegrations {
+  categories: TaskIntegrationResolution[];
+  choices: TaskIntegrationOverride[];
+  grants: { categoryId: string; connectionId: string | null }[];
+}
+const taskIntegrationsPath = (taskId: string) =>
+  `/tasks/${encodeURIComponent(taskId)}/integrations`;
+export const getTaskIntegrations = (taskId: string) =>
+  api.get<TaskIntegrations>(taskIntegrationsPath(taskId));
+export const saveTaskIntegration = (
+  taskId: string,
+  categoryId: string,
+  body: {
+    providerId: string;
+    connectionId: string | null;
+    remember?: boolean;
+  },
+) => api.put(`${taskIntegrationsPath(taskId)}/${encodeURIComponent(categoryId)}`, body);
+export const resetTaskIntegration = (taskId: string, categoryId: string, remember = false) =>
+  api.delete(
+    `${taskIntegrationsPath(taskId)}/${encodeURIComponent(categoryId)}${remember ? '?remember=1' : ''}`,
+  );
+
 export function getTaskIntegrationPreview(input: {
   type: string;
   repositoryId?: string;
