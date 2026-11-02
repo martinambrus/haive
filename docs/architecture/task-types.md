@@ -282,12 +282,22 @@ records `agent_persona.unresolved` (a persona may exist only on the base branch)
 optional?}`, pinned with the step and read per requirement like its tools. The save check refuses an id
 outside `^[a-z][a-z0-9-]{0,15}$` or repeated within the step, two requirements of one category (a step
 gets one account per category), a category the install does not register (the api passes
-`listIntegrationCategories()`; the web composer checks core categories only), a pinned `provider` (a
+`listIntegrationCategories()`; the web composer loads core and active-module categories from `GET /integrations/categories`), a pinned `provider` (a
 prompt step names a category and Haive resolves the account) and a repository-bound category (`forge`)
 on a repo-less type. Dispatch hands the pinned requirements to the broker exactly as a catalog entry's
 (see [Integrations](integrations.md)); one that no longer parses fails the step
 `integration-requirement-invalid` before anything resolves. Drafts carry none, so a draft's
 `{{integration:…}}` is refused as undeclared.
+
+The prompt-step editor's Integrations section authors the requirement id, category, read/write
+access and optional flag, and shows its `{{integration:<id>.account}}` token. Module categories
+come from the authenticated categories list; the editor uses the same ids for its live validation.
+A stored unavailable category stays visible, and malformed entries stay in the form until repaired
+or removed. Editing one entry never drops an invalid sibling; choosing a category replaces a stored
+unsupported provider pin. Integration-only edits count as unsaved composition changes and are sent
+on save. General provider installation/state overviews and generated integration drafts remain
+separate work. The New Task picker and transactional create admission are documented in
+[Integrations](integrations.md#new-task-admission).
 
 `{{integration:<id>.account}}` names the account the declared requirement `<id>` resolved to at this
 dispatch: the connection's account label when, cut to 200 characters, it is one line, survives the

@@ -356,3 +356,33 @@ describe('listedPromptSteps and samePromptSteps', () => {
     expect(samePromptSteps({ a: entry('a', { tools: undefined }) }, steps())).toBe(true);
   });
 });
+
+it('detects integration-only edits and accepts registered module categories', () => {
+  const integration = { id: 'docs', category: 'module.notes.docs', access: 'read' as const };
+  const start = { a: entry('a') };
+  const next = {
+    a: entry('a', { integrations: [integration], template: '{{integration:docs.account}}' }),
+  };
+  expect(samePromptSteps(start, next)).toBe(false);
+  expect(samePromptSteps(next, { a: { ...next.a } })).toBe(true);
+  expect(
+    promptStepIssues({
+      typeSlug: 't',
+      stepIds: ['custom.t.a'],
+      requiresRepository: true,
+      promptSteps: next,
+      catalog: base,
+      integrationCategoryIds: new Set(['module.notes.docs']),
+    }),
+  ).toEqual([]);
+  expect(
+    promptStepIssues({
+      typeSlug: 't',
+      stepIds: ['custom.t.a'],
+      requiresRepository: true,
+      promptSteps: next,
+      catalog: base,
+      integrationCategoryIds: new Set(),
+    }).map((issue) => issue.kind),
+  ).toContain('integration-category-unknown');
+});

@@ -67,7 +67,24 @@ describe('PromptStepEditor', () => {
       <PromptStepEditor entry={entry} disabled onChange={noop} onRemove={noop} />,
     );
     const controls = off.match(/<(button|input|textarea)\b[^>]*>/g) ?? [];
-    expect(controls.length).toBe(8);
+    expect(controls.length).toBe(9);
     for (const tag of controls) expect(tag).toContain('disabled=""');
   });
+});
+
+it('offers an Integrations authoring section and account token for a declared requirement', () => {
+  const html = renderToStaticMarkup(
+    <PromptStepEditor
+      entry={{
+        ...entry,
+        integrations: [{ id: 'docs', category: 'rich-documents', access: 'read' }],
+      }}
+      onChange={noop}
+      onRemove={noop}
+    />,
+  );
+  expect(html).toContain('Add integration');
+  expect(html).toContain('value="docs"');
+  expect(html).toContain('{{integration:docs.account}}');
+  expect(html).toContain('Documents');
 });

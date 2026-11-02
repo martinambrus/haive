@@ -88,6 +88,7 @@ export function promptStepIssues(input: {
   requiresRepository: boolean;
   promptSteps: PromptSteps;
   catalog: CatalogEntries;
+  integrationCategoryIds?: ReadonlySet<string>;
 }): PromptStepIssue[] {
   const { typeSlug, stepIds, promptSteps } = input;
   const byId = new Map(
@@ -98,7 +99,7 @@ export function promptStepIssues(input: {
     { slug: typeSlug, stepIds, requiresRepository: input.requiresRepository },
     promptSteps,
     { composable: input.catalog },
-    CORE_CATEGORY_IDS,
+    input.integrationCategoryIds ?? CORE_CATEGORY_IDS,
   ).filter((issue) => issue.kind !== 'prompt-step-missing' && issue.kind !== 'prompt-step-orphan');
   const empty = stepIds.flatMap((stepId, index): PromptStepIssue[] => {
     const entry = byId.get(stepId);
@@ -233,7 +234,8 @@ function sameEntry(a: StoredPromptStep, b: StoredPromptStep): boolean {
     (a.description ?? '') === (b.description ?? '') &&
     sameList(a.capabilities, b.capabilities) &&
     JSON.stringify(a.paramFormSchema ?? null) === JSON.stringify(b.paramFormSchema ?? null) &&
-    JSON.stringify(a.tools ?? []) === JSON.stringify(b.tools ?? [])
+    JSON.stringify(a.tools ?? []) === JSON.stringify(b.tools ?? []) &&
+    JSON.stringify(a.integrations ?? []) === JSON.stringify(b.integrations ?? [])
   );
 }
 

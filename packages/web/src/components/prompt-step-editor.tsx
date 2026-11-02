@@ -15,6 +15,10 @@ import {
 } from '@/lib/prompt-step-editing';
 import { Button, Input } from '@/components/ui';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
+import {
+  PromptStepIntegrations,
+  type IntegrationCategoryOption,
+} from '@/components/prompt-step-integrations';
 import { PromptStepTools } from '@/components/prompt-step-tools';
 
 const CAPABILITY_LABELS: Record<PromptStepCapability, string> = {
@@ -33,6 +37,7 @@ interface PromptStepEditorProps {
   /** The step's problems that name one of its tools, shown on that tool's row. */
   issues?: readonly PromptStepIssue[];
   disabled?: boolean;
+  integrationCategories?: readonly IntegrationCategoryOption[];
   onChange: (entry: PromptStepEntry) => void;
   onRemove: () => void;
 }
@@ -41,6 +46,7 @@ export function PromptStepEditor({
   entry: stored,
   issues = NO_ISSUES,
   disabled = false,
+  integrationCategories,
   onChange,
   onRemove,
 }: PromptStepEditorProps) {
@@ -111,6 +117,12 @@ export function PromptStepEditor({
           </label>
         ))}
       </fieldset>
+      <PromptStepIntegrations
+        integrations={entry.integrations}
+        categories={integrationCategories}
+        disabled={disabled}
+        onChange={(integrations) => onChange({ ...entry, integrations })}
+      />
       <PromptStepTools
         tools={entry.tools}
         issues={issues}

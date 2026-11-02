@@ -14,12 +14,18 @@ import {
   type LastCliChoice,
   type LastSummaryCliChoice,
 } from '@/lib/last-cli-choice';
-import type { PlanNodeTaskRole, PlanTaskProposal } from '@haive/shared';
+import type {
+  TaskIntegrationChoice,
+  TaskIntegrationPreview,
+  PlanNodeTaskRole,
+  PlanTaskProposal,
+} from '@haive/shared';
 import type { PublicTaskType } from '@haive/shared/modularity';
 import { describePlanNodesForTask } from '@haive/shared/plan-describe';
 import { taskProposal } from '@/components/plan/plan-chat-turn';
 import { attachmentUnavailableNote } from '@/lib/attachment-availability';
 import { stepCliProviderIds } from '@/lib/step-cli-providers';
+import { TaskIntegrationPicker } from '@/components/task-integration-picker';
 import { HoursMinutesInput } from '@/components/hours-minutes-input';
 import { UploadFailureList } from '@/components/attachments/upload-failure-list';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
@@ -36,6 +42,7 @@ import {
   getPlanNode,
   listTaskTypes,
   getSavedStepClis,
+  getTaskIntegrationPreview,
   attachmentUploadName,
   uploadTaskAttachment,
   type CliProvider,
@@ -285,6 +292,51 @@ export default function NewTaskPage() {
     steps: UpcomingCliStep[];
     defaultProviderId: string | null;
   } | null>(null);
+
+  const integrationSelection = JSON.stringify([savedStepsSlug, repositoryId]);
+  const [integrationPicks, setIntegrationPicks] = useState<{
+    selection: string;
+    choices: TaskIntegrationChoice[];
+  }>({ selection: '', choices: [] });
+  const integrationChoices =
+    integrationPicks.selection === integrationSelection ? integrationPicks.choices : [];
+  const integrationKey = JSON.stringify([integrationSelection, integrationChoices]);
+  const integrationKeyRef = useRef(integrationKey);
+  integrationKeyRef.current = integrationKey;
+  const [integrationRetry, setIntegrationRetry] = useState(0);
+  const [integrationState, setIntegrationState] = useState<{
+    key: string;
+    preview: TaskIntegrationPreview | null;
+    error: string | null;
+  } | null>(null);
+  const integrationCurrent = integrationState?.key === integrationKey ? integrationState : null;
+  const integrationPending = !!savedStepsSlug && integrationCurrent === null;
+  const integrationAdmitted = integrationCurrent?.preview?.admitted === true;
+  useEffect(() => {
+    if (!savedStepsSlug) return;
+    let cancelled = false;
+    setIntegrationState(null);
+    void getTaskIntegrationPreview({
+      type: savedStepsSlug,
+      repositoryId: repositoryId || undefined,
+      choices: integrationChoices,
+    })
+      .then((preview) => {
+        if (!cancelled && integrationKeyRef.current === integrationKey)
+          setIntegrationState({ key: integrationKey, preview, error: null });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled && integrationKeyRef.current === integrationKey)
+          setIntegrationState({
+            key: integrationKey,
+            preview: null,
+            error: err instanceof Error ? err.message : 'Failed to check integration accounts',
+          });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [integrationKey, integrationRetry]);
 
   const lockOn = ignoreSavedStepClis && cliProviderId !== '';
 
@@ -700,6 +752,12 @@ export default function NewTaskPage() {
       setError('Onboarding is still running on this repository. Open that task or wait for it.');
       return;
     }
+    if (!integrationAdmitted) {
+      setError(
+        'Wait for the integration check and choose an available account for each required integration',
+      );
+      return;
+    }
     // `nothingToOnboard` counts as onboarded HERE and only here: without it a
     // repository created empty can never run a workflow task, because a missing
     // knowledge base forces the first task to be an onboarding pass over a tree
@@ -751,6 +809,9 @@ export default function NewTaskPage() {
         parentTaskId,
       });
 
+      body.integrationChoices = integrationChoices;
+      const submittingIntegrationKey = integrationKey;
+
       if (newTaskFields(selectedType, type).dumpUpload && dumpFile) {
         setDumpUploading(true);
         try {
@@ -772,6 +833,8 @@ export default function NewTaskPage() {
         body.deferStart = true;
         body.expectedAttachmentCount = attachmentFiles.length;
       }
+      if (integrationKeyRef.current !== submittingIntegrationKey)
+        throw new Error('The task selection changed; check integration accounts again');
       const data = await api.post<{ task: Task }>('/tasks', body);
       const failed: AttachmentOutcome['failed'] = [];
       let start: AttachmentOutcome['start'] = null;
@@ -812,6 +875,14 @@ export default function NewTaskPage() {
       router.push(`/tasks/${data.task.id}`);
     } catch (err) {
       setError((err as Error).message ?? 'Failed to create task');
+      if (
+        (err as { code?: string }).code === 'integration-admission-required' &&
+        integrationKeyRef.current === integrationKey
+      ) {
+        // A definition may have changed since preview. Refresh its picker, without resending creation.
+        setIntegrationState(null);
+        setIntegrationRetry((n) => n + 1);
+      }
       setSubmitting(false);
     }
   }
@@ -1496,6 +1567,17 @@ export default function NewTaskPage() {
           </div>
         )}
 
+        <TaskIntegrationPicker
+          preview={integrationCurrent?.preview ?? null}
+          pending={integrationPending}
+          error={integrationCurrent?.error ?? null}
+          choices={integrationChoices}
+          onChange={(choices) => setIntegrationPicks({ selection: integrationSelection, choices })}
+          onRetry={() => {
+            setIntegrationState(null);
+            setIntegrationRetry((n) => n + 1);
+          }}
+        />
         <FormError message={error} />
 
         <div>
@@ -1503,6 +1585,7 @@ export default function NewTaskPage() {
             type="submit"
             disabled={
               submitting ||
+              !integrationAdmitted ||
               selectedType.disabled ||
               (fields.onboardingGate && (!onboardingStatus || statusLoading)) ||
               (fields.onboardingGate && !!onboardingStatus?.onboardingTaskId)

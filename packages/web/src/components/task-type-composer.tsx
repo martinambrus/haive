@@ -2,10 +2,12 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  CORE_INTEGRATION_CATEGORY_SPECS,
   promptStepId,
   type ComposableStepEntry,
   type CompositionIssue,
 } from '@haive/shared/modularity';
+import type { IntegrationCategoryOption } from '@/components/prompt-step-integrations';
 import type { TaskTypeCatalog } from '@/lib/api-client';
 import {
   catalogEntries,
@@ -53,6 +55,7 @@ interface TaskTypeComposerProps {
   serverIssues?: CompositionIssue[];
   typeSlug?: string;
   promptSteps?: PromptSteps;
+  integrationCategories?: readonly IntegrationCategoryOption[];
   serverPromptIssues?: PromptStepIssue[];
   onPromptStepsChange?: (promptSteps: PromptSteps) => void;
   onStepIdsChange: (stepIds: string[]) => void;
@@ -156,6 +159,7 @@ export function TaskTypeComposer({
   serverIssues = [],
   typeSlug,
   promptSteps = NO_PROMPT_STEPS,
+  integrationCategories = CORE_INTEGRATION_CATEGORY_SPECS,
   serverPromptIssues = NO_PROMPT_ISSUES,
   onPromptStepsChange,
   onStepIdsChange,
@@ -228,6 +232,7 @@ export function TaskTypeComposer({
               requiresRepository,
               promptSteps,
               catalog: entries,
+              integrationCategoryIds: new Set(integrationCategories.map((category) => category.id)),
             })),
         ...server.prompt,
       ]),
@@ -539,6 +544,7 @@ export function TaskTypeComposer({
                   <PromptStepEditor
                     entry={promptEntry}
                     issues={toolRowIssues}
+                    integrationCategories={integrationCategories}
                     disabled={disabled}
                     onChange={(next) => prompt.set({ ...promptSteps, [promptEntry.slug]: next })}
                     onRemove={() => remove(index)}

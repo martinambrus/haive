@@ -3,12 +3,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { CORE_INTEGRATION_CATEGORY_SPECS } from '@haive/shared/modularity';
+import type { IntegrationCategoryOption } from '@/components/prompt-step-integrations';
 import type { CompositionIssue } from '@haive/shared/modularity';
 import {
   changedTaskType,
   createTaskType,
   getAdminTaskType,
   getTaskTypeCatalog,
+  getIntegrationCategories,
   updateTaskType,
   type AdminTaskType,
   type ApiError,
@@ -98,6 +101,10 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
   const creating = slug === null;
   usePageTitle(creating ? 'New task type' : `Task type ${slug}`);
 
+  const [integrationCategories, setIntegrationCategories] = useState<
+    readonly IntegrationCategoryOption[]
+  >(CORE_INTEGRATION_CATEGORY_SPECS);
+  const [categoryError, setCategoryError] = useState<string | null>(null);
   const [catalog, setCatalog] = useState<TaskTypeCatalog | null>(null);
   const [row, setRow] = useState<AdminTaskType | null>(null);
   const [availability, setAvailability] = useState<TaskTypeAvailability | null>(null);
@@ -149,6 +156,14 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
 
   useEffect(() => {
     void load();
+    void getIntegrationCategories()
+      .then((reply) => {
+        setIntegrationCategories(reply.categories);
+        setCategoryError(null);
+      })
+      .catch(() =>
+        setCategoryError('Could not load module integration categories. Reload to try again.'),
+      );
   }, [load]);
 
   const editableFields = creating ? CREATE_FIELDS : (row?.editableFields ?? []);
@@ -179,6 +194,9 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
                   requiresRepository,
                   promptSteps,
                   catalog: withPrompts,
+                  integrationCategoryIds: new Set(
+                    integrationCategories.map((category) => category.id),
+                  ),
                 })
               : [],
           }
@@ -192,6 +210,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
       loopLimits,
       requiresRepository,
       promptSteps,
+      integrationCategories,
     ],
   );
   const compositionEdited =
@@ -333,34 +352,38 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
 
   const lastField = schema.fields.at(-1)?.id;
   const composer = (readOnly: boolean) => (
-    <TaskTypeComposer
-      catalog={catalog}
-      stepIds={readOnly ? (row?.stepIds ?? null) : stepIds}
-      loopLimits={loopLimits}
-      requiresRepository={requiresRepository}
-      readOnly={readOnly}
-      disabled={saving}
-      serverIssues={serverIssues}
-      {...(promptEditable && !readOnly
-        ? {
-            typeSlug,
-            promptSteps,
-            serverPromptIssues,
-            onPromptStepsChange: (next: PromptSteps) => {
-              touch();
-              setPromptSteps(next);
-            },
-          }
-        : {})}
-      onStepIdsChange={(next) => {
-        touch();
-        setStepIds(next);
-      }}
-      onLoopLimitsChange={(next) => {
-        touch();
-        setLoopLimits(next);
-      }}
-    />
+    <>
+      {categoryError && <FormError message={categoryError} />}
+      <TaskTypeComposer
+        catalog={catalog}
+        integrationCategories={integrationCategories}
+        stepIds={readOnly ? (row?.stepIds ?? null) : stepIds}
+        loopLimits={loopLimits}
+        requiresRepository={requiresRepository}
+        readOnly={readOnly}
+        disabled={saving}
+        serverIssues={serverIssues}
+        {...(promptEditable && !readOnly
+          ? {
+              typeSlug,
+              promptSteps,
+              serverPromptIssues,
+              onPromptStepsChange: (next: PromptSteps) => {
+                touch();
+                setPromptSteps(next);
+              },
+            }
+          : {})}
+        onStepIdsChange={(next) => {
+          touch();
+          setStepIds(next);
+        }}
+        onLoopLimitsChange={(next) => {
+          touch();
+          setLoopLimits(next);
+        }}
+      />
+    </>
   );
 
   return (
