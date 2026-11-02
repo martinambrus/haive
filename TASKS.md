@@ -502,12 +502,6 @@ status: parked: deferred until the first module that pins a provider · was modu
 
 Decision reconciliation 2026-11-01: Remain deliberately deferred until a real module needs provider pinning; do not invent a consumer to unblock this infrastructure work.
 
-### T360 · I6d · web: module categories in every category list, admin provider card, Settings state note
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T14:38Z · last: 2026-11-02T14:38Z · was modular #195 · priority: P2
-
-Progress 2026-11-02T14:38Z: approved bounded module category lists/admin provider card/Settings state note; prior T332driver source quiescent, fresh weekly84% above40% checkpoint.
-
 ### T361 · I6f · purge of a provider module deletes its integration rows and reports counts
 
 status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T15:21Z · last: 2026-11-02T15:21Z · was modular #196 · priority: P2
@@ -1376,6 +1370,8 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
 ## Done
+
+- T360 — Module categories and provider availability in Settings/admin/preferences/defaults — PR #998 (835b58ecfd), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41490277684 green; Settings/preferences/admin browser1280/768/390 passed18 scoped probes/screenshots inspected;12 synthetic writes locally captured/0forwarded; readonlydeployedAPI200/provider state+module fields; actualPG164; mainCI41490277684/allchecks/source-watchers/health/idle green. Evidence .claude/tmp/codex-run/queue-exec-20261101/T360/.
 
 - T332 — required integration reconnect waits, missing-provider recovery and current-row continuation ownership — PR #997 (d764679dc8), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41477323495 green; actual task page browser1280/768/390 passed reconnect/disabled/deactivated/schema/runtime/dead/completed states;9scopedcaptures inspected,0writes forwarded; realPG37,mainCI41477323495,live0218normalapplier/physicalnullableJSONB-last/source-watchers/health/idlechecks green. Evidence .claude/tmp/codex-run/queue-exec-20261101/T332/.
 
