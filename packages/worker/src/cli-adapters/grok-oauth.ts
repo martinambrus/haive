@@ -120,6 +120,40 @@ interface TokenResponse {
   expires_in?: number;
 }
 
+/** A token-endpoint refusal. Only standard OAuth codes are retained: descriptions and
+ * unknown error strings may echo credentials and must never enter worker diagnostics. */
+export class GrokOauthError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string | null,
+  ) {
+    super(`grok oauth refresh_token: http ${status}${code ? ` (${code})` : ''}`);
+    this.name = 'GrokOauthError';
+  }
+}
+
+const OAUTH_ERROR_CODES = new Set([
+  'invalid_request',
+  'invalid_client',
+  'invalid_grant',
+  'unauthorized_client',
+  'unsupported_grant_type',
+  'invalid_scope',
+  'server_error',
+  'temporarily_unavailable',
+]);
+
+function oauthRejectionCode(status: number, body: string): string | null {
+  // A gateway/server failure is not evidence that the stored refresh token was refused.
+  if (status !== 400 && status !== 401) return null;
+  try {
+    const code = rec(JSON.parse(body))?.['error'];
+    return typeof code === 'string' && OAUTH_ERROR_CODES.has(code) ? code : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Renew an expiring access token. OAuth2 token endpoints are form-encoded per RFC 6749.
  *  The caller MUST persist the returned refresh token: xAI rotates it, so the one passed
  *  in is dead the moment this resolves. */
@@ -129,6 +163,7 @@ export async function refreshGrokToken(
 ): Promise<GrokRefreshedTokens> {
   const res = await fetch(GROK_TOKEN_URL, {
     method: 'POST',
+    signal: AbortSignal.timeout(15_000),
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
     body: new URLSearchParams({
       grant_type: 'refresh_token',
@@ -137,12 +172,17 @@ export async function refreshGrokToken(
     }).toString(),
   });
   if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    // The body carries the OAuth error code; callers substring-match `invalid_grant` on
-    // this message to tell "permanently rejected" from "try again later".
-    throw new Error(`grok oauth refresh_token: http ${res.status} ${body.slice(0, 200)}`);
+    const body = await res.text();
+    throw new GrokOauthError(res.status, oauthRejectionCode(res.status, body));
   }
-  const json = (await res.json()) as TokenResponse;
+  let json: TokenResponse;
+  try {
+    json = (await res.json()) as TokenResponse;
+  } catch (err) {
+    // JSON parse errors can quote the vendor body. Network/abort errors remain retryable.
+    if (err instanceof SyntaxError) throw new Error('grok oauth: invalid token response');
+    throw err;
+  }
   if (!json.access_token) throw new Error('grok oauth: response had no access_token');
   return {
     accessToken: json.access_token,

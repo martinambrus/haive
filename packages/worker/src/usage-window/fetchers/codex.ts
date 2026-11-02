@@ -69,7 +69,11 @@ export const fetchCodexUsage: UsageFetcher = async (token, ctx): Promise<UsageFe
       Accept: 'application/json',
     };
     if (ctx.accountId) headers['chatgpt-account-id'] = ctx.accountId;
-    const res = await fetch(CODEX_USAGE_URL, { method: 'GET', headers });
+    const res = await fetch(CODEX_USAGE_URL, {
+      method: 'GET',
+      headers,
+      signal: AbortSignal.timeout(15_000),
+    });
     if (res.status === 429) return { ok: false, rateLimited: true, error: 'http 429' };
     if (!res.ok) return httpErrorOutcome(res.status);
     const windows = parseCodexUsage(await res.json());

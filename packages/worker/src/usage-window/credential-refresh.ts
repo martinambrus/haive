@@ -8,6 +8,7 @@ import {
 import { schema, type Database } from '@haive/database';
 import {
   applyGrokRefresh,
+  GrokOauthError,
   grokTokenNeedsRefresh,
   parseGrokAuthFile,
   refreshGrokToken,
@@ -137,8 +138,7 @@ async function refreshGrokVolume(
   try {
     fresh = await refreshGrokToken(cred.refreshToken, cred.clientId);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (!msg.includes('invalid_grant')) {
+    if (!(err instanceof GrokOauthError && err.code === 'invalid_grant')) {
       // Transient (network / 5xx). Leave the stored credential untouched and retry next
       // tick; the access token may still have life left in it.
       log.warn({ vol, err }, 'grok token refresh failed (transient); retrying next tick');

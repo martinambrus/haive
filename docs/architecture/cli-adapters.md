@@ -89,3 +89,20 @@ fragment. RAG usage review needs those timestamps to distinguish pre-query prose
 from later actions within the same displayed segment. Timing metadata is capped
 at 8,192 fragments per invocation; dropping old offsets leaves the display text
 intact. Older transcripts lack this metadata and remain valid.
+
+## Credential refresh and usage polling
+
+The singleton usage-poll worker refreshes expiring Grok credentials before polling usage.
+Grok's token grant and the Claude, Codex, z.ai and Gemini usage requests each carry a
+15-second `AbortSignal.timeout`, matching the existing Claude OAuth grant deadline. The
+signal also covers response body consumption, so a stalled body cannot hold the worker
+indefinitely. This is a per-request deadline, not a deadline for the entire sweep.
+
+A timeout follows the existing transient-failure path: it does not suppress the credential,
+write a replacement auth file, or prevent later polls. Grok refresh still yields while a
+task holds an auth copy and rotates each shared user volume once. Only a parsed
+`invalid_grant` from an HTTP 400/401 OAuth rejection marks that volume's exact refresh token
+dead and asks its providers for a re-login; a changed token lifts the suppression. Plain
+text mentioning that code, other OAuth codes, server failures and aborts remain retryable.
+`GrokOauthError` retains the HTTP status and an allowlisted OAuth code, never the vendor's
+raw body or description, which may echo credentials.

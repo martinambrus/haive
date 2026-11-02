@@ -70,6 +70,7 @@ export const fetchZaiUsage: UsageFetcher = async (token, ctx): Promise<UsageFetc
     const base = originOf(ctx.baseUrl);
     const res = await fetch(`${base}${ZAI_USAGE_PATH}`, {
       method: 'GET',
+      signal: AbortSignal.timeout(15_000),
       // Raw token, NO "Bearer " prefix (confirmed in the vendor plugin).
       headers: { Authorization: token, Accept: 'application/json' },
     });

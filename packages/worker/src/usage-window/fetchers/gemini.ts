@@ -39,6 +39,7 @@ export const fetchGeminiUsage: UsageFetcher = async (token): Promise<UsageFetchO
   try {
     const res = await fetch(GEMINI_USAGE_URL, {
       method: 'POST',
+      signal: AbortSignal.timeout(15_000),
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
     });
