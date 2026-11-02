@@ -366,10 +366,12 @@ Plan D2: installer flags, an install-local docker config for private pulls, and 
 
 ### T336 · D3 · haive-builder image + run-overlay image vars + pre-flight rebuild + per-customer builder (+1)
 
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T19:25Z · last: 2026-11-02T19:25Z · was modular #105 · priority: P2
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T19:25Z · last: 2026-11-02T20:01Z · was modular #105 · priority: P2
 Plan D3. Check: an own module installs on a published-image install with no host toolchain.
 
 Progress 2026-11-02T19:25Z: Admitted after actual allowance66% and measured C26.3GiB/RAM10.7GiB. One HIGH implementation driver; local builder/own-module install and preflight scope only. T330PR1000 remains in hosted review/CI; this branch will align to its actual merged source before final review/publication. No registry publication or live stack mutation in implementation.
+
+Progress 2026-11-02T20:01Z: Driver complete; parent aligned13byte-identical feature files onto reviewedT330a42 (ancestor of merged59f, onlyTASKS delta). Fresh xhigh review clean; full66updater+1163script cases/types pass, actual Docker public/customer/negative entitlement/token gates passed with owned cleanup. PR1001 exactHEAD7b7 in hostedreview/CI; no new admissions near owner60% checkpoint, latest61%.
 
 ### T337 · D4 · module_sources table (git/registry, envelope-encrypted token) + Modules page form
 
