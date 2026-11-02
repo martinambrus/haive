@@ -28,6 +28,8 @@ const EXPIRES_AT_MS = Date.parse('2026-08-17T12:21:40.847755288Z');
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe('parseGrokAuthFile', () => {
@@ -119,18 +121,64 @@ describe('refreshGrokToken', () => {
     expect(fresh.refreshToken).toBe('rt-original');
   });
 
-  // The caller substring-matches invalid_grant on this message to tell a permanent
-  // rejection from a transient one, so the body has to survive into the error.
-  it('throws with the response body so invalid_grant stays detectable', async () => {
+  it.each([
+    [400, '{"error":"invalid_grant","error_description":"secret-token"}', 'invalid_grant'],
+    [503, '{"error":"invalid_grant","error_description":"secret-token"}', null],
+    [
+      400,
+      '{"error":"temporarily_unavailable","error_description":"invalid_grant secret-token"}',
+      'temporarily_unavailable',
+    ],
+    [400, 'invalid_grant secret-token', null],
+    [400, '{"error":"secret-token","error_description":"invalid_grant"}', null],
+    [400, 'null', null],
+  ])('reports safe structured rejection for HTTP %i body %s', async (status, body, code) => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => ({
-        ok: false,
-        status: 400,
-        text: async () => '{"error":"invalid_grant","error_description":"token is expired"}',
-      })),
+      vi.fn(async () => ({ ok: false, status, text: async () => body })),
     );
-    await expect(refreshGrokToken('rt-dead', 'client-abc')).rejects.toThrow(/invalid_grant/);
+    const failure = await refreshGrokToken('rt-dead', 'client-abc').catch((err: unknown) => err);
+    expect(failure).toMatchObject({ name: 'GrokOauthError', status, code });
+    expect(String(failure)).not.toContain('secret-token');
+    expect(String(failure)).not.toContain('error_description');
+  });
+
+  it.each(['request', 'success body', 'error body'])('aborts a stalled %s', async (phase) => {
+    vi.useFakeTimers();
+    const deadline = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException('Grok deadline', 'TimeoutError')), ms);
+      return controller.signal;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: unknown, init?: RequestInit) => {
+        const signal = init?.signal;
+        if (!signal) throw new Error('missing deadline signal');
+        const stalled = () =>
+          new Promise<never>((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+          });
+        if (phase === 'request') return stalled();
+        return { ok: phase === 'success body', status: 400, json: stalled, text: stalled };
+      }),
+    );
+    const pending = refreshGrokToken('rt-original', 'client-abc').catch((err: unknown) => err);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(await pending).toMatchObject({ name: 'TimeoutError' });
+    expect(deadline).toHaveBeenCalledWith(15_000);
+  });
+
+  it('does not expose a malformed success body through the JSON parser error', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('secret-token: not JSON')),
+    );
+    const failure = await refreshGrokToken('rt-original', 'client-abc').catch(
+      (err: unknown) => err,
+    );
+    expect(String(failure)).toContain('invalid token response');
+    expect(String(failure)).not.toContain('secret-token');
   });
 
   it('throws when the endpoint answers 200 with no access token', async () => {

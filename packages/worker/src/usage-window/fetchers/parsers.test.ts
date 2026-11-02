@@ -1,8 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { parseClaudeUsage } from './claude-code.js';
 import { parseCodexUsage } from './codex.js';
 import { parseZaiUsage } from './zai.js';
 import { parseGeminiUsage } from './gemini.js';
+import { USAGE_PROVIDERS } from './index.js';
+import type { CliProviderName } from '@haive/shared';
 
 describe('parseClaudeUsage', () => {
   it('maps five_hour/seven_day utilization (0-100 used) + ISO resets', () => {
@@ -166,5 +168,69 @@ describe('parseGeminiUsage', () => {
 
   it('returns empty when no bucket carries a remainingFraction', () => {
     expect(parseGeminiUsage({ buckets: [{ tokenType: 'REQUESTS' }] })).toEqual({});
+  });
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
+
+describe.each(Object.entries(USAGE_PROVIDERS))('%s usage HTTP deadline', (name, cfg) => {
+  it.each(['request', 'body'])(
+    'aborts a stalled %s and allows a later successful fetch',
+    async (phase) => {
+      vi.useFakeTimers();
+      const deadline = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+        const controller = new AbortController();
+        setTimeout(() => controller.abort(new DOMException('Usage deadline', 'TimeoutError')), ms);
+        return controller.signal;
+      });
+      const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
+        const signal = init?.signal;
+        if (!signal) throw new Error('missing deadline signal');
+        const stalled = () =>
+          new Promise<never>((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+          });
+        if (phase === 'request') return stalled();
+        return { ok: true, json: stalled };
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      const ctx = { providerName: name as CliProviderName };
+      const pending = cfg.fetch('fixture-token', ctx);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(await pending).toEqual({ ok: false, rateLimited: false, error: 'Usage deadline' });
+      expect(deadline).toHaveBeenCalledWith(15_000);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => ({
+          ok: true,
+          json: async () => ({
+            five_hour: { utilization: 12 },
+            primary: { used_percent: 12 },
+            data: [{ type: 'TOKENS_LIMIT', percentage: 12 }],
+            buckets: [{ tokenType: 'REQUESTS', remainingFraction: 0.88 }],
+          }),
+        })),
+      );
+      expect((await cfg.fetch('fixture-token', ctx)).ok).toBe(true);
+    },
+  );
+
+  it.each([401, 403, 429, 503])('preserves HTTP %i classification', async (status) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: false, status })),
+    );
+    const result = await cfg.fetch('fixture-token', { providerName: name as CliProviderName });
+    expect(result).toMatchObject({
+      ok: false,
+      rateLimited: status === 429,
+      error: `http ${status}`,
+    });
+    if (status !== 429)
+      expect(result).toHaveProperty('authExpired', status === 401 || status === 403);
   });
 });

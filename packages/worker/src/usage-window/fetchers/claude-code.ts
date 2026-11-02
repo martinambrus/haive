@@ -42,6 +42,7 @@ export const fetchClaudeUsage: UsageFetcher = async (token, ctx): Promise<UsageF
   try {
     const res = await fetch(CLAUDE_USAGE_URL, {
       method: 'GET',
+      signal: AbortSignal.timeout(15_000),
       headers: {
         Authorization: `Bearer ${token}`,
         'anthropic-beta': ANTHROPIC_BETA,
