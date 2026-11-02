@@ -513,7 +513,9 @@ Decision reconciliation 2026-11-01: Remain deliberately deferred until a real mo
 
 ### T360 · I6d · web: module categories in every category list, admin provider card, Settings state note
 
-status: open · was modular #195 · priority: P2
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T14:38Z · last: 2026-11-02T14:38Z · was modular #195 · priority: P2
+
+Progress 2026-11-02T14:38Z: approved bounded module category lists/admin provider card/Settings state note; prior T332driver source quiescent, fresh weekly84% above40% checkpoint.
 
 ### T361 · I6f · purge of a provider module deletes its integration rows and reports counts
 
