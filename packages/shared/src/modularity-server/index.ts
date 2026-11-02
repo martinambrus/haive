@@ -52,3 +52,6 @@ export async function readStepCatalog(
   }
   return catalog;
 }
+
+export * from './module-dependencies.js';
+export * from './module-drain.js';

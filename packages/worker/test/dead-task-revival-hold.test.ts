@@ -71,6 +71,7 @@ function withoutDistinctFrom(node: unknown): unknown {
 /** Dead tasks whose run list resolves; `log` lists what each transaction sends, in order. */
 function setup(initialState: string | Error = 'normal') {
   const fake = createFakeDb({
+    modules: schema.modules,
     tasks: schema.tasks,
     taskEvents: schema.taskEvents,
     taskTypeDefinitions: schema.taskTypeDefinitions,

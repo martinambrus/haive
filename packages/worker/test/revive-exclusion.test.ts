@@ -23,6 +23,7 @@ function setup(
   status = 'failed',
 ) {
   const fake = createFakeDb({
+    modules: schema.modules,
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     taskEvents: schema.taskEvents,

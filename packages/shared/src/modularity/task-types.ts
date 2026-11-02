@@ -24,6 +24,7 @@ export const TASK_TYPE_UNAVAILABLE_REASONS = [
   'module-types-off',
   'module-missing',
   'module-deactivated',
+  'module-draining',
   'missing-step',
   'invalid-composition',
 ] as const;
@@ -35,6 +36,7 @@ export const PUBLIC_TASK_TYPE_UNAVAILABLE_REASONS = [
   'module-types-off',
   'module-missing',
   'module-deactivated',
+  'module-draining',
   'missing-step',
   'invalid-composition',
 ] as const satisfies readonly TaskTypeUnavailableReason[];
@@ -44,6 +46,7 @@ export interface TaskTypeModuleState {
   name: string;
   missing: boolean;
   deactivated: boolean;
+  draining?: boolean;
 }
 
 export const taskTypeModuleRefSchema = z.object({ id: z.string(), name: z.string().nullable() });
@@ -118,6 +121,9 @@ export function resolveTaskTypeAvailability(
     if (missing.length > 0) {
       return { available: false, reason: 'module-missing', modules: refs(missing) };
     }
+    const draining = used.filter((id) => modules.get(id)?.draining === true);
+    if (draining.length > 0)
+      return { available: false, reason: 'module-draining', modules: refs(draining) };
     const deactivated = used.filter((id) => modules.get(id)?.deactivated === true);
     if (deactivated.length > 0) {
       return { available: false, reason: 'module-deactivated', modules: refs(deactivated) };

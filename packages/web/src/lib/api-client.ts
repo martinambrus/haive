@@ -2684,6 +2684,20 @@ export interface ModuleActiveResponse {
 export const patchModuleActive = (moduleId: string, active: boolean) =>
   api.patch<ModuleActiveResponse>(`/modules/${encodeURIComponent(moduleId)}`, { active });
 
+export const getModuleDependents = (moduleId: string) =>
+  api.get<{ moduleId: string; tasks: ModuleOpenTask[]; capped: boolean }>(
+    `/modules/${encodeURIComponent(moduleId)}/dependents`,
+  );
+export const patchModuleGraceful = (moduleId: string) =>
+  api.patch<{
+    moduleId: string;
+    drainingAt: string | null;
+    deactivatedAt: string | null;
+    warning?: string;
+  }>(`/modules/${encodeURIComponent(moduleId)}`, { active: false, mode: 'graceful' });
+export const cancelModuleDrain = (moduleId: string) =>
+  api.delete(`/modules/${encodeURIComponent(moduleId)}/drain`);
+
 export interface ModuleOpenTask {
   id: string;
   title: string;

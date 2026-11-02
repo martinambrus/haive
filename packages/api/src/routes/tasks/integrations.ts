@@ -1,3 +1,4 @@
+import { guardModuleAdmission, integrationModuleIds } from '@haive/shared/modularity-server';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
@@ -104,6 +105,7 @@ taskIntegrationRoutes.put('/:id/integrations/:categoryId', async (c) => {
 
   await db.transaction(async (tx) => {
     await lockTaskIntegrations(tx, task.id);
+    await guardModuleAdmission(tx, integrationModuleIds([pick]), task.id, true);
     await tx
       .insert(schema.taskIntegrationChoices)
       .values({ taskId: task.id, ...pick })

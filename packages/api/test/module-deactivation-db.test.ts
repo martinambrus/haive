@@ -1,3 +1,8 @@
+import {
+  finalizeModuleDrain,
+  guardModuleAdmission,
+  guardTaskModuleAdmission,
+} from '@haive/shared/modularity-server';
 import { eq, inArray, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
@@ -464,6 +469,321 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
     });
   });
 
+  describe('graceful module drain', () => {
+    const settled = (pending: Promise<unknown>) =>
+      Promise.race([
+        pending.then(() => 'done'),
+        new Promise<string>((resolve) => setTimeout(() => resolve('blocked'), 150)),
+      ]);
+    const drain = () => send('PATCH', '/modules/alpha', { active: false, mode: 'graceful' });
+    it('captures an uncapped cohort, keeps routes live, refuses only new relevant tasks, and survives a new finalizer call', async () => {
+      const t = await task();
+      expect((await drain()).status).toBe(200);
+      expect(await stampOf('alpha')).toBeNull();
+      expect((await read('/m/alpha/x')).status).toBe(200);
+      expect(await db.select().from(schema.moduleDrainTasks)).toEqual([
+        { moduleId: 'alpha', taskId: t.id },
+      ]);
+      expect(await finalizeModuleDrain(db, 'alpha')).toBe(false);
+      await db.transaction((tx) => guardModuleAdmission(tx, ['alpha'], t.id));
+      await expect(
+        db.transaction((tx) => guardModuleAdmission(tx, ['alpha'])),
+      ).rejects.toMatchObject({ code: 'module-draining' });
+      await db.transaction((tx) => guardModuleAdmission(tx, ['beta']));
+      await db.update(schema.tasks).set({ status: 'completed' }).where(eq(schema.tasks.id, t.id));
+      expect(await finalizeModuleDrain(db, 'alpha')).toBe(true);
+      expect(await stampOf('alpha')).toBeInstanceOf(Date);
+      expect((await read('/m/alpha/x')).status).toBe(404);
+      expect((await read('/m/beta/x')).status).toBe(200);
+      expect((await audits()).map((r) => r.action)).toEqual(['module.drain', 'module.deactivate']);
+      expect(h.stored.has(CONFIG_KEYS.MAINTENANCE_STATE)).toBe(false);
+    });
+
+    it('keeps cohort tasks blocking after their last binding is reset; explicit cancel defeats a stale finalizer', async () => {
+      const t = await task();
+      expect((await drain()).status).toBe(200);
+      await db
+        .update(schema.tasks)
+        .set({ runListSnapshot: ['01-worktree-setup'] })
+        .where(eq(schema.tasks.id, t.id));
+      expect(await finalizeModuleDrain(db, 'alpha')).toBe(false);
+      expect((await send('DELETE', '/modules/alpha/drain')).status).toBe(200);
+      expect(await finalizeModuleDrain(db, 'alpha')).toBe(false);
+      expect(await stampOf('alpha')).toBeNull();
+      expect(await db.select().from(schema.moduleDrainTasks)).toEqual([]);
+    });
+
+    it('preflights direct persisted grants and choices once without changing state', async () => {
+      const t = await task({ runListSnapshot: ['01-worktree-setup'] });
+      const [connection] = await db
+        .insert(schema.integrationConnections)
+        .values({
+          providerId: 'module.alpha.docs',
+          scope: 'user',
+          ownerUserId: userId,
+          accountLabel: 'Private account',
+          authMethod: 'oauth2',
+        })
+        .returning();
+      await db.insert(schema.integrationGrants).values({
+        targetKind: 'task',
+        taskId: t.id,
+        categoryId: 'mail',
+        connectionId: connection!.id,
+      });
+      await db.insert(schema.taskIntegrationChoices).values({
+        taskId: t.id,
+        categoryId: 'module.alpha.docs',
+        providerId: 'module.alpha.docs',
+        connectionId: connection!.id,
+      });
+      const res = await send('GET', '/modules/alpha/dependents');
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { tasks: { id: string }[] };
+      expect(body.tasks.map((r) => r.id)).toEqual([t.id]);
+      expect(JSON.stringify(body)).not.toContain('Private account');
+      expect(await audits()).toEqual([]);
+      expect(await stampOf('alpha')).toBeNull();
+      expect((await drain()).status).toBe(200);
+      await db
+        .delete(schema.taskIntegrationChoices)
+        .where(eq(schema.taskIntegrationChoices.taskId, t.id));
+      await db.delete(schema.integrationGrants).where(eq(schema.integrationGrants.taskId, t.id));
+      expect(await finalizeModuleDrain(db, 'alpha')).toBe(false);
+      await db
+        .delete(schema.integrationConnections)
+        .where(eq(schema.integrationConnections.id, connection!.id));
+    });
+
+    it('includes reset-before-drain live invocation stamps until their task finishes', async () => {
+      const t = await task({ runListSnapshot: ['01-worktree-setup'] });
+      const [step] = await db
+        .insert(schema.taskSteps)
+        .values({
+          taskId: t.id,
+          stepId: '01-worktree-setup',
+          title: 'Core step',
+          stepIndex: 0,
+          status: 'waiting_cli',
+        })
+        .returning();
+      const [run] = await db
+        .insert(schema.cliInvocations)
+        .values({
+          taskId: t.id,
+          taskStepId: step!.id,
+          mode: 'cli',
+          prompt: 'test',
+          integrations: [
+            {
+              requirementId: 'docs',
+              categoryId: 'mail',
+              providerId: 'module.alpha.docs',
+              connectionId: ACTOR,
+              access: 'read',
+            },
+          ],
+        })
+        .returning();
+      const res = await send('GET', '/modules/alpha/dependents');
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ tasks: [{ id: t.id }] });
+      expect((await drain()).status).toBe(200);
+      expect(await stampOf('alpha')).toBeNull();
+      await db
+        .update(schema.cliInvocations)
+        .set({ endedAt: new Date() })
+        .where(eq(schema.cliInvocations.id, run!.id));
+      expect(await finalizeModuleDrain(db, 'alpha')).toBe(false);
+      await db.update(schema.tasks).set({ status: 'completed' }).where(eq(schema.tasks.id, t.id));
+      expect(await finalizeModuleDrain(db, 'alpha')).toBe(true);
+    });
+
+    it('keeps a started fan-out with pending reservations after Reset and its last invocation end', async () => {
+      const t = await task({
+        runListSnapshot: ['01-worktree-setup'],
+        currentStepId: '01-worktree-setup',
+      });
+      const [step] = await db
+        .insert(schema.taskSteps)
+        .values({
+          taskId: t.id,
+          stepId: '01-worktree-setup',
+          title: 'Fan-out',
+          stepIndex: 0,
+          status: 'waiting_cli',
+        })
+        .returning();
+      const [run] = await db
+        .insert(schema.cliInvocations)
+        .values({
+          taskId: t.id,
+          taskStepId: step!.id,
+          mode: 'agent_mining',
+          prompt: 'test',
+          endedAt: new Date(),
+          integrations: [
+            {
+              requirementId: 'docs',
+              categoryId: 'mail',
+              providerId: 'module.alpha.docs',
+              connectionId: ACTOR,
+              access: 'read',
+            },
+          ],
+        })
+        .returning();
+      // An ended stamp alone is history, not current dependency evidence.
+      expect(await (await send('GET', '/modules/alpha/dependents')).json()).toMatchObject({
+        tasks: [],
+      });
+      await db.insert(schema.taskStepAgentMinings).values([
+        { taskStepId: step!.id, agentId: 'sent', status: 'done', cliInvocationId: run!.id },
+        {
+          taskStepId: step!.id,
+          agentId: 'reserved',
+          status: 'pending',
+          dispatchPrompt: 'reserved task',
+        },
+      ]);
+      expect(await (await send('GET', '/modules/alpha/dependents')).json()).toMatchObject({
+        tasks: [{ id: t.id }],
+      });
+      expect((await drain()).status).toBe(200);
+      await db.transaction((tx) => guardModuleAdmission(tx, ['alpha'], t.id, true));
+      await db
+        .delete(schema.taskStepAgentMinings)
+        .where(eq(schema.taskStepAgentMinings.taskStepId, step!.id));
+      expect(await finalizeModuleDrain(db, 'alpha')).toBe(false);
+    });
+
+    it('captures every dependent beyond the preview cap', async () => {
+      await db.insert(schema.tasks).values(
+        Array.from({ length: MODULE_DEPENDENTS_CAP + 1 }, (_, i) => ({
+          userId,
+          type: TYPE,
+          title: `Drain ${i}`,
+          status: 'running' as const,
+          runListSnapshot: ['module.alpha.x'],
+        })),
+      );
+      expect((await drain()).status).toBe(200);
+      expect(await db.select().from(schema.moduleDrainTasks)).toHaveLength(
+        MODULE_DEPENDENTS_CAP + 1,
+      );
+      expect(await (await send('GET', '/modules/alpha/dependents')).json()).toMatchObject({
+        capped: true,
+      });
+    });
+
+    it('rolls drain intent and final deactivation back when their required audit is refused', async () => {
+      const t = await task();
+      await db.execute(
+        sql`CREATE FUNCTION reject_drain_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action IN ('module.drain', 'module.deactivate') THEN RAISE EXCEPTION 'fixture audit refusal'; END IF; RETURN NEW; END $$`,
+      );
+      await db.execute(
+        sql`CREATE TRIGGER reject_drain_audit BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION reject_drain_audit()`,
+      );
+      try {
+        expect((await drain()).status).toBe(500);
+        expect(await db.select().from(schema.moduleDrainTasks)).toEqual([]);
+        expect(
+          (await db.select().from(schema.modules).where(eq(schema.modules.moduleId, 'alpha')))[0]!
+            .drainingAt,
+        ).toBeNull();
+      } finally {
+        await db.execute(sql`DROP TRIGGER reject_drain_audit ON audit_events`);
+      }
+      await drain();
+      await db.update(schema.tasks).set({ status: 'completed' }).where(eq(schema.tasks.id, t.id));
+      await db.execute(
+        sql`CREATE TRIGGER reject_drain_audit BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION reject_drain_audit()`,
+      );
+      try {
+        await expect(finalizeModuleDrain(db, 'alpha')).rejects.toThrow();
+        expect(await stampOf('alpha')).toBeNull();
+        expect(await db.select().from(schema.moduleDrainTasks)).toHaveLength(1);
+      } finally {
+        await db.execute(sql`DROP TRIGGER reject_drain_audit ON audit_events`);
+        await db.execute(sql`DROP FUNCTION reject_drain_audit()`);
+      }
+      expect(await finalizeModuleDrain(db, 'alpha')).toBe(true);
+    });
+
+    it('reports a persisted drain if immediate finalization fails, then retries from that durable intent', async () => {
+      await db.execute(
+        sql`CREATE FUNCTION reject_drain_finalize() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action = 'module.deactivate' THEN RAISE EXCEPTION 'fixture finalization refusal'; END IF; RETURN NEW; END $$`,
+      );
+      await db.execute(
+        sql`CREATE TRIGGER reject_drain_finalize BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION reject_drain_finalize()`,
+      );
+      try {
+        const response = await drain();
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({
+          moduleId: 'alpha',
+          warning: expect.stringContaining('Drain recorded'),
+          deactivatedAt: null,
+          drainingAt: expect.any(String),
+        });
+      } finally {
+        await db.execute(sql`DROP TRIGGER reject_drain_finalize ON audit_events`);
+        await db.execute(sql`DROP FUNCTION reject_drain_finalize()`);
+      }
+      expect(await finalizeModuleDrain(db, 'alpha')).toBe(true);
+    });
+
+    it('waits for an admission already holding the module row, then captures its task', async () => {
+      let pending!: Promise<Response>;
+      let id = '';
+      await db.transaction(async (tx) => {
+        await guardModuleAdmission(tx, ['alpha']);
+        const [created] = await tx
+          .insert(schema.tasks)
+          .values({
+            userId,
+            type: TYPE,
+            title: 'Admission race',
+            runListSnapshot: ['module.alpha.x'],
+            status: 'running',
+          })
+          .returning();
+        id = created!.id;
+        pending = Promise.resolve(drain());
+        expect(await settled(pending)).toBe('blocked');
+      });
+      expect((await pending).status).toBe(200);
+      expect((await db.select().from(schema.moduleDrainTasks)).map((r) => r.taskId)).toEqual([id]);
+    });
+
+    it('refuses a new binding while the finalizer owns the row, with a bounded structural busy result', async () => {
+      const t = await task();
+      await drain();
+      await db.transaction(async (tx) => {
+        await tx
+          .select()
+          .from(schema.modules)
+          .where(eq(schema.modules.moduleId, 'alpha'))
+          .for('update');
+        await expect(
+          db.transaction((other) => guardModuleAdmission(other, ['alpha'], t.id)),
+        ).rejects.toMatchObject({ code: 'module-busy' });
+      });
+    });
+
+    it('refuses failed/dead noncohort revival but lets an admitted member resume', async () => {
+      const member = await task();
+      const failed = await task({ status: 'failed' });
+      const dead = await task({ deadAt: new Date() });
+      await drain();
+      await db.transaction((tx) => guardTaskModuleAdmission(tx, member.id));
+      for (const t of [failed, dead])
+        await expect(
+          db.transaction((tx) => guardTaskModuleAdmission(tx, t.id)),
+        ).rejects.toMatchObject({ code: 'module-draining' });
+    });
+  });
+
   describe('PATCH /modules/:id', () => {
     it('refuses a user and changes nothing', async () => {
       h.role = 'user';
@@ -477,7 +797,7 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       { active: 'false' },
       { active: false, extra: true },
       { active: true, mode: 'urgent' },
-      { active: false, mode: 'graceful' },
+      { active: true, mode: 'graceful' },
       { active: false, mode: 'urgent', extra: true },
     ])('refuses the body %j', async (body) => {
       expect((await send('PATCH', '/modules/alpha', body)).status).toBe(400);
@@ -1463,6 +1783,20 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
         expect(await typeTasks()).toHaveLength(1);
       },
     );
+
+    it('refuses creation through the public task route during this module drain and admits it again after cancellation', async () => {
+      await insertType();
+      expect((await postTask()).status).toBe(201);
+      expect(
+        (await send('PATCH', '/modules/alpha', { active: false, mode: 'graceful' })).status,
+      ).toBe(200);
+      const refused = await postTask();
+      expect(refused.status).toBe(409);
+      expect(await refused.json()).toMatchObject({ code: 'module-draining' });
+      expect(await typeTasks()).toHaveLength(1);
+      expect((await send('DELETE', '/modules/alpha/drain')).status).toBe(200);
+      expect((await postTask()).status).toBe(201);
+    });
 
     it('lists the type unavailable with the reason, and the module on the admin routes, until the module is back', async () => {
       await insertType();

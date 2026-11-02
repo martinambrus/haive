@@ -1,12 +1,12 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import type { ModuleDiffRow, ModuleState } from '@haive/shared/modularity';
 import {
   getModulesLoaded,
-  moduleOpenCapped,
-  moduleOpenTasks,
+  getModuleDependents,
+  cancelModuleDrain,
   patchModuleActive,
   type ApiError,
   type ModulePurgeResponse,
@@ -71,18 +71,25 @@ export default function ModulesPage() {
   const router = useRouter();
   const [data, setData] = useState<ModulesLoadedResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
+  const pending = useRef(new Set<string>());
+  const preflight = useRef(0);
+  const latestLoad = useRef(0);
   const [blocked, setBlocked] = useState<ModuleTasksBlocked | null>(null);
   const [tearingDown, setTearingDown] = useState<string | null>(null);
   const [purging, setPurging] = useState<{ id: string; tornDown: boolean } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    const request = ++latestLoad.current;
     try {
-      setData(await getModulesLoaded());
+      const response = await getModulesLoaded();
+      if (request !== latestLoad.current) return;
+      setData(response);
       setError(null);
     } catch (err) {
-      setError((err as ApiError).message ?? 'Failed to load modules');
+      if (request === latestLoad.current)
+        setError((err as ApiError).message ?? 'Failed to load modules');
     }
   }, []);
 
@@ -91,29 +98,64 @@ export default function ModulesPage() {
   }, [load]);
 
   async function toggle(row: ModuleDiffRow) {
-    setBusy(true);
+    if (pending.current.has(row.id)) return;
+    pending.current.add(row.id);
+    setBusy(new Set(pending.current));
+    const request = ++preflight.current;
     setError(null);
     setNotice(null);
     try {
-      await patchModuleActive(row.id, row.deactivatedAt !== null);
-      await load();
-      router.refresh();
-    } catch (err) {
-      const tasks = moduleOpenTasks(err as ApiError);
-      if (tasks.length > 0) {
-        setBlocked({
-          moduleId: row.id,
-          name: row.name,
-          tasks,
-          capped: moduleOpenCapped(err as ApiError),
-        });
+      if (row.deactivatedAt === null) {
+        const response = await getModuleDependents(row.id);
+        if (request === preflight.current && response.moduleId === row.id)
+          setBlocked({
+            ...response,
+            name: row.name,
+            draining: row.drainingAt != null,
+          });
       } else {
-        setError((err as ApiError).message ?? 'Failed to update the module');
+        await patchModuleActive(row.id, true);
+        await load();
+        router.refresh();
       }
+    } catch (err) {
+      setError((err as ApiError).message ?? 'Failed to update the module');
     } finally {
-      setBusy(false);
+      pending.current.delete(row.id);
+      setBusy(new Set(pending.current));
     }
   }
+
+  async function cancelDrain(row: ModuleDiffRow) {
+    if (pending.current.has(row.id)) return;
+    pending.current.add(row.id);
+    setBusy(new Set(pending.current));
+    try {
+      await cancelModuleDrain(row.id);
+      await load();
+    } catch (err) {
+      setError((err as ApiError).message ?? 'Failed to cancel the drain');
+    } finally {
+      pending.current.delete(row.id);
+      setBusy(new Set(pending.current));
+    }
+  }
+
+  useEffect(() => {
+    if (!data?.modules.rows.some((row) => row.drainingAt)) return;
+    const timer = setInterval(() => {
+      void load();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [data, load]);
+
+  useEffect(
+    () => () => {
+      ++preflight.current;
+      ++latestLoad.current;
+    },
+    [],
+  );
 
   function turnedOff(result: ModuleUrgentResponse) {
     const titles = new Map((blocked?.tasks ?? []).map((t) => [t.id, t.title]));
@@ -214,7 +256,8 @@ export default function ModulesPage() {
                   <td className="px-3 py-2">
                     <ModuleActiveCell
                       row={row}
-                      busy={busy}
+                      busy={busy.has(row.id)}
+                      onCancelDrain={() => void cancelDrain(row)}
                       onToggle={() => void toggle(row)}
                       onTeardown={() => setTearingDown(row.id)}
                       onPurge={() => setPurging({ id: row.id, tornDown: row.tornDownAt !== null })}
@@ -234,6 +277,15 @@ export default function ModulesPage() {
       )}
       {data && <ModuleSkippedSeeds rows={data.modules.rows} />}
       <ModuleTasksOpenDialog
+        key={blocked?.moduleId ?? 'closed'}
+        onDrained={(result) => {
+          setNotice(
+            result.warning ??
+              `Drain requested for ${blocked?.moduleId}. Its existing tasks can finish; unrelated work continues.`,
+          );
+          setBlocked(null);
+          void load();
+        }}
         blocked={blocked}
         onClose={() => setBlocked(null)}
         onDone={turnedOff}

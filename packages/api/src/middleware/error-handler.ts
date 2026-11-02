@@ -1,3 +1,4 @@
+import { ModuleAdmissionError } from '@haive/shared/modularity-server';
 import type { ErrorHandler } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { routePath } from 'hono/route';
@@ -11,6 +12,11 @@ import { isUuid } from '../lib/uuid.js';
 const INVALID_TEXT_REPRESENTATION = '22P02';
 
 export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
+  if (err instanceof ModuleAdmissionError)
+    return c.json(
+      { error: err.message, code: err.code, moduleId: err.moduleId },
+      err.code === 'module-busy' ? 503 : 409,
+    );
   if (err instanceof HttpError) {
     return c.json(
       { error: err.message, code: err.code ?? null },

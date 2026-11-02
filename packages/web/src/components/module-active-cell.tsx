@@ -9,23 +9,30 @@ export function ModuleActiveCell({
   onToggle,
   onTeardown,
   onPurge,
+  onCancelDrain,
 }: {
   row: Pick<
     ModuleDiffRow,
-    'id' | 'rowVersion' | 'deactivatedAt' | 'state' | 'tornDownAt' | 'missingAt'
+    'id' | 'rowVersion' | 'deactivatedAt' | 'state' | 'tornDownAt' | 'missingAt' | 'drainingAt'
   >;
   busy: boolean;
   onToggle: () => void;
   onTeardown: () => void;
   onPurge: () => void;
+  onCancelDrain?: () => void;
 }) {
   if (row.rowVersion === null) return <span className="text-neutral-500">—</span>;
   const since = row.deactivatedAt;
-  const action = since === null ? 'Deactivate' : 'Activate';
+  const draining = since === null && row.drainingAt != null;
+  const action = draining ? 'View dependents' : since === null ? 'Deactivate' : 'Activate';
   return (
     <div className="flex flex-col items-start gap-2">
       <span className={since === null ? 'text-emerald-300' : 'text-amber-300'}>
-        {since === null ? 'Active' : `Deactivated since ${new Date(since).toLocaleString()}`}
+        {draining
+          ? `Draining since ${new Date(row.drainingAt!).toLocaleString()}`
+          : since === null
+            ? 'Active'
+            : `Deactivated since ${new Date(since).toLocaleString()}`}
       </span>
       <Button
         type="button"
@@ -37,6 +44,18 @@ export function ModuleActiveCell({
       >
         {action}
       </Button>
+      {draining && (
+        <Button
+          type="button"
+          size="sm"
+          variant="secondary"
+          disabled={busy}
+          onClick={onCancelDrain}
+          aria-label={`Cancel drain ${row.id}`}
+        >
+          Cancel drain
+        </Button>
+      )}
       {since !== null && row.tornDownAt !== null && (
         <span className="text-neutral-400">
           {`Torn down ${new Date(row.tornDownAt).toLocaleString()}`}

@@ -1,3 +1,4 @@
+import { guardModuleAdmission, integrationModuleIds } from '@haive/shared/modularity-server';
 import { and, eq, inArray } from 'drizzle-orm';
 import { HTTPException } from 'hono/http-exception';
 import { schema, type Database, type DbTx } from '@haive/database';
@@ -203,6 +204,7 @@ export async function admitTaskIntegrations(
       throw new HttpError(409, 'Reconnect the selected integration account in Settings');
     picks.push({ ...pick, providerId: row.providerId });
   }
+  await guardModuleAdmission(db, integrationModuleIds(picks), undefined, true);
   const preview = await taskIntegrationPreview(db, input);
   if (!preview.admitted)
     throw new HTTPException(409, {

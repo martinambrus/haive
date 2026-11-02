@@ -105,6 +105,7 @@ import { resolveMergePhase } from './merge-resolver.js';
 import {
   dispatchIntegrationAccounts,
   insertStampedRun,
+  insertFixedStampedRun,
   IntegrationBlockedError,
   type IntegrationBlock,
   invalidRequirementsFailure,
@@ -667,7 +668,15 @@ async function insertDispatchRun(
 ): Promise<typeof schema.cliInvocations.$inferSelect | { failure: string }> {
   if (stamp.bindings.length === 0) return insertOwnedRun(db, stepRowId, values);
   if (stamp.fixed) {
-    return insertOwnedRun(db, stepRowId, { ...values, integrations: stamp.fixed.integrations });
+    const run = await insertFixedStampedRun(
+      db,
+      taskId,
+      stepRowId,
+      values,
+      stamp.fixed.integrations ?? [],
+    );
+    if ('failure' in run) throw new IntegrationBlockedError(run.blocked);
+    return run;
   }
   const run = await insertStampedRun(
     db,

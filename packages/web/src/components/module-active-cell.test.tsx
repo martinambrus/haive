@@ -11,6 +11,7 @@ const row = (
   over: {
     rowVersion?: string | null;
     deactivatedAt?: string | null;
+    drainingAt?: string | null;
     state?: ModuleState;
     tornDownAt?: string | null;
     missingAt?: string | null;
@@ -42,6 +43,14 @@ describe('ModuleActiveCell', () => {
     expect(html).not.toContain('Deactivated since');
     expect(html).toMatch(/<button[^>]*>Deactivate<\/button>/);
     expect(html).not.toMatch(/<button[^>]*>Activate<\/button>/);
+  });
+
+  it('shows the structural drain and explicit cancel while keeping teardown hidden', () => {
+    const html = render(row({ drainingAt: SINCE }));
+    expect(html).toContain('Draining since');
+    expect(html).toContain('View dependents');
+    expect(html).toContain('Cancel drain');
+    expect(html).not.toContain('Tear down');
   });
 
   it('reads Deactivated since the stamp and offers Activate for a deactivated one', () => {

@@ -15,6 +15,7 @@ const AGENT = '00000000-0000-4000-8000-0000000000e1';
 /** A task failed on its fan-out step's rate limit: a failed trailing run and an agent it killed. */
 function setup(taskStatus: 'failed' | 'running') {
   const fake = createFakeDb({
+    modules: schema.modules,
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     cliInvocations: schema.cliInvocations,

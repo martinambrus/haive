@@ -1,3 +1,8 @@
+import {
+  ModuleAdmissionError,
+  guardModuleAdmission,
+  integrationModuleIds,
+} from '@haive/shared/modularity-server';
 import { inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { promptNamesAgentPath } from '@haive/shared';
@@ -262,12 +267,58 @@ export async function insertStampedRun(
         failure: `${INTEGRATION_ACCOUNT_CHANGED_REASON}: the account of ${changed.join(', ')} changed while this step was starting, so the prompt names another account; retry the step.`,
       };
     }
-    await recordTaskGrants(tx, taskId, resolutions);
+    try {
+      await recordTaskGrants(tx, taskId, resolutions);
+    } catch (err) {
+      if (!(err instanceof ModuleAdmissionError)) throw err;
+      return moduleAdmissionBlocked(err, bindings);
+    }
     return insertOwnedRun(tx, stepRowId, {
       ...values,
       integrations: bindings.length > 0 ? bindings : null,
     });
   });
+}
+
+function moduleAdmissionBlocked(
+  err: ModuleAdmissionError,
+  bindings: readonly IntegrationBinding[],
+) {
+  const blocked: IntegrationBlock = {
+    kind: 'wait',
+    wait: {
+      causes: bindings
+        .filter((b) => integrationModuleIds([b]).includes(err.moduleId))
+        .map((b) => ({
+          requirementId: b.requirementId,
+          categoryId: b.categoryId,
+          providerId: b.providerId,
+          connectionId: b.connectionId,
+          reason: err.code === 'module-deactivated' ? 'provider-deactivated' : err.code,
+        })),
+    },
+  };
+  return { failure: `${err.code}: ${err.message}`, blocked };
+}
+
+/** Later agents retain their fan-out's stamp, but still fence a new module dependency. */
+export async function insertFixedStampedRun(
+  db: Database,
+  taskId: string,
+  stepRowId: string,
+  values: typeof schema.cliInvocations.$inferInsert,
+  bindings: IntegrationBinding[],
+) {
+  try {
+    return await db.transaction(async (tx) => {
+      await lockTaskIntegrations(tx, taskId);
+      await guardModuleAdmission(tx, integrationModuleIds(bindings), taskId, true);
+      return insertOwnedRun(tx, stepRowId, { ...values, integrations: bindings });
+    });
+  } catch (err) {
+    if (!(err instanceof ModuleAdmissionError)) throw err;
+    return moduleAdmissionBlocked(err, bindings);
+  }
 }
 
 export const NO_ACCOUNT_TEXT = '(no account connected)';

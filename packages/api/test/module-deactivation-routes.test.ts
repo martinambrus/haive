@@ -12,6 +12,12 @@ const h = vi.hoisted(() => ({
   urgent: { kind: 'missing' } as unknown,
   urgents: [] as unknown[],
   audits: [] as unknown[],
+  dependents: {
+    tasks: [
+      { id: 't1', title: 'Uses alpha', status: 'running', ownerId: 'u1', currentStepId: null },
+    ],
+    capped: false,
+  },
   publishes: [] as unknown[][],
   publishImpl: null as null | ((...args: unknown[]) => unknown),
 }));
@@ -77,6 +83,7 @@ vi.mock('../src/modules/activation.js', () => ({
     h.reads += 1;
     return h.deactivated.has(id);
   },
+  liveDependents: async () => h.dependents,
   setModuleActive: async (_db: unknown, id: string, active: boolean) => {
     h.toggles.push([id, active]);
     return h.toggle;
@@ -301,7 +308,7 @@ describe('PATCH /modules/:id', () => {
     { active: false, extra: 1 },
     { Active: false },
     { active: true, mode: 'urgent' },
-    { active: false, mode: 'graceful' },
+    { active: true, mode: 'graceful' },
     { active: false, mode: 'urgent', extra: 1 },
   ])('refuses the body %j', async (body) => {
     const res = await patch('alpha', body);
@@ -449,5 +456,22 @@ describe('PATCH /modules/:id', () => {
       expect(h.publishes).toHaveLength(1);
       expect(h.audits).toEqual(audited);
     });
+  });
+});
+
+describe('GET /modules/:id/dependents', () => {
+  it('preflights without toggling, auditing or publishing', async () => {
+    const res = await (await buildApp()).request('/modules/alpha/dependents');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject(h.dependents);
+    expect(h.toggles).toEqual([]);
+    expect(h.urgents).toEqual([]);
+    expect(h.audits).toEqual([]);
+    expect(h.publishes).toEqual([]);
+  });
+
+  it('refuses nonadministrators', async () => {
+    h.role = 'user';
+    expect((await (await buildApp()).request('/modules/alpha/dependents')).status).toBe(403);
   });
 });

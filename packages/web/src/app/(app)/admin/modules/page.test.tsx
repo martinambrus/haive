@@ -11,7 +11,12 @@ import ModulesPage from './page';
 
 // No DOM environment here: the page's hooks run on a plain slot list, as in task-type-editor.test.tsx.
 const hooks = vi.hoisted(() => ({ slots: [] as unknown[], next: 0, dirty: false, mounting: true }));
-const api = vi.hoisted(() => ({ getModulesLoaded: vi.fn(), patchModuleActive: vi.fn() }));
+const api = vi.hoisted(() => ({
+  getModulesLoaded: vi.fn(),
+  patchModuleActive: vi.fn(),
+  getModuleDependents: vi.fn(),
+  cancelModuleDrain: vi.fn(),
+}));
 const router = vi.hoisted(() => ({ refresh: vi.fn() }));
 
 vi.mock('react', async (importOriginal) => ({
@@ -27,6 +32,11 @@ vi.mock('react', async (importOriginal) => ({
       }
     };
     return [hooks.slots[at], set];
+  },
+  useRef: (initial: unknown) => {
+    const at = hooks.next++;
+    if (!(at in hooks.slots)) hooks.slots[at] = { current: initial };
+    return hooks.slots[at];
   },
   useEffect: (effect: () => void) => {
     if (hooks.mounting) effect();
@@ -99,12 +109,6 @@ const RESULT: ModuleUrgentResponse = {
   failed: [],
   capped: false,
 };
-const refusal = (body: Record<string, unknown>) =>
-  Object.assign(new Error('Live tasks still use this module. Finish or cancel them first.'), {
-    status: 409,
-    code: 'module_tasks_open',
-    body: { code: 'module_tasks_open', ...body },
-  });
 
 async function mount() {
   hooks.slots = [];
@@ -144,15 +148,20 @@ async function mount() {
 
 beforeEach(() => {
   for (const fn of [...Object.values(api), router.refresh]) fn.mockReset();
+  api.getModuleDependents.mockImplementation(async (moduleId: string) => ({
+    moduleId,
+    tasks: TASKS,
+    capped: false,
+  }));
   api.getModulesLoaded.mockResolvedValue({
     intent: [],
     modules: { workerAt: null, rows: [row('alpha', 'Alpha Search'), row('beta', null)] },
   });
 });
 
-describe('Modules page when a deactivation is refused', () => {
+describe('Modules page preflight', () => {
   it('hands the dialog the module, its name, the tasks and whether the list was cut', async () => {
-    api.patchModuleActive.mockRejectedValue(refusal({ tasks: TASKS, capped: true }));
+    api.getModuleDependents.mockResolvedValue({ moduleId: 'alpha', tasks: TASKS, capped: true });
     const page = await mount();
     expect(page.dialog().props.blocked).toBeNull();
     await page.deactivate('alpha');
@@ -161,11 +170,11 @@ describe('Modules page when a deactivation is refused', () => {
       name: 'Alpha Search',
       tasks: TASKS,
       capped: true,
+      draining: false,
     });
   });
 
   it('passes no name for a module without one, and not capped when the refusal does not say so', async () => {
-    api.patchModuleActive.mockRejectedValue(refusal({ tasks: TASKS }));
     const page = await mount();
     await page.deactivate('beta');
     expect(page.dialog().props.blocked).toEqual({
@@ -173,11 +182,12 @@ describe('Modules page when a deactivation is refused', () => {
       name: null,
       tasks: TASKS,
       capped: false,
+      draining: false,
     });
   });
 
   it('shows any other failure as an error and opens no dialog', async () => {
-    api.patchModuleActive.mockRejectedValue(
+    api.getModuleDependents.mockRejectedValue(
       Object.assign(new Error('Module not found'), { status: 404, body: {} }),
     );
     const page = await mount();
@@ -187,22 +197,54 @@ describe('Modules page when a deactivation is refused', () => {
   });
 
   it('closes on Cancel without turning anything off, reloading or refreshing', async () => {
-    api.patchModuleActive.mockRejectedValue(refusal({ tasks: TASKS }));
     const page = await mount();
     await page.deactivate('alpha');
     page.dialog().props.onClose!();
     page.draw();
     expect(page.dialog().props.blocked).toBeNull();
-    expect(api.patchModuleActive).toHaveBeenCalledTimes(1);
+    expect(api.patchModuleActive).not.toHaveBeenCalled();
+    expect(api.getModuleDependents).toHaveBeenCalledTimes(1);
     expect(api.getModulesLoaded).toHaveBeenCalledTimes(1);
     expect(router.refresh).not.toHaveBeenCalled();
     expect(page.notice()).toBeUndefined();
   });
 });
 
+describe('preflight response ownership', () => {
+  it('keeps another module usable, prevents duplicate requests, and discards an older target reply', async () => {
+    let finishAlpha!: (value: unknown) => void;
+    api.getModuleDependents.mockImplementation((id: string) =>
+      id === 'alpha'
+        ? new Promise((resolve) => {
+            finishAlpha = resolve;
+          })
+        : Promise.resolve({ moduleId: id, tasks: [], capped: false }),
+    );
+    const page = await mount();
+    await page.deactivate('alpha');
+    await page.deactivate('alpha');
+    expect(api.getModuleDependents).toHaveBeenCalledTimes(1);
+    expect(page.dialog().props.blocked).toBeNull();
+    await page.deactivate('beta');
+    expect(page.dialog().props.blocked).toMatchObject({ moduleId: 'beta', tasks: [] });
+    finishAlpha({ moduleId: 'alpha', tasks: TASKS, capped: false });
+    await flush();
+    page.draw();
+    expect(page.dialog().props.blocked).toMatchObject({ moduleId: 'beta', tasks: [] });
+    expect(api.patchModuleActive).not.toHaveBeenCalled();
+  });
+
+  it('does not enable actions from a response naming another module', async () => {
+    api.getModuleDependents.mockResolvedValue({ moduleId: 'beta', tasks: TASKS, capped: false });
+    const page = await mount();
+    await page.deactivate('alpha');
+    expect(page.dialog().props.blocked).toBeNull();
+    expect(api.patchModuleActive).not.toHaveBeenCalled();
+  });
+});
+
 describe('Modules page after Turn off now', () => {
   const turnedOff = async (result: ModuleUrgentResponse) => {
-    api.patchModuleActive.mockRejectedValue(refusal({ tasks: TASKS }));
     const page = await mount();
     await page.deactivate('alpha');
     page.dialog().props.onDone!(result);
@@ -234,7 +276,6 @@ describe('Modules page after Turn off now', () => {
   });
 
   it('names a module without a name by its id', async () => {
-    api.patchModuleActive.mockRejectedValue(refusal({ tasks: TASKS }));
     const page = await mount();
     await page.deactivate('beta');
     page.dialog().props.onDone!({ ...RESULT, moduleId: 'beta' });

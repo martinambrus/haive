@@ -31,7 +31,10 @@ and recovery do not increment it. The separate entered-continuation bit survives
 module-schema hold taking over the wait; clearing the active integration cause must not re-ask
 `shouldRun` and skip those reservations. No grant, invocation or CLI job is written. Once the first run
 has been stamped, the rest share its stamp without another integration resolution, so this block
-cannot strand an already-sent sibling.
+cannot strand an already-sent sibling. Later stamp insertions still take the module drain
+admission guard. A drain includes already-started fan-outs through their current reservations
+and linked stamps, so those siblings retain module access until their task finishes; a genuinely
+new dependency parks through the same typed wait.
 
 Every other dispatch that throws part-way fails what it reserved or linked and did not queue
 (`releaseUnsentAgents`), and ends the one run it had recorded. A pass that fails its step, at any

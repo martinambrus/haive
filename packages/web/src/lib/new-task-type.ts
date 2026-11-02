@@ -36,6 +36,8 @@ function unavailableText(row: PublicTaskType): string {
       return 'custom task types are turned off by an administrator';
     case 'module-types-off':
       return 'module task types are turned off by an administrator';
+    case 'module-draining':
+      return 'A module this task type needs is draining. Wait for it to be reactivated or ask an administrator to cancel the drain.';
     case 'module-missing':
     case 'module-deactivated':
       return moduleNeedText(row.modules ?? [], row.reason);

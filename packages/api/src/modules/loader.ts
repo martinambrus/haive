@@ -1,3 +1,8 @@
+import {
+  beginModuleDrain,
+  cancelModuleDrain,
+  finalizeModuleDrain,
+} from '@haive/shared/modularity-server';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { Hono } from 'hono';
 import { sql } from 'drizzle-orm';
@@ -67,7 +72,7 @@ export type LoadedApiModule = {
 
 const putBodySchema = z.object({ values: z.record(z.string(), z.unknown()) });
 const patchBodySchema = z
-  .object({ active: z.boolean(), mode: z.literal('urgent').optional() })
+  .object({ active: z.boolean(), mode: z.enum(['urgent', 'graceful']).optional() })
   .strict()
   .refine((body) => body.mode === undefined || !body.active);
 const purgeBodySchema = z.object({ confirm: z.string() });
@@ -91,6 +96,16 @@ function lockBusyError(err: unknown): never {
   if (isLockNotAvailable(err)) {
     throw new HttpError(503, 'Another save of this setting is in progress; try again');
   }
+  throw err;
+}
+
+function moduleBusyError(err: unknown): never {
+  if (isLockNotAvailable(err))
+    throw new HttpError(
+      503,
+      'Another lifecycle action is changing this module; try again.',
+      'module-busy',
+    );
   throw err;
 }
 
@@ -267,12 +282,48 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
     return c.json(await loadedReport());
   });
 
+  routes.get('/:id/dependents', requireAdmin, async (c) => {
+    const id = c.req.param('id');
+    if (
+      !loaded.some((m) => m.manifest.id === id) &&
+      !(await loadedReport()).modules.rows.some((r) => r.id === id)
+    )
+      throw new HttpError(404, 'Module not found');
+    return c.json({ moduleId: id, ...(await liveDependents(getDb(), id)) });
+  });
+
+  routes.delete('/:id/drain', requireAdmin, async (c) => {
+    if (
+      !(await cancelModuleDrain(getDb(), c.req.param('id'), c.get('userId')).catch(moduleBusyError))
+    )
+      throw new HttpError(404, 'Module not found');
+    return c.json({ moduleId: c.req.param('id'), drainingAt: null });
+  });
+
   routes.patch('/:id', requireAdmin, async (c) => {
     const id = c.req.param('id');
     const { active, mode } = patchBodySchema.parse(await c.req.json());
     const db = getDb();
+    if (mode === 'graceful') {
+      const started = await beginModuleDrain(db, id, c.get('userId')).catch(moduleBusyError);
+      if (!started) throw new HttpError(404, 'Module not found');
+      let warning: string | undefined;
+      try {
+        await finalizeModuleDrain(db, id);
+      } catch (err) {
+        logger.warn({ err, moduleId: id }, 'module drain recorded; finalization will be retried');
+        warning =
+          'Drain recorded. Finalization could not finish; the worker will retry. Reload the module state to check progress.';
+      }
+      return c.json({
+        moduleId: id,
+        mode,
+        ...(warning ? { warning } : {}),
+        ...(await loadedReport()).modules.rows.find((r) => r.id === id),
+      });
+    }
     if (mode === 'urgent') {
-      const urgent = await deactivateUrgently(db, id, c.get('userId'));
+      const urgent = await deactivateUrgently(db, id, c.get('userId')).catch(moduleBusyError);
       if (urgent.kind === 'missing') throw new HttpError(404, 'Module not found');
       await recordAuditEvent(db, {
         actorUserId: c.get('userId'),
@@ -291,7 +342,7 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
         capped: urgent.capped,
       });
     }
-    const result = await setModuleActive(db, id, active);
+    const result = await setModuleActive(db, id, active, c.get('userId')).catch(moduleBusyError);
     if (result.kind === 'missing') throw new HttpError(404, 'Module not found');
     if (result.kind === 'open') {
       return c.json(

@@ -104,6 +104,13 @@ Both `@haive/shared/integrations` (server-only, imports the database) and `@haiv
 out of the root barrel. Web imports `@haive/shared/forge`, so nothing loaded by that subpath may import
 a node-only module or the database.
 
+During a graceful module drain, provider enablement stays unchanged so already admitted tasks
+keep their tools. New task choices and dispatch grants take the module's shared admission guard
+in their mutation transaction; nonmembers receive `module-draining`, and dispatch uses the
+existing integration wait. A raced final deactivation is rechecked under that guard. The
+module drain cohort also counts live invocation stamps, so Reset cannot cut a call off merely
+by removing its current grant. See [Modules](modules.md) for finalization and cancellation.
+
 ## Module data purge
 
 Uninstalling keeps integration data. An admin's explicit purge of a missing module removes only

@@ -7,3 +7,11 @@ export async function lockTaskIntegrations(tx: DbTx, taskId: string): Promise<vo
     sql`select pg_advisory_xact_lock(hashtextextended(${`task-integrations:${taskId}`}, 0))`,
   );
 }
+
+/** A revive can already hold step rows; never wait behind a dispatch that needs those rows. */
+export async function tryLockTaskIntegrations(tx: DbTx, taskId: string): Promise<boolean> {
+  const rows = await tx.execute(
+    sql`select pg_try_advisory_xact_lock(hashtextextended(${`task-integrations:${taskId}`}, 0)) as locked`,
+  );
+  return rows[0]?.locked === true;
+}
