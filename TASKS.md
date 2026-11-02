@@ -1345,24 +1345,6 @@ Queued broader findings from T489 PR #975, review-6 and codex-rev-6/last.txt. PR
 4. Escaped whitespace before # can be mistaken for a comment (~:154).
 5. The suffix rescan (~:23) can be quadratic for a long script. Keep the scanner proportional to the fixed first-party workflow corpus; avoid building a general shell parser.
 
-### T521 · FNF[haive-save-leftovers] · first Save & push to an empty origin fails before committing
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T07:05Z · last: 2026-11-02T07:20Z · kind: reproduced operational bug · executable member: 5 · priority: P1
-Queued connected findings from T120 PR1b reviews, not additional authorized implementation. PRE-EXISTING, minor; raw reports under .claude/tmp/codex-run/T120/.
-
-1. MOVED to T526; not part of the measured empty-origin fix.
-2. MOVED to T526; not part of the measured empty-origin fix.
-3. MOVED to T527; not part of the measured empty-origin fix.
-4. DESIGN MOVED to T523, outside this execution bundle: ambient XDG_CONFIG_HOME/GIT_CONFIG_* handling. Executable git filters are already T387. Known-name staged-only additions remain an accepted name-only repair trade-off documented in onboarding-upgrades.md.
-
-5. Measured by T120-live against the existing worker: first Save & push to a completely empty origin fails before committing, because plan/merge.ts fetchOrigin (~:105-111) explicitly fetches refs/heads/<branch> and treats its absence as integration_failed; integrateOrigin invokes it before divergence can classify a missing remote branch (plan-mirror-queue.ts ~:258, project-state/save.ts ~:328). Same-history initialized origins push successfully. PRE-EXISTING, connected; distinguish a genuinely absent remote branch from a transport/read error without weakening other refusals. Raw browser/backend evidence in .claude/tmp/codex-run/codex-resume-20261101/T120-live/empty-remote-failure.png and report.md. No broader fix authorized.
-
-Reconciled 2026-11-01: member 5 alone is the next fix scope. Members1/2 are separate verification candidates in T526;3 is parked in T527;4 was already split as design T523. Preserve the distinction between an absent remote branch and a failed remote read.
-
-Execution 2026-11-02: member5 only, bounded empty-origin first-push fix. Evidence `.claude/tmp/codex-run/queue-exec-20261101/T521/`. No rejoining T523/T526/T527 or broader Git cleanup. Fresh failing control, paired review and all delivery gates required.
-
-Progress 2026-11-02T07:20Z: Initial implementation10f52032b ready: real HTTP Git old-source2fail, corrected12files230pass/2existing skips, worker typecheckgreen. Exact remote absence/auth/stale-ref and branch-appears nonforce controls; fresh xhigh review in progress before fullworker candidate. Liveexisting-stack proof preparation only; no model work. Weekly11%,3%admissioncheckpoint.
-
 ### T522 · FNF[git-text-redaction-limits] · unusual URL delimiters and pathless query-at-signs evade text redaction (+1)
 
 status: open · priority: P2
@@ -1438,6 +1420,8 @@ status: parked · reason: diminishing returns; comment only, no runtime conseque
 Source: route-retirement follow-up review 2026-11-01, packages/worker/src/step-engine/steps/index.ts:119. The unchanged startup-assertion JSDoc describes task-row invalidation through providerSensitive metadata, while the task-level switch route is being retired by T338. The assertion itself still correctly checks metadata/list equality. Preserve as low documentation debt; update only on the next related documentation/source touch. No extra implementation/review round or runtime audit is authorized by this note. Evidence .claude/tmp/codex-run/queue-exec-20261101/route-retirement/review-comments.md.
 
 ## Done
+
+- T521 — member5 only: verified empty-origin first push; retained stale-ref and nonforce protections — PR #989 (3778949f02), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41409986755 green; actual browser Plan firstpush to emptyA and Haive-data firstpush to emptyB with stale tracking ref passed; barehistory/portableplanstate verified; fixtures removed, primaryactivityunchanged. Evidence .claude/tmp/codex-run/queue-exec-20261101/T521/.
 
 - T122 — portable independent KB/plan review watermarks and filtered drift — PR #988 (42577ae961), 2026-11-01; exact-HEAD reviews/full candidate/PR CI/main CI41348129256 green; core browser/two-install acceptance with explicit supplemental-B-UI limit; corrected real-Git controls/fullworker15037 and SQL218 green; merged source loaded healthy with activity unchanged. Evidence .claude/tmp/codex-run/queue-exec-20261101/T121-T122/.
 
