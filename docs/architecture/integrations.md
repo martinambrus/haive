@@ -361,8 +361,12 @@ from the second; tools/list follows the stamp, so a choice change landing betwee
 leave the prompt naming tools the agent is not offered.
 
 **Reconnect and provider waits (J7).** The step's nullable `integration_wait` (0218) stores typed
-causes with requirement, category, provider and connection ids from the resolver. It never stores a
-token, invents a provider for an unserved category, or writes connection `status`: refresh and sign-in
+causes with requirement, category, provider and connection ids from the resolver. Its separate
+`continuation: true` bit records that this interrupted dispatch already passed its entry precondition;
+it stays true when runtime capacity or module schema setup takes over and clears the active `causes`
+array. Legacy nonempty-cause rows also identify an entered continuation, so no data migration is
+needed. A cause-free continuation is not a reconnect wait. The envelope never stores a token, invents
+a provider for an unserved category, or writes connection `status`: refresh and sign-in
 remain the auth-health owners. Deactivation does not say the account's tokens are bad. No vendor
 refresh or login runs while checking a wait.
 
@@ -378,10 +382,12 @@ including a follow-up wave, without creating a new agent retry owner.
 
 A park takes the step row first and reads it after the lock, refuses a Retry's unmarked pending row,
 a Stop/Skip, a changed epoch, a terminal or dead task, and any live invocation. Duplicate blocks keep
-the same idle marker and do not fold a park twice. Pause takes precedence; a runtime wait that wins
-after recovery clears the integration cause. The existing stale-park sweep repairs a lost delayed
-advance at boot and after its cutoff. Reset/Retry and successful claim clear `integration_wait`, and
-banner/badge readers require the pending status plus idle marker as well as the typed field: stale
+the same idle marker and do not fold a park twice. Pause takes precedence; a runtime or schema
+wait that wins after recovery clears only the active integration cause and keeps the continuation bit, so the next
+pending tick cannot ask `shouldRun` again and skip unfinished work or reserved follow-up agents.
+The existing stale-park sweep repairs a lost delayed advance at boot and after its cutoff.
+Reset/Retry, terminal settlement and successful claim clear the whole `integration_wait` envelope.
+Banner/badge readers require pending status plus idle marker and a nonempty active cause array: stale
 copy or an ended task cannot advertise a reconnect wait. The banner points to Settings and names the
 requirement/provider state; the `integration` wait badge is shared by the task header and list.
 

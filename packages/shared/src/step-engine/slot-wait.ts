@@ -126,12 +126,11 @@ export function deriveSlotWait(args: {
 
   if (row.status === 'pending' && since !== null) {
     return {
-      kind:
-        row.integrationWait != null
-          ? 'integration'
-          : isModuleStepId(row.stepId)
-            ? 'module'
-            : 'runtime',
+      kind: row.integrationWait?.causes.length
+        ? 'integration'
+        : isModuleStepId(row.stepId)
+          ? 'module'
+          : 'runtime',
       since,
       stepId: row.stepId,
       message: row.statusMessage,

@@ -2,6 +2,8 @@ import {
   resolveDispatchIntegrations,
   stepIntegrationRequirements,
   invalidRequirementsFailure,
+  hasIntegrationContinuation,
+  clearIntegrationWaitCause,
   type IntegrationBlock,
 } from '../step-engine/step-integrations.js';
 import { safeErrorMessage } from '@haive/shared/logger';
@@ -628,7 +630,7 @@ export async function parkForIntegrations(
       held.id,
       {
         status: 'pending',
-        integrationWait: block.wait,
+        integrationWait: { ...block.wait, continuation: true },
         ...(already
           ? {}
           : {
@@ -3136,7 +3138,7 @@ async function handleAdvanceStep(
   if (
     !pause &&
     existing?.status === 'pending' &&
-    existing.integrationWait != null &&
+    hasIntegrationContinuation(existing.integrationWait) &&
     invalidRequirementsFailure(stepDef) === null
   ) {
     const resolution = await resolveDispatchIntegrations(
@@ -3211,7 +3213,13 @@ async function handleAdvanceStep(
         db,
         ctx,
         row.id,
-        { statusMessage: message, updatedAt: new Date() },
+        {
+          statusMessage: message,
+          integrationWait: pause
+            ? row.integrationWait
+            : clearIntegrationWaitCause(row.integrationWait),
+          updatedAt: new Date(),
+        },
         payload.stepId !== ctx.currentStepId || round !== ctx.currentRound ? pointer : null,
       );
     } else {
@@ -3231,6 +3239,9 @@ async function handleAdvanceStep(
           waitingStartedAt: new Date(),
           userActiveMs: 0,
           statusMessage: message,
+          integrationWait: pause
+            ? row.integrationWait
+            : clearIntegrationWaitCause(row.integrationWait),
           updatedAt: new Date(),
         },
         pointer,
@@ -3364,7 +3375,11 @@ async function handleAdvanceStep(
           db,
           ctx,
           row.id,
-          { statusMessage: parkMessage, integrationWait: null, updatedAt: new Date() },
+          {
+            statusMessage: parkMessage,
+            integrationWait: clearIntegrationWaitCause(row.integrationWait),
+            updatedAt: new Date(),
+          },
           payload.stepId !== ctx.currentStepId || round !== ctx.currentRound ? pointer : null,
         );
       } else {
@@ -3395,7 +3410,7 @@ async function handleAdvanceStep(
             waitingStartedAt: new Date(),
             userActiveMs: 0,
             statusMessage: parkMessage,
-            integrationWait: null,
+            integrationWait: clearIntegrationWaitCause(row.integrationWait),
             updatedAt: new Date(),
           },
           pointer,

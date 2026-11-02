@@ -202,6 +202,26 @@ describe('advanceStep park fold on resume', () => {
     expect(foldCliParkOnResume).toHaveBeenCalledWith(expect.anything(), 'ts-1');
   });
 
+  it('continues an entered integration dispatch through another hold, then a reset asks its entry predicate again', async () => {
+    const state: MockState = {
+      taskStepRow: {
+        ...stepRow('pending', true),
+        integrationWait: { causes: [], continuation: true },
+      },
+      updates: [],
+    };
+    const shouldRun = vi.fn(() => false);
+    const params = runParams(state);
+    params.stepDef = { ...applyingStep(), shouldRun } as StepDefinition;
+    expect((await advanceStep(params)).status).toBe('done');
+    expect(shouldRun).not.toHaveBeenCalled();
+    expect(state.taskStepRow.integrationWait).toBeNull();
+    // Reset/Retry clear the whole integration_wait envelope. A genuinely fresh row still asks.
+    state.taskStepRow = { ...stepRow('pending', false), integrationWait: null };
+    expect((await advanceStep(params)).status).toBe('skipped');
+    expect(shouldRun).toHaveBeenCalledTimes(1);
+  });
+
   it('does not fold a terminal row (short-circuit runs before the resume block)', async () => {
     for (const status of ['done', 'skipped'] as const) {
       vi.mocked(foldCliParkOnResume).mockClear();

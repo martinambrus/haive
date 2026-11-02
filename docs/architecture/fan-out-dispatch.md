@@ -27,7 +27,9 @@ sent nothing still parks while any row is live (`hasLiveMiningAgents`).
 A typed required-integration block before the first stamp is a durable park/dead result, not a
 failed dispatch ([Integrations](integrations.md)). It leaves the unsent reservations and their
 prompts intact for `dispatchReservedAgents`; the reservation starts at `attempts = 1`, and parking
-and recovery do not increment it. No grant, invocation or CLI job is written. Once the first run
+and recovery do not increment it. The separate entered-continuation bit survives a runtime or
+module-schema hold taking over the wait; clearing the active integration cause must not re-ask
+`shouldRun` and skip those reservations. No grant, invocation or CLI job is written. Once the first run
 has been stamped, the rest share its stamp without another integration resolution, so this block
 cannot strand an already-sent sibling.
 

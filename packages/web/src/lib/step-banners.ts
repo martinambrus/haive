@@ -89,7 +89,7 @@ export function parkBanner(
   // statusMessage guard is skipped here for the same reason: under pause the step is provably
   // waiting whether or not the park ever wrote its line.
   if (opts.paused) return { text: PAUSED_WAIT_TEXT };
-  if (step.integrationWait != null) {
+  if (step.integrationWait?.causes.length) {
     const causes = step.integrationWait.causes.map((cause) => {
       const target = codeSpan(cause.providerId ?? cause.categoryId ?? 'integration');
       const requirement = codeSpan(cause.requirementId);

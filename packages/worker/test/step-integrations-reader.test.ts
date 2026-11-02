@@ -163,3 +163,26 @@ describe('integration blocking classification', () => {
       expect(integrationBlock([unresolved(reason) as never])).toBeUndefined();
   });
 });
+
+it('settles a legacy integration cause while retaining only its entered continuation, and leaves fresh rows fresh', async () => {
+  const { hasIntegrationContinuation, clearIntegrationWaitCause } =
+    await import('../src/step-engine/step-integrations.js');
+  const legacy = {
+    causes: [
+      {
+        requirementId: 'docs',
+        categoryId: 'rich-documents',
+        providerId: 'module.fx.crm',
+        connectionId: 'account',
+        reason: 'connection-unavailable' as const,
+      },
+    ],
+  };
+  const next = clearIntegrationWaitCause(legacy);
+  expect(next?.causes).toEqual([]);
+  expect(hasIntegrationContinuation(next)).toBe(true);
+  expect(legacy.causes).toHaveLength(1);
+  expect(clearIntegrationWaitCause(null)).toBeNull();
+  expect(hasIntegrationContinuation(null)).toBe(false);
+  expect(hasIntegrationContinuation({ causes: [] })).toBe(false);
+});

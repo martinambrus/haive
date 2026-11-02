@@ -108,6 +108,7 @@ import {
   IntegrationBlockedError,
   type IntegrationBlock,
   invalidRequirementsFailure,
+  hasIntegrationContinuation,
   resolveDispatchIntegrations,
   stepIntegrationRequirements,
 } from './step-integrations.js';
@@ -2720,7 +2721,7 @@ export async function willSkipBeforeAdmission(
   row: TaskStepRow,
 ): Promise<boolean> {
   const { stepDef } = params;
-  if (!stepDef.shouldRun || row.integrationWait != null) return false;
+  if (!stepDef.shouldRun || hasIntegrationContinuation(row.integrationWait)) return false;
   try {
     const ctx = buildStepContext(params, row, new AbortController().signal, () => {});
     return !(await stepDef.shouldRun(ctx));
@@ -2852,7 +2853,11 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
   let opened = row.status !== 'pending';
 
   try {
-    if (stepDef.shouldRun && isFreshStepEntry(row.status) && row.integrationWait == null) {
+    if (
+      stepDef.shouldRun &&
+      isFreshStepEntry(row.status) &&
+      !hasIntegrationContinuation(row.integrationWait)
+    ) {
       const should = await stepDef.shouldRun(ctx);
       if (!should) {
         await foldCliParkOnResume(db, row.id);

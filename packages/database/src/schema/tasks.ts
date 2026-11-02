@@ -53,7 +53,10 @@ export interface IntegrationWaitCause {
     | 'no-provider';
 }
 export interface IntegrationWait {
+  /** The active integration cause; empty when runtime/schema setup owns the wait now. */
   causes: IntegrationWaitCause[];
+  /** This interrupted dispatch already passed its entry precondition. Kept across other holds. */
+  continuation?: true;
 }
 
 export const cliInvocationModeEnum = pgEnum('cli_invocation_mode', [

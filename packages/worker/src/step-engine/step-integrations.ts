@@ -40,6 +40,20 @@ export type DispatchIntegrations =
   | { ok: true; bindings: IntegrationBinding[]; resolutions: IntegrationResolution[] }
   | { ok: false; failure: string; blocked?: IntegrationBlock };
 
+type IntegrationWaitState = NonNullable<typeof schema.taskSteps.$inferSelect.integrationWait>;
+
+/** Legacy cause-bearing parks predate the explicit continuation bit. */
+export function hasIntegrationContinuation(wait: IntegrationWaitState | null | undefined): boolean {
+  return wait?.continuation === true || (wait?.causes.length ?? 0) > 0;
+}
+
+/** Settle only the active cause when another hold takes over this interrupted dispatch. */
+export function clearIntegrationWaitCause(
+  wait: IntegrationWaitState | null | undefined,
+): IntegrationWaitState | null {
+  return hasIntegrationContinuation(wait) ? { causes: [], continuation: true } : null;
+}
+
 export interface IntegrationBlock {
   kind: 'wait' | 'dead';
   wait: NonNullable<typeof schema.taskSteps.$inferSelect.integrationWait>;
