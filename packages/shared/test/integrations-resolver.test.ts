@@ -90,7 +90,9 @@ const docsCtx = (over: Partial<ResolverContext> = {}) =>
 const FORGE: ResolverTarget = { category: 'forge' };
 const DOCS: ResolverTarget = { category: 'rich-documents' };
 const without = (...ids: string[]) =>
-  PROVIDERS.map((p) => (ids.includes(p.id) ? { ...p, enabled: false } : p));
+  PROVIDERS.map((p) =>
+    ids.includes(p.id) ? { id: p.id, categories: p.categories, enabled: false } : p,
+  );
 const picked = (category: string, providerId: string, connectionId: string | null = null) =>
   new Map([[category, { providerId, connectionId }]]);
 
@@ -824,5 +826,178 @@ describe('resolveRequirements', () => {
 
   it('answers nothing for no requirement', () => {
     expect(resolveRequirements(context, [])).toEqual([]);
+  });
+});
+
+describe('module provider resolution reasons', () => {
+  const providerId = 'module.fx.crm';
+  const categoryId = 'module.fx.docs';
+  const own = conn('module-account', providerId);
+  const moduleContext = (missing: boolean, over: Partial<ResolverContext> = {}) =>
+    docsCtx({
+      providers: missing
+        ? PROVIDERS
+        : [
+            ...PROVIDERS,
+            {
+              id: providerId,
+              categories: ['rich-documents', categoryId],
+              state: 'module-deactivated',
+            },
+          ],
+      categoryStates: new Map([[categoryId, 'module-deactivated']]),
+      connections: [own, docsA],
+      ...over,
+    });
+
+  it.each([false, true])(
+    'blocks a chosen and a sticky account accurately (missing=%s)',
+    (missing) => {
+      const reason = missing ? 'provider-missing' : 'provider-deactivated';
+      for (const tier of [
+        { choices: picked('rich-documents', providerId, own.id) },
+        { grants: new Map([['rich-documents', own.id]]) },
+      ]) {
+        const r = unresolved(
+          resolveTarget(
+            moduleContext(missing, {
+              ...tier,
+              preferences: picked('rich-documents', 'docs-a', docsA.id),
+            }),
+            DOCS,
+          ),
+        );
+        expect(r).toMatchObject({ reason, providerId, connectionId: null, candidates: [docsA.id] });
+      }
+    },
+  );
+
+  it.each([false, true])('preserves absent-account guards (missing=%s)', (missing) => {
+    for (const id of [null, 'removed', 'foreign', 'shared']) {
+      const context = moduleContext(missing, {
+        connections: [
+          docsA,
+          conn('foreign', providerId, { ownerUserId: B }),
+          conn('shared', providerId, { scope: 'shared' }),
+        ],
+        choices: picked('rich-documents', providerId, id),
+      });
+      expect(outcome(resolveTarget(context, DOCS))).toBe('needs-choice');
+      if (id !== null)
+        expect(
+          outcome(
+            resolveTarget(
+              {
+                ...context,
+                choices: new Map(),
+                grants: new Map([['rich-documents', id]]),
+                preferences: picked('rich-documents', 'docs-a', docsA.id),
+              },
+              DOCS,
+            ),
+          ),
+        ).toBe('docsA/user');
+    }
+  });
+
+  it.each([false, true])(
+    'soft tiers explain the unavailable module and retain fallback (missing=%s)',
+    (missing) => {
+      const r = resolveTarget(
+        moduleContext(missing, {
+          preferences: picked('rich-documents', providerId, own.id),
+          defaults: new Map([['rich-documents', providerId]]),
+        }),
+        DOCS,
+      );
+      expect(outcome(r)).toBe('docsA/only');
+      expect(r.skipped).toEqual(
+        ['user', 'admin'].map((tier) => ({
+          tier,
+          providerId,
+          why: missing ? 'provider-missing' : 'provider-deactivated',
+        })),
+      );
+    },
+  );
+
+  it('explains pins without accounts, but leaves an unknown core id unknown', () => {
+    expect(
+      outcome(resolveTarget(moduleContext(false, { connections: [] }), { provider: providerId })),
+    ).toBe('provider-deactivated');
+    expect(
+      outcome(resolveTarget(moduleContext(true, { connections: [] }), { provider: providerId })),
+    ).toBe('provider-missing');
+    expect(outcome(resolveTarget(moduleContext(true), { provider: 'unknown-core' }))).toBe(
+      'no-provider',
+    );
+  });
+
+  it('explains declared deactivated and missing module categories without inventing providers', () => {
+    expect(
+      resolveTarget(moduleContext(false, { connections: [] }), { category: categoryId }),
+    ).toMatchObject({ reason: 'provider-deactivated', providerId: null });
+    expect(
+      resolveTarget(moduleContext(true, { connections: [], categoryStates: new Map() }), {
+        category: categoryId,
+      }),
+    ).toMatchObject({ reason: 'provider-missing', providerId: null });
+    expect(
+      outcome(
+        resolveTarget(moduleContext(false, { connections: [], providers: PROVIDERS }), {
+          category: categoryId,
+        }),
+      ),
+    ).toBe('provider-deactivated');
+  });
+
+  it('keeps an active declared module category with no provider as no-provider', () => {
+    const context = moduleContext(false, {
+      providers: PROVIDERS,
+      categoryStates: new Map([[categoryId, 'enabled']]),
+    });
+    expect(outcome(resolveTarget(context, { category: categoryId }))).toBe('no-provider');
+  });
+
+  it('keeps an account-less choice asking even when its module category is missing', () => {
+    const context = moduleContext(true, {
+      categoryStates: new Map(),
+      choices: picked(categoryId, providerId),
+    });
+    expect(outcome(resolveTarget(context, { category: categoryId }))).toBe('needs-choice');
+  });
+
+  it('uses a stale own grant as evidence for its missing provider in a missing module category', () => {
+    const context = moduleContext(true, {
+      categoryStates: new Map(),
+      grants: new Map([[categoryId, own.id]]),
+    });
+    expect(resolveTarget(context, { category: categoryId })).toMatchObject({
+      reason: 'provider-missing',
+      providerId,
+    });
+    expect(
+      resolveRequirements(context, [{ id: 'docs', category: categoryId, access: 'read' }]),
+    ).toMatchObject([{ reason: 'provider-missing', providerId }]);
+  });
+
+  it('uses the common blocked reason only when the remaining owned providers agree', () => {
+    expect(outcome(resolveTarget(moduleContext(false, { connections: [own] }), DOCS))).toBe(
+      'provider-deactivated',
+    );
+    expect(
+      outcome(
+        resolveTarget(
+          moduleContext(false, {
+            connections: [own, docsA],
+            providers: [
+              ...without('docs-a'),
+              { id: providerId, categories: ['rich-documents'], state: 'module-deactivated' },
+            ],
+          }),
+          DOCS,
+        ),
+      ),
+    ).toBe('provider-disabled');
   });
 });
