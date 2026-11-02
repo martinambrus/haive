@@ -519,15 +519,6 @@ In redis-factory.ts:18-27, `maxRetriesPerRequest: null` plus `enableOfflineQueue
 
 Engineering scope derived from the accepted policy (2026-11-01), not a new owner decision: Apply bounded configuration reads and explicit retryable/unavailable failures. Preserve existing fail-closed new-work/maintenance fences; Redis unavailability must not silently bypass them.
 
-### T357 · J6d · web: New Task integration picker + composer Integrations section
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · last: 2026-11-02T12:01Z · was modular #188 · priority: P2
-Plan J6. Browser check at 1280, 768 and 390.
-
-Execution bundle T356/T357: one complete task-integration admission feature (read-only preview + transactional required-category/choice handling + New Task picker and prompt-step integration authoring). Focused checks per part; one fresh complete-feature review/full-suite cadence. Excludes parked provider pins T358, reconnect parking T332, composer install-state overview T333 and mobile header T530. T359 corrected state reasons deliver separately; generic reason compatibility preserved.
-
-Progress 2026-11-02T12:01Z: PR #994 shared with T356; native review/full suites passed, required browser CI compatibility correction in progress. Preserve existing no-choice POST bodies and nonempty explicit account choices. Controlled real-browser acceptance at1280/768/390 remains required before closure.
-
 ### T358 · J6e · provider-pinned requirements (pin table, grants.provider_id, resolver tiers, drop the dispatch refusal)
 
 status: parked: deferred until the first module that pins a provider · was modular #189 · priority: P4
@@ -1404,6 +1395,8 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
 ## Done
+
+- T357 — New Task account picker and prompt integration authoring — PR #994 (0d5de5bc6c), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41444429959 green; actual browser New Task and existing type editor1280/768/390 passed, all6 screenshots inspected; pending/required admission, explicit unavailable account clear/draft preservation and integration-only raw repair PATCH checked with0 forwarded mutations; authenticated deployed preview200 and actualPG19/source-load checks green. Evidence .claude/tmp/codex-run/queue-exec-20261101/T356-T357/.
 
 - T356 — required integration create admission and read-only preview — PR #994 (0d5de5bc6c), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41444429959 green; actual browser New Task and existing type editor1280/768/390 passed, all6 screenshots inspected; pending/required admission, explicit unavailable account clear/draft preservation and integration-only raw repair PATCH checked with0 forwarded mutations; authenticated deployed preview200 and actualPG19/source-load checks green. Evidence .claude/tmp/codex-run/queue-exec-20261101/T356-T357/.
 
