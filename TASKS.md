@@ -1341,7 +1341,7 @@ Queued broader findings from T489 PR #975, review-6 and codex-rev-6/last.txt. PR
 
 ### T521 · FNF[haive-save-leftovers] · first Save & push to an empty origin fails before committing
 
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T07:05Z · last: 2026-11-02T07:05Z · kind: reproduced operational bug · executable member: 5 · priority: P1
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T07:05Z · last: 2026-11-02T07:20Z · kind: reproduced operational bug · executable member: 5 · priority: P1
 Queued connected findings from T120 PR1b reviews, not additional authorized implementation. PRE-EXISTING, minor; raw reports under .claude/tmp/codex-run/T120/.
 
 1. MOVED to T526; not part of the measured empty-origin fix.
@@ -1354,6 +1354,8 @@ Queued connected findings from T120 PR1b reviews, not additional authorized impl
 Reconciled 2026-11-01: member 5 alone is the next fix scope. Members1/2 are separate verification candidates in T526;3 is parked in T527;4 was already split as design T523. Preserve the distinction between an absent remote branch and a failed remote read.
 
 Execution 2026-11-02: member5 only, bounded empty-origin first-push fix. Evidence `.claude/tmp/codex-run/queue-exec-20261101/T521/`. No rejoining T523/T526/T527 or broader Git cleanup. Fresh failing control, paired review and all delivery gates required.
+
+Progress 2026-11-02T07:20Z: Initial implementation10f52032b ready: real HTTP Git old-source2fail, corrected12files230pass/2existing skips, worker typecheckgreen. Exact remote absence/auth/stale-ref and branch-appears nonforce controls; fresh xhigh review in progress before fullworker candidate. Liveexisting-stack proof preparation only; no model work. Weekly11%,3%admissioncheckpoint.
 
 ### T522 · FNF[git-text-redaction-limits] · unusual URL delimiters and pathless query-at-signs evade text redaction (+1)
 
