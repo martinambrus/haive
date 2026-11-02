@@ -511,13 +511,17 @@ Engineering scope derived from the accepted policy (2026-11-01), not a new owner
 
 ### T356 · J6c · create gate for required integration categories + GET /tasks/integration-preview
 
-status: open · was modular #187 · priority: P2
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · last: 2026-11-02T10:22Z · was modular #187 · priority: P2
 Plan J6.
+
+Execution bundle T356/T357: one complete task-integration admission feature (read-only preview + transactional required-category/choice handling + New Task picker and prompt-step integration authoring). Focused checks per part; one fresh complete-feature review/full-suite cadence. Excludes parked provider pins T358, reconnect parking T332, composer install-state overview T333 and mobile header T530. T359 corrected state reasons deliver separately; generic reason compatibility preserved.
 
 ### T357 · J6d · web: New Task integration picker + composer Integrations section
 
-status: open · was modular #188 · priority: P2
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · last: 2026-11-02T10:22Z · was modular #188 · priority: P2
 Plan J6. Browser check at 1280, 768 and 390.
+
+Execution bundle T356/T357: one complete task-integration admission feature (read-only preview + transactional required-category/choice handling + New Task picker and prompt-step integration authoring). Focused checks per part; one fresh complete-feature review/full-suite cadence. Excludes parked provider pins T358, reconnect parking T332, composer install-state overview T333 and mobile header T530. T359 corrected state reasons deliver separately; generic reason compatibility preserved.
 
 ### T358 · J6e · provider-pinned requirements (pin table, grants.provider_id, resolver tiers, drop the dispatch refusal)
 
