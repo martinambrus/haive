@@ -1503,15 +1503,13 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
         .update(schema.tasks)
         .set({ runListSnapshot: [id], customSteps: stored })
         .where(eq(schema.tasks.id, w.taskId));
-      await db
-        .insert(schema.tasks)
-        .values({
-          userId: w.userId,
-          type: 'workflow',
-          title: 'Mixed holder',
-          status: 'running',
-          runListSnapshot: ['module.fx.hold'],
-        });
+      await db.insert(schema.tasks).values({
+        userId: w.userId,
+        type: 'workflow',
+        title: 'Mixed holder',
+        status: 'running',
+        runListSnapshot: ['module.fx.hold'],
+      });
       await beginModuleDrain(db, 'fx', w.userId);
       h.beforeRequest = async () => {
         h.beforeRequest = null;
