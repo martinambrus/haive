@@ -11,6 +11,7 @@ import {
   taskRemoteUrl,
 } from '../src/repo/git-push.js';
 import { startGitHttpServer } from './support/git-http-fixture.js';
+import { fetchOrigin } from '../src/plan/merge.js';
 
 const h = vi.hoisted(() => ({ host: '' }));
 vi.mock('../src/repo/credentials.js', () => ({
@@ -177,4 +178,32 @@ it('prevents an uploaded remote helper from inheriting the credential environmen
   const res = await originGitRun(work, [...auth.argv, 'ls-remote', 'origin'], env);
   expect(res.code !== 0).toBe(true);
   expect(await lstatNoFollow(root, 'hardened-marker')).toBeNull();
+});
+
+it('authenticates both the failed first fetch and the empty-branch probe on the bound host', async () => {
+  const before = await right.authCount();
+  expect(
+    await fetchOrigin({
+      repoPath: work,
+      branch: 'main',
+      db: {} as never,
+      userId: 'user',
+      credentialId: 'cred',
+      remoteUrl: bound,
+    }),
+  ).toBe('absent');
+  expect((await right.authCount()) - before).toBeGreaterThanOrEqual(2);
+});
+
+it('does not treat an authentication failure as an empty origin', async () => {
+  await expect(
+    fetchOrigin({
+      repoPath: work,
+      branch: 'main',
+      db: {} as never,
+      userId: 'user',
+      remoteUrl: bound,
+    }),
+  ).rejects.toThrow('git fetch failed:');
+  expect(await right.authCount()).toBe(0);
 });

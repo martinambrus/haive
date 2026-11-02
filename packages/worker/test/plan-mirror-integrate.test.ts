@@ -5,6 +5,8 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
+import type { PlanMirror } from '@haive/shared';
+import { renderPlanMarkdownFromMirror, serializePlanMirror } from '@haive/shared/plan';
 import { createFakeDb } from '@haive/database/testing';
 import { failGit, type FakeGit } from './support/fake-git.js';
 
@@ -12,6 +14,9 @@ const h = vi.hoisted(() => ({ db: null as unknown }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 
 import { integrateOrigin } from '../src/queues/plan-mirror-queue.js';
+import { pushBranch } from '../src/repo/git-push.js';
+import * as transport from '../src/repo/git-push.js';
+import { commitPlanSnapshotFiles } from '../src/plan/snapshot-git.js';
 import { PLAN_MERGE_BASELINE_EVENT } from '../src/plan/merge-baseline.js';
 import { planMergeStep } from '../src/step-engine/steps/plan/01-plan-merge.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
@@ -32,6 +37,7 @@ async function git(dir: string, args: string[]): Promise<void> {
 const dirs: string[] = [];
 let shim: FakeGit | null = null;
 afterEach(async () => {
+  vi.restoreAllMocks();
   await shim?.restore();
   shim = null;
   for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true });
@@ -303,4 +309,158 @@ it('names an unknown untracked state file through the real set-aside with origin
   expect(await readFile(path.join(repoPath, '.haive-data/state/my-unknown.txt'), 'utf8')).toBe(
     'mine',
   );
+});
+
+/** No initial forge commit: the ordinary first Save & push destination. */
+async function emptyOrigin() {
+  const remote = await mkdtemp(path.join(fixtureBase, 'planmerge-empty-origin-'));
+  const local = await mkdtemp(path.join(fixtureBase, 'planmerge-first-push-'));
+  dirs.push(remote, local);
+  await git(remote, ['init', '--bare', '-b', 'main']);
+  await git(local, ['init', '-b', 'main']);
+  await git(local, ['config', 'gc.auto', '0']);
+  await writeFile(path.join(local, 'README.md'), '# Local project\n');
+  await git(local, ['add', 'README.md']);
+  await git(local, ['commit', '-m', 'initial local project']);
+  await git(local, ['remote', 'add', 'origin', remote]);
+  return { remote, local };
+}
+
+const readGit = async (cwd: string, args: string[]) =>
+  (await exec('git', args, { cwd, env: { ...process.env, ...IDENTITY } })).stdout.trim();
+
+describe('first push to an absent origin branch', () => {
+  it.each([false, true])('pushes local history with a stale tracking ref: %s', async (stale) => {
+    const { remote, local } = await emptyOrigin();
+    if (stale) {
+      await git(local, ['push', 'origin', 'main']);
+      const writer = await mkdtemp(path.join(fixtureBase, 'planmerge-removed-writer-'));
+      dirs.push(writer);
+      await git(writer, ['clone', remote, '.']);
+      await git(writer, ['config', 'gc.auto', '0']);
+      await writeFile(path.join(writer, 'removed-remote.txt'), 'remote-only history\n');
+      await git(writer, ['add', 'removed-remote.txt']);
+      await git(writer, ['commit', '-m', 'remote-only change']);
+      await git(writer, ['push', 'origin', 'main']);
+      await git(local, ['fetch', 'origin', 'main']);
+      await git(remote, ['update-ref', '-d', 'refs/heads/main']);
+    }
+    // Real plan commit, on top of the project's existing local commit.
+    await mkdir(path.join(local, '.haive-data'));
+    const plan: PlanMirror = {
+      schemaVersion: 2,
+      nodes: [
+        {
+          id: '00000000-0000-4000-8000-000000000001',
+          parentId: null,
+          ordinal: 0,
+          title: 'Local project',
+          kind: 'component',
+          body: null,
+          status: 'todo',
+          taskable: false,
+        },
+      ],
+      edges: [],
+      codeLinks: [],
+    };
+    await writeFile(path.join(local, '.haive-data/plan.json'), serializePlanMirror(plan));
+    await writeFile(path.join(local, '.haive-data/plan.md'), renderPlanMarkdownFromMirror(plan));
+    const committed = await commitPlanSnapshotFiles({
+      repoPath: local,
+      message: 'docs: save project plan',
+      identity: IDENTITY,
+    });
+    expect(committed.committed).toBe(true);
+    const before = await readGit(local, ['rev-parse', 'HEAD']);
+    expect(committed.commitSha).toBe(before);
+    const tracking = stale ? await readGit(local, ['rev-parse', 'origin/main']) : null;
+    const { db } = fakeDb();
+    h.db = db;
+    const detected = await planMergeStep.detect!(contextFor(local, db));
+    expect(detected).toMatchObject({ mergeOpen: false, conflicts: [], unrelated: true });
+    expect(await integrate(local)).toMatchObject({ landed: false, previousCommit: before });
+    expect(await readGit(local, ['rev-parse', 'HEAD'])).toBe(before);
+    if (tracking) expect(await readGit(local, ['rev-parse', 'origin/main'])).toBe(tracking);
+    await pushBranch({
+      cwd: local,
+      branch: 'main',
+      sha: before,
+      setUpstream: true,
+      db: db as never,
+      userId: 'u1',
+    });
+    expect(await readGit(remote, ['rev-parse', 'refs/heads/main'])).toBe(before);
+    expect(await readGit(local, ['rev-parse', '--abbrev-ref', '@{upstream}'])).toBe('origin/main');
+    expect(await readGit(local, ['rev-list', '--count', 'HEAD'])).toBe('2');
+    expect(await readGit(remote, ['show', 'main:.haive-data/plan.json'])).toBe(
+      serializePlanMirror(plan).trim(),
+    );
+    expect(await readGit(local, ['ls-tree', '--name-only', 'HEAD'])).not.toContain(
+      'removed-remote.txt',
+    );
+  });
+});
+
+describe('a failed fetch is not proof of an absent remote branch', () => {
+  it.each([
+    [128, '', 'transport/authentication failure'],
+    [1, '', 'unclassified failure'],
+    [124, '', 'no answer at the time bound'],
+    [0, '', 'empty success without the absence exit code'],
+    [0, 'malformed answer', 'malformed success'],
+    [2, 'malformed answer', 'absence exit code with unexpected output'],
+    [2, ' \n', 'absence exit code with unexpected whitespace'],
+    [0, `${'a'.repeat(40)}\trefs/heads/main\n`, 'branch appeared after failed fetch'],
+  ])('rejects ls-remote result %s (%s, %s)', async (exit, stdout) => {
+    const { local } = await emptyOrigin();
+    const { db } = fakeDb();
+    h.db = db;
+    shim = await failGit(['ls-remote'], { exit, stdout, stderr: 'any diagnostic' });
+    await expect(integrate(local)).rejects.toThrow('git fetch failed:');
+    expect(await readGit(local, ['rev-list', '--count', 'HEAD'])).toBe('1');
+  });
+
+  it('rejects a remote read with no exit status', async () => {
+    const { local } = await emptyOrigin();
+    const { db } = fakeDb();
+    h.db = db;
+    const run = transport.originGitRun;
+    vi.spyOn(transport, 'originGitRun').mockImplementation((cwd, args, ...rest) =>
+      args.includes('ls-remote')
+        ? Promise.resolve({ code: -1, noExit: 'SIGKILL', stdout: '', stderr: 'no answer' })
+        : run(cwd, args, ...rest),
+    );
+    await expect(integrate(local)).rejects.toThrow('git fetch failed:');
+  });
+
+  it('does not force a push over a branch created after the absence read', async () => {
+    const { remote, local } = await emptyOrigin();
+    const { db } = fakeDb();
+    h.db = db;
+    expect(await integrate(local)).toMatchObject({ landed: false });
+    const writer = await mkdtemp(path.join(fixtureBase, 'planmerge-new-writer-'));
+    dirs.push(writer);
+    await git(writer, ['init', '-b', 'main']);
+    await git(writer, ['config', 'gc.auto', '0']);
+    await writeFile(path.join(writer, 'forge.txt'), 'created concurrently\n');
+    await git(writer, ['add', 'forge.txt']);
+    await git(writer, ['commit', '-m', 'concurrent origin initialization']);
+    await git(writer, ['remote', 'add', 'origin', remote]);
+    await git(writer, ['push', 'origin', 'main']);
+    const remoteHead = await readGit(remote, ['rev-parse', 'refs/heads/main']);
+    const sha = await readGit(local, ['rev-parse', 'HEAD']);
+    await expect(
+      pushBranch({
+        cwd: local,
+        branch: 'main',
+        sha,
+        setUpstream: true,
+        db: db as never,
+        userId: 'u1',
+      }),
+    ).rejects.toThrow();
+    expect(await readGit(remote, ['rev-parse', 'refs/heads/main'])).toBe(remoteHead);
+    expect(await readGit(local, ['rev-parse', 'HEAD'])).toBe(sha);
+  });
 });
