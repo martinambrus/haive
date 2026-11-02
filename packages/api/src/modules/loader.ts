@@ -16,6 +16,7 @@ import {
   collectFieldIds,
   diffModuleIntent,
   MODULE_ACTIVATED_CHANNEL,
+  MODULE_DEPENDENTS_CAP,
   MODULES_LOADED_WORKER_KEY,
   moduleManifestSchema,
   modulePackageId,
@@ -48,6 +49,7 @@ import {
 } from './activation.js';
 import { setModuleExecutors } from './integration-executors.js';
 import { PurgeIncompleteError, purgeModule } from './purge.js';
+import { moduleIntegrationDependents, previewModuleIntegrations } from './purge-integrations.js';
 
 export type ApiModuleEntry = {
   packageName: string;
@@ -372,6 +374,16 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
     return c.json({ moduleId: id, tornDownAt: result.tornDownAt });
   });
 
+  routes.get('/:id/purge-preview', requireAdmin, async (c) => {
+    const id = c.req.param('id');
+    const { modules } = await loadedReport();
+    const row = modules.rows.find((r) => r.id === id);
+    if (row === undefined || row.rowVersion === null) throw new HttpError(404, 'Module not found');
+    if (row.missingAt === null)
+      throw new HttpError(409, 'Only a module that is missing can be purged', 'module_not_missing');
+    return c.json({ moduleId: id, integrations: await previewModuleIntegrations(getDb(), id) });
+  });
+
   routes.post('/:id/purge', requireAdmin, async (c) => {
     const id = c.req.param('id');
     const body = purgeBodySchema.safeParse(await c.req.json().catch(() => null));
@@ -395,7 +407,15 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
       throw new HttpError(409, 'The api or the worker still loads this module', 'module_loaded');
     }
     const db = getDb();
-    const { tasks, capped } = await liveDependents(db, id, true);
+    const stepDependents = await liveDependents(db, id, true);
+    const integrationDependents = await moduleIntegrationDependents(db, id);
+    // Keep the existing cap and deduplicate tasks bound through both paths.
+    const byId = new Map(
+      [...stepDependents.tasks, ...integrationDependents.tasks].map((task) => [task.id, task]),
+    );
+    const tasks = [...byId.values()].slice(0, MODULE_DEPENDENTS_CAP);
+    const capped =
+      stepDependents.capped || integrationDependents.capped || byId.size > MODULE_DEPENDENTS_CAP;
     if (tasks.length > 0) {
       return c.json(
         {
@@ -407,11 +427,11 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
         409,
       );
     }
-    const result = await purgeModule(db, getRedis(), id).catch((err: unknown) => {
+    const result = await purgeModule(db, getRedis(), id, c.get('userId')).catch((err: unknown) => {
       if (!(err instanceof PurgeIncompleteError)) throw err;
       throw new HttpError(
         502,
-        'The module database was dropped, but removing its settings, task types and row failed. Run the purge again to finish it.',
+        'The module database was dropped, but removing its settings, integration configuration, task types and row failed. Run the purge again to finish it.',
         'module_purge_incomplete',
       );
     });
@@ -423,19 +443,21 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
       );
     }
     if (result.kind === 'gone') throw new HttpError(404, 'Module not found');
-    await recordAuditEvent(db, {
-      actorUserId: c.get('userId'),
-      action: 'module.purge',
-      targetType: 'module',
-      targetId: null,
-      metadata: {
-        moduleId: id,
-        database: result.database,
-        configKeysDeleted: result.configKeysDeleted,
-        taskTypesDeleted: result.taskTypesDeleted,
-        taskTypesKept: result.taskTypesKept,
-      },
-    });
+    if (result.kind === 'came-back')
+      await recordAuditEvent(db, {
+        actorUserId: c.get('userId'),
+        action: 'module.purge',
+        targetType: 'module',
+        targetId: null,
+        metadata: {
+          moduleId: id,
+          database: result.database,
+          configKeysDeleted: result.configKeysDeleted,
+          taskTypesDeleted: result.taskTypesDeleted,
+          taskTypesKept: result.taskTypesKept,
+          integrationsDeleted: result.integrationsDeleted,
+        },
+      });
     if (result.kind === 'came-back') {
       throw new HttpError(
         409,
@@ -449,6 +471,7 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
       configKeysDeleted: result.configKeysDeleted,
       taskTypesDeleted: result.taskTypesDeleted,
       taskTypesKept: result.taskTypesKept,
+      integrationsDeleted: result.integrationsDeleted,
     });
   });
 

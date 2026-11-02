@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { isValidElement, type ReactElement, type ReactNode } from 'react';
+import { isValidElement, type ComponentProps, type ReactElement, type ReactNode } from 'react';
 import type { ModuleDiffRow } from '@haive/shared/modularity';
 import type { ModuleOpenTask, ModuleUrgentResponse } from '@/lib/api-client';
+import { ModulePurgeDialog } from '@/components/module-purge-dialog';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { ModuleActiveCell } from '@/components/module-active-cell';
 import { ModuleTasksOpenDialog } from '@/components/module-tasks-open-dialog';
 import { FormError } from '@/components/ui';
@@ -40,6 +42,7 @@ vi.mock('@/lib/api-client', async (importOriginal) => ({
 
 type El = ReactElement<{
   children?: ReactNode;
+  body?: string;
   role?: string;
   row?: ModuleDiffRow;
   blocked?: unknown;
@@ -60,7 +63,7 @@ const textOf = (node: ReactNode): string =>
   Array.isArray(node)
     ? node.map(textOf).join('')
     : isValidElement<El['props']>(node)
-      ? textOf(node.props.children)
+      ? (node.props.body ?? textOf(node.props.children))
       : typeof node === 'string' || typeof node === 'number'
         ? String(node)
         : '';
@@ -123,6 +126,10 @@ async function mount() {
   const dialog = () => flatten(tree).find((e) => e.type === ModuleTasksOpenDialog)!;
   return {
     dialog,
+    purgeDialog: () =>
+      flatten(tree).find((e) => e.type === ModulePurgeDialog) as unknown as ReactElement<
+        ComponentProps<typeof ModulePurgeDialog>
+      >,
     draw,
     notice: () => flatten(tree).find((e) => e.props.role === 'status'),
     error: () => flatten(tree).find((e) => e.type === FormError)?.props.message,
@@ -234,5 +241,32 @@ describe('Modules page after Turn off now', () => {
     await flush();
     page.draw();
     expect(textOf(page.notice())).toContain('Turned off beta:');
+  });
+});
+
+describe('Modules page after purge', () => {
+  it('renders the actual deletion counts through the Markdown renderer', async () => {
+    const page = await mount();
+    page.purgeDialog().props.onDone({
+      moduleId: 'alpha',
+      database: 'haive_module_alpha',
+      configKeysDeleted: 2,
+      taskTypesDeleted: ['alpha__unused'],
+      taskTypesKept: ['alpha__used'],
+      integrationsDeleted: {
+        providerConfigs: 1,
+        connections: 7,
+        userSettings: 2,
+        preferences: 3,
+        taskChoices: 4,
+        grants: 5,
+      },
+    });
+    await flush();
+    page.draw();
+    expect(textOf(page.notice())).toContain('7 connected accounts');
+    expect(textOf(page.notice())).toContain('5 task or repository account grants');
+    expect(textOf(page.notice())).toContain('kept 1 task type');
+    expect(flatten(page.notice()).some((e) => e.type === InlineMarkdown)).toBe(true);
   });
 });

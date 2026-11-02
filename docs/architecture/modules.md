@@ -161,13 +161,29 @@ the module loads again.
   id once no row is left), and creating a task of it is refused with 409 `module-missing`; this
   reason is checked before `module-deactivated` and before `missing-step`.
 - **Purged.** "Purge data..." on `/admin/modules`, offered for a `Missing` module only and confirmed
-  by typing its id. It is refused while the api or the worker loads the module, before the worker
-  has reported what it loaded, and while a live task (a dead one included) uses it. It drops the
-  module database without FORCE (a connection still on it refuses the purge), deletes the
-  `config:module:<id>:*` settings, deletes the module's task types no task uses (the others are kept
-  and listed) and deletes the `modules` row. Every step is safe to repeat: a purge that failed after
-  the drop answers 502 `module_purge_incomplete`, and the next one finishes it. The dialog warns
-  when the module's teardown hook never ran.
+  by typing its id after the admin-only, read-only `GET /modules/:id/purge-preview` has loaded its
+  current integration counts. Loading, failed, incomplete or wrong-target previews cannot enable
+  Purge; retry reads again, and closing or changing the target discards old replies. The preview
+  counts provider configurations, connected accounts, user write settings, saved account preferences
+  (installation defaults included), task overrides and task/repository grants. It is a snapshot;
+  the purge returns and audits actual deletion counts, never client-supplied counts.
+  It is refused while the api or the worker loads the module, before the worker has reported what
+  it loaded, and while a live task (a dead one included) uses it, including a direct integration
+  choice or grant that would be deleted. It drops the module database without FORCE (a connection
+  still on it refuses the purge), deletes the `config:module:<id>:*` settings, deletes owned
+  integration configuration and bindings ([Integrations](integrations.md#module-data-purge)),
+  deletes the module's task types no task uses (the others are kept and listed) and deletes the
+  `modules` row. The main-store changes and required `module.purge` audit insert share one
+  transaction: a refused audit or a module that came back rolls those changes back. The latter
+  still gets the existing best-effort partial-purge audit with zero integration deletions.
+  Type rows lock before the module row. Brief `SHARE ROW EXCLUSIVE NOWAIT` locks on the six
+  integration configuration/binding tables prevent an intervening binding or account write;
+  affected task rows take `FOR NO KEY UPDATE NOWAIT` to stabilize their status, then live direct
+  bindings are checked again. A concurrent writer refuses this cleanup immediately rather than
+  waiting with the type locks held. Database drop and Redis deletion are outside that transaction:
+  a purge that failed after the drop answers 502 `module_purge_incomplete`, and the next one
+  finishes it. Every cleanup is safe to repeat. The dialog warns when the module's teardown hook
+  never ran, and explains that call/invocation/audit history and Git credentials are retained.
 
 **Teardown.** "Tear down" on `/admin/modules` (`POST /modules/:id/teardown`, admin, audited as
 `module.teardown`) runs a deactivated module's `./teardown` hook in the worker, which drops the module's

@@ -2729,7 +2729,25 @@ export type ModuleTeardownResponse = ModuleTeardownDone | { status: 'running' };
 export const postModuleTeardown = (moduleId: string) =>
   api.post<ModuleTeardownResponse>(`/modules/${encodeURIComponent(moduleId)}/teardown`);
 
+export interface ModuleIntegrationCounts {
+  providerConfigs: number;
+  connections: number;
+  userSettings: number;
+  preferences: number;
+  taskChoices: number;
+  grants: number;
+}
+
+export interface ModulePurgePreview {
+  moduleId: string;
+  integrations: ModuleIntegrationCounts;
+}
+
+export const getModulePurgePreview = (moduleId: string, signal?: AbortSignal) =>
+  api.get<ModulePurgePreview>(`/modules/${encodeURIComponent(moduleId)}/purge-preview`, signal);
+
 export interface ModulePurgeResponse {
+  integrationsDeleted: ModuleIntegrationCounts;
   moduleId: string;
   database: string;
   configKeysDeleted: number;

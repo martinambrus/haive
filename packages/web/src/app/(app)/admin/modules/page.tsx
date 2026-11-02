@@ -14,6 +14,8 @@ import {
   type ModuleTeardownResponse,
   type ModuleUrgentResponse,
 } from '@/lib/api-client';
+import { moduleIntegrationCountsCopy } from '@/lib/module-purge';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { usePageTitle } from '@/lib/use-page-title';
 import { ModuleActiveCell } from '@/components/module-active-cell';
 import { ModulePurgeDialog } from '@/components/module-purge-dialog';
@@ -134,7 +136,7 @@ export default function ModulesPage() {
   function purged(result: ModulePurgeResponse) {
     const kept = result.taskTypesKept.length;
     setNotice(
-      `Purged ${result.moduleId}: deleted its database, ${count(result.configKeysDeleted, 'setting')} and ${count(result.taskTypesDeleted.length, 'task type')}${kept > 0 ? `; kept ${count(kept, 'task type')} that tasks use` : ''}.`,
+      `Purged ${result.moduleId}: deleted its database, ${count(result.configKeysDeleted, 'setting')} and ${count(result.taskTypesDeleted.length, 'task type')}, ${moduleIntegrationCountsCopy(result.integrationsDeleted)}${kept > 0 ? `; kept ${count(kept, 'task type')} that tasks use` : ''}.`,
     );
     setPurging(null);
     void load();
@@ -161,7 +163,7 @@ export default function ModulesPage() {
           role="status"
           className="whitespace-pre-line rounded-md border border-amber-900 bg-amber-950/40 px-3 py-2 text-sm text-amber-200"
         >
-          {notice}
+          <InlineMarkdown body={notice} />
         </div>
       )}
       {data && (

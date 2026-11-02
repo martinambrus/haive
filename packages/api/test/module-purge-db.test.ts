@@ -71,6 +71,22 @@ const KEYS = {
 const FREE = `${ID}__free`;
 const USED = `${ID}__used`;
 const OTHER_TYPE = `${OTHER}__free`;
+const ZERO_INTEGRATIONS = {
+  providerConfigs: 0,
+  connections: 0,
+  userSettings: 0,
+  preferences: 0,
+  taskChoices: 0,
+  grants: 0,
+};
+const OWNED_INTEGRATIONS = {
+  providerConfigs: 1,
+  connections: 1,
+  userSettings: 1,
+  preferences: 4,
+  taskChoices: 3,
+  grants: 3,
+};
 
 const apiModule = (id: string): LoadedApiModule => ({
   packageName: `@haive/module-${id}`,
@@ -148,6 +164,14 @@ describe.skipIf(!url || !redisUrl)('POST /modules/:id/purge on Postgres and Redi
         .map((r) => r.slug)
         .sort(),
       tasks: (await db.select({ id: schema.tasks.id }).from(schema.tasks)).length,
+      integrations: {
+        configs: await db.select().from(schema.integrationProviderConfigs),
+        connections: await db.select().from(schema.integrationConnections),
+        settings: await db.select().from(schema.integrationUserSettings),
+        preferences: await db.select().from(schema.integrationCategoryPreferences),
+        choices: await db.select().from(schema.taskIntegrationChoices),
+        grants: await db.select().from(schema.integrationGrants),
+      },
       purges: await purgeAudits(),
     };
   }
@@ -222,6 +246,20 @@ describe.skipIf(!url || !redisUrl)('POST /modules/:id/purge on Postgres and Redi
     await held?.close();
     held = undefined;
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, ACTOR));
+    await db
+      .delete(schema.integrationCalls)
+      .where(
+        inArray(schema.integrationCalls.providerId, [
+          `module.${ID}.account`,
+          `module.${OTHER}.account`,
+        ]),
+      );
+    await db.delete(schema.repositories).where(eq(schema.repositories.userId, ACTOR));
+    await db.delete(schema.integrationCategoryPreferences);
+    await db.delete(schema.integrationConnections);
+    await db.delete(schema.integrationUserSettings);
+    await db.delete(schema.integrationProviderConfigs);
+    await db.delete(schema.repoCredentials).where(eq(schema.repoCredentials.userId, ACTOR));
     await db.delete(schema.modules);
     await db
       .delete(schema.taskTypeDefinitions)
@@ -272,6 +310,7 @@ describe.skipIf(!url || !redisUrl)('POST /modules/:id/purge on Postgres and Redi
         configKeysDeleted: 2,
         taskTypesDeleted: [FREE],
         taskTypesKept: [USED],
+        integrationsDeleted: ZERO_INTEGRATIONS,
       });
 
       const after = await snapshot();
@@ -350,6 +389,290 @@ describe.skipIf(!url || !redisUrl)('POST /modules/:id/purge on Postgres and Redi
       const res = await purge();
       expect(res.status).toBe(200);
       expect((await json(res)).taskTypesKept).toEqual([FREE, USED]);
+    });
+  });
+
+  async function ownedFixture() {
+    const provider = `module.${ID}.account`;
+    const otherProvider = `module.${OTHER}.account`;
+    const ownerTask = await task();
+    const [credential] = await db
+      .insert(schema.repoCredentials)
+      .values({
+        userId: ACTOR,
+        label: 'Kept credential',
+        host: 'example.test',
+        usernameEncrypted: 'x',
+        secretEncrypted: 'x',
+        encryptedDek: 'x',
+      })
+      .returning();
+    await db
+      .insert(schema.integrationProviderConfigs)
+      .values([
+        { providerId: provider },
+        { providerId: otherProvider },
+        { providerId: `module.${ID}x.account` },
+        { providerId: `module.${ID}.bad.extra` },
+        { providerId: 'github' },
+      ]);
+    const connections = await db
+      .insert(schema.integrationConnections)
+      .values([
+        {
+          providerId: provider,
+          scope: 'user',
+          ownerUserId: ACTOR,
+          accountLabel: 'Owned',
+          authMethod: 'oauth2',
+          repoCredentialId: credential!.id,
+        },
+        {
+          providerId: otherProvider,
+          scope: 'user',
+          ownerUserId: ACTOR,
+          accountLabel: 'Other',
+          authMethod: 'oauth2',
+        },
+      ])
+      .returning();
+    const owned = connections[0]!;
+    const other = connections[1]!;
+    await db.insert(schema.integrationUserSettings).values([
+      { userId: ACTOR, providerId: provider },
+      { userId: ACTOR, providerId: otherProvider },
+    ]);
+    const bindings = [
+      { categoryId: `module.${ID}.category`, providerId: otherProvider, connectionId: other.id },
+      { categoryId: 'mail', providerId: provider, connectionId: null },
+      { categoryId: 'chat', providerId: otherProvider, connectionId: owned.id },
+      { categoryId: 'wiki', providerId: otherProvider, connectionId: other.id },
+    ];
+    await db.insert(schema.integrationCategoryPreferences).values([
+      ...bindings.map((b) => ({ ...b, userId: ACTOR })),
+      {
+        userId: null,
+        categoryId: `module.${ID}.default`,
+        providerId: provider,
+        connectionId: owned.id,
+      },
+    ]);
+    await db
+      .insert(schema.taskIntegrationChoices)
+      .values(bindings.map((b) => ({ ...b, taskId: ownerTask.id })));
+    const [repository] = await db
+      .insert(schema.repositories)
+      .values({
+        userId: ACTOR,
+        name: 'Restricted repository',
+        source: 'blank',
+        integrationsRestricted: true,
+      })
+      .returning();
+    await db.insert(schema.integrationGrants).values([
+      { targetKind: 'repository', repositoryId: repository!.id, connectionId: owned.id },
+      {
+        targetKind: 'task',
+        taskId: ownerTask.id,
+        categoryId: `module.${ID}.overlap`,
+        connectionId: owned.id,
+      },
+      {
+        targetKind: 'task',
+        taskId: ownerTask.id,
+        categoryId: `module.${ID}.category`,
+        connectionId: other.id,
+      },
+      { targetKind: 'task', taskId: ownerTask.id, categoryId: 'wiki', connectionId: other.id },
+    ]);
+    const stamp = [
+      {
+        requirementId: 'mail',
+        categoryId: 'mail',
+        providerId: provider,
+        connectionId: owned.id,
+        access: 'read' as const,
+      },
+    ];
+    const [invocation] = await db
+      .insert(schema.cliInvocations)
+      .values({ taskId: ownerTask.id, mode: 'cli', prompt: 'History', integrations: stamp })
+      .returning();
+    const [call] = await db
+      .insert(schema.integrationCalls)
+      .values({
+        taskId: ownerTask.id,
+        cliInvocationId: invocation!.id,
+        connectionId: owned.id,
+        providerId: provider,
+        tool: 'read',
+        access: 'read',
+        surface: 'mcp',
+        outcome: 'ok',
+      })
+      .returning();
+    return {
+      ownerTask,
+      provider,
+      owned,
+      other,
+      repository: repository!,
+      credential: credential!,
+      invocation: invocation!,
+      call: call!,
+    };
+  }
+
+  describe('module-owned integration data', () => {
+    it('previews exact counts without changing any store, even with no loaded provider declarations', async () => {
+      await ownedFixture();
+      const beforePreview = await snapshot();
+      const app = new Hono<AppEnv>();
+      app.route('/modules', moduleRoutes([apiModule(OTHER)]));
+      app.onError(errorHandler);
+      const res = await app.request(`/modules/${ID}/purge-preview`);
+      expect(res.status).toBe(200);
+      expect(await json(res)).toEqual({ moduleId: ID, integrations: OWNED_INTEGRATIONS });
+      expect(await snapshot()).toEqual(beforePreview);
+    });
+
+    it('deletes owned configuration and bindings once, preserves neighbours, Git credentials, calls and stamps, and audits actual counts', async () => {
+      const f = await ownedFixture();
+      const res = await purge();
+      expect(res.status).toBe(200);
+      const rows = (await snapshot()).integrations;
+      expect(rows.configs.map((r) => r.providerId).sort()).toEqual(
+        [
+          `module.${OTHER}.account`,
+          `module.${ID}x.account`,
+          `module.${ID}.bad.extra`,
+          'github',
+        ].sort(),
+      );
+      expect(rows.connections.map((r) => r.id)).toEqual([f.other.id]);
+      expect(rows.settings.map((r) => r.providerId)).toEqual([f.other.providerId]);
+      expect(rows.preferences.map((r) => r.categoryId)).toEqual(['wiki']);
+      expect(rows.choices.map((r) => r.categoryId)).toEqual(['wiki']);
+      expect(rows.grants.map((r) => r.categoryId)).toEqual(['wiki']);
+      expect(
+        await db
+          .select()
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, f.repository.id)),
+      ).toEqual([f.repository]);
+      expect((await json(res)).integrationsDeleted).toEqual(OWNED_INTEGRATIONS);
+      expect(
+        await db
+          .select()
+          .from(schema.repoCredentials)
+          .where(eq(schema.repoCredentials.id, f.credential.id)),
+      ).toEqual([f.credential]);
+      expect(
+        await db
+          .select()
+          .from(schema.cliInvocations)
+          .where(eq(schema.cliInvocations.id, f.invocation.id)),
+      ).toEqual([f.invocation]);
+      expect(
+        await db
+          .select()
+          .from(schema.integrationCalls)
+          .where(eq(schema.integrationCalls.id, f.call.id)),
+      ).toEqual([{ ...f.call, connectionId: null }]);
+      expect((await purgeAudits())[0]!.metadata).toMatchObject({
+        integrationsDeleted: OWNED_INTEGRATIONS,
+      });
+    });
+
+    it.each(['choice', 'grant'] as const)(
+      'refuses a live/dead task whose direct %s binding would be removed',
+      async (binding) => {
+        const f = await ownedFixture();
+        if (binding === 'grant')
+          await db
+            .delete(schema.taskIntegrationChoices)
+            .where(eq(schema.taskIntegrationChoices.taskId, f.ownerTask.id));
+        else
+          await db
+            .delete(schema.integrationGrants)
+            .where(eq(schema.integrationGrants.taskId, f.ownerTask.id));
+        await db
+          .update(schema.tasks)
+          .set({ type: 'workflow', status: 'running', deadAt: new Date() })
+          .where(eq(schema.tasks.id, f.ownerTask.id));
+        before = await snapshot();
+        await refused(await purge(), 409, 'module_tasks_open');
+      },
+    );
+
+    it('rolls main-store cleanup back when its required audit insert fails, then permits a retry', async () => {
+      await ownedFixture();
+      const initial = await snapshot();
+      await db.execute(
+        sql`CREATE OR REPLACE FUNCTION reject_module_purge_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action = 'module.purge' THEN RAISE EXCEPTION 'fixture audit refusal'; END IF; RETURN NEW; END $$`,
+      );
+      await db.execute(
+        sql`CREATE TRIGGER reject_module_purge_audit BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION reject_module_purge_audit()`,
+      );
+      try {
+        const res = await purge();
+        expect([res.status, (await json(res)).code]).toEqual([502, 'module_purge_incomplete']);
+        const after = await snapshot();
+        expect(after.integrations).toEqual(initial.integrations);
+        expect(after.modules).toEqual(initial.modules);
+        expect(after.types).toEqual(initial.types);
+        expect(after.purges).toEqual(initial.purges);
+      } finally {
+        await db.execute(sql`DROP TRIGGER reject_module_purge_audit ON audit_events`);
+        await db.execute(sql`DROP FUNCTION reject_module_purge_audit()`);
+      }
+      expect((await purge()).status).toBe(200);
+    });
+
+    it('refuses a direct binding that becomes live after preflight, preserving all main-store rows', async () => {
+      const f = await ownedFixture();
+      const initial = await snapshot();
+      h.beforeTransaction = async () => {
+        await db
+          .update(schema.tasks)
+          .set({ type: 'workflow', status: 'running' })
+          .where(eq(schema.tasks.id, f.ownerTask.id));
+      };
+      const res = await purge();
+      expect([res.status, (await json(res)).code]).toEqual([502, 'module_purge_incomplete']);
+      const after = await snapshot();
+      expect(after.integrations).toEqual(initial.integrations);
+      expect(after.modules).toEqual(initial.modules);
+      expect(after.types).toEqual(initial.types);
+      expect(after.purges).toEqual(initial.purges);
+    });
+
+    it('does not wait holding type rows behind a concurrent integration writer, and retries after it finishes', async () => {
+      await ownedFixture();
+      const initial = await snapshot();
+      await db.transaction(async (tx) => {
+        await tx.execute(sql`LOCK TABLE integration_grants IN ROW EXCLUSIVE MODE`);
+        const res = await purge();
+        expect([res.status, (await json(res)).code]).toEqual([502, 'module_purge_incomplete']);
+      });
+      const after = await snapshot();
+      expect(after.integrations).toEqual(initial.integrations);
+      expect(after.modules).toEqual(initial.modules);
+      expect(after.purges).toEqual(initial.purges);
+      expect((await purge()).status).toBe(200);
+    });
+
+    it('rolls integration cleanup back when the missing module came back', async () => {
+      await ownedFixture();
+      const initial = await snapshot();
+      h.beforeTransaction = async () => {
+        await db
+          .update(schema.modules)
+          .set({ missingAt: null })
+          .where(eq(schema.modules.moduleId, ID));
+      };
+      expect((await purge()).status).toBe(409);
+      expect((await snapshot()).integrations).toEqual(initial.integrations);
     });
   });
 

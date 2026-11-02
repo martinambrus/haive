@@ -28,6 +28,15 @@ describe('ModulePurgeDialog', () => {
     expect(html).toContain('cannot be undone');
   });
 
+  it('waits for integration counts and explains retained history', () => {
+    const html = render({ id: 'statistics', tornDown: true });
+    expect(html).toContain('Loading integration counts');
+    expect(html).toContain(
+      'Call history, invocation records, audit history and Git credentials are kept',
+    );
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Purge<\/button>/);
+  });
+
   it('warns that the module teardown never ran, and stays quiet once it did', () => {
     expect(render({ id: 'statistics', tornDown: false })).toContain('teardown never ran');
     expect(render({ id: 'statistics', tornDown: true })).not.toContain('teardown never ran');
