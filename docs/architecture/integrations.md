@@ -18,7 +18,7 @@ and its own `integrations` token (see The call log, the stamp and the token), an
 merged: a step whose catalog entry declares requirements is resolved, granted and stamped at dispatch
 (see Dispatch). No shipped core step declares one; a module step can, and an admin's prompt step can
 declare `integrations` (see [Task types](task-types.md)), so only those reach the broker. The task page
-has no Integrations section yet.
+has an Integrations tab for account overrides, explicit remembered preferences and reset.
 
 ## Providers and categories
 
@@ -39,9 +39,9 @@ label, optional `authorizeParams` = extra authorize-URL parameters such as Googl
 sign anyone in), `token` (a form and help text).
 
 Ids: a core provider or category is `^[a-z0-9][a-z0-9_-]*$`, a module's is `module.<moduleId>.<id>`.
-`isCategoryId` accepts a module-grammar id or a registered core id only; the choice routes are
+`isCategoryId` accepts a module-grammar id or a registered core id only; the choice PUT routes are
 stricter and accept only a registered category (`listIntegrationCategories`: the core list, then the
-categories loaded modules declare). Core categories and their labels:
+categories loaded modules declare); DELETE also accepts retained unavailable categories. Core categories and their labels:
 `rich-documents` Documents, `spreadsheets`, `file-storage` File storage, `mail` Email, `chat`,
 `issues` Issue tracking, `wiki`, `forge` Git forge. Only `forge` has core providers.
 
@@ -60,7 +60,7 @@ provider-config row is off, and enablement folds `modules.deactivated_at` in liv
 `providerState(db, id)` answers `enabled`, `disabled`, `module-deactivated`, `module-missing` (a module-grammar id
 nothing registers) or `unknown`. `GET /integrations/categories` lists the core categories, then those of active
 modules (`{id, label, description?, moduleId, moduleName}`); `GET /tasks/:id/integrations` lists the categories of
-core and active-module providers plus any category a choice row of the task already names.
+core and active-module providers plus any category a choice or retained task grant already names.
 
 The core providers are the five forges, in this order: `github`, `gitea`, `gitlab`,
 `bitbucket_cloud`, `bitbucket_server` (`CORE_FORGE_PROVIDER_SPECS`, `@haive/shared/forge`). Each
@@ -319,8 +319,8 @@ The rules that look odd and are deliberate:
 - `integration_grants.tool_allow_list` is never written, so nothing reads it.
 
 `resolveStepIntegrations(db, {taskId} | {draft}, requirements)` is read-only;
-`resolveTaskCategories` answers `GET /tasks/:id/integrations`, meant for the task page, which does not
-call it yet; `recordTaskGrants` upserts one grant per category (a
+`resolveTaskCategories` is the category-resolution helper; the task page read route uses the same
+`loadResolverContext` and `resolveTarget` contracts; `recordTaskGrants` upserts one grant per category (a
 no-op when unchanged) and skips unresolved and provider-pinned results. The agreed dispatch contract:
 the grant is written FIRST and the stamped invocation inserted after it, in one transaction, so no run
 holds a connection without a grant.
@@ -381,6 +381,42 @@ restricted repository's allow-list are 400; a disabled provider is 409 (403 on s
 both pinned by tests); a connection that is not the caller's is 404, missing and foreign alike; a
 completed or cancelled task is 409 (a failed one can still change) and a dead one 409 `task_dead`.
 Admins get no override on another user's preferences, repositories or tasks.
+
+## Task-page controls
+
+The task page’s **Integrations** tab uses the ordinary authenticated web API client and is loaded
+only when opened, separate from task polling. Its owner-only `GET /tasks/:id/integrations` retains
+`categories` with resolver status, source/reason and skipped tiers; it adds `choices` (category,
+provider and nullable account ids) and `grants` (category/nullable account ids). An account id outside
+the owner’s user-scope accounts is returned as null, including on a stale stored binding. Categories
+include retained choice and grant categories even when a module has disappeared, so reset remains possible. Each
+category also carries eligible `candidates`, including while resolved. Candidate discovery calls the
+same resolver with choices, grants, preferences and defaults cleared; owner/user scope, provider
+state, repository fit and allow-list remain authoritative and connection status is never filtered.
+No credential, secret or other owner’s account is returned. The tab obtains labels and structural
+account status from the existing safe providers, connections and categories endpoints.
+
+Current resolution and the task’s explicit override are displayed separately. A missing or ineligible
+explicit provider/account remains visible and removable; Refresh does not prune a draft or replace an
+unavailable account. Unresolved states show their named reason (including newer unknown reasons)
+and direct the owner to Settings in another tab and Refresh. Provider-only choices are supported by
+the existing PUT contract and ask for a specific account at resolution. The server validates every
+submitted provider/account and remains final authority for repository and provider constraints.
+
+Save sends `remember: true` only after **Also for my later tasks** is checked. Reset uses the task
+DELETE, clearing both choice and category grant; it clears the user preference only after a separate
+**Also clear my remembered preference** checkbox. Both consents start unchecked and clear after a
+confirmed mutation reload. No control enables write access. Running invocation stamps are unchanged;
+all choices take effect from the next dispatch.
+
+Task ids own separate component state and outstanding reads are fenced against unmount and newer
+loads. The task-detail poll accepts replies in request order within the current route: a slower older
+reply can settle while a newer read is pending, but cannot overwrite a newer reply already applied.
+An older running reply therefore cannot replace an ended/dead status. Busy controls and a synchronous action claim prevent duplicate mutations; confirmed server
+reloads supply canonical state. Failed requests preserve the draft and expose Refresh for recovery.
+A task poll marking completed, cancelled or dead makes controls read-only even if an older request
+finishes later. These controls do not park, retry or resume workers. Browser width checks are required
+for the new tab at 1280, 768 and 390; unrelated task header layout is outside this feature.
 
 ## New Task admission
 

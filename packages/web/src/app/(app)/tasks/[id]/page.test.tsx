@@ -16,7 +16,7 @@ vi.mock('react', async (importOriginal) => ({
   ...(await import('../../../../../test/render-tree')).reactHooks,
 }));
 vi.mock('next/navigation', () => ({
-  useParams: () => ({ id: 't1' }),
+  useParams: () => ({ id: net.routeId }),
   useRouter: () => ({ replace: () => {}, push: () => {} }),
   useSearchParams: () => new URLSearchParams(),
 }));
@@ -47,7 +47,10 @@ vi.mock('@/components/terminal/InteractiveShell', () => ({
 
 const net = vi.hoisted(() => ({
   detail: {} as Record<string, unknown>,
+  routeId: 't1',
   missing: false,
+  heldDetail: null as Promise<unknown> | null,
+  integrationSnapshot: { categories: [], choices: [], grants: [] } as Record<string, unknown>,
   actions: [] as Record<string, unknown>[],
   attachmentFetches: [] as string[],
   unstubbed: [] as string[],
@@ -119,13 +122,28 @@ async function fakeFetch(input: unknown, init?: { body?: string; method?: string
       json: async () => (net.patchError ? { error: net.patchError } : {}),
     };
   }
-  if (path === '/tasks/t1') {
+  if (path === '/tasks/t1' || path === '/tasks/t2') {
+    if (net.heldDetail) {
+      const held = net.heldDetail;
+      net.heldDetail = null;
+      return held;
+    }
     return { ok: true, status: 200, json: async () => structuredClone(net.detail) };
   }
   if (path === '/tasks/t1/attachments') {
     net.attachmentFetches.push(path);
     return { ok: true, status: 200, json: async () => ({ attachments: [] }) };
   }
+  if (path === '/tasks/t1/integrations' || path === '/tasks/t2/integrations')
+    return {
+      ok: true,
+      status: 200,
+      json: async () => net.integrationSnapshot,
+    };
+  if (path === '/integrations/connections')
+    return { ok: true, status: 200, json: async () => ({ connections: [] }) };
+  if (path === '/integrations/categories')
+    return { ok: true, status: 200, json: async () => ({ categories: [] }) };
   net.unstubbed.push(path);
   return { ok: true, status: 200, json: async () => ({ providers: [], events: [] }) };
 }
@@ -147,7 +165,11 @@ beforeAll(() => {
   vi.stubGlobal('cancelAnimationFrame', () => {});
 });
 beforeEach(() => {
+  vi.clearAllTimers();
   net.patchError = null;
+  net.routeId = 't1';
+  net.heldDetail = null;
+  net.integrationSnapshot = { categories: [], choices: [], grants: [] };
 });
 afterAll(() => {
   vi.useRealTimers();
@@ -458,4 +480,90 @@ describe('task page auto-continue action lifecycle (#395)', () => {
     for (let i = 0; i < 5; i += 1) await view.flush();
     expect(textOf(view.tree())).not.toContain('toggle failed probe');
   });
+});
+
+describe('task Integrations entry point', () => {
+  it('opens account controls from the actual task page', async () => {
+    const view = await mount({});
+    const tab = buttons(view.tree(), 'integrations')[0];
+    expect(tab, 'task page must expose its Integrations tab').toBeDefined();
+    fire.click(tab!);
+    await view.flush();
+    expect(textOf(view.tree())).toContain('next dispatch');
+  });
+});
+
+it('keeps task integrations read-only when an older running poll finishes after a completed poll', async () => {
+  net.integrationSnapshot = {
+    categories: [
+      {
+        categoryId: 'forge',
+        status: 'resolved',
+        providerId: 'github',
+        connectionId: 'a',
+        source: 'task',
+        candidates: ['a'],
+        skipped: [],
+      },
+    ],
+    choices: [{ categoryId: 'forge', providerId: 'github', connectionId: 'a' }],
+    grants: [],
+  };
+  const view = await mount({});
+  fire.click(buttons(view.tree(), 'integrations')[0]!);
+  for (let i = 0; i < 5; i++) await view.flush();
+  const save = () => buttons(view.tree(), 'save forge override')[0]!;
+  expect(save().props.disabled).toBe(false);
+  const stale = structuredClone(net.detail);
+  let finish!: (value: unknown) => void;
+  net.heldDetail = new Promise((resolve) => {
+    finish = resolve;
+  });
+  vi.advanceTimersByTime(2000);
+  (net.detail.task as Record<string, unknown>).status = 'completed';
+  vi.advanceTimersByTime(2000);
+  await view.flush();
+  expect(save().props.disabled).toBe(true);
+  finish({ ok: true, status: 200, json: async () => stale });
+  await view.flush();
+  expect(save().props.disabled).toBe(true);
+});
+
+it('does not restore another route’s task after its late detail reply', async () => {
+  const view = await mount({ title: 'Old route task' });
+  const stale = structuredClone(net.detail);
+  let finish!: (value: unknown) => void;
+  net.heldDetail = new Promise((resolve) => {
+    finish = resolve;
+  });
+  vi.advanceTimersByTime(2000);
+  net.routeId = 't2';
+  net.detail = { task: taskRow({ id: 't2', title: 'Current route task' }), steps: [] };
+  view.draw();
+  await view.flush();
+  expect(textOf(view.tree())).toContain('Current route task');
+  finish({ ok: true, status: 200, json: async () => stale });
+  await view.flush();
+  expect(textOf(view.tree())).toContain('Current route task');
+  expect(textOf(view.tree())).not.toContain('Old route task');
+});
+
+it('accepts a slow task poll while a newer poll is still pending', async () => {
+  const view = await mount({});
+  let first!: (value: unknown) => void;
+  let second!: (value: unknown) => void;
+  net.heldDetail = new Promise((resolve) => {
+    first = resolve;
+  });
+  vi.advanceTimersByTime(2000);
+  net.heldDetail = new Promise((resolve) => {
+    second = resolve;
+  });
+  vi.advanceTimersByTime(2000);
+  const updated = { task: taskRow({ title: 'Accepted slow response' }), steps: [] };
+  first({ ok: true, status: 200, json: async () => updated });
+  await view.flush();
+  expect(textOf(view.tree())).toContain('Accepted slow response');
+  second({ ok: true, status: 200, json: async () => updated });
+  await view.flush();
 });

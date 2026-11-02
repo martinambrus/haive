@@ -2,6 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   clearIntegrationPreference,
   getRepositoryIntegrations,
+  getTaskIntegrations,
+  saveTaskIntegration,
+  resetTaskIntegration,
   listAdminIntegrationDefaults,
   listIntegrationConnections,
   listIntegrationDefaults,
@@ -21,7 +24,8 @@ const record = () => {
       return new Response(JSON.stringify({}), { status: 200 });
     }),
   );
-  return () => calls.map((c) => [c.method, new URL(c.url).pathname, c.body]);
+  return () =>
+    calls.map((c) => [c.method, new URL(c.url).pathname + new URL(c.url).search, c.body]);
 };
 
 describe('integration choice helpers', () => {
@@ -73,6 +77,37 @@ describe('integration choice helpers', () => {
     expect(sent()).toEqual([
       ['PUT', '/admin/integrations/defaults/forge', JSON.stringify({ providerId: 'github' })],
       ['PUT', '/admin/integrations/defaults/forge', JSON.stringify({ providerId: null })],
+    ]);
+  });
+
+  it('uses task PUT/DELETE with explicit remember only, preserving encoded route ids', async () => {
+    const sent = record();
+    await getTaskIntegrations('task 1');
+    await saveTaskIntegration('task 1', 'module.acme.docs', {
+      providerId: 'module.acme.docs',
+      connectionId: 'account-2',
+    });
+    await saveTaskIntegration('task 1', 'forge', {
+      providerId: 'gitlab',
+      connectionId: null,
+      remember: true,
+    });
+    await resetTaskIntegration('task 1', 'module.acme.docs');
+    await resetTaskIntegration('task 1', 'forge', true);
+    expect(sent()).toEqual([
+      ['GET', '/tasks/task%201/integrations', undefined],
+      [
+        'PUT',
+        '/tasks/task%201/integrations/module.acme.docs',
+        JSON.stringify({ providerId: 'module.acme.docs', connectionId: 'account-2' }),
+      ],
+      [
+        'PUT',
+        '/tasks/task%201/integrations/forge',
+        JSON.stringify({ providerId: 'gitlab', connectionId: null, remember: true }),
+      ],
+      ['DELETE', '/tasks/task%201/integrations/module.acme.docs', undefined],
+      ['DELETE', '/tasks/task%201/integrations/forge?remember=1', undefined],
     ]);
   });
 

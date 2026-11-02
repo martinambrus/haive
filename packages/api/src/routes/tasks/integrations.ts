@@ -3,12 +3,10 @@ import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
-  listIntegrationProviders,
-  loadDeactivatedModuleIds,
+  loadResolverContext,
   lockTaskIntegrations,
-  resolveTaskCategories,
+  resolveTarget,
 } from '@haive/shared/integrations';
-import { parseProviderId } from '@haive/shared/modularity';
 import { getDb, type Database } from '../../db.js';
 import {
   removePreference,
@@ -52,24 +50,42 @@ async function requireChangeableTask(db: Database, taskId: string, userId: strin
 taskIntegrationRoutes.get('/:id/integrations', async (c) => {
   const db = getDb();
   const task = await requireOwnTask(db, c.req.param('id'), c.get('userId'));
-  const chosen = await db
-    .select({ categoryId: schema.taskIntegrationChoices.categoryId })
-    .from(schema.taskIntegrationChoices)
-    .where(eq(schema.taskIntegrationChoices.taskId, task.id));
-  const deactivated = await loadDeactivatedModuleIds(db);
-  const served = listIntegrationProviders().filter((provider) => {
-    const parsed = parseProviderId(provider.id);
-    return parsed?.kind !== 'module' || !deactivated.has(parsed.moduleId);
-  });
+  const context = await loadResolverContext(db, { taskId: task.id });
+  const served = context.providers.filter((provider) => provider.state !== 'module-deactivated');
   const categories = new Set([
     ...served.flatMap((provider) => provider.categories),
-    ...chosen.map((choice) => choice.categoryId),
+    ...context.choices.keys(),
+    ...context.grants.keys(),
   ]);
+  // Discover eligible accounts through the same resolver, without selecting a preference or grant.
+  const discovery = {
+    ...context,
+    choices: new Map(),
+    grants: new Map(),
+    preferences: new Map(),
+    defaults: new Map(),
+  };
+  const ownConnectionIds = new Set(context.connections.map((connection) => connection.id));
+  const safeConnectionId = (id: string | null) =>
+    id !== null && ownConnectionIds.has(id) ? id : null;
   return c.json({
-    categories: await resolveTaskCategories(db, {
-      taskId: task.id,
-      categories: [...categories].sort(),
+    categories: [...categories].sort().map((category) => {
+      const candidates = resolveTarget(discovery, { category });
+      return {
+        ...resolveTarget(context, { category }),
+        candidates:
+          candidates.status === 'resolved' ? [candidates.connectionId] : candidates.candidates,
+      };
     }),
+    choices: [...context.choices].map(([categoryId, choice]) => ({
+      categoryId,
+      providerId: choice.providerId,
+      connectionId: safeConnectionId(choice.connectionId),
+    })),
+    grants: [...context.grants].map(([categoryId, connectionId]) => ({
+      categoryId,
+      connectionId: safeConnectionId(connectionId),
+    })),
   });
 });
 

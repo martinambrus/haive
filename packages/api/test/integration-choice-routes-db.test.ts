@@ -73,10 +73,17 @@ const expectOk = (reply: Reply, label?: string) =>
 const expectStatus = (reply: Reply, status: number, label?: string) =>
   expect(reply.status, note(reply, label)).toBe(status);
 
-// A list route may answer a bare array or one array under a single key; the entries are what is pinned.
+// The task read now has side metadata; other list routes retain their single-array envelope.
 function entriesOf(reply: Reply): Entry[] {
   const body = reply.json;
   if (Array.isArray(body)) return body as Entry[];
+  if (
+    body !== null &&
+    typeof body === 'object' &&
+    'categories' in body &&
+    Array.isArray(body.categories)
+  )
+    return body.categories as Entry[];
   const lists =
     body !== null && typeof body === 'object' ? Object.values(body).filter(Array.isArray) : [];
   if (lists.length === 1) return lists[0] as Entry[];
@@ -1082,6 +1089,49 @@ describe.skipIf(!url)('integration choice routes on Postgres', () => {
         status: 'unresolved',
         reason: 'no-remote',
       });
+    });
+  });
+
+  describe('task account controls read metadata', () => {
+    it('retains raw unresolved choices and grant-only removed categories without credentials', async () => {
+      await choose(taskA, 'mail', 'ghost');
+      await grantTask(taskA, 'module.gone.archive', ghA);
+      await grantTask(taskB, 'module.foreign.archive', ghB);
+      const reply = await unchanged(() => as(a).get(PATHS.task(taskA)));
+      expectOk(reply);
+      expect(reply.json).toMatchObject({
+        choices: [{ categoryId: 'mail', providerId: 'ghost', connectionId: null }],
+        grants: [{ categoryId: 'module.gone.archive', connectionId: ghA }],
+      });
+      const rows = (reply.json as { categories: Entry[] }).categories;
+      expect(rows.some((row) => row.categoryId === 'module.gone.archive')).toBe(true);
+      expect(rows.some((row) => row.categoryId === 'module.foreign.archive')).toBe(false);
+      expect(reply.text).not.toMatch(/secretEncrypted|accessToken|refreshToken|ownerUserId/);
+    });
+
+    it('does not expose a foreign connection from a stale stored choice or grant', async () => {
+      await choose(taskA, 'mail', 'github', ghB);
+      await grantTask(taskA, 'chat', ghB);
+      const reply = await as(a).get(PATHS.task(taskA));
+      expectOk(reply);
+      expect(reply.json).toMatchObject({
+        choices: [{ categoryId: 'mail', providerId: 'github', connectionId: null }],
+        grants: [{ categoryId: 'chat', connectionId: null }],
+      });
+      expect(reply.text).not.toContain(ghB);
+    });
+
+    it('offers resolver candidates even while an explicit task account resolves', async () => {
+      const alternate = await createAccount(a.id);
+      expectOk(await putChoice({ providerId: 'github', connectionId: ghA }));
+      const row = await forgeEntry(taskA);
+      expect([...(row.candidates as string[])].sort()).toEqual([ghA, alternate].sort());
+      await grantRepository(repoA, ghA);
+      await db
+        .update(schema.repositories)
+        .set({ integrationsRestricted: true })
+        .where(eq(schema.repositories.id, repoA));
+      expect((await forgeEntry(taskA)).candidates).toEqual([ghA]);
     });
   });
 
