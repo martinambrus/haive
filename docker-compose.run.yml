@@ -23,7 +23,7 @@ services:
   # published-image install would otherwise boot against an unmigrated database. It runs the same
   # runner from the same api image — the corpus ships inside it — and api/worker/web wait for it.
   db-migrate:
-    image: ${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-api:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}
+    image: ${HAIVE_API_IMAGE:-${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-api:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}}
     container_name: ${HAIVE_INSTALL_ID:-haive}-db-migrate
     depends_on:
       postgres:
@@ -59,7 +59,7 @@ services:
 
   api:
     build: !reset null
-    image: ${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-api:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}
+    image: ${HAIVE_API_IMAGE:-${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-api:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}}
     # docker-compose.yml publishes NOTHING — every port the dev stack exposes comes from the dev
     # override, which a published-image install does not use. Without these the stack boots
     # healthy and is completely unreachable, which is the worst kind of working.
@@ -93,14 +93,14 @@ services:
 
   worker:
     build: !reset null
-    image: ${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-worker:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}
+    image: ${HAIVE_WORKER_IMAGE:-${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-worker:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}}
     depends_on:
       db-migrate:
         condition: service_completed_successfully
 
   web:
     build: !reset null
-    image: ${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-web:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}
+    image: ${HAIVE_WEB_IMAGE:-${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-web:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}}
     # The browser runs on the HOST and calls the api directly. It used to call the URL baked into
     # the image at build time, which meant the published web image could only reach an api on
     # 3001 — so an install whose port the installer had moved (because 3001 was taken, which is

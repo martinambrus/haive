@@ -180,8 +180,8 @@ export function networkName(suffix: string): string {
 /** Image REPOSITORY (no tag): `haive-cli-sandbox`, `haive-sandbox`, `haive-ddev-runner`. Two
  *  installs building the same content would otherwise overwrite one tag, and one install's image
  *  reaper would delete the other's cached layers by name. */
-export function imageRepo(suffix: string): string {
-  return `${dashPrefix()}${suffix}`;
+export function imageRepo(suffix: string, env?: NodeJS.ProcessEnv): string {
+  return `${dashPrefix(env)}${suffix}`;
 }
 
 /* ── Postgres databases ──────────────────────────────────────────────────── */

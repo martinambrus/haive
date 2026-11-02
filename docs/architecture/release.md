@@ -141,3 +141,14 @@ read answers 500, so a read that failed never enables the start buttons and neve
 The updater creates the journal table itself, at every start: `ensureJournal` runs
 `UPGRADE_JOURNAL_DDL`, which `@haive/database` exports once and the api's tests build the table
 from, so nothing keeps a copy of it.
+
+## Own-module images
+
+The release matrix also publishes `haive-builder` from the repository-root context using
+`docker/own-module-builder/Dockerfile`. It is stamped with the same release version. Published
+installs can override api/worker/web image references independently through `HAIVE_API_IMAGE`,
+`HAIVE_WORKER_IMAGE`, and `HAIVE_WEB_IMAGE`; db-migrate follows the API reference. The updater
+rebuilds configured own modules during preflight, before draining, and journals both old and target
+references for rollback and recovery. See [Modules](modules.md#own-modules-on-a-published-install)
+for the prepared-source and per-customer builder contract. Channel selection and customer builder
+publication remain the vendor pipeline's responsibility; a public builder contains public core only.

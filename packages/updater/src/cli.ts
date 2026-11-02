@@ -20,6 +20,13 @@ import {
   type UpgradeContext,
 } from './run.js';
 import { decideResume } from './phases.js';
+import {
+  imageFor,
+  journalImages,
+  prepareImages,
+  readImageOverrides,
+  readImageSettings,
+} from './images.js';
 
 /**
  * `haive upgrade`.
@@ -144,7 +151,10 @@ async function main(): Promise<number> {
           minFrom: '0.0.0',
           migrationHead: String(live.metadata.migrationHead ?? ''),
         }),
-        registry,
+        registry:
+          typeof live.metadata.imageRegistry === 'string' ? live.metadata.imageRegistry : registry,
+        previousImages: journalImages(live.metadata.previousImages),
+        targetImages: journalImages(live.metadata.targetImages),
         apiUrl,
         postgresVolume: pgVolume,
         network,
@@ -168,8 +178,10 @@ async function main(): Promise<number> {
     }
     const target = await loadManifest(manifestSource);
 
-    const currentImages = ['api', 'worker', 'web'].map(
-      (s) => `${registry}/haive-${s}:${fromVersion}`,
+    const imageSettings = await readImageSettings(envFile);
+    const previousImages = await readImageOverrides(envFile, imageSettings);
+    const currentImages = (['api', 'worker', 'web'] as const).map((s) =>
+      imageFor(s, fromVersion, registry, previousImages),
     );
     const check = preflight({
       currentVersion: fromVersion,
@@ -190,14 +202,25 @@ async function main(): Promise<number> {
     if (flag('check')) return EXIT.ok;
 
     // Pull BEFORE any hold is applied: a failed pull must cost nothing.
-    await dk.pullImages(compose, { ...process.env, HAIVE_VERSION: target.version });
+    const targetImages = await prepareImages(
+      compose,
+      envFile,
+      target.version,
+      registry,
+      imageSettings,
+    );
     emit('pulled', { version: target.version });
 
     const runId = await startRun(sql, {
       fromVersion,
       toVersion: target.version,
       channel: target.channel,
-      metadata: { migrationHead: target.migrationHead },
+      metadata: {
+        migrationHead: target.migrationHead,
+        imageRegistry: registry,
+        previousImages,
+        targetImages,
+      },
     });
 
     const ctx: UpgradeContext = {
@@ -209,6 +232,8 @@ async function main(): Promise<number> {
       fromVersion,
       target,
       registry,
+      previousImages,
+      targetImages,
       apiUrl,
       postgresVolume: pgVolume,
       network,
