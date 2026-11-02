@@ -168,6 +168,7 @@ const ROUTES: { name: string; path: string; body: unknown }[] = [
 
 function setup() {
   const fake = createFakeDb({
+    modules: schema.modules,
     tasks: schema.tasks,
     taskEvents: schema.taskEvents,
     repositories: schema.repositories,
@@ -325,6 +326,7 @@ describe('POST /tasks/:id/action', () => {
     app.request(`/tasks/${TASK}/action`, request({ body: { action } }));
   const withTask = (row: Record<string, unknown>) => {
     const fake = createFakeDb({
+      modules: schema.modules,
       tasks: schema.tasks,
       taskSteps: schema.taskSteps,
       taskEvents: schema.taskEvents,
@@ -429,6 +431,7 @@ describe('POST /tasks/:id/steps/:stepId/action', () => {
     app.request(`/tasks/${TASK}/steps/${STEP}/action`, request({ body: { action, round: 0 } }));
   const withFailedStep = () => {
     const fake = createFakeDb({
+      modules: schema.modules,
       tasks: schema.tasks,
       taskSteps: schema.taskSteps,
       taskEvents: schema.taskEvents,
@@ -642,6 +645,7 @@ describe('PATCH /tasks/:id/steps/:stepId/cli-provider', () => {
     });
   const withStep = (step: Record<string, unknown>, task: Record<string, unknown> = {}) => {
     const fake = createFakeDb({
+      modules: schema.modules,
       tasks: schema.tasks,
       taskSteps: schema.taskSteps,
       taskEvents: schema.taskEvents,
@@ -835,6 +839,7 @@ describe.each([
   const answer = () => app.request(`/tasks/${TASK}/steps/${STEP}/${route}`, request({ body }));
   const withParkedForm = (status: string) => {
     const fake = createFakeDb({
+      modules: schema.modules,
       tasks: schema.tasks,
       taskSteps: schema.taskSteps,
       taskEvents: schema.taskEvents,

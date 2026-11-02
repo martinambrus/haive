@@ -117,6 +117,7 @@ function setup(
   conflicts: string[] = [],
 ) {
   const fake = createFakeDb({
+    modules: schema.modules,
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     taskEvents: schema.taskEvents,

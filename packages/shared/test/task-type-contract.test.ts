@@ -701,12 +701,13 @@ describe('publicTaskTypeSchema', () => {
     }
   });
 
-  it('lists module-missing right before module-deactivated', () => {
+  it('lists module-missing, module-deactivated and module-draining before missing-step', () => {
     const at = (reason: string) =>
       (TASK_TYPE_UNAVAILABLE_REASONS as readonly string[]).indexOf(reason);
     expect(at('module-missing')).toBeGreaterThan(at('module-types-off'));
     expect(at('module-deactivated')).toBe(at('module-missing') + 1);
-    expect(at('missing-step')).toBe(at('module-deactivated') + 1);
+    expect(at('module-draining')).toBe(at('module-deactivated') + 1);
+    expect(at('missing-step')).toBe(at('module-draining') + 1);
   });
 });
 

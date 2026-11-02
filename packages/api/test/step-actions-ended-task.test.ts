@@ -36,6 +36,7 @@ vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 /** A task at `status` whose fan-out step failed with one agent left to re-run. */
 function setup(status: string) {
   const fake = createFakeDb({
+    modules: schema.modules,
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     taskEvents: schema.taskEvents,

@@ -36,6 +36,7 @@ vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 describe('retrying a task that failed on a provider outage', () => {
   it('clears the allowance watch the failure armed', async () => {
     const fake = createFakeDb({
+      modules: schema.modules,
       tasks: schema.tasks,
       taskSteps: schema.taskSteps,
       cliInvocations: schema.cliInvocations,

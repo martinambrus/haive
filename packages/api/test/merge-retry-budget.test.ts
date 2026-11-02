@@ -58,6 +58,7 @@ const actions: [string, () => Response | Promise<Response>][] = [
 describe.each(actions)('%s on a step whose merge retries ran out', (_name, request) => {
   it('hands only the retry counter back', async () => {
     const fake = createFakeDb({
+      modules: schema.modules,
       tasks: schema.tasks,
       taskSteps: schema.taskSteps,
       taskEvents: schema.taskEvents,

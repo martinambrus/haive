@@ -165,6 +165,7 @@ const WRITTEN = [
 /** The fixture as a dead task (`dead_at` set, status kept) or as the same task alive. */
 function setup(f: Fixture, dead: boolean) {
   const fake = createFakeDb({
+    modules: schema.modules,
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     taskEvents: schema.taskEvents,
