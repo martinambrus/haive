@@ -74,9 +74,9 @@ board. At session start, load the board's tasks you own or will work on into the
 
 ## Decisions and prerequisites
 
-Owner allowance policy 2026-11-02 (codex-queue, latest): monitor actual weekly allowance. At40% remaining, stop admitting new tasks, finish all tasks already in progress, save handoff and pause. This explicit owner instruction supersedes the near-zero3% checkpoint. Do not reset or purchase automatically; preserve evidence and parked-task fences.
+Owner allowance policy 2026-11-02 (codex-queue, latest): monitor actual weekly allowance. At60% remaining, stop admitting new tasks, finish all tasks already in progress, save handoff and pause. This latest explicit owner instruction supersedes the40% and earlier near-zero checkpoints, reserving allowance for other projects. Do not reset or purchase automatically; preserve evidence and parked-task fences.
 
-Execution RESUMED 2026-11-02. The owner applied the available reset, verified100% remaining and0 resetcredits by live account RPC. Latest verified meter97% at10:44UTC; admission checkpoint40%. T521/T434/T362/T496 are delivered, T359 is merged awaiting main CI, and the approved T356/T357 complete-feature bundle is in progress. Historical pause/reset receipts are retained locally.
+Execution active 2026-11-02 after the owner-applied reset; no resetcredits remain. Delivery is complete through T360/T361. T330 is in its bounded required-gate fixture correction after clean feature review and actual PostgreSQL199; next approved module/channel tasks remain queued. Current metering and handoff: .claude/tmp/codex-run/queue-exec-20261101/. Historical pause/reset receipts are retained.
 
 Owner resource update 2026-11-02: the C-drive test reserve is5GiB by explicit owner instruction, superseding the inherited20GiB. Keep4GiB RAM reserve and serialize heavy checks. Saved runner policy: `.claude/tmp/codex-run/queue-exec-20261101/resource-policy.json`. Do not prune project volumes or unknown/user data.
 
