@@ -474,20 +474,77 @@ describe('the onboarding status beside the repository select', () => {
       expect(page(view)).toContain('Will run: workflow');
     });
 
-    it('offers no Retry for its failure, since Re-run onboarding is still there to try again', async () => {
+    it('keeps its failure beside a fresh verdict that still admits a workflow', async () => {
       const view = await resetA();
       await release(view, RESET('repo-a'), 500, { error: 'reset failed for a' });
+      await answer(view, 'repo-a', 200, status({ onboarded: true }));
       expect(page(view)).toContain('reset failed for a');
       expect(buttons(view.tree(), /^retry$/)).toHaveLength(0);
       expect(buttons(view.tree(), /^re-run onboarding$/)).toHaveLength(1);
-    });
-
-    it('keeps the verdict in view beside its failure', async () => {
-      const view = await resetA();
-      await release(view, RESET('repo-a'), 500, { error: 'reset failed for a' });
-      expect(page(view)).toContain('reset failed for a');
       expect(page(view)).toContain('Will run: workflow');
       expect(isDisabled(submit(view))).toBe(false);
+    });
+
+    it('waits for actual readiness after a failed reset, then creates from that answer', async () => {
+      const view = await resetA();
+      fire.type(controls(view.tree(), /^title$/)[0]!, 'A title');
+      fire.type(controls(view.tree(), /^description/)[0]!, 'A description');
+      await release(view, RESET('repo-a'), 500, { error: 'reset failed for a' });
+      expect(page(view)).toContain('reset failed for a');
+      expect(page(view)).toContain('Checking onboarding');
+      expect(page(view)).not.toContain('Will run: workflow');
+      expect(isDisabled(submit(view))).toBe(true);
+      await submitForm(view);
+      expect(sent).not.toContain('POST /tasks');
+      await answer(view, 'repo-a', 200, status({ missing: ['knowledge base'] }));
+      expect(page(view)).toContain('reset failed for a');
+      expect(page(view)).toContain('Will run: onboarding');
+      expect(page(view)).toContain('Missing: knowledge base');
+      expect(valueOf(controls(view.tree(), /^title$/)[0]!)).toBe('A title');
+      expect(valueOf(controls(view.tree(), /^description/)[0]!)).toBe('A description');
+      expect(isDisabled(submit(view))).toBe(false);
+      await submitForm(view);
+      expect(posted).toMatchObject([
+        { type: 'onboarding', title: 'A title', description: 'A description' },
+      ]);
+    });
+
+    it('leaves readiness unknown if the fresh read fails, retaining the reset error through Retry', async () => {
+      const view = await resetA();
+      await release(view, RESET('repo-a'), 500, { error: 'reset failed for a' });
+      await answer(view, 'repo-a', 503, { error: 'readiness unavailable' });
+      expect(page(view)).toContain('reset failed for a');
+      expect(page(view)).toContain('readiness unavailable');
+      expect(page(view)).not.toContain('Will run');
+      expect(isDisabled(submit(view))).toBe(true);
+      await submitForm(view);
+      expect(sent).not.toContain('POST /tasks');
+      fire.click(buttons(view.tree(), /^retry$/)[0]!);
+      view.draw();
+      expect(page(view)).toContain('reset failed for a');
+      await answer(view, 'repo-a', 200, status({ onboardingTaskId: 'live-onboarding' }));
+      expect(page(view)).toContain('reset failed for a');
+      expect(isDisabled(submit(view))).toBe(true);
+      await submitForm(view);
+      expect(sent).not.toContain('POST /tasks');
+    });
+
+    it('ignores a pre-reset read and a late fresh answer once another repository is selected', async () => {
+      const view = await resetA();
+      pick(view, 'repo-b');
+      pick(view, 'repo-a');
+      const beforeReset = held.get(STATUS('repo-a'))!;
+      await release(view, RESET('repo-a'), 500, { error: 'reset failed for a' });
+      beforeReset(200, status({ onboarded: true }));
+      await view.flush();
+      expect(page(view)).toContain('Checking onboarding');
+      expect(isDisabled(submit(view))).toBe(true);
+      pick(view, 'repo-b');
+      await answer(view, 'repo-b', 200, status({ missing: ['skills'] }));
+      await answer(view, 'repo-a', 200, status({ onboarded: true }));
+      expect(page(view)).toContain('Missing: skills');
+      expect(page(view)).not.toContain('Will run: workflow');
+      expect(page(view)).not.toContain('reset failed for a');
     });
 
     it('disables Retry while the status is being asked for again', async () => {
