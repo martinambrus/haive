@@ -115,6 +115,15 @@ describe('the default id reproduces the shipped names byte for byte', () => {
 });
 
 describe('a second install is disjoint from the first', () => {
+  it('accepts explicit image naming config over ambient identity and validates it', () => {
+    process.env.HAIVE_INSTALL_ID = 'ambient';
+    expect(imageRepo('own-api', {})).toBe('haive-own-api');
+    expect(imageRepo('own-worker', { HAIVE_INSTALL_ID: 'team_a' })).toBe('team_a-own-worker');
+    expect(() => imageRepo('own-web', { HAIVE_INSTALL_ID: 'Bad-ID' })).toThrow(
+      InvalidInstallIdError,
+    );
+    expect(process.env.HAIVE_INSTALL_ID).toBe('ambient');
+  });
   it('separates every family', () => {
     process.env.HAIVE_INSTALL_ID = 'haive2';
     expect(containerName(CONTAINER_FAMILY.cli, 'x')).toBe('haive2-cli-x');

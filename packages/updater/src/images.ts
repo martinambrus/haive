@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { imageRepo } from '@haive/shared/naming';
 import type { ComposeContext } from './docker.js';
 import * as dk from './docker.js';
 import { readEnvVar } from './run.js';
@@ -73,11 +74,13 @@ export async function prepareImages(
     throw new Error('HAIVE_BUILDER_IMAGE must contain {version}');
   const builderImage =
     template?.replaceAll('{version}', version) || `${registry}/haive-builder:${version}`;
+  const installEnv = { HAIVE_INSTALL_ID: (await readEnvVar(envFile, 'HAIVE_INSTALL_ID')) ?? '' };
   const suffix = randomUUID();
-  target.HAIVE_API_IMAGE = `haive-own-api:${version}-${suffix}`;
-  target.HAIVE_WORKER_IMAGE = `haive-own-worker:${version}-${suffix}`;
+  target.HAIVE_API_IMAGE = `${imageRepo('own-api', installEnv)}:${version}-${suffix}`;
+  target.HAIVE_WORKER_IMAGE = `${imageRepo('own-worker', installEnv)}:${version}-${suffix}`;
   const rebuildWeb = (await readEnvVar(envFile, 'HAIVE_OWN_MODULES_REBUILD_WEB')) === 'true';
-  if (rebuildWeb) target.HAIVE_WEB_IMAGE = `haive-own-web:${version}-${suffix}`;
+  if (rebuildWeb)
+    target.HAIVE_WEB_IMAGE = `${imageRepo('own-web', installEnv)}:${version}-${suffix}`;
   const baseImages = Object.fromEntries(
     ['api', 'worker', 'web'].map((host) => [host, `${registry}/haive-${host}:${version}`]),
   );

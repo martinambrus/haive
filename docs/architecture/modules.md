@@ -417,7 +417,9 @@ it from the next derived image without purging its data. An empty own-module dir
 to remove the final own module, select the prebuilt images and clear the own-module configuration.
 
 Upgrade Phase 0 pulls the new bases and matching builder, then repeats this build before draining.
-Every attempt uses fresh local output tags, preserving the running images. A failed pull/build changes
+Every attempt uses fresh local output tags, preserving the running images. Local image repositories
+use `HAIVE_INSTALL_ID` from the install's `.env`; missing or empty means the default `haive`, even
+when the updater's ambient environment names another install. A failed pull/build changes
 no pins or maintenance state. The journal records the registry and exact previous and target overrides before the first
 hold, so migration/commit one-shots use the derived targets and rollback/crash recovery restore the
 previous references. Old journal rows without image overrides retain their original registry/tag
