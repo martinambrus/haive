@@ -74,9 +74,9 @@ board. At session start, load the board's tasks you own or will work on into the
 
 ## Decisions and prerequisites
 
-Owner allowance policy 2026-11-02 (codex-queue): the owner resumed execution and has an available reset. The previous40% cutoff is superseded. Monitor actual weekly allowance; use3% remaining as the near-zero admission checkpoint, finish active tasks, save handoff and pause for the owner to apply the reset. Do not reset automatically. Preserve prior evidence and parked-task fences.
+Owner allowance policy 2026-11-02 (codex-queue, latest): monitor actual weekly allowance. At40% remaining, stop admitting new tasks, finish all tasks already in progress, save handoff and pause. This explicit owner instruction supersedes the near-zero3% checkpoint. Do not reset or purchase automatically; preserve evidence and parked-task fences.
 
-Execution RESUMED 2026-11-02 by owner instruction. The prior40% checkpoint completed T121/T122/T456. Current weekly meter12% remaining; near-zero checkpoint3%. Continue the approved queue from T521 member5 only. Historical pause receipt is retained locally.
+Execution RESUMED 2026-11-02. The owner applied the available reset, verified100% remaining and0 resetcredits by live account RPC. Latest verified meter97% at10:44UTC; admission checkpoint40%. T521/T434/T362/T496 are delivered, T359 is merged awaiting main CI, and the approved T356/T357 complete-feature bundle is in progress. Historical pause/reset receipts are retained locally.
 
 Owner resource update 2026-11-02: the C-drive test reserve is5GiB by explicit owner instruction, superseding the inherited20GiB. Keep4GiB RAM reserve and serialize heavy checks. Saved runner policy: `.claude/tmp/codex-run/queue-exec-20261101/resource-policy.json`. Do not prune project volumes or unknown/user data.
 
