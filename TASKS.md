@@ -320,7 +320,7 @@ Dependency reconciliation 2026-11-01: B3.1c landed and modular-haive-plan is pau
 
 ### T330 · M12 · module lifecycle L3: dependents preflight urgent/graceful (+J9)
 
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T17:12Z · last: 2026-11-02T19:23Z · was modular #35 · priority: P2
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T17:12Z · last: 2026-11-02T20:01Z · was modular #35 · priority: P2
 From the modularity plan, docs/plans/twinkling-frolicking-toast.md (M12, J9).
 
 - U1 and U2 shipped: urgent deactivation and the dependents dialog.
@@ -333,6 +333,8 @@ Progress 2026-11-02T18:07Z: Aligned reviewed dependency source; independent curr
 Progress 2026-11-02T18:58Z: Fix1 f34 independently reviewed clean; parent realSQL199 passed. Complete candidate exposed existing fixture compatibility failures across15files; test-only fix2 active. Private phone control flow passed. Latest owner allowance checkpoint is60% remaining, superseding40%; finish all in-flight tasks then pause.
 
 Progress 2026-11-02T19:23Z: Final6c complete candidate passed all six checks (30148 package tests plus root scripts); fresh focused review clean. PR1000 opened for exact-HEAD hosted review/all CI. Additive0219+0220 and primary browser acceptance remain after main CI. Latest owner pause checkpoint60% remaining.
+
+Progress 2026-11-02T20:01Z: PR1000 merged59f48d98c with all exact-HEAD hosted/PR CI green. Phone busy-error controls hit-tested and Retry/Cancel passed; outer padding clipping is cosmetic, no new repair round. Main CI41514316829 running; additive0219+0220/source/primary3width acceptance remain after green.
 
 ### T331 · I7 · modules/integration-google (Drive, Docs, Gmail)
 
