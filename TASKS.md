@@ -344,13 +344,6 @@ Execution scope: J7 required-integration reconnect/provider-deactivation waiting
 
 Progress 2026-11-02T12:47Z: Reserved migration 0218 for the necessary nullable task_steps.integration_wait structural JSONB marker; existing waiting_started_at/status text cannot identify this recovery owner. No other active session migration reservation is recorded. Append the schema column last, use guarded idempotent SQL, preserve all applied migrations and normal applier. Driver builds/tests only in owned scratch fixtures; parent owns live application after review/CI.
 
-### T333 · J8 · composer shows integration requirements + provider install state
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T12:22Z · last: 2026-11-02T12:22Z · was modular #48 · priority: P2
-Plan J8: for each requirement, the composer shows its category, the providers that can resolve it, and their install state.
-
-Execution scope: bounded J8 task-type composer overview of each integration requirement, its category, eligible/serving providers and current provider/module install state. Reuses shipped provider/catalog contracts and preserves requirement authoring/admission. Excludes reconnect automation T332, provider-pin execution T358, broad module/settings category expansion T360, and live Google setup T331. Prioritized as the author-facing completion of the current integration controls; one implementation driver, same complete-feature review/CI cadence.
-
 ### T334 · FNF[builtin-order-hazards] · built-in workflow runs 07b before 07c, and 08b fixer edits after both
 
 status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
@@ -1388,6 +1381,8 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
 ## Done
+
+- T333 — composer integration requirement and provider install-state overview — PR #996 (38b75516cf), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41454594533 green; actual authenticated composer browser create/edit/readonly at1280/768/390 passed18probes; draft edits retained through delayedmetadata/error/retry/refused409,15screenshots inspected,3PATCH locallycaptured/0forwarded; actual readonly catalog API200 and watcher/health/activity checks green. Evidence .claude/tmp/codex-run/queue-exec-20261101/T333/.
 
 - T339 — task-page integration overrides, explicit remembered preferences and reset — PR #995 (69f3f237fb), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41449928905 green; actual task-page browser1280/768/390 save/explicitremember/refuseddraft/refresh/reset/explicitforget/unavailablegrantreset and completedreadonly with lateolderpoll passed;9screenshots inspected,18writes locallycaptured/0forwarded; actualPG37 and source/APIwatcher/health/activity checks green. Evidence .claude/tmp/codex-run/queue-exec-20261101/T339/.
 
