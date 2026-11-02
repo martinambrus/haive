@@ -748,12 +748,14 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
         const originalPrompt = 'Finish the reserved follow-up from the first wave.';
         let canEnter = true;
         const shouldRun = vi.fn(async () => canEnter);
-        const def = miningStep(id, {
-          selectAgents: async () => [
-            { agentId: 'first-wave', agentTitle: 'First wave', prompt: 'Do the first wave.' },
-          ],
-        });
-        def.needsRuntime = 'app';
+        const def: StepDefinition = {
+          ...miningStep(id, {
+            selectAgents: async () => [
+              { agentId: 'first-wave', agentTitle: 'First wave', prompt: 'Do the first wave.' },
+            ],
+          }),
+          needsRuntime: 'app',
+        };
         def.shouldRun = shouldRun;
         def.apply = async () => {
           canEnter = false; // Work has happened; re-asking the entry precondition would now skip it.
@@ -902,8 +904,7 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
         canEnter = false;
         return { prepared: true };
       });
-      const def = miningStep(id);
-      def.needsRuntime = 'app';
+      const def: StepDefinition = { ...miningStep(id), needsRuntime: 'app' };
       def.shouldRun = shouldRun;
       def.detect = detect;
       stepRegistry.register(def);
