@@ -529,15 +529,6 @@ status: parked: deferred until the first module that pins a provider · was modu
 
 Decision reconciliation 2026-11-01: Remain deliberately deferred until a real module needs provider pinning; do not invent a consumer to unblock this infrastructure work.
 
-### T359 · I6c · resolver reasons provider-deactivated / provider-missing
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · last: 2026-11-02T10:05Z · was modular #194 · priority: P2
-Plan I6: the reasons apply to a choice, a grant, a pinned target and a module category.
-
-Execution scope: existing PlanI6c resolver reasons provider-deactivated/provider-missing for choices, grants, pins and module categories; preserve documented resolution tiers/ownership/selection semantics. No broker redesign or integration UI expansion.
-
-Progress 2026-11-02T10:05Z: PR993 exactHEAD0bef hosted clean and local full suites/realPG acceptance passed, but required Postgres C7b caught an introduced no-serving core category compatibility regression (no-provider became needs-choice). Fix1 in progress; original failure/evidence retained; no task completed or new scope admitted.
-
 ### T360 · I6d · web: module categories in every category list, admin provider card, Settings state note
 
 status: open · was modular #195 · priority: P2
@@ -1408,6 +1399,8 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
 ## Done
+
+- T359 — preserve module provider resolution reasons and core-category compatibility — PR #993 (e0ed6fba7b), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41430501569 green; real scratch PostgreSQL live state/ownership acceptance and unchanged C7b34 passed; deployed API/worker resolver checks pass with synthetic contexts; appactivityunchanged. Evidence .claude/tmp/codex-run/queue-exec-20261101/T359/.
 
 - T496 — bound usage vendor requests and classify Grok rejection structurally — PR #992 (081bb553e7), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41423875746 green; native Node HTTP stalled-body deadlines and subsequent recovery passed with synthetic local fixture; deployed worker ready/reviewed source hashes match; app activity unchanged. Evidence .claude/tmp/codex-run/queue-exec-20261101/T496/.
 
