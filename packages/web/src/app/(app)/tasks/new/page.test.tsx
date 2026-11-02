@@ -971,6 +971,7 @@ describe('a new task with attachments', () => {
     await submitForm(view);
     expect(posted).toHaveLength(1);
     expect(posted[0]).not.toHaveProperty('deferStart');
+    expect(posted[0]).not.toHaveProperty('integrationChoices');
     expect(writes()).toEqual(['POST /tasks']);
   });
 
@@ -1501,6 +1502,11 @@ describe('New Task integration admission', () => {
     await view.flush();
     expect(isDisabled(submit(view))).toBe(false);
     expect(page(view)).toContain('Optional');
+    fire.type(controls(view.tree(), /^title/)[0]!, 'Optional integrations without choices');
+    view.draw();
+    await submitForm(view);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).not.toHaveProperty('integrationChoices');
   });
 });
 

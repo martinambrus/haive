@@ -809,7 +809,7 @@ export default function NewTaskPage() {
         parentTaskId,
       });
 
-      body.integrationChoices = integrationChoices;
+      if (integrationChoices.length > 0) body.integrationChoices = integrationChoices;
       const submittingIntegrationKey = integrationKey;
 
       if (newTaskFields(selectedType, type).dumpUpload && dumpFile) {
