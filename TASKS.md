@@ -378,8 +378,10 @@ Plan D4: git and registry install sources drive D1 and D3; the token is stored e
 
 ### T339 · I4d · task page Integrations tab (override, "Also for my later tasks", reset) (+2)
 
-status: open · was modular #127 · priority: P2
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T12:02Z · last: 2026-11-02T12:02Z · was modular #127 · priority: P2
 Plan I4, part d. Browser check at 1280, 768 and 390.
+
+Execution scope: complete existing task-page Integrations feature: per-category task override, explicit "Also for my later tasks" preference consent, reset to automatic resolution, and safe read-only ended/dead state. Use existing transactional choice routes; any read metadata extension stays within this UI contract. Browser1280/768/390. Excludes reconnect automation T332, composer install-state overview T333, module category/admin expansion T360 and provider purge T361. Starts after T356/T357 fix2 driver is quiescent; may stack on its reviewed feature while delivery gates run.
 
 ### T342 · FNF[mcp-token-file] · rag/ddev task tokens in the server env defeat the cli-merge skip (measure first) (+4)
 
