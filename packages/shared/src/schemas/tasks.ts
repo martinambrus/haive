@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { PLAN_TASK_MAX_NODES, planNodeTaskRoleSchema, type PlanNodeTaskRole } from './plan.js';
+import { taskIntegrationChoicesSchema } from './task-integrations.js';
 
 export const workflowTypeSchema = z.enum([
   'onboarding',
@@ -73,6 +74,7 @@ export const createTaskRequestSchema = z
      *  effort (work + user-active) in the task UI. All task types. */
     estimatedTimeHours: z.number().positive().max(1000).optional(),
     repositoryId: z.string().uuid().optional(),
+    integrationChoices: taskIntegrationChoicesSchema.optional(),
     /** Explicit `null` means "no default CLI" and is a STATED
      *  choice; omitting the field states nothing. The create handler stores the
      *  same value either way and records the difference in tasks.cli_choice_recorded,

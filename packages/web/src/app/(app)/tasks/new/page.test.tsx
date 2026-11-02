@@ -30,8 +30,15 @@ vi.mock('next/navigation', () => ({
 vi.mock('next/link', async () => {
   const { createElement } = await import('react');
   return {
-    default: ({ href, children }: { href: string; children?: unknown }) =>
-      createElement('a', { href }, children as never),
+    default: ({
+      children,
+      ...props
+    }: {
+      href: string;
+      target?: string;
+      rel?: string;
+      children?: unknown;
+    }) => createElement('a', props, children as never),
   };
 });
 vi.mock('@/lib/use-page-title', () => ({ usePageTitle: () => {} }));
@@ -129,6 +136,14 @@ const PARENTS: Record<string, unknown[]> = {
 const held = new Map<string, (code: number, body: unknown) => void>();
 const sent: string[] = [];
 const posted: Record<string, unknown>[] = [];
+let integrationCreateFailure = false;
+let holdIntegrationPreview = false;
+let integrationPreview: Record<string, unknown> = {
+  admitted: true,
+  scope: 'static',
+  categories: [],
+  issues: [],
+};
 let holdLastCli = false;
 let holdParents = false;
 let holdUploads = false;
@@ -154,6 +169,7 @@ async function fakeFetch(input: unknown, init?: { method?: string; body?: string
   const key = `${call}${url.search}`;
   sent.push(key);
   if (
+    (holdIntegrationPreview && path === '/tasks/integration-preview') ||
     HELD.test(call) ||
     (holdLastCli && path === '/tasks/last-cli') ||
     (holdParents && call === 'GET /tasks') ||
@@ -163,6 +179,7 @@ async function fakeFetch(input: unknown, init?: { method?: string; body?: string
       held.set(key, (code, body) => resolve(reply(code, body)));
     });
   }
+  if (path === '/tasks/integration-preview') return reply(200, integrationPreview);
   if (path === '/tasks/last-cli') return reply(200, last);
   if (call === 'GET /tasks') {
     return reply(200, { tasks: PARENTS[url.searchParams.get('repositoryId') ?? ''] ?? [] });
@@ -191,6 +208,11 @@ async function fakeFetch(input: unknown, init?: { method?: string; body?: string
   }
   if (call === 'POST /tasks') {
     posted.push(JSON.parse(init?.body ?? '{}') as Record<string, unknown>);
+    if (integrationCreateFailure)
+      return reply(409, {
+        error: 'The integration requirements changed',
+        code: 'integration-admission-required',
+      });
     return reply(200, { task: { id: 'task-new' } });
   }
   const savedSlug = /^\/task-types\/([^/]+)\/saved-step-clis$/.exec(path)?.[1];
@@ -213,6 +235,9 @@ beforeEach(() => {
   savedDefault = null;
   sent.length = 0;
   posted.length = 0;
+  integrationCreateFailure = false;
+  holdIntegrationPreview = false;
+  integrationPreview = { admitted: true, scope: 'static', categories: [], issues: [] };
   holdLastCli = false;
   holdParents = false;
   holdUploads = false;
@@ -250,6 +275,8 @@ async function release(view: Renderer, call: string, code: number, body: unknown
   held.delete(call);
   settle(code, body);
   await view.flush();
+  // Readiness can change the inferred task type, which starts its integration preview.
+  await view.flush();
 }
 
 const answer = (view: Renderer, repositoryId: string, code: number, body: unknown) =>
@@ -259,6 +286,7 @@ const page = (view: Renderer) => textOf(view.tree());
 const submit = (view: Renderer) => buttons(view.tree(), /^create task$/)[0]!;
 
 async function submitForm(view: Renderer) {
+  await view.flush();
   const form = findAll(view.tree(), (h) => h.tag === 'form')[0]!;
   await (form.props.onSubmit as (e: unknown) => Promise<void>)({ preventDefault: () => {} });
   await view.flush();
@@ -943,6 +971,7 @@ describe('a new task with attachments', () => {
     await submitForm(view);
     expect(posted).toHaveLength(1);
     expect(posted[0]).not.toHaveProperty('deferStart');
+    expect(posted[0]).not.toHaveProperty('integrationChoices');
     expect(writes()).toEqual(['POST /tasks']);
   });
 
@@ -1227,4 +1256,292 @@ it('offers only enabled providers for a new task', async () => {
     expect(options).toContain(P1);
     expect(options).not.toContain(P3);
   }
+});
+
+describe('New Task integration admission', () => {
+  const account = {
+    connectionId: 'account-a',
+    providerId: 'documents',
+    providerLabel: 'Documents provider',
+    accountLabel: 'Work account',
+    status: 'connected',
+  };
+  const unresolved = (required = true) => ({
+    admitted: !required,
+    scope: 'static',
+    issues: [],
+    categories: [
+      {
+        categoryId: 'rich-documents',
+        label: 'Documents',
+        required,
+        steps: [
+          {
+            stepId: 'review',
+            title: 'Review',
+            requirementId: 'docs',
+            access: 'read',
+            optional: !required,
+          },
+        ],
+        status: 'unresolved',
+        reason: 'needs-choice',
+        selected: null,
+        candidates: [account],
+      },
+    ],
+  });
+  const waiting = () =>
+    [...held.keys()].filter((key) => key.startsWith('GET /tasks/integration-preview'));
+  it('waits for preview, blocks unresolved requirements, rechecks a pick and submits it while keeping text', async () => {
+    holdIntegrationPreview = true;
+    const view = await mount();
+    chooseType(view, 'scoped');
+    pick(view, 'repo-a');
+    await view.flush();
+    fire.type(controls(view.tree(), /^title/)[0]!, 'Keep my title');
+    view.draw();
+    expect(isDisabled(submit(view))).toBe(true);
+    await release(view, waiting().at(-1)!, 200, unresolved());
+    expect(page(view)).toContain('Choose an account');
+    await submitForm(view);
+    expect(posted).toEqual([]);
+    fire.type(controls(view.tree(), /^documents account/i)[0]!, 'account-a');
+    view.draw();
+    await view.flush();
+    expect(isDisabled(submit(view))).toBe(true);
+    await release(view, waiting().at(-1)!, 200, {
+      ...unresolved(),
+      admitted: true,
+      categories: [
+        { ...unresolved().categories[0], status: 'resolved', reason: null, selected: account },
+      ],
+    });
+    expect(isDisabled(submit(view))).toBe(false);
+    await submitForm(view);
+    expect(posted[0]).toMatchObject({
+      title: 'Keep my title',
+      integrationChoices: [{ categoryId: 'rich-documents', connectionId: 'account-a' }],
+    });
+  });
+  it('ignores an older repository preview and keeps admission closed on a failed current preview', async () => {
+    holdIntegrationPreview = true;
+    const view = await mount();
+    chooseType(view, 'scoped');
+    pick(view, 'repo-a');
+    await view.flush();
+    const old = waiting().at(-1)!;
+    pick(view, 'repo-b');
+    await view.flush();
+    const current = waiting().at(-1)!;
+    await release(view, current, 503, { error: 'Integration check unavailable' });
+    await release(view, old, 200, { admitted: true, scope: 'static', categories: [], issues: [] });
+    expect(page(view)).toContain('Integration check unavailable');
+    expect(isDisabled(submit(view))).toBe(true);
+    await submitForm(view);
+    expect(posted).toEqual([]);
+  });
+  it('refreshes preview after create refuses changed requirements, preserving the entered title', async () => {
+    const view = await mount();
+    chooseType(view, 'scoped');
+    pick(view, 'repo-a');
+    await view.flush();
+    await view.flush();
+    fire.type(controls(view.tree(), /^title/)[0]!, 'Preserved title');
+    view.draw();
+    integrationPreview = unresolved();
+    integrationCreateFailure = true;
+    await submitForm(view);
+    await view.flush();
+    expect(posted).toHaveLength(1);
+    expect(page(view)).toContain('Choose an account');
+    expect(isDisabled(submit(view))).toBe(true);
+    expect(valueOf(controls(view.tree(), /^title/)[0]!)).toBe('Preserved title');
+    await submitForm(view);
+    expect(posted).toHaveLength(1);
+  });
+  it('rechecks accounts connected in Settings while retaining the task text', async () => {
+    integrationPreview = unresolved();
+    const view = await mount();
+    chooseType(view, 'scoped');
+    pick(view, 'repo-a');
+    await view.flush();
+    await view.flush();
+    fire.type(controls(view.tree(), /^title/)[0]!, 'Draft retained');
+    view.draw();
+    const settings = findAll(
+      view.tree(),
+      (host) => host.tag === 'a' && host.props.href === '/settings/integrations',
+    )[0]!;
+    expect(settings.props.target).toBe('_blank');
+    integrationPreview = {
+      ...unresolved(),
+      admitted: true,
+      categories: [
+        { ...unresolved().categories[0], status: 'resolved', reason: null, selected: account },
+      ],
+    };
+    fire.click(buttons(view.tree(), /^refresh accounts$/i)[0]!);
+    view.draw();
+    expect(isDisabled(submit(view))).toBe(true);
+    await view.flush();
+    expect(isDisabled(submit(view))).toBe(false);
+    expect(valueOf(controls(view.tree(), /^title/)[0]!)).toBe('Draft retained');
+  });
+  it.each([false, true])(
+    'keeps a removed explicit account clearable (required=%s) without discarding the draft or another choice',
+    async (required) => {
+      const other = { ...account, connectionId: 'account-b', accountLabel: 'Chat account' };
+      const docs = {
+        ...unresolved(required).categories[0]!,
+        status: 'resolved',
+        reason: null,
+        selected: account,
+      };
+      const chat = {
+        ...docs,
+        categoryId: 'chat',
+        label: 'Chat',
+        required: true,
+        selected: other,
+        candidates: [other],
+      };
+      integrationPreview = {
+        admitted: true,
+        scope: 'static',
+        issues: [],
+        categories: [docs, chat],
+      };
+      const view = await mount();
+      chooseType(view, 'scoped');
+      pick(view, 'repo-a');
+      await view.flush();
+      await view.flush();
+      fire.type(controls(view.tree(), /^title/)[0]!, 'Retain my draft');
+      fire.type(controls(view.tree(), /^description/)[0]!, 'Keep this description too.');
+      view.draw();
+      fire.type(controls(view.tree(), /^documents account/i)[0]!, 'account-a');
+      view.draw();
+      await view.flush();
+      fire.type(controls(view.tree(), /^chat account/i)[0]!, 'account-b');
+      view.draw();
+      await view.flush();
+      const latestChoices = () =>
+        JSON.parse(
+          new URL(
+            sent
+              .filter((request) => request.startsWith('GET /tasks/integration-preview'))
+              .at(-1)!
+              .slice(4),
+            'http://localhost',
+          ).searchParams.get('choices') ?? '[]',
+        );
+      const removed = {
+        ...docs,
+        status: 'unresolved',
+        reason: 'needs-choice',
+        selected: null,
+        candidates: [],
+      };
+      integrationPreview = {
+        admitted: !required,
+        scope: 'static',
+        issues: [],
+        categories: [removed, chat],
+      };
+      fire.click(buttons(view.tree(), /^refresh accounts$/i)[0]!);
+      view.draw();
+      await view.flush();
+      expect(latestChoices()).toEqual([
+        { categoryId: 'rich-documents', connectionId: 'account-a' },
+        { categoryId: 'chat', connectionId: 'account-b' },
+      ]);
+      const picker = controls(view.tree(), /^documents account/i)[0]!;
+      // A matching unavailable option makes the native selected value honest and lets a user
+      // change it to Automatic. Old React DOM instead displayed the sole empty option.
+      const missing = findAll(
+        picker,
+        (host) => host.tag === 'option' && host.props.value === 'account-a',
+      );
+      expect(missing).toHaveLength(1);
+      expect(isDisabled(missing[0]!)).toBe(true);
+      expect(textOf(missing[0]!)).toContain('unavailable');
+      holdIntegrationPreview = true;
+      fire.type(picker, '');
+      view.draw();
+      await view.flush();
+      expect(latestChoices()).toEqual([{ categoryId: 'chat', connectionId: 'account-b' }]);
+      expect(isDisabled(submit(view))).toBe(true);
+      await release(view, waiting().at(-1)!, 200, {
+        admitted: !required,
+        scope: 'static',
+        issues: [],
+        categories: [{ ...removed, reason: 'no-connection' }, chat],
+      });
+      expect(valueOf(controls(view.tree(), /^title/)[0]!)).toBe('Retain my draft');
+      expect(valueOf(controls(view.tree(), /^description/)[0]!)).toBe('Keep this description too.');
+      expect(valueOf(controls(view.tree(), /^chat account/i)[0]!)).toBe('account-b');
+      expect(isDisabled(submit(view))).toBe(required);
+      await submitForm(view);
+      if (required) expect(posted).toEqual([]);
+      else
+        expect(posted).toMatchObject([
+          {
+            title: 'Retain my draft',
+            description: 'Keep this description too.',
+            integrationChoices: [{ categoryId: 'chat', connectionId: 'account-b' }],
+          },
+        ]);
+    },
+  );
+  it('does not gate creation on an unresolved optional requirement', async () => {
+    integrationPreview = unresolved(false);
+    const view = await mount();
+    chooseType(view, 'scoped');
+    pick(view, 'repo-a');
+    await view.flush();
+    expect(isDisabled(submit(view))).toBe(false);
+    expect(page(view)).toContain('Optional');
+    fire.type(controls(view.tree(), /^title/)[0]!, 'Optional integrations without choices');
+    view.draw();
+    await submitForm(view);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).not.toHaveProperty('integrationChoices');
+  });
+});
+
+it('invalidates a Workflow preview when a failed reset changes the actual create type to onboarding', async () => {
+  vi.stubGlobal('window', { confirm: () => true });
+  holdIntegrationPreview = true;
+  const view = await mount();
+  pick(view, 'repo-a');
+  await answer(view, 'repo-a', 200, status({ onboarded: true }));
+  const old = [...held.keys()].find(
+    (key) => key.startsWith('GET /tasks/integration-preview') && key.includes('type=workflow'),
+  )!;
+  fire.click(buttons(view.tree(), /^re-run onboarding$/)[0]!);
+  await view.flush();
+  await release(view, RESET('repo-a'), 500, { error: 'Reset diagnosis retained' });
+  await answer(view, 'repo-a', 200, status({ missing: ['knowledge base'] }));
+  expect(page(view)).toContain('Will run: onboarding');
+  await release(view, old, 200, {
+    admitted: true,
+    scope: 'dispatch-time',
+    categories: [],
+    issues: [],
+  });
+  expect(isDisabled(submit(view))).toBe(true);
+  expect(page(view)).toContain('Reset diagnosis retained');
+  const current = [...held.keys()].find(
+    (key) => key.startsWith('GET /tasks/integration-preview') && key.includes('type=onboarding'),
+  )!;
+  await release(view, current, 200, {
+    admitted: true,
+    scope: 'static',
+    categories: [],
+    issues: [],
+  });
+  expect(isDisabled(submit(view))).toBe(false);
+  expect(page(view)).toContain('Reset diagnosis retained');
+  Reflect.deleteProperty(globalThis, 'window');
 });

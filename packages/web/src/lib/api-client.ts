@@ -1,3 +1,4 @@
+import type { TaskIntegrationChoice, TaskIntegrationPreview } from '@haive/shared';
 import type { IntegrationConnection, IntegrationProvider } from './integrations';
 import type { SidebarTree } from './sidebar-tree';
 import type { TaskToneFilter } from './task-tone';
@@ -2797,3 +2798,18 @@ export const getRepositoryIntegrations = (repositoryId: string) =>
 
 export const saveRepositoryIntegrations = (repositoryId: string, body: RepositoryIntegrationList) =>
   api.put<RepositoryIntegrationList>(repositoryIntegrationsPath(repositoryId), body);
+
+export function getTaskIntegrationPreview(input: {
+  type: string;
+  repositoryId?: string;
+  choices: readonly TaskIntegrationChoice[];
+}) {
+  const query = new URLSearchParams({ type: input.type, choices: JSON.stringify(input.choices) });
+  if (input.repositoryId) query.set('repositoryId', input.repositoryId);
+  return api.get<TaskIntegrationPreview>(`/tasks/integration-preview?${query}`);
+}
+
+export const getIntegrationCategories = () =>
+  api.get<{
+    categories: { id: string; label: string; moduleId: string | null; moduleName: string | null }[];
+  }>('/integrations/categories');

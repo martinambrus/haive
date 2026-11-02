@@ -382,6 +382,56 @@ both pinned by tests); a connection that is not the caller's is 404, missing and
 completed or cancelled task is 409 (a failed one can still change) and a dead one 409 `task_dead`.
 Admins get no override on another user's preferences, repositories or tasks.
 
+## New Task admission
+
+`GET /tasks/integration-preview?type=<slug>&repositoryId=<uuid>&choices=<JSON>` is an
+authenticated, read-only preview. `repositoryId` is optional and must name the caller's own
+repository. `choices` is an optional JSON array of `{categoryId, connectionId}`; the same array
+is accepted as `integrationChoices` on `POST /tasks`. It is strictly typed, accepts at most 64
+unique categories, and refuses unknown choice keys (including `remember`); the query's JSON
+text is capped at 24,000 characters. A choice names an account, with its provider derived on
+the server. Neither request creates a preference or a grant.
+
+The response is `{admitted, scope, categories, issues}`. Each category carries its id and label,
+`required` (true when any step requires it), its step contexts (`stepId`, title,
+`requirementId`, access and optional flag), current `status` and named `reason`, token-free
+`selected` account and `candidates`. Accounts contain only `connectionId`, `providerId`,
+`providerLabel`, `accountLabel` and structural connection `status`. Candidate discovery uses
+the same resolver with its choice and soft tiers cleared; status stays visible and never
+silently switches an unavailable account to a different one. The picker offers the account
+labels and directs unavailable accounts to Settings. Provider/module reasons remain open strings
+so a newer named reason can be displayed without inventing a new selection rule.
+
+For a static type the preview uses the definition's exact snapshot, the current catalog entries
+and the prompt steps that would be pinned on create. It aggregates categories across those steps;
+optional unresolved categories do not block. Invalid stored requirements and provider pins are
+reported in `issues` and refuse creation, matching the worker's dispatch refusal. `scope` is
+`static` for these lists. Dynamic built-in paths (`workflow_paths`, `run_app_modes`) and unseeded
+built-ins answer `scope: 'dispatch-time'`: the API does not reconstruct a worker run list and
+makes no claim about requirements on a path chosen later. No shipped core step currently declares
+integration requirements. The worker still resolves every dispatched step, for both scopes.
+
+A preview makes no vendor calls, refreshes no tokens and writes no task, event, job, choice,
+preference or grant. Creation re-evaluates the requirements against the definition read `FOR SHARE`
+inside its existing insert transaction; relevant catalog rows are also read `FOR SHARE`. Explicit
+accounts are revalidated for owner, user scope, category/provider, repository fit, allow-list,
+provider enablement and connected status. A refusal writes nothing. An unresolved required category
+answers 409 `{code: 'integration-admission-required', error, integrationPreview}` with a fresh preview.
+Success writes the requested choices and `task.integration_choice_changed` events
+(`remembered: false`) in the task/event/queue-state transaction, then enqueues only after commit.
+A failed choice/event/queue-state write rolls the task back too. Existing root, upgrade,
+database and attachment admission stays in that transaction. This is account admission only:
+the owner's write switch and broker permissions still decide which operations can run, and the
+worker's dispatch resolution remains final authority when accounts or provider state change later.
+
+New Task checks the actual create type (including Workflow's inferred onboarding/workflow type),
+repository and explicit choices. It discards old responses, gates Create while the current check is
+pending, failed or missing a required account, and rechecks each account choice. Optional unresolved
+categories remain nonblocking. The onboarding readiness/reset checks retain their own state and errors;
+changing an inferred type invalidates the integration preview without clearing entered form text.
+Settings opens in another tab, and Refresh accounts rechecks a newly connected account while
+keeping the draft. A create-time admission refusal refreshes the preview without resending creation.
+
 ## Forges
 
 `@haive/shared/forge` holds the forge code that needs no database: the types and typed errors,

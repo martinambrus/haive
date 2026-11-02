@@ -1,5 +1,10 @@
 import { normalizeStepFormValues } from '@haive/shared/schemas';
 import { Hono } from 'hono';
+import { taskIntegrationChoicesSchema, taskIntegrationPreviewQuerySchema } from '@haive/shared';
+import {
+  admitTaskIntegrations,
+  taskIntegrationPreview,
+} from '../../lib/task-integration-admission.js';
 import {
   and,
   asc,
@@ -707,7 +712,13 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
       if (!normalized.success) throw new HttpError(400, normalized.issues.join('; '));
       normalizedPreAnswers![stepId] = normalized.data;
     }
-    return await handle
+    const integrationPicks = await admitTaskIntegrations(handle, {
+      userId,
+      repositoryId: body.repositoryId ?? null,
+      definition: locked,
+      choices: body.integrationChoices ?? [],
+    });
+    const rows = await handle
       .insert(schema.tasks)
       .values({
         userId,
@@ -750,6 +761,19 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
         expectedAttachmentCount: body.deferStart ? (body.expectedAttachmentCount ?? null) : null,
       })
       .returning();
+    const created = rows[0];
+    if (created && integrationPicks.length > 0) {
+      await handle
+        .insert(schema.taskIntegrationChoices)
+        .values(integrationPicks.map((pick) => ({ taskId: created.id, ...pick })));
+      for (const pick of integrationPicks)
+        await appendTaskEvent(handle, created.id, null, 'task.integration_choice_changed', {
+          ...pick,
+          remembered: false,
+          by: userId,
+        });
+    }
+    return rows;
   };
   const firstRow = (rows: (typeof schema.tasks.$inferSelect)[]) => {
     const [row] = rows;
@@ -849,6 +873,41 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
   if (queued) await enqueueStart(task.id, userId);
 
   return c.json({ task: queued ?? task }, 201);
+});
+
+// Read-only draft account resolution, registered before /:id.
+taskRoutes.get('/integration-preview', async (c) => {
+  const query = taskIntegrationPreviewQuerySchema.parse(c.req.query());
+  let rawChoices: unknown = [];
+  if (query.choices !== undefined) {
+    try {
+      rawChoices = JSON.parse(query.choices);
+    } catch {
+      throw new HttpError(400, 'Invalid integration choices');
+    }
+  }
+  const choices = taskIntegrationChoicesSchema.parse(rawChoices);
+  const userId = c.get('userId');
+  const db = getDb();
+  if (query.repositoryId) {
+    const repo = await db.query.repositories.findFirst({
+      where: and(
+        eq(schema.repositories.id, query.repositoryId),
+        eq(schema.repositories.userId, userId),
+      ),
+      columns: { id: true },
+    });
+    if (!repo) throw new HttpError(404, 'Repository not found');
+  }
+  const definition = await definitionForCreate(db, query.type, { generic: true });
+  return c.json(
+    await taskIntegrationPreview(db, {
+      userId,
+      repositoryId: query.repositoryId ?? null,
+      definition,
+      choices,
+    }),
+  );
 });
 
 // Feature/area autocomplete: distinct `metadata.feature` values previously used

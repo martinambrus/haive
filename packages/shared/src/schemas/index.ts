@@ -7,6 +7,7 @@ export * from './db-dumps.js';
 export * from './task-attachments.js';
 export * from './bundles.js';
 export * from './tasks.js';
+export * from './task-integrations.js';
 export * from './dag.js';
 export * from './cli-providers.js';
 export * from './user-settings.js';
