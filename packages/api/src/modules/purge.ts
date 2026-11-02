@@ -9,6 +9,7 @@ import {
   deleteModuleIntegrations,
   emptyModuleIntegrationCounts,
   moduleIntegrationDependents,
+  moduleIntegrationPredicates,
   moduleIntegrationTaskPredicate,
   type ModuleIntegrationCounts,
 } from './purge-integrations.js';
@@ -123,6 +124,14 @@ async function purgeAfterDrop(
       await tx.execute(
         sql`LOCK TABLE ${schema.integrationProviderConfigs}, ${schema.integrationConnections}, ${schema.integrationUserSettings}, ${schema.integrationCategoryPreferences}, ${schema.taskIntegrationChoices}, ${schema.integrationGrants} IN SHARE ROW EXCLUSIVE MODE NOWAIT`,
       );
+      // A disconnect's SELECT FOR UPDATE holds compatible ROW SHARE before DELETE.
+      // Refuse its owned row now, so neither request waits on the other's later lock.
+      await tx
+        .select({ id: schema.integrationConnections.id })
+        .from(schema.integrationConnections)
+        .where(moduleIntegrationPredicates(moduleId).connections)
+        .orderBy(asc(schema.integrationConnections.id))
+        .for('update', { noWait: true });
       // Stabilize status changes for every task whose direct binding we would remove.
       await tx
         .select({ id: schema.tasks.id })

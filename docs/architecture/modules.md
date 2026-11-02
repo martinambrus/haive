@@ -177,7 +177,11 @@ the module loads again.
   transaction: a refused audit or a module that came back rolls those changes back. The latter
   still gets the existing best-effort partial-purge audit with zero integration deletions.
   Type rows lock before the module row. Brief `SHARE ROW EXCLUSIVE NOWAIT` locks on the six
-  integration configuration/binding tables prevent an intervening binding or account write;
+  integration configuration/binding tables prevent an intervening binding or account write.
+  They admit `ROW SHARE`, so owned connection rows are then taken `FOR UPDATE NOWAIT`, with
+  the same ownership predicate as deletion: a disconnect that selected an account before its
+  DELETE refuses cleanup immediately, rather than deadlocking on the later table upgrade.
+  An unrelated account's row-only lock does not refuse this fence. Next,
   affected task rows take `FOR NO KEY UPDATE NOWAIT` to stabilize their status, then live direct
   bindings are checked again. A concurrent writer refuses this cleanup immediately rather than
   waiting with the type locks held. Database drop and Redis deletion are outside that transaction:

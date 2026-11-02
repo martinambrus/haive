@@ -107,8 +107,11 @@ that binding, while unrelated bindings and other modules' accounts/configuration
 
 Live tasks, dead ones included, with a directly affected choice or task grant refuse purge, even
 when their type/run list names no module step. The main-store transaction checks direct bindings
-again with writers fenced and affected task status rows held. A late live binding or concurrent
-writer after the module database has gone yields the existing incomplete-cleanup response, with
+again with writers fenced and affected task status rows held. The table fence permits a
+connection's row-only `FOR UPDATE` holder, so purge additionally locks owned connection rows
+`FOR UPDATE NOWAIT` before task status rows and deletion. This refuses a current disconnect
+before its DELETE can wait on purge's table lock; unrelated account row locks remain compatible.
+A late live binding or concurrent writer after the module database has gone yields the existing incomplete-cleanup response, with
 all main-store changes rolled back. See [Modules](modules.md) for lock ordering and retries.
 
 `integration_calls` are retained: their provider, tool, outcome and task/invocation references
