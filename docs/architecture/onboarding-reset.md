@@ -362,6 +362,13 @@ the repo still reads onboarded. That case is reported as a failure and touches n
 predicate is "an error occurred", never "nothing was removed" — a second reset over a clean tree
 also removes nothing and stays a no-op.
 
+The New Task page re-reads `/repos/:id/onboarding-status` after a failed reset too: files may
+already have gone before the route fails, including when the later database transaction fails.
+Create waits for this fresh answer and stays disabled if the read fails. The reset error is kept
+separately from the status-read error, so the new verdict or a Retry cannot erase the diagnosis.
+A fresh verdict can admit creation while that error remains visible. Existing request and
+repository-selection guards discard older answers; changing repositories clears the reset error.
+
 **Every piece of "onboarded" evidence is read against the epoch, not just the column.** Guarding
 `onboarded_at` alone was cosmetic: the completed onboarding task row lives forever, so
 `hasCompleted` kept answering yes across a reset. `resolveOnboardingVerdict` therefore requires a

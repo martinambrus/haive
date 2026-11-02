@@ -267,6 +267,7 @@ export default function NewTaskPage() {
   const [onboardingStatus, setOnboardingStatus] = useState<OnboardingStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
+  const [resetError, setResetError] = useState<string | null>(null);
   // Only a Workflow choice is inferred from the repository; a custom type is exactly what was picked.
   const inferredType: WorkflowType | null = isRunApp
     ? 'run_app'
@@ -380,6 +381,7 @@ export default function NewTaskPage() {
     setRepositoryId(id);
     setOnboardingStatus(null);
     setStatusError(null);
+    setResetError(null);
     setResetNote(null);
     setParentTaskId('');
     setParentOptions(null);
@@ -584,6 +586,7 @@ export default function NewTaskPage() {
     );
     if (!confirmed) return;
     setResetting(true);
+    setResetError(null);
     setResetNote(null);
     try {
       const res = await api.delete<{
@@ -622,7 +625,10 @@ export default function NewTaskPage() {
       await refreshStatus(repositoryId);
     } catch (err) {
       if (statusRepoId.current === repositoryId) {
-        setStatusError((err as Error).message ?? 'Failed to reset onboarding');
+        setResetError((err as Error).message ?? 'Failed to reset onboarding');
+        // Files may have been removed before the reset failed. Only a fresh answer can
+        // vouch for readiness; keep the reset diagnosis beside that independent read.
+        await refreshStatus(repositoryId);
       }
     } finally {
       setResetting(false);
@@ -924,10 +930,12 @@ export default function NewTaskPage() {
           {repositoryId && fields.onboardingStatus && (
             <div className="mt-1 rounded-md border border-neutral-800 bg-neutral-900/40 px-3 py-2 text-xs">
               {statusLoading && <span className="text-neutral-400">Checking onboarding...</span>}
-              {statusError && (
+              {(resetError || statusError) && (
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-red-400">{statusError}</span>
-                  {/* A failed check leaves no verdict; a failed reset or mark keeps its button. */}
+                  <span className="text-red-400">
+                    {[resetError, statusError].filter(Boolean).join(' ')}
+                  </span>
+                  {/* A failed check leaves no verdict; a fresh verdict restores its own actions. */}
                   {!onboardingStatus && (
                     <Button
                       type="button"
