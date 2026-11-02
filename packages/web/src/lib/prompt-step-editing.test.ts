@@ -361,7 +361,7 @@ it('detects integration-only edits and accepts registered module categories', ()
   const integration = { id: 'docs', category: 'module.notes.docs', access: 'read' as const };
   const start = { a: entry('a') };
   const next = {
-    a: entry('a', { integrations: [integration], template: '{{integration:docs.account}}' }),
+    a: entry('a', { integrations: [integration] }),
   };
   expect(samePromptSteps(start, next)).toBe(false);
   expect(samePromptSteps(next, { a: { ...next.a } })).toBe(true);

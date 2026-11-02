@@ -59,57 +59,66 @@ export function TaskIntegrationPicker({
           </Button>
         </div>
       )}
-      {preview?.categories.map((category) => (
-        <div key={category.categoryId} className="flex min-w-0 flex-col gap-1">
-          <label className="flex min-w-0 flex-col gap-1 text-sm">
-            {category.label} account ({category.required ? 'Required' : 'Optional'})
-            <select
-              aria-label={`${category.label} account`}
-              value={
-                choices.find((pick) => pick.categoryId === category.categoryId)?.connectionId ?? ''
-              }
-              className="h-11 w-full min-w-0 max-w-full rounded-md border border-neutral-800 bg-neutral-950 px-2 text-sm"
-              onChange={(event) =>
-                onChange([
-                  ...choices.filter((pick) => pick.categoryId !== category.categoryId),
-                  ...(event.target.value
-                    ? [{ categoryId: category.categoryId, connectionId: event.target.value }]
-                    : []),
-                ])
-              }
-            >
-              <option value="">
-                {category.selected
-                  ? `Automatic: ${category.selected.accountLabel ?? category.selected.providerLabel} (${category.selected.providerLabel})`
-                  : 'Choose an account'}
-              </option>
-              {category.candidates.map((account) => (
-                <option
-                  key={account.connectionId}
-                  value={account.connectionId}
-                  disabled={account.status !== 'connected'}
-                >
-                  {account.accountLabel ?? account.providerLabel} ({account.providerLabel})
-                  {account.status !== 'connected' ? ' — reconnect required' : ''}
+      {preview?.categories.map((category) => {
+        const choice = choices.find((pick) => pick.categoryId === category.categoryId);
+        return (
+          <div key={category.categoryId} className="flex min-w-0 flex-col gap-1">
+            <label className="flex min-w-0 flex-col gap-1 text-sm">
+              {category.label} account ({category.required ? 'Required' : 'Optional'})
+              <select
+                aria-label={`${category.label} account`}
+                value={choice?.connectionId ?? ''}
+                className="h-11 w-full min-w-0 max-w-full rounded-md border border-neutral-800 bg-neutral-950 px-2 text-sm"
+                onChange={(event) =>
+                  onChange([
+                    ...choices.filter((pick) => pick.categoryId !== category.categoryId),
+                    ...(event.target.value
+                      ? [{ categoryId: category.categoryId, connectionId: event.target.value }]
+                      : []),
+                  ])
+                }
+              >
+                <option value="">
+                  {category.selected
+                    ? `Automatic: ${category.selected.accountLabel ?? category.selected.providerLabel} (${category.selected.providerLabel})`
+                    : 'Choose an account'}
                 </option>
-              ))}
-            </select>
-          </label>
-          <InlineMarkdown
-            body={`Used by: ${[...new Set(category.steps.map((step) => step.title))].join(', ')}`}
-            className="text-xs text-neutral-500 [overflow-wrap:anywhere]"
-          />
-          {category.status === 'unresolved' && (
+                {choice &&
+                  !category.candidates.some(
+                    (account) => account.connectionId === choice.connectionId,
+                  ) && (
+                    <option value={choice.connectionId} disabled>
+                      Previously selected account (unavailable)
+                    </option>
+                  )}
+                {category.candidates.map((account) => (
+                  <option
+                    key={account.connectionId}
+                    value={account.connectionId}
+                    disabled={account.status !== 'connected'}
+                  >
+                    {account.accountLabel ?? account.providerLabel} ({account.providerLabel})
+                    {account.status !== 'connected' ? ' — reconnect required' : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
             <InlineMarkdown
-              body={
-                REASONS[category.reason ?? ''] ??
-                `Integration unavailable (${category.reason ?? 'unknown reason'}). Check Settings or contact an administrator.`
-              }
-              className="text-sm text-amber-300"
+              body={`Used by: ${[...new Set(category.steps.map((step) => step.title))].join(', ')}`}
+              className="text-xs text-neutral-500 [overflow-wrap:anywhere]"
             />
-          )}
-        </div>
-      ))}
+            {category.status === 'unresolved' && (
+              <InlineMarkdown
+                body={
+                  REASONS[category.reason ?? ''] ??
+                  `Integration unavailable (${category.reason ?? 'unknown reason'}). Check Settings or contact an administrator.`
+                }
+                className="text-sm text-amber-300"
+              />
+            )}
+          </div>
+        );
+      })}
       {!!preview?.issues.length && (
         <InlineMarkdown
           body="This task type has an unsupported integration requirement. Ask an administrator to repair the task type."

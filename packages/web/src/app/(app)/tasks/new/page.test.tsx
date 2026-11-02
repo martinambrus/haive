@@ -1387,6 +1387,112 @@ describe('New Task integration admission', () => {
     expect(isDisabled(submit(view))).toBe(false);
     expect(valueOf(controls(view.tree(), /^title/)[0]!)).toBe('Draft retained');
   });
+  it.each([false, true])(
+    'keeps a removed explicit account clearable (required=%s) without discarding the draft or another choice',
+    async (required) => {
+      const other = { ...account, connectionId: 'account-b', accountLabel: 'Chat account' };
+      const docs = {
+        ...unresolved(required).categories[0]!,
+        status: 'resolved',
+        reason: null,
+        selected: account,
+      };
+      const chat = {
+        ...docs,
+        categoryId: 'chat',
+        label: 'Chat',
+        required: true,
+        selected: other,
+        candidates: [other],
+      };
+      integrationPreview = {
+        admitted: true,
+        scope: 'static',
+        issues: [],
+        categories: [docs, chat],
+      };
+      const view = await mount();
+      chooseType(view, 'scoped');
+      pick(view, 'repo-a');
+      await view.flush();
+      await view.flush();
+      fire.type(controls(view.tree(), /^title/)[0]!, 'Retain my draft');
+      fire.type(controls(view.tree(), /^description/)[0]!, 'Keep this description too.');
+      view.draw();
+      fire.type(controls(view.tree(), /^documents account/i)[0]!, 'account-a');
+      view.draw();
+      await view.flush();
+      fire.type(controls(view.tree(), /^chat account/i)[0]!, 'account-b');
+      view.draw();
+      await view.flush();
+      const latestChoices = () =>
+        JSON.parse(
+          new URL(
+            sent
+              .filter((request) => request.startsWith('GET /tasks/integration-preview'))
+              .at(-1)!
+              .slice(4),
+            'http://localhost',
+          ).searchParams.get('choices') ?? '[]',
+        );
+      const removed = {
+        ...docs,
+        status: 'unresolved',
+        reason: 'needs-choice',
+        selected: null,
+        candidates: [],
+      };
+      integrationPreview = {
+        admitted: !required,
+        scope: 'static',
+        issues: [],
+        categories: [removed, chat],
+      };
+      fire.click(buttons(view.tree(), /^refresh accounts$/i)[0]!);
+      view.draw();
+      await view.flush();
+      expect(latestChoices()).toEqual([
+        { categoryId: 'rich-documents', connectionId: 'account-a' },
+        { categoryId: 'chat', connectionId: 'account-b' },
+      ]);
+      const picker = controls(view.tree(), /^documents account/i)[0]!;
+      // A matching unavailable option makes the native selected value honest and lets a user
+      // change it to Automatic. Old React DOM instead displayed the sole empty option.
+      const missing = findAll(
+        picker,
+        (host) => host.tag === 'option' && host.props.value === 'account-a',
+      );
+      expect(missing).toHaveLength(1);
+      expect(isDisabled(missing[0]!)).toBe(true);
+      expect(textOf(missing[0]!)).toContain('unavailable');
+      holdIntegrationPreview = true;
+      fire.type(picker, '');
+      view.draw();
+      await view.flush();
+      expect(latestChoices()).toEqual([{ categoryId: 'chat', connectionId: 'account-b' }]);
+      expect(isDisabled(submit(view))).toBe(true);
+      await release(view, waiting().at(-1)!, 200, {
+        admitted: !required,
+        scope: 'static',
+        issues: [],
+        categories: [{ ...removed, reason: 'no-connection' }, chat],
+      });
+      expect(valueOf(controls(view.tree(), /^title/)[0]!)).toBe('Retain my draft');
+      expect(valueOf(controls(view.tree(), /^description/)[0]!)).toBe('Keep this description too.');
+      expect(valueOf(controls(view.tree(), /^chat account/i)[0]!)).toBe('account-b');
+      expect(isDisabled(submit(view))).toBe(required);
+      await submitForm(view);
+      if (required) expect(posted).toEqual([]);
+      else
+        expect(posted).toMatchObject([
+          {
+            title: 'Retain my draft',
+            description: 'Keep this description too.',
+            integrationChoices: [{ categoryId: 'chat', connectionId: 'account-b' }],
+          },
+        ]);
+    },
+  );
   it('does not gate creation on an unresolved optional requirement', async () => {
     integrationPreview = unresolved(false);
     const view = await mount();

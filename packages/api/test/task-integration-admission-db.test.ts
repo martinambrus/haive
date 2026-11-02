@@ -6,12 +6,11 @@ import { createDatabase, schema, type Database } from '@haive/database';
 const url = process.env.TASK_INTEGRATION_ADMISSION_TEST_URL;
 if (url) {
   const parsed = new URL(url);
-  if (
-    parsed.hostname !== '127.0.0.1' ||
-    parsed.port !== '45553' ||
-    !parsed.pathname.startsWith('/ti_admission_')
-  )
-    throw new Error('Use owned scratch PostgreSQL 45553 /ti_admission_*');
+  const localScratch = parsed.hostname === '127.0.0.1' && parsed.port === '45553';
+  const ciScratch =
+    process.env.CI === 'true' && parsed.hostname === 'localhost' && parsed.port === '5432';
+  if (!parsed.pathname.startsWith('/ti_admission_') || !(localScratch || ciScratch))
+    throw new Error('Use owned /ti_admission_* scratch PostgreSQL (local45553 or CI service)');
 }
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
@@ -178,29 +177,25 @@ describe.skipIf(!url)('task integration preview and atomic admission on Postgres
       })
       .returning();
     repoId = repo!.id;
-    await db
-      .insert(schema.stepCatalog)
-      .values({
-        stepId: '00-model-health-workflow',
-        source: 'core',
-        title: 'Health',
-        workflowType: 'workflow',
-        dispatchesCli: true,
-        allowSkip: false,
-        providerSensitive: false,
-        composable: false,
-      });
-    await db
-      .insert(schema.taskTypeDefinitions)
-      .values({
-        slug: TYPE,
-        displayName: 'Review',
-        source: 'admin',
-        runListStrategy: 'static',
-        stepIds: [STEP],
-        promptSteps: { review: prompt([requirement()]) },
-        requiresRepository: true,
-      });
+    await db.insert(schema.stepCatalog).values({
+      stepId: '00-model-health-workflow',
+      source: 'core',
+      title: 'Health',
+      workflowType: 'workflow',
+      dispatchesCli: true,
+      allowSkip: false,
+      providerSensitive: false,
+      composable: false,
+    });
+    await db.insert(schema.taskTypeDefinitions).values({
+      slug: TYPE,
+      displayName: 'Review',
+      source: 'admin',
+      runListStrategy: 'static',
+      stepIds: [STEP],
+      promptSteps: { review: prompt([requirement()]) },
+      requiresRepository: true,
+    });
     own = await connection();
   });
   it('authenticates and validates the literal preview route', async () => {
@@ -357,35 +352,31 @@ describe.skipIf(!url)('task integration preview and atomic admission on Postgres
   });
   it('aggregates catalog/module and pinned prompt requirements for one category with all step contexts', async () => {
     const stepId = 'module.fixture.review';
-    await db
-      .insert(schema.modules)
-      .values({
-        moduleId: 'fixture',
-        packageName: '@haive/module-fixture',
-        name: 'Fixture module',
-        installedVersion: '1.0.0',
-      });
-    await db
-      .insert(schema.stepCatalog)
-      .values({
+    await db.insert(schema.modules).values({
+      moduleId: 'fixture',
+      packageName: '@haive/module-fixture',
+      name: 'Fixture module',
+      installedVersion: '1.0.0',
+    });
+    await db.insert(schema.stepCatalog).values({
+      stepId,
+      source: 'module:fixture',
+      title: 'Module review',
+      workflowType: 'module.fixture',
+      dispatchesCli: true,
+      allowSkip: false,
+      providerSensitive: false,
+      composable: true,
+      entry: {
         stepId,
-        source: 'module:fixture',
-        title: 'Module review',
-        workflowType: 'module.fixture',
+        label: 'Module review',
+        group: 'build',
         dispatchesCli: true,
-        allowSkip: false,
-        providerSensitive: false,
-        composable: true,
-        entry: {
-          stepId,
-          label: 'Module review',
-          group: 'build',
-          dispatchesCli: true,
-          requires: [],
-          provides: [],
-          integrations: [{ id: 'forge', category: 'forge', access: 'write' }],
-        },
-      });
+        requires: [],
+        provides: [],
+        integrations: [{ id: 'forge', category: 'forge', access: 'write' }],
+      },
+    });
     await db
       .update(schema.taskTypeDefinitions)
       .set({ stepIds: [stepId, STEP] })
@@ -431,19 +422,17 @@ describe.skipIf(!url)('task integration preview and atomic admission on Postgres
       provides: [],
       integrations: [requirement()],
     };
-    await db
-      .insert(schema.stepCatalog)
-      .values({
-        stepId,
-        source: 'core',
-        title: 'Catalog review',
-        workflowType: 'workflow',
-        dispatchesCli: true,
-        allowSkip: false,
-        providerSensitive: false,
-        composable: true,
-        entry: catalogEntry,
-      });
+    await db.insert(schema.stepCatalog).values({
+      stepId,
+      source: 'core',
+      title: 'Catalog review',
+      workflowType: 'workflow',
+      dispatchesCli: true,
+      allowSkip: false,
+      providerSensitive: false,
+      composable: true,
+      entry: catalogEntry,
+    });
     await db
       .update(schema.taskTypeDefinitions)
       .set({ stepIds: [stepId, STEP] })
