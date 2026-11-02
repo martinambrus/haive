@@ -1,3 +1,4 @@
+import type { EnvelopeEncrypted } from '../crypto/index.js';
 import {
   CONTAINER_FAMILY,
   composeContainerName,
@@ -526,6 +527,8 @@ export interface CliProbeJobPayload {
   providerId: string;
   userId: string;
   targetMode: CliProbeTargetMode;
+  /** Login-only credential, envelope encrypted before entering Redis. Never an active secret. */
+  oauthCandidate?: EnvelopeEncrypted;
 }
 
 export interface SandboxImageBuildJobPayload {

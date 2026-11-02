@@ -280,7 +280,11 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
     it(`captured login token: ${refused ? 'refusal keeps prior secret and legacy environment' : 'commits token, scrub and audit together'}`, async () => {
       await db
         .update(schema.cliProviders)
-        .set({ envVars: { CLAUDE_CODE_OAUTH_TOKEN: 'legacy-token', KEEP: 'yes' } })
+        .set({
+          envVars: { CLAUDE_CODE_OAUTH_TOKEN: 'legacy-token', KEEP: 'yes' },
+          authStatus: 'auth_expired',
+          authMessage: 'old failure',
+        })
         .where(eq(schema.cliProviders.id, provider));
       const before = await db.query.cliProviders.findFirst({
         where: eq(schema.cliProviders.id, provider),
@@ -303,10 +307,43 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
           (await db.query.cliProviders.findFirst({ where: eq(schema.cliProviders.id, provider) }))!
             .envVars,
         ).toEqual({ KEEP: 'yes' });
+        const refreshed = await db.query.cliProviders.findFirst({
+          where: eq(schema.cliProviders.id, provider),
+        });
+        expect(refreshed?.authStatus).toBe('ok');
+        expect(refreshed?.authMessage).toBe('authenticated');
+        expect(refreshed?.authLastCheckedAt).toBeInstanceOf(Date);
       }
       expect(await audits(db)).toHaveLength(refused ? 0 : 1);
     });
   }
+  it('cancellation during promotion rolls back its audit and preserves the active credential and profile', async () => {
+    await saveCliLoginSecret(db, h.actor, provider, 'previous-working-token');
+    await db
+      .update(schema.cliProviders)
+      .set({ authStatus: 'auth_expired', authMessage: 'previous status' })
+      .where(eq(schema.cliProviders.id, provider));
+    const priorSecrets = await secrets();
+    const priorProvider = await db.query.cliProviders.findFirst({
+      where: eq(schema.cliProviders.id, provider),
+    });
+    const priorAudits = await audits(db);
+    let cancelled = false;
+    h.auditInsert.mockImplementationOnce(() => {
+      cancelled = true;
+    });
+    await expect(
+      saveCliLoginSecret(db, h.actor, provider, 'candidate-token', () => {
+        if (cancelled) throw new Error('login cancelled');
+      }),
+    ).rejects.toThrow('login cancelled');
+    expect(JSON.stringify(await secrets()) === JSON.stringify(priorSecrets)).toBe(true);
+    expect(
+      await db.query.cliProviders.findFirst({ where: eq(schema.cliProviders.id, provider) }),
+    ).toEqual(priorProvider);
+    expect(await audits(db)).toEqual(priorAudits);
+  });
+
   it('a refused vendor exchange rolls back the audit and leaves no token', async () => {
     h.exchange.mockRejectedValue(new Error('vendor refused'));
     const res = await send('POST', 'usage-auth/complete', { code: 'code#state' });

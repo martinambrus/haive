@@ -1,6 +1,6 @@
 import { asc, eq, inArray, ne, or } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { getCliProviderMetadata, type CliProviderName } from '@haive/shared';
+import { getCliProviderMetadata, splitSecretLikeEnv, type CliProviderName } from '@haive/shared';
 import type { CliProbePathResult } from '@haive/shared';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { defaultDockerRunner, type DockerRunner } from '../../sandbox/docker-runner.js';
@@ -170,7 +170,15 @@ export async function probeCliPath(
   adapter: BaseCliAdapter,
   provider: CliProviderRecord,
   secrets: Record<string, string> = {},
+  { candidateOnly = false }: { candidateOnly?: boolean } = {},
 ): Promise<CliProbePathResult> {
+  if (candidateOnly) {
+    if (provider.name !== 'claude-code') return { ok: false };
+    // Keep the configured command/wrapper and endpoint, but supply no competing legacy
+    // credential. Encrypted provider secrets are not resolved by this probe's caller.
+    const { ANTHROPIC_CUSTOM_HEADERS: _headers, ...env } = provider.envVars ?? {};
+    provider = { ...provider, envVars: splitSecretLikeEnv(env).envVars };
+  }
   const startedAt = Date.now();
   const resolvedCommand = resolveProviderExecutable(adapter, provider);
   let sandboxImage: string | null;
@@ -184,7 +192,7 @@ export async function probeCliPath(
     };
   }
   let authMounts: Awaited<ReturnType<typeof resolveCliAuthMounts>> = [];
-  if (isAuthProbeSupported(provider.name)) {
+  if (!candidateOnly && isAuthProbeSupported(provider.name)) {
     authMounts = resolveCliAuthMounts(
       {
         userId: provider.userId,

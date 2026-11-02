@@ -321,3 +321,18 @@ not into the env, and writes a fresh one each time the shell is opened again and
 reaper, once half its expiry has passed, so a shell kept open for days still pushes. The helper
 reads only that file, and the route takes only this token: the env fallback and the older two-part
 token keyed with the raw secret went once the last of them had expired.
+
+Captured Claude OAuth credentials are verified before promotion. The login API envelope-encrypts
+its candidate with purpose, user and provider bindings before putting it on `cli-probe`; the
+worker decrypts it for that probe only. It resolves no active provider secrets, mounts no shared
+auth volume, removes competing legacy credentials from provider env, and overlays the candidate
+`CLAUDE_CODE_OAUTH_TOKEN`. The configured executable/wrapper and ordinary provider settings still
+apply. Candidate output is reduced to fixed diagnostics before returning through the queue, and
+candidate probes never write active provider health.
+
+Only an explicitly successful authenticated result can promote the candidate. The API checks
+that the login socket is still open before promotion and across the transaction's awaited writes;
+a close observed before the final check rolls back the credential, health and audit together.
+Failure, an unknown/missing result, a thrown probe, session revocation or timeout preserves the
+previous credential and profile. Successful promotion updates encrypted storage, legacy-env
+cleanup, active auth health and its audit in one transaction, then requests the usage tick.

@@ -13,10 +13,13 @@ import {
   INCOMPLETE_ANSI_ESCAPE,
   TOKEN_PASTE_PROVIDERS,
   detectAuthResult,
+  encryptCliLoginCandidate,
+  secretsService,
   extractDeviceCode,
   extractWrappedUrl,
   logger,
   stripAnsi,
+  type EnvelopeEncrypted,
   type CliLoginCreateJobPayload,
   type CliLoginCreateResult,
   type CliProbeJobPayload,
@@ -1095,35 +1098,47 @@ function stopCaptureWatchdog(session: BannerSession): void {
   }
 }
 
-/** Persist the captured long-lived OAuth token into provider.envVars as
- *  CLAUDE_CODE_OAUTH_TOKEN, then re-run the probe so the UI reflects actual
- *  auth state. The probe spec already forwards provider.envVars to claude. */
+/** Verify this capture in isolation before replacing the active encrypted credential. */
 async function saveOauthTokenAndProbe(session: BannerSession, oauthToken: string): Promise<void> {
+  const assertActive = (): void => {
+    if (session.abort.aborted || session.cleanedUp || session.ws.readyState !== WebSocket.OPEN) {
+      throw new LoginCancelled();
+    }
+  };
   try {
-    await saveCliLoginSecret(getDb(), session.userId, session.providerId, oauthToken);
-    log.info({ providerId: session.providerId }, 'oauth token saved to encrypted secret');
+    assertActive();
+    const candidate = encryptCliLoginCandidate(
+      session.userId,
+      session.providerId,
+      oauthToken,
+      await secretsService.getMasterKek(),
+    );
+    assertActive();
     const result = await enqueueProbe(
       session.providerId,
       session.userId,
       session.abort,
       session.ws,
       session.pending,
+      candidate,
     );
-    log.info(
-      {
-        providerId: session.providerId,
-        authStatus: result?.cli?.authStatus,
-        wsOpen: session.ws.readyState === WebSocket.OPEN,
-      },
-      'probe returned, sending saved',
-    );
+    assertActive();
+    if (result?.ok !== true || result.cli?.ok !== true || result.cli.authStatus !== 'ok') {
+      wsSend(session.ws, {
+        type: 'error',
+        message:
+          'Captured credentials could not be verified. Existing credentials were kept. Retry the login.',
+      });
+      return;
+    }
+    await saveCliLoginSecret(getDb(), session.userId, session.providerId, oauthToken, assertActive);
+    requestUsagePoll();
+    log.info({ providerId: session.providerId }, 'verified oauth token saved to encrypted secret');
     wsSend(session.ws, { type: 'saved', result });
   } catch (err) {
-    // The token is already saved by this point; a cancel here only abandons the verification
-    // probe, so it is not a failure and there is no socket left to tell.
     if (err instanceof LoginCancelled) {
       log.info({ providerId: session.providerId }, 'login dialog closed while verifying');
-      return; // the finally below still clears probePending and tears the session down
+      return;
     }
     log.error(
       { error: safeErrorDetails(err), providerId: session.providerId },
@@ -1158,7 +1173,7 @@ async function runProbeAndSave(session: BannerSession): Promise<void> {
     );
     wsSend(session.ws, { type: 'saved', result });
   } catch (err) {
-    // Same as saveOauthTokenAndProbe: the login itself already landed, so a cancel during
+    // The volume-based login already landed, so a cancel during
     // verification is the user leaving, not a failure to report.
     if (err instanceof LoginCancelled) {
       log.info({ providerId: session.providerId }, 'login dialog closed while verifying');
@@ -1293,30 +1308,47 @@ async function enqueueProbe(
   abort: AbortHandle,
   ws: WebSocket,
   pending: { job: Job | null },
+  oauthCandidate?: EnvelopeEncrypted,
 ): Promise<CliProbeResult> {
+  if (abort.aborted) throw new LoginCancelled();
   const queue = getCliExecQueue();
-  const payload: CliProbeJobPayload = { providerId, userId, targetMode: 'cli' };
+  const payload: CliProbeJobPayload = {
+    providerId,
+    userId,
+    targetMode: 'cli',
+    ...(oauthCandidate ? { oauthCandidate } : {}),
+  };
   const job = await queue.add(CLI_EXEC_JOB_NAMES.PROBE, payload, {
     removeOnComplete: true,
     removeOnFail: true,
   });
   pending.job = job;
+  if (abort.aborted) {
+    // A close can arrive while Redis accepts the job, before pending.job was assigned.
+    // A running candidate has no active-secret or health writes and can finish harmlessly.
+    try {
+      await job.remove();
+    } catch {
+      /* already active or removed */
+    }
+    throw new LoginCancelled();
+  }
   const result = await awaitQueuedJob<CliProbeResult>(job, abort, ws);
-  // A login just rewrote this provider's credential, which for the volumeJson CLIs is the
-  // very file the usage poller reads — so kick a tick and let the meter come back in seconds
-  // instead of leaving a "reconnect" prompt up for a whole ~5-min repeatable interval after
-  // the user already fixed it. The claude usage-OAuth callback has done this for a while;
-  // this is the interactive-login path catching up. Both post-login paths funnel through
-  // here, so one enqueue covers them.
+  // Volume-based logins already wrote their credential; candidates tick only after promotion.
+  if (!oauthCandidate) requestUsagePoll();
+  return result;
+}
+
+function requestUsagePoll(): void {
   void getUsagePollQueue()
     .add('usage-poll-tick', {}, { removeOnComplete: true, removeOnFail: 10 })
     .catch(() => {});
-  return result;
 }
 
 async function cleanupSession(session: BannerSession): Promise<void> {
   if (session.cleanedUp) return;
   session.cleanedUp = true;
+  session.abort.fire();
   stopCaptureWatchdog(session);
   if (session.credsPoller) {
     clearInterval(session.credsPoller);
