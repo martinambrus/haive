@@ -339,3 +339,211 @@ describe('TaskTypeComposer', () => {
     });
   });
 });
+
+describe('composer integration overview', () => {
+  const stepId = '05-phase-0b5-spec-quality';
+  const requirements = [
+    { id: 'git', category: 'forge', access: 'write' as const },
+    { id: 'docs', category: 'module.notes.docs', access: 'read' as const, optional: true },
+    { id: 'mail', category: 'mail', access: 'read' as const },
+  ];
+  const catalog = {
+    ...TEST_CATALOG,
+    steps: TEST_CATALOG.steps.map((step) =>
+      step.stepId === stepId
+        ? { ...step, entry: { ...step.entry, integrations: requirements } }
+        : step,
+    ),
+    modules: [{ id: 'notes', name: 'Notes', state: 'deactivated' as const }],
+  };
+  const provider = (id: string, displayName: string, categories: string[], enabled = true) => ({
+    id,
+    displayName,
+    categories,
+    enabled,
+    selfHosted: false,
+    writeEnabled: false,
+    canWrite: true,
+    writeScopes: {},
+    connect: [],
+  });
+  const integrationInfo = {
+    status: 'current' as const,
+    providers: [
+      provider('github', 'GitHub', ['forge']),
+      provider('gitlab', 'GitLab', ['forge'], false),
+      provider('module.notes.cloud', 'Notes Cloud', ['module.notes.docs']),
+    ],
+    modules: catalog.modules,
+    categories: [
+      { id: 'forge', label: 'Git forge' },
+      { id: 'mail', label: 'Email' },
+    ],
+  };
+  it.each([false, true])(
+    'shows every category and actual provider/module state (readOnly=%s)',
+    (readOnly) => {
+      const html = renderToStaticMarkup(
+        <TaskTypeComposer
+          {...base}
+          {...{ integrationInfo }}
+          catalog={catalog}
+          readOnly={readOnly}
+          stepIds={[stepId]}
+        />,
+      );
+      expect(html).toContain('Integration requirements');
+      expect(html).toContain('Git forge');
+      expect(html).toContain('Required');
+      expect(html).toContain('Read and write');
+      expect(html).toContain('GitHub');
+      expect(html).toContain('Installed and enabled');
+      expect(html).toContain('GitLab');
+      expect(html).toContain('Provider disabled');
+      expect(html).toContain('Module deactivated');
+      expect(html).toContain('Optional');
+      expect(html).toContain('No registered provider serves this category');
+      expect(html).toContain('Account access is checked when creating and running a task');
+    },
+  );
+  it('keeps malformed authored requirements and provider pins visible without promising execution', () => {
+    const html = renderToStaticMarkup(
+      <TaskTypeComposer
+        {...base}
+        {...{ integrationInfo }}
+        readOnly
+        typeSlug="t"
+        stepIds={['custom.t.ask']}
+        promptSteps={{
+          ask: {
+            slug: 'ask',
+            title: 'Ask',
+            template: 'Ask',
+            capabilities: [],
+            tools: [],
+            timeoutMs: 300000,
+            integrations: [
+              null,
+              { id: 'old', provider: 'module.gone.cloud', access: 'read' },
+            ] as never,
+          },
+        }}
+      />,
+    );
+    expect(html).toContain('Invalid stored requirement');
+    expect(html).toContain('Provider pin unsupported');
+    expect(html).toContain('module.gone.cloud');
+    expect(html).toContain('Module missing');
+  });
+  it.each(['loading', 'error'] as const)(
+    'does not present stale enabled providers as current while %s',
+    (status) => {
+      const html = renderToStaticMarkup(
+        <TaskTypeComposer
+          {...base}
+          {...{ integrationInfo: { ...integrationInfo, status } }}
+          catalog={catalog}
+          stepIds={[stepId]}
+        />,
+      );
+      expect(html).toContain(
+        status === 'loading' ? 'Loading provider information' : 'Provider information unavailable',
+      );
+      expect(html).not.toContain('Installed and enabled');
+      expect(html).toContain('Git forge');
+    },
+  );
+  it('reads filtered module requirements without adding the step to the palette or validation catalog', () => {
+    const unavailable = {
+      ...catalog.steps.find((s) => s.stepId === stepId)!,
+      stepId: 'module.notes.review',
+      entry: {
+        ...catalog.steps.find((s) => s.stepId === stepId)!.entry,
+        stepId: 'module.notes.review',
+      },
+    };
+    const html = renderToStaticMarkup(
+      <TaskTypeComposer
+        {...base}
+        {...{ integrationInfo }}
+        catalog={
+          {
+            ...TEST_CATALOG,
+            modules: catalog.modules,
+            unavailableSteps: [unavailable],
+          } as typeof catalog
+        }
+        stepIds={['module.notes.review']}
+      />,
+    );
+    expect(html).toContain('Module deactivated');
+    expect(html).toContain('Integration requirements');
+    expect(html).not.toContain('aria-label="Add module.notes.review"');
+  });
+  it('shows enabled module providers, missing modules, removed categories and unknown pins with literal safe labels', () => {
+    const html = renderToStaticMarkup(
+      <TaskTypeComposer
+        {...base}
+        readOnly
+        typeSlug="t"
+        stepIds={['custom.t.ask']}
+        integrationInfo={{
+          ...integrationInfo,
+          modules: [
+            { id: 'notes', name: 'Notes', state: 'loaded' },
+            { id: 'gone', name: 'Gone', state: 'missing' },
+          ],
+          providers: [
+            ...integrationInfo.providers.map((provider) => ({
+              ...provider,
+              displayName: '<img src=x onerror=alert(1)>',
+            })),
+            provider('module.gone.cloud', 'Hidden\nname', ['module.gone.docs']),
+          ],
+        }}
+        promptSteps={{
+          ask: {
+            slug: 'ask',
+            title: 'Ask',
+            template: 'Ask',
+            capabilities: [],
+            tools: [],
+            timeoutMs: 300000,
+            integrations: [
+              { id: 'docs', category: 'module.notes.docs', access: 'read' },
+              { id: 'gone', category: 'module.gone.docs', access: 'read' },
+              { id: 'removed', category: 'module.notes.removed', access: 'read' },
+              { id: 'unknown', provider: 'unknown', access: 'read' },
+            ],
+          },
+        }}
+      />,
+    );
+    expect(html).toContain('Installed and enabled');
+    expect(html).toContain('Module missing');
+    expect(html).toContain('Category unavailable');
+    expect(html).toContain('Unknown provider');
+    expect(html).toContain('&lt;img');
+    expect(html).not.toContain('<img');
+    expect(html).not.toContain('Hidden');
+    expect(html).toContain('module.gone.cloud');
+  });
+  it('keeps a registered but unrecorded module unverified', () => {
+    const html = renderToStaticMarkup(
+      <TaskTypeComposer
+        {...base}
+        catalog={catalog}
+        stepIds={[stepId]}
+        integrationCategories={[{ id: 'module.notes.docs', label: 'Notes documents' }]}
+        integrationInfo={{
+          ...integrationInfo,
+          modules: [],
+          categories: [{ id: 'module.notes.docs', label: 'Notes documents' }],
+        }}
+      />,
+    );
+    expect(html).toContain('Module state unknown');
+    const notes = html.slice(html.indexOf('Notes documents'));
+    expect(notes).not.toContain('Installed and enabled');
+  });
+});

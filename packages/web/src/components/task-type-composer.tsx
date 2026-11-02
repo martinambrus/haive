@@ -8,6 +8,8 @@ import {
   type CompositionIssue,
 } from '@haive/shared/modularity';
 import type { IntegrationCategoryOption } from '@/components/prompt-step-integrations';
+import { StepIntegrationOverview } from './step-integration-overview';
+import type { ComposerIntegrationInfo } from '@/lib/composer-integrations';
 import type { TaskTypeCatalog } from '@/lib/api-client';
 import {
   catalogEntries,
@@ -57,6 +59,8 @@ interface TaskTypeComposerProps {
   promptSteps?: PromptSteps;
   integrationCategories?: readonly IntegrationCategoryOption[];
   serverPromptIssues?: PromptStepIssue[];
+  integrationInfo?: ComposerIntegrationInfo;
+  onRefreshIntegrationInfo?: () => void;
   onPromptStepsChange?: (promptSteps: PromptSteps) => void;
   onStepIdsChange: (stepIds: string[]) => void;
   onLoopLimitsChange: (limits: Record<string, number>) => void;
@@ -65,6 +69,12 @@ interface TaskTypeComposerProps {
 type FocusKind = 'up' | 'down' | 'remove';
 
 const ICON_BUTTON = 'h-11 min-w-11 px-0';
+const UNVERIFIED_INTEGRATIONS: ComposerIntegrationInfo = {
+  status: 'error',
+  providers: [],
+  categories: CORE_INTEGRATION_CATEGORY_SPECS,
+  modules: [],
+};
 const NO_PROMPT_STEPS: PromptSteps = {};
 const NO_PROMPT_ISSUES: PromptStepIssue[] = [];
 
@@ -161,6 +171,8 @@ export function TaskTypeComposer({
   promptSteps = NO_PROMPT_STEPS,
   integrationCategories = CORE_INTEGRATION_CATEGORY_SPECS,
   serverPromptIssues = NO_PROMPT_ISSUES,
+  integrationInfo = UNVERIFIED_INTEGRATIONS,
+  onRefreshIntegrationInfo,
   onPromptStepsChange,
   onStepIdsChange,
   onLoopLimitsChange,
@@ -373,6 +385,44 @@ export function TaskTypeComposer({
           </div>
         )}
         {readOnly && stepIds.length === 0 && <p className="text-sm text-neutral-400">No steps.</p>}
+        {(stepIds.some((id) => {
+          const promptSlug = typeSlug === undefined ? null : promptStepSlugOf(id, typeSlug);
+          return (
+            promptSlug !== null
+              ? promptSteps[promptSlug]?.integrations
+              : (entries.get(id)?.integrations ??
+                catalog.unavailableSteps?.find((step) => step.stepId === id)?.entry.integrations)
+          )?.length;
+        }) ||
+          (onRefreshIntegrationInfo && integrationInfo.status !== 'current')) && (
+          <div className="mb-3 flex min-w-0 flex-col gap-2">
+            <InlineMarkdown
+              className="text-xs text-neutral-400"
+              body="Provider install state describes capabilities only. Account access is checked when creating and running a task. Write operations also require the account owner’s write switch. Manage accounts in [Settings → Integrations](/settings/integrations)."
+            />
+            {onRefreshIntegrationInfo && (
+              <Button
+                type="button"
+                variant="secondary"
+                className="h-11 self-start"
+                disabled={integrationInfo.status === 'loading'}
+                onClick={onRefreshIntegrationInfo}
+              >
+                Refresh providers
+              </Button>
+            )}
+            {integrationInfo.status !== 'current' && (
+              <InlineMarkdown
+                className="text-xs text-amber-300"
+                body={
+                  integrationInfo.status === 'loading'
+                    ? 'Loading provider information.'
+                    : 'Provider information unavailable. Refresh providers to try again.'
+                }
+              />
+            )}
+          </div>
+        )}
         <ol ref={listRef} className="flex flex-col gap-2">
           {stepIds.map((stepId, index) => {
             const entry = entries.get(stepId);
@@ -462,6 +512,16 @@ export function TaskTypeComposer({
                     ) : (
                       <StepWithoutEntryNote stepId={stepId} readOnly={readOnly} catalog={catalog} />
                     )}
+                    <StepIntegrationOverview
+                      requirements={
+                        promptEntry?.integrations ??
+                        entry?.integrations ??
+                        catalog.unavailableSteps?.find((step) => step.stepId === stepId)?.entry
+                          .integrations
+                      }
+                      info={integrationInfo}
+                      categories={integrationCategories}
+                    />
                     {promptEntry && prompt && (
                       <Button
                         type="button"

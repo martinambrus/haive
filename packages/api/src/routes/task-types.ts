@@ -178,6 +178,8 @@ adminTaskTypeRoutes.get('/catalog', async (c) => {
     .map((id) => ({ id, label: id }));
   return c.json({
     steps,
+    // Read-only declarations for selected rows; never feed these back into the palette.
+    unavailableSteps: catalog.steps.filter((s) => offSources.has(s.source)),
     groups: [...COMPOSABLE_STEP_GROUPS.map(({ id, label }) => ({ id, label })), ...unknown],
     synced: catalog.synced,
     modules: [...modules]

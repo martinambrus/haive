@@ -2577,6 +2577,13 @@ export type AdminTaskTypeListed = AdminTaskType & {
 };
 
 export interface TaskTypeCatalog {
+  /** Filtered declarations for existing rows' read-only overview; never selectable. */
+  unavailableSteps?: {
+    stepId: string;
+    source: string;
+    title: string;
+    entry: ComposableStepEntry;
+  }[];
   steps: { stepId: string; source: string; title: string; entry: ComposableStepEntry }[];
   groups: { id: string; label: string }[];
   synced: boolean;
@@ -2595,7 +2602,8 @@ export const getAdminTaskType = (slug: string) =>
     promptStepIssues?: PromptStepIssue[];
   }>(`/admin/task-types/${encodeURIComponent(slug)}`);
 
-export const getTaskTypeCatalog = () => api.get<TaskTypeCatalog>('/admin/task-types/catalog');
+export const getTaskTypeCatalog = (signal?: AbortSignal) =>
+  api.get<TaskTypeCatalog>('/admin/task-types/catalog', signal);
 
 export const createTaskType = (body: CustomTaskTypeCreate) =>
   api.post<{ taskType: AdminTaskType }>('/admin/task-types', body);
@@ -2756,8 +2764,8 @@ export interface RepositoryIntegrationList {
   connectionIds: string[];
 }
 
-export const listIntegrationProviders = () =>
-  api.get<{ providers: IntegrationProvider[] }>('/integrations/providers');
+export const listIntegrationProviders = (signal?: AbortSignal) =>
+  api.get<{ providers: IntegrationProvider[] }>('/integrations/providers', signal);
 
 export const listIntegrationConnections = () =>
   api.get<{ connections: IntegrationConnection[] }>('/integrations/connections');
@@ -2848,7 +2856,7 @@ export function getTaskIntegrationPreview(input: {
   return api.get<TaskIntegrationPreview>(`/tasks/integration-preview?${query}`);
 }
 
-export const getIntegrationCategories = () =>
+export const getIntegrationCategories = (signal?: AbortSignal) =>
   api.get<{
     categories: { id: string; label: string; moduleId: string | null; moduleName: string | null }[];
-  }>('/integrations/categories');
+  }>('/integrations/categories', signal);

@@ -748,3 +748,27 @@ uniqueIndex option, hence a `unique(...).nullsNotDistinct()` constraint.
 18. An integration action's audit row is inserted in the change's own transaction and logged after
     the commit, so a refused row undoes the change; only disconnect's stays best-effort, because the
     revoke at the vendor before it cannot be undone.
+
+## Composer capability overview
+
+The task-type editor's selected step rows show each catalog or pinned prompt-template
+requirement, its category, required/optional flag, requested access and the registered
+providers that serve it. This is an installation/capability overview, not account admission:
+it loads no accounts and makes no vendor call. New Task admission and dispatch remain the
+authority for account choice, repository restrictions and execution; write operations still
+require the task owner's write switch. Stored provider pins are explicitly unsupported.
+
+The overview uses the existing authenticated provider/category reads and the admin task-type
+catalog's module states. A disabled provider is distinct from a deactivated or missing module;
+an unrecorded module provider is unverified. An unserved or removed category keeps its id,
+and a stored malformed requirement remains visible for repair. Labels are literal text,
+with unsafe control characters falling back to ids. Missing modules cannot supply invented
+provider capabilities: only registered provider declarations are listed.
+
+Provider/category/module metadata loads separately from the editable draft. Refresh re-reads
+all three, shows loading/error instead of stale healthy install states, and never applies a
+task-type row, clears dirty fields or changes saved-revision evidence. Category authoring can
+load independently while a provider read fails or remains pending. Superseded overview and
+initial-type reads ignore old replies; unmounted editors discard these reads and abort their requests. Each explicit refresh has a
+15-second deadline, with no automatic retry. Installation state is a snapshot of these reads,
+not a promise that it will remain unchanged before dispatch.
