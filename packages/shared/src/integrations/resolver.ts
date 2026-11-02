@@ -2,8 +2,12 @@ import type { schema } from '@haive/database';
 import { connectionCredentialFits } from '../forge/known-hosts.js';
 import {
   REPOSITORY_BOUND_CATEGORIES,
+  parseProviderId,
+  parseCategoryId,
   type IntegrationRequirement,
 } from '../modularity/contracts.js';
+
+import type { CategoryState, ProviderState } from './providers.js';
 
 type ConnectionRow = typeof schema.integrationConnections.$inferSelect;
 
@@ -16,11 +20,10 @@ export interface ResolverConnection {
   credential: { provider: string | null; host: string } | null;
 }
 
-export interface ResolverProvider {
+export type ResolverProvider = {
   id: string;
   categories: readonly string[];
-  enabled: boolean;
-}
+} & ({ state: ProviderState; enabled?: never } | { enabled: boolean; state?: never });
 
 export interface ResolverRepository {
   remoteUrl: string | null;
@@ -43,6 +46,8 @@ export interface ResolverContext {
   ownerUserId: string;
   repository: ResolverRepository | null;
   providers: readonly ResolverProvider[];
+  /** Registered categories, including a deactivated module's declarations. */
+  categoryStates?: ReadonlyMap<string, CategoryState>;
   connections: readonly ResolverConnection[];
   choices: ReadonlyMap<string, ResolverChoice>;
   grants: ReadonlyMap<string, string>;
@@ -55,6 +60,8 @@ export type ResolverTarget = { category: string } | { provider: string };
 export type UnresolvedReason =
   | 'no-provider'
   | 'provider-disabled'
+  | 'provider-deactivated'
+  | 'provider-missing'
   | 'no-connection'
   | 'needs-choice'
   | 'not-allowed-by-repository'
@@ -67,7 +74,13 @@ export type ResolutionSource = 'task' | 'grant' | 'user' | 'admin' | 'only' | 'p
 export interface SkippedTier {
   tier: 'user' | 'admin';
   providerId: string;
-  why: 'disabled' | 'not-connected' | 'not-allowed' | 'not-for-repository';
+  why:
+    | 'disabled'
+    | 'provider-deactivated'
+    | 'provider-missing'
+    | 'not-connected'
+    | 'not-allowed'
+    | 'not-for-repository';
 }
 
 export type TargetResolution =
@@ -143,11 +156,32 @@ export function resolveTarget(ctx: ResolverContext, target: ResolverTarget): Tar
     candidates,
     skipped,
   });
-  if (providers.length === 0) return unresolved('no-provider', pinned, null, []);
+  const stateOf = (id: string): ProviderState => {
+    const provider = ctx.providers.find((p) => p.id === id);
+    return provider === undefined
+      ? parseProviderId(id)?.kind === 'module'
+        ? 'module-missing'
+        : 'unknown'
+      : (provider.state ?? (provider.enabled ? 'enabled' : 'disabled'));
+  };
+  const blockedReason = (
+    state: ProviderState,
+  ): 'provider-deactivated' | 'provider-missing' | 'provider-disabled' =>
+    state === 'module-deactivated'
+      ? 'provider-deactivated'
+      : state === 'module-missing'
+        ? 'provider-missing'
+        : 'provider-disabled';
+  if (pinned !== null) {
+    const state = stateOf(pinned);
+    if (state === 'module-missing' || state === 'module-deactivated')
+      return unresolved(blockedReason(state), pinned, null, []);
+    if (providers.length === 0) return unresolved('no-provider', pinned, null, []);
+  }
 
   const repository = ctx.repository;
   const providerIds = new Set(providers.map((p) => p.id));
-  const enabledIds = new Set(providers.filter((p) => p.enabled).map((p) => p.id));
+  const enabledIds = new Set(providers.filter((p) => stateOf(p.id) === 'enabled').map((p) => p.id));
   const repositoryBound =
     category !== null
       ? REPOSITORY_BOUND_CATEGORIES.has(category)
@@ -179,10 +213,21 @@ export function resolveTarget(ctx: ResolverContext, target: ResolverTarget): Tar
       : unresolved('connection-unavailable', connection.providerId, connection.id, usableIds);
 
   const account = (connectionId: string): Account => {
-    const c = declared.find((x) => x.id === connectionId);
+    // An own persisted choice/grant proves the category of an account whose module vanished.
+    // It does not supply a provider spec or put that account in the picker.
+    const c = ctx.connections.find(
+      (x) =>
+        x.id === connectionId &&
+        owned(x) &&
+        (providerIds.has(x.providerId) || stateOf(x.providerId) === 'module-missing'),
+    );
     if (c === undefined) return { kind: 'absent' };
     if (!enabledIds.has(c.providerId)) {
-      return { kind: 'blocked', reason: 'provider-disabled', providerId: c.providerId };
+      return {
+        kind: 'blocked',
+        reason: blockedReason(stateOf(c.providerId)),
+        providerId: c.providerId,
+      };
     }
     if (repositoryBound) {
       if (repository === null) {
@@ -208,7 +253,10 @@ export function resolveTarget(ctx: ResolverContext, target: ResolverTarget): Tar
       skipped.push({ tier, providerId, why });
       return null;
     };
-    if (!enabledIds.has(providerId)) return skip('disabled');
+    if (!enabledIds.has(providerId)) {
+      const reason = blockedReason(stateOf(providerId));
+      return skip(reason === 'provider-disabled' ? 'disabled' : reason);
+    }
     const own = declared.filter((c) => c.providerId === providerId);
     const ownFitting = repositoryBound ? own.filter(fits) : own;
     const ownUsable = ownFitting.filter(allowed);
@@ -231,6 +279,10 @@ export function resolveTarget(ctx: ResolverContext, target: ResolverTarget): Tar
     if (picked?.kind === 'selected') return finish(picked.connection, 'task');
     if (picked?.kind === 'blocked')
       return unresolved(picked.reason, picked.providerId, null, usableIds);
+    // An absent account cannot establish a provider for an unserved core category.
+    // Own missing-module bindings already stopped above with their specific reason.
+    if (providers.length === 0 && category !== null && parseCategoryId(category)?.kind !== 'module')
+      return unresolved('no-provider', null, null, []);
     return unresolved('needs-choice', choice.providerId, null, usableIds);
   }
 
@@ -254,11 +306,25 @@ export function resolveTarget(ctx: ResolverContext, target: ResolverTarget): Tar
     if (result !== null) return result;
   }
 
+  if (category !== null && parseCategoryId(category)?.kind === 'module') {
+    const state = ctx.categoryStates?.get(category);
+    if (state === 'module-deactivated') return unresolved('provider-deactivated', null, null, []);
+    if (state === undefined && !providers.some((p) => p.categories.includes(category)))
+      return unresolved('provider-missing', null, null, []);
+  }
+  if (providers.length === 0) return unresolved('no-provider', pinned, null, []);
   if (usable.length === 1) return finish(usable[0]!, category === null ? 'pinned' : 'only');
   if (usable.length > 1) return unresolved('needs-choice', commonProvider(usable), null, usableIds);
   if (declared.length === 0) return unresolved('no-connection', null, null, []);
-  if (active.length === 0)
-    return unresolved('provider-disabled', commonProvider(declared), null, []);
+  if (active.length === 0) {
+    const reasons = new Set(declared.map((c) => blockedReason(stateOf(c.providerId))));
+    return unresolved(
+      reasons.size === 1 ? [...reasons][0]! : 'provider-disabled',
+      commonProvider(declared),
+      null,
+      [],
+    );
+  }
   if (fitting.length === 0) {
     const reason =
       repository === null

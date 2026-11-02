@@ -7,6 +7,7 @@ import {
   listIntegrationModules,
   loadDeactivatedModuleIds,
   loadProviderEnablement,
+  loadIntegrationStates,
   providerState,
   registerModuleIntegrations,
 } from '../src/integrations/index.js';
@@ -165,5 +166,33 @@ describe('the state of a module provider', () => {
     expect(await providerState(db, 'module.zz.crm')).toBe('module-missing');
     expect(await providerState(db, 'nosuchforge')).toBe('unknown');
     expect(await providerState(db, 'Not A Provider')).toBe('unknown');
+  });
+});
+
+describe('bulk integration states', () => {
+  it('keeps module state and declared categories in one live snapshot with bounded queries', async () => {
+    const { db, reads, setConfig, setModule } = setup();
+    register('fx', 'gx');
+    setConfig(FX, true);
+    setConfig('github', false);
+    setModule('fx', true);
+    setModule('gx', false);
+
+    const states = await loadIntegrationStates(db);
+    expect(states.providers.get(FX)).toBe('module-deactivated');
+    expect(states.providers.get(GX)).toBe('disabled');
+    expect(states.providers.get('github')).toBe('disabled');
+    expect(states.providers.get('gitlab')).toBe('enabled');
+    expect(states.categories.get('module.fx.docs')).toBe('module-deactivated');
+    expect(states.categories.get('module.gx.docs')).toBe('enabled');
+    expect(states.categories.get('forge')).toBe('enabled');
+    expect(states.providers.has('module.zz.crm')).toBe(false);
+    expect(reads.filter((table) => table === schema.modules)).toHaveLength(1);
+    expect(reads.filter((table) => table === schema.integrationProviderConfigs)).toHaveLength(1);
+
+    register('gx');
+    const afterRemoval = await loadIntegrationStates(db);
+    expect(afterRemoval.providers.has(FX)).toBe(false);
+    expect(afterRemoval.categories.has('module.fx.docs')).toBe(false);
   });
 });

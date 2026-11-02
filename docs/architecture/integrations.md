@@ -270,6 +270,7 @@ refuses every shared connection.
 5. the only usable account (`only`; `pinned` for a provider-pinned requirement).
 
 Otherwise the result is unresolved with a reason — `no-provider`, `provider-disabled`,
+`provider-deactivated`, `provider-missing`,
 `no-connection`, `needs-choice`, `not-allowed-by-repository`, `connection-unavailable`, and for a
 forge `no-repository` and `no-remote` — and `candidates`, the connection ids a picker offers.
 
@@ -277,6 +278,23 @@ Candidates are the task owner's scope-user connections of a provider that serves
 pinned provider), with the provider enabled; for `forge` the linked credential must fit the
 repository's `remote_url` (`credentialUsableForPr`) and, for a forge provider, still be that
 provider's forge (`connectionCredentialFits`), then the repository allow-list applies.
+
+Module state survives resolution: an own selected account from a deactivated module answers
+`provider-deactivated`; one whose module provider is no longer registered answers `provider-missing`,
+including a sticky grant. A provider-pinned target gets the same reasons even without an account.
+A module category's registered declaration supplies its deactivation state even when no provider
+serves it; a module-grammar category no longer declared or served answers `provider-missing`.
+A choice without an account still asks `needs-choice`, and a missing or foreign account is still
+absent. An unserved core category retains `no-provider` for an unbound or absent choice; only an
+own missing-module account binding supplies evidence for its specific `provider-missing` reason.
+An own persisted choice or grant supplies evidence for a missing provider's category without
+inventing a spec or offering that account as a candidate. Unknown core ids remain `no-provider`.
+Soft tiers skip module providers with `provider-deactivated` or `provider-missing` in `skipped.why`
+and keep their fallback; when all owned accounts' registered providers are blocked for the same
+reason, that reason is the unresolved result (mixed causes stay `provider-disabled`).
+`loadIntegrationStates` loads registered providers and categories from one live bulk read (at most
+one provider-config query and one module query); `loadResolverContext` keeps those states, while
+`loadProviderEnablement` retains its boolean map for other readers.
 
 The rules that look odd and are deliberate:
 

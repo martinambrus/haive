@@ -1,8 +1,12 @@
 import { eq } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
-import { parseProviderId } from '../modularity/contracts.js';
+import { parseCategoryId, parseProviderId } from '../modularity/contracts.js';
 import type { IntegrationProviderSpec } from '../modularity/integrations.js';
-import { loadDeactivatedModuleIds, registeredProviders } from './module-registry.js';
+import {
+  loadDeactivatedModuleIds,
+  registeredCategories,
+  registeredProviders,
+} from './module-registry.js';
 
 export type ProviderState =
   'enabled' | 'disabled' | 'module-deactivated' | 'module-missing' | 'unknown';
@@ -57,10 +61,13 @@ export async function providerState(
   return (await switchedOn(db, providerId)) ? 'enabled' : 'disabled';
 }
 
-/** The switch of every registered provider, as isProviderEnabled reads it, from two queries at most. */
-export async function loadProviderEnablement(
-  db: Database | DbTx,
-): Promise<ReadonlyMap<string, boolean>> {
+export type CategoryState = 'enabled' | 'module-deactivated';
+
+/** One live snapshot for provider and declared-category state, from two queries at most. */
+export async function loadIntegrationStates(db: Database | DbTx): Promise<{
+  providers: ReadonlyMap<string, ProviderState>;
+  categories: ReadonlyMap<string, CategoryState>;
+}> {
   const rows = await db
     .select({
       providerId: schema.integrationProviderConfigs.providerId,
@@ -69,14 +76,38 @@ export async function loadProviderEnablement(
     .from(schema.integrationProviderConfigs);
   const configured = new Map(rows.map((row) => [row.providerId, row.enabled]));
   const deactivated = await loadDeactivatedModuleIds(db);
-  return new Map(
+  const providers = new Map<string, ProviderState>(
     listIntegrationProviders().map((provider) => {
       const parsed = parseProviderId(provider.id);
       const off = parsed?.kind === 'module' && deactivated.has(parsed.moduleId);
       return [
         provider.id,
-        !off && (configured.get(provider.id) ?? defaultProviderEnabled(provider.id)),
+        off
+          ? 'module-deactivated'
+          : (configured.get(provider.id) ?? defaultProviderEnabled(provider.id))
+            ? 'enabled'
+            : 'disabled',
       ];
     }),
   );
+  const categories = new Map<string, CategoryState>(
+    registeredCategories().map((category) => {
+      const parsed = parseCategoryId(category.id);
+      return [
+        category.id,
+        parsed?.kind === 'module' && deactivated.has(parsed.moduleId)
+          ? 'module-deactivated'
+          : 'enabled',
+      ];
+    }),
+  );
+  return { providers, categories };
+}
+
+/** The switch of every registered provider, as isProviderEnabled reads it, from two queries at most. */
+export async function loadProviderEnablement(
+  db: Database | DbTx,
+): Promise<ReadonlyMap<string, boolean>> {
+  const states = await loadIntegrationStates(db);
+  return new Map([...states.providers].map(([id, state]) => [id, state === 'enabled']));
 }

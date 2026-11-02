@@ -1,7 +1,7 @@
 import { and, asc, eq, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
 import type { IntegrationRequirement } from '../modularity/contracts.js';
-import { listIntegrationProviders, loadProviderEnablement } from './providers.js';
+import { listIntegrationProviders, loadIntegrationStates } from './providers.js';
 import {
   resolveRequirements,
   resolveTarget,
@@ -76,11 +76,11 @@ export async function loadResolverContext(
   }
 
   const repository = await loadRepository(db, repositoryId);
-  const enablement = await loadProviderEnablement(db);
+  const states = await loadIntegrationStates(db);
   const providers = listIntegrationProviders().map((spec) => ({
     id: spec.id,
     categories: spec.categories,
-    enabled: enablement.get(spec.id) ?? false,
+    state: states.providers.get(spec.id) ?? 'disabled',
   }));
 
   const connectionRows = await db
@@ -181,6 +181,7 @@ export async function loadResolverContext(
     ownerUserId,
     repository,
     providers,
+    categoryStates: states.categories,
     connections,
     choices,
     grants,
