@@ -1,3 +1,4 @@
+import { guardTaskModuleAdmission } from './modularity-server/module-drain.js';
 import { and, desc, eq, gt, inArray, isNull, max, or } from 'drizzle-orm';
 import {
   checkRevive,
@@ -650,6 +651,7 @@ export async function reviveRefusal(
   | { task: ReviveTask; admission: Exclude<UpgradeAdmission, { admitted: true }> }
   | null
 > {
+  await guardTaskModuleAdmission(tx, taskId);
   // A revived merge conversation takes its scratch worktree back, so it waits for Save, Pull or a discard.
   const [revived] = await tx
     .select({ type: schema.tasks.type, repositoryId: schema.tasks.repositoryId })

@@ -33,6 +33,7 @@ type World = {
 
 function setup(w: World = {}) {
   const fake = createFakeDb({
+    modules: schema.modules,
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     taskEvents: schema.taskEvents,

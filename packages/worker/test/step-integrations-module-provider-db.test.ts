@@ -1,3 +1,6 @@
+import { beginModuleDrain, cancelModuleDrain } from '@haive/shared/modularity-server';
+import { parsePinnedCustomSteps } from '@haive/shared/modularity';
+import { buildPromptStep } from '../src/step-engine/steps/custom/prompt-step.js';
 import { and, eq, isNull } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, ZERO_MERGE_RETRIES, type Database } from '@haive/database';
@@ -252,8 +255,9 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
     markModuleSchemaReady('fx');
     await db
       .update(schema.modules)
-      .set({ deactivatedAt: null })
+      .set({ deactivatedAt: null, drainingAt: null, drainingBy: null })
       .where(eq(schema.modules.moduleId, 'fx'));
+    await db.delete(schema.moduleDrainTasks).where(eq(schema.moduleDrainTasks.moduleId, 'fx'));
     h.parkJobs.length = 0;
     h.beforeRequest = null;
     savedKey = process.env.CONFIG_ENCRYPTION_KEY;
@@ -1439,6 +1443,103 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
   });
 
   describe('[M3] a dispatched step', () => {
+    it.each([true, false])(
+      '[T330 D2] pinned initial optional=%s dispatch omits a denied module account before prompt/tools construction',
+      async (optional) => {
+        const w = await moduleWorld();
+        const id = `custom.drain-prompt-${++counter}.audit`;
+        const { stored } = pinnedPromptStep([{ ...DOCS_REQUIRED, optional }], { id });
+        stored[id] = {
+          ...(stored[id] as object),
+          template: 'Audit with {{integration:docs.account}}.',
+        };
+        const stepDef = buildPromptStep(
+          id,
+          parsePinnedCustomSteps(stored)[id]!,
+          0,
+        ) as unknown as StepDefinition;
+        await db
+          .update(schema.tasks)
+          .set({ runListSnapshot: [id], customSteps: stored })
+          .where(eq(schema.tasks.id, w.taskId));
+        await db.insert(schema.tasks).values({
+          userId: w.userId,
+          type: 'workflow',
+          title: 'Other dependent',
+          status: 'running',
+          runListSnapshot: ['module.fx.hold'],
+        });
+        await beginModuleDrain(db, 'fx', w.userId);
+        const result = await advance(w, stepDef);
+        expect(result.status).toBe(optional ? 'waiting_cli' : 'integration_blocked');
+        const runs = await runsOf(db, w.taskId);
+        expect(await grantsOf(db, w.taskId)).toEqual([]);
+        if (optional) {
+          expect(runs).toHaveLength(1);
+          expect(runs[0]!.integrations).toBeNull();
+          expect(runs[0]!.prompt).toContain('(no account connected)');
+          expect(runs[0]!.prompt).not.toContain(MODULE_TOOL);
+          expect(runs[0]!.prompt).not.toContain('fx-account-5512');
+          expect(requestsOf()[0]!.integrations).toBeUndefined();
+          expect(enqueued).toHaveLength(1);
+        } else expect(runs).toEqual([]);
+      },
+    );
+
+    it('[T330 D2] cancellation between prompt and insert cannot add an omitted optional account to a mixed stamp', async () => {
+      const w = await mixedWorld();
+      const id = `custom.drain-mixed-${++counter}.audit`;
+      const { stored } = pinnedPromptStep([FORGE_READ, DOCS_OPTIONAL], { id });
+      stored[id] = {
+        ...(stored[id] as object),
+        template: 'Audit with {{integration:docs.account}}.',
+      };
+      const stepDef = buildPromptStep(
+        id,
+        parsePinnedCustomSteps(stored)[id]!,
+        0,
+      ) as unknown as StepDefinition;
+      await db
+        .update(schema.tasks)
+        .set({ runListSnapshot: [id], customSteps: stored })
+        .where(eq(schema.tasks.id, w.taskId));
+      await db.insert(schema.tasks).values({
+        userId: w.userId,
+        type: 'workflow',
+        title: 'Mixed holder',
+        status: 'running',
+        runListSnapshot: ['module.fx.hold'],
+      });
+      await beginModuleDrain(db, 'fx', w.userId);
+      h.beforeRequest = async () => {
+        h.beforeRequest = null;
+        await cancelModuleDrain(db, 'fx', w.userId);
+      };
+      expect((await advance(w, stepDef)).status).toBe('waiting_cli');
+      const [run] = await runsOf(db, w.taskId);
+      expect(run!.integrations).toEqual([forgeBinding(w.connectionId)]);
+      expect(run!.prompt).toContain('(no account connected)');
+      expect(run!.prompt).not.toContain(MODULE_TOOL);
+      expect(await grantsOf(db, w.taskId)).toEqual([
+        { categoryId: 'forge', connectionId: w.connectionId },
+      ]);
+    });
+
+    it('[T330 D2] an admitted cohort member retains its optional prompt account', async () => {
+      const w = await moduleWorld();
+      const id = `custom.drain-member-${++counter}.audit`;
+      const { stored, stepDef } = pinnedPromptStep([DOCS_OPTIONAL], { id });
+      await db
+        .update(schema.tasks)
+        .set({ runListSnapshot: [id, 'module.fx.future'], customSteps: stored })
+        .where(eq(schema.tasks.id, w.taskId));
+      await beginModuleDrain(db, 'fx', w.userId);
+      expect((await advance(w, stepDef)).status).toBe('waiting_cli');
+      expect((await runsOf(db, w.taskId))[0]!.integrations).toEqual([
+        moduleBinding(w.moduleConnectionId, DOCS_OPTIONAL),
+      ]);
+    });
+
     it('[M3] an llm step with a required module requirement waits on one run stamped with it, and its prompt names the module tool', async () => {
       const w = await moduleWorld();
       const stepId = declare([DOCS_REQUIRED]);

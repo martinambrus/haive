@@ -289,6 +289,8 @@ export function describeAvailability(availability: TaskTypeAvailability): string
       return 'Unavailable: custom task types are switched off';
     case 'module-types-off':
       return 'Unavailable: module task types are switched off';
+    case 'module-draining':
+      return 'A module this task type needs is draining; new tasks are held until its drain is cancelled or it is reactivated.';
     case 'module-missing':
     case 'module-deactivated':
       return `Unavailable: ${moduleNeedText(availability.modules ?? [], availability.reason)}`;

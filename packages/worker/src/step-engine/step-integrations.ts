@@ -1,3 +1,9 @@
+import {
+  ModuleAdmissionError,
+  guardModuleAdmission,
+  integrationModuleIds,
+  moduleAdmissionFailures,
+} from '@haive/shared/modularity-server';
 import { inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { promptNamesAgentPath } from '@haive/shared';
@@ -37,7 +43,12 @@ export const INTEGRATIONS_NO_SIGNING_KEY_REASON = 'integrations-no-signing-key';
 export const INTEGRATION_ACCOUNT_CHANGED_REASON = 'integration-account-changed';
 
 export type DispatchIntegrations =
-  | { ok: true; bindings: IntegrationBinding[]; resolutions: IntegrationResolution[] }
+  | {
+      ok: true;
+      bindings: IntegrationBinding[];
+      resolutions: IntegrationResolution[];
+      omittedRequirementIds?: string[];
+    }
   | { ok: false; failure: string; blocked?: IntegrationBlock };
 
 type IntegrationWaitState = NonNullable<typeof schema.taskSteps.$inferSelect.integrationWait>;
@@ -169,6 +180,7 @@ export function integrationBlock(
     'provider-deactivated',
     'provider-disabled',
     'provider-missing',
+    'module-draining',
   ]);
   const causes = required.flatMap((r) =>
     r.status === 'unresolved' && waitable.has(r.reason)
@@ -212,12 +224,37 @@ export async function resolveDispatchIntegrations(
       failure: `${INTEGRATION_PROVIDER_PINNED_REASON}: ${pinned.id} pins the provider ${pinned.provider}, and a step cannot be given a pinned provider yet.`,
     };
   }
-  const resolutions = await resolveStepIntegrations(db, { taskId }, requirements);
+  const raw = await resolveStepIntegrations(db, { taskId }, requirements);
+  const failures = await moduleAdmissionFailures(db, integrationModuleIds(bindingsOf(raw)), {
+    taskId,
+    checkOff: true,
+  });
+  const omittedRequirementIds: string[] = [];
+  const resolutions: IntegrationResolution[] = raw.map((resolution) => {
+    if (resolution.status !== 'resolved') return resolution;
+    const denied = integrationModuleIds([resolution])
+      .map((id) => failures.get(id))
+      .find(Boolean);
+    if (!denied) return resolution;
+    const optional = requirements.find((r) => r.id === resolution.requirementId)?.optional === true;
+    if (optional) omittedRequirementIds.push(resolution.requirementId);
+    return {
+      status: 'unresolved',
+      requirementId: resolution.requirementId,
+      categoryId: resolution.categoryId,
+      providerId: resolution.providerId,
+      connectionId: resolution.connectionId,
+      candidates: [resolution.connectionId],
+      optional,
+      reason: denied === 'module-deactivated' ? 'provider-deactivated' : denied,
+    };
+  });
+  const omitted = omittedRequirementIds.length ? { omittedRequirementIds } : {};
   const unresolved = unresolvedFailure(resolutions);
   if (unresolved !== null)
     return { ok: false, failure: unresolved, blocked: integrationBlock(resolutions) };
   const bindings = bindingsOf(resolutions);
-  if (bindings.length === 0) return { ok: true, bindings, resolutions };
+  if (bindings.length === 0) return { ok: true, bindings, resolutions, ...omitted };
   if (!process.env.CONFIG_ENCRYPTION_KEY) {
     return {
       ok: false,
@@ -230,7 +267,7 @@ export async function resolveDispatchIntegrations(
     if (!(err instanceof IntegrationToolNameError)) throw err;
     return { ok: false, failure: `${INTEGRATION_TOOLS_UNLISTABLE_REASON}: ${err.message}.` };
   }
-  return { ok: true, bindings, resolutions };
+  return { ok: true, bindings, resolutions, ...omitted };
 }
 
 /** Resolves again under the task lock, so the grant and the stamp follow the choice as it stands now; a required requirement lost since then writes nothing, nor does a `named` account (requirement id to the connection its prompt was built on, null for none) that is another now. */
@@ -262,12 +299,58 @@ export async function insertStampedRun(
         failure: `${INTEGRATION_ACCOUNT_CHANGED_REASON}: the account of ${changed.join(', ')} changed while this step was starting, so the prompt names another account; retry the step.`,
       };
     }
-    await recordTaskGrants(tx, taskId, resolutions);
+    try {
+      await recordTaskGrants(tx, taskId, resolutions);
+    } catch (err) {
+      if (!(err instanceof ModuleAdmissionError)) throw err;
+      return moduleAdmissionBlocked(err, bindings);
+    }
     return insertOwnedRun(tx, stepRowId, {
       ...values,
       integrations: bindings.length > 0 ? bindings : null,
     });
   });
+}
+
+function moduleAdmissionBlocked(
+  err: ModuleAdmissionError,
+  bindings: readonly IntegrationBinding[],
+) {
+  const blocked: IntegrationBlock = {
+    kind: 'wait',
+    wait: {
+      causes: bindings
+        .filter((b) => integrationModuleIds([b]).includes(err.moduleId))
+        .map((b) => ({
+          requirementId: b.requirementId,
+          categoryId: b.categoryId,
+          providerId: b.providerId,
+          connectionId: b.connectionId,
+          reason: err.code === 'module-deactivated' ? 'provider-deactivated' : err.code,
+        })),
+    },
+  };
+  return { failure: `${err.code}: ${err.message}`, blocked };
+}
+
+/** Later agents retain their fan-out's stamp, but still fence a new module dependency. */
+export async function insertFixedStampedRun(
+  db: Database,
+  taskId: string,
+  stepRowId: string,
+  values: typeof schema.cliInvocations.$inferInsert,
+  bindings: IntegrationBinding[],
+) {
+  try {
+    return await db.transaction(async (tx) => {
+      await lockTaskIntegrations(tx, taskId);
+      await guardModuleAdmission(tx, integrationModuleIds(bindings), taskId, true);
+      return insertOwnedRun(tx, stepRowId, { ...values, integrations: bindings });
+    });
+  } catch (err) {
+    if (!(err instanceof ModuleAdmissionError)) throw err;
+    return moduleAdmissionBlocked(err, bindings);
+  }
 }
 
 export const NO_ACCOUNT_TEXT = '(no account connected)';

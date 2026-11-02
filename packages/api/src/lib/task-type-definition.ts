@@ -99,6 +99,7 @@ export async function readModuleStates(
       name: schema.modules.name,
       missingAt: schema.modules.missingAt,
       deactivatedAt: schema.modules.deactivatedAt,
+      drainingAt: schema.modules.drainingAt,
     })
     .from(schema.modules);
   const rows =
@@ -108,7 +109,12 @@ export async function readModuleStates(
   return new Map(
     rows.map((row) => [
       row.moduleId,
-      { name: row.name, missing: row.missingAt !== null, deactivated: row.deactivatedAt !== null },
+      {
+        name: row.name,
+        missing: row.missingAt !== null,
+        deactivated: row.deactivatedAt !== null,
+        draining: row.drainingAt != null,
+      },
     ]),
   );
 }
@@ -168,6 +174,12 @@ export async function definitionForCreate(
         throw new HttpError(
           409,
           `Task type ${slug} needs modules that are not installed: ${moduleNames(availability.modules)}`,
+          availability.reason,
+        );
+      case 'module-draining':
+        throw new HttpError(
+          409,
+          `Task type ${slug} needs modules that are draining: ${moduleNames(availability.modules)}`,
           availability.reason,
         );
       case 'module-deactivated':

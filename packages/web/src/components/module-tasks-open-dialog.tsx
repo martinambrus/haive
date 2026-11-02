@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { MODULE_DEPENDENTS_CAP, isStepOfModule } from '@haive/shared/modularity';
 import {
   patchModuleUrgent,
+  patchModuleGraceful,
   type ApiError,
   type ModuleOpenTask,
   type ModuleUrgentResponse,
@@ -20,6 +21,7 @@ export interface ModuleTasksBlocked {
   name: string | null;
   tasks: ModuleOpenTask[];
   capped: boolean;
+  draining?: boolean;
 }
 
 const COPY_TAIL =
@@ -98,10 +100,12 @@ export function ModuleTasksOpenDialog({
   blocked,
   onClose,
   onDone,
+  onDrained,
 }: {
   blocked: ModuleTasksBlocked | null;
   onClose: () => void;
   onDone: (result: ModuleUrgentResponse) => void;
+  onDrained?: (result: Awaited<ReturnType<typeof patchModuleGraceful>>) => void;
 }) {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -133,14 +137,32 @@ export function ModuleTasksOpenDialog({
     }
   }
 
+  async function drain() {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setRunning(true);
+    setError(null);
+    try {
+      const result = await patchModuleGraceful(moduleId);
+      onDrained?.(result);
+    } catch (err) {
+      setError((err as ApiError).message ?? 'Failed to drain the module');
+    } finally {
+      inFlight.current = false;
+      setRunning(false);
+    }
+  }
+
   return (
     <Dialog open onOpenChange={(open) => !open && close()}>
       <DialogContent role="alertdialog" aria-labelledby="module-tasks-open-title">
         <DialogHeader>
-          <DialogTitle id="module-tasks-open-title">Module still in use</DialogTitle>
+          <DialogTitle id="module-tasks-open-title">
+            {blocked.draining ? 'Module draining' : 'Deactivate module'}
+          </DialogTitle>
           <InlineMarkdown
             className="text-sm text-neutral-300 [overflow-wrap:anywhere]"
-            body={`Live tasks still use \`${moduleId}\`. Finish or cancel them, then deactivate it again.`}
+            body={`Drain \`${moduleId}\` to let its existing tasks finish before it turns off. New tasks and new dependencies on it are held; unrelated work continues. You can cancel its drain from the module row.`}
           />
         </DialogHeader>
         <ul className="flex max-h-64 flex-col gap-2 overflow-y-auto">
@@ -179,6 +201,17 @@ export function ModuleTasksOpenDialog({
           >
             Cancel
           </Button>
+          {!blocked.draining && (
+            <Button
+              type="button"
+              variant="secondary"
+              className="h-11"
+              disabled={running}
+              onClick={() => void drain()}
+            >
+              Drain then turn off
+            </Button>
+          )}
           <Button
             type="button"
             variant="destructive"

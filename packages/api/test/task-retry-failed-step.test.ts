@@ -45,6 +45,7 @@ beforeEach(() => {
 /** A task that failed on `step-b`, the second of three steps, with that row in `target`. */
 function setup(target: Record<string, unknown>) {
   const fake = createFakeDb({
+    modules: schema.modules,
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     taskEvents: schema.taskEvents,

@@ -95,6 +95,9 @@ export function parkBanner(
       const requirement = codeSpan(cause.requirementId);
       if (cause.reason === 'connection-unavailable')
         return `The selected account for ${requirement} (${target}) needs reconnecting.`;
+      if (cause.reason === 'module-draining')
+        return 'Module draining; new dependencies are held until its drain is cancelled or it is reactivated.';
+      if (cause.reason === 'module-busy') return 'Module is being changed; checking again shortly.';
       if (cause.reason === 'provider-deactivated')
         return `The provider for ${requirement} (${target}) has a deactivated module. Ask an administrator to reactivate it.`;
       if (cause.reason === 'provider-disabled')

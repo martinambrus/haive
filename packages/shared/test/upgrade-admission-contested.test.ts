@@ -30,6 +30,7 @@ const repo: RepositoryForUpgrade = {
 
 function setup() {
   const fake = createFakeDb({
+    modules: schema.modules,
     tasks: schema.tasks,
     onboardingArtifacts: schema.onboardingArtifacts,
     projectStateConflicts: schema.projectStateConflicts,

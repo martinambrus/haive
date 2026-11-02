@@ -65,6 +65,7 @@ function storedStates(...values: (string | Error)[]) {
 /** A task armed after a rate limit whose reset has passed; the poller's join read answers it. */
 function setup() {
   const fake = createFakeDb({
+    modules: schema.modules,
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     cliInvocations: schema.cliInvocations,

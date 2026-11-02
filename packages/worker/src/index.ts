@@ -1,3 +1,4 @@
+import { finalizeModuleDrains } from '@haive/shared/modularity-server';
 import { logger, configService, CONFIG_KEYS } from '@haive/shared';
 import { bootstrap } from './bootstrap.js';
 import { initBuildStamp } from './build-stamp.js';
@@ -296,6 +297,7 @@ async function main(): Promise<void> {
   });
   const reconcileModuleJobs = async (): Promise<void> => {
     try {
+      await finalizeModuleDrains(getDb());
       const { deactivated, stamps } = await moduleActivationState(getDb());
       await moduleJobs.reconcile(deactivated, stamps);
     } catch (err) {

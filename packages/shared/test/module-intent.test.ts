@@ -71,6 +71,7 @@ describe('diffModuleIntent', () => {
       missingAt: null,
       deactivatedAt: null,
       tornDownAt: null,
+      drainingAt: null,
       skippedSeeds: [],
     });
     expect(result.rows[0]!.missingAt).toBe(GONE.toISOString());

@@ -193,6 +193,34 @@ the module loads again.
   finishes it. Every cleanup is safe to repeat. The dialog warns when the module's teardown hook
   never ran, and explains that call/invocation/audit history and Git credentials are retained.
 
+**Graceful drain.** The admin's read-only `GET /modules/:id/dependents` preflights persisted
+seeded types, run-list snapshots, known required static module admissions, direct integration choices/grants and live invocation stamps
+(`ended_at` and `superseded_at` both NULL). It returns one deduplicated task list and an honest
+200-row cap, with no account labels or secrets. A binding Reset can remove the current grant while
+an invocation still uses its stamp, so those live stamps are dependency evidence too. An ended mining stamp still linked to a
+current step counts while that step has pending/running agent reservations: the last sent agent
+may have finished before the next reserved agent was sent. Ended stamps without this current
+fan-out evidence are history and do not count.
+`PATCH /modules/:id {active: false, mode: "graceful"}` records `draining_at`, the initiating actor
+and an uncapped `module_drain_tasks` cohort in one transaction with its required `module.drain`
+audit. The module stays active: admitted tasks can answer forms, resume, run its steps and call its
+providers; unrelated work continues. New tasks and new module dependencies are refused with
+`module-draining`. Guards hold module rows KEY SHARE through admission; a lifecycle action holds
+FOR UPDATE. New guards never wait on a row upgrade (`module-busy`, retry), and task revival takes
+its integration-choice lock without waiting before discovering dependencies, so a choice cannot
+race that discovery and a dispatch cannot deadlock on a revive's step rows.
+The worker's existing 15-second module pass rechecks each drain under its row lock, using actual
+live dependencies plus the cohort, without a preview cap or task-row locks. A cohort member keeps
+blocking even after its binding or invocation ends, until the task ends. The same live/nondead
+statuses as ordinary deactivation apply; failed, completed, cancelled and dead tasks do not block.
+Only then does the finalizer stamp deactivated_at, clear intent/cohort and insert its required
+`module.deactivate` audit together; the normal module job pass stops that module's jobs. SQL waits
+on lifecycle actions are bounded to five seconds. Intent survives worker restart and failed passes
+are retried; no instance-wide maintenance flag is changed. `DELETE /modules/:id/drain` explicitly
+cancels and audits the drain, idempotently. Activate and urgent deactivation also cancel it under
+the same row lock, so an older finalizer cannot overwrite a newer admin decision. A failed audit
+rolls the new intent, cancellation or finalization back. Urgent stop/kill reporting stays as above.
+
 **Teardown.** "Tear down" on `/admin/modules` (`POST /modules/:id/teardown`, admin, audited as
 `module.teardown`) runs a deactivated module's `./teardown` hook in the worker, which drops the module's
 own data; it answers 409 `module_active` or `module_missing` for a module in any other state. The

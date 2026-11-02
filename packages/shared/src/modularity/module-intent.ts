@@ -21,6 +21,7 @@ export interface ModuleIntentRow {
   missingAt: Date | string | null;
   deactivatedAt: Date | string | null;
   tornDownAt: Date | string | null;
+  drainingAt?: Date | string | null;
 }
 
 export type SkippedSeed =
@@ -41,6 +42,7 @@ export interface ModuleDiffRow {
   missingAt: string | null;
   deactivatedAt: string | null;
   tornDownAt: string | null;
+  drainingAt?: string | null;
   skippedSeeds: SkippedSeed[];
 }
 
@@ -147,6 +149,7 @@ export function diffModuleIntent(
       missingAt: row ? iso(row.missingAt) : null,
       deactivatedAt: row ? iso(row.deactivatedAt) : null,
       tornDownAt: row ? iso(row.tornDownAt) : null,
+      drainingAt: row?.drainingAt ? iso(row.drainingAt) : null,
       skippedSeeds: worker.skipped.get(id) ?? [],
     };
   });

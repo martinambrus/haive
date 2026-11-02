@@ -24,6 +24,7 @@ const READS_STATE = 'reads the state';
 /** A failed task; `log` lists what each transaction sends, in order: locks, state reads, updates. */
 function setup(status: 'failed' | 'running' = 'failed') {
   const fake = createFakeDb({
+    modules: schema.modules,
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     taskEvents: schema.taskEvents,

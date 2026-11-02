@@ -1,3 +1,8 @@
+import {
+  guardModuleAdmission,
+  integrationModuleIds,
+  moduleAdmissionFailures,
+} from '@haive/shared/modularity-server';
 import { and, eq, inArray } from 'drizzle-orm';
 import { HTTPException } from 'hono/http-exception';
 import { schema, type Database, type DbTx } from '@haive/database';
@@ -77,6 +82,7 @@ export async function taskIntegrationPreview(
     definition: TaskTypeDefinitionForCreate;
     choices: readonly TaskIntegrationChoice[];
   },
+  opts: { lockRequiredModules?: boolean } = {},
 ): Promise<TaskIntegrationPreview> {
   const { requirements, issues } = await requirementsForCreate(db, input.definition);
   const result: TaskIntegrationPreview = {
@@ -165,6 +171,32 @@ export async function taskIntegrationPreview(
       optional: requirement.optional === true,
     });
   }
+  // Static automatic selections are known dependencies too. A create holds their module
+  // leases before writing its task; the read-only preview reports the same fresh drain state.
+  const required = result.categories.filter(
+    (category) => category.required && category.status === 'resolved' && category.selected,
+  );
+  const failures = await moduleAdmissionFailures(
+    db,
+    integrationModuleIds(
+      required.map((category) => ({
+        categoryId: category.categoryId,
+        providerId: category.selected!.providerId,
+      })),
+    ),
+    { lock: opts.lockRequiredModules, checkOff: true },
+  );
+  for (const category of required) {
+    const blocked = integrationModuleIds([
+      { categoryId: category.categoryId, providerId: category.selected!.providerId },
+    ])
+      .map((id) => failures.get(id))
+      .find(Boolean);
+    if (blocked) {
+      category.status = 'unresolved';
+      category.reason = blocked === 'module-deactivated' ? 'provider-deactivated' : blocked;
+    }
+  }
   result.admitted &&= result.categories.every(
     (category) => !category.required || category.status === 'resolved',
   );
@@ -203,7 +235,8 @@ export async function admitTaskIntegrations(
       throw new HttpError(409, 'Reconnect the selected integration account in Settings');
     picks.push({ ...pick, providerId: row.providerId });
   }
-  const preview = await taskIntegrationPreview(db, input);
+  await guardModuleAdmission(db, integrationModuleIds(picks), undefined, true);
+  const preview = await taskIntegrationPreview(db, input, { lockRequiredModules: true });
   if (!preview.admitted)
     throw new HTTPException(409, {
       res: Response.json(
@@ -216,5 +249,17 @@ export async function admitTaskIntegrations(
         { status: 409 },
       ),
     });
-  return picks;
+  return {
+    picks,
+    moduleIds: integrationModuleIds(
+      preview.categories
+        .filter(
+          (category) => category.required && category.status === 'resolved' && category.selected,
+        )
+        .map((category) => ({
+          categoryId: category.categoryId,
+          providerId: category.selected!.providerId,
+        })),
+    ),
+  };
 }

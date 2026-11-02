@@ -202,59 +202,62 @@ const db = {
     h.state.onSelect();
     if (!h.state.readsAnswer) throw new Error('the job went no further');
     return {
-      from: (table: unknown) => ({
-        where: (cond: unknown) => {
-          const name = tableNameOf(table);
-          // Awaited directly by some reads, cut with .limit() by others, and locked by the
-          // hand-off and the park.
-          return Object.assign(Promise.resolve([]), {
-            limit: async () => {
-              if (name === 'usage_window_snapshots' && h.state.snapshotReadFails) {
-                throw new Error('the usage snapshot read failed');
-              }
-              if (name === 'modules') {
-                h.state.moduleReads += 1;
-                return h.state.moduleReads > 1 && h.state.laterModuleRows
-                  ? h.state.laterModuleRows
-                  : h.state.moduleRows;
-              }
-              if (fields && 'pausedAt' in fields) {
-                return h.state.pausedAt ? [{ pausedAt: h.state.pausedAt }] : [];
-              }
-              if (fields && 'status' in fields && name === 'tasks') {
-                return [{ status: h.state.taskStatus }];
-              }
-              if (!fields && name === 'task_steps' && h.state.existingRow) {
-                return [h.state.existingRow];
-              }
-              return [];
-            },
-            for: async () => {
-              if (name === 'task_steps' && fields && 'integrationWait' in fields) {
-                return h.state.sourceOwned
-                  ? [{ integrationWait: h.state.currentIntegrationWait }]
-                  : [];
-              }
-              if (name === 'modules') {
-                h.state.moduleReads += 1;
-                return h.state.moduleReads > 1 && h.state.laterModuleRows
-                  ? h.state.laterModuleRows
-                  : h.state.moduleRows;
-              }
-              if (name === 'tasks') {
-                const held = taskMatches(cond);
-                h.state.taskHolds.push(held);
-                return held.landed ? [{ id: 'task-1' }] : [];
-              }
-              return h.state.sourceOwned ? [{ id: 'ts-1' }] : [];
-            },
-            orderBy: () => {
-              const rows = name === 'cli_invocations' ? h.state.endedRuns : h.state.requestedEvents;
-              return Object.assign(Promise.resolve(rows), { limit: async () => rows });
-            },
-          });
-        },
-      }),
+      // No recorded module intents in this fixture; the keyed moduleRows below are per-step gate probes.
+      from: (table: unknown) =>
+        Object.assign(tableNameOf(table) === 'modules' ? Promise.resolve([]) : {}, {
+          where: (cond: unknown) => {
+            const name = tableNameOf(table);
+            // Awaited directly by some reads, cut with .limit() by others, and locked by the
+            // hand-off and the park.
+            return Object.assign(Promise.resolve([]), {
+              limit: async () => {
+                if (name === 'usage_window_snapshots' && h.state.snapshotReadFails) {
+                  throw new Error('the usage snapshot read failed');
+                }
+                if (name === 'modules') {
+                  h.state.moduleReads += 1;
+                  return h.state.moduleReads > 1 && h.state.laterModuleRows
+                    ? h.state.laterModuleRows
+                    : h.state.moduleRows;
+                }
+                if (fields && 'pausedAt' in fields) {
+                  return h.state.pausedAt ? [{ pausedAt: h.state.pausedAt }] : [];
+                }
+                if (fields && 'status' in fields && name === 'tasks') {
+                  return [{ status: h.state.taskStatus }];
+                }
+                if (!fields && name === 'task_steps' && h.state.existingRow) {
+                  return [h.state.existingRow];
+                }
+                return [];
+              },
+              for: async () => {
+                if (name === 'task_steps' && fields && 'integrationWait' in fields) {
+                  return h.state.sourceOwned
+                    ? [{ integrationWait: h.state.currentIntegrationWait }]
+                    : [];
+                }
+                if (name === 'modules') {
+                  h.state.moduleReads += 1;
+                  return h.state.moduleReads > 1 && h.state.laterModuleRows
+                    ? h.state.laterModuleRows
+                    : h.state.moduleRows;
+                }
+                if (name === 'tasks') {
+                  const held = taskMatches(cond);
+                  h.state.taskHolds.push(held);
+                  return held.landed ? [{ id: 'task-1' }] : [];
+                }
+                return h.state.sourceOwned ? [{ id: 'ts-1' }] : [];
+              },
+              orderBy: () => {
+                const rows =
+                  name === 'cli_invocations' ? h.state.endedRuns : h.state.requestedEvents;
+                return Object.assign(Promise.resolve(rows), { limit: async () => rows });
+              },
+            });
+          },
+        }),
     };
   },
   insert: () => ({

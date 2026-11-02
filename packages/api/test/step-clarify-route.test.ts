@@ -32,6 +32,7 @@ vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 /** A task at `status` whose merge step is parked on a clarification. */
 function setup(status: string) {
   const fake = createFakeDb({
+    modules: schema.modules,
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     taskEvents: schema.taskEvents,

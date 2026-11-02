@@ -1,3 +1,11 @@
+import {
+  beginModuleDrain,
+  cancelModuleDrain,
+  recordTaskModuleAdmissions,
+} from '@haive/shared/modularity-server';
+import { registerModuleIntegrations } from '@haive/shared/integrations';
+import { admitTaskIntegrations } from '../src/lib/task-integration-admission.js';
+import { definitionForCreate } from '../src/lib/task-type-definition.js';
 import { randomUUID } from 'node:crypto';
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -136,7 +144,7 @@ describe.skipIf(!url)('task integration preview and atomic admission on Postgres
   };
   const counts = async () => {
     const [row] = await db.execute(
-      sql`select (select count(*)::int from tasks) as tasks, (select count(*)::int from task_events) as events, (select count(*)::int from task_integration_choices) as choices, (select count(*)::int from integration_grants where target_kind='task') as grants`,
+      sql`select (select count(*)::int from tasks) as tasks, (select count(*)::int from task_events) as events, (select count(*)::int from task_integration_choices) as choices, (select count(*)::int from integration_grants where target_kind='task') as grants, (select count(*)::int from module_task_admissions) as admissions`,
     );
     return row;
   };
@@ -148,6 +156,7 @@ describe.skipIf(!url)('task integration preview and atomic admission on Postgres
     await db.$client.end({ timeout: 5 });
   });
   beforeEach(async () => {
+    registerModuleIntegrations([]);
     h.add.mockReset();
     h.afterDefinition = undefined;
     await db.execute(
@@ -198,6 +207,183 @@ describe.skipIf(!url)('task integration preview and atomic admission on Postgres
     });
     own = await connection();
   });
+  async function autoModuleAccount(draining = true) {
+    const moduleId = 'admission';
+    const providerId = 'module.admission.docs';
+    registerModuleIntegrations([
+      {
+        manifest: {
+          id: moduleId,
+          name: 'Admission module',
+          integrations: [
+            {
+              id: providerId,
+              displayName: 'Module documents',
+              categories: ['rich-documents'],
+              selfHosted: false,
+              auth: [
+                {
+                  kind: 'token',
+                  form: { title: 'Token', fields: [{ id: 'token', type: 'text', label: 'Token' }] },
+                  help: 'Fixture',
+                },
+              ],
+              operations: [
+                {
+                  opId: 'docs_list',
+                  description: 'List documents',
+                  inputSchema: { type: 'object' },
+                  access: 'read',
+                },
+              ],
+              apiHosts: ['docs.example'],
+            },
+          ],
+        },
+      },
+    ]);
+    await db.insert(schema.modules).values({
+      moduleId,
+      packageName: '@haive/module-admission',
+      name: 'Admission',
+      installedVersion: '1.0.0',
+    });
+    await db.insert(schema.integrationProviderConfigs).values({ providerId, enabled: true });
+    await connection(h.userId, {
+      providerId,
+      repoCredentialId: null,
+      accountLabel: 'Automatic documents',
+    });
+    await setRequirements([requirement('rich-documents')]);
+    if (draining) {
+      await db.insert(schema.tasks).values({
+        userId: h.userId,
+        type: 'workflow',
+        title: 'Existing dependent',
+        status: 'running',
+        runListSnapshot: ['module.admission.hold'],
+      });
+      await beginModuleDrain(db, moduleId, h.userId);
+    }
+    return moduleId;
+  }
+
+  it('[T330 D1] readonly preview refuses an automatically selected required account while its module drains', async () => {
+    await autoModuleAccount();
+    const before = await counts();
+    const response = await preview(); // Real New Task sends no explicit choices when Auto is unchanged.
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      admitted: false,
+      categories: [{ categoryId: 'rich-documents', required: true, reason: 'module-draining' }],
+    });
+    expect(await counts()).toEqual(before);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
+  it('[T330 D1] create refuses the same automatic required account without task/event/queued state, then admits it after cancel', async () => {
+    const moduleId = await autoModuleAccount();
+    const before = await counts();
+    expect((await create()).status).toBe(409);
+    expect(await counts()).toEqual(before);
+    expect(h.add).not.toHaveBeenCalled();
+    await cancelModuleDrain(db, moduleId, h.userId);
+    expect((await create()).status).toBe(201);
+    expect(h.add).toHaveBeenCalledTimes(1);
+  });
+
+  it('[T330 D1 cohort] creation winning before drain joins the initial cohort and survives cancel/re-drain', async () => {
+    const moduleId = await autoModuleAccount(false);
+    const response = await create();
+    expect(response.status).toBe(201);
+    const { task } = (await response.json()) as { task: { id: string } };
+    await beginModuleDrain(db, moduleId, h.userId);
+    expect(await db.select().from(schema.moduleDrainTasks)).toEqual([
+      { moduleId, taskId: task.id },
+    ]);
+    await cancelModuleDrain(db, moduleId, h.userId);
+    expect(await db.select().from(schema.moduleTaskAdmissions)).toEqual([
+      { moduleId, taskId: task.id },
+    ]);
+    await beginModuleDrain(db, moduleId, h.userId);
+    expect(await db.select().from(schema.moduleDrainTasks)).toEqual([
+      { moduleId, taskId: task.id },
+    ]);
+    expect(await db.select().from(schema.taskIntegrationChoices)).toEqual([]);
+    expect(await db.select().from(schema.integrationGrants)).toEqual([]);
+  });
+
+  it('[T330 D1] refuses all creation writes when the required module admission row cannot be recorded', async () => {
+    await autoModuleAccount(false);
+    const before = await counts();
+    await db.execute(
+      sql`CREATE FUNCTION reject_module_admission() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture admission refusal'; END $$`,
+    );
+    await db.execute(
+      sql`CREATE TRIGGER reject_module_admission BEFORE INSERT ON module_task_admissions FOR EACH ROW EXECUTE FUNCTION reject_module_admission()`,
+    );
+    try {
+      expect((await create()).status).toBe(500);
+      expect(await counts()).toEqual(before);
+      expect(h.add).not.toHaveBeenCalled();
+    } finally {
+      await db.execute(sql`DROP TRIGGER reject_module_admission ON module_task_admissions`);
+      await db.execute(sql`DROP FUNCTION reject_module_admission()`);
+    }
+  });
+
+  it('[T330 D1] optional-only and unrelated new tasks remain admitted during the drain', async () => {
+    await autoModuleAccount();
+    await setRequirements([requirement('rich-documents', true)]);
+    expect(await (await preview()).json()).toMatchObject({ admitted: true });
+    expect((await create()).status).toBe(201);
+    await setRequirements([]);
+    expect((await create()).status).toBe(201);
+  });
+
+  it('[T330 D1] automatically resolved required admission holds the module until the new task commits', async () => {
+    const moduleId = await autoModuleAccount(false);
+    let pending!: ReturnType<typeof beginModuleDrain>;
+    let createdId = '';
+    await db.transaction(async (tx) => {
+      const definition = await definitionForCreate(tx, TYPE, { generic: true });
+      const admission = await admitTaskIntegrations(tx, {
+        userId: h.userId,
+        repositoryId: repoId,
+        definition,
+        choices: [],
+      });
+      const [made] = await tx
+        .insert(schema.tasks)
+        .values({
+          userId: h.userId,
+          type: TYPE,
+          title: 'Auto admission race',
+          status: 'running',
+          runListSnapshot: definition.runListSnapshot,
+          customSteps: definition.customSteps,
+        })
+        .returning();
+      createdId = made!.id;
+      await recordTaskModuleAdmissions(tx, createdId, admission.moduleIds);
+      pending = beginModuleDrain(db, moduleId, h.userId);
+      expect(
+        await Promise.race([
+          pending.then(() => 'done'),
+          new Promise((resolve) => setTimeout(() => resolve('blocked'), 150)),
+        ]),
+      ).toBe('blocked');
+    });
+    await pending;
+    expect(await db.select().from(schema.moduleDrainTasks)).toEqual([
+      { moduleId, taskId: createdId },
+    ]);
+    // The tag records only module dependency; automatic account selection stays unpinned.
+    expect(await db.select().from(schema.tasks).where(eq(schema.tasks.id, createdId))).toHaveLength(
+      1,
+    );
+  });
+
   it('authenticates and validates the literal preview route', async () => {
     expect((await send('GET', '/tasks/integration-preview', undefined, false)).status).toBe(401);
     for (const query of [

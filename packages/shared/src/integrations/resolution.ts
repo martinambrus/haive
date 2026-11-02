@@ -1,3 +1,4 @@
+import { guardModuleAdmission, integrationModuleIds } from '../modularity-server/module-drain.js';
 import { and, asc, eq, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
 import type { IntegrationRequirement } from '../modularity/contracts.js';
@@ -212,6 +213,12 @@ export async function recordTaskGrants(
   taskId: string,
   resolutions: readonly IntegrationResolution[],
 ): Promise<void> {
+  await guardModuleAdmission(
+    db,
+    integrationModuleIds(resolutions.filter((r) => r.status === 'resolved')),
+    taskId,
+    true,
+  );
   const connectionByCategory = new Map<string, string>();
   for (const resolution of resolutions) {
     if (resolution.status !== 'resolved' || resolution.categoryId === null) continue;

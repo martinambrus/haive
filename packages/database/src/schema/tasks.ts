@@ -46,6 +46,8 @@ export interface IntegrationWaitCause {
   reason:
     | 'connection-unavailable'
     | 'provider-deactivated'
+    | 'module-draining'
+    | 'module-busy'
     | 'provider-disabled'
     | 'provider-missing'
     | 'no-connection'

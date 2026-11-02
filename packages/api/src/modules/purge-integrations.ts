@@ -1,6 +1,16 @@
-import { and, inArray, or, sql, type AnyColumn } from 'drizzle-orm';
+import { and, inArray, sql } from 'drizzle-orm';
 import { LIVE_TASK_STATUSES, schema, type Database } from '@haive/database';
-import { modulePackageId, MODULE_DEPENDENTS_CAP } from '@haive/shared/modularity';
+import { MODULE_DEPENDENTS_CAP } from '@haive/shared/modularity';
+
+import {
+  moduleIntegrationPredicates,
+  moduleIntegrationTaskPredicate,
+} from '@haive/shared/modularity-server';
+export {
+  moduleIntegrationIdPattern,
+  moduleIntegrationPredicates,
+  moduleIntegrationTaskPredicate,
+} from '@haive/shared/modularity-server';
 
 export interface ModuleIntegrationCounts {
   providerConfigs: number;
@@ -19,49 +29,6 @@ export const emptyModuleIntegrationCounts = (): ModuleIntegrationCounts => ({
   taskChoices: 0,
   grants: 0,
 });
-
-/** Same persisted scoped-id grammar as parseProviderId/parseCategoryId, even after uninstall. */
-export function moduleIntegrationIdPattern(moduleId: string): string {
-  if (modulePackageId(`@haive/module-${moduleId}`) !== moduleId)
-    throw new Error('Invalid module id');
-  return `^module\\.${moduleId}\\.[a-z0-9][a-z0-9_-]*$`;
-}
-
-export function moduleIntegrationPredicates(moduleId: string) {
-  const pattern = moduleIntegrationIdPattern(moduleId);
-  const owned = (column: AnyColumn) => sql`${column} ~ ${pattern}`;
-  const connections = owned(schema.integrationConnections.providerId);
-  const ownedConnection = (column: AnyColumn) =>
-    inArray(
-      column,
-      sql`(SELECT ${schema.integrationConnections.id} FROM ${schema.integrationConnections} WHERE ${connections})`,
-    );
-  return {
-    providerConfigs: owned(schema.integrationProviderConfigs.providerId),
-    connections,
-    userSettings: owned(schema.integrationUserSettings.providerId),
-    preferences: or(
-      owned(schema.integrationCategoryPreferences.categoryId),
-      owned(schema.integrationCategoryPreferences.providerId),
-      ownedConnection(schema.integrationCategoryPreferences.connectionId),
-    )!,
-    taskChoices: or(
-      owned(schema.taskIntegrationChoices.categoryId),
-      owned(schema.taskIntegrationChoices.providerId),
-      ownedConnection(schema.taskIntegrationChoices.connectionId),
-    )!,
-    grants: or(
-      owned(schema.integrationGrants.categoryId),
-      ownedConnection(schema.integrationGrants.connectionId),
-    )!,
-  };
-}
-
-export function moduleIntegrationTaskPredicate(moduleId: string) {
-  const p = moduleIntegrationPredicates(moduleId);
-  return sql`(EXISTS (SELECT 1 FROM ${schema.taskIntegrationChoices} WHERE ${schema.taskIntegrationChoices.taskId} = ${schema.tasks.id} AND ${p.taskChoices})
-    OR EXISTS (SELECT 1 FROM ${schema.integrationGrants} WHERE ${schema.integrationGrants.taskId} = ${schema.tasks.id} AND ${p.grants}))`;
-}
 
 export async function moduleIntegrationDependents(db: Pick<Database, 'select'>, moduleId: string) {
   const rows = await db

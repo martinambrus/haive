@@ -61,6 +61,7 @@ export type UnresolvedReason =
   | 'no-provider'
   | 'provider-disabled'
   | 'provider-deactivated'
+  | 'module-draining'
   | 'provider-missing'
   | 'no-connection'
   | 'needs-choice'

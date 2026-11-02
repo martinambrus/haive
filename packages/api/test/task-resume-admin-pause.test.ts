@@ -46,6 +46,7 @@ let clock = 0;
 
 const setup = (over: Record<string, unknown> = {}, taskOwner = OWNER) => {
   const fake = createFakeDb({
+    modules: schema.modules,
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     taskEvents: schema.taskEvents,

@@ -104,6 +104,13 @@ Both `@haive/shared/integrations` (server-only, imports the database) and `@haiv
 out of the root barrel. Web imports `@haive/shared/forge`, so nothing loaded by that subpath may import
 a node-only module or the database.
 
+During a graceful module drain, provider enablement stays unchanged so already admitted tasks
+keep their tools. New task choices and dispatch grants take the module's shared admission guard
+in their mutation transaction; nonmembers receive `module-draining`, and dispatch uses the
+existing integration wait. A raced final deactivation is rechecked under that guard. The
+module drain cohort also counts live invocation stamps, so Reset cannot cut a call off merely
+by removing its current grant. See [Modules](modules.md) for finalization and cancellation.
+
 ## Module data purge
 
 Uninstalling keeps integration data. An admin's explicit purge of a missing module removes only
@@ -567,6 +574,22 @@ A failed choice/event/queue-state write rolls the task back too. Existing root, 
 database and attachment admission stays in that transaction. This is account admission only:
 the owner's write switch and broker permissions still decide which operations can run, and the
 worker's dispatch resolution remains final authority when accounts or provider state change later.
+
+Required static integrations selected automatically are module dependencies just like explicit
+picks. The read-only preview checks their freshly resolved module state and reports
+`module-draining` without admitting creation; the insert transaction takes the same required
+modules KEY SHARE before recording the task, so a lifecycle write waits for admission. The same creation transaction records the known required module ids in `module_task_admissions`,
+so a create that wins before a drain is included in its later cohort. These tags do not pin an
+automatic account as a task choice or grant and do not reconstruct dynamic paths. They survive
+cancel/reactivate/urgent actions until task deletion or explicit module purge, with the normal
+live/nondead task filter on dependency reads; there is no legacy inference or backfill. An
+admission-row failure rolls back task/events/queued state too.
+An optional module account denied to a nonmember is omitted before the worker builds its account
+text, prompt and tools. The dispatch keeps that omission through its second resolution, even if
+the drain is cancelled meanwhile; it never adds an account to a prompt built without it. An
+account already used by a cohort member or an immutable fan-out stamp keeps its existing behavior.
+A drain beginning after a bound prompt was built still refuses that insert through the existing
+integration wait, allowing the next poll to rebuild the optional prompt without the account.
 
 New Task checks the actual create type (including Workflow's inferred onboarding/workflow type),
 repository and explicit choices. It discards old responses, gates Create while the current check is

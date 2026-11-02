@@ -105,6 +105,7 @@ import { resolveMergePhase } from './merge-resolver.js';
 import {
   dispatchIntegrationAccounts,
   insertStampedRun,
+  insertFixedStampedRun,
   IntegrationBlockedError,
   type IntegrationBlock,
   invalidRequirementsFailure,
@@ -621,6 +622,7 @@ async function resolveCustomTools(
 }
 
 type DispatchStamp = {
+  admittedRequirements?: readonly IntegrationRequirement[];
   requirements: readonly IntegrationRequirement[];
   bindings: IntegrationBinding[];
   failure: string | null;
@@ -645,6 +647,9 @@ async function resolveDispatchStamp(
   return resolved.ok
     ? {
         requirements,
+        admittedRequirements: requirements.filter(
+          (r) => !resolved.omittedRequirementIds?.includes(r.id),
+        ),
         bindings: resolved.bindings,
         failure: null,
         named: new Map<string, string | null>(
@@ -667,14 +672,22 @@ async function insertDispatchRun(
 ): Promise<typeof schema.cliInvocations.$inferSelect | { failure: string }> {
   if (stamp.bindings.length === 0) return insertOwnedRun(db, stepRowId, values);
   if (stamp.fixed) {
-    return insertOwnedRun(db, stepRowId, { ...values, integrations: stamp.fixed.integrations });
+    const run = await insertFixedStampedRun(
+      db,
+      taskId,
+      stepRowId,
+      values,
+      stamp.fixed.integrations ?? [],
+    );
+    if ('failure' in run) throw new IntegrationBlockedError(run.blocked);
+    return run;
   }
   const run = await insertStampedRun(
     db,
     taskId,
     stepRowId,
     values,
-    stamp.requirements,
+    stamp.admittedRequirements ?? stamp.requirements,
     stamp.named,
   );
   if ('failure' in run && run.blocked) throw new IntegrationBlockedError(run.blocked);

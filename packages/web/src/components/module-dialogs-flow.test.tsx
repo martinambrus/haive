@@ -245,10 +245,11 @@ describe('ModuleTasksOpenDialog actions', () => {
     expect((await view(null)).tree()).toBeNull();
   });
 
-  it('offers Cancel and a danger Turn off now, and sends nothing until one is clicked', async () => {
+  it('offers Cancel, Drain then turn off and a danger Turn off now, and sends nothing until one is clicked', async () => {
     const { buttons } = await view();
     expect(buttons().map((b) => [textOf(b), b.props.variant])).toEqual([
       ['Cancel', 'secondary'],
+      ['Drain then turn off', 'secondary'],
       ['Turn off now', 'destructive'],
     ]);
     expect(sent('/modules/alpha')).toHaveLength(0);
@@ -279,13 +280,14 @@ describe('ModuleTasksOpenDialog actions', () => {
     expect(onDone).toHaveBeenCalledTimes(1);
   });
 
-  it('shows it is busy, disables both buttons, and ignores Cancel and Escape until the answer arrives', async () => {
+  it('shows it is busy, disables all three buttons, and ignores Cancel and Escape until the answer arrives', async () => {
     let answer!: (response: Response) => void;
     apiAnswer = () => new Promise<Response>((resolve) => (answer = resolve));
     const { click, buttons, press, button, onClose, onDone } = await view();
     await click('Turn off now');
     expect(buttons().map((b) => [textOf(b), b.props.disabled])).toEqual([
       ['Cancel', true],
+      ['Drain then turn off', true],
       ['Turning off…', true],
     ]);
     button('Cancel').props.onClick!();
@@ -326,6 +328,7 @@ describe('ModuleTasksOpenDialog actions', () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(buttons().map((b) => [textOf(b), b.props.disabled])).toEqual([
       ['Cancel', false],
+      ['Drain then turn off', false],
       ['Turn off now', false],
     ]);
     await click('Turn off now');

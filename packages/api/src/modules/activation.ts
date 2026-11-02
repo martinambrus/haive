@@ -1,9 +1,10 @@
-import { and, desc, eq, inArray, isNotNull, isNull, sql, type SQL } from 'drizzle-orm';
-import { LIVE_TASK_STATUSES, schema, type Database } from '@haive/database';
+import { moduleDependentRows, moduleDependents } from '@haive/shared/modularity-server';
+import { eq, isNotNull, sql } from 'drizzle-orm';
+import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { safeErrorMessage } from '@haive/shared/logger';
-import { MODULE_DEPENDENTS_CAP, isStepOfModule } from '@haive/shared/modularity';
-import { recordAuditEvent } from '../lib/audit.js';
+import { isStepOfModule } from '@haive/shared/modularity';
+import { insertAuditEvent, recordAuditEvent } from '../lib/audit.js';
 import { killTaskSandboxesOrThrow } from '../lib/sandbox-kill.js';
 import { supersedeLiveRuns } from '../lib/task-control.js';
 import { appendTaskEvent } from '../routes/tasks/_helpers.js';
@@ -61,67 +62,46 @@ export async function isModuleDeactivated(db: Reader, moduleId: string): Promise
   return row?.deactivatedAt != null;
 }
 
-// CASE, not AND: SQL does not order an AND's operands, and a snapshot that is not an array makes
-// jsonb_array_elements_text raise.
-const dependentRows = (db: Reader, moduleId: string, includeDead: boolean, also?: SQL) =>
-  db
-    .select({
-      id: schema.tasks.id,
-      title: schema.tasks.title,
-      status: schema.tasks.status,
-      ownerId: schema.tasks.userId,
-      currentStepId: schema.tasks.currentStepId,
-    })
-    .from(schema.tasks)
-    .where(
-      and(
-        // `created` counts: a draft runs nothing but would find its module deactivated once started.
-        inArray(schema.tasks.status, [...LIVE_TASK_STATUSES]),
-        includeDead ? undefined : isNull(schema.tasks.deadAt),
-        also,
-        sql`(EXISTS (
-            SELECT 1 FROM ${schema.taskTypeDefinitions}
-            WHERE ${schema.taskTypeDefinitions.slug} = ${schema.tasks.type}
-              AND ${schema.taskTypeDefinitions.source} = ${`module:${moduleId}`}
-          )
-          OR CASE WHEN jsonb_typeof(${schema.tasks.runListSnapshot}) = 'array'
-          THEN EXISTS (
-            SELECT 1 FROM jsonb_array_elements_text(${schema.tasks.runListSnapshot}) AS s(id)
-            WHERE starts_with(s.id, ${`module.${moduleId}.`})
-          )
-          ELSE false END)`,
-      ),
-    )
-    .orderBy(desc(schema.tasks.updatedAt));
-
-export async function liveDependents(
-  db: Reader,
-  moduleId: string,
-  includeDead = false,
-): Promise<{ tasks: ModuleDependent[]; capped: boolean }> {
-  const rows = await dependentRows(db, moduleId, includeDead).limit(MODULE_DEPENDENTS_CAP + 1);
-  return {
-    tasks: rows.slice(0, MODULE_DEPENDENTS_CAP),
-    capped: rows.length > MODULE_DEPENDENTS_CAP,
-  };
-}
+const dependentRows = moduleDependentRows;
+export const liveDependents = moduleDependents;
 
 export function setModuleActive(
   db: Database,
   moduleId: string,
   active: boolean,
+  actorUserId?: string,
 ): Promise<ModuleToggle> {
   return db.transaction(async (tx): Promise<ModuleToggle> => {
+    await tx.execute(sql`SET LOCAL lock_timeout = '5s'`);
     const [row] = await tx
-      .select({ deactivatedAt: schema.modules.deactivatedAt })
+      .select({
+        deactivatedAt: schema.modules.deactivatedAt,
+        drainingAt: schema.modules.drainingAt,
+      })
       .from(schema.modules)
       .where(eq(schema.modules.moduleId, moduleId))
       .for('update');
     if (!row) return { kind: 'missing' };
     if (active) {
+      if (row.drainingAt && actorUserId)
+        await insertAuditEvent(tx, {
+          actorUserId,
+          action: 'module.drain_cancel',
+          targetType: 'module',
+          metadata: { moduleId },
+        });
+      await tx
+        .delete(schema.moduleDrainTasks)
+        .where(eq(schema.moduleDrainTasks.moduleId, moduleId));
       await tx
         .update(schema.modules)
-        .set({ deactivatedAt: null, tornDownAt: null, updatedAt: new Date() })
+        .set({
+          deactivatedAt: null,
+          tornDownAt: null,
+          drainingAt: null,
+          drainingBy: null,
+          updatedAt: new Date(),
+        })
         .where(eq(schema.modules.moduleId, moduleId));
       return { kind: 'ok', deactivatedAt: null };
     }
@@ -129,9 +109,21 @@ export function setModuleActive(
     const { tasks, capped } = await liveDependents(tx, moduleId);
     if (tasks.length > 0) return { kind: 'open', tasks, capped };
     const deactivatedAt = new Date();
+    if (row.drainingAt) {
+      if (actorUserId)
+        await insertAuditEvent(tx, {
+          actorUserId,
+          action: 'module.deactivate',
+          targetType: 'module',
+          metadata: { moduleId, mode: 'graceful' },
+        });
+      await tx
+        .delete(schema.moduleDrainTasks)
+        .where(eq(schema.moduleDrainTasks.moduleId, moduleId));
+    }
     await tx
       .update(schema.modules)
-      .set({ deactivatedAt, updatedAt: deactivatedAt })
+      .set({ deactivatedAt, drainingAt: null, drainingBy: null, updatedAt: deactivatedAt })
       .where(eq(schema.modules.moduleId, moduleId));
     return { kind: 'ok', deactivatedAt };
   });
@@ -176,17 +168,34 @@ export async function deactivateUrgently(
   actorUserId: string,
 ): Promise<UrgentDeactivation> {
   const stamped = await db.transaction(async (tx) => {
+    await tx.execute(sql`SET LOCAL lock_timeout = '5s'`);
     const [row] = await tx
-      .select({ deactivatedAt: schema.modules.deactivatedAt })
+      .select({
+        deactivatedAt: schema.modules.deactivatedAt,
+        drainingAt: schema.modules.drainingAt,
+      })
       .from(schema.modules)
       .where(eq(schema.modules.moduleId, moduleId))
       .for('update');
     if (!row) return null;
+    await tx.delete(schema.moduleDrainTasks).where(eq(schema.moduleDrainTasks.moduleId, moduleId));
+    if (row.drainingAt)
+      await insertAuditEvent(tx, {
+        actorUserId,
+        action: 'module.drain_cancel',
+        targetType: 'module',
+        metadata: { moduleId, mode: 'urgent' },
+      });
+    if (row.drainingAt)
+      await tx
+        .update(schema.modules)
+        .set({ drainingAt: null, drainingBy: null })
+        .where(eq(schema.modules.moduleId, moduleId));
     const deactivatedAt = row.deactivatedAt ?? new Date();
     if (!row.deactivatedAt) {
       await tx
         .update(schema.modules)
-        .set({ deactivatedAt, updatedAt: deactivatedAt })
+        .set({ deactivatedAt, drainingAt: null, drainingBy: null, updatedAt: deactivatedAt })
         .where(eq(schema.modules.moduleId, moduleId));
     }
     const { tasks, capped } = await liveDependents(tx, moduleId);
