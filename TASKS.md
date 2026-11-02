@@ -382,13 +382,6 @@ Plan D3. Check: an own module installs on a published-image install with no host
 status: open · was modular #106 · priority: P2
 Plan D4: git and registry install sources drive D1 and D3; the token is stored envelope-encrypted.
 
-### T339 · I4d · task page Integrations tab (override, "Also for my later tasks", reset) (+2)
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T12:02Z · last: 2026-11-02T12:02Z · was modular #127 · priority: P2
-Plan I4, part d. Browser check at 1280, 768 and 390.
-
-Execution scope: complete existing task-page Integrations feature: per-category task override, explicit "Also for my later tasks" preference consent, reset to automatic resolution, and safe read-only ended/dead state. Use existing transactional choice routes; any read metadata extension stays within this UI contract. Browser1280/768/390. Excludes reconnect automation T332, composer install-state overview T333, module category/admin expansion T360 and provider purge T361. Starts after T356/T357 fix2 driver is quiescent; may stack on its reviewed feature while delivery gates run.
-
 ### T342 · FNF[mcp-token-file] · rag/ddev task tokens in the server env defeat the cli-merge skip (measure first) (+4)
 
 status: parked · kind: design · was modular #146 · reason: diminishing returns (2026-11-01 scan): Bundle concerns merge efficiency, stale wiring, helper cleanup, and orphan-directory hygiene; resume when resume when measured overhead or stale wiring disrupts invocations · priority: P4
@@ -1395,6 +1388,8 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
 ## Done
+
+- T339 — task-page integration overrides, explicit remembered preferences and reset — PR #995 (69f3f237fb), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41449928905 green; actual task-page browser1280/768/390 save/explicitremember/refuseddraft/refresh/reset/explicitforget/unavailablegrantreset and completedreadonly with lateolderpoll passed;9screenshots inspected,18writes locallycaptured/0forwarded; actualPG37 and source/APIwatcher/health/activity checks green. Evidence .claude/tmp/codex-run/queue-exec-20261101/T339/.
 
 - T357 — New Task account picker and prompt integration authoring — PR #994 (0d5de5bc6c), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41444429959 green; actual browser New Task and existing type editor1280/768/390 passed, all6 screenshots inspected; pending/required admission, explicit unavailable account clear/draft preservation and integration-only raw repair PATCH checked with0 forwarded mutations; authenticated deployed preview200 and actualPG19/source-load checks green. Evidence .claude/tmp/codex-run/queue-exec-20261101/T356-T357/.
 
