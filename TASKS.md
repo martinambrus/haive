@@ -1078,11 +1078,13 @@ Execution fence 2026-11-01: Deduplicate the resolved T397 paths and T379 overlap
 
 ### T496 · FNF[vendor-call-deadlines] · the worker's usage poll awaits vendor calls with no deadline (+1)
 
-status: open · priority: P1
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · last: 2026-11-02T09:13Z · priority: P1
 From the T376 follow-up review (2026-10-31). PRE-EXISTING, moderate; the same class as the 15 s deadline T376 gives `postToken`.
 
 1. The Grok token refresh (worker grok-oauth.ts ~:130) is awaited ahead of the poll (usage-poll-queue.ts ~:693) on a `concurrency: 1` worker (~:698), and the usage fetchers (claude-code.ts ~:43, codex.ts ~:72, zai.ts ~:71, gemini.ts ~:40, awaited per batch through `cfg.fetch` ~:340) pass no `signal`; the only bound is the HTTP client's default. A stalled endpoint holds the tick, the provider-outage watch behind it and the Claude refresh. Give each an `AbortSignal.timeout` and pin it.
 2. The Grok refresh reads a permanent rejection from the message text (credential-refresh.ts ~:141 `msg.includes('invalid_grant')`, relying on grok-oauth.ts ~:144-146); the Claude twin has a typed `ClaudeOauthError.code`. Key it on a code.
+
+Execution scope: bounded deadlines for existing usage fetchers/Grok refresh and typed permanent OAuth rejection; no vendor calls, broad provider audit or new refresh framework. Owner-approved queue continuation, resource reserve5GiB C/4GiB RAM, one active driver.
 
 ### T497 · FNF[plan-merge-failed-visibility] · after a reload a failed plan merge leaves no trace on the plan page
 
