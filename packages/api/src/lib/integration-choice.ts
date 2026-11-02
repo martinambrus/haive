@@ -38,7 +38,7 @@ export function listAdminDefaults(db: Database) {
 
 /** The caller's own connections, else 404: a missing connection and someone else's answer alike. */
 export async function requireOwnConnections(
-  db: Database,
+  db: Database | DbTx,
   userId: string,
   connectionIds: readonly string[],
 ): Promise<OwnConnection[]> {
@@ -76,7 +76,7 @@ export async function requireOwnConnections(
 
 /** Refuses what no row may hold; the shared resolver folds most of it into needs-choice instead. */
 export async function requireValidChoice(
-  db: Database,
+  db: Database | DbTx,
   userId: string,
   pick: { categoryId: string; providerId: string; connectionId: string | null },
 ): Promise<OwnConnection | null> {
@@ -101,7 +101,7 @@ export async function requireValidChoice(
 
 /** A forge account must be one the task's repository remote can use, by the rule that opens its pull requests. */
 export async function requireFitsRepository(
-  db: Database,
+  db: Database | DbTx,
   categoryId: string,
   connection: OwnConnection | null,
   repositoryId: string | null,
@@ -128,7 +128,7 @@ export async function requireFitsRepository(
 
 /** An account the task's repository leaves off its allow-list could never be resolved for the task. */
 export async function requireAllowedByRepository(
-  db: Database,
+  db: Database | DbTx,
   connection: OwnConnection | null,
   repositoryId: string | null,
 ): Promise<void> {

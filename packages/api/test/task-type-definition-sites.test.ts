@@ -53,6 +53,7 @@ vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 function world() {
   const fake = createFakeDb({
     tasks: schema.tasks,
+    stepCatalog: schema.stepCatalog,
     taskEvents: schema.taskEvents,
     repositories: schema.repositories,
     onboardingArtifacts: schema.onboardingArtifacts,
