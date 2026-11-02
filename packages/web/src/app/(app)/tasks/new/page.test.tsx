@@ -30,8 +30,15 @@ vi.mock('next/navigation', () => ({
 vi.mock('next/link', async () => {
   const { createElement } = await import('react');
   return {
-    default: ({ href, children }: { href: string; children?: unknown }) =>
-      createElement('a', { href }, children as never),
+    default: ({
+      children,
+      ...props
+    }: {
+      href: string;
+      target?: string;
+      rel?: string;
+      children?: unknown;
+    }) => createElement('a', props, children as never),
   };
 });
 vi.mock('@/lib/use-page-title', () => ({ usePageTitle: () => {} }));
@@ -1351,6 +1358,34 @@ describe('New Task integration admission', () => {
     expect(valueOf(controls(view.tree(), /^title/)[0]!)).toBe('Preserved title');
     await submitForm(view);
     expect(posted).toHaveLength(1);
+  });
+  it('rechecks accounts connected in Settings while retaining the task text', async () => {
+    integrationPreview = unresolved();
+    const view = await mount();
+    chooseType(view, 'scoped');
+    pick(view, 'repo-a');
+    await view.flush();
+    await view.flush();
+    fire.type(controls(view.tree(), /^title/)[0]!, 'Draft retained');
+    view.draw();
+    const settings = findAll(
+      view.tree(),
+      (host) => host.tag === 'a' && host.props.href === '/settings/integrations',
+    )[0]!;
+    expect(settings.props.target).toBe('_blank');
+    integrationPreview = {
+      ...unresolved(),
+      admitted: true,
+      categories: [
+        { ...unresolved().categories[0], status: 'resolved', reason: null, selected: account },
+      ],
+    };
+    fire.click(buttons(view.tree(), /^refresh accounts$/i)[0]!);
+    view.draw();
+    expect(isDisabled(submit(view))).toBe(true);
+    await view.flush();
+    expect(isDisabled(submit(view))).toBe(false);
+    expect(valueOf(controls(view.tree(), /^title/)[0]!)).toBe('Draft retained');
   });
   it('does not gate creation on an unresolved optional requirement', async () => {
     integrationPreview = unresolved(false);

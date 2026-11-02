@@ -429,6 +429,8 @@ repository and explicit choices. It discards old responses, gates Create while t
 pending, failed or missing a required account, and rechecks each account choice. Optional unresolved
 categories remain nonblocking. The onboarding readiness/reset checks retain their own state and errors;
 changing an inferred type invalidates the integration preview without clearing entered form text.
+Settings opens in another tab, and Refresh accounts rechecks a newly connected account while
+keeping the draft. A create-time admission refusal refreshes the preview without resending creation.
 
 ## Forges
 

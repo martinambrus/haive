@@ -116,9 +116,21 @@ export function TaskIntegrationPicker({
           className="text-sm text-amber-300"
         />
       )}
-      <Link href="/settings/integrations" className="text-sm text-indigo-400 hover:underline">
-        Manage integration accounts
-      </Link>
+      <div className="flex flex-wrap items-center gap-3">
+        <Link
+          href="/settings/integrations"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-sm text-indigo-400 hover:underline"
+        >
+          Manage integration accounts
+        </Link>
+        {!pending && !error && (
+          <Button type="button" variant="secondary" onClick={onRetry}>
+            Refresh accounts
+          </Button>
+        )}
+      </div>
     </section>
   );
 }
