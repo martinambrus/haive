@@ -318,24 +318,6 @@ Two PRs:
 
 Dependency reconciliation 2026-11-01: B3.1c landed and modular-haive-plan is paused with no files held; old peer-ownership notes are not a current blocker. Existing user-decided report/explicitUndo semantics remain.
 
-### T330 · M12 · module lifecycle L3: dependents preflight urgent/graceful (+J9)
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T17:12Z · last: 2026-11-02T20:01Z · was modular #35 · priority: P2
-From the modularity plan, docs/plans/twinkling-frolicking-toast.md (M12, J9).
-
-- U1 and U2 shipped: urgent deactivation and the dependents dialog.
-- Remaining: the graceful path through the maintenance primitives, and J9, the preflight that lists dependents (snapshot module.<m>.* ids plus grants).
-
-User decision 2026-11-02: drain only tasks dependent on this module; unrelated work stays available. Existing dependent tasks finish before the module turns off. Reuse maintenance admission/locking semantics without an instance-wide maintenance window.
-
-Progress 2026-11-02T18:07Z: Aligned reviewed dependency source; independent currentHEAD PostgreSQL133 green, fresh xhigh review found required auto-account admission and optional-only dispatch omissions; bounded fix1 active, full candidate follows fresh clean review. Owner module-only drain and 40% allowance checkpoint retained.
-
-Progress 2026-11-02T18:58Z: Fix1 f34 independently reviewed clean; parent realSQL199 passed. Complete candidate exposed existing fixture compatibility failures across15files; test-only fix2 active. Private phone control flow passed. Latest owner allowance checkpoint is60% remaining, superseding40%; finish all in-flight tasks then pause.
-
-Progress 2026-11-02T19:23Z: Final6c complete candidate passed all six checks (30148 package tests plus root scripts); fresh focused review clean. PR1000 opened for exact-HEAD hosted review/all CI. Additive0219+0220 and primary browser acceptance remain after main CI. Latest owner pause checkpoint60% remaining.
-
-Progress 2026-11-02T20:01Z: PR1000 merged59f48d98c with all exact-HEAD hosted/PR CI green. Phone busy-error controls hit-tested and Retry/Cancel passed; outer padding clipping is cosmetic, no new repair round. Main CI41514316829 running; additive0219+0220/source/primary3width acceptance remain after green.
-
 ### T331 · I7 · modules/integration-google (Drive, Docs, Gmail)
 
 status: parked: needs a real GCP OAuth client from the user · was modular #42 · priority: P4
@@ -1375,6 +1357,8 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
 ## Done
+
+- T330 — Module-only graceful shutdown and dependents preflight — PR #1000 (59f48d98cc), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41514316829 green; PrimaryModules/NewTask1280/768/390 passed15scopedprobes/screenshotsallparentviewed;9browserlocalPATCHDELETEs0forwarded; realreadonlymodules+dependents200; preflight503/lateA-B/busy/duplicate/Escape/draining/cancel+automaticrequiredblockedvsoptionalallowed verified. MainCI41514316829/allchecks/sourcewatchers/APIwebhealth/idle green; normal219+220applier beforewatchedsource plusjournal/physicalcolumns/keys/cascades/emptyadditivetables verified.. Evidence .claude/tmp/codex-run/queue-exec-20261101/T330/.
 
 - T361 — Preview and purge module-owned integration data with counted transactional cleanup — PR #999 (fa1dcd14d8), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41493981640 green; Modules/purge browser1280/768/390 passed21scopedprobes/screenshots inspected;12fakePOSTs0forwarded; delay/503/wrongtarget/incomplete/15stimeout/targetswitch/Escape/retry/duplicate andactualreturnedcounts verified; mainCI41493981640/allchecks/source-watchers/health/idle green. Evidence .claude/tmp/codex-run/queue-exec-20261101/T361/.
 
