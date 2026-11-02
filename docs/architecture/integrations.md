@@ -104,6 +104,45 @@ Both `@haive/shared/integrations` (server-only, imports the database) and `@haiv
 out of the root barrel. Web imports `@haive/shared/forge`, so nothing loaded by that subpath may import
 a node-only module or the database.
 
+## Module data purge
+
+Uninstalling keeps integration data. An admin's explicit purge of a missing module removes only
+configuration and bindings owned by that module. Ownership comes from persisted
+`module.<moduleId>.<local>` ids using the scoped provider/category grammar, without needing a
+loaded manifest. The delimiter and full local-id match distinguish `foo`, `foobar` and `foo-bar`,
+and exclude malformed extra suffixes. `api/src/modules/purge-integrations.ts` supplies the same
+predicates to the readonly preview and the delete:
+
+- provider configurations, connections and user write settings belong through their provider id;
+- preferences (user and installation defaults) and task choices belong through their category id,
+  provider id, or a connection owned by the module;
+- grants (task bindings and repository allow-lists) belong through their category id or an owned
+  connection.
+
+A binding matching several ownership paths counts once. Bindings are explicitly deleted before
+connections, so neither grant cascades nor preference/choice `SET NULL` actions silently change
+uncounted rows. A repository's `integrations_restricted` flag stays set: removing its last allowed
+account still allows nothing. An unrelated category/provider pointing at an owned account loses
+that binding, while unrelated bindings and other modules' accounts/configurations remain.
+
+Live tasks, dead ones included, with a directly affected choice or task grant refuse purge, even
+when their type/run list names no module step. The main-store transaction checks direct bindings
+again with writers fenced and affected task status rows held. The table fence permits a
+connection's row-only `FOR UPDATE` holder, so purge additionally locks owned connection rows
+`FOR UPDATE NOWAIT` before task status rows and deletion. This refuses a current disconnect
+before its DELETE can wait on purge's table lock; unrelated account row locks remain compatible.
+A late live binding or concurrent writer after the module database has gone yields the existing incomplete-cleanup response, with
+all main-store changes rolled back. See [Modules](modules.md) for lock ordering and retries.
+
+`integration_calls` are retained: their provider, tool, outcome and task/invocation references
+survive, while a removed connection becomes NULL through its existing foreign key. Invocation
+integration stamps, task events and audit rows are retained. Git credentials are retained even
+when an owned connection points at one: the credential-to-connection cascade is one-way.
+No vendor revoke is attempted. The actual six deletion counts join the purge response and its
+required main-store audit insert atomically. The database drop and Redis cleanup retain their
+separate partial-failure semantics; preview counts promise neither a reservation nor cross-store
+atomicity.
+
 ## Accounts
 
 `integration_connections` has a `scope` (`user` or `shared`) and a `status` (`connected`,
