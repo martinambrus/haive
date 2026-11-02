@@ -346,19 +346,6 @@ User decision 2026-11-01: Reconcile runtime before validation; revalidate affect
 status: blocked · blocked-by: T351,T352,T353 · was modular #104 · priority: P2
 Plan D2: installer flags, an install-local docker config for private pulls, and a host upgrade that reads the channel. Depends on T351-T353.
 
-### T336 · D3 · haive-builder image + run-overlay image vars + pre-flight rebuild + per-customer builder (+1)
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T19:25Z · last: 2026-11-02T21:59Z · was modular #105 · priority: P2
-Plan D3. Check: an own module installs on a published-image install with no host toolchain.
-
-Progress 2026-11-02T19:25Z: Admitted after actual allowance66% and measured C26.3GiB/RAM10.7GiB. One HIGH implementation driver; local builder/own-module install and preflight scope only. T330PR1000 remains in hosted review/CI; this branch will align to its actual merged source before final review/publication. No registry publication or live stack mutation in implementation.
-
-Progress 2026-11-02T20:01Z: Driver complete; parent aligned13byte-identical feature files onto reviewedT330a42 (ancestor of merged59f, onlyTASKS delta). Fresh xhigh review clean; full66updater+1163script cases/types pass, actual Docker public/customer/negative entitlement/token gates passed with owned cleanup. PR1001 exactHEAD7b7 in hostedreview/CI; no new admissions near owner60% checkpoint, latest61%.
-
-Progress 2026-11-02T20:25Z: RequiredCI globalchildprocessguard corrected d6aa with literal Docker helper, ratchet/baseline unchanged. Fresh focused review clean; fullshared4997+updater66+root1163/types passed; exactnewHEAD hostedreview clean, PR1001CI running. T330DELIVERED/CLOSED/CLEANED. Owner60% checkpoint reached20:03; finish ONLYT336 then pause, no new admissions.
-
-Progress 2026-11-02T21:59Z: Finalf85 resolves quoted/interpolated new image/build settings through bounded read-only Compose parsing; real preflight regression and resolver/journal/redaction proof passed. Fresh independent review clean; full22workspace checks/31490passes/typechecks/format green. Hostedfinding4447711805 fixed and resolved; exactf85hostedreview clean, finalPRCI running. This is sole task finishing after owner60% checkpoint; no new admissions, pause after delivery.
-
 ### T337 · D4 · module_sources table (git/registry, envelope-encrypted token) + Modules page form
 
 status: open · was modular #106 · priority: P2
@@ -1361,6 +1348,8 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
 ## Done
+
+- T336 — Own-module container builder and upgrade image recovery — PR #1001 (c4f4768900), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41534422031 green; Own-modulebuilder actualpublic/customercontainerproof plusquotedsettingsreadonlyCompose/preflight/journalrestoreproof andentitlement/tokennegativecontrols passed; completeworkspace8packagesunits/types/rootformat/scripts passed, exactHEADnative/hosted/allPRCI/allmainCI green; reviewedoperator/updater/sharednaming source loaded,serializedlibs/watchers/compilednamingartifact/APIwebhealth/idle/userfiles verified. EightownedDockerfixturetags/inputscratchcleaned.. Evidence .claude/tmp/codex-run/queue-exec-20261101/T336/.
 
 - T330 — Module-only graceful shutdown and dependents preflight — PR #1000 (59f48d98cc), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41514316829 green; PrimaryModules/NewTask1280/768/390 passed15scopedprobes/screenshotsallparentviewed;9browserlocalPATCHDELETEs0forwarded; realreadonlymodules+dependents200; preflight503/lateA-B/busy/duplicate/Escape/draining/cancel+automaticrequiredblockedvsoptionalallowed verified. MainCI41514316829/allchecks/sourcewatchers/APIwebhealth/idle green; normal219+220applier beforewatchedsource plusjournal/physicalcolumns/keys/cascades/emptyadditivetables verified.. Evidence .claude/tmp/codex-run/queue-exec-20261101/T330/.
 
