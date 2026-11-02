@@ -264,6 +264,28 @@ describe('CLI auth banner socket close', () => {
     expect(textOf(view.draw()) === before).toBe(true);
   });
 
+  it('keeps a queued candidate retryable after close without claiming durable success', async () => {
+    socket.readyState = FakeWebSocket.OPEN;
+    socket.onopen?.();
+    socket.frame({ type: 'auth-url', url: 'https://claude.ai/oauth/authorize' });
+    socket.frame({ type: 'phase', phase: 'submitting' });
+    socket.frame({ type: 'queue', running: 1, agents: 1, service: 0, ahead: 0 });
+    view.draw();
+    await vi.advanceTimersByTimeAsync(50_000);
+    view.draw();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(textOf(view.tree())).toContain('Verifying...');
+    expect(buttons(view.tree(), 'test connection')).toHaveLength(0);
+    socket.close();
+    assertClosedError();
+    await vi.advanceTimersByTimeAsync(40_000);
+    view.draw();
+    expect(buttons(view.tree(), 'retry')).toHaveLength(1);
+    expect(buttons(view.tree(), 'test connection')).toHaveLength(0);
+    expect(textOf(view.tree())).not.toContain('credentials were saved');
+    expect(textOf(view.tree())).not.toContain('Signed in and verified');
+  });
+
   it('fix7 bounds queued verification after a success-phase server close', async () => {
     socket.readyState = FakeWebSocket.OPEN;
     socket.onopen?.();

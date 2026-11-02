@@ -17,6 +17,8 @@ import {
   CONFIG_RUNTIME_LIMITS_CHANNEL,
   QUEUE_NAMES,
   configService,
+  decryptCliLoginCandidate,
+  secretsService,
   createRedisConnection,
   getCliProviderMetadata,
   resolveCliAuthUserVolumeName,
@@ -653,9 +655,43 @@ export async function handleProbeJob(
     };
   }
   const adapter = cliAdapterRegistry.get(provider.name);
-  const secrets = await resolveProviderSecrets(db, payload.providerId);
+  const candidateOnly = payload.oauthCandidate !== undefined;
+  let secrets: Record<string, string>;
+  if (candidateOnly) {
+    // Bind the encrypted transport to this login and owner. Neither the active secret nor
+    // the shared auth volume may rescue an invalid capture. Decode failures never echo data.
+    if (provider.userId !== payload.userId || provider.name !== 'claude-code') {
+      throw new Error('Invalid login candidate');
+    }
+    secrets = {
+      CLAUDE_CODE_OAUTH_TOKEN: decryptCliLoginCandidate(
+        payload.oauthCandidate!,
+        payload.userId,
+        payload.providerId,
+        await secretsService.getMasterKek(),
+      ),
+    };
+  } else {
+    secrets = await resolveProviderSecrets(db, payload.providerId);
+  }
 
-  const cli = await probeCliPath(db, adapter, provider, secrets);
+  const probed = await probeCliPath(db, adapter, provider, secrets, { candidateOnly });
+  // CLI diagnostics can echo its environment. A candidate's raw output never enters the
+  // persisted queue result, provider health, or logs, including version/unknown failures.
+  const cli = candidateOnly
+    ? {
+        ok: probed.ok === true && probed.authStatus === 'ok',
+        authStatus: probed.authStatus,
+        durationMs: probed.durationMs,
+        authMessage:
+          probed.ok && probed.authStatus === 'ok'
+            ? 'Candidate authentication verified'
+            : 'Candidate authentication could not be verified',
+        ...(!(probed.ok && probed.authStatus === 'ok')
+          ? { error: 'Candidate authentication could not be verified' }
+          : {}),
+      }
+    : probed;
   const result: CliProbeResult = {
     ok: cli.ok === true,
     providerId: payload.providerId,
@@ -663,7 +699,7 @@ export async function handleProbeJob(
     cli,
   };
 
-  if (cli.authStatus) {
+  if (!candidateOnly && cli.authStatus) {
     await db
       .update(schema.cliProviders)
       .set({
