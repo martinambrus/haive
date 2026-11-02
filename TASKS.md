@@ -776,17 +776,6 @@ From the T375 review (2026-10-24). PRE-EXISTING, consequential, low frequency. w
 
 User decision 2026-11-01: Refuse incomplete unregistered gitlinks and explain submodule registration or including ordinary files.
 
-### T434 · FNF[token-save-before-probe] · a captured CLI token overwrites the stored one before the probe verifies it
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T07:26Z · last: 2026-11-02T07:44Z · kind: fix · user decision: resolved 2026-11-01 · priority: P1
-From the T427 review (2026-10-25), F3. PRE-EXISTING design. api routes/cli-login-banner.ts ~:976-982 (`onExisting: 'overwrite'`, then the probe): any wrong capture replaces the user's working CLAUDE_CODE_OAUTH_TOKEN before the probe runs, so a failed probe leaves the user with neither. Keep the old value until the probe passes (probe with the candidate, then write), or restore it on a failed probe. Needs a decision on how the probe gets the candidate (it reads the stored secret today).
-
-User decision 2026-11-01: Probe candidate credentials before replacing the existing working token; promote only after success.
-
-Execution 2026-11-02: bounded candidate-token probe before promotion, preserving prior working credentials on failure. One active implementation driver; T521 initial driver is quiescent, its parent-owned full suite/delivery is independent. Evidence `.claude/tmp/codex-run/queue-exec-20261101/T434/`. No live provider login/model work or changes to real user credentials.
-
-Progress 2026-11-02T07:44Z: Initial candidateed88d291a ready: old-route/helper11red; focusedAPI1979/worker66/freshPG28, private sharedbuild/API+workertypechecksgreen. Existing wrappers retained; encryptedcandidate-only probe, unverified/cancelpreservesactive, acceptedsecret+health+audit atomic. Freshxhighreview in progress; fullshared/API/worker afterclean. No provider/model/livecredentials. Weekly9%,3%checkpoint.
-
 ### T435 · FNF[web-api-cookie-transport] · different web/API hostnames cannot establish the server-rendered session
 
 status: open · kind: feature · user decision: resolved 2026-11-01 · priority: P2
@@ -1432,6 +1421,8 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
 ## Done
+
+- T434 — probe captured CLI token before atomic promotion — PR #990 (c234388ac6), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41416018770 green; real route/component/worker controls and real PostgreSQL atomic promotion passed; deployed API-to-worker synthetic crypto roundtrip and owner refusal passed; primary activity unchanged. Evidence .claude/tmp/codex-run/queue-exec-20261101/T434/.
 
 - T521 — member5 only: verified empty-origin first push; retained stale-ref and nonforce protections — PR #989 (3778949f02), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41409986755 green; actual browser Plan firstpush to emptyA and Haive-data firstpush to emptyB with stale tracking ref passed; barehistory/portableplanstate verified; fixtures removed, primaryactivityunchanged. Evidence .claude/tmp/codex-run/queue-exec-20261101/T521/.
 
