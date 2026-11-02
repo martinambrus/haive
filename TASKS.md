@@ -527,10 +527,12 @@ Decision reconciliation 2026-11-01: Remain deliberately deferred until a real mo
 
 ### T359 · I6c · resolver reasons provider-deactivated / provider-missing
 
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · last: 2026-11-02T09:21Z · was modular #194 · priority: P2
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · last: 2026-11-02T10:05Z · was modular #194 · priority: P2
 Plan I6: the reasons apply to a choice, a grant, a pinned target and a module category.
 
 Execution scope: existing PlanI6c resolver reasons provider-deactivated/provider-missing for choices, grants, pins and module categories; preserve documented resolution tiers/ownership/selection semantics. No broker redesign or integration UI expansion.
+
+Progress 2026-11-02T10:05Z: PR993 exactHEAD0bef hosted clean and local full suites/realPG acceptance passed, but required Postgres C7b caught an introduced no-serving core category compatibility regression (no-provider became needs-choice). Fix1 in progress; original failure/evidence retained; no task completed or new scope admitted.
 
 ### T360 · I6d · web: module categories in every category list, admin provider card, Settings state note
 
