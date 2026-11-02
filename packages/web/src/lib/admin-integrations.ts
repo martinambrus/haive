@@ -1,6 +1,8 @@
+import type { ProviderMetadata } from './integrations';
+
 export type IntegrationAuthKind = 'oauth2' | 'device' | 'token';
 
-export interface AdminIntegrationProvider {
+export interface AdminIntegrationProvider extends ProviderMetadata {
   id: string;
   name: string;
   categories: string[];
@@ -58,6 +60,9 @@ export function precedenceNote(
 }
 
 export function enabledLabel(provider: AdminIntegrationProvider): string {
+  if (provider.state === 'module-deactivated') return 'Module deactivated';
+  if (provider.state === 'module-missing') return 'Module unavailable';
+  if (provider.state === 'unknown') return 'Availability unknown';
   const state = provider.enabled ? 'Enabled' : 'Disabled';
   return provider.rowExists ? state : `${state} by default`;
 }

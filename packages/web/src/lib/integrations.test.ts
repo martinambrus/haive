@@ -379,6 +379,13 @@ describe('authMethodLabel', () => {
 });
 
 describe('categoryLabel', () => {
+  it('uses a loaded literal module label and falls back for unsafe or unknown metadata', () => {
+    const id = 'module.acme.crm';
+    expect(categoryLabel(id, [{ id, label: 'Customer records' }])).toBe('Customer records');
+    expect(categoryLabel(id, [{ id, label: 'Customer\nrecords' }])).toBe(id);
+    expect(categoryLabel(id, [{ id, label: '\u202eevil' }])).toBe(id);
+    expect(categoryLabel(id, [])).toBe(id);
+  });
   it('names every core category by its label', () => {
     for (const spec of CORE_INTEGRATION_CATEGORY_SPECS) {
       expect(categoryLabel(spec.id)).toBe(spec.label);

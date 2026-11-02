@@ -1,8 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { CORE_INTEGRATION_CATEGORY_SPECS } from '@haive/shared/modularity';
 import {
+  getIntegrationCategories,
   listAdminIntegrationDefaults,
   saveAdminIntegrationDefault,
   type ApiError,
@@ -10,21 +10,40 @@ import {
 } from '@/lib/api-client';
 import type { AdminIntegrationProvider } from '@/lib/admin-integrations';
 import { Button, FormError } from '@/components/ui';
-import { enabledServing } from '@/lib/integrations';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
+import {
+  categoryRows,
+  enabledServing,
+  integrationDisplayBody,
+  type IntegrationCategory,
+} from '@/lib/integrations';
 
 const SELECT_CLASS =
   'h-10 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 disabled:opacity-50 sm:w-auto sm:max-w-xs';
 
 export function DefaultsByKind({ providers }: { providers: AdminIntegrationProvider[] }) {
+  const [categories, setCategories] = useState<IntegrationCategory[]>([]);
   const [defaults, setDefaults] = useState<IntegrationDefault[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<{ categoryId: string; message: string } | null>(null);
 
   useEffect(() => {
-    void listAdminIntegrationDefaults()
-      .then((res) => setDefaults(res.defaults))
-      .catch((err: ApiError) => setLoadError(err.message ?? 'Failed to load the install defaults'));
+    let active = true;
+    void Promise.all([listAdminIntegrationDefaults(), getIntegrationCategories()])
+      .then(([res, metadata]) => {
+        if (active) {
+          setCategories(metadata.categories);
+          setDefaults(res.defaults);
+        }
+      })
+      .catch(
+        (err: ApiError) =>
+          active && setLoadError(err.message ?? 'Failed to load the install defaults'),
+      );
+    return () => {
+      active = false;
+    };
   }, []);
 
   async function save(categoryId: string, providerId: string | null) {
@@ -63,8 +82,11 @@ export function DefaultsByKind({ providers }: { providers: AdminIntegrationProvi
 
       {defaults && (
         <ul className="flex flex-col gap-3">
-          {CORE_INTEGRATION_CATEGORY_SPECS.map(({ id, label }) => {
-            const offered = enabledServing(id, providers);
+          {categoryRows(
+            categories,
+            defaults.map((row) => row.categoryId),
+          ).map(({ id, label, available }) => {
+            const offered = available ? enabledServing(id, providers) : [];
             const saved = defaults.find((row) => row.categoryId === id);
             return (
               <li
@@ -72,7 +94,23 @@ export function DefaultsByKind({ providers }: { providers: AdminIntegrationProvi
                 data-category-id={id}
                 className="flex flex-col gap-3 rounded-md border border-neutral-800 bg-neutral-900/50 px-4 py-3"
               >
-                <h3 className="text-sm font-medium text-neutral-100">{label}</h3>
+                <h3 className="text-sm font-medium text-neutral-100 [overflow-wrap:anywhere]">
+                  {label}
+                </h3>
+                {saved && (
+                  <InlineMarkdown
+                    className="text-xs text-neutral-400 [overflow-wrap:anywhere]"
+                    body={integrationDisplayBody(
+                      `Saved default: ${providers.find((p) => p.id === saved.providerId)?.name ?? saved.providerId}.`,
+                    )}
+                  />
+                )}
+                {!available && (
+                  <InlineMarkdown
+                    className="text-xs text-amber-300"
+                    body="Category unavailable on this install. The saved default can still be cleared."
+                  />
+                )}
                 <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
                   <select
                     aria-label={`${label} default provider`}

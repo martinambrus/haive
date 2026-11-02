@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { api, type ApiError } from '@/lib/api-client';
+import { api, getIntegrationCategories, type ApiError } from '@/lib/api-client';
 import {
   clientUpdate,
   enabledLabel,
@@ -12,9 +12,10 @@ import {
   type AdminIntegrationUpdate,
   type IntegrationAuthKind,
 } from '@/lib/admin-integrations';
-import { categoryLabel } from '@/lib/integrations';
+import { categoryLabel, providerStateNote, type IntegrationCategory } from '@/lib/integrations';
 import { usePageTitle } from '@/lib/use-page-title';
 import { Badge, Button, Card, FormError, Input, Label } from '@/components/ui';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { DefaultsByKind } from '@/components/integrations/defaults-by-kind';
 
 const AUTH_LABEL: Record<IntegrationAuthKind, string> = {
@@ -25,9 +26,11 @@ const AUTH_LABEL: Record<IntegrationAuthKind, string> = {
 
 function ProviderCard({
   provider,
+  categories,
   onSaved,
 }: {
   provider: AdminIntegrationProvider;
+  categories: readonly IntegrationCategory[];
   onSaved: (saved: AdminIntegrationProvider) => void;
 }) {
   const [clientId, setClientId] = useState(provider.oauthClientId ?? '');
@@ -80,8 +83,14 @@ function ProviderCard({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-base font-semibold text-neutral-50">{provider.name}</h2>
-            <Badge variant={provider.enabled ? 'success' : 'warning'}>
+            <h2 className="text-base font-semibold text-neutral-50 [overflow-wrap:anywhere]">
+              {provider.name}
+            </h2>
+            <Badge
+              variant={
+                provider.enabled && providerStateNote(provider) === null ? 'success' : 'warning'
+              }
+            >
               {enabledLabel(provider)}
             </Badge>
           </div>
@@ -90,8 +99,12 @@ function ProviderCard({
           </p>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {provider.categories.map((category) => (
-              <Badge key={category} variant="info">
-                {categoryLabel(category)}
+              <Badge
+                key={category}
+                variant="info"
+                className="max-w-full whitespace-normal [overflow-wrap:anywhere]"
+              >
+                {categoryLabel(category, categories)}
               </Badge>
             ))}
             {provider.authKinds.map((kind) => (
@@ -115,6 +128,18 @@ function ProviderCard({
           Enabled
         </label>
       </div>
+
+      {provider.module && (
+        <div className="text-xs text-neutral-400 [overflow-wrap:anywhere]">
+          Module: {provider.module.name} ({provider.module.id})
+        </div>
+      )}
+      {providerStateNote(provider) && (
+        <InlineMarkdown
+          className="text-xs text-amber-300 [overflow-wrap:anywhere]"
+          body={providerStateNote(provider)!}
+        />
+      )}
 
       {usesOauthClient(provider) && (
         <div className="flex flex-col gap-3">
@@ -202,6 +227,8 @@ function ProviderCard({
 export default function AdminIntegrationsPage() {
   usePageTitle('Integrations');
 
+  const [categories, setCategories] = useState<IntegrationCategory[] | null>(null);
+  const [categoryError, setCategoryError] = useState<string | null>(null);
   const [providers, setProviders] = useState<AdminIntegrationProvider[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -219,6 +246,17 @@ export default function AdminIntegrationsPage() {
 
   useEffect(() => {
     void load();
+    let active = true;
+    void getIntegrationCategories()
+      .then((res) => {
+        if (active) setCategories(res.categories);
+      })
+      .catch((err: ApiError) => {
+        if (active) setCategoryError(err.message ?? 'Category metadata unavailable');
+      });
+    return () => {
+      active = false;
+    };
   }, [load]);
 
   function replace(saved: AdminIntegrationProvider) {
@@ -233,10 +271,22 @@ export default function AdminIntegrationsPage() {
         it here. The client secret is write-only: it is stored encrypted and never shown again.
       </p>
       <FormError message={error} />
+      <FormError message={categoryError} />
+      {categories === null && !categoryError && (
+        <InlineMarkdown
+          className="text-xs text-neutral-400"
+          body="Loading category labels… Module categories use their ids until labels are available."
+        />
+      )}
       {providers === null && !error && <p className="text-sm text-neutral-400">Loading…</p>}
       <div className="flex flex-col gap-3">
         {providers?.map((provider) => (
-          <ProviderCard key={provider.id} provider={provider} onSaved={replace} />
+          <ProviderCard
+            key={provider.id}
+            provider={provider}
+            categories={categories ?? []}
+            onSaved={replace}
+          />
         ))}
       </div>
       {providers && <DefaultsByKind providers={providers} />}

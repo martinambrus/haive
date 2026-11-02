@@ -12,7 +12,7 @@ import {
   listIntegrationModules,
   listIntegrationProviders,
   loadDeactivatedModuleIds,
-  loadProviderEnablement,
+  loadIntegrationStates,
   oauthRedirectUri,
   resolveOauthClient,
   resolveOauthClientById,
@@ -133,15 +133,25 @@ integrationsRoutes.get('/providers', async (c) => {
         .where(eq(schema.integrationUserSettings.userId, userId))
     ).map((setting) => [setting.providerId, setting.writeEnabled]),
   );
-  const enablement = await loadProviderEnablement(db);
+  const states = await loadIntegrationStates(db);
+  const modules = new Map(
+    listIntegrationModules().flatMap((module) =>
+      module.providers.map(
+        (provider) => [provider.id, { id: module.id, name: module.name }] as const,
+      ),
+    ),
+  );
   const providers = [];
   for (const spec of listIntegrationProviders()) {
-    const enabled = enablement.get(spec.id) === true;
+    const state = states.providers.get(spec.id) ?? 'unknown';
+    const enabled = state === 'enabled';
     providers.push({
       id: spec.id,
       displayName: spec.displayName,
       categories: spec.categories,
       selfHosted: spec.selfHosted,
+      state,
+      module: modules.get(spec.id) ?? null,
       enabled,
       writeEnabled: switches.get(spec.id) ?? false,
       ...writeAccessOf(spec),

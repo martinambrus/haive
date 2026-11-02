@@ -1,11 +1,13 @@
 'use client';
 
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { Badge, Button } from '@/components/ui';
 import {
   authMethodLabel,
   reconnectOffer,
   statusBadge,
   statusNote,
+  providerStateNote,
   type ConnectMethod,
   type IntegrationConnection,
   type IntegrationProvider,
@@ -38,7 +40,9 @@ export function ConnectionRow({
     >
       <div className="flex min-w-0 flex-col gap-1.5">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm font-medium text-neutral-100">{providerName}</span>
+          <span className="text-sm font-medium text-neutral-100 [overflow-wrap:anywhere]">
+            {providerName}
+          </span>
           <Badge variant={badge.variant}>{badge.label}</Badge>
         </div>
         <span className="text-sm text-neutral-200 [overflow-wrap:anywhere]">
@@ -59,6 +63,12 @@ export function ConnectionRow({
               ? `Uses the Git credential "${credentialLabel}".`
               : 'Uses a Git credential.'}
           </p>
+        )}
+        {providerStateNote(provider) && (
+          <InlineMarkdown
+            className="text-xs text-amber-300 [overflow-wrap:anywhere]"
+            body={providerStateNote(provider)!}
+          />
         )}
         {note && <p className="text-xs text-amber-300 [overflow-wrap:anywhere]">{note}</p>}
         {offer?.reason === 'write_access' && (
