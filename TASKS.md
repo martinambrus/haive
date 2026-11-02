@@ -527,8 +527,10 @@ Decision reconciliation 2026-11-01: Remain deliberately deferred until a real mo
 
 ### T359 · I6c · resolver reasons provider-deactivated / provider-missing
 
-status: open · was modular #194 · priority: P2
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · last: 2026-11-02T09:21Z · was modular #194 · priority: P2
 Plan I6: the reasons apply to a choice, a grant, a pinned target and a module category.
+
+Execution scope: existing PlanI6c resolver reasons provider-deactivated/provider-missing for choices, grants, pins and module categories; preserve documented resolution tiers/ownership/selection semantics. No broker redesign or integration UI expansion.
 
 ### T360 · I6d · web: module categories in every category list, admin provider card, Settings state note
 
