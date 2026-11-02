@@ -335,8 +335,10 @@ User decision 2026-11-01: keep live Google connection parked; prepare setup inst
 
 ### T332 · J7 · reconnect park (deactivated provider) / dead (uninstalled)
 
-status: blocked · blocked-by: T359 · was modular #47 · priority: P2
+status: open · was modular #47 · priority: P2
 Plan J7: a single owner keyed on the connection's `status`. A step that needs a deactivated provider PARKS with a reconnect banner; an uninstalled provider makes the task DEAD.
+
+Dependency reconciled 2026-11-02: T359 delivered as PR #993, corrected exact-HEAD reviews/full suites/main CI41430501569 and real-PG/deployed resolver checks green. Reconnect parking is now ready; retain independent J7 scope and the active T356/T357 feature fence.
 
 ### T333 · J8 · composer shows integration requirements + provider install state
 
