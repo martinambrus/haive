@@ -1,3 +1,4 @@
+import { recordTaskModuleAdmissions } from '@haive/shared/modularity-server';
 import { normalizeStepFormValues } from '@haive/shared/schemas';
 import { Hono } from 'hono';
 import { taskIntegrationChoicesSchema, taskIntegrationPreviewQuerySchema } from '@haive/shared';
@@ -713,7 +714,7 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
       if (!normalized.success) throw new HttpError(400, normalized.issues.join('; '));
       normalizedPreAnswers![stepId] = normalized.data;
     }
-    const integrationPicks = await admitTaskIntegrations(handle, {
+    const integrationAdmission = await admitTaskIntegrations(handle, {
       userId,
       repositoryId: body.repositoryId ?? null,
       definition: locked,
@@ -763,6 +764,9 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
       })
       .returning();
     const created = rows[0];
+    if (created)
+      await recordTaskModuleAdmissions(handle, created.id, integrationAdmission.moduleIds);
+    const integrationPicks = integrationAdmission.picks;
     if (created && integrationPicks.length > 0) {
       await handle
         .insert(schema.taskIntegrationChoices)

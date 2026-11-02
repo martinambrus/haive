@@ -37,3 +37,18 @@ export const moduleDrainTasks = pgTable(
   },
   (table) => [primaryKey({ columns: [table.moduleId, table.taskId] })],
 );
+
+/** Known static required module dependencies admitted at task creation. These are evidence for
+ * future drains, not an account choice or grant; cancellation does not remove them. */
+export const moduleTaskAdmissions = pgTable(
+  'module_task_admissions',
+  {
+    moduleId: text('module_id')
+      .notNull()
+      .references(() => modules.moduleId, { onDelete: 'cascade' }),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+  },
+  (table) => [primaryKey({ columns: [table.moduleId, table.taskId] })],
+);

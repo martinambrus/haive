@@ -44,18 +44,18 @@ export function integrationModuleIds(
   return [...ids].sort();
 }
 
-/** Caller keeps this read in the transaction that records admission. NOWAIT avoids lock upgrades
- * against a toggle queued behind the creator's existing KEY SHARE and bounds every new wait. */
-export async function guardModuleAdmission(
+/** Same admission state for read-only previews and fenced mutation checks. A preview holds no
+ * row lock; a mutation retains KEY SHARE until its transaction commits. Failed reads still throw. */
+export async function moduleAdmissionFailures(
   db: Reader,
   ids: readonly string[],
-  taskId?: string,
-  checkOff = false,
-): Promise<void> {
-  if (ids.length === 0) return;
+  opts: { taskId?: string; lock?: boolean; checkOff?: boolean } = {},
+): Promise<Map<string, 'module-draining' | 'module-deactivated'>> {
+  const failures = new Map<string, 'module-draining' | 'module-deactivated'>();
+  if (ids.length === 0) return failures;
   let rows;
   try {
-    rows = await db
+    const query = db
       .select({
         id: schema.modules.moduleId,
         drainingAt: schema.modules.drainingAt,
@@ -63,29 +63,60 @@ export async function guardModuleAdmission(
       })
       .from(schema.modules)
       .where(inArray(schema.modules.moduleId, [...new Set(ids)].sort()))
-      .orderBy(asc(schema.modules.moduleId))
-      .for('key share', { noWait: true });
+      .orderBy(asc(schema.modules.moduleId));
+    rows = opts.lock ? await query.for('key share', { noWait: true }) : await query;
   } catch (err) {
-    if (isLockNotAvailable(err)) throw new ModuleAdmissionError(ids[0]!, 'module-busy');
+    if (opts.lock && isLockNotAvailable(err))
+      throw new ModuleAdmissionError(ids[0]!, 'module-busy');
     throw err;
   }
   for (const row of rows) {
-    if (checkOff && row.deactivatedAt) throw new ModuleAdmissionError(row.id, 'module-deactivated');
+    if (opts.checkOff && row.deactivatedAt) {
+      failures.set(row.id, 'module-deactivated');
+      continue;
+    }
     if (!row.drainingAt) continue;
-    const member = taskId
+    const member = opts.taskId
       ? await db
           .select({ id: schema.moduleDrainTasks.taskId })
           .from(schema.moduleDrainTasks)
           .where(
             and(
               eq(schema.moduleDrainTasks.moduleId, row.id),
-              eq(schema.moduleDrainTasks.taskId, taskId),
+              eq(schema.moduleDrainTasks.taskId, opts.taskId),
             ),
           )
           .limit(1)
       : [];
-    if (!member.length) throw new ModuleAdmissionError(row.id, 'module-draining');
+    if (!member.length) failures.set(row.id, 'module-draining');
   }
+  return failures;
+}
+
+/** NOWAIT avoids a row upgrade against a toggle queued behind a creator's KEY SHARE. */
+export async function guardModuleAdmission(
+  db: Reader,
+  ids: readonly string[],
+  taskId?: string,
+  checkOff = false,
+): Promise<void> {
+  const failures = await moduleAdmissionFailures(db, ids, { taskId, checkOff, lock: true });
+  const first = failures.entries().next().value;
+  if (first) throw new ModuleAdmissionError(first[0], first[1]);
+}
+
+/** The caller already holds the required module admission leases in this task-insert transaction.
+ * Keep evidence across drain cancellation/reactivation without pinning an account or provider. */
+export async function recordTaskModuleAdmissions(
+  db: Pick<Database, 'insert'>,
+  taskId: string,
+  moduleIds: readonly string[],
+): Promise<void> {
+  if (moduleIds.length === 0) return;
+  await db
+    .insert(schema.moduleTaskAdmissions)
+    .values([...new Set(moduleIds)].sort().map((moduleId) => ({ moduleId, taskId })))
+    .onConflictDoNothing();
 }
 
 /** Stored source/snapshot/bindings, plus the cohort even after a binding is reset. No task locks. */

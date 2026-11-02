@@ -57,6 +57,7 @@ export function moduleTaskDependency(moduleId: string | SQL): SQL {
     typeof moduleId === 'string' ? `module:${moduleId}` : sql`('module:' || ${moduleId})`;
   return sql`(EXISTS (SELECT 1 FROM ${schema.taskTypeDefinitions} WHERE ${schema.taskTypeDefinitions.slug} = ${schema.tasks.type} AND ${schema.taskTypeDefinitions.source} = ${source})
     OR CASE WHEN jsonb_typeof(${schema.tasks.runListSnapshot}) = 'array' THEN EXISTS (SELECT 1 FROM jsonb_array_elements_text(${schema.tasks.runListSnapshot}) AS s(id) WHERE starts_with(s.id, ${prefix})) ELSE false END
+    OR EXISTS (SELECT 1 FROM ${schema.moduleTaskAdmissions} WHERE ${schema.moduleTaskAdmissions.moduleId} = ${moduleId} AND ${schema.moduleTaskAdmissions.taskId} = ${schema.tasks.id})
     OR ${moduleIntegrationTaskPredicate(moduleId)}
     OR EXISTS (SELECT 1 FROM ${schema.cliInvocations} WHERE ${schema.cliInvocations.taskId} = ${schema.tasks.id}
       AND ${schema.cliInvocations.supersededAt} IS NULL

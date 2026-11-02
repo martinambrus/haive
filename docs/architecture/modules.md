@@ -194,7 +194,7 @@ the module loads again.
   never ran, and explains that call/invocation/audit history and Git credentials are retained.
 
 **Graceful drain.** The admin's read-only `GET /modules/:id/dependents` preflights persisted
-seeded types, run-list snapshots, direct integration choices/grants and live invocation stamps
+seeded types, run-list snapshots, known required static module admissions, direct integration choices/grants and live invocation stamps
 (`ended_at` and `superseded_at` both NULL). It returns one deduplicated task list and an honest
 200-row cap, with no account labels or secrets. A binding Reset can remove the current grant while
 an invocation still uses its stamp, so those live stamps are dependency evidence too. An ended mining stamp still linked to a

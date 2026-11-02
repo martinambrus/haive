@@ -575,6 +575,22 @@ database and attachment admission stays in that transaction. This is account adm
 the owner's write switch and broker permissions still decide which operations can run, and the
 worker's dispatch resolution remains final authority when accounts or provider state change later.
 
+Required static integrations selected automatically are module dependencies just like explicit
+picks. The read-only preview checks their freshly resolved module state and reports
+`module-draining` without admitting creation; the insert transaction takes the same required
+modules KEY SHARE before recording the task, so a lifecycle write waits for admission. The same creation transaction records the known required module ids in `module_task_admissions`,
+so a create that wins before a drain is included in its later cohort. These tags do not pin an
+automatic account as a task choice or grant and do not reconstruct dynamic paths. They survive
+cancel/reactivate/urgent actions until task deletion or explicit module purge, with the normal
+live/nondead task filter on dependency reads; there is no legacy inference or backfill. An
+admission-row failure rolls back task/events/queued state too.
+An optional module account denied to a nonmember is omitted before the worker builds its account
+text, prompt and tools. The dispatch keeps that omission through its second resolution, even if
+the drain is cancelled meanwhile; it never adds an account to a prompt built without it. An
+account already used by a cohort member or an immutable fan-out stamp keeps its existing behavior.
+A drain beginning after a bound prompt was built still refuses that insert through the existing
+integration wait, allowing the next poll to rebuild the optional prompt without the account.
+
 New Task checks the actual create type (including Workflow's inferred onboarding/workflow type),
 repository and explicit choices. It discards old responses, gates Create while the current check is
 pending, failed or missing a required account, and rechecks each account choice. Optional unresolved

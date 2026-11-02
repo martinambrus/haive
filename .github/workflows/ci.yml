@@ -481,6 +481,7 @@ jobs:
           api test/task-type-drafts-db.test.ts TASK_TYPE_DRAFTS_TEST_URL task_type_drafts_test pg
           api test/task-custom-steps-db.test.ts TASK_CUSTOM_STEPS_TEST_URL task_custom_steps_test pg
           api test/module-deactivation-db.test.ts MODULE_DEACTIVATION_API_TEST_URL module_deactivation_api_test pg
+          worker test/module-drain-db.test.ts MODULE_DEACTIVATION_API_TEST_URL module_deactivation_api_test_330_ci pg
           api test/module-missing-db.test.ts MODULE_MISSING_API_TEST_URL module_missing_api_test pg
           api test/module-purge-db.test.ts MODULE_PURGE_API_TEST_URL module_purge_api_test pg
           api test/task-create-path.test.ts TASK_CREATE_PATH_TEST_URL task_create_path_test pg
