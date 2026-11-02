@@ -40,7 +40,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [api, worker, web, updater, ollama-thinking-proxy, openrouter-compat-proxy]
+        service:
+          [api, worker, web, updater, builder, ollama-thinking-proxy, openrouter-compat-proxy]
         arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -75,6 +76,11 @@ jobs:
             api|worker|web|updater)
               echo "context=." >> "$GITHUB_OUTPUT"
               echo "file=packages/${{ matrix.service }}/Dockerfile" >> "$GITHUB_OUTPUT"
+              echo "target=production" >> "$GITHUB_OUTPUT"
+              ;;
+            builder)
+              echo "context=." >> "$GITHUB_OUTPUT"
+              echo "file=docker/own-module-builder/Dockerfile" >> "$GITHUB_OUTPUT"
               echo "target=production" >> "$GITHUB_OUTPUT"
               ;;
             *)
@@ -133,7 +139,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [api, worker, web, updater, ollama-thinking-proxy, openrouter-compat-proxy]
+        service:
+          [api, worker, web, updater, builder, ollama-thinking-proxy, openrouter-compat-proxy]
     steps:
       - name: Download digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

@@ -362,3 +362,65 @@ worker must carry `HAIVE_VERSION`; and no `.npmrc` in any layer may hold a crede
 which also finds an indented key). It exits 0 only when every image passed, 1 with one `OFFENDER`
 line per finding, and 2 when it could not look, offenders still printed; it never prints the token or
 an `.npmrc` value. A multi-platform `docker save` is refused (2): channel images are single-platform.
+
+## Own modules on a published install
+
+`haive-builder:<version>` supplies the core source, Node, pnpm, installed dependencies and pnpm
+store. Its Dockerfile is `docker/own-module-builder/Dockerfile` (repository-root context); the
+ordinary release matrix publishes it. A vendor builds the same Dockerfile from an entitlement-filtered
+context for a customer with paid modules. Only that customer's packages may be installed or present:
+the public builder must never contain private packages. Vendor registry credentials use the optional
+`npmrc` BuildKit secret, which is not copied into the image. A customer-side rebuild uses the baked
+closure and can fetch public npm dependencies without receiving a vendor token. An incomplete private
+closure fails the build; there is no credential fallback.
+
+The one-shot accepts prepared module folders under `/input/<id>/` and `HAIVE_BUILD_PLAN` JSON:
+
+```json
+{
+  "version": "0.2.0",
+  "builderImage": "ghcr.io/martinambrus/haive-builder:0.2.0",
+  "baseImages": {
+    "api": "ghcr.io/martinambrus/haive-api:0.2.0",
+    "worker": "ghcr.io/martinambrus/haive-worker:0.2.0"
+  },
+  "outputImages": {
+    "api": "haive-own-api:0.2.0-install",
+    "worker": "haive-own-worker:0.2.0-install"
+  }
+}
+```
+
+Run the matching builder with `docker run --rm`, mount `/var/run/docker.sock` at the same path,
+mount the prepared module directory read-only at `/input`, and pass that JSON with
+`-e HAIVE_BUILD_PLAN=...`. No host Node, pnpm or Haive checkout is needed. Inputs must already be
+fetched and pinned; durable git source/token management and the Modules install UI are separate.
+The builder checks its release stamp, refuses collisions with baked modules, adds own packages to
+the disposable workspace dependency lists, installs dependencies, and runs existing codegen and
+package builds. It derives only api and worker by default. A module exporting `./web` or
+`./dashboard` requires `rebuildWeb: true` and web base/output image references; otherwise the build
+fails before producing a candidate. Runtime-fetched declarative pages need no web rebuild.
+
+This one-shot has host-root authority through the Docker socket, and module build scripts execute
+with that authority. Only use trusted modules and trusted builder images. The input mount is read-only;
+all package edits and dependency installation happen inside disposable build stages. Nested `.git`,
+`.env`, `.env.*`, `.npmrc` and `node_modules` are excluded from the own-module build context.
+
+Installation callers run the one-shot before bringing up services, then persist the successful output
+references as `HAIVE_API_IMAGE` and `HAIVE_WORKER_IMAGE` (and `HAIVE_WEB_IMAGE` when rebuilt) in `.env`.
+The run overlay uses the API override for both api and db-migrate. Keep the source configuration in
+that file too: `HAIVE_OWN_MODULES_HOST_DIR` is an absolute **daemon-side** prepared module directory;
+`HAIVE_OWN_MODULES_REBUILD_WEB=true` opts into web builds; optional `HAIVE_BUILDER_IMAGE` is a
+customer builder reference containing `{version}`. Its default is the install's registry plus
+`/haive-builder:{version}`. Keep module selection in that directory exact; removing a folder omits
+it from the next derived image without purging its data. An empty own-module directory is refused;
+to remove the final own module, select the prebuilt images and clear the own-module configuration.
+
+Upgrade Phase 0 pulls the new bases and matching builder, then repeats this build before draining.
+Every attempt uses fresh local output tags, preserving the running images. A failed pull/build changes
+no pins or maintenance state. The journal records the registry and exact previous and target overrides before the first
+hold, so migration/commit one-shots use the derived targets and rollback/crash recovery restore the
+previous references. Old journal rows without image overrides retain their original registry/tag
+behavior. Do not prune previous local images before upgrading: preflight checks those exact references.
+Vendor delivery must run the existing channel leak/token/module gate on the complete derived image set;
+the builder does not replace entitlement/channel resolution or publication gates.

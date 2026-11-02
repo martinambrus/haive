@@ -173,3 +173,28 @@ export async function runOneShot(
     ...args,
   ]);
 }
+
+/** The daemon resolves the prepared source mount, just like snapshotHostDir. No npm credential. */
+export async function buildOwnModules(
+  image: string,
+  sourceHostDir: string,
+  plan: Record<string, unknown>,
+): Promise<void> {
+  await run('docker', ['pull', image], undefined, 1_800_000);
+  await run(
+    'docker',
+    [
+      'run',
+      '--rm',
+      '--mount',
+      'type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock',
+      '--mount',
+      `type=bind,src=${sourceHostDir},dst=/input,readonly`,
+      '-e',
+      `HAIVE_BUILD_PLAN=${JSON.stringify(plan)}`,
+      image,
+    ],
+    undefined,
+    3_600_000,
+  );
+}

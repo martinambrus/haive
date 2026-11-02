@@ -11,6 +11,7 @@ import {
 } from '@haive/shared';
 import type { ReleaseManifest } from '@haive/shared/release';
 import * as dk from './docker.js';
+import { IMAGE_KEYS, imageFor, type ImageOverrides } from './images.js';
 import {
   enterPhase,
   finishRun,
@@ -38,6 +39,8 @@ export interface UpgradeContext {
   fromVersion: string;
   target: ReleaseManifest;
   registry: string;
+  previousImages?: ImageOverrides;
+  targetImages?: ImageOverrides;
   /** Base URL of the api, for the health gate. */
   apiUrl: string;
   /** Postgres data volume to snapshot. */
@@ -80,8 +83,21 @@ export async function readEnvVar(envFile: string, key: string): Promise<string |
 
 /** Compose reads the pin from the environment as well as from .env, so the version being acted on
  *  is passed explicitly rather than relying on the file having been rewritten already. */
-function composeEnv(version: string): NodeJS.ProcessEnv {
-  return { ...process.env, HAIVE_VERSION: version };
+function composeEnv(
+  version: string,
+  images?: ImageOverrides,
+  registry?: string,
+): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    HAIVE_VERSION: version,
+    ...(registry ? { HAIVE_REGISTRY: registry } : {}),
+    ...images,
+  };
+}
+
+async function writeImages(ctx: UpgradeContext, images?: ImageOverrides): Promise<void> {
+  if (images) for (const key of IMAGE_KEYS) await setEnvVar(ctx.envFile, key, images[key]);
 }
 
 /** Poll `GET /version` until it reports the expected release, or give up.
@@ -285,13 +301,17 @@ export async function phaseSnapshot(ctx: UpgradeContext): Promise<string> {
   const file = `pg-${ctx.fromVersion}-${Date.now()}.tgz`;
   ctx.log('snapshot-start', { volume: ctx.postgresVolume, file });
 
-  await dk.composeStop(ctx.compose, composeEnv(ctx.fromVersion), ['postgres']);
+  await dk.composeStop(ctx.compose, composeEnv(ctx.fromVersion, ctx.previousImages, ctx.registry), [
+    'postgres',
+  ]);
   try {
     await dk.snapshotVolume(ctx.postgresVolume, ctx.snapshotHostDir, file);
   } finally {
     // Always bring it back, even on a failed snapshot: everything after this needs a database, and
     // leaving it stopped turns a recoverable failure into an outage.
-    await dk.composeUp(ctx.compose, composeEnv(ctx.fromVersion), ['postgres']);
+    await dk.composeUp(ctx.compose, composeEnv(ctx.fromVersion, ctx.previousImages, ctx.registry), [
+      'postgres',
+    ]);
     // And WAIT for it. The journal is in this database; without this the next write races the
     // restart and loses.
     await awaitDatabase(ctx.sql);
@@ -302,7 +322,7 @@ export async function phaseSnapshot(ctx: UpgradeContext): Promise<string> {
 
 export async function phaseMigrate(ctx: UpgradeContext): Promise<void> {
   await enterPhase(ctx.sql, ctx.runId, 'migrate');
-  const image = `${ctx.registry}/haive-api:${ctx.target.version}`;
+  const image = imageFor('api', ctx.target.version, ctx.registry, ctx.targetImages);
   // Run from the TARGET image, never the current one: the migrations being applied are the new
   // release's, and the old image does not have them.
   const out = await dk.runOneShot(
@@ -316,8 +336,9 @@ export async function phaseMigrate(ctx: UpgradeContext): Promise<void> {
 
 export async function phaseVerify(ctx: UpgradeContext): Promise<boolean> {
   await enterPhase(ctx.sql, ctx.runId, 'verify');
+  await writeImages(ctx, ctx.targetImages);
   await setEnvVar(ctx.envFile, 'HAIVE_VERSION', ctx.target.version);
-  await dk.composeUp(ctx.compose, composeEnv(ctx.target.version));
+  await dk.composeUp(ctx.compose, composeEnv(ctx.target.version, ctx.targetImages, ctx.registry));
   ctx.log('verify-start', { expect: ctx.target.version });
 
   const result = await awaitVersion(
@@ -335,8 +356,9 @@ export async function phaseVerify(ctx: UpgradeContext): Promise<boolean> {
  *  against them perfectly well, and undoing them is neither possible nor necessary. */
 export async function rollback(ctx: UpgradeContext, reason: string): Promise<void> {
   ctx.log('rollback', { to: ctx.fromVersion, reason });
+  await writeImages(ctx, ctx.previousImages);
   await setEnvVar(ctx.envFile, 'HAIVE_VERSION', ctx.fromVersion);
-  await dk.composeUp(ctx.compose, composeEnv(ctx.fromVersion));
+  await dk.composeUp(ctx.compose, composeEnv(ctx.fromVersion, ctx.previousImages, ctx.registry));
   await restoreMaintenanceState(ctx);
   await finishRun(ctx.sql, ctx.runId, 'rolled_back', reason);
   ctx.log('rolled-back', { version: ctx.fromVersion });
@@ -347,7 +369,7 @@ export async function phaseCommit(ctx: UpgradeContext): Promise<void> {
   // ONLY here, and this is the whole reason the data migrations were split. These delete rows with
   // no tombstone, some in a database the snapshot never covered, so running them before the health
   // gate would mean a rollback restores old images onto data the new version already destroyed.
-  const image = `${ctx.registry}/haive-worker:${ctx.target.version}`;
+  const image = imageFor('worker', ctx.target.version, ctx.registry, ctx.targetImages);
   const out = await dk.runOneShot(
     image,
     ['node', 'packages/worker/dist/destructive-data-migrations-cli.js'],
