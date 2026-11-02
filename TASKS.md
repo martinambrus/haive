@@ -541,19 +541,6 @@ status: open · was modular #195 · priority: P2
 status: open · was modular #196 · priority: P2
 DECIDED 2026-10-23: delete only that module's rows and show the counts in the confirmation.
 
-### T362 · FNF[new-task-reset-verdict] · after a failed reset the New Task page keeps the pre-reset verdict
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T08:42Z · last: 2026-11-02T08:42Z · kind: fix · policy: covered by accepted bounded-wait/consistency rules · priority: P1
-
-1. PRE-EXISTING. The reset route removes files before its database transaction (api repos.ts ~:2893, then ~:2935).
-   Fix direction: after a failed reset, re-ask for the status without clearing the error, and keep Create disabled until the answer lands.
-
-2. MOVED to T530; parked low-impact mobile-header follow-up, outside this readiness repair.
-
-Engineering scope derived from the accepted policy (2026-11-01), not a new owner decision: After any failed reset, re-read actual readiness without clearing the error and keep Create disabled until that answer arrives. Responsive overflow is a separate low-impact member, not a reason for broad UI work.
-
-Execution 2026-11-02: member1 only, fresh readiness after failed reset without hiding the error; Create remains disabled until actual readiness is known. Evidence `.claude/tmp/codex-run/queue-exec-20261101/T362/`. No reset backend rewrite or mobile-header work.
-
 ### T364 · FNF[test-coverage-gaps] · optional coverage controls after correctness and test-hygiene splits
 
 status: parked · reason: diminishing returns · user confirmed routine coverage stays parked, 2026-11-01 · priority: P4
@@ -1425,6 +1412,8 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
 ## Done
+
+- T362 — refresh New Task readiness after a failed onboarding reset (member1; mobile T530 parked) — PR #991 (51240c0b0b), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41421355760 green; actual merged New Task browser with synthetic reset/read/task route fixtures passed pending/failed/retry readiness and preserved inputs; zero writes forwarded. Evidence .claude/tmp/codex-run/queue-exec-20261101/T362/.
 
 - T434 — probe captured CLI token before atomic promotion — PR #990 (c234388ac6), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41416018770 green; real route/component/worker controls and real PostgreSQL atomic promotion passed; deployed API-to-worker synthetic crypto roundtrip and owner refusal passed; primary activity unchanged. Evidence .claude/tmp/codex-run/queue-exec-20261101/T434/.
 
