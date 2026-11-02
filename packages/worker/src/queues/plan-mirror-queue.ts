@@ -256,7 +256,7 @@ export async function integrateOrigin(args: {
   const db = getDb();
   const previousCommit = await headCommit(args.repoPath);
 
-  await fetchOrigin({
+  const originBranch = await fetchOrigin({
     repoPath: args.repoPath,
     branch: args.branch,
     db,
@@ -271,7 +271,7 @@ export async function integrateOrigin(args: {
       : null,
     ...(args.credentialId ? { credentialId: args.credentialId } : {}),
   });
-  const gap = await divergence(args.repoPath, args.branch);
+  const gap = await divergence(args.repoPath, args.branch, originBranch);
   const putBack = () => putBackProjections(db, args.repositoryId, args.repoPath, args.kept);
   if (gap.behind === 0) {
     await putBack();

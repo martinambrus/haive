@@ -348,7 +348,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     let unrelated = false;
     let priorRef = recordedPrior;
     if (!open) {
-      await fetchOrigin({
+      const originBranch = await fetchOrigin({
         repoPath: ctx.repoPath,
         branch,
         db: ctx.db,
@@ -356,7 +356,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
         remoteUrl: repo?.remoteUrl,
         ...(repo?.credentialsSecretId ? { credentialId: repo.credentialsSecretId } : {}),
       });
-      const gap = await divergence(ctx.repoPath, branch);
+      const gap = await divergence(ctx.repoPath, branch, originBranch);
       unrelated = gap.unrelated;
       if (gap.behind > 0) {
         const unlanded =

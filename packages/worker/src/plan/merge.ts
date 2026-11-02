@@ -77,9 +77,11 @@ export async function removePlanMergeWorktree(repoPath: string): Promise<void> {
   await gitRun(repoPath, ['worktree', 'prune']).catch(() => undefined);
 }
 
-/** Authenticated `git fetch origin <branch>`. The credential helper is built per
- *  call and its secret scrubbed from any message, the same dance `pull()` already
- *  does. */
+export type OriginBranch = 'present' | 'absent';
+
+/** Authenticated fetch, with an exact remote read after failure to distinguish an
+ * empty origin from a failed transport. A verified absence belongs to this attempt,
+ * not to the potentially stale origin/<branch> ref, which is left untouched. */
 export async function fetchOrigin(args: {
   repoPath: string;
   branch: string;
@@ -87,7 +89,7 @@ export async function fetchOrigin(args: {
   userId: string;
   credentialId?: string | null;
   remoteUrl?: string | null;
-}): Promise<void> {
+}): Promise<OriginBranch> {
   const env: Record<string, string> = { GIT_TERMINAL_PROMPT: '0' };
   const argv: string[] = [];
   let secret: string | null = null;
@@ -107,9 +109,17 @@ export async function fetchOrigin(args: {
     [...argv, 'fetch', '--end-of-options', 'origin', `refs/heads/${args.branch}`],
     env,
   );
-  if (res.code !== 0) {
-    throw new Error(`git fetch failed: ${scrubSecret(res.stderr || res.stdout, secret)}`);
-  }
+  if (res.code === 0) return 'present';
+  // ls-remote --exit-code exits 2 only when the remote answered with no matching
+  // refs. Empty stdout with exit 0, malformed output, authentication/transport
+  // errors and a run that gave no answer are all still failures, never absence.
+  const probe = await originGitRun(
+    args.repoPath,
+    [...argv, 'ls-remote', '--exit-code', '--refs', '--', 'origin', `refs/heads/${args.branch}`],
+    env,
+  );
+  if (probe.code === 2 && probe.stdout === '') return 'absent';
+  throw new Error(`git fetch failed: ${scrubSecret(res.stderr || res.stdout, secret)}`);
 }
 
 /** How far apart the checkout and the fetched remote are.
@@ -118,11 +128,13 @@ export async function fetchOrigin(args: {
  *  rejection prints a multi-line hint that git is free to reword at any release
  *  (`pushBranch` throws it verbatim), so branching on it would break silently on a
  *  git upgrade — and silently is the worst way for this to break, because the
- *  symptom would be a push that stops integrating. A missing `origin/<branch>` is the
- *  only failure read as "nothing to pull"; every other failed read throws. */
+ *  symptom would be a push that stops integrating. Verified remote absence from
+ *  this fetch attempt takes priority over a stale tracking ref. Otherwise only a
+ *  missing `origin/<branch>` reads as "nothing to pull"; every failed read throws. */
 export async function divergence(
   repoPath: string,
   branch: string,
+  originBranch: OriginBranch = 'present',
 ): Promise<{ ahead: number; behind: number; unrelated: boolean }> {
   const failed = (cmd: string, res: { stdout: string; stderr: string }): Error =>
     new Error(`git ${cmd} failed in ${repoPath}: ${res.stderr.trim() || res.stdout.trim()}`);
@@ -132,6 +144,7 @@ export async function divergence(
     if (res.code !== 0 || !Number.isFinite(n)) throw failed('rev-list', res);
     return n;
   };
+  if (originBranch === 'absent') return { ahead: await count('HEAD'), behind: 0, unrelated: true };
   const ref = await gitRun(repoPath, [
     'rev-parse',
     '--verify',
