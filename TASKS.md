@@ -342,8 +342,10 @@ Dependency reconciled 2026-11-02: T359 delivered as PR #993, corrected exact-HEA
 
 ### T333 · J8 · composer shows integration requirements + provider install state
 
-status: open · was modular #48 · priority: P2
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T12:22Z · last: 2026-11-02T12:22Z · was modular #48 · priority: P2
 Plan J8: for each requirement, the composer shows its category, the providers that can resolve it, and their install state.
+
+Execution scope: bounded J8 task-type composer overview of each integration requirement, its category, eligible/serving providers and current provider/module install state. Reuses shipped provider/catalog contracts and preserves requirement authoring/admission. Excludes reconnect automation T332, provider-pin execution T358, broad module/settings category expansion T360, and live Google setup T331. Prioritized as the author-facing completion of the current integration controls; one implementation driver, same complete-feature review/CI cadence.
 
 ### T334 · FNF[builtin-order-hazards] · built-in workflow runs 07b before 07c, and 08b fixer edits after both
 
