@@ -1619,6 +1619,7 @@ it('an audit refusal fails the verified login before credential storage', async 
 });
 
 describe('candidate verification before credential promotion', () => {
+  const frameTypes = () => ws.send.mock.calls.map(([raw]) => JSON.parse(raw).type as string);
   const capture = async () => {
     await start();
     stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
@@ -1644,6 +1645,7 @@ describe('candidate verification before credential promotion', () => {
     expect(current === 'previous-working-credential').toBe(true);
     expect(h.probe).toHaveBeenCalledTimes(1);
     expect(h.save.mock.calls.length === 0).toBe(true);
+    expect(frameTypes().includes('auth-success')).toBe(false);
     expect(ws.send.mock.calls.some(([raw]) => JSON.parse(raw).type === 'saved')).toBe(false);
     expect(ws.send.mock.calls.some(([raw]) => JSON.parse(raw).type === 'error')).toBe(true);
     assertNoCredentialText(TOKEN);
@@ -1656,6 +1658,11 @@ describe('candidate verification before credential promotion', () => {
     });
     await capture();
     expect(h.save.mock.calls.length === 0).toBe(true);
+    expect(frameTypes().includes('auth-success')).toBe(false);
+    stream.emit('end');
+    stream.emit('data', Buffer.from(`${TOKEN}\n\n`));
+    expect(frameTypes().includes('exit')).toBe(false);
+    expect(h.probe).toHaveBeenCalledTimes(1);
     const payload = h.probe.mock.calls[0]?.[0];
     expect(JSON.stringify(payload).includes(TOKEN)).toBe(false);
     const { envelopeDecrypt } = await import('@haive/shared');
@@ -1666,7 +1673,10 @@ describe('candidate verification before credential promotion', () => {
     release();
     await settle();
     expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === TOKEN).toBe(true);
-    expect(ws.send.mock.calls.some(([raw]) => JSON.parse(raw).type === 'saved')).toBe(true);
+    expect(frameTypes().filter((type) => type === 'auth-success' || type === 'saved')).toEqual([
+      'auth-success',
+      'saved',
+    ]);
     assertNoCredentialText(TOKEN);
   });
 
@@ -1674,6 +1684,7 @@ describe('candidate verification before credential promotion', () => {
     h.probeError = new Error('candidate rejected');
     await capture();
     expect(h.save.mock.calls.length === 0).toBe(true);
+    expect(frameTypes().includes('auth-success')).toBe(false);
     expect(ws.send.mock.calls.some(([raw]) => JSON.parse(raw).type === 'saved')).toBe(false);
   });
 
@@ -1693,8 +1704,77 @@ describe('candidate verification before credential promotion', () => {
       release();
       await settle();
       expect(h.save.mock.calls.length === 0).toBe(true);
+      expect(frameTypes().includes('auth-success')).toBe(false);
       expect(ws.send.mock.calls.some(([raw]) => JSON.parse(raw).type === 'saved')).toBe(false);
       expect(vi.getTimerCount()).toBe(0);
     },
   );
+});
+
+describe('login success wire persistence boundary', () => {
+  const frameTypes = () => ws.send.mock.calls.map(([raw]) => JSON.parse(raw).type as string);
+
+  it('waits for captured-token promotion commit before auth-success and saved', async () => {
+    let release!: () => void;
+    const commitGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let reachedCommit!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      reachedCommit = resolve;
+    });
+    let committed = false;
+    const fixture = h.db as { transaction: (fn: (tx: unknown) => unknown) => Promise<unknown> };
+    const transaction = fixture.transaction;
+    fixture.transaction = async (fn) => {
+      await transaction(fn);
+      reachedCommit();
+      await commitGate;
+      committed = true;
+    };
+    await start();
+    stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
+    paste();
+    stream.emit('data', Buffer.from(`${TOKEN}\n\n`));
+    await reached;
+    try {
+      expect(h.save.mock.calls.length === 1).toBe(true);
+      expect(frameTypes().includes('auth-success') || frameTypes().includes('saved')).toBe(false);
+    } finally {
+      release();
+      await settle();
+    }
+    expect(committed).toBe(true);
+    expect(frameTypes().filter((type) => type === 'auth-success' || type === 'saved')).toEqual([
+      'auth-success',
+      'saved',
+    ]);
+    assertNoCredentialText(TOKEN);
+  });
+
+  it('keeps volume-login auth-success before its pending verification', async () => {
+    providerName = 'grok';
+    let release!: () => void;
+    h.probeGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await start();
+    stream.emit(
+      'data',
+      Buffer.from(`https://accounts.x.ai/oauth2/device?user_code=${CODE}\n\nSigned in\n`),
+    );
+    await settle();
+    expect(h.probe).toHaveBeenCalledTimes(1);
+    expect(frameTypes().filter((type) => type === 'auth-success' || type === 'saved')).toEqual([
+      'auth-success',
+    ]);
+    stream.emit('end');
+    expect(frameTypes().includes('exit')).toBe(false);
+    release();
+    await settle();
+    expect(frameTypes().filter((type) => type === 'auth-success' || type === 'saved')).toEqual([
+      'auth-success',
+      'saved',
+    ]);
+  });
 });

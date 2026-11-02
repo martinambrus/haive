@@ -336,3 +336,11 @@ a close observed before the final check rolls back the credential, health and au
 Failure, an unknown/missing result, a thrown probe, session revocation or timeout preserves the
 previous credential and profile. Successful promotion updates encrypted storage, legacy-env
 cleanup, active auth health and its audit in one transaction, then requests the usage tick.
+
+For a captured Claude token, wire `auth-success` is sent only after promotion commits, immediately
+before `saved`. The browser uses that event as proof the credential is durable when recovering a
+lost result through an ordinary active-token probe. Before promotion it stays in the pending
+phase, shows queue progress, and offers a fresh login if the socket closes. The internal capture
+guard still suppresses duplicate captures and `probePending` keeps stream EOF from ending the
+session. Volume-based logins retain their existing earlier success event because their credential
+is already stored.

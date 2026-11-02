@@ -681,6 +681,7 @@ function captureClaudeOauthToken(session: BannerSession, text: string): boolean 
   }
   const oauthToken = extractClaudeOauthToken(text);
   if (!oauthToken) return false;
+  // Fence duplicate captures while verification is pending; wire success follows promotion.
   session.authSuccessSent = true;
   session.probePending = true;
   stopCaptureWatchdog(session);
@@ -691,7 +692,6 @@ function captureClaudeOauthToken(session: BannerSession, text: string): boolean 
     },
     'claude oauth token captured from stdout',
   );
-  wsSend(session.ws, { type: 'auth-success' });
   void saveOauthTokenAndProbe(session, oauthToken);
   return true;
 }
@@ -1134,6 +1134,8 @@ async function saveOauthTokenAndProbe(session: BannerSession, oauthToken: string
     await saveCliLoginSecret(getDb(), session.userId, session.providerId, oauthToken, assertActive);
     requestUsagePoll();
     log.info({ providerId: session.providerId }, 'verified oauth token saved to encrypted secret');
+    // The browser's lost-result recovery treats auth-success as proof of durable storage.
+    wsSend(session.ws, { type: 'auth-success' });
     wsSend(session.ws, { type: 'saved', result });
   } catch (err) {
     if (err instanceof LoginCancelled) {
