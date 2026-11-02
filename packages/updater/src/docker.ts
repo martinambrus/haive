@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { dirname, resolve } from 'node:path';
 
 const exec = promisify(execFile);
 
@@ -197,4 +198,66 @@ export async function buildOwnModules(
     undefined,
     3_600_000,
   );
+}
+
+/** Resolve only the new own-module settings with Compose's .env parser/interpolator.
+ * The updater image carries the target version, so installed version/registry and settings
+ * must come from the install file rather than the updater's ambient environment. */
+export async function resolveImageSettings(
+  file: string,
+  keys: readonly string[],
+): Promise<Record<string, string>> {
+  const env = { ...process.env };
+  for (const key of [...keys, 'HAIVE_VERSION', 'HAIVE_REGISTRY']) delete env[key];
+  const envFile = resolve(file);
+  const model = {
+    services: {
+      settings: {
+        image: 'scratch',
+        environment: Object.fromEntries(keys.map((key) => [key, '${' + key + '-}'])),
+      },
+    },
+  };
+  try {
+    const stdout = await new Promise<string>((done, reject) => {
+      const child = execFile(
+        'docker',
+        [
+          'compose',
+          '--project-name',
+          'updater-settings',
+          '--project-directory',
+          dirname(envFile),
+          '--env-file',
+          envFile,
+          '-f',
+          '-',
+          'config',
+          '--format',
+          'json',
+        ],
+        { env, timeout: 30_000, maxBuffer: 1024 * 1024 },
+        (error, out) => (error ? reject(error) : done(out)),
+      );
+      child.stdin?.on('error', () => {});
+      child.stdin?.end(JSON.stringify(model));
+    });
+    const values = JSON.parse(stdout)?.services?.settings?.environment as unknown;
+    if (!values || typeof values !== 'object' || Array.isArray(values))
+      throw new Error('invalid Compose output');
+    const result: Record<string, string> = {};
+    for (const key of keys) {
+      const value = (values as Record<string, unknown>)[key];
+      if (typeof value !== 'string') throw new Error('invalid Compose setting');
+      // Compose config escapes every dollar for re-reading its serialized model:
+      // docker/compose cmd/compose/config.go runConfig. Undo that one transport layer.
+      result[key] = value.replaceAll('$$', '$');
+    }
+    return result;
+  } catch {
+    // Compose errors can echo .env values. Never send its stderr/command into logs or the journal.
+    throw new Error(
+      'could not resolve install image settings with Docker Compose; check .env syntax and Compose availability',
+    );
+  }
 }

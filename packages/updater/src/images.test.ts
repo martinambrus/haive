@@ -1,11 +1,28 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { emptyOverrides, imageFor, journalImages, prepareImages } from './images.js';
+import { parseEnv } from 'node:util';
+import {
+  emptyOverrides,
+  imageFor,
+  journalImages,
+  prepareImages,
+  readImageOverrides,
+  readImageSettings,
+} from './images.js';
+import { preflight } from './preflight.js';
+import { parseReleaseManifest } from '@haive/shared/release';
 import * as dk from './docker.js';
 
 const dirs: string[] = [];
+beforeEach(() => {
+  // Syntax is exercised through real Compose in the read-only integration receipt; units isolate transport.
+  vi.spyOn(dk, 'resolveImageSettings').mockImplementation(async (file, keys) => {
+    const values = parseEnv(await readFile(file, 'utf8'));
+    return Object.fromEntries(keys.map((key) => [key, values[key] ?? '']));
+  });
+});
 afterEach(async () => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
@@ -136,4 +153,81 @@ it('resumed migrations and commit can select exact derived targets, while old jo
   expect(imageFor('web', '1.1.0', 'public', restored)).toBe('public/haive-web:1.1.0');
   expect(journalImages(undefined)).toBeUndefined();
   expect(() => journalImages({ HAIVE_API_IMAGE: 'local-api:one' })).toThrow('invalid journal');
+});
+
+it('quoted current Compose image refs pass rollback preflight and survive journal normalization', async () => {
+  const file = await env(
+    'HAIVE_API_IMAGE="own-api:1.0.0" # current API\nHAIVE_WORKER_IMAGE=\'own-worker:1.0.0\'\nHAIVE_WEB_IMAGE=own-web:1.0.0 # current web\n',
+  );
+  const text = await readFile(file, 'utf8');
+  const refs = await readImageOverrides(file);
+  const local = ['own-api:1.0.0', 'own-worker:1.0.0', 'own-web:1.0.0'];
+  const currentImages = (['api', 'worker', 'web'] as const).map((host) =>
+    imageFor(host, '1.0.0', 'public', refs),
+  );
+  expect(
+    preflight({
+      currentVersion: '1.0.0',
+      target: parseReleaseManifest({
+        manifestVersion: 1,
+        version: '1.1.0',
+        builtAt: '2026-11-02',
+        migrationHead: '0220',
+      }),
+      localImages: local,
+      currentImages,
+      freeBytes: 1,
+      snapshotBytes: 0,
+    }),
+  ).toEqual({ ok: true });
+  expect(Object.values(journalImages(JSON.parse(JSON.stringify(refs)))!)).toEqual(local);
+  expect(await readFile(file, 'utf8')).toBe(text);
+});
+
+it('reuses one resolved snapshot for quoted build settings and explicit install identity', async () => {
+  vi.stubEnv('HAIVE_INSTALL_ID', 'ambient');
+  const text =
+    'HAIVE_INSTALL_ID="team_a" # namespace\nHAIVE_OWN_MODULES_HOST_DIR=\'/prepared modules\'\nHAIVE_BUILDER_IMAGE="customer/builder:{version}"\nHAIVE_OWN_MODULES_REBUILD_WEB="true" # opt in\n';
+  const file = await env(text);
+  const snapshot = await readImageSettings(file);
+  await writeFile(file, 'HAIVE_OWN_MODULES_HOST_DIR=/changed\n');
+  vi.spyOn(dk, 'pullImages').mockResolvedValue();
+  const build = vi.spyOn(dk, 'buildOwnModules').mockResolvedValue();
+  const refs = await prepareImages(
+    { dir: '/install', files: [] },
+    file,
+    '1.1.0',
+    'customer',
+    snapshot,
+  );
+  expect(dk.resolveImageSettings).toHaveBeenCalledTimes(1);
+  expect(build).toHaveBeenCalledWith(
+    'customer/builder:1.1.0',
+    '/prepared modules',
+    expect.objectContaining({
+      rebuildWeb: true,
+      outputImages: {
+        api: refs.HAIVE_API_IMAGE,
+        worker: refs.HAIVE_WORKER_IMAGE,
+        web: refs.HAIVE_WEB_IMAGE,
+      },
+    }),
+  );
+  expect(refs.HAIVE_API_IMAGE).toMatch(/^team_a-own-api:/);
+  expect(refs.HAIVE_WEB_IMAGE).toMatch(/^team_a-own-web:/);
+  expect(process.env.HAIVE_INSTALL_ID).toBe('ambient');
+  expect(await readFile(file, 'utf8')).toBe('HAIVE_OWN_MODULES_HOST_DIR=/changed\n');
+});
+
+it('fails visibly before pulling or building for unsupported web settings', async () => {
+  const pull = vi.spyOn(dk, 'pullImages').mockResolvedValue();
+  const build = vi.spyOn(dk, 'buildOwnModules').mockResolvedValue();
+  const file = await env(
+    'HAIVE_OWN_MODULES_HOST_DIR=/modules\nHAIVE_OWN_MODULES_REBUILD_WEB=yes\n',
+  );
+  await expect(prepareImages({ dir: '/', files: [] }, file, '1.1.0', 'public')).rejects.toThrow(
+    'must be true or false',
+  );
+  expect(pull).not.toHaveBeenCalled();
+  expect(build).not.toHaveBeenCalled();
 });

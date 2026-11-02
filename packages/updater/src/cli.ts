@@ -20,7 +20,13 @@ import {
   type UpgradeContext,
 } from './run.js';
 import { decideResume } from './phases.js';
-import { imageFor, journalImages, prepareImages, readImageOverrides } from './images.js';
+import {
+  imageFor,
+  journalImages,
+  prepareImages,
+  readImageOverrides,
+  readImageSettings,
+} from './images.js';
 
 /**
  * `haive upgrade`.
@@ -172,7 +178,8 @@ async function main(): Promise<number> {
     }
     const target = await loadManifest(manifestSource);
 
-    const previousImages = await readImageOverrides(envFile);
+    const imageSettings = await readImageSettings(envFile);
+    const previousImages = await readImageOverrides(envFile, imageSettings);
     const currentImages = (['api', 'worker', 'web'] as const).map((s) =>
       imageFor(s, fromVersion, registry, previousImages),
     );
@@ -195,7 +202,13 @@ async function main(): Promise<number> {
     if (flag('check')) return EXIT.ok;
 
     // Pull BEFORE any hold is applied: a failed pull must cost nothing.
-    const targetImages = await prepareImages(compose, envFile, target.version, registry);
+    const targetImages = await prepareImages(
+      compose,
+      envFile,
+      target.version,
+      registry,
+      imageSettings,
+    );
     emit('pulled', { version: target.version });
 
     const runId = await startRun(sql, {

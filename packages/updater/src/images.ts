@@ -2,9 +2,21 @@ import { randomUUID } from 'node:crypto';
 import { imageRepo } from '@haive/shared/naming';
 import type { ComposeContext } from './docker.js';
 import * as dk from './docker.js';
-import { readEnvVar } from './run.js';
 
 export const IMAGE_KEYS = ['HAIVE_API_IMAGE', 'HAIVE_WORKER_IMAGE', 'HAIVE_WEB_IMAGE'] as const;
+export const IMAGE_SETTING_KEYS = [
+  ...IMAGE_KEYS,
+  'HAIVE_OWN_MODULES_HOST_DIR',
+  'HAIVE_BUILDER_IMAGE',
+  'HAIVE_INSTALL_ID',
+  'HAIVE_OWN_MODULES_REBUILD_WEB',
+] as const;
+export type ImageSettings = Record<(typeof IMAGE_SETTING_KEYS)[number], string>;
+
+export async function readImageSettings(file: string): Promise<ImageSettings> {
+  return (await dk.resolveImageSettings(file, IMAGE_SETTING_KEYS)) as ImageSettings;
+}
+
 export type ImageOverrides = Record<(typeof IMAGE_KEYS)[number], string>;
 export const emptyOverrides = (): ImageOverrides => ({
   HAIVE_API_IMAGE: '',
@@ -12,10 +24,14 @@ export const emptyOverrides = (): ImageOverrides => ({
   HAIVE_WEB_IMAGE: '',
 });
 
-export async function readImageOverrides(file: string): Promise<ImageOverrides> {
+export async function readImageOverrides(
+  file: string,
+  settings?: ImageSettings,
+): Promise<ImageOverrides> {
+  const snapshot = settings ?? (await readImageSettings(file));
   const result = emptyOverrides();
-  for (const key of IMAGE_KEYS) result[key] = (await readEnvVar(file, key)) ?? '';
-  return result;
+  for (const key of IMAGE_KEYS) result[key] = snapshot[key];
+  return journalImages(result)!;
 }
 
 export function imageFor(
@@ -49,7 +65,13 @@ export async function prepareImages(
   envFile: string,
   version: string,
   registry: string,
+  settings?: ImageSettings,
 ): Promise<ImageOverrides> {
+  const snapshot = settings ?? (await readImageSettings(envFile));
+  const current = await readImageOverrides(envFile, snapshot);
+  const webSetting = snapshot.HAIVE_OWN_MODULES_REBUILD_WEB;
+  if (webSetting !== '' && webSetting !== 'true' && webSetting !== 'false')
+    throw new Error('HAIVE_OWN_MODULES_REBUILD_WEB must be true or false');
   const target = emptyOverrides();
   // Never let previous local pins make compose pull the old own-module images.
   await dk.pullImages(compose, {
@@ -58,8 +80,7 @@ export async function prepareImages(
     HAIVE_REGISTRY: registry,
     ...target,
   });
-  const source = await readEnvVar(envFile, 'HAIVE_OWN_MODULES_HOST_DIR');
-  const current = await readImageOverrides(envFile);
+  const source = snapshot.HAIVE_OWN_MODULES_HOST_DIR;
   if (!source) {
     if (IMAGE_KEYS.some((key) => current[key]))
       throw new Error(
@@ -69,16 +90,18 @@ export async function prepareImages(
   }
   if (!source.startsWith('/') || source.includes(','))
     throw new Error('HAIVE_OWN_MODULES_HOST_DIR must be an absolute daemon path without commas');
-  const template = await readEnvVar(envFile, 'HAIVE_BUILDER_IMAGE');
+  const template = snapshot.HAIVE_BUILDER_IMAGE;
   if (template && !template.includes('{version}'))
     throw new Error('HAIVE_BUILDER_IMAGE must contain {version}');
   const builderImage =
     template?.replaceAll('{version}', version) || `${registry}/haive-builder:${version}`;
-  const installEnv = { HAIVE_INSTALL_ID: (await readEnvVar(envFile, 'HAIVE_INSTALL_ID')) ?? '' };
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/:@-]*$/.test(builderImage))
+    throw new Error('HAIVE_BUILDER_IMAGE must resolve to an image reference');
+  const installEnv = { HAIVE_INSTALL_ID: snapshot.HAIVE_INSTALL_ID };
   const suffix = randomUUID();
   target.HAIVE_API_IMAGE = `${imageRepo('own-api', installEnv)}:${version}-${suffix}`;
   target.HAIVE_WORKER_IMAGE = `${imageRepo('own-worker', installEnv)}:${version}-${suffix}`;
-  const rebuildWeb = (await readEnvVar(envFile, 'HAIVE_OWN_MODULES_REBUILD_WEB')) === 'true';
+  const rebuildWeb = webSetting === 'true';
   if (rebuildWeb)
     target.HAIVE_WEB_IMAGE = `${imageRepo('own-web', installEnv)}:${version}-${suffix}`;
   const baseImages = Object.fromEntries(

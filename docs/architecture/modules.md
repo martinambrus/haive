@@ -419,7 +419,11 @@ to remove the final own module, select the prebuilt images and clear the own-mod
 Upgrade Phase 0 pulls the new bases and matching builder, then repeats this build before draining.
 Every attempt uses fresh local output tags, preserving the running images. Local image repositories
 use `HAIVE_INSTALL_ID` from the install's `.env`; missing or empty means the default `haive`, even
-when the updater's ambient environment names another install. A failed pull/build changes
+when the updater's ambient environment names another install. The new image/build settings are
+resolved together with Compose's `.env` rules (quotes, comments and interpolation); current installed
+version/registry references resolve from the install file rather than the updater image's baked target.
+Preflight and the build share that snapshot. Malformed settings fail before any hold or pin write.
+A failed pull/build changes
 no pins or maintenance state. The journal records the registry and exact previous and target overrides before the first
 hold, so migration/commit one-shots use the derived targets and rollback/crash recovery restore the
 previous references. Old journal rows without image overrides retain their original registry/tag
