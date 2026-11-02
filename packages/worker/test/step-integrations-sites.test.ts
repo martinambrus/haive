@@ -6,6 +6,8 @@ const SRC = fileURLToPath(new URL('../src/', import.meta.url));
 const MODULE = 'step-engine/step-integrations.ts';
 const RUNNER = 'step-engine/step-runner.ts';
 const BOOT = 'step-engine/boot.ts';
+const PARK = 'queues/task-queue.ts';
+const REVIVE = 'queues/dead-task-boot.ts';
 
 const withoutComments = (text: string) =>
   text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
@@ -48,14 +50,14 @@ describe('[D7] the dispatch integrations are written at two sites and nowhere el
 
   it.each([
     ['insertStampedRun', [MODULE, RUNNER]],
-    ['resolveDispatchIntegrations', [MODULE, RUNNER]],
-    ['stepIntegrationRequirements', [MODULE, RUNNER]],
+    ['resolveDispatchIntegrations', [MODULE, RUNNER, PARK]],
+    ['stepIntegrationRequirements', [MODULE, RUNNER, PARK, REVIVE]],
     ['setComposableCatalog', [MODULE, BOOT]],
   ] as const)('[D7] %s is named only by %j', (identifier, allowed) => {
     expect(mentioning(identifier).sort()).toEqual([...allowed].sort());
   });
 
-  it('[D7] only the step runner and the boot import the module', () => {
+  it('[D7] only dispatch, boot and the integration park/revival owners import the module', () => {
     const importers = [...FILES]
       .filter(([, text]) =>
         /from\s+'(?:\.\.?\/)+(?:step-engine\/)?step-integrations\.js'/.test(text),
@@ -63,7 +65,7 @@ describe('[D7] the dispatch integrations are written at two sites and nowhere el
       .map(([file]) => file)
       .sort();
 
-    expect(importers).toEqual([BOOT, RUNNER].sort());
+    expect(importers).toEqual([BOOT, RUNNER, PARK, REVIVE].sort());
   });
 
   it.each(['step-engine/merge-resolver.ts', 'step-engine/dag-executor.ts'])(

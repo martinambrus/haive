@@ -44,7 +44,11 @@ const owned = (id: string) =>
 function stepPatch(patch: PgUpdateSetSource<typeof schema.taskSteps>) {
   const finished =
     patch.status === 'done' || patch.status === 'failed' || patch.status === 'skipped';
-  return { ...patch, ...(finished ? CLEAR_STEP_USAGE_STAMP : {}), updatedAt: new Date() };
+  return {
+    ...patch,
+    ...(finished ? { ...CLEAR_STEP_USAGE_STAMP, integrationWait: null } : {}),
+    updatedAt: new Date(),
+  };
 }
 
 /** A pass lost its row: a Retry, a Skip or a Stop that arrived meanwhile left it `pending`,

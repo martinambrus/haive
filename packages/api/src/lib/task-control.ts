@@ -228,6 +228,7 @@ export async function reofferParkedSteps(
       status: 'pending',
       ...parkFolded,
       waitingStartedAt: null,
+      integrationWait: null,
       statusMessage: null,
       updatedAt: now,
       ...reofferGate,
@@ -260,6 +261,7 @@ export async function settleActiveStepsIn(tx: DbHandle, taskId: string): Promise
       status: 'pending',
       ...parkFolded,
       waitingStartedAt: null,
+      integrationWait: null,
       updatedAt: now,
       ...reofferGate,
     })
@@ -328,6 +330,7 @@ async function failStuckSteps(
       // 0.04h) against multi-hour parks, so the trade is strongly net-correct.
       ...parkFolded,
       waitingStartedAt: null,
+      integrationWait: null,
       updatedAt: now,
     })
     .where(

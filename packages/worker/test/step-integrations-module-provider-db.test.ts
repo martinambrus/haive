@@ -1,7 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
-import type { CliExecJobPayload } from '@haive/shared';
+import { TASK_JOB_NAMES, type CliExecJobPayload } from '@haive/shared';
 import {
   lockTaskIntegrations,
   registerModuleIntegrations,
@@ -14,6 +14,7 @@ import type { DispatchRequest } from '../src/orchestrator/dispatcher.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import {
   insertStampedRun,
+  invalidRequirementsFailure,
   resolveDispatchIntegrations,
   setComposableCatalog,
 } from '../src/step-engine/step-integrations.js';
@@ -42,7 +43,12 @@ if (url && !new URL(url).pathname.startsWith('/step_integrations_module_provider
 
 const h = vi.hoisted(() => {
   process.env.LOG_LEVEL ??= 'error';
-  return { requests: [] as unknown[] };
+  return {
+    requests: [] as unknown[],
+    parkJobs: [] as { name: string; data: unknown; opts: { delay?: number } }[],
+    db: undefined as unknown,
+    beforeRequest: null as null | (() => Promise<void>),
+  };
 });
 
 vi.mock('@haive/shared', async (importOriginal) => ({
@@ -69,11 +75,45 @@ vi.mock('../src/orchestrator/dispatcher.js', async (importOriginal) => {
     ...actual,
     resolveTaskDispatch: async (...args: Parameters<typeof actual.resolveTaskDispatch>) => {
       h.requests.push(args[2]);
+      await h.beforeRequest?.();
       return actual.resolveTaskDispatch(...args);
     },
   };
 });
 
+vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/redis.js', () => ({ getBullRedis: () => ({}), getRedis: () => ({}) }));
+vi.mock('bullmq', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('bullmq')>()),
+  Queue: class {
+    async add(name: string, data: unknown, opts: { delay?: number }) {
+      h.parkJobs.push({ name, data, opts });
+    }
+  },
+}));
+vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  cleanupTaskAuthVolumes: async () => ({ removed: [], failed: [] }),
+  syncRefreshedAuthToUserVolumes: async () => undefined,
+}));
+vi.mock('../src/sandbox/sandbox-kill.js', () => ({
+  killCliSandboxesForTask: async () => undefined,
+  listCliSandboxesForTask: async () => [],
+}));
+vi.mock('../src/project-state/set-aside.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  resyncAfterTaskEnd: async () => undefined,
+}));
+
+import { pinnedPromptStep } from './support/prompt-step-integrations.js';
+import {
+  parkForIntegrations,
+  processTaskJob,
+  setContainerCleanupRunner,
+} from '../src/queues/task-queue.js';
+import { reviveDeadTasks } from '../src/queues/dead-task-boot.js';
+import { stepRegistry } from '../src/step-engine/registry.js';
+import type { ResolvedTaskContext } from '../src/queues/run-list.js';
 import { advanceStep } from '../src/step-engine/step-runner.js';
 
 const MODULE_PROVIDER = 'module.fx.crm';
@@ -138,6 +178,16 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
 
   beforeAll(async () => {
     db = createDatabase(url as string);
+    h.db = db;
+    await db
+      .insert(schema.modules)
+      .values({
+        moduleId: 'fx',
+        packageName: '@haive/module-fx',
+        name: 'Module fx',
+        installedVersion: '1.0.0',
+      })
+      .onConflictDoNothing();
     await db
       .insert(schema.integrationProviderConfigs)
       .values({ providerId: MODULE_PROVIDER, enabled: true })
@@ -148,14 +198,23 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
   });
 
   afterAll(async () => {
+    setContainerCleanupRunner(null);
     await deleteUsers(db, users);
     await db
       .delete(schema.integrationProviderConfigs)
       .where(eq(schema.integrationProviderConfigs.providerId, MODULE_PROVIDER));
+    await db.delete(schema.modules).where(eq(schema.modules.moduleId, 'fx'));
     await db.$client.end({ timeout: 5 });
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    setContainerCleanupRunner(async () => 0);
+    await db
+      .update(schema.modules)
+      .set({ deactivatedAt: null })
+      .where(eq(schema.modules.moduleId, 'fx'));
+    h.parkJobs.length = 0;
+    h.beforeRequest = null;
     savedKey = process.env.CONFIG_ENCRYPTION_KEY;
     process.env.CONFIG_ENCRYPTION_KEY = SIGNING_KEY;
     enqueued.length = 0;
@@ -344,6 +403,423 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
     providerId: 'github',
     connectionId,
     access: 'read',
+  });
+
+  describe('[J7] durable reconnect/provider waits', () => {
+    const rowOf = async (taskId: string) =>
+      (await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, taskId)))[0]!;
+    const taskOf = async (taskId: string) =>
+      (await db.select().from(schema.tasks).where(eq(schema.tasks.id, taskId)))[0]!;
+    async function park(
+      w: { taskId: string; userId: string },
+      def: StepDefinition,
+      result: Awaited<ReturnType<typeof advance>>,
+    ) {
+      expect(result.status).toBe('integration_blocked');
+      if (result.status !== 'integration_blocked')
+        throw new Error('expected typed integration block');
+      await db
+        .update(schema.tasks)
+        .set({ currentStepId: def.metadata.id })
+        .where(eq(schema.tasks.id, w.taskId));
+      const ctx = {
+        taskId: w.taskId,
+        userId: w.userId,
+        orchestrationEpoch: 0,
+        currentStepId: def.metadata.id,
+        currentRound: 0,
+      } as ResolvedTaskContext;
+      expect(await parkForIntegrations(db, ctx, def, result.row, result.block)).toBe(true);
+      return ctx;
+    }
+    const expectNoDispatch = async (taskId: string) => {
+      expect(await runsOf(db, taskId)).toEqual([]);
+      expect(await grantsOf(db, taskId)).toEqual([]);
+      expect(enqueued).toEqual([]);
+    };
+
+    it('parks the selected unhealthy account without fallback, then stamps the CURRENT override exactly once', async () => {
+      const w = await moduleWorld();
+      const second = await seedModuleConnection(w.userId);
+      await db.insert(schema.taskIntegrationChoices).values({
+        taskId: w.taskId,
+        categoryId: MODULE_CATEGORY,
+        providerId: MODULE_PROVIDER,
+        connectionId: w.moduleConnectionId,
+      });
+      await db
+        .update(schema.integrationConnections)
+        .set({ status: 'needs_reauth' })
+        .where(eq(schema.integrationConnections.id, w.moduleConnectionId));
+      const id = declare([DOCS_REQUIRED]);
+      const def = llmStep(id);
+      const first = await advance(w, def);
+      expect(first).toMatchObject({
+        status: 'integration_blocked',
+        block: {
+          kind: 'wait',
+          wait: {
+            causes: [
+              {
+                connectionId: w.moduleConnectionId,
+                providerId: MODULE_PROVIDER,
+                reason: 'connection-unavailable',
+              },
+            ],
+          },
+        },
+      });
+      await expectNoDispatch(w.taskId);
+      const ctx = await park(w, def, first);
+      const parked = await rowOf(w.taskId);
+      expect(parked.status).toBe('pending');
+      expect(parked.waitingStartedAt).not.toBeNull();
+      expect(parked.integrationWait?.causes[0]?.connectionId).toBe(w.moduleConnectionId);
+      expect(h.parkJobs[0]?.opts.delay).toBe(30_000);
+      if (first.status !== 'integration_blocked') throw new Error('block missing');
+      await Promise.all([
+        parkForIntegrations(db, ctx, def, first.row, first.block),
+        parkForIntegrations(db, ctx, def, first.row, first.block),
+      ]);
+      expect((await rowOf(w.taskId)).waitingStartedAt).toEqual(parked.waitingStartedAt);
+      expect((await rowOf(w.taskId)).carriedIdleMs).toBe(parked.carriedIdleMs);
+      // The task-page choice owner may choose another account while parked. No captured account wins.
+      await db.transaction(async (tx) => {
+        await lockTaskIntegrations(tx, w.taskId);
+        await tx
+          .update(schema.taskIntegrationChoices)
+          .set({ connectionId: second })
+          .where(eq(schema.taskIntegrationChoices.taskId, w.taskId));
+      });
+      expect((await advance(w, def)).status).toBe('waiting_cli');
+      expect((await rowOf(w.taskId)).integrationWait).toBeNull();
+      expect((await runsOf(db, w.taskId))[0]?.integrations).toMatchObject([
+        { connectionId: second },
+      ]);
+      await advance(w, def);
+      expect(await runsOf(db, w.taskId)).toHaveLength(1);
+      expect(enqueued).toHaveLength(1);
+      expect(await parkForIntegrations(db, ctx, def, first.row, first.block)).toBe(false);
+      expect(
+        (
+          await db
+            .select()
+            .from(schema.integrationConnections)
+            .where(eq(schema.integrationConnections.id, w.moduleConnectionId))
+        )[0]?.status,
+      ).toBe('needs_reauth');
+    });
+
+    it('provider deactivation parks without changing auth health, and reactivation allows dispatch', async () => {
+      const w = await moduleWorld();
+      const id = declare([DOCS_REQUIRED]);
+      const def = llmStep(id);
+      await db
+        .update(schema.modules)
+        .set({ deactivatedAt: new Date() })
+        .where(eq(schema.modules.moduleId, 'fx'));
+      const result = await advance(w, def);
+      expect(result).toMatchObject({
+        status: 'integration_blocked',
+        block: { kind: 'wait', wait: { causes: [{ reason: 'provider-deactivated' }] } },
+      });
+      await park(w, def, result);
+      await expectNoDispatch(w.taskId);
+      expect(
+        (
+          await db
+            .select()
+            .from(schema.integrationConnections)
+            .where(eq(schema.integrationConnections.id, w.moduleConnectionId))
+        )[0]?.status,
+      ).toBe('connected');
+      await db
+        .update(schema.modules)
+        .set({ deactivatedAt: null })
+        .where(eq(schema.modules.moduleId, 'fx'));
+      expect((await advance(w, def)).status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(1);
+    });
+
+    it('rechecks provider state at the locked stamp boundary and retains reserved mining prompts for recovery', async () => {
+      const w = await moduleWorld();
+      const id = declare([DOCS_REQUIRED]);
+      const def = miningStep(id);
+      h.beforeRequest = async () => {
+        await db
+          .update(schema.modules)
+          .set({ deactivatedAt: new Date() })
+          .where(eq(schema.modules.moduleId, 'fx'));
+      };
+      const result = await advance(w, def);
+      expect(result).toMatchObject({ status: 'integration_blocked', block: { kind: 'wait' } });
+      await expectNoDispatch(w.taskId);
+      await park(w, def, result);
+      const rows = await db
+        .select()
+        .from(schema.taskStepAgentMinings)
+        .where(eq(schema.taskStepAgentMinings.taskStepId, result.row.id));
+      expect(rows).toHaveLength(AGENTS.length);
+      // Attempts starts at 1 when reserved (schema default); a blocked dispatch must
+      // neither link a run nor spend another attempt. Recovery keeps that same first attempt.
+      expect(
+        rows
+          .map((r) => ({
+            agentId: r.agentId,
+            status: r.status,
+            cliInvocationId: r.cliInvocationId,
+            dispatchPrompt: r.dispatchPrompt,
+            attempts: r.attempts,
+          }))
+          .sort((a, b) => a.agentId.localeCompare(b.agentId)),
+      ).toEqual(
+        AGENTS.map((agentId) => ({
+          agentId,
+          status: 'pending',
+          cliInvocationId: null,
+          dispatchPrompt: `Review ${agentId}.`,
+          attempts: 1,
+        })),
+      );
+      h.beforeRequest = null;
+      await db
+        .update(schema.modules)
+        .set({ deactivatedAt: null })
+        .where(eq(schema.modules.moduleId, 'fx'));
+      expect((await advance(w, def)).status).toBe('waiting_cli');
+      expect(enqueued).toHaveLength(AGENTS.length);
+      expect(await runsOf(db, w.taskId)).toHaveLength(AGENTS.length);
+      const recovered = await db
+        .select()
+        .from(schema.taskStepAgentMinings)
+        .where(eq(schema.taskStepAgentMinings.taskStepId, result.row.id));
+      expect(recovered.map((r) => r.attempts)).toEqual(rows.map((r) => r.attempts));
+    });
+
+    it('ordinary queue ticks park an admin prompt, respect pause, recheck current provider state and dispatch once after recovery', async () => {
+      const w = await moduleWorld();
+      const type = 'j7-queue-tick';
+      const id = `custom.${type}.audit`;
+      const { stored } = pinnedPromptStep([DOCS_REQUIRED], { id });
+      await db
+        .insert(schema.taskTypeDefinitions)
+        .values({
+          slug: type,
+          displayName: type,
+          source: 'admin',
+          runListStrategy: 'static',
+          stepIds: [id],
+        })
+        .onConflictDoNothing();
+      try {
+        await db
+          .update(schema.repositories)
+          .set({ localPath: '/var/tmp/haive-codex-332' })
+          .where(eq(schema.repositories.id, w.repositoryId));
+        await db
+          .update(schema.tasks)
+          .set({
+            type,
+            currentStepId: id,
+            runListSnapshot: [id],
+            customSteps: stored,
+            cliProviderId: w.claude.id,
+          })
+          .where(eq(schema.tasks.id, w.taskId));
+        await db
+          .update(schema.integrationConnections)
+          .set({ status: 'needs_reauth' })
+          .where(eq(schema.integrationConnections.id, w.moduleConnectionId));
+        let seq = 0;
+        const tick = () =>
+          processTaskJob(
+            {
+              id: `j7-tick-${++seq}`,
+              name: TASK_JOB_NAMES.ADVANCE_STEP,
+              data: { taskId: w.taskId, userId: w.userId, stepId: id, round: 0, epoch: 0 },
+              timestamp: Date.now(),
+            } as never,
+            'test-token',
+          );
+        await tick();
+        const parked = await rowOf(w.taskId);
+        expect(parked).toMatchObject({
+          status: 'pending',
+          integrationWait: {
+            causes: [{ reason: 'connection-unavailable', connectionId: w.moduleConnectionId }],
+          },
+        });
+        expect(parked.waitingStartedAt).not.toBeNull();
+        expect(
+          h.parkJobs.filter((j) => j.name === TASK_JOB_NAMES.ADVANCE_STEP).at(-1)?.opts.delay,
+        ).toBe(30_000);
+        expect(await runsOf(db, w.taskId)).toEqual([]);
+        // Reconnect is represented solely by the auth owner's status transition; a pause still wins.
+        await db
+          .update(schema.tasks)
+          .set({ pausedAt: new Date() })
+          .where(eq(schema.tasks.id, w.taskId));
+        await db
+          .update(schema.integrationConnections)
+          .set({ status: 'connected' })
+          .where(eq(schema.integrationConnections.id, w.moduleConnectionId));
+        await tick();
+        expect(await runsOf(db, w.taskId)).toEqual([]);
+        expect((await rowOf(w.taskId)).waitingStartedAt).toEqual(parked.waitingStartedAt);
+        // A different live structural block now applies; recovery may not trust the old account-only cause.
+        await db.update(schema.tasks).set({ pausedAt: null }).where(eq(schema.tasks.id, w.taskId));
+        await db
+          .update(schema.modules)
+          .set({ deactivatedAt: new Date() })
+          .where(eq(schema.modules.moduleId, 'fx'));
+        await tick();
+        expect((await rowOf(w.taskId)).integrationWait?.causes[0]?.reason).toBe(
+          'provider-deactivated',
+        );
+        expect(await runsOf(db, w.taskId)).toEqual([]);
+        await db
+          .update(schema.modules)
+          .set({ deactivatedAt: null })
+          .where(eq(schema.modules.moduleId, 'fx'));
+        await tick();
+        expect((await rowOf(w.taskId)).integrationWait).toBeNull();
+        expect((await runsOf(db, w.taskId))[0]?.integrations).toMatchObject([
+          { connectionId: w.moduleConnectionId },
+        ]);
+        await tick();
+        expect(await runsOf(db, w.taskId)).toHaveLength(1);
+      } finally {
+        await db.delete(schema.tasks).where(eq(schema.tasks.id, w.taskId));
+        await db
+          .delete(schema.taskTypeDefinitions)
+          .where(eq(schema.taskTypeDefinitions.slug, type));
+      }
+    });
+
+    it('a saved wait with a newly invalid requirement fails by name even while its valid sibling still needs reconnecting', async () => {
+      const w = await moduleWorld();
+      const type = 'j7-invalid-wait';
+      const id = `custom.${type}.audit`;
+      const { stored, stepDef } = pinnedPromptStep(
+        [DOCS_REQUIRED, { id: 'broken', category: MODULE_CATEGORY, access: 'admin' }],
+        { id },
+      );
+      expect(invalidRequirementsFailure(stepDef)).toMatch(/^integration-requirement-invalid:/);
+      await db
+        .insert(schema.taskTypeDefinitions)
+        .values({
+          slug: type,
+          displayName: type,
+          source: 'admin',
+          runListStrategy: 'static',
+          stepIds: [id],
+        })
+        .onConflictDoNothing();
+      try {
+        await db
+          .update(schema.repositories)
+          .set({ localPath: '/var/tmp/haive-codex-332' })
+          .where(eq(schema.repositories.id, w.repositoryId));
+        await db
+          .update(schema.tasks)
+          .set({
+            type,
+            currentStepId: id,
+            runListSnapshot: [id],
+            customSteps: stored,
+            cliProviderId: w.claude.id,
+          })
+          .where(eq(schema.tasks.id, w.taskId));
+        await db
+          .update(schema.integrationConnections)
+          .set({ status: 'needs_reauth' })
+          .where(eq(schema.integrationConnections.id, w.moduleConnectionId));
+        const resolution = await resolveDispatchIntegrations(db, w.taskId, [DOCS_REQUIRED]);
+        expect(resolution).toMatchObject({ ok: false, blocked: { kind: 'wait' } });
+        if (resolution.ok || !resolution.blocked)
+          throw new Error('fixture must have a reconnect-blocked valid sibling');
+        await seedStepRow(db, w.taskId, {
+          stepId: id,
+          status: 'pending',
+          waitingStartedAt: new Date(),
+          integrationWait: resolution.blocked.wait,
+        });
+        await processTaskJob(
+          {
+            id: 'j7-invalid-wait',
+            name: TASK_JOB_NAMES.ADVANCE_STEP,
+            data: { taskId: w.taskId, userId: w.userId, stepId: id, round: 0, epoch: 0 },
+            timestamp: Date.now(),
+          } as never,
+          'test-token',
+        );
+        expect(await rowOf(w.taskId)).toMatchObject({
+          status: 'failed',
+          integrationWait: null,
+          errorMessage: expect.stringMatching(/^integration-requirement-invalid:/),
+        });
+        expect((await taskOf(w.taskId)).status).toBe('failed');
+        expect(await runsOf(db, w.taskId)).toEqual([]);
+        expect(h.parkJobs.filter((j) => j.name === TASK_JOB_NAMES.ADVANCE_STEP)).toEqual([]);
+      } finally {
+        await db.delete(schema.tasks).where(eq(schema.tasks.id, w.taskId));
+        await db
+          .delete(schema.taskTypeDefinitions)
+          .where(eq(schema.taskTypeDefinitions.slug, type));
+      }
+    });
+
+    it('a missing required provider is structurally dead until the current requirement resolves again', async () => {
+      const w = await moduleWorld();
+      const id = declare([DOCS_REQUIRED]);
+      const def = llmStep(id);
+      stepRegistry.register(def);
+      registerModuleIntegrations([]);
+      const result = await advance(w, def);
+      expect(result).toMatchObject({ status: 'integration_blocked', block: { kind: 'dead' } });
+      await park(w, def, result);
+      expect((await taskOf(w.taskId)).deadAt).not.toBeNull();
+      await expectNoDispatch(w.taskId);
+      const recovery = {
+        enqueueStart: vi.fn(async () => undefined),
+        enqueueAdvance: vi.fn(async () => undefined),
+        redriveRetryDelaysMs: [],
+      };
+      expect((await reviveDeadTasks(db, recovery)).revived).toBe(0);
+      expect(recovery.enqueueAdvance).not.toHaveBeenCalled();
+      registerModuleIntegrations([fxModule(DOCS_CATEGORIES)]);
+      expect((await reviveDeadTasks(db, recovery)).revived).toBe(1);
+      expect((await taskOf(w.taskId)).deadAt).toBeNull();
+      expect(recovery.enqueueAdvance).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(['failed', 'cancelled', 'completed'] as const)(
+      'a %s task cannot be reparked or resurrected by a stale integration block',
+      async (status) => {
+        const w = await moduleWorld();
+        const id = declare([DOCS_REQUIRED]);
+        const def = llmStep(id);
+        await db
+          .update(schema.integrationConnections)
+          .set({ status: 'needs_reauth' })
+          .where(eq(schema.integrationConnections.id, w.moduleConnectionId));
+        const result = await advance(w, def);
+        expect(result.status).toBe('integration_blocked');
+        if (result.status !== 'integration_blocked') return;
+        await db.update(schema.tasks).set({ status }).where(eq(schema.tasks.id, w.taskId));
+        const ctx = {
+          taskId: w.taskId,
+          userId: w.userId,
+          orchestrationEpoch: 0,
+          currentStepId: id,
+          currentRound: 0,
+        } as ResolvedTaskContext;
+        expect(await parkForIntegrations(db, ctx, def, result.row, result.block)).toBe(false);
+        expect((await taskOf(w.taskId)).status).toBe(status);
+        expect((await rowOf(w.taskId)).integrationWait).toBeNull();
+        expect(h.parkJobs).toHaveLength(0);
+      },
+    );
   });
 
   describe('[M1] resolveDispatchIntegrations', () => {

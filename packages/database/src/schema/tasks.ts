@@ -37,6 +37,25 @@ type TaskStepErrorHint =
     }
   | { type: 'cli_timeout'; stepId: string; lastBudgetMinutes: number; attempts: number };
 
+/** Durable dispatch wait, never a second owner of connection auth status. */
+export interface IntegrationWaitCause {
+  requirementId: string;
+  categoryId: string | null;
+  providerId: string | null;
+  connectionId: string | null;
+  reason:
+    | 'connection-unavailable'
+    | 'provider-deactivated'
+    | 'provider-disabled'
+    | 'provider-missing'
+    | 'no-connection'
+    | 'needs-choice'
+    | 'no-provider';
+}
+export interface IntegrationWait {
+  causes: IntegrationWaitCause[];
+}
+
 export const cliInvocationModeEnum = pgEnum('cli_invocation_mode', [
   'cli',
   'subagent_emulated',
@@ -628,6 +647,7 @@ export const taskSteps = pgTable(
     usageDailyPct: integer('usage_daily_pct'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
+    integrationWait: jsonb('integration_wait').$type<IntegrationWait>(),
   },
   (table) => [
     index('task_steps_task_id_idx').on(table.taskId),

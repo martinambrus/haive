@@ -22,6 +22,12 @@ import {
   supersedeDeadTaskRuns,
 } from './task-queue.js';
 
+import { resolveStepIntegrations } from '@haive/shared/integrations';
+import {
+  stepIntegrationRequirements,
+  invalidRequirementsFailure,
+} from '../step-engine/step-integrations.js';
+
 const log = logger.child({ module: 'dead-task-boot' });
 
 type DbHandle = Parameters<Parameters<Database['transaction']>[0]>[0];
@@ -147,6 +153,8 @@ export async function reviveDeadTask(
 ): Promise<ReviveJob['kind'] | 'held' | null> {
   const revived = await db.transaction(async (tx) => {
     if (await newWorkHeldUnderFence(tx)) return 'held' as const;
+    const [current] = await readCandidates(tx, eq(schema.tasks.id, c.id));
+    if (!current || (await currentIntegrationMissing(tx, current))) return null;
     const locked = await tx
       .select({ id: schema.tasks.id })
       .from(schema.tasks)
@@ -236,7 +244,7 @@ async function deathNamedSteps(db: Database | DbTx, taskId: string): Promise<str
   return Array.isArray(named) ? named.filter((id): id is string => typeof id === 'string') : [];
 }
 
-const readCandidates = (db: Database, extra: SQL | undefined) =>
+const readCandidates = (db: Database | DbTx, extra: SQL | undefined) =>
   db
     .select({
       id: schema.tasks.id,
@@ -260,7 +268,34 @@ async function judgeCandidate(db: Database, c: Candidate) {
   const deathNamed =
     c.deadAt !== null && c.runListSnapshot === null ? await deathNamedSteps(db, c.id) : undefined;
   const found = deadTaskResolution({ ...c, deathNamed }, runListStrategy);
-  return { found, resolves: found.unresolved.length === 0 && found.outsideList === null };
+  const integrationMissing = await currentIntegrationMissing(db, c);
+  return {
+    found,
+    integrationMissing,
+    resolves: found.unresolved.length === 0 && found.outsideList === null && !integrationMissing,
+  };
+}
+
+/** Current declarations and resolver state, including task choices/grants, decide revival. */
+async function currentIntegrationMissing(db: Database | DbTx, c: Candidate): Promise<boolean> {
+  if (c.currentStepId === null) return false;
+  const def = resolveTaskStep(
+    {
+      taskId: c.id,
+      customSteps: parseCustomSteps(c.customSteps),
+      runListSnapshot: c.runListSnapshot,
+    },
+    c.currentStepId,
+  );
+  if (!def) return false; // The ordinary step-resolution owner judges that case.
+  if (invalidRequirementsFailure(def) !== null) return false;
+  const requirements = stepIntegrationRequirements(def);
+  // Unsupported pins keep the existing named dispatch refusal, before category resolution.
+  if (requirements.length === 0 || requirements.some((r) => r.category === undefined)) return false;
+  const resolutions = await resolveStepIntegrations(db, { taskId: c.id }, requirements);
+  return resolutions.some(
+    (r) => r.status === 'unresolved' && !r.optional && r.reason === 'provider-missing',
+  );
 }
 
 /** One pass over the dead tasks whose steps are registered again: each is revived, counted as held while new work is held, or counted as failed when judging or reviving it throws. */
@@ -322,12 +357,14 @@ export async function reconcileDeadTasks(
   );
   for (const c of live) {
     try {
-      const { found, resolves } = await judgeCandidate(db, c);
+      const { found, integrationMissing, resolves } = await judgeCandidate(db, c);
       if (!resolves) {
         const landed = await markTaskDead(
           db,
           c.id,
-          deadReasonFor(found.unresolved, found.outsideList ?? undefined),
+          integrationMissing
+            ? 'A required integration provider is not installed. Ask an administrator to restore its module and restart the worker.'
+            : deadReasonFor(found.unresolved, found.outsideList ?? undefined),
           {
             epoch: c.epoch,
             unresolved: found.unresolved,

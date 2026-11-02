@@ -547,3 +547,50 @@ describe('showsStepUsageStamp', () => {
     },
   );
 });
+
+describe('required integration park', () => {
+  const parked = step({
+    waitingStartedAt: '2026-11-02T10:00:00Z',
+    statusMessage: 'stale runtime words',
+    integrationWait: {
+      causes: [
+        {
+          requirementId: 'mail',
+          categoryId: 'mail',
+          providerId: 'module.mail.google',
+          connectionId: 'account',
+          reason: 'connection-unavailable',
+        },
+      ],
+    },
+  });
+  it('uses structural integration state for actionable Settings guidance', () => {
+    const banner = parkBanner(parked, { taskEnded: false });
+    expect(banner?.text).toContain('/settings/integrations');
+    expect(banner?.text).toContain('automatically');
+    expect(banner?.text).not.toContain('stale runtime words');
+  });
+  it('hides stale wait state after claim, Stop, death or completion, and pause wins', () => {
+    for (const status of ['running', 'waiting_cli', 'failed', 'done', 'waiting_form']) {
+      expect(parkBanner({ ...parked, status }, { taskEnded: false })).toBeNull();
+    }
+    expect(parkBanner({ ...parked, waitingStartedAt: null }, { taskEnded: false })).toBeNull();
+    expect(parkBanner(parked, { taskEnded: true })).toBeNull();
+    expect(parkBanner(parked, { taskEnded: false, dead: true })).toBeNull();
+    expect(parkBanner(parked, { taskEnded: false, paused: true })).toEqual({
+      text: PAUSED_WAIT_TEXT,
+    });
+  });
+});
+
+it('a provider death uses its reason only while structural dead state proves it', () => {
+  const reason =
+    'A required integration provider is not installed. Ask an administrator to restore its module and restart the worker.';
+  expect(
+    deadBanner({ status: 'running', deadAt: '2026-11-02T10:00:00Z', deadReason: reason }, [])?.text,
+  ).toContain('restore its module');
+  expect(deadBanner({ status: 'running', deadAt: null, deadReason: reason }, [])).toBeNull();
+  expect(
+    deadBanner({ status: 'cancelled', deadAt: '2026-11-02T10:00:00Z', deadReason: reason }, []),
+  ).toBeNull();
+});

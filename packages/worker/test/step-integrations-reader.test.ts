@@ -124,3 +124,42 @@ describe("[D1] the one reader of a step's declared integrations", () => {
     expect(mod.INTEGRATIONS_NO_SIGNING_KEY_REASON).toBe('integrations-no-signing-key');
   });
 });
+
+describe('integration blocking classification', () => {
+  const unresolved = (reason: string, optional = false) => ({
+    requirementId: 'mail',
+    categoryId: 'mail',
+    providerId: 'module.mail.google',
+    connectionId: 'selected-account',
+    status: 'unresolved',
+    optional,
+    reason,
+    candidates: [],
+  });
+  it('preserves selected identity for reconnect and provider state waits', async () => {
+    const { integrationBlock } = await import('../src/step-engine/step-integrations.js');
+    for (const reason of ['connection-unavailable', 'provider-deactivated', 'provider-disabled']) {
+      const resolution = unresolved(reason);
+      expect(integrationBlock([resolution as never])).toEqual({
+        kind: 'wait',
+        wait: {
+          causes: [
+            expect.objectContaining({
+              reason,
+              connectionId: 'selected-account',
+              providerId: 'module.mail.google',
+            }),
+          ],
+        },
+      });
+    }
+  });
+  it('only a required missing provider is dead; optional and unrelated hard failures stay distinct', async () => {
+    const { integrationBlock } = await import('../src/step-engine/step-integrations.js');
+    expect(integrationBlock([unresolved('provider-missing') as never])?.kind).toBe('dead');
+    expect(integrationBlock([unresolved('provider-missing', true) as never])).toBeUndefined();
+    expect(integrationBlock([unresolved('not-allowed-by-repository') as never])).toBeUndefined();
+    for (const reason of ['no-remote', 'needs-choice', 'no-provider', 'no-connection'])
+      expect(integrationBlock([unresolved(reason) as never])).toBeUndefined();
+  });
+});

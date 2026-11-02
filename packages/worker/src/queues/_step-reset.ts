@@ -158,6 +158,7 @@ export async function resetStepAndDownstream(
             endedAt: null,
             idleMs: 0,
             waitingStartedAt: null,
+            integrationWait: null,
             userActiveMs: 0,
             carriedWorkMs: r.carriedWorkMs + c.workMs,
             carriedIdleMs: r.carriedIdleMs + c.idleMs,

@@ -105,6 +105,8 @@ import { resolveMergePhase } from './merge-resolver.js';
 import {
   dispatchIntegrationAccounts,
   insertStampedRun,
+  IntegrationBlockedError,
+  type IntegrationBlock,
   invalidRequirementsFailure,
   resolveDispatchIntegrations,
   stepIntegrationRequirements,
@@ -365,9 +367,11 @@ export type AdvanceStepResult =
   /** A Retry or Skip took the row over while this pass ran; the pass wrote no outcome. */
   | { status: 'superseded'; row: TaskStepRow }
   /** A schema setup that failed at admission was reset since; the step re-enters admission and writes nothing. */
-  | { status: 'deferred'; row: TaskStepRow };
+  | { status: 'deferred'; row: TaskStepRow }
+  | { status: 'integration_blocked'; row: TaskStepRow; block: IntegrationBlock };
 
 type UpdatePatch = Partial<{
+  integrationWait: TaskStepRow['integrationWait'];
   status: StepStatus;
   detectOutput: unknown;
   formSchema: unknown;
@@ -636,6 +640,7 @@ async function resolveDispatchStamp(
   const requirements = toolProfile === undefined ? stepIntegrationRequirements(stepDef) : [];
   if (requirements.length === 0) return { requirements, bindings: [], failure: null };
   const resolved = await resolveDispatchIntegrations(db, taskId, requirements);
+  if (!resolved.ok && resolved.blocked) throw new IntegrationBlockedError(resolved.blocked);
   return resolved.ok
     ? {
         requirements,
@@ -671,6 +676,7 @@ async function insertDispatchRun(
     stamp.requirements,
     stamp.named,
   );
+  if ('failure' in run && run.blocked) throw new IntegrationBlockedError(run.blocked);
   if (!('failure' in run)) stamp.fixed = { integrations: run.integrations };
   return run;
 }
@@ -2297,6 +2303,11 @@ async function dispatchMiningAgents(
     }
     return { sent: enqueued, lost, refused: refusedRows };
   } catch (err) {
+    if (err instanceof IntegrationBlockedError) {
+      // No first run was stamped, so every retained target is unsent. Its own row already
+      // holds its prompt, including follow-up waves, without spending an invocation attempt.
+      throw err;
+    }
     await releaseUnsentAgents(db, linking, [...targets.values()], err, ctx);
     throw err;
   }
@@ -2709,7 +2720,7 @@ export async function willSkipBeforeAdmission(
   row: TaskStepRow,
 ): Promise<boolean> {
   const { stepDef } = params;
-  if (!stepDef.shouldRun) return false;
+  if (!stepDef.shouldRun || row.integrationWait != null) return false;
   try {
     const ctx = buildStepContext(params, row, new AbortController().signal, () => {});
     return !(await stepDef.shouldRun(ctx));
@@ -2841,7 +2852,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
   let opened = row.status !== 'pending';
 
   try {
-    if (stepDef.shouldRun && isFreshStepEntry(row.status)) {
+    if (stepDef.shouldRun && isFreshStepEntry(row.status) && row.integrationWait == null) {
       const should = await stepDef.shouldRun(ctx);
       if (!should) {
         await foldCliParkOnResume(db, row.id);
@@ -2871,6 +2882,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         // Clear any queued/parked message (e.g. "waiting for a free runtime slot") so it does
         // not linger once the step actually runs; the run's own emitProgress takes over.
         statusMessage: null,
+        integrationWait: null,
       });
       if (!claimed) return supersededPass(current);
       current = claimed;
@@ -3722,6 +3734,13 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     return { status: 'done', row: done, output };
   } catch (err) {
     if (superseded || err instanceof StepSupersededError) return supersededPass(row);
+    if (err instanceof IntegrationBlockedError) {
+      return {
+        status: 'integration_blocked',
+        row: await upsertRow(db, taskId, stepDef, round),
+        block: err.block,
+      };
+    }
     const cancelled = err instanceof TaskCancelledError;
     const errorMessage = cancelled ? 'task cancelled by user' : safeErrorMessage(err);
     if (cancelled) {

@@ -23,7 +23,7 @@
 
 import { isModuleStepId } from '../modularity/contracts.js';
 
-export type SlotWaitKind = 'runtime' | 'agent' | 'module';
+export type SlotWaitKind = 'runtime' | 'agent' | 'module' | 'integration';
 
 /** A task step reduced to the fields the derivation needs. Date fields accept a `Date`
  *  (server-side Drizzle rows) or an ISO string (web JSON), like `TaskTimingStep`. */
@@ -33,6 +33,7 @@ export interface SlotWaitStep {
   stepId: string;
   round: number;
   status: string;
+  integrationWait?: { causes: readonly unknown[] } | null;
   waitingStartedAt: Date | string | null;
   statusMessage: string | null;
   updatedAt: Date | string | null;
@@ -125,7 +126,12 @@ export function deriveSlotWait(args: {
 
   if (row.status === 'pending' && since !== null) {
     return {
-      kind: isModuleStepId(row.stepId) ? 'module' : 'runtime',
+      kind:
+        row.integrationWait != null
+          ? 'integration'
+          : isModuleStepId(row.stepId)
+            ? 'module'
+            : 'runtime',
       since,
       stepId: row.stepId,
       message: row.statusMessage,

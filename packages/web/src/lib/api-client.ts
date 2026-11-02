@@ -732,7 +732,7 @@ export type StepStatus =
  *  has picked it up, 'module' = a module step waiting for its module's schema setup (no slot
  *  involved). Local mirror of @haive/shared's SlotWait — the web package intentionally keeps
  *  its own copies of API types. */
-export type SlotWaitKind = 'runtime' | 'agent' | 'module';
+export type SlotWaitKind = 'runtime' | 'agent' | 'module' | 'integration';
 
 export interface SlotWait {
   kind: SlotWaitKind;
@@ -1122,6 +1122,15 @@ export interface TaskStep {
   /** Start of the current open idle period while the step is waiting for
    *  input (waiting_form); null otherwise. */
   waitingStartedAt: string | null;
+  integrationWait?: {
+    causes: {
+      requirementId: string;
+      categoryId: string | null;
+      providerId: string | null;
+      connectionId: string | null;
+      reason: string;
+    }[];
+  } | null;
   /** Focused-and-visible time (ms) the user actively spent on this step while
    *  it waited for input — the active-viewing subset of idleMs, measured in the
    *  browser and posted in increments. Pauses while the agent works. */

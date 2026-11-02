@@ -224,3 +224,29 @@ describe('deriveSlotWait', () => {
     );
   });
 });
+
+it('distinguishes an integration wait from runtime/module capacity without reading copy', () => {
+  const args = {
+    taskStatus: 'running',
+    currentStepId: 'module.mail.audit',
+    currentRound: 0,
+    steps: [
+      {
+        id: 'row',
+        stepId: 'module.mail.audit',
+        round: 0,
+        status: 'pending',
+        waitingStartedAt: '2026-11-02T10:00:00Z',
+        updatedAt: '2026-11-02T10:00:10Z',
+        statusMessage: 'old runtime copy',
+        integrationWait: { causes: [] },
+      },
+    ],
+    queuedInvocationStepRowIds: new Set<string>(),
+    paused: false,
+    nowMs: Date.parse('2026-11-02T10:00:20Z'),
+  };
+  expect(deriveSlotWait(args)?.kind).toBe('integration');
+  expect(deriveSlotWait({ ...args, paused: true })).toBeNull();
+  expect(deriveSlotWait({ ...args, taskStatus: 'failed' })).toBeNull();
+});

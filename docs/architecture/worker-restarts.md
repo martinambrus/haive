@@ -63,8 +63,9 @@ task for that long and then do nothing. It does hold a task parked or running on
 since it runs that step inside the job (below).
 
 **A park whose poll chain was lost is re-driven.** A parked row (`pending` with
-`waiting_started_at`: a runtime slot, a pause or a module's schema setup) is driven by a chain of
-delayed advances, each queueing the next and rewriting the row's `updated_at` (15 s, 30 s, 5 s). A
+`waiting_started_at`: a runtime slot, a pause, module schema setup or a required integration) is
+driven by a chain of delayed advances, each queueing the next and rewriting the row's `updated_at`
+(15 s, 30 s, 5 s; integration waits use 30 s). A
 chain whose job was lost (Redis restored without it, a queue cleaned by hand) leaves the row parked
 with a stale stamp, and the sweep takes it once the ROW's stamp is older than the cutoff. The task's
 stamp cannot tell a dead chain from a live one, since a tick that finds the pointer right never
@@ -570,8 +571,9 @@ when a parked PR's current history has no classifiable evidence; its initial
 
 ## Dead tasks
 
-A task is **dead** when its data names a step this install no longer registers: a module was removed, or a step its
-run list names went away (`UnresolvedStepError`). Dead is neither failed nor completed. `markTaskDead`
+A task is **dead** when its current step requires an uninstalled integration provider, or its data
+names a step this install no longer registers: a module was removed, or a step its run list names
+went away (`UnresolvedStepError`). Dead is neither failed nor completed. `markTaskDead`
 (`queues/task-queue.ts`) sets `dead_at` and `dead_reason`, keeps the status and the epoch, appends `task.dead`
 (`TASK_DEAD_EVENT`) naming the missing ids, supersedes every open run of the task, and otherwise tears nothing down, so
 a revive finds the task as it was. The api refuses every advancing action on a dead task with 409 `task_dead`
@@ -582,8 +584,12 @@ back and before orphaned steps are recovered; it checks every live task that has
 names a missing step. At run time the hand-off marks a task whose current or next step does not resolve. A task with no
 snapshot (the dynamic types) is only ever marked at run time.
 
-**What revives it.** The same boot pass revives a dead task once what it was missing resolves again: a snapshot task
-when its whole run list does, a snapshot-less one when the step ids its last `task.dead` event named and its current
+**What revives it.** Required integrations of the current step are re-resolved as well: a required
+`provider-missing` keeps it dead even when every step resolves. The revival owner repeats this check
+inside its transaction, including for direct callers; a provider restored but deactivated can revive
+into the integration park. This uses only resolver state, never dead-reason copy or token refresh
+(see [Integrations](integrations.md#dispatch)). The same boot pass revives a dead task once what it
+was missing resolves again: a snapshot task when its whole run list does, a snapshot-less one when the step ids its last `task.dead` event named and its current
 step do. Judging a snapshot-less task by its current step alone revived one whose death named a step that was still
 missing, and its first job killed it again on every boot. `reviveDeadTask` clears the mark under the epoch
 compare-and-swap, records `task.revived`, and enqueues the job the task's status is owed: a start for a queued task,

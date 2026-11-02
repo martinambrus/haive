@@ -4397,7 +4397,7 @@ function StepCardImpl({
         // the presence of the copy.
         <div className="flex items-center gap-2 rounded-md border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">
           <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-amber-400" />
-          {park.text}
+          <InlineMarkdown body={park.text} className="min-w-0 [overflow-wrap:anywhere]" />
         </div>
       )}
 

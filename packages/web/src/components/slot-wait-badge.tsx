@@ -8,12 +8,14 @@ const KIND_LABEL: Record<SlotWait['kind'], string> = {
   runtime: 'runtime slot',
   agent: 'agent slot',
   module: 'module setup',
+  integration: 'integration',
 };
 
 const KIND_TITLE: Record<SlotWait['kind'], string> = {
   runtime: 'Queued for a free runtime slot',
   agent: 'Queued for a free agent slot',
   module: "Waiting for its module's setup to finish",
+  integration: 'Waiting for a required integration to become available',
 };
 
 const STALE_HINT =
