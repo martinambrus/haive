@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { isValidElement, type ReactElement, type ReactNode } from 'react';
+import { isValidElement, type ComponentProps, type ReactElement, type ReactNode } from 'react';
 import Link from 'next/link';
-import type { ModuleOpenTask, ModuleUrgentResponse } from '@/lib/api-client';
+import type { ModuleOpenTask, ModulePurgePreview, ModuleUrgentResponse } from '@/lib/api-client';
 import { Dialog, DialogContent } from '@/components/dialog';
 import { Button, FormError, Input } from '@/components/ui';
 import { ModulePurgeDialog } from './module-purge-dialog';
@@ -87,6 +87,17 @@ const textOf = (node: ReactNode): string =>
         : '';
 
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+// The purge entry point keys a private stateful child. Run that known wrapper's
+// returned component so this plain-hook fixture exercises the actual dialog.
+function renderPurgeDialog(props: ComponentProps<typeof ModulePurgeDialog>): ReactNode {
+  const wrapper = ModulePurgeDialog(props);
+  return wrapper === null
+    ? null
+    : (wrapper.type as (value: ComponentProps<typeof ModulePurgeDialog>) => ReactNode)(
+        wrapper.props,
+      );
+}
 
 async function mount(render: () => ReactNode, runDialog = false) {
   hooks.slots = [];
@@ -185,6 +196,18 @@ const json = (status: number, body: unknown) => new Response(JSON.stringify(body
 const fetchMock = vi.fn();
 let meAnswer: () => Promise<Response> | Response;
 let apiAnswer: () => Promise<Response> | Response;
+let previewAnswer: () => Promise<Response> | Response;
+const PREVIEW: ModulePurgePreview = {
+  moduleId: 'alpha',
+  integrations: {
+    providerConfigs: 1,
+    connections: 2,
+    userSettings: 3,
+    preferences: 4,
+    taskChoices: 5,
+    grants: 6,
+  },
+};
 const sent = (path: string) =>
   fetchMock.mock.calls.filter(([url]) => new URL(url as string).pathname === path);
 
@@ -194,9 +217,13 @@ beforeEach(() => {
   apiAnswer = () => {
     throw new Error('this test set no answer for the request');
   };
-  fetchMock.mockImplementation(async (url: string) =>
-    new URL(url).pathname === '/auth/me' ? meAnswer() : apiAnswer(),
-  );
+  previewAnswer = () => json(200, PREVIEW);
+  fetchMock.mockImplementation(async (url: string) => {
+    const path = new URL(url).pathname;
+    if (path === '/auth/me') return meAnswer();
+    if (path === '/modules/alpha/purge-preview') return previewAnswer();
+    return apiAnswer();
+  });
   vi.stubGlobal('fetch', fetchMock);
 });
 
@@ -388,6 +415,8 @@ describe('who gets a link to a task', () => {
   });
 
   it('applies to the purge dialog the same way', async () => {
+    let answerPreview!: (response: Response) => void;
+    previewAnswer = () => new Promise<Response>((resolve) => (answerPreview = resolve));
     apiAnswer = () =>
       json(409, {
         error: 'Live tasks still use this module, dead ones included. Cancel them first.',
@@ -395,7 +424,7 @@ describe('who gets a link to a task', () => {
         tasks,
       });
     const purge = await mount(() =>
-      ModulePurgeDialog({
+      renderPurgeDialog({
         target: { id: 'alpha', tornDown: true },
         onClose: () => {},
         onDone: () => {},
@@ -404,7 +433,16 @@ describe('who gets a link to a task', () => {
     const input = flatten(purge.tree()).find((e) => e.type === Input)!;
     input.props.onChange!({ target: { value: 'alpha' } });
     purge.draw();
+    expect(purge.button('Purge').props.disabled).toBe(true);
     await purge.click('Purge');
+    expect(sent('/modules/alpha/purge')).toHaveLength(0);
+    answerPreview(json(200, PREVIEW));
+    await flush();
+    purge.draw();
+    expect(purge.button('Purge').props.disabled).toBe(false);
+    await purge.click('Purge');
+    expect(sent('/modules/alpha/purge-preview')).toHaveLength(1);
+    expect(sent('/modules/alpha/purge')).toHaveLength(1);
     expect(purge.titles()).toEqual(OWN_ONLY);
     expect(sent('/auth/me')).toHaveLength(1);
   });
@@ -413,7 +451,7 @@ describe('who gets a link to a task', () => {
     meAnswer = () => json(500, { error: 'The database is away' });
     apiAnswer = () => json(409, { error: 'x', code: 'module_tasks_open', tasks });
     const purge = await mount(() =>
-      ModulePurgeDialog({
+      renderPurgeDialog({
         target: { id: 'alpha', tornDown: true },
         onClose: () => {},
         onDone: () => {},
@@ -440,7 +478,7 @@ describe('ModulePurgeDialog cap note', () => {
   const purge = async (answer: Response) => {
     apiAnswer = () => answer;
     const mounted = await mount(() =>
-      ModulePurgeDialog({
+      renderPurgeDialog({
         target: { id: 'alpha', tornDown: true },
         onClose: () => {},
         onDone: () => {},
