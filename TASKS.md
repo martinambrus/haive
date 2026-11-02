@@ -335,12 +335,14 @@ User decision 2026-11-01: keep live Google connection parked; prepare setup inst
 
 ### T332 · J7 · reconnect park (deactivated provider) / dead (uninstalled)
 
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T12:42Z · last: 2026-11-02T12:42Z · was modular #47 · priority: P2
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T12:42Z · last: 2026-11-02T12:47Z · was modular #47 · priority: P2
 Plan J7: a single owner keyed on the connection's `status`. A step that needs a deactivated provider PARKS with a reconnect banner; an uninstalled provider makes the task DEAD.
 
 Dependency reconciled 2026-11-02: T359 delivered as PR #993, corrected exact-HEAD reviews/full suites/main CI41430501569 and real-PG/deployed resolver checks green. Reconnect parking is now ready; retain independent J7 scope and the active T356/T357 feature fence.
 
 Execution scope: J7 required-integration reconnect/provider-deactivation waiting and missing-provider dead state, using structural state and existing connection-status ownership, with bounded idempotent recovery. Preserve current invocation stamps, optional requirement behavior, explicit selection, pause/cancel/boot ownership and existing provider-pin refusal. No live provider OAuth, broad worker audits or module/settings redesign. T359 dependency is delivered; one implementation driver and isolated focused state/DB controls before full-feature review and delivery.
+
+Progress 2026-11-02T12:47Z: Reserved migration 0218 for the necessary nullable task_steps.integration_wait structural JSONB marker; existing waiting_started_at/status text cannot identify this recovery owner. No other active session migration reservation is recorded. Append the schema column last, use guarded idempotent SQL, preserve all applied migrations and normal applier. Driver builds/tests only in owned scratch fixtures; parent owns live application after review/CI.
 
 ### T333 · J8 · composer shows integration requirements + provider install state
 
