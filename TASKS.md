@@ -1067,16 +1067,6 @@ Reconciled 2026-11-01: item9's failed-HEAD-read defect is RESOLVED by T397 (curr
 
 Execution fence 2026-11-01: Deduplicate the resolved T397 paths and T379 overlap first. Select at most three current consequential caller cases; no twelve-item generic Git-read audit. The fixed item9 HEAD probe must not be reimplemented.
 
-### T496 · FNF[vendor-call-deadlines] · the worker's usage poll awaits vendor calls with no deadline (+1)
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · last: 2026-11-02T09:13Z · priority: P1
-From the T376 follow-up review (2026-10-31). PRE-EXISTING, moderate; the same class as the 15 s deadline T376 gives `postToken`.
-
-1. The Grok token refresh (worker grok-oauth.ts ~:130) is awaited ahead of the poll (usage-poll-queue.ts ~:693) on a `concurrency: 1` worker (~:698), and the usage fetchers (claude-code.ts ~:43, codex.ts ~:72, zai.ts ~:71, gemini.ts ~:40, awaited per batch through `cfg.fetch` ~:340) pass no `signal`; the only bound is the HTTP client's default. A stalled endpoint holds the tick, the provider-outage watch behind it and the Claude refresh. Give each an `AbortSignal.timeout` and pin it.
-2. The Grok refresh reads a permanent rejection from the message text (credential-refresh.ts ~:141 `msg.includes('invalid_grant')`, relying on grok-oauth.ts ~:144-146); the Claude twin has a typed `ClaudeOauthError.code`. Key it on a code.
-
-Execution scope: bounded deadlines for existing usage fetchers/Grok refresh and typed permanent OAuth rejection; no vendor calls, broad provider audit or new refresh framework. Owner-approved queue continuation, resource reserve5GiB C/4GiB RAM, one active driver.
-
 ### T497 · FNF[plan-merge-failed-visibility] · after a reload a failed plan merge leaves no trace on the plan page
 
 status: open · kind: feature · user decision: resolved 2026-11-01 · priority: P2
@@ -1414,6 +1404,8 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
 ## Done
+
+- T496 — bound usage vendor requests and classify Grok rejection structurally — PR #992 (081bb553e7), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41423875746 green; native Node HTTP stalled-body deadlines and subsequent recovery passed with synthetic local fixture; deployed worker ready/reviewed source hashes match; app activity unchanged. Evidence .claude/tmp/codex-run/queue-exec-20261101/T496/.
 
 - T362 — refresh New Task readiness after a failed onboarding reset (member1; mobile T530 parked) — PR #991 (51240c0b0b), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41421355760 green; actual merged New Task browser with synthetic reset/read/task route fixtures passed pending/failed/retry readiness and preserved inputs; zero writes forwarded. Evidence .claude/tmp/codex-run/queue-exec-20261101/T362/.
 
