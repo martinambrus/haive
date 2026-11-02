@@ -1,8 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { api, type ApiError } from '@/lib/api-client';
+import { api, getIntegrationCategories, type ApiError } from '@/lib/api-client';
 import { usePageTitle } from '@/lib/use-page-title';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { Card, FormError } from '@/components/ui';
 import { ConnectionRow } from '@/components/integrations/connection-row';
 import { DeviceSignInDialog } from '@/components/integrations/device-sign-in-dialog';
@@ -13,6 +14,8 @@ import {
   disconnectNotice,
   isHttpsUrl,
   linkableCredentials,
+  providerStateNote,
+  type IntegrationCategory,
   type ConnectMethod,
   type GitCredentialRow,
   type IntegrationConnection,
@@ -25,6 +28,8 @@ const providerPath = (providerId: string) =>
 
 export default function IntegrationsPage() {
   usePageTitle('Integrations');
+  const [categories, setCategories] = useState<IntegrationCategory[] | null>(null);
+  const [categoryError, setCategoryError] = useState<string | null>(null);
   const [providers, setProviders] = useState<IntegrationProvider[] | null>(null);
   const [connections, setConnections] = useState<IntegrationConnection[]>([]);
   const [credentials, setCredentials] = useState<GitCredentialRow[]>([]);
@@ -52,6 +57,17 @@ export default function IntegrationsPage() {
 
   useEffect(() => {
     void load();
+    let active = true;
+    void getIntegrationCategories()
+      .then((res) => {
+        if (active) setCategories(res.categories);
+      })
+      .catch((err: ApiError) => {
+        if (active) setCategoryError(err.message ?? 'Category metadata unavailable');
+      });
+    return () => {
+      active = false;
+    };
   }, [load]);
 
   const providerOf = (providerId: string) => providers?.find((p) => p.id === providerId);
@@ -154,6 +170,19 @@ export default function IntegrationsPage() {
       </div>
 
       <FormError message={loadError} />
+      {loadError && providers !== null && (
+        <InlineMarkdown
+          className="text-xs text-amber-300"
+          body="Provider availability could not be refreshed. The displayed provider information may be out of date."
+        />
+      )}
+      <FormError message={categoryError} />
+      {categories === null && !categoryError && (
+        <InlineMarkdown
+          className="text-xs text-neutral-400"
+          body="Loading category labels… Module categories use their ids until labels are available."
+        />
+      )}
       <FormError message={error} />
       {notice && (
         <div
@@ -205,6 +234,7 @@ export default function IntegrationsPage() {
           <ProviderCard
             key={provider.id}
             provider={provider}
+            categories={categories ?? []}
             linkable={linkableCredentials(provider.id, credentials, connections)}
             busy={busy}
             onConnect={(method) => void connectWith(provider, method)}
@@ -212,6 +242,19 @@ export default function IntegrationsPage() {
             onLink={(credential) => void useAsConnection(provider, credential)}
           />
         ))}
+        {providers
+          ?.filter((provider) => !provider.enabled)
+          .map((provider) => (
+            <Card key={provider.id} data-provider-id={provider.id} className="min-w-0 p-4">
+              <h4 className="text-sm font-medium [overflow-wrap:anywhere]">
+                {provider.displayName}
+              </h4>
+              <InlineMarkdown
+                className="text-xs text-amber-300"
+                body={providerStateNote(provider) ?? 'Provider availability is unknown.'}
+              />
+            </Card>
+          ))}
         {providers !== null && enabledProviders.length === 0 && (
           <p className="text-sm text-neutral-400">
             No provider is enabled on this server. An administrator can turn them on under Admin,

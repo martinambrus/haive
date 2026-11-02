@@ -64,16 +64,22 @@ export async function providerState(
 export type CategoryState = 'enabled' | 'module-deactivated';
 
 /** One live snapshot for provider and declared-category state, from two queries at most. */
-export async function loadIntegrationStates(db: Database | DbTx): Promise<{
+export async function loadIntegrationStates(
+  db: Database | DbTx,
+  /** Admin listings already read these rows for the OAuth fields; reuse that same switch snapshot. */
+  configRows?: readonly { providerId: string; enabled: boolean }[],
+): Promise<{
   providers: ReadonlyMap<string, ProviderState>;
   categories: ReadonlyMap<string, CategoryState>;
 }> {
-  const rows = await db
-    .select({
-      providerId: schema.integrationProviderConfigs.providerId,
-      enabled: schema.integrationProviderConfigs.enabled,
-    })
-    .from(schema.integrationProviderConfigs);
+  const rows =
+    configRows ??
+    (await db
+      .select({
+        providerId: schema.integrationProviderConfigs.providerId,
+        enabled: schema.integrationProviderConfigs.enabled,
+      })
+      .from(schema.integrationProviderConfigs));
   const configured = new Map(rows.map((row) => [row.providerId, row.enabled]));
   const deactivated = await loadDeactivatedModuleIds(db);
   const providers = new Map<string, ProviderState>(

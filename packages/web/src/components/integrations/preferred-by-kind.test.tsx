@@ -8,6 +8,7 @@ import { PreferredByKind } from './preferred-by-kind';
 // No DOM in this package: hooks run on a plain slot list, as in repos/[id]/tooling/page.test.tsx.
 const hooks = vi.hoisted(() => ({ slots: [] as unknown[], next: 0, dirty: false, mounting: true }));
 const api = vi.hoisted(() => ({
+  getIntegrationCategories: vi.fn(),
   listIntegrationProviders: vi.fn(),
   listIntegrationConnections: vi.fn(),
   listIntegrationPreferences: vi.fn(),
@@ -41,6 +42,7 @@ vi.mock('@/lib/api-client', async (importOriginal) => ({
 
 type El = ReactElement<{
   children?: ReactNode;
+  body?: string;
   'aria-label'?: string;
   'data-category-id'?: string;
   value?: string;
@@ -61,7 +63,8 @@ const textOf = (node: ReactNode): string =>
   Array.isArray(node)
     ? node.map(textOf).join('')
     : isValidElement<El['props']>(node)
-      ? textOf(node.props.children)
+      ? (node.props.body?.replace(/\\([\\`*_{}[\]()<>#+.!|~-])/g, '$1') ??
+        textOf(node.props.children))
       : typeof node === 'string' || typeof node === 'number'
         ? String(node)
         : '';
@@ -124,7 +127,8 @@ const NAME = {
 };
 type Control = keyof typeof NAME;
 const labelOf = (categoryId: string) =>
-  CORE_INTEGRATION_CATEGORY_SPECS.find((spec) => spec.id === categoryId)!.label;
+  CORE_INTEGRATION_CATEGORY_SPECS.find((spec) => spec.id === categoryId)?.label ??
+  (categoryId === 'module.acme.crm' ? 'Customer records' : categoryId);
 const refusal = (message: string, status: number) => Object.assign(new Error(message), { status });
 
 interface Setup {
@@ -133,6 +137,8 @@ interface Setup {
   preferences?: { categoryId: string; providerId: string; connectionId: string | null }[];
   defaults?: { categoryId: string; providerId: string }[];
   loadError?: string;
+  categories?: { id: string; label: string }[];
+  categoryError?: string;
 }
 
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -148,6 +154,10 @@ async function mount(setup: Setup = {}) {
   });
   api.listIntegrationPreferences.mockResolvedValue({ preferences: setup.preferences ?? [] });
   api.listIntegrationDefaults.mockResolvedValue({ defaults: setup.defaults ?? [] });
+  api.getIntegrationCategories.mockImplementation(async () => {
+    if (setup.categoryError) throw new Error(setup.categoryError);
+    return { categories: setup.categories ?? CORE_INTEGRATION_CATEGORY_SPECS };
+  });
   hooks.slots = [];
   hooks.mounting = true;
   let tree: ReactNode = null;
@@ -439,6 +449,47 @@ describe('when the page cannot load', () => {
   it('shows the failure and no rows', async () => {
     const view = await mount({ loadError: 'Failed to load' });
     expect(view.errors()).toEqual(['Failed to load']);
+    expect(view.rows()).toEqual([]);
+  });
+});
+
+describe('module categories', () => {
+  it('lists active module categories once after the core list and saves to their id', async () => {
+    const view = await mount({
+      categories: [
+        ...CORE_INTEGRATION_CATEGORY_SPECS,
+        { id: 'module.acme.crm', label: 'Customer records' },
+        { id: 'module.acme.crm', label: 'duplicate' },
+      ],
+      providers: [...PROVIDERS, provider('module.acme.crm-provider', 'CRM', ['module.acme.crm'])],
+    });
+    expect(view.rows()).toEqual([
+      ...CORE_INTEGRATION_CATEGORY_SPECS.map((c) => c.id),
+      'module.acme.crm',
+    ]);
+    view.choose('module.acme.crm', 'provider', 'module.acme.crm-provider');
+    await view.press('module.acme.crm', 'save');
+    expect(api.saveIntegrationPreference).toHaveBeenCalledWith('module.acme.crm', {
+      providerId: 'module.acme.crm-provider',
+      connectionId: null,
+    });
+  });
+  it('retains an unavailable category by id for clear only even if a provider still names it', async () => {
+    const id = 'module.gone.crm';
+    const view = await mount({
+      providers: [provider('module.gone.vendor', 'Gone CRM', [id])],
+      preferences: [{ categoryId: id, providerId: 'module.gone.vendor', connectionId: null }],
+    });
+    expect(view.rowText(id)).toContain(id);
+    expect(view.rowText(id)).toContain('unavailable');
+    expect(view.values(id, 'provider')).toEqual(['']);
+    expect(view.control(id, 'save')!.props.disabled).toBe(true);
+    await view.press(id, 'clear');
+    expect(api.clearIntegrationPreference).toHaveBeenCalledWith(id);
+  });
+  it('does not claim a complete core-only list after category metadata fails', async () => {
+    const view = await mount({ categoryError: 'Categories unavailable' });
+    expect(view.errors()).toContain('Categories unavailable');
     expect(view.rows()).toEqual([]);
   });
 });

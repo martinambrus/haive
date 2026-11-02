@@ -7,6 +7,10 @@ import {
   envClientSource,
   getIntegrationProvider,
   listIntegrationProviders,
+  listIntegrationModules,
+  loadIntegrationStates,
+  providerState,
+  type ProviderState,
   oauthRedirectUri,
 } from '@haive/shared/integrations';
 import type { IntegrationProviderSpec } from '@haive/shared/modularity';
@@ -44,10 +48,19 @@ const updateSchema = z
 
 const defaultSchema = z.object({ providerId: z.string().min(1).max(256).nullable() });
 
-function providerJson(spec: IntegrationProviderSpec, row: ConfigRow | undefined) {
+function providerJson(
+  spec: IntegrationProviderSpec,
+  row: ConfigRow | undefined,
+  state: ProviderState,
+) {
+  const owner = listIntegrationModules().find((module) =>
+    module.providers.some((provider) => provider.id === spec.id),
+  );
   return {
     id: spec.id,
     name: spec.displayName,
+    state,
+    module: owner ? { id: owner.id, name: owner.name } : null,
     categories: spec.categories,
     authKinds: spec.auth.map((method) => method.kind),
     enabled: row ? row.enabled : defaultProviderEnabled(spec.id),
@@ -72,8 +85,11 @@ adminIntegrationRoutes.use('*', requireAdmin);
 adminIntegrationRoutes.get('/providers', async (c) => {
   const rows = await getDb().select().from(schema.integrationProviderConfigs);
   const byId = new Map(rows.map((row) => [row.providerId, row]));
+  const states = await loadIntegrationStates(getDb(), rows);
   return c.json({
-    providers: listIntegrationProviders().map((spec) => providerJson(spec, byId.get(spec.id))),
+    providers: listIntegrationProviders().map((spec) =>
+      providerJson(spec, byId.get(spec.id), states.providers.get(spec.id) ?? 'unknown'),
+    ),
   });
 });
 
@@ -115,10 +131,10 @@ adminIntegrationRoutes.put('/providers/:id', async (c) => {
       .onConflictDoUpdate({ target: schema.integrationProviderConfigs.providerId, set: changes })
       .returning();
     await insertAuditEvent(tx, audit);
-    return row;
+    return { row, state: await providerState(tx, spec.id) };
   });
   logAuditEvent(audit);
-  return c.json({ provider: providerJson(spec, saved) });
+  return c.json({ provider: providerJson(spec, saved.row, saved.state) });
 });
 
 adminIntegrationRoutes.get('/defaults', async (c) => {

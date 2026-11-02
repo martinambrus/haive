@@ -23,6 +23,7 @@ import {
   isProviderEnabled,
   listIntegrationProviders,
   resolveOauthClient,
+  registerModuleIntegrations,
 } from '@haive/shared/integrations';
 import { ACCESS_COOKIE } from '../src/auth/cookies.js';
 import { signAccessToken } from '../src/auth/jwt.js';
@@ -141,6 +142,7 @@ describe.skipIf(!url)('admin integrations routes on Postgres', () => {
   });
 
   afterEach(() => {
+    registerModuleIntegrations([]);
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
@@ -225,6 +227,61 @@ describe.skipIf(!url)('admin integrations routes on Postgres', () => {
   });
 
   describe('PUT /admin/integrations/providers/:id', () => {
+    it('keeps the configured switch separate from effective module state in saves and listings', async () => {
+      const moduleId = 'admin-test';
+      const id = `module.${moduleId}.crm`;
+      registerModuleIntegrations([
+        {
+          manifest: {
+            id: moduleId,
+            name: 'Admin test module',
+            integrations: [
+              {
+                id,
+                displayName: 'CRM',
+                categories: ['issues'],
+                selfHosted: false,
+                auth: [],
+                operations: [],
+              },
+            ],
+          },
+        },
+      ] as never);
+      await db.insert(schema.modules).values({
+        moduleId,
+        packageName: '@haive/module-admin-test',
+        name: 'Admin test module',
+        installedVersion: '1.0.0',
+        deactivatedAt: new Date(),
+      });
+      try {
+        const res = await put(id, { enabled: true });
+        expect(res.status).toBe(200);
+        expect(await savedProvider(res)).toMatchObject({
+          enabled: true,
+          state: 'module-deactivated',
+          module: { id: moduleId, name: 'Admin test module' },
+        });
+        expect(await provider(id)).toMatchObject({ enabled: true, state: 'module-deactivated' });
+        expect(await isProviderEnabled(db, id)).toBe(false);
+        await db
+          .update(schema.modules)
+          .set({ deactivatedAt: null })
+          .where(eq(schema.modules.moduleId, moduleId));
+        expect(await provider(id)).toMatchObject({ enabled: true, state: 'enabled' });
+        expect(await savedProvider(await put(id, { enabled: false }))).toMatchObject({
+          enabled: false,
+          state: 'disabled',
+        });
+        expect(await auditRows()).toHaveLength(2);
+      } finally {
+        await db
+          .delete(schema.integrationProviderConfigs)
+          .where(eq(schema.integrationProviderConfigs.providerId, id));
+        await db.delete(schema.modules).where(eq(schema.modules.moduleId, moduleId));
+      }
+    });
     it('round-trips the client id and the secret flag, and no response or audit row holds the secret', async () => {
       const res = await put('github', { oauthClientId: CLIENT_ID, oauthClientSecret: SECRET });
       expect(res.status).toBe(200);

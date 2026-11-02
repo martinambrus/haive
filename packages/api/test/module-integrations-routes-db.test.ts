@@ -426,7 +426,7 @@ describe.skipIf(!url)(
         expect((await listed())[CORE_PROVIDER_IDS.length]).toMatchObject({ enabled: false });
       });
 
-      it('[K0] with no module loaded answers byte for byte what the unchanged tree answered', async () => {
+      it('[K0] pins core providers with availability metadata when no module is loaded', async () => {
         await mount();
 
         const reply = await as(user).get('/integrations/providers');
@@ -434,7 +434,7 @@ describe.skipIf(!url)(
         expectOk(reply);
         if (process.env.PROVIDERS_BASELINE_CAPTURE === '1')
           writeFileSync(PROVIDERS_BASELINE, reply.text);
-        // The fixture is formatted by prettier; its canonical compact form keeps the byte-for-byte pin.
+        // The additive state/module fields are part of the expected core response; retain the exact pin.
         expect(reply.text).toBe(
           JSON.stringify(JSON.parse(readFileSync(PROVIDERS_BASELINE, 'utf8'))),
         );

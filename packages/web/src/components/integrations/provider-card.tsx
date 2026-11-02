@@ -1,13 +1,16 @@
 'use client';
 
 import Link from 'next/link';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { Badge, Button, Card } from '@/components/ui';
 import {
   categoryLabel,
   connectChoices,
+  providerStateNote,
   type ConnectMethod,
   type GitCredentialRow,
   type IntegrationProvider,
+  type IntegrationCategory,
 } from '@/lib/integrations';
 
 const CONNECT_LABEL: Record<ConnectMethod, (name: string) => string> = {
@@ -48,6 +51,7 @@ function NoSignIn({ provider }: { provider: IntegrationProvider }) {
 
 export function ProviderCard({
   provider,
+  categories = [],
   linkable,
   busy,
   onConnect,
@@ -55,6 +59,7 @@ export function ProviderCard({
   onLink,
 }: {
   provider: IntegrationProvider;
+  categories?: readonly IntegrationCategory[];
   linkable: GitCredentialRow[];
   busy: boolean;
   onConnect: (method: ConnectMethod) => void;
@@ -67,10 +72,16 @@ export function ProviderCard({
     <Card className="flex flex-col gap-4 p-4" data-provider-id={provider.id}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <h4 className="text-base font-semibold text-neutral-50">{provider.displayName}</h4>
+          <h4 className="text-base font-semibold text-neutral-50 [overflow-wrap:anywhere]">
+            {provider.displayName}
+          </h4>
           {provider.categories.map((category) => (
-            <Badge key={category} variant="info">
-              {categoryLabel(category)}
+            <Badge
+              key={category}
+              variant="info"
+              className="max-w-full whitespace-normal [overflow-wrap:anywhere]"
+            >
+              {categoryLabel(category, categories)}
             </Badge>
           ))}
         </div>
@@ -87,6 +98,18 @@ export function ProviderCard({
           </label>
         )}
       </div>
+
+      {provider.module && (
+        <div className="text-xs text-neutral-400 [overflow-wrap:anywhere]">
+          Module: {provider.module.name} ({provider.module.id})
+        </div>
+      )}
+      {providerStateNote(provider) && (
+        <InlineMarkdown
+          className="text-xs text-amber-300 [overflow-wrap:anywhere]"
+          body={providerStateNote(provider)!}
+        />
+      )}
 
       {choices.length > 0 ? (
         <div className="flex flex-wrap gap-2">

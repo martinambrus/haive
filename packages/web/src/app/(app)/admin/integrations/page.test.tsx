@@ -1,126 +1,116 @@
-import { describe, expect, it, vi } from 'vitest';
-import { isValidElement, type ReactElement, type ReactNode } from 'react';
-import { Badge } from '@/components/ui';
-import { DefaultsByKind } from '@/components/integrations/defaults-by-kind';
-import type { AdminIntegrationProvider } from '@/lib/admin-integrations';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  createRenderer,
+  controls,
+  buttons,
+  findAll,
+  fire,
+  textOf,
+} from '../../../../../test/render-tree';
 import AdminIntegrationsPage from './page';
 
-// No DOM in this package: hooks run on a plain slot list, as in repos/[id]/tooling/page.test.tsx.
-const hooks = vi.hoisted(() => ({ slots: [] as unknown[], next: 0, dirty: false, mounting: true }));
-const api = vi.hoisted(() => ({ get: vi.fn() }));
-
-vi.mock('react', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('react')>()),
-  useState: (initial: unknown) => {
-    const at = hooks.next++;
-    if (!(at in hooks.slots)) hooks.slots[at] = initial;
-    const set = (update: unknown) => {
-      const value = typeof update === 'function' ? update(hooks.slots[at]) : update;
-      if (!Object.is(value, hooks.slots[at])) {
-        hooks.slots[at] = value;
-        hooks.dirty = true;
-      }
-    };
-    return [hooks.slots[at], set];
-  },
-  useEffect: (effect: () => void) => {
-    if (hooks.mounting) effect();
-  },
-  useCallback: (fn: unknown) => fn,
+const api = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn(), getIntegrationCategories: vi.fn() }));
+vi.mock('react', async (original) => ({
+  ...(await original<typeof import('react')>()),
+  ...(await import('../../../../../test/render-tree')).reactHooks,
+}));
+vi.mock('@/lib/api-client', async (original) => ({
+  ...(await original<typeof import('@/lib/api-client')>()),
+  api,
+  getIntegrationCategories: api.getIntegrationCategories,
 }));
 vi.mock('@/lib/use-page-title', () => ({ usePageTitle: () => {} }));
-vi.mock('@/lib/api-client', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/lib/api-client')>()),
-  api,
+vi.mock('@/components/markdown/markdown-view', () => ({
+  MarkdownView: ({ body }: { body: string }) => body,
+}));
+vi.mock('@/components/integrations/defaults-by-kind', () => ({
+  DefaultsByKind: ({ providers }: { providers: { id: string }[] }) => (
+    <section data-default-providers={providers.map((p) => p.id).join(',')}>
+      Defaults by kind
+    </section>
+  ),
 }));
 
-type El = ReactElement<{
-  children?: ReactNode;
-  variant?: string;
-  provider?: AdminIntegrationProvider;
-  providers?: AdminIntegrationProvider[];
-}>;
-
-const flatten = (node: ReactNode): El[] =>
-  Array.isArray(node)
-    ? node.flatMap(flatten)
-    : isValidElement<El['props']>(node)
-      ? [node, ...flatten(node.props.children)]
-      : [];
-
-const textOf = (node: ReactNode): string =>
-  Array.isArray(node)
-    ? node.map(textOf).join('')
-    : isValidElement<El['props']>(node)
-      ? textOf(node.props.children)
-      : typeof node === 'string' || typeof node === 'number'
-        ? String(node)
-        : '';
-
-const provider = (id: string, name: string, categories: string[]): AdminIntegrationProvider => ({
-  id,
-  name,
-  categories,
-  authKinds: ['token'],
+const provider = {
+  id: 'module.acme.docs',
+  name: 'Acme Docs',
+  categories: ['module.acme.crm'],
+  authKinds: ['oauth2'],
   enabled: true,
   rowExists: true,
-  oauthClientId: null,
-  hasClientSecret: false,
-  redirectUri: `https://haive.test/settings/integrations/callback/${id}`,
+  oauthClientId: 'saved-client',
+  hasClientSecret: true,
+  redirectUri: 'https://haive.test/callback',
   precedence: null,
+  state: 'module-deactivated',
+  module: { id: 'acme', name: 'Acme module' },
+};
+const categories = {
+  categories: [
+    {
+      id: 'module.acme.crm',
+      label: 'Customer records',
+      moduleId: 'acme',
+      moduleName: 'Acme module',
+    },
+  ],
+};
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+};
+beforeEach(() => {
+  Object.values(api).forEach((fn) => fn.mockReset());
+  api.get.mockResolvedValue({ providers: [provider] });
+  api.getIntegrationCategories.mockResolvedValue(categories);
 });
 
-const PROVIDERS = [
-  provider('github', 'GitHub', ['forge']),
-  provider('module.acme.docs', 'Acme Docs', ['rich-documents', 'file-storage']),
-];
-
-const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
-
-async function mount(providers: AdminIntegrationProvider[] = PROVIDERS) {
-  api.get.mockReset();
-  api.get.mockResolvedValue({ providers });
-  hooks.slots = [];
-  hooks.mounting = true;
-  let tree: ReactNode = null;
-  const draw = () => {
-    for (let pass = 0; pass < 10; pass++) {
-      hooks.next = 0;
-      hooks.dirty = false;
-      tree = AdminIntegrationsPage();
-      hooks.mounting = false;
-      if (!hooks.dirty) return;
-    }
-    throw new Error('the page kept updating its own state');
-  };
-  draw();
-  const beforeLoad = flatten(tree);
-  await flush();
-  draw();
-  return { beforeLoad, all: () => flatten(tree) };
-}
-
 describe('the admin Integrations page', () => {
-  it('shows Defaults by kind with the providers it loaded, and not before they are there', async () => {
-    const view = await mount();
-    expect(view.beforeLoad.find((e) => e.type === DefaultsByKind)).toBeUndefined();
-    expect(view.all().find((e) => e.type === DefaultsByKind)?.props.providers).toEqual(PROVIDERS);
+  it('shows defaults after providers load, module category labels and contributing module/state', async () => {
+    const view = createRenderer(() => <AdminIntegrationsPage />);
+    expect(textOf(view.tree())).not.toContain('Defaults by kind');
+    await view.flush();
+    expect(
+      findAll(view.tree(), (h) => h.props['data-default-providers'] === provider.id),
+    ).toHaveLength(1);
+    const text = textOf(view.tree());
+    expect(text).toContain('Customer records');
+    expect(text).toContain('Acme module');
+    expect(text).toContain('Module deactivated');
+    expect(controls(view.tree(), 'enabled')[0]!.props.checked).toBe(true);
   });
 
-  it('names the categories of each provider card by their labels, not their ids', async () => {
-    const view = await mount();
-    const card = view
-      .all()
-      .find(
-        (e) =>
-          typeof e.type === 'function' &&
-          e.type.name === 'ProviderCard' &&
-          e.props.provider?.id === 'module.acme.docs',
-      );
-    const render = card!.type as (props: unknown) => ReactNode;
-    const badges = flatten(render(card!.props))
-      .filter((e) => e.type === Badge && e.props.variant === 'info')
-      .map(textOf);
-    expect(badges).toEqual(['Documents', 'File storage']);
-  });
+  it.each(['success', 'failure'])(
+    'keeps edited OAuth fields through late category %s',
+    async (outcome) => {
+      const pending = deferred<typeof categories>();
+      void pending.promise.catch(() => {});
+      api.getIntegrationCategories.mockReturnValue(pending.promise);
+      const view = createRenderer(() => <AdminIntegrationsPage />);
+      await view.flush();
+      fire.type(controls(view.tree(), 'client id')[0]!, 'my-current-client');
+      fire.type(controls(view.tree(), 'client secret')[0]!, 'my-current-secret');
+      view.draw();
+      if (outcome === 'success') pending.resolve(categories);
+      else pending.reject(new Error('Category metadata unavailable'));
+      await view.flush();
+      expect(controls(view.tree(), 'client id')[0]!.props.value).toBe('my-current-client');
+      expect(controls(view.tree(), 'client secret')[0]!.props.value).toBe('my-current-secret');
+      if (outcome === 'success') expect(textOf(view.tree())).toContain('Customer records');
+      else expect(textOf(view.tree())).toContain('Category metadata unavailable');
+      api.put.mockRejectedValueOnce(new Error('Save refused'));
+      fire.click(buttons(view.tree(), 'save client')[0]!);
+      await view.flush();
+      expect(api.put).toHaveBeenCalledWith('/admin/integrations/providers/module.acme.docs', {
+        oauthClientId: 'my-current-client',
+        oauthClientSecret: 'my-current-secret',
+      });
+      expect(controls(view.tree(), 'client secret')[0]!.props.value).toBe('my-current-secret');
+    },
+  );
 });

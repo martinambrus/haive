@@ -5,7 +5,18 @@ export type ConnectMethod = 'oauth2' | 'device';
 export type GithubClientSource = 'env' | 'user' | 'admin' | null;
 export type ReconnectReason = 'needs_reauth' | 'write_access';
 
-export interface IntegrationProvider {
+export interface IntegrationCategory {
+  id: string;
+  label: string;
+}
+
+export interface ProviderMetadata {
+  /** Effective live state; unknown or absent metadata must not imply module readiness. */
+  state?: string;
+  module?: { id: string; name: string } | null;
+}
+
+export interface IntegrationProvider extends ProviderMetadata {
   id: string;
   displayName: string;
   categories: string[];
@@ -198,18 +209,76 @@ export function isHttpsUrl(value: string): boolean {
   }
 }
 
-/** A core category's label, else its id: no core spec names a module's category. */
-export function categoryLabel(categoryId: string): string {
-  return (
-    CORE_INTEGRATION_CATEGORY_SPECS.find((spec) => spec.id === categoryId)?.label ?? categoryId
-  );
+/** Labels are literal display data, never inferred from a module id. */
+export function categoryLabel(
+  categoryId: string,
+  categories: readonly IntegrationCategory[] = [],
+): string {
+  const label =
+    categories.find((spec) => spec.id === categoryId)?.label ??
+    CORE_INTEGRATION_CATEGORY_SPECS.find((spec) => spec.id === categoryId)?.label;
+  return label && !/[\p{Cc}\p{Cf}]/u.test(label) && label.trim() ? label : categoryId;
 }
 
-export function enabledServing<T extends Pick<IntegrationProvider, 'categories' | 'enabled'>>(
-  categoryId: string,
-  providers: readonly T[],
-): T[] {
+/** Core order first, stable API module order next, retained unavailable choices last. */
+export function categoryRows(
+  categories: readonly IntegrationCategory[],
+  retainedIds: readonly string[] = [],
+) {
+  const ids = new Set<string>();
+  const activeIds = new Set(categories.map((category) => category.id));
+  return [
+    ...CORE_INTEGRATION_CATEGORY_SPECS,
+    ...categories,
+    ...retainedIds.map((id) => ({ id, label: id })),
+  ]
+    .filter((category) => {
+      if (ids.has(category.id)) return false;
+      ids.add(category.id);
+      return true;
+    })
+    .map((category) => ({
+      id: category.id,
+      label: categoryLabel(category.id, categories),
+      available: activeIds.has(category.id),
+    }));
+}
+
+/** Quote display data used inside a Markdown prose body, preserving its literal spelling. */
+export function integrationDisplayBody(text: string): string {
+  return text.replace(/([\\`*_{}[\]()<>#+.!|~-])/g, '\\$1');
+}
+
+/** Keep provider/module availability separate from an owned account's status. */
+export function providerStateNote(
+  provider: (ProviderMetadata & { id?: string }) | undefined,
+): string | null {
+  if (!provider) return 'Provider unavailable on this install.';
+  switch (provider.state) {
+    case 'enabled':
+      return null;
+    case 'disabled':
+      return 'Provider disabled by an administrator.';
+    case 'module-deactivated':
+      return 'Module deactivated. Its providers cannot be used until an administrator activates it.';
+    case 'module-missing':
+      return 'Module unavailable on this install.';
+    case 'unknown':
+      return 'Provider availability is unknown.';
+    default:
+      return provider.module || provider.id?.startsWith('module.')
+        ? 'Module provider availability is unknown.'
+        : null;
+  }
+}
+
+export function enabledServing<
+  T extends Pick<IntegrationProvider, 'categories' | 'enabled' | 'state'>,
+>(categoryId: string, providers: readonly T[]): T[] {
   return providers.filter(
-    (provider) => provider.enabled && provider.categories.includes(categoryId),
+    (provider) =>
+      provider.enabled &&
+      (provider.state === undefined || provider.state === 'enabled') &&
+      provider.categories.includes(categoryId),
   );
 }

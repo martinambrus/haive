@@ -15,6 +15,10 @@ package, source, version, parts), which the web production image ships at `/app/
 so a build can read back what an image carries; and the `dev`, `build` and `typecheck` scripts of the api, worker and web run
 it first, as do the `test` scripts of the api, worker and web.
 
+The integration settings and admin cards identify a provider's contributing module and live
+provider state separately from its configured switch; see [Integrations](integrations.md). A
+provider enabled by configuration can still be unavailable because its module is deactivated.
+
 ## The four states
 
 Two things move independently: whether the code is **installed** (a rebuild moves it) and whether the

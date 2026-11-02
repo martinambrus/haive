@@ -62,6 +62,26 @@ nothing registers) or `unknown`. `GET /integrations/categories` lists the core c
 modules (`{id, label, description?, moduleId, moduleName}`); `GET /tasks/:id/integrations` lists the categories of
 core and active-module providers plus any category a choice or retained task grant already names.
 
+The Settings and admin provider listings carry `state` from the live provider-state snapshot and
+`module: {id, name}` for the contributing registered module (`null` for core). The user listing's
+`enabled` remains effective availability; the admin listing's `enabled` remains the configured switch,
+so a deactivated module can have that switch on while `state` is `module-deactivated`. Admin bulk
+reads reuse their already-read config rows in `loadIntegrationStates`, with at most one config query
+and one module query. A save computes its response state inside the existing save/audit transaction.
+These are availability snapshots, not evidence that a module's worker schema or jobs are ready.
+Settings shows disabled/deactivated providers and keeps unavailable owned accounts visible, with
+provider availability separate from the account's own status and its disconnect/reconnect controls.
+
+Preferred by kind and Defaults by kind load the active category endpoint before showing editable
+rows: core order first, stable module order next, deduplicated by id. Stored preferences/defaults for
+unavailable categories remain visible by raw id, with Clear and no new provider option; a default's
+saved provider remains named even when unavailable. Category failures show an error rather than a
+complete-looking core-only list. Provider badges in Settings and admin use the same category labels,
+falling back to ids while metadata is loading or unavailable, with that condition visible. This label
+read is independent of provider/client edits; late labels or errors do not reset OAuth fields or saved
+write-switch state. Category labels are literal text and unsafe control characters fall back to ids.
+Repository allow-lists group owned accounts by provider rather than category and retain that contract.
+
 The core providers are the five forges, in this order: `github`, `gitea`, `gitlab`,
 `bitbucket_cloud`, `bitbucket_server` (`CORE_FORGE_PROVIDER_SPECS`, `@haive/shared/forge`). Each
 declares `forge`, a token method first, and two operations: `open_pull_request` (write) and

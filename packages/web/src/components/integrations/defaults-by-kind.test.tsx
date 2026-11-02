@@ -8,6 +8,7 @@ import { DefaultsByKind } from './defaults-by-kind';
 // No DOM in this package: hooks run on a plain slot list, as in repos/[id]/tooling/page.test.tsx.
 const hooks = vi.hoisted(() => ({ slots: [] as unknown[], next: 0, dirty: false, mounting: true }));
 const api = vi.hoisted(() => ({
+  getIntegrationCategories: vi.fn(),
   listAdminIntegrationDefaults: vi.fn(),
   saveAdminIntegrationDefault: vi.fn(),
 }));
@@ -37,6 +38,7 @@ vi.mock('@/lib/api-client', async (importOriginal) => ({
 
 type El = ReactElement<{
   children?: ReactNode;
+  body?: string;
   'aria-label'?: string;
   'data-category-id'?: string;
   value?: string;
@@ -57,7 +59,8 @@ const textOf = (node: ReactNode): string =>
   Array.isArray(node)
     ? node.map(textOf).join('')
     : isValidElement<El['props']>(node)
-      ? textOf(node.props.children)
+      ? (node.props.body?.replace(/\\([\\`*_{}[\]()<>#+.!|~-])/g, '$1') ??
+        textOf(node.props.children))
       : typeof node === 'string' || typeof node === 'number'
         ? String(node)
         : '';
@@ -93,12 +96,15 @@ const NAME = {
 };
 type Control = keyof typeof NAME;
 const labelOf = (categoryId: string) =>
-  CORE_INTEGRATION_CATEGORY_SPECS.find((spec) => spec.id === categoryId)!.label;
+  CORE_INTEGRATION_CATEGORY_SPECS.find((spec) => spec.id === categoryId)?.label ??
+  (categoryId === 'module.acme.crm' ? 'Customer records' : categoryId);
 const refusal = (message: string, status: number) => Object.assign(new Error(message), { status });
 
 interface Setup {
   defaults?: { categoryId: string; providerId: string }[];
   loadError?: string;
+  categories?: { id: string; label: string }[];
+  categoryError?: string;
 }
 
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -109,6 +115,10 @@ async function mount(providers: AdminIntegrationProvider[] = PROVIDERS, setup: S
   } else {
     api.listAdminIntegrationDefaults.mockResolvedValue({ defaults: setup.defaults ?? [] });
   }
+  api.getIntegrationCategories.mockImplementation(async () => {
+    if (setup.categoryError) throw new Error(setup.categoryError);
+    return { categories: setup.categories ?? CORE_INTEGRATION_CATEGORY_SPECS };
+  });
   hooks.slots = [];
   hooks.mounting = true;
   let shown = providers;
@@ -333,6 +343,37 @@ describe('when the defaults cannot load', () => {
   it('shows the failure and no rows', async () => {
     const view = await mount(PROVIDERS, { loadError: 'Failed to load' });
     expect(view.errors()).toEqual(['Failed to load']);
+    expect(view.rows()).toEqual([]);
+  });
+});
+
+describe('module categories', () => {
+  it('lists an active category by label and saves the default to its id', async () => {
+    const id = 'module.acme.crm';
+    const view = await mount([...PROVIDERS, provider('module.acme.vendor', 'CRM', [id])], {
+      categories: [...CORE_INTEGRATION_CATEGORY_SPECS, { id, label: 'Customer records' }],
+    });
+    expect(view.rows().at(-1)).toBe(id);
+    expect(view.rowText(id)).toContain('Customer records');
+    await view.choose(id, 'module.acme.vendor');
+    expect(api.saveAdminIntegrationDefault).toHaveBeenCalledWith(id, 'module.acme.vendor');
+  });
+  it('retains an unavailable default with its provider and clears it without offering a new PUT', async () => {
+    const id = 'module.gone.crm';
+    const view = await mount([provider('module.gone.vendor', 'Gone CRM', [id])], {
+      defaults: [{ categoryId: id, providerId: 'module.gone.vendor' }],
+    });
+    expect(view.rowText(id)).toContain(id);
+    expect(view.rowText(id)).toContain('Gone CRM');
+    expect(view.rowText(id)).toContain('unavailable');
+    expect(view.values(id)).toEqual(['']);
+    expect(view.control(id, 'provider')!.props.disabled).toBe(true);
+    await view.clear(id);
+    expect(api.saveAdminIntegrationDefault).toHaveBeenCalledWith(id, null);
+  });
+  it('shows category failures instead of core-only defaults', async () => {
+    const view = await mount(PROVIDERS, { categoryError: 'Categories unavailable' });
+    expect(view.errors()).toContain('Categories unavailable');
     expect(view.rows()).toEqual([]);
   });
 });

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { GitCredentialRow, IntegrationProvider } from '@/lib/integrations';
+import type {
+  GitCredentialRow,
+  IntegrationProvider,
+  IntegrationCategory,
+} from '@/lib/integrations';
 import { ProviderCard } from './provider-card';
 
 const provider = (over: Partial<IntegrationProvider> = {}): IntegrationProvider => ({
@@ -18,10 +22,15 @@ const provider = (over: Partial<IntegrationProvider> = {}): IntegrationProvider 
 
 const credential: GitCredentialRow = { id: 'cred-1', label: 'Work GitLab', host: 'gitlab.com' };
 
-const render = (p: IntegrationProvider, linkable: GitCredentialRow[] = []) =>
+const render = (
+  p: IntegrationProvider,
+  linkable: GitCredentialRow[] = [],
+  categories: IntegrationCategory[] = [],
+) =>
   renderToStaticMarkup(
     <ProviderCard
       provider={p}
+      categories={categories}
       linkable={linkable}
       busy={false}
       onConnect={() => {}}
@@ -31,6 +40,12 @@ const render = (p: IntegrationProvider, linkable: GitCredentialRow[] = []) =>
   );
 
 describe('ProviderCard', () => {
+  it('renders an active module category label literally in the provider badge', () => {
+    const id = 'module.acme.crm';
+    const html = render(provider({ categories: [id] }), [], [{ id, label: 'Customer [records]' }]);
+    expect(html).toContain('>Customer [records]<');
+    expect(html).not.toContain(`>${id}<`);
+  });
   it('shows one write switch, off by default, for a provider that can write', () => {
     const html = render(provider());
     expect(html.match(/type="checkbox"/g)).toHaveLength(1);

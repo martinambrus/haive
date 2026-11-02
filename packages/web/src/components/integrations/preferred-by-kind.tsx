@@ -1,9 +1,9 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { CORE_INTEGRATION_CATEGORY_SPECS } from '@haive/shared/modularity';
 import {
   clearIntegrationPreference,
+  getIntegrationCategories,
   listIntegrationConnections,
   listIntegrationDefaults,
   listIntegrationPreferences,
@@ -13,14 +13,19 @@ import {
   type IntegrationDefault,
   type IntegrationPreference,
 } from '@/lib/api-client';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { Button, FormError } from '@/components/ui';
 import {
+  categoryRows,
+  integrationDisplayBody,
   enabledServing,
+  type IntegrationCategory,
   type IntegrationConnection,
   type IntegrationProvider,
 } from '@/lib/integrations';
 
 interface Loaded {
+  categories: IntegrationCategory[];
   providers: IntegrationProvider[];
   connections: IntegrationConnection[];
   preferences: IntegrationPreference[];
@@ -73,23 +78,32 @@ export function PreferredByKind() {
   const [failure, setFailure] = useState<{ categoryId: string; message: string } | null>(null);
 
   useEffect(() => {
+    let active = true;
     void Promise.all([
+      getIntegrationCategories(),
       listIntegrationProviders(),
       listIntegrationConnections(),
       listIntegrationPreferences(),
       listIntegrationDefaults(),
     ])
-      .then(([providers, connections, preferences, defaults]) =>
-        setLoaded({
-          providers: providers.providers,
-          connections: connections.connections,
-          preferences: preferences.preferences,
-          defaults: defaults.defaults,
-        }),
+      .then(
+        ([categories, providers, connections, preferences, defaults]) =>
+          active &&
+          setLoaded({
+            categories: categories.categories,
+            providers: providers.providers,
+            connections: connections.connections,
+            preferences: preferences.preferences,
+            defaults: defaults.defaults,
+          }),
       )
-      .catch((err: ApiError) =>
-        setLoadError(err.message ?? 'Failed to load your integration preferences'),
+      .catch(
+        (err: ApiError) =>
+          active && setLoadError(err.message ?? 'Failed to load your integration preferences'),
       );
+    return () => {
+      active = false;
+    };
   }, []);
 
   async function run(categoryId: string, action: () => Promise<void>, failed: string) {
@@ -158,8 +172,11 @@ export function PreferredByKind() {
 
       {loaded && (
         <ul className="flex flex-col gap-3">
-          {CORE_INTEGRATION_CATEGORY_SPECS.map(({ id, label }) => {
-            const offered = enabledServing(id, loaded.providers);
+          {categoryRows(
+            loaded.categories,
+            [...loaded.preferences, ...loaded.defaults].map((row) => row.categoryId),
+          ).map(({ id, label, available }) => {
+            const offered = available ? enabledServing(id, loaded.providers) : [];
             const saved = loaded.preferences.find((row) => row.categoryId === id);
             const fallback = loaded.defaults.find((row) => row.categoryId === id);
             const choice = choices[id] ?? choiceOf(saved, offered);
@@ -173,10 +190,19 @@ export function PreferredByKind() {
                 className="flex flex-col gap-3 rounded-md border border-neutral-800 bg-neutral-900/50 px-4 py-3"
               >
                 <div className="flex flex-col gap-1">
-                  <h3 className="text-sm font-medium text-neutral-100">{label}</h3>
-                  <p className="text-xs text-neutral-400 [overflow-wrap:anywhere]">
-                    {statusLine(saved, fallback, loaded)}
-                  </p>
+                  <h3 className="text-sm font-medium text-neutral-100 [overflow-wrap:anywhere]">
+                    {label}
+                  </h3>
+                  <InlineMarkdown
+                    className="text-xs text-neutral-400 [overflow-wrap:anywhere]"
+                    body={integrationDisplayBody(statusLine(saved, fallback, loaded))}
+                  />
+                  {!available && (
+                    <InlineMarkdown
+                      className="text-xs text-amber-300"
+                      body="Category unavailable on this install. A saved preference can still be cleared."
+                    />
+                  )}
                 </div>
                 <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
                   <select

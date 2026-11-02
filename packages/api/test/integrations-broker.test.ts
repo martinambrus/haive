@@ -73,6 +73,15 @@ vi.mock('@haive/shared/integrations', async (importOriginal) => {
     ...original,
     listIntegrationProviders: providers,
     getIntegrationProvider: (id: string) => providers().find((p) => p.id === id),
+    loadIntegrationStates: async (...args: Parameters<typeof original.loadIntegrationStates>) => {
+      const current = await original.loadIntegrationStates(...args);
+      const states = new Map(current.providers);
+      states.set(
+        h.stub.id,
+        (await original.isProviderEnabled(args[0], h.stub.id)) ? 'enabled' : 'disabled',
+      );
+      return { ...current, providers: states };
+    },
     loadProviderEnablement: async (db: Parameters<typeof original.loadProviderEnablement>[0]) =>
       new Map([
         ...(await original.loadProviderEnablement(db)),

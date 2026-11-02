@@ -13,10 +13,11 @@ import type { PgTable } from 'drizzle-orm/pg-core';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { secretsService } from '@haive/shared';
-import { listIntegrationProviders } from '@haive/shared/integrations';
+import { listIntegrationProviders, registerModuleIntegrations } from '@haive/shared/integrations';
 import { ACCESS_COOKIE } from '../src/auth/cookies.js';
 import { signAccessToken } from '../src/auth/jwt.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
+import { adminIntegrationRoutes } from '../src/routes/admin-integrations.js';
 import { integrationsRoutes } from '../src/routes/integrations.js';
 import type { AppEnv } from '../src/context.js';
 
@@ -28,11 +29,13 @@ const ADMIN: Caller = { id: '00000000-0000-4000-8000-0000000000a3', role: 'admin
 
 const app = new Hono<AppEnv>();
 app.route('/integrations', integrationsRoutes);
+app.route('/admin/integrations', adminIntegrationRoutes);
 app.onError(errorHandler);
 
 function setup() {
   const fake = createFakeDb({
     users: schema.users,
+    modules: schema.modules,
     integrationUserSettings: schema.integrationUserSettings,
     integrationProviderConfigs: schema.integrationProviderConfigs,
     integrationCategoryPreferences: schema.integrationCategoryPreferences,
@@ -63,7 +66,10 @@ describe('integration listing routes', () => {
   beforeEach(() => {
     vi.spyOn(secretsService, 'getJwtSecret').mockResolvedValue('cd'.repeat(32));
   });
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    registerModuleIntegrations([]);
+  });
 
   describe('GET /integrations/defaults', () => {
     it('lists the admin default rows to a plain signed-in user, and none of anyone own preferences', async () => {
@@ -137,6 +143,63 @@ describe('integration listing routes', () => {
   });
 
   describe('GET /integrations/providers', () => {
+    it('reports live disabled/deactivated module state and attribution in one bulk snapshot', async () => {
+      const { fake, reads } = setup();
+      const id = 'module.crm.vendor';
+      registerModuleIntegrations([
+        {
+          manifest: {
+            id: 'crm',
+            name: 'Customer records',
+            integrations: [
+              {
+                id,
+                displayName: 'CRM',
+                categories: ['issues'],
+                selfHosted: false,
+                auth: [],
+                operations: [],
+              },
+            ],
+          },
+        },
+      ] as never);
+      const module = fake.insert(schema.modules, {
+        moduleId: 'crm',
+        name: 'Customer records',
+        deactivatedAt: new Date(),
+      });
+      fake.insert(schema.integrationProviderConfigs, { providerId: id, enabled: true });
+      let reply = await get('/integrations/providers', USER);
+      expect(reply.body.providers.find((p: any) => p.id === id)).toMatchObject({
+        enabled: false,
+        state: 'module-deactivated',
+        module: { id: 'crm', name: 'Customer records' },
+        connect: [],
+      });
+      expect(reads.filter((table) => table === schema.integrationProviderConfigs)).toHaveLength(1);
+      expect(reads.filter((table) => table === schema.modules)).toHaveLength(1);
+      reads.length = 0;
+      const admin = await get('/admin/integrations/providers', ADMIN);
+      expect(admin.status).toBe(200);
+      expect(admin.body.providers.find((p: any) => p.id === id)).toMatchObject({
+        enabled: true,
+        state: 'module-deactivated',
+        module: { id: 'crm', name: 'Customer records' },
+      });
+      expect(reads.filter((table) => table === schema.integrationProviderConfigs)).toHaveLength(1);
+      expect(reads.filter((table) => table === schema.modules)).toHaveLength(1);
+      fake.patch(schema.modules, module.id as string, { deactivatedAt: null });
+      reply = await get('/integrations/providers', USER);
+      expect(reply.body.providers.find((p: any) => p.id === id)).toMatchObject({
+        enabled: true,
+        state: 'enabled',
+      });
+      expect(reply.body.providers.find((p: any) => p.id === 'github')).toMatchObject({
+        state: 'enabled',
+        module: null,
+      });
+    });
     it('reads every provider switch with one query and reports each provider its own', async () => {
       const { fake, reads } = setup();
       fake.insert(schema.integrationProviderConfigs, { providerId: 'github', enabled: false });
@@ -149,6 +212,10 @@ describe('integration listing routes', () => {
         Object.fromEntries(listIntegrationProviders().map((p) => [p.id, p.id !== 'github'])),
       );
       expect(reads.filter((table) => table === schema.integrationProviderConfigs)).toHaveLength(1);
+      expect(reply.body.providers.find((provider: any) => provider.id === 'github')).toMatchObject({
+        state: 'disabled',
+        module: null,
+      });
     });
   });
 });
