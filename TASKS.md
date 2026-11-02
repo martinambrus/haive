@@ -774,10 +774,12 @@ User decision 2026-11-01: Refuse incomplete unregistered gitlinks and explain su
 
 ### T434 · FNF[token-save-before-probe] · a captured CLI token overwrites the stored one before the probe verifies it
 
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P1
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T07:26Z · last: 2026-11-02T07:26Z · kind: fix · user decision: resolved 2026-11-01 · priority: P1
 From the T427 review (2026-10-25), F3. PRE-EXISTING design. api routes/cli-login-banner.ts ~:976-982 (`onExisting: 'overwrite'`, then the probe): any wrong capture replaces the user's working CLAUDE_CODE_OAUTH_TOKEN before the probe runs, so a failed probe leaves the user with neither. Keep the old value until the probe passes (probe with the candidate, then write), or restore it on a failed probe. Needs a decision on how the probe gets the candidate (it reads the stored secret today).
 
 User decision 2026-11-01: Probe candidate credentials before replacing the existing working token; promote only after success.
+
+Execution 2026-11-02: bounded candidate-token probe before promotion, preserving prior working credentials on failure. One active implementation driver; T521 initial driver is quiescent, its parent-owned full suite/delivery is independent. Evidence `.claude/tmp/codex-run/queue-exec-20261101/T434/`. No live provider login/model work or changes to real user credentials.
 
 ### T435 · FNF[web-api-cookie-transport] · different web/API hostnames cannot establish the server-rendered session
 
