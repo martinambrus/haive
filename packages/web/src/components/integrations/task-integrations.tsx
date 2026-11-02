@@ -369,6 +369,7 @@ function TaskIntegrationControls({ taskId, status, dead }: Props) {
               Also for my later tasks
             </label>
             <Button
+              className="h-auto min-h-10 w-full min-w-0 whitespace-normal [overflow-wrap:anywhere] py-2"
               disabled={disabled || !draft.providerId}
               onClick={() => void mutate(categoryId, draft, false)}
             >
@@ -385,6 +386,7 @@ function TaskIntegrationControls({ taskId, status, dead }: Props) {
             </label>
             <Button
               variant="secondary"
+              className="h-auto min-h-10 w-full min-w-0 whitespace-normal [overflow-wrap:anywhere] py-2"
               disabled={disabled || (!saved && !grant && !draft.forget)}
               onClick={() => void mutate(categoryId, draft, true)}
             >
