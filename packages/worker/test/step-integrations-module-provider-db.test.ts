@@ -1,7 +1,8 @@
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createDatabase, schema, type Database } from '@haive/database';
+import { createDatabase, schema, ZERO_MERGE_RETRIES, type Database } from '@haive/database';
 import { TASK_JOB_NAMES, deriveSlotWait, type CliExecJobPayload } from '@haive/shared';
+import { computeFoldContribution } from '@haive/shared/timing';
 import {
   lockTaskIntegrations,
   registerModuleIntegrations,
@@ -50,6 +51,9 @@ const h = vi.hoisted(() => {
     db: undefined as unknown,
     beforeRequest: null as null | (() => Promise<void>),
     runtimePark: false,
+    runtimeParkReadArmed: false,
+    afterRuntimeParkRead: null as
+      null | ((row: { id: string; integrationWait: unknown }) => Promise<void>),
   };
 });
 
@@ -85,16 +89,35 @@ vi.mock('../src/orchestrator/dispatcher.js', async (importOriginal) => {
 
 vi.mock('../src/sandbox/runtime-admission.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
-  runtimeAdmission: async () => ({
-    decision: h.runtimePark ? 'park' : 'proceed',
-    busyMb: 1024,
-    budgetMb: 1024,
-    myWeightMb: 1024,
-    position: 1,
-    waiting: 1,
-  }),
+  runtimeAdmission: async () => {
+    if (h.runtimePark && h.afterRuntimeParkRead) h.runtimeParkReadArmed = true;
+    return {
+      decision: h.runtimePark ? 'park' : 'proceed',
+      busyMb: 1024,
+      budgetMb: 1024,
+      myWeightMb: 1024,
+      position: 1,
+      waiting: 1,
+    };
+  },
   releaseRuntimeReservation: async () => undefined,
 }));
+vi.mock('../src/step-engine/step-runner.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/step-engine/step-runner.js')>();
+  return {
+    ...actual,
+    upsertRow: async (...args: Parameters<typeof actual.upsertRow>) => {
+      const row = await actual.upsertRow(...args);
+      if (h.runtimeParkReadArmed && h.afterRuntimeParkRead) {
+        const reset = h.afterRuntimeParkRead;
+        h.runtimeParkReadArmed = false;
+        h.afterRuntimeParkRead = null;
+        await reset(row); // The real SELECT has completed; the park still holds this unlocked snapshot.
+      }
+      return row;
+    },
+  };
+});
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/redis.js', () => ({ getBullRedis: () => ({}), getRedis: () => ({}) }));
 vi.mock('bullmq', async (importOriginal) => ({
@@ -224,6 +247,8 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
   beforeEach(async () => {
     setContainerCleanupRunner(async () => 0);
     h.runtimePark = false;
+    h.runtimeParkReadArmed = false;
+    h.afterRuntimeParkRead = null;
     markModuleSchemaReady('fx');
     await db
       .update(schema.modules)
@@ -865,6 +890,167 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
         }
       },
     );
+
+    it('[J7 fix2] honors a same-epoch pending CLI reset committed after the runtime park snapshot', async () => {
+      const w = await moduleWorld();
+      const type = 'j7-runtime-reset-race';
+      const id = declare([DOCS_REQUIRED]);
+      const tailId = `${id}-tail`;
+      let canEnter = true;
+      const shouldRun = vi.fn(async () => canEnter);
+      const detect = vi.fn(async () => {
+        canEnter = false;
+        return { prepared: true };
+      });
+      const def = miningStep(id);
+      def.needsRuntime = 'app';
+      def.shouldRun = shouldRun;
+      def.detect = detect;
+      stepRegistry.register(def);
+      // A skipped reset row hands off to a fake queued tail rather than completing/tearing down a runtime.
+      stepRegistry.register({
+        metadata: metadata(tailId),
+        apply: async () => ({}),
+      } as StepDefinition);
+      await db
+        .insert(schema.taskTypeDefinitions)
+        .values({
+          slug: type,
+          displayName: type,
+          source: 'admin',
+          runListStrategy: 'static',
+          stepIds: [id, tailId],
+        })
+        .onConflictDoNothing();
+      try {
+        await db
+          .update(schema.repositories)
+          .set({ localPath: '/var/tmp/haive-codex-332' })
+          .where(eq(schema.repositories.id, w.repositoryId));
+        await db
+          .update(schema.tasks)
+          .set({
+            type,
+            currentStepId: id,
+            runListSnapshot: [id, tailId],
+            cliProviderId: w.claude.id,
+          })
+          .where(eq(schema.tasks.id, w.taskId));
+        await db
+          .update(schema.integrationConnections)
+          .set({ status: 'needs_reauth' })
+          .where(eq(schema.integrationConnections.id, w.moduleConnectionId));
+        let seq = 0;
+        const tick = () =>
+          processTaskJob(
+            {
+              id: `j7-reset-race-${++seq}`,
+              name: TASK_JOB_NAMES.ADVANCE_STEP,
+              data: { taskId: w.taskId, userId: w.userId, stepId: id, round: 0, epoch: 0 },
+              timestamp: Date.now(),
+            } as never,
+            'test-token',
+          );
+        await tick();
+        const parked = await rowOf(w.taskId);
+        expect(parked).toMatchObject({
+          status: 'pending',
+          iterationCount: 0,
+          integrationWait: { continuation: true },
+        });
+        const reserved = () =>
+          db
+            .select()
+            .from(schema.taskStepAgentMinings)
+            .where(eq(schema.taskStepAgentMinings.taskStepId, parked.id));
+        expect(await reserved()).toHaveLength(AGENTS.length);
+        expect(await runsOf(db, w.taskId)).toEqual([]);
+        const entryCalls = shouldRun.mock.calls.length;
+        const epoch = (await taskOf(w.taskId)).orchestrationEpoch;
+        await db
+          .update(schema.integrationConnections)
+          .set({ status: 'connected' })
+          .where(eq(schema.integrationConnections.id, w.moduleConnectionId));
+        let resets = 0;
+        h.afterRuntimeParkRead = async (snapshot) => {
+          expect(snapshot.id).toBe(parked.id);
+          expect(snapshot.integrationWait).not.toBeNull();
+          // Execute the pending default-role CLI switch's reset shape from api/routes/tasks/steps.ts:
+          // runs -> reservations -> held row; iteration zero/pending keeps movesTask=false and epoch.
+          // Auth/preference persistence is the unchanged API boundary, not part of this SQL race fixture.
+          await db.transaction(async (tx) => {
+            const now = new Date();
+            await tx
+              .update(schema.cliInvocations)
+              .set({ supersededAt: now })
+              .where(
+                and(
+                  eq(schema.cliInvocations.taskStepId, parked.id),
+                  isNull(schema.cliInvocations.supersededAt),
+                ),
+              );
+            await tx
+              .delete(schema.taskStepAgentMinings)
+              .where(eq(schema.taskStepAgentMinings.taskStepId, parked.id));
+            const [held] = await tx
+              .select()
+              .from(schema.taskSteps)
+              .where(eq(schema.taskSteps.id, parked.id))
+              .for('no key update');
+            expect(held).toMatchObject({ status: 'pending', iterationCount: 0 });
+            const contribution = computeFoldContribution(held!, now.getTime());
+            await tx
+              .update(schema.taskSteps)
+              .set({
+                status: 'pending',
+                detectOutput: null,
+                formSchema: null,
+                formValues: null,
+                statusMessage: null,
+                startedAt: null,
+                endedAt: null,
+                errorMessage: null,
+                mergeResolveState: ZERO_MERGE_RETRIES,
+                idleMs: 0,
+                waitingStartedAt: null,
+                integrationWait: null,
+                userActiveMs: 0,
+                carriedWorkMs: held!.carriedWorkMs + contribution.workMs,
+                carriedIdleMs: held!.carriedIdleMs + contribution.idleMs,
+                carriedUserActiveMs: held!.carriedUserActiveMs + contribution.userActiveMs,
+                updatedAt: now,
+              })
+              .where(eq(schema.taskSteps.id, parked.id));
+          });
+          expect((await rowOf(w.taskId)).integrationWait).toBeNull();
+          expect(await reserved()).toEqual([]);
+          expect((await taskOf(w.taskId)).orchestrationEpoch).toBe(epoch);
+          resets += 1;
+        };
+        h.runtimePark = true;
+        await tick(); // Suspends only the park's upsertRow read, runs the reset, then writes the stale park.
+        expect(resets).toBe(1);
+        expect(await reserved()).toEqual([]);
+        const afterPark = await rowOf(w.taskId);
+        expect((await taskOf(w.taskId)).orchestrationEpoch).toBe(epoch);
+        h.runtimePark = false;
+        await tick();
+        // The reset made this a fresh entry. On db68 the stale park resurrects continuation:true,
+        // so shouldRun is suppressed and a brand-new mining run is dispatched instead of skipping.
+        expect((await rowOf(w.taskId)).status).toBe('skipped');
+        expect(shouldRun.mock.calls.length).toBeGreaterThan(entryCalls);
+        expect(detect).toHaveBeenCalledTimes(1);
+        expect(afterPark.integrationWait).toBeNull();
+        expect(await runsOf(db, w.taskId)).toEqual([]);
+      } finally {
+        h.afterRuntimeParkRead = null;
+        h.runtimeParkReadArmed = false;
+        await db.delete(schema.tasks).where(eq(schema.tasks.id, w.taskId));
+        await db
+          .delete(schema.taskTypeDefinitions)
+          .where(eq(schema.taskTypeDefinitions.slug, type));
+      }
+    });
 
     it('a saved wait with a newly invalid requirement fails by name even while its valid sibling still needs reconnecting', async () => {
       const w = await moduleWorld();
