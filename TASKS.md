@@ -539,16 +539,18 @@ status: open · was modular #195 · priority: P2
 status: open · was modular #196 · priority: P2
 DECIDED 2026-10-23: delete only that module's rows and show the counts in the confirmation.
 
-### T362 · FNF[new-task-reset-verdict] · after a failed reset the New Task page keeps the pre-reset verdict (+1)
+### T362 · FNF[new-task-reset-verdict] · after a failed reset the New Task page keeps the pre-reset verdict
 
-status: open · kind: fix · policy: covered by accepted bounded-wait/consistency rules · priority: P1
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T08:42Z · last: 2026-11-02T08:42Z · kind: fix · policy: covered by accepted bounded-wait/consistency rules · priority: P1
 
 1. PRE-EXISTING. The reset route removes files before its database transaction (api repos.ts ~:2893, then ~:2935).
    Fix direction: after a failed reset, re-ask for the status without clearing the error, and keep Create disabled until the answer lands.
 
-2. QUEUED broader finding, PRE-EXISTING; not authorized for T118 or the design fix above: at 375px on an onboarded repository, the New Task header with Re-run onboarding + Cancel overflows horizontally and squeezes the description into a narrow column. `packages/web/src/app/(app)/tasks/new/page.tsx:817` uses a non-wrapping header/action row. Fix direction: responsive stacking/wrapping with a viewport control for both actions. Source is byte-identical to main; evidence `.claude/tmp/board-run/T118/browser-reset-cli/before-reset-375.png` and `T118/fnf-mobile-header.json`. Leave queued when T118 pauses.
+2. MOVED to T530; parked low-impact mobile-header follow-up, outside this readiness repair.
 
 Engineering scope derived from the accepted policy (2026-11-01), not a new owner decision: After any failed reset, re-read actual readiness without clearing the error and keep Create disabled until that answer arrives. Responsive overflow is a separate low-impact member, not a reason for broad UI work.
+
+Execution 2026-11-02: member1 only, fresh readiness after failed reset without hiding the error; Create remains disabled until actual readiness is known. Evidence `.claude/tmp/codex-run/queue-exec-20261101/T362/`. No reset backend rewrite or mobile-header work.
 
 ### T364 · FNF[test-coverage-gaps] · optional coverage controls after correctness and test-hygiene splits
 
@@ -1418,6 +1420,16 @@ Split from T364 items1/13/14, 2026-11-01. This is three candidate ways validatio
 
 status: parked · reason: diminishing returns; comment only, no runtime consequence · kind: documentation · priority: P4
 Source: route-retirement follow-up review 2026-11-01, packages/worker/src/step-engine/steps/index.ts:119. The unchanged startup-assertion JSDoc describes task-row invalidation through providerSensitive metadata, while the task-level switch route is being retired by T338. The assertion itself still correctly checks metadata/list equality. Preserve as low documentation debt; update only on the next related documentation/source touch. No extra implementation/review round or runtime audit is authorized by this note. Evidence .claude/tmp/codex-run/queue-exec-20261101/route-retirement/review-comments.md.
+
+### T530 · FNF[new-task-mobile-header] · New Task header overflows at375px
+
+status: parked · kind: queued broader finding · reason: diminishing returns · priority: P3
+
+Moved from T362 member2 so shipping the readiness fix does not mark this layout work complete.
+
+2. QUEUED broader finding, PRE-EXISTING; not authorized for T118 or the design fix above: at 375px on an onboarded repository, the New Task header with Re-run onboarding + Cancel overflows horizontally and squeezes the description into a narrow column. `packages/web/src/app/(app)/tasks/new/page.tsx:817` uses a non-wrapping header/action row. Fix direction: responsive stacking/wrapping with a viewport control for both actions. Source is byte-identical to main; evidence `.claude/tmp/board-run/T118/browser-reset-cli/before-reset-375.png` and `T118/fnf-mobile-header.json`. Leave queued when T118 pauses.
+
+Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
 ## Done
 
