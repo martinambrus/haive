@@ -6,6 +6,7 @@ const h = vi.hoisted(() => ({
   write: vi.fn(),
   defs: [] as unknown[],
   catalog: [] as unknown[],
+  modules: [] as unknown[],
 }));
 
 vi.mock('../src/db.js', () => ({
@@ -41,7 +42,13 @@ import type { AppEnv } from '../src/context.js';
 
 function rows(table: unknown) {
   const result =
-    table === schema.taskTypeDefinitions ? h.defs : table === schema.stepCatalog ? h.catalog : [];
+    table === schema.taskTypeDefinitions
+      ? h.defs
+      : table === schema.stepCatalog
+        ? h.catalog
+        : table === schema.modules
+          ? h.modules
+          : [];
   const chain: Record<string, unknown> = {
     then: (resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) =>
       Promise.resolve(result).then(resolve, reject),
@@ -68,6 +75,7 @@ beforeEach(() => {
   h.write.mockClear();
   h.defs = [];
   h.catalog = [];
+  h.modules = [];
 });
 
 describe('/admin/task-types for a regular user', () => {
@@ -162,6 +170,41 @@ describe('GET /task-types', () => {
           available: true,
         },
       ],
+    });
+    expect(h.write).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /admin/task-types/catalog overview metadata', () => {
+  it('keeps filtered module declarations read-only and outside the selectable catalog', async () => {
+    h.role = 'admin';
+    h.modules = [{ moduleId: 'notes', name: 'Notes', missingAt: null, deactivatedAt: new Date() }];
+    const entry = {
+      stepId: 'module.notes.review',
+      label: 'Notes review',
+      group: 'build',
+      dispatchesCli: true,
+      requires: [],
+      provides: [],
+      integrations: [{ id: 'docs', category: 'module.notes.docs', access: 'read' }],
+    };
+    h.catalog = [
+      {
+        stepId: entry.stepId,
+        source: 'module:notes',
+        title: entry.label,
+        composable: true,
+        dispatchesCli: true,
+        entry,
+      },
+    ];
+    const response = await send('GET', '/admin/task-types/catalog');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      steps: [],
+      unavailableSteps: [{ stepId: entry.stepId, entry }],
+      registeredStepIds: [entry.stepId],
+      modules: [{ id: 'notes', state: 'deactivated' }],
     });
     expect(h.write).not.toHaveBeenCalled();
   });

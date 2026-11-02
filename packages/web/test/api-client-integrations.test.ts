@@ -5,6 +5,8 @@ import {
   getTaskIntegrations,
   saveTaskIntegration,
   resetTaskIntegration,
+  getIntegrationCategories,
+  getTaskTypeCatalog,
   listAdminIntegrationDefaults,
   listIntegrationConnections,
   listIntegrationDefaults,
@@ -45,6 +47,26 @@ describe('integration choice helpers', () => {
       ['GET', '/integrations/defaults', undefined],
       ['GET', '/admin/integrations/defaults', undefined],
     ]);
+  });
+
+  it('passes overview cancellation to each metadata read without changing the session client', async () => {
+    const sent: RequestInit[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        sent.push(init);
+        return new Response('{}', { status: 200 });
+      }),
+    );
+    const controller = new AbortController();
+    await listIntegrationProviders(controller.signal);
+    await getIntegrationCategories(controller.signal);
+    await getTaskTypeCatalog(controller.signal);
+    expect(sent).toHaveLength(3);
+    for (const init of sent) {
+      expect(init.signal).toBe(controller.signal);
+      expect(init.credentials).toBe('include');
+    }
   });
 
   it('saves a preference with exactly the body the route takes, and clears it with a DELETE', async () => {

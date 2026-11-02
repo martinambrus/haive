@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { integrationRequirementSchema, type PromptStepEntry } from '@haive/shared/modularity';
+import { TaskTypeComposer } from './task-type-composer';
+import { TEST_CATALOG } from '@/lib/composition-test-catalog';
 import { PromptStepEditor } from './prompt-step-editor';
-import { buttons, controls, createRenderer, fire, textOf } from '../../test/render-tree';
+import { buttons, controls, createRenderer, findAll, fire, textOf } from '../../test/render-tree';
 vi.mock('react', async (original) => ({
   ...(await original<typeof import('react')>()),
   ...(await import('../../test/render-tree')).reactHooks,
@@ -72,5 +74,46 @@ describe('prompt step integration authoring', () => {
       category: 'module.notes.docs',
       access: 'read',
     });
+  });
+  it('updates the selected row overview when a requirement category is repaired, preserving its invalid sibling', () => {
+    let entry = {
+      ...base,
+      integrations: [{ id: 'docs', category: 'module.notes.docs', access: 'read' }, null],
+    } as unknown as PromptStepEntry;
+    const view = createRenderer(() => (
+      <TaskTypeComposer
+        catalog={TEST_CATALOG}
+        typeSlug="t"
+        stepIds={['custom.t.review']}
+        promptSteps={{ review: entry }}
+        loopLimits={{}}
+        requiresRepository={false}
+        integrationCategories={[...moduleCategories, { id: 'mail', label: 'Email' }]}
+        integrationInfo={{
+          status: 'current',
+          providers: [],
+          categories: [...moduleCategories, { id: 'mail', label: 'Email' }],
+          modules: [{ id: 'notes', name: 'Notes', state: 'loaded' }],
+        }}
+        onStepIdsChange={() => {}}
+        onLoopLimitsChange={() => {}}
+        onPromptStepsChange={(next) => {
+          entry = next.review!;
+        }}
+      />
+    ));
+    const overview = () =>
+      textOf(
+        findAll(view.tree(), (host) => host.props['aria-label'] === 'Integration requirements')[0]!,
+      );
+    expect(overview()).toContain('Module documents');
+    fire.click(buttons(view.tree(), /^edit prompt step review$/i)[0]!);
+    view.draw();
+    fire.type(controls(view.tree(), /^category$/i)[0]!, 'mail');
+    view.draw();
+    expect(overview()).toContain('Email');
+    expect(overview()).not.toContain('Module documents');
+    expect(overview()).toContain('Invalid stored requirement');
+    expect(entry.integrations![1]).toBe(null);
   });
 });

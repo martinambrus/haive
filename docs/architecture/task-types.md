@@ -232,6 +232,10 @@ field list, `delete`).
   copies the rule. The composer validates live with the same shared validators the api runs.
 - **New Task** offers Workflow (onboarding or workflow, inferred) and Run the app, then every other row
   of `GET /task-types` except `onboarding_upgrade`, unavailable ones disabled with the reason in words.
+- The admin catalog's optional `unavailableSteps` contains already-persisted, parsed declarations
+  filtered out of `steps` because their module is deactivated. Selected rows may read these only
+  for the integration overview. Palette, validation and availability still use `steps`,
+  `registeredStepIds` and module state; an absent module's lost declaration is never reconstructed.
 - **Step panels** (`UiPanelSpec`, `BUILTIN_STEP_PANELS`, `resolveStepPanels`) are a web table keyed by
   step id: a custom type reusing a core step gets its panels; module and prompt steps get none.
 
@@ -295,8 +299,11 @@ come from the authenticated categories list; the editor uses the same ids for it
 A stored unavailable category stays visible, and malformed entries stay in the form until repaired
 or removed. Editing one entry never drops an invalid sibling; choosing a category replaces a stored
 unsupported provider pin. Integration-only edits count as unsaved composition changes and are sent
-on save. General provider installation/state overviews and generated integration drafts remain
-separate work. The New Task picker and transactional create admission are documented in
+on save. Selected rows also show the category, required/optional access and registered provider install
+state in create, edit and read-only views (see [Integrations](integrations.md#composer-capability-overview)).
+The overview reads raw prompt requirements so an invalid entry or unsupported provider pin remains
+visible until repaired; changing a requirement updates that row immediately. Generated integration
+drafts remain separate work. The New Task picker and transactional create admission are documented in
 [Integrations](integrations.md#new-task-admission).
 
 `{{integration:<id>.account}}` names the account the declared requirement `<id>` resolved to at this

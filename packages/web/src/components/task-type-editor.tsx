@@ -3,15 +3,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { CORE_INTEGRATION_CATEGORY_SPECS } from '@haive/shared/modularity';
-import type { IntegrationCategoryOption } from '@/components/prompt-step-integrations';
 import type { CompositionIssue } from '@haive/shared/modularity';
 import {
   changedTaskType,
   createTaskType,
   getAdminTaskType,
   getTaskTypeCatalog,
-  getIntegrationCategories,
   updateTaskType,
   type AdminTaskType,
   type ApiError,
@@ -42,6 +39,7 @@ import {
   taskTypeFormSchema,
 } from '@/lib/task-type-form';
 import { editorStateForAgent, loadDraftIntoEditor } from '@/lib/task-type-draft-load';
+import { useComposerIntegrations } from '@/lib/use-composer-integrations';
 import { usePageTitle } from '@/lib/use-page-title';
 import { useUnsavedChangesGuard } from '@/lib/use-unsaved-changes-guard';
 import type { TaskTypeAvailability } from '@haive/shared/modularity';
@@ -101,10 +99,8 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
   const creating = slug === null;
   usePageTitle(creating ? 'New task type' : `Task type ${slug}`);
 
-  const [integrationCategories, setIntegrationCategories] = useState<
-    readonly IntegrationCategoryOption[]
-  >(CORE_INTEGRATION_CATEGORY_SPECS);
-  const [categoryError, setCategoryError] = useState<string | null>(null);
+  const { info: integrationInfo, refresh: refreshIntegrationInfo } = useComposerIntegrations(slug);
+  const integrationCategories = integrationInfo.categories;
   const [catalog, setCatalog] = useState<TaskTypeCatalog | null>(null);
   const [row, setRow] = useState<AdminTaskType | null>(null);
   const [availability, setAvailability] = useState<TaskTypeAvailability | null>(null);
@@ -137,34 +133,30 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
     setFormRevision((n) => n + 1);
   }, []);
 
-  const load = useCallback(async () => {
-    try {
-      const [cat, one] = await Promise.all([
-        getTaskTypeCatalog(),
-        slug === null ? null : getAdminTaskType(slug),
-      ]);
-      setCatalog(cat);
-      if (one) {
-        applyRow(one.taskType);
-        setAvailability(one.availability);
-        setServerPromptIssues(promptStepIssuesOf(one.promptStepIssues));
-      }
-    } catch (err) {
-      setLoadError((err as ApiError).message ?? 'Failed to load the task type');
-    }
-  }, [slug, applyRow]);
-
   useEffect(() => {
-    void load();
-    void getIntegrationCategories()
-      .then((reply) => {
-        setIntegrationCategories(reply.categories);
-        setCategoryError(null);
+    let current = true;
+    setCatalog(null);
+    setRow(null);
+    setLoadError(null);
+    void Promise.all([getTaskTypeCatalog(), slug === null ? null : getAdminTaskType(slug)])
+      .then(([cat, one]) => {
+        if (!current) return;
+        setCatalog(cat);
+        if (one) {
+          applyRow(one.taskType);
+          setAvailability(one.availability);
+          setServerPromptIssues(promptStepIssuesOf(one.promptStepIssues));
+        } else {
+          setAvailability(null);
+        }
       })
-      .catch(() =>
-        setCategoryError('Could not load module integration categories. Reload to try again.'),
-      );
-  }, [load]);
+      .catch((err: ApiError) => {
+        if (current) setLoadError(err.message ?? 'Failed to load the task type');
+      });
+    return () => {
+      current = false;
+    };
+  }, [slug, applyRow]);
 
   const editableFields = creating ? CREATE_FIELDS : (row?.editableFields ?? []);
   const composable = editableFields.includes('stepIds');
@@ -353,10 +345,15 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
   const lastField = schema.fields.at(-1)?.id;
   const composer = (readOnly: boolean) => (
     <>
-      {categoryError && <FormError message={categoryError} />}
       <TaskTypeComposer
         catalog={catalog}
         integrationCategories={integrationCategories}
+        integrationInfo={integrationInfo}
+        onRefreshIntegrationInfo={() => {
+          void refreshIntegrationInfo();
+        }}
+        typeSlug={typeSlug}
+        promptSteps={promptSteps}
         stepIds={readOnly ? (row?.stepIds ?? null) : stepIds}
         loopLimits={loopLimits}
         requiresRepository={requiresRepository}
@@ -365,8 +362,6 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
         serverIssues={serverIssues}
         {...(promptEditable && !readOnly
           ? {
-              typeSlug,
-              promptSteps,
               serverPromptIssues,
               onPromptStepsChange: (next: PromptSteps) => {
                 touch();
