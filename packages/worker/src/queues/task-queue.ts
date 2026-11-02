@@ -538,14 +538,14 @@ async function writeFencedPark(
   db: Database | DbHandle,
   ctx: ResolvedTaskContext,
   rowId: string,
-  patch: PgUpdateSetSource<typeof schema.taskSteps>,
+  requestedPatch: PgUpdateSetSource<typeof schema.taskSteps>,
   pointer: { stepId: string; stepIndex: number; round: number } | null,
   opts: { foldRun?: boolean; clearIntegrationCause?: boolean } = {},
 ): Promise<boolean> {
   const fence = { epoch: ctx.orchestrationEpoch };
   try {
     await db.transaction(async (tx) => {
-      const currentPatch = { ...patch };
+      const patch = { ...requestedPatch };
       if (opts.clearIntegrationCause) {
         // A pending CLI switch resets the envelope without changing the task epoch.
         // Transform the held current value, never the caller's unlocked park snapshot.
@@ -555,10 +555,10 @@ async function writeFencedPark(
           .where(eq(schema.taskSteps.id, rowId))
           .for('no key update');
         if (!held) throw new ParkOvertaken();
-        currentPatch.integrationWait = clearIntegrationWaitCause(held.integrationWait);
+        patch.integrationWait = clearIntegrationWaitCause(held.integrationWait);
       }
       if (opts.foldRun) await foldRunIntoCarried(tx, rowId);
-      await tx.update(schema.taskSteps).set(currentPatch).where(eq(schema.taskSteps.id, rowId));
+      await tx.update(schema.taskSteps).set(patch).where(eq(schema.taskSteps.id, rowId));
       const holds = pointer
         ? await markTaskRunningWithStep(
             tx,
