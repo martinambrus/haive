@@ -502,13 +502,6 @@ status: parked: deferred until the first module that pins a provider · was modu
 
 Decision reconciliation 2026-11-01: Remain deliberately deferred until a real module needs provider pinning; do not invent a consumer to unblock this infrastructure work.
 
-### T361 · I6f · purge of a provider module deletes its integration rows and reports counts
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T15:21Z · last: 2026-11-02T15:21Z · was modular #196 · priority: P2
-DECIDED 2026-10-23: delete only that module's rows and show the counts in the confirmation.
-
-Progress 2026-11-02T15:21Z: approved module-owned integration cleanup and confirmation counts; bounded transaction/ownership controls, no live purge. Prior drivers quiescent; T332 hosted review/CI and T360 candidate gates continue.
-
 ### T364 · FNF[test-coverage-gaps] · optional coverage controls after correctness and test-hygiene splits
 
 status: parked · reason: diminishing returns · user confirmed routine coverage stays parked, 2026-11-01 · priority: P4
@@ -1370,6 +1363,8 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
 ## Done
+
+- T361 — Preview and purge module-owned integration data with counted transactional cleanup — PR #999 (fa1dcd14d8), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41493981640 green; Modules/purge browser1280/768/390 passed21scopedprobes/screenshots inspected;12fakePOSTs0forwarded; delay/503/wrongtarget/incomplete/15stimeout/targetswitch/Escape/retry/duplicate andactualreturnedcounts verified; mainCI41493981640/allchecks/source-watchers/health/idle green. Evidence .claude/tmp/codex-run/queue-exec-20261101/T361/.
 
 - T360 — Module categories and provider availability in Settings/admin/preferences/defaults — PR #998 (835b58ecfd), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41490277684 green; Settings/preferences/admin browser1280/768/390 passed18 scoped probes/screenshots inspected;12 synthetic writes locally captured/0forwarded; readonlydeployedAPI200/provider state+module fields; actualPG164; mainCI41490277684/allchecks/source-watchers/health/idle green. Evidence .claude/tmp/codex-run/queue-exec-20261101/T360/.
 
