@@ -333,17 +333,6 @@ Plan I7: REST by default, remote MCP opt-in. Blocked until the user provides an 
 
 User decision 2026-11-01: keep live Google connection parked; prepare setup instructions when its turn comes. A live OAuth client is still an external prerequisite; never request a secret in chat.
 
-### T332 · J7 · reconnect park (deactivated provider) / dead (uninstalled)
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T12:42Z · last: 2026-11-02T12:47Z · was modular #47 · priority: P2
-Plan J7: a single owner keyed on the connection's `status`. A step that needs a deactivated provider PARKS with a reconnect banner; an uninstalled provider makes the task DEAD.
-
-Dependency reconciled 2026-11-02: T359 delivered as PR #993, corrected exact-HEAD reviews/full suites/main CI41430501569 and real-PG/deployed resolver checks green. Reconnect parking is now ready; retain independent J7 scope and the active T356/T357 feature fence.
-
-Execution scope: J7 required-integration reconnect/provider-deactivation waiting and missing-provider dead state, using structural state and existing connection-status ownership, with bounded idempotent recovery. Preserve current invocation stamps, optional requirement behavior, explicit selection, pause/cancel/boot ownership and existing provider-pin refusal. No live provider OAuth, broad worker audits or module/settings redesign. T359 dependency is delivered; one implementation driver and isolated focused state/DB controls before full-feature review and delivery.
-
-Progress 2026-11-02T12:47Z: Reserved migration 0218 for the necessary nullable task_steps.integration_wait structural JSONB marker; existing waiting_started_at/status text cannot identify this recovery owner. No other active session migration reservation is recorded. Append the schema column last, use guarded idempotent SQL, preserve all applied migrations and normal applier. Driver builds/tests only in owned scratch fixtures; parent owns live application after review/CI.
-
 ### T334 · FNF[builtin-order-hazards] · built-in workflow runs 07b before 07c, and 08b fixer edits after both
 
 status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
@@ -1385,6 +1374,8 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
 ## Done
+
+- T332 — required integration reconnect waits, missing-provider recovery and current-row continuation ownership — PR #997 (d764679dc8), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41477323495 green; actual task page browser1280/768/390 passed reconnect/disabled/deactivated/schema/runtime/dead/completed states;9scopedcaptures inspected,0writes forwarded; realPG37,mainCI41477323495,live0218normalapplier/physicalnullableJSONB-last/source-watchers/health/idlechecks green. Evidence .claude/tmp/codex-run/queue-exec-20261101/T332/.
 
 - T333 — composer integration requirement and provider install-state overview — PR #996 (38b75516cf), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41454594533 green; actual authenticated composer browser create/edit/readonly at1280/768/390 passed18probes; draft edits retained through delayedmetadata/error/retry/refused409,15screenshots inspected,3PATCH locallycaptured/0forwarded; actual readonly catalog API200 and watcher/health/activity checks green. Evidence .claude/tmp/codex-run/queue-exec-20261101/T333/.
 
