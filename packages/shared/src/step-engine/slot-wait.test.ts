@@ -239,7 +239,7 @@ it('distinguishes an integration wait from runtime/module capacity without readi
         waitingStartedAt: '2026-11-02T10:00:00Z',
         updatedAt: '2026-11-02T10:00:10Z',
         statusMessage: 'old runtime copy',
-        integrationWait: { causes: [] },
+        integrationWait: { causes: [{ reason: 'connection-unavailable' }] },
       },
     ],
     queuedInvocationStepRowIds: new Set<string>(),
@@ -249,4 +249,35 @@ it('distinguishes an integration wait from runtime/module capacity without readi
   expect(deriveSlotWait(args)?.kind).toBe('integration');
   expect(deriveSlotWait({ ...args, paused: true })).toBeNull();
   expect(deriveSlotWait({ ...args, taskStatus: 'failed' })).toBeNull();
+});
+
+it('a continuation without an active integration cause keeps the current module/runtime wait kind', () => {
+  const args = {
+    taskStatus: 'running',
+    currentStepId: 'module.fx.audit',
+    currentRound: 0,
+    steps: [
+      {
+        id: 'row',
+        stepId: 'module.fx.audit',
+        round: 0,
+        status: 'pending',
+        waitingStartedAt: '2026-11-02T10:00:00Z',
+        updatedAt: '2026-11-02T10:00:10Z',
+        statusMessage: 'Module fx schema is being set up.',
+        integrationWait: { causes: [] },
+      },
+    ],
+    queuedInvocationStepRowIds: new Set<string>(),
+    paused: false,
+    nowMs: Date.parse('2026-11-02T10:00:20Z'),
+  };
+  expect(deriveSlotWait(args)?.kind).toBe('module');
+  expect(
+    deriveSlotWait({
+      ...args,
+      currentStepId: 'core-step',
+      steps: [{ ...args.steps[0]!, stepId: 'core-step' }],
+    })?.kind,
+  ).toBe('runtime');
 });

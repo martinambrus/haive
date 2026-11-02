@@ -1,7 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
-import { TASK_JOB_NAMES, type CliExecJobPayload } from '@haive/shared';
+import { TASK_JOB_NAMES, deriveSlotWait, type CliExecJobPayload } from '@haive/shared';
 import {
   lockTaskIntegrations,
   registerModuleIntegrations,
@@ -11,7 +11,8 @@ import {
 import type { ComposableStepEntry, IntegrationRequirement } from '@haive/shared/modularity';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 import type { DispatchRequest } from '../src/orchestrator/dispatcher.js';
-import type { StepDefinition } from '../src/step-engine/step-definition.js';
+import { MiningWaveError, type StepDefinition } from '../src/step-engine/step-definition.js';
+import { markModuleSchemaReady, markModuleSchemaUnready } from '../src/modules/schema-ready.js';
 import {
   insertStampedRun,
   invalidRequirementsFailure,
@@ -48,6 +49,7 @@ const h = vi.hoisted(() => {
     parkJobs: [] as { name: string; data: unknown; opts: { delay?: number } }[],
     db: undefined as unknown,
     beforeRequest: null as null | (() => Promise<void>),
+    runtimePark: false,
   };
 });
 
@@ -81,6 +83,18 @@ vi.mock('../src/orchestrator/dispatcher.js', async (importOriginal) => {
   };
 });
 
+vi.mock('../src/sandbox/runtime-admission.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  runtimeAdmission: async () => ({
+    decision: h.runtimePark ? 'park' : 'proceed',
+    busyMb: 1024,
+    budgetMb: 1024,
+    myWeightMb: 1024,
+    position: 1,
+    waiting: 1,
+  }),
+  releaseRuntimeReservation: async () => undefined,
+}));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/redis.js', () => ({ getBullRedis: () => ({}), getRedis: () => ({}) }));
 vi.mock('bullmq', async (importOriginal) => ({
@@ -209,6 +223,8 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
 
   beforeEach(async () => {
     setContainerCleanupRunner(async () => 0);
+    h.runtimePark = false;
+    markModuleSchemaReady('fx');
     await db
       .update(schema.modules)
       .set({ deactivatedAt: null })
@@ -223,6 +239,7 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
   });
 
   afterEach(() => {
+    markModuleSchemaReady('fx');
     registerModuleIntegrations([]);
     if (savedKey === undefined) delete process.env.CONFIG_ENCRYPTION_KEY;
     else process.env.CONFIG_ENCRYPTION_KEY = savedKey;
@@ -695,6 +712,159 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
           .where(eq(schema.taskTypeDefinitions.slug, type));
       }
     });
+
+    it.each(['runtime', 'schema'] as const)(
+      '[J7 fix1] preserves an interrupted follow-up wave when %s takes over a resolved integration wait',
+      async (hold) => {
+        const w = await moduleWorld();
+        const type = `j7-takeover-${hold}`;
+        const id = declare([DOCS_REQUIRED]);
+        const tailId = `${id}-tail`;
+        const originalPrompt = 'Finish the reserved follow-up from the first wave.';
+        let canEnter = true;
+        const shouldRun = vi.fn(async () => canEnter);
+        const def = miningStep(id, {
+          selectAgents: async () => [
+            { agentId: 'first-wave', agentTitle: 'First wave', prompt: 'Do the first wave.' },
+          ],
+        });
+        def.needsRuntime = 'app';
+        def.shouldRun = shouldRun;
+        def.apply = async () => {
+          canEnter = false; // Work has happened; re-asking the entry precondition would now skip it.
+          await db
+            .update(schema.integrationConnections)
+            .set({ status: 'needs_reauth' })
+            .where(eq(schema.integrationConnections.id, w.moduleConnectionId));
+          throw new MiningWaveError([
+            { agentId: 'follow-up', agentTitle: 'Follow-up', prompt: originalPrompt },
+          ]);
+        };
+        stepRegistry.register(def);
+        stepRegistry.register({
+          metadata: metadata(tailId),
+          apply: async () => ({}),
+        } as StepDefinition);
+        await db
+          .insert(schema.taskTypeDefinitions)
+          .values({
+            slug: type,
+            displayName: type,
+            source: 'admin',
+            runListStrategy: 'static',
+            stepIds: [id, tailId],
+          })
+          .onConflictDoNothing();
+        try {
+          await db
+            .update(schema.repositories)
+            .set({ localPath: '/var/tmp/haive-codex-332' })
+            .where(eq(schema.repositories.id, w.repositoryId));
+          await db
+            .update(schema.tasks)
+            .set({
+              type,
+              currentStepId: id,
+              runListSnapshot: [id, tailId],
+              cliProviderId: w.claude.id,
+            })
+            .where(eq(schema.tasks.id, w.taskId));
+          let seq = 0;
+          const tick = () =>
+            processTaskJob(
+              {
+                id: `j7-${hold}-${++seq}`,
+                name: TASK_JOB_NAMES.ADVANCE_STEP,
+                data: { taskId: w.taskId, userId: w.userId, stepId: id, round: 0, epoch: 0 },
+                timestamp: Date.now(),
+              } as never,
+              'test-token',
+            );
+          await tick();
+          const first = (await runsOf(db, w.taskId))[0]!;
+          expect(first.integrations).toMatchObject([{ connectionId: w.moduleConnectionId }]);
+          // Deliver the first wave's persisted result, without starting a CLI or sandbox.
+          await db
+            .update(schema.cliInvocations)
+            .set({ endedAt: new Date(), exitCode: 0 })
+            .where(eq(schema.cliInvocations.id, first.id));
+          await db
+            .update(schema.taskStepAgentMinings)
+            .set({ status: 'done', output: {}, endedAt: new Date() })
+            .where(eq(schema.taskStepAgentMinings.cliInvocationId, first.id));
+          await tick();
+          const parked = await rowOf(w.taskId);
+          expect(parked.status).toBe('pending');
+          expect(parked.integrationWait?.causes[0]?.reason).toBe('connection-unavailable');
+          const entryCalls = shouldRun.mock.calls.length;
+          expect(entryCalls).toBeGreaterThan(0);
+          const agents = () =>
+            db
+              .select()
+              .from(schema.taskStepAgentMinings)
+              .where(eq(schema.taskStepAgentMinings.taskStepId, parked.id));
+          const reserved = (await agents()).find((r) => r.agentId === 'follow-up')!;
+          expect(reserved).toMatchObject({
+            status: 'pending',
+            cliInvocationId: null,
+            dispatchPrompt: originalPrompt,
+            attempts: 1,
+          });
+          await db
+            .update(schema.integrationConnections)
+            .set({ status: 'connected' })
+            .where(eq(schema.integrationConnections.id, w.moduleConnectionId));
+          if (hold === 'runtime') h.runtimePark = true;
+          else markModuleSchemaUnready('fx');
+          await tick();
+          const held = await rowOf(w.taskId);
+          expect(held.status).toBe('pending');
+          expect(held.waitingStartedAt).toEqual(parked.waitingStartedAt);
+          expect(held.carriedIdleMs).toBe(parked.carriedIdleMs);
+          if (hold === 'schema') {
+            // Assert the visible state before any assertion about new implementation fields.
+            expect(
+              deriveSlotWait({
+                taskStatus: 'running',
+                currentStepId: id,
+                currentRound: 0,
+                steps: [held],
+                queuedInvocationStepRowIds: new Set(),
+                paused: false,
+                nowMs: Date.now(),
+              })?.kind,
+            ).toBe('module');
+            expect(held.statusMessage).toContain('schema is being set up');
+          } else expect(held.statusMessage).toContain('free runtime slot');
+          h.runtimePark = false;
+          markModuleSchemaReady('fx');
+          await tick();
+          // On old source the runtime park erases continuation identity: this is skipped,
+          // the task moves to its tail, and the follow-up reservation is stranded.
+          expect((await rowOf(w.taskId)).status).toBe('waiting_cli');
+          expect(shouldRun).toHaveBeenCalledTimes(entryCalls);
+          const runs = await runsOf(db, w.taskId);
+          expect(runs).toHaveLength(2);
+          const follow = runs.find((r) => r.id !== first.id)!;
+          expect(follow.prompt).toContain(originalPrompt);
+          expect(follow.integrations).toEqual(first.integrations);
+          expect((await agents()).find((r) => r.agentId === 'follow-up')).toMatchObject({
+            attempts: reserved.attempts,
+            cliInvocationId: follow.id,
+          });
+          expect((await rowOf(w.taskId)).integrationWait).toBeNull();
+          await tick();
+          expect(await runsOf(db, w.taskId)).toHaveLength(2);
+          expect(shouldRun).toHaveBeenCalledTimes(entryCalls);
+        } finally {
+          markModuleSchemaReady('fx');
+          await db.delete(schema.tasks).where(eq(schema.tasks.id, w.taskId));
+          await db
+            .delete(schema.taskTypeDefinitions)
+            .where(eq(schema.taskTypeDefinitions.slug, type));
+        }
+      },
+    );
 
     it('a saved wait with a newly invalid requirement fails by name even while its valid sibling still needs reconnecting', async () => {
       const w = await moduleWorld();

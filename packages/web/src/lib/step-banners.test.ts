@@ -594,3 +594,14 @@ it('a provider death uses its reason only while structural dead state proves it'
     deadBanner({ status: 'cancelled', deadAt: '2026-11-02T10:00:00Z', deadReason: reason }, []),
   ).toBeNull();
 });
+
+it('a continuation with no active integration cause displays the current hold copy', () => {
+  const held = step({
+    waitingStartedAt: '2026-11-02T10:00:00Z',
+    statusMessage: 'Module fx schema is being set up.',
+    integrationWait: { causes: [] },
+  });
+  expect(parkBanner(held, { taskEnded: false })).toEqual({
+    text: 'Module fx schema is being set up.',
+  });
+});
