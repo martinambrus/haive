@@ -519,15 +519,6 @@ In redis-factory.ts:18-27, `maxRetriesPerRequest: null` plus `enableOfflineQueue
 
 Engineering scope derived from the accepted policy (2026-11-01), not a new owner decision: Apply bounded configuration reads and explicit retryable/unavailable failures. Preserve existing fail-closed new-work/maintenance fences; Redis unavailability must not silently bypass them.
 
-### T356 · J6c · create gate for required integration categories + GET /tasks/integration-preview
-
-status: taken · owner: codex-queue@DESKTOP-IUBG9OP · last: 2026-11-02T12:01Z · was modular #187 · priority: P2
-Plan J6.
-
-Execution bundle T356/T357: one complete task-integration admission feature (read-only preview + transactional required-category/choice handling + New Task picker and prompt-step integration authoring). Focused checks per part; one fresh complete-feature review/full-suite cadence. Excludes parked provider pins T358, reconnect parking T332, composer install-state overview T333 and mobile header T530. T359 corrected state reasons deliver separately; generic reason compatibility preserved.
-
-Progress 2026-11-02T12:01Z: PR #994 exact866: fresh native reviews, full shared/API/web and actual PostgreSQL19 pass; hosted Codex clean. All CI passed except one existing Playwright legacy request-body assertion, now under bounded required fix2. No empty choices should be added to unchanged requests. Browser acceptance and delivery gates remain open.
-
 ### T357 · J6d · web: New Task integration picker + composer Integrations section
 
 status: taken · owner: codex-queue@DESKTOP-IUBG9OP · last: 2026-11-02T12:01Z · was modular #188 · priority: P2
@@ -1413,6 +1404,8 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
 ## Done
+
+- T356 — required integration create admission and read-only preview — PR #994 (0d5de5bc6c), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41444429959 green; actual browser New Task and existing type editor1280/768/390 passed, all6 screenshots inspected; pending/required admission, explicit unavailable account clear/draft preservation and integration-only raw repair PATCH checked with0 forwarded mutations; authenticated deployed preview200 and actualPG19/source-load checks green. Evidence .claude/tmp/codex-run/queue-exec-20261101/T356-T357/.
 
 - T359 — preserve module provider resolution reasons and core-category compatibility — PR #993 (e0ed6fba7b), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41430501569 green; real scratch PostgreSQL live state/ownership acceptance and unchanged C7b34 passed; deployed API/worker resolver checks pass with synthetic contexts; appactivityunchanged. Evidence .claude/tmp/codex-run/queue-exec-20261101/T359/.
 
