@@ -279,6 +279,10 @@ export function resolveTarget(ctx: ResolverContext, target: ResolverTarget): Tar
     if (picked?.kind === 'selected') return finish(picked.connection, 'task');
     if (picked?.kind === 'blocked')
       return unresolved(picked.reason, picked.providerId, null, usableIds);
+    // An absent account cannot establish a provider for an unserved core category.
+    // Own missing-module bindings already stopped above with their specific reason.
+    if (providers.length === 0 && category !== null && parseCategoryId(category)?.kind !== 'module')
+      return unresolved('no-provider', null, null, []);
     return unresolved('needs-choice', choice.providerId, null, usableIds);
   }
 

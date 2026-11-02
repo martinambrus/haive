@@ -160,6 +160,41 @@ describe('the precedence of the tiers', () => {
 });
 
 describe('every unresolved reason', () => {
+  it.each(['mail', 'unknown-core'])(
+    'keeps an unserved %s category unknown despite an unbound or absent choice',
+    (category) => {
+      for (const connectionId of [null, 'removed', 'foreign', 'shared']) {
+        const context = docsCtx({
+          choices: picked(category, 'ghost', connectionId),
+          connections: [
+            conn('foreign', 'ghost', { ownerUserId: B }),
+            conn('shared', 'ghost', { scope: 'shared' }),
+          ],
+        });
+        expect(resolveTarget(context, { category })).toMatchObject({
+          status: 'unresolved',
+          reason: 'no-provider',
+          providerId: null,
+          connectionId: null,
+          candidates: [],
+        });
+      }
+    },
+  );
+
+  it('retains an own missing-module binding as evidence for an otherwise unserved core category', () => {
+    const providerId = 'module.fx.crm';
+    const connection = conn('own-module', providerId);
+    for (const tier of [
+      { choices: picked('mail', providerId, connection.id) },
+      { grants: new Map([['mail', connection.id]]) },
+    ]) {
+      expect(
+        resolveTarget(docsCtx({ connections: [connection], ...tier }), { category: 'mail' }),
+      ).toMatchObject({ reason: 'provider-missing', providerId });
+    }
+  });
+
   it('no-provider: nothing registered fills the category', () => {
     const r = unresolved(resolveTarget(ctx(), { category: 'chat' }));
     expect(r).toMatchObject({ reason: 'no-provider', providerId: null, connectionId: null });

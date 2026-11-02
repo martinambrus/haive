@@ -285,7 +285,9 @@ including a sticky grant. A provider-pinned target gets the same reasons even wi
 A module category's registered declaration supplies its deactivation state even when no provider
 serves it; a module-grammar category no longer declared or served answers `provider-missing`.
 A choice without an account still asks `needs-choice`, and a missing or foreign account is still
-absent. An own persisted choice or grant supplies evidence for a missing provider's category without
+absent. An unserved core category retains `no-provider` for an unbound or absent choice; only an
+own missing-module account binding supplies evidence for its specific `provider-missing` reason.
+An own persisted choice or grant supplies evidence for a missing provider's category without
 inventing a spec or offering that account as a candidate. Unknown core ids remain `no-provider`.
 Soft tiers skip module providers with `provider-deactivated` or `provider-missing` in `skipped.why`
 and keep their fallback; when all owned accounts' registered providers are blocked for the same
