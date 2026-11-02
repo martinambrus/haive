@@ -104,9 +104,9 @@ COPY --from=own /app/packages/web/src/generated/modules.json ./packages/web/modu
   }`;
 }
 
-function run(cmd, args) {
-  const result = spawnSync(cmd, args, { stdio: 'inherit', timeout: 1_800_000 });
-  if (result.status !== 0) throw new Error(`${cmd} failed (${result.signal ?? result.status})`);
+function runDocker(args) {
+  const result = spawnSync('docker', args, { stdio: 'inherit', timeout: 1_800_000 });
+  if (result.status !== 0) throw new Error(`docker failed (${result.signal ?? result.status})`);
 }
 
 export function main() {
@@ -136,7 +136,7 @@ export function main() {
     );
     writeFileSync(join(dir, 'Dockerfile'), buildDockerfile(plan));
     for (const host of ['api', 'worker', ...(plan.rebuildWeb ? ['web'] : [])]) {
-      run('docker', ['build', '--target', host, '-t', plan.outputImages[host], dir]);
+      runDocker(['build', '--target', host, '-t', plan.outputImages[host], dir]);
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
