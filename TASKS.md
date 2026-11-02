@@ -519,8 +519,10 @@ Progress 2026-11-02T14:38Z: approved bounded module category lists/admin provide
 
 ### T361 · I6f · purge of a provider module deletes its integration rows and reports counts
 
-status: open · was modular #196 · priority: P2
+status: taken · owner: codex-queue@DESKTOP-IUBG9OP · since: 2026-11-02T15:21Z · last: 2026-11-02T15:21Z · was modular #196 · priority: P2
 DECIDED 2026-10-23: delete only that module's rows and show the counts in the confirmation.
+
+Progress 2026-11-02T15:21Z: approved module-owned integration cleanup and confirmation counts; bounded transaction/ownership controls, no live purge. Prior drivers quiescent; T332 hosted review/CI and T360 candidate gates continue.
 
 ### T364 · FNF[test-coverage-gaps] · optional coverage controls after correctness and test-hygiene splits
 
