@@ -404,7 +404,9 @@ if existing_state; then
 fi
 
 preflight
-[ "$CHECK_ONLY" -eq 0 ] || { say ""; say "--check: nothing was installed."; exit 0; }
+if [ "$CHECK_ONLY" -eq 1 ] && [ "$CHANNEL" = "public" ]; then
+  say ""; say "--check: nothing was installed."; exit 0
+fi
 
 
 
@@ -421,6 +423,13 @@ if [ "$CHANNEL" = "public" ]; then
 curl -fsSL -o /dev/null "$MANIFEST_URL" 2>/dev/null \
   || die "release ${TAG} has no published manifest at ${MANIFEST_URL}.
        Check the version, or list what exists: https://github.com/${REPO}/releases"
+fi
+if [ "$CHECK_ONLY" -eq 1 ]; then
+  read_channel_manifest
+  say "  Channel           $CHANNEL ($CHANNEL_REGISTRY)"
+  say "  manifest          verified for $PINNED"
+  say "--check: nothing was installed."
+  exit 0
 fi
 say "  manifest          found"
 

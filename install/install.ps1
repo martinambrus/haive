@@ -295,7 +295,7 @@ an install named '$InstallId' already has data on this machine.
 }
 
 Test-Preflight
-if ($Check) { Write-Host ""; Write-Host "-Check: nothing was installed."; exit 0 }
+if ($Check -and $Channel -ceq 'public') { Write-Host ""; Write-Host "-Check: nothing was installed."; exit 0 }
 
 
 
@@ -310,6 +310,15 @@ Write-Note "resolved          $pinned  (tag $tag)"
 if ($Channel -ceq 'public') {
 try { Invoke-WebRequest -Uri "$Releases/$tag/release.json" -UseBasicParsing -Method Head | Out-Null }
 catch { Die "release $tag has no published manifest.`n       Check the version, or list what exists: https://github.com/$Repo/releases" }
+}
+if ($Check) {
+  try { $null = Read-ChannelManifest }
+  catch { Die $_.Exception.Message }
+  finally { if ($ChannelScratch) { Remove-Item -LiteralPath $ChannelScratch -Recurse -Force } }
+  Write-Note "Channel           $Channel ($ChannelRegistry)"
+  Write-Note "manifest          verified for $pinned"
+  Write-Host "-Check: nothing was installed."
+  exit 0
 }
 Write-Note "manifest          found"
 
