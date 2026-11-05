@@ -715,6 +715,7 @@ test('control: a record without builder refuses before gates or pushes', async (
     },
   });
   assert.equal(await f.invoke(['--dry-run']), 2, f.logs.join('\n'));
+  assert.match(f.logs.join('\n'), /record has no builder \(schema 1\); rebuild the channel/);
   assert.deepEqual(f.attempted, []);
   assert.equal(f.bootCalls.length, 0);
 });

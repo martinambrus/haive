@@ -276,7 +276,16 @@ for (const [label, config] of [
     'wrong schema',
     {
       editRecord: (r) => {
+        r.schema = 3;
+      },
+    },
+  ],
+  [
+    'schema 2 without builder',
+    {
+      editRecord: (r) => {
         r.schema = 2;
+        delete r.images.builder;
       },
     },
   ],

@@ -269,8 +269,12 @@ export async function run(
     for (const ref of confirmations)
       if (!Object.values(destinations).includes(ref))
         throw new Error('--confirm-absent is not a destination');
+    if (!record.images.builder)
+      throw new Error(
+        `record has no builder (schema ${record.schema}); rebuild the channel with build-channel`,
+      );
     for (const host of ['api', 'worker', 'builder'])
-      if (!record.images[host]?.built) throw new Error(`record ${host} must be built`);
+      if (!record.images[host].built) throw new Error(`record ${host} must be built`);
     if (!record.images.web.built) {
       const pinned = record.images.web.repoDigest;
       const at = typeof pinned === 'string' ? pinned.lastIndexOf('@') : -1;
@@ -389,7 +393,7 @@ export async function run(
       record.tag,
       '--channel',
       record.channel,
-      ...KEYS.flatMap((host) => [`--${host}`, images[host]]),
+      ...['api', 'worker', 'web'].flatMap((host) => [`--${host}`, images[host]]),
     ]);
     const generated = JSON.parse(result.stdout);
     const manifest = parseReleaseManifest({
