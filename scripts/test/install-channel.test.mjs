@@ -102,7 +102,8 @@ function fixture(
   };
   const invoke = (file, args) => {
     const childEnv = { ...env, EXPECT_CHANNEL: file === script ? env.EXPECT_CHANNEL : '0' };
-    if (lang === 'sh') return spawnSync('sh', [file, ...args], { env: childEnv, encoding: 'utf8' });
+    if (lang === 'sh')
+      return spawnSync('sh', [file, ...args], { cwd: root, env: childEnv, encoding: 'utf8' });
     // Windows-only host probes/downloads are replaced; all installer and generated helper code runs.
     const wrapper = join(root, 'invoke.ps1');
     writeFileSync(
@@ -111,6 +112,7 @@ function fixture(
     );
     if (hostPwsh)
       return spawnSync('pwsh', ['-NoProfile', '-File', wrapper], {
+        cwd: root,
         env: { ...childEnv, USERPROFILE: '/tmp' },
         encoding: 'utf8',
       });
@@ -142,6 +144,8 @@ function fixture(
         'never',
         '--network',
         'none',
+        '--workdir',
+        root,
         '--user',
         `${process.getuid()}:${process.getgid()}`,
         '-v',
@@ -263,6 +267,34 @@ for (const lang of ['sh', 'ps1']) {
         }
       });
   }
+  for (const pathForm of ['relative dot', 'interior dot', 'trailing slash', 'space'])
+    check(`normalised config path: ${pathForm}`, () => {
+      const f = fixture(lang);
+      const target = join(f.root, pathForm === 'space' ? 'with space' : 'x');
+      const dir =
+        pathForm === 'relative dot'
+          ? './x'
+          : pathForm === 'interior dot'
+            ? `${f.root}/./x`
+            : pathForm === 'trailing slash'
+              ? `${target}/`
+              : target;
+      try {
+        const r = f.install([f.flag('dir'), dir]);
+        assert.equal(r.status, 0, r.stdout + r.stderr);
+        const e = readFileSync(join(target, '.env'), 'utf8');
+        assert.equal(
+          e.split('\n').find((x) => x.startsWith('DOCKER_CONFIG=')),
+          `DOCKER_CONFIG=${join(target, '.docker')}`,
+        );
+        assert.equal(
+          e.split('\n').find((x) => x.startsWith('HAIVE_INSTALL_DIR_HOST=')),
+          `HAIVE_INSTALL_DIR_HOST=${target}`,
+        );
+      } finally {
+        f.clean();
+      }
+    });
   check('channel flags, private config and pinned env', () => {
     const f = fixture(lang);
     try {

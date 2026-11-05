@@ -437,6 +437,15 @@ say "  manifest          found"
 : "${INSTALL_DIR:=${HOME:-.}/${INSTALL_ID}}"
 case "$INSTALL_DIR" in /*) ;; *) INSTALL_DIR="$(pwd)/$INSTALL_DIR" ;; esac
 
+if [ "$CHANNEL" != "public" ]; then
+  # Match path.join's lexical form without requiring the destination to exist.
+  # Parent traversal is refused below rather than resolving it through possible symlinks.
+  INSTALL_DIR=$(printf '%s\n' "$INSTALL_DIR" | awk -F/ '{
+    out=""; for (i=1; i<=NF; i++) if ($i!="" && $i!=".") out=out "/" $i
+    print out=="" ? "/" : out
+  }')
+fi
+
 if [ -e "$INSTALL_DIR" ] && [ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null || true)" ]; then
   if [ -f "$INSTALL_DIR/.env" ]; then
     die "$INSTALL_DIR already holds a Haive install.

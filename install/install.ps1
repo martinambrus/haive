@@ -347,6 +347,7 @@ if ($Check) {
 Write-Note "manifest          found"
 
 if (-not $Dir) { $Dir = Join-Path $env:USERPROFILE $InstallId }
+# Collapse relative and /./ segments before deriving the updater credential path.
 $Dir = [System.IO.Path]::GetFullPath($Dir)
 
 if ((Test-Path $Dir) -and (Get-ChildItem -Force $Dir | Measure-Object).Count -gt 0) {
