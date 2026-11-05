@@ -109,3 +109,27 @@ it('does not expose secret-bearing Compose errors', async () => {
     /^could not resolve install image settings with Docker Compose; check .env syntax and Compose availability$/,
   );
 });
+
+it('keeps Docker transport --config explicit while clearing new install interpolation keys', async () => {
+  const values = {
+    HAIVE_CHANNEL: 'acme',
+    HAIVE_CHANNEL_REGISTRY: 'private/customer',
+    DOCKER_CONFIG: '/install/.docker',
+  };
+  for (const key of Object.keys(values)) vi.stubEnv(key, 'ambient-' + key);
+  vi.stubEnv('DOCKER_CONFIG', '/ambient-credentials');
+  const stdin = { on: vi.fn(), end: vi.fn() };
+  vi.mocked(execFile).mockImplementation((...args: unknown[]) => {
+    const callback = args.at(-1) as (error: Error | null, stdout: string) => void;
+    queueMicrotask(() =>
+      callback(null, JSON.stringify({ services: { settings: { environment: values } } })),
+    );
+    return { stdin } as unknown as ChildProcess;
+  });
+  expect(await resolveImageSettings('/install/.env', Object.keys(values))).toEqual(values);
+  const [, argv, options] = vi.mocked(execFile).mock.calls[0]!;
+  expect(argv?.slice(0, 3)).toEqual(['--config', '/ambient-credentials', 'compose']);
+  const env = (options as { env: NodeJS.ProcessEnv }).env;
+  for (const key of Object.keys(values)) expect(env).not.toHaveProperty(key);
+  expect(process.env.DOCKER_CONFIG).toBe('/ambient-credentials');
+});

@@ -1,3 +1,9 @@
+import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { readFileNoFollow } from '@haive/shared/fs-safe';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { CONTAINER_FAMILY, containerName } from '@haive/shared/naming';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, resolve } from 'node:path';
@@ -56,7 +62,17 @@ function composeArgs(ctx: ComposeContext, rest: string[]): string[] {
 
 /** Image references present on this daemon. Used by preflight to prove a rollback has somewhere to
  *  go back to before anything is touched. */
-export async function localImages(): Promise<string[]> {
+export async function localImages(includeDigests = false): Promise<string[]> {
+  if (includeDigests) {
+    const out = await run('docker', [
+      'image',
+      'ls',
+      '--digests',
+      '--format',
+      '{{.Repository}}:{{.Tag}}\t{{.Repository}}@{{.Digest}}',
+    ]);
+    return [...new Set(out.split(/\s+/).filter((ref) => ref && !ref.includes('<none>')))];
+  }
   const out = await run('docker', ['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}']);
   return out.split('\n').filter(Boolean);
 }
@@ -180,6 +196,7 @@ export async function buildOwnModules(
   image: string,
   sourceHostDir: string,
   plan: Record<string, unknown>,
+  dockerConfigHostDir?: string,
 ): Promise<void> {
   await run('docker', ['pull', image], undefined, 1_800_000);
   await run(
@@ -193,6 +210,16 @@ export async function buildOwnModules(
       `type=bind,src=${sourceHostDir},dst=/input,readonly`,
       '-e',
       `HAIVE_BUILD_PLAN=${JSON.stringify(plan)}`,
+      ...(dockerConfigHostDir
+        ? [
+            '--mount',
+            `type=bind,src=${dockerConfigHostDir},dst=/run/haive-docker-config,readonly`,
+            '-e',
+            'DOCKER_CONFIG=/run/haive-docker-config',
+            '-e',
+            'BUILDX_CONFIG=/tmp/buildx',
+          ]
+        : []),
       image,
     ],
     undefined,
@@ -223,6 +250,10 @@ export async function resolveImageSettings(
       const child = execFile(
         'docker',
         [
+          // Keep Docker's transport config explicit while clearing interpolation precedence.
+          ...(keys.includes('DOCKER_CONFIG') && process.env.DOCKER_CONFIG
+            ? ['--config', process.env.DOCKER_CONFIG]
+            : []),
           'compose',
           '--project-name',
           'updater-settings',
@@ -259,5 +290,31 @@ export async function resolveImageSettings(
     throw new Error(
       'could not resolve install image settings with Docker Compose; check .env syntax and Compose availability',
     );
+  }
+}
+
+/** Pull even when cached: revoked credentials and missing remote tags must refuse preflight. */
+export async function readReleaseManifestImage(image: string): Promise<string> {
+  await run('docker', ['pull', image], undefined, 1_800_000);
+  const dir = await mkdtemp(join(tmpdir(), 'updater-release-'));
+  const name = containerName(CONTAINER_FAMILY.upgrade, 'manifest', randomUUID());
+  let id = name;
+  try {
+    // A scratch release image has no CMD. This command is never executed.
+    id = await run('docker', ['create', '--name', name, image, '/unused']);
+    const file = join(dir, 'release.json');
+    await run('docker', ['cp', `${id}:/release.json`, file]);
+    const read = await readFileNoFollow(dir, 'release.json', {
+      strict: true,
+      maxBytes: 1024 * 1024,
+    });
+    if (!read || read.truncated) throw new Error('release manifest is missing or too large');
+    return read.data.toString('utf8');
+  } finally {
+    try {
+      await run('docker', ['rm', '-f', id]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   }
 }

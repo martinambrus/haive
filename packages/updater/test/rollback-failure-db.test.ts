@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import postgres, { type Sql } from 'postgres';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -60,7 +61,8 @@ describe.skipIf(!url)(
       exitCode = undefined;
       process.argv = [
         'node',
-        'cli.js',
+        // The entry guard runs main only when argv[1] resolves to this module.
+        fileURLToPath(new URL('../src/cli.ts', import.meta.url)),
         '--install-dir',
         dir,
         '--manifest',

@@ -446,8 +446,8 @@ nothing unless it exits 0.
   not the working tree, so `migrationHead` and `contracts` describe the tagged tree. `images` hold pinned
   `<repository>@sha256:<digest>` refs, because a channel's images live in channel-named repositories a bare
   digest cannot be pulled from. `images.builder` is optional in the schema and set only by a channel publish;
-  the public manifest has none. The updater does not read `images` yet (`packages/updater/src/images.ts`
-  composes refs from the version).
+  the public manifest has none. A public updater ignores `images` and composes refs from the version; a
+  channel install upgrades to exactly these pins (see "Upgrading a channel install").
 - Manifest image: `haive-<channel>-release:<version>` is `FROM scratch` with one file, `/release.json`
   (byte-identical to the local file), and the label `org.haive.release=1`. Its build context is a fresh
   scratch directory holding only that file and the Dockerfile. It gets the same absence proof,
@@ -476,6 +476,37 @@ nothing unless it exits 0.
   concurrent publishers of one version can race; only registry-side tag immutability closes that. The script
   imports `packages/shared/src/release/manifest.ts`, so it needs the repository's installed dependencies and
   a Node with type stripping.
+
+### Upgrading a channel install
+
+A channel install's `.env` holds `HAIVE_CHANNEL`, `HAIVE_CHANNEL_REGISTRY`, `DOCKER_CONFIG=<install>/.docker`
+and the three `HAIVE_{API,WORKER,WEB}_IMAGE` pins. Absent or `public` means a public install, whose upgrade path
+is unchanged. `HAIVE_REGISTRY` stays the public registry: the updater image and the stock services are not
+per-customer.
+
+- Trigger: the admin page's POST /upgrade passes `--channel <c>`,
+  `--manifest-image ${HAIVE_CHANNEL_REGISTRY}/haive-<c>-release:<version>`, `-e DOCKER_CONFIG=/install/.docker`
+  and `-e HAIVE_INSTALL_DIR_HOST`, names only, never a token. It refuses a channel or registry that fails the
+  build-channel CHANNEL/PREFIX rules. GET /upgrade reports `channel`. `docker-compose.run.yml` passes the three
+  keys to the api.
+- Credential: the updater applies the install `DOCKER_CONFIG` to its own docker calls before recovery and
+  the manifest read, and again after re-reading `.env` under the lock. It must equal `<host install dir>/.docker` (refused otherwise), translated to
+  `/install/.docker` inside the api-launched container. The own-module builder gets that directory mounted
+  read-only plus `BUILDX_CONFIG=/tmp/buildx`, because buildx refuses a read-only `$DOCKER_CONFIG/buildx`
+  (MEASURED: `mkdir ...: read-only file system`). A public install's docker calls see no change.
+- Manifest: `--manifest-image` and `--manifest` are exclusive, and a channel install requires the image (with
+  `--version`); argv errors exit 2. A run with no target still finishes an interrupted upgrade first. The image must be `${HAIVE_CHANNEL_REGISTRY}/haive-<channel>-release:`; the
+  updater reads `/release.json` by `docker create` + `docker cp` + `docker rm -f` of a temp container, removed on
+  every path, through `readFileNoFollow` with a 1 MiB cap. A manifest whose `channel` or `version` differs, or an
+  image that cannot be pulled, refuses. There is no public fallback.
+- Images: without own modules the overrides are the manifest's pinned api/worker/web; with own modules the base
+  images and the builder come from the manifest, and a manifest without `builder` refuses. Every pin must be in
+  `${HAIVE_CHANNEL_REGISTRY}/haive-<channel>-<host>`. The `.env` settings are re-read under the upgrade lock, so
+  the journal's previous images are the ones in force; a channel install with no current pins refuses
+  (`rollback-images-missing`). Rollback inventory lists digests for a channel install, so digest pins pass
+  preflight.
+- `--dry-plan` (channel installs only) prints the computed image plan from the manifest and touches no database.
+- Revocation: the vendor revokes the token; the next pull fails closed and the running stack keeps running.
 
 ## Own modules on a published install
 

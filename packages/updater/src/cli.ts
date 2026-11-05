@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import postgres from 'postgres';
 import { configService, networkName } from '@haive/shared';
 import { parseReleaseManifest, type ReleaseManifest } from '@haive/shared/release';
@@ -21,11 +23,14 @@ import {
 } from './run.js';
 import { decideResume } from './phases.js';
 import {
+  channelImagePlan,
   imageFor,
   journalImages,
   prepareImages,
   readImageOverrides,
   readImageSettings,
+  requireChannelRegistry,
+  type ImageSettings,
 } from './images.js';
 
 /**
@@ -59,11 +64,65 @@ function emit(event: string, fields: Record<string, unknown> = {}): void {
   console.log(JSON.stringify({ t: new Date().toISOString(), event, ...fields }));
 }
 
-async function loadManifest(source: string): Promise<ReleaseManifest> {
-  const text = /^https?:\/\//.test(source)
-    ? await (await fetch(source)).text()
-    : await readFile(source, 'utf8');
-  return parseReleaseManifest(JSON.parse(text));
+/** Match scripts/build-channel.mjs; an unset install channel means public. */
+export function resolveChannel(requested: string | undefined, installed: string): string {
+  const channel = installed || 'public';
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(channel))
+    throw new Error('invalid install channel');
+  if (requested !== undefined && requested !== channel)
+    throw new Error('--channel disagrees with install HAIVE_CHANNEL');
+  return channel;
+}
+
+/** Set before recovery and manifest pulls, and again after the post-lock re-read; every Docker subprocess inherits it. */
+export function applyInstallDockerConfig(
+  settings: Pick<ImageSettings, 'HAIVE_CHANNEL' | 'DOCKER_CONFIG'>,
+  installDir: string,
+  // Required, never defaulted: a default would re-read the env a previous call overwrote.
+  launchDockerConfig: string | undefined,
+): void {
+  if (!settings.HAIVE_CHANNEL || settings.HAIVE_CHANNEL === 'public') return;
+  if (!settings.DOCKER_CONFIG?.startsWith('/') || settings.DOCKER_CONFIG.includes(','))
+    throw new Error('channel install requires an absolute DOCKER_CONFIG in .env');
+  // The API mounts the host install at /install and explicitly supplies this translation. Judged by
+  // the value this process was launched with, since a previous call overwrites the env.
+  const mounted = installDir === '/install' && launchDockerConfig === '/install/.docker';
+  const hostInstallDir = mounted ? process.env.HAIVE_INSTALL_DIR_HOST : installDir;
+  if (!hostInstallDir?.startsWith('/') || hostInstallDir.includes(','))
+    throw new Error('channel updater requires an absolute HAIVE_INSTALL_DIR_HOST');
+  if (settings.DOCKER_CONFIG !== join(hostInstallDir, '.docker'))
+    throw new Error('channel install DOCKER_CONFIG must be <host install dir>/.docker');
+  process.env.DOCKER_CONFIG = mounted ? join(installDir, '.docker') : settings.DOCKER_CONFIG;
+}
+
+export async function loadManifest(options: {
+  manifest?: string;
+  manifestImage?: string;
+  channelRegistry?: string;
+  channel: string;
+  version?: string;
+}): Promise<ReleaseManifest> {
+  const { manifest: source, manifestImage: image, channel, version } = options;
+  if (source && image) throw new Error('--manifest and --manifest-image are mutually exclusive');
+  if (channel !== 'public' && !image) throw new Error('channel installs require --manifest-image');
+  if (image && !version) throw new Error('--manifest-image requires --version <target>');
+  if (!source && !image)
+    throw new Error('--manifest <url|path> or --manifest-image <ref> is required');
+  if (channel !== 'public') {
+    const registry = requireChannelRegistry(options.channelRegistry ?? '');
+    if (!image!.startsWith(`${registry}/haive-${channel}-release:`))
+      throw new Error('manifest image release repository differs from install channel registry');
+  }
+  const text = image
+    ? await dk.readReleaseManifestImage(image)
+    : /^https?:\/\//.test(source!)
+      ? await (await fetch(source!)).text()
+      : await readFile(source!, 'utf8');
+  const target = parseReleaseManifest(JSON.parse(text));
+  if (target.channel !== channel) throw new Error('manifest channel differs from install channel');
+  if (version !== undefined && target.version !== version)
+    throw new Error('manifest version differs from requested target version');
+  return target;
 }
 
 /** A rollback that throws has not undone the upgrade, so the run stays `running` for the next
@@ -87,10 +146,18 @@ async function rollbackFailed(ctx: UpgradeContext, err: unknown): Promise<number
   return EXIT.rollbackFailed;
 }
 
-async function main(): Promise<number> {
+export async function main(): Promise<number> {
+  if (flag('manifest') && flag('manifest-image')) {
+    emit('error', { message: '--manifest and --manifest-image are mutually exclusive' });
+    return EXIT.usage;
+  }
+  if (arg('manifest-image') && !arg('version')) {
+    emit('error', { message: '--manifest-image requires --version <target>' });
+    return EXIT.usage;
+  }
   const databaseUrl = process.env.DATABASE_URL;
   const redisUrl = process.env.REDIS_URL;
-  if (!databaseUrl || !redisUrl) {
+  if ((!databaseUrl || !redisUrl) && !flag('dry-plan')) {
     emit('error', { message: 'DATABASE_URL and REDIS_URL are required' });
     return EXIT.usage;
   }
@@ -119,9 +186,45 @@ async function main(): Promise<number> {
     files: ['docker-compose.yml', 'docker-compose.run.yml'],
   };
 
-  const sql = postgres(databaseUrl, { max: 1, max_lifetime: 0 });
+  let imageSettings = await readImageSettings(envFile);
+  const channel = resolveChannel(arg('channel'), imageSettings.HAIVE_CHANNEL);
+  const manifestOptions = {
+    manifest: arg('manifest'),
+    manifestImage: arg('manifest-image'),
+    channelRegistry: imageSettings.HAIVE_CHANNEL_REGISTRY,
+    channel,
+    version: arg('version'),
+  };
+  // Recovery needs no target, so a missing one is refused only where a target is read.
+  const missingTarget = (): string | undefined =>
+    channel !== 'public' && !manifestOptions.manifestImage
+      ? 'channel installs require --manifest-image'
+      : !manifestOptions.manifest && !manifestOptions.manifestImage
+        ? '--manifest <url|path> or --manifest-image <ref> is required'
+        : undefined;
+  const launchDockerConfig = process.env.DOCKER_CONFIG;
+  applyInstallDockerConfig(imageSettings, installDir, launchDockerConfig);
+
+  // The dry plan reads no journal. Normal starts recover an interrupted run before fetching a target.
+  if (flag('dry-plan')) {
+    if (channel === 'public') throw new Error('--dry-plan requires a channel install');
+    const usage = missingTarget();
+    if (usage) {
+      emit('error', { message: usage });
+      return EXIT.usage;
+    }
+    const channelTarget = await loadManifest(manifestOptions);
+    emit('image-plan', {
+      channel,
+      version: channelTarget.version,
+      ...channelImagePlan(channelTarget.version, imageSettings, channelTarget.images),
+    });
+    return EXIT.ok;
+  }
+
+  const sql = postgres(databaseUrl!, { max: 1, max_lifetime: 0 });
   try {
-    await configService.initialize(redisUrl);
+    await configService.initialize(redisUrl!);
     await ensureJournal(sql);
 
     // One upgrade at a time. The lock guards concurrency; the journal's partial unique index is
@@ -130,6 +233,12 @@ async function main(): Promise<number> {
       emit('error', { message: 'another upgrade holds the lock' });
       return EXIT.busy;
     }
+
+    // A preceding upgrader may have changed the pins while this run waited for the lock.
+    imageSettings = await readImageSettings(envFile);
+    resolveChannel(channel, imageSettings.HAIVE_CHANNEL);
+    manifestOptions.channelRegistry = imageSettings.HAIVE_CHANNEL_REGISTRY;
+    applyInstallDockerConfig(imageSettings, installDir, launchDockerConfig);
 
     const fromVersion = (await readEnvVar(envFile, 'HAIVE_VERSION')) ?? 'unknown';
     const live = await findLiveRun(sql);
@@ -171,22 +280,30 @@ async function main(): Promise<number> {
       return EXIT.ok;
     }
 
-    const manifestSource = arg('manifest');
-    if (!manifestSource) {
-      emit('error', { message: '--manifest <url|path> is required' });
+    const usage = missingTarget();
+    if (usage) {
+      emit('error', { message: usage });
       return EXIT.usage;
     }
-    const target = await loadManifest(manifestSource);
+    const target = await loadManifest(manifestOptions);
 
-    const imageSettings = await readImageSettings(envFile);
+    if (channel !== 'public') channelImagePlan(target.version, imageSettings, target.images);
+
     const previousImages = await readImageOverrides(envFile, imageSettings);
+    if (channel !== 'public' && Object.values(previousImages).every((ref) => !ref)) {
+      emit('refused', {
+        refusal: 'rollback-images-missing',
+        message: 'channel install has no pinned current images',
+      });
+      return EXIT.refused;
+    }
     const currentImages = (['api', 'worker', 'web'] as const).map((s) =>
       imageFor(s, fromVersion, registry, previousImages),
     );
     const check = preflight({
       currentVersion: fromVersion,
       target,
-      localImages: await dk.localImages(),
+      localImages: await dk.localImages(channel !== 'public'),
       currentImages,
       freeBytes: Number(arg('free-bytes', String(Number.MAX_SAFE_INTEGER))),
       snapshotBytes: Number(arg('snapshot-bytes', '0')),
@@ -199,7 +316,11 @@ async function main(): Promise<number> {
 
     // `--check` stops here, having changed nothing. This is also where a support conversation
     // should begin.
-    if (flag('check')) return EXIT.ok;
+    if (flag('check')) {
+      if (channel !== 'public')
+        emit('image-plan', channelImagePlan(target.version, imageSettings, target.images));
+      return EXIT.ok;
+    }
 
     // Pull BEFORE any hold is applied: a failed pull must cost nothing.
     const targetImages = await prepareImages(
@@ -208,6 +329,7 @@ async function main(): Promise<number> {
       target.version,
       registry,
       imageSettings,
+      channel !== 'public' ? target.images : undefined,
     );
     emit('pulled', { version: target.version });
 
@@ -280,9 +402,15 @@ async function main(): Promise<number> {
   }
 }
 
-try {
-  process.exit(await main());
-} catch (err) {
-  emit('error', { message: err instanceof Error ? err.message : String(err) });
-  process.exit(EXIT.failed);
+if (
+  process.argv[1] &&
+  (await realpath(process.argv[1]).catch(() => undefined)) ===
+    (await realpath(fileURLToPath(import.meta.url)))
+) {
+  try {
+    process.exit(await main());
+  } catch (err) {
+    emit('error', { message: err instanceof Error ? err.message : String(err) });
+    process.exit(EXIT.failed);
+  }
 }
