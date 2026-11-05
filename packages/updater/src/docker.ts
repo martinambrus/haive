@@ -216,6 +216,8 @@ export async function buildOwnModules(
             `type=bind,src=${dockerConfigHostDir},dst=/run/haive-docker-config,readonly`,
             '-e',
             'DOCKER_CONFIG=/run/haive-docker-config',
+            '-e',
+            'BUILDX_CONFIG=/tmp/buildx',
           ]
         : []),
       image,

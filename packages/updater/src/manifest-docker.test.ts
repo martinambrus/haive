@@ -64,9 +64,11 @@ it('channel own-module builder receives an install-local credential mount for it
     'type=bind,src=/host/install/.docker,dst=/run/haive-docker-config,readonly',
   );
   expect(args).toContain('DOCKER_CONFIG=/run/haive-docker-config');
+  expect(args).toContain('BUILDX_CONFIG=/tmp/buildx');
   h.exec.mockClear();
   await buildOwnModules('public/builder:1', '/modules', {});
   expect((h.exec.mock.calls[1]![1] as string[]).join(' ')).not.toContain('DOCKER_CONFIG');
+  expect((h.exec.mock.calls[1]![1] as string[]).join(' ')).not.toContain('BUILDX_CONFIG');
 });
 
 it('refuses a copied release.json symlink and still removes the container', async () => {
