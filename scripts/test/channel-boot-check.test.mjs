@@ -571,3 +571,24 @@ else if(args[0]==='logs') {
     }
   });
 }
+
+test('schema 2 validates builder metadata but never boots the builder', async (t) => {
+  const f = fixture(t, {
+    editRecord: (r) => {
+      r.schema = 2;
+      r.images.builder = {
+        ref: 'example.test/haive-test-builder:9.9.9',
+        id: `sha256:${'b'.repeat(64)}`,
+        built: true,
+      };
+    },
+  });
+  assert.equal(await f.check(), 0, f.logs.join('\n'));
+  assert.ok(
+    !f.calls.some(
+      ({ args }) =>
+        args.includes('example.test/haive-test-builder:9.9.9') ||
+        args.includes(`sha256:${'b'.repeat(64)}`),
+    ),
+  );
+});

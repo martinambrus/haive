@@ -263,6 +263,8 @@ export async function run(
     for (const file of [
       'scripts/module.mjs',
       'scripts/gen-modules.mjs',
+      'scripts/own-module-builder.mjs',
+      'docker/own-module-builder/Dockerfile',
       ...['api', 'worker', 'web'].map((host) => `packages/${host}/Dockerfile`),
     ]) {
       let content;
@@ -315,7 +317,7 @@ export async function run(
           );
       }
     };
-    await checkTags(['api', 'worker']);
+    await checkTags(['api', 'worker', 'builder']);
     const moduleEnv = {
       ...childEnv,
       NPM_CONFIG_USERCONFIG: npmrc,
@@ -338,7 +340,7 @@ export async function run(
     const rebuildWeb = modules.some(
       (module) => module.source === 'registry' && module.webParts.length > 0,
     );
-    const hosts = ['api', 'worker', ...(rebuildWeb ? ['web'] : [])];
+    const hosts = ['api', 'worker', 'builder', ...(rebuildWeb ? ['web'] : [])];
     const images = Object.fromEntries(hosts.map((host) => [host, outputImage(host)]));
     if (!rebuildWeb) images.web = `${sourceRegistry}/haive-web:${version}`;
     if (rebuildWeb) await checkTags(['web']);
@@ -382,7 +384,9 @@ export async function run(
           '--build-arg',
           `HAIVE_VERSION=${version}`,
           '--file',
-          join(tree, 'packages', host, 'Dockerfile'),
+          host === 'builder'
+            ? join(tree, 'docker', 'own-module-builder', 'Dockerfile')
+            : join(tree, 'packages', host, 'Dockerfile'),
           '--tag',
           images[host],
           tree,
@@ -461,7 +465,7 @@ export async function run(
     const pending = join(out, `.build-record-${process.pid}.json`);
     try {
       put(pending, {
-        schema: 1,
+        schema: 2,
         tag,
         commit,
         channel,

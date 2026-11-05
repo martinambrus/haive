@@ -10,7 +10,7 @@ const MODULE_PACKAGE = /^(?:@haive\/module-|@haive-module\/)([a-z0-9][a-z0-9-]{0
 export const idOf = (name) => MODULE_PACKAGE.exec(name)?.[1] ?? null;
 
 const USAGE = 'usage: node scripts/channel-gate.mjs --expect <expect.json> --token-file <file>';
-const KEYS = ['api', 'worker', 'web'];
+const KEYS = ['api', 'worker', 'web', 'builder'];
 const WEB_PARTS = ['dashboard', 'web'];
 const IMAGE_REF = /^[A-Za-z0-9][A-Za-z0-9._/:@-]*$/;
 const REGISTRY_PREFIX = '@haive-module+';

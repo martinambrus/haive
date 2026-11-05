@@ -21,12 +21,17 @@ const SHA = '1234567890abcdef1234567890abcdef12345678';
 const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
 
 function seedTree(tree, config = {}) {
-  for (const file of ['scripts/module.mjs', 'scripts/gen-modules.mjs']) {
+  for (const file of [
+    'scripts/module.mjs',
+    'scripts/gen-modules.mjs',
+    'scripts/own-module-builder.mjs',
+  ]) {
     mkdirSync(dirname(join(tree, file)), { recursive: true });
     if (config.missingTool !== file) writeFileSync(join(tree, file), '');
   }
-  for (const host of ['api', 'worker', 'web']) {
-    const file = `packages/${host}/Dockerfile`;
+  for (const host of ['api', 'worker', 'web', 'builder']) {
+    const file =
+      host === 'builder' ? 'docker/own-module-builder/Dockerfile' : `packages/${host}/Dockerfile`;
     mkdirSync(dirname(join(tree, file)), { recursive: true });
     writeFileSync(
       join(tree, file),
@@ -288,6 +293,7 @@ test('archives the resolved tag, adds each entitlement once and round-trips the 
     images: {
       api: 'ghcr.io/martinambrus/haive-acme-api:1.2.3',
       worker: 'ghcr.io/martinambrus/haive-acme-worker:1.2.3',
+      builder: 'ghcr.io/martinambrus/haive-acme-builder:1.2.3',
       web: 'ghcr.io/martinambrus/haive-web:1.2.3',
     },
     modules: [
@@ -306,7 +312,7 @@ test('empty entitlement builds api and worker, uses secrets and stamps, and writ
   const f = fixture(t);
   assert.equal(await f.execute(['--registry', 'registry.example:5000/vendor']), 0);
   const builds = f.calls.filter((c) => c.cmd === 'docker' && c.args[0] === 'buildx');
-  assert.equal(builds.length, 2);
+  assert.equal(builds.length, 3);
   for (const { args } of builds) {
     assert.ok(args.includes('--load'));
     assert.ok(args.includes('--secret'));
@@ -316,11 +322,11 @@ test('empty entitlement builds api and worker, uses secrets and stamps, and writ
   }
   assert.equal(f.expectation.images.web, 'ghcr.io/martinambrus/haive-web:1.2.3');
   const record = JSON.parse(readFileSync(join(f.out, 'build-record.json'), 'utf8'));
-  assert.equal(record.schema, 1);
+  assert.equal(record.schema, 2);
   assert.equal(record.tag, 'v1.2.3');
   assert.equal(record.channel, 'acme');
   assert.deepEqual(record.modules, []);
-  assert.deepEqual(Object.keys(record.images).sort(), ['api', 'web', 'worker']);
+  assert.deepEqual(Object.keys(record.images).sort(), ['api', 'builder', 'web', 'worker']);
   for (const image of Object.values(record.images)) {
     assert.match(image.ref, /:1\.2\.3$/);
     assert.match(image.id, /^sha256:[a-f0-9]{64}$/);
@@ -337,7 +343,7 @@ for (const parts of [['./web'], ['./dashboard'], ['./web', './dashboard']]) {
       exports: Object.fromEntries(['./manifest', ...parts].map((p) => [p, './dist/part.js'])),
     });
     assert.equal(await f.execute(), 0);
-    assert.equal(f.calls.filter((c) => c.cmd === 'docker' && c.args[0] === 'buildx').length, 3);
+    assert.equal(f.calls.filter((c) => c.cmd === 'docker' && c.args[0] === 'buildx').length, 4);
     assert.equal(f.expectation.images.web, 'ghcr.io/martinambrus/haive-acme-web:1.2.3');
     assert.deepEqual(f.expectation.modules[0].webParts, parts.map((p) => p.slice(2)).sort());
   });
@@ -460,7 +466,7 @@ test('rebuilt web skips the stock pull and includes local web parts', async (t) 
 test('stock web expects local statistics dashboard and web parts without forcing a rebuild', async (t) => {
   const f = fixture(t, { local: true });
   assert.equal(await f.execute(), 0);
-  assert.equal(f.calls.filter((c) => c.args[0] === 'buildx').length, 2);
+  assert.equal(f.calls.filter((c) => c.args[0] === 'buildx').length, 3);
   assert.deepEqual(f.expectation.modules, [
     { packageName: '@haive/module-statistics', source: 'local', webParts: ['dashboard', 'web'] },
   ]);
@@ -477,6 +483,8 @@ test('invalid local package id and local/registry collision fail before builds',
 for (const missingTool of [
   'scripts/module.mjs',
   'scripts/gen-modules.mjs',
+  'scripts/own-module-builder.mjs',
+  'docker/own-module-builder/Dockerfile',
   'packages/api/Dockerfile',
   'packages/worker/Dockerfile',
   'packages/web/Dockerfile',
@@ -503,6 +511,7 @@ test('record pins platform, image store, built markers and pulled digest', async
   });
   assert.equal(record.images.api.built, true);
   assert.equal(record.images.worker.built, true);
+  assert.equal(record.images.builder.built, true);
   assert.equal(record.images.web.built, false);
   assert.equal(
     record.images.web.repoDigest,
@@ -647,11 +656,16 @@ test('build commands pin tags, Dockerfiles, context, production target, and orde
   const f = fixture(t, { modules: ['@haive-module/demo@1.0.0'] });
   assert.equal(await f.execute(), 0);
   const builds = f.calls.filter((c) => c.args[0] === 'buildx');
-  for (const [i, host] of ['api', 'worker'].entries()) {
+  for (const [i, host] of ['api', 'worker', 'builder'].entries()) {
     const { args, options } = builds[i];
     const tree = args.at(-1);
     assert.equal(args[args.indexOf('--tag') + 1], f.expectation.images[host]);
-    assert.equal(args[args.indexOf('--file') + 1], join(tree, 'packages', host, 'Dockerfile'));
+    assert.equal(
+      args[args.indexOf('--file') + 1],
+      host === 'builder'
+        ? join(tree, 'docker/own-module-builder/Dockerfile')
+        : join(tree, 'packages', host, 'Dockerfile'),
+    );
     assert.equal(options.cwd, tree);
     assert.equal(args[args.indexOf('--target') + 1], 'production');
     assert.equal(typeof options.onOutput, 'function');
