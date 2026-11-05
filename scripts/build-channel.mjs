@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -215,12 +216,29 @@ export async function run(
     });
     await command('tar', ['-xf', archive, '-C', tree], { quiet: true });
     rmSync(archive);
+    for (const entry of readdirSync(join(tree, 'modules'), { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      let pkg;
+      try {
+        pkg = json(join(tree, 'modules', entry.name, 'package.json'));
+      } catch (error) {
+        if (error.code === 'ENOENT') continue;
+        throw error;
+      }
+      if (typeof pkg.name !== 'string' || idOf(pkg.name) === null)
+        throw new Error(`invalid local module package name in modules/${entry.name}/package.json`);
+      modules.push({
+        packageName: pkg.name,
+        source: 'local',
+        webParts: ['dashboard', 'web'].filter((part) => pkg.exports?.[`./${part}`] !== undefined),
+      });
+    }
     const npmrc = join(scratch, 'npmrc');
     writeFileSync(npmrc, privateNpmrc(tree, token), { mode: 0o600, flag: 'wx' });
     const tokenFile = join(scratch, 'token');
     writeFileSync(tokenFile, token, { mode: 0o600, flag: 'wx' });
     const moduleEnv = { ...childEnv, NPM_CONFIG_USERCONFIG: npmrc, CI: 'true' };
-    for (const module of modules) {
+    for (const module of modules.filter((module) => module.source === 'registry')) {
       const spec = `${module.packageName}@${module.version}`;
       const metadata = await command('pnpm', ['view', spec, 'exports', '--json'], {
         cwd: tree,
@@ -236,7 +254,9 @@ export async function run(
         env: moduleEnv,
       });
     }
-    const rebuildWeb = modules.some((module) => module.webParts.length > 0);
+    const rebuildWeb = modules.some(
+      (module) => module.source === 'registry' && module.webParts.length > 0,
+    );
     const hosts = ['api', 'worker', ...(rebuildWeb ? ['web'] : [])];
     const images = Object.fromEntries(
       hosts.map((host) => [host, `${registry}/haive-${channel}-${host}:${version}`]),
