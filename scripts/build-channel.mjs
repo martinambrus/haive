@@ -112,6 +112,7 @@ export async function run(
 ) {
   let scratch;
   let token;
+  const retainedImages = [];
   const scrub = (text) => (token ? String(text).split(token).join('[token]') : String(text));
   const emit = (text) => {
     if (text) say(scrub(text).trimEnd());
@@ -291,6 +292,12 @@ export async function run(
       if (found.stdout.trim() && !values.replace)
         throw new Error(`local tag ${images[host]} already exists; use --replace to overwrite`);
     }
+    mkdirSync(out, { recursive: true });
+    rmSync(join(out, 'build-record.json'), { force: true });
+    const store = JSON.parse(
+      (await command('docker', ['info', '--format', '{{json .}}'], { quiet: true })).stdout,
+    );
+    const imageStore = { Driver: store.Driver, DriverStatus: store.DriverStatus };
     for (const host of hosts) {
       emit(`build-channel: building ${images[host]} from ${tag} (${commit})`);
       await command(
@@ -313,15 +320,46 @@ export async function run(
         ],
         { cwd: tree },
       );
+      retainedImages.push(images[host]);
     }
+    let repoDigest;
     if (!rebuildWeb) {
       emit(`build-channel: pulling stock web ${images.web} for ${platform}`);
       await command('docker', ['pull', '--platform', platform, images.web]);
+      retainedImages.push(images.web);
+      const digests = JSON.parse(
+        (
+          await command(
+            'docker',
+            ['image', 'inspect', '--format', '{{json .RepoDigests}}', images.web],
+            { quiet: true },
+          )
+        ).stdout,
+      );
+      repoDigest = digests.find((digest) =>
+        digest.startsWith(`${images.web.slice(0, images.web.lastIndexOf(':'))}@sha256:`),
+      );
+      if (!repoDigest || !/@sha256:[a-f0-9]{64}$/.test(repoDigest))
+        throw new Error('could not read the pulled stock web RepoDigest');
     }
     const expectation = { version, images, modules };
     parseExpect(JSON.stringify(expectation));
     const expectFile = join(scratch, 'expect.json');
     put(expectFile, expectation);
+    const readIds = async () => {
+      const result = {};
+      for (const [host, ref] of Object.entries(images)) {
+        const image = await command('docker', ['image', 'inspect', '--format', '{{.Id}}', ref], {
+          quiet: true,
+        });
+        const id = image.stdout.trim();
+        if (!/^sha256:[a-f0-9]{64}$/.test(id))
+          throw new Error(`could not read the local image id for ${host}`);
+        result[host] = id;
+      }
+      return result;
+    };
+    const beforeGate = await readIds();
     const gate = await command(
       process.execPath,
       [
@@ -335,21 +373,39 @@ export async function run(
     );
     if (gate.error || ![0, 1, 2].includes(gate.status))
       throw new Error('channel gate could not finish');
-    if (gate.status !== 0) return gate.status;
-    const recordedImages = {};
-    for (const [host, ref] of Object.entries(images)) {
-      const image = await command('docker', ['image', 'inspect', '--format', '{{.Id}}', ref], {
-        quiet: true,
-      });
-      const id = image.stdout.trim();
-      if (!/^sha256:[a-f0-9]{64}$/.test(id))
-        throw new Error(`could not read the local image id for ${host}`);
-      recordedImages[host] = { ref, id };
+    const afterGate = await readIds();
+    for (const host of Object.keys(images)) {
+      if (beforeGate[host] !== afterGate[host])
+        throw new Error(`local image id changed during gate: ${images[host]}`);
     }
-    mkdirSync(out, { recursive: true });
+    if (gate.status !== 0) {
+      emit(`build-channel: gate failed; tags retained for diagnosis: ${retainedImages.join(', ')}`);
+      return gate.status;
+    }
+    const recordedImages = Object.fromEntries(
+      Object.entries(images).map(([host, ref]) => [
+        host,
+        {
+          ref,
+          built: hosts.includes(host),
+          id: beforeGate[host],
+          ...(!rebuildWeb && host === 'web' ? { repoDigest } : {}),
+        },
+      ]),
+    );
     const pending = join(out, `.build-record-${process.pid}.json`);
     try {
-      put(pending, { schema: 1, tag, commit, channel, version, images: recordedImages, modules });
+      put(pending, {
+        schema: 1,
+        tag,
+        commit,
+        channel,
+        version,
+        platform,
+        imageStore,
+        images: recordedImages,
+        modules,
+      });
       renameSync(pending, join(out, 'build-record.json'));
     } finally {
       rmSync(pending, { force: true });
@@ -358,6 +414,8 @@ export async function run(
     return 0;
   } catch (error) {
     emit(`build-channel: ${error.message}`);
+    if (retainedImages.length)
+      emit(`build-channel: tags retained for diagnosis: ${retainedImages.join(', ')}`);
     return 2;
   } finally {
     if (scratch) rmSync(scratch, { recursive: true, force: true, maxRetries: 3 });
