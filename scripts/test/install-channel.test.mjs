@@ -341,6 +341,22 @@ for (const lang of ['sh', 'ps1']) {
       pub.clean();
     }
   });
+  check('manifest status is printed only after verification', () => {
+    const fail = fixture(lang, { fail: 'cp' });
+    const ok = fixture(lang);
+    try {
+      const a = fail.install();
+      assert.notEqual(a.status, 0);
+      assert.doesNotMatch(a.stdout, /manifest\s+(found|verified)/i);
+      const b = ok.install();
+      assert.equal(b.status, 0, b.stdout + b.stderr);
+      assert.match(b.stdout, /manifest\s+verified/i);
+      assert.doesNotMatch(b.stdout, /manifest\s+found/i);
+    } finally {
+      fail.clean();
+      ok.clean();
+    }
+  });
   check('channel flags, private config and pinned env', () => {
     const f = fixture(lang);
     try {

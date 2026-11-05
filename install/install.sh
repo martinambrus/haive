@@ -434,7 +434,7 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
   say "--check: nothing was installed."
   exit 0
 fi
-say "  manifest          found"
+if [ "$CHANNEL" = "public" ]; then say "  manifest          found"; fi
 
 : "${INSTALL_DIR:=${HOME:-.}/${INSTALL_ID}}"
 case "$INSTALL_DIR" in /*) ;; *) INSTALL_DIR="$(pwd)/$INSTALL_DIR" ;; esac
@@ -465,6 +465,7 @@ if [ "$CHANNEL" != "public" ]; then
   [ "$INSTALL_DIR" != / ] || die "channel install directory cannot be the filesystem root"
   INSTALL_DIR=${INSTALL_DIR%/}
   read_channel_manifest
+  say "  manifest          verified for $PINNED"
 fi
 
 step "Writing the install to $INSTALL_DIR"

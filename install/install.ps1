@@ -390,7 +390,7 @@ if ($Check) {
   Write-Host "-Check: nothing was installed."
   exit 0
 }
-Write-Note "manifest          found"
+if ($Channel -ceq 'public') { Write-Note "manifest          found" }
 
 if (-not $Dir) { $Dir = Join-Path $env:USERPROFILE $InstallId }
 # Collapse relative and /./ segments before deriving the updater credential path.
@@ -417,6 +417,7 @@ if ($Channel -cne 'public') {
   if ($channelHostDir -cnotmatch '^/[a-zA-Z0-9_./ -]+$' -or $channelHostDir.Contains('..') -or $channelHostDir.Contains('//') -or $channelHostDir.EndsWith('/.')) { Die 'channel install directory must be a normalized absolute path using letters, digits, spaces, _, - and .' }
   try { $channelManifest = Read-ChannelManifest }
   catch { Die $_.Exception.Message }
+  Write-Note "manifest          verified for $pinned"
 }
 
 Write-Step "Writing the install to $Dir"
