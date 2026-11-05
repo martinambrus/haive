@@ -87,7 +87,7 @@ T524's 2026-11-01 owner round answered 42 questions. Decisions are recorded on t
 - T402: operator script with dry run, before-image and undo. The owner subsequently requested indefinite development-record retention: transcripts changed from 90 to 0/forever through the audited admin API; prompts were already 0. Historical expiry estimates no longer govern this install. Missing old logs remain unrecoverable.
 - T300: one owned validation attempt before feature work; stop at 90 minutes or $50 notional usage, whichever comes first, or on an unexpected failure. No automatic retry loops.
 - T331: live Google OAuth intentionally remains parked; prepare setup instructions when its turn comes. T358 stays deferred until its first real provider-pinning consumer.
-- T299 needs T300 evidence; T293's code fix shipped in PR986 without a paid validation retry; T298 additionally needs graded evaluation data. T332 needs T359; T335 needs T351/T352/T353; T275's Track B dependency is complete (PR988); the broad audit remains parked under the bounded-work rule.
+- T299 needs T300 evidence; T293's code fix shipped in PR986 without a paid validation retry; T298 additionally needs graded evaluation data. T332 needs T359; T335 needs T352; T275's Track B dependency is complete (PR988); the broad audit remains parked under the bounded-work rule.
 - Routine diminishing-return work remains parked. Risk-bearing exceptions are verification candidates, not confirmed production bugs or permission for broad audits.
 - T487: ask at each Replace ZIP whether to preserve the old bundle until success or remove it first to free disk. Explain rollback loss for remove-first. This supersedes the initial keep-old-only answer.
 - T376's shipped strict sign-in audit behavior remains in force; no new break-glass or best-effort policy change was requested.
@@ -343,7 +343,7 @@ User decision 2026-11-01: Reconcile runtime before validation; revalidate affect
 
 ### T335 · D2b · channel install/upgrade (+3)
 
-status: blocked · blocked-by: T351,T352,T353 · was modular #104 · priority: P2
+status: blocked · blocked-by: T352 · was modular #104 · priority: P2
 Plan D2: installer flags, an install-local docker config for private pulls, and a host upgrade that reads the channel. Depends on T351-T353.
 
 ### T531 · FNF[module-sources] · install-source fetch/pin follow-ups from T337 (+3)
@@ -355,7 +355,7 @@ status: open · kind: fix · found: T337 reviews 2026-11-05 · priority: P3
 3. PRE-EXISTING order, fails closed: when `refs/heads/<ref>` and `refs/tags/<ref>` both exist the branch wins in both the first resolution and the fallback (source-fetch.ts:197, :203); a source pinned from a tag that later gets a same-named branch fails `module_source_ref_moved` on servers that refuse object-name fetches. Fix: remember which namespace resolved (store the qualified ref) and reuse it.
 4. PRE-EXISTING, minor: the module-id pattern `[a-z0-9][a-z0-9-]{0,22}` is duplicated across ~7 files (manifest, gen-modules, module.mjs, api sources, migration 0221 CHECK, web dialog). Fix: one exported constant in @haive/shared reused by the TS sites; the SQL CHECK stays literal with a test pinning equality.
 
-### T533 · FNF[build-channel] · build-channel.mjs and channel-gate follow-ups from T351 (+7)
+### T533 · FNF[build-channel] · build-channel.mjs, channel-gate and channel-boot-check follow-ups from T351/T353 (+14)
 
 status: open · kind: fix · found: T351 reviews 2026-11-05 · priority: P3
 
@@ -367,6 +367,13 @@ status: open · kind: fix · found: T351 reviews 2026-11-05 · priority: P3
 6. `repoDigest` read once and not re-checked after the gate (~:399-410); `find` takes the first RepoDigest. Re-read after the gate and compare.
 7. Nits: timeout kill reads "failed (no exit code)" and the 30 min per-command limit applies to builds; preflight matches `--mount` text in comments and does not check for a `production` stage; the pulled stock tag is listed as "retained"; no multibyte chunk-split test.
 8. channel-gate stops at the first missing image (scripts/channel-gate.mjs ~:657-662), hiding findings for present images. PRE-EXISTING, minor.
+9. channel-boot-check: no SIGHUP handler and no Docker labels on created resources (scripts/channel-boot-check.mjs ~:474); a closed terminal skips cleanup and leftovers cannot be found by label. Minor; add SIGHUP to the abort set, label `haive.boot-check=<run>`.
+10. channel-boot-check scrubs only its own generated secrets from printed logs; secrets an image prints of its own are not scrubbed. Minor.
+11. channel-boot-check `--timeout-ms` bounds each boot stage, not the whole run (documented in modules.md). Nit; add an overall deadline if a caller needs one.
+12. channel-boot-check: an abort during `docker pull` of a dependency image leaves a possibly pulled image untracked, since it is recorded only after the pull returns (~:269-270). Minor.
+13. channel-boot-check: the `/modules/loaded` poll retries any fetch error; a TLS/DNS misconfiguration surfaces only as a stage timeout, and the last fetch error is not in the timeout message (~:380-388). Nit; include the last error.
+14. channel-boot-check: a create killed by the per-command timeout (not an abort) still takes the inspect-only branch (~:147-151, :172), so a container the daemon finishes creating late is not removed. Minor; treat a timeout kill like an abort.
+15. channel-boot-check tests: the two "does not remove or report a nonexistent resource" tests assert only the absence of "leftover" (scripts/test/channel-boot-check.test.mjs ~:435-447); rename or assert the cleanup line. Nit.
 
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
@@ -459,9 +466,9 @@ Fix direction: publish the per-module runtime state (schema pending/failed/ready
 
 User decision 2026-11-01: Show configured-active but runtime/schema-unready modules as failed/unready with an explicit Retry action
 
-### T352 · D2a-4 · channel publish (+3)
+### T352 · D2a-4 · channel publish (+4)
 
-status: open · was modular #178 · priority: P2
+status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-05 · last: 2026-11-05 · was modular #178 · priority: P2
 Plan D2a-4:
 
 - push only after the full gate;
@@ -471,10 +478,7 @@ Plan D2a-4:
 
 Inputs from T351 (2026-11-05): read `build-record.json` schema 1 (`scripts/build-channel.mjs`, docs/architecture/modules.md "Building a channel"); `built:false` images (stock web) are copied by `repoDigest`; re-inspect each built `id` against its tag and refuse a mismatch. Decide before pushing: (a) BuildKit default attestation manifests ride with `--load` builds but the gate scans one image manifest only, so pushing the index publishes unscanned attestation content (push the platform manifest only, or build with `--provenance=false --sbom=false`); (b) whether the channel set includes the vendor-built `haive-builder` for customers with paid modules (modules.md "Own modules on a published install"), which the gate does not check today.
 
-### T353 · D2a-5 · live boot check of a channel build before push
-
-status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-05 · last: 2026-11-05 · was modular #179 · priority: P2
-Plan D2a-5: a throwaway stack with no docker.sock, checking that /modules/loaded equals the entitled set.
+Input from T353 (2026-11-05): run BOTH `scripts/channel-gate.mjs` (proves what is PRESENT in each image) and `scripts/channel-boot-check.mjs --record <record>` (proves what the api and worker LOADED, exit 0/1/2) before any push; neither covers the other (modules.md "Boot check").
 
 ### T354 · FNF[npm-cache-shared] · the shared npm cache volume is mounted read-write into every agent sandbox
 
@@ -1368,6 +1372,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T353 — scripts/channel-boot-check.mjs live boot check of a channel build (no docker.sock), /modules/loaded vs entitled set in api and worker — PR #1005 (e81805a35), 2026-11-05; CI 13/13 green, merged without bot review (Codex and Greptile out of allowance); three Sonnet reviews ACCEPT; real scratch-channel run exit 0, extra-statistics negative exit 1 in both halves, pre-existing postgres/redis images kept, all resources removed. Follow-ups T533 items 9-15, T352 note. Evidence .claude/tmp/sonnet-run/T353/.
 - T351 — scripts/build-channel.mjs per-customer channel build from a final tag, no push — PR #1004 (0ec2c9f00), 2026-11-05; PR CI 13/13 green after a child_process ratchet baseline entry, merged without bot review (Codex and Greptile out of allowance); two Sonnet reviews (review-2 ACCEPT); real throwaway-registry run gate exit 0 with record; GHCR 0.2.0 platform pull + gate save verified. Follow-ups T533 (FNF), T352 notes. Evidence .claude/tmp/sonnet-run/T351/.
 - T337 — module_sources install sources with fetch and pin (git; registry refused pending T532) — PR #1003 (9a8d8a3c7), 2026-11-05; PR CI 13/13 green, merged without bot review (Codex review allowance exhausted); full suite at feature end green bar two load-timing flakes in untouched files (pg-startup-storm positive control, project-state-write-bounds 4,090 claims); migration 0221 applied to dev; admin Modules page shows Install sources with source-checkout read-only note. Follow-ups T531, T532. Evidence .claude/tmp/sonnet-run/T337/.
 - T336 — Own-module container builder and upgrade image recovery — PR #1001 (c4f4768900), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41534422031 green; Own-modulebuilder actualpublic/customercontainerproof plusquotedsettingsreadonlyCompose/preflight/journalrestoreproof andentitlement/tokennegativecontrols passed; completeworkspace8packagesunits/types/rootformat/scripts passed, exactHEADnative/hosted/allPRCI/allmainCI green; reviewedoperator/updater/sharednaming source loaded,serializedlibs/watchers/compilednamingartifact/APIwebhealth/idle/userfiles verified. EightownedDockerfixturetags/inputscratchcleaned.. Evidence .claude/tmp/codex-run/queue-exec-20261101/T336/.
