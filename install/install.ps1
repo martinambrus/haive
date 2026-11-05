@@ -212,6 +212,25 @@ function Protect-RegistryCredentials([string]$directory) {
   }
 }
 
+# Validate object keys before ConvertFrom-Json (which otherwise keeps the last duplicate).
+# Tokenize complete strings so braces/colons inside values cannot be mistaken for object syntax.
+# This uses the same .NET/PowerShell runtime as the original installer, including Windows PS 5.1.
+function Assert-ManifestKeys([string]$json) {
+  $tokens = [regex]::Matches($json, '"(?:[^"\\]|\\.)*"|[{}:]', [Text.RegularExpressions.RegexOptions]::CultureInvariant, [TimeSpan]::FromSeconds(2))
+  $objects = [Collections.Generic.Stack[object]]::new()
+  for ($i = 0; $i -lt $tokens.Count; $i++) {
+    $token = $tokens[$i].Value
+    if ($token -eq '{') {
+      $objects.Push([Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase))
+    } elseif ($token -eq '}') {
+      $null = $objects.Pop()
+    } elseif ($token.StartsWith('"') -and $i + 1 -lt $tokens.Count -and $tokens[$i + 1].Value -eq ':') {
+      $key = $token.Substring(1, $token.Length - 2)
+      if ($key.IndexOfAny([char[]]'"\/') -ge 0 -or -not $objects.Peek().Add($key)) { throw 'invalid channel manifest object key' }
+    }
+  }
+}
+
 # Stage credentials until verification succeeds; no failed manifest creates an install.
 function Read-ChannelManifest {
   $scratch = Join-Path ([IO.Path]::GetTempPath()) ("haive-install-" + [guid]::NewGuid().ToString('N'))
@@ -253,13 +272,21 @@ function Read-ChannelManifest {
     $container = $null
     $entry = Get-Item -LiteralPath $file -Force
     if ($entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $entry.Length -gt 1048576) { throw 'channel manifest must be a regular file of at most 1 MiB' }
-    $manifest = [IO.File]::ReadAllText($file) | ConvertFrom-Json
-    if ($manifest.channel -cne $Channel -or $manifest.version -cne $pinned) { throw 'channel manifest channel or version differs from the requested release' }
-    foreach ($hostName in @('api','worker','web','builder')) {
-      $pin = $manifest.images.$hostName
-      $prefix = [regex]::Escape("$ChannelRegistry/haive-$Channel-$hostName@sha256:")
-      if ($pin -isnot [string] -or $pin -cnotmatch "\A${prefix}[0-9a-f]{64}\z") { throw 'channel manifest image pin differs from the requested registry release' }
-    }
+    try {
+      $json = [IO.File]::ReadAllText($file)
+      Assert-ManifestKeys $json
+      $manifest = $json | ConvertFrom-Json
+      foreach ($name in @('channel','version','images')) {
+        if (@($manifest.PSObject.Properties.Name) -cnotcontains $name) { throw 'missing manifest key' }
+      }
+      if ($manifest.channel -cne $Channel -or $manifest.version -cne $pinned) { throw 'channel or version differs' }
+      foreach ($hostName in @('api','worker','web','builder')) {
+        if (@($manifest.images.PSObject.Properties.Name) -cnotcontains $hostName) { throw 'missing image pin' }
+        $pin = $manifest.images.$hostName
+        $prefix = [regex]::Escape("$ChannelRegistry/haive-$Channel-$hostName@sha256:")
+        if ($pin -isnot [string] -or $pin -cnotmatch "\A${prefix}[0-9a-f]{64}\z") { throw 'image pin differs' }
+      }
+    } catch { throw 'invalid channel manifest: channel, version and all image pins must match the requested registry release' }
     return $manifest
   } catch {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue

@@ -230,4 +230,7 @@ jobs:
       - name: Ensure the existing PowerShell harness can run
         run: docker pull mcr.microsoft.com/powershell:lts-7.4-alpine-3.20
       - name: Channel installer controls on both shells
+        # Missing PowerShell or public baseline history fails under CI; this job requires both.
+        env:
+          CI: 'true'
         run: node --test scripts/test/install-channel.test.mjs

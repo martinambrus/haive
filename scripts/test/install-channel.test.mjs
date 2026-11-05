@@ -18,6 +18,10 @@ const repo = resolve(import.meta.dirname, '../..');
 const image = 'mcr.microsoft.com/powershell:lts-7.4-alpine-3.20';
 const hostPwsh = spawnSync('pwsh', ['-NoProfile', '-Command', 'exit 0']).status === 0;
 const containerPwsh = !hostPwsh && spawnSync('docker', ['image', 'inspect', image]).status === 0;
+const skipPwsh = process.env.HAIVE_INSTALLER_SKIP_PWSH === '1';
+const skipBaseline = process.env.HAIVE_INSTALLER_SKIP_BASELINE === '1';
+if (process.env.CI && !skipPwsh)
+  test('CI requires a PowerShell harness', () => assert.ok(hostPwsh || containerPwsh));
 const token = 'channel-test-secret';
 const registry = '127.0.0.1:54321/vendor';
 const pins = Object.fromEntries(
@@ -204,7 +208,7 @@ function fixture(
 for (const lang of ['sh', 'ps1']) {
   const options = {
     skip:
-      lang === 'ps1' && !hostPwsh && !containerPwsh
+      lang === 'ps1' && (skipPwsh || (!process.env.CI && !hostPwsh && !containerPwsh))
         ? 'pwsh unavailable; pull the existing harness PowerShell image or run in CI'
         : false,
   };
@@ -366,6 +370,26 @@ for (const lang of ['sh', 'ps1']) {
       { ...manifest, images: { ...pins, builder: pins.builder.replace(registry, 'evil.test') } },
       '',
     ],
+    [
+      'registry prefix lookalike',
+      { ...manifest, images: { ...pins, api: pins.api.replace('/vendor/', '/vendor2/') } },
+      '',
+    ],
+    [
+      'host suffix lookalike',
+      { ...manifest, images: { ...pins, api: pins.api.replace('-api@', '-apix@') } },
+      '',
+    ],
+    ['63 hex digits', { ...manifest, images: { ...pins, api: pins.api.slice(0, -1) } }, ''],
+    ['65 hex digits', { ...manifest, images: { ...pins, api: pins.api + 'a' } }, ''],
+    ['non-hex digest', { ...manifest, images: { ...pins, api: pins.api.slice(0, -1) + 'z' } }, ''],
+    [
+      'duplicate key',
+      JSON.stringify(manifest).replace('"channel":', '"channel":"other","channel":'),
+      '',
+    ],
+    ['escaped-quote key', JSON.stringify(manifest).replace('{', '{"escaped\\\"key":0,'), ''],
+    ['oversized manifest', JSON.stringify(manifest) + ' '.repeat(1048576), ''],
     ['malformed JSON', '{"channel":', ''],
     ['missing pin', { ...manifest, images: { ...pins, web: null } }, ''],
     ['pin ending in newline', { ...manifest, images: { ...pins, api: pins.api + '\n' } }, ''],
@@ -392,6 +416,11 @@ for (const lang of ['sh', 'ps1']) {
         if (f.calls().includes('\tcp\t')) assert.match(f.calls(), /\trm\t-f\thi-manifest-/);
         if (fail !== 'rm') assert.ok(!existsSync(join(f.root, 'container')));
         assert.ok(f.calls().includes('\tlogin\t'), 'reaches authenticated verification');
+        assert.deepEqual(
+          readdirSync(f.root).filter((x) => x.startsWith('haive-install')),
+          [],
+          'no credential scratch after failure',
+        );
       } finally {
         f.clean();
       }
@@ -439,6 +468,25 @@ for (const lang of ['sh', 'ps1']) {
       ])
         assert.ok(call.split('\t').includes(value), value);
       assert.ok(!call.split('\t').includes('--manifest'));
+      const argv = call.split('\t').slice(1);
+      const imageAt = argv.indexOf('ghcr.io/martinambrus/haive-updater:10.0.0');
+      assert.ok(imageAt > 0);
+      for (let i = 0; i < argv.length; i++) {
+        if (argv[i] === '-e') assert.ok(i < imageAt, `docker env option at ${i} after image`);
+        if (
+          [
+            '--channel',
+            '--manifest-image',
+            '--version',
+            '--install-dir',
+            '--registry',
+            '--postgres-volume',
+            '--snapshot-host-dir',
+            '--force',
+          ].includes(argv[i])
+        )
+          assert.ok(i > imageAt, `updater option ${argv[i]} before image`);
+      }
       const up = f.invoke(helper, ['pull']);
       assert.equal(up.status, 0);
       assert.ok(f.calls().trim().split('\n').at(-1).startsWith(`config=${f.dir}/.docker\t`));
@@ -458,11 +506,16 @@ for (const lang of ['sh', 'ps1']) {
     }
   });
   check('public output and upgrade argv identical to base', (t) => {
+    if (skipBaseline) {
+      t.skip('baseline belongs to platform installer-controls, explicitly excluded here');
+      return;
+    }
     const base = spawnSync('git', ['show', '1f311d7c9:install/install.' + lang], {
       cwd: repo,
       encoding: 'utf8',
     });
     if (base.status !== 0) {
+      assert.ok(!process.env.CI, 'CI public baseline requires full git history');
       t.skip('public baseline comparison requires history; platform installer-controls fetches it');
       return;
     }

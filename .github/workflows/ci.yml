@@ -69,6 +69,11 @@ jobs:
 
       # gen-modules.mjs and module.mjs belong to no package, so `pnpm test` never reaches them.
       - name: Module scripts
+        # The full-history, pinned-PowerShell controls run in platform-checks/installer-controls.
+        # This shallow job runs the shell controls and the other script suites.
+        env:
+          HAIVE_INSTALLER_SKIP_PWSH: '1'
+          HAIVE_INSTALLER_SKIP_BASELINE: '1'
         run: pnpm test:scripts
 
       # `install/install.sh` is the one script in this repo that runs on a stranger's machine, out
