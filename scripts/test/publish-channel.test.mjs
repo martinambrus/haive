@@ -134,7 +134,13 @@ function fixture(t, config = {}) {
           );
         }
         if (config.rereadFailure === host && attempted.includes(host)) return { status: 1 };
-        return { status: 1, stderr: config.inspectError ?? 'manifest unknown' };
+        return {
+          status: 1,
+          stderr:
+            (typeof config.inspectError === 'function'
+              ? config.inspectError(ref)
+              : config.inspectError) ?? `ERROR: ${ref}: not found`,
+        };
       }
       const push = args[0] === 'push';
       const copy = args[0] === 'buildx' && args[2] === 'create';
@@ -559,4 +565,62 @@ test('dry-run refuses an existing manifest just like publication', async (t) => 
   assert.deepEqual(f.attempted, []);
   assert.equal(readFileSync(f.manifest, 'utf8'), 'previous manifest');
   assert.match(f.logs.join('\n'), /manifest already exists/);
+});
+
+for (const [name, inspectError] of [
+  [
+    'credential helper executable file not found in $PATH',
+    'error getting credentials - err: exec: "docker-credential-desktop.exe": executable file not found in $PATH',
+  ],
+  [
+    'authorization failure together with not found',
+    (ref) => `ERROR: ${ref}: not found\nERROR: failed to authorize: 403 Forbidden: not found`,
+  ],
+  [
+    'not-found line for another ref',
+    (ref) => `ERROR: ${ref.replace('customer', 'another')}: not found`,
+  ],
+  [
+    'not-found line with a regex lookalike ref',
+    (ref) => `ERROR: ${ref.replace('127.0.0.1', '127x0x0x1')}: not found`,
+  ],
+  [
+    'not-found wording embedded in another error',
+    (ref) => `unexpected wrapper: ERROR: ${ref}: not found`,
+  ],
+]) {
+  test(`daemon absence refuses ${name} without confirmation`, async (t) => {
+    const f = fixture(t, { request: tokenRegistry({ tokenStatus: 403 }), inspectError });
+    assert.equal(await f.invoke(), 2);
+    assert.deepEqual(f.attempted, []);
+    assert.ok(!existsSync(f.manifest));
+    assert.match(f.logs.join('\n'), /could not be proven/);
+  });
+}
+
+test('daemon absence accepts the exact ref containing tls and version 1.0.500', async (t) => {
+  const f = fixture(t, {
+    request: async () => ({ status: 403 }),
+    editRecord: (record) => {
+      record.tag = 'v1.0.500';
+      record.version = '1.0.500';
+      for (const image of Object.values(record.images))
+        image.ref = image.ref.replace('/vendor/', '/atlstudio/').replace(':9.9.9', ':1.0.500');
+    },
+  });
+  assert.equal(await f.invoke(['--dry-run']), 0, f.logs.join('\n'));
+  assert.equal(f.logs.filter((line) => line.includes('daemon-only')).length, 3);
+  assert.deepEqual(f.attempted, []);
+  assert.ok(!existsSync(f.manifest));
+});
+
+test('daemon absence word-bounds transport tokens outside a multiline exact proof', async (t) => {
+  const f = fixture(t, {
+    request: async () => ({ status: 403 }),
+    inspectError: (ref) =>
+      `networking connectionless atls xeofx status500\nERROR: ${ref}: not found\nend`,
+  });
+  assert.equal(await f.invoke(['--dry-run']), 0, f.logs.join('\n'));
+  assert.equal(f.logs.filter((line) => line.includes('daemon-only')).length, 3);
+  assert.deepEqual(f.attempted, []);
 });

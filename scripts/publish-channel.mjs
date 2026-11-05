@@ -23,10 +23,12 @@ const KEYS = ['api', 'worker', 'web'];
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const PREFIX = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
 // Volatile Docker daemon wording; used only with exit 1 and no spawn error.
-const DAEMON_NOT_FOUND = /\b(not found|manifest unknown|name unknown|no such manifest)\b/i;
+// A normalized or reworded ref is not proof of absence and refuses with exit 2.
+const DAEMON_NOT_FOUND = (ref) =>
+  new RegExp(`^ERROR: ${ref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: not found$`, 'm');
 const DAEMON_DENIED = /failed to authorize|unauthorized|\bdenied\b|\b40[13]\b|forbidden/i;
 const DAEMON_TRANSPORT_ERROR =
-  /\b5\d\d\b|network|connection|timeout|timed out|no such host|credential helper|tls|certificate|eof/i;
+  /\b(?:5\d\d|network|connection|timeout|timed out|no such host|credential helper|tls|certificate|eof)\b/i;
 const USAGE =
   'usage: node scripts/publish-channel.mjs --record <build-record.json> [--registry <prefix; defaults to record api prefix>] [--out <dir; defaults beside record>] [--dry-run] [--confirm-absent <exact destination ref; repeatable>] [--timeout-ms <boot-stage timeout>] — writes release.json locally; URL delivery is T335';
 
@@ -110,13 +112,13 @@ export async function run(
       return false;
     }
     const unproven = () => new Error(`absence of ${ref} could not be proven`);
+    const stderr = result.stderr ?? '';
+    const diagnostics = stderr.replaceAll(ref, '');
     const daemonUsable =
-      result.status === 1 && !result.error && !DAEMON_TRANSPORT_ERROR.test(result.stderr ?? '');
+      result.status === 1 && !result.error && !DAEMON_TRANSPORT_ERROR.test(diagnostics);
     const daemonAbsent =
-      daemonUsable &&
-      DAEMON_NOT_FOUND.test(result.stderr ?? '') &&
-      !DAEMON_DENIED.test(result.stderr ?? '');
-    const daemonDenied = daemonUsable && DAEMON_DENIED.test(result.stderr ?? '');
+      daemonUsable && DAEMON_NOT_FOUND(ref).test(stderr) && !DAEMON_DENIED.test(diagnostics);
+    const daemonDenied = daemonUsable && DAEMON_DENIED.test(diagnostics);
     if (!daemonAbsent && !daemonDenied) throw unproven();
     const slash = ref.indexOf('/');
     const host = ref.slice(0, slash);
