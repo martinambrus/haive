@@ -28,7 +28,9 @@ import * as run from './run.js';
 const pin = (host: string) => `private/haive-acme-${host}@sha256:${'a'.repeat(64)}`;
 const refs = { api: pin('api'), worker: pin('worker'), web: pin('web'), builder: pin('builder') };
 const settings: images.ImageSettings = {
-  ...images.emptyOverrides(),
+  HAIVE_API_IMAGE: pin('api'),
+  HAIVE_WORKER_IMAGE: pin('worker'),
+  HAIVE_WEB_IMAGE: pin('web'),
   HAIVE_CHANNEL: 'acme',
   DOCKER_CONFIG: '/host/install/.docker',
   HAIVE_CHANNEL_REGISTRY: 'private',
@@ -63,9 +65,9 @@ beforeEach(() => {
   vi.mocked(run.readEnvVar).mockResolvedValue('1.0.0');
   h.sql.end.mockResolvedValue(undefined);
   vi.spyOn(dk, 'localImages').mockResolvedValue([
-    'ghcr.io/martinambrus/haive-api:1.0.0',
-    'ghcr.io/martinambrus/haive-worker:1.0.0',
-    'ghcr.io/martinambrus/haive-web:1.0.0',
+    settings.HAIVE_API_IMAGE,
+    settings.HAIVE_WORKER_IMAGE,
+    settings.HAIVE_WEB_IMAGE,
   ]);
   vi.spyOn(dk, 'readReleaseManifestImage').mockResolvedValue(
     JSON.stringify({
@@ -173,4 +175,53 @@ it('rollback pins use the settings refreshed after taking the lock', async () =>
   ]);
   expect(await main()).toBe(0);
   expect(images.readImageSettings).toHaveBeenCalledTimes(2);
+});
+
+it('an unpinned channel refuses before inventory without naming public image refs', async () => {
+  vi.mocked(images.readImageSettings).mockResolvedValue({
+    ...settings,
+    ...images.emptyOverrides(),
+  });
+  expect(await main()).toBe(3);
+  const output = vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line)));
+  expect(output).toContainEqual(
+    expect.objectContaining({
+      event: 'refused',
+      message: 'channel install has no pinned current images',
+    }),
+  );
+  expect(JSON.stringify(output)).not.toContain('ghcr.io/martinambrus/haive-');
+  expect(dk.localImages).not.toHaveBeenCalled();
+});
+it('an unpinned public install retains its original tag-based preflight', async () => {
+  process.argv = [
+    'node',
+    'updater',
+    '--install-dir',
+    '/host/install',
+    '--manifest-image',
+    'public/release:9.9.9',
+    '--version',
+    '9.9.9',
+    '--check',
+  ];
+  vi.mocked(images.readImageSettings).mockResolvedValue({
+    ...settings,
+    ...images.emptyOverrides(),
+    HAIVE_CHANNEL: 'public',
+  });
+  vi.mocked(dk.readReleaseManifestImage).mockResolvedValue(
+    JSON.stringify({
+      manifestVersion: 1,
+      channel: 'public',
+      version: '9.9.9',
+      builtAt: '2026-11-05',
+      migrationHead: '0221',
+    }),
+  );
+  vi.mocked(dk.localImages).mockResolvedValue(
+    ['api', 'worker', 'web'].map((host) => `ghcr.io/martinambrus/haive-${host}:1.0.0`),
+  );
+  expect(await main()).toBe(0);
+  expect(dk.localImages).toHaveBeenCalledWith(false);
 });

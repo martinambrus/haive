@@ -278,6 +278,13 @@ export async function main(): Promise<number> {
     if (channel !== 'public') channelImagePlan(target.version, imageSettings, target.images);
 
     const previousImages = await readImageOverrides(envFile, imageSettings);
+    if (channel !== 'public' && Object.values(previousImages).every((ref) => !ref)) {
+      emit('refused', {
+        refusal: 'rollback-images-missing',
+        message: 'channel install has no pinned current images',
+      });
+      return EXIT.refused;
+    }
     const currentImages = (['api', 'worker', 'web'] as const).map((s) =>
       imageFor(s, fromVersion, registry, previousImages),
     );
