@@ -160,7 +160,7 @@ export function main() {
     snapshotModules(source, join(dir, 'own-modules'));
     writeFileSync(
       join(dir, '.dockerignore'),
-      '**/node_modules\n**/.git\n**/.npmrc\n**/.env\n**/.env.*\n',
+      '**/node_modules\n**/.git\n**/.npmrc\n**/.env\n**/.env.*\n**/.haive-source.json\n',
     );
     writeFileSync(join(dir, 'Dockerfile'), buildDockerfile(plan));
     for (const host of ['api', 'worker', ...(plan.rebuildWeb ? ['web'] : [])]) {
