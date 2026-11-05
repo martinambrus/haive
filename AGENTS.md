@@ -369,7 +369,7 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 
 ### Modularity
 
-- [Modules](docs/architecture/modules.md): the four states, `pnpm module add|remove`. `gen-modules.mjs`, `module.mjs`.
+- [Modules](docs/architecture/modules.md): the four states, `pnpm module add|remove`, channel builds. `gen-modules.mjs`, `module.mjs`, `build-channel.mjs`.
 - [Integrations](docs/architecture/integrations.md): accounts, write switch, resolution, forge calls. `resolver.ts`.
 - [Task types](docs/architecture/task-types.md): seeding, composer, prompt steps, custom tools, creator. `task_type_definitions`.
 
