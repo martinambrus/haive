@@ -52,6 +52,7 @@ import {
   liveDependents,
   setModuleActive,
 } from './activation.js';
+import { moduleSourceRoutes } from './sources.js';
 import { setModuleExecutors } from './integration-executors.js';
 import { PurgeIncompleteError, purgeModule } from './purge.js';
 import { moduleIntegrationDependents, previewModuleIntegrations } from './purge-integrations.js';
@@ -217,6 +218,7 @@ export async function mountModules(
 export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
   const routes = new Hono<AppEnv>();
   routes.use('*', requireAuth);
+  routes.route('/sources', moduleSourceRoutes());
 
   const settingsFor = async (id: string, kind: ModuleSettingsKind) => {
     const module = loaded.find((m) => m.manifest.id === id);

@@ -81,6 +81,7 @@ services:
     # compose-level copy would be a second source of truth that disagrees during a rollback — the
     # moment `.env` is re-pinned but the containers have not been recreated yet.
     environment:
+      HAIVE_PUBLISHED_INSTALL: 'true'
       HAIVE_INSTALL_DIR_HOST: ${HAIVE_INSTALL_DIR_HOST:-}
       HAIVE_REGISTRY: ${HAIVE_REGISTRY:-ghcr.io/martinambrus}
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-haive}
