@@ -348,7 +348,7 @@ Plan D2: installer flags, an install-local docker config for private pulls, and 
 
 ### T337 · D4 · module_sources table (git/registry, envelope-encrypted token) + Modules page form
 
-status: open · was modular #106 · priority: P2
+status: taken · owner: sonnet-sonnet@zathrus-wsl · since: 2026-11-05 · last: 2026-11-05 · was modular #106 · priority: P2
 Plan D4: git and registry install sources drive D1 and D3; the token is stored envelope-encrypted.
 
 ### T342 · FNF[mcp-token-file] · rag/ddev task tokens in the server env defeat the cli-merge skip (measure first) (+4)
