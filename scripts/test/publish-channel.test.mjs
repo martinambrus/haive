@@ -373,12 +373,18 @@ test('contracting migrations are derived from the record commit', async (t) => {
   assert.equal(JSON.parse(readFileSync(f.manifest, 'utf8')).contracts, true);
 });
 
-test('a destination that appears between gates and push is refused', async (t) => {
-  const f = fixture(t, { appeared: 'worker' });
-  assert.equal(await f.invoke(), 1);
-  assert.deepEqual(f.attempted, ['api']);
-  assert.equal(existsSync(f.manifest), false);
-});
+for (const [host, code, attempted] of [
+  ['api', 1, []],
+  ['worker', 2, ['api']],
+  ['web', 2, ['api', 'worker']],
+]) {
+  test(`a ${host} destination appearing before push returns ${code}`, async (t) => {
+    const f = fixture(t, { appeared: host });
+    assert.equal(await f.invoke(), code);
+    assert.deepEqual(f.attempted, attempted);
+    assert.equal(existsSync(f.manifest), false);
+  });
+}
 
 test('an interrupted run cannot push', async (t) => {
   const f = fixture(t);

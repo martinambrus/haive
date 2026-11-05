@@ -401,7 +401,7 @@ export async function run(
         emit(
           `publish-channel: tag appeared before push; no manifest written; attempted: ${attempted.join(', ') || 'none'}`,
         );
-        return 1;
+        return attempted.length ? 2 : 1;
       }
       if (record.images[host].built)
         await docker(['image', 'tag', record.images[host].id, destinations[host]]);
