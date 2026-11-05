@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -106,7 +107,7 @@ function fixture(
     const wrapper = join(root, 'invoke.ps1');
     writeFileSync(
       wrapper,
-      `$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method); if($OutFile){ if($env:FAIL_AT -eq 'bundle'){ throw 'bundle failure' }; [IO.File]::WriteAllText($OutFile, "services: {}\\n") } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|force|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
+      `$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction New-Item { param($ItemType,$Path,[switch]$Force); if($Path -like '*/snapshots' -and $env:FAIL_AT -in @('mkdir','pipeline-stop')) { if($env:FAIL_AT -eq 'pipeline-stop'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; throw 'post-verification mkdir failure' }; Microsoft.PowerShell.Management\\New-Item @PSBoundParameters }\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method); if($OutFile){ if($env:FAIL_AT -eq 'bundle'){ throw 'bundle failure' }; [IO.File]::WriteAllText($OutFile, "services: {}\\n") } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|force|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
     );
     if (hostPwsh)
       return spawnSync('pwsh', ['-NoProfile', '-File', wrapper], {
@@ -243,6 +244,25 @@ for (const lang of ['sh', 'ps1']) {
       f.clean();
     }
   });
+  if (lang === 'ps1') {
+    for (const fail of ['mkdir', 'pipeline-stop', 'bundle'])
+      check(`scratch removed after post-verification ${fail}`, () => {
+        const f = fixture(lang, { fail });
+        try {
+          const r = f.install();
+          // PowerShell pipeline cancellation can return status 0 to its caller.
+          if (fail !== 'pipeline-stop') assert.notEqual(r.status, 0, r.stdout + r.stderr);
+          assert.ok(!existsSync(join(f.dir, '.env')), 'installation stopped');
+          assert.match(f.calls(), /\tcp\t/, 'verification finished');
+          assert.deepEqual(
+            readdirSync(f.root).filter((x) => x.startsWith('haive-install')),
+            [],
+          );
+        } finally {
+          f.clean();
+        }
+      });
+  }
   check('channel flags, private config and pinned env', () => {
     const f = fixture(lang);
     try {

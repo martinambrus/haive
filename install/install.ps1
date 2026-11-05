@@ -192,6 +192,7 @@ function Resolve-HaiveVersion([string]$want) {
 # Stage credentials until verification succeeds; no failed manifest creates an install.
 function Read-ChannelManifest {
   $scratch = Join-Path ([IO.Path]::GetTempPath()) ("haive-install-" + [guid]::NewGuid().ToString('N'))
+  $script:ChannelScratch = $scratch
   $container = $null
   try {
     $null = New-Item -ItemType Directory -Path (Join-Path $scratch '.docker')
@@ -244,7 +245,6 @@ function Read-ChannelManifest {
       $prefix = [regex]::Escape("$ChannelRegistry/haive-$Channel-$hostName@sha256:")
       if ($pin -isnot [string] -or $pin -cnotmatch "\A${prefix}[0-9a-f]{64}\z") { throw 'channel manifest image pin differs from the requested registry release' }
     }
-    $script:ChannelScratch = $scratch
     return $manifest
   } catch {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
@@ -319,6 +319,7 @@ an install named '$InstallId' already has data on this machine.
 "@
 }
 
+try {
 Test-Preflight
 if ($Check -and $Channel -ceq 'public') { Write-Host ""; Write-Host "-Check: nothing was installed."; exit 0 }
 
@@ -822,3 +823,9 @@ Write-Host "    The Haive worker mounts the Docker socket, so it can create and 
 Write-Host "    on this machine. That is how it runs AI CLIs in sandboxes - and it is equivalent to"
 Write-Host "    root on the host. Run Haive on a machine where that is acceptable."
 Write-Host ""
+
+} finally {
+  if ($ChannelScratch) {
+    Remove-Item -LiteralPath $ChannelScratch -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
