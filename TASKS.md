@@ -341,22 +341,6 @@ All PRE-EXISTING.
 
 User decision 2026-11-01: Reconcile runtime before validation; revalidate affected final changes after a later fixer edits code or tests
 
-### T335 · D2b · channel install/upgrade (+5)
-
-status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-05 · last: 2026-11-05 · was modular #104 · priority: P2
-Plan D2: installer flags, an install-local docker config for private pulls, and a host upgrade that reads the channel. Depends on T351-T353 (all done).
-
-Progress: PR A (builder + `haive-<channel>-release` manifest image, record schema 2) merged as PR #1007 (4d4193768), 2026-11-05. PR B (updater reads `--manifest-image`, pinned refs bound to `HAIVE_CHANNEL_REGISTRY`, install-local `DOCKER_CONFIG`; api passes the channel) merged as PR #1008 (d71934772), 2026-11-05, CI 13/13 green, unreviewed by bots (out of allowance), Sonnet review-5 ACCEPT. PR C (installers) next. Plan docs/plans/calm-crafting-fiddle.md. Follow-ups T534 (FNF), T535 (design).
-
-PR C input from PR B: the generated `./haive upgrade` must pass `DOCKER_CONFIG` exactly `<install>/.docker` (no trailing slash; the updater refuses any other spelling), `HAIVE_INSTALL_DIR_HOST`, and forward `--version`.
-
-Inputs from T352 (2026-11-05, PR #1006):
-
-- `scripts/publish-channel.mjs` writes the channel `release.json` locally only. Serving it to installs is this task's job.
-- Its `images` hold pinned `<registry>/haive-<channel>-<host>@sha256:` refs. The updater ignores them today, since `packages/updater/src/images.ts` composes `${registry}/haive-${host}:${version}`, so an upgrade must pull from the manifest's refs.
-- Decide whether the channel set includes the vendor-built `haive-builder` for customers with paid modules. T352 left it out, and the leak gate does not check it.
-- UNMEASURED: an authenticated `buildx imagetools inspect` of a missing tag in a private ghcr repository (publish relies on the anchored daemon line or `--confirm-absent`). Measure it on the first real private publish.
-
 ### T531 · FNF[module-sources] · install-source fetch/pin follow-ups from T337 (+3)
 
 status: open · kind: fix · found: T337 reviews 2026-11-05 · priority: P3
@@ -410,6 +394,18 @@ status: open · kind: fix · found: T335 PR B reviews 2026-11-05 · priority: P3
 status: open · kind: design · found: T335 PR B review 1 2026-11-05 · priority: P3
 
 If `.env` loses `HAIVE_CHANNEL`, `resolveChannel` (packages/updater/src/cli.ts ~:67-74) returns `public` and only the pre-existing "image overrides require HAIVE_OWN_MODULES_HOST_DIR" refusal in `prepareImages` stops the upgrade. Fixing T534 item 3 or relaxing that refusal for public would let a channel install silently fall to the public registry. Proposal: record the channel on the first channel run (journal or a dedicated row) and refuse a change unless an explicit flag allows it. Needs a decision on where it lives and how a deliberate channel move is authorised.
+
+### T536 · FNF[installer-channel] · install.sh/install.ps1 channel-install follow-ups from T335 PR C (+7)
+
+status: open · kind: fix · found: T335 PR C reviews 2026-11-05 · priority: P3
+
+1. The scratch `DOCKER_CONFIG` used for the channel login and manifest read hides the user's docker contexts, CLI plugins and credential helpers (install/install.sh ~:235, install/install.ps1 ~:254). A host whose daemon is reached only through a non-default context fails verification. UNVERIFIED, consequential for that setup; copy `currentContext` and `contexts/` into the scratch config, or honour `DOCKER_HOST`/`DOCKER_CONTEXT`.
+2. A channel install's `latest`/`next` resolve through the public GitHub releases (install.sh ~:194, install.ps1 ~:183), so a channel that has not published that version refuses (fail closed). PRE-EXISTING shape, consequential; require `--version` for a channel or resolve from the channel registry's release tags.
+3. The public install's `umask 077` (set for `.env`) stays in effect for the rest of the script (install.sh ~:526). PRE-EXISTING, minor; scope it to the `.env` write as the channel path now does.
+4. The awk JSON validator is quadratic (`substr` per character) and its time on a large manifest is unmeasured; the 1 MiB cap bounds it (install.sh ~:276). Minor; measure, then index by position if it matters.
+5. The final `.docker` guard (install.sh ~:576, install.ps1 ~:502) runs after `.env` is written, so a `.docker` created between the early guard and the move still leaves a half install. Narrow race, minor; create the destination with an exclusive mkdir-and-rename.
+6. PowerShell reads the manifest with `ConvertFrom-Json` plus `Assert-ManifestKeys`, which is looser than the sh awk reader on some shapes (review-1 L4). Minor; add parity controls for the shapes the awk reader refuses.
+7. Test gap: no control for a bare positional after the value of `--dir`/`--install-id` in install.ps1 (scripts/test/install-channel.test.mjs ~:412-471). Minor.
 
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
@@ -1396,6 +1392,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T335 — channel install and upgrade (plan D2b), in three PRs. PR A #1007 (4d4193768): builder + `haive-<channel>-release` manifest image. PR B #1008 (d71934772): the updater reads `--manifest-image` with pins bound to `HAIVE_CHANNEL_REGISTRY` and an install-local `DOCKER_CONFIG`; the api passes the channel. PR C #1009 (d94aafc00), 2026-11-05: install.sh/install.ps1 `--channel`/`--channel-registry`/`--registry-user`, login and verified manifest before any write, channel `./haive upgrade`, uninstall removes `.docker`; public path fixes (ps1 `HAIVE_INSTALL_ID` order, updater secrets by name). CI 17/17 green (one macOS GitHub-API flake re-run); merged without bot review (Codex and Greptile out of allowance); Sonnet reviews 1-3, last ACCEPT; real throwaway-registry runs per PR. Docs modules.md "Installing a channel". Follow-ups T534, T535, T536. Evidence .claude/tmp/sonnet-run/T335/.
 - T352 — scripts/publish-channel.mjs publishes a gated channel build. It re-checks the ids and runs the boot check, then proves tag absence fail-closed (Bearer-token aware, anchored daemon line, `--confirm-absent`). It pushes the platform manifest only, copies the web by digest, verifies the digests, and writes release.json last from record.commit — PR #1006 (65063fc37), 2026-11-05. CI green; merged without bot review (Codex and Greptile out of allowance). Three Sonnet reviews (review-3 ACCEPT). Real throwaway-registry run: dry-run 0, publish 0, repeat 1. ghcr.io anonymous 401/DENIED measured. Follow-ups: T533 items 16-19 and T335 inputs. Evidence .claude/tmp/sonnet-run/T352/.
 - T353 — scripts/channel-boot-check.mjs live boot check of a channel build (no docker.sock), /modules/loaded vs entitled set in api and worker — PR #1005 (e81805a35), 2026-11-05; CI 13/13 green, merged without bot review (Codex and Greptile out of allowance); three Sonnet reviews ACCEPT; real scratch-channel run exit 0, extra-statistics negative exit 1 in both halves, pre-existing postgres/redis images kept, all resources removed. Follow-ups T533 items 9-15, T352 note. Evidence .claude/tmp/sonnet-run/T353/.
 - T351 — scripts/build-channel.mjs per-customer channel build from a final tag, no push — PR #1004 (0ec2c9f00), 2026-11-05; PR CI 13/13 green after a child_process ratchet baseline entry, merged without bot review (Codex and Greptile out of allowance); two Sonnet reviews (review-2 ACCEPT); real throwaway-registry run gate exit 0 with record; GHCR 0.2.0 platform pull + gate save verified. Follow-ups T533 (FNF), T352 notes. Evidence .claude/tmp/sonnet-run/T351/.
