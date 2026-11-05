@@ -176,6 +176,7 @@ function fixture(t, config = {}) {
   const request = async (url, options) => {
     requests.push({ url, options });
     assert.equal(options.redirect, 'error');
+    if (config.request) return config.request(url, options);
     assert.ok(!options.headers?.Authorization);
     if (config.fetchError) throw new Error('registry unreachable');
     return {
@@ -429,4 +430,123 @@ test('an existing manifest is preserved without publishing', async (t) => {
     1,
   );
   assert.equal(readFileSync(f.manifest, 'utf8'), 'previous manifest');
+});
+
+const TOKEN = 't352-anonymous-token-never-log';
+const destination = (host) => `${PREFIX}/haive-customer-${host}:9.9.9`;
+function tokenRegistry({
+  tokenStatus = 200,
+  secondStatus = 404,
+  realmHost = '127.0.0.1:5050',
+} = {}) {
+  return async (url, options) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === '/token') {
+      assert.equal(parsed.protocol, 'https:');
+      assert.equal(parsed.host, '127.0.0.1:5050');
+      assert.equal(parsed.searchParams.get('service'), 'registry-test');
+      assert.match(
+        parsed.searchParams.get('scope'),
+        /^repository:vendor\/haive-customer-(api|worker|web):pull$/,
+      );
+      assert.ok(!options.headers.Authorization);
+      return {
+        status: tokenStatus,
+        json: async () =>
+          tokenStatus === 200 ? { token: TOKEN } : { errors: [{ code: 'DENIED' }] },
+      };
+    }
+    if (options.headers.Authorization) {
+      assert.equal(options.headers.Authorization, `Bearer ${TOKEN}`);
+      return {
+        status: secondStatus,
+        json: async () => ({ errors: [{ code: 'MANIFEST_UNKNOWN' }] }),
+      };
+    }
+    const repository = parsed.pathname.slice(4, parsed.pathname.indexOf('/manifests/'));
+    return {
+      status: 401,
+      headers: new Headers({
+        'www-authenticate': `Bearer realm="https://${realmHost}/token",service="registry-test",scope="repository:${repository}:pull"`,
+      }),
+      json: async () => ({ errors: [{ code: 'UNAUTHORIZED' }] }),
+    };
+  };
+}
+
+for (const config of [{}, { tokenStatus: 403 }, { tokenStatus: 401 }, { secondStatus: 401 }]) {
+  test(`Bearer absence proof ${JSON.stringify(config)} publishes without exposing a token`, async (t) => {
+    const f = fixture(t, { request: tokenRegistry(config) });
+    assert.equal(await f.invoke(), 0, f.logs.join('\n'));
+    assert.deepEqual(f.attempted, KEYS);
+    assert.match(
+      f.logs.join('\n'),
+      config.tokenStatus || config.secondStatus ? /daemon-only/ : /corroborated/,
+    );
+    assert.ok(f.requests.some(({ url }) => new URL(url).pathname === '/token'));
+    assert.ok(!JSON.stringify({ calls: f.calls, logs: f.logs }).includes(TOKEN));
+  });
+}
+
+test('token DENIED plus daemon authorization failure refuses and names the unproven ref', async (t) => {
+  const f = fixture(t, {
+    request: tokenRegistry({ tokenStatus: 403 }),
+    inspectError: 'ERROR: failed to authorize: 403 Forbidden',
+  });
+  assert.equal(await f.invoke(), 2);
+  assert.deepEqual(f.attempted, []);
+  assert.ok(f.requests.some(({ url }) => new URL(url).pathname === '/token'));
+  assert.ok(
+    f.logs.some((line) => line.includes(`absence of ${destination('api')} could not be proven`)),
+  );
+});
+
+test('exact confirmations permit only access-denied destinations and are loud in the plan', async (t) => {
+  const f = fixture(t, {
+    request: tokenRegistry({ tokenStatus: 403 }),
+    inspectError:
+      'ERROR: failed to authorize: failed to fetch anonymous token: unexpected status from GET request to https://127.0.0.1:5050/token: 403 Forbidden',
+  });
+  assert.equal(
+    await f.invoke(KEYS.flatMap((host) => ['--confirm-absent', destination(host)])),
+    0,
+    f.logs.join('\n'),
+  );
+  assert.deepEqual(f.attempted, KEYS);
+  for (const host of KEYS)
+    assert.ok(
+      f.logs.some((line) => line.includes(`WARNING: --confirm-absent ${destination(host)}`)),
+    );
+});
+
+for (const config of [
+  { httpStatus: 500 },
+  { fetchError: true },
+  { request: tokenRegistry({ realmHost: 'another-host.test' }) },
+  { request: tokenRegistry({ tokenStatus: 500 }) },
+  { request: tokenRegistry({ secondStatus: 500 }) },
+  { request: tokenRegistry({ tokenStatus: 403 }), inspectError: 'connection refused: not found' },
+]) {
+  test(`confirmation fails closed for transport or untrusted proof ${Object.keys(config)}`, async (t) => {
+    const f = fixture(t, config);
+    assert.equal(await f.invoke(['--confirm-absent', destination('api')]), 2);
+    assert.deepEqual(f.attempted, []);
+    assert.ok(
+      f.logs.some((line) => line.includes(`absence of ${destination('api')} could not be proven`)),
+    );
+  });
+}
+
+test('confirmation cannot override a present destination', async (t) => {
+  const f = fixture(t, { existing: 'api' });
+  assert.equal(await f.invoke(['--confirm-absent', destination('api')]), 1);
+  assert.deepEqual(f.attempted, []);
+});
+
+test('confirmation must name an exact destination', async (t) => {
+  const f = fixture(t);
+  assert.equal(await f.invoke(['--confirm-absent', `${PREFIX}/other:9.9.9`]), 2);
+  assert.deepEqual(f.attempted, []);
+  assert.equal(f.bootCalls.length, 0);
+  assert.match(f.logs.join('\n'), /--confirm-absent is not a destination/);
 });

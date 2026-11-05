@@ -22,8 +22,13 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const KEYS = ['api', 'worker', 'web'];
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const PREFIX = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
+// Volatile Docker daemon wording; used only with exit 1 and no spawn error.
+const DAEMON_NOT_FOUND = /\b(not found|manifest unknown|name unknown|no such manifest)\b/i;
+const DAEMON_DENIED = /failed to authorize|unauthorized|\bdenied\b|\b40[13]\b|forbidden/i;
+const DAEMON_TRANSPORT_ERROR =
+  /\b5\d\d\b|network|connection|timeout|timed out|no such host|credential helper|tls|certificate|eof/i;
 const USAGE =
-  'usage: node scripts/publish-channel.mjs --record <build-record.json> [--registry <prefix; defaults to record api prefix>] [--out <dir; defaults beside record>] [--dry-run] [--timeout-ms <boot-stage timeout>] — writes release.json locally; URL delivery is T335';
+  'usage: node scripts/publish-channel.mjs --record <build-record.json> [--registry <prefix; defaults to record api prefix>] [--out <dir; defaults beside record>] [--dry-run] [--confirm-absent <exact destination ref; repeatable>] [--timeout-ms <boot-stage timeout>] — writes release.json locally; URL delivery is T335';
 
 function capture(command, args, { timeout, signal, ...options }) {
   return new Promise((resolveResult) => {
@@ -94,6 +99,7 @@ export async function run(
   const docker = (args, allowFailure) => command('docker', args, allowFailure);
   const inspect = (ref) =>
     docker(['buildx', 'imagetools', 'inspect', '--format', '{{json .Manifest}}', ref], true);
+  let confirmations = new Set();
   const absent = async (ref) => {
     const result = await inspect(ref);
     if (result.status === 0 && !result.error) {
@@ -103,12 +109,15 @@ export async function run(
       emit(`publish-channel: existing tag ${ref}`);
       return false;
     }
-    if (
-      result.status !== 1 ||
-      result.error ||
-      !/\b(not found|manifest unknown|name unknown|no such manifest)\b/i.test(result.stderr ?? '')
-    )
-      throw new Error(`could not inspect registry tag ${ref}`);
+    const unproven = () => new Error(`absence of ${ref} could not be proven`);
+    const daemonUsable =
+      result.status === 1 && !result.error && !DAEMON_TRANSPORT_ERROR.test(result.stderr ?? '');
+    const daemonAbsent =
+      daemonUsable &&
+      DAEMON_NOT_FOUND.test(result.stderr ?? '') &&
+      !DAEMON_DENIED.test(result.stderr ?? '');
+    const daemonDenied = daemonUsable && DAEMON_DENIED.test(result.stderr ?? '');
+    if (!daemonAbsent && !daemonDenied) throw unproven();
     const slash = ref.indexOf('/');
     const host = ref.slice(0, slash);
     const colon = ref.lastIndexOf(':');
@@ -116,20 +125,97 @@ export async function run(
     const tag = ref.slice(colon + 1);
     const scheme = /^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host) ? 'http' : 'https';
     const bounded = AbortSignal.timeout(30_000);
-    const response = await request(`${scheme}://${host}/v2/${repository}/manifests/${tag}`, {
-      redirect: 'error',
-      signal: signal ? AbortSignal.any([signal, bounded]) : bounded,
-      headers: { Accept: 'application/vnd.oci.image.manifest.v1+json' },
-    });
-    interrupted();
-    const body = await response.json();
-    if (
-      response.status !== 404 ||
-      !Array.isArray(body?.errors) ||
-      body.errors.length === 0 ||
-      body.errors.some((error) => !['MANIFEST_UNKNOWN', 'NAME_UNKNOWN'].includes(error.code))
-    )
-      throw new Error(`could not prove registry tag absent ${ref} (HTTP ${response.status})`);
+    const headers = { Accept: 'application/vnd.oci.image.manifest.v1+json' };
+    const get = async (url, requestHeaders = headers) => {
+      try {
+        const response = await request(url, {
+          redirect: 'error',
+          signal: signal ? AbortSignal.any([signal, bounded]) : bounded,
+          headers: requestHeaders,
+        });
+        interrupted();
+        return response;
+      } catch {
+        throw unproven();
+      }
+    };
+    const json = async (response) => {
+      try {
+        return await response.json();
+      } catch {
+        throw unproven();
+      }
+    };
+    const manifestUrl = `${scheme}://${host}/v2/${repository}/manifests/${tag}`;
+    let response = await get(manifestUrl);
+    let denied = false;
+    if (response.status === 401) {
+      const challenge = response.headers?.get('www-authenticate');
+      if (!/^Bearer\s+/i.test(challenge ?? '')) throw unproven();
+      const params = new Map();
+      const fields = challenge.replace(/^Bearer\s+/i, '');
+      let end = 0;
+      for (const match of fields.matchAll(/([a-z]+)="([^"\\]*)"(?:,\s*|$)/gi)) {
+        if (match.index !== end || params.has(match[1].toLowerCase())) throw unproven();
+        params.set(match[1].toLowerCase(), match[2]);
+        end = match.index + match[0].length;
+      }
+      if (end !== fields.length || !params.get('service') || !params.get('scope')) throw unproven();
+      let realm;
+      try {
+        realm = new URL(params.get('realm'));
+      } catch {
+        throw unproven();
+      }
+      if (
+        realm.protocol !== 'https:' ||
+        realm.host !== host ||
+        realm.username ||
+        realm.password ||
+        realm.hash
+      )
+        throw unproven();
+      realm.searchParams.set('service', params.get('service'));
+      realm.searchParams.set('scope', params.get('scope'));
+      const tokenResponse = await get(realm.href);
+      if ([401, 403].includes(tokenResponse.status)) denied = true;
+      else {
+        if (tokenResponse.status !== 200) throw unproven();
+        const body = await json(tokenResponse);
+        if (
+          Array.isArray(body?.errors) &&
+          body.errors.length &&
+          body.errors.every((error) => error.code === 'DENIED')
+        )
+          denied = true;
+        else {
+          const token = body?.token ?? body?.access_token;
+          if (typeof token !== 'string' || !token || /[\r\n]/.test(token)) throw unproven();
+          response = await get(manifestUrl, { ...headers, Authorization: `Bearer ${token}` });
+          denied = response.status === 401 || response.status === 403;
+        }
+      }
+    } else if (response.status === 403) denied = true;
+    if (denied) {
+      if (daemonAbsent)
+        emit(`publish-channel: absence ${ref}: daemon-only (anonymous access denied)`);
+      else if (confirmations.has(ref))
+        emit(
+          `publish-channel: plan WARNING: --confirm-absent ${ref} overrides inconclusive access-denied proof`,
+        );
+      else throw unproven();
+    } else {
+      const body = await json(response);
+      if (
+        !daemonAbsent ||
+        response.status !== 404 ||
+        !Array.isArray(body?.errors) ||
+        !body.errors.length ||
+        body.errors.some((error) => !['MANIFEST_UNKNOWN', 'NAME_UNKNOWN'].includes(error.code))
+      )
+        throw unproven();
+      emit(`publish-channel: absence ${ref}: corroborated`);
+    }
     return true;
   };
   try {
@@ -141,6 +227,7 @@ export async function run(
         out: { type: 'string', multiple: true },
         'timeout-ms': { type: 'string', multiple: true },
         'dry-run': { type: 'boolean' },
+        'confirm-absent': { type: 'string', multiple: true },
         help: { type: 'boolean' },
       },
       allowPositionals: false,
@@ -171,6 +258,10 @@ export async function run(
     const destinations = Object.fromEntries(
       KEYS.map((host) => [host, `${registry}/haive-${record.channel}-${host}:${record.version}`]),
     );
+    confirmations = new Set(values['confirm-absent'] ?? []);
+    for (const ref of confirmations)
+      if (!Object.values(destinations).includes(ref))
+        throw new Error('--confirm-absent is not a destination');
     for (const host of ['api', 'worker'])
       if (!record.images[host].built) throw new Error(`record ${host} must be built`);
     if (!record.images.web.built) {
