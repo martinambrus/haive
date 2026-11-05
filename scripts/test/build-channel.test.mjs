@@ -723,3 +723,55 @@ test('cleanup failure preserves gate status and reports the leftover path', asyn
     ),
   );
 });
+
+test('default runner streams builds beyond 32 MiB and scrubs split tokens', async (t) => {
+  const f = fixture(t);
+  seedTree(f.root);
+  writeFileSync(join(f.root, 'scripts', 'channel-gate.mjs'), 'process.exitCode = 0;');
+  for (const args of [
+    ['init', '--quiet'],
+    ['config', 'user.name', 'Channel Test'],
+    ['config', 'user.email', 'channel@example.invalid'],
+    ['add', '.'],
+    ['commit', '--quiet', '-m', 'tag tree'],
+    ['tag', 'v1.2.3'],
+  ]) {
+    const r = spawnSync('git', ['-C', f.root, ...args], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+  }
+  const bin = join(f.dir, 'bin');
+  mkdirSync(bin);
+  writeFileSync(
+    join(bin, 'docker'),
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === 'buildx') {
+  const chunk = Buffer.alloc(64 * 1024, 'x');
+  for (let i = 0; i < 34 * 16; i++) await new Promise(resolve => process.stdout.write(chunk, resolve));
+  process.stdout.write(${JSON.stringify(TOKEN.slice(0, 10))});
+  await new Promise(resolve => setTimeout(resolve, 20));
+  process.stdout.write(${JSON.stringify(TOKEN.slice(10))});
+} else if (args[0] === 'info') {
+  process.stdout.write(JSON.stringify({ Driver: 'overlayfs', DriverStatus: [] }));
+} else if (args[1] === 'inspect') {
+  process.stdout.write(args.includes('{{.Id}}') ? 'sha256:${'a'.repeat(64)}' : JSON.stringify(['ghcr.io/martinambrus/haive-web@sha256:${'b'.repeat(64)}']));
+}
+`,
+    { mode: 0o700 },
+  );
+  let bytes = 0;
+  let scrubbed = false;
+  const code = await run(f.argv, {
+    root: f.root,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+    say(line) {
+      bytes += line.length;
+      scrubbed ||= line.includes('[token]');
+      assert.ok(!line.includes(TOKEN));
+    },
+  });
+  assert.equal(code, 0);
+  assert.ok(bytes > 68 * 1024 * 1024);
+  assert.ok(scrubbed);
+  assert.ok(existsSync(join(f.out, 'build-record.json')));
+});
