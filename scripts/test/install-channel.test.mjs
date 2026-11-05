@@ -357,6 +357,28 @@ for (const lang of ['sh', 'ps1']) {
       ok.clean();
     }
   });
+  check('public helper puts every docker env option before the image', () => {
+    const f = fixture(lang, { publicInstall: true });
+    try {
+      assert.equal(f.install().status, 0);
+      const helper = join(f.dir, lang === 'sh' ? 'haive' : 'haive.ps1');
+      const r = f.invoke(
+        helper,
+        lang === 'sh' ? ['upgrade', '--version', '10.0.0'] : ['upgrade', '-Version', '10.0.0'],
+      );
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      const argv = f.calls().trim().split('\n').at(-1).split('\t').slice(1);
+      const imageAt = argv.indexOf('ghcr.io/martinambrus/haive-updater:10.0.0');
+      assert.ok(imageAt > 0);
+      assert.ok(argv.includes('HAIVE_INSTALL_ID=unit'));
+      argv.forEach((arg, i) => {
+        if (arg === '-e') assert.ok(i < imageAt, `env at ${i} after image`);
+      });
+      assert.ok(argv.indexOf('--manifest') > imageAt);
+    } finally {
+      f.clean();
+    }
+  });
   check('channel flags, private config and pinned env', () => {
     const f = fixture(lang);
     try {
@@ -577,12 +599,40 @@ for (const lang of ['sh', 'ps1']) {
       assert.equal(installed.status, 0, installed.stdout + installed.stderr);
       const names = ['.env', lang === 'sh' ? 'haive' : 'haive.ps1', `uninstall.${lang}`];
       const expected = Object.fromEntries(
-        names.map((name) => [name, readFileSync(join(f.dir, name))]),
+        names.map((name) => {
+          let bytes = readFileSync(join(f.dir, name));
+          if (lang === 'ps1' && name === names[1]) {
+            const before = bytes.toString();
+            const after = before
+              .replace(
+                "      '-e', \"COMPOSE_PROJECT_NAME=$($e['COMPOSE_PROJECT_NAME'])\",",
+                "      '-e', \"COMPOSE_PROJECT_NAME=$($e['COMPOSE_PROJECT_NAME'])\",\n      '-e', \"HAIVE_INSTALL_ID=$($e['HAIVE_INSTALL_ID'])\",",
+              )
+              .replace(
+                "      '--snapshot-host-dir', \"$($e['HAIVE_INSTALL_DIR_HOST'])/snapshots\",\n      '-e', \"HAIVE_INSTALL_ID=$($e['HAIVE_INSTALL_ID'])\"",
+                "      '--snapshot-host-dir', \"$($e['HAIVE_INSTALL_DIR_HOST'])/snapshots\"",
+              );
+            assert.notEqual(after, before);
+            bytes = Buffer.from(after);
+          }
+          return [name, bytes];
+        }),
       );
       const upgradeArgs =
         lang === 'sh' ? ['upgrade', '--version', '10.0.0'] : ['upgrade', '-Version', '10.0.0'];
       assert.equal(old.invoke(join(f.dir, names[1]), upgradeArgs).status, 0);
-      const expectedArgv = old.calls().trim().split('\n').at(-1);
+      let expectedArgv = old.calls().trim().split('\n').at(-1);
+      if (lang === 'ps1') {
+        const argv = expectedArgv.split('\t');
+        assert.deepEqual(argv.splice(-2), ['-e', 'HAIVE_INSTALL_ID=unit']);
+        argv.splice(
+          argv.indexOf('COMPOSE_PROJECT_NAME=unit') + 1,
+          0,
+          '-e',
+          'HAIVE_INSTALL_ID=unit',
+        );
+        expectedArgv = argv.join('\t');
+      }
       rmSync(f.dir, { recursive: true, force: true });
       const current = f.install();
       assert.equal(current.status, 0, current.stdout + current.stderr);

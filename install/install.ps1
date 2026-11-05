@@ -533,6 +533,7 @@ switch ($Command) {
       '-v','/var/run/docker.sock:/var/run/docker.sock',
       '-v', "$($e['HAIVE_INSTALL_DIR_HOST']):/install",
       '-e', "COMPOSE_PROJECT_NAME=$($e['COMPOSE_PROJECT_NAME'])",
+      '-e', "HAIVE_INSTALL_ID=$($e['HAIVE_INSTALL_ID'])",
       '-e', "DATABASE_URL=postgres://haive:$($e['POSTGRES_PASSWORD'])@postgres:5432/haive",
       '-e', 'REDIS_URL=redis://redis:6379',
       '-e', "CONFIG_ENCRYPTION_KEY=$($e['CONFIG_ENCRYPTION_KEY'])",
@@ -541,8 +542,7 @@ switch ($Command) {
       '--install-dir','/install',
       '--registry', $e['HAIVE_REGISTRY'],
       '--postgres-volume', "$($e['COMPOSE_PROJECT_NAME'])_postgres_data",
-      '--snapshot-host-dir', "$($e['HAIVE_INSTALL_DIR_HOST'])/snapshots",
-      '-e', "HAIVE_INSTALL_ID=$($e['HAIVE_INSTALL_ID'])"
+      '--snapshot-host-dir', "$($e['HAIVE_INSTALL_DIR_HOST'])/snapshots"
     )
     if ($ForceDrain) { $dargs += '--force' }
     & docker @dargs
@@ -565,7 +565,6 @@ switch ($Command) {
   $haivePs1 = $haivePs1.Replace('      "$($e[''HAIVE_REGISTRY''])/haive-updater:$v",', @'
       '-e', 'DOCKER_CONFIG=/install/.docker',
       '-e', "HAIVE_INSTALL_DIR_HOST=$($e['HAIVE_INSTALL_DIR_HOST'])",
-      '-e', "HAIVE_INSTALL_ID=$($e['HAIVE_INSTALL_ID'])",
       "$($e['HAIVE_REGISTRY'])/haive-updater:$v",
 '@)
   $haivePs1 = $haivePs1.Replace('      ''--manifest'', "https://github.com/martinambrus/haive/releases/download/v$v/release.json",', @'
@@ -573,7 +572,6 @@ switch ($Command) {
       '--manifest-image', "$($e['HAIVE_CHANNEL_REGISTRY'])/haive-$($e['HAIVE_CHANNEL'])-release:$v",
       '--version', $v,
 '@)
-  $haivePs1 = $haivePs1.Replace('      ''--snapshot-host-dir'', "$($e[''HAIVE_INSTALL_DIR_HOST''])/snapshots",' + "`n" + '      ''-e'', "HAIVE_INSTALL_ID=$($e[''HAIVE_INSTALL_ID''])"', '      ''--snapshot-host-dir'', "$($e[''HAIVE_INSTALL_DIR_HOST''])/snapshots"')
 }
 [System.IO.File]::WriteAllText((Join-Path $Dir 'haive.ps1'), $haivePs1, (New-Object System.Text.UTF8Encoding($false)))
 
