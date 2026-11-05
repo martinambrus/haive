@@ -83,9 +83,22 @@ it('refuses a copied release.json symlink and still removes the container', asyn
       if (args[0] === 'cp') await symlink(target, args[2]!);
       return { stdout: args[0] === 'create' ? 'container-id' : '' };
     });
-    await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow();
+    await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow(
+      /^a symlink in the path: release\.json$/,
+    );
     expect(h.exec.mock.calls.at(-1)![1]).toEqual(['rm', '-f', 'container-id']);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+it('refuses release.json above one MiB and still removes the manifest container', async () => {
+  h.exec.mockImplementation(async (_command: string, args: string[]) => {
+    if (args[0] === 'cp') await writeFile(args[2]!, Buffer.alloc(1024 * 1024 + 1, 'a'));
+    return { stdout: args[0] === 'create' ? 'container-id' : '' };
+  });
+  await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow(
+    'release manifest is missing or too large',
+  );
+  expect(h.exec.mock.calls.at(-1)![1]).toEqual(['rm', '-f', 'container-id']);
 });
