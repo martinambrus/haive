@@ -394,7 +394,7 @@ The one-shot accepts prepared module folders under `/input/<id>/` and `HAIVE_BUI
 Run the matching builder with `docker run --rm`, mount `/var/run/docker.sock` at the same path,
 mount the prepared module directory read-only at `/input`, and pass that JSON with
 `-e HAIVE_BUILD_PLAN=...`. No host Node, pnpm or Haive checkout is needed. Inputs must already be
-fetched and pinned; durable git source/token management and the Modules install UI are separate.
+fetched and pinned, by hand or through the install sources below.
 The builder checks its release stamp, refuses collisions with baked modules, adds own packages to
 the disposable workspace dependency lists, installs dependencies, and runs existing codegen and
 package builds. It derives only api and worker by default. A module exporting `./web` or
@@ -404,7 +404,8 @@ fails before producing a candidate. Runtime-fetched declarative pages need no we
 This one-shot has host-root authority through the Docker socket, and module build scripts execute
 with that authority. Only use trusted modules and trusted builder images. The input mount is read-only;
 all package edits and dependency installation happen inside disposable build stages. Nested `.git`,
-`.env`, `.env.*`, `.npmrc` and `node_modules` are excluded from the own-module build context.
+`.env`, `.env.*`, `.npmrc`, `node_modules` and the `.haive-source.json` pin marker are excluded
+from the own-module build context (`BUILD_CONTEXT_IGNORE`, pinned by its test).
 
 Installation callers run the one-shot before bringing up services, then persist the successful output
 references as `HAIVE_API_IMAGE` and `HAIVE_WORKER_IMAGE` (and `HAIVE_WEB_IMAGE` when rebuilt) in `.env`.
@@ -430,3 +431,37 @@ previous references. Old journal rows without image overrides retain their origi
 behavior. Do not prune previous local images before upgrading: preflight checks those exact references.
 Vendor delivery must run the existing channel leak/token/module gate on the complete derived image set;
 the builder does not replace entitlement/channel resolution or publication gates.
+
+### Install sources (admin Modules page)
+
+The admin Modules page records where each own module comes from (`module_sources`, migration 0221)
+and fetches it into `HAIVE_OWN_MODULES_HOST_DIR`. It is live only on a published-image install:
+`HAIVE_PUBLISHED_INSTALL: 'true'` is set for api and worker in `docker-compose.run.yml` and nowhere
+else, so a source checkout gets 409 `source_checkout` on every write and the page shows a read-only
+note pointing at `pnpm module add`. Saving or fetching never builds or swaps an image: a pinned
+module applies at the next upgrade or an explicit build of the one-shot above.
+
+- A row is a git source (https URL without userinfo, query or fragment; a bare branch, tag or
+  40-hex SHA as ref) or a registry source (`@haive-module/<id>` at an exact version). The module id
+  is unique.
+- The access token is install-wide per source, stored by `SecretsService` in `system_secrets`
+  under `module_source:<id>:token`, and never returned: responses carry `hasToken`. A blank token
+  on edit keeps the stored one; an explicit clear removes it. Every add, edit, delete, fetch and
+  refresh writes its audit row in the same transaction and fails with it. Changing a source's
+  identity clears `resolved_sha` and its fetch state.
+- Fetch (`POST /modules/sources/:id/fetch`) queues a job on its own queue (`QUEUE_NAMES.MODULE_SOURCE`,
+  concurrency 1). The worker clones through the hardened git path, resolves the ref to a commit SHA
+  once and stores it in `resolved_sha`; later fetches build that SHA. Only Refresh (`refresh: true`)
+  re-resolves the ref to a newer commit. Status moves `queued`, `fetching`, then `pinned` or
+  `failed` with a scrubbed `last_error`; a 10s sweep re-queues rows left `queued` or `fetching`.
+- Registry fetch is refused with 409 `registry_fetch_unsupported`: published packages ship `dist`
+  only, which the own-module builder cannot rebuild. Use a git source.
+- The worker never resolves the host directory by name. It streams the validated tree (no nested
+  `.git`, links or special files; depth, entry and size limits) as tar into a helper container run
+  from the worker's own image (`--pull never`) with the directory bind-mounted, which stages it,
+  writes `.haive-source.json` (url, ref, sha), and swaps it into `<dir>/<id>` with `renameat2` under
+  `flock` LOCK_EX. The builder's snapshot takes LOCK_SH, so a build never reads a half-written pin.
+  A module folder without a valid marker (placed by hand) is never replaced. Leftover
+  `.<id>.tmp-*` stages are removed by the next pin of that id.
+- Deleting a source removes the row and its token but keeps its pinned folder; remove the folder
+  by hand to drop the module from the next build.
