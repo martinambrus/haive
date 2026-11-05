@@ -191,6 +191,7 @@ it('argv without a target and no interrupted run returns usage', async () => {
 
 it.each([
   [{ HAIVE_CHANNEL_REGISTRY: 'other' }, 'release repository differs'],
+  [{ HAIVE_CHANNEL: 'other' }, 'disagrees with install HAIVE_CHANNEL'],
   [{ DOCKER_CONFIG: '/host/other/.docker' }, 'must be <host install dir>/.docker'],
 ])('settings changed while waiting for the lock are enforced: %j', async (change, message) => {
   vi.mocked(journal.tryLock).mockImplementation(async () => {

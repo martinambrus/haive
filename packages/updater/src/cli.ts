@@ -78,7 +78,8 @@ export function resolveChannel(requested: string | undefined, installed: string)
 export function applyInstallDockerConfig(
   settings: Pick<ImageSettings, 'HAIVE_CHANNEL' | 'DOCKER_CONFIG'>,
   installDir: string,
-  launchDockerConfig = process.env.DOCKER_CONFIG,
+  // Required, never defaulted: a default would re-read the env a previous call overwrote.
+  launchDockerConfig: string | undefined,
 ): void {
   if (!settings.HAIVE_CHANNEL || settings.HAIVE_CHANNEL === 'public') return;
   if (!settings.DOCKER_CONFIG?.startsWith('/') || settings.DOCKER_CONFIG.includes(','))
