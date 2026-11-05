@@ -2,7 +2,7 @@ import { asc, eq, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { isLockNotAvailable, isUniqueViolationOf, schema } from '@haive/database';
-import { MODULE_CONTROL_JOB_NAMES, secretsService } from '@haive/shared';
+import { MODULE_SOURCE_JOB_NAMES, secretsService } from '@haive/shared';
 import { isBranchName } from '@haive/shared/git-args';
 import { modulePackageId } from '@haive/shared/modularity';
 import { HttpError, type AppEnv } from '../context.js';
@@ -10,8 +10,7 @@ import { getDb } from '../db.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { isUuid } from '../lib/uuid.js';
-import { getModuleControlQueue } from '../queues.js';
-import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
+import { getModuleSourceQueue } from '../queues.js';
 
 const registryPrefix = '@haive-module/';
 const moduleId = z.string().refine((value) => modulePackageId(registryPrefix + value) === value);
@@ -146,8 +145,6 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
 
   routes.post('/:sourceId/fetch', async (c) => {
     assertWritable();
-    if (isForeignOrigin(c.req.header('origin'), c.req.header('host'), trustedOrigins()))
-      throw new HttpError(403, 'Refused a request from another page');
     const id = c.req.param('sourceId');
     if (!isUuid(id)) throw new HttpError(404, 'Not found');
     const body = z
@@ -194,8 +191,8 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
       .catch(sourceWriteError);
     logAuditEvent(event);
     try {
-      await getModuleControlQueue().add(
-        MODULE_CONTROL_JOB_NAMES.FETCH_SOURCE,
+      await getModuleSourceQueue().add(
+        MODULE_SOURCE_JOB_NAMES.FETCH,
         { sourceId: id, moduleId: source.moduleId, requestedAt: source.updatedAt.toISOString() },
         {
           jobId: 'source-' + id + '-' + source.updatedAt.getTime(),

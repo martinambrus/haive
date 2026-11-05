@@ -1,6 +1,6 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { MODULE_CONTROL_JOB_NAMES, secretsService } from '@haive/shared';
+import { MODULE_SOURCE_JOB_NAMES, secretsService } from '@haive/shared';
 import type { Queue } from 'bullmq';
 import { fetchModuleSource, sourceFetchError } from './source-fetch.js';
 import { pinModuleTree } from './source-pin.js';
@@ -95,7 +95,7 @@ export async function recoverModuleSourceFetches(
     .where(inArray(schema.moduleSources.fetchStatus, ['queued', 'fetching']));
   for (const source of rows)
     await queue.add(
-      MODULE_CONTROL_JOB_NAMES.FETCH_SOURCE,
+      MODULE_SOURCE_JOB_NAMES.FETCH,
       {
         sourceId: source.id,
         moduleId: source.moduleId,

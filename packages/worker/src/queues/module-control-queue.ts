@@ -1,7 +1,6 @@
 import { safeProcessor } from './safe-processor.js';
-import { Queue, Worker } from 'bullmq';
-import { recoverModuleSourceFetches, runModuleSourceFetch } from '../modules/source-jobs.js';
-import { and, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
+import { Worker } from 'bullmq';
+import { and, eq, isNotNull, isNull, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   MODULE_CONTROL_JOB_NAMES,
@@ -197,20 +196,6 @@ export function startModuleControlWorker(
   const worker = new Worker<ModuleTeardownPayload, ModuleTeardownResult>(
     QUEUE_NAMES.MODULE_CONTROL,
     safeProcessor(async (job) => {
-      if (job.name === MODULE_CONTROL_JOB_NAMES.FETCH_SOURCE) {
-        const { sourceId, requestedAt } = job.data as ModuleTeardownPayload & {
-          sourceId: string;
-          requestedAt: string;
-        };
-        if (
-          typeof sourceId !== 'string' ||
-          typeof requestedAt !== 'string' ||
-          !Number.isFinite(Date.parse(requestedAt))
-        )
-          throw new Error('Missing module source request identity');
-        await runModuleSourceFetch(getDb(), sourceId, requestedAt);
-        return { moduleId: job.data.moduleId, tornDownAt: null };
-      }
       return processModuleControlJob(
         {
           ...modules,
@@ -226,46 +211,6 @@ export function startModuleControlWorker(
   );
   worker.on('failed', (job, err) => {
     log.warn({ jobId: job?.id, moduleId: job?.data?.moduleId, err }, 'module-control job failed');
-    if (job?.name === MODULE_CONTROL_JOB_NAMES.FETCH_SOURCE) {
-      const { sourceId, requestedAt } = job.data as ModuleTeardownPayload & {
-        sourceId: string;
-        requestedAt: string;
-      };
-      if (typeof requestedAt !== 'string' || !Number.isFinite(Date.parse(requestedAt))) return;
-      void getDb()
-        .update(schema.moduleSources)
-        .set({ fetchStatus: 'failed', lastError: 'Module fetch job ended; retry Fetch.' })
-        .where(
-          and(
-            eq(schema.moduleSources.id, sourceId),
-            inArray(schema.moduleSources.fetchStatus, ['queued', 'fetching']),
-            eq(schema.moduleSources.updatedAt, new Date(requestedAt)),
-          ),
-        )
-        .catch((error) => log.error({ err: error }, 'Could not record module fetch failure'));
-    }
   });
-  if (process.env.HAIVE_PUBLISHED_INSTALL === 'true') {
-    const queue = new Queue(QUEUE_NAMES.MODULE_CONTROL, { connection: getBullRedis() });
-    let running = false;
-    const recover = async () => {
-      if (running) return;
-      running = true;
-      try {
-        await recoverModuleSourceFetches(getDb(), queue);
-      } catch (error) {
-        log.warn({ err: error }, 'Could not recover module source fetches');
-      } finally {
-        running = false;
-      }
-    };
-    const timer = setInterval(() => void recover(), 10_000);
-    timer.unref();
-    worker.on('ready', () => void recover());
-    worker.on('closed', () => {
-      clearInterval(timer);
-      void queue.close();
-    });
-  }
   return worker;
 }

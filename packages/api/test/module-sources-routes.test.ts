@@ -3,7 +3,8 @@ import { eq, sql } from 'drizzle-orm';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { configService, secretsService } from '@haive/shared';
 import { Hono } from 'hono';
-import type { AppEnv } from '../src/context.js';
+import { HttpError, type AppEnv } from '../src/context.js';
+import { isForeignOrigin, trustedOrigins } from '../src/lib/request-origin.js';
 import { moduleRoutes } from '../src/modules/loader.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 
@@ -13,7 +14,10 @@ const h = vi.hoisted(() => ({
   auditFails: false,
   enqueue: vi.fn(),
 }));
-vi.mock('../src/queues.js', () => ({ getModuleControlQueue: () => ({ add: h.enqueue }) }));
+vi.mock('../src/queues.js', () => ({
+  getModuleControlQueue: () => ({ add: h.enqueue }),
+  getModuleSourceQueue: () => ({ add: h.enqueue }),
+}));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/middleware/auth.js', async (original) => ({
   ...(await original<typeof import('../src/middleware/auth.js')>()),
@@ -48,8 +52,17 @@ const registry = {
   version: '1.2.3',
 };
 const token = 't337-secret-never-return';
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const app = new Hono<AppEnv>();
 app.onError(errorHandler);
+app.use('*', async (c, next) => {
+  if (
+    !SAFE_METHODS.has(c.req.method) &&
+    isForeignOrigin(c.req.header('origin'), c.req.header('host'), trustedOrigins())
+  )
+    throw new HttpError(403, 'Refused a request from another page');
+  await next();
+});
 app.route('/modules', moduleRoutes([]));
 const send = (method: string, path = '', body?: unknown) =>
   app.request('/modules/sources' + path, {

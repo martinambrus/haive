@@ -483,6 +483,7 @@ jobs:
           api test/module-deactivation-db.test.ts MODULE_DEACTIVATION_API_TEST_URL module_deactivation_api_test pg
           worker test/module-drain-db.test.ts MODULE_DEACTIVATION_API_TEST_URL module_deactivation_api_test_330_ci pg
           api test/module-sources-routes.test.ts MODULE_SOURCES_TEST_URL module_sources_test pg
+          worker test/module-source-jobs.test.ts MODULE_SOURCES_TEST_URL module_sources_test_worker pg
           api test/module-missing-db.test.ts MODULE_MISSING_API_TEST_URL module_missing_api_test pg
           api test/module-purge-db.test.ts MODULE_PURGE_API_TEST_URL module_purge_api_test pg
           api test/task-create-path.test.ts TASK_CREATE_PATH_TEST_URL task_create_path_test pg
@@ -812,6 +813,18 @@ jobs:
         run: |
           docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T worker \
             sh -c 'cd /app/packages/worker && node_modules/.bin/vitest run --root . test/repo-extract.test.ts test/tool-spawn.test.ts test/bundle-ingest.test.ts src/attachments/expand-archives.test.ts src/step-engine/steps/plan/plan-inputs.test.ts'
+
+      - name: Module pin helper inside the worker image
+        timeout-minutes: 3
+        if: ${{ !cancelled() && steps.runtime.conclusion == 'success' }}
+        run: |
+          pin_tmp=$(mktemp -d /tmp/module-source-ci-XXXXXX)
+          trap 'rm -rf "$pin_tmp"' EXIT
+          image=$(docker container inspect --format '{{.Image}}' haive-worker)
+          docker run --rm --pull never --volumes-from haive-worker \
+            --mount "type=bind,src=$pin_tmp,dst=$pin_tmp" \
+            -e TMPDIR="$pin_tmp" -e MODULE_SOURCE_DOCKER_TEST=true \
+            "$image" sh -c 'cd /app/packages/worker && node_modules/.bin/vitest run --root . test/module-source-pin.test.ts'
 
       - name: Dump service status
         if: always()
