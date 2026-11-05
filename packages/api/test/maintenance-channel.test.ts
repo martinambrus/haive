@@ -90,6 +90,10 @@ it('channel argv selects image/channel/version and mounted Docker config without
     '--version',
     '9.9.9',
   ]);
+  expect(args).toContain('HAIVE_INSTALL_DIR_HOST=/host/install');
+  expect(args.indexOf('HAIVE_INSTALL_DIR_HOST=/host/install')).toBeLessThan(
+    args.indexOf('ghcr.io/martinambrus/haive-updater:9.9.9'),
+  );
   expect(args).toContain('DOCKER_CONFIG=/install/.docker');
   expect(args.indexOf('DOCKER_CONFIG=/install/.docker')).toBeLessThan(
     args.indexOf('ghcr.io/martinambrus/haive-updater:9.9.9'),

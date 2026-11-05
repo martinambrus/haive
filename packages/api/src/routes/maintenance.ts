@@ -551,7 +551,9 @@ maintenanceRoutes.post('/upgrade', async (c) => {
     // join `haive-network` — another install's, on any namespaced install.
     '-e',
     `HAIVE_INSTALL_ID=${installId()}`,
-    ...(channel !== 'public' ? ['-e', 'DOCKER_CONFIG=/install/.docker'] : []),
+    ...(channel !== 'public'
+      ? ['-e', 'DOCKER_CONFIG=/install/.docker', '-e', `HAIVE_INSTALL_DIR_HOST=${installDir}`]
+      : []),
     image,
     ...(channel !== 'public'
       ? [

@@ -84,6 +84,11 @@ export function applyInstallDockerConfig(
     throw new Error('channel install requires an absolute DOCKER_CONFIG in .env');
   // The API mounts the host install at /install and explicitly supplies this translation.
   const mounted = installDir === '/install' && process.env.DOCKER_CONFIG === '/install/.docker';
+  const hostInstallDir = mounted ? process.env.HAIVE_INSTALL_DIR_HOST : installDir;
+  if (!hostInstallDir?.startsWith('/') || hostInstallDir.includes(','))
+    throw new Error('channel updater requires an absolute HAIVE_INSTALL_DIR_HOST');
+  if (settings.DOCKER_CONFIG !== join(hostInstallDir, '.docker'))
+    throw new Error('channel install DOCKER_CONFIG must be <host install dir>/.docker');
   process.env.DOCKER_CONFIG = mounted ? join(installDir, '.docker') : settings.DOCKER_CONFIG;
 }
 
@@ -184,7 +189,6 @@ export async function main(): Promise<number> {
 
   let imageSettings = await readImageSettings(envFile);
   const channel = resolveChannel(arg('channel'), imageSettings.HAIVE_CHANNEL);
-  applyInstallDockerConfig(imageSettings, installDir);
   const manifestOptions = {
     manifest: arg('manifest'),
     manifestImage: arg('manifest-image'),
@@ -196,6 +200,7 @@ export async function main(): Promise<number> {
     emit('error', { message: 'channel installs require --manifest-image' });
     return EXIT.usage;
   }
+  applyInstallDockerConfig(imageSettings, installDir);
   // The dry plan reads no journal. Normal starts recover an interrupted run before fetching a target.
   const channelTarget = flag('dry-plan') ? await loadManifest(manifestOptions) : undefined;
 
