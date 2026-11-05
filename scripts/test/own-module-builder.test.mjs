@@ -1,6 +1,42 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeTree } from './tree.mjs';
+import { mkdirSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+
+test('own-module snapshots exclude abandoned fetch staging directories', async (t) => {
+  const { snapshotModules } = await import('../own-module-builder.mjs');
+  const tree = makeTree(t, { modules: { own: {} } });
+  const source = join(tree.root, 'modules');
+  mkdirSync(join(source, '.own.tmp-00000000-0000-4000-8000-000000000337'));
+  writeFileSync(join(source, 'own', 'value'), 'pinned');
+  const output = join(tree.root, 'snapshot');
+  snapshotModules(source, output);
+  assert.deepEqual(readdirSync(output), ['own']);
+  assert.equal(readFileSync(join(output, 'own', 'value'), 'utf8'), 'pinned');
+});
+
+test('own-module snapshots wait for an in-progress pin', async (t) => {
+  const { snapshotModules } = await import('../own-module-builder.mjs');
+  const tree = makeTree(t, { modules: { own: {} } });
+  const source = join(tree.root, 'modules');
+  const file = join(source, 'own', 'value');
+  writeFileSync(file, 'before');
+  const locker = spawn('python3', [
+    '-c',
+    `import fcntl,os,sys,time\nfd=os.open(sys.argv[1],os.O_RDONLY)\nfcntl.flock(fd,fcntl.LOCK_EX)\nprint('ready',flush=True)\ntime.sleep(0.2)\nopen(sys.argv[2],'w').write('after')\nos.close(fd)`,
+    source,
+    file,
+  ]);
+  await new Promise((resolve, reject) => {
+    locker.stdout.once('data', resolve);
+    locker.once('error', reject);
+  });
+  const output = join(tree.root, 'snapshot');
+  snapshotModules(source, output);
+  assert.equal(readFileSync(join(output, 'own', 'value'), 'utf8'), 'after');
+});
 
 test('prepared own modules retain baked modules and regenerate matching hosts', async (t) => {
   const { prepareModules } = await import('../own-module-builder.mjs');

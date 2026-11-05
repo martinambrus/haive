@@ -310,6 +310,7 @@ export interface DdevControlResult {
 
 export const MODULE_CONTROL_JOB_NAMES = {
   TEARDOWN: 'teardown',
+  FETCH_SOURCE: 'fetch-source',
 } as const;
 
 export interface ModuleTeardownPayload {

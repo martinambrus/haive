@@ -102,6 +102,7 @@ export const CONTAINER_FAMILY = {
   app: 'app',
   /** The one-shot updater, which is deliberately NOT part of the compose project. */
   upgrade: 'upgrade',
+  moduleSource: 'module-source',
 } as const;
 export type ContainerFamily = (typeof CONTAINER_FAMILY)[keyof typeof CONTAINER_FAMILY];
 

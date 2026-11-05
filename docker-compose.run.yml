@@ -72,6 +72,7 @@ services:
     environment:
       # HAIVE_PUBLISHED_INSTALL enables module source management on published-image installs.
       HAIVE_PUBLISHED_INSTALL: 'true'
+      HAIVE_OWN_MODULES_HOST_DIR: ${HAIVE_OWN_MODULES_HOST_DIR:-}
       # Everything the in-app "Upgrade" button needs, and nothing it does not.
       #
       # HAIVE_INSTALL_DIR_HOST is the only one with no sane default, so it is the one that gates the
@@ -95,6 +96,9 @@ services:
 
   worker:
     build: !reset null
+    environment:
+      HAIVE_PUBLISHED_INSTALL: 'true'
+      HAIVE_OWN_MODULES_HOST_DIR: ${HAIVE_OWN_MODULES_HOST_DIR:-}
     image: ${HAIVE_WORKER_IMAGE:-${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-worker:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}}
     depends_on:
       db-migrate:

@@ -109,6 +109,34 @@ function runDocker(args) {
   if (result.status !== 0) throw new Error(`docker failed (${result.signal ?? result.status})`);
 }
 
+export function snapshotModules(source, destination) {
+  const result = spawnSync(
+    'python3',
+    [
+      '-c',
+      String.raw`
+import fcntl, os, re, shutil, sys
+source, destination = sys.argv[1:]
+fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    staging = re.compile(r'^\.[a-z0-9][a-z0-9-]{0,22}\.tmp-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$')
+    shutil.copytree(source, destination, symlinks=True,
+        ignore=lambda path, names: [name for name in names if path == source and staging.fullmatch(name)])
+finally:
+    os.close(fd)
+`,
+      source,
+      destination,
+    ],
+    { encoding: 'utf8', timeout: 120_000 },
+  );
+  if (result.status !== 0)
+    throw new Error(
+      `own-module snapshot failed: ${result.stderr || result.error?.message || result.signal}`,
+    );
+}
+
 export function main() {
   if (process.argv.includes('--prepare')) {
     const ids = readdirSync('/own-modules');
@@ -129,7 +157,7 @@ export function main() {
   if (readdirSync(source).length === 0) throw new Error('own-module directory is empty');
   const dir = mkdtempSync(join(tmpdir(), 'haive-own-build-'));
   try {
-    cpSync(source, join(dir, 'own-modules'), { recursive: true });
+    snapshotModules(source, join(dir, 'own-modules'));
     writeFileSync(
       join(dir, '.dockerignore'),
       '**/node_modules\n**/.git\n**/.npmrc\n**/.env\n**/.env.*\n',
