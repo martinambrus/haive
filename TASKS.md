@@ -459,11 +459,6 @@ Fix direction: publish the per-module runtime state (schema pending/failed/ready
 
 User decision 2026-11-01: Show configured-active but runtime/schema-unready modules as failed/unready with an explicit Retry action
 
-### T351 · D2a-3 · scripts/build-channel.mjs: channel build from a final base tag, no push
-
-status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-05 · last: 2026-11-05 · was modular #177 · priority: P2
-Plan D2a-3: a git-archive tree, `module add` per entitled package, `--secret` builds, then the gate.
-
 ### T352 · D2a-4 · channel publish (+3)
 
 status: open · was modular #178 · priority: P2
@@ -478,7 +473,7 @@ Inputs from T351 (2026-11-05): read `build-record.json` schema 1 (`scripts/build
 
 ### T353 · D2a-5 · live boot check of a channel build before push
 
-status: open · was modular #179 · priority: P2
+status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-05 · last: 2026-11-05 · was modular #179 · priority: P2
 Plan D2a-5: a throwaway stack with no docker.sock, checking that /modules/loaded equals the entitled set.
 
 ### T354 · FNF[npm-cache-shared] · the shared npm cache volume is mounted read-write into every agent sandbox
@@ -1373,6 +1368,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T351 — scripts/build-channel.mjs per-customer channel build from a final tag, no push — PR #1004 (0ec2c9f00), 2026-11-05; PR CI 13/13 green after a child_process ratchet baseline entry, merged without bot review (Codex and Greptile out of allowance); two Sonnet reviews (review-2 ACCEPT); real throwaway-registry run gate exit 0 with record; GHCR 0.2.0 platform pull + gate save verified. Follow-ups T533 (FNF), T352 notes. Evidence .claude/tmp/sonnet-run/T351/.
 - T337 — module_sources install sources with fetch and pin (git; registry refused pending T532) — PR #1003 (9a8d8a3c7), 2026-11-05; PR CI 13/13 green, merged without bot review (Codex review allowance exhausted); full suite at feature end green bar two load-timing flakes in untouched files (pg-startup-storm positive control, project-state-write-bounds 4,090 claims); migration 0221 applied to dev; admin Modules page shows Install sources with source-checkout read-only note. Follow-ups T531, T532. Evidence .claude/tmp/sonnet-run/T337/.
 - T336 — Own-module container builder and upgrade image recovery — PR #1001 (c4f4768900), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41534422031 green; Own-modulebuilder actualpublic/customercontainerproof plusquotedsettingsreadonlyCompose/preflight/journalrestoreproof andentitlement/tokennegativecontrols passed; completeworkspace8packagesunits/types/rootformat/scripts passed, exactHEADnative/hosted/allPRCI/allmainCI green; reviewedoperator/updater/sharednaming source loaded,serializedlibs/watchers/compilednamingartifact/APIwebhealth/idle/userfiles verified. EightownedDockerfixturetags/inputscratchcleaned.. Evidence .claude/tmp/codex-run/queue-exec-20261101/T336/.
 
