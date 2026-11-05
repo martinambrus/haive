@@ -489,8 +489,8 @@ per-customer.
   and `-e HAIVE_INSTALL_DIR_HOST`, names only, never a token. It refuses a channel or registry that fails the
   build-channel CHANNEL/PREFIX rules. GET /upgrade reports `channel`. `docker-compose.run.yml` passes the three
   keys to the api.
-- Credential: the updater applies the install `DOCKER_CONFIG` to its own docker calls, once, before recovery and
-  the manifest read. It must equal `<host install dir>/.docker` (refused otherwise), translated to
+- Credential: the updater applies the install `DOCKER_CONFIG` to its own docker calls before recovery and
+  the manifest read, and again after re-reading `.env` under the lock. It must equal `<host install dir>/.docker` (refused otherwise), translated to
   `/install/.docker` inside the api-launched container. The own-module builder gets that directory mounted
   read-only plus `BUILDX_CONFIG=/tmp/buildx`, because buildx refuses a read-only `$DOCKER_CONFIG/buildx`
   (MEASURED: `mkdir ...: read-only file system`). A public install's docker calls see no change.
