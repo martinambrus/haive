@@ -145,12 +145,24 @@ export async function prepareImages(
   return target;
 }
 
+/** Match the repository prefix accepted by the channel publisher. */
+export function requireChannelRegistry(registry: string): string {
+  if (
+    !/^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/.test(registry)
+  )
+    throw new Error('channel install requires a valid HAIVE_CHANNEL_REGISTRY');
+  return registry;
+}
+
 /** A read-only plan also used by channel preflight; never substitutes public tag references. */
 export function channelImagePlan(version: string, settings: ImageSettings, images?: ReleaseImages) {
+  const registry = requireChannelRegistry(settings.HAIVE_CHANNEL_REGISTRY);
   const pinned = (host: 'api' | 'worker' | 'web' | 'builder'): string => {
     const ref = images?.[host];
     if (!ref || !/^[a-z0-9][a-z0-9._/:-]*@sha256:[a-f0-9]{64}$/.test(ref))
       throw new Error(`channel manifest requires a pinned ${host} image`);
+    if (ref.split('@')[0] !== `${registry}/haive-${settings.HAIVE_CHANNEL}-${host}`)
+      throw new Error(`channel manifest ${host} repository differs from install channel registry`);
     return ref;
   };
   const baseImages = { api: pinned('api'), worker: pinned('worker'), web: pinned('web') };

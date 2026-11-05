@@ -25,7 +25,7 @@ import * as images from './images.js';
 import * as dk from './docker.js';
 import * as journal from './journal.js';
 import * as run from './run.js';
-const pin = (host: string) => `private/acme-${host}@sha256:${'a'.repeat(64)}`;
+const pin = (host: string) => `private/haive-acme-${host}@sha256:${'a'.repeat(64)}`;
 const refs = { api: pin('api'), worker: pin('worker'), web: pin('web'), builder: pin('builder') };
 const settings: images.ImageSettings = {
   ...images.emptyOverrides(),
@@ -50,7 +50,7 @@ beforeEach(() => {
     '--version',
     '9.9.9',
     '--manifest-image',
-    'private/release:9.9.9',
+    'private/haive-acme-release:9.9.9',
     '--check',
   ];
   vi.stubEnv('DATABASE_URL', 'postgres://isolated');

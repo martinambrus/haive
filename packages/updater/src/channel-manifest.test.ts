@@ -18,8 +18,9 @@ describe('channel manifest controls', () => {
     await expect(
       loadManifest({
         manifest: 'https://invalid/release.json',
-        manifestImage: 'acme/release:9.9.9',
+        manifestImage: 'private/haive-acme-release:9.9.9',
         channel: 'acme',
+        channelRegistry: 'private',
         version: '9.9.9',
       }),
     ).rejects.toThrow('mutually exclusive');
@@ -30,7 +31,12 @@ describe('channel manifest controls', () => {
       JSON.stringify({ ...manifest, channel: 'other' }),
     );
     await expect(
-      loadManifest({ manifestImage: 'acme/release:9.9.9', channel: 'acme', version: '9.9.9' }),
+      loadManifest({
+        manifestImage: 'private/haive-acme-release:9.9.9',
+        channel: 'acme',
+        channelRegistry: 'private',
+        version: '9.9.9',
+      }),
     ).rejects.toThrow('channel');
   });
   it('refuses a wrong version', async () => {
@@ -38,14 +44,24 @@ describe('channel manifest controls', () => {
       JSON.stringify({ ...manifest, version: '8.8.8' }),
     );
     await expect(
-      loadManifest({ manifestImage: 'acme/release:9.9.9', channel: 'acme', version: '9.9.9' }),
+      loadManifest({
+        manifestImage: 'private/haive-acme-release:9.9.9',
+        channel: 'acme',
+        channelRegistry: 'private',
+        version: '9.9.9',
+      }),
     ).rejects.toThrow('version');
   });
   it('never falls back to public on an unpullable manifest image', async () => {
     vi.spyOn(dk, 'readReleaseManifestImage').mockRejectedValue(new Error('pull denied'));
     const fetcher = vi.spyOn(globalThis, 'fetch');
     await expect(
-      loadManifest({ manifestImage: 'acme/release:9.9.9', channel: 'acme', version: '9.9.9' }),
+      loadManifest({
+        manifestImage: 'private/haive-acme-release:9.9.9',
+        channel: 'acme',
+        channelRegistry: 'private',
+        version: '9.9.9',
+      }),
     ).rejects.toThrow('pull denied');
     expect(fetcher).not.toHaveBeenCalled();
   });
@@ -53,15 +69,16 @@ describe('channel manifest controls', () => {
     vi.spyOn(dk, 'readReleaseManifestImage').mockResolvedValue(JSON.stringify(manifest));
     expect(
       await loadManifest({
-        manifestImage: 'acme/release:9.9.9',
+        manifestImage: 'private/haive-acme-release:9.9.9',
         channel: 'acme',
+        channelRegistry: 'private',
         version: '9.9.9',
       }),
     ).toMatchObject(manifest);
   });
   it('requires an explicit image target version and refuses URL fallback for channel installs', async () => {
     await expect(
-      loadManifest({ manifestImage: 'acme/release:9.9.9', channel: 'acme' }),
+      loadManifest({ manifestImage: 'private/haive-acme-release:9.9.9', channel: 'acme' }),
     ).rejects.toThrow('--version');
     await expect(
       loadManifest({ manifest: 'https://invalid/release.json', channel: 'acme' }),
@@ -83,4 +100,22 @@ describe('channel manifest controls', () => {
       await loadManifest({ manifest: 'https://public/release.json', channel: 'public' }),
     ).toEqual({ ...manifest, channel: 'public', minFrom: '0.0.0', contracts: false, images: {} });
   });
+});
+
+it.each([
+  ['other/haive-acme-release:9.9.9', 'private'],
+  ['private/haive-other-release:9.9.9', 'private'],
+  ['private/haive-acme-release-evil:9.9.9', 'private'],
+  ['private/haive-acme-release:9.9.9', ''],
+])('refuses a foreign release ref or empty registry before pulling: %s', async (ref, registry) => {
+  const read = vi.spyOn(dk, 'readReleaseManifestImage').mockResolvedValue(JSON.stringify(manifest));
+  await expect(
+    loadManifest({
+      manifestImage: ref,
+      channel: 'acme',
+      channelRegistry: registry,
+      version: '9.9.9',
+    }),
+  ).rejects.toThrow(/HAIVE_CHANNEL_REGISTRY|release repository/);
+  expect(read).not.toHaveBeenCalled();
 });

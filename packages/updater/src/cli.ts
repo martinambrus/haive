@@ -29,6 +29,7 @@ import {
   prepareImages,
   readImageOverrides,
   readImageSettings,
+  requireChannelRegistry,
   type ImageSettings,
 } from './images.js';
 
@@ -89,6 +90,7 @@ export function applyInstallDockerConfig(
 export async function loadManifest(options: {
   manifest?: string;
   manifestImage?: string;
+  channelRegistry?: string;
   channel: string;
   version?: string;
 }): Promise<ReleaseManifest> {
@@ -98,6 +100,11 @@ export async function loadManifest(options: {
   if (image && !version) throw new Error('--manifest-image requires --version <target>');
   if (!source && !image)
     throw new Error('--manifest <url|path> or --manifest-image <ref> is required');
+  if (channel !== 'public') {
+    const registry = requireChannelRegistry(options.channelRegistry ?? '');
+    if (!image!.startsWith(`${registry}/haive-${channel}-release:`))
+      throw new Error('manifest image release repository differs from install channel registry');
+  }
   const text = image
     ? await dk.readReleaseManifestImage(image)
     : /^https?:\/\//.test(source!)
@@ -181,6 +188,7 @@ export async function main(): Promise<number> {
   const manifestOptions = {
     manifest: arg('manifest'),
     manifestImage: arg('manifest-image'),
+    channelRegistry: imageSettings.HAIVE_CHANNEL_REGISTRY,
     channel,
     version: arg('version'),
   };
@@ -217,6 +225,7 @@ export async function main(): Promise<number> {
     // A preceding upgrader may have changed the pins while this run waited for the lock.
     imageSettings = await readImageSettings(envFile);
     resolveChannel(channel, imageSettings.HAIVE_CHANNEL);
+    manifestOptions.channelRegistry = imageSettings.HAIVE_CHANNEL_REGISTRY;
     applyInstallDockerConfig(imageSettings, installDir);
 
     const fromVersion = (await readEnvVar(envFile, 'HAIVE_VERSION')) ?? 'unknown';
@@ -260,6 +269,8 @@ export async function main(): Promise<number> {
     }
 
     const target = channelTarget ?? (await loadManifest(manifestOptions));
+
+    if (channel !== 'public') channelImagePlan(target.version, imageSettings, target.images);
 
     const previousImages = await readImageOverrides(envFile, imageSettings);
     const currentImages = (['api', 'worker', 'web'] as const).map((s) =>

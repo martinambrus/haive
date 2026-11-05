@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { prepareImages, emptyOverrides, type ImageSettings } from './images.js';
 import * as dk from './docker.js';
 
-const pin = (host: string) => `private/acme-${host}@sha256:${'a'.repeat(64)}`;
+const pin = (host: string) => `private/haive-acme-${host}@sha256:${'a'.repeat(64)}`;
 const images = { api: pin('api'), worker: pin('worker'), web: pin('web'), builder: pin('builder') };
 const compose = { dir: '/install', files: [] };
 function settings(own = false): ImageSettings {
@@ -98,4 +98,43 @@ it('public output and tag pull remain unchanged; public pins still require own m
       HAIVE_API_IMAGE: 'own:old',
     }),
   ).rejects.toThrow('HAIVE_OWN_MODULES_HOST_DIR');
+});
+
+it.each(['api', 'worker', 'web', 'builder'] as const)(
+  'refuses a foreign pinned %s repository before Docker calls',
+  async (host) => {
+    const pull = vi.spyOn(dk, 'pullImages').mockResolvedValue();
+    const build = vi.spyOn(dk, 'buildOwnModules').mockResolvedValue();
+    for (const repository of [
+      'other/haive-acme-',
+      'private/haive-other-',
+      'private/haive-acme-evil-',
+    ]) {
+      await expect(
+        prepareImages(compose, '/install/.env', '9.9.9', 'public', settings(true), {
+          ...images,
+          [host]: `${repository}${host}@sha256:${'a'.repeat(64)}`,
+        }),
+      ).rejects.toThrow(`channel manifest ${host} repository`);
+    }
+    expect(pull).not.toHaveBeenCalled();
+    expect(build).not.toHaveBeenCalled();
+  },
+);
+it('channel without a registry refuses before Docker calls', async () => {
+  const pull = vi.spyOn(dk, 'pullImages').mockResolvedValue();
+  await expect(
+    prepareImages(
+      compose,
+      '/install/.env',
+      '9.9.9',
+      'public',
+      {
+        ...settings(),
+        HAIVE_CHANNEL_REGISTRY: '',
+      },
+      images,
+    ),
+  ).rejects.toThrow('HAIVE_CHANNEL_REGISTRY');
+  expect(pull).not.toHaveBeenCalled();
 });
