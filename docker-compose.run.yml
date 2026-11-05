@@ -86,6 +86,9 @@ services:
       # moment `.env` is re-pinned but the containers have not been recreated yet.
       HAIVE_INSTALL_DIR_HOST: ${HAIVE_INSTALL_DIR_HOST:-}
       HAIVE_REGISTRY: ${HAIVE_REGISTRY:-ghcr.io/martinambrus}
+      HAIVE_CHANNEL: ${HAIVE_CHANNEL:-}
+      HAIVE_CHANNEL_REGISTRY: ${HAIVE_CHANNEL_REGISTRY:-}
+      DOCKER_CONFIG: ${DOCKER_CONFIG:-}
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-haive}
       HAIVE_POSTGRES_VOLUME: ${HAIVE_POSTGRES_VOLUME:-}
       HAIVE_SNAPSHOT_HOST_DIR: ${HAIVE_SNAPSHOT_HOST_DIR:-}

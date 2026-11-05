@@ -440,6 +440,7 @@ maintenanceRoutes.get('/upgrade', async (c) => {
   const version = getHaiveVersion();
   return c.json({
     version,
+    channel: process.env.HAIVE_CHANNEL || 'public',
     // Two separate reasons an upgrade cannot start, reported separately because they have
     // different fixes: a dev checkout has nothing to upgrade TO, while a published install that
     // was not told where it lives needs one line in its `.env`.
@@ -478,6 +479,19 @@ maintenanceRoutes.post('/upgrade', async (c) => {
   const version = stripV(body.version.trim());
   // The version reaches a command line. Constrain it rather than trust it.
   if (!/^[0-9A-Za-z][0-9A-Za-z.+-]*$/.test(version)) throw new HttpError(400, 'invalid version');
+
+  const channel = process.env.HAIVE_CHANNEL || 'public';
+  const channelRegistry = process.env.HAIVE_CHANNEL_REGISTRY || '';
+  // Same CHANNEL/PREFIX rules as scripts/build-channel.mjs; names only, never credentials.
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(channel))
+    throw new HttpError(400, 'invalid HAIVE_CHANNEL');
+  if (
+    channel !== 'public' &&
+    !/^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/.test(
+      channelRegistry,
+    )
+  )
+    throw new HttpError(400, 'invalid HAIVE_CHANNEL_REGISTRY');
 
   const current = getHaiveVersion();
   if (isDevVersion(current)) {
@@ -537,9 +551,18 @@ maintenanceRoutes.post('/upgrade', async (c) => {
     // join `haive-network` — another install's, on any namespaced install.
     '-e',
     `HAIVE_INSTALL_ID=${installId()}`,
+    ...(channel !== 'public' ? ['-e', 'DOCKER_CONFIG=/install/.docker'] : []),
     image,
-    '--manifest',
-    manifestUrl(version),
+    ...(channel !== 'public'
+      ? [
+          '--manifest-image',
+          `${channelRegistry}/haive-${channel}-release:${version}`,
+          '--channel',
+          channel,
+          '--version',
+          version,
+        ]
+      : ['--manifest', manifestUrl(version)]),
     '--install-dir',
     '/install',
     '--registry',
