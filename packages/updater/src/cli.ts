@@ -74,7 +74,7 @@ export function resolveChannel(requested: string | undefined, installed: string)
   return channel;
 }
 
-/** Set once before manifest pulls and recovery; every Docker subprocess inherits it. */
+/** Set before recovery and manifest pulls, and again after the post-lock re-read; every Docker subprocess inherits it. */
 export function applyInstallDockerConfig(
   settings: Pick<ImageSettings, 'HAIVE_CHANNEL' | 'DOCKER_CONFIG'>,
   installDir: string,
