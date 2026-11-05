@@ -1,18 +1,29 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { parseReleaseManifest } from '../../packages/shared/src/release/manifest.ts';
 import { run } from '../publish-channel.mjs';
 
-const KEYS = ['api', 'worker', 'web'];
+const KEYS = ['api', 'worker', 'web', 'builder'];
+const DESTINATIONS = [...KEYS, 'release'];
 const PREFIX = '127.0.0.1:5050/vendor';
-const IDS = Object.fromEntries(KEYS.map((host, i) => [host, `sha256:${String(i + 1).repeat(64)}`]));
+const IDS = Object.fromEntries(
+  DESTINATIONS.map((host, i) => [host, `sha256:${String(i + 1).repeat(64)}`]),
+);
 const bodies = Object.fromEntries(
-  KEYS.map((host) => [
+  DESTINATIONS.map((host) => [
     host,
     JSON.stringify({
       schemaVersion: 2,
@@ -23,7 +34,10 @@ const bodies = Object.fromEntries(
   ]),
 );
 const digests = Object.fromEntries(
-  KEYS.map((host) => [host, `sha256:${createHash('sha256').update(bodies[host]).digest('hex')}`]),
+  DESTINATIONS.map((host) => [
+    host,
+    `sha256:${createHash('sha256').update(bodies[host]).digest('hex')}`,
+  ]),
 );
 const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
 
@@ -53,7 +67,7 @@ function fixture(t, config = {}) {
   const commit = git('rev-parse', 'HEAD');
   writeFileSync(join(root, 'packages/database/migrations/9999_wrong_tree.sql'), 'DROP TABLE x;');
   const record = {
-    schema: 1,
+    schema: 2,
     tag: 'v9.9.9',
     version: '9.9.9',
     channel: 'customer',
@@ -87,28 +101,47 @@ function fixture(t, config = {}) {
   const inspections = new Map();
   let archiveHost;
   let idReads = 0;
+  let releaseBytes;
   const runner = async (cmd, args, options) => {
     calls.push({ cmd, args });
     assert.ok(options.timeout > 0);
-    if (!config.existingManifest)
-      assert.ok(!existsSync(manifest), 'manifest is absent until all commands finish');
+    if (!config.existingManifest && attempted.length < KEYS.length)
+      assert.ok(!existsSync(manifest), 'manifest is absent until runtime images finish');
     if (config.abortOn?.(cmd, args)) options.signal?.throwIfAborted();
     if (cmd === 'docker') {
       if (args[0] === 'image' && args[1] === 'inspect') {
         const host = KEYS.find((key) => record.images[key].ref === args.at(-1));
         idReads++;
         return ok(
-          config.mismatch === host || (config.retagAfterBoot && idReads > 3)
+          config.mismatch === host || (config.retagAfterBoot && idReads > KEYS.length)
             ? `sha256:${'f'.repeat(64)}`
             : IDS[host],
         );
       }
       if (args[0] === 'image' && args[1] === 'save') {
-        archiveHost = KEYS.find((host) => IDS[host] === args.at(-1));
+        archiveHost = args.at(-1).includes('customer-release:')
+          ? 'release'
+          : DESTINATIONS.find((host) => IDS[host] === args.at(-1));
         assert.equal(args[args.indexOf('--platform') + 1], record.platform);
         return config.saveFailure ? { status: 1 } : ok();
       }
       if (args[0] === 'image' && args[1] === 'tag') return ok();
+      if (args[0] === 'buildx' && args[1] === 'build') {
+        assert.deepEqual(attempted, KEYS, 'release build follows every runtime push');
+        assert.ok(existsSync(manifest), 'release build follows the local write');
+        const context = args.at(-1);
+        assert.deepEqual(readdirSync(context).sort(), ['Dockerfile', 'release.json']);
+        assert.equal(
+          readFileSync(join(context, 'Dockerfile'), 'utf8'),
+          'FROM scratch\nCOPY release.json /release.json\nLABEL org.haive.release=1\n',
+        );
+        releaseBytes = readFileSync(join(context, 'release.json'));
+        assert.deepEqual(releaseBytes, readFileSync(manifest));
+        assert.equal(args[args.indexOf('--platform') + 1], record.platform);
+        assert.ok(args.includes('--load'));
+        assert.ok(!args.includes('--push'));
+        return config.releaseBuildFailure ? { status: 1 } : ok();
+      }
       if (args[0] === 'buildx' && args[2] === 'inspect') {
         const ref = args.at(-1);
         if (args.includes('--raw')) {
@@ -121,7 +154,7 @@ function fixture(t, config = {}) {
             }),
           );
         }
-        const host = KEYS.find((key) => ref.includes(`customer-${key}:`));
+        const host = DESTINATIONS.find((key) => ref.includes(`customer-${key}:`));
         inspections.set(host, (inspections.get(host) ?? 0) + 1);
         if (config.inspectCaptureError) return { status: 1, error: new Error('transport failed') };
         if (
@@ -146,7 +179,7 @@ function fixture(t, config = {}) {
       const copy = args[0] === 'buildx' && args[2] === 'create';
       if (push || copy) {
         const ref = copy ? args[args.indexOf('--tag') + 1] : args.at(-1);
-        const host = KEYS.find((key) => ref.includes(`customer-${key}:`));
+        const host = DESTINATIONS.find((key) => ref.includes(`customer-${key}:`));
         attempted.push(host);
         if (config.pushFailure === host) return { status: 1, stderr: 'push failed' };
         if (copy) {
@@ -207,6 +240,9 @@ function fixture(t, config = {}) {
     logs,
     attempted,
     bootCalls,
+    get releaseBytes() {
+      return releaseBytes;
+    },
     invoke: (extra = [], options = {}) =>
       run(['--record', path, '--out', out, ...extra], {
         root,
@@ -276,7 +312,7 @@ for (const config of [
 test('publish orders api, worker, web copy, then writes a valid manifest from the recorded tree', async (t) => {
   const f = fixture(t);
   assert.equal(await f.invoke(), 0, f.logs.join('\n'));
-  assert.deepEqual(f.attempted, KEYS);
+  assert.deepEqual(f.attempted, DESTINATIONS);
   const manifest = parseReleaseManifest(JSON.parse(readFileSync(f.manifest, 'utf8')));
   assert.deepEqual(
     manifest.images,
@@ -309,7 +345,7 @@ test('dry-run does all gates, prints a plan, pushes nothing and writes no manife
   const f = fixture(t);
   assert.equal(await f.invoke(['--dry-run']), 0, f.logs.join('\n'));
   assert.equal(f.bootCalls.length, 1);
-  assert.equal(f.requests.length, 3);
+  assert.equal(f.requests.length, 5);
   assert.deepEqual(f.attempted, []);
   assert.equal(existsSync(f.manifest), false);
   assert.match(f.logs.join('\n'), /plan.*api/);
@@ -358,7 +394,7 @@ test('a rebuilt web is pushed as a platform manifest', async (t) => {
     },
   });
   assert.equal(await f.invoke(), 0, f.logs.join('\n'));
-  assert.equal(f.calls.filter(({ args }) => args[0] === 'push').length, 3);
+  assert.equal(f.calls.filter(({ args }) => args[0] === 'push').length, 5);
   assert.equal(f.calls.filter(({ args }) => args.includes('create')).length, 0);
 });
 
@@ -479,7 +515,7 @@ function assertTokenRequests(requests) {
       assert.equal(parsed.searchParams.get('service'), 'registry-test');
       assert.match(
         parsed.searchParams.get('scope'),
-        /^repository:vendor\/haive-customer-(api|worker|web):pull$/,
+        /^repository:vendor\/haive-customer-(api|worker|web|builder|release):pull$/,
       );
       assert.ok(!options.headers.Authorization);
     } else if (options.headers.Authorization) {
@@ -492,7 +528,7 @@ for (const config of [{}, { tokenStatus: 403 }, { tokenStatus: 401 }, { secondSt
   test(`Bearer absence proof ${JSON.stringify(config)} publishes without exposing a token`, async (t) => {
     const f = fixture(t, { request: tokenRegistry(config) });
     assert.equal(await f.invoke(), 0, f.logs.join('\n'));
-    assert.deepEqual(f.attempted, KEYS);
+    assert.deepEqual(f.attempted, DESTINATIONS);
     assert.match(
       f.logs.join('\n'),
       config.tokenStatus || config.secondStatus ? /daemon-only/ : /corroborated/,
@@ -524,13 +560,13 @@ test('exact confirmations permit only access-denied destinations and are loud in
       'ERROR: failed to authorize: failed to fetch anonymous token: unexpected status from GET request to https://127.0.0.1:5050/token: 403 Forbidden',
   });
   assert.equal(
-    await f.invoke(KEYS.flatMap((host) => ['--confirm-absent', destination(host)])),
+    await f.invoke(DESTINATIONS.flatMap((host) => ['--confirm-absent', destination(host)])),
     0,
     f.logs.join('\n'),
   );
-  assert.deepEqual(f.attempted, KEYS);
+  assert.deepEqual(f.attempted, DESTINATIONS);
   assertTokenRequests(f.requests);
-  for (const host of KEYS)
+  for (const host of DESTINATIONS)
     assert.ok(
       f.logs.some((line) => line.includes(`WARNING: --confirm-absent ${destination(host)}`)),
     );
@@ -621,7 +657,7 @@ test('daemon absence accepts the exact ref containing tls and version 1.0.500', 
     },
   });
   assert.equal(await f.invoke(['--dry-run']), 0, f.logs.join('\n'));
-  assert.equal(f.logs.filter((line) => line.includes('daemon-only')).length, 3);
+  assert.equal(f.logs.filter((line) => line.includes('daemon-only')).length, 5);
   assert.deepEqual(f.attempted, []);
   assert.ok(!existsSync(f.manifest));
 });
@@ -633,7 +669,7 @@ test('daemon absence word-bounds transport tokens outside a multiline exact proo
       `networking connectionless atls xeofx status500\nERROR: ${ref}: not found\nend`,
   });
   assert.equal(await f.invoke(['--dry-run']), 0, f.logs.join('\n'));
-  assert.equal(f.logs.filter((line) => line.includes('daemon-only')).length, 3);
+  assert.equal(f.logs.filter((line) => line.includes('daemon-only')).length, 5);
   assert.deepEqual(f.attempted, []);
 });
 
@@ -666,7 +702,58 @@ test('usage describes local manifest delivery without a board task ID', async ()
   assert.equal(await run(['--help'], { say: (line) => logs.push(line) }), 0);
   assert.match(
     logs.join('\n'),
-    /— writes release\.json locally; it does not deliver it to installs$/,
+    /— writes release\.json locally and publishes its manifest image last$/,
   );
   assert.doesNotMatch(logs.join('\n'), /\bT\d+\b/);
+});
+
+test('control: a record without builder refuses before gates or pushes', async (t) => {
+  const f = fixture(t, {
+    editRecord: (r) => {
+      r.schema = 1;
+      delete r.images.builder;
+    },
+  });
+  assert.equal(await f.invoke(['--dry-run']), 2, f.logs.join('\n'));
+  assert.deepEqual(f.attempted, []);
+  assert.equal(f.bootCalls.length, 0);
+});
+
+test('control: release push follows the local write and every other push with identical bytes', async (t) => {
+  const f = fixture(t);
+  assert.equal(await f.invoke(), 0, f.logs.join('\n'));
+  assert.deepEqual(f.attempted, DESTINATIONS);
+  assert.deepEqual(f.releaseBytes, readFileSync(f.manifest));
+});
+
+test('control: existing release destination refuses before any push even with confirmation', async (t) => {
+  const f = fixture(t, { existing: 'release' });
+  assert.equal(await f.invoke(['--confirm-absent', destination('release')]), 1, f.logs.join('\n'));
+  assert.deepEqual(f.attempted, []);
+});
+
+for (const kind of ['pushFailure', 'rereadFailure', 'rereadMismatch']) {
+  test(`release ${kind} returns 2, preserves the local file and reports attempted refs`, async (t) => {
+    const f = fixture(t, { [kind]: 'release' });
+    assert.equal(await f.invoke(), 2, f.logs.join('\n'));
+    assert.ok(existsSync(f.manifest));
+    assert.deepEqual(f.attempted, DESTINATIONS);
+    assert.match(f.logs.join('\n'), /attempted: .*customer-release/);
+    assert.doesNotMatch(f.logs.at(-1), /no manifest written/);
+  });
+}
+
+test('control: manifest-image context round-trips local release bytes', async (t) => {
+  const f = fixture(t);
+  assert.equal(await f.invoke(), 0, f.logs.join('\n'));
+  assert.ok(Buffer.isBuffer(f.releaseBytes), 'a manifest image was built');
+  assert.deepEqual(f.releaseBytes, readFileSync(f.manifest));
+});
+
+test('a failed release build retains the local manifest and returns 2 after runtime pushes', async (t) => {
+  const f = fixture(t, { releaseBuildFailure: true });
+  assert.equal(await f.invoke(), 2, f.logs.join('\n'));
+  assert.ok(existsSync(f.manifest));
+  assert.deepEqual(f.attempted, KEYS);
+  assert.match(f.logs.at(-1), /local manifest retained/);
 });

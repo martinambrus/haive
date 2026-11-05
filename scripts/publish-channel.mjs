@@ -30,7 +30,7 @@ const DAEMON_DENIED = /failed to authorize|unauthorized|\bdenied\b|\b40[13]\b|fo
 const DAEMON_TRANSPORT_ERROR =
   /\b(?:5\d\d|network|connection|timeout|timed out|no such host|credential helper|tls|certificate|eof)\b/i;
 const USAGE =
-  'usage: node scripts/publish-channel.mjs --record <build-record.json> [--registry <prefix; defaults to record api prefix>] [--out <dir; defaults beside record>] [--dry-run] [--confirm-absent <exact destination ref; repeatable>] [--timeout-ms <boot-stage timeout>] — writes release.json locally; it does not deliver it to installs';
+  'usage: node scripts/publish-channel.mjs --record <build-record.json> [--registry <prefix; defaults to record api prefix>] [--out <dir; defaults beside record>] [--dry-run] [--confirm-absent <exact destination ref; repeatable>] [--timeout-ms <boot-stage timeout>] — writes release.json locally and publishes its manifest image last';
 
 function capture(command, args, { timeout, signal, ...options }) {
   return new Promise((resolveResult) => {
@@ -86,6 +86,8 @@ export async function run(
   } = {},
 ) {
   let scratch;
+  let output;
+  let manifestWritten = false;
   const attempted = [];
   const verified = [];
   const emit = (line) => say(String(line).replace(/[\u0000-\u001f\u007f-\u009f]/g, '?'));
@@ -258,7 +260,10 @@ export async function run(
         'registry must be a lowercase repository prefix without a scheme or credentials',
       );
     const destinations = Object.fromEntries(
-      KEYS.map((host) => [host, `${registry}/haive-${record.channel}-${host}:${record.version}`]),
+      [...KEYS, 'release'].map((host) => [
+        host,
+        `${registry}/haive-${record.channel}-${host}:${record.version}`,
+      ]),
     );
     confirmations = new Set(values['confirm-absent'] ?? []);
     for (const ref of confirmations)
@@ -298,13 +303,12 @@ export async function run(
       return bootStatus;
     }
     let existing = false;
-    for (const host of KEYS) if (!(await absent(destinations[host]))) existing = true;
+    for (const ref of Object.values(destinations)) if (!(await absent(ref))) existing = true;
     if (existing) return 1;
     await readIds();
     const expected = {};
     const sources = {};
-    for (const host of KEYS) {
-      const image = record.images[host];
+    const platformDigest = async (host, image) => {
       const archive = join(scratch, `${host}.tar`);
       await docker(['image', 'save', '--platform', record.platform, '--output', archive, image.id]);
       const index = JSON.parse((await command('tar', ['-xOf', archive, 'index.json'])).stdout);
@@ -333,8 +337,12 @@ export async function run(
         ].includes(manifest.mediaType)
       )
         throw new Error(`invalid gated platform manifest for ${host}`);
-      expected[host] = descriptor.digest;
       rmSync(archive, { force: true });
+      return descriptor.digest;
+    };
+    for (const host of KEYS) {
+      const image = record.images[host];
+      expected[host] = await platformDigest(host, image);
       if (!image.built) {
         const repoDigest = image.repoDigest;
         const remote = JSON.parse(
@@ -383,15 +391,21 @@ export async function run(
       record.channel,
       ...KEYS.flatMap((host) => [`--${host}`, images[host]]),
     ]);
-    const manifest = parseReleaseManifest({ ...JSON.parse(result.stdout), images });
+    const generated = JSON.parse(result.stdout);
+    const manifest = parseReleaseManifest({
+      ...generated,
+      images: { ...generated.images, builder: images.builder },
+    });
     if (
       manifest.version !== record.version ||
       manifest.channel !== record.channel ||
       KEYS.some((host) => manifest.images[host] !== images[host])
     )
       throw new Error('record tree produced an inconsistent release manifest');
-    const output = join(resolve(values.out?.[0] ?? dirname(recordPath)), 'release.json');
-    emit(`publish-channel: plan manifest ${output} LAST (metadata from ${record.commit})`);
+    output = join(resolve(values.out?.[0] ?? dirname(recordPath)), 'release.json');
+    emit(
+      `publish-channel: plan manifest ${output} then ${destinations.release} LAST (metadata from ${record.commit})`,
+    );
     if (existsSync(output)) throw new Error(`manifest already exists: ${output}`);
     if (values['dry-run']) {
       emit('publish-channel: dry-run passed; nothing pushed; no manifest written');
@@ -437,14 +451,46 @@ export async function run(
     try {
       writeFileSync(pending, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
       linkSync(pending, output);
+      manifestWritten = true;
     } finally {
       rmSync(pending, { force: true });
     }
+    const context = mkdtempSync(join(scratch, 'manifest-image-'));
+    writeFileSync(join(context, 'release.json'), readFileSync(output), { mode: 0o600, flag: 'wx' });
+    writeFileSync(
+      join(context, 'Dockerfile'),
+      'FROM scratch\nCOPY release.json /release.json\nLABEL org.haive.release=1\n',
+      { mode: 0o600, flag: 'wx' },
+    );
+    await docker([
+      'buildx',
+      'build',
+      '--platform',
+      record.platform,
+      '--load',
+      '--tag',
+      destinations.release,
+      context,
+    ]);
+    expected.release = await platformDigest('release', { id: destinations.release });
+    if (!(await absent(destinations.release)))
+      throw new Error('release tag appeared before its push');
+    attempted.push(destinations.release);
+    await docker(['push', '--platform', record.platform, destinations.release]);
+    const pushed = await inspect(destinations.release);
+    if (
+      pushed.status !== 0 ||
+      pushed.error ||
+      JSON.parse(pushed.stdout).digest !== expected.release
+    )
+      throw new Error(`pushed digest verification failed for ${destinations.release}`);
+    verified.push(destinations.release);
+    emit(`publish-channel: published ${destinations.release} @ ${expected.release}`);
     emit(`publish-channel: passed; manifest ${output}`);
     return 0;
   } catch (error) {
     emit(
-      `publish-channel: could not publish: ${error.message}; no manifest written; attempted: ${attempted.join(', ') || 'none'}; verified: ${verified.join(', ') || 'none'}`,
+      `publish-channel: could not publish: ${error.message}; ${manifestWritten ? `local manifest retained at ${output}` : 'no manifest written'}; attempted: ${attempted.join(', ') || 'none'}; verified: ${verified.join(', ') || 'none'}`,
     );
     return 2;
   } finally {
