@@ -87,7 +87,11 @@ for ($i = 0; $i -lt $Options.Count; $i++) {
     '--check' { $Check = $true }
     '--force' { $Force = $true }
     '--no-start' { $NoStart = $true }
-    default { Die "unknown option: $($Options[$i])" }
+    default {
+      # Keep the original positional Version call while GNU options remain unbound.
+      if ($i -eq 0 -and -not $Version -and -not $Options[$i].StartsWith('-')) { $Version = $Options[$i] }
+      else { Die "unknown option: $($Options[$i])" }
+    }
   }
   if ($target) {
     $option = $Options[$i]

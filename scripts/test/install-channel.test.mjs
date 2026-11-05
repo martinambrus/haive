@@ -311,6 +311,17 @@ for (const lang of ['sh', 'ps1']) {
         f.clean();
       }
     });
+  if (lang === 'ps1')
+    check('public positional Version remains accepted', () => {
+      const f = fixture(lang, { publicInstall: true });
+      try {
+        const r = f.invoke(f.script, ['0.1.4', '-Dir', f.dir, '-InstallId', 'unit', '-NoStart']);
+        assert.equal(r.status, 0, r.stdout + r.stderr);
+        assert.match(readFileSync(join(f.dir, '.env'), 'utf8'), /^HAIVE_VERSION=0\.1\.4$/m);
+      } finally {
+        f.clean();
+      }
+    });
   check('channel flags, private config and pinned env', () => {
     const f = fixture(lang);
     try {
