@@ -19,7 +19,7 @@ import { parseReleaseManifest } from '../packages/shared/src/release/manifest.ts
 import { parseRecord, run as checkBoot } from './channel-boot-check.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const KEYS = ['api', 'worker', 'web'];
+const KEYS = ['api', 'worker', 'web', 'builder'];
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const PREFIX = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
 // Volatile Docker daemon wording; used only with exit 1 and no spawn error.
@@ -264,8 +264,8 @@ export async function run(
     for (const ref of confirmations)
       if (!Object.values(destinations).includes(ref))
         throw new Error('--confirm-absent is not a destination');
-    for (const host of ['api', 'worker'])
-      if (!record.images[host].built) throw new Error(`record ${host} must be built`);
+    for (const host of ['api', 'worker', 'builder'])
+      if (!record.images[host]?.built) throw new Error(`record ${host} must be built`);
     if (!record.images.web.built) {
       const pinned = record.images.web.repoDigest;
       const at = typeof pinned === 'string' ? pinned.lastIndexOf('@') : -1;
@@ -383,7 +383,7 @@ export async function run(
       record.channel,
       ...KEYS.flatMap((host) => [`--${host}`, images[host]]),
     ]);
-    const manifest = parseReleaseManifest(JSON.parse(result.stdout));
+    const manifest = parseReleaseManifest({ ...JSON.parse(result.stdout), images });
     if (
       manifest.version !== record.version ||
       manifest.channel !== record.channel ||
