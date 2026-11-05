@@ -30,6 +30,7 @@ const docker = `#!/bin/sh
 printf 'config=%s' "$DOCKER_CONFIG" >> "$CALLS"
 for arg do printf '\\t%s' "$arg" >> "$CALLS"; done
 printf '\\n' >> "$CALLS"
+if [ "$EXPECT_CHANNEL" = 1 ] && [ -n "$HAIVE_REGISTRY_TOKEN" ]; then echo token_in_environment >&2; exit 91; fi
 case "$1" in
  login) cat > "$CASE_ROOT/stdin"; [ "$FAIL_AT" != login ] || exit 1; printf '{"auths":{}}' > "$DOCKER_CONFIG/config.json" ;;
  pull) [ "$FAIL_AT" != pull ] || exit 1 ;;
@@ -47,11 +48,14 @@ for arg do [ "$prev" != -o ] || out=$arg; prev=$arg; done
 case "$out" in *docker-compose*) printf 'services: {}\\n' > "$out" ;; esac
 exit 0
 `;
-function fixture(lang, { publicInstall = false, data = manifest, fail = '', source } = {}) {
+function fixture(
+  lang,
+  { publicInstall = false, data = manifest, fail = '', source, installDir } = {},
+) {
   const root = mkdtempSync(join(tmpdir(), 'channel-installer-'));
   const bin = join(root, 'bin');
   mkdirSync(bin);
-  const dir = join(root, 'install');
+  const dir = installDir ?? join(root, 'install');
   const calls = join(root, 'calls');
   writeFileSync(
     join(root, 'manifest.json'),
@@ -63,7 +67,26 @@ function fixture(lang, { publicInstall = false, data = manifest, fail = '', sour
   writeFileSync(join(bin, 'date'), '#!/bin/sh\necho 2000-01-01T00:00:00Z\n', { mode: 0o755 });
   writeFileSync(join(bin, 'ss'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   const script = join(root, `install.${lang}`);
-  writeFileSync(script, source ?? readFileSync(join(repo, 'install', `install.${lang}`), 'utf8'));
+  const selected =
+    source ??
+    (process.env.HAIVE_TEST_INSTALLER_DIR
+      ? readFileSync(join(process.env.HAIVE_TEST_INSTALLER_DIR, `install.${lang}`), 'utf8')
+      : undefined) ??
+    (process.env.HAIVE_TEST_INSTALLER_REF
+      ? spawnSync(
+          'git',
+          ['show', `${process.env.HAIVE_TEST_INSTALLER_REF}:install/install.${lang}`],
+          { cwd: repo, encoding: 'utf8' },
+        ).stdout
+      : readFileSync(join(repo, 'install', `install.${lang}`), 'utf8'));
+  // Supply deterministic randomness to both versions for the byte comparison.
+  writeFileSync(
+    script,
+    selected.replace(
+      '[System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)',
+      '$b[0] = 0',
+    ),
+  );
   const env = {
     ...process.env,
     PATH: `${bin}:${process.env.PATH}`,
@@ -72,23 +95,25 @@ function fixture(lang, { publicInstall = false, data = manifest, fail = '', sour
     CASE_ROOT: root,
     CALLS: calls,
     FAIL_AT: fail,
+    EXPECT_CHANNEL: publicInstall ? '0' : '1',
     TMPDIR: root,
   };
   const invoke = (file, args) => {
-    if (lang === 'sh') return spawnSync('sh', [file, ...args], { env, encoding: 'utf8' });
+    const childEnv = { ...env, EXPECT_CHANNEL: file === script ? env.EXPECT_CHANNEL : '0' };
+    if (lang === 'sh') return spawnSync('sh', [file, ...args], { env: childEnv, encoding: 'utf8' });
     // Windows-only host probes/downloads are replaced; all installer and generated helper code runs.
     const wrapper = join(root, 'invoke.ps1');
     writeFileSync(
       wrapper,
-      `function Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-WebRequest { param($Uri,$OutFile,$UseBasicParsing,$Method); if($OutFile){ [IO.File]::WriteAllText($OutFile, "services: {}\\n") } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => `'${x.replaceAll("'", "''")}'`).join(' ')}\n`,
+      `$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method); if($OutFile){ [IO.File]::WriteAllText($OutFile, "services: {}\\n") } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
     );
     if (hostPwsh)
       return spawnSync('pwsh', ['-NoProfile', '-File', wrapper], {
-        env: { ...env, USERPROFILE: '/tmp' },
+        env: { ...childEnv, USERPROFILE: '/tmp' },
         encoding: 'utf8',
       });
     const pass = Object.entries({
-      ...env,
+      ...childEnv,
       PATH: `${bin}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
       USERPROFILE: '/tmp',
     })
@@ -101,6 +126,7 @@ function fixture(lang, { publicInstall = false, data = manifest, fail = '', sour
           'CASE_ROOT',
           'CALLS',
           'FAIL_AT',
+          'EXPECT_CHANNEL',
           'TMPDIR',
         ].includes(key),
       )
@@ -118,6 +144,7 @@ function fixture(lang, { publicInstall = false, data = manifest, fail = '', sour
         `${process.getuid()}:${process.getgid()}`,
         '-v',
         `${root}:${root}`,
+        ...(installDir ? ['-v', `${resolve(installDir, '..')}:${resolve(installDir, '..')}`] : []),
         ...pass,
         image,
         'pwsh',
@@ -130,8 +157,8 @@ function fixture(lang, { publicInstall = false, data = manifest, fail = '', sour
   };
   const flag = (s) =>
     lang === 'sh' ? `--${s}` : `-${s.replace(/-([a-z])/g, (_, c) => c.toUpperCase())}`;
-  const install = (extra = []) =>
-    invoke(script, [
+  const install = (extra = []) => {
+    const args = [
       flag('version'),
       '9.9.9',
       flag('dir'),
@@ -149,11 +176,17 @@ function fixture(lang, { publicInstall = false, data = manifest, fail = '', sour
             flag('registry-user'),
             'installer',
           ]),
-      ...extra,
-    ]);
+    ];
+    for (let i = 0; i < extra.length; i++) {
+      const existing = args.indexOf(extra[i]);
+      if (existing >= 0 && extra[i + 1] !== undefined) args.splice(existing, 2);
+    }
+    return invoke(script, [...args, ...extra]);
+  };
   return {
     root,
     dir,
+    script,
     env,
     invoke,
     flag,
@@ -170,6 +203,30 @@ for (const lang of ['sh', 'ps1']) {
         : false,
   };
   const check = (name, fn) => test(`${lang}: ${name}`, options, fn);
+  check('shared GNU flag spellings install the same channel', () => {
+    const f = fixture(lang);
+    try {
+      const r = f.invoke(f.script, [
+        '--version',
+        '9.9.9',
+        '--dir',
+        f.dir,
+        '--install-id',
+        'unit',
+        '--channel',
+        'customer',
+        '--channel-registry',
+        registry,
+        '--registry-user',
+        'installer',
+        '--no-start',
+      ]);
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      assert.match(readFileSync(join(f.dir, '.env'), 'utf8'), /^HAIVE_CHANNEL=customer$/m);
+    } finally {
+      f.clean();
+    }
+  });
   check('channel flags, private config and pinned env', () => {
     const f = fixture(lang);
     try {
@@ -197,8 +254,8 @@ for (const lang of ['sh', 'ps1']) {
     }
   });
   for (const [field, values] of [
-    ['channel', ['BAD', '-bad', 'bad-', 'a'.repeat(33)]],
-    ['channel-registry', ['https://bad', 'bad/', 'Bad', 'bad,,x']],
+    ['channel', ['BAD', '-bad', 'bad-', 'good\nbad', 'good\n', 'a'.repeat(33)]],
+    ['channel-registry', ['https://bad', 'bad/', 'Bad', 'bad,,x', 'good\nbad', 'good\n']],
   ])
     for (const value of values)
       check(`reject invalid ${field} ${value}`, () => {
@@ -231,6 +288,15 @@ for (const lang of ['sh', 'ps1']) {
     ],
     ['malformed JSON', '{"channel":', ''],
     ['missing pin', { ...manifest, images: { ...pins, web: null } }, ''],
+    ['pin ending in newline', { ...manifest, images: { ...pins, api: pins.api + '\n' } }, ''],
+    [
+      'uppercase digest',
+      {
+        ...manifest,
+        images: { ...pins, api: pins.api.replaceAll('a'.repeat(64), 'A'.repeat(64)) },
+      },
+      '',
+    ],
     ['unpullable release', manifest, 'pull'],
     ['copy failure', manifest, 'cp'],
     ['login failure', manifest, 'login'],
@@ -293,7 +359,7 @@ for (const lang of ['sh', 'ps1']) {
       ])
         assert.ok(call.split('\t').includes(value), value);
       assert.ok(!call.split('\t').includes('--manifest'));
-      const up = f.invoke(helper, ['ps']);
+      const up = f.invoke(helper, ['pull']);
       assert.equal(up.status, 0);
       assert.ok(f.calls().trim().split('\n').at(-1).startsWith(`config=${f.dir}/.docker\t`));
     } finally {
@@ -311,38 +377,40 @@ for (const lang of ['sh', 'ps1']) {
       f.clean();
     }
   });
-  check('public output and upgrade argv identical to base', () => {
+  check('public output and upgrade argv identical to base', (t) => {
     const base = spawnSync('git', ['show', '1f311d7c9:install/install.' + lang], {
       cwd: repo,
       encoding: 'utf8',
     });
-    assert.equal(base.status, 0);
+    if (base.status !== 0) {
+      t.skip('public baseline comparison requires history; platform installer-controls fetches it');
+      return;
+    }
     const f = fixture(lang, { publicInstall: true });
-    const old = fixture(lang, { publicInstall: true, source: base.stdout });
+    const old = fixture(lang, { publicInstall: true, source: base.stdout, installDir: f.dir });
     try {
-      assert.equal(old.install().status, 0);
-      assert.equal(f.install().status, 0);
-      for (const name of ['.env', lang === 'sh' ? 'haive' : 'haive.ps1', `uninstall.${lang}`]) {
-        const normalize = (s, dir) =>
-          s
-            .replaceAll(dir, '<INSTALL>')
-            .replace(/^# Haive install.*$/m, '<DATE>')
-            .replace(/^(CONFIG_ENCRYPTION_KEY|JWT_SECRET|POSTGRES_PASSWORD)=.*$/gm, '$1=<SECRET>');
-        assert.equal(
-          normalize(readFileSync(join(f.dir, name), 'utf8'), f.dir),
-          normalize(readFileSync(join(old.dir, name), 'utf8'), old.dir),
-          name,
-        );
-      }
-      for (const t of [f, old]) {
-        const r = t.invoke(
-          join(t.dir, lang === 'sh' ? 'haive' : 'haive.ps1'),
-          lang === 'sh' ? ['upgrade', '--version', '10.0.0'] : ['upgrade', '-Version', '10.0.0'],
-        );
-        assert.equal(r.status, 0, r.stdout + r.stderr);
-      }
-      const norm = (s, dir) => s.trim().split('\n').at(-1).replaceAll(dir, '<INSTALL>');
-      assert.equal(norm(f.calls(), f.dir), norm(old.calls(), old.dir));
+      const oldCheck = old.install([old.flag('check')]);
+      const currentCheck = f.install([f.flag('check')]);
+      assert.equal(oldCheck.status, 0);
+      assert.equal(currentCheck.status, 0);
+      assert.equal(currentCheck.stdout, oldCheck.stdout, 'public check output');
+      const installed = old.install();
+      assert.equal(installed.status, 0, installed.stdout + installed.stderr);
+      const names = ['.env', lang === 'sh' ? 'haive' : 'haive.ps1', `uninstall.${lang}`];
+      const expected = Object.fromEntries(
+        names.map((name) => [name, readFileSync(join(f.dir, name))]),
+      );
+      const upgradeArgs =
+        lang === 'sh' ? ['upgrade', '--version', '10.0.0'] : ['upgrade', '-Version', '10.0.0'];
+      assert.equal(old.invoke(join(f.dir, names[1]), upgradeArgs).status, 0);
+      const expectedArgv = old.calls().trim().split('\n').at(-1);
+      rmSync(f.dir, { recursive: true, force: true });
+      const current = f.install();
+      assert.equal(current.status, 0, current.stdout + current.stderr);
+      for (const name of names)
+        assert.deepEqual(readFileSync(join(f.dir, name)), expected[name], name);
+      assert.equal(f.invoke(join(f.dir, names[1]), upgradeArgs).status, 0);
+      assert.equal(f.calls().trim().split('\n').at(-1), expectedArgv);
       assert.ok(!f.calls().includes('\tlogin\t'));
     } finally {
       f.clean();

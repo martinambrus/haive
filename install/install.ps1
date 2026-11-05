@@ -17,17 +17,18 @@
 .EXAMPLE
   .\install.ps1 -Version 0.1.4 -Dir C:\haive
 #>
-[CmdletBinding()]
+[CmdletBinding(PositionalBinding=$false)]
 param(
   [string]$Version,
   [string]$Dir,
   [string]$InstallId,
-  [Alias('-channel')][string]$Channel = 'public',
-  [Alias('channel-registry','-channel-registry')][string]$ChannelRegistry = 'ghcr.io/martinambrus',
-  [Alias('registry-user','-registry-user')][string]$RegistryUser,
+  [string]$Channel = 'public',
+  [Alias('channel-registry')][string]$ChannelRegistry = 'ghcr.io/martinambrus',
+  [Alias('registry-user')][string]$RegistryUser,
   [switch]$Check,
   [switch]$Force,
-  [switch]$NoStart
+  [switch]$NoStart,
+  [Parameter(ValueFromRemainingArguments=$true)][string[]]$Options
 )
 
 $ErrorActionPreference = 'Stop'
@@ -72,6 +73,30 @@ function Write-Note($m) { Write-Host "  $m" }
 function Write-Warn($m) { Write-Host "warning: $m" -ForegroundColor Yellow }
 function Die($m) { Write-Host "error: $m" -ForegroundColor Red; exit 1 }
 
+# PowerShell does not bind GNU --options as named parameters. Accept the same
+# spellings as install.sh as well as the native -Channel / -ChannelRegistry form.
+for ($i = 0; $i -lt $Options.Count; $i++) {
+  $target = $null
+  switch -CaseSensitive ($Options[$i]) {
+    '--version' { $target = 'Version' }
+    '--dir' { $target = 'Dir' }
+    '--install-id' { $target = 'InstallId' }
+    '--channel' { $target = 'Channel' }
+    '--channel-registry' { $target = 'ChannelRegistry' }
+    '--registry-user' { $target = 'RegistryUser' }
+    '--check' { $Check = $true }
+    '--force' { $Force = $true }
+    '--no-start' { $NoStart = $true }
+    default { Die "unknown option: $($Options[$i])" }
+  }
+  if ($target) {
+    $option = $Options[$i]
+    $i++
+    if ($i -ge $Options.Count -or -not $Options[$i]) { Die "$option needs a value" }
+    Set-Variable -Name $target -Value $Options[$i]
+  }
+}
+
 if ($Channel -cne 'public') {
   Set-PSDebug -Off
   $script:RegistryToken = $env:HAIVE_REGISTRY_TOKEN
@@ -79,8 +104,8 @@ if ($Channel -cne 'public') {
 }
 
 # Match scripts/build-channel.mjs CHANNEL and PREFIX before contacting any registry.
-if ($Channel -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$') { Die "invalid -Channel (use 1-32 lowercase letters, digits or dashes; start and end with a letter or digit)" }
-if ($ChannelRegistry -cnotmatch '^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$') { Die "invalid -ChannelRegistry (use a registry host and optional repository prefix, without a scheme)" }
+if ($Channel -cnotmatch '\A[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?\z') { Die "invalid -Channel (use 1-32 lowercase letters, digits or dashes; start and end with a letter or digit)" }
+if ($ChannelRegistry -cnotmatch '\A[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*\z') { Die "invalid -ChannelRegistry (use a registry host and optional repository prefix, without a scheme)" }
 
 # ── Preflight ────────────────────────────────────────────────────────────────
 # Prerequisites are CHECKED, never installed. Docker Desktop is a GUI application with a licence
@@ -217,7 +242,7 @@ function Read-ChannelManifest {
     foreach ($hostName in @('api','worker','web','builder')) {
       $pin = $manifest.images.$hostName
       $prefix = [regex]::Escape("$ChannelRegistry/haive-$Channel-$hostName@sha256:")
-      if ($pin -isnot [string] -or $pin -cnotmatch "^${prefix}[0-9a-fA-F]{64}$") { throw 'channel manifest image pin differs from the requested registry release' }
+      if ($pin -isnot [string] -or $pin -cnotmatch "\A${prefix}[0-9a-f]{64}\z") { throw 'channel manifest image pin differs from the requested registry release' }
     }
     $script:ChannelScratch = $scratch
     return $manifest
@@ -297,8 +322,6 @@ an install named '$InstallId' already has data on this machine.
 Test-Preflight
 if ($Check -and $Channel -ceq 'public') { Write-Host ""; Write-Host "-Check: nothing was installed."; exit 0 }
 
-
-
 Write-Step "Resolving the release"
 $tag    = Resolve-HaiveVersion $Version
 $pinned = $tag -replace '^v', ''
@@ -308,8 +331,8 @@ Write-Note "resolved          $pinned  (tag $tag)"
 # Verify the release EXISTS before generating a secret or pulling an image, so a typo costs
 # nothing. Its manifest is the artefact an upgrade reads too.
 if ($Channel -ceq 'public') {
-try { Invoke-WebRequest -Uri "$Releases/$tag/release.json" -UseBasicParsing -Method Head | Out-Null }
-catch { Die "release $tag has no published manifest.`n       Check the version, or list what exists: https://github.com/$Repo/releases" }
+  try { Invoke-WebRequest -Uri "$Releases/$tag/release.json" -UseBasicParsing -Method Head | Out-Null }
+  catch { Die "release $tag has no published manifest.`n       Check the version, or list what exists: https://github.com/$Repo/releases" }
 }
 if ($Check) {
   try { $null = Read-ChannelManifest }
@@ -475,6 +498,7 @@ switch ($Command) {
 '@
 if ($Channel -cne 'public') {
   $haivePs1 = $haivePs1.Replace('switch ($Command) {', @'
+Remove-Item Env:HAIVE_REGISTRY_TOKEN -ErrorAction SilentlyContinue
 $installEnv = Get-DotEnv
 $env:DOCKER_CONFIG = $installEnv['DOCKER_CONFIG']
 # /c/... is the daemon/updater path; Windows docker needs the native client path.
@@ -482,6 +506,7 @@ if ($env:OS -eq 'Windows_NT' -and $env:DOCKER_CONFIG -match '^/([a-z])/(.*)$') {
   $env:DOCKER_CONFIG = $Matches[1] + ':/' + $Matches[2]
 }
 switch ($Command) {
+  'pull' { docker compose @files pull }
 '@)
   $haivePs1 = $haivePs1.Replace('      "$($e[''HAIVE_REGISTRY''])/haive-updater:$v",', @'
       '-e', 'DOCKER_CONFIG=/install/.docker',
@@ -704,6 +729,7 @@ if ($Purge) {
 }
 '@
 if ($Channel -cne 'public') {
+  $uninstall = $uninstall.Replace("`$ErrorActionPreference = 'Stop'", "`$ErrorActionPreference = 'Stop'`nRemove-Item Env:HAIVE_REGISTRY_TOKEN -ErrorAction SilentlyContinue")
   $uninstall = $uninstall.Replace('# `down` first', @'
 if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '.docker')) {
   Remove-Item -LiteralPath (Join-Path $PSScriptRoot '.docker') -Recurse -Force

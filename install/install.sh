@@ -84,11 +84,14 @@ done
 if [ "$CHANNEL" != "public" ]; then
   # Do not trace, export or leave the token in the environment of any subprocess.
   set +x
+  unset REGISTRY_TOKEN
   REGISTRY_TOKEN=${HAIVE_REGISTRY_TOKEN:-}
   unset HAIVE_REGISTRY_TOKEN
 fi
 
 # Match scripts/build-channel.mjs CHANNEL and PREFIX before contacting any registry.
+case "$CHANNEL" in *[!a-z0-9-]*) die "invalid --channel" ;; esac
+case "$CHANNEL_REGISTRY" in *[!a-z0-9/._:-]*) die "invalid --channel-registry" ;; esac
 printf '%s\n' "$CHANNEL" | LC_ALL=C grep -Eq '^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$' \
   || die "invalid --channel (use 1-32 lowercase letters, digits or dashes; start and end with a letter or digit)"
 printf '%s\n' "$CHANNEL_REGISTRY" | LC_ALL=C grep -Eq '^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*$' \
@@ -217,7 +220,7 @@ read_channel_manifest() {
   CHANNEL_CONTAINER=""
   CHANNEL_TTY=""
   cleanup_channel() {
-    if [ -n "$CHANNEL_TTY" ]; then stty "$CHANNEL_TTY" < /dev/tty; fi
+    if [ -n "$CHANNEL_TTY" ]; then stty "$CHANNEL_TTY" < /dev/tty || warn "could not restore terminal settings"; fi
     if [ -n "$CHANNEL_CONTAINER" ]; then
       docker rm -f "$CHANNEL_CONTAINER" >/dev/null 2>&1 \
         || warn "could not remove manifest container $CHANNEL_CONTAINER; run docker rm -f $CHANNEL_CONTAINER"
@@ -237,8 +240,8 @@ read_channel_manifest() {
   if [ -z "$REGISTRY_TOKEN" ]; then
     [ -r /dev/tty ] || die "set HAIVE_REGISTRY_TOKEN or run in a terminal for the registry token prompt"
     CHANNEL_TTY=$(stty -g < /dev/tty) || die "cannot read terminal settings"
-    printf 'Registry token: ' > /dev/tty
     stty -echo < /dev/tty
+    printf 'Registry token: ' > /dev/tty
     IFS= read -r REGISTRY_TOKEN < /dev/tty || die "could not read registry token"
     stty "$CHANNEL_TTY" < /dev/tty
     CHANNEL_TTY=""
@@ -313,7 +316,7 @@ read_channel_manifest() {
         pin=strings["/images/" hosts[i]]; prefix=registry "/haive-" channel "-" hosts[i] "@sha256:"
         if(index(pin,prefix)!=1) fail()
         digest=substr(pin,length(prefix)+1)
-        if(length(digest)!=64 || digest ~ /[^0-9a-fA-F]/) fail()
+        if(length(digest)!=64 || digest ~ /[^0-9a-f]/) fail()
       }
       for(i=1;i<=3;i++) print strings["/images/" hosts[i]]
     }
@@ -408,8 +411,6 @@ if [ "$CHECK_ONLY" -eq 1 ] && [ "$CHANNEL" = "public" ]; then
   say ""; say "--check: nothing was installed."; exit 0
 fi
 
-
-
 step "Resolving the release"
 TAG=$(resolve_version "$VERSION")
 PINNED="${TAG#v}"
@@ -420,7 +421,7 @@ say "  resolved          ${PINNED}  (tag ${TAG})"
 # nothing. Its manifest is the artefact an upgrade reads too.
 MANIFEST_URL="${RELEASES}/${TAG}/release.json"
 if [ "$CHANNEL" = "public" ]; then
-curl -fsSL -o /dev/null "$MANIFEST_URL" 2>/dev/null \
+  curl -fsSL -o /dev/null "$MANIFEST_URL" 2>/dev/null \
   || die "release ${TAG} has no published manifest at ${MANIFEST_URL}.
        Check the version, or list what exists: https://github.com/${REPO}/releases"
 fi
@@ -450,6 +451,7 @@ fi
 if [ "$CHANNEL" != "public" ]; then
   # Keep env values literal in Compose and in the generated host helper.
   case "$INSTALL_DIR" in *[!a-zA-Z0-9_./\ -]*|*'..'*|*'//'*|*/.) die "channel install directory must be a normalized absolute path using letters, digits, spaces, _, - and ." ;; esac
+  [ "$INSTALL_DIR" != / ] || die "channel install directory cannot be the filesystem root"
   INSTALL_DIR=${INSTALL_DIR%/}
   read_channel_manifest
 fi
@@ -565,22 +567,24 @@ COMPOSE_FILES="-f docker-compose.yml -f docker-compose.run.yml"
 [ -n "$GPU_FILE" ] && COMPOSE_FILES="$COMPOSE_FILES -f $GPU_FILE"
 
 # Empty substitutions preserve the public helper byte for byte.
+# These literals are expanded by the generated helper, not by the installer.
+# shellcheck disable=SC2016
+{
 CHANNEL_HELPER_ENV=""
+CHANNEL_PULL=""
 CHANNEL_UPGRADE_ENV=""
 LOAD_INSTALL_ENV='. ./.env'
-MANIFEST_ARGS=$(cat <<'ARGS'
-      --manifest "https://github.com/REPO_PLACEHOLDER/releases/download/v${v#v}/release.json" \
-ARGS
-)
-MANIFEST_ARGS=$(printf '%s' "$MANIFEST_ARGS" | sed "s|REPO_PLACEHOLDER|${REPO}|g")
-MANIFEST_ARGS="$MANIFEST_ARGS
-"
+MANIFEST_ARGS='      --manifest "https://github.com/'"${REPO}"'/releases/download/v${v#v}/release.json" \
+'
 if [ "$CHANNEL" != "public" ]; then
-  CHANNEL_HELPER_ENV='while IFS= read -r line; do
+  CHANNEL_HELPER_ENV='unset HAIVE_REGISTRY_TOKEN
+while IFS= read -r line; do
   case "$line" in
     HAIVE_*=*|COMPOSE_PROJECT_NAME=*|POSTGRES_*=*|CONFIG_ENCRYPTION_KEY=*|JWT_SECRET=*|DOCKER_CONFIG=*) export "$line" ;;
   esac
 done < .env
+'
+  CHANNEL_PULL='  pull)    shift; $DC pull "$@" ;;
 '
   LOAD_INSTALL_ENV=': # install settings were read above as data'
   CHANNEL_UPGRADE_ENV='      -e DOCKER_CONFIG=/install/.docker \
@@ -591,6 +595,7 @@ done < .env
       --version "${v#v}" \
 '
 fi
+}
 
 cat > haive <<EOF
 #!/bin/sh
@@ -599,7 +604,7 @@ set -eu
 cd "\$(dirname "\$0")"
 ${CHANNEL_HELPER_ENV}DC="docker compose ${COMPOSE_FILES}"
 case "\${1:-}" in
-  up)      shift; \$DC up -d "\$@" ;;
+${CHANNEL_PULL}  up)      shift; \$DC up -d "\$@" ;;
   down)    shift; \$DC down "\$@" ;;
   logs)    shift; \$DC logs -f "\$@" ;;
   ps)      shift; \$DC ps "\$@" ;;
@@ -851,7 +856,11 @@ else
 fi
 EOF
 if [ "$CHANNEL" != "public" ]; then
-  sed '/^# `down` first/i\
+  # Match a literal generated comment; its backticks must not run in the installer.
+  # shellcheck disable=SC2016
+  sed '/^set -eu/a\
+unset HAIVE_REGISTRY_TOKEN
+/^# `down` first/i\
 rm -rf .docker
 ' uninstall.sh > "$CHANNEL_SCRATCH/uninstall.sh"
   mv "$CHANNEL_SCRATCH/uninstall.sh" uninstall.sh
