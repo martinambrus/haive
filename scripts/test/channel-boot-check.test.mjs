@@ -58,8 +58,17 @@ function fixture(t, config = {}) {
     assert.ok(options.timeout > 0);
     if (args[0] === 'image' && args[1] === 'inspect') {
       const host = Object.keys(record.images).find((key) => record.images[key].ref === args.at(-1));
-      if (!host && config.pullDependencies) return { status: 1, stderr: 'not found' };
+      if (!host && config.dependencyInspectError)
+        return { status: 1, stderr: config.dependencyInspectError };
+      if (!host && config.dependencyInspectCaptureError)
+        return { status: 0, error: new Error('inspect transport failed') };
+      if (!host && config.pullDependencies) return { status: 1, stderr: 'No such image' };
       return ok(config.retagged === host ? `sha256:${'f'.repeat(64)}` : IDS[host]);
+    }
+    if (args[0] === 'image' && args[1] === 'ls') {
+      return config.dependencyListFailure
+        ? { status: 1, stderr: 'daemon unavailable' }
+        : ok(config.pullDependencies ? '' : `sha256:${'4'.repeat(64)}`);
     }
     if (args[0] === 'pull') {
       created.images.push(args.at(-1));
@@ -395,6 +404,30 @@ test('dependency images pulled by this run are removed too', async (t) => {
   assert.equal(await f.check(), 0);
   assert.deepEqual(f.created.images, ['pgvector/pgvector:pg18', 'redis:8.4-alpine']);
 });
+
+test('pre-existing dependency images are never pulled or removed', async (t) => {
+  const f = fixture(t);
+  assert.equal(await f.check(), 0);
+  assert.deepEqual(f.created.images, []);
+  assert.deepEqual(f.removed.images, []);
+  assert.ok(!f.calls.some(({ args }) => args[0] === 'pull'));
+});
+
+for (const [label, config] of [
+  ['transient failure', { dependencyInspectError: 'daemon temporarily unavailable' }],
+  ['misleading absence message', { dependencyInspectError: 'No such image' }],
+  ['capture error', { dependencyInspectCaptureError: true }],
+  ['failed absence check', { pullDependencies: true, dependencyListFailure: true }],
+]) {
+  test(`dependency inspect ${label}: exit 2 without pull or image removal`, async (t) => {
+    const f = fixture(t, config);
+    assert.equal(await f.check(), 2);
+    assert.deepEqual(f.created.images, []);
+    assert.deepEqual(f.removed.images, []);
+    assert.ok(!f.calls.some(({ args }) => args[0] === 'pull'));
+    assert.equal(f.created.networks.length, 0);
+  });
+}
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   test(`CLI ${signal} cleans up after Docker creates a container`, (t) => {

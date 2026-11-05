@@ -132,6 +132,7 @@ export async function run(
   let timeout = 180_000;
   const secrets = [];
   const resources = [];
+  const pulledImages = [];
   const containers = [];
   const emit = (value) => {
     let text = String(value);
@@ -239,9 +240,12 @@ export async function run(
       const found = await docker(['image', 'inspect', '--format', '{{.Id}}', image], {
         allowFailure: true,
       });
-      if (found.status !== 0) {
-        resources.push({ kind: 'image', name: image });
+      if (found.status !== 0 || found.error) {
+        const listed = await docker(['image', 'ls', '-q', image]);
+        if (found.error || found.status !== 1 || listed.stdout.trim() !== '')
+          throw new Error(`could not inspect dependency image ${image}`);
         await docker(['pull', image]);
+        pulledImages.push({ kind: 'image', name: image });
       }
     }
     resources.push({ kind: 'network', name: prefix });
@@ -397,7 +401,7 @@ export async function run(
       }
     }
   } finally {
-    for (const { kind, name } of resources.reverse()) {
+    for (const { kind, name } of [...pulledImages, ...resources].reverse()) {
       try {
         await docker(kind === 'container' ? ['rm', '-f', '-v', name] : [kind, 'rm', name], {
           cleanup: true,
