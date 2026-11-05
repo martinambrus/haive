@@ -189,6 +189,29 @@ function Resolve-HaiveVersion([string]$want) {
   return "v$want"
 }
 
+# Reassert protection at the destination too: a cross-volume move may inherit its ACL.
+function Protect-RegistryCredentials([string]$directory) {
+  $config = Join-Path $directory 'config.json'
+  if ($env:OS -eq 'Windows_NT') {
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($user, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+    Set-Acl -LiteralPath $directory -AclObject $acl
+    if (Test-Path -LiteralPath $config) {
+      $fileAcl = New-Object System.Security.AccessControl.FileSecurity
+      $fileAcl.SetAccessRuleProtection($true, $false)
+      $fileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($user, 'FullControl', 'Allow')))
+      Set-Acl -LiteralPath $config -AclObject $fileAcl
+    }
+  } else {
+    if ((Invoke-Native chmod @('700', $directory)).ExitCode -ne 0) { throw 'cannot protect registry credentials' }
+    if (Test-Path -LiteralPath $config) {
+      if ((Invoke-Native chmod @('600', $config)).ExitCode -ne 0) { throw 'cannot protect registry credentials' }
+    }
+  }
+}
+
 # Stage credentials until verification succeeds; no failed manifest creates an install.
 function Read-ChannelManifest {
   $scratch = Join-Path ([IO.Path]::GetTempPath()) ("haive-install-" + [guid]::NewGuid().ToString('N'))
@@ -196,16 +219,8 @@ function Read-ChannelManifest {
   $container = $null
   try {
     $null = New-Item -ItemType Directory -Path (Join-Path $scratch '.docker')
-    if ($env:OS -eq 'Windows_NT') {
-      $acl = New-Object System.Security.AccessControl.DirectorySecurity
-      $acl.SetAccessRuleProtection($true, $false)
-      $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
-      $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($user, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
-      Set-Acl -LiteralPath $scratch -AclObject $acl
-      Set-Acl -LiteralPath (Join-Path $scratch '.docker') -AclObject $acl
-    } else {
-      if ((Invoke-Native chmod @('700', $scratch, (Join-Path $scratch '.docker'))).ExitCode -ne 0) { throw 'cannot protect registry credentials' }
-    }
+    Protect-RegistryCredentials $scratch
+    Protect-RegistryCredentials (Join-Path $scratch '.docker')
     $env:DOCKER_CONFIG = Join-Path $scratch '.docker'
     $server = ($ChannelRegistry -split '/')[0]
     # Prevent Docker auto-selecting a machine credential helper for an empty config.
@@ -442,7 +457,11 @@ if (-not (Test-Path $envPath)) {
 
 if ($Channel -cne 'public') {
   if (Test-Path -LiteralPath (Join-Path $Dir '.docker')) { Remove-Item -LiteralPath $ChannelScratch -Recurse -Force; Die "$Dir/.docker already exists; choose a clean install directory" }
-  try { Move-Item -LiteralPath (Join-Path $ChannelScratch '.docker') -Destination (Join-Path $Dir '.docker') }
+  try {
+    Move-Item -LiteralPath (Join-Path $ChannelScratch '.docker') -Destination (Join-Path $Dir '.docker')
+    try { Protect-RegistryCredentials (Join-Path $Dir '.docker') }
+    catch { Remove-Item -LiteralPath (Join-Path $Dir '.docker') -Recurse -Force; throw }
+  }
   finally { Remove-Item -LiteralPath $ChannelScratch -Recurse -Force }
   $env:DOCKER_CONFIG = Join-Path $Dir '.docker'
 }
