@@ -52,6 +52,7 @@ function fixture(t, config = {}) {
   const controller = new AbortController();
   let clock = 0;
   let prefix;
+  let late;
   const runner = async (cmd, args, options) => {
     calls.push({ cmd, args });
     assert.equal(cmd, 'docker');
@@ -107,6 +108,11 @@ function fixture(t, config = {}) {
         assert.equal(args[args.indexOf('--platform') + 1], record.platform);
       }
       if (config.createFailure === 'container') return { status: 1, stderr: 'create refused' };
+      if (config.abortCreateLate && name.endsWith('-api')) {
+        late = name;
+        controller.abort();
+        return { status: null, error: new Error('interrupted'), stdout: '', stderr: '' };
+      }
       if (config.abortBeforeCreate) {
         controller.abort();
         return { status: null, error: new Error('interrupted') };
@@ -152,6 +158,9 @@ function fixture(t, config = {}) {
     }
     if (args[0] === 'logs') return ok(`boot log ${[...secrets].join(' ')}`);
     if (args[0] === 'rm') {
+      if (args.at(-1) === late) created.containers.push(late);
+      else if (!created.containers.includes(args.at(-1)))
+        return { status: 1, stderr: 'No such container' };
       removed.containers.push(args.at(-1));
       if (config.abortCleanup) controller.abort();
       return config.cleanupFailure ? { status: 1, stderr: 'cleanup refused' } : ok();
@@ -435,6 +444,12 @@ test('abort before container creation does not report a leftover', async (t) => 
   const f = fixture(t, { abortBeforeCreate: true });
   assert.equal(await f.check(), 2);
   assert.doesNotMatch(f.logs.join('\n'), /leftover/);
+});
+
+test('abort while the daemon is still creating a container still removes it', async (t) => {
+  const f = fixture(t, { abortCreateLate: true });
+  assert.equal(await f.check(), 2);
+  assert.ok(f.removed.containers.some((name) => name.endsWith('-api')));
 });
 
 test('a cleanup failure prevents a successful verdict', async (t) => {

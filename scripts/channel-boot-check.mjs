@@ -169,7 +169,7 @@ export async function run(
         cleanup: true,
         allowFailure: true,
       });
-      if (existing.status === 0 && !existing.error) register();
+      if (signal?.aborted || (existing.status === 0 && !existing.error)) register();
       throw error;
     }
   };
