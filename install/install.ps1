@@ -384,7 +384,7 @@ if ($Channel -ceq 'public') {
 if ($Check) {
   try { $null = Read-ChannelManifest }
   catch { Die $_.Exception.Message }
-  finally { if ($ChannelScratch) { Remove-Item -LiteralPath $ChannelScratch -Recurse -Force } }
+  finally { if ($ChannelScratch) { Remove-Item -LiteralPath $ChannelScratch -Recurse -Force -ErrorAction SilentlyContinue } }
   Write-Note "Channel           $Channel ($ChannelRegistry)"
   Write-Note "manifest          verified for $pinned"
   Write-Host "-Check: nothing was installed."

@@ -322,6 +322,24 @@ for (const lang of ['sh', 'ps1']) {
     }
   });
   if (lang === 'ps1') {
+    check('failed check reports one error and removes scratch', () => {
+      const f = fixture(lang, { fail: 'login' });
+      try {
+        const r = f.install([f.flag('check')]);
+        assert.notEqual(r.status, 0, r.stdout + r.stderr);
+        assert.ok(!existsSync(f.dir), 'check writes no install');
+        assert.match(f.calls(), /\tlogin\t/);
+        assert.deepEqual(
+          readdirSync(f.root).filter((x) => x.startsWith('haive-install')),
+          [],
+          'no credential scratch remains',
+        );
+        assert.equal((r.stdout + r.stderr).match(/error:/g)?.length, 1);
+        assert.equal(r.stderr, '', 'no second PowerShell cleanup error');
+      } finally {
+        f.clean();
+      }
+    });
     for (const fail of ['mkdir', 'pipeline-stop', 'bundle'])
       check(`scratch removed after post-verification ${fail}`, () => {
         const f = fixture(lang, { fail });
