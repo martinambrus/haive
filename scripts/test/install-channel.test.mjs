@@ -322,6 +322,25 @@ for (const lang of ['sh', 'ps1']) {
         f.clean();
       }
     });
+  check('compose bundle mode matches public install', () => {
+    const channel = fixture(lang);
+    const pub = fixture(lang, { publicInstall: true });
+    try {
+      const a = channel.install();
+      const b = pub.install();
+      assert.equal(a.status, 0, a.stdout + a.stderr);
+      assert.equal(b.status, 0, b.stdout + b.stderr);
+      for (const name of ['docker-compose.yml', 'docker-compose.run.yml'])
+        assert.equal(
+          statSync(join(channel.dir, name)).mode & 0o777,
+          statSync(join(pub.dir, name)).mode & 0o777,
+          name,
+        );
+    } finally {
+      channel.clean();
+      pub.clean();
+    }
+  });
   check('channel flags, private config and pinned env', () => {
     const f = fixture(lang);
     try {

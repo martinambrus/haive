@@ -215,6 +215,7 @@ resolve_version() {
 # Authenticate and validate before creating anything in the destination. The staged config
 # becomes this install's .docker only after the entire manifest has passed.
 read_channel_manifest() {
+  CHANNEL_UMASK=$(umask)
   umask 077
   CHANNEL_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/haive-install.XXXXXXXX")
   CHANNEL_CONTAINER=""
@@ -326,6 +327,7 @@ read_channel_manifest() {
   API_IMAGE=$(sed -n '1p' "$CHANNEL_SCRATCH/pins")
   WORKER_IMAGE=$(sed -n '2p' "$CHANNEL_SCRATCH/pins")
   WEB_IMAGE=$(sed -n '3p' "$CHANNEL_SCRATCH/pins")
+  umask "$CHANNEL_UMASK"
 }
 
 # ── Install ──────────────────────────────────────────────────────────────────
