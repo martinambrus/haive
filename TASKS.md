@@ -346,13 +346,6 @@ User decision 2026-11-01: Reconcile runtime before validation; revalidate affect
 status: blocked · blocked-by: T351,T352,T353 · was modular #104 · priority: P2
 Plan D2: installer flags, an install-local docker config for private pulls, and a host upgrade that reads the channel. Depends on T351-T353.
 
-### T337 · D4 · module_sources table (git/registry, envelope-encrypted token) + Modules page form
-
-status: taken · owner: sonnet-sonnet@zathrus-wsl · since: 2026-11-05 · last: 2026-11-05 · was modular #106 · priority: P2
-Plan D4: git and registry install sources drive D1 and D3; the token is stored envelope-encrypted.
-
-Owner decisions 2026-11-05: (1) saving records the source and a worker job fetches/pins it into the prepared own-modules directory; it applies at the next upgrade or a later explicit Build, never an image swap from the form; (2) published-image installs only, source checkouts keep `pnpm module` and see a read-only note; (3) token install-wide in system_secrets via SecretsService, admin only, write-only (blank keeps), every add/edit/delete audited in the same transaction; (4) a git ref resolves to a commit SHA on fetch, newer commits only via explicit Refresh. Delivery: codex-sonnet, branch feat/337-module-sources.
-
 ### T531 · FNF[module-sources] · install-source fetch/pin follow-ups from T337 (+3)
 
 status: open · kind: fix · found: T337 reviews 2026-11-05 · priority: P3
@@ -455,7 +448,7 @@ User decision 2026-11-01: Show configured-active but runtime/schema-unready modu
 
 ### T351 · D2a-3 · scripts/build-channel.mjs: channel build from a final base tag, no push
 
-status: open · was modular #177 · priority: P2
+status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-05 · last: 2026-11-05 · was modular #177 · priority: P2
 Plan D2a-3: a git-archive tree, `module add` per entitled package, `--secret` builds, then the gate.
 
 ### T352 · D2a-4 · channel publish (+3)
@@ -1365,6 +1358,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T337 — module_sources install sources with fetch and pin (git; registry refused pending T532) — PR #1003 (9a8d8a3c7), 2026-11-05; PR CI 13/13 green, merged without bot review (Codex review allowance exhausted); full suite at feature end green bar two load-timing flakes in untouched files (pg-startup-storm positive control, project-state-write-bounds 4,090 claims); migration 0221 applied to dev; admin Modules page shows Install sources with source-checkout read-only note. Follow-ups T531, T532. Evidence .claude/tmp/sonnet-run/T337/.
 - T336 — Own-module container builder and upgrade image recovery — PR #1001 (c4f4768900), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41534422031 green; Own-modulebuilder actualpublic/customercontainerproof plusquotedsettingsreadonlyCompose/preflight/journalrestoreproof andentitlement/tokennegativecontrols passed; completeworkspace8packagesunits/types/rootformat/scripts passed, exactHEADnative/hosted/allPRCI/allmainCI green; reviewedoperator/updater/sharednaming source loaded,serializedlibs/watchers/compilednamingartifact/APIwebhealth/idle/userfiles verified. EightownedDockerfixturetags/inputscratchcleaned.. Evidence .claude/tmp/codex-run/queue-exec-20261101/T336/.
 
 - T330 — Module-only graceful shutdown and dependents preflight — PR #1000 (59f48d98cc), 2026-11-02; exact-HEAD reviews/full candidate/PR CI/main CI41514316829 green; PrimaryModules/NewTask1280/768/390 passed15scopedprobes/screenshotsallparentviewed;9browserlocalPATCHDELETEs0forwarded; realreadonlymodules+dependents200; preflight503/lateA-B/busy/duplicate/Escape/draining/cancel+automaticrequiredblockedvsoptionalallowed verified. MainCI41514316829/allchecks/sourcewatchers/APIwebhealth/idle green; normal219+220applier beforewatchedsource plusjournal/physicalcolumns/keys/cascades/emptyadditivetables verified.. Evidence .claude/tmp/codex-run/queue-exec-20261101/T330/.
