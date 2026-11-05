@@ -2,7 +2,7 @@ import { asc, eq, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { isLockNotAvailable, isUniqueViolationOf, schema } from '@haive/database';
-import { secretsService } from '@haive/shared';
+import { MODULE_CONTROL_JOB_NAMES, secretsService } from '@haive/shared';
 import { isBranchName } from '@haive/shared/git-args';
 import { modulePackageId } from '@haive/shared/modularity';
 import { HttpError, type AppEnv } from '../context.js';
@@ -10,6 +10,8 @@ import { getDb } from '../db.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { isUuid } from '../lib/uuid.js';
+import { getModuleControlQueue } from '../queues.js';
+import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 
 const registryPrefix = '@haive-module/';
 const moduleId = z.string().refine((value) => modulePackageId(registryPrefix + value) === value);
@@ -105,6 +107,8 @@ const sourceBody = z
 
 const writable = () => process.env.HAIVE_PUBLISHED_INSTALL === 'true';
 const secretKey = (id: string) => 'module_source:' + id + ':token';
+const fetching = (status: string | null | undefined) =>
+  status === 'queued' || status === 'fetching';
 
 function assertWritable() {
   if (!writable())
@@ -132,12 +136,78 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
   routes.get('/', async (c) =>
     c.json({
       writable: writable(),
+      fetchConfigured: !!process.env.HAIVE_OWN_MODULES_HOST_DIR,
       sources: await getDb()
         .select()
         .from(schema.moduleSources)
         .orderBy(asc(schema.moduleSources.moduleId)),
     }),
   );
+
+  routes.post('/:sourceId/fetch', async (c) => {
+    assertWritable();
+    if (isForeignOrigin(c.req.header('origin'), c.req.header('host'), trustedOrigins()))
+      throw new HttpError(403, 'Refused a request from another page');
+    const id = c.req.param('sourceId');
+    if (!isUuid(id)) throw new HttpError(404, 'Not found');
+    const body = z
+      .object({ refresh: z.boolean().optional() })
+      .strict()
+      .parse(await c.req.json());
+    const event: AuditEvent = {
+      actorUserId: c.get('userId'),
+      action: 'module_source.fetch',
+      targetType: 'module_source',
+      targetId: id,
+      metadata: { refresh: body.refresh === true },
+    };
+    const source = await getDb()
+      .transaction(async (tx) => {
+        await tx.execute(sql.raw("SET LOCAL lock_timeout = '5s'"));
+        const [row] = await tx
+          .select()
+          .from(schema.moduleSources)
+          .where(eq(schema.moduleSources.id, id))
+          .for('update');
+        if (!row) throw new HttpError(404, 'Module source not found');
+        if (row.kind !== 'git')
+          throw new HttpError(
+            409,
+            'Registry fetch is unavailable: the builder requires rebuildable sources',
+            'registry_fetch_unsupported',
+          );
+        if (fetching(row.fetchStatus))
+          throw new HttpError(409, 'This source is already being fetched', 'module_source_busy');
+        const [queued] = await tx
+          .update(schema.moduleSources)
+          .set({
+            fetchStatus: 'queued',
+            lastError: null,
+            updatedAt: new Date(Math.max(Date.now(), row.updatedAt.getTime() + 1)),
+            ...(body.refresh ? { resolvedSha: null } : {}),
+          })
+          .where(eq(schema.moduleSources.id, id))
+          .returning();
+        await insertAuditEvent(tx, event);
+        return queued!;
+      })
+      .catch(sourceWriteError);
+    logAuditEvent(event);
+    try {
+      await getModuleControlQueue().add(
+        MODULE_CONTROL_JOB_NAMES.FETCH_SOURCE,
+        { sourceId: id, moduleId: source.moduleId, requestedAt: source.updatedAt.toISOString() },
+        {
+          jobId: 'source-' + id + '-' + source.updatedAt.getTime(),
+          removeOnComplete: true,
+          removeOnFail: true,
+        },
+      );
+    } catch {
+      // The worker's outbox sweep retries the committed queued state.
+    }
+    return c.json(source, 202);
+  });
 
   for (const method of ['post', 'put'] as const) {
     routes[method](method === 'post' ? '/' : '/:sourceId', async (c) => {
@@ -170,6 +240,8 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
                     .for('update')
                 )[0];
           if (id !== null && !previous) throw new HttpError(404, 'Module source not found');
+          if (fetching(previous?.fetchStatus))
+            throw new HttpError(409, 'This source is being fetched', 'module_source_busy');
           const values = {
             kind: body.kind,
             moduleId: body.moduleId,
@@ -231,6 +303,13 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
     await getDb()
       .transaction(async (tx) => {
         await tx.execute(sql.raw("SET LOCAL lock_timeout = '5s'"));
+        const [previous] = await tx
+          .select()
+          .from(schema.moduleSources)
+          .where(eq(schema.moduleSources.id, id))
+          .for('update');
+        if (fetching(previous?.fetchStatus))
+          throw new HttpError(409, 'This source is being fetched', 'module_source_busy');
         const [row] = await tx
           .delete(schema.moduleSources)
           .where(eq(schema.moduleSources.id, id))

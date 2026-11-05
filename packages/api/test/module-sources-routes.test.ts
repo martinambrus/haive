@@ -7,7 +7,13 @@ import type { AppEnv } from '../src/context.js';
 import { moduleRoutes } from '../src/modules/loader.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 
-const h = vi.hoisted(() => ({ db: undefined as unknown, role: 'admin', auditFails: false }));
+const h = vi.hoisted(() => ({
+  db: undefined as unknown,
+  role: 'admin',
+  auditFails: false,
+  enqueue: vi.fn(),
+}));
+vi.mock('../src/queues.js', () => ({ getModuleControlQueue: () => ({ add: h.enqueue }) }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/middleware/auth.js', async (original) => ({
   ...(await original<typeof import('../src/middleware/auth.js')>()),
@@ -88,6 +94,7 @@ describe.skipIf(!url)('module install sources (real database)', () => {
   beforeEach(async () => {
     h.role = 'admin';
     h.auditFails = false;
+    h.enqueue.mockReset().mockResolvedValue({ id: 'fetch' });
     vi.stubEnv('HAIVE_PUBLISHED_INSTALL', 'true');
     await db.execute(
       sql.raw(
@@ -97,6 +104,58 @@ describe.skipIf(!url)('module install sources (real database)', () => {
     await db.execute(sql.raw("DELETE FROM system_secrets WHERE key LIKE 'module_source:%'"));
     await db.execute(sql.raw("DELETE FROM audit_events WHERE target_type = 'module_source'"));
     secretsService.clearCache();
+  });
+  it('queues a fetch with its audit, refuses concurrent edits and clears the SHA only on Refresh', async () => {
+    const source = await add();
+    await db
+      .update(schema.moduleSources)
+      .set({ resolvedSha: 'a'.repeat(40) })
+      .where(eq(schema.moduleSources.id, source.id));
+    expect((await send('POST', '/' + source.id + '/fetch', {})).status).toBe(202);
+    expect(h.enqueue).toHaveBeenCalledOnce();
+    expect((await send('POST', '/' + source.id + '/fetch', {})).status).toBe(409);
+    expect((await send('PUT', '/' + source.id, { ...git, ref: 'other' })).status).toBe(409);
+    expect((await send('DELETE', '/' + source.id)).status).toBe(409);
+    expect(await db.select().from(schema.moduleSources)).toMatchObject([
+      { fetchStatus: 'queued', resolvedSha: 'a'.repeat(40) },
+    ]);
+    expect(
+      await db.execute(sql.raw("SELECT id FROM audit_events WHERE action='module_source.fetch'")),
+    ).toHaveLength(1);
+    await db
+      .update(schema.moduleSources)
+      .set({ fetchStatus: 'pinned' })
+      .where(eq(schema.moduleSources.id, source.id));
+    expect((await send('POST', '/' + source.id + '/fetch', { refresh: true })).status).toBe(202);
+    expect(await db.select().from(schema.moduleSources)).toMatchObject([{ resolvedSha: null }]);
+  });
+  it('rolls enqueue-state back when its audit fails', async () => {
+    const source = await add();
+    h.auditFails = true;
+    expect((await send('POST', '/' + source.id + '/fetch', {})).status).toBe(500);
+    expect(h.enqueue).not.toHaveBeenCalled();
+    expect(await db.select().from(schema.moduleSources)).toMatchObject([{ fetchStatus: null }]);
+  });
+  it('requires admin and a published install, and rejects foreign origins and registry fetch', async () => {
+    const source = await add();
+    h.role = 'user';
+    expect((await send('POST', '/' + source.id + '/fetch', {})).status).toBe(403);
+    h.role = 'admin';
+    vi.stubEnv('HAIVE_PUBLISHED_INSTALL', '');
+    expect((await send('POST', '/' + source.id + '/fetch', {})).status).toBe(409);
+    vi.stubEnv('HAIVE_PUBLISHED_INSTALL', 'true');
+    expect(
+      (
+        await app.request('/modules/sources/' + source.id + '/fetch', {
+          method: 'POST',
+          headers: { origin: 'https://foreign.example', 'content-type': 'application/json' },
+          body: '{}',
+        })
+      ).status,
+    ).toBe(403);
+    const other = await add(registry);
+    expect((await send('POST', '/' + other.id + '/fetch', {})).status).toBe(409);
+    expect(h.enqueue).not.toHaveBeenCalled();
   });
   it.each(['GET', 'POST', 'PUT', 'DELETE'])('refuses a normal user: %s', async (method) => {
     h.role = 'user';
