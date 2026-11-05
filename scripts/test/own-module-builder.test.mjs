@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeTree } from './tree.mjs';
+import { BUILD_CONTEXT_IGNORE } from '../own-module-builder.mjs';
 import { mkdirSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -83,4 +84,11 @@ test('runtime assembly copies generated artifacts over versioned bases, includin
   assert.match(text, /COPY --from=own \/app\/packages\/api\/dist/);
   assert.doesNotMatch(text, /AS web\n/);
   assert.throws(() => parsePlan({ ...plan, rebuildWeb: true }), /outputImages.web/);
+});
+
+test('build context excludes fetch pin markers and credentials', () => {
+  const entries = BUILD_CONTEXT_IGNORE.split('\n');
+  for (const entry of ['**/.haive-source.json', '**/.git', '**/.npmrc', '**/.env']) {
+    assert.ok(entries.includes(entry), entry);
+  }
 });

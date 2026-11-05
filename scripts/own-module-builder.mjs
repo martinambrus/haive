@@ -21,6 +21,9 @@ const HOSTS = ['api', 'worker', 'web'];
 const json = (file) => JSON.parse(readFileSync(file, 'utf8'));
 const putJson = (file, value) => writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
 
+export const BUILD_CONTEXT_IGNORE =
+  '**/node_modules\n**/.git\n**/.npmrc\n**/.env\n**/.env.*\n**/.haive-source.json\n';
+
 export function parsePlan(value) {
   if (
     !value ||
@@ -158,10 +161,7 @@ export function main() {
   const dir = mkdtempSync(join(tmpdir(), 'haive-own-build-'));
   try {
     snapshotModules(source, join(dir, 'own-modules'));
-    writeFileSync(
-      join(dir, '.dockerignore'),
-      '**/node_modules\n**/.git\n**/.npmrc\n**/.env\n**/.env.*\n**/.haive-source.json\n',
-    );
+    writeFileSync(join(dir, '.dockerignore'), BUILD_CONTEXT_IGNORE);
     writeFileSync(join(dir, 'Dockerfile'), buildDockerfile(plan));
     for (const host of ['api', 'worker', ...(plan.rebuildWeb ? ['web'] : [])]) {
       runDocker(['build', '--target', host, '-t', plan.outputImages[host], dir]);
