@@ -127,7 +127,10 @@ describe.skipIf(!url)('module install sources (real database)', () => {
       fetchedAt: null,
       lastError: null,
     });
-    const secret = await db.query.systemSecrets.findFirst();
+    const secret = await db.query.systemSecrets.findFirst({
+      where: eq(schema.systemSecrets.key, key(source.id)),
+    });
+    expect(secret).toBeDefined();
     expect(secret!.encryptedValue).not.toContain(token);
     expect(await secretsService.get(key(source.id))).toBe(token);
   });
@@ -168,6 +171,8 @@ describe.skipIf(!url)('module install sources (real database)', () => {
     { ...git, ref: '' },
     { ...git, version: '1.0.0' },
     { ...registry, packageName: '@haive-module/other' },
+    { ...registry, packageName: '@haive/module-beta' },
+    { ...registry, packageName: '@haive-module/beta\n' },
     { ...registry, version: '^1.2.3' },
     { ...registry, version: '01.2.3' },
     { ...registry, version: '1.2.3-01' },
@@ -290,20 +295,127 @@ describe.skipIf(!url)('module install sources (real database)', () => {
       expect(await res.json()).toMatchObject({ code: 'source_checkout' });
     }
   });
-  it('deletes the source and secret, auditing without secret metadata', async () => {
-    const source = await add();
-    const res = await send('DELETE', '/' + source.id);
-    expect(res.status).toBe(200);
-    expect(await res.text()).not.toContain(token);
-    expect(await secretsService.getFresh(key(source.id))).toBeNull();
-    const audits = await db.execute(
-      sql.raw(
-        "SELECT action, metadata FROM audit_events WHERE target_type = 'module_source' ORDER BY created_at",
-      ),
+  describe('audit metadata', () => {
+    it.each([{}, { token: '' }, { clearToken: true }])(
+      'records creation without a token using %j',
+      async (edit) => {
+        const source = await add({ ...registry, ...edit });
+        const audit = await db.query.auditEvents.findFirst({
+          where: eq(schema.auditEvents.targetId, source.id),
+        });
+        expect(audit?.metadata).toEqual({
+          moduleId: registry.moduleId,
+          kind: registry.kind,
+          tokenSet: false,
+          tokenCleared: 'clearToken' in edit,
+        });
+      },
     );
-    expect(audits.map((a) => a.action)).toEqual(['module_source.create', 'module_source.delete']);
-    expect(JSON.stringify(audits)).not.toContain(token);
-    expect(await (await send('GET')).json()).toMatchObject({ sources: [] });
+    it('records token changes and deleted source identity without secret metadata', async () => {
+      const source = await add();
+      for (const edit of [{}, { token: '' }, { token: 'replacement' }, { clearToken: true }]) {
+        const res = await send('PUT', '/' + source.id, { ...git, moduleId: 'gamma', ...edit });
+        expect(res.status).toBe(200);
+      }
+      const res = await send('DELETE', '/' + source.id);
+      expect(res.status).toBe(200);
+      expect(await res.text()).not.toContain(token);
+      expect(await secretsService.getFresh(key(source.id))).toBeNull();
+      const audits = await db
+        .select()
+        .from(schema.auditEvents)
+        .where(eq(schema.auditEvents.targetId, source.id))
+        .orderBy(schema.auditEvents.createdAt);
+      expect(audits.map((a) => ({ action: a.action, metadata: a.metadata }))).toEqual([
+        {
+          action: 'module_source.create',
+          metadata: { moduleId: 'alpha', kind: 'git', tokenSet: true, tokenCleared: false },
+        },
+        ...[
+          { tokenSet: false, tokenCleared: false },
+          { tokenSet: false, tokenCleared: false },
+          { tokenSet: true, tokenCleared: false },
+          { tokenSet: false, tokenCleared: true },
+        ].map((flags) => ({
+          action: 'module_source.update',
+          metadata: { moduleId: 'gamma', kind: 'git', ...flags },
+        })),
+        { action: 'module_source.delete', metadata: { moduleId: 'gamma', kind: 'git' } },
+      ]);
+      expect(JSON.stringify(audits)).not.toContain(token);
+      expect(JSON.stringify(audits)).not.toContain('replacement');
+      expect(await (await send('GET')).json()).toMatchObject({ sources: [] });
+    });
+  });
+  it.each(['PUT', 'DELETE'])('answers malformed path IDs with 404 for %s', async (method) => {
+    const res = await send(method, '/not-a-uuid', method === 'PUT' ? git : undefined);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'Not found', code: null });
+  });
+  it.each(['PUT', 'DELETE'])(
+    'maps row lock contention to module-busy for %s',
+    async (method) => {
+      const source = await add();
+      const acquired = Promise.withResolvers<void>();
+      const released = Promise.withResolvers<void>();
+      const holder = db.transaction(async (tx) => {
+        await tx
+          .select()
+          .from(schema.moduleSources)
+          .where(eq(schema.moduleSources.id, source.id))
+          .for('update');
+        acquired.resolve();
+        await released.promise;
+      });
+      try {
+        await Promise.race([acquired.promise, holder]);
+        const res = await send(
+          method,
+          '/' + source.id,
+          method === 'PUT' ? { ...git, clearToken: true } : undefined,
+        );
+        expect(res.status).toBe(503);
+        expect(await res.json()).toMatchObject({ code: 'module-busy' });
+      } finally {
+        released.resolve();
+        await holder;
+      }
+      expect(await (await send('GET')).json()).toMatchObject({ sources: [{ hasToken: true }] });
+      expect(await secretsService.getFresh(key(source.id))).toBe(token);
+      expect(
+        await db
+          .select()
+          .from(schema.auditEvents)
+          .where(eq(schema.auditEvents.targetId, source.id)),
+      ).toHaveLength(1);
+    },
+    15000,
+  );
+  describe('canonical source URLs', () => {
+    it.each(['https:///host/a', 'https:////host/a', 'https://'])(
+      'rejects empty authority %s on create and update',
+      async (url) => {
+        const source = await add();
+        expect((await send('POST', '', { ...git, moduleId: 'other', url })).status).toBe(400);
+        expect((await send('PUT', '/' + source.id, { ...git, url })).status).toBe(400);
+      },
+    );
+    it('stores parsed canonical URLs on create and update', async () => {
+      const source = await add({ ...git, url: 'https://EXAMPLE.com:443/a/../alpha.git' });
+      expect(source).toMatchObject({ url: git.url });
+      const res = await send('PUT', '/' + source.id, {
+        ...git,
+        url: 'https://EXAMPLE.com:443/b/../other.git',
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ url: 'https://example.com/other.git' });
+    });
+    it.each(['https://localhost/a', 'https://127.0.0.1/a'])(
+      'keeps private host policy for the fetch job: %s',
+      async (url) => {
+        expect(await add({ ...git, url })).toMatchObject({ url });
+      },
+    );
   });
   it('returns 404 for missing targets', async () => {
     for (const method of ['PUT', 'DELETE'])

@@ -1,15 +1,18 @@
 import { asc, eq, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { isUniqueViolationOf, schema } from '@haive/database';
+import { isLockNotAvailable, isUniqueViolationOf, schema } from '@haive/database';
 import { secretsService } from '@haive/shared';
 import { isBranchName } from '@haive/shared/git-args';
+import { modulePackageId } from '@haive/shared/modularity';
 import { HttpError, type AppEnv } from '../context.js';
 import { getDb } from '../db.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { requireAdmin } from '../middleware/auth.js';
+import { isUuid } from '../lib/uuid.js';
 
-const moduleId = z.string().regex(/^[a-z0-9][a-z0-9-]{0,22}(?![\s\S])/);
+const registryPrefix = '@haive-module/';
+const moduleId = z.string().refine((value) => modulePackageId(registryPrefix + value) === value);
 const numeric = '(?:0|[1-9][0-9]*)';
 const prerelease = '(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)';
 const semver = new RegExp(
@@ -41,19 +44,22 @@ const sourceBody = z
           .refine((value) => {
             try {
               const url = new URL(value);
+              const authority = value.slice(8).split('/')[0]!;
               return (
                 value.startsWith('https://') &&
                 url.protocol === 'https:' &&
+                authority.length > 0 &&
                 !!url.hostname &&
                 !url.username &&
                 !url.password &&
                 !/[?#\s\\]/.test(value) &&
-                !value.slice(8).split('/')[0]!.includes('@')
+                !authority.includes('@')
               );
             } catch {
               return false;
             }
-          }, 'Use an HTTPS URL without userinfo, query or fragment'),
+          }, 'Use an HTTPS URL without userinfo, query or fragment')
+          .transform((value) => new URL(value).href),
         ref: z
           .string()
           .min(1)
@@ -83,7 +89,7 @@ const sourceBody = z
       .strict(),
   ])
   .superRefine((body, ctx) => {
-    if (body.kind === 'registry' && body.packageName !== '@haive-module/' + body.moduleId)
+    if (body.kind === 'registry' && body.packageName !== registryPrefix + body.moduleId)
       ctx.addIssue({
         code: 'custom',
         path: ['packageName'],
@@ -108,7 +114,13 @@ function assertWritable() {
       'source_checkout',
     );
 }
-function duplicate(error: unknown): never {
+function sourceWriteError(error: unknown): never {
+  if (isLockNotAvailable(error))
+    throw new HttpError(
+      503,
+      'Another lifecycle action is changing this module; try again.',
+      'module-busy',
+    );
   if (isUniqueViolationOf(error, 'module_sources_module_id_unique'))
     throw new HttpError(409, 'A source for this module id already exists', 'module_source_exists');
   throw error;
@@ -130,17 +142,23 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
   for (const method of ['post', 'put'] as const) {
     routes[method](method === 'post' ? '/' : '/:sourceId', async (c) => {
       assertWritable();
+      const id = method === 'put' ? c.req.param('sourceId')! : null;
+      if (id !== null && !isUuid(id)) throw new HttpError(404, 'Not found');
       const body = sourceBody.parse(await c.req.json());
       const event: AuditEvent = {
         actorUserId: c.get('userId'),
         action: method === 'post' ? 'module_source.create' : 'module_source.update',
         targetType: 'module_source',
-        metadata: { moduleId: body.moduleId, kind: body.kind },
+        metadata: {
+          moduleId: body.moduleId,
+          kind: body.kind,
+          tokenSet: !!body.token,
+          tokenCleared: !!body.clearToken,
+        },
       };
       const source = await getDb()
         .transaction(async (tx) => {
           await tx.execute(sql.raw("SET LOCAL lock_timeout = '5s'"));
-          const id = method === 'put' ? z.string().uuid().parse(c.req.param('sourceId')) : null;
           const previous =
             id === null
               ? null
@@ -194,7 +212,7 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
           await insertAuditEvent(tx, event);
           return row;
         })
-        .catch(duplicate);
+        .catch(sourceWriteError);
       logAuditEvent(event);
       return c.json(source, method === 'post' ? 201 : 200);
     });
@@ -202,23 +220,27 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
 
   routes.delete('/:sourceId', async (c) => {
     assertWritable();
-    const id = z.string().uuid().parse(c.req.param('sourceId'));
+    const id = c.req.param('sourceId');
+    if (!isUuid(id)) throw new HttpError(404, 'Not found');
     const event: AuditEvent = {
       actorUserId: c.get('userId'),
       action: 'module_source.delete',
       targetType: 'module_source',
       targetId: id,
     };
-    await getDb().transaction(async (tx) => {
-      await tx.execute(sql.raw("SET LOCAL lock_timeout = '5s'"));
-      const [row] = await tx
-        .delete(schema.moduleSources)
-        .where(eq(schema.moduleSources.id, id))
-        .returning();
-      if (!row) throw new HttpError(404, 'Module source not found');
-      await secretsService.delete(secretKey(id), tx);
-      await insertAuditEvent(tx, event);
-    });
+    await getDb()
+      .transaction(async (tx) => {
+        await tx.execute(sql.raw("SET LOCAL lock_timeout = '5s'"));
+        const [row] = await tx
+          .delete(schema.moduleSources)
+          .where(eq(schema.moduleSources.id, id))
+          .returning();
+        if (!row) throw new HttpError(404, 'Module source not found');
+        event.metadata = { moduleId: row.moduleId, kind: row.kind };
+        await secretsService.delete(secretKey(id), tx);
+        await insertAuditEvent(tx, event);
+      })
+      .catch(sourceWriteError);
     logAuditEvent(event);
     return c.json({ deleted: true });
   });
