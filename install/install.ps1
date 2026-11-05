@@ -473,6 +473,29 @@ switch ($Command) {
   default { Write-Host "usage: .\haive.ps1 up|down|logs|ps|version|upgrade -Version <v>" }
 }
 '@
+if ($Channel -cne 'public') {
+  $haivePs1 = $haivePs1.Replace('switch ($Command) {', @'
+$installEnv = Get-DotEnv
+$env:DOCKER_CONFIG = $installEnv['DOCKER_CONFIG']
+# /c/... is the daemon/updater path; Windows docker needs the native client path.
+if ($env:OS -eq 'Windows_NT' -and $env:DOCKER_CONFIG -match '^/([a-z])/(.*)$') {
+  $env:DOCKER_CONFIG = $Matches[1] + ':/' + $Matches[2]
+}
+switch ($Command) {
+'@)
+  $haivePs1 = $haivePs1.Replace('      "$($e[''HAIVE_REGISTRY''])/haive-updater:$v",', @'
+      '-e', 'DOCKER_CONFIG=/install/.docker',
+      '-e', "HAIVE_INSTALL_DIR_HOST=$($e['HAIVE_INSTALL_DIR_HOST'])",
+      '-e', "HAIVE_INSTALL_ID=$($e['HAIVE_INSTALL_ID'])",
+      "$($e['HAIVE_REGISTRY'])/haive-updater:$v",
+'@)
+  $haivePs1 = $haivePs1.Replace('      ''--manifest'', "https://github.com/martinambrus/haive/releases/download/v$v/release.json",', @'
+      '--channel', $e['HAIVE_CHANNEL'],
+      '--manifest-image', "$($e['HAIVE_CHANNEL_REGISTRY'])/haive-$($e['HAIVE_CHANNEL'])-release:$v",
+      '--version', $v,
+'@)
+  $haivePs1 = $haivePs1.Replace('      ''--snapshot-host-dir'', "$($e[''HAIVE_INSTALL_DIR_HOST''])/snapshots",' + "`n" + '      ''-e'', "HAIVE_INSTALL_ID=$($e[''HAIVE_INSTALL_ID''])"', '      ''--snapshot-host-dir'', "$($e[''HAIVE_INSTALL_DIR_HOST''])/snapshots"')
+}
 [System.IO.File]::WriteAllText((Join-Path $Dir 'haive.ps1'), $haivePs1, (New-Object System.Text.UTF8Encoding($false)))
 
 # Uninstall deliberately does NOT use `down -v`. Five volumes in docker-compose.yml carry an
