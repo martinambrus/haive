@@ -18,7 +18,7 @@ import { idOf, parseExpect, parseToken } from './channel-gate.mjs';
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const PUBLIC_REGISTRY = 'ghcr.io/martinambrus';
 const USAGE =
-  'usage: node scripts/build-channel.mjs --tag vX.Y.Z --channel <name> --modules <file.json> --token-file <file> [--registry <prefix>] [--out <dir>] [--replace]';
+  'usage: node scripts/build-channel.mjs --tag vX.Y.Z --channel <name> --modules <file.json> --token-file <file> [--registry <output-prefix>] [--source-registry <stock-prefix>] [--out <dir>] [--replace]';
 const FINAL = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const EXACT =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
@@ -124,6 +124,7 @@ export async function run(
         modules: { type: 'string', multiple: true },
         'token-file': { type: 'string', multiple: true },
         registry: { type: 'string', multiple: true },
+        'source-registry': { type: 'string', multiple: true },
         out: { type: 'string', multiple: true },
         replace: { type: 'boolean' },
       },
@@ -132,12 +133,13 @@ export async function run(
     for (const key of ['tag', 'channel', 'modules', 'token-file']) {
       if (values[key]?.length !== 1) throw new Error(`exactly one --${key} is required\n${USAGE}`);
     }
-    for (const key of ['registry', 'out']) {
+    for (const key of ['registry', 'source-registry', 'out']) {
       if (values[key]?.length > 1) throw new Error(`only one --${key} is allowed`);
     }
     const tag = values.tag[0];
     const channel = values.channel[0];
     const registry = values.registry?.[0] ?? PUBLIC_REGISTRY;
+    const sourceRegistry = values['source-registry']?.[0] ?? env.HAIVE_REGISTRY ?? PUBLIC_REGISTRY;
     const out = resolve(values.out?.[0] ?? `channel-build-${channel}`);
     if (!FINAL.test(tag) || tag.length > 129)
       throw new Error('tag must be a final release tag vX.Y.Z');
@@ -145,10 +147,15 @@ export async function run(
       throw new Error(
         'channel must be 1–32 lowercase letters, digits or dashes, starting and ending with a letter or digit',
       );
-    if (!PREFIX.test(registry))
-      throw new Error(
-        'registry must be a lowercase image repository prefix without a scheme or tag',
-      );
+    for (const [flag, prefix] of [
+      ['registry', registry],
+      ['source-registry', sourceRegistry],
+    ]) {
+      if (!PREFIX.test(prefix))
+        throw new Error(
+          `${flag} must be a lowercase image repository prefix without a scheme or tag`,
+        );
+    }
     const modules = parseModules(json(values.modules[0]));
     token = parseToken(readFileSync(values['token-file'][0], 'utf8'));
     const childEnv = Object.fromEntries(
@@ -186,6 +193,7 @@ export async function run(
       return result;
     };
     const version = tag.slice(1);
+    const platform = `linux/${process.arch === 'arm64' ? 'arm64' : 'amd64'}`;
     const resolved = await command(
       'git',
       ['-C', root, 'rev-parse', '--verify', `refs/tags/${tag}^{commit}`],
@@ -233,7 +241,7 @@ export async function run(
     const images = Object.fromEntries(
       hosts.map((host) => [host, `${registry}/haive-${channel}-${host}:${version}`]),
     );
-    if (!rebuildWeb) images.web = `${PUBLIC_REGISTRY}/haive-web:${version}`;
+    if (!rebuildWeb) images.web = `${sourceRegistry}/haive-web:${version}`;
     for (const host of hosts) {
       const found = await command(
         'docker',
@@ -251,7 +259,7 @@ export async function run(
           'buildx',
           'build',
           '--platform',
-          `linux/${process.arch === 'arm64' ? 'arm64' : 'amd64'}`,
+          platform,
           '--load',
           '--secret',
           `id=npmrc,src=${npmrc}`,
@@ -265,6 +273,10 @@ export async function run(
         ],
         { cwd: tree },
       );
+    }
+    if (!rebuildWeb) {
+      emit(`build-channel: pulling stock web ${images.web} for ${platform}`);
+      await command('docker', ['pull', '--platform', platform, images.web]);
     }
     const expectation = { version, images, modules };
     parseExpect(JSON.stringify(expectation));
