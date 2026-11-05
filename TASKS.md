@@ -351,6 +351,8 @@ Plan D2: installer flags, an install-local docker config for private pulls, and 
 status: taken · owner: sonnet-sonnet@zathrus-wsl · since: 2026-11-05 · last: 2026-11-05 · was modular #106 · priority: P2
 Plan D4: git and registry install sources drive D1 and D3; the token is stored envelope-encrypted.
 
+Owner decisions 2026-11-05: (1) saving records the source and a worker job fetches/pins it into the prepared own-modules directory; it applies at the next upgrade or a later explicit Build, never an image swap from the form; (2) published-image installs only, source checkouts keep `pnpm module` and see a read-only note; (3) token install-wide in system_secrets via SecretsService, admin only, write-only (blank keeps), every add/edit/delete audited in the same transaction; (4) a git ref resolves to a commit SHA on fetch, newer commits only via explicit Refresh. Delivery: codex-sonnet, branch feat/337-module-sources.
+
 ### T342 · FNF[mcp-token-file] · rag/ddev task tokens in the server env defeat the cli-merge skip (measure first) (+4)
 
 status: parked · kind: design · was modular #146 · reason: diminishing returns (2026-11-01 scan): Bundle concerns merge efficiency, stale wiring, helper cleanup, and orphan-directory hygiene; resume when resume when measured overhead or stale wiring disrupts invocations · priority: P4
