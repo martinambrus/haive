@@ -191,7 +191,7 @@ for (const lang of ['sh', 'ps1']) {
       assert.equal(readFileSync(join(f.root, 'stdin'), 'utf8').trim(), token);
       assert.ok(!r.stdout.includes(token) && !r.stderr.includes(token));
       assert.ok(!existsSync(join(f.root, 'container')));
-      assert.match(f.calls(), /\trm\t-f\tunit-manifest/);
+      assert.match(f.calls(), /\trm\t-f\thi-manifest-/);
     } finally {
       f.clean();
     }
@@ -243,7 +243,7 @@ for (const lang of ['sh', 'ps1']) {
         assert.notEqual(r.status, 0);
         assert.ok(!existsSync(join(f.dir, '.env')));
         assert.ok(!existsSync(f.dir), 'failed verification leaves no install');
-        if (f.calls().includes('\tcp\t')) assert.match(f.calls(), /\trm\t-f\tunit-manifest/);
+        if (f.calls().includes('\tcp\t')) assert.match(f.calls(), /\trm\t-f\thi-manifest-/);
         if (fail !== 'rm') assert.ok(!existsSync(join(f.root, 'container')));
         assert.ok(f.calls().includes('\tlogin\t'), 'reaches authenticated verification');
       } finally {

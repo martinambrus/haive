@@ -81,6 +81,13 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+if [ "$CHANNEL" != "public" ]; then
+  # Do not trace, export or leave the token in the environment of any subprocess.
+  set +x
+  REGISTRY_TOKEN=${HAIVE_REGISTRY_TOKEN:-}
+  unset HAIVE_REGISTRY_TOKEN
+fi
+
 # Match scripts/build-channel.mjs CHANNEL and PREFIX before contacting any registry.
 printf '%s\n' "$CHANNEL" | LC_ALL=C grep -Eq '^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$' \
   || die "invalid --channel (use 1-32 lowercase letters, digits or dashes; start and end with a letter or digit)"
@@ -202,6 +209,122 @@ resolve_version() {
   printf '%s' "$tag"
 }
 
+# Authenticate and validate before creating anything in the destination. The staged config
+# becomes this install's .docker only after the entire manifest has passed.
+read_channel_manifest() {
+  umask 077
+  CHANNEL_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/haive-install.XXXXXXXX")
+  CHANNEL_CONTAINER=""
+  CHANNEL_TTY=""
+  cleanup_channel() {
+    if [ -n "$CHANNEL_TTY" ]; then stty "$CHANNEL_TTY" < /dev/tty; fi
+    if [ -n "$CHANNEL_CONTAINER" ]; then
+      docker rm -f "$CHANNEL_CONTAINER" >/dev/null 2>&1 \
+        || warn "could not remove manifest container $CHANNEL_CONTAINER; run docker rm -f $CHANNEL_CONTAINER"
+    fi
+    rm -rf "$CHANNEL_SCRATCH"
+  }
+  trap cleanup_channel 0
+  trap 'exit 1' HUP INT TERM
+  mkdir "$CHANNEL_SCRATCH/.docker"
+  chmod 700 "$CHANNEL_SCRATCH/.docker"
+  export DOCKER_CONFIG="$CHANNEL_SCRATCH/.docker"
+  # A nonempty auth map prevents Docker from automatically selecting a Desktop credential
+  # helper. Login replaces this empty credential; this config must remain self-contained.
+  printf '{"auths":{"%s":{"auth":"Og=="}}}\n' "${CHANNEL_REGISTRY%%/*}" > "$DOCKER_CONFIG/config.json"
+  chmod 600 "$DOCKER_CONFIG/config.json"
+  [ -n "$REGISTRY_USER" ] || die "--registry-user is required for a channel install"
+  if [ -z "$REGISTRY_TOKEN" ]; then
+    [ -r /dev/tty ] || die "set HAIVE_REGISTRY_TOKEN or run in a terminal for the registry token prompt"
+    CHANNEL_TTY=$(stty -g < /dev/tty) || die "cannot read terminal settings"
+    printf 'Registry token: ' > /dev/tty
+    stty -echo < /dev/tty
+    IFS= read -r REGISTRY_TOKEN < /dev/tty || die "could not read registry token"
+    stty "$CHANNEL_TTY" < /dev/tty
+    CHANNEL_TTY=""
+    printf '\n' > /dev/tty
+  fi
+  [ -n "$REGISTRY_TOKEN" ] || die "registry token is empty"
+  if ! printf '%s\n' "$REGISTRY_TOKEN" | docker login "${CHANNEL_REGISTRY%%/*}" --username "$REGISTRY_USER" --password-stdin >/dev/null 2>&1; then
+    REGISTRY_TOKEN=""
+    die "registry login failed; check the registry user and token"
+  fi
+  REGISTRY_TOKEN=""
+  chmod 600 "$DOCKER_CONFIG/config.json"
+  MANIFEST_IMAGE="${CHANNEL_REGISTRY}/haive-${CHANNEL}-release:${PINNED}"
+  docker pull "$MANIFEST_IMAGE" >/dev/null 2>&1 || die "could not pull channel release image $MANIFEST_IMAGE"
+  CHANNEL_CONTAINER="hi-manifest-$(basename "$CHANNEL_SCRATCH")"
+  docker create --name "$CHANNEL_CONTAINER" "$MANIFEST_IMAGE" /unused >/dev/null \
+    || die "could not create the channel manifest container"
+  docker cp "$CHANNEL_CONTAINER:/release.json" "$CHANNEL_SCRATCH/release.json" >/dev/null 2>&1 \
+    || die "could not read /release.json from the channel release image"
+  docker rm -f "$CHANNEL_CONTAINER" >/dev/null 2>&1 || die "could not remove manifest container $CHANNEL_CONTAINER"
+  CHANNEL_CONTAINER=""
+  [ -f "$CHANNEL_SCRATCH/release.json" ] && [ ! -L "$CHANNEL_SCRATCH/release.json" ] \
+    || die "channel release.json must be a regular file"
+  [ "$(wc -c < "$CHANNEL_SCRATCH/release.json")" -le 1048576 ] || die "channel manifest is too large"
+  # Recursive JSON grammar, not a grep for strings that might be inside an unrelated object.
+  # awk is already required by preflight and the port probe; no host JSON runtime is needed.
+  if ! LC_ALL=C awk -v channel="$CHANNEL" -v version="$PINNED" -v registry="$CHANNEL_REGISTRY" '
+    function ws() { while (substr(s,p,1) ~ /[ \t\r\n]/ && p <= length(s)) p++ }
+    function fail() { bad=1; exit 1 }
+    function str(   c,t,e,h) {
+      if (substr(s,p++,1) != "\"") fail()
+      t=""
+      while (p <= length(s)) {
+        c=substr(s,p++,1)
+        if (c == "\"") return t
+        if (c ~ /[[:cntrl:]]/) fail()
+        if (c == "\\") {
+          e=substr(s,p++,1)
+          if (e == "u") { h=substr(s,p,4); if (length(h)!=4 || h ~ /[^0-9a-fA-F]/) fail(); p+=4; t=t "\\u" h }
+          else { if (e !~ /^["\\\/bfnrt]$/) fail(); t=t "\\" e }
+        } else t=t c
+      }
+      fail()
+    }
+    function val(path,depth,   c,k,t,n,seen,a) {
+      if (depth > 64) fail()
+      ws(); c=substr(s,p,1)
+      if (c == "{") {
+        p++; ws(); if (substr(s,p,1)=="}") { p++; return }
+        while (1) {
+          ws(); k=str(); if (index(k,"\\") || index(k,"/")) fail()
+          if ((path SUBSEP k) in keys) fail(); keys[path SUBSEP k]=1
+          ws(); if (substr(s,p++,1)!=":") fail()
+          val(path "/" k,depth+1); ws(); c=substr(s,p++,1)
+          if (c=="}") return
+          if (c!=",") fail()
+        }
+      } else if (c == "[") {
+        p++; ws(); if (substr(s,p,1)=="]") { p++; return }
+        n=0; while (1) { val(path "/[" n++ "]",depth+1); ws(); c=substr(s,p++,1); if (c=="]") return; if(c!=",") fail() }
+      } else if (c == "\"") { t=str(); strings[path]=t }
+      else if (match(substr(s,p),/^(true|false|null|-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?)/)) p+=RLENGTH
+      else fail()
+    }
+    { s=s $0 "\n" }
+    END {
+      if (bad) exit 1
+      p=1; ws(); if(substr(s,p,1)!="{") fail(); val("",0); ws(); if(p<=length(s)) fail()
+      if(strings["/channel"]!=channel || strings["/version"]!=version) fail()
+      split("api worker web builder",hosts," ")
+      for(i=1;i<=4;i++) {
+        pin=strings["/images/" hosts[i]]; prefix=registry "/haive-" channel "-" hosts[i] "@sha256:"
+        if(index(pin,prefix)!=1) fail()
+        digest=substr(pin,length(prefix)+1)
+        if(length(digest)!=64 || digest ~ /[^0-9a-fA-F]/) fail()
+      }
+      for(i=1;i<=3;i++) print strings["/images/" hosts[i]]
+    }
+  ' "$CHANNEL_SCRATCH/release.json" > "$CHANNEL_SCRATCH/pins"; then
+    die "invalid channel manifest: channel, version and all image pins must match the requested registry release"
+  fi
+  API_IMAGE=$(sed -n '1p' "$CHANNEL_SCRATCH/pins")
+  WORKER_IMAGE=$(sed -n '2p' "$CHANNEL_SCRATCH/pins")
+  WEB_IMAGE=$(sed -n '3p' "$CHANNEL_SCRATCH/pins")
+}
+
 # ── Install ──────────────────────────────────────────────────────────────────
 
 # ── Host ports ───────────────────────────────────────────────────────────────
@@ -294,9 +417,11 @@ say "  resolved          ${PINNED}  (tag ${TAG})"
 # Verify the release EXISTS before generating a secret or pulling an image, so a typo costs
 # nothing. Its manifest is the artefact an upgrade reads too.
 MANIFEST_URL="${RELEASES}/${TAG}/release.json"
+if [ "$CHANNEL" = "public" ]; then
 curl -fsSL -o /dev/null "$MANIFEST_URL" 2>/dev/null \
   || die "release ${TAG} has no published manifest at ${MANIFEST_URL}.
        Check the version, or list what exists: https://github.com/${REPO}/releases"
+fi
 say "  manifest          found"
 
 : "${INSTALL_DIR:=${HOME:-.}/${INSTALL_ID}}"
@@ -313,9 +438,21 @@ if [ -e "$INSTALL_DIR" ] && [ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null || true)" ]
   [ "$FORCE" -eq 1 ] || die "$INSTALL_DIR is not empty. Pass --force to install into it anyway."
 fi
 
+if [ "$CHANNEL" != "public" ]; then
+  # Keep env values literal in Compose and in the generated host helper.
+  case "$INSTALL_DIR" in *[!a-zA-Z0-9_./\ -]*|*'..'*|*'//'*|*/.) die "channel install directory must be a normalized absolute path using letters, digits, spaces, _, - and ." ;; esac
+  INSTALL_DIR=${INSTALL_DIR%/}
+  read_channel_manifest
+fi
+
 step "Writing the install to $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR/snapshots"
 cd "$INSTALL_DIR"
+if [ "$CHANNEL" != "public" ]; then
+  [ ! -e .docker ] && [ ! -L .docker ] || die "$INSTALL_DIR/.docker already exists; choose a clean install directory"
+  mv "$CHANNEL_SCRATCH/.docker" .docker
+  export DOCKER_CONFIG="$INSTALL_DIR/.docker"
+fi
 
 # The compose bundle is fetched AT THE TAG, so it always matches the images being pinned.
 fetch "${RAW}/${TAG}/docker-compose.yml"     docker-compose.yml
@@ -398,6 +535,17 @@ HOST_REPO_ROOT=${HOME:-/}
 # container can work it out. Without it the in-app Upgrade button is not offered.
 HAIVE_INSTALL_DIR_HOST=${INSTALL_DIR}
 EOF
+  if [ "$CHANNEL" != "public" ]; then
+    cat >> .env <<EOF
+
+HAIVE_CHANNEL=${CHANNEL}
+HAIVE_CHANNEL_REGISTRY=${CHANNEL_REGISTRY}
+DOCKER_CONFIG=${INSTALL_DIR}/.docker
+HAIVE_API_IMAGE=${API_IMAGE}
+HAIVE_WORKER_IMAGE=${WORKER_IMAGE}
+HAIVE_WEB_IMAGE=${WEB_IMAGE}
+EOF
+  fi
   chmod 600 .env
   say "  secrets           generated (.env, mode 600)"
 fi
