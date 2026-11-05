@@ -343,7 +343,7 @@ User decision 2026-11-01: Reconcile runtime before validation; revalidate affect
 
 ### T335 · D2b · channel install/upgrade (+5)
 
-status: open · was modular #104 · priority: P2
+status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-05 · last: 2026-11-05 · was modular #104 · priority: P2
 Plan D2: installer flags, an install-local docker config for private pulls, and a host upgrade that reads the channel. Depends on T351-T353 (all done).
 
 Inputs from T352 (2026-11-05, PR #1006):
@@ -388,8 +388,10 @@ status: open · kind: fix · found: T351 reviews 2026-11-05 · priority: P3
 
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
-status: open · kind: design · user decision: pending · found: T337 run 2 · priority: P3
-`@haive-module/<id>` registry packages ship `dist` only, while the own-module builder rebuilds from sources, so T337 refuses registry fetch with 409 `registry_fetch_unsupported` (api modules/sources.ts ~:174). Options: publish sources in the package (a `files` change in the packaging script), teach the builder to accept prebuilt dist packages, or drop the registry kind from the form. Needs an owner decision.
+status: open · kind: design · user decision: resolved 2026-11-05 · found: T337 run 2 · priority: P3
+`@haive-module/<id>` registry packages ship `dist` only, while the own-module builder rebuilds from sources, so T337 refuses registry fetch with 409 `registry_fetch_unsupported` (api modules/sources.ts ~:174). Options: publish sources in the package (a `files` change in the packaging script), teach the builder to accept prebuilt dist packages, or drop the registry kind from the form.
+
+User decision 2026-11-05: Drop the registry kind (form, api, schema); git sources cover the need. Re-add it only when a customer asks.
 
 ### T342 · FNF[mcp-token-file] · rag/ddev task tokens in the server env defeat the cli-merge skip (measure first) (+4)
 
