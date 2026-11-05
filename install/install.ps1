@@ -534,9 +534,9 @@ switch ($Command) {
       '-v', "$($e['HAIVE_INSTALL_DIR_HOST']):/install",
       '-e', "COMPOSE_PROJECT_NAME=$($e['COMPOSE_PROJECT_NAME'])",
       '-e', "HAIVE_INSTALL_ID=$($e['HAIVE_INSTALL_ID'])",
-      '-e', "DATABASE_URL=postgres://haive:$($e['POSTGRES_PASSWORD'])@postgres:5432/haive",
+      '-e', 'DATABASE_URL',
       '-e', 'REDIS_URL=redis://redis:6379',
-      '-e', "CONFIG_ENCRYPTION_KEY=$($e['CONFIG_ENCRYPTION_KEY'])",
+      '-e', 'CONFIG_ENCRYPTION_KEY',
       "$($e['HAIVE_REGISTRY'])/haive-updater:$v",
       '--manifest', "https://github.com/martinambrus/haive/releases/download/v$v/release.json",
       '--install-dir','/install',
@@ -545,7 +545,16 @@ switch ($Command) {
       '--snapshot-host-dir', "$($e['HAIVE_INSTALL_DIR_HOST'])/snapshots"
     )
     if ($ForceDrain) { $dargs += '--force' }
-    & docker @dargs
+    $previousDatabaseUrl = $env:DATABASE_URL
+    $previousEncryptionKey = $env:CONFIG_ENCRYPTION_KEY
+    try {
+      $env:DATABASE_URL = "postgres://haive:$($e['POSTGRES_PASSWORD'])@postgres:5432/haive"
+      $env:CONFIG_ENCRYPTION_KEY = $e['CONFIG_ENCRYPTION_KEY']
+      & docker @dargs
+    } finally {
+      $env:DATABASE_URL = $previousDatabaseUrl
+      $env:CONFIG_ENCRYPTION_KEY = $previousEncryptionKey
+    }
   }
   default { Write-Host "usage: .\haive.ps1 up|down|logs|ps|version|upgrade -Version <v>" }
 }

@@ -37,6 +37,7 @@ for arg do printf '\\t%s' "$arg" >> "$CALLS"; done
 printf '\\n' >> "$CALLS"
 if [ "$EXPECT_CHANNEL" = 1 ] && [ -n "$HAIVE_REGISTRY_TOKEN" ]; then echo token_in_environment >&2; exit 91; fi
 case "$1" in
+ run) printf '%s\\n%s\\n' "$DATABASE_URL" "$CONFIG_ENCRYPTION_KEY" > "$CASE_ROOT/updater-env" ;;
  login) cat > "$CASE_ROOT/stdin"; [ "$FAIL_AT" != login ] || exit 1; printf '{"auths":{}}' > "$DOCKER_CONFIG/config.json" ;;
  pull) [ "$FAIL_AT" != pull ] || exit 1 ;;
  create) [ "$FAIL_AT" != create ] || exit 1; echo unit-manifest; touch "$CASE_ROOT/container" ;;
@@ -54,6 +55,42 @@ for arg do [ "$prev" != -o ] || out=$arg; prev=$arg; done
 case "$out" in *docker-compose*) printf 'services: {}\\n' > "$out" ;; esac
 exit 0
 `;
+// Only these secret-transport edits and the explicit PowerShell install-id reorder
+// are allowed to differ from the public baseline; all other bytes must still match.
+const publicSecretChanges = {
+  sh: [
+    [
+      '    exec docker run --rm -it \\\n',
+      '    DATABASE_URL="postgres://${POSTGRES_USER:-haive}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-haive}" \\\n    CONFIG_ENCRYPTION_KEY="${CONFIG_ENCRYPTION_KEY}" \\\n    exec docker run --rm -it \\\n',
+    ],
+    [
+      '      -e DATABASE_URL="postgres://${POSTGRES_USER:-haive}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-haive}"',
+      '      -e DATABASE_URL',
+    ],
+    ['      -e CONFIG_ENCRYPTION_KEY="${CONFIG_ENCRYPTION_KEY}"', '      -e CONFIG_ENCRYPTION_KEY'],
+  ],
+  ps1: [
+    [
+      "      '-e', \"DATABASE_URL=postgres://haive:$($e['POSTGRES_PASSWORD'])@postgres:5432/haive\",",
+      "      '-e', 'DATABASE_URL',",
+    ],
+    [
+      "      '-e', \"CONFIG_ENCRYPTION_KEY=$($e['CONFIG_ENCRYPTION_KEY'])\",",
+      "      '-e', 'CONFIG_ENCRYPTION_KEY',",
+    ],
+    [
+      '    & docker @dargs',
+      "    $previousDatabaseUrl = $env:DATABASE_URL\n    $previousEncryptionKey = $env:CONFIG_ENCRYPTION_KEY\n    try {\n      $env:DATABASE_URL = \"postgres://haive:$($e['POSTGRES_PASSWORD'])@postgres:5432/haive\"\n      $env:CONFIG_ENCRYPTION_KEY = $e['CONFIG_ENCRYPTION_KEY']\n      & docker @dargs\n    } finally {\n      $env:DATABASE_URL = $previousDatabaseUrl\n      $env:CONFIG_ENCRYPTION_KEY = $previousEncryptionKey\n    }",
+    ],
+  ],
+};
+function approvedPublicSecrets(lang, text) {
+  for (const [before, after] of publicSecretChanges[lang]) {
+    assert.ok(text.includes(before), `baseline contains ${before}`);
+    text = text.replace(before, after);
+  }
+  return text;
+}
 function fixture(
   lang,
   { publicInstall = false, data = manifest, fail = '', source, installDir } = {},
@@ -379,6 +416,41 @@ for (const lang of ['sh', 'ps1']) {
       f.clean();
     }
   });
+  for (const publicInstall of [true, false])
+    check(
+      `upgrade secret values stay in child env: ${publicInstall ? 'public' : 'channel'}`,
+      () => {
+        const f = fixture(lang, { publicInstall });
+        try {
+          assert.equal(f.install().status, 0);
+          const e = Object.fromEntries(
+            readFileSync(join(f.dir, '.env'), 'utf8')
+              .split('\n')
+              .filter((x) => x.includes('='))
+              .map((x) => x.split('=')),
+          );
+          const helper = join(f.dir, lang === 'sh' ? 'haive' : 'haive.ps1');
+          const r = f.invoke(
+            helper,
+            lang === 'sh' ? ['upgrade', '--version', '10.0.0'] : ['upgrade', '-Version', '10.0.0'],
+          );
+          assert.equal(r.status, 0, r.stdout + r.stderr);
+          const call = f.calls().trim().split('\n').at(-1);
+          assert.ok(!call.includes(e.POSTGRES_PASSWORD), 'no database password in argv');
+          assert.ok(!call.includes(e.CONFIG_ENCRYPTION_KEY), 'no encryption key in argv');
+          const argv = call.split('\t');
+          assert.ok(argv.includes('DATABASE_URL'));
+          assert.ok(argv.includes('CONFIG_ENCRYPTION_KEY'));
+          const child = readFileSync(join(f.root, 'updater-env'), 'utf8').trimEnd().split('\n');
+          assert.deepEqual(child, [
+            `postgres://haive:${e.POSTGRES_PASSWORD}@postgres:5432/haive`,
+            e.CONFIG_ENCRYPTION_KEY,
+          ]);
+        } finally {
+          f.clean();
+        }
+      },
+    );
   check('channel flags, private config and pinned env', () => {
     const f = fixture(lang);
     try {
@@ -615,6 +687,7 @@ for (const lang of ['sh', 'ps1']) {
             assert.notEqual(after, before);
             bytes = Buffer.from(after);
           }
+          if (name === names[1]) bytes = Buffer.from(approvedPublicSecrets(lang, bytes.toString()));
           return [name, bytes];
         }),
       );
@@ -633,6 +706,16 @@ for (const lang of ['sh', 'ps1']) {
         );
         expectedArgv = argv.join('\t');
       }
+      expectedArgv = expectedArgv
+        .split('\t')
+        .map((arg) =>
+          arg.startsWith('DATABASE_URL=')
+            ? 'DATABASE_URL'
+            : arg.startsWith('CONFIG_ENCRYPTION_KEY=')
+              ? 'CONFIG_ENCRYPTION_KEY'
+              : arg,
+        )
+        .join('\t');
       rmSync(f.dir, { recursive: true, force: true });
       const current = f.install();
       assert.equal(current.status, 0, current.stdout + current.stderr);

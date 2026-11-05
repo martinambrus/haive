@@ -630,15 +630,17 @@ ${CHANNEL_PULL}  up)      shift; \$DC up -d "\$@" ;;
     # The updater runs OUTSIDE this compose project: a process cannot bring itself down and
     # survive to verify the result or roll it back.
     ${LOAD_INSTALL_ENV}
+    DATABASE_URL="postgres://\${POSTGRES_USER:-haive}:\${POSTGRES_PASSWORD}@postgres:5432/\${POSTGRES_DB:-haive}" \\
+    CONFIG_ENCRYPTION_KEY="\${CONFIG_ENCRYPTION_KEY}" \\
     exec docker run --rm -it \\
       --network "\${HAIVE_NETWORK:-\${HAIVE_INSTALL_ID:-haive}-network}" \\
       -v /var/run/docker.sock:/var/run/docker.sock \\
       -v "\${HAIVE_INSTALL_DIR_HOST}:/install" \\
       -e COMPOSE_PROJECT_NAME="\${COMPOSE_PROJECT_NAME:-\${HAIVE_INSTALL_ID:-haive}}" \\
       -e HAIVE_INSTALL_ID="\${HAIVE_INSTALL_ID:-haive}" \\
-      -e DATABASE_URL="postgres://\${POSTGRES_USER:-haive}:\${POSTGRES_PASSWORD}@postgres:5432/\${POSTGRES_DB:-haive}" \\
+      -e DATABASE_URL \\
       -e REDIS_URL="redis://redis:6379" \\
-      -e CONFIG_ENCRYPTION_KEY="\${CONFIG_ENCRYPTION_KEY}" \\
+      -e CONFIG_ENCRYPTION_KEY \\
 ${CHANNEL_UPGRADE_ENV}      "\${HAIVE_REGISTRY}/haive-updater:\${v#v}" \\
 ${MANIFEST_ARGS}      --install-dir /install \\
       --registry "\${HAIVE_REGISTRY}" \\
