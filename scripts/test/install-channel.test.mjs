@@ -639,7 +639,7 @@ for (const lang of ['sh', 'ps1']) {
       JSON.stringify(manifest).replace('"channel":', '"channel":"other","channel":'),
       '',
     ],
-    ['escaped-quote key', JSON.stringify(manifest).replace('{', '{"escaped\\\"key":0,'), ''],
+    ['escaped-quote key', '{"escaped\\\"key":0,' + JSON.stringify(manifest).slice(1), ''],
     ['oversized manifest', JSON.stringify(manifest) + ' '.repeat(1048576), ''],
     ['malformed JSON', '{"channel":', ''],
     ['missing pin', { ...manifest, images: { ...pins, web: null } }, ''],
