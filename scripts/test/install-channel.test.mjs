@@ -409,6 +409,67 @@ for (const lang of ['sh', 'ps1']) {
         f.clean();
       }
     });
+  if (lang === 'ps1') {
+    for (const withId of [false, true])
+      check(`public positional Version and Dir${withId ? ' and InstallId' : ''}`, () => {
+        const f = fixture(lang, { publicInstall: true });
+        try {
+          const r = f.invoke(f.script, ['0.1.4', f.dir, ...(withId ? ['myid'] : []), '-NoStart']);
+          assert.equal(r.status, 0, r.stdout + r.stderr);
+          const e = readFileSync(join(f.dir, '.env'), 'utf8');
+          assert.match(e, /^HAIVE_VERSION=0\.1\.4$/m);
+          if (withId) assert.match(e, /^HAIVE_INSTALL_ID=myid$/m);
+        } finally {
+          f.clean();
+        }
+      });
+    check('positional Channel follows Version Dir and InstallId', () => {
+      const f = fixture(lang);
+      try {
+        const r = f.invoke(f.script, [
+          '9.9.9',
+          f.dir,
+          'myid',
+          'customer',
+          '--channel-registry',
+          registry,
+          '--registry-user',
+          'installer',
+          '--no-start',
+        ]);
+        assert.equal(r.status, 0, r.stdout + r.stderr);
+        const e = readFileSync(join(f.dir, '.env'), 'utf8');
+        assert.match(e, /^HAIVE_CHANNEL=customer$/m);
+        assert.match(e, /^HAIVE_INSTALL_ID=myid$/m);
+      } finally {
+        f.clean();
+      }
+    });
+    for (const versionFlag of ['-Version', '--version'])
+      check(`positional arguments skip the ${versionFlag} named slot`, () => {
+        const f = fixture(lang, { publicInstall: true });
+        try {
+          const r = f.invoke(f.script, [versionFlag, '0.1.4', f.dir, 'myid', '-NoStart']);
+          assert.equal(r.status, 0, r.stdout + r.stderr);
+          const e = readFileSync(join(f.dir, '.env'), 'utf8');
+          assert.match(e, /^HAIVE_VERSION=0\.1\.4$/m);
+          assert.match(e, /^HAIVE_INSTALL_ID=myid$/m);
+        } finally {
+          f.clean();
+        }
+      });
+    check('positional token past Channel is an unknown option', () => {
+      const f = fixture(lang, { publicInstall: true });
+      try {
+        const r = f.invoke(f.script, ['0.1.4', f.dir, 'myid', 'public', 'extra', '-NoStart']);
+        assert.notEqual(r.status, 0, r.stdout + r.stderr);
+        assert.match(r.stdout + r.stderr, /unknown option: extra/);
+        assert.ok(!existsSync(f.dir));
+      } finally {
+        f.clean();
+      }
+    });
+  }
   check('compose bundle mode matches public install', () => {
     const channel = fixture(lang);
     const pub = fixture(lang, { publicInstall: true });

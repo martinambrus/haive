@@ -75,6 +75,9 @@ function Die($m) { Write-Host "error: $m" -ForegroundColor Red; exit 1 }
 
 # PowerShell does not bind GNU --options as named parameters. Accept the same
 # spellings as install.sh as well as the native -Channel / -ChannelRegistry form.
+$positionalNames = @('Version', 'Dir', 'InstallId', 'Channel')
+$boundOptions = @{}
+foreach ($name in $PSBoundParameters.Keys) { $boundOptions[$name] = $true }
 for ($i = 0; $i -lt $Options.Count; $i++) {
   $target = $null
   switch -CaseSensitive ($Options[$i]) {
@@ -88,9 +91,12 @@ for ($i = 0; $i -lt $Options.Count; $i++) {
     '--force' { $Force = $true }
     '--no-start' { $NoStart = $true }
     default {
-      # Keep the original positional Version call while GNU options remain unbound.
-      if ($i -eq 0 -and -not $Version -and -not $Options[$i].StartsWith('-')) { $Version = $Options[$i] }
-      else { Die "unknown option: $($Options[$i])" }
+      # Preserve the base's positional order, skipping slots already supplied by name.
+      $positionalName = $positionalNames | Where-Object { -not $boundOptions.ContainsKey($_) } | Select-Object -First 1
+      if ($positionalName -and -not $Options[$i].StartsWith('-')) {
+        Set-Variable -Name $positionalName -Value $Options[$i]
+        $boundOptions[$positionalName] = $true
+      } else { Die "unknown option: $($Options[$i])" }
     }
   }
   if ($target) {
@@ -98,6 +104,7 @@ for ($i = 0; $i -lt $Options.Count; $i++) {
     $i++
     if ($i -ge $Options.Count -or -not $Options[$i]) { Die "$option needs a value" }
     Set-Variable -Name $target -Value $Options[$i]
+    $boundOptions[$target] = $true
   }
 }
 
