@@ -110,7 +110,8 @@ it('check applies install credentials before manifest IO, emits pins, and starts
   });
 });
 it('an interrupted channel run resumes before any new manifest pull', async () => {
-  process.argv = ['node', 'updater', '--install-dir', '/host/install'];
+  // Recovery still receives valid target argv, but must not pull it.
+
   vi.mocked(journal.findLiveRun).mockResolvedValue({
     id: 'run',
     fromVersion: '1.0.0',
@@ -130,4 +131,26 @@ it('a mismatched manifest creates no upgrade run', async () => {
   await expect(main()).rejects.toThrow('version');
   expect(journal.startRun).not.toHaveBeenCalled();
   expect(run.resume).not.toHaveBeenCalled();
+});
+
+it.each([
+  [[], 'is required'],
+  [['--manifest', 'release.json', '--manifest-image', 'private/release:1'], 'mutually exclusive'],
+  [['--manifest-image', 'private/release:1'], 'requires --version'],
+])('argv refusal returns usage and emits an error: %j', async (args, message) => {
+  process.argv = ['node', 'updater', ...args];
+  expect(await main()).toBe(2);
+  expect(console.log).toHaveBeenCalledWith(expect.stringContaining(message));
+  expect(JSON.parse(String(vi.mocked(console.log).mock.calls[0]![0])).event).toBe('error');
+  expect(images.readImageSettings).not.toHaveBeenCalled();
+  expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
+});
+
+it('channel argv without a manifest image returns usage with an emitted error', async () => {
+  process.argv = ['node', 'updater', '--manifest', 'release.json'];
+  expect(await main()).toBe(2);
+  expect(console.log).toHaveBeenCalledWith(
+    expect.stringContaining('channel installs require --manifest-image'),
+  );
+  expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
 });

@@ -136,6 +136,14 @@ export async function main(): Promise<number> {
     emit('error', { message: '--manifest and --manifest-image are mutually exclusive' });
     return EXIT.usage;
   }
+  if (!arg('manifest') && !arg('manifest-image')) {
+    emit('error', { message: '--manifest <url|path> or --manifest-image <ref> is required' });
+    return EXIT.usage;
+  }
+  if (arg('manifest-image') && !arg('version')) {
+    emit('error', { message: '--manifest-image requires --version <target>' });
+    return EXIT.usage;
+  }
   const databaseUrl = process.env.DATABASE_URL;
   const redisUrl = process.env.REDIS_URL;
   if ((!databaseUrl || !redisUrl) && !flag('dry-plan')) {
@@ -176,6 +184,10 @@ export async function main(): Promise<number> {
     channel,
     version: arg('version'),
   };
+  if (channel !== 'public' && !manifestOptions.manifestImage) {
+    emit('error', { message: 'channel installs require --manifest-image' });
+    return EXIT.usage;
+  }
   // The dry plan reads no journal. Normal starts recover an interrupted run before fetching a target.
   const channelTarget = flag('dry-plan') ? await loadManifest(manifestOptions) : undefined;
 
