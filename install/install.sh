@@ -25,6 +25,8 @@ VERSION=""
 INSTALL_DIR=""
 INSTALL_ID=""
 CHANNEL="public"
+CHANNEL_REGISTRY="$REGISTRY_DEFAULT"
+REGISTRY_USER=""
 CHECK_ONLY=0
 FORCE=0
 NO_START=0
@@ -51,6 +53,8 @@ Haive installer
                   identifies the install, never the version, and changing it later orphans
                   what the install owns rather than renaming it — so choose it now.
   --channel <id>  Release channel. Default: public
+  --channel-registry <prefix>  Channel image registry. Default: ghcr.io/martinambrus
+  --registry-user <u>  Registry login user. Token: HAIVE_REGISTRY_TOKEN or a hidden prompt.
   --check         Run the preflight checks and exit, changing nothing.
   --force         Install into a non-empty directory.
   --no-start      Write the install but do not boot the stack.
@@ -67,6 +71,8 @@ while [ $# -gt 0 ]; do
     --dir)     INSTALL_DIR="${2:-}"; [ -n "$INSTALL_DIR" ] || die "--dir needs a value"; shift 2 ;;
     --install-id) INSTALL_ID="${2:-}"; [ -n "$INSTALL_ID" ] || die "--install-id needs a value"; shift 2 ;;
     --channel) CHANNEL="${2:-}"; [ -n "$CHANNEL" ] || die "--channel needs a value"; shift 2 ;;
+    --channel-registry) CHANNEL_REGISTRY="${2:-}"; [ -n "$CHANNEL_REGISTRY" ] || die "--channel-registry needs a value"; shift 2 ;;
+    --registry-user) REGISTRY_USER="${2:-}"; [ -n "$REGISTRY_USER" ] || die "--registry-user needs a value"; shift 2 ;;
     --check)   CHECK_ONLY=1; shift ;;
     --force)   FORCE=1; shift ;;
     --no-start) NO_START=1; shift ;;
@@ -74,6 +80,12 @@ while [ $# -gt 0 ]; do
     *) die "unknown option: $1 (try --help)" ;;
   esac
 done
+
+# Match scripts/build-channel.mjs CHANNEL and PREFIX before contacting any registry.
+printf '%s\n' "$CHANNEL" | LC_ALL=C grep -Eq '^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$' \
+  || die "invalid --channel (use 1-32 lowercase letters, digits or dashes; start and end with a letter or digit)"
+printf '%s\n' "$CHANNEL_REGISTRY" | LC_ALL=C grep -Eq '^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*$' \
+  || die "invalid --channel-registry (use a registry host and optional repository prefix, without a scheme)"
 
 # ── Preflight ────────────────────────────────────────────────────────────────
 # Prerequisites are CHECKED, never installed. Docker is privileged, OS-specific, and on
@@ -271,7 +283,7 @@ fi
 preflight
 [ "$CHECK_ONLY" -eq 0 ] || { say ""; say "--check: nothing was installed."; exit 0; }
 
-[ "$CHANNEL" = "public" ] || die "channel '$CHANNEL' is not available yet. Only the public channel is published today."
+
 
 step "Resolving the release"
 TAG=$(resolve_version "$VERSION")

@@ -22,7 +22,9 @@ param(
   [string]$Version,
   [string]$Dir,
   [string]$InstallId,
-  [string]$Channel = 'public',
+  [Alias('-channel')][string]$Channel = 'public',
+  [Alias('channel-registry','-channel-registry')][string]$ChannelRegistry = 'ghcr.io/martinambrus',
+  [Alias('registry-user','-registry-user')][string]$RegistryUser,
   [switch]$Check,
   [switch]$Force,
   [switch]$NoStart
@@ -69,6 +71,10 @@ function Write-Step($m) { Write-Host ""; Write-Host "==> $m" -ForegroundColor Cy
 function Write-Note($m) { Write-Host "  $m" }
 function Write-Warn($m) { Write-Host "warning: $m" -ForegroundColor Yellow }
 function Die($m) { Write-Host "error: $m" -ForegroundColor Red; exit 1 }
+
+# Match scripts/build-channel.mjs CHANNEL and PREFIX before contacting any registry.
+if ($Channel -cnotmatch '^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$') { Die "invalid -Channel (use 1-32 lowercase letters, digits or dashes; start and end with a letter or digit)" }
+if ($ChannelRegistry -cnotmatch '^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$') { Die "invalid -ChannelRegistry (use a registry host and optional repository prefix, without a scheme)" }
 
 # ── Preflight ────────────────────────────────────────────────────────────────
 # Prerequisites are CHECKED, never installed. Docker Desktop is a GUI application with a licence
@@ -219,7 +225,7 @@ an install named '$InstallId' already has data on this machine.
 Test-Preflight
 if ($Check) { Write-Host ""; Write-Host "-Check: nothing was installed."; exit 0 }
 
-if ($Channel -ne 'public') { Die "channel '$Channel' is not available yet. Only the public channel is published today." }
+
 
 Write-Step "Resolving the release"
 $tag    = Resolve-HaiveVersion $Version
