@@ -1428,3 +1428,80 @@ describe('the command line against a docker that answers', () => {
     assert.match(result.stderr, /could not look: api lists: the in-image reader printed no result/);
   });
 });
+
+describe('builder controls', () => {
+  const files = {
+    ...GOOD_FILES,
+    'expect.json': JSON.stringify(
+      expectation({
+        images: {
+          api: 'a-api:1',
+          worker: 'a-worker:1',
+          builder: 'a-builder:1',
+        },
+      }),
+    ),
+  };
+  it('control: leaked module in builder is an offender', (t) => {
+    const image = fakeImage(t, {
+      layers: [
+        { ...CLEAN_LAYER, 'app/node_modules/.pnpm/@haive-module+beta@1.0.0/package.json': '{}' },
+      ],
+    });
+    const r = runGate(t, { files, ...image });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stdout, /OFFENDER builder presence registry module beta/);
+  });
+  it('control: token in builder is an offender and redacted', (t) => {
+    const image = fakeImage(t, { layers: [{ ...CLEAN_LAYER, 'app/token': TOKEN }] });
+    const r = runGate(t, { files, ...image });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stdout, /OFFENDER builder token/);
+    assert.ok(!r.stdout.includes(TOKEN));
+    assert.ok(!r.stderr.includes(TOKEN));
+  });
+  it('accepts the exact entitled builder closure without compiled host registries', (t) => {
+    const r = runGate(t, { files, ...fakeImage(t) });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /builder a-builder:1: 0 offender/);
+  });
+});
+
+describe('builder dependency reader', () => {
+  it('reads source dependencies without compiled registries and detects a half-installed module', (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'builder-reader-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    for (const host of ['api', 'worker']) {
+      const base = join(dir, 'packages', host);
+      const pkg = join(base, 'node_modules/@haive-module/alpha');
+      mkdirSync(pkg, { recursive: true });
+      writeFileSync(
+        join(base, 'package.json'),
+        JSON.stringify({ dependencies: { '@haive-module/alpha': '1.0.0' } }),
+      );
+      writeFileSync(
+        join(pkg, 'package.json'),
+        JSON.stringify({
+          name: '@haive-module/alpha',
+          version: '1.0.0',
+          exports: { './manifest': './dist/manifest.js' },
+        }),
+      );
+    }
+    const read = () => {
+      const r = spawnSync(process.execPath, ['--input-type=module', '-'], {
+        input: readerScript('builder').replaceAll('/app/', `${dir}/`),
+        encoding: 'utf8',
+      });
+      assert.equal(r.status, 0, r.stderr);
+      return parseReading('builder', r.stdout);
+    };
+    assert.deepEqual(read(), {
+      entries: [{ packageName: '@haive-module/alpha', source: 'registry', problem: null }],
+    });
+    writeFileSync(join(dir, 'packages/worker/package.json'), '{"dependencies":{}}');
+    assert.match(read().entries[0].problem, /different api\/worker dependency declarations/);
+    rmSync(join(dir, 'packages/worker/node_modules/@haive-module/alpha'), { recursive: true });
+    assert.match(read().entries[0].problem, /worker installed module metadata is unreadable/);
+  });
+});

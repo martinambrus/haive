@@ -25,7 +25,7 @@ const lastLines = (text) =>
 
 export function parseRecord(text) {
   const doc = JSON.parse(text);
-  if (!doc || doc.schema !== 1) throw new Error('record must have schema 1');
+  if (!doc || ![1, 2].includes(doc.schema)) throw new Error('record must have schema 1 or 2');
   if (
     typeof doc.channel !== 'string' ||
     !/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(doc.channel)
@@ -44,7 +44,12 @@ export function parseRecord(text) {
   if (!doc.imageStore || typeof doc.imageStore.Driver !== 'string')
     throw new Error('record has no image store');
   const refs = {};
-  for (const key of ['api', 'worker', 'web']) {
+  for (const key of [
+    'api',
+    'worker',
+    'web',
+    ...(doc.schema === 2 || doc.images?.builder !== undefined ? ['builder'] : []),
+  ]) {
     const image = doc.images?.[key];
     if (
       !image ||

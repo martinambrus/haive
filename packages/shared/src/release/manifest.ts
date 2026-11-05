@@ -18,6 +18,7 @@ export const releaseImagesSchema = z.object({
   api: z.string().min(1).optional(),
   worker: z.string().min(1).optional(),
   web: z.string().min(1).optional(),
+  builder: z.string().min(1).optional(),
 });
 
 export const releaseManifestSchema = z.object({
