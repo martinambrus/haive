@@ -216,6 +216,26 @@ export async function run(
     });
     await command('tar', ['-xf', archive, '-C', tree], { quiet: true });
     rmSync(archive);
+    for (const file of [
+      'scripts/module.mjs',
+      'scripts/gen-modules.mjs',
+      ...['api', 'worker', 'web'].map((host) => `packages/${host}/Dockerfile`),
+    ]) {
+      let content;
+      try {
+        content = readFileSync(join(tree, file), 'utf8');
+      } catch {
+        throw new Error(`preflight ${tag}: missing ${file}`);
+      }
+      if (
+        file.endsWith('/Dockerfile') &&
+        ![...content.matchAll(/--mount=([^\s\\]+)/g)].some((match) => {
+          const fields = match[1].split(',');
+          return fields.includes('type=secret') && fields.includes('id=npmrc');
+        })
+      )
+        throw new Error(`preflight ${tag}: ${file} lacks an id=npmrc secret mount`);
+    }
     for (const entry of readdirSync(join(tree, 'modules'), { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
       let pkg;
