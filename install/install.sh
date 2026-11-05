@@ -850,6 +850,12 @@ else
   echo "The stack is gone either way; delete this directory when you are done with it."
 fi
 EOF
+if [ "$CHANNEL" != "public" ]; then
+  sed '/^# `down` first/i\
+rm -rf .docker
+' uninstall.sh > "$CHANNEL_SCRATCH/uninstall.sh"
+  mv "$CHANNEL_SCRATCH/uninstall.sh" uninstall.sh
+fi
 chmod +x uninstall.sh
 say "  helpers           ./haive, ./uninstall.sh"
 

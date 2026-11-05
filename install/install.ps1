@@ -703,6 +703,15 @@ if ($Purge) {
   Write-Host "The stack is gone either way; delete this directory when you are done with it."
 }
 '@
+if ($Channel -cne 'public') {
+  $uninstall = $uninstall.Replace('# `down` first', @'
+if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '.docker')) {
+  Remove-Item -LiteralPath (Join-Path $PSScriptRoot '.docker') -Recurse -Force
+}
+
+# `down` first
+'@)
+}
 [System.IO.File]::WriteAllText((Join-Path $Dir 'uninstall.ps1'), $uninstall, (New-Object System.Text.UTF8Encoding($false)))
 Write-Note "helpers           .\haive.ps1, .\uninstall.ps1"
 
