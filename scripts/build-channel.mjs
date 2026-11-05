@@ -1,0 +1,333 @@
+#!/usr/bin/env node
+import { spawn } from 'node:child_process';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { parseArgs } from 'node:util';
+import { idOf, parseExpect, parseToken } from './channel-gate.mjs';
+
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
+const PUBLIC_REGISTRY = 'ghcr.io/martinambrus';
+const USAGE =
+  'usage: node scripts/build-channel.mjs --tag vX.Y.Z --channel <name> --modules <file.json> --token-file <file> [--registry <prefix>] [--out <dir>] [--replace]';
+const FINAL = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+const EXACT =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const CHANNEL = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
+const PREFIX = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
+const json = (file) => JSON.parse(readFileSync(file, 'utf8'));
+const put = (file, data) =>
+  writeFileSync(file, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
+
+export function parseModules(value) {
+  if (!Array.isArray(value))
+    throw new Error('modules must be a JSON array of exact package specifications');
+  const ids = new Set();
+  return value.map((spec) => {
+    if (typeof spec !== 'string')
+      throw new Error('each module must be an exact package specification');
+    const at = spec.lastIndexOf('@');
+    const packageName = spec.slice(0, at);
+    const version = spec.slice(at + 1);
+    const id = idOf(packageName);
+    const match = EXACT.exec(version);
+    if (
+      !packageName.startsWith('@haive-module/') ||
+      id === null ||
+      match === null ||
+      match[4]?.split('.').some((part) => /^0\d+$/.test(part))
+    ) {
+      throw new Error('each module must be @haive-module/<id>@<exact-version>');
+    }
+    if (ids.has(id)) throw new Error('two entitlements have the same module id');
+    ids.add(id);
+    return { packageName, source: 'registry', version, webParts: [] };
+  });
+}
+
+function capture(command, args, options) {
+  return new Promise((resolveResult) => {
+    const child = spawn(command, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'] });
+    const stdout = [];
+    const stderr = [];
+    let size = 0;
+    let error;
+    const collect = (chunks) => (chunk) => {
+      size += chunk.length;
+      if (size > 32 * 1024 * 1024) {
+        error = new Error('command output exceeded 32 MiB');
+        child.kill('SIGTERM');
+      } else chunks.push(chunk);
+    };
+    child.stdout.on('data', collect(stdout));
+    child.stderr.on('data', collect(stderr));
+    child.on('error', (cause) => {
+      error = cause;
+    });
+    child.on('close', (status) =>
+      resolveResult({
+        status,
+        stdout: Buffer.concat(stdout).toString('utf8'),
+        stderr: Buffer.concat(stderr).toString('utf8'),
+        error,
+      }),
+    );
+  });
+}
+
+function privateNpmrc(tree, token) {
+  const scope =
+    /^@haive-module:registry\s*=\s*(\S+)\s*$/m.exec(
+      readFileSync(join(tree, '.npmrc'), 'utf8'),
+    )?.[1] ?? 'https://npm.pkg.github.com/';
+  const url = new URL(scope);
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
+    throw new Error(
+      'the module registry must be an HTTPS URL without credentials or query parameters',
+    );
+  }
+  const path = url.pathname.endsWith('/') ? url.pathname : `${url.pathname}/`;
+  return `@haive-module:registry=${url.origin}${path}\n//${url.host}${path}:_authToken=${token}\n`;
+}
+
+export async function run(
+  argv,
+  {
+    root = ROOT,
+    runner = capture,
+    env = process.env,
+    say = (line) => process.stdout.write(`${line}\n`),
+    signal,
+  } = {},
+) {
+  let scratch;
+  let token;
+  const scrub = (text) => (token ? String(text).split(token).join('[token]') : String(text));
+  const emit = (text) => {
+    if (text) say(scrub(text).trimEnd());
+  };
+  try {
+    const { values } = parseArgs({
+      args: argv,
+      options: {
+        tag: { type: 'string', multiple: true },
+        channel: { type: 'string', multiple: true },
+        modules: { type: 'string', multiple: true },
+        'token-file': { type: 'string', multiple: true },
+        registry: { type: 'string', multiple: true },
+        out: { type: 'string', multiple: true },
+        replace: { type: 'boolean' },
+      },
+      allowPositionals: false,
+    });
+    for (const key of ['tag', 'channel', 'modules', 'token-file']) {
+      if (values[key]?.length !== 1) throw new Error(`exactly one --${key} is required\n${USAGE}`);
+    }
+    for (const key of ['registry', 'out']) {
+      if (values[key]?.length > 1) throw new Error(`only one --${key} is allowed`);
+    }
+    const tag = values.tag[0];
+    const channel = values.channel[0];
+    const registry = values.registry?.[0] ?? PUBLIC_REGISTRY;
+    const out = resolve(values.out?.[0] ?? `channel-build-${channel}`);
+    if (!FINAL.test(tag) || tag.length > 129)
+      throw new Error('tag must be a final release tag vX.Y.Z');
+    if (!CHANNEL.test(channel))
+      throw new Error(
+        'channel must be 1–32 lowercase letters, digits or dashes, starting and ending with a letter or digit',
+      );
+    if (!PREFIX.test(registry))
+      throw new Error(
+        'registry must be a lowercase image repository prefix without a scheme or tag',
+      );
+    const modules = parseModules(json(values.modules[0]));
+    token = parseToken(readFileSync(values['token-file'][0], 'utf8'));
+    const childEnv = Object.fromEntries(
+      Object.entries(env).filter(
+        ([key, value]) =>
+          value !== undefined && !key.includes(token) && !String(value).includes(token),
+      ),
+    );
+    const command = async (
+      cmd,
+      args,
+      { cwd = root, quiet = false, allowFailure = false, ...options } = {},
+    ) => {
+      if (signal?.aborted) throw new Error('interrupted');
+      const result = await runner(cmd, args, {
+        cwd,
+        env: childEnv,
+        timeout: 1_800_000,
+        signal,
+        ...options,
+      });
+      if (!quiet) {
+        emit(result.stdout);
+        emit(result.stderr);
+      }
+      if (!allowFailure && (result.status !== 0 || result.error)) {
+        if (quiet) {
+          emit(result.stdout);
+          emit(result.stderr);
+        }
+        throw new Error(
+          `${cmd} failed (${result.status ?? 'no exit code'})${result.error ? `: ${result.error.message}` : ''}`,
+        );
+      }
+      return result;
+    };
+    const version = tag.slice(1);
+    const resolved = await command(
+      'git',
+      ['-C', root, 'rev-parse', '--verify', `refs/tags/${tag}^{commit}`],
+      { quiet: true },
+    );
+    const commit = resolved.stdout.trim();
+    if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit))
+      throw new Error('tag did not resolve to a commit');
+    const tempBase = realpathSync(tmpdir());
+    const rel = relative(realpathSync(root), tempBase);
+    if (rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`)))
+      throw new Error('temporary directory must be outside the repository');
+    scratch = mkdtempSync(join(tempBase, 'haive-build-channel-'));
+    const tree = join(scratch, 'tree');
+    mkdirSync(tree);
+    const archive = join(scratch, 'base.tar');
+    await command('git', ['-C', root, 'archive', '--format=tar', `--output=${archive}`, commit], {
+      quiet: true,
+    });
+    await command('tar', ['-xf', archive, '-C', tree], { quiet: true });
+    rmSync(archive);
+    const npmrc = join(scratch, 'npmrc');
+    writeFileSync(npmrc, privateNpmrc(tree, token), { mode: 0o600, flag: 'wx' });
+    const tokenFile = join(scratch, 'token');
+    writeFileSync(tokenFile, token, { mode: 0o600, flag: 'wx' });
+    const moduleEnv = { ...childEnv, NPM_CONFIG_USERCONFIG: npmrc, CI: 'true' };
+    for (const module of modules) {
+      const spec = `${module.packageName}@${module.version}`;
+      const metadata = await command('pnpm', ['view', spec, 'exports', '--json'], {
+        cwd: tree,
+        env: moduleEnv,
+        quiet: true,
+      });
+      const exports = JSON.parse(metadata.stdout);
+      if (!exports || exports['./manifest'] === undefined)
+        throw new Error('an entitled package does not export ./manifest');
+      module.webParts = ['dashboard', 'web'].filter((part) => exports[`./${part}`] !== undefined);
+      await command(process.execPath, [join(tree, 'scripts', 'module.mjs'), 'add', spec], {
+        cwd: tree,
+        env: moduleEnv,
+      });
+    }
+    const rebuildWeb = modules.some((module) => module.webParts.length > 0);
+    const hosts = ['api', 'worker', ...(rebuildWeb ? ['web'] : [])];
+    const images = Object.fromEntries(
+      hosts.map((host) => [host, `${registry}/haive-${channel}-${host}:${version}`]),
+    );
+    if (!rebuildWeb) images.web = `${PUBLIC_REGISTRY}/haive-web:${version}`;
+    for (const host of hosts) {
+      const found = await command(
+        'docker',
+        ['image', 'ls', '--quiet', '--no-trunc', '--filter', `reference=${images[host]}`],
+        { quiet: true },
+      );
+      if (found.stdout.trim() && !values.replace)
+        throw new Error(`local tag ${images[host]} already exists; use --replace to overwrite`);
+    }
+    for (const host of hosts) {
+      emit(`build-channel: building ${images[host]} from ${tag} (${commit})`);
+      await command(
+        'docker',
+        [
+          'buildx',
+          'build',
+          '--platform',
+          `linux/${process.arch === 'arm64' ? 'arm64' : 'amd64'}`,
+          '--load',
+          '--secret',
+          `id=npmrc,src=${npmrc}`,
+          '--build-arg',
+          `HAIVE_VERSION=${version}`,
+          '--file',
+          join(tree, 'packages', host, 'Dockerfile'),
+          '--tag',
+          images[host],
+          tree,
+        ],
+        { cwd: tree },
+      );
+    }
+    const expectation = { version, images, modules };
+    parseExpect(JSON.stringify(expectation));
+    const expectFile = join(scratch, 'expect.json');
+    put(expectFile, expectation);
+    const gate = await command(
+      process.execPath,
+      [
+        join(root, 'scripts', 'channel-gate.mjs'),
+        '--expect',
+        expectFile,
+        '--token-file',
+        tokenFile,
+      ],
+      { allowFailure: true },
+    );
+    if (gate.error || ![0, 1, 2].includes(gate.status))
+      throw new Error('channel gate could not finish');
+    if (gate.status !== 0) return gate.status;
+    const recordedImages = {};
+    for (const [host, ref] of Object.entries(images)) {
+      const image = await command('docker', ['image', 'inspect', '--format', '{{.Id}}', ref], {
+        quiet: true,
+      });
+      const id = image.stdout.trim();
+      if (!/^sha256:[a-f0-9]{64}$/.test(id))
+        throw new Error(`could not read the local image id for ${host}`);
+      recordedImages[host] = { ref, id };
+    }
+    mkdirSync(out, { recursive: true });
+    const pending = join(out, `.build-record-${process.pid}.json`);
+    try {
+      put(pending, { schema: 1, tag, commit, channel, version, images: recordedImages, modules });
+      renameSync(pending, join(out, 'build-record.json'));
+    } finally {
+      rmSync(pending, { force: true });
+    }
+    emit(`build-channel: passed; record ${join(out, 'build-record.json')}`);
+    return 0;
+  } catch (error) {
+    emit(`build-channel: ${error.message}`);
+    return 2;
+  } finally {
+    if (scratch) rmSync(scratch, { recursive: true, force: true, maxRetries: 3 });
+  }
+}
+
+function isEntryPoint() {
+  try {
+    return (
+      process.argv[1] !== undefined &&
+      pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
+  const controller = new AbortController();
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'])
+    process.on(signal, () => controller.abort());
+  run(process.argv.slice(2), { signal: controller.signal }).then((code) => {
+    process.exitCode = code;
+  });
+}
