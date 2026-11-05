@@ -465,6 +465,10 @@ test('pre-existing dependency images are never pulled or removed', async (t) => 
 for (const [label, config] of [
   ['transient failure', { dependencyInspectError: 'daemon temporarily unavailable' }],
   ['misleading absence message', { dependencyInspectError: 'No such image' }],
+  [
+    'transient failure with an empty listing',
+    { dependencyInspectError: 'daemon temporarily unavailable', pullDependencies: true },
+  ],
   ['capture error', { dependencyInspectCaptureError: true }],
   ['failed absence check', { pullDependencies: true, dependencyListFailure: true }],
 ]) {

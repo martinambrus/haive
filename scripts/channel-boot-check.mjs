@@ -259,7 +259,12 @@ export async function run(
       });
       if (found.status !== 0 || found.error) {
         const listed = await docker(['image', 'ls', '-q', image]);
-        if (found.error || found.status !== 1 || listed.stdout.trim() !== '')
+        if (
+          found.error ||
+          found.status !== 1 ||
+          !/No such image/i.test(found.stderr ?? '') ||
+          listed.stdout.trim() !== ''
+        )
           throw new Error(`could not inspect dependency image ${image}`);
         await docker(['pull', image]);
         pulledImages.push({ kind: 'image', name: image });
