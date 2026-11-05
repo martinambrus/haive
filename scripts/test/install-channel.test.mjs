@@ -8,6 +8,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -274,6 +275,37 @@ for (const lang of ['sh', 'ps1']) {
       f.clean();
     }
   });
+  for (const stale of ['directory', 'symlink', 'dangling symlink'])
+    check(`stale .docker ${stale} refuses before writes and force retry succeeds`, () => {
+      const f = fixture(lang);
+      try {
+        mkdirSync(f.dir);
+        const config = join(f.dir, '.docker');
+        if (stale === 'directory') mkdirSync(config);
+        else {
+          const target = join(f.root, 'old-config');
+          if (stale === 'symlink') mkdirSync(target);
+          symlinkSync(target, config);
+        }
+        const failed = f.install([f.flag('force')]);
+        assert.notEqual(failed.status, 0, failed.stdout + failed.stderr);
+        assert.match(failed.stdout + failed.stderr, /\.docker already exists/);
+        assert.deepEqual(readdirSync(f.dir), ['.docker'], 'no install files written');
+        assert.deepEqual(
+          readdirSync(f.root).filter((x) => x.startsWith('haive-install')),
+          [],
+          'no credential scratch remains',
+        );
+        rmSync(config, { recursive: true, force: true });
+        const retry = f.install([f.flag('force')]);
+        assert.equal(retry.status, 0, retry.stdout + retry.stderr);
+        assert.ok(existsSync(join(f.dir, '.env')));
+        assert.ok(existsSync(join(f.dir, 'docker-compose.yml')));
+        assert.ok(existsSync(join(f.dir, '.docker/config.json')));
+      } finally {
+        f.clean();
+      }
+    });
   check('bundle failure leaves no final credential and force retry succeeds', () => {
     const f = fixture(lang, { fail: 'bundle' });
     try {

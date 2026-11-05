@@ -409,6 +409,10 @@ $Dir already holds a Haive install.
   if (-not $Force) { Die "$Dir is not empty. Pass -Force to install into it anyway." }
 }
 
+if ($Channel -cne 'public' -and (Get-Item -LiteralPath (Join-Path $Dir '.docker') -Force -ErrorAction SilentlyContinue)) {
+  Die "$Dir/.docker already exists; choose a clean install directory"
+}
+
 if ($Channel -cne 'public') {
   # Docker Desktop accepts /c/... as a daemon bind path. The Linux updater requires an
   # absolute POSIX host path; local Windows docker calls still use the native directory.

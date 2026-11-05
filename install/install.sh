@@ -460,6 +460,10 @@ if [ -e "$INSTALL_DIR" ] && [ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null || true)" ]
 fi
 
 if [ "$CHANNEL" != "public" ]; then
+  [ ! -e "$INSTALL_DIR/.docker" ] && [ ! -L "$INSTALL_DIR/.docker" ] || die "$INSTALL_DIR/.docker already exists; choose a clean install directory"
+fi
+
+if [ "$CHANNEL" != "public" ]; then
   # Keep env values literal in Compose and in the generated host helper.
   case "$INSTALL_DIR" in *[!a-zA-Z0-9_./\ -]*|*'..'*|*'//'*|*/.) die "channel install directory must be a normalized absolute path using letters, digits, spaces, _, - and ." ;; esac
   [ "$INSTALL_DIR" != / ] || die "channel install directory cannot be the filesystem root"
