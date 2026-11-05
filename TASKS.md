@@ -355,6 +355,18 @@ status: open · kind: fix · found: T337 reviews 2026-11-05 · priority: P3
 3. PRE-EXISTING order, fails closed: when `refs/heads/<ref>` and `refs/tags/<ref>` both exist the branch wins in both the first resolution and the fallback (source-fetch.ts:197, :203); a source pinned from a tag that later gets a same-named branch fails `module_source_ref_moved` on servers that refuse object-name fetches. Fix: remember which namespace resolved (store the qualified ref) and reuse it.
 4. PRE-EXISTING, minor: the module-id pattern `[a-z0-9][a-z0-9-]{0,22}` is duplicated across ~7 files (manifest, gen-modules, module.mjs, api sources, migration 0221 CHECK, web dialog). Fix: one exported constant in @haive/shared reused by the TS sites; the SQL CHECK stays literal with a test pinning equality.
 
+### T533 · FNF[build-channel] · build-channel.mjs and channel-gate follow-ups from T351 (+7)
+
+status: open · kind: fix · found: T351 reviews 2026-11-05 · priority: P3
+1. Stock web pull runs after both builds; a missing stock tag or wrong `--source-registry` is found after the longest step (scripts/build-channel.mjs ~:394, test ~:440 pins the order). PRE-EXISTING in T351 design; pull before the first build.
+2. Streamed chunks are re-lined: `emit` trims and adds a newline per chunk (~:128), splitting lines at chunk boundaries. Cosmetic; raw write for streamed text.
+3. End-of-stream flush prints the held tail, a proper prefix of the token (~:205), when a child dies mid-token. Drop the tail.
+4. Local module entries skip gen-modules' installed + `./manifest` filter (~:283-299 vs gen-modules.mjs ~:100-118); fails closed, latent (statistics satisfies both); test fixture lacks `./manifest`.
+5. Local-module edge cases unpinned (dir without package.json, malformed package.json) and a malformed file surfaces as a bare SyntaxError without its path (~:286-291).
+6. `repoDigest` read once and not re-checked after the gate (~:399-410); `find` takes the first RepoDigest. Re-read after the gate and compare.
+7. Nits: timeout kill reads "failed (no exit code)" and the 30 min per-command limit applies to builds; preflight matches `--mount` text in comments and does not check for a `production` stage; the pulled stock tag is listed as "retained"; no multibyte chunk-split test.
+8. channel-gate stops at the first missing image (scripts/channel-gate.mjs ~:657-662), hiding findings for present images. PRE-EXISTING, minor.
+
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
 status: open · kind: design · user decision: pending · found: T337 run 2 · priority: P3
@@ -460,6 +472,8 @@ Plan D2a-4:
 - refuse existing tags;
 - copy unbuilt images by digest;
 - write the channel manifest last.
+
+Inputs from T351 (2026-11-05): read `build-record.json` schema 1 (`scripts/build-channel.mjs`, docs/architecture/modules.md "Building a channel"); `built:false` images (stock web) are copied by `repoDigest`; re-inspect each built `id` against its tag and refuse a mismatch. Decide before pushing: (a) BuildKit default attestation manifests ride with `--load` builds but the gate scans one image manifest only, so pushing the index publishes unscanned attestation content (push the platform manifest only, or build with `--provenance=false --sbom=false`); (b) whether the channel set includes the vendor-built `haive-builder` for customers with paid modules (modules.md "Own modules on a published install"), which the gate does not check today.
 
 ### T353 · D2a-5 · live boot check of a channel build before push
 
