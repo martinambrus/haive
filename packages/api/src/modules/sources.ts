@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { isUniqueViolationOf, schema } from '@haive/database';
 import { secretsService } from '@haive/shared';
+import { isBranchName } from '@haive/shared/git-args';
 import { HttpError, type AppEnv } from '../context.js';
 import { getDb } from '../db.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
@@ -57,7 +58,14 @@ const sourceBody = z
           .string()
           .min(1)
           .max(256)
-          .refine((value) => value.trim().length > 0 && !/[\x00-\x1f\x7f]/.test(value)),
+          .refine(
+            (value) =>
+              isBranchName(value) &&
+              !value.startsWith('+') &&
+              !value.startsWith('refs/') &&
+              !/\s/.test(value),
+            'Use a bare branch or tag name',
+          ),
         ...tokenFields,
       })
       .strict(),

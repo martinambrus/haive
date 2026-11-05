@@ -176,6 +176,55 @@ describe.skipIf(!url)('module install sources (real database)', () => {
   ])('rejects invalid source %#', async (body) => {
     expect((await send('POST', '', body)).status).toBe(400);
   });
+  describe('bare branch and tag refs', () => {
+    it.each([
+      '-x',
+      '--upload-pack=touch /tmp/x',
+      '-c core.sshCommand=x',
+      '+x',
+      '+refs/heads/*:refs/heads/*',
+      ' main ',
+      'a b',
+      'a\tb',
+      'a\u00a0b',
+      'a..b',
+      'a:b',
+      'a\u0000b',
+      'a\u001fb',
+      'a\u007fb',
+      'refs/heads/main',
+      'refs/tags/v1',
+      'a\\b',
+      'a~b',
+      'a^b',
+      'a?b',
+      'a*b',
+      'a[b',
+      'a@{b',
+      'a/',
+      '/a',
+      'a//b',
+      '.a',
+      'a/.b',
+      'a.',
+      'a.lock',
+      'a.lock/b',
+      '@',
+      'HEAD',
+    ])('rejects ref %j on create and update', async (ref) => {
+      const source = await add();
+      expect((await send('POST', '', { ...git, moduleId: 'other', ref })).status).toBe(400);
+      expect((await send('PUT', '/' + source.id, { ...git, ref })).status).toBe(400);
+      expect(await (await send('GET')).json()).toMatchObject({ sources: [{ ref: 'main' }] });
+    });
+    it.each(['v1.2.3', 'feature/x'])('accepts ref %s on create and update', async (ref) => {
+      const source = await add({ ...git, ref });
+      expect(source).toMatchObject({ ref });
+      const res = await send('PUT', '/' + source.id, { ...git, ref });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ ref });
+    });
+  });
   it('refuses duplicate ids on create and edit', async () => {
     await add();
     const second = await add(registry);
