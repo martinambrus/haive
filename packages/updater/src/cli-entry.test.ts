@@ -39,7 +39,7 @@ it('runs main through a symlink to the built CLI, while importing it has no side
       expect(result.code).toBe(2);
       expect(JSON.parse(result.stdout.trim())).toMatchObject({
         event: 'error',
-        message: expect.stringContaining('is required'),
+        message: expect.stringContaining('required'),
       });
       expect(result.stderr).toBe('');
     }

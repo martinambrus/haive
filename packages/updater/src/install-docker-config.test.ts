@@ -19,6 +19,15 @@ it('containerized updater translates host credential path to mounted /install/.d
   );
   expect(process.env.DOCKER_CONFIG).toBe('/install/.docker');
 });
+it('a second call keeps the host-run semantics of an updater whose install dir is /install', () => {
+  vi.stubEnv('DOCKER_CONFIG', '/ambient');
+  vi.stubEnv('HAIVE_INSTALL_DIR_HOST', '/elsewhere');
+  const launch = process.env.DOCKER_CONFIG;
+  const local = { HAIVE_CHANNEL: 'acme', DOCKER_CONFIG: '/install/.docker' };
+  applyInstallDockerConfig(local, '/install', launch);
+  expect(() => applyInstallDockerConfig(local, '/install', launch)).not.toThrow();
+  expect(process.env.DOCKER_CONFIG).toBe('/install/.docker');
+});
 it('channel refuses missing or relative install config instead of using ambient credential', () => {
   vi.stubEnv('DOCKER_CONFIG', '/ambient');
   for (const config of ['', 'relative'])

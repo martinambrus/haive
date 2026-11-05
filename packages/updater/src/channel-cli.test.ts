@@ -136,7 +136,6 @@ it('a mismatched manifest creates no upgrade run', async () => {
 });
 
 it.each([
-  [[], 'is required'],
   [['--manifest', 'release.json', '--manifest-image', 'private/release:1'], 'mutually exclusive'],
   [['--manifest-image', 'private/release:1'], 'requires --version'],
 ])('argv refusal returns usage and emits an error: %j', async (args, message) => {
@@ -149,12 +148,58 @@ it.each([
 });
 
 it('channel argv without a manifest image returns usage with an emitted error', async () => {
-  process.argv = ['node', 'updater', '--manifest', 'release.json'];
+  process.argv = [
+    'node',
+    'updater',
+    '--install-dir',
+    '/host/install',
+    '--manifest',
+    'release.json',
+  ];
   expect(await main()).toBe(2);
   expect(console.log).toHaveBeenCalledWith(
     expect.stringContaining('channel installs require --manifest-image'),
   );
   expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
+});
+
+it('argv without a target resumes an interrupted run', async () => {
+  process.argv = ['node', 'updater', '--install-dir', '/host/install'];
+  vi.mocked(journal.findLiveRun).mockResolvedValue({
+    id: 'run',
+    fromVersion: '1.0.0',
+    toVersion: '9.9.9',
+    startedAt: new Date(),
+    phase: 'migrate',
+    metadata: { migrationHead: '0221' },
+  } as never);
+  vi.mocked(run.resume).mockResolvedValue(undefined);
+  expect(await main()).toBe(0);
+  expect(run.resume).toHaveBeenCalled();
+  expect(process.env.DOCKER_CONFIG).toBe('/host/install/.docker');
+});
+
+it('argv without a target and no interrupted run returns usage', async () => {
+  process.argv = ['node', 'updater', '--install-dir', '/host/install'];
+  expect(await main()).toBe(2);
+  expect(console.log).toHaveBeenCalledWith(
+    expect.stringContaining('channel installs require --manifest-image'),
+  );
+  expect(journal.startRun).not.toHaveBeenCalled();
+  expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
+});
+
+it.each([
+  [{ HAIVE_CHANNEL_REGISTRY: 'other' }, 'release repository differs'],
+  [{ DOCKER_CONFIG: '/host/other/.docker' }, 'must be <host install dir>/.docker'],
+])('settings changed while waiting for the lock are enforced: %j', async (change, message) => {
+  vi.mocked(journal.tryLock).mockImplementation(async () => {
+    vi.mocked(images.readImageSettings).mockResolvedValue({ ...settings, ...change });
+    return true;
+  });
+  await expect(main()).rejects.toThrow(message);
+  expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
+  expect(journal.startRun).not.toHaveBeenCalled();
 });
 
 it('rollback pins use the settings refreshed after taking the lock', async () => {

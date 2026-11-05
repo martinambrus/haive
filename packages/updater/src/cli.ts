@@ -78,12 +78,14 @@ export function resolveChannel(requested: string | undefined, installed: string)
 export function applyInstallDockerConfig(
   settings: Pick<ImageSettings, 'HAIVE_CHANNEL' | 'DOCKER_CONFIG'>,
   installDir: string,
+  launchDockerConfig = process.env.DOCKER_CONFIG,
 ): void {
   if (!settings.HAIVE_CHANNEL || settings.HAIVE_CHANNEL === 'public') return;
   if (!settings.DOCKER_CONFIG?.startsWith('/') || settings.DOCKER_CONFIG.includes(','))
     throw new Error('channel install requires an absolute DOCKER_CONFIG in .env');
-  // The API mounts the host install at /install and explicitly supplies this translation.
-  const mounted = installDir === '/install' && process.env.DOCKER_CONFIG === '/install/.docker';
+  // The API mounts the host install at /install and explicitly supplies this translation. Judged by
+  // the value this process was launched with, since a previous call overwrites the env.
+  const mounted = installDir === '/install' && launchDockerConfig === '/install/.docker';
   const hostInstallDir = mounted ? process.env.HAIVE_INSTALL_DIR_HOST : installDir;
   if (!hostInstallDir?.startsWith('/') || hostInstallDir.includes(','))
     throw new Error('channel updater requires an absolute HAIVE_INSTALL_DIR_HOST');
@@ -148,10 +150,6 @@ export async function main(): Promise<number> {
     emit('error', { message: '--manifest and --manifest-image are mutually exclusive' });
     return EXIT.usage;
   }
-  if (!arg('manifest') && !arg('manifest-image')) {
-    emit('error', { message: '--manifest <url|path> or --manifest-image <ref> is required' });
-    return EXIT.usage;
-  }
   if (arg('manifest-image') && !arg('version')) {
     emit('error', { message: '--manifest-image requires --version <target>' });
     return EXIT.usage;
@@ -196,17 +194,25 @@ export async function main(): Promise<number> {
     channel,
     version: arg('version'),
   };
-  if (channel !== 'public' && !manifestOptions.manifestImage) {
-    emit('error', { message: 'channel installs require --manifest-image' });
-    return EXIT.usage;
-  }
-  applyInstallDockerConfig(imageSettings, installDir);
-  // The dry plan reads no journal. Normal starts recover an interrupted run before fetching a target.
-  const channelTarget = flag('dry-plan') ? await loadManifest(manifestOptions) : undefined;
+  // Recovery needs no target, so a missing one is refused only where a target is read.
+  const missingTarget = (): string | undefined =>
+    channel !== 'public' && !manifestOptions.manifestImage
+      ? 'channel installs require --manifest-image'
+      : !manifestOptions.manifest && !manifestOptions.manifestImage
+        ? '--manifest <url|path> or --manifest-image <ref> is required'
+        : undefined;
+  const launchDockerConfig = process.env.DOCKER_CONFIG;
+  applyInstallDockerConfig(imageSettings, installDir, launchDockerConfig);
 
+  // The dry plan reads no journal. Normal starts recover an interrupted run before fetching a target.
   if (flag('dry-plan')) {
-    if (channel === 'public' || !channelTarget)
-      throw new Error('--dry-plan requires a channel install');
+    if (channel === 'public') throw new Error('--dry-plan requires a channel install');
+    const usage = missingTarget();
+    if (usage) {
+      emit('error', { message: usage });
+      return EXIT.usage;
+    }
+    const channelTarget = await loadManifest(manifestOptions);
     emit('image-plan', {
       channel,
       version: channelTarget.version,
@@ -231,7 +237,7 @@ export async function main(): Promise<number> {
     imageSettings = await readImageSettings(envFile);
     resolveChannel(channel, imageSettings.HAIVE_CHANNEL);
     manifestOptions.channelRegistry = imageSettings.HAIVE_CHANNEL_REGISTRY;
-    applyInstallDockerConfig(imageSettings, installDir);
+    applyInstallDockerConfig(imageSettings, installDir, launchDockerConfig);
 
     const fromVersion = (await readEnvVar(envFile, 'HAIVE_VERSION')) ?? 'unknown';
     const live = await findLiveRun(sql);
@@ -273,7 +279,12 @@ export async function main(): Promise<number> {
       return EXIT.ok;
     }
 
-    const target = channelTarget ?? (await loadManifest(manifestOptions));
+    const usage = missingTarget();
+    if (usage) {
+      emit('error', { message: usage });
+      return EXIT.usage;
+    }
+    const target = await loadManifest(manifestOptions);
 
     if (channel !== 'public') channelImagePlan(target.version, imageSettings, target.images);
 
