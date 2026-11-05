@@ -90,7 +90,8 @@ function fixture(t, config = {}) {
   const runner = async (cmd, args, options) => {
     calls.push({ cmd, args });
     assert.ok(options.timeout > 0);
-    assert.ok(!existsSync(manifest), 'manifest is absent until all commands finish');
+    if (!config.existingManifest)
+      assert.ok(!existsSync(manifest), 'manifest is absent until all commands finish');
     if (config.abortOn?.(cmd, args)) options.signal?.throwIfAborted();
     if (cmd === 'docker') {
       if (args[0] === 'image' && args[1] === 'inspect') {
@@ -419,23 +420,16 @@ test('stock repoDigest cannot carry userinfo', async (t) => {
 });
 
 test('an existing manifest is preserved without publishing', async (t) => {
-  const f = fixture(t);
+  const f = fixture(t, { existingManifest: true });
   mkdirSync(f.out);
   writeFileSync(f.manifest, 'previous manifest');
-  assert.equal(
-    await f.invoke([], {
-      bootCheck: async () => 0,
-      runner: async (cmd, args, options) => {
-        if (cmd === 'docker' && args[0] === 'image' && args[1] === 'inspect')
-          return ok(IDS[KEYS.find((host) => f.record.images[host].ref === args.at(-1))]);
-        if (cmd === 'docker' && args[2] === 'inspect')
-          return ok(JSON.stringify({ digest: digests.api }));
-        assert.fail('no publishing command is allowed');
-      },
-    }),
-    1,
-  );
+  assert.equal(await f.invoke(), 2);
+  assert.deepEqual(f.attempted, []);
   assert.equal(readFileSync(f.manifest, 'utf8'), 'previous manifest');
+  assert.match(f.logs.join('\n'), /manifest already exists/);
+  assert.ok(
+    KEYS.every((host) => f.requests.some(({ url }) => url.includes(`customer-${host}/manifests/`))),
+  );
 });
 
 const TOKEN = 't352-anonymous-token-never-log';
