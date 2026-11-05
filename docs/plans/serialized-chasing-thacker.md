@@ -572,7 +572,7 @@ actually registered" — the only evidence the rebuilt process loaded it. Cordis
 (print the exact composed plugin tree the running process is made of) is the same idea and worth
 building concretely, because a half-install is this plan's stated recurring failure:
 
-- Add `GET /admin/modules/loaded` (requireAdmin): the api and worker each report what they
+- Add `GET /modules/loaded` (requireAdmin): the api and worker each report what they
   ACTUALLY registered at boot — module ids, their routes' base paths, contributed step ids,
   composable-catalog entries, seeded config namespaces, and `ensure-schema` result. Not the
   `modules` intent table (that records what SHOULD load); the live registry (what DID).
@@ -715,7 +715,7 @@ without the choice.
 - Core migration: `integration_provider_configs`, `integration_connections`, `integration_grants`,
   `integration_user_settings`, `integration_calls` (additive only; `repo_credentials` untouched).
 - Provider registry in api and worker: core providers plus every loaded module's `integrations`,
-  reported in `GET /admin/modules/loaded` beside routes and steps.
+  reported in `GET /modules/loaded` (admin only) beside routes and steps.
 - The five forges re-registered as core providers wrapping the existing `ForgeProvider`s; their
   connections reference `repo_credentials`. `resolveForgeProvider` keeps its signature.
 - OAuth broker routes (connect, callback, refresh, disconnect) with PKCE, single-use state and the
@@ -831,7 +831,7 @@ Distribution and entitlement:
 9. An absent or revoked token fails `pnpm install` with a clear message and leaves the previously
    installed version running — a failed upgrade must not disable a paid module already in service.
 9a. Per-customer build: an image built for customer A contains **only** A's entitled modules —
-   verified by listing the loaded module ids off `GET /admin/modules/loaded` in a container run from
+   verified by listing the loaded module ids off `GET /modules/loaded` (admin only) in a container run from
    that image, not by trusting the build matrix. This is the one defect a later release cannot undo,
    so it is checked per build rather than per release.
 9b. A per-customer install pulls its own channel: `haive upgrade` on customer A's host resolves A's
