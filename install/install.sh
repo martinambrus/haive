@@ -25,6 +25,8 @@ VERSION=""
 INSTALL_DIR=""
 INSTALL_ID=""
 CHANNEL="public"
+CHANNEL_REGISTRY="$REGISTRY_DEFAULT"
+REGISTRY_USER=""
 CHECK_ONLY=0
 FORCE=0
 NO_START=0
@@ -51,6 +53,8 @@ Haive installer
                   identifies the install, never the version, and changing it later orphans
                   what the install owns rather than renaming it — so choose it now.
   --channel <id>  Release channel. Default: public
+  --channel-registry <prefix>  Channel image registry. Default: ghcr.io/martinambrus
+  --registry-user <u>  Registry login user. Token: HAIVE_REGISTRY_TOKEN or a hidden prompt.
   --check         Run the preflight checks and exit, changing nothing.
   --force         Install into a non-empty directory.
   --no-start      Write the install but do not boot the stack.
@@ -67,6 +71,8 @@ while [ $# -gt 0 ]; do
     --dir)     INSTALL_DIR="${2:-}"; [ -n "$INSTALL_DIR" ] || die "--dir needs a value"; shift 2 ;;
     --install-id) INSTALL_ID="${2:-}"; [ -n "$INSTALL_ID" ] || die "--install-id needs a value"; shift 2 ;;
     --channel) CHANNEL="${2:-}"; [ -n "$CHANNEL" ] || die "--channel needs a value"; shift 2 ;;
+    --channel-registry) CHANNEL_REGISTRY="${2:-}"; [ -n "$CHANNEL_REGISTRY" ] || die "--channel-registry needs a value"; shift 2 ;;
+    --registry-user) REGISTRY_USER="${2:-}"; [ -n "$REGISTRY_USER" ] || die "--registry-user needs a value"; shift 2 ;;
     --check)   CHECK_ONLY=1; shift ;;
     --force)   FORCE=1; shift ;;
     --no-start) NO_START=1; shift ;;
@@ -74,6 +80,22 @@ while [ $# -gt 0 ]; do
     *) die "unknown option: $1 (try --help)" ;;
   esac
 done
+
+if [ "$CHANNEL" != "public" ]; then
+  # Do not trace, export or leave the token in the environment of any subprocess.
+  set +x
+  unset REGISTRY_TOKEN
+  REGISTRY_TOKEN=${HAIVE_REGISTRY_TOKEN:-}
+  unset HAIVE_REGISTRY_TOKEN
+fi
+
+# Match scripts/build-channel.mjs CHANNEL and PREFIX before contacting any registry.
+case "$CHANNEL" in *[!a-z0-9-]*) die "invalid --channel" ;; esac
+case "$CHANNEL_REGISTRY" in *[!a-z0-9/._:-]*) die "invalid --channel-registry" ;; esac
+printf '%s\n' "$CHANNEL" | LC_ALL=C grep -Eq '^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$' \
+  || die "invalid --channel (use 1-32 lowercase letters, digits or dashes; start and end with a letter or digit)"
+printf '%s\n' "$CHANNEL_REGISTRY" | LC_ALL=C grep -Eq '^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*$' \
+  || die "invalid --channel-registry (use a registry host and optional repository prefix, without a scheme)"
 
 # ── Preflight ────────────────────────────────────────────────────────────────
 # Prerequisites are CHECKED, never installed. Docker is privileged, OS-specific, and on
@@ -190,6 +212,124 @@ resolve_version() {
   printf '%s' "$tag"
 }
 
+# Authenticate and validate before creating anything in the destination. The staged config
+# becomes this install's .docker only after the entire manifest has passed.
+read_channel_manifest() {
+  CHANNEL_UMASK=$(umask)
+  umask 077
+  CHANNEL_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/haive-install.XXXXXXXX")
+  CHANNEL_CONTAINER=""
+  CHANNEL_TTY=""
+  cleanup_channel() {
+    if [ -n "$CHANNEL_TTY" ]; then stty "$CHANNEL_TTY" < /dev/tty || warn "could not restore terminal settings"; fi
+    if [ -n "$CHANNEL_CONTAINER" ]; then
+      docker rm -f "$CHANNEL_CONTAINER" >/dev/null 2>&1 \
+        || warn "could not remove manifest container $CHANNEL_CONTAINER; run docker rm -f $CHANNEL_CONTAINER"
+    fi
+    rm -rf "$CHANNEL_SCRATCH"
+  }
+  trap cleanup_channel 0
+  trap 'exit 1' HUP INT TERM
+  mkdir "$CHANNEL_SCRATCH/.docker"
+  chmod 700 "$CHANNEL_SCRATCH/.docker"
+  export DOCKER_CONFIG="$CHANNEL_SCRATCH/.docker"
+  # A nonempty auth map prevents Docker from automatically selecting a Desktop credential
+  # helper. Login replaces this empty credential; this config must remain self-contained.
+  printf '{"auths":{"%s":{"auth":"Og=="}}}\n' "${CHANNEL_REGISTRY%%/*}" > "$DOCKER_CONFIG/config.json"
+  chmod 600 "$DOCKER_CONFIG/config.json"
+  [ -n "$REGISTRY_USER" ] || die "--registry-user is required for a channel install"
+  if [ -z "$REGISTRY_TOKEN" ]; then
+    [ -r /dev/tty ] || die "set HAIVE_REGISTRY_TOKEN or run in a terminal for the registry token prompt"
+    CHANNEL_TTY=$(stty -g < /dev/tty) || die "cannot read terminal settings"
+    stty -echo < /dev/tty
+    printf 'Registry token: ' > /dev/tty
+    IFS= read -r REGISTRY_TOKEN < /dev/tty || die "could not read registry token"
+    stty "$CHANNEL_TTY" < /dev/tty
+    CHANNEL_TTY=""
+    printf '\n' > /dev/tty
+  fi
+  [ -n "$REGISTRY_TOKEN" ] || die "registry token is empty"
+  if ! printf '%s\n' "$REGISTRY_TOKEN" | docker login "${CHANNEL_REGISTRY%%/*}" --username "$REGISTRY_USER" --password-stdin >/dev/null 2>&1; then
+    REGISTRY_TOKEN=""
+    die "registry login failed; check the registry user and token"
+  fi
+  REGISTRY_TOKEN=""
+  chmod 600 "$DOCKER_CONFIG/config.json"
+  MANIFEST_IMAGE="${CHANNEL_REGISTRY}/haive-${CHANNEL}-release:${PINNED}"
+  docker pull "$MANIFEST_IMAGE" >/dev/null 2>&1 || die "could not pull channel release image $MANIFEST_IMAGE"
+  CHANNEL_CONTAINER="hi-manifest-$(basename "$CHANNEL_SCRATCH")"
+  docker create --name "$CHANNEL_CONTAINER" "$MANIFEST_IMAGE" /unused >/dev/null \
+    || die "could not create the channel manifest container"
+  docker cp "$CHANNEL_CONTAINER:/release.json" "$CHANNEL_SCRATCH/release.json" >/dev/null 2>&1 \
+    || die "could not read /release.json from the channel release image"
+  docker rm -f "$CHANNEL_CONTAINER" >/dev/null 2>&1 || die "could not remove manifest container $CHANNEL_CONTAINER"
+  CHANNEL_CONTAINER=""
+  [ -f "$CHANNEL_SCRATCH/release.json" ] && [ ! -L "$CHANNEL_SCRATCH/release.json" ] \
+    || die "channel release.json must be a regular file"
+  [ "$(wc -c < "$CHANNEL_SCRATCH/release.json")" -le 1048576 ] || die "channel manifest is too large"
+  # Recursive JSON grammar, not a grep for strings that might be inside an unrelated object.
+  # awk is already required by preflight and the port probe; no host JSON runtime is needed.
+  if ! LC_ALL=C awk -v channel="$CHANNEL" -v version="$PINNED" -v registry="$CHANNEL_REGISTRY" '
+    function ws() { while (substr(s,p,1) ~ /[ \t\r\n]/ && p <= length(s)) p++ }
+    function fail() { bad=1; exit 1 }
+    function str(   c,t,e,h) {
+      if (substr(s,p++,1) != "\"") fail()
+      t=""
+      while (p <= length(s)) {
+        c=substr(s,p++,1)
+        if (c == "\"") return t
+        if (c ~ /[[:cntrl:]]/) fail()
+        if (c == "\\") {
+          e=substr(s,p++,1)
+          if (e == "u") { h=substr(s,p,4); if (length(h)!=4 || h ~ /[^0-9a-fA-F]/) fail(); p+=4; t=t "\\u" h }
+          else { if (e !~ /^["\\\/bfnrt]$/) fail(); t=t "\\" e }
+        } else t=t c
+      }
+      fail()
+    }
+    function val(path,depth,   c,k,t,n,seen,a) {
+      if (depth > 64) fail()
+      ws(); c=substr(s,p,1)
+      if (c == "{") {
+        p++; ws(); if (substr(s,p,1)=="}") { p++; return }
+        while (1) {
+          ws(); k=str(); if (index(k,"\\") || index(k,"/")) fail()
+          if ((path SUBSEP k) in keys) fail(); keys[path SUBSEP k]=1
+          ws(); if (substr(s,p++,1)!=":") fail()
+          val(path "/" k,depth+1); ws(); c=substr(s,p++,1)
+          if (c=="}") return
+          if (c!=",") fail()
+        }
+      } else if (c == "[") {
+        p++; ws(); if (substr(s,p,1)=="]") { p++; return }
+        n=0; while (1) { val(path "/[" n++ "]",depth+1); ws(); c=substr(s,p++,1); if (c=="]") return; if(c!=",") fail() }
+      } else if (c == "\"") { t=str(); strings[path]=t }
+      else if (match(substr(s,p),/^(true|false|null|-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?)/)) p+=RLENGTH
+      else fail()
+    }
+    { s=s $0 "\n" }
+    END {
+      if (bad) exit 1
+      p=1; ws(); if(substr(s,p,1)!="{") fail(); val("",0); ws(); if(p<=length(s)) fail()
+      if(strings["/channel"]!=channel || strings["/version"]!=version) fail()
+      split("api worker web builder",hosts," ")
+      for(i=1;i<=4;i++) {
+        pin=strings["/images/" hosts[i]]; prefix=registry "/haive-" channel "-" hosts[i] "@sha256:"
+        if(index(pin,prefix)!=1) fail()
+        digest=substr(pin,length(prefix)+1)
+        if(length(digest)!=64 || digest ~ /[^0-9a-f]/) fail()
+      }
+      for(i=1;i<=3;i++) print strings["/images/" hosts[i]]
+    }
+  ' "$CHANNEL_SCRATCH/release.json" > "$CHANNEL_SCRATCH/pins"; then
+    die "invalid channel manifest: channel, version and all image pins must match the requested registry release"
+  fi
+  API_IMAGE=$(sed -n '1p' "$CHANNEL_SCRATCH/pins")
+  WORKER_IMAGE=$(sed -n '2p' "$CHANNEL_SCRATCH/pins")
+  WEB_IMAGE=$(sed -n '3p' "$CHANNEL_SCRATCH/pins")
+  umask "$CHANNEL_UMASK"
+}
+
 # ── Install ──────────────────────────────────────────────────────────────────
 
 # ── Host ports ───────────────────────────────────────────────────────────────
@@ -269,9 +409,9 @@ if existing_state; then
 fi
 
 preflight
-[ "$CHECK_ONLY" -eq 0 ] || { say ""; say "--check: nothing was installed."; exit 0; }
-
-[ "$CHANNEL" = "public" ] || die "channel '$CHANNEL' is not available yet. Only the public channel is published today."
+if [ "$CHECK_ONLY" -eq 1 ] && [ "$CHANNEL" = "public" ]; then
+  say ""; say "--check: nothing was installed."; exit 0
+fi
 
 step "Resolving the release"
 TAG=$(resolve_version "$VERSION")
@@ -282,13 +422,31 @@ say "  resolved          ${PINNED}  (tag ${TAG})"
 # Verify the release EXISTS before generating a secret or pulling an image, so a typo costs
 # nothing. Its manifest is the artefact an upgrade reads too.
 MANIFEST_URL="${RELEASES}/${TAG}/release.json"
-curl -fsSL -o /dev/null "$MANIFEST_URL" 2>/dev/null \
+if [ "$CHANNEL" = "public" ]; then
+  curl -fsSL -o /dev/null "$MANIFEST_URL" 2>/dev/null \
   || die "release ${TAG} has no published manifest at ${MANIFEST_URL}.
        Check the version, or list what exists: https://github.com/${REPO}/releases"
-say "  manifest          found"
+fi
+if [ "$CHECK_ONLY" -eq 1 ]; then
+  read_channel_manifest
+  say "  Channel           $CHANNEL ($CHANNEL_REGISTRY)"
+  say "  manifest          verified for $PINNED"
+  say "--check: nothing was installed."
+  exit 0
+fi
+if [ "$CHANNEL" = "public" ]; then say "  manifest          found"; fi
 
 : "${INSTALL_DIR:=${HOME:-.}/${INSTALL_ID}}"
 case "$INSTALL_DIR" in /*) ;; *) INSTALL_DIR="$(pwd)/$INSTALL_DIR" ;; esac
+
+if [ "$CHANNEL" != "public" ]; then
+  # Match path.join's lexical form without requiring the destination to exist.
+  # Parent traversal is refused below rather than resolving it through possible symlinks.
+  INSTALL_DIR=$(printf '%s\n' "$INSTALL_DIR" | awk -F/ '{
+    out=""; for (i=1; i<=NF; i++) if ($i!="" && $i!=".") out=out "/" $i
+    print out=="" ? "/" : out
+  }')
+fi
 
 if [ -e "$INSTALL_DIR" ] && [ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null || true)" ]; then
   if [ -f "$INSTALL_DIR/.env" ]; then
@@ -299,6 +457,19 @@ if [ -e "$INSTALL_DIR" ] && [ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null || true)" ]
          cd $INSTALL_DIR && ./haive upgrade --version <v>"
   fi
   [ "$FORCE" -eq 1 ] || die "$INSTALL_DIR is not empty. Pass --force to install into it anyway."
+fi
+
+if [ "$CHANNEL" != "public" ]; then
+  [ ! -e "$INSTALL_DIR/.docker" ] && [ ! -L "$INSTALL_DIR/.docker" ] || die "$INSTALL_DIR/.docker already exists; choose a clean install directory"
+fi
+
+if [ "$CHANNEL" != "public" ]; then
+  # Keep env values literal in Compose and in the generated host helper.
+  case "$INSTALL_DIR" in *[!a-zA-Z0-9_./\ -]*|*'..'*|*'//'*|*/.) die "channel install directory must be a normalized absolute path using letters, digits, spaces, _, - and ." ;; esac
+  [ "$INSTALL_DIR" != / ] || die "channel install directory cannot be the filesystem root"
+  INSTALL_DIR=${INSTALL_DIR%/}
+  read_channel_manifest
+  say "  manifest          verified for $PINNED"
 fi
 
 step "Writing the install to $INSTALL_DIR"
@@ -386,8 +557,25 @@ HOST_REPO_ROOT=${HOME:-/}
 # container can work it out. Without it the in-app Upgrade button is not offered.
 HAIVE_INSTALL_DIR_HOST=${INSTALL_DIR}
 EOF
+  if [ "$CHANNEL" != "public" ]; then
+    cat >> .env <<EOF
+
+HAIVE_CHANNEL=${CHANNEL}
+HAIVE_CHANNEL_REGISTRY=${CHANNEL_REGISTRY}
+DOCKER_CONFIG=${INSTALL_DIR}/.docker
+HAIVE_API_IMAGE=${API_IMAGE}
+HAIVE_WORKER_IMAGE=${WORKER_IMAGE}
+HAIVE_WEB_IMAGE=${WEB_IMAGE}
+EOF
+  fi
   chmod 600 .env
   say "  secrets           generated (.env, mode 600)"
+fi
+
+if [ "$CHANNEL" != "public" ]; then
+  [ ! -e .docker ] && [ ! -L .docker ] || die "$INSTALL_DIR/.docker already exists; choose a clean install directory"
+  mv "$CHANNEL_SCRATCH/.docker" .docker
+  export DOCKER_CONFIG="$INSTALL_DIR/.docker"
 fi
 
 # ── Helper scripts ───────────────────────────────────────────────────────────
@@ -395,14 +583,45 @@ fi
 COMPOSE_FILES="-f docker-compose.yml -f docker-compose.run.yml"
 [ -n "$GPU_FILE" ] && COMPOSE_FILES="$COMPOSE_FILES -f $GPU_FILE"
 
+# Empty substitutions preserve the public helper byte for byte.
+# These literals are expanded by the generated helper, not by the installer.
+# shellcheck disable=SC2016
+{
+CHANNEL_HELPER_ENV=""
+CHANNEL_PULL=""
+CHANNEL_UPGRADE_ENV=""
+LOAD_INSTALL_ENV='. ./.env'
+MANIFEST_ARGS='      --manifest "https://github.com/'"${REPO}"'/releases/download/v${v#v}/release.json" \
+'
+if [ "$CHANNEL" != "public" ]; then
+  CHANNEL_HELPER_ENV='unset HAIVE_REGISTRY_TOKEN
+while IFS= read -r line; do
+  case "$line" in
+    HAIVE_*=*|COMPOSE_PROJECT_NAME=*|POSTGRES_*=*|CONFIG_ENCRYPTION_KEY=*|JWT_SECRET=*|DOCKER_CONFIG=*) export "$line" ;;
+  esac
+done < .env
+'
+  CHANNEL_PULL='  pull)    shift; $DC pull "$@" ;;
+'
+  LOAD_INSTALL_ENV=': # install settings were read above as data'
+  CHANNEL_UPGRADE_ENV='      -e DOCKER_CONFIG=/install/.docker \
+      -e HAIVE_INSTALL_DIR_HOST="${HAIVE_INSTALL_DIR_HOST}" \
+'
+  MANIFEST_ARGS='      --channel "${HAIVE_CHANNEL}" \
+      --manifest-image "${HAIVE_CHANNEL_REGISTRY}/haive-${HAIVE_CHANNEL}-release:${v#v}" \
+      --version "${v#v}" \
+'
+fi
+}
+
 cat > haive <<EOF
 #!/bin/sh
 # Haive control script for this install. Generated by the installer.
 set -eu
 cd "\$(dirname "\$0")"
-DC="docker compose ${COMPOSE_FILES}"
+${CHANNEL_HELPER_ENV}DC="docker compose ${COMPOSE_FILES}"
 case "\${1:-}" in
-  up)      shift; \$DC up -d "\$@" ;;
+${CHANNEL_PULL}  up)      shift; \$DC up -d "\$@" ;;
   down)    shift; \$DC down "\$@" ;;
   logs)    shift; \$DC logs -f "\$@" ;;
   ps)      shift; \$DC ps "\$@" ;;
@@ -414,19 +633,20 @@ case "\${1:-}" in
     [ -n "\$v" ] || { echo "usage: ./haive upgrade --version <v> [--force]" >&2; exit 2; }
     # The updater runs OUTSIDE this compose project: a process cannot bring itself down and
     # survive to verify the result or roll it back.
-    . ./.env
+    ${LOAD_INSTALL_ENV}
+    DATABASE_URL="postgres://\${POSTGRES_USER:-haive}:\${POSTGRES_PASSWORD}@postgres:5432/\${POSTGRES_DB:-haive}" \\
+    CONFIG_ENCRYPTION_KEY="\${CONFIG_ENCRYPTION_KEY}" \\
     exec docker run --rm -it \\
       --network "\${HAIVE_NETWORK:-\${HAIVE_INSTALL_ID:-haive}-network}" \\
       -v /var/run/docker.sock:/var/run/docker.sock \\
       -v "\${HAIVE_INSTALL_DIR_HOST}:/install" \\
       -e COMPOSE_PROJECT_NAME="\${COMPOSE_PROJECT_NAME:-\${HAIVE_INSTALL_ID:-haive}}" \\
       -e HAIVE_INSTALL_ID="\${HAIVE_INSTALL_ID:-haive}" \\
-      -e DATABASE_URL="postgres://\${POSTGRES_USER:-haive}:\${POSTGRES_PASSWORD}@postgres:5432/\${POSTGRES_DB:-haive}" \\
+      -e DATABASE_URL \\
       -e REDIS_URL="redis://redis:6379" \\
-      -e CONFIG_ENCRYPTION_KEY="\${CONFIG_ENCRYPTION_KEY}" \\
-      "\${HAIVE_REGISTRY}/haive-updater:\${v#v}" \\
-      --manifest "https://github.com/${REPO}/releases/download/v\${v#v}/release.json" \\
-      --install-dir /install \\
+      -e CONFIG_ENCRYPTION_KEY \\
+${CHANNEL_UPGRADE_ENV}      "\${HAIVE_REGISTRY}/haive-updater:\${v#v}" \\
+${MANIFEST_ARGS}      --install-dir /install \\
       --registry "\${HAIVE_REGISTRY}" \\
       --postgres-volume "\${COMPOSE_PROJECT_NAME:-\${HAIVE_INSTALL_ID:-haive}}_postgres_data" \\
       --snapshot-host-dir "\${HAIVE_INSTALL_DIR_HOST}/snapshots" "\$@"
@@ -654,6 +874,16 @@ else
   echo "The stack is gone either way; delete this directory when you are done with it."
 fi
 EOF
+if [ "$CHANNEL" != "public" ]; then
+  # Match a literal generated comment; its backticks must not run in the installer.
+  # shellcheck disable=SC2016
+  sed '/^set -eu/a\
+unset HAIVE_REGISTRY_TOKEN
+/^# `down` first/i\
+rm -rf .docker
+' uninstall.sh > "$CHANNEL_SCRATCH/uninstall.sh"
+  mv "$CHANNEL_SCRATCH/uninstall.sh" uninstall.sh
+fi
 chmod +x uninstall.sh
 say "  helpers           ./haive, ./uninstall.sh"
 

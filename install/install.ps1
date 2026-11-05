@@ -17,15 +17,18 @@
 .EXAMPLE
   .\install.ps1 -Version 0.1.4 -Dir C:\haive
 #>
-[CmdletBinding()]
+[CmdletBinding(PositionalBinding=$false)]
 param(
   [string]$Version,
   [string]$Dir,
   [string]$InstallId,
   [string]$Channel = 'public',
+  [Alias('channel-registry')][string]$ChannelRegistry = 'ghcr.io/martinambrus',
+  [Alias('registry-user')][string]$RegistryUser,
   [switch]$Check,
   [switch]$Force,
-  [switch]$NoStart
+  [switch]$NoStart,
+  [Parameter(ValueFromRemainingArguments=$true)][string[]]$Options
 )
 
 $ErrorActionPreference = 'Stop'
@@ -69,6 +72,51 @@ function Write-Step($m) { Write-Host ""; Write-Host "==> $m" -ForegroundColor Cy
 function Write-Note($m) { Write-Host "  $m" }
 function Write-Warn($m) { Write-Host "warning: $m" -ForegroundColor Yellow }
 function Die($m) { Write-Host "error: $m" -ForegroundColor Red; exit 1 }
+
+# PowerShell does not bind GNU --options as named parameters. Accept the same
+# spellings as install.sh as well as the native -Channel / -ChannelRegistry form.
+$positionalNames = @('Version', 'Dir', 'InstallId', 'Channel')
+$boundOptions = @{}
+foreach ($name in $PSBoundParameters.Keys) { $boundOptions[$name] = $true }
+for ($i = 0; $i -lt $Options.Count; $i++) {
+  $target = $null
+  switch -CaseSensitive ($Options[$i]) {
+    '--version' { $target = 'Version' }
+    '--dir' { $target = 'Dir' }
+    '--install-id' { $target = 'InstallId' }
+    '--channel' { $target = 'Channel' }
+    '--channel-registry' { $target = 'ChannelRegistry' }
+    '--registry-user' { $target = 'RegistryUser' }
+    '--check' { $Check = $true }
+    '--force' { $Force = $true }
+    '--no-start' { $NoStart = $true }
+    default {
+      # Preserve the base's positional order, skipping slots already supplied by name.
+      $positionalName = $positionalNames | Where-Object { -not $boundOptions.ContainsKey($_) } | Select-Object -First 1
+      if ($positionalName -and -not $Options[$i].StartsWith('-')) {
+        Set-Variable -Name $positionalName -Value $Options[$i]
+        $boundOptions[$positionalName] = $true
+      } else { Die "unknown option: $($Options[$i])" }
+    }
+  }
+  if ($target) {
+    $option = $Options[$i]
+    $i++
+    if ($i -ge $Options.Count -or -not $Options[$i]) { Die "$option needs a value" }
+    Set-Variable -Name $target -Value $Options[$i]
+    $boundOptions[$target] = $true
+  }
+}
+
+if ($Channel -cne 'public') {
+  Set-PSDebug -Off
+  $script:RegistryToken = $env:HAIVE_REGISTRY_TOKEN
+  Remove-Item Env:HAIVE_REGISTRY_TOKEN -ErrorAction SilentlyContinue
+}
+
+# Match scripts/build-channel.mjs CHANNEL and PREFIX before contacting any registry.
+if ($Channel -cnotmatch '\A[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?\z') { Die "invalid -Channel (use 1-32 lowercase letters, digits or dashes; start and end with a letter or digit)" }
+if ($ChannelRegistry -cnotmatch '\A[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*\z') { Die "invalid -ChannelRegistry (use a registry host and optional repository prefix, without a scheme)" }
 
 # ── Preflight ────────────────────────────────────────────────────────────────
 # Prerequisites are CHECKED, never installed. Docker Desktop is a GUI application with a licence
@@ -152,6 +200,114 @@ function Resolve-HaiveVersion([string]$want) {
   return "v$want"
 }
 
+# Reassert protection at the destination too: a cross-volume move may inherit its ACL.
+function Protect-RegistryCredentials([string]$directory) {
+  $config = Join-Path $directory 'config.json'
+  if ($env:OS -eq 'Windows_NT') {
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($user, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+    Set-Acl -LiteralPath $directory -AclObject $acl
+    if (Test-Path -LiteralPath $config) {
+      $fileAcl = New-Object System.Security.AccessControl.FileSecurity
+      $fileAcl.SetAccessRuleProtection($true, $false)
+      $fileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($user, 'FullControl', 'Allow')))
+      Set-Acl -LiteralPath $config -AclObject $fileAcl
+    }
+  } else {
+    if ((Invoke-Native chmod @('700', $directory)).ExitCode -ne 0) { throw 'cannot protect registry credentials' }
+    if (Test-Path -LiteralPath $config) {
+      if ((Invoke-Native chmod @('600', $config)).ExitCode -ne 0) { throw 'cannot protect registry credentials' }
+    }
+  }
+}
+
+# Validate object keys before ConvertFrom-Json (which otherwise keeps the last duplicate).
+# Tokenize complete strings so braces/colons inside values cannot be mistaken for object syntax.
+# This uses the same .NET/PowerShell runtime as the original installer, including Windows PS 5.1.
+function Assert-ManifestKeys([string]$json) {
+  $tokens = [regex]::Matches($json, '"(?:[^"\\]|\\.)*"|[{}:]', [Text.RegularExpressions.RegexOptions]::CultureInvariant, [TimeSpan]::FromSeconds(2))
+  $objects = [Collections.Generic.Stack[object]]::new()
+  for ($i = 0; $i -lt $tokens.Count; $i++) {
+    $token = $tokens[$i].Value
+    if ($token -eq '{') {
+      $objects.Push([Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase))
+    } elseif ($token -eq '}') {
+      $null = $objects.Pop()
+    } elseif ($token.StartsWith('"') -and $i + 1 -lt $tokens.Count -and $tokens[$i + 1].Value -eq ':') {
+      $key = $token.Substring(1, $token.Length - 2)
+      if ($key.IndexOfAny([char[]]'"\/') -ge 0 -or -not $objects.Peek().Add($key)) { throw 'invalid channel manifest object key' }
+    }
+  }
+}
+
+# Stage credentials until verification succeeds; no failed manifest creates an install.
+function Read-ChannelManifest {
+  $scratch = Join-Path ([IO.Path]::GetTempPath()) ("haive-install-" + [guid]::NewGuid().ToString('N'))
+  $script:ChannelScratch = $scratch
+  $container = $null
+  try {
+    $null = New-Item -ItemType Directory -Path (Join-Path $scratch '.docker')
+    Protect-RegistryCredentials $scratch
+    Protect-RegistryCredentials (Join-Path $scratch '.docker')
+    $env:DOCKER_CONFIG = Join-Path $scratch '.docker'
+    $server = ($ChannelRegistry -split '/')[0]
+    # Prevent Docker auto-selecting a machine credential helper for an empty config.
+    [IO.File]::WriteAllText((Join-Path $env:DOCKER_CONFIG 'config.json'), ('{"auths":{"' + $server + '":{"auth":"Og=="}}}'))
+    if (-not $RegistryUser) { throw '-RegistryUser is required for a channel install' }
+    if (-not $script:RegistryToken) {
+      $secure = Read-Host 'Registry token' -AsSecureString
+      $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+      try { $script:RegistryToken = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
+      finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr); $secure.Dispose() }
+    }
+    if (-not $script:RegistryToken) { throw 'registry token is empty' }
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+      $script:RegistryToken | & docker login $server --username $RegistryUser --password-stdin 2>&1 | Out-Null
+      $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $prev; $script:RegistryToken = $null }
+    if ($code -ne 0) { throw 'registry login failed; check the registry user and token' }
+    if ($env:OS -ne 'Windows_NT') {
+      if ((Invoke-Native chmod @('600', (Join-Path $env:DOCKER_CONFIG 'config.json'))).ExitCode -ne 0) { throw 'cannot protect registry credentials' }
+    }
+    $image = "$ChannelRegistry/haive-$Channel-release:$pinned"
+    if ((Invoke-Native docker @('pull', $image)).ExitCode -ne 0) { throw "could not pull channel release image $image" }
+    $container = 'hi-manifest-' + [guid]::NewGuid().ToString('N')
+    if ((Invoke-Native docker @('create', '--name', $container, $image, '/unused')).ExitCode -ne 0) { throw 'could not create the channel manifest container' }
+    $file = Join-Path $scratch 'release.json'
+    if ((Invoke-Native docker @('cp', "${container}:/release.json", $file)).ExitCode -ne 0) { throw 'could not read /release.json from the channel release image' }
+    if ((Invoke-Native docker @('rm', '-f', $container)).ExitCode -ne 0) { throw "could not remove manifest container $container" }
+    $container = $null
+    $entry = Get-Item -LiteralPath $file -Force
+    if ($entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $entry.Length -gt 1048576) { throw 'channel manifest must be a regular file of at most 1 MiB' }
+    try {
+      $json = [IO.File]::ReadAllText($file)
+      Assert-ManifestKeys $json
+      $manifest = $json | ConvertFrom-Json
+      foreach ($name in @('channel','version','images')) {
+        if (@($manifest.PSObject.Properties.Name) -cnotcontains $name) { throw 'missing manifest key' }
+      }
+      if ($manifest.channel -cne $Channel -or $manifest.version -cne $pinned) { throw 'channel or version differs' }
+      foreach ($hostName in @('api','worker','web','builder')) {
+        if (@($manifest.images.PSObject.Properties.Name) -cnotcontains $hostName) { throw 'missing image pin' }
+        $pin = $manifest.images.$hostName
+        $prefix = [regex]::Escape("$ChannelRegistry/haive-$Channel-$hostName@sha256:")
+        if ($pin -isnot [string] -or $pin -cnotmatch "\A${prefix}[0-9a-f]{64}\z") { throw 'image pin differs' }
+      }
+    } catch { throw 'invalid channel manifest: channel, version and all image pins must match the requested registry release' }
+    return $manifest
+  } catch {
+    Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    throw
+  } finally {
+    if ($container -and (Invoke-Native docker @('rm','-f',$container)).ExitCode -ne 0) { Write-Warn "could not remove manifest container $container; run docker rm -f $container" }
+    $script:RegistryToken = $null
+  }
+}
+
 # ── Host ports ───────────────────────────────────────────────────────────────
 # Probed, not assumed. The defaults collide in practice rather than in theory: Haive pins DDEV's
 # global mailpit to 8025-8026, so a machine that has run a Haive-managed DDEV project already
@@ -216,10 +372,9 @@ an install named '$InstallId' already has data on this machine.
 "@
 }
 
+try {
 Test-Preflight
-if ($Check) { Write-Host ""; Write-Host "-Check: nothing was installed."; exit 0 }
-
-if ($Channel -ne 'public') { Die "channel '$Channel' is not available yet. Only the public channel is published today." }
+if ($Check -and $Channel -ceq 'public') { Write-Host ""; Write-Host "-Check: nothing was installed."; exit 0 }
 
 Write-Step "Resolving the release"
 $tag    = Resolve-HaiveVersion $Version
@@ -229,11 +384,23 @@ Write-Note "resolved          $pinned  (tag $tag)"
 
 # Verify the release EXISTS before generating a secret or pulling an image, so a typo costs
 # nothing. Its manifest is the artefact an upgrade reads too.
-try { Invoke-WebRequest -Uri "$Releases/$tag/release.json" -UseBasicParsing -Method Head | Out-Null }
-catch { Die "release $tag has no published manifest.`n       Check the version, or list what exists: https://github.com/$Repo/releases" }
-Write-Note "manifest          found"
+if ($Channel -ceq 'public') {
+  try { Invoke-WebRequest -Uri "$Releases/$tag/release.json" -UseBasicParsing -Method Head | Out-Null }
+  catch { Die "release $tag has no published manifest.`n       Check the version, or list what exists: https://github.com/$Repo/releases" }
+}
+if ($Check) {
+  try { $null = Read-ChannelManifest }
+  catch { Die $_.Exception.Message }
+  finally { if ($ChannelScratch) { Remove-Item -LiteralPath $ChannelScratch -Recurse -Force -ErrorAction SilentlyContinue } }
+  Write-Note "Channel           $Channel ($ChannelRegistry)"
+  Write-Note "manifest          verified for $pinned"
+  Write-Host "-Check: nothing was installed."
+  exit 0
+}
+if ($Channel -ceq 'public') { Write-Note "manifest          found" }
 
 if (-not $Dir) { $Dir = Join-Path $env:USERPROFILE $InstallId }
+# Collapse relative and /./ segments before deriving the updater credential path.
 $Dir = [System.IO.Path]::GetFullPath($Dir)
 
 if ((Test-Path $Dir) -and (Get-ChildItem -Force $Dir | Measure-Object).Count -gt 0) {
@@ -247,6 +414,21 @@ $Dir already holds a Haive install.
 "@
   }
   if (-not $Force) { Die "$Dir is not empty. Pass -Force to install into it anyway." }
+}
+
+if ($Channel -cne 'public' -and (Get-Item -LiteralPath (Join-Path $Dir '.docker') -Force -ErrorAction SilentlyContinue)) {
+  Die "$Dir/.docker already exists; choose a clean install directory"
+}
+
+if ($Channel -cne 'public') {
+  # Docker Desktop accepts /c/... as a daemon bind path. The Linux updater requires an
+  # absolute POSIX host path; local Windows docker calls still use the native directory.
+  $channelHostDir = $Dir.Replace('\', '/').TrimEnd('/')
+  if ($channelHostDir -match '^([A-Za-z]):/(.*)$') { $channelHostDir = '/' + $Matches[1].ToLowerInvariant() + '/' + $Matches[2] }
+  if ($channelHostDir -cnotmatch '^/[a-zA-Z0-9_./ -]+$' -or $channelHostDir.Contains('..') -or $channelHostDir.Contains('//') -or $channelHostDir.EndsWith('/.')) { Die 'channel install directory must be a normalized absolute path using letters, digits, spaces, _, - and .' }
+  try { $channelManifest = Read-ChannelManifest }
+  catch { Die $_.Exception.Message }
+  Write-Note "manifest          verified for $pinned"
 }
 
 Write-Step "Writing the install to $Dir"
@@ -306,10 +488,25 @@ if (-not (Test-Path $envPath)) {
     "HOST_REPO_ROOT=$env:USERPROFILE"
     "HAIVE_INSTALL_DIR_HOST=$Dir"
   )
+  if ($Channel -cne 'public') {
+    $lines = @($lines | ForEach-Object { if ($_ -like 'HAIVE_INSTALL_DIR_HOST=*') { "HAIVE_INSTALL_DIR_HOST=$channelHostDir" } else { $_ } })
+    $lines += @('', "HAIVE_CHANNEL=$Channel", "HAIVE_CHANNEL_REGISTRY=$ChannelRegistry", "DOCKER_CONFIG=$channelHostDir/.docker", "HAIVE_API_IMAGE=$($channelManifest.images.api)", "HAIVE_WORKER_IMAGE=$($channelManifest.images.worker)", "HAIVE_WEB_IMAGE=$($channelManifest.images.web)")
+  }
   # LF, not CRLF, and written without a BOM: compose reads this file itself and a stray carriage
   # return lands inside the VALUE of the last variable on every line.
   [System.IO.File]::WriteAllText($envPath, ($lines -join "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
   Write-Note "secrets           generated (.env)"
+}
+
+if ($Channel -cne 'public') {
+  if (Test-Path -LiteralPath (Join-Path $Dir '.docker')) { Remove-Item -LiteralPath $ChannelScratch -Recurse -Force; Die "$Dir/.docker already exists; choose a clean install directory" }
+  try {
+    Move-Item -LiteralPath (Join-Path $ChannelScratch '.docker') -Destination (Join-Path $Dir '.docker')
+    try { Protect-RegistryCredentials (Join-Path $Dir '.docker') }
+    catch { Remove-Item -LiteralPath (Join-Path $Dir '.docker') -Recurse -Force; throw }
+  }
+  finally { Remove-Item -LiteralPath $ChannelScratch -Recurse -Force }
+  $env:DOCKER_CONFIG = Join-Path $Dir '.docker'
 }
 
 # ── Helper scripts ───────────────────────────────────────────────────────────
@@ -347,23 +544,55 @@ switch ($Command) {
       '-v','/var/run/docker.sock:/var/run/docker.sock',
       '-v', "$($e['HAIVE_INSTALL_DIR_HOST']):/install",
       '-e', "COMPOSE_PROJECT_NAME=$($e['COMPOSE_PROJECT_NAME'])",
-      '-e', "DATABASE_URL=postgres://haive:$($e['POSTGRES_PASSWORD'])@postgres:5432/haive",
+      '-e', "HAIVE_INSTALL_ID=$($e['HAIVE_INSTALL_ID'])",
+      '-e', 'DATABASE_URL',
       '-e', 'REDIS_URL=redis://redis:6379',
-      '-e', "CONFIG_ENCRYPTION_KEY=$($e['CONFIG_ENCRYPTION_KEY'])",
+      '-e', 'CONFIG_ENCRYPTION_KEY',
       "$($e['HAIVE_REGISTRY'])/haive-updater:$v",
       '--manifest', "https://github.com/martinambrus/haive/releases/download/v$v/release.json",
       '--install-dir','/install',
       '--registry', $e['HAIVE_REGISTRY'],
       '--postgres-volume', "$($e['COMPOSE_PROJECT_NAME'])_postgres_data",
-      '--snapshot-host-dir', "$($e['HAIVE_INSTALL_DIR_HOST'])/snapshots",
-      '-e', "HAIVE_INSTALL_ID=$($e['HAIVE_INSTALL_ID'])"
+      '--snapshot-host-dir', "$($e['HAIVE_INSTALL_DIR_HOST'])/snapshots"
     )
     if ($ForceDrain) { $dargs += '--force' }
-    & docker @dargs
+    $previousDatabaseUrl = $env:DATABASE_URL
+    $previousEncryptionKey = $env:CONFIG_ENCRYPTION_KEY
+    try {
+      $env:DATABASE_URL = "postgres://haive:$($e['POSTGRES_PASSWORD'])@postgres:5432/haive"
+      $env:CONFIG_ENCRYPTION_KEY = $e['CONFIG_ENCRYPTION_KEY']
+      & docker @dargs
+    } finally {
+      $env:DATABASE_URL = $previousDatabaseUrl
+      $env:CONFIG_ENCRYPTION_KEY = $previousEncryptionKey
+    }
   }
   default { Write-Host "usage: .\haive.ps1 up|down|logs|ps|version|upgrade -Version <v>" }
 }
 '@
+if ($Channel -cne 'public') {
+  $haivePs1 = $haivePs1.Replace('switch ($Command) {', @'
+Remove-Item Env:HAIVE_REGISTRY_TOKEN -ErrorAction SilentlyContinue
+$installEnv = Get-DotEnv
+$env:DOCKER_CONFIG = $installEnv['DOCKER_CONFIG']
+# /c/... is the daemon/updater path; Windows docker needs the native client path.
+if ($env:OS -eq 'Windows_NT' -and $env:DOCKER_CONFIG -match '^/([a-z])/(.*)$') {
+  $env:DOCKER_CONFIG = $Matches[1] + ':/' + $Matches[2]
+}
+switch ($Command) {
+  'pull' { docker compose @files pull }
+'@)
+  $haivePs1 = $haivePs1.Replace('      "$($e[''HAIVE_REGISTRY''])/haive-updater:$v",', @'
+      '-e', 'DOCKER_CONFIG=/install/.docker',
+      '-e', "HAIVE_INSTALL_DIR_HOST=$($e['HAIVE_INSTALL_DIR_HOST'])",
+      "$($e['HAIVE_REGISTRY'])/haive-updater:$v",
+'@)
+  $haivePs1 = $haivePs1.Replace('      ''--manifest'', "https://github.com/martinambrus/haive/releases/download/v$v/release.json",', @'
+      '--channel', $e['HAIVE_CHANNEL'],
+      '--manifest-image', "$($e['HAIVE_CHANNEL_REGISTRY'])/haive-$($e['HAIVE_CHANNEL'])-release:$v",
+      '--version', $v,
+'@)
+}
 [System.IO.File]::WriteAllText((Join-Path $Dir 'haive.ps1'), $haivePs1, (New-Object System.Text.UTF8Encoding($false)))
 
 # Uninstall deliberately does NOT use `down -v`. Five volumes in docker-compose.yml carry an
@@ -571,6 +800,16 @@ if ($Purge) {
   Write-Host "The stack is gone either way; delete this directory when you are done with it."
 }
 '@
+if ($Channel -cne 'public') {
+  $uninstall = $uninstall.Replace("`$ErrorActionPreference = 'Stop'", "`$ErrorActionPreference = 'Stop'`nRemove-Item Env:HAIVE_REGISTRY_TOKEN -ErrorAction SilentlyContinue")
+  $uninstall = $uninstall.Replace('# `down` first', @'
+if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '.docker')) {
+  Remove-Item -LiteralPath (Join-Path $PSScriptRoot '.docker') -Recurse -Force
+}
+
+# `down` first
+'@)
+}
 [System.IO.File]::WriteAllText((Join-Path $Dir 'uninstall.ps1'), $uninstall, (New-Object System.Text.UTF8Encoding($false)))
 Write-Note "helpers           .\haive.ps1, .\uninstall.ps1"
 
@@ -654,3 +893,9 @@ Write-Host "    The Haive worker mounts the Docker socket, so it can create and 
 Write-Host "    on this machine. That is how it runs AI CLIs in sandboxes - and it is equivalent to"
 Write-Host "    root on the host. Run Haive on a machine where that is acceptable."
 Write-Host ""
+
+} finally {
+  if ($ChannelScratch) {
+    Remove-Item -LiteralPath $ChannelScratch -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}

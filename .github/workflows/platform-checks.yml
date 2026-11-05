@@ -30,6 +30,7 @@ on:
       - 'packages/worker/src/sandbox/image-composer.ts'
       - 'packages/worker/scripts/check-cli-arch.ts'
       - 'install/**'
+      - 'scripts/test/install-channel.test.mjs'
       - '.github/workflows/platform-checks.yml'
 
 permissions:
@@ -213,3 +214,23 @@ jobs:
           sh ./uninstall.sh --purge --yes
           left=$( { docker ps -aq --filter "name=^ci-"; docker volume ls -q --filter "name=^ci_"; } | wc -l | tr -d ' ')
           [ "$left" = "0" ] || { echo "::error::$left object(s) left behind"; exit 1; }
+
+  installer-controls:
+    name: Shell and PowerShell channel installer controls
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The public-output control compares generated files against the pre-channel installer.
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+      - name: Ensure the existing PowerShell harness can run
+        run: docker pull mcr.microsoft.com/powershell:lts-7.4-alpine-3.20
+      - name: Channel installer controls on both shells
+        # Missing PowerShell or public baseline history fails under CI; this job requires both.
+        env:
+          CI: 'true'
+        run: node --test scripts/test/install-channel.test.mjs

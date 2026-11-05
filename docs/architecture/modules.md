@@ -477,6 +477,44 @@ nothing unless it exits 0.
   imports `packages/shared/src/release/manifest.ts`, so it needs the repository's installed dependencies and
   a Node with type stripping.
 
+### Installing a channel
+
+`install/install.sh --channel <c> --registry-user <u> [--channel-registry <prefix>] [--version <v>]` (PowerShell:
+`install.ps1 -Channel <c> -RegistryUser <u> [-ChannelRegistry <prefix>]`, which also takes the GNU spellings and
+the base's bare positional order Version, Dir, InstallId, Channel)
+installs a channel from its private registry. `<c>` and `<prefix>` follow the build-channel CHANNEL and PREFIX rules;
+the prefix defaults to `ghcr.io/martinambrus`. Without `--channel`, or with `public`, nothing below happens and the
+public output (`.env`, `./haive`, the uninstall script) is unchanged.
+
+- Token: from `HAIVE_REGISTRY_TOKEN` (removed from the environment at once) or a no-echo prompt that restores the
+  terminal on every exit. It reaches `docker login --password-stdin` only, never argv, a file the installer
+  writes or a message.
+- Order: a scratch `DOCKER_CONFIG` (0700, `config.json` 0600, seeded with an empty auth entry so Docker Desktop does
+  not pick a credential helper) holds the login. The installer pulls `haive-<c>-release:<version>`, reads
+  `/release.json` by `docker create` + `docker cp` + `docker rm -f` (removed on every path), caps it at 1 MiB, and
+  parses it with a strict JSON reader in awk (duplicate keys, escapes in keys and nesting past 64 refused). The
+  manifest's `channel` and `version` must equal the request, and the `api`, `worker`, `web` and `builder` pins
+  must each be `<prefix>/haive-<c>-<host>@sha256:<64 lowercase hex>`. Any failure refuses before the install
+  directory is touched; there is no public fallback.
+- Written: the keys under "Upgrading a channel install" go to `.env` (0600), and the scratch config becomes
+  `<install>/.docker` only after `.env` is written, so a failure before then leaves no credential in the install
+  directory and a `--force` retry works. A destination that already holds `.docker` (or a link by that name) refuses
+  before anything is written. The install directory is normalised to the lexical form the updater
+  compares (`./x`, `/./` and a trailing slash collapse), and a channel install refuses `..` and characters outside
+  letters, digits, spaces, `_`, `-` and `.`. The PowerShell installer re-applies the owner-only DACL (or POSIX
+  0700/0600) after the move.
+- `--check`: login and manifest read under the scratch config, then removed; writes nothing.
+- Generated `./haive`: reads `.env` as data (it never sources it) and exports `DOCKER_CONFIG` for compose, so
+  `up` and `pull` use the install credential. `upgrade` runs the updater with `--channel`,
+  `--manifest-image <prefix>/haive-<c>-release:<v>`, `--version`, `-e DOCKER_CONFIG=/install/.docker` and
+  `-e HAIVE_INSTALL_DIR_HOST`. On every install, public included, `DATABASE_URL` and `CONFIG_ENCRYPTION_KEY` pass
+  to the updater by name with the values in the docker child's environment only, as the api's POST /upgrade does.
+- Uninstall: the generated script also removes `<install>/.docker`.
+- Tests: `scripts/test/install-channel.test.mjs` runs both installers against a fake docker that records argv.
+  CI's `Module scripts` step runs the shell controls; `platform-checks` `installer-controls` runs both shells on the
+  pinned PowerShell image plus the public byte-identity baseline against full git history, and fails rather than
+  skips when either is missing. UNMEASURED: native Windows DACLs across volumes and Windows PowerShell 5.1.
+
 ### Upgrading a channel install
 
 A channel install's `.env` holds `HAIVE_CHANNEL`, `HAIVE_CHANNEL_REGISTRY`, `DOCKER_CONFIG=<install>/.docker`
