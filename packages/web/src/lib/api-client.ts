@@ -2931,9 +2931,14 @@ export interface ModuleSourceInput {
 }
 export interface ModuleSourcesResponse {
   writable: boolean;
+  fetchConfigured: boolean;
   sources: ModuleInstallSource[];
 }
 export const getModuleSources = () => api.get<ModuleSourcesResponse>('/modules/sources');
+export const fetchModuleSource = (id: string, refresh = false) =>
+  api.post<ModuleInstallSource>('/modules/sources/' + encodeURIComponent(id) + '/fetch', {
+    refresh,
+  });
 export const createModuleSource = (body: ModuleSourceInput) =>
   api.post<ModuleInstallSource>('/modules/sources', body);
 export const updateModuleSource = (id: string, body: ModuleSourceInput) =>

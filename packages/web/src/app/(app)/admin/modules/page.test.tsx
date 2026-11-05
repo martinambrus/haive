@@ -15,6 +15,7 @@ const hooks = vi.hoisted(() => ({ slots: [] as unknown[], next: 0, dirty: false,
 const api = vi.hoisted(() => ({
   getModulesLoaded: vi.fn(),
   getModuleSources: vi.fn(),
+  fetchModuleSource: vi.fn(),
   patchModuleActive: vi.fn(),
   getModuleDependents: vi.fn(),
   cancelModuleDrain: vi.fn(),
@@ -174,6 +175,34 @@ beforeEach(() => {
 });
 
 describe('Modules page preflight', () => {
+  it('offers Fetch and Refresh and shows structural fetch status and SHA', async () => {
+    api.getModuleSources.mockResolvedValue({
+      writable: true,
+      fetchConfigured: true,
+      sources: [
+        {
+          id: 's1',
+          moduleId: 'alpha',
+          kind: 'git',
+          url: 'https://example.com/a',
+          ref: 'main',
+          fetchStatus: 'pinned',
+          resolvedSha: 'a'.repeat(40),
+          lastError: 'stale failure',
+        },
+      ],
+    });
+    api.fetchModuleSource.mockResolvedValue({});
+    const page = await mount();
+    expect(page.text()).toContain('Fetch');
+    expect(page.text()).toContain('Refresh');
+    expect(page.text()).toContain('pinned');
+    expect(page.text()).toContain('a'.repeat(40));
+    expect(page.text()).not.toContain('stale failure');
+    page.click('Refresh');
+    await flush();
+    expect(api.fetchModuleSource).toHaveBeenCalledWith('s1', true);
+  });
   it('hands the dialog the module, its name, the tasks and whether the list was cut', async () => {
     api.getModuleDependents.mockResolvedValue({ moduleId: 'alpha', tasks: TASKS, capped: true });
     const page = await mount();
