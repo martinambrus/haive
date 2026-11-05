@@ -163,6 +163,7 @@ describe('GET /admin/maintenance/upgrade', () => {
       canUpgrade: true,
       devBuild: false,
       installDirConfigured: true,
+      channel: 'public',
       runs: [],
     });
   });
