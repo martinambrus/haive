@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { configService, secretsService } from '@haive/shared';
 import { Hono } from 'hono';
@@ -224,6 +224,51 @@ describe.skipIf(!url)('module install sources (real database)', () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toMatchObject({ ref });
     });
+  });
+  describe('fetch pin invalidation', () => {
+    const pin = {
+      resolvedSha: 'a'.repeat(40),
+      fetchStatus: 'fetched',
+      fetchedAt: new Date('2026-01-01T00:00:00Z'),
+      lastError: 'old fetch diagnostic',
+    };
+    it.each([
+      ['kind', git, { ...registry, moduleId: 'alpha', packageName: '@haive-module/alpha' }],
+      ['moduleId', git, { ...git, moduleId: 'gamma' }],
+      ['url', git, { ...git, url: 'https://example.com/other.git' }],
+      ['ref', git, { ...git, ref: 'feature/x' }],
+      [
+        'packageName',
+        registry,
+        { ...registry, moduleId: 'gamma', packageName: '@haive-module/gamma' },
+      ],
+      ['version', registry, { ...registry, version: '2.0.0' }],
+    ])('clears fetch state when %s changes', async (_field, initial, changed) => {
+      const source = await add(initial);
+      await db.update(schema.moduleSources).set(pin).where(eq(schema.moduleSources.id, source.id));
+      const res = await send('PUT', '/' + source.id, changed);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        ...changed,
+        resolvedSha: null,
+        fetchStatus: null,
+        fetchedAt: null,
+        lastError: null,
+      });
+    });
+    it.each([{}, { token: '' }, { token: 'replacement' }, { clearToken: true }])(
+      'preserves fetch state for an unchanged source with token edit %j',
+      async (edit) => {
+        const source = await add();
+        await db
+          .update(schema.moduleSources)
+          .set(pin)
+          .where(eq(schema.moduleSources.id, source.id));
+        const res = await send('PUT', '/' + source.id, { ...git, ...edit });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ ...pin, fetchedAt: pin.fetchedAt.toISOString() });
+      },
+    );
   });
   it('refuses duplicate ids on create and edit', async () => {
     await add();

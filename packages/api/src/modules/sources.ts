@@ -162,6 +162,14 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
             hasToken: body.clearToken ? false : !!body.token || previous?.hasToken || false,
             updatedAt: new Date(),
           };
+          const sourceChanged =
+            previous &&
+            (['kind', 'moduleId', 'url', 'ref', 'packageName', 'version'] as const).some(
+              (field) => previous[field] !== values[field],
+            );
+          const fetchState = sourceChanged
+            ? { resolvedSha: null, fetchStatus: null, fetchedAt: null, lastError: null }
+            : {};
           const [row] =
             id === null
               ? await tx
@@ -170,7 +178,7 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
                   .returning()
               : await tx
                   .update(schema.moduleSources)
-                  .set(values)
+                  .set({ ...values, ...fetchState })
                   .where(eq(schema.moduleSources.id, id))
                   .returning();
           if (!row) throw new HttpError(404, 'Module source not found');
