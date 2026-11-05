@@ -154,3 +154,23 @@ it('channel argv without a manifest image returns usage with an emitted error', 
   );
   expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
 });
+
+it('rollback pins use the settings refreshed after taking the lock', async () => {
+  const fresh = {
+    ...settings,
+    HAIVE_API_IMAGE: pin('current-api'),
+    HAIVE_WORKER_IMAGE: pin('current-worker'),
+    HAIVE_WEB_IMAGE: pin('current-web'),
+  };
+  vi.mocked(journal.tryLock).mockImplementation(async () => {
+    vi.mocked(images.readImageSettings).mockResolvedValue(fresh);
+    return true;
+  });
+  vi.mocked(dk.localImages).mockResolvedValue([
+    fresh.HAIVE_API_IMAGE,
+    fresh.HAIVE_WORKER_IMAGE,
+    fresh.HAIVE_WEB_IMAGE,
+  ]);
+  expect(await main()).toBe(0);
+  expect(images.readImageSettings).toHaveBeenCalledTimes(2);
+});

@@ -175,7 +175,7 @@ export async function main(): Promise<number> {
     files: ['docker-compose.yml', 'docker-compose.run.yml'],
   };
 
-  const imageSettings = await readImageSettings(envFile);
+  let imageSettings = await readImageSettings(envFile);
   const channel = resolveChannel(arg('channel'), imageSettings.HAIVE_CHANNEL);
   applyInstallDockerConfig(imageSettings, installDir);
   const manifestOptions = {
@@ -213,6 +213,11 @@ export async function main(): Promise<number> {
       emit('error', { message: 'another upgrade holds the lock' });
       return EXIT.busy;
     }
+
+    // A preceding upgrader may have changed the pins while this run waited for the lock.
+    imageSettings = await readImageSettings(envFile);
+    resolveChannel(channel, imageSettings.HAIVE_CHANNEL);
+    applyInstallDockerConfig(imageSettings, installDir);
 
     const fromVersion = (await readEnvVar(envFile, 'HAIVE_VERSION')) ?? 'unknown';
     const live = await findLiveRun(sql);
