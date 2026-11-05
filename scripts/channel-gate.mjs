@@ -269,6 +269,35 @@ export function comparePresence(key, footprint, folderNames, expect) {
 }
 
 export function readerScript(key) {
+  if (key === 'builder') {
+    // The builder bakes source and dependencies, not compiled host registries.
+    return `import { readFileSync } from 'node:fs';
+const hosts = ['api', 'worker'];
+const read = (file) => JSON.parse(readFileSync(file, 'utf8'));
+const declarations = hosts.map(host => read('/app/packages/' + host + '/package.json').dependencies ?? {});
+const names = [...new Set(declarations.flatMap(deps => Object.keys(deps)))].filter(name =>
+  name.startsWith('@haive-module/') || name.startsWith('@haive/module-'));
+const entries = names.map(packageName => {
+  const specs = declarations.map(deps => deps[packageName]);
+  const source = specs.some(spec => typeof spec === 'string' && spec.startsWith('workspace:')) ? 'local' : 'registry';
+  const problems = [];
+  if (!${MODULE_PACKAGE}.test(packageName)) problems.push('an invalid module package name');
+  if (specs.some(spec => typeof spec !== 'string') || specs[0] !== specs[1])
+    problems.push('different api/worker dependency declarations');
+  for (const [i, host] of hosts.entries()) {
+    try {
+      const pkg = read('/app/packages/' + host + '/node_modules/' + packageName + '/package.json');
+      if (pkg.name !== packageName || pkg.exports?.['./manifest'] === undefined)
+        problems.push(host + ' has invalid installed module metadata');
+      if (source === 'registry' && pkg.version?.split('+')[0] !== specs[i]?.split('+')[0])
+        problems.push(host + ' installed version differs from its declaration');
+    } catch { problems.push(host + ' installed module metadata is unreadable'); }
+  }
+  return { packageName, source, problem: problems.length ? problems.join('; ') : null };
+});
+process.stdout.write(JSON.stringify({ entries }) + '\\n', () => process.exit(0));
+`;
+  }
   if (key === 'web') {
     return `import { existsSync, readFileSync } from 'node:fs';
 const file = '${WEB_LIST}';
@@ -565,7 +594,7 @@ async function readList(key, ref) {
       '--entrypoint',
       'node',
       '-w',
-      `/app/packages/${key}`,
+      key === 'builder' ? '/app' : `/app/packages/${key}`,
       ref,
       '--input-type=module',
       '-',
