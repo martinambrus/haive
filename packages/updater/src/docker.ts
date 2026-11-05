@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { readFileNoFollow } from '@haive/shared/fs-safe';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CONTAINER_FAMILY, containerName } from '@haive/shared/naming';
@@ -195,6 +196,7 @@ export async function buildOwnModules(
   image: string,
   sourceHostDir: string,
   plan: Record<string, unknown>,
+  dockerConfigHostDir?: string,
 ): Promise<void> {
   await run('docker', ['pull', image], undefined, 1_800_000);
   await run(
@@ -208,6 +210,14 @@ export async function buildOwnModules(
       `type=bind,src=${sourceHostDir},dst=/input,readonly`,
       '-e',
       `HAIVE_BUILD_PLAN=${JSON.stringify(plan)}`,
+      ...(dockerConfigHostDir
+        ? [
+            '--mount',
+            `type=bind,src=${dockerConfigHostDir},dst=/run/haive-docker-config,readonly`,
+            '-e',
+            'DOCKER_CONFIG=/run/haive-docker-config',
+          ]
+        : []),
       image,
     ],
     undefined,
@@ -238,6 +248,10 @@ export async function resolveImageSettings(
       const child = execFile(
         'docker',
         [
+          // Keep Docker's transport config explicit while clearing interpolation precedence.
+          ...(keys.includes('DOCKER_CONFIG') && process.env.DOCKER_CONFIG
+            ? ['--config', process.env.DOCKER_CONFIG]
+            : []),
           'compose',
           '--project-name',
           'updater-settings',
@@ -288,7 +302,12 @@ export async function readReleaseManifestImage(image: string): Promise<string> {
     id = await run('docker', ['create', '--name', name, image, '/unused']);
     const file = join(dir, 'release.json');
     await run('docker', ['cp', `${id}:/release.json`, file]);
-    return await readFile(file, 'utf8');
+    const read = await readFileNoFollow(dir, 'release.json', {
+      strict: true,
+      maxBytes: 1024 * 1024,
+    });
+    if (!read || read.truncated) throw new Error('release manifest is missing or too large');
+    return read.data.toString('utf8');
   } finally {
     try {
       await run('docker', ['rm', '-f', id]);

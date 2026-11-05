@@ -30,8 +30,8 @@ import { maintenanceRoutes } from '../src/routes/maintenance.js';
 import { HttpError } from '../src/context.js';
 
 const app = new Hono();
-app.onError((err, c) =>
-  c.json({ error: err.message }, err instanceof HttpError ? err.status : 500),
+app.onError((err) =>
+  Response.json({ error: err.message }, { status: err instanceof HttpError ? err.status : 500 }),
 );
 app.route('/maintenance', maintenanceRoutes);
 const post = () =>

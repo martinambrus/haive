@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
+import { join } from 'node:path';
 import postgres from 'postgres';
 import { configService, networkName } from '@haive/shared';
 import { parseReleaseManifest, type ReleaseManifest } from '@haive/shared/release';
@@ -28,6 +29,7 @@ import {
   prepareImages,
   readImageOverrides,
   readImageSettings,
+  type ImageSettings,
 } from './images.js';
 
 /**
@@ -69,6 +71,19 @@ export function resolveChannel(requested: string | undefined, installed: string)
   if (requested !== undefined && requested !== channel)
     throw new Error('--channel disagrees with install HAIVE_CHANNEL');
   return channel;
+}
+
+/** Set once before manifest pulls and recovery; every Docker subprocess inherits it. */
+export function applyInstallDockerConfig(
+  settings: Pick<ImageSettings, 'HAIVE_CHANNEL' | 'DOCKER_CONFIG'>,
+  installDir: string,
+): void {
+  if (!settings.HAIVE_CHANNEL || settings.HAIVE_CHANNEL === 'public') return;
+  if (!settings.DOCKER_CONFIG?.startsWith('/') || settings.DOCKER_CONFIG.includes(','))
+    throw new Error('channel install requires an absolute DOCKER_CONFIG in .env');
+  // The API mounts the host install at /install and explicitly supplies this translation.
+  const mounted = installDir === '/install' && process.env.DOCKER_CONFIG === '/install/.docker';
+  process.env.DOCKER_CONFIG = mounted ? join(installDir, '.docker') : settings.DOCKER_CONFIG;
 }
 
 export async function loadManifest(options: {
@@ -123,7 +138,7 @@ export async function main(): Promise<number> {
   }
   const databaseUrl = process.env.DATABASE_URL;
   const redisUrl = process.env.REDIS_URL;
-  if (!databaseUrl || !redisUrl) {
+  if ((!databaseUrl || !redisUrl) && !flag('dry-plan')) {
     emit('error', { message: 'DATABASE_URL and REDIS_URL are required' });
     return EXIT.usage;
   }
@@ -152,23 +167,32 @@ export async function main(): Promise<number> {
     files: ['docker-compose.yml', 'docker-compose.run.yml'],
   };
 
-  const channelSettings = await dk.resolveImageSettings(envFile, ['HAIVE_CHANNEL']);
-  const channel = resolveChannel(arg('channel'), channelSettings.HAIVE_CHANNEL ?? '');
+  const imageSettings = await readImageSettings(envFile);
+  const channel = resolveChannel(arg('channel'), imageSettings.HAIVE_CHANNEL);
+  applyInstallDockerConfig(imageSettings, installDir);
   const manifestOptions = {
     manifest: arg('manifest'),
     manifestImage: arg('manifest-image'),
     channel,
     version: arg('version'),
   };
-  // A channel must be proven before opening the journal or changing maintenance state.
-  const channelTarget =
-    channel !== 'public' || manifestOptions.manifestImage
-      ? await loadManifest(manifestOptions)
-      : undefined;
+  // The dry plan reads no journal. Normal starts recover an interrupted run before fetching a target.
+  const channelTarget = flag('dry-plan') ? await loadManifest(manifestOptions) : undefined;
 
-  const sql = postgres(databaseUrl, { max: 1, max_lifetime: 0 });
+  if (flag('dry-plan')) {
+    if (channel === 'public' || !channelTarget)
+      throw new Error('--dry-plan requires a channel install');
+    emit('image-plan', {
+      channel,
+      version: channelTarget.version,
+      ...channelImagePlan(channelTarget.version, imageSettings, channelTarget.images),
+    });
+    return EXIT.ok;
+  }
+
+  const sql = postgres(databaseUrl!, { max: 1, max_lifetime: 0 });
   try {
-    await configService.initialize(redisUrl);
+    await configService.initialize(redisUrl!);
     await ensureJournal(sql);
 
     // One upgrade at a time. The lock guards concurrency; the journal's partial unique index is
@@ -220,7 +244,6 @@ export async function main(): Promise<number> {
 
     const target = channelTarget ?? (await loadManifest(manifestOptions));
 
-    const imageSettings = await readImageSettings(envFile);
     const previousImages = await readImageOverrides(envFile, imageSettings);
     const currentImages = (['api', 'worker', 'web'] as const).map((s) =>
       imageFor(s, fromVersion, registry, previousImages),

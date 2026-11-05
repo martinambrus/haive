@@ -1,13 +1,10 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({ exec: vi.fn() }));
 vi.mock('node:child_process', () => ({
   execFile: Object.assign(vi.fn(), { [Symbol.for('nodejs.util.promisify.custom')]: h.exec }),
 }));
 import { readReleaseManifestImage } from './docker.js';
-const dirs: string[] = [];
 beforeEach(() => {
   vi.stubEnv('HAIVE_INSTALL_ID', 't335b_test');
   h.exec.mockReset().mockImplementation(async (_command: string, args: string[]) => {
@@ -15,10 +12,7 @@ beforeEach(() => {
     return { stdout: args[0] === 'create' ? 'container-id\n' : '' };
   });
 });
-afterEach(async () => {
-  vi.unstubAllEnvs();
-  for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
-});
+afterEach(() => vi.unstubAllEnvs());
 it('temp manifest container is removed on success, named by install, and uses a scratch-compatible command', async () => {
   expect(await readReleaseManifestImage('private/release:1')).toBe('{"manifestVersion":1}');
   const calls = h.exec.mock.calls.map((c) => c[1] as string[]);
@@ -60,4 +54,36 @@ it('channel rollback inventory includes digest pins while public inventory stays
   h.exec.mockResolvedValue({ stdout: 'public/api:1\npublic/web:1' });
   expect(await localImages()).toEqual(['public/api:1', 'public/web:1']);
   expect(h.exec.mock.calls[1]![1]).toEqual(['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}']);
+});
+
+it('channel own-module builder receives an install-local credential mount for its Docker client', async () => {
+  const { buildOwnModules } = await import('./docker.js');
+  await buildOwnModules('private/builder@sha256:abc', '/modules', {}, '/host/install/.docker');
+  const args = h.exec.mock.calls[1]![1] as string[];
+  expect(args).toContain(
+    'type=bind,src=/host/install/.docker,dst=/run/haive-docker-config,readonly',
+  );
+  expect(args).toContain('DOCKER_CONFIG=/run/haive-docker-config');
+  h.exec.mockClear();
+  await buildOwnModules('public/builder:1', '/modules', {});
+  expect((h.exec.mock.calls[1]![1] as string[]).join(' ')).not.toContain('DOCKER_CONFIG');
+});
+
+it('refuses a copied release.json symlink and still removes the container', async () => {
+  const { mkdtemp, symlink, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = await mkdtemp(join(tmpdir(), 'manifest-link-test-'));
+  try {
+    const target = join(dir, 'target');
+    await writeFile(target, 'host-only-file');
+    h.exec.mockImplementation(async (_command: string, args: string[]) => {
+      if (args[0] === 'cp') await symlink(target, args[2]!);
+      return { stdout: args[0] === 'create' ? 'container-id' : '' };
+    });
+    await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow();
+    expect(h.exec.mock.calls.at(-1)![1]).toEqual(['rm', '-f', 'container-id']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

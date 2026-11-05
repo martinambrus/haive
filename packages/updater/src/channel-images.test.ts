@@ -50,6 +50,7 @@ it.each([false, true])(
         baseImages: { api: images.api, worker: images.worker, web: images.web },
         rebuildWeb: rebuild,
       }),
+      '/install/.docker',
     );
     expect(result.HAIVE_API_IMAGE).toMatch(/^haive-own-api:9\.9\.9-/);
     expect(result.HAIVE_WEB_IMAGE).toEqual(

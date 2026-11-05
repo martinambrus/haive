@@ -14,6 +14,7 @@ afterEach(() => vi.restoreAllMocks());
 describe('channel manifest controls', () => {
   it('refuses --manifest and --manifest-image together before IO', async () => {
     const fetcher = vi.spyOn(globalThis, 'fetch');
+    vi.spyOn(dk, 'readReleaseManifestImage').mockResolvedValue(JSON.stringify(manifest));
     await expect(
       loadManifest({
         manifest: 'https://invalid/release.json',

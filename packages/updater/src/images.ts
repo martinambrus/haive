@@ -12,6 +12,8 @@ export const IMAGE_SETTING_KEYS = [
   'HAIVE_INSTALL_ID',
   'HAIVE_OWN_MODULES_REBUILD_WEB',
   'HAIVE_CHANNEL',
+  'HAIVE_CHANNEL_REGISTRY',
+  'DOCKER_CONFIG',
 ] as const;
 export type ImageSettings = Record<(typeof IMAGE_SETTING_KEYS)[number], string>;
 
@@ -84,6 +86,7 @@ export async function prepareImages(
         plan.build.builderImage,
         snapshot.HAIVE_OWN_MODULES_HOST_DIR,
         plan.build,
+        snapshot.DOCKER_CONFIG,
       );
     }
     return plan.overrides;
