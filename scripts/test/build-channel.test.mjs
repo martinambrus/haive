@@ -19,6 +19,38 @@ const TOKEN = 't351-secret-that-must-never-be-printed';
 const SHA = '1234567890abcdef1234567890abcdef12345678';
 const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
 
+function seedTree(tree, config = {}) {
+  for (const file of ['scripts/module.mjs', 'scripts/gen-modules.mjs']) {
+    mkdirSync(dirname(join(tree, file)), { recursive: true });
+    if (config.missingTool !== file) writeFileSync(join(tree, file), '');
+  }
+  for (const host of ['api', 'worker', 'web']) {
+    const file = `packages/${host}/Dockerfile`;
+    mkdirSync(dirname(join(tree, file)), { recursive: true });
+    writeFileSync(
+      join(tree, file),
+      config.missingTool === file
+        ? 'RUN pnpm install'
+        : 'RUN --mount=type=secret,id=npmrc,target=/root/.npmrc pnpm install',
+    );
+  }
+  writeFileSync(
+    join(tree, '.npmrc'),
+    `@haive-module:registry=${config.scope ?? 'https://npm.pkg.github.com'}\n`,
+  );
+  mkdirSync(join(tree, 'modules'), { recursive: true });
+  if (config.local) {
+    mkdirSync(join(tree, 'modules', 'statistics'));
+    writeFileSync(
+      join(tree, 'modules', 'statistics', 'package.json'),
+      JSON.stringify({
+        name: config.localName ?? '@haive/module-statistics',
+        exports: { './web': './dist/web/index.js', './dashboard': './dist/dashboard/index.js' },
+      }),
+    );
+  }
+}
+
 function fixture(t, config = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'haive-channel-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -30,13 +62,18 @@ function fixture(t, config = {}) {
   writeFileSync(modules, JSON.stringify(config.modules ?? []));
   writeFileSync(token, `${TOKEN}\n`);
   const calls = [];
+  const violations = [];
+  t.after(() => assert.deepEqual(violations, []));
   const logs = [];
   let expectation;
   let scratch;
   let secret;
   const runner = (cmd, args, options) => {
     calls.push({ cmd, args, options });
-    assert.ok(!JSON.stringify({ cmd, args, env: options.env }).includes(TOKEN));
+    if (JSON.stringify({ cmd, args, env: options.env }).includes(TOKEN))
+      violations.push({ cmd, args, env: options.env });
+    config.onCall?.(cmd, args, options);
+    if (cmd === 'git' && args.includes('status')) return ok(config.dirtyGate ?? '');
     if (config.delegate && (cmd === 'git' || cmd === 'tar')) {
       return spawnSync(cmd, args, { ...options, encoding: 'utf8' });
     }
@@ -52,7 +89,7 @@ function fixture(t, config = {}) {
     if (cmd === 'tar') {
       const tree = args[args.indexOf('-C') + 1];
       mkdirSync(join(tree, 'scripts'), { recursive: true });
-      writeFileSync(join(tree, '.npmrc'), '@haive-module:registry=https://npm.pkg.github.com\n');
+      seedTree(tree, config);
       return ok();
     }
     if (cmd === 'pnpm' || (cmd === process.execPath && args[0].endsWith('/module.mjs'))) {
@@ -61,8 +98,13 @@ function fixture(t, config = {}) {
       assert.ok(readFileSync(secret, 'utf8').includes(`:_authToken=${TOKEN}`));
       assert.ok(relative(options.cwd, secret).startsWith('..'));
       if (cmd === 'pnpm') {
-        return ok(JSON.stringify(config.exports ?? { './manifest': './dist/manifest.js' }));
+        return ok(
+          config.emptyMetadata
+            ? ''
+            : JSON.stringify(config.exports ?? { './manifest': './dist/manifest.js' }),
+        );
       }
+      assert.ok(!readFileSync(join(options.cwd, '.npmrc'), 'utf8').includes(TOKEN));
       return ok(`module added\n${TOKEN}\n`);
     }
     if (cmd === 'docker' && args[0] === 'image' && args[1] === 'ls') {
@@ -78,18 +120,37 @@ function fixture(t, config = {}) {
       assert.ok(readFileSync(secret, 'utf8').includes(TOKEN));
       assert.ok(!readFileSync(join(context, '.npmrc'), 'utf8').includes(TOKEN));
       if (config.delegate) assert.equal(readFileSync(join(context, 'marker'), 'utf8'), 'tag');
-      return { status: config.buildFailure ? 1 : 0, stdout: `build output ${TOKEN}\n` };
+      if (options.onOutput) options.onOutput(`build output ${TOKEN}\n`);
+      return {
+        status: config.buildFailure ? 1 : 0,
+        stdout: options.onOutput ? '' : `build output ${TOKEN}\n`,
+      };
     }
     if (cmd === 'docker' && args[0] === 'image' && args[1] === 'inspect') {
-      return ok(`sha256:${'a'.repeat(64)}\n`);
+      if (args.includes('{{json .RepoDigests}}'))
+        return ok(
+          JSON.stringify([
+            `${args.at(-1).split(':').slice(0, -1).join(':')}@sha256:${'b'.repeat(64)}`,
+          ]),
+        );
+      const afterGate = expectation !== undefined;
+      return ok(`sha256:${(config.changedId && afterGate ? 'c' : 'a').repeat(64)}\n`);
     }
+    if (cmd === 'docker' && args[0] === 'info')
+      return ok(
+        JSON.stringify({
+          Driver: 'overlayfs',
+          DriverStatus: [['driver-type', 'io.containerd.snapshotter.v1']],
+        }),
+      );
+    if (cmd === 'docker' && args[0] === 'pull') return ok('pulled');
     if (cmd === process.execPath && args[0].endsWith('/channel-gate.mjs')) {
       const file = args[args.indexOf('--expect') + 1];
       expectation = JSON.parse(readFileSync(file, 'utf8'));
       parseExpect(JSON.stringify(expectation));
       assert.equal(readFileSync(args[args.indexOf('--token-file') + 1], 'utf8').trim(), TOKEN);
       return {
-        status: config.gateCode ?? 0,
+        status: 'gateCode' in config ? config.gateCode : 0,
         stdout: config.gateCode ? `OFFENDER api token ${TOKEN}\n` : '',
       };
     }
@@ -127,7 +188,8 @@ function fixture(t, config = {}) {
       return run([...argv, ...extra], {
         root,
         runner,
-        env: { PATH: process.env.PATH, UNRELATED_SECRET: TOKEN },
+        env: { PATH: process.env.PATH, UNRELATED_SECRET: TOKEN, ...config.env },
+        signal: config.signal,
         say: (line) => logs.push(line),
       });
     },
@@ -146,7 +208,7 @@ for (const tag of ['v1.2.3-rc.1', 'v1.2.3+meta', '1.2.3', 'v01.2.3']) {
 test('refuses a missing tag without archiving or building', async (t) => {
   const f = fixture(t, { missingTag: true });
   assert.equal(await f.execute(), 2);
-  assert.equal(f.calls.length, 1);
+  assert.ok(!f.calls.some((c) => c.cmd !== 'git'));
 });
 
 for (const channel of ['ACME', '../acme', '-acme', 'acme-', 'a'.repeat(33), '']) {
@@ -316,6 +378,7 @@ test('real git archive contains tag contents despite different HEAD and dirty fi
   git('init', '--quiet');
   git('config', 'user.name', 'Channel Test');
   git('config', 'user.email', 'channel@example.invalid');
+  seedTree(f.root);
   writeFileSync(join(f.root, 'marker'), 'tag');
   writeFileSync(join(f.root, '.npmrc'), '@haive-module:registry=https://npm.pkg.github.com\n');
   git('add', '.');
@@ -326,4 +389,295 @@ test('real git archive contains tag contents despite different HEAD and dirty fi
   writeFileSync(join(f.root, 'marker'), 'dirty checkout');
   assert.equal(await f.execute(), 0);
   assert.equal(readFileSync(join(f.root, 'marker'), 'utf8'), 'dirty checkout');
+});
+
+for (const scope of [
+  'http://npm.example.com',
+  'https://user:pass@npm.example.com',
+  'https://npm.example.com/?token=bad',
+]) {
+  test(`refuses unsafe module registry ${scope} before any network use`, async (t) => {
+    const f = fixture(t, { scope, modules: ['@haive-module/demo@1.0.0'] });
+    assert.equal(await f.execute(), 2);
+    assert.ok(f.logs.some((line) => line.includes('HTTPS URL without credentials')));
+    assert.ok(!f.calls.some((c) => c.cmd === 'pnpm' || c.cmd === 'docker'));
+    assert.ok(!existsSync(f.scratch));
+  });
+}
+
+test('stock web is pulled for the build platform before the gate, even with an existing stock tag', async (t) => {
+  const f = fixture(t);
+  assert.equal(await f.execute(['--source-registry', 'localhost:5000/public']), 0);
+  const pull = f.calls.find((c) => c.cmd === 'docker' && c.args[0] === 'pull');
+  assert.deepEqual(pull.args, [
+    'pull',
+    '--platform',
+    `linux/${process.arch === 'arm64' ? 'arm64' : 'amd64'}`,
+    'localhost:5000/public/haive-web:1.2.3',
+  ]);
+  assert.ok(f.logs.some((line) => line.includes('pulling stock web')));
+  assert.ok(
+    !f.calls.some(
+      (c) => c.args[0] === 'image' && c.args[1] === 'ls' && c.args.at(-1).includes('/haive-web:'),
+    ),
+  );
+  assert.ok(f.calls.indexOf(pull) > f.calls.findLastIndex((c) => c.args[0] === 'buildx'));
+  assert.ok(
+    f.calls.indexOf(pull) < f.calls.findIndex((c) => c.args[0]?.endsWith('/channel-gate.mjs')),
+  );
+});
+
+test('rebuilt web skips the stock pull and includes local web parts', async (t) => {
+  const f = fixture(t, {
+    local: true,
+    modules: ['@haive-module/demo@1.0.0'],
+    exports: { './manifest': './dist/manifest.js', './web': './dist/web.js' },
+  });
+  assert.equal(await f.execute(), 0);
+  assert.ok(!f.calls.some((c) => c.args[0] === 'pull'));
+  assert.deepEqual(
+    f.expectation.modules.find((m) => m.source === 'local'),
+    { packageName: '@haive/module-statistics', source: 'local', webParts: ['dashboard', 'web'] },
+  );
+});
+
+test('stock web expects local statistics dashboard and web parts without forcing a rebuild', async (t) => {
+  const f = fixture(t, { local: true });
+  assert.equal(await f.execute(), 0);
+  assert.equal(f.calls.filter((c) => c.args[0] === 'buildx').length, 2);
+  assert.deepEqual(f.expectation.modules, [
+    { packageName: '@haive/module-statistics', source: 'local', webParts: ['dashboard', 'web'] },
+  ]);
+});
+
+test('invalid local package id and local/registry collision fail before builds', async (t) => {
+  for (const config of [{ localName: 'bad' }, { modules: ['@haive-module/statistics@1.0.0'] }]) {
+    const f = fixture(t, { local: true, ...config });
+    assert.equal(await f.execute(), 2);
+    assert.ok(!f.calls.some((c) => c.args[0] === 'buildx'));
+  }
+});
+
+for (const missingTool of [
+  'scripts/module.mjs',
+  'scripts/gen-modules.mjs',
+  'packages/api/Dockerfile',
+  'packages/worker/Dockerfile',
+  'packages/web/Dockerfile',
+]) {
+  for (const modules of [[], ['@haive-module/demo@1.0.0']]) {
+    test(`preflight names ${missingTool}, modules=${modules.length}, before network`, async (t) => {
+      const f = fixture(t, { missingTool, modules });
+      assert.equal(await f.execute(), 2);
+      assert.ok(f.logs.some((line) => line.includes('preflight') && line.includes(missingTool)));
+      assert.ok(!f.calls.some((c) => c.cmd === 'pnpm' || c.cmd === 'docker'));
+      assert.ok(!existsSync(f.scratch));
+    });
+  }
+}
+
+test('record pins platform, image store, built markers and pulled digest', async (t) => {
+  const f = fixture(t);
+  assert.equal(await f.execute(), 0);
+  const record = JSON.parse(readFileSync(join(f.out, 'build-record.json'), 'utf8'));
+  assert.equal(record.platform, `linux/${process.arch === 'arm64' ? 'arm64' : 'amd64'}`);
+  assert.deepEqual(record.imageStore, {
+    Driver: 'overlayfs',
+    DriverStatus: [['driver-type', 'io.containerd.snapshotter.v1']],
+  });
+  assert.equal(record.images.api.built, true);
+  assert.equal(record.images.worker.built, true);
+  assert.equal(record.images.web.built, false);
+  assert.equal(
+    record.images.web.repoDigest,
+    `ghcr.io/martinambrus/haive-web@sha256:${'b'.repeat(64)}`,
+  );
+  const gateIndex = f.calls.findIndex((c) => c.args[0]?.endsWith('/channel-gate.mjs'));
+  for (const ref of Object.values(f.expectation.images)) {
+    const inspections = f.calls
+      .map((c, i) => ({ c, i }))
+      .filter(({ c }) => c.args.includes('{{.Id}}') && c.args.at(-1) === ref);
+    assert.ok(inspections.some(({ i }) => i < gateIndex));
+    assert.ok(inspections.some(({ i }) => i > gateIndex));
+  }
+});
+
+test('deletes stale record before building and retains named tags on gate failure', async (t) => {
+  let f;
+  f = fixture(t, {
+    gateCode: 1,
+    onCall(cmd, args) {
+      if (args[0] === 'buildx') assert.ok(!existsSync(join(f.out, 'build-record.json')));
+    },
+  });
+  mkdirSync(f.out);
+  writeFileSync(join(f.out, 'build-record.json'), 'stale');
+  assert.equal(await f.execute(), 1);
+  assert.ok(!existsSync(join(f.out, 'build-record.json')));
+  assert.ok(
+    f.logs.some((line) => line.includes('retained') && line.includes('haive-acme-api:1.2.3')),
+  );
+});
+
+test('refuses image identity changes across the gate', async (t) => {
+  const f = fixture(t, { changedId: true });
+  assert.equal(await f.execute(), 2);
+  assert.ok(f.logs.some((line) => line.includes('changed')));
+  assert.ok(!existsSync(join(f.out, 'build-record.json')));
+});
+
+for (const flag of ['registry', 'source-registry']) {
+  for (const prefix of [
+    'https://example.com/repo',
+    'UPPER/repo',
+    'example.com/repo:tag',
+    '../repo',
+    '',
+  ]) {
+    test(`refuses invalid --${flag} ${JSON.stringify(prefix)}`, async (t) => {
+      const f = fixture(t);
+      assert.equal(await f.execute([`--${flag}`, prefix]), 2);
+      assert.ok(f.logs.some((line) => line.includes(`${flag} must be`)));
+      assert.equal(f.calls.length, 0);
+    });
+  }
+}
+
+test('output and source prefixes are independent, source defaults to HAIVE_REGISTRY', async (t) => {
+  const f = fixture(t, { env: { HAIVE_REGISTRY: 'source.example/vendor' } });
+  assert.equal(await f.execute(['--registry', 'output.example/customer']), 0);
+  assert.equal(f.expectation.images.api, 'output.example/customer/haive-acme-api:1.2.3');
+  assert.equal(f.expectation.images.web, 'source.example/vendor/haive-web:1.2.3');
+});
+
+for (const flag of [
+  'tag',
+  'channel',
+  'modules',
+  'token-file',
+  'registry',
+  'source-registry',
+  'out',
+]) {
+  test(`refuses repeated --${flag}`, async (t) => {
+    const f = fixture(t);
+    const extra = [`--${flag}`, 'x'];
+    if (!f.argv.includes(`--${flag}`)) extra.push(`--${flag}`, 'y');
+    assert.equal(await f.execute(extra), 2);
+    assert.ok(f.logs.some((line) => line.includes(`--${flag}`)));
+    assert.equal(f.calls.length, 0);
+  });
+  test(`refuses missing --${flag} value`, async (t) => {
+    const f = fixture(t);
+    assert.equal(await f.execute([`--${flag}`]), 2);
+    assert.equal(f.calls.length, 0);
+  });
+}
+
+for (const flag of ['tag', 'channel', 'modules', 'token-file']) {
+  test(`refuses absent required --${flag}`, async (t) => {
+    const f = fixture(t);
+    const index = f.argv.indexOf(`--${flag}`);
+    f.argv.splice(index, 2);
+    assert.equal(await f.execute(), 2);
+    assert.ok(f.logs.some((line) => line.includes(`--${flag}`)));
+    assert.equal(f.calls.length, 0);
+  });
+}
+
+test('refuses a temporary directory inside the repository', async (t) => {
+  const f = fixture(t);
+  const previous = process.env.TMPDIR;
+  process.env.TMPDIR = f.root;
+  try {
+    assert.equal(await f.execute(), 2);
+    assert.ok(f.logs.some((line) => line.includes('temporary directory must be outside')));
+    assert.ok(!f.calls.some((c) => c.args.includes('archive')));
+  } finally {
+    if (previous === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previous;
+  }
+});
+
+for (const gateCode of [3, null, -1]) {
+  test(`refuses unexpected gate status ${gateCode}`, async (t) => {
+    const f = fixture(t, { gateCode });
+    assert.equal(await f.execute(), 2);
+    assert.ok(f.logs.some((line) => line.includes('channel gate could not finish')));
+    assert.ok(!existsSync(join(f.out, 'build-record.json')));
+  });
+}
+
+test('abort during build removes scratch and secrets without gate or record', async (t) => {
+  const controller = new AbortController();
+  const f = fixture(t, {
+    signal: controller.signal,
+    onCall(cmd, args, options) {
+      if (args[0] === 'buildx') {
+        assert.equal(options.signal, controller.signal);
+        controller.abort();
+      }
+    },
+  });
+  assert.equal(await f.execute(), 2);
+  assert.ok(!existsSync(f.scratch));
+  assert.ok(!existsSync(f.secret));
+  assert.ok(!f.calls.some((c) => c.args[0]?.endsWith('/channel-gate.mjs')));
+});
+
+test('build commands pin tags, Dockerfiles, context, production target, and ordering', async (t) => {
+  const f = fixture(t, { modules: ['@haive-module/demo@1.0.0'] });
+  assert.equal(await f.execute(), 0);
+  const builds = f.calls.filter((c) => c.args[0] === 'buildx');
+  for (const [i, host] of ['api', 'worker'].entries()) {
+    const { args, options } = builds[i];
+    const tree = args.at(-1);
+    assert.equal(args[args.indexOf('--tag') + 1], f.expectation.images[host]);
+    assert.equal(args[args.indexOf('--file') + 1], join(tree, 'packages', host, 'Dockerfile'));
+    assert.equal(options.cwd, tree);
+    assert.equal(args[args.indexOf('--target') + 1], 'production');
+    assert.equal(typeof options.onOutput, 'function');
+    assert.ok(
+      f.calls.findIndex((c) => c.args[0]?.endsWith('/module.mjs')) < f.calls.indexOf(builds[i]),
+    );
+  }
+});
+
+test('existing output tag is refused before module add', async (t) => {
+  const f = fixture(t, { existing: true, modules: ['@haive-module/demo@1.0.0'] });
+  assert.equal(await f.execute(), 2);
+  assert.ok(!f.calls.some((c) => c.args[0]?.endsWith('/module.mjs')));
+});
+
+test('out is probed for writability before builds', async (t) => {
+  const f = fixture(t);
+  writeFileSync(f.out, 'file blocking output directory');
+  assert.equal(await f.execute(), 2);
+  assert.ok(!f.calls.some((c) => c.args[0] === 'buildx'));
+});
+
+for (const dirtyGate of [
+  ' M scripts/channel-gate.mjs\n',
+  'M  scripts/smoke/scan-image.sh\n',
+  '?? scripts/channel-gate.mjs\n',
+]) {
+  test(`refuses dirty gate ${dirtyGate.trim()}`, async (t) => {
+    const f = fixture(t, { dirtyGate });
+    assert.equal(await f.execute(), 2);
+    assert.ok(f.logs.some((line) => line.includes('gate tooling is dirty')));
+    assert.ok(!f.calls.some((c) => c.cmd === 'pnpm' || c.cmd === 'docker'));
+  });
+}
+
+test('empty pnpm metadata has a named refusal and isolated cache', async (t) => {
+  const f = fixture(t, { modules: ['@haive-module/demo@1.0.0'], emptyMetadata: true });
+  assert.equal(await f.execute(), 2);
+  assert.ok(
+    f.logs.some(
+      (line) =>
+        line.includes('pnpm view returned no exports') && line.includes('@haive-module/demo@1.0.0'),
+    ),
+  );
+  const query = f.calls.find((c) => c.cmd === 'pnpm');
+  assert.equal(query.options.env.XDG_CACHE_HOME, join(f.scratch, 'cache'));
 });
