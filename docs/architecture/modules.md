@@ -418,6 +418,48 @@ publishing, because an image carrying another customer's module is the one defec
   registered is invisible to it; the leak gate (`channel-gate.mjs`) proves what is PRESENT. Publishing must
   run both.
 
+### Publishing a channel (`scripts/publish-channel.mjs`)
+
+`node scripts/publish-channel.mjs --record <build-record.json> [--registry <prefix>] [--out <dir>] [--dry-run]
+[--confirm-absent <ref>]... [--timeout-ms <n>]` publishes one gated build. The record exists only when the
+leak gate passed; the script runs the boot check itself (the imported `run`, not a second copy) and pushes
+nothing unless it exits 0.
+
+- Order: re-check every recorded image `id` against its ref (mismatch exit 2), boot check, prove that EVERY
+  destination tag is absent, print the plan, push api and worker, copy the stock web, re-read each pushed
+  digest, then write `release.json` last (no-overwrite). `--dry-run` stops after the plan and also refuses an
+  existing `release.json`.
+- Destinations: `<registry>/haive-<channel>-{api,worker,web}:<version>`, `<registry>` the record's own api
+  prefix unless `--registry` says otherwise. What is pushed is the single platform image manifest the gate
+  scanned: BuildKit attestation manifests that ride along with a `--load` build are left out, and the stock
+  web is copied by the platform digest inside its recorded `repoDigest`.
+- Manifest: produced by the `build-release-manifest.mjs` and migrations of `record.commit` (`git archive`),
+  not the working tree, so `migrationHead` and `contracts` describe the tagged tree. `images` hold pinned
+  `<repository>@sha256:<digest>` refs, because a channel's images live in channel-named repositories a bare
+  digest cannot be pulled from. The script writes the file locally; serving it to installs is separate work.
+  The updater does not read `images` yet (`packages/updater/src/images.ts` composes refs from the version).
+- Absence proof, fail-closed: a tag counts as absent only when the authenticated
+  `docker buildx imagetools inspect` exits 1 with a line that is exactly `ERROR: <ref>: not found` (MEASURED
+  on ghcr.io and `registry:3`) AND an anonymous registry GET (with the registry's anonymous Bearer token,
+  same https host only, when it answers 401) returns 404 with only `MANIFEST_UNKNOWN`/`NAME_UNKNOWN` errors.
+  When that anonymous read is denied (MEASURED: ghcr.io answers 401, and its anonymous token is DENIED for a
+  repository that does not exist yet), the daemon's line decides alone. That shape sits in one constant
+  marked volatile, so a reworded daemon or a normalized ref refuses rather than overwrites; an unrelated
+  `not found` (a missing credential helper) does not count. Any other failure, `failed to authorize`
+  included, exits 2. A first publish to a new private repository can prove neither:
+  `--confirm-absent <exact ref>` is the operator's statement that it is absent, accepted only for a
+  destination whose proof was denied, never for a 5xx, a network error or a tag seen present. UNMEASURED: an
+  authenticated inspect of a missing tag in a private ghcr repository.
+- Credentials: the operator's docker credential store. The script never runs `docker login`, never takes a
+  token flag, and never prints a token or a helper's output.
+- Exit 0 published; 1 a gate said no with nothing pushed (boot-check mismatch, an existing tag); 2 could not
+  publish. A failure after a push exits 2, writes no manifest and names every attempted and verified remote
+  ref; nothing remote is ever deleted, and a re-run then refuses on the existing tag.
+- Limits: the absence check and the push are not atomic (registry tag writes are unconditional), so two
+  concurrent publishers of one version can race; only registry-side tag immutability closes that. The script
+  imports `packages/shared/src/release/manifest.ts`, so it needs the repository's installed dependencies and
+  a Node with type stripping. `haive-builder` is not part of a channel.
+
 ## Own modules on a published install
 
 `haive-builder:<version>` supplies the core source, Node, pnpm, installed dependencies and pnpm
