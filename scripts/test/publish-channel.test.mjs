@@ -182,9 +182,7 @@ function fixture(t, config = {}) {
   };
   const request = async (url, options) => {
     requests.push({ url, options });
-    assert.equal(options.redirect, 'error');
     if (config.request) return config.request(url, options);
-    assert.ok(!options.headers?.Authorization);
     if (config.fetchError) throw new Error('registry unreachable');
     return {
       status: config.httpStatus ?? 404,
@@ -443,19 +441,11 @@ const destination = (host) => `${PREFIX}/haive-customer-${host}:9.9.9`;
 function tokenRegistry({
   tokenStatus = 200,
   secondStatus = 404,
-  realmHost = '127.0.0.1:5050',
+  realm = 'https://127.0.0.1:5050/token',
 } = {}) {
   return async (url, options) => {
     const parsed = new URL(url);
     if (parsed.pathname === '/token') {
-      assert.equal(parsed.protocol, 'https:');
-      assert.equal(parsed.host, '127.0.0.1:5050');
-      assert.equal(parsed.searchParams.get('service'), 'registry-test');
-      assert.match(
-        parsed.searchParams.get('scope'),
-        /^repository:vendor\/haive-customer-(api|worker|web):pull$/,
-      );
-      assert.ok(!options.headers.Authorization);
       return {
         status: tokenStatus,
         json: async () =>
@@ -463,7 +453,6 @@ function tokenRegistry({
       };
     }
     if (options.headers.Authorization) {
-      assert.equal(options.headers.Authorization, `Bearer ${TOKEN}`);
       return {
         status: secondStatus,
         json: async () => ({ errors: [{ code: 'MANIFEST_UNKNOWN' }] }),
@@ -473,11 +462,30 @@ function tokenRegistry({
     return {
       status: 401,
       headers: new Headers({
-        'www-authenticate': `Bearer realm="https://${realmHost}/token",service="registry-test",scope="repository:${repository}:pull"`,
+        'www-authenticate': `Bearer realm="${realm}",service="registry-test",scope="repository:${repository}:pull"`,
       }),
       json: async () => ({ errors: [{ code: 'UNAUTHORIZED' }] }),
     };
   };
+}
+
+function assertTokenRequests(requests) {
+  for (const { url, options } of requests) {
+    const parsed = new URL(url);
+    assert.equal(options.redirect, 'error');
+    assert.equal(parsed.host, '127.0.0.1:5050');
+    if (parsed.pathname === '/token') {
+      assert.equal(parsed.protocol, 'https:');
+      assert.equal(parsed.searchParams.get('service'), 'registry-test');
+      assert.match(
+        parsed.searchParams.get('scope'),
+        /^repository:vendor\/haive-customer-(api|worker|web):pull$/,
+      );
+      assert.ok(!options.headers.Authorization);
+    } else if (options.headers.Authorization) {
+      assert.equal(options.headers.Authorization, `Bearer ${TOKEN}`);
+    }
+  }
 }
 
 for (const config of [{}, { tokenStatus: 403 }, { tokenStatus: 401 }, { secondStatus: 401 }]) {
@@ -489,6 +497,7 @@ for (const config of [{}, { tokenStatus: 403 }, { tokenStatus: 401 }, { secondSt
       f.logs.join('\n'),
       config.tokenStatus || config.secondStatus ? /daemon-only/ : /corroborated/,
     );
+    assertTokenRequests(f.requests);
     assert.ok(f.requests.some(({ url }) => new URL(url).pathname === '/token'));
     assert.ok(!JSON.stringify({ calls: f.calls, logs: f.logs }).includes(TOKEN));
   });
@@ -501,6 +510,7 @@ test('token DENIED plus daemon authorization failure refuses and names the unpro
   });
   assert.equal(await f.invoke(), 2);
   assert.deepEqual(f.attempted, []);
+  assertTokenRequests(f.requests);
   assert.ok(f.requests.some(({ url }) => new URL(url).pathname === '/token'));
   assert.ok(
     f.logs.some((line) => line.includes(`absence of ${destination('api')} could not be proven`)),
@@ -519,6 +529,7 @@ test('exact confirmations permit only access-denied destinations and are loud in
     f.logs.join('\n'),
   );
   assert.deepEqual(f.attempted, KEYS);
+  assertTokenRequests(f.requests);
   for (const host of KEYS)
     assert.ok(
       f.logs.some((line) => line.includes(`WARNING: --confirm-absent ${destination(host)}`)),
@@ -528,7 +539,6 @@ test('exact confirmations permit only access-denied destinations and are loud in
 for (const config of [
   { httpStatus: 500 },
   { fetchError: true },
-  { request: tokenRegistry({ realmHost: 'another-host.test' }) },
   { request: tokenRegistry({ tokenStatus: 500 }) },
   { request: tokenRegistry({ secondStatus: 500 }) },
   { request: tokenRegistry({ tokenStatus: 403 }), inspectError: 'connection refused: not found' },
@@ -536,6 +546,7 @@ for (const config of [
   test(`confirmation fails closed for transport or untrusted proof ${Object.keys(config)}`, async (t) => {
     const f = fixture(t, config);
     assert.equal(await f.invoke(['--confirm-absent', destination('api')]), 2);
+    assertTokenRequests(f.requests);
     assert.deepEqual(f.attempted, []);
     assert.ok(
       f.logs.some((line) => line.includes(`absence of ${destination('api')} could not be proven`)),
@@ -592,6 +603,7 @@ for (const [name, inspectError] of [
   test(`daemon absence refuses ${name} without confirmation`, async (t) => {
     const f = fixture(t, { request: tokenRegistry({ tokenStatus: 403 }), inspectError });
     assert.equal(await f.invoke(), 2);
+    assertTokenRequests(f.requests);
     assert.deepEqual(f.attempted, []);
     assert.ok(!existsSync(f.manifest));
     assert.match(f.logs.join('\n'), /could not be proven/);
@@ -624,3 +636,27 @@ test('daemon absence word-bounds transport tokens outside a multiline exact proo
   assert.equal(f.logs.filter((line) => line.includes('daemon-only')).length, 3);
   assert.deepEqual(f.attempted, []);
 });
+
+for (const [name, realm] of [
+  ['foreign host', 'https://another-host.test/token'],
+  ['non-https', 'http://127.0.0.1:5050/token'],
+  ['username', 'https://operator@127.0.0.1:5050/token'],
+  ['password', 'https://:secret@127.0.0.1:5050/token'],
+  ['fragment', 'https://127.0.0.1:5050/token#fragment'],
+]) {
+  test(`untrusted Bearer realm ${name} refuses before any token request`, async (t) => {
+    const f = fixture(t, { request: tokenRegistry({ realm }) });
+    assert.equal(await f.invoke(['--confirm-absent', destination('api')]), 2);
+    assertTokenRequests(f.requests);
+    assert.deepEqual(f.attempted, []);
+    assert.ok(!existsSync(f.manifest));
+    assert.ok(f.requests.every(({ url }) => new URL(url).host === '127.0.0.1:5050'));
+    assert.ok(!f.requests.some(({ url }) => new URL(url).pathname === '/token'));
+    assert.ok(f.requests.every(({ options }) => !options.headers.Authorization));
+    assert.deepEqual(
+      f.requests.map(({ url }) => url),
+      ['http://127.0.0.1:5050/v2/vendor/haive-customer-api/manifests/9.9.9'],
+    );
+    assert.match(f.logs.join('\n'), /could not be proven/);
+  });
+}
