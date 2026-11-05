@@ -296,7 +296,7 @@ export async function resolveImageSettings(
 /** Pull even when cached: revoked credentials and missing remote tags must refuse preflight. */
 export async function readReleaseManifestImage(image: string): Promise<string> {
   await run('docker', ['pull', image], undefined, 1_800_000);
-  const dir = await mkdtemp(join(tmpdir(), 'haive-release-'));
+  const dir = await mkdtemp(join(tmpdir(), 'updater-release-'));
   const name = containerName(CONTAINER_FAMILY.upgrade, 'manifest', randomUUID());
   let id = name;
   try {
