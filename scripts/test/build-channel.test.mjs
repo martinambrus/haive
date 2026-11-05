@@ -626,16 +626,18 @@ for (const gateCode of [3, null, -1]) {
 
 test('abort during build removes scratch and secrets without gate or record', async (t) => {
   const controller = new AbortController();
+  let observedSignal;
   const f = fixture(t, {
     signal: controller.signal,
     onCall(cmd, args, options) {
       if (args[0] === 'buildx') {
-        assert.equal(options.signal, controller.signal);
+        observedSignal = options.signal;
         controller.abort();
       }
     },
   });
   assert.equal(await f.execute(), 2);
+  assert.equal(observedSignal, controller.signal);
   assert.ok(!existsSync(f.scratch));
   assert.ok(!existsSync(f.secret));
   assert.ok(!f.calls.some((c) => c.args[0]?.endsWith('/channel-gate.mjs')));
@@ -667,9 +669,14 @@ test('existing output tag is refused before module add', async (t) => {
 
 test('out is probed for writability before builds', async (t) => {
   const f = fixture(t);
-  writeFileSync(f.out, 'file blocking output directory');
-  assert.equal(await f.execute(), 2);
-  assert.ok(!f.calls.some((c) => c.args[0] === 'buildx'));
+  mkdirSync(f.out);
+  chmodSync(f.out, 0o500);
+  try {
+    assert.equal(await f.execute(), 2);
+    assert.ok(!f.calls.some((c) => c.args[0] === 'buildx'));
+  } finally {
+    chmodSync(f.out, 0o700);
+  }
 });
 
 for (const dirtyGate of [
