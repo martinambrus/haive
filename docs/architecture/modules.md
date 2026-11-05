@@ -363,6 +363,39 @@ which also finds an indented key). It exits 0 only when every image passed, 1 wi
 line per finding, and 2 when it could not look, offenders still printed; it never prints the token or
 an `.npmrc` value. A multi-platform `docker save` is refused (2): channel images are single-platform.
 
+### Building a channel (`scripts/build-channel.mjs`)
+
+`node scripts/build-channel.mjs --tag vX.Y.Z --channel <name> --modules <file.json> --token-file <file>
+[--registry <output-prefix>] [--source-registry <stock-prefix>] [--out <dir>] [--replace]` builds one
+customer's images locally and runs the gate on them. It never pushes or logs in; publishing is a separate
+step that reads its record.
+
+- Inputs: a final tag only (`vX.Y.Z`, no prerelease), resolved to its commit and exported with `git archive`
+  into a temp dir outside the repository; never the working tree. `<file.json>` is a JSON array of exact
+  `@haive-module/<id>@<version>` specifications. The channel name is 1-32 lowercase letters, digits or dashes.
+- Preflight, before any network use: the tag's tree must hold `scripts/module.mjs`, `scripts/gen-modules.mjs`
+  and an `id=npmrc` secret mount in each of the api, worker and web Dockerfiles. v0.2.0 and older are refused
+  (exit 2, the missing file named). The working tree's `scripts/channel-gate.mjs` and
+  `scripts/smoke/scan-image.sh` must be clean, because the gate runs from this checkout, not from the tag.
+- Modules: `module add` runs once per entitled package inside the tree. Every `modules/<dir>/package.json`
+  in the tree is expected as a local module, with web parts read from its `./dashboard` and `./web` exports.
+- Token: it reaches pnpm and BuildKit only as a private 0600 `.npmrc` in scratch (`--secret id=npmrc`), never
+  argv, env or a build ARG. Streamed output is scrubbed of it across chunk boundaries. Scratch, the pnpm cache
+  (`XDG_CACHE_HOME`) and the secret are removed on every path; a cleanup failure prints the leftover path and
+  keeps the exit code.
+- Images: api and worker are built with `--target production`, `--load`, `HAIVE_VERSION` and the build
+  platform, tagged `<registry>/haive-<channel>-<host>:<version>`. Web is rebuilt only when an entitled module
+  exports web parts. Otherwise the stock `<source-registry>/haive-web:<version>` is pulled for that platform.
+  `--source-registry` defaults to `HAIVE_REGISTRY`, then `ghcr.io/martinambrus`. An existing local tag is
+  refused unless `--replace` is given. Default BuildKit attestations are kept. The gate's `docker save`
+  accepts both a `--load` build and a single-platform pull of a multi-platform index on the containerd image
+  store (one manifest entry), measured 2026-11-05.
+- Result: the gate's exit code. Only on exit 0 is `<out>/build-record.json` written. A stale record is deleted
+  before building, and a failed run leaves its tags for diagnosis. The record carries `"schema": 1`, the tag,
+  commit, channel, version, platform, the docker image store, and per image its `ref`, `built`, `id` and, for
+  the stock image, its `repoDigest`. Ids are read before and after the gate, and a change is refused. Under
+  the containerd store `id` is the index digest; under the classic store it is the config digest.
+
 ## Own modules on a published install
 
 `haive-builder:<version>` supplies the core source, Node, pnpm, installed dependencies and pnpm
