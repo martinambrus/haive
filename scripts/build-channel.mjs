@@ -57,7 +57,8 @@ export function parseModules(value) {
 
 function capture(command, args, options) {
   return new Promise((resolveResult) => {
-    const child = spawn(command, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'] });
+    const { onOutput, ...spawnOptions } = options;
+    const child = spawn(command, args, { ...spawnOptions, stdio: ['ignore', 'pipe', 'pipe'] });
     const stdout = [];
     const stderr = [];
     let size = 0;
@@ -69,8 +70,18 @@ function capture(command, args, options) {
         child.kill('SIGTERM');
       } else chunks.push(chunk);
     };
-    child.stdout.on('data', collect(stdout));
-    child.stderr.on('data', collect(stderr));
+    if (onOutput) {
+      for (const [name, stream] of [
+        ['stdout', child.stdout],
+        ['stderr', child.stderr],
+      ]) {
+        stream.setEncoding('utf8');
+        stream.on('data', (chunk) => onOutput(chunk, name));
+      }
+    } else {
+      child.stdout.on('data', collect(stdout));
+      child.stderr.on('data', collect(stderr));
+    }
     child.on('error', (cause) => {
       error = cause;
     });
@@ -169,16 +180,30 @@ export async function run(
     const command = async (
       cmd,
       args,
-      { cwd = root, quiet = false, allowFailure = false, ...options } = {},
+      { cwd = root, quiet = false, allowFailure = false, stream = false, ...options } = {},
     ) => {
       if (signal?.aborted) throw new Error('interrupted');
-      const result = await runner(cmd, args, {
-        cwd,
-        env: childEnv,
-        timeout: 1_800_000,
-        signal,
-        ...options,
-      });
+      const buffers = new Map();
+      const onOutput = (chunk, name = 'stdout') => {
+        const text = scrub((buffers.get(name) ?? '') + chunk);
+        let keep = Math.min(text.length, token.length - 1);
+        while (keep > 0 && !text.endsWith(token.slice(0, keep))) keep--;
+        buffers.set(name, keep ? text.slice(-keep) : '');
+        emit(keep ? text.slice(0, -keep) : text);
+      };
+      let result;
+      try {
+        result = await runner(cmd, args, {
+          cwd,
+          env: childEnv,
+          timeout: 1_800_000,
+          signal,
+          ...options,
+          ...(stream ? { onOutput } : {}),
+        });
+      } finally {
+        for (const text of buffers.values()) emit(text);
+      }
       if (!quiet) {
         emit(result.stdout);
         emit(result.stderr);
@@ -204,6 +229,24 @@ export async function run(
     const commit = resolved.stdout.trim();
     if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit))
       throw new Error('tag did not resolve to a commit');
+    const gateStatus = await command(
+      'git',
+      [
+        '-C',
+        root,
+        'status',
+        '--porcelain=v1',
+        '--untracked-files=all',
+        '--',
+        'scripts/channel-gate.mjs',
+        'scripts/smoke/scan-image.sh',
+      ],
+      { quiet: true },
+    );
+    if (gateStatus.stdout.trim())
+      throw new Error(
+        'gate tooling is dirty: scripts/channel-gate.mjs or scripts/smoke/scan-image.sh',
+      );
     const tempBase = realpathSync(tmpdir());
     const rel = relative(realpathSync(root), tempBase);
     if (rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`)))
@@ -258,7 +301,12 @@ export async function run(
     writeFileSync(npmrc, privateNpmrc(tree, token), { mode: 0o600, flag: 'wx' });
     const tokenFile = join(scratch, 'token');
     writeFileSync(tokenFile, token, { mode: 0o600, flag: 'wx' });
-    const moduleEnv = { ...childEnv, NPM_CONFIG_USERCONFIG: npmrc, CI: 'true' };
+    const moduleEnv = {
+      ...childEnv,
+      NPM_CONFIG_USERCONFIG: npmrc,
+      XDG_CACHE_HOME: join(scratch, 'cache'),
+      CI: 'true',
+    };
     for (const module of modules.filter((module) => module.source === 'registry')) {
       const spec = `${module.packageName}@${module.version}`;
       const metadata = await command('pnpm', ['view', spec, 'exports', '--json'], {
@@ -266,14 +314,11 @@ export async function run(
         env: moduleEnv,
         quiet: true,
       });
+      if (!metadata.stdout.trim()) throw new Error(`pnpm view returned no exports for ${spec}`);
       const exports = JSON.parse(metadata.stdout);
       if (!exports || exports['./manifest'] === undefined)
         throw new Error('an entitled package does not export ./manifest');
       module.webParts = ['dashboard', 'web'].filter((part) => exports[`./${part}`] !== undefined);
-      await command(process.execPath, [join(tree, 'scripts', 'module.mjs'), 'add', spec], {
-        cwd: tree,
-        env: moduleEnv,
-      });
     }
     const rebuildWeb = modules.some(
       (module) => module.source === 'registry' && module.webParts.length > 0,
@@ -294,6 +339,23 @@ export async function run(
     }
     mkdirSync(out, { recursive: true });
     rmSync(join(out, 'build-record.json'), { force: true });
+    const probe = join(out, `.write-probe-${process.pid}`);
+    try {
+      writeFileSync(probe, '', { flag: 'wx', mode: 0o600 });
+    } finally {
+      rmSync(probe, { force: true });
+    }
+    const expectation = { version, images, modules };
+    parseExpect(JSON.stringify(expectation));
+    const expectFile = join(scratch, 'expect.json');
+    put(expectFile, expectation);
+    for (const module of modules.filter((module) => module.source === 'registry')) {
+      const spec = `${module.packageName}@${module.version}`;
+      await command(process.execPath, [join(tree, 'scripts', 'module.mjs'), 'add', spec], {
+        cwd: tree,
+        env: moduleEnv,
+      });
+    }
     const store = JSON.parse(
       (await command('docker', ['info', '--format', '{{json .}}'], { quiet: true })).stdout,
     );
@@ -308,6 +370,8 @@ export async function run(
           '--platform',
           platform,
           '--load',
+          '--target',
+          'production',
           '--secret',
           `id=npmrc,src=${npmrc}`,
           '--build-arg',
@@ -318,7 +382,7 @@ export async function run(
           images[host],
           tree,
         ],
-        { cwd: tree },
+        { cwd: tree, stream: true },
       );
       retainedImages.push(images[host]);
     }
@@ -342,10 +406,6 @@ export async function run(
       if (!repoDigest || !/@sha256:[a-f0-9]{64}$/.test(repoDigest))
         throw new Error('could not read the pulled stock web RepoDigest');
     }
-    const expectation = { version, images, modules };
-    parseExpect(JSON.stringify(expectation));
-    const expectFile = join(scratch, 'expect.json');
-    put(expectFile, expectation);
     const readIds = async () => {
       const result = {};
       for (const [host, ref] of Object.entries(images)) {
@@ -408,7 +468,11 @@ export async function run(
       });
       renameSync(pending, join(out, 'build-record.json'));
     } finally {
-      rmSync(pending, { force: true });
+      try {
+        rmSync(pending, { force: true });
+      } catch {
+        emit(`build-channel: cleanup failed; leftover path ${pending}`);
+      }
     }
     emit(`build-channel: passed; record ${join(out, 'build-record.json')}`);
     return 0;
@@ -418,7 +482,13 @@ export async function run(
       emit(`build-channel: tags retained for diagnosis: ${retainedImages.join(', ')}`);
     return 2;
   } finally {
-    if (scratch) rmSync(scratch, { recursive: true, force: true, maxRetries: 3 });
+    if (scratch) {
+      try {
+        rmSync(scratch, { recursive: true, force: true, maxRetries: 3 });
+      } catch {
+        emit(`build-channel: cleanup failed; leftover path ${scratch}`);
+      }
+    }
   }
 }
 

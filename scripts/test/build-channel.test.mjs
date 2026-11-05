@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -39,6 +40,7 @@ function seedTree(tree, config = {}) {
     `@haive-module:registry=${config.scope ?? 'https://npm.pkg.github.com'}\n`,
   );
   mkdirSync(join(tree, 'modules'), { recursive: true });
+  writeFileSync(join(tree, 'modules', '.gitkeep'), '');
   if (config.local) {
     mkdirSync(join(tree, 'modules', 'statistics'));
     writeFileSync(
@@ -120,7 +122,11 @@ function fixture(t, config = {}) {
       assert.ok(readFileSync(secret, 'utf8').includes(TOKEN));
       assert.ok(!readFileSync(join(context, '.npmrc'), 'utf8').includes(TOKEN));
       if (config.delegate) assert.equal(readFileSync(join(context, 'marker'), 'utf8'), 'tag');
-      if (options.onOutput) options.onOutput(`build output ${TOKEN}\n`);
+      if (options.onOutput) {
+        options.onOutput('build output ' + TOKEN.slice(0, 10), 'stdout');
+        options.onOutput('stderr progress\n', 'stderr');
+        options.onOutput(TOKEN.slice(10) + '\n', 'stdout');
+      }
       return {
         status: config.buildFailure ? 1 : 0,
         stdout: options.onOutput ? '' : `build output ${TOKEN}\n`,
@@ -148,6 +154,16 @@ function fixture(t, config = {}) {
       const file = args[args.indexOf('--expect') + 1];
       expectation = JSON.parse(readFileSync(file, 'utf8'));
       parseExpect(JSON.stringify(expectation));
+      if (config.cleanupFailure) {
+        const locked = join(scratch, 'locked');
+        mkdirSync(locked);
+        writeFileSync(join(locked, 'file'), 'locked');
+        chmodSync(locked, 0);
+        t.after(() => {
+          chmodSync(locked, 0o700);
+          rmSync(scratch, { recursive: true, force: true });
+        });
+      }
       assert.equal(readFileSync(args[args.indexOf('--token-file') + 1], 'utf8').trim(), TOKEN);
       return {
         status: 'gateCode' in config ? config.gateCode : 0,
@@ -680,4 +696,23 @@ test('empty pnpm metadata has a named refusal and isolated cache', async (t) => 
   );
   const query = f.calls.find((c) => c.cmd === 'pnpm');
   assert.equal(query.options.env.XDG_CACHE_HOME, join(f.scratch, 'cache'));
+});
+
+test('split tokens are scrubbed while build output streams', async (t) => {
+  const f = fixture(t);
+  assert.equal(await f.execute(), 0);
+  assert.ok(f.logs.some((line) => line.includes('build output')));
+  assert.ok(f.logs.some((line) => line.includes('[token]')));
+  assert.ok(!f.logs.join('').includes(TOKEN));
+  assert.ok(!f.logs.some((line) => line.includes(TOKEN.slice(0, 10))));
+});
+
+test('cleanup failure preserves gate status and reports the leftover path', async (t) => {
+  const f = fixture(t, { cleanupFailure: true, gateCode: 1 });
+  assert.equal(await f.execute(), 1);
+  assert.ok(
+    f.logs.some(
+      (line) => line.includes('cleanup failed; leftover path') && line.includes(f.scratch),
+    ),
+  );
 });
