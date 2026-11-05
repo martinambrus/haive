@@ -550,3 +550,13 @@ test('confirmation must name an exact destination', async (t) => {
   assert.equal(f.bootCalls.length, 0);
   assert.match(f.logs.join('\n'), /--confirm-absent is not a destination/);
 });
+
+test('dry-run refuses an existing manifest just like publication', async (t) => {
+  const f = fixture(t, { existingManifest: true });
+  mkdirSync(f.out);
+  writeFileSync(f.manifest, 'previous manifest');
+  assert.equal(await f.invoke(['--dry-run']), 2);
+  assert.deepEqual(f.attempted, []);
+  assert.equal(readFileSync(f.manifest, 'utf8'), 'previous manifest');
+  assert.match(f.logs.join('\n'), /manifest already exists/);
+});

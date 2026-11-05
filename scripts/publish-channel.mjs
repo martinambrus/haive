@@ -390,11 +390,11 @@ export async function run(
       throw new Error('record tree produced an inconsistent release manifest');
     const output = join(resolve(values.out?.[0] ?? dirname(recordPath)), 'release.json');
     emit(`publish-channel: plan manifest ${output} LAST (metadata from ${record.commit})`);
+    if (existsSync(output)) throw new Error(`manifest already exists: ${output}`);
     if (values['dry-run']) {
       emit('publish-channel: dry-run passed; nothing pushed; no manifest written');
       return 0;
     }
-    if (existsSync(output)) throw new Error(`manifest already exists: ${output}`);
     mkdirSync(dirname(output), { recursive: true });
     for (const host of KEYS) {
       if (!(await absent(destinations[host]))) {
