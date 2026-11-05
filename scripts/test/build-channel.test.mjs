@@ -661,10 +661,10 @@ test('build commands pin tags, Dockerfiles, context, production target, and orde
   }
 });
 
-test('existing output tag is refused before module add', async (t) => {
+test('existing output tag is refused before registry metadata or module add', async (t) => {
   const f = fixture(t, { existing: true, modules: ['@haive-module/demo@1.0.0'] });
   assert.equal(await f.execute(), 2);
-  assert.ok(!f.calls.some((c) => c.args[0]?.endsWith('/module.mjs')));
+  assert.ok(!f.calls.some((c) => c.cmd === 'pnpm' || c.args[0]?.endsWith('/module.mjs')));
 });
 
 test('out is probed for writability before builds', async (t) => {

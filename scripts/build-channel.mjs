@@ -301,6 +301,21 @@ export async function run(
     writeFileSync(npmrc, privateNpmrc(tree, token), { mode: 0o600, flag: 'wx' });
     const tokenFile = join(scratch, 'token');
     writeFileSync(tokenFile, token, { mode: 0o600, flag: 'wx' });
+    const outputImage = (host) => `${registry}/haive-${channel}-${host}:${version}`;
+    const checkTags = async (hosts) => {
+      for (const host of hosts) {
+        const found = await command(
+          'docker',
+          ['image', 'ls', '--quiet', '--no-trunc', '--filter', `reference=${outputImage(host)}`],
+          { quiet: true },
+        );
+        if (found.stdout.trim() && !values.replace)
+          throw new Error(
+            `local tag ${outputImage(host)} already exists; use --replace to overwrite`,
+          );
+      }
+    };
+    await checkTags(['api', 'worker']);
     const moduleEnv = {
       ...childEnv,
       NPM_CONFIG_USERCONFIG: npmrc,
@@ -324,19 +339,9 @@ export async function run(
       (module) => module.source === 'registry' && module.webParts.length > 0,
     );
     const hosts = ['api', 'worker', ...(rebuildWeb ? ['web'] : [])];
-    const images = Object.fromEntries(
-      hosts.map((host) => [host, `${registry}/haive-${channel}-${host}:${version}`]),
-    );
+    const images = Object.fromEntries(hosts.map((host) => [host, outputImage(host)]));
     if (!rebuildWeb) images.web = `${sourceRegistry}/haive-web:${version}`;
-    for (const host of hosts) {
-      const found = await command(
-        'docker',
-        ['image', 'ls', '--quiet', '--no-trunc', '--filter', `reference=${images[host]}`],
-        { quiet: true },
-      );
-      if (found.stdout.trim() && !values.replace)
-        throw new Error(`local tag ${images[host]} already exists; use --replace to overwrite`);
-    }
+    if (rebuildWeb) await checkTags(['web']);
     mkdirSync(out, { recursive: true });
     rmSync(join(out, 'build-record.json'), { force: true });
     const probe = join(out, `.write-probe-${process.pid}`);
