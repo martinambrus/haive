@@ -1,12 +1,13 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
+import { hostname } from 'node:os';
+import { safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
 import { basename, dirname } from 'node:path';
 import { CONTAINER_FAMILY, containerName, logger } from '@haive/shared';
 import { openDirNoFollow, openFileNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import { childFd, runTool } from '../repo/tool-spawn.js';
 
-export const PIN_IMAGE = 'python:3.14-alpine';
 export const PIN_SCRIPT = String.raw`
 import ctypes, fcntl, json, os, re, shutil, stat, sys, tarfile, uuid
 root, module = sys.argv[1:]
@@ -20,6 +21,12 @@ if os.geteuid() == 0:
     os.setuid(owner.st_uid)
 fd = os.open(root, flags)
 fcntl.flock(fd, fcntl.LOCK_EX)
+for stale in os.listdir(fd):
+    if stale.startswith('.' + module + '.tmp-'):
+        if stat.S_ISDIR(os.stat(stale, dir_fd=fd, follow_symlinks=False).st_mode):
+            shutil.rmtree(stale, dir_fd=fd)
+        else:
+            os.unlink(stale, dir_fd=fd)
 stage = '.' + module + '.tmp-' + str(uuid.uuid4())
 os.mkdir(stage, 0o755, dir_fd=fd)
 staged = os.open(stage, flags, dir_fd=fd)
@@ -91,11 +98,45 @@ finally:
 
 const exec = promisify(execFile);
 
+export async function resolveWorkerImage(
+  container: string = hostname(),
+  inspect: (container: string) => Promise<string> = async (name) =>
+    (
+      await exec('docker', ['container', 'inspect', '--format', '{{.Image}}', '--', name], {
+        timeout: 15_000,
+        maxBuffer: 4096,
+      })
+    ).stdout,
+): Promise<string> {
+  try {
+    const image = (await inspect(container)).trim();
+    if (!/^sha256:[a-f0-9]{64}$/.test(image)) throw new Error('Invalid worker image id');
+    return image;
+  } catch {
+    throw new Error(
+      'module_source_worker_image_unavailable: Cannot resolve this worker container image',
+    );
+  }
+}
+
+export function modulePinError(error: unknown, hostDir: string): Error {
+  const failure = error as { stderr?: string; code?: unknown; signal?: string };
+  const detail =
+    failure.stderr?.trim().split('\n').at(-1) ||
+    failure.signal ||
+    failure.code ||
+    safeErrorMessage(error);
+  return new Error(
+    'Module pin failed: ' + scrubErrorPaths(String(detail).split(hostDir).join('[path]')),
+  );
+}
+
 export async function pinModuleTree(
   tree: string,
   hostDir: string,
   moduleId: string,
 ): Promise<void> {
+  const image = await resolveWorkerImage();
   const dir = await openDirNoFollow(dirname(tree), basename(tree));
   const rel = '.haive-archive-' + randomUUID();
   const created = await openFileNoFollow(tree, rel, 'create-exclusive', { fileMode: 0o600 }).catch(
@@ -125,6 +166,8 @@ export async function pinModuleTree(
       [
         'run',
         '--rm',
+        '--pull',
+        'never',
         '-i',
         '--name',
         name,
@@ -145,7 +188,7 @@ export async function pinModuleTree(
         '256m',
         '--mount',
         `type=bind,src=${hostDir},dst=/output`,
-        PIN_IMAGE,
+        image,
         'python3',
         '-B',
         '-c',
@@ -162,14 +205,7 @@ export async function pinModuleTree(
     try {
       await run;
     } catch (error) {
-      const failure = error as { stderr?: string; code?: unknown; signal?: string };
-      throw new Error(
-        'Module pin failed: ' +
-          (failure.stderr?.trim().split('\n').at(-1) ||
-            failure.signal ||
-            failure.code ||
-            'helper exited without a result'),
-      );
+      throw modulePinError(error, hostDir);
     } finally {
       input.destroy();
     }
