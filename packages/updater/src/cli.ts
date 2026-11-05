@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
 import postgres from 'postgres';
 import { configService, networkName } from '@haive/shared';
 import { parseReleaseManifest, type ReleaseManifest } from '@haive/shared/release';
@@ -59,11 +60,38 @@ function emit(event: string, fields: Record<string, unknown> = {}): void {
   console.log(JSON.stringify({ t: new Date().toISOString(), event, ...fields }));
 }
 
-async function loadManifest(source: string): Promise<ReleaseManifest> {
-  const text = /^https?:\/\//.test(source)
-    ? await (await fetch(source)).text()
-    : await readFile(source, 'utf8');
-  return parseReleaseManifest(JSON.parse(text));
+/** Match scripts/build-channel.mjs; an unset install channel means public. */
+export function resolveChannel(requested: string | undefined, installed: string): string {
+  const channel = installed || 'public';
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(channel))
+    throw new Error('invalid install channel');
+  if (requested !== undefined && requested !== channel)
+    throw new Error('--channel disagrees with install HAIVE_CHANNEL');
+  return channel;
+}
+
+export async function loadManifest(options: {
+  manifest?: string;
+  manifestImage?: string;
+  channel: string;
+  version?: string;
+}): Promise<ReleaseManifest> {
+  const { manifest: source, manifestImage: image, channel, version } = options;
+  if (source && image) throw new Error('--manifest and --manifest-image are mutually exclusive');
+  if (channel !== 'public' && !image) throw new Error('channel installs require --manifest-image');
+  if (image && !version) throw new Error('--manifest-image requires --version <target>');
+  if (!source && !image)
+    throw new Error('--manifest <url|path> or --manifest-image <ref> is required');
+  const text = image
+    ? await dk.readReleaseManifestImage(image)
+    : /^https?:\/\//.test(source!)
+      ? await (await fetch(source!)).text()
+      : await readFile(source!, 'utf8');
+  const target = parseReleaseManifest(JSON.parse(text));
+  if (target.channel !== channel) throw new Error('manifest channel differs from install channel');
+  if (version !== undefined && target.version !== version)
+    throw new Error('manifest version differs from requested target version');
+  return target;
 }
 
 /** A rollback that throws has not undone the upgrade, so the run stays `running` for the next
@@ -87,7 +115,11 @@ async function rollbackFailed(ctx: UpgradeContext, err: unknown): Promise<number
   return EXIT.rollbackFailed;
 }
 
-async function main(): Promise<number> {
+export async function main(): Promise<number> {
+  if (flag('manifest') && flag('manifest-image')) {
+    emit('error', { message: '--manifest and --manifest-image are mutually exclusive' });
+    return EXIT.usage;
+  }
   const databaseUrl = process.env.DATABASE_URL;
   const redisUrl = process.env.REDIS_URL;
   if (!databaseUrl || !redisUrl) {
@@ -118,6 +150,20 @@ async function main(): Promise<number> {
     dir: installDir,
     files: ['docker-compose.yml', 'docker-compose.run.yml'],
   };
+
+  const channelSettings = await dk.resolveImageSettings(envFile, ['HAIVE_CHANNEL']);
+  const channel = resolveChannel(arg('channel'), channelSettings.HAIVE_CHANNEL ?? '');
+  const manifestOptions = {
+    manifest: arg('manifest'),
+    manifestImage: arg('manifest-image'),
+    channel,
+    version: arg('version'),
+  };
+  // A channel must be proven before opening the journal or changing maintenance state.
+  const channelTarget =
+    channel !== 'public' || manifestOptions.manifestImage
+      ? await loadManifest(manifestOptions)
+      : undefined;
 
   const sql = postgres(databaseUrl, { max: 1, max_lifetime: 0 });
   try {
@@ -171,12 +217,7 @@ async function main(): Promise<number> {
       return EXIT.ok;
     }
 
-    const manifestSource = arg('manifest');
-    if (!manifestSource) {
-      emit('error', { message: '--manifest <url|path> is required' });
-      return EXIT.usage;
-    }
-    const target = await loadManifest(manifestSource);
+    const target = channelTarget ?? (await loadManifest(manifestOptions));
 
     const imageSettings = await readImageSettings(envFile);
     const previousImages = await readImageOverrides(envFile, imageSettings);
@@ -280,9 +321,11 @@ async function main(): Promise<number> {
   }
 }
 
-try {
-  process.exit(await main());
-} catch (err) {
-  emit('error', { message: err instanceof Error ? err.message : String(err) });
-  process.exit(EXIT.failed);
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try {
+    process.exit(await main());
+  } catch (err) {
+    emit('error', { message: err instanceof Error ? err.message : String(err) });
+    process.exit(EXIT.failed);
+  }
 }

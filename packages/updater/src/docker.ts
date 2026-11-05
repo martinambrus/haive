@@ -1,3 +1,8 @@
+import { randomUUID } from 'node:crypto';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { CONTAINER_FAMILY, containerName } from '@haive/shared/naming';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, resolve } from 'node:path';
@@ -259,5 +264,26 @@ export async function resolveImageSettings(
     throw new Error(
       'could not resolve install image settings with Docker Compose; check .env syntax and Compose availability',
     );
+  }
+}
+
+/** Pull even when cached: revoked credentials and missing remote tags must refuse preflight. */
+export async function readReleaseManifestImage(image: string): Promise<string> {
+  await run('docker', ['pull', image], undefined, 1_800_000);
+  const dir = await mkdtemp(join(tmpdir(), 'haive-release-'));
+  const name = containerName(CONTAINER_FAMILY.upgrade, 'manifest', randomUUID());
+  let id = name;
+  try {
+    // A scratch release image has no CMD. This command is never executed.
+    id = await run('docker', ['create', '--name', name, image, '/unused']);
+    const file = join(dir, 'release.json');
+    await run('docker', ['cp', `${id}:/release.json`, file]);
+    return await readFile(file, 'utf8');
+  } finally {
+    try {
+      await run('docker', ['rm', '-f', id]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   }
 }
