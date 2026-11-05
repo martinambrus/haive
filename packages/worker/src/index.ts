@@ -69,6 +69,7 @@ import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
 import { bootStepEngine } from './step-engine/boot.js';
 import { MODULE_JOBS_RECONCILE_MS, startModuleJobs } from './modules/loader.js';
 import { guardShutdown } from './shutdown-guard.js';
+import { startModuleSourceWorker } from './queues/module-source-queue.js';
 import { startModuleControlWorker } from './queues/module-control-queue.js';
 import { deactivatedModuleIds, moduleActivationState } from './modules/activation.js';
 import { ModulePassScheduler } from './modules/pass-scheduler.js';
@@ -291,6 +292,7 @@ async function main(): Promise<void> {
     new Set([...deactivatedAtBoot, ...(await deactivatedModuleIds(getDb()))]),
   );
   // After the module jobs: a teardown refuses a module whose jobs this worker started.
+  const moduleSourceWorker = startModuleSourceWorker();
   const moduleControlWorker = startModuleControlWorker({
     loaded: loadedModules,
     entries: moduleEntries,
@@ -351,6 +353,7 @@ async function main(): Promise<void> {
       prPollWorker.close(true),
       planMirrorWorker.close(true),
       moduleControlWorker.close(true),
+      moduleSourceWorker.close(true),
       closeTaskQueue(),
       closeCliExecQueue(),
       closePrPollQueue(),

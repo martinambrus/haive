@@ -107,6 +107,7 @@ export const QUEUE_NAMES = {
   PR_POLL: 'haive-pr-poll',
   PLAN_MIRROR: 'haive-plan-mirror',
   MODULE_CONTROL: 'haive-module-control',
+  MODULE_SOURCE: 'haive-module-source',
 } as const;
 
 export const PLAN_MIRROR_JOB_NAMES = {
@@ -311,6 +312,16 @@ export interface DdevControlResult {
 export const MODULE_CONTROL_JOB_NAMES = {
   TEARDOWN: 'teardown',
 } as const;
+
+export const MODULE_SOURCE_JOB_NAMES = {
+  FETCH: 'fetch-source',
+} as const;
+
+export interface ModuleSourcePayload {
+  sourceId: string;
+  moduleId: string;
+  requestedAt: string;
+}
 
 export interface ModuleTeardownPayload {
   moduleId: string;

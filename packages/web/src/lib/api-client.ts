@@ -2901,3 +2901,47 @@ export const getIntegrationCategories = (signal?: AbortSignal) =>
   api.get<{
     categories: { id: string; label: string; moduleId: string | null; moduleName: string | null }[];
   }>('/integrations/categories', signal);
+
+export interface ModuleInstallSource {
+  id: string;
+  kind: 'git' | 'registry';
+  moduleId: string;
+  url: string | null;
+  ref: string | null;
+  packageName: string | null;
+  version: string | null;
+  hasToken: boolean;
+  resolvedSha: string | null;
+  fetchStatus: string | null;
+  fetchedAt: string | null;
+  lastError: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface ModuleSourceInput {
+  kind: 'git' | 'registry';
+  moduleId: string;
+  url?: string;
+  ref?: string;
+  packageName?: string;
+  version?: string;
+  token?: string;
+  clearToken?: boolean;
+}
+export interface ModuleSourcesResponse {
+  writable: boolean;
+  fetchConfigured: boolean;
+  sources: ModuleInstallSource[];
+}
+export const getModuleSources = () => api.get<ModuleSourcesResponse>('/modules/sources');
+export const fetchModuleSource = (id: string, refresh = false) =>
+  api.post<ModuleInstallSource>('/modules/sources/' + encodeURIComponent(id) + '/fetch', {
+    refresh,
+  });
+export const createModuleSource = (body: ModuleSourceInput) =>
+  api.post<ModuleInstallSource>('/modules/sources', body);
+export const updateModuleSource = (id: string, body: ModuleSourceInput) =>
+  api.put<ModuleInstallSource>('/modules/sources/' + encodeURIComponent(id), body);
+export const deleteModuleSource = (id: string) =>
+  api.delete<{ deleted: boolean }>('/modules/sources/' + encodeURIComponent(id));

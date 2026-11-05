@@ -69,18 +69,21 @@ services:
     # surface to get it.
     ports:
       - '${HAIVE_API_PORT:-3001}:3001'
-    # Everything the in-app "Upgrade" button needs, and nothing it does not.
-    #
-    # HAIVE_INSTALL_DIR_HOST is the only one with no sane default, so it is the one that gates the
-    # feature: the api hands it to `docker run -v`, which the DAEMON resolves on the HOST, so a
-    # guess (`$PWD`, `process.cwd()`) silently bind-mounts the wrong directory. That is exactly how
-    # the first real upgrade wrote its snapshot to a `/snapshots` nobody owned. Unset, the endpoint
-    # refuses and says so; it never infers.
-    #
-    # `HAIVE_VERSION` is deliberately NOT passed: it is stamped into the image at build time, and a
-    # compose-level copy would be a second source of truth that disagrees during a rollback — the
-    # moment `.env` is re-pinned but the containers have not been recreated yet.
     environment:
+      # HAIVE_PUBLISHED_INSTALL enables module source management on published-image installs.
+      HAIVE_PUBLISHED_INSTALL: 'true'
+      HAIVE_OWN_MODULES_HOST_DIR: ${HAIVE_OWN_MODULES_HOST_DIR:-}
+      # Everything the in-app "Upgrade" button needs, and nothing it does not.
+      #
+      # HAIVE_INSTALL_DIR_HOST is the only one with no sane default, so it is the one that gates the
+      # feature: the api hands it to `docker run -v`, which the DAEMON resolves on the HOST, so a
+      # guess (`$PWD`, `process.cwd()`) silently bind-mounts the wrong directory. That is exactly how
+      # the first real upgrade wrote its snapshot to a `/snapshots` nobody owned. Unset, the endpoint
+      # refuses and says so; it never infers.
+      #
+      # `HAIVE_VERSION` is deliberately NOT passed: it is stamped into the image at build time, and a
+      # compose-level copy would be a second source of truth that disagrees during a rollback — the
+      # moment `.env` is re-pinned but the containers have not been recreated yet.
       HAIVE_INSTALL_DIR_HOST: ${HAIVE_INSTALL_DIR_HOST:-}
       HAIVE_REGISTRY: ${HAIVE_REGISTRY:-ghcr.io/martinambrus}
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-haive}
@@ -93,6 +96,9 @@ services:
 
   worker:
     build: !reset null
+    environment:
+      HAIVE_PUBLISHED_INSTALL: 'true'
+      HAIVE_OWN_MODULES_HOST_DIR: ${HAIVE_OWN_MODULES_HOST_DIR:-}
     image: ${HAIVE_WORKER_IMAGE:-${HAIVE_REGISTRY:-ghcr.io/martinambrus}/haive-worker:${HAIVE_VERSION:?set HAIVE_VERSION to the release you want, e.g. 0.2.0}}
     depends_on:
       db-migrate:

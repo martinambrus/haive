@@ -5,6 +5,9 @@ import { useRouter } from 'next/navigation';
 import type { ModuleDiffRow, ModuleState } from '@haive/shared/modularity';
 import {
   getModulesLoaded,
+  getModuleSources,
+  fetchModuleSource,
+  type ModuleSourcesResponse,
   getModuleDependents,
   cancelModuleDrain,
   patchModuleActive,
@@ -26,7 +29,8 @@ import {
   type ModuleTasksBlocked,
 } from '@/components/module-tasks-open-dialog';
 import { ModuleTeardownDialog } from '@/components/module-teardown-dialog';
-import { Badge, FormError } from '@/components/ui';
+import { ModuleSourceDialog, type ModuleSourceTarget } from '@/components/module-source-dialog';
+import { Badge, Button, FormError } from '@/components/ui';
 
 const STATE_BADGE: Record<
   ModuleState,
@@ -69,6 +73,51 @@ export default function ModulesPage() {
   usePageTitle('Modules');
 
   const router = useRouter();
+  const [sources, setSources] = useState<ModuleSourcesResponse | null>(null);
+  const [sourceError, setSourceError] = useState<string | null>(null);
+  const [sourceTarget, setSourceTarget] = useState<ModuleSourceTarget | null>(null);
+  const [sourcePending, setSourcePending] = useState<ReadonlySet<string>>(new Set());
+  const sourceRequests = useRef(new Set<string>());
+  const latestSourceLoad = useRef(0);
+  const loadSources = useCallback(async () => {
+    const request = ++latestSourceLoad.current;
+    try {
+      const response = await getModuleSources();
+      if (request !== latestSourceLoad.current) return;
+      setSources(response);
+      setSourceError(null);
+    } catch (err) {
+      if (request === latestSourceLoad.current)
+        setSourceError((err as ApiError).message ?? 'Failed to load install sources');
+    }
+  }, []);
+  useEffect(() => {
+    void loadSources();
+  }, [loadSources]);
+  useEffect(() => {
+    if (
+      !sources?.sources.some(
+        (source) => source.fetchStatus === 'queued' || source.fetchStatus === 'fetching',
+      )
+    )
+      return;
+    const timer = setInterval(() => void loadSources(), 3000);
+    return () => clearInterval(timer);
+  }, [sources, loadSources]);
+  async function fetchSource(id: string, refresh: boolean) {
+    if (sourceRequests.current.has(id)) return;
+    sourceRequests.current.add(id);
+    setSourcePending(new Set(sourceRequests.current));
+    try {
+      await fetchModuleSource(id, refresh);
+      await loadSources();
+    } catch (error) {
+      setSourceError((error as ApiError).message ?? 'Failed to queue module fetch');
+    } finally {
+      sourceRequests.current.delete(id);
+      setSourcePending(new Set(sourceRequests.current));
+    }
+  }
   const [data, setData] = useState<ModulesLoadedResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
@@ -274,6 +323,155 @@ export default function ModulesPage() {
             </tbody>
           </table>
         </div>
+      )}
+      <section className="flex flex-col gap-3 rounded-md border border-neutral-800 p-4">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold text-neutral-100">Install sources</h2>
+          {sources?.writable && (
+            <Button onClick={() => setSourceTarget({ mode: 'add' })}>Add source</Button>
+          )}
+        </div>
+        <InlineMarkdown
+          className="text-sm text-neutral-400"
+          body="Fetch pins module sources for the next upgrade or explicit Build. Refresh resolves a newer Git commit. Deleting a source keeps its pinned folder."
+        />
+        {sources?.writable && !sources.fetchConfigured && (
+          <InlineMarkdown
+            className="text-sm text-neutral-400"
+            body="Set `HAIVE_OWN_MODULES_HOST_DIR` to an existing prepared directory on the Docker host to enable Fetch."
+          />
+        )}
+        <FormError message={sourceError} />
+        {sourceError && (
+          <Button variant="secondary" onClick={() => void loadSources()}>
+            Retry sources
+          </Button>
+        )}
+        {sources && !sources.writable && (
+          <InlineMarkdown
+            className="text-sm text-neutral-400"
+            body="Install sources are read-only on a source checkout. Use the repository command: `pnpm module add`."
+          />
+        )}
+        {sources?.sources.length === 0 && (
+          <InlineMarkdown
+            className="text-sm text-neutral-500"
+            body="No install sources recorded."
+          />
+        )}
+        {sources && sources.sources.length > 0 && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="text-neutral-500">
+                <tr>
+                  <th className="p-2">Module</th>
+                  <th className="p-2">Source</th>
+                  <th className="p-2">Ref / version</th>
+                  <th className="p-2">Token</th>
+                  <th className="p-2">Fetch status</th>
+                  <th className="p-2">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sources.sources.map((source) => (
+                  <tr key={source.id} className="border-t border-neutral-800">
+                    <td className="p-2 font-mono">{source.moduleId}</td>
+                    <td className="p-2">
+                      <code>{source.url ?? source.packageName}</code>
+                    </td>
+                    <td className="p-2 font-mono">{source.ref ?? source.version}</td>
+                    <td className="p-2">{source.hasToken ? 'Stored' : 'None'}</td>
+                    <td className="p-2">
+                      <span>{source.fetchStatus ?? 'Not fetched'}</span>
+                      {source.resolvedSha && <code className="block">{source.resolvedSha}</code>}
+                      {source.fetchedAt && <span className="block">{when(source.fetchedAt)}</span>}
+                      {source.fetchStatus === 'failed' && source.lastError && (
+                        <InlineMarkdown className="text-sm text-red-300" body={source.lastError} />
+                      )}
+                    </td>
+                    <td className="p-2">
+                      {sources.writable && (
+                        <div className="flex gap-2">
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            disabled={
+                              !sources.fetchConfigured ||
+                              source.kind !== 'git' ||
+                              sourcePending.has(source.id) ||
+                              source.fetchStatus === 'queued' ||
+                              source.fetchStatus === 'fetching'
+                            }
+                            onClick={() => void fetchSource(source.id, false)}
+                          >
+                            Fetch
+                          </Button>
+                          {(source.kind === 'registry' || !sources.fetchConfigured) && (
+                            <InlineMarkdown
+                              className="text-sm text-text-secondary"
+                              body={
+                                source.kind === 'registry'
+                                  ? 'Registry fetch requires rebuildable sources and is unavailable.'
+                                  : 'Set HAIVE_OWN_MODULES_HOST_DIR to enable Fetch.'
+                              }
+                            />
+                          )}
+                          {source.kind === 'git' && source.resolvedSha && (
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              disabled={
+                                !sources.fetchConfigured ||
+                                sourcePending.has(source.id) ||
+                                source.fetchStatus === 'queued' ||
+                                source.fetchStatus === 'fetching'
+                              }
+                              onClick={() => void fetchSource(source.id, true)}
+                            >
+                              Refresh
+                            </Button>
+                          )}
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            disabled={
+                              sourcePending.has(source.id) ||
+                              source.fetchStatus === 'queued' ||
+                              source.fetchStatus === 'fetching'
+                            }
+                            onClick={() => setSourceTarget({ mode: 'edit', source })}
+                          >
+                            Edit
+                          </Button>
+                          <Button
+                            variant="destructive"
+                            size="sm"
+                            disabled={
+                              sourcePending.has(source.id) ||
+                              source.fetchStatus === 'queued' ||
+                              source.fetchStatus === 'fetching'
+                            }
+                            onClick={() => setSourceTarget({ mode: 'delete', source })}
+                          >
+                            Delete
+                          </Button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+      {sourceTarget && (
+        <ModuleSourceDialog
+          key={sourceTarget.source?.id ?? 'add'}
+          target={sourceTarget}
+          onClose={() => setSourceTarget((current) => (current === sourceTarget ? null : current))}
+          onSaved={() => void loadSources()}
+        />
       )}
       {data && <ModuleSkippedSeeds rows={data.modules.rows} />}
       <ModuleTasksOpenDialog

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { isValidElement, type ComponentProps, type ReactElement, type ReactNode } from 'react';
 import type { ModuleDiffRow } from '@haive/shared/modularity';
 import type { ModuleOpenTask, ModuleUrgentResponse } from '@/lib/api-client';
+import { ModuleSourceDialog } from '@/components/module-source-dialog';
 import { ModulePurgeDialog } from '@/components/module-purge-dialog';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { ModuleActiveCell } from '@/components/module-active-cell';
@@ -13,6 +14,8 @@ import ModulesPage from './page';
 const hooks = vi.hoisted(() => ({ slots: [] as unknown[], next: 0, dirty: false, mounting: true }));
 const api = vi.hoisted(() => ({
   getModulesLoaded: vi.fn(),
+  getModuleSources: vi.fn(),
+  fetchModuleSource: vi.fn(),
   patchModuleActive: vi.fn(),
   getModuleDependents: vi.fn(),
   cancelModuleDrain: vi.fn(),
@@ -135,6 +138,17 @@ async function mount() {
         ComponentProps<typeof ModulePurgeDialog>
       >,
     draw,
+    text: () => textOf(tree),
+    sourcesDialog: () =>
+      flatten(tree).find((e) => e.type === ModuleSourceDialog) as unknown as
+        ReactElement<ComponentProps<typeof ModuleSourceDialog>> | undefined,
+    click: (label: string) => {
+      const element = flatten(tree).find(
+        (e) => textOf(e.props.children) === label && 'onClick' in e.props,
+      )!;
+      (element.props as { onClick: () => void }).onClick();
+      draw();
+    },
     notice: () => flatten(tree).find((e) => e.props.role === 'status'),
     error: () => flatten(tree).find((e) => e.type === FormError)?.props.message,
     deactivate: async (id: string) => {
@@ -148,6 +162,7 @@ async function mount() {
 
 beforeEach(() => {
   for (const fn of [...Object.values(api), router.refresh]) fn.mockReset();
+  api.getModuleSources.mockResolvedValue({ writable: false, sources: [] });
   api.getModuleDependents.mockImplementation(async (moduleId: string) => ({
     moduleId,
     tasks: TASKS,
@@ -160,6 +175,46 @@ beforeEach(() => {
 });
 
 describe('Modules page preflight', () => {
+  it('offers Fetch and Refresh and shows structural fetch status and SHA', async () => {
+    api.getModuleSources.mockResolvedValue({
+      writable: true,
+      fetchConfigured: true,
+      sources: [
+        {
+          id: 's1',
+          moduleId: 'alpha',
+          kind: 'git',
+          url: 'https://example.com/a',
+          ref: 'main',
+          fetchStatus: 'pinned',
+          resolvedSha: 'a'.repeat(40),
+          lastError: 'stale failure',
+        },
+      ],
+    });
+    api.fetchModuleSource.mockResolvedValue({});
+    const page = await mount();
+    expect(page.text()).toContain('Fetch');
+    expect(page.text()).toContain('Refresh');
+    expect(page.text()).toContain('pinned');
+    expect(page.text()).toContain('a'.repeat(40));
+    expect(page.text()).not.toContain('stale failure');
+    page.click('Refresh');
+    await flush();
+    expect(api.fetchModuleSource).toHaveBeenCalledWith('s1', true);
+  });
+  it.each([
+    ['registry', true, 'Registry fetch requires rebuildable sources and is unavailable.'],
+    ['git', false, 'Set HAIVE_OWN_MODULES_HOST_DIR to enable Fetch.'],
+  ])('shows the %s fetch refusal as visible copy', async (kind, fetchConfigured, reason) => {
+    api.getModuleSources.mockResolvedValue({
+      writable: true,
+      fetchConfigured,
+      sources: [{ id: 's1', moduleId: 'alpha', kind }],
+    });
+    const page = await mount();
+    expect(page.text()).toContain(reason);
+  });
   it('hands the dialog the module, its name, the tasks and whether the list was cut', async () => {
     api.getModuleDependents.mockResolvedValue({ moduleId: 'alpha', tasks: TASKS, capped: true });
     const page = await mount();
@@ -309,5 +364,48 @@ describe('Modules page after purge', () => {
     expect(textOf(page.notice())).toContain('5 task or repository account grants');
     expect(textOf(page.notice())).toContain('kept 1 task type');
     expect(flatten(page.notice()).some((e) => e.type === InlineMarkdown)).toBe(true);
+  });
+});
+
+describe('module install sources', () => {
+  it('shows the Install sources section and source-checkout instructions', async () => {
+    const page = await mount();
+    expect(page.text()).toContain('Install sources');
+    expect(page.text()).toContain('pnpm module add');
+    expect(page.text()).toContain('read-only');
+    expect(page.text()).not.toContain('Add source');
+    expect(page.sourcesDialog()).toBeUndefined();
+  });
+});
+
+describe('editable install sources', () => {
+  it('lists saved sources, opens add/edit/delete targets and discards an old close callback', async () => {
+    const source = {
+      id: 'source-one',
+      moduleId: 'alpha',
+      kind: 'git',
+      url: 'https://example.com/a.git',
+      ref: 'main',
+      hasToken: true,
+    };
+    api.getModuleSources.mockResolvedValue({ writable: true, sources: [source] });
+    const page = await mount();
+    expect(page.text()).toContain(source.url);
+    expect(page.text()).toContain('Stored');
+    expect(page.text()).not.toContain('read-only');
+    page.click('Add source');
+    const oldClose = page.sourcesDialog()!.props.onClose;
+    expect(page.sourcesDialog()!.props.target.mode).toBe('add');
+    oldClose();
+    page.draw();
+    page.click('Edit');
+    expect(page.sourcesDialog()!.props.target).toEqual({ mode: 'edit', source });
+    oldClose();
+    page.draw();
+    expect(page.sourcesDialog()!.props.target.mode).toBe('edit');
+    page.sourcesDialog()!.props.onClose();
+    page.draw();
+    page.click('Delete');
+    expect(page.sourcesDialog()!.props.target).toEqual({ mode: 'delete', source });
   });
 });

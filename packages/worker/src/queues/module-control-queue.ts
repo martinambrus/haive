@@ -195,8 +195,8 @@ export function startModuleControlWorker(
 ): Worker<ModuleTeardownPayload, ModuleTeardownResult> {
   const worker = new Worker<ModuleTeardownPayload, ModuleTeardownResult>(
     QUEUE_NAMES.MODULE_CONTROL,
-    safeProcessor((job) =>
-      processModuleControlJob(
+    safeProcessor(async (job) => {
+      return processModuleControlJob(
         {
           ...modules,
           db: getDb(),
@@ -204,8 +204,8 @@ export function startModuleControlWorker(
           teardownRunning: moduleTeardownRunning,
         },
         job,
-      ),
-    ),
+      );
+    }),
     // A worker that dies mid-hook fails the job instead of running the hook again unasked.
     { connection: getBullRedis(), concurrency: 1, maxStalledCount: 0 },
   );

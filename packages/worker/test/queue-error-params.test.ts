@@ -42,9 +42,11 @@ import {
   REPO_JOB_NAMES,
   BUNDLE_JOB_NAMES,
   MODULE_CONTROL_JOB_NAMES,
+  MODULE_SOURCE_JOB_NAMES,
 } from '@haive/shared';
 import { startCliExecWorker } from '../src/queues/cli-exec/handlers.js';
 import { startPlanMirrorWorker } from '../src/queues/plan-mirror-queue.js';
+import { startModuleSourceWorker } from '../src/queues/module-source-queue.js';
 import { startModuleControlWorker } from '../src/queues/module-control-queue.js';
 import { startRuntimeEnsureWorker } from '../src/queues/runtime-ensure-queue.js';
 import { startIdeEnsureWorker } from '../src/queues/ide-ensure-queue.js';
@@ -68,6 +70,7 @@ const cases = [
     MODULE_CONTROL_JOB_NAMES.TEARDOWN,
     () => startModuleControlWorker({ loaded: [], entries: [] }),
   ],
+  [QUEUE_NAMES.MODULE_SOURCE, MODULE_SOURCE_JOB_NAMES.FETCH, startModuleSourceWorker],
   [QUEUE_NAMES.RUNTIME_ENSURE, RUNTIME_ENSURE_JOB_NAMES.ENSURE, startRuntimeEnsureWorker],
   [QUEUE_NAMES.IDE_ENSURE, IDE_ENSURE_JOB_NAMES.ENSURE, startIdeEnsureWorker],
   [QUEUE_NAMES.DDEV_CONTROL, DDEV_CONTROL_JOB_NAMES.RUN, startDdevControlWorker],
@@ -98,7 +101,13 @@ it.each(cases)('fix5 sanitizes %s / %s at the registered processor', async (queu
   const job = {
     id: 'queue-control',
     name,
-    data: { taskId: 'task', repositoryId: 'repo', userId: 'user' },
+    data: {
+      taskId: 'task',
+      repositoryId: 'repo',
+      userId: 'user',
+      sourceId: 'source',
+      requestedAt: '2026-11-05T00:00:00.000Z',
+    },
   };
   const err = await Promise.resolve()
     .then(() => processor(job, 'token'))
