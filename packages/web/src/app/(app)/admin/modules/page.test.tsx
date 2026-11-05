@@ -203,6 +203,18 @@ describe('Modules page preflight', () => {
     await flush();
     expect(api.fetchModuleSource).toHaveBeenCalledWith('s1', true);
   });
+  it.each([
+    ['registry', true, 'Registry fetch requires rebuildable sources and is unavailable.'],
+    ['git', false, 'Set HAIVE_OWN_MODULES_HOST_DIR to enable Fetch.'],
+  ])('shows the %s fetch refusal as visible copy', async (kind, fetchConfigured, reason) => {
+    api.getModuleSources.mockResolvedValue({
+      writable: true,
+      fetchConfigured,
+      sources: [{ id: 's1', moduleId: 'alpha', kind }],
+    });
+    const page = await mount();
+    expect(page.text()).toContain(reason);
+  });
   it('hands the dialog the module, its name, the tasks and whether the list was cut', async () => {
     api.getModuleDependents.mockResolvedValue({ moduleId: 'alpha', tasks: TASKS, capped: true });
     const page = await mount();

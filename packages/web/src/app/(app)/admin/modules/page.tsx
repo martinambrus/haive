@@ -402,17 +402,20 @@ export default function ModulesPage() {
                               source.fetchStatus === 'queued' ||
                               source.fetchStatus === 'fetching'
                             }
-                            title={
-                              source.kind === 'registry'
-                                ? 'Registry fetch requires rebuildable sources and is unavailable.'
-                                : !sources.fetchConfigured
-                                  ? 'Set HAIVE_OWN_MODULES_HOST_DIR to enable Fetch.'
-                                  : undefined
-                            }
                             onClick={() => void fetchSource(source.id, false)}
                           >
                             Fetch
                           </Button>
+                          {(source.kind === 'registry' || !sources.fetchConfigured) && (
+                            <InlineMarkdown
+                              className="text-sm text-text-secondary"
+                              body={
+                                source.kind === 'registry'
+                                  ? 'Registry fetch requires rebuildable sources and is unavailable.'
+                                  : 'Set HAIVE_OWN_MODULES_HOST_DIR to enable Fetch.'
+                              }
+                            />
+                          )}
                           {source.kind === 'git' && source.resolvedSha && (
                             <Button
                               variant="secondary"
