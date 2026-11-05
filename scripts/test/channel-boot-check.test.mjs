@@ -87,6 +87,14 @@ function fixture(t, config = {}) {
     if (args[0] === 'run') {
       const name = args[args.indexOf('--name') + 1];
       assert.ok(name.startsWith(`${prefix}-`));
+      const suffix = name.slice(prefix.length + 1);
+      if (['api', 'migrate', 'worker'].includes(suffix)) {
+        const key = suffix === 'migrate' ? 'api' : suffix;
+        assert.ok(args.includes(record.images[key].id), `${suffix} uses its recorded image id`);
+        assert.ok(!args.includes(record.images[key].ref), `${suffix} does not run by ref`);
+        assert.equal(args[args.indexOf('--pull') + 1], 'never');
+        assert.equal(args[args.indexOf('--platform') + 1], record.platform);
+      }
       created.containers.push(name);
       assert.ok(!args.includes('--privileged'));
       assert.ok(!args.join(' ').includes('/var/run/docker.sock'));
@@ -337,12 +345,14 @@ test('missing worker id exits 1 and prints one OFFENDER; cleanup ran', async (t)
   );
 });
 
-test('retagged image exits 2 before boot', async (t) => {
-  const f = fixture(t, { retagged: 'api' });
-  assert.equal(await f.check(), 2);
-  assert.equal(f.created.containers.length, 0);
-  assert.match(f.logs.join('\n'), /recorded id/);
-});
+for (const key of ['api', 'worker']) {
+  test(`retagged ${key} image exits 2 before boot`, async (t) => {
+    const f = fixture(t, { retagged: key });
+    assert.equal(await f.check(), 2);
+    assert.equal(f.created.containers.length, 0);
+    assert.match(f.logs.join('\n'), new RegExp(`${key} .*recorded id`));
+  });
+}
 
 for (const mode of [
   'bootTimeout',
