@@ -181,6 +181,15 @@ function fixture(t, config = {}) {
     }
     assert.ok(url.endsWith('/modules/loaded'));
     assert.equal(new Headers(options.headers).get('Cookie'), 'haive_access=fake-access-cookie');
+    if (config.abortReport) {
+      controller.abort();
+      throw new Error('fetch interrupted');
+    }
+    if (
+      config.transientReport &&
+      requests.filter((r) => r.url.endsWith('/modules/loaded')).length === 1
+    )
+      throw new Error('connection reset');
     if (config.reportFailure) return Response.json({}, { status: 500 });
     return Response.json({
       api: { modules: (config.api ?? ['statistics']).map(moduleRow) },
@@ -387,6 +396,19 @@ for (const mode of [
     }
   });
 }
+
+test('a transient module-report network error retries and exits 0', async (t) => {
+  const f = fixture(t, { transientReport: true });
+  assert.equal(await f.check(), 0);
+  assert.equal(f.requests.filter((r) => r.url.endsWith('/modules/loaded')).length, 2);
+});
+
+test('abort during module-report fetch exits 2 without retrying', async (t) => {
+  const f = fixture(t, { abortReport: true });
+  assert.equal(await f.check(), 2);
+  assert.equal(f.requests.filter((r) => r.url.endsWith('/modules/loaded')).length, 1);
+  assert.match(f.logs.join('\n'), /interrupted/);
+});
 
 test('a cleanup failure prevents a successful verdict', async (t) => {
   const f = fixture(t, { cleanupFailure: true });

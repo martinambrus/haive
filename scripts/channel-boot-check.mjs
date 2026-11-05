@@ -359,9 +359,15 @@ export async function run(
     const report = await poll(`${worker} module report`, async () => {
       await running(api);
       await running(worker);
-      const response = await http(`${base}/modules/loaded`, {
-        headers: { Cookie: cookies.join('; ') },
-      });
+      let response;
+      try {
+        response = await http(`${base}/modules/loaded`, {
+          headers: { Cookie: cookies.join('; ') },
+        });
+      } catch {
+        interrupted();
+        return false;
+      }
       if (!response.ok) throw new Error(`${api} /modules/loaded failed (HTTP ${response.status})`);
       const body = await response.json();
       if (body.worker === null) return false;
