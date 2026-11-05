@@ -346,7 +346,9 @@ User decision 2026-11-01: Reconcile runtime before validation; revalidate affect
 status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-05 · last: 2026-11-05 · was modular #104 · priority: P2
 Plan D2: installer flags, an install-local docker config for private pulls, and a host upgrade that reads the channel. Depends on T351-T353 (all done).
 
-Progress: PR A (builder + `haive-<channel>-release` manifest image, record schema 2) merged as PR #1007 (4d4193768), 2026-11-05. PR B (updater + api) and PR C (installers) next. Plan docs/plans/calm-crafting-fiddle.md.
+Progress: PR A (builder + `haive-<channel>-release` manifest image, record schema 2) merged as PR #1007 (4d4193768), 2026-11-05. PR B (updater reads `--manifest-image`, pinned refs bound to `HAIVE_CHANNEL_REGISTRY`, install-local `DOCKER_CONFIG`; api passes the channel) merged as PR #1008 (d71934772), 2026-11-05, CI 13/13 green, unreviewed by bots (out of allowance), Sonnet review-5 ACCEPT. PR C (installers) next. Plan docs/plans/calm-crafting-fiddle.md. Follow-ups T534 (FNF), T535 (design).
+
+PR C input from PR B: the generated `./haive upgrade` must pass `DOCKER_CONFIG` exactly `<install>/.docker` (no trailing slash; the updater refuses any other spelling), `HAIVE_INSTALL_DIR_HOST`, and forward `--version`.
 
 Inputs from T352 (2026-11-05, PR #1006):
 
@@ -390,6 +392,24 @@ status: open · kind: fix · found: T351 reviews 2026-11-05 · priority: P3
 20. publish-channel (T335 A): a failure building or pushing the release manifest image leaves the runtime tags public and `release.json` local, and a re-run refuses on the existing tags with no recovery hint (scripts/publish-channel.mjs ~:458-495). Fix: when `manifestWritten`, print the exact recovery (push the release image from the retained file). REGRESSION of the window, low.
 21. publish-channel test fake: the guard `attempted.length < KEYS.length` (scripts/test/publish-channel.test.mjs:107) stops checking manifest absence before the builder (fourth) push, and the release-build failure tests (:143) assert no log text. Fix: cover the last runtime push and assert exit plus log. Low.
 22. publish-channel: a stock web whose saved archive has no per-entry platform (a hand-made single-manifest image) is refused, exit 2 before any push (scripts/publish-channel.mjs ~:315-323). PRE-EXISTING; release.yml publishes multi-arch indexes, so it bites only hand-made stock images. Fix needs approval: accept one manifest with no platform when its config os/arch matches the record.
+
+### T534 · FNF[updater-channel] · updater and api channel-upgrade follow-ups from T335 PR B (+7)
+
+status: open · kind: fix · found: T335 PR B reviews 2026-11-05 · priority: P3
+
+1. Partial pins (some `HAIVE_*_IMAGE` set, not all) on a channel install fail closed, but the refusal names a public tag-composed ref (packages/updater/src/cli.ts ~:293 checks only the all-empty case). Minor; refuse partial pins with the channel message.
+2. `docker cp` writes the whole `/release.json` to disk before the 1 MiB cap applies (packages/updater/src/docker.ts:306-309). PRE-EXISTING shape, minor; stream with `docker cp ... -` and cap the tar read.
+3. A public install with digest overrides fails the tag-only rollback inventory: `localImages(false)` lists `repo:tag` only (docker.ts:65-77). PRE-EXISTING, consequential for that rare setup; use the digest form whenever an override is a digest ref.
+4. The channel and registry-prefix patterns are written in three places with no parity test (scripts/build-channel.mjs:26-27, packages/updater/src/cli.ts:70 and images.ts:151, packages/api/src/routes/maintenance.ts:486-490). Minor; one constant in @haive/shared reused by the TS sites, a test pinning the .mjs copy.
+5. `--check` leaves the pulled release image on the daemon (docker.ts ~:299-318). Cosmetic; remove it when the check pulled it.
+6. `docker rm -f` in the manifest read's `finally` can replace the original error with its own (docker.ts:313-316). Minor; keep the first error.
+7. A public `--dry-plan` now throws (exit 1) instead of returning usage (exit 2) (cli.ts:209-210), and no test pins it. Minor; emit and return `EXIT.usage`.
+
+### T535 · D2c · pin the install channel in the upgrade journal (design)
+
+status: open · kind: design · found: T335 PR B review 1 2026-11-05 · priority: P3
+
+If `.env` loses `HAIVE_CHANNEL`, `resolveChannel` (packages/updater/src/cli.ts ~:67-74) returns `public` and only the pre-existing "image overrides require HAIVE_OWN_MODULES_HOST_DIR" refusal in `prepareImages` stops the upgrade. Fixing T534 item 3 or relaxing that refusal for public would let a channel install silently fall to the public registry. Proposal: record the channel on the first channel run (journal or a dedicated row) and refuse a change unless an explicit flag allows it. Needs a decision on where it lives and how a deliberate channel move is authorised.
 
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
