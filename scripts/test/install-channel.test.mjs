@@ -43,6 +43,7 @@ esac
 exit 0
 `;
 const curl = `#!/bin/sh
+[ "$FAIL_AT" != bundle ] || exit 1
 prev=; out=
 for arg do [ "$prev" != -o ] || out=$arg; prev=$arg; done
 case "$out" in *docker-compose*) printf 'services: {}\\n' > "$out" ;; esac
@@ -105,7 +106,7 @@ function fixture(
     const wrapper = join(root, 'invoke.ps1');
     writeFileSync(
       wrapper,
-      `$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method); if($OutFile){ [IO.File]::WriteAllText($OutFile, "services: {}\\n") } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
+      `$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method); if($OutFile){ if($env:FAIL_AT -eq 'bundle'){ throw 'bundle failure' }; [IO.File]::WriteAllText($OutFile, "services: {}\\n") } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|force|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
     );
     if (hostPwsh)
       return spawnSync('pwsh', ['-NoProfile', '-File', wrapper], {
@@ -223,6 +224,21 @@ for (const lang of ['sh', 'ps1']) {
       ]);
       assert.equal(r.status, 0, r.stdout + r.stderr);
       assert.match(readFileSync(join(f.dir, '.env'), 'utf8'), /^HAIVE_CHANNEL=customer$/m);
+    } finally {
+      f.clean();
+    }
+  });
+  check('bundle failure leaves no final credential and force retry succeeds', () => {
+    const f = fixture(lang, { fail: 'bundle' });
+    try {
+      const failed = f.install();
+      assert.notEqual(failed.status, 0, failed.stdout + failed.stderr);
+      assert.ok(!existsSync(join(f.dir, '.docker')), 'no final credential after bundle failure');
+      assert.ok(!existsSync(join(f.dir, '.env')));
+      f.env.FAIL_AT = '';
+      const retry = f.install([f.flag('force')]);
+      assert.equal(retry.status, 0, retry.stdout + retry.stderr);
+      assert.ok(existsSync(join(f.dir, '.docker/config.json')));
     } finally {
       f.clean();
     }

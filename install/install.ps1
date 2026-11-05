@@ -374,12 +374,6 @@ if ($Channel -cne 'public') {
 Write-Step "Writing the install to $Dir"
 New-Item -ItemType Directory -Force -Path (Join-Path $Dir 'snapshots') | Out-Null
 Push-Location $Dir
-if ($Channel -cne 'public') {
-  if (Test-Path -LiteralPath (Join-Path $Dir '.docker')) { Remove-Item -LiteralPath $ChannelScratch -Recurse -Force; Die "$Dir/.docker already exists; choose a clean install directory" }
-  try { Move-Item -LiteralPath (Join-Path $ChannelScratch '.docker') -Destination (Join-Path $Dir '.docker') }
-  finally { Remove-Item -LiteralPath $ChannelScratch -Recurse -Force }
-  $env:DOCKER_CONFIG = Join-Path $Dir '.docker'
-}
 
 Get-Bundle "$Raw/$tag/docker-compose.yml"     (Join-Path $Dir 'docker-compose.yml')
 Get-Bundle "$Raw/$tag/docker-compose.run.yml" (Join-Path $Dir 'docker-compose.run.yml')
@@ -442,6 +436,13 @@ if (-not (Test-Path $envPath)) {
   # return lands inside the VALUE of the last variable on every line.
   [System.IO.File]::WriteAllText($envPath, ($lines -join "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
   Write-Note "secrets           generated (.env)"
+}
+
+if ($Channel -cne 'public') {
+  if (Test-Path -LiteralPath (Join-Path $Dir '.docker')) { Remove-Item -LiteralPath $ChannelScratch -Recurse -Force; Die "$Dir/.docker already exists; choose a clean install directory" }
+  try { Move-Item -LiteralPath (Join-Path $ChannelScratch '.docker') -Destination (Join-Path $Dir '.docker') }
+  finally { Remove-Item -LiteralPath $ChannelScratch -Recurse -Force }
+  $env:DOCKER_CONFIG = Join-Path $Dir '.docker'
 }
 
 # ── Helper scripts ───────────────────────────────────────────────────────────

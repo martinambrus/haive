@@ -459,11 +459,6 @@ fi
 step "Writing the install to $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR/snapshots"
 cd "$INSTALL_DIR"
-if [ "$CHANNEL" != "public" ]; then
-  [ ! -e .docker ] && [ ! -L .docker ] || die "$INSTALL_DIR/.docker already exists; choose a clean install directory"
-  mv "$CHANNEL_SCRATCH/.docker" .docker
-  export DOCKER_CONFIG="$INSTALL_DIR/.docker"
-fi
 
 # The compose bundle is fetched AT THE TAG, so it always matches the images being pinned.
 fetch "${RAW}/${TAG}/docker-compose.yml"     docker-compose.yml
@@ -559,6 +554,12 @@ EOF
   fi
   chmod 600 .env
   say "  secrets           generated (.env, mode 600)"
+fi
+
+if [ "$CHANNEL" != "public" ]; then
+  [ ! -e .docker ] && [ ! -L .docker ] || die "$INSTALL_DIR/.docker already exists; choose a clean install directory"
+  mv "$CHANNEL_SCRATCH/.docker" .docker
+  export DOCKER_CONFIG="$INSTALL_DIR/.docker"
 fi
 
 # ── Helper scripts ───────────────────────────────────────────────────────────
