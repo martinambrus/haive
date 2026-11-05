@@ -660,3 +660,13 @@ for (const [name, realm] of [
     assert.match(f.logs.join('\n'), /could not be proven/);
   });
 }
+
+test('usage describes local manifest delivery without a board task ID', async () => {
+  const logs = [];
+  assert.equal(await run(['--help'], { say: (line) => logs.push(line) }), 0);
+  assert.match(
+    logs.join('\n'),
+    /— writes release\.json locally; it does not deliver it to installs$/,
+  );
+  assert.doesNotMatch(logs.join('\n'), /\bT\d+\b/);
+});

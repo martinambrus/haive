@@ -30,7 +30,7 @@ const DAEMON_DENIED = /failed to authorize|unauthorized|\bdenied\b|\b40[13]\b|fo
 const DAEMON_TRANSPORT_ERROR =
   /\b(?:5\d\d|network|connection|timeout|timed out|no such host|credential helper|tls|certificate|eof)\b/i;
 const USAGE =
-  'usage: node scripts/publish-channel.mjs --record <build-record.json> [--registry <prefix; defaults to record api prefix>] [--out <dir; defaults beside record>] [--dry-run] [--confirm-absent <exact destination ref; repeatable>] [--timeout-ms <boot-stage timeout>] — writes release.json locally; URL delivery is T335';
+  'usage: node scripts/publish-channel.mjs --record <build-record.json> [--registry <prefix; defaults to record api prefix>] [--out <dir; defaults beside record>] [--dry-run] [--confirm-absent <exact destination ref; repeatable>] [--timeout-ms <boot-stage timeout>] — writes release.json locally; it does not deliver it to installs';
 
 function capture(command, args, { timeout, signal, ...options }) {
   return new Promise((resolveResult) => {
