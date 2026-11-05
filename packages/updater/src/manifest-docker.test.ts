@@ -50,3 +50,14 @@ it('an unpullable manifest cannot create or use a cached image', async () => {
   await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow('pull denied');
   expect(h.exec).toHaveBeenCalledTimes(1);
 });
+
+it('channel rollback inventory includes digest pins while public inventory stays unchanged', async () => {
+  const { localImages } = await import('./docker.js');
+  const pin = `private/api@sha256:${'a'.repeat(64)}`;
+  h.exec.mockResolvedValue({ stdout: `private/api:1\t${pin}\nprivate/old:2\tprivate/old@<none>` });
+  expect(await localImages(true)).toEqual(['private/api:1', pin, 'private/old:2']);
+  expect(h.exec.mock.calls[0]![1]).toContain('--digests');
+  h.exec.mockResolvedValue({ stdout: 'public/api:1\npublic/web:1' });
+  expect(await localImages()).toEqual(['public/api:1', 'public/web:1']);
+  expect(h.exec.mock.calls[1]![1]).toEqual(['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}']);
+});

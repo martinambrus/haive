@@ -61,7 +61,17 @@ function composeArgs(ctx: ComposeContext, rest: string[]): string[] {
 
 /** Image references present on this daemon. Used by preflight to prove a rollback has somewhere to
  *  go back to before anything is touched. */
-export async function localImages(): Promise<string[]> {
+export async function localImages(includeDigests = false): Promise<string[]> {
+  if (includeDigests) {
+    const out = await run('docker', [
+      'image',
+      'ls',
+      '--digests',
+      '--format',
+      '{{.Repository}}:{{.Tag}}\t{{.Repository}}@{{.Digest}}',
+    ]);
+    return [...new Set(out.split(/\s+/).filter((ref) => ref && !ref.includes('<none>')))];
+  }
   const out = await run('docker', ['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}']);
   return out.split('\n').filter(Boolean);
 }

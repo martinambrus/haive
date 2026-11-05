@@ -22,6 +22,7 @@ import {
 } from './run.js';
 import { decideResume } from './phases.js';
 import {
+  channelImagePlan,
   imageFor,
   journalImages,
   prepareImages,
@@ -227,7 +228,7 @@ export async function main(): Promise<number> {
     const check = preflight({
       currentVersion: fromVersion,
       target,
-      localImages: await dk.localImages(),
+      localImages: await dk.localImages(channel !== 'public'),
       currentImages,
       freeBytes: Number(arg('free-bytes', String(Number.MAX_SAFE_INTEGER))),
       snapshotBytes: Number(arg('snapshot-bytes', '0')),
@@ -240,7 +241,11 @@ export async function main(): Promise<number> {
 
     // `--check` stops here, having changed nothing. This is also where a support conversation
     // should begin.
-    if (flag('check')) return EXIT.ok;
+    if (flag('check')) {
+      if (channel !== 'public')
+        emit('image-plan', channelImagePlan(target.version, imageSettings, target.images));
+      return EXIT.ok;
+    }
 
     // Pull BEFORE any hold is applied: a failed pull must cost nothing.
     const targetImages = await prepareImages(
@@ -249,6 +254,7 @@ export async function main(): Promise<number> {
       target.version,
       registry,
       imageSettings,
+      channel !== 'public' ? target.images : undefined,
     );
     emit('pulled', { version: target.version });
 
