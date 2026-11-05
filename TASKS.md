@@ -346,6 +346,8 @@ User decision 2026-11-01: Reconcile runtime before validation; revalidate affect
 status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-05 · last: 2026-11-05 · was modular #104 · priority: P2
 Plan D2: installer flags, an install-local docker config for private pulls, and a host upgrade that reads the channel. Depends on T351-T353 (all done).
 
+Progress: PR A (builder + `haive-<channel>-release` manifest image, record schema 2) merged as PR #1007 (4d4193768), 2026-11-05. PR B (updater + api) and PR C (installers) next. Plan docs/plans/calm-crafting-fiddle.md.
+
 Inputs from T352 (2026-11-05, PR #1006):
 
 - `scripts/publish-channel.mjs` writes the channel `release.json` locally only. Serving it to installs is this task's job.
@@ -362,7 +364,7 @@ status: open · kind: fix · found: T337 reviews 2026-11-05 · priority: P3
 3. PRE-EXISTING order, fails closed: when `refs/heads/<ref>` and `refs/tags/<ref>` both exist the branch wins in both the first resolution and the fallback (source-fetch.ts:197, :203); a source pinned from a tag that later gets a same-named branch fails `module_source_ref_moved` on servers that refuse object-name fetches. Fix: remember which namespace resolved (store the qualified ref) and reuse it.
 4. PRE-EXISTING, minor: the module-id pattern `[a-z0-9][a-z0-9-]{0,22}` is duplicated across ~7 files (manifest, gen-modules, module.mjs, api sources, migration 0221 CHECK, web dialog). Fix: one exported constant in @haive/shared reused by the TS sites; the SQL CHECK stays literal with a test pinning equality.
 
-### T533 · FNF[build-channel] · build-channel.mjs, channel-gate, channel-boot-check and publish-channel follow-ups from T351/T353/T352 (+18)
+### T533 · FNF[build-channel] · build-channel.mjs, channel-gate, channel-boot-check and publish-channel follow-ups from T351/T353/T352 (+21)
 
 status: open · kind: fix · found: T351 reviews 2026-11-05 · priority: P3
 
@@ -385,6 +387,9 @@ status: open · kind: fix · found: T351 reviews 2026-11-05 · priority: P3
 17. publish-channel `capture()` is a near-copy of channel-boot-check's child runner (publish-channel.mjs ~:35-70 vs channel-boot-check.mjs ~:65-104; 4 MiB vs 2 MiB cap). Minor; share one runner across the channel scripts.
 18. publish-channel tags the local image with the destination ref before the push (~:416), so a failed push leaves that local tag. Cosmetic; untag on failure.
 19. publish-channel transport classification is word-bounded, so plurals (`connections`, `timeouts`) do not count as transport errors (~:30-31). Absence still needs the exact daemon line; low.
+20. publish-channel (T335 A): a failure building or pushing the release manifest image leaves the runtime tags public and `release.json` local, and a re-run refuses on the existing tags with no recovery hint (scripts/publish-channel.mjs ~:458-495). Fix: when `manifestWritten`, print the exact recovery (push the release image from the retained file). REGRESSION of the window, low.
+21. publish-channel test fake: the guard `attempted.length < KEYS.length` (scripts/test/publish-channel.test.mjs:107) stops checking manifest absence before the builder (fourth) push, and the release-build failure tests (:143) assert no log text. Fix: cover the last runtime push and assert exit plus log. Low.
+22. publish-channel: a stock web whose saved archive has no per-entry platform (a hand-made single-manifest image) is refused, exit 2 before any push (scripts/publish-channel.mjs ~:315-323). PRE-EXISTING; release.yml publishes multi-arch indexes, so it bites only hand-made stock images. Fix needs approval: accept one manifest with no platform when its config os/arch matches the record.
 
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
