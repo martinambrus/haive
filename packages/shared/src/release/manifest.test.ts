@@ -41,6 +41,15 @@ describe('parseReleaseManifest', () => {
     expect(m.images.web).toBeUndefined();
   });
 
+  it('control: accepts and round-trips the optional builder image', () => {
+    const builder = `127.0.0.1:5000/haive-customer-builder@sha256:${'a'.repeat(64)}`;
+    const m = parseReleaseManifest({ ...base, images: { builder } });
+    expect(m.images.builder).toBe(builder);
+    expect(parseReleaseManifest(JSON.parse(JSON.stringify(m))).images.builder).toBe(builder);
+    expect(() => parseReleaseManifest({ ...base, images: { builder: '' } })).toThrow();
+    expect(() => parseReleaseManifest({ ...base, images: { builder: 42 } })).toThrow();
+  });
+
   // The document is FETCHED and an upgrade acts on it, so a malformed one must not be guessed at.
   it('rejects a manifest it cannot read', () => {
     expect(() => parseReleaseManifest({ ...base, manifestVersion: 2 })).toThrow();
