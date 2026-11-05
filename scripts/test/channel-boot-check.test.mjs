@@ -81,6 +81,7 @@ function fixture(t, config = {}) {
     if (args[0] === 'network' && args[1] === 'create') {
       prefix = args.at(-1);
       assert.match(prefix, /^hbc-test-[a-z0-9]+$/);
+      if (config.createFailure === 'network') return { status: 1, stderr: 'create refused' };
       created.networks.push(prefix);
       if (config.abortNetwork) {
         controller.abort();
@@ -90,6 +91,7 @@ function fixture(t, config = {}) {
     }
     if (args[0] === 'volume' && args[1] === 'create') {
       assert.ok(args.at(-1).startsWith(`${prefix}-`));
+      if (config.createFailure === 'volume') return { status: 1, stderr: 'create refused' };
       created.volumes.push(args.at(-1));
       return ok(args.at(-1));
     }
@@ -103,6 +105,11 @@ function fixture(t, config = {}) {
         assert.ok(!args.includes(record.images[key].ref), `${suffix} does not run by ref`);
         assert.equal(args[args.indexOf('--pull') + 1], 'never');
         assert.equal(args[args.indexOf('--platform') + 1], record.platform);
+      }
+      if (config.createFailure === 'container') return { status: 1, stderr: 'create refused' };
+      if (config.abortBeforeCreate) {
+        controller.abort();
+        return { status: null, error: new Error('interrupted') };
       }
       created.containers.push(name);
       assert.ok(!args.includes('--privileged'));
@@ -128,6 +135,11 @@ function fixture(t, config = {}) {
         return { status: null, error: new Error('interrupted'), stdout: '', stderr: '' };
       }
       return ok(name);
+    }
+    if (['container', 'network', 'volume'].includes(args[0]) && args[1] === 'inspect') {
+      return created[`${args[0]}s`].includes(args.at(-1))
+        ? ok('{}')
+        : { status: 1, stderr: 'No such object' };
     }
     if (args[0] === 'port') return ok('127.0.0.1:43210\n');
     if (args[0] === 'exec') return config.pgTimeout ? { status: 1 } : ok('PONG');
@@ -408,6 +420,21 @@ test('abort during module-report fetch exits 2 without retrying', async (t) => {
   assert.equal(await f.check(), 2);
   assert.equal(f.requests.filter((r) => r.url.endsWith('/modules/loaded')).length, 1);
   assert.match(f.logs.join('\n'), /interrupted/);
+});
+
+for (const kind of ['network', 'volume', 'container']) {
+  test(`failed ${kind} create does not remove or report a nonexistent resource`, async (t) => {
+    const f = fixture(t, { createFailure: kind });
+    assert.equal(await f.check(), 2);
+    assert.doesNotMatch(f.logs.join('\n'), /leftover/);
+    assert.match(f.logs.join('\n'), /create refused/);
+  });
+}
+
+test('abort before container creation does not report a leftover', async (t) => {
+  const f = fixture(t, { abortBeforeCreate: true });
+  assert.equal(await f.check(), 2);
+  assert.doesNotMatch(f.logs.join('\n'), /leftover/);
 });
 
 test('a cleanup failure prevents a successful verdict', async (t) => {

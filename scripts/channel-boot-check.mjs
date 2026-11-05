@@ -156,6 +156,23 @@ export async function run(
       );
     return result;
   };
+  const create = async (kind, name, args) => {
+    const register = () => {
+      resources.push({ kind, name });
+      if (kind === 'container') containers.push(name);
+    };
+    try {
+      await docker(args);
+      register();
+    } catch (error) {
+      const existing = await docker([kind, 'inspect', name], {
+        cleanup: true,
+        allowFailure: true,
+      });
+      if (existing.status === 0 && !existing.error) register();
+      throw error;
+    }
+  };
   const poll = async (name, probe) => {
     const deadline = now() + timeout;
     do {
@@ -248,18 +265,14 @@ export async function run(
         pulledImages.push({ kind: 'image', name: image });
       }
     }
-    resources.push({ kind: 'network', name: prefix });
-    await docker(['network', 'create', prefix]);
+    await create('network', prefix, ['network', 'create', prefix]);
     for (const suffix of ['postgres-data', 'redis-data']) {
       const name = `${prefix}-${suffix}`;
-      resources.push({ kind: 'volume', name });
-      await docker(['volume', 'create', name]);
+      await create('volume', name, ['volume', 'create', name]);
     }
     const start = async (suffix, args) => {
       const name = `${prefix}-${suffix}`;
-      resources.push({ kind: 'container', name });
-      containers.push(name);
-      await docker(['run', '-d', '--name', name, '--network', prefix, ...args]);
+      await create('container', name, ['run', '-d', '--name', name, '--network', prefix, ...args]);
       emit(`channel-boot-check: started ${name}`);
       return name;
     };
@@ -415,7 +428,13 @@ export async function run(
         emit(`channel-boot-check: removed ${kind} ${name}`);
       } catch (error) {
         status = 2;
-        emit(`channel-boot-check: cleanup failed; leftover ${kind} ${name}: ${error.message}`);
+        const existing = await docker([kind, 'inspect', name], {
+          cleanup: true,
+          allowFailure: true,
+        });
+        if (existing.status === 0 && !existing.error)
+          emit(`channel-boot-check: cleanup failed; leftover ${kind} ${name}: ${error.message}`);
+        else emit(`channel-boot-check: cleanup failed for ${kind} ${name}: ${error.message}`);
       }
     }
     if (scratch) {
