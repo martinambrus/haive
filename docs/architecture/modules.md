@@ -396,6 +396,28 @@ step that reads its record.
   the stock image, its `repoDigest`. Ids are read before and after the gate, and a change is refused. Under
   the containerd store `id` is the index digest; under the classic store it is the config digest.
 
+### Boot check (`scripts/channel-boot-check.mjs`)
+
+`node scripts/channel-boot-check.mjs --record <build-record.json> [--timeout-ms <n>]` boots a built channel
+and proves which modules its processes actually load. Plan item 9a requires it once per build, before
+publishing, because an image carrying another customer's module is the one defect a later release cannot undo.
+
+- Stack: one throwaway network with Postgres and Redis (the compose images), the migration applier, then the
+  api and the worker, each run by its recorded image `id` with `--pull never` and the record's platform. A ref
+  that no longer resolves to the recorded id is refused (exit 2). No `docker.sock`, no `--privileged`, no host
+  bind mount; the api publishes one ephemeral port on 127.0.0.1. Web is not booted.
+- Names are `hbc-<channel>-<random>`, never `haive-*`. Containers, volumes and the network are removed on every
+  path, signals included; a Postgres or Redis image is removed only when this run pulled it.
+- Secrets (database password, encryption key, setup token, admin password) are generated per run, passed by a 0600 env file in a
+  private temp dir outside the repository, and scrubbed from every printed line, failure logs included.
+- Check: it registers the bootstrap admin and polls `GET /modules/loaded` until the worker half has reported.
+  The ids each half loaded must equal the record's `modules` (entitled registry packages plus the tree's local
+  ones). Exit 0 equal, 1 mismatch with one `OFFENDER` line per extra or missing id per half, 2 could not check
+  (bad record, boot failure, timeout). `--timeout-ms` bounds each boot stage, not the whole run.
+- Scope: it proves what LOADED, from the baked module registry. A package present in an image but not
+  registered is invisible to it; the leak gate (`channel-gate.mjs`) proves what is PRESENT. Publishing must
+  run both.
+
 ## Own modules on a published install
 
 `haive-builder:<version>` supplies the core source, Node, pnpm, installed dependencies and pnpm
