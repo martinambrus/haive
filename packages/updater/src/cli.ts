@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { readFile } from 'node:fs/promises';
-import { pathToFileURL } from 'node:url';
+import { readFile, realpath } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import postgres from 'postgres';
 import { configService, networkName } from '@haive/shared';
@@ -390,7 +390,11 @@ export async function main(): Promise<number> {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (
+  process.argv[1] &&
+  (await realpath(process.argv[1]).catch(() => undefined)) ===
+    (await realpath(fileURLToPath(import.meta.url)))
+) {
   try {
     process.exit(await main());
   } catch (err) {
