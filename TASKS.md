@@ -353,7 +353,7 @@ Plan D4: git and registry install sources drive D1 and D3; the token is stored e
 
 Owner decisions 2026-11-05: (1) saving records the source and a worker job fetches/pins it into the prepared own-modules directory; it applies at the next upgrade or a later explicit Build, never an image swap from the form; (2) published-image installs only, source checkouts keep `pnpm module` and see a read-only note; (3) token install-wide in system_secrets via SecretsService, admin only, write-only (blank keeps), every add/edit/delete audited in the same transaction; (4) a git ref resolves to a commit SHA on fetch, newer commits only via explicit Refresh. Delivery: codex-sonnet, branch feat/337-module-sources.
 
-### T400 · FNF[module-sources] · install-source fetch/pin follow-ups from T337 (+3)
+### T531 · FNF[module-sources] · install-source fetch/pin follow-ups from T337 (+3)
 
 status: open · kind: fix · found: T337 reviews 2026-11-05 · priority: P3
 
@@ -362,7 +362,7 @@ status: open · kind: fix · found: T337 reviews 2026-11-05 · priority: P3
 3. PRE-EXISTING order, fails closed: when `refs/heads/<ref>` and `refs/tags/<ref>` both exist the branch wins in both the first resolution and the fallback (source-fetch.ts:197, :203); a source pinned from a tag that later gets a same-named branch fails `module_source_ref_moved` on servers that refuse object-name fetches. Fix: remember which namespace resolved (store the qualified ref) and reuse it.
 4. PRE-EXISTING, minor: the module-id pattern `[a-z0-9][a-z0-9-]{0,22}` is duplicated across ~7 files (manifest, gen-modules, module.mjs, api sources, migration 0221 CHECK, web dialog). Fix: one exported constant in @haive/shared reused by the TS sites; the SQL CHECK stays literal with a test pinning equality.
 
-### T401 · D4b · registry-kind install sources cannot be fetched (design)
+### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
 status: open · kind: design · user decision: pending · found: T337 run 2 · priority: P3
 `@haive-module/<id>` registry packages ship `dist` only, while the own-module builder rebuilds from sources, so T337 refuses registry fetch with 409 `registry_fetch_unsupported` (api modules/sources.ts ~:174). Options: publish sources in the package (a `files` change in the packaging script), teach the builder to accept prebuilt dist packages, or drop the registry kind from the form. Needs an owner decision.
