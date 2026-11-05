@@ -61,11 +61,20 @@ async function validateTree(root: string, moduleId: string): Promise<void> {
     throw new Error('Expected @haive-module/' + moduleId + ' exporting ./manifest');
 }
 
+function moduleSourceUrl(raw: string): URL {
+  assertCloneUrl(raw);
+  const url = new URL(raw);
+  if (url.protocol !== 'https:' || url.username || url.password || /[?#\s\\]/.test(raw))
+    throw new Error('Module sources require HTTPS without credentials, query or fragment');
+  return url;
+}
+
 export async function fetchModuleSource(
   source: FetchSource,
   token: string | null,
   pin: (tree: string, hostDir: string, moduleId: string) => Promise<void> = pinModuleTree,
   resolved: (sha: string) => Promise<void> = async () => {},
+  validateUrl: (raw: string) => URL = moduleSourceUrl,
 ): Promise<string> {
   if (process.env.HAIVE_PUBLISHED_INSTALL !== 'true')
     throw new Error('Module fetch requires a published install');
@@ -86,10 +95,7 @@ export async function fetchModuleSource(
     /\s/.test(ref)
   )
     throw new Error('Invalid module branch or tag ref');
-  assertCloneUrl(source.url ?? '');
-  const url = new URL(source.url!);
-  if (url.protocol !== 'https:' || url.username || url.password || /[?#\s\\]/.test(source.url!))
-    throw new Error('Module sources require HTTPS without credentials, query or fragment');
+  const url = validateUrl(source.url ?? '');
   if (source.resolvedSha !== null && !/^[a-f0-9]{40}$/.test(source.resolvedSha))
     throw new Error('Invalid recorded SHA');
   const temporary = await mkdtemp(join(tmpdir(), 'haive-worker-module-source-'));
@@ -170,10 +176,10 @@ export async function fetchModuleSource(
     const run = async (args: string[]) => output(await gitRun(tree, [...auth, ...args], env, io));
     await run(['init']);
     await run(['remote', 'add', 'origin', url.href]);
-    let sha = source.resolvedSha;
-    if (!sha) {
-      const heads = `refs/heads/${ref}`;
-      const tags = `refs/tags/${ref}`;
+    const heads = `refs/heads/${ref}`;
+    const tags = `refs/tags/${ref}`;
+    let qualifiedRef: string | undefined;
+    const listRefs = async () => {
       const listing = output(
         await originGitRun(
           tree,
@@ -188,23 +194,36 @@ export async function fetchModuleSource(
           .map((line) => line.split('\t') as [string, string])
           .map(([sha, name]) => [name, sha]),
       );
+      qualifiedRef = refs.has(heads) ? heads : refs.has(tags) ? tags : undefined;
+      return refs;
+    };
+    let sha = source.resolvedSha;
+    if (!sha) {
+      const refs = await listRefs();
       sha = refs.get(heads) ?? refs.get(`${tags}^{}`) ?? refs.get(tags) ?? null;
       if (!sha || !/^[a-f0-9]{40}$/.test(sha))
         throw new Error('Module branch or tag was not found');
     }
-    output(
-      await originGitRun(
+    const fetch = (target: string) =>
+      originGitRun(
         tree,
-        [...auth, 'fetch', '--no-tags', '--depth=1', '--end-of-options', url.href, sha],
+        [...auth, 'fetch', '--no-tags', '--depth=1', '--end-of-options', url.href, target],
         env,
         io,
-      ),
-    );
+      );
+    const byObject = await fetch(sha);
+    if (byObject.code !== 0) {
+      if (!qualifiedRef) await listRefs();
+      if (!qualifiedRef)
+        throw new Error('module_source_ref_unavailable: Module branch or tag was not found');
+      output(await fetch(qualifiedRef));
+    }
     const commit = await run(['rev-parse', '--verify', '--end-of-options', 'FETCH_HEAD^{commit}']);
-    if (commit !== sha) throw new Error('Fetched commit does not match the pinned SHA');
+    if (commit !== sha)
+      throw new Error('module_source_ref_moved: Fetched commit does not match the pinned SHA');
     await resolved(sha);
     await run(['checkout', '--detach', sha, '--']);
-    await removeNoFollow(tree, '.git');
+    await removeNoFollow(tree, '.git', { recursive: true });
     await validateTree(tree, source.moduleId);
     await writeFileNoFollow(
       tree,

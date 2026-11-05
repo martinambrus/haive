@@ -30,7 +30,9 @@ function setup() {
     if (args.includes('ls-remote'))
       return { code: 0, stdout: `${sha}\trefs/heads/main\n`, stderr: '' };
     if (args.includes('checkout')) {
-      await mkdir(join(cwd, '.git'), { recursive: true });
+      await mkdir(join(cwd, '.git', 'objects', 'aa'), { recursive: true });
+      await writeFile(join(cwd, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+      await writeFile(join(cwd, '.git', 'objects', 'aa', 'pack'), 'object', { mode: 0o444 });
       await writeFile(
         join(cwd, 'package.json'),
         JSON.stringify({
@@ -133,6 +135,47 @@ describe('fetch and pin a module source', () => {
     expect(calls).toContain('--end-of-options');
     expect(calls).toContain(sha);
     expect(calls).not.toContain('private-token');
+  });
+  it.each(['refs/heads/main', 'refs/tags/v1'])(
+    'falls back to the qualified ref %s when object-name fetch is refused',
+    async (qualified) => {
+      setup();
+      const previous = git.getMockImplementation()!;
+      git.mockImplementation(async (cwd: string, args: string[], env: unknown) => {
+        if (args.includes('ls-remote'))
+          return { code: 0, stdout: `${sha}\t${qualified}\n`, stderr: '' };
+        if (args.includes('fetch') && args.at(-1) === sha)
+          return { code: 1, stdout: '', stderr: 'object wants not supported' };
+        return previous(cwd, args, env);
+      });
+      await expect(
+        fetchModuleSource(
+          { ...source, ref: qualified.endsWith('v1') ? 'v1' : 'main' },
+          null,
+          vi.fn(),
+        ),
+      ).resolves.toBe(sha);
+      const fallback = git.mock.calls.find(
+        ([, args]) => args.includes('fetch') && args.at(-1) === qualified,
+      );
+      expect(fallback).toBeDefined();
+      expect(fallback![1].slice(-3)).toEqual(['--end-of-options', source.url, qualified]);
+    },
+  );
+  it('refuses a moved fallback ref rather than replacing the pinned commit', async () => {
+    setup();
+    const previous = git.getMockImplementation()!;
+    git.mockImplementation(async (cwd: string, args: string[], env: unknown) => {
+      if (args.includes('fetch') && args.at(-1) === sha)
+        return { code: 1, stdout: '', stderr: 'object wants not supported' };
+      if (args.includes('rev-parse')) return { code: 0, stdout: 'b'.repeat(40), stderr: '' };
+      return previous(cwd, args, env);
+    });
+    const pin = vi.fn();
+    await expect(fetchModuleSource({ ...source, resolvedSha: sha }, null, pin)).rejects.toThrow(
+      'module_source_ref_moved',
+    );
+    expect(pin).not.toHaveBeenCalled();
   });
   it('re-fetches the recorded SHA without re-resolving the branch', async () => {
     setup();
