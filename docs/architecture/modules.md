@@ -373,8 +373,9 @@ step that reads its record.
 - Inputs: a final tag only (`vX.Y.Z`, no prerelease), resolved to its commit and exported with `git archive`
   into a temp dir outside the repository; never the working tree. `<file.json>` is a JSON array of exact
   `@haive-module/<id>@<version>` specifications. The channel name is 1-32 lowercase letters, digits or dashes.
-- Preflight, before any network use: the tag's tree must hold `scripts/module.mjs`, `scripts/gen-modules.mjs`
-  and an `id=npmrc` secret mount in each of the api, worker and web Dockerfiles. v0.2.0 and older are refused
+- Preflight, before any network use: the tag's tree must hold `scripts/module.mjs`, `scripts/gen-modules.mjs`,
+  `scripts/own-module-builder.mjs`, `docker/own-module-builder/Dockerfile` and an `id=npmrc` secret mount in
+  each of the api, worker and web Dockerfiles. v0.2.0 and older are refused
   (exit 2, the missing file named). The working tree's `scripts/channel-gate.mjs` and
   `scripts/smoke/scan-image.sh` must be clean, because the gate runs from this checkout, not from the tag.
 - Modules: `module add` runs once per entitled package inside the tree. Every `modules/<dir>/package.json`
@@ -384,17 +385,25 @@ step that reads its record.
   (`XDG_CACHE_HOME`) and the secret are removed on every path; a cleanup failure prints the leftover path and
   keeps the exit code.
 - Images: api and worker are built with `--target production`, `--load`, `HAIVE_VERSION` and the build
-  platform, tagged `<registry>/haive-<channel>-<host>:<version>`. Web is rebuilt only when an entitled module
+  platform, tagged `<registry>/haive-<channel>-<host>:<version>`. The builder
+  (`docker/own-module-builder/Dockerfile`) is built the same way from the same prepared tree as
+  `haive-<channel>-builder`, always, because a channel install may add own modules later: it is the paid+own
+  customer's builder, and it bakes in the entitled packages and their pnpm store but never the token. Web is rebuilt only when an entitled module
   exports web parts. Otherwise the stock `<source-registry>/haive-web:<version>` is pulled for that platform.
   `--source-registry` defaults to `HAIVE_REGISTRY`, then `ghcr.io/martinambrus`. An existing local tag is
   refused unless `--replace` is given. Default BuildKit attestations are kept. The gate's `docker save`
   accepts both a `--load` build and a single-platform pull of a multi-platform index on the containerd image
   store (one manifest entry), measured 2026-11-05.
 - Result: the gate's exit code. Only on exit 0 is `<out>/build-record.json` written. A stale record is deleted
-  before building, and a failed run leaves its tags for diagnosis. The record carries `"schema": 1`, the tag,
+  before building, and a failed run leaves its tags for diagnosis. The record carries `"schema": 2`, the tag,
   commit, channel, version, platform, the docker image store, and per image its `ref`, `built`, `id` and, for
   the stock image, its `repoDigest`. Ids are read before and after the gate, and a change is refused. Under
-  the containerd store `id` is the index digest; under the classic store it is the config digest.
+  the containerd store `id` is the index digest; under the classic store it is the config digest. Schema 2
+  adds `images.builder`; the boot check still reads a schema-1 record, publish refuses one (exit 2, "record
+  has no builder"), since an older publisher would silently drop the builder.
+- Gate: the builder is scanned with the api and worker rules (module footprint, `.npmrc`, token bytes, version
+  stamp). It has no compiled module registry, so its module set is read from
+  `/app/packages/{api,worker}/package.json` dependencies and the installed module metadata.
 
 ### Boot check (`scripts/channel-boot-check.mjs`)
 
@@ -426,18 +435,24 @@ leak gate passed; the script runs the boot check itself (the imported `run`, not
 nothing unless it exits 0.
 
 - Order: re-check every recorded image `id` against its ref (mismatch exit 2), boot check, prove that EVERY
-  destination tag is absent, print the plan, push api and worker, copy the stock web, re-read each pushed
-  digest, then write `release.json` last (no-overwrite). `--dry-run` stops after the plan and also refuses an
-  existing `release.json`.
-- Destinations: `<registry>/haive-<channel>-{api,worker,web}:<version>`, `<registry>` the record's own api
+  destination tag is absent, print the plan, push api, worker and builder, copy the stock web, re-read each
+  pushed digest, write `release.json` locally (no-overwrite), then build and push the manifest image LAST.
+  `--dry-run` stops after the plan and also refuses an existing `release.json`.
+- Destinations: `<registry>/haive-<channel>-{api,worker,web,builder,release}:<version>`, `<registry>` the record's own api
   prefix unless `--registry` says otherwise. What is pushed is the single platform image manifest the gate
   scanned: BuildKit attestation manifests that ride along with a `--load` build are left out, and the stock
   web is copied by the platform digest inside its recorded `repoDigest`.
 - Manifest: produced by the `build-release-manifest.mjs` and migrations of `record.commit` (`git archive`),
   not the working tree, so `migrationHead` and `contracts` describe the tagged tree. `images` hold pinned
   `<repository>@sha256:<digest>` refs, because a channel's images live in channel-named repositories a bare
-  digest cannot be pulled from. The script writes the file locally; serving it to installs is separate work.
-  The updater does not read `images` yet (`packages/updater/src/images.ts` composes refs from the version).
+  digest cannot be pulled from. `images.builder` is optional in the schema and set only by a channel publish;
+  the public manifest has none. The updater does not read `images` yet (`packages/updater/src/images.ts`
+  composes refs from the version).
+- Manifest image: `haive-<channel>-release:<version>` is `FROM scratch` with one file, `/release.json`
+  (byte-identical to the local file), and the label `org.haive.release=1`. Its build context is a fresh
+  scratch directory holding only that file and the Dockerfile. It gets the same absence proof,
+  `--confirm-absent` and digest re-read as the others. An install reads it with `docker create`, `docker cp`
+  and `docker rm`, so one registry credential reaches both the manifest and the images.
 - Absence proof, fail-closed: a tag counts as absent only when the authenticated
   `docker buildx imagetools inspect` exits 1 with a line that is exactly `ERROR: <ref>: not found` (MEASURED
   on ghcr.io and `registry:3`) AND an anonymous registry GET (with the registry's anonymous Bearer token,
@@ -453,12 +468,14 @@ nothing unless it exits 0.
 - Credentials: the operator's docker credential store. The script never runs `docker login`, never takes a
   token flag, and never prints a token or a helper's output.
 - Exit 0 published; 1 a gate said no with nothing pushed (boot-check mismatch, an existing tag); 2 could not
-  publish. A failure after a push exits 2, writes no manifest and names every attempted and verified remote
-  ref; nothing remote is ever deleted, and a re-run then refuses on the existing tag.
+  publish. A failure after a push exits 2 and names every attempted and verified remote ref; nothing remote is
+  ever deleted, and a re-run then refuses on the existing tag. A failure before `release.json` is written
+  leaves no manifest. A failure building or pushing the manifest image leaves the runtime tags public and
+  keeps the local `release.json` (named in the error), with no install able to read it yet.
 - Limits: the absence check and the push are not atomic (registry tag writes are unconditional), so two
   concurrent publishers of one version can race; only registry-side tag immutability closes that. The script
   imports `packages/shared/src/release/manifest.ts`, so it needs the repository's installed dependencies and
-  a Node with type stripping. `haive-builder` is not part of a channel.
+  a Node with type stripping.
 
 ## Own modules on a published install
 
