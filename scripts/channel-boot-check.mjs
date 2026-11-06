@@ -178,7 +178,7 @@ export async function run(
       throw error;
     }
   };
-  const poll = async (name, probe) => {
+  const poll = async (name, probe, lastError = () => undefined) => {
     const deadline = now() + timeout;
     do {
       interrupted();
@@ -187,7 +187,10 @@ export async function run(
       if (now() >= deadline) break;
       await wait(Math.min(1000, Math.max(1, deadline - now())));
     } while (now() <= deadline);
-    throw new Error(`timed out waiting for ${name}`);
+    const diagnostic = lastError();
+    throw new Error(
+      `timed out waiting for ${name}${diagnostic ? `; last fetch error: ${diagnostic}` : ''}`,
+    );
   };
   const state = async (name) =>
     JSON.parse((await docker(['inspect', '--format', '{{json .State}}', name])).stdout);
@@ -402,25 +405,34 @@ export async function run(
     }
     if (!cookies.some((cookie) => cookie.startsWith('haive_access=')))
       throw new Error(`${api} registration returned no session cookie`);
-    const report = await poll(`${worker} module report`, async () => {
-      await running(api);
-      await running(worker);
-      let response;
-      try {
-        response = await http(`${base}/modules/loaded`, {
-          headers: { Cookie: cookies.join('; ') },
-        });
-      } catch {
-        interrupted();
-        return false;
-      }
-      if (!response.ok) throw new Error(`${api} /modules/loaded failed (HTTP ${response.status})`);
-      const body = await response.json();
-      if (body.worker === null) return false;
-      readModules(body.api, 'api');
-      readModules(body.worker, 'worker');
-      return body;
-    });
+    let reportFetchError;
+    const report = await poll(
+      `${worker} module report`,
+      async () => {
+        await running(api);
+        await running(worker);
+        let response;
+        try {
+          response = await http(`${base}/modules/loaded`, {
+            headers: { Cookie: cookies.join('; ') },
+          });
+        } catch (error) {
+          interrupted();
+          reportFetchError = lastLines(
+            [error.message, error.cause?.message].filter(Boolean).join(': '),
+          );
+          return false;
+        }
+        if (!response.ok)
+          throw new Error(`${api} /modules/loaded failed (HTTP ${response.status})`);
+        const body = await response.json();
+        if (body.worker === null) return false;
+        readModules(body.api, 'api');
+        readModules(body.worker, 'worker');
+        return body;
+      },
+      () => reportFetchError,
+    );
     let offenders = 0;
     for (const key of ['api', 'worker']) {
       const actual = readModules(report[key], key);

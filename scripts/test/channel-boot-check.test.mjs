@@ -215,6 +215,10 @@ function fixture(t, config = {}) {
       requests.filter((r) => r.url.endsWith('/modules/loaded')).length === 1
     )
       throw new Error('connection reset');
+    if (config.reportFetchError)
+      throw new TypeError('fetch failed', {
+        cause: new Error('getaddrinfo ENOTFOUND api.invalid'),
+      });
     if (config.reportFailure) return Response.json({}, { status: 500 });
     return Response.json({
       api: { modules: (config.api ?? ['statistics']).map(moduleRow) },
@@ -626,4 +630,13 @@ test('abort during a dependency pull removes the image this run may have pulled'
   assert.deepEqual(f.created.images, ['pgvector/pgvector:pg18']);
   assert.deepEqual(f.removed.images, f.created.images);
   assert.equal(f.created.networks.length, 0);
+});
+
+test('module-report timeout includes the last fetch failure and its cause', async (t) => {
+  const f = fixture(t, { reportFetchError: true });
+  assert.equal(await f.check(), 2);
+  assert.match(
+    f.logs.join('\n'),
+    /timed out waiting for .*module report.*fetch failed.*ENOTFOUND api.invalid/,
+  );
 });
