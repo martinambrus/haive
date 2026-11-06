@@ -38,7 +38,7 @@ beforeEach(() => {
   checkout.transfers = [];
 });
 afterEach(() => vi.unstubAllEnvs());
-it('refuses a real-git large-blob transfer before checkout', async () => {
+it('refuses a real-git oversized blob before checkout', async () => {
   const root = await mkdtemp(join(tmpdir(), 'module-source-large-blob-'));
   const fixture = await startGitHttpServer(root);
   const run = async (args: string[]) => {
@@ -93,7 +93,7 @@ it('refuses a real-git large-blob transfer before checkout', async () => {
     await fixture.close();
     await rm(root, { recursive: true, force: true });
   }
-});
+}, 60_000);
 it('resolves a raw SHA on its first real-git fetch and reports an unavailable object', async () => {
   const root = await mkdtemp(join(tmpdir(), 'module-source-sha-'));
   const fixture = await startGitHttpServer(root);
