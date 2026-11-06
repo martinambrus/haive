@@ -55,10 +55,19 @@ export function parseModules(value) {
   });
 }
 
-function capture(command, args, options) {
+export function capture(command, args, options) {
   return new Promise((resolveResult) => {
-    const { onOutput, ...spawnOptions } = options;
+    const { onOutput, timeout, ...spawnOptions } = options;
     const child = spawn(command, args, { ...spawnOptions, stdio: ['ignore', 'pipe', 'pipe'] });
+    let timedOut = false;
+    const timer =
+      timeout > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            child.kill('SIGTERM');
+          }, timeout)
+        : undefined;
+    timer?.unref();
     const stdout = [];
     const stderr = [];
     let size = 0;
@@ -85,14 +94,17 @@ function capture(command, args, options) {
     child.on('error', (cause) => {
       error = cause;
     });
-    child.on('close', (status) =>
+    child.on('close', (status, signal) => {
+      clearTimeout(timer);
       resolveResult({
+        signal,
+        timedOut,
         status,
         stdout: Buffer.concat(stdout).toString('utf8'),
         stderr: Buffer.concat(stderr).toString('utf8'),
         error,
-      }),
-    );
+      });
+    });
   });
 }
 
@@ -118,6 +130,7 @@ export async function run(
     runner = capture,
     env = process.env,
     say = (line) => process.stdout.write(`${line}\n`),
+    write = (text) => process.stdout.write(text),
     signal,
   } = {},
 ) {
@@ -180,29 +193,43 @@ export async function run(
     const command = async (
       cmd,
       args,
-      { cwd = root, quiet = false, allowFailure = false, stream = false, ...options } = {},
+      {
+        cwd = root,
+        quiet = false,
+        allowFailure = false,
+        stream = false,
+        timeout = 1_800_000,
+        ...options
+      } = {},
     ) => {
       if (signal?.aborted) throw new Error('interrupted');
       const buffers = new Map();
+      let needsNewline = false;
       const onOutput = (chunk, name = 'stdout') => {
         const text = scrub((buffers.get(name) ?? '') + chunk);
         let keep = Math.min(text.length, token.length - 1);
         while (keep > 0 && !text.endsWith(token.slice(0, keep))) keep--;
         buffers.set(name, keep ? text.slice(-keep) : '');
-        emit(keep ? text.slice(0, -keep) : text);
+        const ready = keep ? text.slice(0, -keep) : text;
+        if (ready) {
+          write(ready);
+          needsNewline = !ready.endsWith('\n');
+        }
       };
+      // A held suffix is a proper prefix of the secret. Never flush it, even if the
+      // child exits successfully: a truncated token must stay private too.
       let result;
       try {
         result = await runner(cmd, args, {
           cwd,
           env: childEnv,
-          timeout: 1_800_000,
+          timeout,
           signal,
           ...options,
           ...(stream ? { onOutput } : {}),
         });
       } finally {
-        for (const text of buffers.values()) emit(text);
+        if (needsNewline) write('\n');
       }
       if (!quiet) {
         emit(result.stdout);
@@ -213,9 +240,12 @@ export async function run(
           emit(result.stdout);
           emit(result.stderr);
         }
-        throw new Error(
-          `${cmd} failed (${result.status ?? 'no exit code'})${result.error ? `: ${result.error.message}` : ''}`,
-        );
+        const reason = result.timedOut
+          ? `timed out after ${timeout} ms`
+          : result.signal
+            ? `terminated by ${result.signal}`
+            : `failed (${result.status ?? 'no exit code'})`;
+        throw new Error(`${cmd} ${reason}${result.error ? `: ${result.error.message}` : ''}`);
       }
       return result;
     };
@@ -273,24 +303,55 @@ export async function run(
       } catch {
         throw new Error(`preflight ${tag}: missing ${file}`);
       }
+      if (!file.endsWith('/Dockerfile')) continue;
+      // Docker ignores whole comment lines, including within continued instructions.
+      const instructions = content
+        .split(/\r?\n/)
+        .filter((line) => !/^\s*#/.test(line))
+        .join('\n')
+        .replace(/\\\r?\n/g, ' ');
+      const mounts = [...instructions.matchAll(/^[ \t]*RUN[ \t]+((?:--\S+[ \t]+)*)/gim)].flatMap(
+        (run) => [...run[1].matchAll(/--mount=([^\s\\]+)/g)],
+      );
       if (
-        file.endsWith('/Dockerfile') &&
-        ![...content.matchAll(/--mount=([^\s\\]+)/g)].some((match) => {
+        !mounts.some((match) => {
           const fields = match[1].split(',');
           return fields.includes('type=secret') && fields.includes('id=npmrc');
         })
       )
         throw new Error(`preflight ${tag}: ${file} lacks an id=npmrc secret mount`);
+      if (
+        !/^[ \t]*FROM[ \t]+(?:--\S+[ \t]+)*\S+[ \t]+AS[ \t]+production[ \t]*\r?$/im.test(
+          instructions,
+        )
+      )
+        throw new Error(`preflight ${tag}: ${file} lacks a production stage`);
+    }
+    let apiPackage;
+    try {
+      apiPackage = json(join(tree, 'packages', 'api', 'package.json'));
+    } catch (error) {
+      throw new Error(
+        `preflight ${tag}: could not read packages/api/package.json: ${error.message}`,
+      );
     }
     for (const entry of readdirSync(join(tree, 'modules'), { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
+      const file = `modules/${entry.name}/package.json`;
       let pkg;
       try {
-        pkg = json(join(tree, 'modules', entry.name, 'package.json'));
+        pkg = json(join(tree, file));
       } catch (error) {
         if (error.code === 'ENOENT') continue;
-        throw error;
+        throw new Error(`could not read ${file}: ${error.message}`);
       }
+      // Match gen-modules: a folder is installed only when the api depends on
+      // it, and only packages exporting ./manifest enter the generated lists.
+      if (
+        pkg.exports?.['./manifest'] === undefined ||
+        apiPackage.dependencies?.[pkg.name] === undefined
+      )
+        continue;
       if (typeof pkg.name !== 'string' || idOf(pkg.name) === null)
         throw new Error(`invalid local module package name in modules/${entry.name}/package.json`);
       modules.push({
@@ -367,6 +428,35 @@ export async function run(
       (await command('docker', ['info', '--format', '{{json .}}'], { quiet: true })).stdout,
     );
     const imageStore = { Driver: store.Driver, DriverStatus: store.DriverStatus };
+    const readRepoDigest = async () => {
+      const digests = JSON.parse(
+        (
+          await command(
+            'docker',
+            ['image', 'inspect', '--format', '{{json .RepoDigests}}', images.web],
+            { quiet: true },
+          )
+        ).stdout,
+      );
+      const repository = images.web.slice(0, images.web.lastIndexOf(':'));
+      const matches = new Set(
+        Array.isArray(digests)
+          ? digests.filter(
+              (digest) => typeof digest === 'string' && digest.startsWith(`${repository}@`),
+            )
+          : [],
+      );
+      const [digest] = matches;
+      if (matches.size !== 1 || !/@sha256:[a-f0-9]{64}$/.test(digest))
+        throw new Error('could not read one unambiguous pulled stock web RepoDigest');
+      return digest;
+    };
+    let repoDigest;
+    if (!rebuildWeb) {
+      emit(`build-channel: pulling stock web ${images.web} for ${platform}`);
+      await command('docker', ['pull', '--platform', platform, images.web]);
+      repoDigest = await readRepoDigest();
+    }
     for (const host of hosts) {
       emit(`build-channel: building ${images[host]} from ${tag} (${commit})`);
       await command(
@@ -391,29 +481,9 @@ export async function run(
           images[host],
           tree,
         ],
-        { cwd: tree, stream: true },
+        { cwd: tree, stream: true, timeout: 0 },
       );
       retainedImages.push(images[host]);
-    }
-    let repoDigest;
-    if (!rebuildWeb) {
-      emit(`build-channel: pulling stock web ${images.web} for ${platform}`);
-      await command('docker', ['pull', '--platform', platform, images.web]);
-      retainedImages.push(images.web);
-      const digests = JSON.parse(
-        (
-          await command(
-            'docker',
-            ['image', 'inspect', '--format', '{{json .RepoDigests}}', images.web],
-            { quiet: true },
-          )
-        ).stdout,
-      );
-      repoDigest = digests.find((digest) =>
-        digest.startsWith(`${images.web.slice(0, images.web.lastIndexOf(':'))}@sha256:`),
-      );
-      if (!repoDigest || !/@sha256:[a-f0-9]{64}$/.test(repoDigest))
-        throw new Error('could not read the pulled stock web RepoDigest');
     }
     const readIds = async () => {
       const result = {};
@@ -447,6 +517,8 @@ export async function run(
       if (beforeGate[host] !== afterGate[host])
         throw new Error(`local image id changed during gate: ${images[host]}`);
     }
+    if (!rebuildWeb && (await readRepoDigest()) !== repoDigest)
+      throw new Error(`stock web RepoDigest changed during gate: ${images.web}`);
     if (gate.status !== 0) {
       emit(`build-channel: gate failed; tags retained for diagnosis: ${retainedImages.join(', ')}`);
       return gate.status;

@@ -683,15 +683,13 @@ export async function run(argv) {
       missing.push(`${key}: ${error.message}`);
     }
   }
-  if (missing.length > 0) {
-    for (const line of missing) say(`could not look: ${line}`);
-    return 2;
-  }
+  for (const line of missing) say(`could not look: ${line}`);
   if (expect.images.web === undefined) say('no web image in the expectation, web is not checked');
 
   const offenders = [];
-  const couldNot = [];
+  const couldNot = [...missing];
   for (const [key, ref] of images) {
+    if (!envs.has(key)) continue;
     const result = await checkImage(key, ref, envs.get(key), expect, token);
     for (const o of result.offenders) process.stdout.write(`${scrub(formatOffender(o))}\n`);
     for (const line of result.couldNot) say(`could not look: ${line}`);

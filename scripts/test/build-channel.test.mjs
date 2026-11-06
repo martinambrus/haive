@@ -35,9 +35,24 @@ function seedTree(tree, config = {}) {
     mkdirSync(dirname(join(tree, file)), { recursive: true });
     writeFileSync(
       join(tree, file),
-      config.missingTool === file
-        ? 'RUN pnpm install'
-        : 'RUN --mount=type=secret,id=npmrc,target=/root/.npmrc pnpm install',
+      config.dockerfiles?.[file] ??
+        (config.missingTool === file
+          ? 'FROM node:26 AS production\nRUN pnpm install'
+          : 'FROM node:26 AS production\nRUN --mount=type=secret,id=npmrc,target=/root/.npmrc pnpm install'),
+    );
+  }
+  for (const host of ['api', 'worker', 'web']) {
+    if (host === 'api' && config.apiMissingPackage) continue;
+    writeFileSync(
+      join(tree, 'packages', host, 'package.json'),
+      (host === 'api' ? config.apiPackageText : undefined) ??
+        JSON.stringify({
+          name: `@haive/${host}`,
+          dependencies:
+            config.local && config.localInstalled !== false
+              ? { [config.localName ?? '@haive/module-statistics']: 'workspace:*' }
+              : {},
+        }),
     );
   }
   writeFileSync(
@@ -48,12 +63,18 @@ function seedTree(tree, config = {}) {
   writeFileSync(join(tree, 'modules', '.gitkeep'), '');
   if (config.local) {
     mkdirSync(join(tree, 'modules', 'statistics'));
+    if (config.localMissingPackage) return;
     writeFileSync(
       join(tree, 'modules', 'statistics', 'package.json'),
-      JSON.stringify({
-        name: config.localName ?? '@haive/module-statistics',
-        exports: { './web': './dist/web/index.js', './dashboard': './dist/dashboard/index.js' },
-      }),
+      config.localPackageText ??
+        JSON.stringify({
+          name: config.localName ?? '@haive/module-statistics',
+          exports: {
+            ...(config.localManifest === false ? {} : { './manifest': './dist/manifest.js' }),
+            './web': './dist/web/index.js',
+            './dashboard': './dist/dashboard/index.js',
+          },
+        }),
     );
   }
 }
@@ -72,6 +93,8 @@ function fixture(t, config = {}) {
   const violations = [];
   t.after(() => assert.deepEqual(violations, []));
   const logs = [];
+  const writes = [];
+  const output = [];
   let expectation;
   let scratch;
   let secret;
@@ -85,7 +108,10 @@ function fixture(t, config = {}) {
       return spawnSync(cmd, args, { ...options, encoding: 'utf8' });
     }
     if (cmd === 'git' && args.includes('rev-parse')) {
-      return config.missingTag ? { status: 128, stderr: 'unknown tag' } : ok(`${SHA}\n`);
+      return (
+        config.resolveResult ??
+        (config.missingTag ? { status: 128, stderr: 'unknown tag' } : ok(`${SHA}\n`))
+      );
     }
     if (cmd === 'git' && args.includes('archive')) {
       const output = args.find((arg) => arg.startsWith('--output=')).slice('--output='.length);
@@ -128,10 +154,14 @@ function fixture(t, config = {}) {
       assert.ok(!readFileSync(join(context, '.npmrc'), 'utf8').includes(TOKEN));
       if (config.delegate) assert.equal(readFileSync(join(context, 'marker'), 'utf8'), 'tag');
       if (options.onOutput) {
-        options.onOutput('build output ' + TOKEN.slice(0, 10), 'stdout');
-        options.onOutput('stderr progress\n', 'stderr');
-        options.onOutput(TOKEN.slice(10) + '\n', 'stdout');
+        for (const [chunk, stream] of config.buildChunks ?? [
+          ['build output ' + TOKEN.slice(0, 10), 'stdout'],
+          ['stderr progress\n', 'stderr'],
+          [TOKEN.slice(10) + '\n', 'stdout'],
+        ])
+          options.onOutput(chunk, stream);
       }
+      if (config.buildThrow) throw new Error('child output interrupted');
       return {
         status: config.buildFailure ? 1 : 0,
         stdout: options.onOutput ? '' : `build output ${TOKEN}\n`,
@@ -140,9 +170,13 @@ function fixture(t, config = {}) {
     if (cmd === 'docker' && args[0] === 'image' && args[1] === 'inspect') {
       if (args.includes('{{json .RepoDigests}}'))
         return ok(
-          JSON.stringify([
-            `${args.at(-1).split(':').slice(0, -1).join(':')}@sha256:${'b'.repeat(64)}`,
-          ]),
+          JSON.stringify(
+            'repoDigests' in config
+              ? config.repoDigests
+              : [
+                  `${args.at(-1).split(':').slice(0, -1).join(':')}@sha256:${(config.changedDigest && expectation !== undefined ? 'c' : 'b').repeat(64)}`,
+                ],
+          ),
         );
       const afterGate = expectation !== undefined;
       return ok(`sha256:${(config.changedId && afterGate ? 'c' : 'a').repeat(64)}\n`);
@@ -154,7 +188,8 @@ function fixture(t, config = {}) {
           DriverStatus: [['driver-type', 'io.containerd.snapshotter.v1']],
         }),
       );
-    if (cmd === 'docker' && args[0] === 'pull') return ok('pulled');
+    if (cmd === 'docker' && args[0] === 'pull')
+      return config.pullFailure ? { status: 1, stderr: 'manifest unknown' } : ok('pulled');
     if (cmd === process.execPath && args[0].endsWith('/channel-gate.mjs')) {
       const file = args[args.indexOf('--expect') + 1];
       expectation = JSON.parse(readFileSync(file, 'utf8'));
@@ -194,6 +229,8 @@ function fixture(t, config = {}) {
     out,
     calls,
     logs,
+    writes,
+    output,
     argv,
     dir,
     get expectation() {
@@ -211,7 +248,15 @@ function fixture(t, config = {}) {
         runner,
         env: { PATH: process.env.PATH, UNRELATED_SECRET: TOKEN, ...config.env },
         signal: config.signal,
-        say: (line) => logs.push(line),
+        say: (line) => {
+          logs.push(line);
+          output.push(`${line}\n`);
+        },
+        write: (text) => {
+          writes.push(text);
+          output.push(text);
+          logs.push(text);
+        },
       });
     },
   };
@@ -427,7 +472,7 @@ for (const scope of [
   });
 }
 
-test('stock web is pulled for the build platform before the gate, even with an existing stock tag', async (t) => {
+test('stock web is pulled for the build platform before the first build, even with an existing stock tag', async (t) => {
   const f = fixture(t);
   assert.equal(await f.execute(['--source-registry', 'localhost:5000/public']), 0);
   const pull = f.calls.find((c) => c.cmd === 'docker' && c.args[0] === 'pull');
@@ -443,7 +488,7 @@ test('stock web is pulled for the build platform before the gate, even with an e
       (c) => c.args[0] === 'image' && c.args[1] === 'ls' && c.args.at(-1).includes('/haive-web:'),
     ),
   );
-  assert.ok(f.calls.indexOf(pull) > f.calls.findLastIndex((c) => c.args[0] === 'buildx'));
+  assert.ok(f.calls.indexOf(pull) < f.calls.findIndex((c) => c.args[0] === 'buildx'));
   assert.ok(
     f.calls.indexOf(pull) < f.calls.findIndex((c) => c.args[0]?.endsWith('/channel-gate.mjs')),
   );
@@ -778,7 +823,8 @@ if (args[0] === 'buildx') {
   const code = await run(f.argv, {
     root: f.root,
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
-    say(line) {
+    say() {},
+    write(line) {
       bytes += line.length;
       scrubbed ||= line.includes('[token]');
       assert.ok(!line.includes(TOKEN));
@@ -788,4 +834,244 @@ if (args[0] === 'buildx') {
   assert.ok(bytes > 68 * 1024 * 1024);
   assert.ok(scrubbed);
   assert.ok(existsSync(join(f.out, 'build-record.json')));
+});
+
+for (const source of [[], ['--source-registry', 'wrong.example/vendor']]) {
+  test(`stock web pull failure prevents builds: ${source.join(' ') || 'default source'}`, async (t) => {
+    const f = fixture(t, { pullFailure: true });
+    assert.equal(await f.execute(source), 2);
+    assert.ok(!f.calls.some((c) => c.args[0] === 'buildx'));
+    assert.ok(!existsSync(join(f.out, 'build-record.json')));
+    assert.ok(!existsSync(f.scratch));
+    assert.ok(f.logs.some((line) => line.includes('manifest unknown')));
+  });
+}
+
+test('streamed chunks preserve spaces and line boundaries with a raw writer', async (t) => {
+  const chunks = ['first ', 'line\nsecond', ' line  ', '\n\nlast\rprogress\n'];
+  const f = fixture(t, { buildChunks: chunks.map((chunk) => [chunk, 'stdout']) });
+  assert.equal(await f.execute(), 0);
+  assert.equal(f.writes.join(''), chunks.join('').repeat(3));
+});
+
+for (const ending of ['success', 'failure', 'throw']) {
+  test(`terminates streamed output before the next status line: ${ending}`, async (t) => {
+    const f = fixture(t, {
+      buildFailure: ending === 'failure',
+      buildThrow: ending === 'throw',
+      buildChunks: [
+        ['first ', 'stdout'],
+        ['line\ndiagnostic', 'stderr'],
+      ],
+    });
+    assert.equal(await f.execute(), ending === 'success' ? 0 : 2);
+    assert.equal(
+      f.writes.join(''),
+      'first line\ndiagnostic\n'.repeat(ending === 'success' ? 3 : 1),
+    );
+    assert.match(f.output.join(''), /diagnostic\nbuild-channel:/);
+  });
+}
+
+for (const ending of ['success', 'failure', 'throw']) {
+  test(`drops a held token prefix at end of stream: ${ending}`, async (t) => {
+    const prefix = TOKEN.slice(0, -1);
+    const f = fixture(t, {
+      buildFailure: ending === 'failure',
+      buildThrow: ending === 'throw',
+      buildChunks: [
+        ['visible\n' + prefix, 'stdout'],
+        ['diagnostic\n' + prefix, 'stderr'],
+      ],
+    });
+    assert.equal(await f.execute(), ending === 'success' ? 0 : 2);
+    assert.ok(!f.logs.join('').includes(prefix));
+    assert.equal(f.writes.join(''), 'visible\ndiagnostic\n'.repeat(ending === 'success' ? 3 : 1));
+  });
+}
+
+for (const config of [{ localInstalled: false }, { localManifest: false }]) {
+  test(`local expectations use the generator's installed and manifest filters: ${JSON.stringify(config)}`, async (t) => {
+    const f = fixture(t, { local: true, ...config });
+    assert.equal(await f.execute(), 0);
+    assert.deepEqual(f.expectation.modules, []);
+    assert.ok(!JSON.parse(readFileSync(join(f.out, 'build-record.json'), 'utf8')).modules.length);
+  });
+}
+
+test('ignores local directories with no package.json', async (t) => {
+  const f = fixture(t, { local: true, localMissingPackage: true });
+  assert.equal(await f.execute(), 0);
+  assert.deepEqual(f.expectation.modules, []);
+  assert.ok(!existsSync(f.scratch));
+});
+
+for (const [name, config] of [
+  ['missing', { apiMissingPackage: true }],
+  ['malformed', { apiPackageText: '{ broken json' }],
+]) {
+  test(`${name} api package.json names its path and tag before network or builds`, async (t) => {
+    const f = fixture(t, config);
+    assert.equal(await f.execute(), 2);
+    assert.ok(
+      f.logs.some((line) =>
+        line.includes('preflight v1.2.3: could not read packages/api/package.json:'),
+      ),
+    );
+    assert.ok(!f.calls.some((c) => c.cmd === 'pnpm' || c.cmd === 'docker'));
+    assert.ok(!existsSync(f.scratch));
+    assert.ok(!existsSync(join(f.out, 'build-record.json')));
+  });
+}
+
+test('malformed local package.json names its path before network or builds', async (t) => {
+  const f = fixture(t, { local: true, localPackageText: '{ broken json' });
+  assert.equal(await f.execute(), 2);
+  assert.ok(f.logs.some((line) => line.includes('modules/statistics/package.json')));
+  assert.ok(!f.calls.some((c) => c.cmd === 'pnpm' || c.cmd === 'docker'));
+  assert.ok(!existsSync(f.scratch));
+  assert.ok(!existsSync(join(f.out, 'build-record.json')));
+});
+
+test('refuses a stock RepoDigest change across the gate even when the image id stays the same', async (t) => {
+  const f = fixture(t, { changedDigest: true });
+  assert.equal(await f.execute(), 2);
+  assert.ok(f.logs.some((line) => line.includes('stock web RepoDigest changed during gate')));
+  assert.ok(!existsSync(join(f.out, 'build-record.json')));
+});
+
+for (const repoDigests of [
+  [],
+  null,
+  ['ghcr.io/martinambrus/haive-web@sha256:bad'],
+  ['b', 'c'].map((hex) => `ghcr.io/martinambrus/haive-web@sha256:${hex.repeat(64)}`),
+]) {
+  test(`refuses absent, invalid or ambiguous stock RepoDigests: ${JSON.stringify(repoDigests)}`, async (t) => {
+    const f = fixture(t, { repoDigests });
+    assert.equal(await f.execute(), 2);
+    assert.ok(f.logs.some((line) => line.includes('pulled stock web RepoDigest')));
+    assert.ok(!existsSync(join(f.out, 'build-record.json')));
+  });
+}
+
+test('stock RepoDigest selection ignores other repositories and deduplicates identical entries', async (t) => {
+  const digest = `ghcr.io/martinambrus/haive-web@sha256:${'b'.repeat(64)}`;
+  const f = fixture(t, {
+    repoDigests: [`other.example/web@sha256:${'c'.repeat(64)}`, digest, digest],
+  });
+  assert.equal(await f.execute(), 0);
+  const record = JSON.parse(readFileSync(join(f.out, 'build-record.json'), 'utf8'));
+  assert.equal(record.images.web.repoDigest, digest);
+  assert.equal(f.calls.filter((c) => c.args.includes('{{json .RepoDigests}}')).length, 2);
+});
+
+test('builds have no command timeout while preflight commands retain their limit', async (t) => {
+  const f = fixture(t);
+  assert.equal(await f.execute(), 0);
+  for (const call of f.calls) {
+    assert.equal(call.options.timeout, call.args[0] === 'buildx' ? 0 : 1_800_000);
+  }
+});
+
+for (const [result, message] of [
+  [{ status: null, signal: 'SIGTERM', timedOut: true }, 'git timed out after 1800000 ms'],
+  [{ status: null, signal: 'SIGKILL' }, 'git terminated by SIGKILL'],
+]) {
+  test(`command failures explain timeout or termination: ${message}`, async (t) => {
+    const f = fixture(t, { resolveResult: { stdout: '', stderr: '', ...result } });
+    assert.equal(await f.execute(), 2);
+    assert.ok(f.logs.some((line) => line.includes(message)));
+  });
+}
+
+for (const file of [
+  'packages/api/Dockerfile',
+  'packages/worker/Dockerfile',
+  'packages/web/Dockerfile',
+  'docker/own-module-builder/Dockerfile',
+]) {
+  for (const [content, message] of [
+    [
+      'FROM node:26 AS production\n# RUN --mount=type=secret,id=npmrc pnpm install\nRUN pnpm install',
+      'secret mount',
+    ],
+    ['FROM node:26 AS production\nRUN echo "--mount=type=secret,id=npmrc"', 'secret mount'],
+    [
+      '# FROM node:26 AS production\nFROM node:26 AS builder\nRUN --mount=type=secret,id=npmrc pnpm install',
+      'production stage',
+    ],
+  ]) {
+    test(`preflight requires an actual ${message} in ${file}`, async (t) => {
+      const f = fixture(t, { dockerfiles: { [file]: content } });
+      assert.equal(await f.execute(), 2);
+      assert.ok(f.logs.some((line) => line.includes(file) && line.includes(message)));
+      assert.ok(!f.calls.some((c) => c.cmd === 'pnpm' || c.cmd === 'docker'));
+      assert.ok(!existsSync(f.scratch));
+    });
+  }
+}
+
+test('preflight accepts case-insensitive instructions and continued RUN mount options', async (t) => {
+  const f = fixture(t, {
+    dockerfiles: {
+      'packages/api/Dockerfile': [
+        'from --platform=$BUILDPLATFORM node:26 as production',
+        'run --mount=type=cache,target=/cache ' + String.fromCharCode(92),
+        '# a comment in a continuation',
+        '  --mount=target=/root/.npmrc,id=npmrc,type=secret pnpm install',
+      ].join('\n'),
+    },
+  });
+  assert.equal(await f.execute(), 0);
+});
+
+test('failure diagnostics retain only built output tags', async (t) => {
+  const f = fixture(t, { gateCode: 1 });
+  assert.equal(await f.execute(), 1);
+  const retained = f.logs.filter((line) => line.includes('tags retained'));
+  assert.equal(retained.length, 1);
+  assert.ok(retained[0].includes('haive-acme-builder:1.2.3'));
+  assert.ok(!retained[0].includes('/haive-web:'));
+});
+
+test('default capture identifies its own timeout', async () => {
+  const { capture } = await import('../build-channel.mjs');
+  assert.equal(typeof capture, 'function');
+  const result = await capture(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    timeout: 100,
+  });
+  assert.equal(result.status, null);
+  assert.equal(result.signal, 'SIGTERM');
+  assert.equal(result.timedOut, true);
+});
+
+test('default capture decodes multibyte characters split across stdout and stderr chunks', async () => {
+  const { capture } = await import('../build-channel.mjs');
+  assert.equal(typeof capture, 'function');
+  const output = { stdout: '', stderr: '' };
+  const result = await capture(
+    process.execPath,
+    [
+      '-e',
+      `
+    (async () => {
+      for (const name of ['stdout', 'stderr']) {
+        for (const byte of Buffer.from('café 🌍 漢字\\n')) {
+          await new Promise(resolve => process[name].write(Buffer.from([byte]), resolve));
+          await new Promise(resolve => setTimeout(resolve, 2));
+        }
+      }
+    })();
+  `,
+    ],
+    {
+      timeout: 5000,
+      onOutput: (text, name) => {
+        output[name] += text;
+      },
+    },
+  );
+  assert.equal(result.status, 0);
+  assert.equal(output.stdout, 'café 🌍 漢字\n');
+  assert.equal(output.stderr, 'café 🌍 漢字\n');
 });
