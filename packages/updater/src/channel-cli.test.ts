@@ -730,3 +730,27 @@ it('scrubs filesystem paths before recording an attempt', async () => {
     expect.objectContaining({ error: 'cannot read [path]' }),
   );
 });
+
+it('never records the raw invalid install channel', async () => {
+  process.argv = process.argv.filter((v) => v !== '--check');
+  vi.mocked(images.readImageSettings).mockResolvedValue({
+    ...settings,
+    HAIVE_CHANNEL: 'INVALID/channel',
+  });
+  await expect(main()).rejects.toThrow('invalid install channel');
+  expect(journal.recordAttempt).toHaveBeenCalledWith(
+    h.sql,
+    expect.objectContaining({ channel: 'public' }),
+  );
+});
+
+it('validates the requested version before an early manifest failure is recorded', async () => {
+  process.argv = process.argv.filter((v) => v !== '--check');
+  process.argv[process.argv.indexOf('--version') + 1] = 'bad/version';
+  vi.mocked(dk.readReleaseManifestImage).mockRejectedValueOnce(new Error('manifest unavailable'));
+  await expect(main()).rejects.toThrow('manifest unavailable');
+  expect(journal.recordAttempt).toHaveBeenCalledWith(
+    h.sql,
+    expect.objectContaining({ toVersion: 'unknown' }),
+  );
+});

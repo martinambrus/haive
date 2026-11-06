@@ -7,6 +7,7 @@ import { safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
 import { configService, networkName } from '@haive/shared';
 import { CHANNEL_PATTERN, parseReleaseManifest, type ReleaseManifest } from '@haive/shared/release';
 import * as dk from './docker.js';
+import { attemptVersion } from './attempt-fields.js';
 import {
   ensureJournal,
   findLiveRun,
@@ -81,7 +82,7 @@ export function resolveChannel(requested: string | undefined, installed: string)
   return channel;
 }
 
-/** Set before recovery and manifest pulls, and again after the post-lock re-read; every Docker subprocess inherits it. */
+/** Set under the lock before recovery and manifest pulls; every Docker subprocess inherits it. */
 export function applyInstallDockerConfig(
   settings: Pick<ImageSettings, 'HAIVE_CHANNEL' | 'DOCKER_CONFIG'>,
   installDir: string,
@@ -197,8 +198,8 @@ export async function main(): Promise<number> {
   const launchDockerConfig = process.env.DOCKER_CONFIG;
   const readInstall = async () => {
     const imageSettings = await readImageSettings(envFile);
-    channel = imageSettings.HAIVE_CHANNEL || 'public';
-    resolveChannel(arg('channel'), imageSettings.HAIVE_CHANNEL);
+    channel = resolveChannel(undefined, imageSettings.HAIVE_CHANNEL);
+    resolveChannel(arg('channel'), channel);
     const manifestOptions = {
       manifest: arg('manifest'),
       manifestImage: arg('manifest-image'),
@@ -242,7 +243,7 @@ export async function main(): Promise<number> {
   let locked = false;
   let hasRun = false;
   let fromVersion = 'unknown';
-  let toVersion = arg('version') ?? 'unknown';
+  let toVersion = attemptVersion(arg('version'));
   let terminal:
     | {
         status: 'refused' | 'failed';
@@ -350,7 +351,7 @@ export async function main(): Promise<number> {
       return EXIT.usage;
     }
     const target = await loadManifest(manifestOptions);
-    toVersion = target.version;
+    toVersion = attemptVersion(target.version);
 
     if (channel !== 'public') channelImagePlan(target.version, imageSettings, target.images);
 

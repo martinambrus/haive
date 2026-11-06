@@ -67,3 +67,39 @@ describe('recordAttempt', () => {
     },
   );
 });
+
+it.each([2048, 2049, 1000000])('bounds stored attempt errors of length %i', async (length) => {
+  const sql = Object.assign(
+    vi.fn(async (..._args: unknown[]) => []),
+    { json: (v: unknown) => v },
+  );
+  const error = 'x'.repeat(length);
+  await recordAttempt(sql as unknown as Sql, {
+    fromVersion: '1.0.0',
+    toVersion: '2.0.0',
+    channel: 'public',
+    status: 'failed',
+    error,
+    metadata: {},
+  });
+  const stored = sql.mock.calls[0]![5] as string;
+  expect(stored.length).toBeLessThanOrEqual(2048);
+  if (length > 2048) expect(stored).toMatch(/\[truncated\]$/);
+  else expect(stored).toBe(error);
+});
+
+it('stores a validated fallback for an invalid target in the non-nullable column', async () => {
+  const sql = Object.assign(
+    vi.fn(async (..._args: unknown[]) => []),
+    { json: (v: unknown) => v },
+  );
+  await recordAttempt(sql as unknown as Sql, {
+    fromVersion: '1.0.0',
+    toVersion: 'bad/version',
+    channel: 'public',
+    status: 'failed',
+    error: 'reason',
+    metadata: {},
+  });
+  expect(sql.mock.calls[0]![2]).toBe('unknown');
+});
