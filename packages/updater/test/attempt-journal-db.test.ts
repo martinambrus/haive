@@ -36,7 +36,7 @@ describe.skipIf(!url)('terminal attempts on PostgreSQL', () => {
       (id, from_version, to_version, phase, status, error, started_at, ended_at)
       SELECT lpad(n::text, 32, '0')::uuid, '1.0.0', '2.0.0', 'preflight',
              CASE WHEN n % 2 = 0 THEN 'failed' ELSE 'refused' END, n::text,
-             timestamp '2020-02-01' + (n / 2) * interval '1 second', now()
+             timestamp '2020-02-01' + ((n + 1) / 2) * interval '1 second', now()
         FROM generate_series(1, ${count}::int) AS n`;
   }
 
@@ -58,7 +58,7 @@ describe.skipIf(!url)('terminal attempts on PostgreSQL', () => {
              ('1.0.0', '2.0.0', 'migrate', 'failed', '2020-01-01'),
              ('1.0.0', '2.0.0', 'verify', 'refused', '2020-01-01')`;
     const realRuns = await sql`SELECT * FROM upgrade_runs ORDER BY id`;
-    // An existing backlog plus this write makes 55; pairs share timestamps to exercise id ties.
+    // This write makes 55; ranks 50 (n=6) and 51 (n=5) share a timestamp, so id breaks the tie.
     await seedAttempts(54);
     await recordAttempt(sql, attempt);
     const attempts = await sql`SELECT error FROM upgrade_runs
