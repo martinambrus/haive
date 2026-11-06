@@ -20,6 +20,7 @@ export const moduleSources = pgTable(
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
+    resolvedRef: text('resolved_ref'),
   },
   () => [
     check('module_sources_kind_check', sql.raw("kind IN ('git', 'registry')")),

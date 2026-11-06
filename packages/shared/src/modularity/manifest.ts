@@ -4,6 +4,8 @@ import {
   CORE_INTEGRATION_CATEGORIES,
   composableStepEntrySchema,
   INTEGRATION_ID_PATTERN,
+  MODULE_ID_PATTERN,
+  MODULE_ID_MAX_LENGTH,
   type ComposableStepEntry,
   isCoreStepId,
   moduleTaskTypeSlug,
@@ -20,10 +22,6 @@ import {
 } from './integrations.js';
 import { STEP_ID_MAX_LENGTH } from './prompt-steps.js';
 
-const MODULE_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
-// databaseName('module', id) must fit Postgres' 63-byte identifier under the longest install id:
-// 63 - 33 ('<32 chars>_') - 7 ('module_') = 23.
-export const MODULE_ID_MAX_LENGTH = 23;
 const PAGE_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 /** The `task_type_definitions.slug` column. */
 const TASK_TYPE_SLUG_MAX_LENGTH = 128;

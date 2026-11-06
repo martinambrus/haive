@@ -65,7 +65,7 @@ describe.skipIf(!url)('module fetch job persistence', () => {
     });
     h.fetch.mockImplementation(async (_source, token, pin, resolved) => {
       expect(token).toBe('new-token');
-      await resolved(sha);
+      await resolved(sha, 'refs/heads/main');
       started();
       await hold;
       await pin('fake', 'fake', 'alpha');
@@ -74,7 +74,7 @@ describe.skipIf(!url)('module fetch job persistence', () => {
     const first = runModuleSourceFetch(db, row.id);
     await ready;
     expect(await db.select().from(schema.moduleSources)).toMatchObject([
-      { fetchStatus: 'fetching', resolvedSha: sha },
+      { fetchStatus: 'fetching', resolvedSha: sha, resolvedRef: 'refs/heads/main' },
     ]);
     await runModuleSourceFetch(db, row.id);
     expect(h.fetch).toHaveBeenCalledOnce();
@@ -90,12 +90,16 @@ describe.skipIf(!url)('module fetch job persistence', () => {
     const key = 'module_source:' + row.id + ':token';
     await secretsService.set(key, 'private-token');
     h.fetch.mockImplementation(async (_source, _token, _pin, resolved) => {
-      await resolved(sha);
+      await resolved(sha, 'refs/heads/main');
       throw new Error('private-token https://user:pass@example.com/a');
     });
     await expect(runModuleSourceFetch(db, row.id)).rejects.toThrow();
     const [failed] = await db.select().from(schema.moduleSources);
-    expect(failed).toMatchObject({ fetchStatus: 'failed', resolvedSha: sha });
+    expect(failed).toMatchObject({
+      fetchStatus: 'failed',
+      resolvedSha: sha,
+      resolvedRef: 'refs/heads/main',
+    });
     expect(failed!.lastError).not.toMatch(/private-token|user:pass/);
     await secretsService.delete(key);
   });
@@ -118,7 +122,7 @@ describe.skipIf(!url)('module fetch job persistence', () => {
     await runModuleSourceFetch(db, row.id, new Date(row.updatedAt.getTime() - 1).toISOString());
     expect(h.fetch).not.toHaveBeenCalled();
     h.fetch.mockImplementation(async (_source, _token, pin, resolved) => {
-      await resolved(sha);
+      await resolved(sha, 'refs/heads/main');
       await db
         .update(schema.moduleSources)
         .set({ fetchStatus: 'queued', updatedAt: new Date(row.updatedAt.getTime() + 1) })

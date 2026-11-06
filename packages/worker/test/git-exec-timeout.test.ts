@@ -1,4 +1,6 @@
 import { createServer, type Server } from 'node:http';
+import { once } from 'node:events';
+import type { ChildProcess } from 'node:child_process';
 import type { AddressInfo } from 'node:net';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -6,7 +8,10 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { hardenGitArgs } from '@haive/shared/git-args';
 
-const seen = vi.hoisted(() => ({ options: [] as Record<string, unknown>[] }));
+const seen = vi.hoisted(() => ({
+  options: [] as Record<string, unknown>[],
+  children: [] as ChildProcess[],
+}));
 
 vi.mock('node:child_process', async (importActual) => {
   const actual = await importActual<typeof import('node:child_process')>();
@@ -20,7 +25,15 @@ vi.mock('node:child_process', async (importActual) => {
       return real(cmd, args, opts);
     },
   });
-  return { ...actual, execFile: wrapped };
+  return {
+    ...actual,
+    execFile: wrapped,
+    spawn: (...args: Parameters<typeof actual.spawn>) => {
+      const child = actual.spawn(...args);
+      seen.children.push(child);
+      return child;
+    },
+  };
 });
 
 import { gitDefaultTimeoutMs, gitExec, gitRun, gitTimeoutLimits } from '../src/repo/git-exec.js';
@@ -28,6 +41,71 @@ import { gitDefaultTimeoutMs, gitExec, gitRun, gitTimeoutLimits } from '../src/r
 const MIN = 60_000;
 const LONG = 30 * MIN;
 const SHORT = 10 * MIN;
+
+describe('a real exit at the timeout boundary', () => {
+  async function fakeGit(script: string, check: (dir: string) => Promise<void>) {
+    const dir = await mkdtemp(path.join(tmpdir(), 'git-timeout-boundary-'));
+    try {
+      await writeFile(path.join(dir, 'git'), `#!${process.execPath}\n${script}\n`);
+      await chmod(path.join(dir, 'git'), 0o755);
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      await check(dir);
+    } finally {
+      vi.useRealTimers();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  it.each([7, 0])('preserves exit %i when git handles the timeout SIGTERM', async (code) => {
+    await fakeGit(
+      `process.on('SIGTERM', () => process.exit(${code}));
+console.log('ready');
+setInterval(() => {}, 1000);`,
+      async (dir) => {
+        const run = gitRun(dir, ['fetch'], { PATH: dir }, { timeout: 5000 });
+        await once(seen.children.at(-1)!.stdout!, 'data');
+        vi.advanceTimersByTime(5000);
+        const result = await run;
+        expect(result.code).toBe(code);
+        expect(result.stderr).not.toContain('timed out');
+      },
+    );
+  });
+
+  it('does not kill an exited leader while a pipe holder delays close', async () => {
+    await fakeGit(
+      `require('node:child_process').spawn(process.execPath,
+  ['-e', 'setTimeout(() => {}, 500)'], { stdio: 'inherit' });
+process.exit(7);`,
+      async (dir) => {
+        const run = gitRun(dir, ['fetch'], { PATH: dir }, { timeout: 5000 });
+        const child = seen.children.at(-1)!;
+        const kill = vi.spyOn(child, 'kill');
+        await once(child, 'exit');
+        vi.advanceTimersByTime(5000);
+        const result = await run;
+        expect(result.code).toBe(7);
+        expect(result.stderr).not.toContain('timed out');
+        expect(kill).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  it('returns 124 and the timeout line when the timer kills git', async () => {
+    await fakeGit(
+      `console.log('ready');
+setInterval(() => {}, 1000);`,
+      async (dir) => {
+        const run = gitRun(dir, ['fetch'], { PATH: dir }, { timeout: 5000 });
+        await once(seen.children.at(-1)!.stdout!, 'data');
+        vi.advanceTimersByTime(5000);
+        const result = await run;
+        expect(result.code).toBe(124);
+        expect(result.stderr).toContain('git fetch timed out after 5 s');
+      },
+    );
+  });
+});
 
 describe('gitDefaultTimeoutMs', () => {
   it('gives the long subcommands 30 minutes and everything else 10', () => {
@@ -75,14 +153,10 @@ describe('gitDefaultTimeoutMs', () => {
 describe('the limit that reaches execFile', () => {
   it('is the default for the subcommand, an explicit value wins, and 0 stays unlimited', async () => {
     seen.options.length = 0;
-    await gitRun(tmpdir(), ['--version']);
-    await gitRun(tmpdir(), ['--version'], undefined, { timeout: 12_345 });
-    await gitRun(tmpdir(), ['--version'], undefined, { timeout: 0 });
-    await gitRun(tmpdir(), ['--version'], undefined, { timeout: undefined });
     await gitExec(['--version']);
     await gitExec(['--version'], { timeout: 0 });
     await gitExec(['--version'], { timeout: 777 });
-    expect(seen.options.map((o) => o.timeout)).toEqual([SHORT, 12_345, 0, SHORT, SHORT, 0, 777]);
+    expect(seen.options.map((o) => o.timeout)).toEqual([SHORT, 0, 777]);
   });
 });
 
@@ -141,6 +215,25 @@ describe('a git that hangs', () => {
     expect(r.code).toBe(124);
     expect(r.stderr.trimEnd().split('\n').at(-1)).toBe('git ls-remote timed out after 1 s');
     expect(Date.now() - started).toBeLessThan(1900);
+  });
+
+  it('keeps zero unlimited even when the default would kill the run', async () => {
+    const bin = path.join(dir, 'git');
+    await writeFile(bin, '#!/bin/sh\nsleep 0.2\nprintf finished\n');
+    await chmod(bin, 0o755);
+    gitTimeoutLimits.short = 20;
+    try {
+      const r = await gitRun(
+        dir,
+        ['status'],
+        { PATH: `${dir}:${process.env.PATH}` },
+        { timeout: 0 },
+      );
+      expect(r).toMatchObject({ code: 0, stdout: 'finished' });
+      expect(r.stderr).not.toContain('timed out');
+    } finally {
+      gitTimeoutLimits.short = 2000;
+    }
   });
 
   it('does not call an ordinary non-zero exit a timeout', async () => {

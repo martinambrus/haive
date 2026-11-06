@@ -21,7 +21,14 @@ export const PERSONA_ID_PATTERN_SOURCE = '[a-z0-9-]+';
 const PERSONA_ID_PATTERN = new RegExp(`^${PERSONA_ID_PATTERN_SOURCE}$`);
 const TASK_TYPE_SLUG_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
 const MODULE_TASK_TYPE_SLUG_PATTERN = /^([a-z0-9][a-z0-9-]*)__[a-z0-9][a-z0-9_-]*$/;
-const MODULE_PACKAGE_PATTERN = /^(?:@haive\/module-|@haive-module\/)([a-z0-9][a-z0-9-]{0,22})$/;
+// databaseName('module', id) must fit Postgres' 63-byte identifier under the longest install id:
+// 63 - 33 ('<32 chars>_') - 7 ('module_') = 23.
+export const MODULE_ID_MAX_LENGTH = 23;
+export const MODULE_ID_PATTERN_SOURCE = `[a-z0-9][a-z0-9-]{0,${MODULE_ID_MAX_LENGTH - 1}}`;
+export const MODULE_ID_PATTERN = new RegExp(`^${MODULE_ID_PATTERN_SOURCE}$`);
+const MODULE_PACKAGE_PATTERN = new RegExp(
+  `^(?:@haive/module-|@haive-module/)(${MODULE_ID_PATTERN_SOURCE})$`,
+);
 /** Slugs no task type may take: `new` is the admin create page and `catalog` the step catalog route. */
 export const RESERVED_TASK_TYPE_SLUGS: readonly string[] = ['new', 'catalog'];
 

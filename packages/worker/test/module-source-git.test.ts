@@ -7,6 +7,11 @@ import { gitRun } from '../src/repo/git-exec.js';
 import { fetchModuleSource, type FetchSource } from '../src/modules/source-fetch.js';
 import { startGitHttpServer } from './support/git-http-fixture.js';
 
+vi.mock('../src/modules/source-pin.js', () => ({
+  resolveWorkerImage: vi.fn().mockResolvedValue('sha256:' + 'c'.repeat(64)),
+  pinModuleTree: vi.fn(),
+}));
+
 const checkout = vi.hoisted(() => ({ count: 0 }));
 vi.mock('../src/repo/git-exec.js', async (original) => {
   const actual = await original<typeof import('../src/repo/git-exec.js')>();
@@ -90,14 +95,14 @@ it('fetches real branches and tags, preserves a pin, and re-resolves only on Ref
       fetchModuleSource(row, null, pin, resolved, (raw) => new URL(raw));
     let second = '';
     expect(await fetch(source)).toBe(first);
-    expect(resolved).toHaveBeenLastCalledWith(first);
+    expect(resolved).toHaveBeenLastCalledWith(first, 'refs/heads/main');
     expect(await fetch({ ...source, ref: 'v1' })).toBe(first);
     await writeFile(join(root, 'value'), 'second');
     second = await commit();
     expect(second).not.toBe(first);
     expect(await fetch({ ...source, resolvedSha: first })).toBe(first);
     expect(await fetch({ ...source, resolvedSha: null })).toBe(second);
-    expect(resolved).toHaveBeenLastCalledWith(second);
+    expect(resolved).toHaveBeenLastCalledWith(second, 'refs/heads/main');
     await expect(fetch({ ...source, ref: '--upload-pack=bad' })).rejects.toThrow(
       'Invalid module branch or tag ref',
     );

@@ -9,13 +9,14 @@ import {
   removeNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
+import { MODULE_ID_PATTERN } from '@haive/shared/modularity';
 import { isBranchName } from '@haive/shared/git-args';
 import { safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
 import { assertCloneUrl } from '../repo/clone.js';
-import { gitRun, type GitRunResult } from '../repo/git-exec.js';
+import { gitGaveNoAnswer, gitRun, type GitRunResult } from '../repo/git-exec.js';
 import { originGitRun, scrubSecret } from '../repo/git-push.js';
 import { shellQuote } from '../sandbox/shell-quote.js';
-import { pinModuleTree } from './source-pin.js';
+import { pinModuleTree, resolveWorkerImage } from './source-pin.js';
 
 export type FetchSource = {
   id: string;
@@ -24,10 +25,63 @@ export type FetchSource = {
   url: string | null;
   ref: string | null;
   resolvedSha: string | null;
+  resolvedRef?: string | null;
 };
 
 export function sourceFetchError(error: unknown, token: string | null): string {
   return scrubErrorPaths(scrubSecret(safeErrorMessage(error), token)).slice(0, 4096);
+}
+
+const MODULE_TREE_BYTES = 64 * 1024 * 1024;
+
+/** Bound git writes on disk: packed objects during fetch, expanded work-tree files during checkout. */
+async function boundedTransfer<T>(
+  root: string,
+  transfer: (signal: AbortSignal) => Promise<T>,
+  worktreeOnly = false,
+): Promise<T> {
+  const controller = new AbortController();
+  let failure: unknown;
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let checking = Promise.resolve();
+  const check = async () => {
+    let bytes = 0;
+    const walk = async (rel: string, depth: number): Promise<void> => {
+      if (depth > 32) throw new Error('Module tree exceeds depth limit');
+      for (const entry of (await readdirSizesNoFollow(root, rel)) ?? []) {
+        if (worktreeOnly && rel === '' && entry.name === '.git') continue;
+        if (entry.isDirectory) await walk(rel ? `${rel}/${entry.name}` : entry.name, depth + 1);
+        else bytes += entry.size ?? 0;
+        if (bytes > MODULE_TREE_BYTES) throw new Error('Module tree exceeds size limit');
+      }
+    };
+    await walk('', 0);
+  };
+  const poll = () => {
+    checking = check()
+      .catch((error) => {
+        failure = error;
+        controller.abort();
+      })
+      .then(() => {
+        if (!stopped && !failure) timer = setTimeout(poll, 25);
+      });
+  };
+  poll();
+  try {
+    const result = await transfer(controller.signal);
+    await checking;
+    if (failure) throw failure;
+    await check();
+    return result;
+  } catch (error) {
+    throw failure ?? error;
+  } finally {
+    stopped = true;
+    clearTimeout(timer);
+    await checking;
+  }
 }
 
 async function validateTree(root: string, moduleId: string): Promise<void> {
@@ -46,7 +100,7 @@ async function validateTree(root: string, moduleId: string): Promise<void> {
       else {
         if (entry.size === null) throw new Error('Module links and special files are refused');
         size += entry.size;
-        if (size > 64 * 1024 * 1024) throw new Error('Module tree exceeds size limit');
+        if (size > MODULE_TREE_BYTES) throw new Error('Module tree exceeds size limit');
       }
     }
   }
@@ -72,8 +126,13 @@ function moduleSourceUrl(raw: string): URL {
 export async function fetchModuleSource(
   source: FetchSource,
   token: string | null,
-  pin: (tree: string, hostDir: string, moduleId: string) => Promise<void> = pinModuleTree,
-  resolved: (sha: string) => Promise<void> = async () => {},
+  pin: (
+    tree: string,
+    hostDir: string,
+    moduleId: string,
+    image: string,
+  ) => Promise<void> = pinModuleTree,
+  resolved: (sha: string, ref: string | null) => Promise<void> = async () => {},
   validateUrl: (raw: string) => URL = moduleSourceUrl,
 ): Promise<string> {
   if (process.env.HAIVE_PUBLISHED_INSTALL !== 'true')
@@ -85,7 +144,7 @@ export async function fetchModuleSource(
     );
   if (source.kind !== 'git')
     throw new Error('Registry fetch is unavailable: the builder requires rebuildable sources');
-  if (!/^[a-z0-9][a-z0-9-]{0,22}$/.test(source.moduleId)) throw new Error('Invalid module id');
+  if (!MODULE_ID_PATTERN.test(source.moduleId)) throw new Error('Invalid module id');
   const ref = source.ref;
   if (
     !ref ||
@@ -98,6 +157,9 @@ export async function fetchModuleSource(
   const url = validateUrl(source.url ?? '');
   if (source.resolvedSha !== null && !/^[a-f0-9]{40}$/.test(source.resolvedSha))
     throw new Error('Invalid recorded SHA');
+  if (source.resolvedRef && ![`refs/heads/${ref}`, `refs/tags/${ref}`].includes(source.resolvedRef))
+    throw new Error('Invalid recorded ref namespace');
+  const image = await resolveWorkerImage();
   const temporary = await mkdtemp(join(tmpdir(), 'haive-worker-module-source-'));
   const sockets = new Set<Socket>();
   const server = createServer({ allowHalfOpen: true }, (socket) => {
@@ -173,12 +235,13 @@ export async function fetchModuleSource(
         );
       return result.stdout.trim();
     };
-    const run = async (args: string[]) => output(await gitRun(tree, [...auth, ...args], env, io));
+    const run = async (args: string[], signal?: AbortSignal) =>
+      output(await gitRun(tree, [...auth, ...args], env, { ...io, signal }));
     await run(['init']);
     await run(['remote', 'add', 'origin', url.href]);
     const heads = `refs/heads/${ref}`;
     const tags = `refs/tags/${ref}`;
-    let qualifiedRef: string | undefined;
+    let qualifiedRef = source.resolvedSha ? (source.resolvedRef ?? undefined) : undefined;
     const listRefs = async () => {
       const listing = output(
         await originGitRun(
@@ -194,7 +257,17 @@ export async function fetchModuleSource(
           .map((line) => line.split('\t') as [string, string])
           .map(([sha, name]) => [name, sha]),
       );
-      qualifiedRef = refs.has(heads) ? heads : refs.has(tags) ? tags : undefined;
+      // Legacy pins have no recorded namespace. Prefer a namespace still pointing at the pin.
+      qualifiedRef ??=
+        source.resolvedSha &&
+        refs.get(heads) !== source.resolvedSha &&
+        (refs.get(`${tags}^{}`) ?? refs.get(tags)) === source.resolvedSha
+          ? tags
+          : refs.has(heads)
+            ? heads
+            : refs.has(tags)
+              ? tags
+              : undefined;
       return refs;
     };
     let sha = source.resolvedSha;
@@ -205,24 +278,29 @@ export async function fetchModuleSource(
         throw new Error('Module branch or tag was not found');
     }
     const fetch = (target: string) =>
-      originGitRun(
-        tree,
-        [...auth, 'fetch', '--no-tags', '--depth=1', '--end-of-options', url.href, target],
-        env,
-        io,
+      boundedTransfer(tree, (signal) =>
+        originGitRun(
+          tree,
+          [...auth, 'fetch', '--no-tags', '--depth=1', '--end-of-options', url.href, target],
+          env,
+          { ...io, signal },
+        ),
       );
     const byObject = await fetch(sha);
     if (byObject.code !== 0) {
       if (!qualifiedRef) await listRefs();
       if (!qualifiedRef)
         throw new Error('module_source_ref_unavailable: Module branch or tag was not found');
-      output(await fetch(qualifiedRef));
+      const fallback = await fetch(qualifiedRef);
+      if (gitGaveNoAnswer(fallback)) output(fallback);
+      if (fallback.code !== 0)
+        throw new Error('module_source_ref_unavailable: Module branch or tag was not found');
     }
     const commit = await run(['rev-parse', '--verify', '--end-of-options', 'FETCH_HEAD^{commit}']);
     if (commit !== sha)
       throw new Error('module_source_ref_moved: Fetched commit does not match the pinned SHA');
-    await resolved(sha);
-    await run(['checkout', '--detach', sha, '--']);
+    await resolved(sha, qualifiedRef ?? null);
+    await boundedTransfer(tree, (signal) => run(['checkout', '--detach', sha, '--'], signal), true);
     await removeNoFollow(tree, '.git', { recursive: true });
     await validateTree(tree, source.moduleId);
     await writeFileNoFollow(
@@ -237,7 +315,7 @@ export async function fetchModuleSource(
         fetched_at: new Date().toISOString(),
       }),
     );
-    await pin(tree, hostDir, source.moduleId);
+    await pin(tree, hostDir, source.moduleId, image);
     return sha;
   } catch (error) {
     throw new Error(sourceFetchError(error, token));

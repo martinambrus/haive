@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { isLockNotAvailable, isUniqueViolationOf, schema } from '@haive/database';
 import { MODULE_SOURCE_JOB_NAMES, secretsService } from '@haive/shared';
 import { isBranchName } from '@haive/shared/git-args';
-import { modulePackageId } from '@haive/shared/modularity';
+import { MODULE_ID_PATTERN } from '@haive/shared/modularity';
 import { HttpError, type AppEnv } from '../context.js';
 import { getDb } from '../db.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
@@ -13,7 +13,7 @@ import { isUuid } from '../lib/uuid.js';
 import { getModuleSourceQueue } from '../queues.js';
 
 const registryPrefix = '@haive-module/';
-const moduleId = z.string().refine((value) => modulePackageId(registryPrefix + value) === value);
+const moduleId = z.string().refine((value) => MODULE_ID_PATTERN.test(value));
 const numeric = '(?:0|[1-9][0-9]*)';
 const prerelease = '(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)';
 const semver = new RegExp(
@@ -181,7 +181,7 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
             fetchStatus: 'queued',
             lastError: null,
             updatedAt: new Date(Math.max(Date.now(), row.updatedAt.getTime() + 1)),
-            ...(body.refresh ? { resolvedSha: null } : {}),
+            ...(body.refresh ? { resolvedSha: null, resolvedRef: null } : {}),
           })
           .where(eq(schema.moduleSources.id, id))
           .returning();
@@ -255,7 +255,13 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
               (field) => previous[field] !== values[field],
             );
           const fetchState = sourceChanged
-            ? { resolvedSha: null, fetchStatus: null, fetchedAt: null, lastError: null }
+            ? {
+                resolvedSha: null,
+                resolvedRef: null,
+                fetchStatus: null,
+                fetchedAt: null,
+                lastError: null,
+              }
             : {};
           const [row] =
             id === null
