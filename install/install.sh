@@ -398,20 +398,31 @@ read_channel_manifest() {
   # Recursive JSON grammar, not a grep for strings that might be inside an unrelated object.
   # awk is already required by preflight and the port probe; no host JSON runtime is needed.
   if ! LC_ALL=C awk -v channel="$CHANNEL" -v version="$PINNED" -v registry="$CHANNEL_REGISTRY" '
-    function ws() { while (substr(s,p,1) ~ /[ \t\r\n]/ && p <= length(s)) p++ }
+    # Keep records separate: repeatedly appending the whole input is quadratic in mawk.
+    # Only whitespace can cross records; an actual newline inside a string is invalid.
+    function ws() {
+      while (1) {
+        if (p > length(s)) {
+          if (line >= NR) return
+          s=lines[++line]; delete lines[line]; p=1
+        } else if (substr(s,p,1) ~ /[ \t\r\n]/) p++
+        else return
+      }
+    }
     function fail() { bad=1; exit 1 }
-    function str(   c,t,e,h) {
+    function str(   c,start,e,h) {
       if (substr(s,p++,1) != "\"") fail()
-      t=""
+      start=p
       while (p <= length(s)) {
         c=substr(s,p++,1)
-        if (c == "\"") return t
+        # Escapes are validated, not decoded. Return one slice, even for many escapes.
+        if (c == "\"") return substr(s,start,p-start-1)
         if (c ~ /[[:cntrl:]]/) fail()
         if (c == "\\") {
           e=substr(s,p++,1)
-          if (e == "u") { h=substr(s,p,4); if (length(h)!=4 || h ~ /[^0-9a-fA-F]/) fail(); p+=4; t=t "\\u" h }
-          else { if (e !~ /^["\\\/bfnrt]$/) fail(); t=t "\\" e }
-        } else t=t c
+          if (e == "u") { h=substr(s,p,4); if (length(h)!=4 || h ~ /[^0-9a-fA-F]/) fail(); p+=4 }
+          else if (e !~ /^["\\\/bfnrt]$/) fail()
+        }
       }
       fail()
     }
@@ -453,9 +464,10 @@ read_channel_manifest() {
       }
       else fail()
     }
-    { s=s $0 "\n" }
+    { lines[NR]=$0 "\n" }
     END {
       if (bad) exit 1
+      line=1; s=lines[line]; delete lines[line]
       p=1; ws(); if(substr(s,p,1)!="{") fail(); val("",0); ws(); if(p<=length(s)) fail()
       if(strings["/channel"]!=channel || strings["/version"]!=version) fail()
       split("api worker web builder",hosts," ")
