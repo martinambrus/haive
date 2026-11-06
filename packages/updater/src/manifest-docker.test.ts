@@ -1,50 +1,119 @@
-import { writeFile } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-const h = vi.hoisted(() => ({ exec: vi.fn() }));
+const h = vi.hoisted(() => ({ exec: vi.fn(), spawn: vi.fn() }));
 vi.mock('node:child_process', () => ({
   execFile: Object.assign(vi.fn(), { [Symbol.for('nodejs.util.promisify.custom')]: h.exec }),
+  spawn: h.spawn,
 }));
 import { readReleaseManifestImage } from './docker.js';
+
+const MAX = 1024 * 1024;
+function header(name = 'release.json', size = 21, type = '0') {
+  const block = Buffer.alloc(512);
+  block.write(name);
+  block.write(size.toString(8).padStart(11, '0') + '\0', 124);
+  block.write(type, 156);
+  block.write('ustar\0', 257);
+  checksum(block);
+  return block;
+}
+function checksum(block: Buffer) {
+  block.fill(32, 148, 156);
+  const sum = block.reduce((sum, byte) => sum + byte, 0);
+  block.write(sum.toString(8).padStart(6, '0') + '\0 ', 148);
+}
+function tar(
+  body = Buffer.from('{"manifestVersion":1}'),
+  block = header('release.json', body.length),
+) {
+  return Buffer.concat([block, body, Buffer.alloc(((512 - (body.length % 512)) % 512) + 1024)]);
+}
+let chunks: Iterable<Buffer>;
+let cpError: Error | undefined;
+let killed: boolean;
+let delivered: number;
 beforeEach(() => {
-  vi.stubEnv('HAIVE_INSTALL_ID', 't335b_test');
-  h.exec.mockReset().mockImplementation(async (_command: string, args: string[]) => {
-    if (args[0] === 'cp') await writeFile(args[2]!, '{"manifestVersion":1}');
-    return { stdout: args[0] === 'create' ? 'container-id\n' : '' };
+  vi.stubEnv('HAIVE_INSTALL_ID', 't534_test');
+  chunks = [tar()];
+  cpError = undefined;
+  killed = false;
+  delivered = 0;
+  h.exec.mockReset().mockImplementation(async (_command: string, args: string[]) => ({
+    stdout: args[0] === 'create' ? 'container-id\n' : '',
+  }));
+  h.spawn.mockReset().mockImplementation(() => {
+    let stopped = false;
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      kill: vi.fn(() => {
+        killed = stopped = true;
+        setImmediate(() => child.emit('close', null, 'SIGKILL'));
+        return true;
+      }),
+    });
+    const iterator = chunks[Symbol.iterator]();
+    const send = () => {
+      if (stopped) return;
+      if (cpError) {
+        child.emit('error', cpError);
+        child.emit('close', -1);
+        return;
+      }
+      const next = iterator.next();
+      if (next.done) {
+        child.stdout.end();
+        child.emit('close', 0);
+      } else {
+        delivered++;
+        child.stdout.write(next.value);
+        setImmediate(send);
+      }
+    };
+    setImmediate(send);
+    return child;
   });
 });
 afterEach(() => vi.unstubAllEnvs());
-it('temp manifest container is removed on success, named by install, and uses a scratch-compatible command', async () => {
+it('streams a single regular manifest and removes its scratch-compatible container', async () => {
   expect(await readReleaseManifestImage('private/release:1')).toBe('{"manifestVersion":1}');
   const calls = h.exec.mock.calls.map((c) => c[1] as string[]);
   expect(calls[0]).toEqual(['pull', 'private/release:1']);
   expect(calls[1]).toEqual([
     'create',
     '--name',
-    expect.stringMatching(/^t335b_test-upgrade-manifest-/),
+    expect.stringMatching(/^t534_test-upgrade-manifest-/),
     'private/release:1',
     '/unused',
   ]);
-  expect(calls[2]).toEqual(['cp', 'container-id:/release.json', expect.any(String)]);
-  expect(calls[3]).toEqual(['rm', '-f', 'container-id']);
+  expect(h.spawn).toHaveBeenCalledWith(
+    'docker',
+    ['cp', 'container-id:/release.json', '-'],
+    expect.any(Object),
+  );
+  expect(calls.at(-1)).toEqual(['rm', '-f', 'container-id']);
 });
 it.each(['create', 'cp'])('temp manifest container is removed on %s failure', async (failure) => {
-  h.exec.mockImplementation(async (_command: string, args: string[]) => {
-    if (args[0] === failure) throw new Error('fixture ' + failure + ' failure');
-    return { stdout: args[0] === 'create' ? 'container-id' : '' };
-  });
+  if (failure === 'cp') cpError = new Error('fixture cp failure');
+  else
+    h.exec.mockImplementation(async (_command: string, args: string[]) => {
+      if (args[0] === failure) throw new Error('fixture create failure');
+      return { stdout: '' };
+    });
   await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow('fixture');
   expect(h.exec.mock.calls.at(-1)![1]).toEqual([
     'rm',
     '-f',
-    failure === 'create' ? expect.stringMatching(/^t335b_test-upgrade-manifest-/) : 'container-id',
+    failure === 'create' ? expect.stringMatching(/^t534_test-upgrade-manifest-/) : 'container-id',
   ]);
 });
 it('an unpullable manifest cannot create or use a cached image', async () => {
   h.exec.mockRejectedValue(new Error('pull denied'));
   await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow('pull denied');
   expect(h.exec).toHaveBeenCalledTimes(1);
+  expect(h.spawn).not.toHaveBeenCalled();
 });
-
 it('channel rollback inventory includes digest pins while public inventory stays unchanged', async () => {
   const { localImages } = await import('./docker.js');
   const pin = `private/api@sha256:${'a'.repeat(64)}`;
@@ -71,34 +140,60 @@ it('channel own-module builder receives an install-local credential mount for it
   expect((h.exec.mock.calls[1]![1] as string[]).join(' ')).not.toContain('BUILDX_CONFIG');
 });
 
-it('refuses a copied release.json symlink and still removes the container', async () => {
-  const { mkdtemp, symlink, rm } = await import('node:fs/promises');
-  const { tmpdir } = await import('node:os');
-  const { join } = await import('node:path');
-  const dir = await mkdtemp(join(tmpdir(), 'manifest-link-test-'));
-  try {
-    const target = join(dir, 'target');
-    await writeFile(target, 'host-only-file');
-    h.exec.mockImplementation(async (_command: string, args: string[]) => {
-      if (args[0] === 'cp') await symlink(target, args[2]!);
-      return { stdout: args[0] === 'create' ? 'container-id' : '' };
-    });
-    await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow(
-      /^a symlink in the path: release\.json$/,
-    );
-    expect(h.exec.mock.calls.at(-1)![1]).toEqual(['rm', '-f', 'container-id']);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-it('refuses release.json above one MiB and still removes the manifest container', async () => {
-  h.exec.mockImplementation(async (_command: string, args: string[]) => {
-    if (args[0] === 'cp') await writeFile(args[2]!, Buffer.alloc(1024 * 1024 + 1, 'a'));
-    return { stdout: args[0] === 'create' ? 'container-id' : '' };
-  });
-  await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow(
-    'release manifest is missing or too large',
-  );
+it.each(['1', '2', '5', 'x', 'g', 'L'])('refuses non-regular tar type %s', async (type) => {
+  chunks = [tar(Buffer.from('{}'), header('release.json', 2, type))];
+  await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow('release manifest');
   expect(h.exec.mock.calls.at(-1)![1]).toEqual(['rm', '-f', 'container-id']);
+});
+it.each(['../release.json', '/release.json', 'other.json', 'dir/release.json'])(
+  'refuses unexpected name %s',
+  async (name) => {
+    chunks = [tar(Buffer.from('{}'), header(name, 2))];
+    await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow('release manifest');
+  },
+);
+it.each(['prefix', 'link', 'checksum', 'size', 'truncated', 'extra', 'missing end'])(
+  'refuses malformed tar: %s',
+  async (fault) => {
+    const block = header('release.json', 2);
+    if (fault === 'prefix') block.write('dir', 345);
+    if (fault === 'link') block.write('target', 157);
+    if (fault === 'size') block.fill(255, 124, 136);
+    checksum(block);
+    if (fault === 'checksum') block[148] = 0;
+    const archive = tar(Buffer.from('{}'), block);
+    chunks = [
+      fault === 'truncated'
+        ? archive.subarray(0, 513)
+        : fault === 'missing end'
+          ? archive.subarray(0, 1024)
+          : fault === 'extra'
+            ? Buffer.concat([tar(), tar()])
+            : archive,
+    ];
+    await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow('release manifest');
+  },
+);
+it('accepts a one MiB manifest across split header and payload chunks', async () => {
+  const archive = tar(Buffer.alloc(MAX, 'a'));
+  chunks = [archive.subarray(0, 100), archive.subarray(100, 513), archive.subarray(513)];
+  expect((await readReleaseManifestImage('private/release:1')).length).toBe(MAX);
+});
+it('kills the copy as soon as the header declares more than one MiB', async () => {
+  chunks = (function* () {
+    yield header('release.json', MAX + 1);
+    for (let i = 0; i < 100; i++) yield Buffer.alloc(MAX);
+  })();
+  await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow('release manifest');
+  expect(killed).toBe(true);
+  expect(delivered).toBe(1);
+});
+it('bounds the tar stream even when a small declared file is followed by unbounded zeros', async () => {
+  chunks = (function* () {
+    yield tar();
+    for (let i = 0; i < 100; i++) yield Buffer.alloc(64 * 1024);
+  })();
+  await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow('release manifest');
+  expect(killed).toBe(true);
+  expect(delivered).toBeLessThan(20);
 });

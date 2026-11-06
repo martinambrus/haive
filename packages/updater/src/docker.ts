@@ -1,10 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { readFileNoFollow } from '@haive/shared/fs-safe';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { CONTAINER_FAMILY, containerName } from '@haive/shared/naming';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, resolve } from 'node:path';
 
@@ -293,28 +289,120 @@ export async function resolveImageSettings(
   }
 }
 
+const MANIFEST_MAX = 1024 * 1024;
+// One header, payload padded to a 512-byte block, and two end blocks.
+const MANIFEST_TAR_MAX = MANIFEST_MAX + 1536;
+
+function manifestHeaderSize(header: Buffer): number {
+  const invalid = () => new Error('invalid release manifest tar header');
+  const string = (start: number, end: number) => {
+    const field = header.subarray(start, end);
+    const zero = field.indexOf(0);
+    if (zero !== -1 && field.subarray(zero).some((byte) => byte !== 0)) throw invalid();
+    return field.subarray(0, zero === -1 ? field.length : zero).toString('latin1');
+  };
+  const octal = (start: number, end: number) => {
+    const value = header.subarray(start, end).toString('latin1');
+    if (!/^[0-7]+[\0 ]*$/.test(value)) throw invalid();
+    return Number.parseInt(value, 8);
+  };
+  const sum = header.reduce(
+    (sum, byte, index) => sum + (index >= 148 && index < 156 ? 32 : byte),
+    0,
+  );
+  const size = octal(124, 136);
+  if (
+    sum !== octal(148, 156) ||
+    string(0, 100) !== 'release.json' ||
+    string(345, 500) !== '' ||
+    string(157, 257) !== '' ||
+    (header[156] !== 0 && header[156] !== 48) ||
+    size > MANIFEST_MAX
+  )
+    throw invalid();
+  return size;
+}
+
+/** Docker emits tar on stdout. Bound it while reading, before retaining any payload, and never
+ * extract paths supplied by an image. Only one ordinary release.json entry is accepted. */
+async function streamReleaseManifest(id: string): Promise<string> {
+  return new Promise((done, reject) => {
+    const child = spawn('docker', ['cp', `${id}:/release.json`, '-'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 600_000,
+      killSignal: 'SIGKILL',
+    });
+    const chunks: Buffer[] = [];
+    const header = Buffer.alloc(512);
+    let total = 0;
+    let size: number | undefined;
+    let failure: Error | undefined;
+    const fail = (error: Error) => {
+      if (failure) return;
+      failure = error;
+      child.stdout.destroy();
+      child.kill('SIGKILL');
+    };
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (failure) return;
+      if (total + chunk.length > MANIFEST_TAR_MAX) {
+        fail(new Error('release manifest tar is too large'));
+        return;
+      }
+      if (total < 512) chunk.copy(header, total, 0, Math.min(chunk.length, 512 - total));
+      total += chunk.length;
+      if (size === undefined && total >= 512) {
+        try {
+          size = manifestHeaderSize(header);
+        } catch (error) {
+          fail(error as Error);
+          return;
+        }
+      }
+      chunks.push(chunk);
+    });
+    child.stdout.on('error', (error) => fail(error));
+    // Do not buffer or expose Docker stderr; it can contain registry credential helper output.
+    child.stderr.resume();
+    child.stderr.on('error', (error) => fail(error));
+    child.on('error', (error) => {
+      failure ??= new Error(redactSecrets(error.message));
+    });
+    child.on('close', (code) => {
+      if (failure) {
+        reject(failure);
+        return;
+      }
+      if (code !== 0) {
+        reject(new Error('could not copy release manifest from image'));
+        return;
+      }
+      const payloadEnd = 512 + (size ?? 0);
+      const archiveEnd = 512 + Math.ceil((size ?? 0) / 512) * 512 + 1024;
+      if (size === undefined || total < archiveEnd) {
+        reject(new Error('release manifest tar is missing or truncated'));
+        return;
+      }
+      const archive = Buffer.concat(chunks, total);
+      if (archive.subarray(payloadEnd).some((byte) => byte !== 0)) {
+        reject(new Error('release manifest tar contains unexpected entries or padding'));
+        return;
+      }
+      done(archive.subarray(512, payloadEnd).toString('utf8'));
+    });
+  });
+}
+
 /** Pull even when cached: revoked credentials and missing remote tags must refuse preflight. */
 export async function readReleaseManifestImage(image: string): Promise<string> {
   await run('docker', ['pull', image], undefined, 1_800_000);
-  const dir = await mkdtemp(join(tmpdir(), 'updater-release-'));
   const name = containerName(CONTAINER_FAMILY.upgrade, 'manifest', randomUUID());
   let id = name;
   try {
     // A scratch release image has no CMD. This command is never executed.
     id = await run('docker', ['create', '--name', name, image, '/unused']);
-    const file = join(dir, 'release.json');
-    await run('docker', ['cp', `${id}:/release.json`, file]);
-    const read = await readFileNoFollow(dir, 'release.json', {
-      strict: true,
-      maxBytes: 1024 * 1024,
-    });
-    if (!read || read.truncated) throw new Error('release manifest is missing or too large');
-    return read.data.toString('utf8');
+    return await streamReleaseManifest(id);
   } finally {
-    try {
-      await run('docker', ['rm', '-f', id]);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    await run('docker', ['rm', '-f', id]);
   }
 }
