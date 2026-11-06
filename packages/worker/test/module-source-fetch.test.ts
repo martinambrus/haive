@@ -6,6 +6,11 @@ import { logger } from '@haive/shared';
 import { fetchModuleSource, sourceFetchError } from '../src/modules/source-fetch.js';
 
 const git = vi.hoisted(() => vi.fn());
+const image = vi.hoisted(() => vi.fn());
+vi.mock('../src/modules/source-pin.js', () => ({
+  resolveWorkerImage: image,
+  pinModuleTree: vi.fn(),
+}));
 vi.mock('../src/repo/git-exec.js', () => ({ gitRun: git }));
 const source = {
   id: '00000000-0000-4000-8000-000000000337',
@@ -25,6 +30,7 @@ afterEach(() => {
 function setup() {
   vi.stubEnv('HAIVE_PUBLISHED_INSTALL', 'true');
   vi.stubEnv('HAIVE_OWN_MODULES_HOST_DIR', '/prepared');
+  image.mockResolvedValue('sha256:' + 'c'.repeat(64));
   git.mockImplementation(async (cwd: string, args: string[]) => {
     if (args.includes('get-url')) return { code: 0, stdout: source.url + '\n', stderr: '' };
     if (args.includes('ls-remote'))
@@ -46,6 +52,18 @@ function setup() {
   });
 }
 describe('fetch and pin a module source', () => {
+  it('fails image resolution before git or persisting a SHA', async () => {
+    setup();
+    image.mockRejectedValueOnce(new Error('module_source_worker_image_unavailable'));
+    const resolved = vi.fn();
+    const pin = vi.fn();
+    await expect(fetchModuleSource(source, null, pin, resolved)).rejects.toThrow(
+      'module_source_worker_image_unavailable',
+    );
+    expect(git).not.toHaveBeenCalled();
+    expect(resolved).not.toHaveBeenCalled();
+    expect(pin).not.toHaveBeenCalled();
+  });
   it.each(['link', 'size', 'name'])('refuses a fetched tree with an invalid %s', async (kind) => {
     setup();
     const previous = git.getMockImplementation()!;

@@ -135,8 +135,9 @@ export async function pinModuleTree(
   tree: string,
   hostDir: string,
   moduleId: string,
+  workerImage?: string,
 ): Promise<void> {
-  const image = await resolveWorkerImage();
+  const image = workerImage ?? (await resolveWorkerImage());
   const dir = await openDirNoFollow(dirname(tree), basename(tree));
   const rel = '.haive-archive-' + randomUUID();
   const created = await openFileNoFollow(tree, rel, 'create-exclusive', { fileMode: 0o600 }).catch(

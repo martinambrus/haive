@@ -15,7 +15,7 @@ import { assertCloneUrl } from '../repo/clone.js';
 import { gitRun, type GitRunResult } from '../repo/git-exec.js';
 import { originGitRun, scrubSecret } from '../repo/git-push.js';
 import { shellQuote } from '../sandbox/shell-quote.js';
-import { pinModuleTree } from './source-pin.js';
+import { pinModuleTree, resolveWorkerImage } from './source-pin.js';
 
 export type FetchSource = {
   id: string;
@@ -72,7 +72,12 @@ function moduleSourceUrl(raw: string): URL {
 export async function fetchModuleSource(
   source: FetchSource,
   token: string | null,
-  pin: (tree: string, hostDir: string, moduleId: string) => Promise<void> = pinModuleTree,
+  pin: (
+    tree: string,
+    hostDir: string,
+    moduleId: string,
+    image: string,
+  ) => Promise<void> = pinModuleTree,
   resolved: (sha: string) => Promise<void> = async () => {},
   validateUrl: (raw: string) => URL = moduleSourceUrl,
 ): Promise<string> {
@@ -98,6 +103,7 @@ export async function fetchModuleSource(
   const url = validateUrl(source.url ?? '');
   if (source.resolvedSha !== null && !/^[a-f0-9]{40}$/.test(source.resolvedSha))
     throw new Error('Invalid recorded SHA');
+  const image = await resolveWorkerImage();
   const temporary = await mkdtemp(join(tmpdir(), 'haive-worker-module-source-'));
   const sockets = new Set<Socket>();
   const server = createServer({ allowHalfOpen: true }, (socket) => {
@@ -237,7 +243,7 @@ export async function fetchModuleSource(
         fetched_at: new Date().toISOString(),
       }),
     );
-    await pin(tree, hostDir, source.moduleId);
+    await pin(tree, hostDir, source.moduleId, image);
     return sha;
   } catch (error) {
     throw new Error(sourceFetchError(error, token));

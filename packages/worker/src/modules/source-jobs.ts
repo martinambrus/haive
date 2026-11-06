@@ -40,14 +40,14 @@ export async function runModuleSourceFetch(
       const sha = await fetchModuleSource(
         source,
         token,
-        async (tree, hostDir, moduleId) => {
+        async (tree, hostDir, moduleId, image) => {
           const [current] = await lock
             .select()
             .from(schema.moduleSources)
             .where(identity)
             .for('update');
           if (!current) throw new Error('Module fetch request was superseded');
-          await pinModuleTree(tree, hostDir, moduleId);
+          await pinModuleTree(tree, hostDir, moduleId, image);
         },
         async (resolvedSha) => {
           const changed = await db

@@ -7,6 +7,11 @@ import { gitRun } from '../src/repo/git-exec.js';
 import { fetchModuleSource, type FetchSource } from '../src/modules/source-fetch.js';
 import { startGitHttpServer } from './support/git-http-fixture.js';
 
+vi.mock('../src/modules/source-pin.js', () => ({
+  resolveWorkerImage: vi.fn().mockResolvedValue('sha256:' + 'c'.repeat(64)),
+  pinModuleTree: vi.fn(),
+}));
+
 const checkout = vi.hoisted(() => ({ count: 0 }));
 vi.mock('../src/repo/git-exec.js', async (original) => {
   const actual = await original<typeof import('../src/repo/git-exec.js')>();
