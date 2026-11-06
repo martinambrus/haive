@@ -375,11 +375,7 @@ export async function run(
       (await command('docker', ['info', '--format', '{{json .}}'], { quiet: true })).stdout,
     );
     const imageStore = { Driver: store.Driver, DriverStatus: store.DriverStatus };
-    let repoDigest;
-    if (!rebuildWeb) {
-      emit(`build-channel: pulling stock web ${images.web} for ${platform}`);
-      await command('docker', ['pull', '--platform', platform, images.web]);
-      retainedImages.push(images.web);
+    const readRepoDigest = async () => {
       const digests = JSON.parse(
         (
           await command(
@@ -389,11 +385,25 @@ export async function run(
           )
         ).stdout,
       );
-      repoDigest = digests.find((digest) =>
-        digest.startsWith(`${images.web.slice(0, images.web.lastIndexOf(':'))}@sha256:`),
+      const repository = images.web.slice(0, images.web.lastIndexOf(':'));
+      const matches = new Set(
+        Array.isArray(digests)
+          ? digests.filter(
+              (digest) => typeof digest === 'string' && digest.startsWith(`${repository}@`),
+            )
+          : [],
       );
-      if (!repoDigest || !/@sha256:[a-f0-9]{64}$/.test(repoDigest))
-        throw new Error('could not read the pulled stock web RepoDigest');
+      const [digest] = matches;
+      if (matches.size !== 1 || !/@sha256:[a-f0-9]{64}$/.test(digest))
+        throw new Error('could not read one unambiguous pulled stock web RepoDigest');
+      return digest;
+    };
+    let repoDigest;
+    if (!rebuildWeb) {
+      emit(`build-channel: pulling stock web ${images.web} for ${platform}`);
+      await command('docker', ['pull', '--platform', platform, images.web]);
+      retainedImages.push(images.web);
+      repoDigest = await readRepoDigest();
     }
     for (const host of hosts) {
       emit(`build-channel: building ${images[host]} from ${tag} (${commit})`);
@@ -455,6 +465,8 @@ export async function run(
       if (beforeGate[host] !== afterGate[host])
         throw new Error(`local image id changed during gate: ${images[host]}`);
     }
+    if (!rebuildWeb && (await readRepoDigest()) !== repoDigest)
+      throw new Error(`stock web RepoDigest changed during gate: ${images.web}`);
     if (gate.status !== 0) {
       emit(`build-channel: gate failed; tags retained for diagnosis: ${retainedImages.join(', ')}`);
       return gate.status;

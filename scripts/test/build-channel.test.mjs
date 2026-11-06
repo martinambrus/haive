@@ -163,9 +163,13 @@ function fixture(t, config = {}) {
     if (cmd === 'docker' && args[0] === 'image' && args[1] === 'inspect') {
       if (args.includes('{{json .RepoDigests}}'))
         return ok(
-          JSON.stringify([
-            `${args.at(-1).split(':').slice(0, -1).join(':')}@sha256:${'b'.repeat(64)}`,
-          ]),
+          JSON.stringify(
+            'repoDigests' in config
+              ? config.repoDigests
+              : [
+                  `${args.at(-1).split(':').slice(0, -1).join(':')}@sha256:${(config.changedDigest && expectation !== undefined ? 'c' : 'b').repeat(64)}`,
+                ],
+          ),
         );
       const afterGate = expectation !== undefined;
       return ok(`sha256:${(config.changedId && afterGate ? 'c' : 'a').repeat(64)}\n`);
@@ -878,4 +882,36 @@ test('malformed local package.json names its path before network or builds', asy
   assert.ok(!f.calls.some((c) => c.cmd === 'pnpm' || c.cmd === 'docker'));
   assert.ok(!existsSync(f.scratch));
   assert.ok(!existsSync(join(f.out, 'build-record.json')));
+});
+
+test('refuses a stock RepoDigest change across the gate even when the image id stays the same', async (t) => {
+  const f = fixture(t, { changedDigest: true });
+  assert.equal(await f.execute(), 2);
+  assert.ok(f.logs.some((line) => line.includes('stock web RepoDigest changed during gate')));
+  assert.ok(!existsSync(join(f.out, 'build-record.json')));
+});
+
+for (const repoDigests of [
+  [],
+  null,
+  ['ghcr.io/martinambrus/haive-web@sha256:bad'],
+  ['b', 'c'].map((hex) => `ghcr.io/martinambrus/haive-web@sha256:${hex.repeat(64)}`),
+]) {
+  test(`refuses absent, invalid or ambiguous stock RepoDigests: ${JSON.stringify(repoDigests)}`, async (t) => {
+    const f = fixture(t, { repoDigests });
+    assert.equal(await f.execute(), 2);
+    assert.ok(f.logs.some((line) => line.includes('pulled stock web RepoDigest')));
+    assert.ok(!existsSync(join(f.out, 'build-record.json')));
+  });
+}
+
+test('stock RepoDigest selection ignores other repositories and deduplicates identical entries', async (t) => {
+  const digest = `ghcr.io/martinambrus/haive-web@sha256:${'b'.repeat(64)}`;
+  const f = fixture(t, {
+    repoDigests: [`other.example/web@sha256:${'c'.repeat(64)}`, digest, digest],
+  });
+  assert.equal(await f.execute(), 0);
+  const record = JSON.parse(readFileSync(join(f.out, 'build-record.json'), 'utf8'));
+  assert.equal(record.images.web.repoDigest, digest);
+  assert.equal(f.calls.filter((c) => c.args.includes('{{json .RepoDigests}}')).length, 2);
 });
