@@ -108,6 +108,25 @@ function fixture(
   );
   writeFileSync(join(bin, 'docker'), docker, { mode: 0o755 });
   writeFileSync(join(bin, 'curl'), curl, { mode: 0o755 });
+  for (const command of ['mkdir', 'mv'])
+    writeFileSync(
+      join(bin, command),
+      `#!/bin/sh
+if [ "$FAIL_AT" = race ]; then
+  for arg do
+    case "$arg" in
+      .docker|*/install/.docker)
+        /bin/mkdir "$arg" 2>/dev/null && printf user-owned > "$arg/config.json" ;;
+    esac
+  done
+fi
+if [ "$FAIL_AT" = credential-move ] && [ "$1" != "" ]; then
+  case "$1" in */.docker/config.json) exit 1 ;; esac
+fi
+exec /bin/${command} "$@"
+`,
+      { mode: 0o755 },
+    );
   writeFileSync(join(bin, 'openssl'), '#!/bin/sh\nprintf 0123456789abcdef\n', { mode: 0o755 });
   writeFileSync(join(bin, 'date'), '#!/bin/sh\necho 2000-01-01T00:00:00Z\n', { mode: 0o755 });
   writeFileSync(join(bin, 'ss'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
@@ -156,7 +175,7 @@ function fixture(
     const wrapper = join(root, 'invoke.ps1');
     writeFileSync(
       wrapper,
-      `$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction Move-Item { param($LiteralPath,$Destination); Microsoft.PowerShell.Management\\Move-Item @PSBoundParameters; if($env:FAIL_AT -eq 'unprotect-move'){ & chmod 755 $Destination; & chmod 644 (Join-Path $Destination 'config.json') } }\nfunction New-Item { param($ItemType,$Path,[switch]$Force); if($Path -like '*/snapshots' -and $env:FAIL_AT -in @('mkdir','pipeline-stop')) { if($env:FAIL_AT -eq 'pipeline-stop'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; throw 'post-verification mkdir failure' }; Microsoft.PowerShell.Management\\New-Item @PSBoundParameters }\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-RestMethod { param($Uri); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); [pscustomobject]@{tag_name='v9.9.9'} }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); if($OutFile){ if($env:FAIL_AT -eq 'bundle'){ throw 'bundle failure' }; [IO.File]::WriteAllText($OutFile, "services: {}\\n") } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|force|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
+      `$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction Move-Item { param($LiteralPath,$Destination); if($env:FAIL_AT -eq 'race' -and $Destination -eq (Join-Path $env:CASE_ROOT 'install/.docker') -and -not (Test-Path -LiteralPath $Destination)){ [IO.Directory]::CreateDirectory($Destination) | Out-Null; [IO.File]::WriteAllText((Join-Path $Destination 'config.json'), 'user-owned') }; if($env:FAIL_AT -eq 'credential-move' -and $LiteralPath -like '*/.docker/config.json'){ throw 'credential move failure' }; Microsoft.PowerShell.Management\\Move-Item @PSBoundParameters; if($env:FAIL_AT -eq 'unprotect-move'){ & chmod 755 (Split-Path $Destination); & chmod 644 $Destination } }\nfunction New-Item { param($ItemType,$Path,[switch]$Force); if($env:FAIL_AT -eq 'race' -and $Path -eq (Join-Path $env:CASE_ROOT 'install/.docker')){ [IO.Directory]::CreateDirectory($Path) | Out-Null; [IO.File]::WriteAllText((Join-Path $Path 'config.json'), 'user-owned') }; if($Path -like '*/snapshots' -and $env:FAIL_AT -in @('mkdir','pipeline-stop')) { if($env:FAIL_AT -eq 'pipeline-stop'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; throw 'post-verification mkdir failure' }; Microsoft.PowerShell.Management\\New-Item @PSBoundParameters }\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-RestMethod { param($Uri); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); [pscustomobject]@{tag_name='v9.9.9'} }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); if($OutFile){ if($env:FAIL_AT -eq 'bundle'){ throw 'bundle failure' }; [IO.File]::WriteAllText($OutFile, "services: {}\\n") } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|force|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
     );
     if (hostPwsh)
       return spawnSync('pwsh', ['-NoProfile', '-File', wrapper], {
@@ -379,6 +398,33 @@ for (const lang of ['sh', 'ps1']) {
         assert.ok(existsSync(join(f.dir, '.env')));
         assert.ok(existsSync(join(f.dir, 'docker-compose.yml')));
         assert.ok(existsSync(join(f.dir, '.docker/config.json')));
+      } finally {
+        f.clean();
+      }
+    });
+  for (const fail of ['race', 'credential-move'])
+    check(`exclusive credential placement refuses ${fail} and allows retry`, () => {
+      const f = fixture(lang, { fail });
+      try {
+        const r = f.install();
+        assert.notEqual(r.status, 0, r.stdout + r.stderr);
+        assert.ok(
+          !existsSync(join(f.dir, '.env')),
+          'remove only this run’s env so retry accepts it',
+        );
+        if (fail === 'race') {
+          assert.match(r.stdout + r.stderr, /\.docker already exists/);
+          assert.deepEqual(readdirSync(join(f.dir, '.docker')), ['config.json']);
+          assert.equal(readFileSync(join(f.dir, '.docker/config.json'), 'utf8'), 'user-owned');
+          rmSync(join(f.dir, '.docker'), { recursive: true });
+        } else assert.ok(!existsSync(join(f.dir, '.docker')), 'no final credential after failure');
+        assert.deepEqual(
+          readdirSync(f.root).filter((x) => x.startsWith('haive-install')),
+          [],
+        );
+        f.env.FAIL_AT = '';
+        const retry = f.install([f.flag('force')]);
+        assert.equal(retry.status, 0, retry.stdout + retry.stderr);
       } finally {
         f.clean();
       }

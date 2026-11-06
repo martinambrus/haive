@@ -204,6 +204,25 @@ function Resolve-HaiveVersion([string]$want) {
   return "v$want"
 }
 
+# Directory.CreateDirectory (and therefore New-Item) can succeed on a directory
+# created concurrently. Use the OS primitive that fails if the name already exists.
+function New-RegistryDirectory([string]$directory) {
+  if ($env:OS -eq 'Windows_NT') {
+    if (-not ('HaiveInstallerDirectory' -as [type])) {
+      Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class HaiveInstallerDirectory {
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool CreateDirectory(string path, IntPtr securityAttributes);
+}
+'@
+    }
+    if (-not [HaiveInstallerDirectory]::CreateDirectory($directory, [IntPtr]::Zero)) { throw 'cannot exclusively create credential directory' }
+  } elseif ((Invoke-Native mkdir @('-m', '700', $directory)).ExitCode -ne 0) { throw 'cannot exclusively create credential directory' }
+}
+
 # Reassert protection at the destination too: a cross-volume move may inherit its ACL.
 function Protect-RegistryCredentials([string]$directory) {
   $config = Join-Path $directory 'config.json'
@@ -468,6 +487,7 @@ $mailpitPort = Get-FreePort 8025
 Write-Note "ports             web $webPort, api $apiPort, mail $mailpitPort"
 
 $envPath = Join-Path $Dir '.env'
+$channelEnvCreated = $false
 if (-not (Test-Path $envPath)) {
   $key  = New-HexSecret 32
   $jwt  = New-HexSecret 32
@@ -512,13 +532,20 @@ if (-not (Test-Path $envPath)) {
   }
   # LF, not CRLF, and written without a BOM: compose reads this file itself and a stray carriage
   # return lands inside the VALUE of the last variable on every line.
+  if ($Channel -cne 'public') { $channelEnvCreated = $true }
   [System.IO.File]::WriteAllText($envPath, ($lines -join "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
   Write-Note "secrets           generated (.env)"
 }
 
 if ($Channel -cne 'public') {
-  if (Test-Path -LiteralPath (Join-Path $Dir '.docker')) { Remove-Item -LiteralPath $ChannelScratch -Recurse -Force; Die "$Dir/.docker already exists; choose a clean install directory" }
+  $claimed = $false
+  $credentialDir = Join-Path $Dir '.docker'
   try {
+    # Exclusively claim the name before moving any credential into the install.
+    try { New-RegistryDirectory $credentialDir }
+    catch { throw "$Dir/.docker already exists or cannot be created; choose a clean install directory" }
+    $claimed = $true
+    Protect-RegistryCredentials $credentialDir
     # The helper needs a nondefault context too; default-daemon installs keep
     # only the channel credential in the final directory.
     if ((-not $script:ChannelContext -or $script:ChannelContext -ceq 'default') -and (-not $env:DOCKER_CONTEXT -or $env:DOCKER_CONTEXT -ceq 'default')) {
@@ -527,9 +554,15 @@ if ($Channel -cne 'public') {
       $settings.PSObject.Properties.Remove('currentContext')
       [IO.File]::WriteAllText((Join-Path $env:DOCKER_CONFIG 'config.json'), ($settings | ConvertTo-Json -Depth 10 -Compress))
     }
-    Move-Item -LiteralPath (Join-Path $ChannelScratch '.docker') -Destination (Join-Path $Dir '.docker')
-    try { Protect-RegistryCredentials (Join-Path $Dir '.docker') }
-    catch { Remove-Item -LiteralPath (Join-Path $Dir '.docker') -Recurse -Force; throw }
+    foreach ($entry in Get-ChildItem -LiteralPath (Join-Path $ChannelScratch '.docker') -Force) {
+      Move-Item -LiteralPath $entry.FullName -Destination (Join-Path $credentialDir $entry.Name)
+    }
+    Protect-RegistryCredentials $credentialDir
+  }
+  catch {
+    if ($claimed) { Remove-Item -LiteralPath $credentialDir -Recurse -Force }
+    if ($channelEnvCreated) { Remove-Item -LiteralPath $envPath -Force }
+    throw
   }
   finally { Remove-Item -LiteralPath $ChannelScratch -Recurse -Force }
   $env:DOCKER_CONFIG = Join-Path $Dir '.docker'

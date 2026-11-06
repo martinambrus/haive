@@ -226,11 +226,18 @@ read_channel_manifest() {
   CHANNEL_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/haive-install.XXXXXXXX")
   CHANNEL_CONTAINER=""
   CHANNEL_TTY=""
+  CHANNEL_ENV_CREATED=0
+  CHANNEL_FINAL_CLAIMED=0
+  CHANNEL_PLACED=0
   cleanup_channel() {
     if [ -n "$CHANNEL_TTY" ]; then stty "$CHANNEL_TTY" < /dev/tty || warn "could not restore terminal settings"; fi
     if [ -n "$CHANNEL_CONTAINER" ]; then
       docker rm -f "$CHANNEL_CONTAINER" >/dev/null 2>&1 \
         || warn "could not remove manifest container $CHANNEL_CONTAINER; run docker rm -f $CHANNEL_CONTAINER"
+    fi
+    if [ "$CHANNEL_PLACED" -eq 0 ]; then
+      if [ "$CHANNEL_FINAL_CLAIMED" -eq 1 ]; then rm -rf "$INSTALL_DIR/.docker"; fi
+      if [ "$CHANNEL_ENV_CREATED" -eq 1 ]; then rm -f "$INSTALL_DIR/.env"; fi
     fi
     rm -rf "$CHANNEL_SCRATCH"
   }
@@ -578,6 +585,7 @@ if [ ! -f .env ]; then
     die "could not generate secrets. Nothing was installed."
   fi
   umask 077
+  if [ "$CHANNEL" != "public" ]; then CHANNEL_ENV_CREATED=1; fi
   cat > .env <<EOF
 # Haive install — generated $(date -u '+%Y-%m-%dT%H:%M:%SZ')
 # Keep this file. CONFIG_ENCRYPTION_KEY is the master key for every secret this install stores;
@@ -627,7 +635,10 @@ EOF
 fi
 
 if [ "$CHANNEL" != "public" ]; then
-  [ ! -e .docker ] && [ ! -L .docker ] || die "$INSTALL_DIR/.docker already exists; choose a clean install directory"
+  # mkdir is the portable exclusive claim: it refuses even a concurrent link or
+  # directory, instead of mv merging the credential into someone else’s tree.
+  mkdir -m 700 .docker 2>/dev/null || die "$INSTALL_DIR/.docker already exists; choose a clean install directory"
+  CHANNEL_FINAL_CLAIMED=1
   # The helper also uses this config. Keep nondefault contexts so it reaches the
   # same daemon; default-daemon installs retain only the channel credential.
   case "$CHANNEL_CONTEXT" in
@@ -645,7 +656,10 @@ if [ "$CHANNEL" != "public" ]; then
         mv "$CHANNEL_SCRATCH/config.json" "$DOCKER_CONFIG/config.json"
       fi ;;
   esac
-  mv "$CHANNEL_SCRATCH/.docker" .docker
+  for entry in "$CHANNEL_SCRATCH/.docker/"*; do
+    mv "$entry" ".docker/${entry##*/}" || die "could not place registry credentials; retry the install"
+  done
+  CHANNEL_PLACED=1
   export DOCKER_CONFIG="$INSTALL_DIR/.docker"
 fi
 
