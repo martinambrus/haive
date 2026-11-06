@@ -286,10 +286,76 @@ read_channel_manifest() {
       }
     ' "$CHANNEL_USER_CONFIG/config.json") || die "cannot read Docker currentContext"
   fi
-  if [ -d "$CHANNEL_USER_CONFIG/contexts" ]; then
-    cp -R "$CHANNEL_USER_CONFIG/contexts" "$CHANNEL_SCRATCH/.docker/contexts"
-    chmod -R go-rwx "$CHANNEL_SCRATCH/.docker/contexts"
+  # Decode the selected JSON string for Docker's name-hashed context store. The
+  # original JSON token above is retained verbatim in the scratch config.
+  CHANNEL_CONTEXT_NAME=$(printf '%s\n' "$CHANNEL_CONTEXT" | LC_ALL=C awk '
+    function hex(t,   i,n,c) {
+      n=0; for(i=1;i<=length(t);i++) {
+        c=index("0123456789abcdef",tolower(substr(t,i,1)))-1
+        if(c<0) exit 1
+        n=n*16+c
+      }; return n
+    }
+    function utf8(n) {
+      if(n==0 || n>1114111 || (n>=55296 && n<=57343)) exit 1
+      if(n<128) return sprintf("%c",n)
+      if(n<2048) return sprintf("%c%c",192+int(n/64),128+n%64)
+      if(n<65536) return sprintf("%c%c%c",224+int(n/4096),128+int(n/64)%64,128+n%64)
+      return sprintf("%c%c%c%c",240+int(n/262144),128+int(n/4096)%64,128+int(n/64)%64,128+n%64)
+    }
+    {
+      for(p=2;p<length($0);p++) {
+        c=substr($0,p,1)
+        if(c=="\\") {
+          c=substr($0,++p,1)
+          if(c=="u") {
+            if(p+4>=length($0)) exit 1
+            n=hex(substr($0,p+1,4)); p+=4
+            if(n>=55296 && n<=56319) {
+              if(substr($0,p+1,2)!="\\u" || p+6>=length($0)) exit 1
+              low=hex(substr($0,p+3,4)); if(low<56320 || low>57343) exit 1
+              n=65536+(n-55296)*1024+low-56320; p+=6
+            }
+            c=utf8(n)
+          } else if(c=="b") c=sprintf("%c",8)
+          else if(c=="f") c=sprintf("%c",12)
+          else if(c=="n") c="\n"
+          else if(c=="r") c="\r"
+          else if(c=="t") c="\t"
+          else if(c!="\"" && c!="\\" && c!="/") exit 1
+        }
+        printf "%s",c
+      }
+    }
+  ') || die "cannot decode Docker currentContext"
+  copy_channel_context() {
+    [ -n "$1" ] && [ "$1" != default ] || return 0
+    if command -v sha256sum >/dev/null 2>&1; then
+      CHANNEL_HASH=$(printf '%s' "$1" | sha256sum) || die "cannot hash selected Docker context"
+    elif command -v shasum >/dev/null 2>&1; then
+      CHANNEL_HASH=$(printf '%s' "$1" | shasum -a 256) || die "cannot hash selected Docker context"
+    else
+      die "selected Docker contexts require sha256sum or shasum -a 256"
+    fi
+    CHANNEL_HASH=${CHANNEL_HASH%% *}
+    [ -d "$CHANNEL_USER_CONFIG/contexts/meta/$CHANNEL_HASH" ] \
+      || die "selected Docker context $1 has no metadata directory"
+    for kind in meta tls; do
+      if [ -d "$CHANNEL_USER_CONFIG/contexts/$kind/$CHANNEL_HASH" ]; then
+        mkdir -p "$CHANNEL_SCRATCH/.docker/contexts/$kind"
+        # Dereference every link; chmod must only ever touch our private copy.
+        cp -RL "$CHANNEL_USER_CONFIG/contexts/$kind/$CHANNEL_HASH" "$CHANNEL_SCRATCH/.docker/contexts/$kind/$CHANNEL_HASH"
+      fi
+    done
+  }
+  copy_channel_context "${DOCKER_CONTEXT:-}"
+  CHANNEL_CONTEXT_HASH=''
+  if [ -n "$CHANNEL_CONTEXT_NAME" ] && [ "$CHANNEL_CONTEXT_NAME" != default ]; then
+    if [ "$CHANNEL_CONTEXT_NAME" != "${DOCKER_CONTEXT:-}" ]; then copy_channel_context "$CHANNEL_CONTEXT_NAME"
+    fi
+    CHANNEL_CONTEXT_HASH=$CHANNEL_HASH
   fi
+  if [ -d "$CHANNEL_SCRATCH/.docker/contexts" ]; then chmod -R go-rwx "$CHANNEL_SCRATCH/.docker/contexts"; fi
   export DOCKER_CONFIG="$CHANNEL_SCRATCH/.docker"
   # A nonempty auth map prevents Docker from automatically selecting a Desktop credential
   # helper. Login replaces this empty credential; this config must remain self-contained.
@@ -643,7 +709,6 @@ if [ "$CHANNEL" != "public" ]; then
   # same daemon; default-daemon installs retain only the channel credential.
   case "$CHANNEL_CONTEXT" in
     ''|'""'|'"default"')
-      if [ -z "${DOCKER_CONTEXT:-}" ] || [ "$DOCKER_CONTEXT" = default ]; then
         rm -rf "$DOCKER_CONFIG/contexts"
         awk '
           { s=s $0 "\n" }
@@ -654,8 +719,14 @@ if [ "$CHANNEL" != "public" ]; then
           }
         ' "$DOCKER_CONFIG/config.json" > "$CHANNEL_SCRATCH/config.json"
         mv "$CHANNEL_SCRATCH/config.json" "$DOCKER_CONFIG/config.json"
-      fi ;;
+      ;;
   esac
+  # The environment override is only needed during this install. The host helper
+  # retains the config selection, with no unrelated endpoints or TLS keys.
+  for entry in "$DOCKER_CONFIG/contexts/"*/*; do
+    [ -e "$entry" ] || continue
+    [ "${entry##*/}" = "$CHANNEL_CONTEXT_HASH" ] || rm -rf "$entry"
+  done
   for entry in "$CHANNEL_SCRATCH/.docker/"*; do
     mv "$entry" ".docker/${entry##*/}" || die "could not place registry credentials; retry the install"
   done

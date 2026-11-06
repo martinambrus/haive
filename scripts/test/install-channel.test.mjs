@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -282,22 +285,48 @@ for (const lang of ['sh', 'ps1']) {
         : false,
   };
   const check = (name, fn) => test(`${lang}: ${name}`, options, fn);
-  for (const selection of ['config', 'host env', 'context env', 'default'])
+  for (const selection of ['config', 'host env', 'context env', 'default', 'symlink', 'escaped'])
     check(`daemon context preserved without user credentials: ${selection}`, () => {
       const f = fixture(lang);
       const userConfig = join(f.root, 'user-docker');
       f.env.DOCKER_CONFIG = userConfig;
       const currentContext = selection === 'default' ? 'default' : 'x';
-      const original = JSON.stringify({
+      let original = JSON.stringify({
         auths: { private: { auth: 'user-secret' } },
         credsStore: 'currentContext',
         credHelpers: { private: 'helper' },
         currentContext,
       });
+      if (selection === 'escaped')
+        original = original.replace('"currentContext":"x"', '"currentContext":"\\u0078"');
+      const hash = (name) => createHash('sha256').update(name).digest('hex');
+      const store = join(f.root, 'real-contexts');
       try {
-        mkdirSync(join(userConfig, 'contexts/meta/example'), { recursive: true });
+        mkdirSync(userConfig);
+        mkdirSync(store);
+        for (const name of ['x', 'override'])
+          for (const kind of ['meta', 'tls']) {
+            const entry = join(store, kind, hash(name));
+            mkdirSync(entry, { recursive: true });
+            writeFileSync(
+              join(entry, kind === 'meta' ? 'meta.json' : 'key.pem'),
+              kind === 'meta' ? JSON.stringify({ Name: name }) : `secret-${name}`,
+            );
+            chmodSync(entry, 0o755);
+            chmodSync(join(entry, kind === 'meta' ? 'meta.json' : 'key.pem'), 0o644);
+          }
+        if (selection === 'symlink') symlinkSync(store, join(userConfig, 'contexts'));
+        else mkdirSync(join(userConfig, 'contexts'));
+        if (selection !== 'symlink')
+          for (const kind of ['meta', 'tls']) {
+            mkdirSync(join(userConfig, 'contexts', kind));
+            for (const name of ['x', 'override'])
+              symlinkSync(
+                join(store, kind, hash(name)),
+                join(userConfig, 'contexts', kind, hash(name)),
+              );
+          }
         writeFileSync(join(userConfig, 'config.json'), original);
-        writeFileSync(join(userConfig, 'contexts/meta/example/meta.json'), '{"Name":"x"}');
         if (selection === 'host env') f.env.DOCKER_HOST = 'unix:///selected.sock';
         if (selection === 'context env') f.env.DOCKER_CONTEXT = 'override';
         const r = f.install();
@@ -306,22 +335,90 @@ for (const lang of ['sh', 'ps1']) {
         assert.equal(staged.currentContext, currentContext);
         assert.deepEqual(Object.keys(staged).sort(), ['auths', 'currentContext']);
         assert.deepEqual(Object.keys(staged.auths), ['127.0.0.1:54321']);
-        assert.equal(
-          readFileSync(join(f.root, 'seen-contexts/meta/example/meta.json'), 'utf8'),
-          '{"Name":"x"}',
-        );
+        const wanted =
+          selection === 'default' ? [] : selection === 'context env' ? ['x', 'override'] : ['x'];
+        for (const kind of ['meta', 'tls']) {
+          const seen = join(f.root, 'seen-contexts', kind);
+          assert.deepEqual(
+            existsSync(seen) ? readdirSync(seen).sort() : [],
+            wanted.map(hash).sort(),
+          );
+          const final = join(f.dir, '.docker/contexts', kind);
+          assert.deepEqual(
+            existsSync(final) ? readdirSync(final).sort() : [],
+            (selection === 'default' ? [] : ['x']).map(hash),
+          );
+          if (selection !== 'default')
+            assert.equal(lstatSync(join(final, hash('x'))).isSymbolicLink(), false);
+          for (const name of ['x', 'override']) {
+            assert.equal(statSync(join(store, kind, hash(name))).mode & 0o777, 0o755);
+            assert.equal(
+              statSync(join(store, kind, hash(name), kind === 'meta' ? 'meta.json' : 'key.pem'))
+                .mode & 0o777,
+              0o644,
+            );
+          }
+        }
         assert.equal(
           readFileSync(join(f.root, 'daemon-env'), 'utf8'),
           `${f.env.DOCKER_HOST}\n${f.env.DOCKER_CONTEXT}\n`,
         );
         assert.equal(readFileSync(join(userConfig, 'config.json'), 'utf8'), original);
-        assert.equal(existsSync(join(f.dir, '.docker/contexts')), selection !== 'default');
         const final = JSON.parse(readFileSync(join(f.dir, '.docker/config.json'), 'utf8'));
         assert.equal(final.currentContext, selection === 'default' ? undefined : 'x');
       } finally {
         f.clean();
       }
     });
+  for (const selected of ['config', 'environment'])
+    check(`missing selected context fails closed: ${selected}`, () => {
+      const f = fixture(lang);
+      try {
+        const config = join(f.root, 'user-docker');
+        mkdirSync(config);
+        writeFileSync(
+          join(config, 'config.json'),
+          JSON.stringify({ currentContext: selected === 'config' ? 'missing' : 'default' }),
+        );
+        f.env.DOCKER_CONFIG = config;
+        if (selected === 'environment') f.env.DOCKER_CONTEXT = 'missing';
+        const r = f.install();
+        assert.notEqual(r.status, 0, r.stdout + r.stderr);
+        assert.match(r.stdout + r.stderr, /selected Docker context.*metadata/i);
+        assert.ok(!f.calls().includes('\tlogin\t'));
+        assert.ok(!existsSync(f.dir));
+      } finally {
+        f.clean();
+      }
+    });
+  if (lang === 'sh')
+    for (const hashTools of ['fallback', 'missing'])
+      check(`context hash tools: ${hashTools}`, () => {
+        const source = readFileSync(join(repo, 'install/install.sh'), 'utf8')
+          .replace('command -v sha256sum', 'false')
+          .replace('command -v shasum', hashTools === 'missing' ? 'false' : 'command -v shasum');
+        const f = fixture(lang, { source });
+        try {
+          const config = join(f.root, 'user-docker');
+          const hash = createHash('sha256').update('x').digest('hex');
+          mkdirSync(join(config, 'contexts/meta', hash), { recursive: true });
+          writeFileSync(join(config, 'contexts/meta', hash, 'meta.json'), '{"Name":"x"}');
+          writeFileSync(join(config, 'config.json'), '{"currentContext":"x"}');
+          f.env.DOCKER_CONFIG = config;
+          const r = f.install();
+          if (hashTools === 'fallback') {
+            assert.equal(r.status, 0, r.stdout + r.stderr);
+            assert.ok(existsSync(join(f.dir, '.docker/contexts/meta', hash, 'meta.json')));
+          } else {
+            assert.notEqual(r.status, 0);
+            assert.match(r.stdout + r.stderr, /require sha256sum or shasum/);
+            assert.ok(!f.calls().includes('\tlogin\t'));
+            assert.ok(!existsSync(f.dir));
+          }
+        } finally {
+          f.clean();
+        }
+      });
   for (const version of [undefined, 'latest', 'next'])
     check(`channel requires explicit version before network: ${version ?? 'omitted'}`, () => {
       const f = fixture(lang);

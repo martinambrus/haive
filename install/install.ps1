@@ -336,8 +336,29 @@ function Read-ChannelManifest {
       $userSettings = [IO.File]::ReadAllText((Join-Path $userConfig 'config.json')) | ConvertFrom-Json
       if ($userSettings.currentContext -is [string]) { $script:ChannelContext = $userSettings.currentContext }
     }
-    if (Test-Path -LiteralPath (Join-Path $userConfig 'contexts')) {
-      Copy-Item -LiteralPath (Join-Path $userConfig 'contexts') -Destination (Join-Path $scratch '.docker/contexts') -Recurse
+    # Copy through links into real private files, never chmod/ACL the user store.
+    function Copy-ContextTree([string]$source, [string]$destination) {
+      $null = [IO.Directory]::CreateDirectory($destination)
+      foreach ($entry in Get-ChildItem -LiteralPath $source -Force) {
+        $target = Join-Path $destination $entry.Name
+        if ($entry.PSIsContainer) { Copy-ContextTree $entry.FullName $target }
+        else { [IO.File]::Copy($entry.FullName, $target, $true) }
+      }
+    }
+    $script:ChannelContextHash = $null
+    foreach ($name in @($env:DOCKER_CONTEXT, $script:ChannelContext) | Select-Object -Unique) {
+      if (-not $name -or $name -ceq 'default') { continue }
+      $sha = [Security.Cryptography.SHA256]::Create()
+      try { $hash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($name)))).Replace('-', '').ToLowerInvariant() }
+      finally { $sha.Dispose() }
+      if ($name -ceq $script:ChannelContext) { $script:ChannelContextHash = $hash }
+      if (-not (Test-Path -LiteralPath (Join-Path $userConfig "contexts/meta/$hash") -PathType Container)) { throw "selected Docker context $name has no metadata directory" }
+      foreach ($kind in @('meta', 'tls')) {
+        $source = Join-Path $userConfig "contexts/$kind/$hash"
+        if (Test-Path -LiteralPath $source -PathType Container) {
+          Copy-ContextTree $source (Join-Path $scratch ".docker/contexts/$kind/$hash")
+        }
+      }
     }
     $env:DOCKER_CONFIG = Join-Path $scratch '.docker'
     $server = ($ChannelRegistry -split '/')[0]
@@ -604,11 +625,19 @@ if ($Channel -cne 'public') {
     Protect-RegistryCredentials $credentialDir
     # The helper needs a nondefault context too; default-daemon installs keep
     # only the channel credential in the final directory.
-    if ((-not $script:ChannelContext -or $script:ChannelContext -ceq 'default') -and (-not $env:DOCKER_CONTEXT -or $env:DOCKER_CONTEXT -ceq 'default')) {
+    if (-not $script:ChannelContext -or $script:ChannelContext -ceq 'default') {
       Remove-Item -LiteralPath (Join-Path $env:DOCKER_CONFIG 'contexts') -Recurse -Force -ErrorAction SilentlyContinue
       $settings = [IO.File]::ReadAllText((Join-Path $env:DOCKER_CONFIG 'config.json')) | ConvertFrom-Json
       $settings.PSObject.Properties.Remove('currentContext')
       [IO.File]::WriteAllText((Join-Path $env:DOCKER_CONFIG 'config.json'), ($settings | ConvertTo-Json -Depth 10 -Compress))
+    }
+    foreach ($kind in @('meta', 'tls')) {
+      $contextDir = Join-Path $env:DOCKER_CONFIG "contexts/$kind"
+      if (Test-Path -LiteralPath $contextDir) {
+        foreach ($entry in Get-ChildItem -LiteralPath $contextDir -Force) {
+          if ($entry.Name -cne $script:ChannelContextHash) { Remove-Item -LiteralPath $entry.FullName -Recurse -Force }
+        }
+      }
     }
     foreach ($entry in Get-ChildItem -LiteralPath (Join-Path $ChannelScratch '.docker') -Force) {
       Move-Item -LiteralPath $entry.FullName -Destination (Join-Path $credentialDir $entry.Name)
