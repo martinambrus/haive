@@ -13,6 +13,7 @@ vi.mock('./journal.js', () => ({
   findLiveRun: vi.fn(),
   lastDoneChannel: vi.fn(),
   recordRunError: vi.fn(),
+  recordAttempt: vi.fn(),
   startRun: vi.fn(),
   tryLock: vi.fn(),
 }));
@@ -232,7 +233,7 @@ it('rollback pins use the settings refreshed after taking the lock', async () =>
     fresh.HAIVE_WEB_IMAGE,
   ]);
   expect(await main()).toBe(0);
-  expect(images.readImageSettings).toHaveBeenCalledTimes(2);
+  expect(images.readImageSettings).toHaveBeenCalledTimes(1);
 });
 
 it.each([0, 1, 2, 3, 4, 5, 6])(
@@ -356,7 +357,7 @@ describe('journal channel pin', () => {
       expect(vi.mocked(journal.tryLock).mock.invocationCallOrder[0]).toBeLessThan(
         vi.mocked(journal.lastDoneChannel).mock.invocationCallOrder[0]!,
       );
-      expect(images.readImageSettings).toHaveBeenCalledTimes(2);
+      expect(images.readImageSettings).toHaveBeenCalledTimes(1);
     },
   );
 
@@ -511,4 +512,245 @@ it('public dry-plan emits a usage error without reading a target or journal', as
   expect(h.initialize).not.toHaveBeenCalled();
   expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
   expect(dk.localImages).not.toHaveBeenCalled();
+});
+
+describe('terminal attempts before a run exists', () => {
+  beforeEach(() => {
+    process.argv = process.argv.filter((v) => v !== '--check');
+    vi.mocked(journal.recordAttempt).mockResolvedValue(undefined);
+  });
+  const attempts = () => vi.mocked(journal.recordAttempt);
+  const expectAttempt = (status: string, refusal?: string) => {
+    expect(attempts()).toHaveBeenCalledTimes(1);
+    const event = vi
+      .mocked(console.log)
+      .mock.calls.map(([line]) => JSON.parse(String(line)))
+      .find((e) => e.event === (status === 'refused' ? 'refused' : 'error'));
+    expect(attempts()).toHaveBeenCalledWith(h.sql, {
+      status,
+      fromVersion: '1.0.0',
+      toVersion: '9.9.9',
+      channel: 'acme',
+      error: event.message,
+      metadata: refusal ? { refusal } : {},
+    });
+  };
+  it.each([
+    'dev-build',
+    'same-version',
+    'downgrade',
+    'illegal-jump',
+    'rollback-images-missing',
+    'insufficient-disk',
+  ])('records exactly one %s preflight refusal', async (refusal) => {
+    if (refusal === 'dev-build') vi.mocked(run.readEnvVar).mockResolvedValue('0.0.0-dev');
+    if (refusal === 'same-version') vi.mocked(run.readEnvVar).mockResolvedValue('9.9.9');
+    if (refusal === 'downgrade') vi.mocked(run.readEnvVar).mockResolvedValue('10.0.0');
+    if (refusal === 'illegal-jump')
+      vi.mocked(dk.readReleaseManifestImage).mockResolvedValue(
+        JSON.stringify({
+          manifestVersion: 1,
+          channel: 'acme',
+          version: '9.9.9',
+          builtAt: '2026-11-05',
+          migrationHead: '0221',
+          minFrom: '5.0.0',
+          images: refs,
+        }),
+      );
+    if (refusal === 'rollback-images-missing') vi.mocked(dk.localImages).mockResolvedValue([]);
+    if (refusal === 'insufficient-disk')
+      process.argv.push('--free-bytes', '1', '--snapshot-bytes', '2');
+    expect(await main()).toBe(3);
+    expect(attempts()).toHaveBeenCalledTimes(1);
+    expect(attempts()).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        status: 'refused',
+        toVersion: '9.9.9',
+        channel: 'acme',
+        metadata: { refusal },
+        fromVersion:
+          refusal === 'dev-build'
+            ? '0.0.0-dev'
+            : refusal === 'same-version'
+              ? '9.9.9'
+              : refusal === 'downgrade'
+                ? '10.0.0'
+                : '1.0.0',
+      }),
+    );
+    const event = vi
+      .mocked(console.log)
+      .mock.calls.map(([line]) => JSON.parse(String(line)))
+      .find((e) => e.event === 'refused');
+    expect(attempts().mock.calls[0]![1].error).toBe(event.message);
+  });
+  it('records the channel change and its CLI remedy', async () => {
+    vi.mocked(journal.lastDoneChannel).mockResolvedValue('public');
+    expect(await main()).toBe(3);
+    expectAttempt('refused', 'channel-changed');
+    expect(attempts().mock.calls[0]![1].error).toContain('--change-channel public');
+  });
+  it('records missing channel rollback pins', async () => {
+    vi.mocked(images.readImageSettings).mockResolvedValue({ ...settings, HAIVE_API_IMAGE: '' });
+    expect(await main()).toBe(3);
+    expectAttempt('refused', 'rollback-images-missing');
+  });
+  it('records a thrown manifest read failure', async () => {
+    vi.mocked(dk.readReleaseManifestImage).mockRejectedValue(new Error('manifest pull failed'));
+    await expect(main()).rejects.toThrow('manifest pull failed');
+    expect(attempts()).toHaveBeenCalledTimes(1);
+    expect(attempts()).toHaveBeenCalledWith(h.sql, {
+      status: 'failed',
+      fromVersion: '1.0.0',
+      toVersion: '9.9.9',
+      channel: 'acme',
+      error: 'manifest pull failed',
+      metadata: {},
+    });
+  });
+  it('records usage after the journal is ensured', async () => {
+    process.argv.push('--change-channel', 'BAD');
+    expect(await main()).toBe(2);
+    expectAttempt('failed');
+  });
+  it('records channel validation failures after acquiring the lock', async () => {
+    process.argv[process.argv.indexOf('--channel') + 1] = 'other';
+    await expect(main()).rejects.toThrow('disagrees');
+    expect(attempts()).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({ status: 'failed', channel: 'acme' }),
+    );
+  });
+  it('uses unknown when the installed version is absent', async () => {
+    vi.mocked(run.readEnvVar).mockResolvedValue(null);
+    vi.mocked(journal.lastDoneChannel).mockResolvedValue('public');
+    expect(await main()).toBe(3);
+    expect(attempts()).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({ fromVersion: 'unknown' }),
+    );
+  });
+  it.each(['busy', 'check', 'dry-plan', 'completed', 'resumed'])(
+    'writes no attempt for %s',
+    async (mode) => {
+      if (mode === 'busy') vi.mocked(journal.tryLock).mockResolvedValue(false);
+      if (mode === 'check') {
+        process.argv.push('--check');
+        vi.mocked(journal.lastDoneChannel).mockResolvedValue('public');
+      }
+      if (mode === 'dry-plan') process.argv.push('--dry-plan');
+      if (mode === 'resumed')
+        vi.mocked(journal.findLiveRun).mockResolvedValue({
+          id: 'live',
+          fromVersion: '1.0.0',
+          toVersion: '9.9.9',
+          startedAt: new Date(),
+          phase: 'migrate',
+          metadata: { migrationHead: '0221' },
+        } as never);
+      await main();
+      expect(attempts()).not.toHaveBeenCalled();
+    },
+  );
+  it('keeps a refusal exit when recording fails, and emits the write error', async () => {
+    vi.mocked(journal.lastDoneChannel).mockResolvedValue('public');
+    attempts().mockRejectedValue(new Error('journal write failed'));
+    expect(await main()).toBe(3);
+    expect(attempts()).toHaveBeenCalledTimes(1);
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('attempt-record-failed'));
+  });
+});
+
+describe('existing runs do not gain terminal attempt rows', () => {
+  beforeEach(() => {
+    process.argv = process.argv.filter((v) => v !== '--check');
+  });
+  it('does not create a second row when commit throws', async () => {
+    vi.mocked(run.phaseCommit).mockRejectedValueOnce(new Error('commit failed'));
+    expect(await main()).toBe(1);
+    expect(journal.startRun).toHaveBeenCalledTimes(1);
+    expect(journal.recordAttempt).not.toHaveBeenCalled();
+  });
+  it('does not create a row when recovery throws', async () => {
+    vi.mocked(journal.findLiveRun).mockResolvedValueOnce({
+      id: 'live',
+      fromVersion: '1.0.0',
+      toVersion: '9.9.9',
+      startedAt: new Date(),
+      phase: 'commit',
+      metadata: { migrationHead: '0221' },
+    } as never);
+    vi.mocked(run.resume).mockRejectedValueOnce(new Error('recovery failed'));
+    await expect(main()).rejects.toThrow('recovery failed');
+    expect(journal.recordAttempt).not.toHaveBeenCalled();
+  });
+  it('keeps a thrown error when writing its attempt fails', async () => {
+    vi.mocked(dk.readReleaseManifestImage).mockRejectedValueOnce(
+      new Error('original manifest error'),
+    );
+    vi.mocked(journal.recordAttempt).mockRejectedValueOnce(new Error('write failed'));
+    await expect(main()).rejects.toThrow('original manifest error');
+    expect(journal.recordAttempt).toHaveBeenCalledTimes(1);
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('attempt-record-failed'));
+  });
+  it('uses unknown when a usage error has no requested target', async () => {
+    process.argv = ['node', 'updater', '--install-dir', '/host/install'];
+    expect(await main()).toBe(2);
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({ toVersion: 'unknown', status: 'failed' }),
+    );
+  });
+});
+
+it('sanitizes bound query diagnostics before recording an attempt', async () => {
+  process.argv = process.argv.filter((v) => v !== '--check');
+  vi.mocked(dk.readReleaseManifestImage).mockRejectedValueOnce(
+    Object.assign(new Error('secret value'), {
+      params: ['secret value'],
+      query: 'SELECT $1',
+    }),
+  );
+  await expect(main()).rejects.toThrow('secret value');
+  expect(journal.recordAttempt).toHaveBeenCalledWith(
+    h.sql,
+    expect.objectContaining({ error: 'Database operation failed' }),
+  );
+});
+it('scrubs filesystem paths before recording an attempt', async () => {
+  process.argv = process.argv.filter((v) => v !== '--check');
+  vi.mocked(dk.readReleaseManifestImage).mockRejectedValueOnce(
+    new Error('cannot read /private/install/release.json'),
+  );
+  await expect(main()).rejects.toThrow('cannot read');
+  expect(journal.recordAttempt).toHaveBeenCalledWith(
+    h.sql,
+    expect.objectContaining({ error: 'cannot read [path]' }),
+  );
+});
+
+it('never records the raw invalid install channel', async () => {
+  process.argv = process.argv.filter((v) => v !== '--check');
+  vi.mocked(images.readImageSettings).mockResolvedValue({
+    ...settings,
+    HAIVE_CHANNEL: 'INVALID/channel',
+  });
+  await expect(main()).rejects.toThrow('invalid install channel');
+  expect(journal.recordAttempt).toHaveBeenCalledWith(
+    h.sql,
+    expect.objectContaining({ channel: 'public' }),
+  );
+});
+
+it('validates the requested version before an early manifest failure is recorded', async () => {
+  process.argv = process.argv.filter((v) => v !== '--check');
+  process.argv[process.argv.indexOf('--version') + 1] = 'bad/version';
+  vi.mocked(dk.readReleaseManifestImage).mockRejectedValueOnce(new Error('manifest unavailable'));
+  await expect(main()).rejects.toThrow('manifest unavailable');
+  expect(journal.recordAttempt).toHaveBeenCalledWith(
+    h.sql,
+    expect.objectContaining({ toVersion: 'unknown' }),
+  );
 });

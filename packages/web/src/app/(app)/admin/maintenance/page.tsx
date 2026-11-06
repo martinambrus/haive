@@ -1,5 +1,7 @@
 'use client';
 
+import { parseUpgradeInstant } from '@/lib/upgrade-time';
+
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   maintenanceApi,
@@ -15,6 +17,7 @@ import { Badge, Button, Card, FormError, Input, Label } from '@/components/ui';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
 import { usePageTitle } from '@/lib/use-page-title';
 import { taskCanStop, stopResultNotice } from '@/lib/task-state';
+import { upgradeAttemptBanner } from '@/lib/step-banners';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 
 /** The three states, in the order an operator walks them, each with what it actually does. Copy
@@ -48,11 +51,13 @@ const RUN_STATUS_VARIANT: Record<string, 'success' | 'warning' | 'error' | 'info
   running: 'info',
   rolled_back: 'warning',
   failed: 'error',
+  refused: 'warning',
 };
 
 function shortTime(iso: string | null): string {
   if (!iso) return '—';
-  return new Date(iso).toLocaleString();
+  const instant = parseUpgradeInstant(iso);
+  return Number.isFinite(instant) ? new Date(instant).toLocaleString() : '—';
 }
 
 function TaskRow({
@@ -149,7 +154,7 @@ export default function MaintenancePage() {
   const [targetVersion, setTargetVersion] = useState('');
   const [force, setForce] = useState(false);
   const [confirming, setConfirming] = useState(false);
-  const [launched, setLaunched] = useState<string | null>(null);
+  const [launched, setLaunched] = useState<{ container: string; startedAt: number } | null>(null);
 
   const loadSeq = useRef(0);
   const load = useCallback(async () => {
@@ -214,8 +219,12 @@ export default function MaintenancePage() {
     setConfirming(false);
     setBusy(true);
     try {
+      const startedAt = Date.now();
       const res = await maintenanceApi.startUpgrade({ version: targetVersion.trim(), force });
-      setLaunched(res.container);
+      setLaunched({
+        container: res.container,
+        startedAt: res.startedAt ? Date.parse(res.startedAt) : startedAt,
+      });
       setError(null);
       await load();
     } catch (err) {
@@ -226,6 +235,7 @@ export default function MaintenancePage() {
   }
 
   const liveRun = upgrade?.runs.find((r) => r.status === 'running') ?? null;
+  const attemptBanner = upgradeAttemptBanner(upgrade?.lastAttempt, launched?.startedAt);
 
   const parked = blocking?.parked ?? [];
 
@@ -413,13 +423,22 @@ export default function MaintenancePage() {
           </div>
         ) : null}
 
-        {launched ? (
+        {attemptBanner ? (
+          <Card
+            role="alert"
+            className={`px-3 py-2 text-sm ${attemptBanner.kind === 'refused' ? 'border-amber-900 bg-amber-950/40 text-amber-300' : 'border-red-900 bg-red-950/40 text-red-300'}`}
+          >
+            <InlineMarkdown body={attemptBanner.text} />
+          </Card>
+        ) : null}
+
+        {launched && !attemptBanner ? (
           <div className="rounded-md border border-sky-900 bg-sky-950/40 px-3 py-2 text-sm text-sky-300">
             The updater is running as container{' '}
-            <code className="text-sky-200">{launched.slice(0, 12)}</code>. This page will stop
-            responding while the api is replaced — that is the upgrade working. Reload once it comes
-            back; <code className="text-sky-200">docker logs</code> on that container is the full
-            narrative either way.
+            <code className="text-sky-200">{launched.container.slice(0, 12)}</code>. This page will
+            stop responding while the api is replaced — that is the upgrade working. Reload once it
+            comes back; <code className="text-sky-200">docker logs</code> on that container is the
+            full narrative either way.
           </div>
         ) : null}
 
@@ -444,7 +463,13 @@ export default function MaintenancePage() {
                 {shortTime(r.started_at)}
                 {r.ended_at ? ` → ${shortTime(r.ended_at)}` : ''}
               </div>
-              {r.error ? <div className="w-full text-xs text-red-400">{r.error}</div> : null}
+              {r.error ? (
+                <div
+                  className={`w-full text-xs ${r.status === 'refused' ? 'text-amber-400' : 'text-red-400'}`}
+                >
+                  <InlineMarkdown body={r.error} />
+                </div>
+              ) : null}
             </div>
           ))}
         </div>

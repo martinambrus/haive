@@ -537,7 +537,8 @@ per-customer.
   build-channel CHANNEL/PREFIX rules. GET /upgrade reports `channel`. `docker-compose.run.yml` passes the three
   keys to the api.
 - Credential: the updater applies the install `DOCKER_CONFIG` to its own docker calls before recovery and
-  the manifest read, and again after re-reading `.env` under the lock. It must equal `<host install dir>/.docker` (refused otherwise), translated to
+  the manifest read, from the one read of `.env` made under the lock (a dry plan takes no lock and reads it up
+  front). It must equal `<host install dir>/.docker` (refused otherwise), translated to
   `/install/.docker` inside the api-launched container. The own-module builder gets that directory mounted
   read-only plus `BUILDX_CONFIG=/tmp/buildx` and `DOCKER_HOST=unix:///var/run/docker.sock`, because buildx refuses a read-only `$DOCKER_CONFIG/buildx`
   (MEASURED: `mkdir ...: read-only file system`). Every updater and builder container that reads the install
@@ -554,7 +555,7 @@ per-customer.
   or `version` differs, or an image that cannot be pulled, refuses. There is no public fallback.
 - Images: without own modules the overrides are the manifest's pinned api/worker/web; with own modules the base
   images and the builder come from the manifest, and a manifest without `builder` refuses. Every pin must be in
-  `${HAIVE_CHANNEL_REGISTRY}/haive-<channel>-<host>`. The `.env` settings are re-read under the upgrade lock, so
+  `${HAIVE_CHANNEL_REGISTRY}/haive-<channel>-<host>`. The `.env` settings are read under the upgrade lock, so
   the journal's previous images are the ones in force; a channel install with no current pins, or with only some
   of the three, refuses (`rollback-images-missing`). Rollback inventory lists digest forms (`repo@digest` and
   `repo:tag@digest`) for a channel install and for a public install whose overrides carry a digest, so digest

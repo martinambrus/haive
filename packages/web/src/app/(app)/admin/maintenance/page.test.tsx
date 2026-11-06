@@ -15,8 +15,9 @@ vi.mock('react', async (importOriginal) => ({
 }));
 vi.mock('@/lib/use-page-title', () => ({ usePageTitle: () => {} }));
 vi.mock('@/components/dialog', () => ({
-  Dialog: () => null,
-  DialogContent: () => null,
+  Dialog: ({ open, children }: { open: boolean; children: import('react').ReactNode }) =>
+    open ? children : null,
+  DialogContent: ({ children }: { children: import('react').ReactNode }) => children,
   DialogHeader: () => null,
   DialogTitle: () => null,
 }));
@@ -28,6 +29,9 @@ const reply = (code: number, body: unknown) => ({
 });
 
 let state = 'normal';
+let lastAttempt: Record<string, unknown> | null = null;
+let canUpgrade = false;
+let launchStartedAt: string | undefined;
 let holdState: { settle?: () => void } | null = null;
 let runs: Array<Record<string, unknown>> = [];
 let blockingTasks: Array<Record<string, unknown>> = [];
@@ -88,12 +92,15 @@ async function fakeFetch(input: unknown, init?: { method?: string; body?: string
   if (call === 'GET /admin/maintenance/upgrade') {
     return reply(200, {
       version: '1.0.0',
-      canUpgrade: false,
+      canUpgrade,
+      lastAttempt,
       devBuild: true,
       installDirConfigured: false,
       runs: structuredClone(runs),
     });
   }
+  if (call === 'POST /admin/maintenance/upgrade')
+    return reply(202, { container: 'new-container-123', startedAt: launchStartedAt });
   return reply(404, { error: `not stubbed: ${call}` });
 }
 
@@ -101,6 +108,9 @@ beforeAll(() => vi.stubGlobal('fetch', fakeFetch));
 afterAll(() => vi.unstubAllGlobals());
 beforeEach(() => {
   state = 'normal';
+  lastAttempt = null;
+  canUpgrade = false;
+  launchStartedAt = undefined;
   holdState = null;
   runs = [];
   blockingTasks = [];
@@ -405,3 +415,118 @@ describe('maintenance Stop controls (#395)', () => {
     expect(notices()).toHaveLength(0);
   });
 });
+
+describe('upgrade attempt banners', () => {
+  const attempt = (status = 'refused') => ({
+    status,
+    refusal: status === 'refused' ? 'channel-changed' : null,
+    error: 'Journal channel differs; use --change-channel acme to acknowledge the move',
+    startedAt: '2026-11-06T11:00:00.000000+01:00',
+    toVersion: '9.9.9',
+    channel: 'public',
+  });
+  const alerts = (view: Renderer) => findAll(view.tree(), (h) => h.props.role === 'alert');
+  it.each(['refused', 'failed'])(
+    'shows a %s banner with the reason and CLI remedy',
+    async (status) => {
+      lastAttempt = attempt(status);
+      runs = [{ ...upgradeRun(status), phase: 'preflight' }];
+      const view = await mount();
+      expect(alerts(view)).toHaveLength(1);
+      expect(textOf(alerts(view)[0]!)).toContain(
+        status === 'refused' ? 'Upgrade refused' : 'Upgrade failed',
+      );
+      expect(textOf(alerts(view)[0]!)).toContain('--change-channel acme');
+      const badge = findAll(view.tree(), (h) => h.tag === 'span' && textOf(h) === status)[0]!;
+      expect(badge.props.className).toContain(status === 'refused' ? 'amber' : 'red');
+    },
+  );
+  it('still shows a terminal status without stored error copy', async () => {
+    lastAttempt = { ...attempt(), error: null };
+    expect(alerts(await mount())).toHaveLength(1);
+  });
+  it('removes the banner when polling reports a newer completed run', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    lastAttempt = attempt();
+    const view = await mount();
+    expect(alerts(view)).toHaveLength(1);
+    lastAttempt = null;
+    runs = [upgradeRun('done')];
+    vi.advanceTimersByTime(5000);
+    for (let i = 0; i < 3; i++) await view.flush();
+    expect(alerts(view)).toHaveLength(0);
+  });
+  it.each(['refused', 'failed'])(
+    'replaces the launch box with a newer %s attempt on polling',
+    async (status) => {
+      vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+      vi.setSystemTime(new Date('2026-11-07T09:59:59.000Z'));
+      launchStartedAt = '2026-11-06T09:59:59.000Z';
+      canUpgrade = true;
+      lastAttempt = { ...attempt(), startedAt: '2026-11-05T10:00:00.000Z' };
+      const view = await mount();
+      fire.type(findAll(view.tree(), (h) => h.props.id === 'target-version')[0]!, '9.9.9');
+      await view.flush();
+      fire.click(stateButton(view, 'Start upgrade'));
+      await view.flush();
+      fire.click(findAll(view.tree(), (h) => h.tag === 'button' && textOf(h) === 'Upgrade')[0]!);
+      for (let i = 0; i < 5; i++) await view.flush();
+      expect(textOf(view.tree())).toContain('running as container');
+      expect(alerts(view)).toHaveLength(0);
+      lastAttempt = attempt(status);
+      vi.advanceTimersByTime(5000);
+      for (let i = 0; i < 5; i++) await view.flush();
+      expect(textOf(view.tree())).not.toContain('running as container');
+      expect(alerts(view)).toHaveLength(1);
+    },
+  );
+});
+
+describe('upgrade timestamp display', () => {
+  it('shortTime displays offset instants in the browser timezone for both history columns', async () => {
+    runs = [
+      {
+        ...upgradeRun('done'),
+        started_at: '2026-11-06T11:00:00.123456+01:00',
+        ended_at: '2026-11-06T05:05:00.123456-05:00',
+      },
+    ];
+    const text = textOf((await mount()).tree());
+    expect(text).toContain(new Date('2026-11-06T10:00:00.123Z').toLocaleString());
+    expect(text).toContain(new Date('2026-11-06T10:05:00.123Z').toLocaleString());
+  });
+
+  it('refuses zone-less timestamps in History shortTime and attempt comparisons', async () => {
+    const zoneless = '2026-11-06 10:00:00.123456';
+    runs = [{ ...upgradeRun('done'), started_at: zoneless, ended_at: zoneless }];
+    lastAttempt = { status: 'refused', startedAt: zoneless, error: 'reason', toVersion: '9.9.9' };
+    const view = await mount();
+    expect(textOf(view.tree())).not.toContain(new Date(zoneless).toLocaleString());
+    expect(findAll(view.tree(), (h) => h.props.role === 'alert')).toHaveLength(0);
+  });
+});
+
+it.each(['running', 'done', 'rolled_back'])(
+  'keeps the launch container and outage explanation after a newer %s run appears',
+  async (status) => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    vi.setSystemTime(new Date('2026-11-06T09:59:59.000Z'));
+    launchStartedAt = '2026-11-06T09:59:59.000Z';
+    canUpgrade = true;
+    const view = await mount();
+    fire.type(findAll(view.tree(), (h) => h.props.id === 'target-version')[0]!, '9.9.9');
+    await view.flush();
+    fire.click(stateButton(view, 'Start upgrade'));
+    await view.flush();
+    fire.click(findAll(view.tree(), (h) => h.tag === 'button' && textOf(h) === 'Upgrade')[0]!);
+    for (let i = 0; i < 5; i++) await view.flush();
+    runs = [{ ...upgradeRun(status), started_at: '2026-11-06T10:00:00.000Z' }];
+    vi.advanceTimersByTime(5000);
+    for (let i = 0; i < 5; i++) await view.flush();
+    const text = textOf(view.tree());
+    expect(text).toContain('running as container');
+    expect(text).toContain('new-containe');
+    expect(text).toContain('stop responding while the api is replaced');
+    expect(text).toContain('docker logs');
+  },
+);

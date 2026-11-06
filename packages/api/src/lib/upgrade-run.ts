@@ -17,11 +17,18 @@ export type UpgradeRunRow = {
   phase: string;
   status: string;
   error: string | null;
-  started_at: Date;
-  ended_at: Date | null;
+  started_at: string;
+  ended_at: string | null;
 };
 
 type UpgradeRunDb = Pick<DbTx, 'execute'>;
+
+// These timestamp columns hold now() in the session TimeZone's wall clock. Convert in SQL,
+// before any driver parser can mistake it for UTC, and return text with an explicit offset.
+const instant = (column: 'started_at' | 'ended_at') => sql`to_char(
+  ${sql.identifier(column)} AT TIME ZONE current_setting('TimeZone') AT TIME ZONE 'UTC',
+  'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+)`;
 
 async function journalExists(db: UpgradeRunDb): Promise<boolean> {
   // The updater creates upgrade_runs, and a failed SELECT would abort the transaction.
@@ -34,8 +41,9 @@ async function journalExists(db: UpgradeRunDb): Promise<boolean> {
 export async function listUpgradeRuns(db: UpgradeRunDb): Promise<UpgradeRunRow[]> {
   if (!(await journalExists(db))) return [];
   const rows = await db.execute<UpgradeRunRow>(
-    sql`SELECT id, from_version, to_version, phase, status, error, started_at, ended_at
-            FROM upgrade_runs ORDER BY started_at DESC LIMIT 20`,
+    sql`SELECT id, from_version, to_version, phase, status, error, ${instant('started_at')} AS started_at,
+           ${instant('ended_at')} AS ended_at
+            FROM upgrade_runs ORDER BY started_at DESC, id DESC LIMIT 20`,
   );
   return rows as unknown as UpgradeRunRow[];
 }
@@ -53,4 +61,40 @@ export async function findLiveUpgradeRun(db: UpgradeRunDb): Promise<LiveUpgradeR
   const row = rows[0];
   if (!row) return null;
   return { id: row.id, fromVersion: row.from_version, toVersion: row.to_version, phase: row.phase };
+}
+
+export interface UpgradeAttempt {
+  status: 'refused' | 'failed';
+  refusal: string | null;
+  error: string | null;
+  startedAt: string;
+  toVersion: string;
+  channel: string;
+}
+
+/** Read independently of the capped history: many refusals must not hide a newer real run. */
+export async function lastUpgradeAttempt(db: UpgradeRunDb): Promise<UpgradeAttempt | null> {
+  if (!(await journalExists(db))) return null;
+  const rows = (await db.execute<UpgradeRunRow & { channel: string; refusal: string | null }>(sql`
+    SELECT id, from_version, to_version, channel, phase, status, error, ${instant('started_at')} AS started_at,
+           ${instant('ended_at')} AS ended_at,
+           metadata ->> 'refusal' AS refusal
+      FROM upgrade_runs
+     WHERE status IN ('done', 'running', 'rolled_back')
+        OR (phase = 'preflight' AND status IN ('refused', 'failed'))
+     ORDER BY started_at DESC,
+              CASE WHEN status IN ('done', 'running', 'rolled_back') THEN 0 ELSE 1 END,
+              id DESC LIMIT 1
+  `)) as unknown as (UpgradeRunRow & { channel: string; refusal: string | null })[];
+  const row = rows[0];
+  if (!row || row.phase !== 'preflight' || (row.status !== 'refused' && row.status !== 'failed'))
+    return null;
+  return {
+    status: row.status,
+    refusal: row.refusal ?? null,
+    error: row.error,
+    startedAt: row.started_at,
+    toVersion: row.to_version,
+    channel: row.channel,
+  };
 }

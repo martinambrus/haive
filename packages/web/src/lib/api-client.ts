@@ -2525,12 +2525,22 @@ export interface UpgradeRun {
   ended_at: string | null;
 }
 
+export interface UpgradeAttempt {
+  status: 'refused' | 'failed';
+  refusal: string | null;
+  error: string | null;
+  startedAt: string;
+  toVersion: string;
+  channel: string;
+}
+
 export interface UpgradeStatusResponse {
   version: string;
   canUpgrade: boolean;
   devBuild: boolean;
   installDirConfigured: boolean;
   runs: UpgradeRun[];
+  lastAttempt?: UpgradeAttempt | null;
 }
 
 export const maintenanceApi = {
@@ -2547,7 +2557,7 @@ export const maintenanceApi = {
     ),
   upgradeStatus: () => api.get<UpgradeStatusResponse>('/admin/maintenance/upgrade'),
   startUpgrade: (body: { version: string; force?: boolean; drainTimeoutSeconds?: number }) =>
-    api.post<{ started: boolean; from: string; to: string; container: string }>(
+    api.post<{ started: boolean; from: string; to: string; container: string; startedAt?: string }>(
       '/admin/maintenance/upgrade',
       body,
     ),

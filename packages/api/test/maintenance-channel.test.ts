@@ -12,6 +12,7 @@ vi.mock('../src/db.js', () => ({ getDb: () => ({}) }));
 vi.mock('../src/lib/upgrade-run.js', () => ({
   findLiveUpgradeRun: async () => null,
   listUpgradeRuns: async () => [],
+  lastUpgradeAttempt: async () => null,
 }));
 vi.mock('../src/lib/audit.js', () => ({
   recordAuditEvent: vi.fn(),

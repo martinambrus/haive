@@ -1,4 +1,5 @@
 import { leftOpenMerges, type MergeLeftOpenOutcome } from '@haive/shared/merge-left-open';
+import { parseUpgradeInstant } from './upgrade-time';
 import { parseStepId } from '@haive/shared/modularity';
 
 /** Banner visibility for step cards, invocation terminals and attachment rows.
@@ -372,5 +373,28 @@ export function moduleStopBanner(
   }
   return {
     text: `Stopped because the module ${stop.moduleId} was turned off by an administrator.`,
+  };
+}
+
+/** A terminal system-upgrade attempt, newer than this page's launch when there is one.
+ *  The API suppresses attempts superseded by a real run; copy never determines visibility. */
+export function upgradeAttemptBanner(
+  attempt:
+    | { status: string; startedAt: string; error: string | null; toVersion: string }
+    | null
+    | undefined,
+  launchStartedAt?: number,
+): { kind: 'refused' | 'failed'; text: string } | null {
+  if (!attempt || (attempt.status !== 'refused' && attempt.status !== 'failed')) return null;
+  const startedAt = parseUpgradeInstant(attempt.startedAt);
+  if (
+    !Number.isFinite(startedAt) ||
+    (launchStartedAt !== undefined && startedAt <= launchStartedAt)
+  )
+    return null;
+  const title = attempt.status === 'refused' ? 'Upgrade refused' : 'Upgrade failed';
+  return {
+    kind: attempt.status,
+    text: `${title} (${codeSpan(attempt.toVersion)}). ${attempt.error ?? 'The updater stopped before starting the upgrade.'}`,
   };
 }

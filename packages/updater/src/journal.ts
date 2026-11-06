@@ -1,6 +1,7 @@
 import { UPGRADE_JOURNAL_DDL } from '@haive/database';
 import { parseMaintenanceState, type MaintenanceState } from '@haive/shared';
 import type { Sql } from 'postgres';
+import { attemptVersion } from './attempt-fields.js';
 import type { RunStatus, UpgradePhase } from './phases.js';
 
 /** Metadata is written to a jsonb column and read back by a human and by a resumed run, so it is
@@ -73,6 +74,27 @@ export async function startRun(
             ${sql.json(entry.metadata ?? {})})
     RETURNING id`;
   return rows[0]!.id;
+}
+
+/** A terminal preflight attempt is history only: it can neither resume nor pin a channel. */
+export async function recordAttempt(
+  sql: Sql,
+  entry: {
+    fromVersion: string;
+    toVersion: string;
+    channel: string;
+    status: 'refused' | 'failed';
+    error: string;
+    metadata: RunMetadata;
+  },
+): Promise<void> {
+  const marker = '… [truncated]';
+  const error =
+    entry.error.length > 2048 ? entry.error.slice(0, 2048 - marker.length) + marker : entry.error;
+  await sql`
+    INSERT INTO upgrade_runs (from_version, to_version, channel, phase, status, error, metadata, ended_at)
+    VALUES (${entry.fromVersion}, ${attemptVersion(entry.toVersion)}, ${entry.channel}, 'preflight', ${entry.status},
+            ${error}, ${sql.json(entry.metadata)}, now())`;
 }
 
 /** Record the phase BEFORE doing it. A journal written after the fact cannot say what was in

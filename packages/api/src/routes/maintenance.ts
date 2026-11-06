@@ -37,7 +37,7 @@ import {
 } from './tasks/_helpers.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
-import { findLiveUpgradeRun, listUpgradeRuns } from '../lib/upgrade-run.js';
+import { findLiveUpgradeRun, lastUpgradeAttempt, listUpgradeRuns } from '../lib/upgrade-run.js';
 
 const log = logger.child({ module: 'maintenance' });
 
@@ -437,6 +437,7 @@ function manifestUrl(version: string): string {
 /** Upgrade history, and whether this install can start one at all. */
 maintenanceRoutes.get('/upgrade', async (c) => {
   const runs = await listUpgradeRuns(getDb());
+  const lastAttempt = await lastUpgradeAttempt(getDb());
 
   const version = getHaiveVersion();
   return c.json({
@@ -449,6 +450,7 @@ maintenanceRoutes.get('/upgrade', async (c) => {
     devBuild: isDevVersion(version),
     installDirConfigured: installDirHost() !== null,
     runs,
+    lastAttempt,
   });
 });
 
@@ -577,6 +579,7 @@ maintenanceRoutes.post('/upgrade', async (c) => {
   }
   if (body.force) args.push('--force');
 
+  const startedAt = new Date().toISOString();
   const started = await runDockerClient(args);
   if (!started.ok) {
     // Never echo `args`: the message would be the one place the redaction above was pointless.
@@ -592,7 +595,10 @@ maintenanceRoutes.post('/upgrade', async (c) => {
   });
   log.info({ from: current, to: version, container: started.containerId }, 'upgrade started');
   // 202: the work outlives this request, and this process is one of the things it replaces.
-  return c.json({ started: true, from: current, to: version, container: started.containerId }, 202);
+  return c.json(
+    { started: true, from: current, to: version, container: started.containerId, startedAt },
+    202,
+  );
 });
 
 /** Run the docker CLI to completion and report what it said.

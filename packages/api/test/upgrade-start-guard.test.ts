@@ -95,6 +95,24 @@ const fakeDb = {
       });
     }
     if (h.mode === 'broken') throw new Error('connection terminated');
+    if (/AS refusal/i.test(text))
+      return h.rows
+        .filter(
+          (r) =>
+            ['done', 'running', 'rolled_back'].includes(String(r.status)) ||
+            (r.phase === 'preflight' && ['refused', 'failed'].includes(String(r.status))),
+        )
+        .sort(
+          (a, b) =>
+            Date.parse(String(b.started_at)) - Date.parse(String(a.started_at)) ||
+            Number(!['done', 'running', 'rolled_back'].includes(String(a.status))) -
+              Number(!['done', 'running', 'rolled_back'].includes(String(b.status))),
+        )
+        .slice(0, 1)
+        .map((r) => ({
+          ...r,
+          refusal: (r.metadata as { refusal?: string } | undefined)?.refusal ?? null,
+        }));
     if (/order by/i.test(text)) return h.rows;
     return h.running ? [{ id: HISTORY[0]!.id }] : [];
   },
@@ -165,6 +183,7 @@ describe('GET /admin/maintenance/upgrade', () => {
       installDirConfigured: true,
       channel: 'public',
       runs: [],
+      lastAttempt: null,
     });
   });
 
@@ -218,4 +237,64 @@ describe('POST /admin/maintenance/upgrade', () => {
     expect(res.status).toBe(202);
     expect(h.spawn).toHaveBeenCalledTimes(1);
   });
+});
+
+describe('GET upgrade terminal attempts', () => {
+  const attempt = (status = 'refused') => ({
+    ...HISTORY[0],
+    status,
+    phase: 'preflight',
+    channel: 'public',
+    metadata: status === 'refused' ? { refusal: 'channel-changed' } : {},
+    error: 'use --change-channel acme',
+    started_at: '2026-11-06T10:00:00.000Z',
+    ended_at: '2026-11-06T10:00:01.000Z',
+  });
+  it.each(['refused', 'failed'])(
+    'exposes the latest %s attempt and includes it in history',
+    async (status) => {
+      const row = attempt(status);
+      setMode('present', [row, ...HISTORY]);
+      const res = await get();
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        runs: [row, ...HISTORY],
+        lastAttempt: {
+          status,
+          refusal: status === 'refused' ? 'channel-changed' : null,
+          error: row.error,
+          startedAt: row.started_at,
+          toVersion: '1.1.0',
+          channel: 'public',
+        },
+      });
+    },
+  );
+  it.each(['done', 'running', 'rolled_back'])(
+    'suppresses an attempt after a newer %s run',
+    async (status) => {
+      setMode('present', [
+        { ...HISTORY[0], status, started_at: '2026-11-06T11:00:00.000Z' },
+        attempt(),
+      ]);
+      expect(await (await get()).json()).toHaveProperty('lastAttempt', null);
+    },
+  );
+  it('does not treat a failed execution phase as a preflight attempt', async () => {
+    setMode('present', [{ ...attempt('failed'), phase: 'migrate' }]);
+    expect(await (await get()).json()).toHaveProperty('lastAttempt', null);
+  });
+  it('uses status rather than error presence', async () => {
+    setMode('present', [{ ...attempt(), error: null }]);
+    expect(await (await get()).json()).toHaveProperty('lastAttempt.status', 'refused');
+  });
+});
+
+it('does not show an attempt with the same timestamp as a completed run', async () => {
+  const started_at = '2026-11-06T10:00:00.000Z';
+  setMode('present', [
+    { ...HISTORY[0], phase: 'preflight', status: 'refused', started_at },
+    { ...HISTORY[0], started_at },
+  ]);
+  expect(await (await get()).json()).toHaveProperty('lastAttempt', null);
 });
