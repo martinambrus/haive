@@ -541,6 +541,27 @@ for (const [label, config] of [
 }
 
 for (const cli of ['channel-boot-check', 'publish-channel']) {
+  for (const code of ['EPIPE', 'EIO', 'EACCES']) {
+    test(`${cli} CLI stdout ${code} before abort ${code === 'EACCES' ? 'throws' : 'is non-fatal'}`, (t) => {
+      const dir = mkdtempSync(join(tmpdir(), 'stdout-control-'));
+      t.after(() => rmSync(dir, { recursive: true, force: true }));
+      const preload = join(dir, 'stdout-error.mjs');
+      writeFileSync(
+        preload,
+        `process.stdout.write = () => process.stdout.emit('error', Object.assign(new Error('stdout control ${code}'), {code: '${code}'}));`,
+      );
+      const result = spawnSync(
+        process.execPath,
+        ['--import', preload, new URL(`../${cli}.mjs`, import.meta.url).pathname, '--help'],
+        { encoding: 'utf8', timeout: 5000 },
+      );
+      assert.equal(result.signal, null);
+      // Boot-check has no --help flag and normally refuses it with exit 2.
+      const normalStatus = cli === 'channel-boot-check' ? 2 : 0;
+      assert.equal(result.status, code === 'EACCES' ? 1 : normalStatus, result.stderr);
+      if (code === 'EACCES') assert.match(result.stderr, /stdout control EACCES/);
+    });
+  }
   for (const [signal, closedStdout] of [
     ['SIGINT', false],
     ['SIGTERM', false],
@@ -564,8 +585,23 @@ for (const cli of ['channel-boot-check', 'publish-channel']) {
       const calls = join(dir, 'docker-calls.jsonl');
       const envFiles = join(dir, 'env-files.jsonl');
       const closed = join(dir, 'stdout-closed');
+      const outputError = join(dir, 'stdout-error');
+      const preload = join(dir, 'closed-stdout.mjs');
       const ready = join(dir, 'worker-ready');
       mkdirSync(bin);
+      if (closedStdout)
+        writeFileSync(
+          preload,
+          `import {existsSync,writeFileSync} from 'node:fs';
+process.stdout.on('error', error => writeFileSync(${JSON.stringify(outputError)}, error.code));
+const timer = setInterval(() => {
+  if (existsSync(${JSON.stringify(closed)})) {
+    clearInterval(timer);
+    process.stdout.write('closed stdout control\\n');
+  }
+}, 10);
+`,
+        );
       const fakeDocker = join(bin, 'docker');
       writeFileSync(
         fakeDocker,
@@ -579,7 +615,7 @@ if(args[0]==='run') {
     if (${closedStdout}) {
       appendFileSync(${JSON.stringify(ready)}, 'ready');
       const deadline = Date.now() + 5000;
-      while (!existsSync(${JSON.stringify(closed)})) {
+      while (!existsSync(${JSON.stringify(outputError)})) {
         if (Date.now() > deadline) throw new Error('stdout did not close');
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -601,7 +637,12 @@ else if(args[0]==='logs') {
       chmodSync(fakeDocker, 0o700);
       const child = spawn(
         process.execPath,
-        [new URL(`../${cli}.mjs`, import.meta.url).pathname, '--record', f.path],
+        [
+          ...(closedStdout ? ['--import', preload] : []),
+          new URL(`../${cli}.mjs`, import.meta.url).pathname,
+          '--record',
+          f.path,
+        ],
         {
           timeout: 15_000,
           env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}`, TMPDIR: tmpdir() },
@@ -636,6 +677,7 @@ else if(args[0]==='logs') {
       });
       assert.equal(status, 2, stdout + stderr);
       assert.equal(exitSignal, null);
+      if (closedStdout) assert.equal(readFileSync(outputError, 'utf8'), 'EPIPE');
       const history = readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse);
       const started = history
         .filter((args) => args[0] === 'run')

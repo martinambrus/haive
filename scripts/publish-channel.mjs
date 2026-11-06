@@ -534,7 +534,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const controller = new AbortController();
   // A terminal may close stdout before sending SIGHUP; keep abort cleanup alive.
   process.stdout.on('error', (error) => {
-    if (!controller.signal.aborted) throw error;
+    if (!['EPIPE', 'EIO'].includes(error.code) && !controller.signal.aborted) throw error;
   });
   const stop = () => controller.abort();
   process.once('SIGINT', stop);
