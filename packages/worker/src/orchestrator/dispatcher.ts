@@ -3,6 +3,7 @@ import {
   CONFIG_KEYS,
   configService,
   getCliProviderMetadata,
+  logger,
   orderByDefaultPriority,
   promptNamesAgentPath,
   resolveEffectiveRules,
@@ -16,7 +17,7 @@ import {
   type CodexAppServerVerdicts,
 } from '../cli-adapters/codex-app-server-verdict.js';
 import { CliAdapterRegistry, cliAdapterRegistry } from '../cli-adapters/registry.js';
-import { PromptTooLargeError } from '../cli-adapters/prompt-delivery.js';
+import { PromptTooLargeError, ProviderBuildError } from '../cli-adapters/prompt-delivery.js';
 import type {
   AgentRulesStamp,
   CliCommandSpec,
@@ -87,6 +88,8 @@ import {
   visionDisallowedTools,
   withModelCapabilityBoundary,
 } from '../cli-adapters/model-capabilities.js';
+
+const log = logger.child({ module: 'dispatcher' });
 
 export type DispatchMode = 'cli' | 'subagent_emulated' | 'skip';
 
@@ -607,6 +610,7 @@ export function resolveDispatch(req: DispatchRequest): DispatchPlan {
   const requiresMcp = req.requiresMcp === true || (req.integrations?.length ?? 0) > 0;
   let sawWithoutMcp = false;
   let sawWithMcp = false;
+  let firstBuildError: ProviderBuildError | null = null;
   for (const { provider, adapter } of dispatchCandidates(enabled, req.preferredProviderId ?? null, {
     needsVision,
     preferVision: req.preferVision,
@@ -619,9 +623,25 @@ export function resolveDispatch(req: DispatchRequest): DispatchPlan {
       }
       sawWithMcp = true;
     }
-    const plan = buildCliSidePlan(adapter, provider, req, needsSubagents);
+    let plan: DispatchPlan | null;
+    try {
+      plan = buildCliSidePlan(adapter, provider, req, needsSubagents);
+    } catch (err) {
+      // An explicit pick keeps its failure visible; a plain error is a bug and stays fatal;
+      // the first cause is rethrown when nothing builds.
+      if (!(err instanceof ProviderBuildError)) throw err;
+      if (provider.id === req.preferredProviderId) throw err;
+      firstBuildError ??= err;
+      log.warn(
+        { err, providerId: provider.id, providerName: provider.name },
+        'provider could not build a command; trying the next candidate',
+      );
+      continue;
+    }
     if (plan) return plan;
   }
+
+  if (firstBuildError) throw firstBuildError;
 
   // Name the capability that went unmet. The runner turns this straight into the
   // step's failure message, and "no provider matched required capabilities" tells
