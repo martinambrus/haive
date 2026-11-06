@@ -42,15 +42,17 @@ function seedTree(tree, config = {}) {
     );
   }
   for (const host of ['api', 'worker', 'web']) {
+    if (host === 'api' && config.apiMissingPackage) continue;
     writeFileSync(
       join(tree, 'packages', host, 'package.json'),
-      JSON.stringify({
-        name: `@haive/${host}`,
-        dependencies:
-          config.local && config.localInstalled !== false
-            ? { [config.localName ?? '@haive/module-statistics']: 'workspace:*' }
-            : {},
-      }),
+      (host === 'api' ? config.apiPackageText : undefined) ??
+        JSON.stringify({
+          name: `@haive/${host}`,
+          dependencies:
+            config.local && config.localInstalled !== false
+              ? { [config.localName ?? '@haive/module-statistics']: 'workspace:*' }
+              : {},
+        }),
     );
   }
   writeFileSync(
@@ -878,6 +880,24 @@ test('ignores local directories with no package.json', async (t) => {
   assert.deepEqual(f.expectation.modules, []);
   assert.ok(!existsSync(f.scratch));
 });
+
+for (const [name, config] of [
+  ['missing', { apiMissingPackage: true }],
+  ['malformed', { apiPackageText: '{ broken json' }],
+]) {
+  test(`${name} api package.json names its path and tag before network or builds`, async (t) => {
+    const f = fixture(t, config);
+    assert.equal(await f.execute(), 2);
+    assert.ok(
+      f.logs.some((line) =>
+        line.includes('preflight v1.2.3: could not read packages/api/package.json:'),
+      ),
+    );
+    assert.ok(!f.calls.some((c) => c.cmd === 'pnpm' || c.cmd === 'docker'));
+    assert.ok(!existsSync(f.scratch));
+    assert.ok(!existsSync(join(f.out, 'build-record.json')));
+  });
+}
 
 test('malformed local package.json names its path before network or builds', async (t) => {
   const f = fixture(t, { local: true, localPackageText: '{ broken json' });

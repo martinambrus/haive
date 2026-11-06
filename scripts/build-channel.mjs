@@ -318,7 +318,14 @@ export async function run(
       )
         throw new Error(`preflight ${tag}: ${file} lacks a production stage`);
     }
-    const apiPackage = json(join(tree, 'packages', 'api', 'package.json'));
+    let apiPackage;
+    try {
+      apiPackage = json(join(tree, 'packages', 'api', 'package.json'));
+    } catch (error) {
+      throw new Error(
+        `preflight ${tag}: could not read packages/api/package.json: ${error.message}`,
+      );
+    }
     for (const entry of readdirSync(join(tree, 'modules'), { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
       const file = `modules/${entry.name}/package.json`;
