@@ -1036,6 +1036,25 @@ for (const lang of ['sh', 'ps1']) {
       f.clean();
     }
   });
+  if (lang === 'ps1')
+    check('generated helper forwards remaining upgrade args after image', () => {
+      const f = fixture(lang);
+      try {
+        assert.equal(f.install().status, 0);
+        const extra = ['--change-channel', 'acme', '--check', '--privileged'];
+        const r = f.invoke(join(f.dir, 'haive.ps1'), ['upgrade', ...extra, '-Version', '10.0.0']);
+        assert.equal(r.status, 0, r.stdout + r.stderr);
+        const argv = f.calls().trim().split('\n').at(-1).split('\t');
+        const imageAt = argv.indexOf('ghcr.io/martinambrus/haive-updater:10.0.0');
+        assert.ok(imageAt > 0);
+        assert.deepEqual(argv.slice(-extra.length), extra);
+        for (const arg of extra) {
+          assert.ok(argv.indexOf(arg) > imageAt, `${arg} must be an updater argument`);
+        }
+      } finally {
+        f.clean();
+      }
+    });
   check('generated helper exports config and sends channel updater argv', () => {
     const f = fixture(lang);
     try {

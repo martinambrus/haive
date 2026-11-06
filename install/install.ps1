@@ -718,6 +718,13 @@ switch ($Command) {
 }
 '@
 if ($Channel -cne 'public') {
+  $haivePs1 = $haivePs1.Replace("param([Parameter(Position=0)][string]`$Command = 'help', [string]`$Version, [switch]`$ForceDrain)", @'
+[CmdletBinding(PositionalBinding=$false)]
+param([Parameter(Position=0)][string]$Command = 'help', [string]$Version, [switch]$ForceDrain,
+  [Parameter(ValueFromRemainingArguments=$true)][string[]]$RemainingArgs)
+'@)
+  # Append only after the image and updater options, never to docker run options.
+  $haivePs1 = $haivePs1.Replace("    if (`$ForceDrain) { `$dargs += '--force' }", "    if (`$ForceDrain) { `$dargs += '--force' }`n    `$dargs += `$RemainingArgs")
   $haivePs1 = $haivePs1.Replace('upgrade -Version <v>', 'upgrade -Version <v> [--change-channel <channel>]')
   $haivePs1 = $haivePs1.Replace('switch ($Command) {', @'
 Remove-Item Env:HAIVE_REGISTRY_TOKEN -ErrorAction SilentlyContinue
