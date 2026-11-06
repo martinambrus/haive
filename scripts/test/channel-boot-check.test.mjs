@@ -461,13 +461,29 @@ for (const kind of ['network', 'volume', 'container']) {
     assert.equal(await f.check(), 2);
     assert.doesNotMatch(f.logs.join('\n'), /leftover/);
     assert.match(f.logs.join('\n'), /create refused/);
+    const failed = f.calls.find(({ args }) =>
+      kind === 'container' ? args[0] === 'run' : args[0] === kind && args[1] === 'create',
+    ).args;
+    const name = kind === 'container' ? failed[failed.indexOf('--name') + 1] : failed.at(-1);
+    assert.ok(
+      !f.calls.some(
+        ({ args }) =>
+          args.at(-1) === name &&
+          (kind === 'container' ? args[0] === 'rm' : args[0] === kind && args[1] === 'rm'),
+      ),
+    );
+    assert.ok(!f.logs.includes(`channel-boot-check: removed ${kind} ${name}`));
   });
 }
 
-test('abort before container creation does not report a leftover', async (t) => {
+test('abort before container creation attempts cleanup without claiming removal', async (t) => {
   const f = fixture(t, { abortBeforeCreate: true });
   assert.equal(await f.check(), 2);
   assert.doesNotMatch(f.logs.join('\n'), /leftover/);
+  const attempted = f.calls.find(({ args }) => args[0] === 'run').args;
+  const name = attempted[attempted.indexOf('--name') + 1];
+  assert.ok(f.calls.some(({ args }) => args[0] === 'rm' && args.at(-1) === name));
+  assert.ok(!f.logs.includes(`channel-boot-check: removed container ${name}`));
 });
 
 test('abort while the daemon is still creating a container still removes it', async (t) => {
