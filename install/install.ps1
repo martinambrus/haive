@@ -5,6 +5,7 @@
 .DESCRIPTION
   Installs a PUBLISHED release: fetches a versioned compose bundle, generates this install's own
   secrets, pulls images and boots the stack. Builds nothing and clones nothing.
+  A non-public channel requires an explicit -Version <v>; latest defaults to public only.
 
   Windows needs Docker Desktop and NOTHING ELSE. Docker Desktop uses WSL2 as its engine, but that
   is its plumbing, not a requirement on your shell: `docker` and `docker compose` answer natively
@@ -118,6 +119,10 @@ if ($Channel -cne 'public') {
 if ($Channel -cnotmatch '\A[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?\z') { Die "invalid -Channel (use 1-32 lowercase letters, digits or dashes; start and end with a letter or digit)" }
 if ($ChannelRegistry -cnotmatch '\A[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*\z') { Die "invalid -ChannelRegistry (use a registry host and optional repository prefix, without a scheme)" }
 
+if ($Channel -cne 'public' -and (-not $Version -or $Version -in @('latest', 'next'))) {
+  Die 'channel installs require an explicit -Version <v>; latest and next are public release aliases'
+}
+
 # ── Preflight ────────────────────────────────────────────────────────────────
 # Prerequisites are CHECKED, never installed. Docker Desktop is a GUI application with a licence
 # agreement that is commercial above a company-size threshold; nobody can accept that on the
@@ -200,6 +205,25 @@ function Resolve-HaiveVersion([string]$want) {
   return "v$want"
 }
 
+# Directory.CreateDirectory (and therefore New-Item) can succeed on a directory
+# created concurrently. Use the OS primitive that fails if the name already exists.
+function New-RegistryDirectory([string]$directory) {
+  if ($env:OS -eq 'Windows_NT') {
+    if (-not ('HaiveInstallerDirectory' -as [type])) {
+      Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class HaiveInstallerDirectory {
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool CreateDirectory(string path, IntPtr securityAttributes);
+}
+'@
+    }
+    if (-not [HaiveInstallerDirectory]::CreateDirectory($directory, [IntPtr]::Zero)) { throw 'cannot exclusively create credential directory' }
+  } elseif ((Invoke-Native mkdir @('-m', '700', $directory)).ExitCode -ne 0) { throw 'cannot exclusively create credential directory' }
+}
+
 # Reassert protection at the destination too: a cross-volume move may inherit its ACL.
 function Protect-RegistryCredentials([string]$directory) {
   $config = Join-Path $directory 'config.json'
@@ -223,23 +247,83 @@ function Protect-RegistryCredentials([string]$directory) {
   }
 }
 
-# Validate object keys before ConvertFrom-Json (which otherwise keeps the last duplicate).
-# Tokenize complete strings so braces/colons inside values cannot be mistaken for object syntax.
-# This uses the same .NET/PowerShell runtime as the original installer, including Windows PS 5.1.
+# Validate JSON grammar before ConvertFrom-Json, whose accepted extensions and
+# pipeline array unwrapping differ between PowerShell versions. Keep the shell
+# reader's object root, key restrictions and 64-level nesting limit on PS 5.1 too.
 function Assert-ManifestKeys([string]$json) {
-  $tokens = [regex]::Matches($json, '"(?:[^"\\]|\\.)*"|[{}:]', [Text.RegularExpressions.RegexOptions]::CultureInvariant, [TimeSpan]::FromSeconds(2))
-  $objects = [Collections.Generic.Stack[object]]::new()
-  for ($i = 0; $i -lt $tokens.Count; $i++) {
-    $token = $tokens[$i].Value
-    if ($token -eq '{') {
-      $objects.Push([Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase))
-    } elseif ($token -eq '}') {
-      $null = $objects.Pop()
-    } elseif ($token.StartsWith('"') -and $i + 1 -lt $tokens.Count -and $tokens[$i + 1].Value -eq ':') {
-      $key = $token.Substring(1, $token.Length - 2)
-      if ($key.IndexOfAny([char[]]'"\/') -ge 0 -or -not $objects.Peek().Add($key)) { throw 'invalid channel manifest object key' }
+  $reader = @{
+    pos = 0
+    literal = [regex]::new('\G(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)', [Text.RegularExpressions.RegexOptions]::CultureInvariant, [TimeSpan]::FromSeconds(2))
+  }
+  function Skip-JsonSpace {
+    while ($reader.pos -lt $json.Length -and " `t`r`n".Contains([string]$json[$reader.pos])) { $reader.pos++ }
+  }
+  function Read-JsonString {
+    if ($reader.pos -ge $json.Length -or $json[$reader.pos] -cne '"') { throw 'expected JSON string' }
+    $start = $reader.pos
+    $reader.pos++
+    while ($reader.pos -lt $json.Length) {
+      $c = $json[$reader.pos]
+      $reader.pos++
+      if ($c -ceq '"') { return $json.Substring($start, $reader.pos - $start) }
+      if ([int]$c -lt 32 -or [int]$c -eq 127) { throw 'invalid JSON control character' }
+      if ($c -ceq '\') {
+        if ($reader.pos -ge $json.Length) { throw 'incomplete JSON escape' }
+        $escape = $json[$reader.pos]
+        $reader.pos++
+        if ($escape -ceq 'u') {
+          if ($reader.pos + 4 -gt $json.Length -or $json.Substring($reader.pos, 4) -cnotmatch '\A[0-9a-fA-F]{4}\z') { throw 'invalid JSON unicode escape' }
+          $reader.pos += 4
+        } elseif (-not '"\/bfnrt'.Contains([string]$escape)) { throw 'invalid JSON escape' }
+      }
+    }
+    throw 'unclosed JSON string'
+  }
+  function Read-JsonValue([int]$depth, [string]$path) {
+    if ($depth -gt 64) { throw 'JSON nesting exceeds 64' }
+    Skip-JsonSpace
+    if ($reader.pos -ge $json.Length) { throw 'missing JSON value' }
+    $c = $json[$reader.pos]
+    if ($c -ceq '{' -or $c -ceq '[') {
+      $object = $c -ceq '{'
+      $close = if ($object) { '}' } else { ']' }
+      $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+      $reader.pos++
+      Skip-JsonSpace
+      if ($reader.pos -lt $json.Length -and $json[$reader.pos] -ceq $close) { $reader.pos++; return }
+      while ($true) {
+        if ($object) {
+          Skip-JsonSpace
+          $key = Read-JsonString
+          if ($key.Contains('\') -or $key.Contains('/') -or -not $seen.Add($key)) { throw 'invalid channel manifest object key' }
+          Skip-JsonSpace
+          if ($reader.pos -ge $json.Length -or $json[$reader.pos] -cne ':') { throw 'missing JSON colon' }
+          $reader.pos++
+        }
+        $childPath = if ($object) { $path + '/' + $key.Substring(1, $key.Length - 2) } else { $path + '/[]' }
+        Read-JsonValue ($depth + 1) $childPath
+        Skip-JsonSpace
+        if ($reader.pos -ge $json.Length) { throw 'unclosed JSON container' }
+        $c = $json[$reader.pos]
+        $reader.pos++
+        if ($c -ceq $close) { return }
+        if ($c -cne ',') { throw 'missing JSON comma' }
+      }
+    } elseif ($c -ceq '"') {
+      $value = Read-JsonString
+      if ($path -cin @('/channel', '/version', '/images/api', '/images/worker', '/images/web', '/images/builder') -and $value.Contains('\')) { throw 'escaped channel manifest selection or pin' }
+    }
+    else {
+      $match = $reader.literal.Match($json, $reader.pos)
+      if (-not $match.Success) { throw 'invalid JSON value' }
+      $reader.pos += $match.Length
     }
   }
+  Skip-JsonSpace
+  if ($reader.pos -ge $json.Length -or $json[$reader.pos] -cne '{') { throw 'manifest must be a JSON object' }
+  Read-JsonValue 0 ''
+  Skip-JsonSpace
+  if ($reader.pos -ne $json.Length) { throw 'trailing JSON content' }
 }
 
 # Stage credentials until verification succeeds; no failed manifest creates an install.
@@ -251,10 +335,44 @@ function Read-ChannelManifest {
     $null = New-Item -ItemType Directory -Path (Join-Path $scratch '.docker')
     Protect-RegistryCredentials $scratch
     Protect-RegistryCredentials (Join-Path $scratch '.docker')
+    $userConfig = if ($env:DOCKER_CONFIG) { $env:DOCKER_CONFIG } else { Join-Path $HOME '.docker' }
+    $script:ChannelContext = $null
+    if (Test-Path -LiteralPath (Join-Path $userConfig 'config.json')) {
+      $userSettings = [IO.File]::ReadAllText((Join-Path $userConfig 'config.json')) | ConvertFrom-Json
+      if ($userSettings.currentContext -is [string]) { $script:ChannelContext = $userSettings.currentContext }
+    }
+    # Copy through links into real private files, never chmod/ACL the user store.
+    function Copy-ContextTree([string]$source, [string]$destination) {
+      $null = [IO.Directory]::CreateDirectory($destination)
+      foreach ($entry in Get-ChildItem -LiteralPath $source -Force) {
+        $target = Join-Path $destination $entry.Name
+        if ($entry.PSIsContainer) { Copy-ContextTree $entry.FullName $target }
+        else { [IO.File]::Copy($entry.FullName, $target, $true) }
+      }
+    }
+    foreach ($name in @($env:DOCKER_CONTEXT, $script:ChannelContext) | Select-Object -Unique) {
+      if (-not $name -or $name -ceq 'default') { continue }
+      $sha = [Security.Cryptography.SHA256]::Create()
+      try { $hash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($name)))).Replace('-', '').ToLowerInvariant() }
+      finally { $sha.Dispose() }
+      if ($hash -cnotmatch '\A[0-9a-f]{64}\z') { throw 'invalid selected Docker context hash' }
+      if (-not (Test-Path -LiteralPath (Join-Path $userConfig "contexts/meta/$hash") -PathType Container)) { throw "selected Docker context $name has no metadata directory" }
+      foreach ($kind in @('meta', 'tls')) {
+        $source = Join-Path $userConfig "contexts/$kind/$hash"
+        if (Test-Path -LiteralPath $source -PathType Container) {
+          Copy-ContextTree $source (Join-Path $scratch ".docker/contexts/$kind/$hash")
+        }
+      }
+    }
     $env:DOCKER_CONFIG = Join-Path $scratch '.docker'
     $server = ($ChannelRegistry -split '/')[0]
     # Prevent Docker auto-selecting a machine credential helper for an empty config.
     [IO.File]::WriteAllText((Join-Path $env:DOCKER_CONFIG 'config.json'), ('{"auths":{"' + $server + '":{"auth":"Og=="}}}'))
+    if ($null -ne $script:ChannelContext) {
+      $settings = [IO.File]::ReadAllText((Join-Path $env:DOCKER_CONFIG 'config.json')) | ConvertFrom-Json
+      $settings | Add-Member -NotePropertyName currentContext -NotePropertyValue $script:ChannelContext
+      [IO.File]::WriteAllText((Join-Path $env:DOCKER_CONFIG 'config.json'), ($settings | ConvertTo-Json -Depth 10 -Compress))
+    }
     if (-not $RegistryUser) { throw '-RegistryUser is required for a channel install' }
     if (-not $script:RegistryToken) {
       $secure = Read-Host 'Registry token' -AsSecureString
@@ -284,13 +402,14 @@ function Read-ChannelManifest {
     $entry = Get-Item -LiteralPath $file -Force
     if ($entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $entry.Length -gt 1048576) { throw 'channel manifest must be a regular file of at most 1 MiB' }
     try {
-      $json = [IO.File]::ReadAllText($file)
+      # GetString retains a BOM so the grammar rejects it, like the shell reader.
+      $json = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($file))
       Assert-ManifestKeys $json
       $manifest = $json | ConvertFrom-Json
       foreach ($name in @('channel','version','images')) {
         if (@($manifest.PSObject.Properties.Name) -cnotcontains $name) { throw 'missing manifest key' }
       }
-      if ($manifest.channel -cne $Channel -or $manifest.version -cne $pinned) { throw 'channel or version differs' }
+      if ($manifest.channel -isnot [string] -or $manifest.version -isnot [string] -or $manifest.channel -cne $Channel -or $manifest.version -cne $pinned) { throw 'channel or version differs' }
       foreach ($hostName in @('api','worker','web','builder')) {
         if (@($manifest.images.PSObject.Properties.Name) -cnotcontains $hostName) { throw 'missing image pin' }
         $pin = $manifest.images.$hostName
@@ -450,6 +569,7 @@ $mailpitPort = Get-FreePort 8025
 Write-Note "ports             web $webPort, api $apiPort, mail $mailpitPort"
 
 $envPath = Join-Path $Dir '.env'
+$channelEnvCreated = $false
 if (-not (Test-Path $envPath)) {
   $key  = New-HexSecret 32
   $jwt  = New-HexSecret 32
@@ -494,16 +614,33 @@ if (-not (Test-Path $envPath)) {
   }
   # LF, not CRLF, and written without a BOM: compose reads this file itself and a stray carriage
   # return lands inside the VALUE of the last variable on every line.
+  if ($Channel -cne 'public') { $channelEnvCreated = $true }
   [System.IO.File]::WriteAllText($envPath, ($lines -join "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
   Write-Note "secrets           generated (.env)"
 }
 
 if ($Channel -cne 'public') {
-  if (Test-Path -LiteralPath (Join-Path $Dir '.docker')) { Remove-Item -LiteralPath $ChannelScratch -Recurse -Force; Die "$Dir/.docker already exists; choose a clean install directory" }
+  $claimed = $false
+  $channelPlaced = $false
+  $credentialDir = Join-Path $Dir '.docker'
   try {
-    Move-Item -LiteralPath (Join-Path $ChannelScratch '.docker') -Destination (Join-Path $Dir '.docker')
-    try { Protect-RegistryCredentials (Join-Path $Dir '.docker') }
-    catch { Remove-Item -LiteralPath (Join-Path $Dir '.docker') -Recurse -Force; throw }
+    # Exclusively claim the name before moving any credential into the install.
+    try { New-RegistryDirectory $credentialDir }
+    catch { throw "$Dir/.docker already exists or cannot be created; choose a clean install directory" }
+    $claimed = $true
+    Protect-RegistryCredentials $credentialDir
+    # Keep both environment and config selections for install-time compose and
+    # the host helper. Scratch already holds only the selected contexts.
+    if (-not $script:ChannelContext -or $script:ChannelContext -ceq 'default') {
+      $settings = [IO.File]::ReadAllText((Join-Path $env:DOCKER_CONFIG 'config.json')) | ConvertFrom-Json
+      $settings.PSObject.Properties.Remove('currentContext')
+      [IO.File]::WriteAllText((Join-Path $env:DOCKER_CONFIG 'config.json'), ($settings | ConvertTo-Json -Depth 10 -Compress))
+    }
+    foreach ($entry in Get-ChildItem -LiteralPath (Join-Path $ChannelScratch '.docker') -Force) {
+      Move-Item -LiteralPath $entry.FullName -Destination (Join-Path $credentialDir $entry.Name)
+    }
+    Protect-RegistryCredentials $credentialDir
+    $channelPlaced = $true
   }
   finally { Remove-Item -LiteralPath $ChannelScratch -Recurse -Force }
   $env:DOCKER_CONFIG = Join-Path $Dir '.docker'
@@ -571,6 +708,14 @@ switch ($Command) {
 }
 '@
 if ($Channel -cne 'public') {
+  $haivePs1 = $haivePs1.Replace("param([Parameter(Position=0)][string]`$Command = 'help', [string]`$Version, [switch]`$ForceDrain)", @'
+[CmdletBinding(PositionalBinding=$false)]
+param([Parameter(Position=0)][string]$Command = 'help', [string]$Version, [switch]$ForceDrain,
+  [Parameter(ValueFromRemainingArguments=$true)][string[]]$RemainingArgs)
+'@)
+  # Append only after the image and updater options, never to docker run options.
+  $haivePs1 = $haivePs1.Replace("    if (`$ForceDrain) { `$dargs += '--force' }", "    if (`$ForceDrain) { `$dargs += '--force' }`n    if (`$RemainingArgs.Count -gt 0) { `$dargs += `$RemainingArgs }")
+  $haivePs1 = $haivePs1.Replace('upgrade -Version <v>', 'upgrade -Version <v> [--change-channel <channel>]')
   $haivePs1 = $haivePs1.Replace('switch ($Command) {', @'
 Remove-Item Env:HAIVE_REGISTRY_TOKEN -ErrorAction SilentlyContinue
 $installEnv = Get-DotEnv
@@ -583,6 +728,7 @@ switch ($Command) {
   'pull' { docker compose @files pull }
 '@)
   $haivePs1 = $haivePs1.Replace('      "$($e[''HAIVE_REGISTRY''])/haive-updater:$v",', @'
+      '-e', 'DOCKER_HOST=unix:///var/run/docker.sock',
       '-e', 'DOCKER_CONFIG=/install/.docker',
       '-e', "HAIVE_INSTALL_DIR_HOST=$($e['HAIVE_INSTALL_DIR_HOST'])",
       "$($e['HAIVE_REGISTRY'])/haive-updater:$v",
@@ -895,6 +1041,12 @@ Write-Host "    root on the host. Run Haive on a machine where that is acceptabl
 Write-Host ""
 
 } finally {
+  # Pipeline cancellation skips catch, but still runs finally. Remove only names
+  # this run created until credential placement has completed successfully.
+  if ($Channel -cne 'public' -and -not $channelPlaced) {
+    if ($claimed) { Remove-Item -LiteralPath $credentialDir -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($channelEnvCreated) { Remove-Item -LiteralPath $envPath -Force -ErrorAction SilentlyContinue }
+  }
   if ($ChannelScratch) {
     Remove-Item -LiteralPath $ChannelScratch -Recurse -Force -ErrorAction SilentlyContinue
   }

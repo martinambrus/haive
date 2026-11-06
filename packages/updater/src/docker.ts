@@ -214,6 +214,8 @@ export async function buildOwnModules(
             'DOCKER_CONFIG=/run/haive-docker-config',
             '-e',
             'BUILDX_CONFIG=/tmp/buildx',
+            '-e',
+            'DOCKER_HOST=unix:///var/run/docker.sock',
           ]
         : []),
       image,

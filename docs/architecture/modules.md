@@ -479,12 +479,13 @@ nothing unless it exits 0.
 
 ### Installing a channel
 
-`install/install.sh --channel <c> --registry-user <u> [--channel-registry <prefix>] [--version <v>]` (PowerShell:
-`install.ps1 -Channel <c> -RegistryUser <u> [-ChannelRegistry <prefix>]`, which also takes the GNU spellings and
+`install/install.sh --channel <c> --registry-user <u> --version <v> [--channel-registry <prefix>]` (PowerShell:
+`install.ps1 -Channel <c> -RegistryUser <u> -Version <v> [-ChannelRegistry <prefix>]`, which also takes the GNU spellings and
 the base's bare positional order Version, Dir, InstallId, Channel)
 installs a channel from its private registry. `<c>` and `<prefix>` follow the build-channel CHANNEL and PREFIX rules;
 the prefix defaults to `ghcr.io/martinambrus`. Without `--channel`, or with `public`, nothing below happens and the
-public output (`.env`, `./haive`, the uninstall script) is unchanged.
+public output (`.env`, `./haive`, the uninstall script) is unchanged. A channel has no `latest`: the version is
+required and its absence refuses.
 
 - Token: from `HAIVE_REGISTRY_TOKEN` (removed from the environment at once) or a no-echo prompt that restores the
   terminal on every exit. It reaches `docker login --password-stdin` only, never argv, a file the installer
@@ -496,18 +497,26 @@ public output (`.env`, `./haive`, the uninstall script) is unchanged.
   manifest's `channel` and `version` must equal the request, and the `api`, `worker`, `web` and `builder` pins
   must each be `<prefix>/haive-<c>-<host>@sha256:<64 lowercase hex>`. Any failure refuses before the install
   directory is touched; there is no public fallback.
+- Contexts: the daemon the user selected (`DOCKER_CONTEXT`, else the user config's `currentContext`) keeps
+  working under the install credential. For each non-default name only `contexts/meta/<sha256(name)>` and
+  `contexts/tls/<sha256(name)>` are copied, links dereferenced so nothing is changed in the user's store; a
+  missing hash tool, a hash that is not 64 lowercase hex or a missing meta dir refuses. Both are kept in
+  `<install>/.docker`; `currentContext` is written only when the user config named a non-default one, so a
+  context selected by `DOCKER_CONTEXT` alone is used by `./haive` only from a shell that still sets it.
 - Written: the keys under "Upgrading a channel install" go to `.env` (0600), and the scratch config becomes
   `<install>/.docker` only after `.env` is written, so a failure before then leaves no credential in the install
-  directory and a `--force` retry works. A destination that already holds `.docker` (or a link by that name) refuses
-  before anything is written. The install directory is normalised to the lexical form the updater
+  directory and a `--force` retry works. The final `.docker` is claimed by an exclusive `mkdir`, so a destination
+  that already holds one (or a link by that name, or a concurrent installer's) refuses; a run that loses the claim,
+  fails or is interrupted afterwards removes only the `.docker` and `.env` it created, and `config.json` is 0600
+  after the move. The install directory is normalised to the lexical form the updater
   compares (`./x`, `/./` and a trailing slash collapse), and a channel install refuses `..` and characters outside
   letters, digits, spaces, `_`, `-` and `.`. The PowerShell installer re-applies the owner-only DACL (or POSIX
   0700/0600) after the move.
 - `--check`: login and manifest read under the scratch config, then removed; writes nothing.
 - Generated `./haive`: reads `.env` as data (it never sources it) and exports `DOCKER_CONFIG` for compose, so
   `up` and `pull` use the install credential. `upgrade` runs the updater with `--channel`,
-  `--manifest-image <prefix>/haive-<c>-release:<v>`, `--version`, `-e DOCKER_CONFIG=/install/.docker` and
-  `-e HAIVE_INSTALL_DIR_HOST`. On every install, public included, `DATABASE_URL` and `CONFIG_ENCRYPTION_KEY` pass
+  `--manifest-image <prefix>/haive-<c>-release:<v>`, `--version`, `-e DOCKER_CONFIG=/install/.docker`,
+  `-e HAIVE_INSTALL_DIR_HOST` and any extra arguments after the image (`--change-channel <c>`, `--check`). On every install, public included, `DATABASE_URL` and `CONFIG_ENCRYPTION_KEY` pass
   to the updater by name with the values in the docker child's environment only, as the api's POST /upgrade does.
 - Uninstall: the generated script also removes `<install>/.docker`.
 - Tests: `scripts/test/install-channel.test.mjs` runs both installers against a fake docker that records argv.
@@ -530,8 +539,11 @@ per-customer.
 - Credential: the updater applies the install `DOCKER_CONFIG` to its own docker calls before recovery and
   the manifest read, and again after re-reading `.env` under the lock. It must equal `<host install dir>/.docker` (refused otherwise), translated to
   `/install/.docker` inside the api-launched container. The own-module builder gets that directory mounted
-  read-only plus `BUILDX_CONFIG=/tmp/buildx`, because buildx refuses a read-only `$DOCKER_CONFIG/buildx`
-  (MEASURED: `mkdir ...: read-only file system`). A public install's docker calls see no change.
+  read-only plus `BUILDX_CONFIG=/tmp/buildx` and `DOCKER_HOST=unix:///var/run/docker.sock`, because buildx refuses a read-only `$DOCKER_CONFIG/buildx`
+  (MEASURED: `mkdir ...: read-only file system`). Every updater and builder container that reads the install
+  `.docker` (`./haive upgrade` in both shells, POST /upgrade, the builder) pins that `DOCKER_HOST`: a context kept
+  for the host points at an endpoint the container cannot reach, and the container reaches the daemon only
+  through the mounted socket. A public install's docker calls see no change.
 - Manifest: `--manifest-image` and `--manifest` are exclusive, and a channel install requires the image (with
   `--version`); argv errors exit 2. A run with no target still finishes an interrupted upgrade first. The image must be `${HAIVE_CHANNEL_REGISTRY}/haive-<channel>-release:`; the
   updater reads `/release.json` by `docker create` + `docker cp <ctr>:/release.json -` + `docker rm -f` of a temp

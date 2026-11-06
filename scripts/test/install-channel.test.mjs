@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -37,9 +40,25 @@ printf 'config=%s' "$DOCKER_CONFIG" >> "$CALLS"
 for arg do printf '\\t%s' "$arg" >> "$CALLS"; done
 printf '\\n' >> "$CALLS"
 if [ "$EXPECT_CHANNEL" = 1 ] && [ -n "$HAIVE_REGISTRY_TOKEN" ]; then echo token_in_environment >&2; exit 91; fi
+# Enforce context-store lookup on commands that reach the daemon. Configs in
+# this fixture use ASCII context names, including JSON's escaped spelling of x.
+case "$*" in 'compose version'*) echo 2.30.0; exit 0 ;; esac
+case "$1" in
+ pull|create|run|compose)
+  selected=$DOCKER_CONTEXT
+  if [ -z "$selected" ] && [ -f "$DOCKER_CONFIG/config.json" ]; then
+    selected=$(tr -d '\\r\\n' < "$DOCKER_CONFIG/config.json" | sed -n 's/.*"currentContext"[[:space:]]*:[[:space:]]*"\\([^" ]*\\)".*/\\1/p' | sed 's/\\\\u0078/x/g')
+  fi
+  if [ -n "$selected" ] && [ "$selected" != default ]; then
+    if command -v sha256sum >/dev/null 2>&1; then hash=$(printf '%s' "$selected" | sha256sum)
+    else hash=$(printf '%s' "$selected" | shasum -a 256); fi
+    hash=\${hash%% *}
+    [ -d "$DOCKER_CONFIG/contexts/meta/$hash" ] || { echo "missing selected context metadata: $selected" >&2; exit 92; }
+  fi ;;
+esac
 case "$1" in
  run) printf '%s\\n%s\\n' "$DATABASE_URL" "$CONFIG_ENCRYPTION_KEY" > "$CASE_ROOT/updater-env" ;;
- login) cat > "$CASE_ROOT/stdin"; [ "$FAIL_AT" != login ] || exit 1; printf '{"auths":{}}' > "$DOCKER_CONFIG/config.json" ;;
+ login) cp "$DOCKER_CONFIG/config.json" "$CASE_ROOT/login-config.json"; if [ -d "$DOCKER_CONFIG/contexts" ]; then cp -R "$DOCKER_CONFIG/contexts" "$CASE_ROOT/seen-contexts"; fi; printf '%s\\n%s\\n' "$DOCKER_HOST" "$DOCKER_CONTEXT" > "$CASE_ROOT/daemon-env"; cat > "$CASE_ROOT/stdin"; [ "$FAIL_AT" != login ] || exit 1 ;;
  pull) [ "$FAIL_AT" != pull ] || exit 1 ;;
  create) [ "$FAIL_AT" != create ] || exit 1; echo unit-manifest; touch "$CASE_ROOT/container" ;;
  cp) [ "$FAIL_AT" != cp ] || exit 1; cp "$CASE_ROOT/manifest.json" "$3" ;;
@@ -50,6 +69,7 @@ esac
 exit 0
 `;
 const curl = `#!/bin/sh
+printf network >> "$CASE_ROOT/network-calls"
 [ "$FAIL_AT" != bundle ] || exit 1
 prev=; out=
 for arg do [ "$prev" != -o ] || out=$arg; prev=$arg; done
@@ -94,7 +114,7 @@ function approvedPublicSecrets(lang, text) {
 }
 function fixture(
   lang,
-  { publicInstall = false, data = manifest, fail = '', source, installDir } = {},
+  { publicInstall = false, data = manifest, fail = '', source, installDir, start = false } = {},
 ) {
   const root = mkdtempSync(join(tmpdir(), 'channel-installer-'));
   const bin = join(root, 'bin');
@@ -107,6 +127,25 @@ function fixture(
   );
   writeFileSync(join(bin, 'docker'), docker, { mode: 0o755 });
   writeFileSync(join(bin, 'curl'), curl, { mode: 0o755 });
+  for (const command of ['mkdir', 'mv'])
+    writeFileSync(
+      join(bin, command),
+      `#!/bin/sh
+if [ "$FAIL_AT" = race ]; then
+  for arg do
+    case "$arg" in
+      .docker|*/install/.docker)
+        /bin/mkdir "$arg" 2>/dev/null && printf user-owned > "$arg/config.json" ;;
+    esac
+  done
+fi
+if [ "$FAIL_AT" = credential-move ] && [ "$1" != "" ]; then
+  case "$1" in */.docker/config.json) exit 1 ;; esac
+fi
+exec /bin/${command} "$@"
+`,
+      { mode: 0o755 },
+    );
   writeFileSync(join(bin, 'openssl'), '#!/bin/sh\nprintf 0123456789abcdef\n', { mode: 0o755 });
   writeFileSync(join(bin, 'date'), '#!/bin/sh\necho 2000-01-01T00:00:00Z\n', { mode: 0o755 });
   writeFileSync(join(bin, 'ss'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
@@ -141,6 +180,11 @@ function fixture(
     FAIL_AT: fail,
     EXPECT_CHANNEL: publicInstall ? '0' : '1',
     TMPDIR: root,
+    HOME: tmpdir(),
+    USERPROFILE: tmpdir(),
+    DOCKER_CONFIG: join(tmpdir(), 'installer-empty-config'),
+    DOCKER_HOST: '',
+    DOCKER_CONTEXT: '',
   };
   const invoke = (file, args) => {
     const childEnv = { ...env, EXPECT_CHANNEL: file === script ? env.EXPECT_CHANNEL : '0' };
@@ -150,18 +194,18 @@ function fixture(
     const wrapper = join(root, 'invoke.ps1');
     writeFileSync(
       wrapper,
-      `$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction Move-Item { param($LiteralPath,$Destination); Microsoft.PowerShell.Management\\Move-Item @PSBoundParameters; if($env:FAIL_AT -eq 'unprotect-move'){ & chmod 755 $Destination; & chmod 644 (Join-Path $Destination 'config.json') } }\nfunction New-Item { param($ItemType,$Path,[switch]$Force); if($Path -like '*/snapshots' -and $env:FAIL_AT -in @('mkdir','pipeline-stop')) { if($env:FAIL_AT -eq 'pipeline-stop'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; throw 'post-verification mkdir failure' }; Microsoft.PowerShell.Management\\New-Item @PSBoundParameters }\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method); if($OutFile){ if($env:FAIL_AT -eq 'bundle'){ throw 'bundle failure' }; [IO.File]::WriteAllText($OutFile, "services: {}\\n") } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|force|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
+      `${file === script ? '' : `function docker { if ($args[0] -eq 'run') { [IO.File]::WriteAllText((Join-Path $env:CASE_ROOT 'helper-argv.json'), (ConvertTo-Json -InputObject @($args) -Compress -Depth 10)) }; & (Join-Path $env:CASE_ROOT 'bin/docker') @args }\n`}$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction Move-Item { param($LiteralPath,$Destination); if($env:FAIL_AT -eq 'credential-move' -and $LiteralPath -like '*/.docker/config.json'){ throw 'credential move failure' }; Microsoft.PowerShell.Management\\Move-Item @PSBoundParameters; if($env:FAIL_AT -eq 'credential-stop' -and $LiteralPath -like '*/.docker/config.json'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; if($env:FAIL_AT -eq 'unprotect-move'){ & chmod 755 (Split-Path $Destination); & chmod 644 $Destination } }\nfunction New-Item { param($ItemType,$Path,[switch]$Force); if($Path -like '*/snapshots' -and $env:FAIL_AT -in @('mkdir','pipeline-stop')) { if($env:FAIL_AT -eq 'pipeline-stop'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; throw 'post-verification mkdir failure' }; Microsoft.PowerShell.Management\\New-Item @PSBoundParameters }\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-RestMethod { param($Uri); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); [pscustomobject]@{tag_name='v9.9.9'} }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method,$TimeoutSec); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); if($OutFile){ if($env:FAIL_AT -eq 'bundle'){ throw 'bundle failure' }; [IO.File]::WriteAllText($OutFile, "services: {}\\n") } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|force|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
     );
     if (hostPwsh)
       return spawnSync('pwsh', ['-NoProfile', '-File', wrapper], {
         cwd: root,
-        env: { ...childEnv, USERPROFILE: '/tmp' },
+        env: childEnv,
         encoding: 'utf8',
       });
     const pass = Object.entries({
       ...childEnv,
       PATH: `${bin}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
-      USERPROFILE: '/tmp',
+      USERPROFILE: childEnv.USERPROFILE,
     })
       .filter(([key]) =>
         [
@@ -174,6 +218,10 @@ function fixture(
           'FAIL_AT',
           'EXPECT_CHANNEL',
           'TMPDIR',
+          'HOME',
+          'DOCKER_CONFIG',
+          'DOCKER_HOST',
+          'DOCKER_CONTEXT',
         ].includes(key),
       )
       .flatMap(([k, v]) => ['-e', `${k}=${v}`]);
@@ -182,6 +230,8 @@ function fixture(
       [
         'run',
         '--rm',
+        '--name',
+        `t536-installer-${process.pid}-${Math.random().toString(16).slice(2)}`,
         '--pull',
         'never',
         '--network',
@@ -213,7 +263,7 @@ function fixture(
       dir,
       flag('install-id'),
       'unit',
-      flag('no-start'),
+      ...(start ? [] : [flag('no-start')]),
       ...(publicInstall
         ? []
         : [
@@ -251,6 +301,254 @@ for (const lang of ['sh', 'ps1']) {
         : false,
   };
   const check = (name, fn) => test(`${lang}: ${name}`, options, fn);
+  for (const selection of [
+    'config',
+    'host env',
+    'context env',
+    'context env default',
+    'context env empty',
+    'default',
+    'symlink',
+    'escaped',
+  ])
+    check(`daemon context preserved without user credentials: ${selection}`, () => {
+      const f = fixture(lang, { start: true });
+      const userConfig = join(f.root, 'user-docker');
+      f.env.DOCKER_CONFIG = userConfig;
+      const currentContext = selection.includes('default')
+        ? 'default'
+        : selection.endsWith('empty')
+          ? ''
+          : 'x';
+      let original = JSON.stringify({
+        auths: { private: { auth: 'user-secret' } },
+        credsStore: 'currentContext',
+        credHelpers: { private: 'helper' },
+        currentContext,
+      });
+      if (selection === 'escaped')
+        original = original.replace('"currentContext":"x"', '"currentContext":"\\u0078"');
+      const hash = (name) => createHash('sha256').update(name).digest('hex');
+      const store = join(f.root, 'real-contexts');
+      try {
+        mkdirSync(userConfig);
+        mkdirSync(store);
+        for (const name of ['x', 'override'])
+          for (const kind of ['meta', 'tls']) {
+            const entry = join(store, kind, hash(name));
+            mkdirSync(entry, { recursive: true });
+            writeFileSync(
+              join(entry, kind === 'meta' ? 'meta.json' : 'key.pem'),
+              kind === 'meta' ? JSON.stringify({ Name: name }) : `secret-${name}`,
+            );
+            chmodSync(entry, 0o755);
+            chmodSync(join(entry, kind === 'meta' ? 'meta.json' : 'key.pem'), 0o644);
+          }
+        if (selection === 'symlink') symlinkSync(store, join(userConfig, 'contexts'));
+        else mkdirSync(join(userConfig, 'contexts'));
+        if (selection !== 'symlink')
+          for (const kind of ['meta', 'tls']) {
+            mkdirSync(join(userConfig, 'contexts', kind));
+            for (const name of ['x', 'override'])
+              symlinkSync(
+                join(store, kind, hash(name)),
+                join(userConfig, 'contexts', kind, hash(name)),
+              );
+          }
+        writeFileSync(join(userConfig, 'config.json'), original);
+        if (selection === 'host env') f.env.DOCKER_HOST = 'unix:///selected.sock';
+        if (selection.startsWith('context env')) f.env.DOCKER_CONTEXT = 'override';
+        const r = f.install();
+        assert.equal(r.status, 0, r.stdout + r.stderr);
+        const staged = JSON.parse(readFileSync(join(f.root, 'login-config.json'), 'utf8'));
+        assert.equal(staged.currentContext, currentContext);
+        assert.deepEqual(Object.keys(staged).sort(), ['auths', 'currentContext']);
+        assert.deepEqual(Object.keys(staged.auths), ['127.0.0.1:54321']);
+        const wanted = [...new Set([currentContext, f.env.DOCKER_CONTEXT])].filter(
+          (name) => name && name !== 'default',
+        );
+        for (const kind of ['meta', 'tls']) {
+          const seen = join(f.root, 'seen-contexts', kind);
+          assert.deepEqual(
+            existsSync(seen) ? readdirSync(seen).sort() : [],
+            wanted.map(hash).sort(),
+          );
+          const final = join(f.dir, '.docker/contexts', kind);
+          assert.deepEqual(
+            existsSync(final) ? readdirSync(final).sort() : [],
+            wanted.map(hash).sort(),
+          );
+          for (const name of wanted)
+            assert.equal(lstatSync(join(final, hash(name))).isSymbolicLink(), false);
+          for (const name of ['x', 'override']) {
+            assert.equal(statSync(join(store, kind, hash(name))).mode & 0o777, 0o755);
+            assert.equal(
+              statSync(join(store, kind, hash(name), kind === 'meta' ? 'meta.json' : 'key.pem'))
+                .mode & 0o777,
+              0o644,
+            );
+          }
+        }
+        assert.equal(
+          readFileSync(join(f.root, 'daemon-env'), 'utf8'),
+          `${f.env.DOCKER_HOST}\n${f.env.DOCKER_CONTEXT}\n`,
+        );
+        assert.equal(readFileSync(join(userConfig, 'config.json'), 'utf8'), original);
+        const final = JSON.parse(readFileSync(join(f.dir, '.docker/config.json'), 'utf8'));
+        assert.equal(
+          final.currentContext,
+          currentContext && currentContext !== 'default' ? currentContext : undefined,
+        );
+        for (const verb of ['pull', 'up']) {
+          assert.ok(
+            f
+              .calls()
+              .split('\n')
+              .some(
+                (line) =>
+                  line.startsWith(`config=${f.dir}/.docker\tcompose\t`) &&
+                  line.split('\t').includes(verb),
+              ),
+            `install-time ${verb} uses final config`,
+          );
+          const helper = join(f.dir, lang === 'sh' ? 'haive' : 'haive.ps1');
+          const r = f.invoke(helper, [verb]);
+          assert.equal(r.status, 0, r.stdout + r.stderr);
+          const call = f.calls().trim().split('\n').at(-1);
+          assert.ok(call.startsWith(`config=${f.dir}/.docker\tcompose\t`));
+          assert.ok(call.split('\t').includes(verb));
+        }
+      } finally {
+        f.clean();
+      }
+    });
+  for (const selected of ['config', 'environment'])
+    check(`missing selected context fails closed: ${selected}`, () => {
+      const f = fixture(lang);
+      try {
+        const config = join(f.root, 'user-docker');
+        mkdirSync(config);
+        writeFileSync(
+          join(config, 'config.json'),
+          JSON.stringify({ currentContext: selected === 'config' ? 'missing' : 'default' }),
+        );
+        f.env.DOCKER_CONFIG = config;
+        if (selected === 'environment') f.env.DOCKER_CONTEXT = 'missing';
+        const r = f.install();
+        assert.notEqual(r.status, 0, r.stdout + r.stderr);
+        assert.match(r.stdout + r.stderr, /selected Docker context.*metadata/i);
+        assert.ok(!f.calls().includes('\tlogin\t'));
+        assert.ok(!existsSync(f.dir));
+      } finally {
+        f.clean();
+      }
+    });
+  if (lang === 'sh')
+    for (const hashTools of ['fallback', 'missing'])
+      check(`context hash tools: ${hashTools}`, () => {
+        const source = readFileSync(join(repo, 'install/install.sh'), 'utf8')
+          .replace('command -v sha256sum', 'false')
+          .replace('command -v shasum', hashTools === 'missing' ? 'false' : 'command -v shasum');
+        const f = fixture(lang, { source });
+        try {
+          const config = join(f.root, 'user-docker');
+          const hash = createHash('sha256').update('x').digest('hex');
+          mkdirSync(join(config, 'contexts/meta', hash), { recursive: true });
+          writeFileSync(join(config, 'contexts/meta', hash, 'meta.json'), '{"Name":"x"}');
+          writeFileSync(join(config, 'config.json'), '{"currentContext":"x"}');
+          f.env.DOCKER_CONFIG = config;
+          const r = f.install();
+          if (hashTools === 'fallback') {
+            assert.equal(r.status, 0, r.stdout + r.stderr);
+            assert.ok(existsSync(join(f.dir, '.docker/contexts/meta', hash, 'meta.json')));
+          } else {
+            assert.notEqual(r.status, 0);
+            assert.match(r.stdout + r.stderr, /require sha256sum or shasum/);
+            assert.ok(!f.calls().includes('\tlogin\t'));
+            assert.ok(!existsSync(f.dir));
+          }
+        } finally {
+          f.clean();
+        }
+      });
+  for (const hash of ['a'.repeat(63), 'a'.repeat(65), 'A'.repeat(64), 'g'.repeat(64)])
+    check(`invalid computed context hash fails closed: ${hash}`, () => {
+      const original = readFileSync(join(repo, `install/install.${lang}`), 'utf8');
+      const marker =
+        lang === 'sh' ? '    CHANNEL_HASH=${CHANNEL_HASH%% *}' : '      finally { $sha.Dispose() }';
+      assert.ok(original.includes(marker));
+      const source = original.replace(
+        marker,
+        `${marker}\n${lang === 'sh' ? `    CHANNEL_HASH='${hash}'` : `      $hash = '${hash}'`}`,
+      );
+      const f = fixture(lang, { source });
+      try {
+        const config = join(f.root, 'user-docker');
+        // Supply metadata at the corrupt hash so metadata existence cannot mask a missing validator.
+        mkdirSync(join(config, 'contexts/meta', hash), { recursive: true });
+        writeFileSync(join(config, 'contexts/meta', hash, 'meta.json'), '{"Name":"x"}');
+        writeFileSync(join(config, 'config.json'), '{"currentContext":"x"}');
+        f.env.DOCKER_CONFIG = config;
+        const r = f.install([f.flag('check')]);
+        assert.notEqual(r.status, 0, r.stdout + r.stderr);
+        assert.match(r.stdout + r.stderr, /invalid.*Docker context hash/i);
+        assert.ok(!f.calls().includes('\tlogin\t'));
+        assert.ok(!existsSync(f.dir));
+      } finally {
+        f.clean();
+      }
+    });
+  check('generated helper upgrade without extra arguments has clean argv', () => {
+    const f = fixture(lang);
+    try {
+      assert.equal(f.install().status, 0);
+      const r = f.invoke(
+        join(f.dir, lang === 'sh' ? 'haive' : 'haive.ps1'),
+        lang === 'sh' ? ['upgrade', '--version', '10.0.0'] : ['upgrade', '-Version', '10.0.0'],
+      );
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      // Preserve trailing tabs: trim() would hide a null/empty final argument.
+      const argv = f.calls().split('\n').filter(Boolean).at(-1).split('\t').slice(1);
+      assert.ok(
+        argv.every((arg) => arg.length > 0),
+        JSON.stringify(argv),
+      );
+      if (lang === 'ps1') {
+        const splatted = JSON.parse(readFileSync(join(f.root, 'helper-argv.json'), 'utf8'));
+        assert.ok(
+          splatted.every((arg) => typeof arg === 'string' && arg.length > 0),
+          JSON.stringify(splatted),
+        );
+      }
+    } finally {
+      f.clean();
+    }
+  });
+  for (const version of [undefined, 'latest', 'next'])
+    check(`channel requires explicit version before network: ${version ?? 'omitted'}`, () => {
+      const f = fixture(lang);
+      try {
+        const r = f.invoke(f.script, [
+          ...(version === undefined ? [] : [f.flag('version'), version]),
+          f.flag('dir'),
+          f.dir,
+          f.flag('install-id'),
+          'unit',
+          f.flag('channel'),
+          'customer',
+          f.flag('registry-user'),
+          'installer',
+          f.flag('no-start'),
+        ]);
+        assert.notEqual(r.status, 0, r.stdout + r.stderr);
+        assert.match(r.stdout + r.stderr, /channel.*explicit.*version/i);
+        assert.ok(!existsSync(join(f.root, 'network-calls')), 'no network calls');
+        assert.equal(f.calls(), '', 'no Docker calls');
+        assert.ok(!existsSync(f.dir));
+      } finally {
+        f.clean();
+      }
+    });
   check('shared GNU flag spellings install the same channel', () => {
     const f = fixture(lang);
     try {
@@ -306,6 +604,33 @@ for (const lang of ['sh', 'ps1']) {
         f.clean();
       }
     });
+  for (const fail of ['race', 'credential-move'])
+    check(`exclusive credential placement refuses ${fail} and allows retry`, () => {
+      const f = fixture(lang, { fail });
+      try {
+        const r = f.install();
+        assert.notEqual(r.status, 0, r.stdout + r.stderr);
+        assert.ok(
+          !existsSync(join(f.dir, '.env')),
+          'remove only this run’s env so retry accepts it',
+        );
+        if (fail === 'race') {
+          assert.match(r.stdout + r.stderr, /\.docker already exists/);
+          assert.deepEqual(readdirSync(join(f.dir, '.docker')), ['config.json']);
+          assert.equal(readFileSync(join(f.dir, '.docker/config.json'), 'utf8'), 'user-owned');
+          rmSync(join(f.dir, '.docker'), { recursive: true });
+        } else assert.ok(!existsSync(join(f.dir, '.docker')), 'no final credential after failure');
+        assert.deepEqual(
+          readdirSync(f.root).filter((x) => x.startsWith('haive-install')),
+          [],
+        );
+        f.env.FAIL_AT = '';
+        const retry = f.install([f.flag('force')]);
+        assert.equal(retry.status, 0, retry.stdout + retry.stderr);
+      } finally {
+        f.clean();
+      }
+    });
   check('bundle failure leaves no final credential and force retry succeeds', () => {
     const f = fixture(lang, { fail: 'bundle' });
     try {
@@ -336,6 +661,26 @@ for (const lang of ['sh', 'ps1']) {
         );
         assert.equal((r.stdout + r.stderr).match(/error:/g)?.length, 1);
         assert.equal(r.stderr, '', 'no second PowerShell cleanup error');
+      } finally {
+        f.clean();
+      }
+    });
+    check('pipeline stop after credential claim removes credentials and env', () => {
+      const f = fixture(lang, { fail: 'credential-stop' });
+      try {
+        f.install();
+        assert.ok(
+          !existsSync(join(f.dir, '.docker')),
+          'remove claimed credentials after pipeline stop',
+        );
+        assert.ok(!existsSync(join(f.dir, '.env')), 'remove this run’s env after pipeline stop');
+        assert.deepEqual(
+          readdirSync(f.root).filter((x) => x.startsWith('haive-install')),
+          [],
+        );
+        f.env.FAIL_AT = '';
+        const retry = f.install([f.flag('force')]);
+        assert.equal(retry.status, 0, retry.stdout + retry.stderr);
       } finally {
         f.clean();
       }
@@ -423,6 +768,25 @@ for (const lang of ['sh', 'ps1']) {
           f.clean();
         }
       });
+    for (const named of ['dir', 'install-id'])
+      for (const spelling of ['native', 'GNU'])
+        check(`bare Version after named ${spelling} ${named} value`, () => {
+          const f = fixture(lang, { publicInstall: true });
+          const flag = spelling === 'GNU' ? `--${named}` : f.flag(named);
+          const args =
+            named === 'dir'
+              ? [flag, f.dir, '0.1.4', '-InstallId', 'unit', '-NoStart']
+              : [flag, 'unit', '0.1.4', '-Dir', f.dir, '-NoStart'];
+          try {
+            const r = f.invoke(f.script, args);
+            assert.equal(r.status, 0, r.stdout + r.stderr);
+            const e = readFileSync(join(f.dir, '.env'), 'utf8');
+            assert.match(e, /^HAIVE_VERSION=0\.1\.4$/m);
+            assert.match(e, /^HAIVE_INSTALL_ID=unit$/m);
+          } finally {
+            f.clean();
+          }
+        });
     check('positional Channel follows Version Dir and InstallId', () => {
       const f = fixture(lang);
       try {
@@ -562,6 +926,32 @@ for (const lang of ['sh', 'ps1']) {
         }
       },
     );
+  check('channel helper usage advertises channel changes', () => {
+    const f = fixture(lang);
+    try {
+      assert.equal(f.install().status, 0);
+      const r = f.invoke(join(f.dir, lang === 'sh' ? 'haive' : 'haive.ps1'), []);
+      assert.match(r.stdout + r.stderr, /--change-channel <channel>/);
+      const installer = readFileSync(join(repo, `install/install.${lang}`), 'utf8');
+      assert.match(installer, /non-public channel.*explicit.*(?:--version|-Version)/i);
+    } finally {
+      f.clean();
+    }
+  });
+  if (lang === 'sh')
+    check('rewritten Docker config is private with a permissive ambient umask', () => {
+      const source = readFileSync(join(repo, 'install/install.sh'), 'utf8').replace(
+        '  # mkdir is the portable exclusive claim',
+        '  umask 022\n  # mkdir is the portable exclusive claim',
+      );
+      const f = fixture(lang, { source });
+      try {
+        assert.equal(f.install().status, 0);
+        assert.equal(statSync(join(f.dir, '.docker/config.json')).mode & 0o777, 0o600);
+      } finally {
+        f.clean();
+      }
+    });
   check('channel flags, private config and pinned env', () => {
     const f = fixture(lang);
     try {
@@ -608,7 +998,27 @@ for (const lang of ['sh', 'ps1']) {
           f.clean();
         }
       });
+  check('valid JSON extras retain escape, scalar and nesting support', () => {
+    const data = JSON.stringify({
+      ...manifest,
+      extra: { text: '\"\\/\n\u0001', values: [null, true, false, -1.25e12, {}, []] },
+    })
+      .replace('"extra":', '"longNumber":1' + '0'.repeat(128) + ',"extra":')
+      .replace('"extra":', '"boundary":' + '['.repeat(63) + '0' + ']'.repeat(63) + ',"extra":');
+    const f = fixture(lang, { data });
+    try {
+      const r = f.install();
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+    } finally {
+      f.clean();
+    }
+  });
   for (const [name, data, fail] of [
+    ...['01', '-', '-01', '1.', '1e', '1e+', '1e-', 'truex', 'nullx'].map((value) => [
+      `invalid JSON scalar ${value}`,
+      '{"extra":' + value + ',' + JSON.stringify(manifest).slice(1),
+      '',
+    ]),
     ['wrong channel', { ...manifest, channel: 'other' }, ''],
     ['wrong version', { ...manifest, version: '1.0.0' }, ''],
     [
@@ -640,6 +1050,44 @@ for (const lang of ['sh', 'ps1']) {
       '',
     ],
     ['escaped-quote key', '{"escaped\\\"key":0,' + JSON.stringify(manifest).slice(1), ''],
+    ['non-object array root', JSON.stringify([manifest]), ''],
+    ['non-object string root', JSON.stringify(JSON.stringify(manifest)), ''],
+    ['non-object null root', 'null', ''],
+    ['trailing garbage', JSON.stringify(manifest) + 'garbage', ''],
+    ['second JSON object', JSON.stringify(manifest) + '{}', ''],
+    ['JSON comment', '{/* comment */' + JSON.stringify(manifest).slice(1), ''],
+    ['trailing object comma', JSON.stringify(manifest).slice(0, -1) + ',}', ''],
+    ['trailing array comma', '{"extra":[0,],' + JSON.stringify(manifest).slice(1), ''],
+    ['escaped unicode key', '{"extra\\u0061":0,' + JSON.stringify(manifest).slice(1), ''],
+    ['slash key', '{"extra/key":0,' + JSON.stringify(manifest).slice(1), ''],
+    ['DEL in string', '{"extra":"\u007f",' + JSON.stringify(manifest).slice(1), ''],
+    ['UTF-8 BOM prefix', '\ufeff' + JSON.stringify(manifest), ''],
+    [
+      'escaped channel value',
+      JSON.stringify(manifest).replace('customer', String.raw`\u0063ustomer`),
+      '',
+    ],
+    [
+      'escaped version value',
+      JSON.stringify(manifest).replace('9.9.9', String.raw`\u0039.9.9`),
+      '',
+    ],
+    ...Object.keys(pins).map((host) => [
+      `escaped ${host} pin value`,
+      JSON.stringify(manifest).replace(
+        JSON.stringify(pins[host]),
+        JSON.stringify(pins[host]).replace('127', String.raw`\u003127`),
+      ),
+      '',
+    ]),
+    ['unescaped control character', '{"extra":"\u0001",' + JSON.stringify(manifest).slice(1), ''],
+    [
+      'deep nesting',
+      '{"extra":' + '['.repeat(65) + '0' + ']'.repeat(65) + ',' + JSON.stringify(manifest).slice(1),
+      '',
+    ],
+    ['array channel', { ...manifest, channel: ['customer'] }, ''],
+    ['array version', { ...manifest, version: ['9.9.9'] }, ''],
     ['oversized manifest', JSON.stringify(manifest) + ' '.repeat(1048576), ''],
     ['malformed JSON', '{"channel":', ''],
     ['missing pin', { ...manifest, images: { ...pins, web: null } }, ''],
@@ -693,6 +1141,25 @@ for (const lang of ['sh', 'ps1']) {
       f.clean();
     }
   });
+  if (lang === 'ps1')
+    check('generated helper forwards remaining upgrade args after image', () => {
+      const f = fixture(lang);
+      try {
+        assert.equal(f.install().status, 0);
+        const extra = ['--change-channel', 'acme', '--check', '--privileged'];
+        const r = f.invoke(join(f.dir, 'haive.ps1'), ['upgrade', ...extra, '-Version', '10.0.0']);
+        assert.equal(r.status, 0, r.stdout + r.stderr);
+        const argv = f.calls().trim().split('\n').at(-1).split('\t');
+        const imageAt = argv.indexOf('ghcr.io/martinambrus/haive-updater:10.0.0');
+        assert.ok(imageAt > 0);
+        assert.deepEqual(argv.slice(-extra.length), extra);
+        for (const arg of extra) {
+          assert.ok(argv.indexOf(arg) > imageAt, `${arg} must be an updater argument`);
+        }
+      } finally {
+        f.clean();
+      }
+    });
   check('generated helper exports config and sends channel updater argv', () => {
     const f = fixture(lang);
     try {
@@ -714,6 +1181,7 @@ for (const lang of ['sh', 'ps1']) {
         '--version',
         '10.0.0',
         'DOCKER_CONFIG=/install/.docker',
+        'DOCKER_HOST=unix:///var/run/docker.sock',
         `HAIVE_INSTALL_DIR_HOST=${f.dir}`,
         '--force',
       ])
@@ -722,6 +1190,9 @@ for (const lang of ['sh', 'ps1']) {
       const argv = call.split('\t').slice(1);
       const imageAt = argv.indexOf('ghcr.io/martinambrus/haive-updater:10.0.0');
       assert.ok(imageAt > 0);
+      const hostAt = argv.indexOf('DOCKER_HOST=unix:///var/run/docker.sock');
+      assert.ok(hostAt > 0 && hostAt < imageAt);
+      assert.equal(argv[hostAt - 1], '-e');
       for (let i = 0; i < argv.length; i++) {
         if (argv[i] === '-e') assert.ok(i < imageAt, `docker env option at ${i} after image`);
         if (

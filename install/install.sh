@@ -45,7 +45,7 @@ Haive installer
 
   --version <v>   Install this release (e.g. 0.1.4, or 'latest' / 'next'). An alias is
                   resolved to a concrete version and PINNED, so the install cannot drift
-                  onto a moving tag. Default: latest.
+                  onto a moving tag. Default: latest (public channel only).
   --dir <path>    Install directory. Default: \$HOME/haive
   --install-id    Names every container, volume, network and database this install owns
                   ([a-z0-9_], default 'haive'). Give a SECOND install on this machine its
@@ -53,6 +53,7 @@ Haive installer
                   identifies the install, never the version, and changing it later orphans
                   what the install owns rather than renaming it — so choose it now.
   --channel <id>  Release channel. Default: public
+                  A non-public channel requires an explicit --version <v>.
   --channel-registry <prefix>  Channel image registry. Default: ghcr.io/martinambrus
   --registry-user <u>  Registry login user. Token: HAIVE_REGISTRY_TOKEN or a hidden prompt.
   --check         Run the preflight checks and exit, changing nothing.
@@ -96,6 +97,12 @@ printf '%s\n' "$CHANNEL" | LC_ALL=C grep -Eq '^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])
   || die "invalid --channel (use 1-32 lowercase letters, digits or dashes; start and end with a letter or digit)"
 printf '%s\n' "$CHANNEL_REGISTRY" | LC_ALL=C grep -Eq '^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*$' \
   || die "invalid --channel-registry (use a registry host and optional repository prefix, without a scheme)"
+
+if [ "$CHANNEL" != "public" ]; then
+  case "$VERSION" in
+    ''|latest|next) die "channel installs require an explicit --version <v>; latest and next are public release aliases" ;;
+  esac
+fi
 
 # ── Preflight ────────────────────────────────────────────────────────────────
 # Prerequisites are CHECKED, never installed. Docker is privileged, OS-specific, and on
@@ -220,11 +227,18 @@ read_channel_manifest() {
   CHANNEL_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/haive-install.XXXXXXXX")
   CHANNEL_CONTAINER=""
   CHANNEL_TTY=""
+  CHANNEL_ENV_CREATED=0
+  CHANNEL_FINAL_CLAIMED=0
+  CHANNEL_PLACED=0
   cleanup_channel() {
     if [ -n "$CHANNEL_TTY" ]; then stty "$CHANNEL_TTY" < /dev/tty || warn "could not restore terminal settings"; fi
     if [ -n "$CHANNEL_CONTAINER" ]; then
       docker rm -f "$CHANNEL_CONTAINER" >/dev/null 2>&1 \
         || warn "could not remove manifest container $CHANNEL_CONTAINER; run docker rm -f $CHANNEL_CONTAINER"
+    fi
+    if [ "$CHANNEL_PLACED" -eq 0 ]; then
+      if [ "$CHANNEL_FINAL_CLAIMED" -eq 1 ]; then rm -rf "$INSTALL_DIR/.docker"; fi
+      if [ "$CHANNEL_ENV_CREATED" -eq 1 ]; then rm -f "$INSTALL_DIR/.env"; fi
     fi
     rm -rf "$CHANNEL_SCRATCH"
   }
@@ -232,10 +246,124 @@ read_channel_manifest() {
   trap 'exit 1' HUP INT TERM
   mkdir "$CHANNEL_SCRATCH/.docker"
   chmod 700 "$CHANNEL_SCRATCH/.docker"
+  CHANNEL_USER_CONFIG=${DOCKER_CONFIG:-${HOME:-/}/.docker}
+  CHANNEL_CONTEXT=''
+  if [ -f "$CHANNEL_USER_CONFIG/config.json" ]; then
+    # Copy only the top-level selection, preserving its JSON string escaping. Never
+    # copy the user config itself: it may name auths or credential helpers.
+    CHANNEL_CONTEXT=$(LC_ALL=C awk '
+      { s=s $0 "\n" }
+      END {
+        depth=0
+        for(p=1;p<=length(s);p++) {
+          c=substr(s,p,1)
+          if(c=="\"") {
+            start=p++
+            while(p<=length(s)) {
+              c=substr(s,p,1)
+              if(c=="\\") p++
+              else if(c=="\"") break
+              p++
+            }
+            token=substr(s,start,p-start+1)
+            if(depth==1 && token=="\"currentContext\"") {
+              q=p+1; while(substr(s,q,1) ~ /[ \t\r\n]/) q++
+              if(substr(s,q,1)!=":") continue
+              p=q+1
+              while(substr(s,p,1) ~ /[ \t\r\n]/) p++
+              if(substr(s,p,1)!="\"") exit 1
+              start=p++
+              while(p<=length(s)) {
+                c=substr(s,p,1)
+                if(c=="\\") p++
+                else if(c=="\"") { print substr(s,start,p-start+1); exit }
+                p++
+              }
+              exit 1
+            }
+          } else if(c=="{" || c=="[") depth++
+          else if(c=="}" || c=="]") depth--
+        }
+      }
+    ' "$CHANNEL_USER_CONFIG/config.json") || die "cannot read Docker currentContext"
+  fi
+  # Decode the selected JSON string for Docker's name-hashed context store. The
+  # original JSON token above is retained verbatim in the scratch config.
+  CHANNEL_CONTEXT_NAME=$(printf '%s\n' "$CHANNEL_CONTEXT" | LC_ALL=C awk '
+    function hex(t,   i,n,c) {
+      n=0; for(i=1;i<=length(t);i++) {
+        c=index("0123456789abcdef",tolower(substr(t,i,1)))-1
+        if(c<0) exit 1
+        n=n*16+c
+      }; return n
+    }
+    function utf8(n) {
+      if(n==0 || n>1114111 || (n>=55296 && n<=57343)) exit 1
+      if(n<128) return sprintf("%c",n)
+      if(n<2048) return sprintf("%c%c",192+int(n/64),128+n%64)
+      if(n<65536) return sprintf("%c%c%c",224+int(n/4096),128+int(n/64)%64,128+n%64)
+      return sprintf("%c%c%c%c",240+int(n/262144),128+int(n/4096)%64,128+int(n/64)%64,128+n%64)
+    }
+    {
+      for(p=2;p<length($0);p++) {
+        c=substr($0,p,1)
+        if(c=="\\") {
+          c=substr($0,++p,1)
+          if(c=="u") {
+            if(p+4>=length($0)) exit 1
+            n=hex(substr($0,p+1,4)); p+=4
+            if(n>=55296 && n<=56319) {
+              if(substr($0,p+1,2)!="\\u" || p+6>=length($0)) exit 1
+              low=hex(substr($0,p+3,4)); if(low<56320 || low>57343) exit 1
+              n=65536+(n-55296)*1024+low-56320; p+=6
+            }
+            c=utf8(n)
+          } else if(c=="b") c=sprintf("%c",8)
+          else if(c=="f") c=sprintf("%c",12)
+          else if(c=="n") c="\n"
+          else if(c=="r") c="\r"
+          else if(c=="t") c="\t"
+          else if(c!="\"" && c!="\\" && c!="/") exit 1
+        }
+        printf "%s",c
+      }
+    }
+  ') || die "cannot decode Docker currentContext"
+  copy_channel_context() {
+    [ -n "$1" ] && [ "$1" != default ] || return 0
+    if command -v sha256sum >/dev/null 2>&1; then
+      CHANNEL_HASH=$(printf '%s' "$1" | sha256sum) || die "cannot hash selected Docker context"
+    elif command -v shasum >/dev/null 2>&1; then
+      CHANNEL_HASH=$(printf '%s' "$1" | shasum -a 256) || die "cannot hash selected Docker context"
+    else
+      die "selected Docker contexts require sha256sum or shasum -a 256"
+    fi
+    CHANNEL_HASH=${CHANNEL_HASH%% *}
+    [ "${#CHANNEL_HASH}" -eq 64 ] || die "invalid selected Docker context hash"
+    case "$CHANNEL_HASH" in *[!0-9a-f]*) die "invalid selected Docker context hash" ;; esac
+    [ -d "$CHANNEL_USER_CONFIG/contexts/meta/$CHANNEL_HASH" ] \
+      || die "selected Docker context $1 has no metadata directory"
+    for kind in meta tls; do
+      if [ -d "$CHANNEL_USER_CONFIG/contexts/$kind/$CHANNEL_HASH" ]; then
+        mkdir -p "$CHANNEL_SCRATCH/.docker/contexts/$kind"
+        # Dereference every link; chmod must only ever touch our private copy.
+        cp -RL "$CHANNEL_USER_CONFIG/contexts/$kind/$CHANNEL_HASH" "$CHANNEL_SCRATCH/.docker/contexts/$kind/$CHANNEL_HASH"
+      fi
+    done
+  }
+  copy_channel_context "${DOCKER_CONTEXT:-}"
+  if [ -n "$CHANNEL_CONTEXT_NAME" ] && [ "$CHANNEL_CONTEXT_NAME" != default ]; then
+    if [ "$CHANNEL_CONTEXT_NAME" != "${DOCKER_CONTEXT:-}" ]; then copy_channel_context "$CHANNEL_CONTEXT_NAME"
+    fi
+  fi
+  if [ -d "$CHANNEL_SCRATCH/.docker/contexts" ]; then chmod -R go-rwx "$CHANNEL_SCRATCH/.docker/contexts"; fi
   export DOCKER_CONFIG="$CHANNEL_SCRATCH/.docker"
   # A nonempty auth map prevents Docker from automatically selecting a Desktop credential
   # helper. Login replaces this empty credential; this config must remain self-contained.
   printf '{"auths":{"%s":{"auth":"Og=="}}}\n' "${CHANNEL_REGISTRY%%/*}" > "$DOCKER_CONFIG/config.json"
+  if [ -n "$CHANNEL_CONTEXT" ]; then
+    printf '{"auths":{"%s":{"auth":"Og=="}},"currentContext":%s}\n' "${CHANNEL_REGISTRY%%/*}" "$CHANNEL_CONTEXT" > "$DOCKER_CONFIG/config.json"
+  fi
   chmod 600 "$DOCKER_CONFIG/config.json"
   [ -n "$REGISTRY_USER" ] || die "--registry-user is required for a channel install"
   if [ -z "$REGISTRY_TOKEN" ]; then
@@ -304,7 +432,25 @@ read_channel_manifest() {
         p++; ws(); if (substr(s,p,1)=="]") { p++; return }
         n=0; while (1) { val(path "/[" n++ "]",depth+1); ws(); c=substr(s,p++,1); if (c=="]") return; if(c!=",") fail() }
       } else if (c == "\"") { t=str(); strings[path]=t }
-      else if (match(substr(s,p),/^(true|false|null|-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?)/)) p+=RLENGTH
+      else if (match(substr(s,p,5),/^(true|false|null)/)) p+=RLENGTH
+      else if (c == "-" || c ~ /^[0-9]$/) {
+        if (c == "-") p++
+        c=substr(s,p,1)
+        if (c == "0") p++
+        else {
+          if (c !~ /^[1-9]$/) fail()
+          do { p++ } while (substr(s,p,1) ~ /^[0-9]$/)
+        }
+        if (substr(s,p,1) == ".") {
+          p++; if (substr(s,p,1) !~ /^[0-9]$/) fail()
+          do { p++ } while (substr(s,p,1) ~ /^[0-9]$/)
+        }
+        if (substr(s,p,1) ~ /^[eE]$/) {
+          p++; if (substr(s,p,1) ~ /^[+-]$/) p++
+          if (substr(s,p,1) !~ /^[0-9]$/) fail()
+          do { p++ } while (substr(s,p,1) ~ /^[0-9]$/)
+        }
+      }
       else fail()
     }
     { s=s $0 "\n" }
@@ -524,6 +670,7 @@ if [ ! -f .env ]; then
     die "could not generate secrets. Nothing was installed."
   fi
   umask 077
+  if [ "$CHANNEL" != "public" ]; then CHANNEL_ENV_CREATED=1; fi
   cat > .env <<EOF
 # Haive install — generated $(date -u '+%Y-%m-%dT%H:%M:%SZ')
 # Keep this file. CONFIG_ENCRYPTION_KEY is the master key for every secret this install stores;
@@ -573,8 +720,30 @@ EOF
 fi
 
 if [ "$CHANNEL" != "public" ]; then
-  [ ! -e .docker ] && [ ! -L .docker ] || die "$INSTALL_DIR/.docker already exists; choose a clean install directory"
-  mv "$CHANNEL_SCRATCH/.docker" .docker
+  # mkdir is the portable exclusive claim: it refuses even a concurrent link or
+  # directory, instead of mv merging the credential into someone else’s tree.
+  mkdir -m 700 .docker 2>/dev/null || die "$INSTALL_DIR/.docker already exists or cannot be created; choose a clean install directory"
+  CHANNEL_FINAL_CLAIMED=1
+  # Keep both environment and config selections for install-time compose and
+  # the host helper. Scratch already holds only the selected contexts.
+  case "$CHANNEL_CONTEXT" in
+    ''|'""'|'"default"')
+        awk '
+          { s=s $0 "\n" }
+          END {
+            gsub(/,[ \t\r\n]*"currentContext"[ \t\r\n]*:[ \t\r\n]*"(default)?"/, "", s)
+            gsub(/"currentContext"[ \t\r\n]*:[ \t\r\n]*"(default)?"[ \t\r\n]*,/, "", s)
+            printf "%s", s
+          }
+        ' "$DOCKER_CONFIG/config.json" > "$CHANNEL_SCRATCH/config.json"
+        mv "$CHANNEL_SCRATCH/config.json" "$DOCKER_CONFIG/config.json"
+        chmod 600 "$DOCKER_CONFIG/config.json"
+      ;;
+  esac
+  for entry in "$CHANNEL_SCRATCH/.docker/"*; do
+    mv "$entry" ".docker/${entry##*/}" || die "could not place registry credentials; retry the install"
+  done
+  CHANNEL_PLACED=1
   export DOCKER_CONFIG="$INSTALL_DIR/.docker"
 fi
 
@@ -590,6 +759,7 @@ COMPOSE_FILES="-f docker-compose.yml -f docker-compose.run.yml"
 CHANNEL_HELPER_ENV=""
 CHANNEL_PULL=""
 CHANNEL_UPGRADE_ENV=""
+CHANNEL_CHANGE_USAGE=""
 LOAD_INSTALL_ENV='. ./.env'
 MANIFEST_ARGS='      --manifest "https://github.com/'"${REPO}"'/releases/download/v${v#v}/release.json" \
 '
@@ -603,8 +773,10 @@ done < .env
 '
   CHANNEL_PULL='  pull)    shift; $DC pull "$@" ;;
 '
+  CHANNEL_CHANGE_USAGE=' [--change-channel <channel>]'
   LOAD_INSTALL_ENV=': # install settings were read above as data'
-  CHANNEL_UPGRADE_ENV='      -e DOCKER_CONFIG=/install/.docker \
+  CHANNEL_UPGRADE_ENV='      -e DOCKER_HOST=unix:///var/run/docker.sock \
+      -e DOCKER_CONFIG=/install/.docker \
       -e HAIVE_INSTALL_DIR_HOST="${HAIVE_INSTALL_DIR_HOST}" \
 '
   MANIFEST_ARGS='      --channel "${HAIVE_CHANNEL}" \
@@ -630,7 +802,7 @@ ${CHANNEL_PULL}  up)      shift; \$DC up -d "\$@" ;;
     shift
     v=""
     while [ \$# -gt 0 ]; do case "\$1" in --version) v="\${2:-}"; shift 2 ;; *) break ;; esac; done
-    [ -n "\$v" ] || { echo "usage: ./haive upgrade --version <v> [--force]" >&2; exit 2; }
+    [ -n "\$v" ] || { echo "usage: ./haive upgrade --version <v> [--force]${CHANNEL_CHANGE_USAGE}" >&2; exit 2; }
     # The updater runs OUTSIDE this compose project: a process cannot bring itself down and
     # survive to verify the result or roll it back.
     ${LOAD_INSTALL_ENV}
@@ -651,7 +823,7 @@ ${MANIFEST_ARGS}      --install-dir /install \\
       --postgres-volume "\${COMPOSE_PROJECT_NAME:-\${HAIVE_INSTALL_ID:-haive}}_postgres_data" \\
       --snapshot-host-dir "\${HAIVE_INSTALL_DIR_HOST}/snapshots" "\$@"
     ;;
-  *) echo "usage: ./haive up|down|logs|ps|version|upgrade --version <v>" >&2; exit 2 ;;
+  *) echo "usage: ./haive up|down|logs|ps|version|upgrade --version <v>${CHANNEL_CHANGE_USAGE}" >&2; exit 2 ;;
 esac
 EOF
 chmod +x haive
