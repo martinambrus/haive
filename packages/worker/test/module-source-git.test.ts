@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile, readFile, access, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { logger } from '@haive/shared';
 import { gitRun } from '../src/repo/git-exec.js';
@@ -12,12 +13,14 @@ vi.mock('../src/modules/source-pin.js', () => ({
   pinModuleTree: vi.fn(),
 }));
 
-const checkout = vi.hoisted(() => ({ count: 0 }));
+const checkout = vi.hoisted(() => ({ count: 0, attempts: 0, transfers: [] as string[] }));
 vi.mock('../src/repo/git-exec.js', async (original) => {
   const actual = await original<typeof import('../src/repo/git-exec.js')>();
   return {
     ...actual,
     gitRun: async (...args: Parameters<typeof actual.gitRun>) => {
+      if (args[1].includes('checkout')) checkout.attempts++;
+      if (args[1].includes('fetch')) checkout.transfers.push(args[0]);
       const result = await actual.gitRun(...args);
       if (args[1].includes('checkout') && result.code === 0) {
         expect((await actual.gitRun(args[0], ['symbolic-ref', '-q', 'HEAD'])).code).toBe(1);
@@ -31,8 +34,66 @@ vi.mock('../src/repo/git-exec.js', async (original) => {
 
 beforeEach(() => {
   checkout.count = 0;
+  checkout.attempts = 0;
+  checkout.transfers = [];
 });
 afterEach(() => vi.unstubAllEnvs());
+it('refuses a real-git large-blob transfer before checkout', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'module-source-large-blob-'));
+  const fixture = await startGitHttpServer(root);
+  const run = async (args: string[]) => {
+    const result = await gitRun(root, args);
+    expect(result.code, result.stderr).toBe(0);
+  };
+  try {
+    vi.stubEnv('HAIVE_PUBLISHED_INSTALL', 'true');
+    vi.stubEnv('HAIVE_OWN_MODULES_HOST_DIR', '/prepared');
+    await run(['init', '-b', 'main']);
+    await writeFile(
+      join(root, 'package.json'),
+      JSON.stringify({
+        name: '@haive-module/alpha',
+        exports: { './manifest': './manifest.js' },
+      }),
+    );
+    // Incompressible bytes exercise the packed-object transfer bound, before checkout can run.
+    await writeFile(join(root, 'blob'), randomBytes(65 * 1024 * 1024));
+    await run(['add', 'package.json', 'blob']);
+    await run([
+      '-c',
+      'user.name=Fixture',
+      '-c',
+      'user.email=fixture@example.test',
+      'commit',
+      '-m',
+      'large blob',
+    ]);
+    const pin = vi.fn();
+    await expect(
+      fetchModuleSource(
+        {
+          id: 'test',
+          moduleId: 'alpha',
+          kind: 'git',
+          url: fixture.httpOrigin(root),
+          ref: 'main',
+          resolvedSha: null,
+        },
+        null,
+        pin,
+        undefined,
+        (raw) => new URL(raw),
+      ),
+    ).rejects.toThrow('Module tree exceeds size limit');
+    expect(checkout.attempts).toBe(0);
+    expect(pin).not.toHaveBeenCalled();
+    expect(checkout.transfers).toHaveLength(1);
+    await expect(access(join(checkout.transfers[0]!, '..'))).rejects.toThrow();
+  } finally {
+    await fixture.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 it('resolves a raw SHA on its first real-git fetch and reports an unavailable object', async () => {
   const root = await mkdtemp(join(tmpdir(), 'module-source-sha-'));
   const fixture = await startGitHttpServer(root);
