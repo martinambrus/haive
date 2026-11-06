@@ -5,6 +5,7 @@
 .DESCRIPTION
   Installs a PUBLISHED release: fetches a versioned compose bundle, generates this install's own
   secrets, pulls images and boots the stack. Builds nothing and clones nothing.
+  A non-public channel requires an explicit -Version <v>; latest defaults to public only.
 
   Windows needs Docker Desktop and NOTHING ELSE. Docker Desktop uses WSL2 as its engine, but that
   is its plumbing, not a requirement on your shell: `docker` and `docker compose` answer natively
@@ -717,6 +718,7 @@ switch ($Command) {
 }
 '@
 if ($Channel -cne 'public') {
+  $haivePs1 = $haivePs1.Replace('upgrade -Version <v>', 'upgrade -Version <v> [--change-channel <channel>]')
   $haivePs1 = $haivePs1.Replace('switch ($Command) {', @'
 Remove-Item Env:HAIVE_REGISTRY_TOKEN -ErrorAction SilentlyContinue
 $installEnv = Get-DotEnv

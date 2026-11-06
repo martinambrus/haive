@@ -821,6 +821,32 @@ for (const lang of ['sh', 'ps1']) {
         }
       },
     );
+  check('channel helper usage advertises channel changes', () => {
+    const f = fixture(lang);
+    try {
+      assert.equal(f.install().status, 0);
+      const r = f.invoke(join(f.dir, lang === 'sh' ? 'haive' : 'haive.ps1'), []);
+      assert.match(r.stdout + r.stderr, /--change-channel <channel>/);
+      const installer = readFileSync(join(repo, `install/install.${lang}`), 'utf8');
+      assert.match(installer, /non-public channel.*explicit.*(?:--version|-Version)/i);
+    } finally {
+      f.clean();
+    }
+  });
+  if (lang === 'sh')
+    check('rewritten Docker config is private with a permissive ambient umask', () => {
+      const source = readFileSync(join(repo, 'install/install.sh'), 'utf8').replace(
+        '  # mkdir is the portable exclusive claim',
+        '  umask 022\n  # mkdir is the portable exclusive claim',
+      );
+      const f = fixture(lang, { source });
+      try {
+        assert.equal(f.install().status, 0);
+        assert.equal(statSync(join(f.dir, '.docker/config.json')).mode & 0o777, 0o600);
+      } finally {
+        f.clean();
+      }
+    });
   check('channel flags, private config and pinned env', () => {
     const f = fixture(lang);
     try {

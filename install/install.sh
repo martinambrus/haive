@@ -45,7 +45,7 @@ Haive installer
 
   --version <v>   Install this release (e.g. 0.1.4, or 'latest' / 'next'). An alias is
                   resolved to a concrete version and PINNED, so the install cannot drift
-                  onto a moving tag. Default: latest.
+                  onto a moving tag. Default: latest (public channel only).
   --dir <path>    Install directory. Default: \$HOME/haive
   --install-id    Names every container, volume, network and database this install owns
                   ([a-z0-9_], default 'haive'). Give a SECOND install on this machine its
@@ -53,6 +53,7 @@ Haive installer
                   identifies the install, never the version, and changing it later orphans
                   what the install owns rather than renaming it — so choose it now.
   --channel <id>  Release channel. Default: public
+                  A non-public channel requires an explicit --version <v>.
   --channel-registry <prefix>  Channel image registry. Default: ghcr.io/martinambrus
   --registry-user <u>  Registry login user. Token: HAIVE_REGISTRY_TOKEN or a hidden prompt.
   --check         Run the preflight checks and exit, changing nothing.
@@ -721,7 +722,7 @@ fi
 if [ "$CHANNEL" != "public" ]; then
   # mkdir is the portable exclusive claim: it refuses even a concurrent link or
   # directory, instead of mv merging the credential into someone else’s tree.
-  mkdir -m 700 .docker 2>/dev/null || die "$INSTALL_DIR/.docker already exists; choose a clean install directory"
+  mkdir -m 700 .docker 2>/dev/null || die "$INSTALL_DIR/.docker already exists or cannot be created; choose a clean install directory"
   CHANNEL_FINAL_CLAIMED=1
   # The helper also uses this config. Keep nondefault contexts so it reaches the
   # same daemon; default-daemon installs retain only the channel credential.
@@ -737,6 +738,7 @@ if [ "$CHANNEL" != "public" ]; then
           }
         ' "$DOCKER_CONFIG/config.json" > "$CHANNEL_SCRATCH/config.json"
         mv "$CHANNEL_SCRATCH/config.json" "$DOCKER_CONFIG/config.json"
+        chmod 600 "$DOCKER_CONFIG/config.json"
       ;;
   esac
   # The environment override is only needed during this install. The host helper
@@ -764,6 +766,7 @@ COMPOSE_FILES="-f docker-compose.yml -f docker-compose.run.yml"
 CHANNEL_HELPER_ENV=""
 CHANNEL_PULL=""
 CHANNEL_UPGRADE_ENV=""
+CHANNEL_CHANGE_USAGE=""
 LOAD_INSTALL_ENV='. ./.env'
 MANIFEST_ARGS='      --manifest "https://github.com/'"${REPO}"'/releases/download/v${v#v}/release.json" \
 '
@@ -777,6 +780,7 @@ done < .env
 '
   CHANNEL_PULL='  pull)    shift; $DC pull "$@" ;;
 '
+  CHANNEL_CHANGE_USAGE=' [--change-channel <channel>]'
   LOAD_INSTALL_ENV=': # install settings were read above as data'
   CHANNEL_UPGRADE_ENV='      -e DOCKER_HOST=unix:///var/run/docker.sock \
       -e DOCKER_CONFIG=/install/.docker \
@@ -805,7 +809,7 @@ ${CHANNEL_PULL}  up)      shift; \$DC up -d "\$@" ;;
     shift
     v=""
     while [ \$# -gt 0 ]; do case "\$1" in --version) v="\${2:-}"; shift 2 ;; *) break ;; esac; done
-    [ -n "\$v" ] || { echo "usage: ./haive upgrade --version <v> [--force]" >&2; exit 2; }
+    [ -n "\$v" ] || { echo "usage: ./haive upgrade --version <v> [--force]${CHANNEL_CHANGE_USAGE}" >&2; exit 2; }
     # The updater runs OUTSIDE this compose project: a process cannot bring itself down and
     # survive to verify the result or roll it back.
     ${LOAD_INSTALL_ENV}
@@ -826,7 +830,7 @@ ${MANIFEST_ARGS}      --install-dir /install \\
       --postgres-volume "\${COMPOSE_PROJECT_NAME:-\${HAIVE_INSTALL_ID:-haive}}_postgres_data" \\
       --snapshot-host-dir "\${HAIVE_INSTALL_DIR_HOST}/snapshots" "\$@"
     ;;
-  *) echo "usage: ./haive up|down|logs|ps|version|upgrade --version <v>" >&2; exit 2 ;;
+  *) echo "usage: ./haive up|down|logs|ps|version|upgrade --version <v>${CHANNEL_CHANGE_USAGE}" >&2; exit 2 ;;
 esac
 EOF
 chmod +x haive
