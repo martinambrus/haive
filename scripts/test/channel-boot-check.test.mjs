@@ -112,6 +112,13 @@ function fixture(t, config = {}) {
         assert.equal(args[args.indexOf('--platform') + 1], record.platform);
       }
       if (config.createFailure === 'container') return { status: 1, stderr: 'create refused' };
+      if (config.timeoutCreateLate && name.endsWith('-api')) {
+        late = name;
+        return {
+          status: null,
+          error: Object.assign(new Error('command timed out'), { code: 'ETIMEDOUT' }),
+        };
+      }
       if (config.abortCreateLate && name.endsWith('-api')) {
         late = name;
         controller.abort();
@@ -639,4 +646,11 @@ test('module-report timeout includes the last fetch failure and its cause', asyn
     f.logs.join('\n'),
     /timed out waiting for .*module report.*fetch failed.*ENOTFOUND api.invalid/,
   );
+});
+
+test('command timeout while the daemon creates a container still removes it', async (t) => {
+  const f = fixture(t, { timeoutCreateLate: true });
+  assert.equal(await f.check(), 2);
+  assert.ok(f.removed.containers.some((name) => name.endsWith('-api')));
+  assert.match(f.logs.join('\n'), /command timed out/);
 });

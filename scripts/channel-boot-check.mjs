@@ -83,7 +83,10 @@ function capture(command, args, { timeout, signal, ...options }) {
     const abort = () => stop(new Error('interrupted'));
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
-    const timer = setTimeout(() => stop(new Error('command timed out')), timeout);
+    const timer = setTimeout(
+      () => stop(Object.assign(new Error('command timed out'), { code: 'ETIMEDOUT' })),
+      timeout,
+    );
     const collect = (chunks) => (chunk) => {
       bytes += chunk.length;
       if (bytes > 2 * 1024 * 1024) stop(new Error('command output exceeded 2 MiB'));
@@ -158,6 +161,7 @@ export async function run(
     if (!allowFailure && (result.status !== 0 || result.error))
       throw new Error(
         `docker ${args[0]} ${args.at(-1)} failed (${result.status ?? 'no exit code'}): ${result.error?.message ?? lastLines(result.stderr)}`,
+        { cause: result.error },
       );
     return result;
   };
@@ -174,7 +178,12 @@ export async function run(
         cleanup: true,
         allowFailure: true,
       });
-      if (signal?.aborted || (existing.status === 0 && !existing.error)) register();
+      if (
+        signal?.aborted ||
+        error.cause?.code === 'ETIMEDOUT' ||
+        (existing.status === 0 && !existing.error)
+      )
+        register();
       throw error;
     }
   };
