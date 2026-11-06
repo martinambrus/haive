@@ -418,8 +418,12 @@ publishing, because an image carrying another customer's module is the one defec
   api and the worker, each run by its recorded image `id` with `--pull never` and the record's platform. A ref
   that no longer resolves to the recorded id is refused (exit 2). No `docker.sock`, no `--privileged`, no host
   bind mount; the api publishes one ephemeral port on 127.0.0.1. Web is not booted.
-- Names are `hbc-<channel>-<random>`, never `haive-*`. Containers, volumes and the network are removed on every
-  path, signals included; a Postgres or Redis image is removed only when this run pulled it.
+- Names are `hbc-<channel>-<random>`, never `haive-*`, and the network, both volumes and every container carry
+  the label `haive.boot-check=<that name>`, so anything a killed run leaves is findable (images cannot be
+  labelled). Containers, volumes and the network are removed on every path; SIGINT, SIGTERM and SIGHUP abort
+  the run into that cleanup, a repeated signal does not interrupt it, and an EPIPE or EIO on stdout (a closed
+  terminal) is ignored at any time so the cleanup finishes. A Postgres or Redis image is removed only when this run proved it absent before pulling it;
+  a pull that failed leaves nothing to remove.
 - Secrets (database password, encryption key, setup token, admin password) are generated per run, passed by a 0600 env file in a
   private temp dir outside the repository, and scrubbed from every printed line, failure logs included.
 - Check: it registers the bootstrap admin and polls `GET /modules/loaded` until the worker half has reported.
@@ -470,11 +474,20 @@ nothing unless it exits 0.
   authenticated inspect of a missing tag in a private ghcr repository.
 - Credentials: the operator's docker credential store. The script never runs `docker login`, never takes a
   token flag, and never prints a token or a helper's output.
+- Local tags: a destination tagged locally for a push (the manifest image included) is put back as it was when
+  anything between the tag and the push fails: the tag that existed before the run is restored, a tag the run
+  created is removed; when the removal fails but a re-inspect finds the tag absent, nothing is reported. SIGINT,
+  SIGTERM and SIGHUP abort the run, and the boot check inside it, into cleanup.
+- Commands both scripts run go through one runner (`scripts/channel-capture.mjs`, `createCapture(<MiB>)`): each
+  caller keeps its own output cap, a timeout fails with code `ETIMEDOUT`, and an abort or timeout sends SIGTERM
+  then SIGKILL one second later.
 - Exit 0 published; 1 a gate said no with nothing pushed (boot-check mismatch, an existing tag); 2 could not
   publish. A failure after a push exits 2 and names every attempted and verified remote ref; nothing remote is
   ever deleted, and a re-run then refuses on the existing tag. A failure before `release.json` is written
   leaves no manifest. A failure building or pushing the manifest image leaves the runtime tags public and
-  keeps the local `release.json` (named in the error), with no install able to read it yet.
+  keeps the local `release.json` (named in the error), with no install able to read it yet. Only then does the
+  script print `recovery` lines: inspect the release ref first, then a shell-quoted command that rebuilds the
+  manifest image from the retained file and pushes it. They name paths and refs only, never a credential.
 - Limits: the absence check and the push are not atomic (registry tag writes are unconditional), so two
   concurrent publishers of one version can race; only registry-side tag immutability closes that. The script
   imports `packages/shared/src/release/manifest.ts`, so it needs the repository's installed dependencies and

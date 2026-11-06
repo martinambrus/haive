@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,6 +8,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { formatOffender, idOf, parseExpect } from './channel-gate.mjs';
 
+import { createCapture, LOCAL_IMAGE_NOT_FOUND } from './channel-capture.mjs';
+
+const capture = createCapture(2);
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const USAGE =
   'usage: node scripts/channel-boot-check.mjs --record <build-record.json> [--timeout-ms <1..600000; default 180000 per boot stage>]';
@@ -67,47 +69,6 @@ export function parseRecord(text) {
   return { ...doc, entitled: expectation.modules.map((m) => m.id).sort() };
 }
 
-function capture(command, args, { timeout, signal, ...options }) {
-  return new Promise((resolveResult) => {
-    const stdout = [];
-    const stderr = [];
-    let error;
-    let bytes = 0;
-    let forceTimer;
-    const child = spawn(command, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'] });
-    const stop = (cause) => {
-      error ??= cause;
-      child.kill('SIGTERM');
-      forceTimer ??= setTimeout(() => child.kill('SIGKILL'), 1000);
-    };
-    const abort = () => stop(new Error('interrupted'));
-    signal?.addEventListener('abort', abort, { once: true });
-    if (signal?.aborted) abort();
-    const timer = setTimeout(() => stop(new Error('command timed out')), timeout);
-    const collect = (chunks) => (chunk) => {
-      bytes += chunk.length;
-      if (bytes > 2 * 1024 * 1024) stop(new Error('command output exceeded 2 MiB'));
-      else chunks.push(chunk);
-    };
-    child.stdout.on('data', collect(stdout));
-    child.stderr.on('data', collect(stderr));
-    child.on('error', (cause) => {
-      error = cause;
-    });
-    child.on('close', (status) => {
-      clearTimeout(timer);
-      clearTimeout(forceTimer);
-      signal?.removeEventListener('abort', abort);
-      resolveResult({
-        status,
-        error,
-        stdout: Buffer.concat(stdout).toString('utf8'),
-        stderr: Buffer.concat(stderr).toString('utf8'),
-      });
-    });
-  });
-}
-
 function readModules(half, key) {
   if (!half || !Array.isArray(half.modules)) throw new Error(`malformed ${key} loaded report`);
   const ids = half.modules.map((m) => {
@@ -158,6 +119,7 @@ export async function run(
     if (!allowFailure && (result.status !== 0 || result.error))
       throw new Error(
         `docker ${args[0]} ${args.at(-1)} failed (${result.status ?? 'no exit code'}): ${result.error?.message ?? lastLines(result.stderr)}`,
+        { cause: result.error },
       );
     return result;
   };
@@ -174,11 +136,16 @@ export async function run(
         cleanup: true,
         allowFailure: true,
       });
-      if (signal?.aborted || (existing.status === 0 && !existing.error)) register();
+      if (
+        signal?.aborted ||
+        error.cause?.code === 'ETIMEDOUT' ||
+        (existing.status === 0 && !existing.error)
+      )
+        register();
       throw error;
     }
   };
-  const poll = async (name, probe) => {
+  const poll = async (name, probe, lastError = () => undefined) => {
     const deadline = now() + timeout;
     do {
       interrupted();
@@ -187,7 +154,10 @@ export async function run(
       if (now() >= deadline) break;
       await wait(Math.min(1000, Math.max(1, deadline - now())));
     } while (now() <= deadline);
-    throw new Error(`timed out waiting for ${name}`);
+    const diagnostic = lastError();
+    throw new Error(
+      `timed out waiting for ${name}${diagnostic ? `; last fetch error: ${diagnostic}` : ''}`,
+    );
   };
   const state = async (name) =>
     JSON.parse((await docker(['inspect', '--format', '{{json .State}}', name])).stdout);
@@ -267,22 +237,45 @@ export async function run(
         if (
           found.error ||
           found.status !== 1 ||
-          !/No such image/i.test(found.stderr ?? '') ||
+          !LOCAL_IMAGE_NOT_FOUND.test(found.stderr ?? '') ||
           listed.stdout.trim() !== ''
         )
           throw new Error(`could not inspect dependency image ${image}`);
-        await docker(['pull', image]);
+        // The daemon may finish a pull after the client is interrupted.
         pulledImages.push({ kind: 'image', name: image });
+        await docker(['pull', image]);
       }
     }
-    await create('network', prefix, ['network', 'create', prefix]);
+    await create('network', prefix, [
+      'network',
+      'create',
+      '--label',
+      `haive.boot-check=${prefix}`,
+      prefix,
+    ]);
     for (const suffix of ['postgres-data', 'redis-data']) {
       const name = `${prefix}-${suffix}`;
-      await create('volume', name, ['volume', 'create', name]);
+      await create('volume', name, [
+        'volume',
+        'create',
+        '--label',
+        `haive.boot-check=${prefix}`,
+        name,
+      ]);
     }
     const start = async (suffix, args) => {
       const name = `${prefix}-${suffix}`;
-      await create('container', name, ['run', '-d', '--name', name, '--network', prefix, ...args]);
+      await create('container', name, [
+        'run',
+        '-d',
+        '--label',
+        `haive.boot-check=${prefix}`,
+        '--name',
+        name,
+        '--network',
+        prefix,
+        ...args,
+      ]);
       emit(`channel-boot-check: started ${name}`);
       return name;
     };
@@ -379,25 +372,35 @@ export async function run(
     }
     if (!cookies.some((cookie) => cookie.startsWith('haive_access=')))
       throw new Error(`${api} registration returned no session cookie`);
-    const report = await poll(`${worker} module report`, async () => {
-      await running(api);
-      await running(worker);
-      let response;
-      try {
-        response = await http(`${base}/modules/loaded`, {
-          headers: { Cookie: cookies.join('; ') },
-        });
-      } catch {
-        interrupted();
-        return false;
-      }
-      if (!response.ok) throw new Error(`${api} /modules/loaded failed (HTTP ${response.status})`);
-      const body = await response.json();
-      if (body.worker === null) return false;
-      readModules(body.api, 'api');
-      readModules(body.worker, 'worker');
-      return body;
-    });
+    let reportFetchError;
+    const report = await poll(
+      `${worker} module report`,
+      async () => {
+        await running(api);
+        await running(worker);
+        let response;
+        try {
+          response = await http(`${base}/modules/loaded`, {
+            headers: { Cookie: cookies.join('; ') },
+          });
+          reportFetchError = undefined;
+        } catch (error) {
+          interrupted();
+          reportFetchError = lastLines(
+            [error.message, error.cause?.message].filter(Boolean).join(': '),
+          );
+          return false;
+        }
+        if (!response.ok)
+          throw new Error(`${api} /modules/loaded failed (HTTP ${response.status})`);
+        const body = await response.json();
+        if (body.worker === null) return false;
+        readModules(body.api, 'api');
+        readModules(body.worker, 'worker');
+        return body;
+      },
+      () => reportFetchError,
+    );
     let offenders = 0;
     for (const key of ['api', 'worker']) {
       const actual = readModules(report[key], key);
@@ -437,11 +440,18 @@ export async function run(
         });
         emit(`channel-boot-check: removed ${kind} ${name}`);
       } catch (error) {
-        status = 2;
         const existing = await docker([kind, 'inspect', name], {
           cleanup: true,
           allowFailure: true,
         });
+        if (
+          kind === 'image' &&
+          existing.status === 1 &&
+          !existing.error &&
+          LOCAL_IMAGE_NOT_FOUND.test(existing.stderr ?? '')
+        )
+          continue;
+        status = 2;
         if (existing.status === 0 && !existing.error)
           emit(`channel-boot-check: cleanup failed; leftover ${kind} ${name}: ${error.message}`);
         else emit(`channel-boot-check: cleanup failed for ${kind} ${name}: ${error.message}`);
@@ -476,6 +486,10 @@ function isEntryPoint() {
 
 if (isEntryPoint()) {
   const controller = new AbortController();
-  for (const name of ['SIGINT', 'SIGTERM']) process.on(name, () => controller.abort());
+  // A terminal may close stdout before sending SIGHUP; keep abort cleanup alive.
+  process.stdout.on('error', (error) => {
+    if (!['EPIPE', 'EIO'].includes(error.code) && !controller.signal.aborted) throw error;
+  });
+  for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(name, () => controller.abort());
   process.exitCode = await run(process.argv.slice(2), { signal: controller.signal });
 }

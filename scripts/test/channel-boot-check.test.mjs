@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -72,10 +72,17 @@ function fixture(t, config = {}) {
         : ok(config.pullDependencies ? '' : `sha256:${'4'.repeat(64)}`);
     }
     if (args[0] === 'pull') {
+      if (config.pullFailure) return { status: 1, stderr: 'pull refused' };
       created.images.push(args.at(-1));
+      if (config.abortPull) {
+        controller.abort();
+        return { status: null, error: new Error('interrupted') };
+      }
       return ok();
     }
     if (args[0] === 'image' && args[1] === 'rm') {
+      if (config.pullFailure)
+        return { status: 1, stderr: 'Error response from daemon: No such image: ' + args.at(-1) };
       removed.images.push(args.at(-1));
       return ok();
     }
@@ -108,6 +115,13 @@ function fixture(t, config = {}) {
         assert.equal(args[args.indexOf('--platform') + 1], record.platform);
       }
       if (config.createFailure === 'container') return { status: 1, stderr: 'create refused' };
+      if (config.timeoutCreateLate && name.endsWith('-api')) {
+        late = name;
+        return {
+          status: null,
+          error: Object.assign(new Error('command timed out'), { code: 'ETIMEDOUT' }),
+        };
+      }
       if (config.abortCreateLate && name.endsWith('-api')) {
         late = name;
         controller.abort();
@@ -211,6 +225,10 @@ function fixture(t, config = {}) {
       requests.filter((r) => r.url.endsWith('/modules/loaded')).length === 1
     )
       throw new Error('connection reset');
+    if (config.reportFetchError)
+      throw new TypeError('fetch failed', {
+        cause: new Error('getaddrinfo ENOTFOUND api.invalid'),
+      });
     if (config.reportFailure) return Response.json({}, { status: 500 });
     return Response.json({
       api: { modules: (config.api ?? ['statistics']).map(moduleRow) },
@@ -446,13 +464,29 @@ for (const kind of ['network', 'volume', 'container']) {
     assert.equal(await f.check(), 2);
     assert.doesNotMatch(f.logs.join('\n'), /leftover/);
     assert.match(f.logs.join('\n'), /create refused/);
+    const failed = f.calls.find(({ args }) =>
+      kind === 'container' ? args[0] === 'run' : args[0] === kind && args[1] === 'create',
+    ).args;
+    const name = kind === 'container' ? failed[failed.indexOf('--name') + 1] : failed.at(-1);
+    assert.ok(
+      !f.calls.some(
+        ({ args }) =>
+          args.at(-1) === name &&
+          (kind === 'container' ? args[0] === 'rm' : args[0] === kind && args[1] === 'rm'),
+      ),
+    );
+    assert.ok(!f.logs.includes(`channel-boot-check: removed ${kind} ${name}`));
   });
 }
 
-test('abort before container creation does not report a leftover', async (t) => {
+test('abort before container creation attempts cleanup without claiming removal', async (t) => {
   const f = fixture(t, { abortBeforeCreate: true });
   assert.equal(await f.check(), 2);
   assert.doesNotMatch(f.logs.join('\n'), /leftover/);
+  const attempted = f.calls.find(({ args }) => args[0] === 'run').args;
+  const name = attempted[attempted.indexOf('--name') + 1];
+  assert.ok(f.calls.some(({ args }) => args[0] === 'rm' && args.at(-1) === name));
+  assert.ok(!f.logs.includes(`channel-boot-check: removed container ${name}`));
 });
 
 test('abort while the daemon is still creating a container still removes it', async (t) => {
@@ -506,27 +540,100 @@ for (const [label, config] of [
   });
 }
 
-for (const signal of ['SIGINT', 'SIGTERM']) {
-  test(`CLI ${signal} cleans up after Docker creates a container`, (t) => {
-    const f = fixture(t);
-    const dir = dirname(f.path);
-    const bin = join(dir, 'bin');
-    const calls = join(dir, 'docker-calls.jsonl');
-    const envFiles = join(dir, 'env-files.jsonl');
-    mkdirSync(bin);
-    const fakeDocker = join(bin, 'docker');
-    writeFileSync(
-      fakeDocker,
-      `#!${process.execPath}
-import {appendFileSync,readFileSync} from 'node:fs';
+for (const cli of ['channel-boot-check', 'publish-channel']) {
+  for (const code of ['EPIPE', 'EIO', 'EACCES']) {
+    test(`${cli} CLI stdout ${code} before abort ${code === 'EACCES' ? 'throws' : 'is non-fatal'}`, (t) => {
+      const dir = mkdtempSync(join(tmpdir(), 'stdout-control-'));
+      t.after(() => rmSync(dir, { recursive: true, force: true }));
+      const preload = join(dir, 'stdout-error.mjs');
+      writeFileSync(
+        preload,
+        `process.stdout.write = () => process.stdout.emit('error', Object.assign(new Error('stdout control ${code}'), {code: '${code}'}));`,
+      );
+      const result = spawnSync(
+        process.execPath,
+        ['--import', preload, new URL(`../${cli}.mjs`, import.meta.url).pathname, '--help'],
+        { encoding: 'utf8', timeout: 5000 },
+      );
+      assert.equal(result.signal, null);
+      // Boot-check has no --help flag and normally refuses it with exit 2.
+      const normalStatus = cli === 'channel-boot-check' ? 2 : 0;
+      assert.equal(result.status, code === 'EACCES' ? 1 : normalStatus, result.stderr);
+      if (code === 'EACCES') assert.match(result.stderr, /stdout control EACCES/);
+    });
+  }
+  for (const [signal, closedStdout, repeatedSignal] of [
+    ['SIGINT', false],
+    ['SIGTERM', false],
+    ['SIGHUP', false],
+    ['SIGHUP', true],
+    ['SIGINT', false, true],
+    ['SIGTERM', false, true],
+    ['SIGHUP', false, true],
+  ]) {
+    test(`${cli} CLI ${signal}${closedStdout ? ' with closed stdout' : ''}${repeatedSignal ? ' repeated during cleanup' : ''} cleans up after Docker creates a container`, async (t) => {
+      const f = fixture(t, {
+        editRecord(record) {
+          record.schema = 2;
+          record.images.web.built = true;
+          record.images.builder = {
+            ref: 'example.test/haive-test-builder:9.9.9',
+            id: `sha256:${'5'.repeat(64)}`,
+            built: true,
+          };
+        },
+      });
+      const dir = dirname(f.path);
+      const bin = join(dir, 'bin');
+      const calls = join(dir, 'docker-calls.jsonl');
+      const envFiles = join(dir, 'env-files.jsonl');
+      const closed = join(dir, 'stdout-closed');
+      const outputError = join(dir, 'stdout-error');
+      const secondSignal = join(dir, 'second-signal');
+      const preload = join(dir, 'closed-stdout.mjs');
+      const ready = join(dir, 'worker-ready');
+      mkdirSync(bin);
+      if (closedStdout)
+        writeFileSync(
+          preload,
+          `import {existsSync,writeFileSync} from 'node:fs';
+process.stdout.on('error', error => writeFileSync(${JSON.stringify(outputError)}, error.code));
+const timer = setInterval(() => {
+  if (existsSync(${JSON.stringify(closed)})) {
+    clearInterval(timer);
+    process.stdout.write('closed stdout control\\n');
+  }
+}, 10);
+`,
+        );
+      const fakeDocker = join(bin, 'docker');
+      writeFileSync(
+        fakeDocker,
+        `#!${process.execPath}
+import {appendFileSync,readFileSync,existsSync} from 'node:fs';
 const args=process.argv.slice(2);
 appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args)+'\\n');
 if(args[0]==='run') {
   for(let i=0;i<args.length;i++) if(args[i]==='--env-file') appendFileSync(${JSON.stringify(envFiles)}, JSON.stringify({path:args[i+1],body:readFileSync(args[i+1],'utf8')})+'\\n');
-  if(args[args.indexOf('--name')+1].endsWith('-worker')) process.kill(process.ppid,${JSON.stringify(signal)});
+  if(args[args.indexOf('--name')+1].endsWith('-worker')) {
+    if (${closedStdout}) {
+      appendFileSync(${JSON.stringify(ready)}, 'ready');
+      const deadline = Date.now() + 5000;
+      while (!existsSync(${JSON.stringify(outputError)})) {
+        if (Date.now() > deadline) throw new Error('stdout did not close');
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    }
+    process.kill(process.ppid,${JSON.stringify(signal)});
+  }
+}
+if (${Boolean(repeatedSignal)} && args[0]==='rm' && !existsSync(${JSON.stringify(secondSignal)})) {
+  appendFileSync(${JSON.stringify(secondSignal)}, 'sent');
+  process.kill(process.ppid,${JSON.stringify(signal)});
+  await new Promise(resolve => setTimeout(resolve, 30));
 }
 if(args[0]==='image' && args[1]==='inspect') {
-  const images=${JSON.stringify(Object.fromEntries(Object.entries(IDS).map(([key, id]) => [`example.test/haive-test-${key}:9.9.9`, id])))};
+  const images=${JSON.stringify(Object.fromEntries(Object.values(JSON.parse(readFileSync(f.path, 'utf8')).images).map((image) => [image.ref, image.id])))};
   process.stdout.write(images[args.at(-1)] ?? 'sha256:'+'4'.repeat(64));
 } else if(args[0]==='inspect') process.stdout.write(JSON.stringify(args.at(-1).endsWith('-migrate')?{Running:false,Status:'exited',ExitCode:0}:{Running:true,Status:'running',ExitCode:0}));
 else if(args[0]==='exec') process.stdout.write('PONG');
@@ -535,50 +642,84 @@ else if(args[0]==='logs') {
   process.stdout.write(lines.map(line=>JSON.parse(line).body).join('\\n'));
 }
 `,
-    );
-    chmodSync(fakeDocker, 0o700);
-    const result = spawnSync(
-      process.execPath,
-      [new URL('../channel-boot-check.mjs', import.meta.url).pathname, '--record', f.path],
-      {
-        encoding: 'utf8',
-        timeout: 15_000,
-        env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}`, TMPDIR: tmpdir() },
-      },
-    );
-    assert.equal(result.status, 2, result.stdout + result.stderr);
-    assert.equal(result.signal, null);
-    const history = readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse);
-    const started = history
-      .filter((args) => args[0] === 'run')
-      .map((args) => args[args.indexOf('--name') + 1]);
-    const removed = history.filter((args) => args[0] === 'rm').map((args) => args.at(-1));
-    assert.equal(started.length, 5);
-    assert.deepEqual([...removed].sort(), [...started].sort());
-    for (const kind of ['network', 'volume']) {
-      assert.deepEqual(
-        history
-          .filter((args) => args[0] === kind && args[1] === 'rm')
-          .map((args) => args.at(-1))
-          .sort(),
-        history
-          .filter((args) => args[0] === kind && args[1] === 'create')
-          .map((args) => args.at(-1))
-          .sort(),
       );
-    }
-    for (const { path, body } of readFileSync(envFiles, 'utf8')
-      .trim()
-      .split('\n')
-      .map(JSON.parse)) {
-      assert.ok(!existsSync(path));
-      for (const line of body.trim().split('\n')) {
-        const [key, ...rest] = line.split('=');
-        if (/PASSWORD|ENCRYPTION_KEY|SETUP_TOKEN/.test(key))
-          assert.ok(!result.stdout.includes(rest.join('=')));
+      chmodSync(fakeDocker, 0o700);
+      const child = spawn(
+        process.execPath,
+        [
+          ...(closedStdout ? ['--import', preload] : []),
+          new URL(`../${cli}.mjs`, import.meta.url).pathname,
+          '--record',
+          f.path,
+        ],
+        {
+          timeout: 15_000,
+          env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}`, TMPDIR: tmpdir() },
+        },
+      );
+      t.after(() => {
+        if (child.exitCode === null) child.kill('SIGKILL');
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk;
+      });
+      const closeOutput = closedStdout
+        ? setInterval(() => {
+            if (existsSync(ready)) {
+              clearInterval(closeOutput);
+              child.stdout.destroy();
+            }
+          }, 10)
+        : undefined;
+      t.after(() => clearInterval(closeOutput));
+      child.stdout.on('close', () => {
+        if (closedStdout) writeFileSync(closed, 'closed');
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk;
+      });
+      const [status, exitSignal] = await new Promise((resolve, reject) => {
+        child.on('error', reject);
+        child.on('close', (...result) => resolve(result));
+      });
+      assert.equal(status, 2, stdout + stderr);
+      assert.equal(exitSignal, null);
+      if (closedStdout) assert.equal(readFileSync(outputError, 'utf8'), 'EPIPE');
+      if (repeatedSignal) assert.equal(readFileSync(secondSignal, 'utf8'), 'sent');
+      const history = readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse);
+      const started = history
+        .filter((args) => args[0] === 'run')
+        .map((args) => args[args.indexOf('--name') + 1]);
+      const removed = history.filter((args) => args[0] === 'rm').map((args) => args.at(-1));
+      assert.equal(started.length, 5);
+      assert.deepEqual([...removed].sort(), [...started].sort());
+      for (const kind of ['network', 'volume']) {
+        assert.deepEqual(
+          history
+            .filter((args) => args[0] === kind && args[1] === 'rm')
+            .map((args) => args.at(-1))
+            .sort(),
+          history
+            .filter((args) => args[0] === kind && args[1] === 'create')
+            .map((args) => args.at(-1))
+            .sort(),
+        );
       }
-    }
-  });
+      for (const { path, body } of readFileSync(envFiles, 'utf8')
+        .trim()
+        .split('\n')
+        .map(JSON.parse)) {
+        assert.ok(!existsSync(path));
+        for (const line of body.trim().split('\n')) {
+          const [key, ...rest] = line.split('=');
+          if (/PASSWORD|ENCRYPTION_KEY|SETUP_TOKEN/.test(key))
+            assert.ok(!stdout.includes(rest.join('=')));
+        }
+      }
+    });
+  }
 }
 
 test('schema 2 validates builder metadata but never boots the builder', async (t) => {
@@ -600,4 +741,116 @@ test('schema 2 validates builder metadata but never boots the builder', async (t
         args.includes(`sha256:${'b'.repeat(64)}`),
     ),
   );
+});
+
+test('every boot-check resource carries the same run label without changing names', async (t) => {
+  const f = fixture(t);
+  assert.equal(await f.check(), 0);
+  const prefix = f.created.networks[0];
+  const creations = f.calls.filter(
+    ({ args }) =>
+      args[0] === 'run' || (['network', 'volume'].includes(args[0]) && args[1] === 'create'),
+  );
+  assert.equal(creations.length, 8);
+  for (const { args } of creations) {
+    assert.equal(args[args.indexOf('--label') + 1], `haive.boot-check=${prefix}`);
+  }
+});
+
+test('abort during a dependency pull removes the image this run may have pulled', async (t) => {
+  const f = fixture(t, { pullDependencies: true, abortPull: true });
+  assert.equal(await f.check(), 2);
+  assert.deepEqual(f.created.images, ['pgvector/pgvector:pg18']);
+  assert.deepEqual(f.removed.images, f.created.images);
+  assert.equal(f.created.networks.length, 0);
+});
+
+test('module-report timeout includes the last fetch failure and its cause', async (t) => {
+  const f = fixture(t, { reportFetchError: true });
+  assert.equal(await f.check(), 2);
+  assert.match(
+    f.logs.join('\n'),
+    /timed out waiting for .*module report.*fetch failed.*ENOTFOUND api.invalid/,
+  );
+});
+
+test('command timeout while the daemon creates a container still removes it', async (t) => {
+  const f = fixture(t, { timeoutCreateLate: true });
+  assert.equal(await f.check(), 2);
+  assert.ok(f.removed.containers.some((name) => name.endsWith('-api')));
+  assert.match(f.logs.join('\n'), /command timed out/);
+});
+
+for (const [limit, size, fails] of [
+  [2, 3, true],
+  [4, 3, false],
+  [4, 5, true],
+]) {
+  test(`shared child runner keeps the ${limit} MiB cap for ${size} MiB of output`, async () => {
+    const { createCapture } = await import('../channel-capture.mjs');
+    const result = await createCapture(limit)(
+      process.execPath,
+      ['-e', `process.stdout.write(Buffer.alloc(${size} * 1024 * 1024, 120))`],
+      { timeout: 5000 },
+    );
+    if (fails) {
+      assert.equal(result.error?.message, `command output exceeded ${limit} MiB`);
+      assert.ok(Buffer.byteLength(result.stdout) <= limit * 1024 * 1024);
+    } else {
+      assert.equal(result.status, 0);
+      assert.equal(result.error, undefined);
+      assert.equal(Buffer.byteLength(result.stdout), size * 1024 * 1024);
+    }
+  });
+}
+
+test('shared child runner bounds combined stdout and stderr', async () => {
+  const { createCapture } = await import('../channel-capture.mjs');
+  const result = await createCapture(2)(
+    process.execPath,
+    [
+      '-e',
+      'process.stdout.write(Buffer.alloc(1536 * 1024)); process.stderr.write(Buffer.alloc(1536 * 1024))',
+    ],
+    { timeout: 5000 },
+  );
+  assert.equal(result.error?.message, 'command output exceeded 2 MiB');
+  assert.ok(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr) <= 2 * 1024 * 1024);
+});
+
+test('shared child runner preserves timeout, interruption and spawn errors', async () => {
+  const { createCapture } = await import('../channel-capture.mjs');
+  const capture = createCapture(2);
+  const timeout = await capture(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    timeout: 50,
+  });
+  assert.equal(timeout.error?.code, 'ETIMEDOUT');
+  assert.equal(timeout.error?.message, 'command timed out');
+  const aborted = await capture(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    timeout: 5000,
+    signal: AbortSignal.abort(),
+  });
+  assert.equal(aborted.error?.message, 'interrupted');
+  const missing = await capture(join(tmpdir(), 'nonexistent-channel-capture-command'), [], {
+    timeout: 1000,
+  });
+  assert.equal(missing.error?.code, 'ENOENT');
+  assert.equal(missing.stdout, '');
+  assert.equal(missing.stderr, '');
+});
+
+test('a failed dependency pull with no image does not report a cleanup failure', async (t) => {
+  const f = fixture(t, { pullDependencies: true, pullFailure: true });
+  assert.equal(await f.check(), 2);
+  assert.match(f.logs.join('\n'), /pull.*failed.*pull refused/);
+  assert.doesNotMatch(f.logs.join('\n'), /cleanup failed|removed image/);
+  assert.ok(f.calls.some(({ args }) => args[0] === 'image' && args[1] === 'rm'));
+});
+
+test('a module-report response clears an earlier fetch error before a worker timeout', async (t) => {
+  const f = fixture(t, { transientReport: true, noWorker: true });
+  assert.equal(await f.check(), 2);
+  assert.ok(f.requests.filter(({ url }) => url.endsWith('/modules/loaded')).length > 1);
+  assert.match(f.logs.join('\n'), /timed out waiting for .*module report/);
+  assert.doesNotMatch(f.logs.join('\n'), /last fetch error|connection reset/);
 });

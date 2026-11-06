@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
@@ -18,9 +17,13 @@ import { parseArgs } from 'node:util';
 import { parseReleaseManifest } from '../packages/shared/src/release/manifest.ts';
 import { parseRecord, run as checkBoot } from './channel-boot-check.mjs';
 
+import { createCapture, LOCAL_IMAGE_NOT_FOUND } from './channel-capture.mjs';
+
+const capture = createCapture(4);
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const KEYS = ['api', 'worker', 'web', 'builder'];
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
+const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
 const PREFIX = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
 // Volatile Docker daemon wording; used only with exit 1 and no spawn error.
 // A normalized or reworded ref is not proof of absence and refuses with exit 2.
@@ -28,50 +31,9 @@ const DAEMON_NOT_FOUND = (ref) =>
   new RegExp(`^ERROR: ${ref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: not found$`, 'm');
 const DAEMON_DENIED = /failed to authorize|unauthorized|\bdenied\b|\b40[13]\b|forbidden/i;
 const DAEMON_TRANSPORT_ERROR =
-  /\b(?:5\d\d|network|connection|timeout|timed out|no such host|credential helper|tls|certificate|eof)\b/i;
+  /\b(?:5\d\d|networks?|connections?|timeouts?|timed out|no such host|credential helpers?|tls|certificates?|eof)\b/i;
 const USAGE =
   'usage: node scripts/publish-channel.mjs --record <build-record.json> [--registry <prefix; defaults to record api prefix>] [--out <dir; defaults beside record>] [--dry-run] [--confirm-absent <exact destination ref; repeatable>] [--timeout-ms <boot-stage timeout>] — writes release.json locally and publishes its manifest image last';
-
-function capture(command, args, { timeout, signal, ...options }) {
-  return new Promise((resolveResult) => {
-    const stdout = [];
-    const stderr = [];
-    let error;
-    let bytes = 0;
-    let forceTimer;
-    const child = spawn(command, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'] });
-    const stop = (cause) => {
-      error ??= cause;
-      child.kill('SIGTERM');
-      forceTimer ??= setTimeout(() => child.kill('SIGKILL'), 1000);
-    };
-    const abort = () => stop(new Error('interrupted'));
-    signal?.addEventListener('abort', abort, { once: true });
-    if (signal?.aborted) abort();
-    const timer = setTimeout(() => stop(new Error('command timed out')), timeout);
-    const collect = (chunks) => (chunk) => {
-      bytes += chunk.length;
-      if (bytes > 4 * 1024 * 1024) stop(new Error('command output exceeded 4 MiB'));
-      else chunks.push(chunk);
-    };
-    child.stdout.on('data', collect(stdout));
-    child.stderr.on('data', collect(stderr));
-    child.on('error', (cause) => {
-      error = cause;
-    });
-    child.on('close', (status) => {
-      clearTimeout(timer);
-      clearTimeout(forceTimer);
-      signal?.removeEventListener('abort', abort);
-      resolveResult({
-        status,
-        error,
-        stdout: Buffer.concat(stdout).toString('utf8'),
-        stderr: Buffer.concat(stderr).toString('utf8'),
-      });
-    });
-  });
-}
 
 export async function run(
   argv,
@@ -88,6 +50,7 @@ export async function run(
   let scratch;
   let output;
   let manifestWritten = false;
+  let recovery;
   const attempted = [];
   const verified = [];
   const emit = (line) => say(String(line).replace(/[\u0000-\u001f\u007f-\u009f]/g, '?'));
@@ -103,6 +66,43 @@ export async function run(
   const docker = (args, allowFailure) => command('docker', args, allowFailure);
   const inspect = (ref) =>
     docker(['buildx', 'imagetools', 'inspect', '--format', '{{json .Manifest}}', ref], true);
+  const localTag = async (ref, inspectLocal = docker) => {
+    const result = await inspectLocal(['image', 'inspect', '--format', '{{.Id}}', ref], true);
+    if (result.status === 0 && !result.error && DIGEST.test(result.stdout.trim()))
+      return result.stdout.trim();
+    if (result.status === 1 && !result.error && LOCAL_IMAGE_NOT_FOUND.test(result.stderr ?? ''))
+      return undefined;
+    throw new Error(`could not inspect local tag ${ref}`);
+  };
+  const withLocalTag = async (ref, publish) => {
+    const previous = await localTag(ref);
+    try {
+      await publish();
+    } catch (error) {
+      // Keep the recorded source image and any tag that existed before this run.
+      try {
+        const result = await runner(
+          'docker',
+          previous ? ['image', 'tag', previous, ref] : ['image', 'rm', ref],
+          { cwd: root, env, timeout: 15_000 },
+        );
+        if (result.status !== 0 || result.error) throw new Error('local tag cleanup failed');
+      } catch {
+        let absent = false;
+        try {
+          absent =
+            (await localTag(ref, (args) =>
+              runner('docker', args, { cwd: root, env, timeout: 15_000 }),
+            )) === undefined;
+        } catch {
+          // An inconclusive inspect cannot prove cleanup succeeded.
+        }
+        if (!absent) emit(`publish-channel: cleanup failed; local tag retained at ${ref}`);
+      }
+      throw error;
+    }
+  };
+
   let confirmations = new Set();
   const absent = async (ref) => {
     const result = await inspect(ref);
@@ -140,6 +140,7 @@ export async function run(
         interrupted();
         return response;
       } catch {
+        interrupted();
         throw unproven();
       }
     };
@@ -147,6 +148,7 @@ export async function run(
       try {
         return await response.json();
       } catch {
+        interrupted();
         throw unproven();
       }
     };
@@ -169,6 +171,7 @@ export async function run(
       try {
         realm = new URL(params.get('realm'));
       } catch {
+        interrupted();
         throw unproven();
       }
       if (
@@ -265,6 +268,7 @@ export async function run(
         `${registry}/haive-${record.channel}-${host}:${record.version}`,
       ]),
     );
+    recovery = { ref: destinations.release, platform: record.platform };
     confirmations = new Set(values['confirm-absent'] ?? []);
     for (const ref of confirmations)
       if (!Object.values(destinations).includes(ref))
@@ -423,10 +427,8 @@ export async function run(
         );
         return attempted.length ? 2 : 1;
       }
-      if (record.images[host].built)
-        await docker(['image', 'tag', record.images[host].id, destinations[host]]);
-      attempted.push(destinations[host]);
-      if (sources[host])
+      if (sources[host]) {
+        attempted.push(destinations[host]);
         await docker([
           'buildx',
           'imagetools',
@@ -436,7 +438,13 @@ export async function run(
           destinations[host],
           sources[host],
         ]);
-      else await docker(['push', '--platform', record.platform, destinations[host]]);
+      } else {
+        await withLocalTag(destinations[host], async () => {
+          await docker(['image', 'tag', record.images[host].id, destinations[host]]);
+          attempted.push(destinations[host]);
+          await docker(['push', '--platform', record.platform, destinations[host]]);
+        });
+      }
       const pushed = await inspect(destinations[host]);
       if (
         pushed.status !== 0 ||
@@ -466,21 +474,23 @@ export async function run(
       'FROM scratch\nCOPY release.json /release.json\nLABEL org.haive.release=1\n',
       { mode: 0o600, flag: 'wx' },
     );
-    await docker([
-      'buildx',
-      'build',
-      '--platform',
-      record.platform,
-      '--load',
-      '--tag',
-      destinations.release,
-      context,
-    ]);
-    expected.release = await platformDigest('release', { id: destinations.release });
-    if (!(await absent(destinations.release)))
-      throw new Error('release tag appeared before its push');
-    attempted.push(destinations.release);
-    await docker(['push', '--platform', record.platform, destinations.release]);
+    await withLocalTag(destinations.release, async () => {
+      await docker([
+        'buildx',
+        'build',
+        '--platform',
+        record.platform,
+        '--load',
+        '--tag',
+        destinations.release,
+        context,
+      ]);
+      expected.release = await platformDigest('release', { id: destinations.release });
+      if (!(await absent(destinations.release)))
+        throw new Error('release tag appeared before its push');
+      attempted.push(destinations.release);
+      await docker(['push', '--platform', record.platform, destinations.release]);
+    });
     const pushed = await inspect(destinations.release);
     if (
       pushed.status !== 0 ||
@@ -493,6 +503,17 @@ export async function run(
     emit(`publish-channel: passed; manifest ${output}`);
     return 0;
   } catch (error) {
+    if (manifestWritten) {
+      emit(
+        `publish-channel: recovery: inspect ${recovery.ref} before retrying; if it is already published, verify its /release.json against the retained file`,
+      );
+      emit(
+        `publish-channel: recovery inspect: docker buildx imagetools inspect ${shellQuote(recovery.ref)}`,
+      );
+      emit(
+        `publish-channel: recovery command: ( recovery_dir=$(mktemp -d) && trap 'rm -rf -- "$recovery_dir"' EXIT && cp -- ${shellQuote(output)} "$recovery_dir/release.json" && printf '%s\\n' 'FROM scratch' 'COPY release.json /release.json' 'LABEL org.haive.release=1' > "$recovery_dir/Dockerfile" && docker buildx build --platform ${shellQuote(recovery.platform)} --load --tag ${shellQuote(recovery.ref)} "$recovery_dir" && docker push --platform ${shellQuote(recovery.platform)} ${shellQuote(recovery.ref)} )`,
+      );
+    }
     emit(
       `publish-channel: could not publish: ${error.message}; ${manifestWritten ? `local manifest retained at ${output}` : 'no manifest written'}; attempted: ${attempted.join(', ') || 'none'}; verified: ${verified.join(', ') || 'none'}`,
     );
@@ -511,10 +532,16 @@ export async function run(
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const controller = new AbortController();
+  // A terminal may close stdout before sending SIGHUP; keep abort cleanup alive.
+  process.stdout.on('error', (error) => {
+    if (!['EPIPE', 'EIO'].includes(error.code) && !controller.signal.aborted) throw error;
+  });
   const stop = () => controller.abort();
-  process.once('SIGINT', stop);
-  process.once('SIGTERM', stop);
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+  process.on('SIGHUP', stop);
   process.exitCode = await run(process.argv.slice(2), { signal: controller.signal });
   process.removeListener('SIGINT', stop);
   process.removeListener('SIGTERM', stop);
+  process.removeListener('SIGHUP', stop);
 }

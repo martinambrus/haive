@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -90,12 +91,20 @@ function fixture(t, config = {}) {
   config.editRecord?.(record);
   const path = join(dir, 'build-record.json');
   writeFileSync(path, config.raw ?? JSON.stringify(record));
-  const out = join(dir, 'out');
+  const out = join(dir, config.outName ?? 'out');
   const manifest = join(out, 'release.json');
   const calls = [];
   const requests = [];
   const logs = [];
   const published = new Set();
+  const runtimeDigestsRead = new Set();
+  const localTags = new Map(Object.values(record.images).map((image) => [image.ref, image.id]));
+  const priorLocalId = `sha256:${'e'.repeat(64)}`;
+  if (config.existingLocal)
+    localTags.set(
+      `${config.localPrefix ?? PREFIX}/haive-customer-${config.existingLocal}:9.9.9`,
+      priorLocalId,
+    );
   const attempted = [];
   const bootCalls = [];
   const inspections = new Map();
@@ -105,12 +114,16 @@ function fixture(t, config = {}) {
   const runner = async (cmd, args, options) => {
     calls.push({ cmd, args });
     assert.ok(options.timeout > 0);
-    if (!config.existingManifest && attempted.length < KEYS.length)
+    if (!config.existingManifest && runtimeDigestsRead.size < KEYS.length)
       assert.ok(!existsSync(manifest), 'manifest is absent until runtime images finish');
     if (config.abortOn?.(cmd, args)) options.signal?.throwIfAborted();
     if (cmd === 'docker') {
       if (args[0] === 'image' && args[1] === 'inspect') {
         const host = KEYS.find((key) => record.images[key].ref === args.at(-1));
+        if (!host) {
+          const id = localTags.get(args.at(-1));
+          return id ? ok(id) : { status: 1, stderr: 'No such image' };
+        }
         idReads++;
         return ok(
           config.mismatch === host || (config.retagAfterBoot && idReads > KEYS.length)
@@ -123,9 +136,22 @@ function fixture(t, config = {}) {
           ? 'release'
           : DESTINATIONS.find((host) => IDS[host] === args.at(-1));
         assert.equal(args[args.indexOf('--platform') + 1], record.platform);
-        return config.saveFailure ? { status: 1 } : ok();
+        return config.saveFailure || (config.releaseSaveFailure && archiveHost === 'release')
+          ? { status: 1 }
+          : ok();
       }
-      if (args[0] === 'image' && args[1] === 'tag') return ok();
+      if (args[0] === 'image' && args[1] === 'tag') {
+        if (config.tagFailure) return { status: 1 };
+        localTags.set(args.at(-1), args.at(-2));
+        return ok();
+      }
+      if (args[0] === 'image' && args[1] === 'rm') {
+        assert.equal(options.signal, undefined, 'cleanup ignores an aborted signal');
+        if (config.localCleanupFailure) return { status: 1 };
+        if (!localTags.has(args.at(-1))) return { status: 1, stderr: 'removal refused' };
+        localTags.delete(args.at(-1));
+        return ok();
+      }
       if (args[0] === 'buildx' && args[1] === 'build') {
         assert.deepEqual(attempted, KEYS, 'release build follows every runtime push');
         assert.ok(existsSync(manifest), 'release build follows the local write');
@@ -135,12 +161,16 @@ function fixture(t, config = {}) {
           readFileSync(join(context, 'Dockerfile'), 'utf8'),
           'FROM scratch\nCOPY release.json /release.json\nLABEL org.haive.release=1\n',
         );
+        if (!config.releaseBuildBeforeLoadFailure)
+          localTags.set(args[args.indexOf('--tag') + 1], IDS.release);
         releaseBytes = readFileSync(join(context, 'release.json'));
         assert.deepEqual(releaseBytes, readFileSync(manifest));
         assert.equal(args[args.indexOf('--platform') + 1], record.platform);
         assert.ok(args.includes('--load'));
         assert.ok(!args.includes('--push'));
-        return config.releaseBuildFailure ? { status: 1 } : ok();
+        return config.releaseBuildFailure || config.releaseBuildBeforeLoadFailure
+          ? { status: 1 }
+          : ok();
       }
       if (args[0] === 'buildx' && args[2] === 'inspect') {
         const ref = args.at(-1);
@@ -156,12 +186,16 @@ function fixture(t, config = {}) {
         }
         const host = DESTINATIONS.find((key) => ref.includes(`customer-${key}:`));
         inspections.set(host, (inspections.get(host) ?? 0) + 1);
+        if (config.releaseAbsenceFailure && host === 'release' && inspections.get(host) > 1)
+          throw new Error('release absence check failed');
         if (config.inspectCaptureError) return { status: 1, error: new Error('transport failed') };
         if (
           config.existing === host ||
           published.has(host) ||
           (config.appeared === host && inspections.get(host) > 1)
         ) {
+          if (KEYS.includes(host) && published.has(host) && config.rereadMismatch !== host)
+            runtimeDigestsRead.add(host);
           return ok(
             JSON.stringify({ digest: config.rereadMismatch === host ? IDS.api : digests[host] }),
           );
@@ -181,12 +215,17 @@ function fixture(t, config = {}) {
         const ref = copy ? args[args.indexOf('--tag') + 1] : args.at(-1);
         const host = DESTINATIONS.find((key) => ref.includes(`customer-${key}:`));
         attempted.push(host);
-        if (config.pushFailure === host) return { status: 1, stderr: 'push failed' };
+        if (config.pushFailure === host) {
+          config.abortPush?.();
+          return { status: 1, stderr: 'push failed' };
+        }
         if (copy) {
           assert.ok(args.includes('--prefer-index=false'));
           assert.equal(args.at(-1), `${PREFIX}/haive-web@${digests.web}`);
         } else assert.equal(args[args.indexOf('--platform') + 1], record.platform);
         if (config.rereadFailure !== host) published.add(host);
+        if (config.prematureManifest && host === 'builder')
+          writeFileSync(manifest, 'premature manifest');
         return ok();
       }
       assert.fail(`unexpected docker command: ${args.join(' ')}`);
@@ -231,6 +270,8 @@ function fixture(t, config = {}) {
   };
   return {
     path,
+    localTags,
+    priorLocalId,
     root,
     out,
     manifest,
@@ -757,4 +798,205 @@ test('a failed release build retains the local manifest and returns 2 after runt
   assert.ok(existsSync(f.manifest));
   assert.deepEqual(f.attempted, KEYS);
   assert.match(f.logs.at(-1), /local manifest retained/);
+});
+
+for (const phase of ['fetch resolves', 'fetch rejects', 'body rejects']) {
+  test(`registry abort during ${phase} preserves the interruption reason`, async (t) => {
+    const controller = new AbortController();
+    const abort = () => controller.abort(new Error('operator interrupted publication'));
+    const f = fixture(t, {
+      request: async () => {
+        if (phase === 'body rejects')
+          return {
+            status: 404,
+            json: async () => {
+              abort();
+              throw new Error('body stopped');
+            },
+          };
+        abort();
+        if (phase === 'fetch rejects') throw new Error('fetch stopped');
+        return { status: 404 };
+      },
+    });
+    assert.equal(await f.invoke([], { signal: controller.signal }), 2);
+    assert.deepEqual(f.attempted, []);
+    assert.match(f.logs.join('\n'), /operator interrupted publication/);
+    assert.doesNotMatch(f.logs.join('\n'), /absence of .*could not be proven/);
+  });
+}
+
+const LOCAL_TEST_PREFIX = '127.0.0.1:5051/other';
+const localDestination = (host) => destination(host).replace(PREFIX, LOCAL_TEST_PREFIX);
+
+for (const host of ['api', 'worker', 'builder', 'release']) {
+  test(`failed ${host} push removes only its new local destination tag`, async (t) => {
+    const f = fixture(t, { pushFailure: host });
+    assert.equal(await f.invoke(['--registry', LOCAL_TEST_PREFIX]), 2);
+    assert.equal(f.localTags.has(localDestination(host)), false);
+    assert.ok(
+      f.calls.some(
+        ({ args }) =>
+          args[0] === 'image' && args[1] === 'rm' && args.at(-1) === localDestination(host),
+      ),
+    );
+    assert.equal(
+      f.localTags.get(
+        `${PREFIX}/haive-${host === 'release' ? 'customer-api' : 'customer-' + host}:9.9.9`,
+      ),
+      host === 'release' ? IDS.api : IDS[host],
+    );
+  });
+}
+
+test('a failed push restores a pre-existing local destination tag', async (t) => {
+  const f = fixture(t, {
+    pushFailure: 'api',
+    existingLocal: 'api',
+    localPrefix: LOCAL_TEST_PREFIX,
+  });
+  assert.equal(await f.invoke(['--registry', LOCAL_TEST_PREFIX]), 2);
+  assert.equal(f.localTags.get(localDestination('api')), f.priorLocalId);
+});
+
+test('an aborted push still removes its new local destination tag', async (t) => {
+  const controller = new AbortController();
+  const f = fixture(t, { pushFailure: 'builder', abortPush: () => controller.abort() });
+  assert.equal(await f.invoke(['--registry', LOCAL_TEST_PREFIX], { signal: controller.signal }), 2);
+  assert.equal(f.localTags.has(localDestination('builder')), false);
+});
+
+test('failed local tag cleanup is reported and keeps exit 2', async (t) => {
+  const f = fixture(t, { pushFailure: 'worker', localCleanupFailure: true });
+  assert.equal(await f.invoke(['--registry', LOCAL_TEST_PREFIX]), 2);
+  assert.match(f.logs.join('\n'), /cleanup failed.*local tag.*customer-worker/);
+});
+
+for (const [stage, config, host] of [
+  ['tag', { tagFailure: true }, 'api'],
+  ['build before load', { releaseBuildBeforeLoadFailure: true }, 'release'],
+]) {
+  test(`failed ${stage} leaves no local tag and reports no cleanup failure`, async (t) => {
+    const f = fixture(t, config);
+    assert.equal(await f.invoke(['--registry', LOCAL_TEST_PREFIX]), 2);
+    assert.equal(f.localTags.has(localDestination(host)), false);
+    assert.doesNotMatch(f.logs.join('\n'), /cleanup failed; local tag retained/);
+    const cleanup = f.calls.findIndex(
+      ({ args }) =>
+        args[0] === 'image' && args[1] === 'rm' && args.at(-1) === localDestination(host),
+    );
+    assert.ok(cleanup >= 0);
+    assert.ok(
+      f.calls
+        .slice(cleanup + 1)
+        .some(
+          ({ args }) =>
+            args[0] === 'image' && args[1] === 'inspect' && args.at(-1) === localDestination(host),
+        ),
+      'failed removal re-inspects the ref instead of reading removal diagnostics',
+    );
+  });
+}
+
+for (const word of ['connections', 'timeouts', 'networks', 'certificates', 'credential helpers']) {
+  test(`plural transport diagnostic ${word} refuses even alongside an exact absence line`, async (t) => {
+    const f = fixture(t, {
+      request: async () => ({ status: 403 }),
+      inspectError: (ref) => `ERROR: ${ref}: not found\nmultiple ${word} failed`,
+    });
+    assert.equal(await f.invoke(['--dry-run', '--confirm-absent', destination('api')]), 2);
+    assert.deepEqual(f.attempted, []);
+    assert.equal(f.requests.length, 0);
+    assert.match(f.logs.join('\n'), /absence of .*could not be proven/);
+  });
+}
+
+for (const failure of [
+  { releaseBuildFailure: true },
+  { pushFailure: 'release' },
+  { rereadFailure: 'release' },
+  { rereadMismatch: 'release' },
+]) {
+  test(`retained manifest recovery rebuilds and pushes identical bytes: ${JSON.stringify(failure)}`, async (t) => {
+    const f = fixture(t, { ...failure, outName: "out with ' quotes $(false)" });
+    assert.equal(await f.invoke(), 2);
+    assert.match(f.logs.join('\n'), /recovery: inspect .*customer-release.* before retrying/);
+    const recovery = f.logs.find((line) => line.startsWith('publish-channel: recovery command: '));
+    assert.ok(recovery, f.logs.join('\n'));
+    const bin = join(f.root, 'bin');
+    mkdirSync(bin);
+    const captured = join(f.root, 'recovery.jsonl');
+    const docker = join(bin, 'docker');
+    writeFileSync(
+      docker,
+      `#!${process.execPath}
+import {appendFileSync, readFileSync} from 'node:fs';
+import {join} from 'node:path';
+const args=process.argv.slice(2);
+const build=args[0]==='buildx' && args[1]==='build';
+appendFileSync(${JSON.stringify(captured)}, JSON.stringify({args, ...(build ? {body:readFileSync(join(args.at(-1),'release.json'),'utf8'), dockerfile:readFileSync(join(args.at(-1),'Dockerfile'),'utf8')} : {})})+'\\n');
+`,
+    );
+    chmodSync(docker, 0o700);
+    const result = spawnSync(
+      'sh',
+      ['-c', recovery.slice('publish-channel: recovery command: '.length)],
+      {
+        cwd: f.root,
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      },
+    );
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const calls = readFileSync(captured, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[0].args.slice(0, -1), [
+      'buildx',
+      'build',
+      '--platform',
+      'linux/amd64',
+      '--load',
+      '--tag',
+      destination('release'),
+    ]);
+    assert.equal(calls[0].body, readFileSync(f.manifest, 'utf8'));
+    assert.equal(
+      calls[0].dockerfile,
+      'FROM scratch\nCOPY release.json /release.json\nLABEL org.haive.release=1\n',
+    );
+    assert.deepEqual(calls[1].args, ['push', '--platform', 'linux/amd64', destination('release')]);
+    assert.equal(existsSync(calls[0].args.at(-1)), false, 'recovery context removed');
+    assert.doesNotMatch(recovery, /\bT\d+\b/);
+  });
+}
+
+for (const failure of ['releaseAbsenceFailure', 'releaseSaveFailure']) {
+  for (const preExisting of [false, true]) {
+    test(`${failure} before release push restores the local tag (pre-existing: ${preExisting})`, async (t) => {
+      const f = fixture(t, {
+        [failure]: true,
+        ...(preExisting ? { existingLocal: 'release' } : {}),
+      });
+      assert.equal(await f.invoke(), 2);
+      assert.deepEqual(f.attempted, KEYS);
+      assert.ok(existsSync(f.manifest));
+      assert.ok(f.releaseBytes, 'the release image was loaded before the failure');
+      assert.equal(
+        f.localTags.get(destination('release')),
+        preExisting ? f.priorLocalId : undefined,
+      );
+      assert.match(f.logs.join('\n'), /local manifest retained/);
+    });
+  }
+}
+
+test('the manifest guard covers the digest re-read after the fourth runtime push', async (t) => {
+  const f = fixture(t, { prematureManifest: true });
+  assert.equal(await f.invoke(), 2);
+  assert.deepEqual(f.attempted, KEYS);
+  assert.match(f.logs.join('\n'), /manifest is absent until runtime images finish/);
+  assert.ok(
+    f.calls.some(({ args }) => args[2] === 'inspect' && args.at(-1) === destination('builder')),
+  );
+  assert.equal(f.releaseBytes, undefined, 'release build never starts');
 });
