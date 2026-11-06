@@ -546,6 +546,25 @@ for (const lang of ['sh', 'ps1']) {
           f.clean();
         }
       });
+    for (const named of ['dir', 'install-id'])
+      for (const spelling of ['native', 'GNU'])
+        check(`bare Version after named ${spelling} ${named} value`, () => {
+          const f = fixture(lang, { publicInstall: true });
+          const flag = spelling === 'GNU' ? `--${named}` : f.flag(named);
+          const args =
+            named === 'dir'
+              ? [flag, f.dir, '0.1.4', '-InstallId', 'unit', '-NoStart']
+              : [flag, 'unit', '0.1.4', '-Dir', f.dir, '-NoStart'];
+          try {
+            const r = f.invoke(f.script, args);
+            assert.equal(r.status, 0, r.stdout + r.stderr);
+            const e = readFileSync(join(f.dir, '.env'), 'utf8');
+            assert.match(e, /^HAIVE_VERSION=0\.1\.4$/m);
+            assert.match(e, /^HAIVE_INSTALL_ID=unit$/m);
+          } finally {
+            f.clean();
+          }
+        });
     check('positional Channel follows Version Dir and InstallId', () => {
       const f = fixture(lang);
       try {
