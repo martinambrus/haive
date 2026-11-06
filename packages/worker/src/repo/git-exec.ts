@@ -113,6 +113,16 @@ function abortExitWait(child: ChildProcess, signal: AbortSignal) {
   };
   const close = () => {
     closed = true;
+    // Destroying our pipes can close the leader before its group has stopped.
+    // Keep escalation and the bounded wait alive for any remaining writers.
+    if (stopping && child.pid) {
+      try {
+        process.kill(-child.pid, 0);
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return;
+      }
+    }
     clearTimeout(killTimer);
     clearTimeout(waitTimer);
     finish();
@@ -234,8 +244,11 @@ export async function gitRun(
         timer = setTimeout(() => {
           if (child.exitCode !== null || child.signalCode !== null) return;
           timedOut = true;
-          if (abortWait) abortWait.stop();
-          else stop();
+          if (abortWait) {
+            abortWait.stop();
+            child.stdout?.destroy();
+            child.stderr?.destroy();
+          } else stop();
         }, timeout);
     });
     if (timedOut || output.signal?.aborted) await abortWait?.wait;
