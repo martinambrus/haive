@@ -154,7 +154,8 @@ function fixture(t, config = {}) {
           DriverStatus: [['driver-type', 'io.containerd.snapshotter.v1']],
         }),
       );
-    if (cmd === 'docker' && args[0] === 'pull') return ok('pulled');
+    if (cmd === 'docker' && args[0] === 'pull')
+      return config.pullFailure ? { status: 1, stderr: 'manifest unknown' } : ok('pulled');
     if (cmd === process.execPath && args[0].endsWith('/channel-gate.mjs')) {
       const file = args[args.indexOf('--expect') + 1];
       expectation = JSON.parse(readFileSync(file, 'utf8'));
@@ -427,7 +428,7 @@ for (const scope of [
   });
 }
 
-test('stock web is pulled for the build platform before the gate, even with an existing stock tag', async (t) => {
+test('stock web is pulled for the build platform before the first build, even with an existing stock tag', async (t) => {
   const f = fixture(t);
   assert.equal(await f.execute(['--source-registry', 'localhost:5000/public']), 0);
   const pull = f.calls.find((c) => c.cmd === 'docker' && c.args[0] === 'pull');
@@ -443,7 +444,7 @@ test('stock web is pulled for the build platform before the gate, even with an e
       (c) => c.args[0] === 'image' && c.args[1] === 'ls' && c.args.at(-1).includes('/haive-web:'),
     ),
   );
-  assert.ok(f.calls.indexOf(pull) > f.calls.findLastIndex((c) => c.args[0] === 'buildx'));
+  assert.ok(f.calls.indexOf(pull) < f.calls.findIndex((c) => c.args[0] === 'buildx'));
   assert.ok(
     f.calls.indexOf(pull) < f.calls.findIndex((c) => c.args[0]?.endsWith('/channel-gate.mjs')),
   );
@@ -789,3 +790,14 @@ if (args[0] === 'buildx') {
   assert.ok(scrubbed);
   assert.ok(existsSync(join(f.out, 'build-record.json')));
 });
+
+for (const source of [[], ['--source-registry', 'wrong.example/vendor']]) {
+  test(`stock web pull failure prevents builds: ${source.join(' ') || 'default source'}`, async (t) => {
+    const f = fixture(t, { pullFailure: true });
+    assert.equal(await f.execute(source), 2);
+    assert.ok(!f.calls.some((c) => c.args[0] === 'buildx'));
+    assert.ok(!existsSync(join(f.out, 'build-record.json')));
+    assert.ok(!existsSync(f.scratch));
+    assert.ok(f.logs.some((line) => line.includes('manifest unknown')));
+  });
+}

@@ -367,6 +367,26 @@ export async function run(
       (await command('docker', ['info', '--format', '{{json .}}'], { quiet: true })).stdout,
     );
     const imageStore = { Driver: store.Driver, DriverStatus: store.DriverStatus };
+    let repoDigest;
+    if (!rebuildWeb) {
+      emit(`build-channel: pulling stock web ${images.web} for ${platform}`);
+      await command('docker', ['pull', '--platform', platform, images.web]);
+      retainedImages.push(images.web);
+      const digests = JSON.parse(
+        (
+          await command(
+            'docker',
+            ['image', 'inspect', '--format', '{{json .RepoDigests}}', images.web],
+            { quiet: true },
+          )
+        ).stdout,
+      );
+      repoDigest = digests.find((digest) =>
+        digest.startsWith(`${images.web.slice(0, images.web.lastIndexOf(':'))}@sha256:`),
+      );
+      if (!repoDigest || !/@sha256:[a-f0-9]{64}$/.test(repoDigest))
+        throw new Error('could not read the pulled stock web RepoDigest');
+    }
     for (const host of hosts) {
       emit(`build-channel: building ${images[host]} from ${tag} (${commit})`);
       await command(
@@ -394,26 +414,6 @@ export async function run(
         { cwd: tree, stream: true },
       );
       retainedImages.push(images[host]);
-    }
-    let repoDigest;
-    if (!rebuildWeb) {
-      emit(`build-channel: pulling stock web ${images.web} for ${platform}`);
-      await command('docker', ['pull', '--platform', platform, images.web]);
-      retainedImages.push(images.web);
-      const digests = JSON.parse(
-        (
-          await command(
-            'docker',
-            ['image', 'inspect', '--format', '{{json .RepoDigests}}', images.web],
-            { quiet: true },
-          )
-        ).stdout,
-      );
-      repoDigest = digests.find((digest) =>
-        digest.startsWith(`${images.web.slice(0, images.web.lastIndexOf(':'))}@sha256:`),
-      );
-      if (!repoDigest || !/@sha256:[a-f0-9]{64}$/.test(repoDigest))
-        throw new Error('could not read the pulled stock web RepoDigest');
     }
     const readIds = async () => {
       const result = {};
