@@ -343,7 +343,7 @@ User decision 2026-11-01: Reconcile runtime before validation; revalidate affect
 
 ### T531 · FNF[module-sources] · install-source fetch/pin follow-ups from T337 (+3)
 
-status: open · kind: fix · found: T337 reviews 2026-11-05 · priority: P3
+status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-06 · last: 2026-11-06 · kind: fix · found: T337 reviews 2026-11-05 · priority: P3
 
 1. REGRESSION, minor (cost only): `resolveWorkerImage()` runs at the top of `pinModuleTree` (worker modules/source-pin.ts:139), after the clone, validation and the `resolved(sha)` write, so a worker topology that cannot resolve its own image (host networking, rootless or remote DOCKER_HOST) pays the whole transfer before failing. Fix: resolve the image before the first git call, or once at boot with a warning.
 2. Minor: the 64 MiB tree cap is checked only after the transfer (worker modules/source-fetch.ts:49, validation after fetch ~:207). Fix: bound the fetch (git `--filter`/size probe, or abort on a byte counter of the transfer dir).
@@ -393,9 +393,11 @@ status: open · kind: fix · found: T536 reviews 2026-11-06 · priority: P4
 
 ### T537 · D3 · updater refusals are invisible on the admin page (design)
 
-status: open · kind: design · found: T535 review 1 2026-11-06 · priority: P3
+status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-06 · last: 2026-11-06 · kind: design · found: T535 review 1 2026-11-06 · priority: P3
 
 The api starts the updater with `docker run -d` and never reads its events or exit code (packages/api/src/routes/maintenance.ts ~:477-577). A refusal (preflight, `rollback-images-missing`, and now `channel-changed`) writes no `upgrade_runs` row, so the admin page shows only the generic "updater is running as container X ... docker logs" box (packages/web/src/app/(app)/admin/maintenance/page.tsx ~:417-422) and the History panel stays empty. PRE-EXISTING mechanism; T535 made `channel-changed` newly reachable, and its remedy (`--change-channel`) is CLI-only. Needs a decision on the surface: the updater records refused attempts (a `refused` status row, which the one-live index allows), or the api follows the container and stores its last event.
+
+Decision 2026-11-06 (owner): the robust surface. The updater records every refused or failed attempt that started no run as an `upgrade_runs` row (status `refused`/`failed`, error text, refusal code), so it survives the api being replaced and covers `./haive upgrade` too; the admin maintenance page shows the latest such attempt newer than the last completed run as a banner with the reason and remedy, and History lists it. Every user-facing upgrade flow shows an error banner.
 
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
