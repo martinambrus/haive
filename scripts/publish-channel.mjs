@@ -537,9 +537,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     if (!['EPIPE', 'EIO'].includes(error.code) && !controller.signal.aborted) throw error;
   });
   const stop = () => controller.abort();
-  process.once('SIGINT', stop);
-  process.once('SIGTERM', stop);
-  process.once('SIGHUP', stop);
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+  process.on('SIGHUP', stop);
   process.exitCode = await run(process.argv.slice(2), { signal: controller.signal });
   process.removeListener('SIGINT', stop);
   process.removeListener('SIGTERM', stop);

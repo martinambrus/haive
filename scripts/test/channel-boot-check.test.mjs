@@ -562,13 +562,16 @@ for (const cli of ['channel-boot-check', 'publish-channel']) {
       if (code === 'EACCES') assert.match(result.stderr, /stdout control EACCES/);
     });
   }
-  for (const [signal, closedStdout] of [
+  for (const [signal, closedStdout, repeatedSignal] of [
     ['SIGINT', false],
     ['SIGTERM', false],
     ['SIGHUP', false],
     ['SIGHUP', true],
+    ['SIGINT', false, true],
+    ['SIGTERM', false, true],
+    ['SIGHUP', false, true],
   ]) {
-    test(`${cli} CLI ${signal}${closedStdout ? ' with closed stdout' : ''} cleans up after Docker creates a container`, async (t) => {
+    test(`${cli} CLI ${signal}${closedStdout ? ' with closed stdout' : ''}${repeatedSignal ? ' repeated during cleanup' : ''} cleans up after Docker creates a container`, async (t) => {
       const f = fixture(t, {
         editRecord(record) {
           record.schema = 2;
@@ -586,6 +589,7 @@ for (const cli of ['channel-boot-check', 'publish-channel']) {
       const envFiles = join(dir, 'env-files.jsonl');
       const closed = join(dir, 'stdout-closed');
       const outputError = join(dir, 'stdout-error');
+      const secondSignal = join(dir, 'second-signal');
       const preload = join(dir, 'closed-stdout.mjs');
       const ready = join(dir, 'worker-ready');
       mkdirSync(bin);
@@ -622,6 +626,11 @@ if(args[0]==='run') {
     }
     process.kill(process.ppid,${JSON.stringify(signal)});
   }
+}
+if (${Boolean(repeatedSignal)} && args[0]==='rm' && !existsSync(${JSON.stringify(secondSignal)})) {
+  appendFileSync(${JSON.stringify(secondSignal)}, 'sent');
+  process.kill(process.ppid,${JSON.stringify(signal)});
+  await new Promise(resolve => setTimeout(resolve, 30));
 }
 if(args[0]==='image' && args[1]==='inspect') {
   const images=${JSON.stringify(Object.fromEntries(Object.values(JSON.parse(readFileSync(f.path, 'utf8')).images).map((image) => [image.ref, image.id])))};
@@ -678,6 +687,7 @@ else if(args[0]==='logs') {
       assert.equal(status, 2, stdout + stderr);
       assert.equal(exitSignal, null);
       if (closedStdout) assert.equal(readFileSync(outputError, 'utf8'), 'EPIPE');
+      if (repeatedSignal) assert.equal(readFileSync(secondSignal, 'utf8'), 'sent');
       const history = readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse);
       const started = history
         .filter((args) => args[0] === 'run')
