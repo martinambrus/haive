@@ -120,8 +120,7 @@ export function preflight(input: PreflightInput): PreflightResult {
       refusal: 'rollback-images-missing',
       message:
         `the images this install currently runs are no longer on the daemon, so a rollback would ` +
-        `have nothing to return to: ${missing.join(', ')}. Re-pull them, or accept that this ` +
-        `upgrade is one-way and re-run with --no-rollback.`,
+        `have nothing to return to: ${missing.join(', ')}. Re-pull them.`,
     };
   }
 
