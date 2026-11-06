@@ -64,6 +64,44 @@ describe('fetch and pin a module source', () => {
     expect(resolved).not.toHaveBeenCalled();
     expect(pin).not.toHaveBeenCalled();
   });
+  it('aborts an oversized transfer before it completes or checks out', async () => {
+    setup();
+    const previous = git.getMockImplementation()!;
+    let aborted = false;
+    let temporary = '';
+    git.mockImplementation(
+      async (cwd: string, args: string[], env: unknown, io: { signal?: AbortSignal }) => {
+        if (args.includes('fetch')) {
+          temporary = dirname(cwd);
+          await mkdir(join(cwd, '.git', 'objects', 'pack'), { recursive: true });
+          const pack = join(cwd, '.git', 'objects', 'pack', 'tmp_pack');
+          await writeFile(pack, '');
+          await truncate(pack, 65 * 1024 * 1024);
+          await new Promise<void>((resolve) => {
+            const timeout = setTimeout(resolve, 500);
+            io.signal?.addEventListener(
+              'abort',
+              () => {
+                aborted = true;
+                clearTimeout(timeout);
+                resolve();
+              },
+              { once: true },
+            );
+          });
+        }
+        return previous(cwd, args, env, io);
+      },
+    );
+    const pin = vi.fn();
+    await expect(fetchModuleSource(source, null, pin)).rejects.toThrow(
+      'Module tree exceeds size limit',
+    );
+    expect(aborted).toBe(true);
+    expect(git.mock.calls.some(([, args]) => args.includes('checkout'))).toBe(false);
+    expect(pin).not.toHaveBeenCalled();
+    await expect(access(temporary)).rejects.toThrow();
+  });
   it.each(['link', 'size', 'name'])('refuses a fetched tree with an invalid %s', async (kind) => {
     setup();
     const previous = git.getMockImplementation()!;

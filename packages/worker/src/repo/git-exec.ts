@@ -98,6 +98,7 @@ export async function gitRun(
     input?: Buffer;
     timeout?: number;
     allowFileTransport?: boolean;
+    signal?: AbortSignal;
   },
 ): Promise<GitRunResult> {
   const { input, allowFileTransport, ...output } = io ?? {};

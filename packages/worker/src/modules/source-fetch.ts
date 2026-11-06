@@ -30,6 +30,56 @@ export function sourceFetchError(error: unknown, token: string | null): string {
   return scrubErrorPaths(scrubSecret(safeErrorMessage(error), token)).slice(0, 4096);
 }
 
+const MODULE_TREE_BYTES = 64 * 1024 * 1024;
+
+/** Bound git's on-disk transfer too, including temporary packfiles before checkout. */
+async function boundedTransfer<T>(
+  root: string,
+  transfer: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  let failure: unknown;
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let checking = Promise.resolve();
+  const check = async () => {
+    let bytes = 0;
+    const walk = async (rel: string, depth: number): Promise<void> => {
+      if (depth > 32) throw new Error('Module tree exceeds depth limit');
+      for (const entry of (await readdirSizesNoFollow(root, rel)) ?? []) {
+        if (entry.isDirectory) await walk(rel ? `${rel}/${entry.name}` : entry.name, depth + 1);
+        else bytes += entry.size ?? 0;
+        if (bytes > MODULE_TREE_BYTES) throw new Error('Module tree exceeds size limit');
+      }
+    };
+    await walk('', 0);
+  };
+  const poll = () => {
+    checking = check()
+      .catch((error) => {
+        failure = error;
+        controller.abort();
+      })
+      .then(() => {
+        if (!stopped && !failure) timer = setTimeout(poll, 25);
+      });
+  };
+  poll();
+  try {
+    const result = await transfer(controller.signal);
+    await checking;
+    if (failure) throw failure;
+    await check();
+    return result;
+  } catch (error) {
+    throw failure ?? error;
+  } finally {
+    stopped = true;
+    clearTimeout(timer);
+    await checking;
+  }
+}
+
 async function validateTree(root: string, moduleId: string): Promise<void> {
   let count = 0;
   let size = 0;
@@ -46,7 +96,7 @@ async function validateTree(root: string, moduleId: string): Promise<void> {
       else {
         if (entry.size === null) throw new Error('Module links and special files are refused');
         size += entry.size;
-        if (size > 64 * 1024 * 1024) throw new Error('Module tree exceeds size limit');
+        if (size > MODULE_TREE_BYTES) throw new Error('Module tree exceeds size limit');
       }
     }
   }
@@ -211,11 +261,13 @@ export async function fetchModuleSource(
         throw new Error('Module branch or tag was not found');
     }
     const fetch = (target: string) =>
-      originGitRun(
-        tree,
-        [...auth, 'fetch', '--no-tags', '--depth=1', '--end-of-options', url.href, target],
-        env,
-        io,
+      boundedTransfer(tree, (signal) =>
+        originGitRun(
+          tree,
+          [...auth, 'fetch', '--no-tags', '--depth=1', '--end-of-options', url.href, target],
+          env,
+          { ...io, signal },
+        ),
       );
     const byObject = await fetch(sha);
     if (byObject.code !== 0) {
