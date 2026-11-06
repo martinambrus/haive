@@ -25,7 +25,9 @@ export const MAX_ARG_BYTES = 131_072;
 export const PROMPT_ARGV_LIMIT_BYTES = 65_536;
 
 /** A provider that cannot build a command for the call. A fan-out fails only the agent on
- *  that provider and carries on; the dispatcher never falls through to another provider. */
+ *  that provider and carries on. The dispatcher tries the next candidate when the failing
+ *  provider was an implicit default, and throws when it was the explicitly selected one or
+ *  when no candidate builds. */
 export class ProviderBuildError extends Error {
   constructor(
     readonly providerName: string,
