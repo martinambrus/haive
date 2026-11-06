@@ -1163,7 +1163,7 @@ describe('the command line: a run that cannot look exits 2', () => {
     assert.deepEqual(result.leftovers, []);
   });
 
-  it('when one image does not exist, naming every image it checked first', (t) => {
+  it('when one image does not exist, still scanning and summarizing present images', (t) => {
     const stub = `#!/bin/sh
 case "$*" in *a-worker*) echo "Error response from daemon: No such image: a-worker:1" >&2; exit 1 ;; esac
 echo '["HAIVE_VERSION=0.9.0.1"]'
@@ -1175,7 +1175,10 @@ echo '["HAIVE_VERSION=0.9.0.1"]'
       result.stderr,
       /could not look: worker: a-worker:1 cannot be inspected: .*No such image/,
     );
-    assert.doesNotMatch(result.stderr, /api: a-api/);
+    assert.match(
+      result.stderr,
+      /^channel-gate: api a-api:1: \d+ offender\(s\), \d+ check\(s\) not looked at$/m,
+    );
   });
 
   it('with offenders it found, which it still prints, and a check it could not make', (t) => {
