@@ -65,7 +65,7 @@ export async function localImages(includeDigests = false): Promise<string[]> {
       'ls',
       '--digests',
       '--format',
-      '{{.Repository}}:{{.Tag}}\t{{.Repository}}@{{.Digest}}',
+      '{{.Repository}}:{{.Tag}}\t{{.Repository}}@{{.Digest}}\t{{.Repository}}:{{.Tag}}@{{.Digest}}',
     ]);
     return [...new Set(out.split(/\s+/).filter((ref) => ref && !ref.includes('<none>')))];
   }
@@ -418,7 +418,9 @@ export async function readReleaseManifestImage(image: string): Promise<string> {
   } finally {
     // Attempt both cleanups, preserving the read/create error or the first cleanup error.
     let cleanupError: unknown;
-    for (const args of [['rm', '-f', id], ...(!present ? [['image', 'rm', image]] : [])]) {
+    // A digest ref may not match the reference filter, so absence is unproven: keep the image.
+    const pulledHere = !present && !image.includes('@');
+    for (const args of [['rm', '-f', id], ...(pulledHere ? [['image', 'rm', image]] : [])]) {
       try {
         await run('docker', args);
       } catch (error) {

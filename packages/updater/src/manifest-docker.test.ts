@@ -129,9 +129,15 @@ it('an unpullable manifest cannot create or use a cached image', async () => {
 it('channel rollback inventory includes digest pins while public inventory stays unchanged', async () => {
   const { localImages } = await import('./docker.js');
   const pin = `private/api@sha256:${'a'.repeat(64)}`;
-  h.exec.mockResolvedValue({ stdout: `private/api:1\t${pin}\nprivate/old:2\tprivate/old@<none>` });
-  expect(await localImages(true)).toEqual(['private/api:1', pin, 'private/old:2']);
+  const tagged = `private/api:1@sha256:${'a'.repeat(64)}`;
+  h.exec.mockResolvedValue({
+    stdout: `private/api:1\t${pin}\t${tagged}\nprivate/old:2\tprivate/old@<none>\tprivate/old:2@<none>`,
+  });
+  expect(await localImages(true)).toEqual(['private/api:1', pin, tagged, 'private/old:2']);
   expect(h.exec.mock.calls[0]![1]).toContain('--digests');
+  expect(h.exec.mock.calls[0]![1]).toContain(
+    '{{.Repository}}:{{.Tag}}\t{{.Repository}}@{{.Digest}}\t{{.Repository}}:{{.Tag}}@{{.Digest}}',
+  );
   h.exec.mockResolvedValue({ stdout: 'public/api:1\npublic/web:1' });
   expect(await localImages()).toEqual(['public/api:1', 'public/web:1']);
   expect(h.exec.mock.calls[1]![1]).toEqual(['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}']);
@@ -237,6 +243,14 @@ it('removes a newly pulled release image when the copy fails', async () => {
     'fixture copy failure',
   );
   expect(h.exec.mock.calls.at(-1)![1]).toEqual(['image', 'rm', 'private/release:1']);
+});
+it('keeps a release image named by digest, whose absence the reference filter cannot prove', async () => {
+  cached = false;
+  const ref = `private/release@sha256:${'b'.repeat(64)}`;
+  expect(await readReleaseManifestImage(ref)).toBe('{"manifestVersion":1}');
+  expect(h.exec.mock.calls.filter((call) => call[1][0] === 'image' && call[1][1] === 'rm')).toEqual(
+    [],
+  );
 });
 it('an inventory failure refuses before pulling or removing any image', async () => {
   h.exec.mockRejectedValue(new Error('daemon unavailable'));
