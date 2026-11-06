@@ -851,7 +851,9 @@ for (const lang of ['sh', 'ps1']) {
     const data = JSON.stringify({
       ...manifest,
       extra: { text: '\"\\/\n\u0001', values: [null, true, false, -1.25e12, {}, []] },
-    }).replace('"extra":', '"boundary":' + '['.repeat(63) + '0' + ']'.repeat(63) + ',"extra":');
+    })
+      .replace('"extra":', '"longNumber":1' + '0'.repeat(128) + ',"extra":')
+      .replace('"extra":', '"boundary":' + '['.repeat(63) + '0' + ']'.repeat(63) + ',"extra":');
     const f = fixture(lang, { data });
     try {
       const r = f.install();
@@ -861,6 +863,11 @@ for (const lang of ['sh', 'ps1']) {
     }
   });
   for (const [name, data, fail] of [
+    ...['01', '-', '-01', '1.', '1e', '1e+', '1e-', 'truex', 'nullx'].map((value) => [
+      `invalid JSON scalar ${value}`,
+      '{"extra":' + value + ',' + JSON.stringify(manifest).slice(1),
+      '',
+    ]),
     ['wrong channel', { ...manifest, channel: 'other' }, ''],
     ['wrong version', { ...manifest, version: '1.0.0' }, ''],
     [

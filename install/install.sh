@@ -431,7 +431,25 @@ read_channel_manifest() {
         p++; ws(); if (substr(s,p,1)=="]") { p++; return }
         n=0; while (1) { val(path "/[" n++ "]",depth+1); ws(); c=substr(s,p++,1); if (c=="]") return; if(c!=",") fail() }
       } else if (c == "\"") { t=str(); strings[path]=t }
-      else if (match(substr(s,p),/^(true|false|null|-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?)/)) p+=RLENGTH
+      else if (match(substr(s,p,5),/^(true|false|null)/)) p+=RLENGTH
+      else if (c == "-" || c ~ /^[0-9]$/) {
+        if (c == "-") p++
+        c=substr(s,p,1)
+        if (c == "0") p++
+        else {
+          if (c !~ /^[1-9]$/) fail()
+          do { p++ } while (substr(s,p,1) ~ /^[0-9]$/)
+        }
+        if (substr(s,p,1) == ".") {
+          p++; if (substr(s,p,1) !~ /^[0-9]$/) fail()
+          do { p++ } while (substr(s,p,1) ~ /^[0-9]$/)
+        }
+        if (substr(s,p,1) ~ /^[eE]$/) {
+          p++; if (substr(s,p,1) ~ /^[+-]$/) p++
+          if (substr(s,p,1) !~ /^[0-9]$/) fail()
+          do { p++ } while (substr(s,p,1) ~ /^[0-9]$/)
+        }
+      }
       else fail()
     }
     { s=s $0 "\n" }
