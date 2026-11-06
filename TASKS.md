@@ -352,7 +352,7 @@ status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-06 · last: 2
 
 ### T533 · FNF[build-channel] · build-channel.mjs, channel-gate, channel-boot-check and publish-channel follow-ups from T351/T353/T352 (+21)
 
-status: open · kind: fix · found: T351 reviews 2026-11-05 · priority: P3
+status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-06 · last: 2026-11-06 · kind: fix · found: T351 reviews 2026-11-05 · priority: P3
 
 1. Stock web pull runs after both builds; a missing stock tag or wrong `--source-registry` is found after the longest step (scripts/build-channel.mjs ~:394, test ~:440 pins the order). PRE-EXISTING in T351 design; pull before the first build.
 2. Streamed chunks are re-lined: `emit` trims and adds a newline per chunk (~:128), splitting lines at chunk boundaries. Cosmetic; raw write for streamed text.
