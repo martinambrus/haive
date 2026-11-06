@@ -13,7 +13,7 @@ import { MODULE_ID_PATTERN } from '@haive/shared/modularity';
 import { isBranchName } from '@haive/shared/git-args';
 import { safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
 import { assertCloneUrl } from '../repo/clone.js';
-import { gitRun, type GitRunResult } from '../repo/git-exec.js';
+import { gitGaveNoAnswer, gitRun, type GitRunResult } from '../repo/git-exec.js';
 import { originGitRun, scrubSecret } from '../repo/git-push.js';
 import { shellQuote } from '../sandbox/shell-quote.js';
 import { pinModuleTree, resolveWorkerImage } from './source-pin.js';
@@ -289,7 +289,11 @@ export async function fetchModuleSource(
     const byObject = await fetch(sha);
     if (byObject.code !== 0) {
       if (!qualifiedRef) await listRefs();
-      if (!qualifiedRef || (await fetch(qualifiedRef)).code !== 0)
+      if (!qualifiedRef)
+        throw new Error('module_source_ref_unavailable: Module branch or tag was not found');
+      const fallback = await fetch(qualifiedRef);
+      if (gitGaveNoAnswer(fallback)) output(fallback);
+      if (fallback.code !== 0)
         throw new Error('module_source_ref_unavailable: Module branch or tag was not found');
     }
     const commit = await run(['rev-parse', '--verify', '--end-of-options', 'FETCH_HEAD^{commit}']);

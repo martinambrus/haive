@@ -11,7 +11,10 @@ vi.mock('../src/modules/source-pin.js', () => ({
   resolveWorkerImage: image,
   pinModuleTree: vi.fn(),
 }));
-vi.mock('../src/repo/git-exec.js', () => ({ gitRun: git }));
+vi.mock('../src/repo/git-exec.js', async (original) => ({
+  ...(await original<typeof import('../src/repo/git-exec.js')>()),
+  gitRun: git,
+}));
 const source = {
   id: '00000000-0000-4000-8000-000000000337',
   moduleId: 'alpha',
@@ -357,6 +360,33 @@ describe('fetch and pin a module source', () => {
       expect(git.mock.calls.some(([, args]) => args.includes('checkout'))).toBe(false);
     },
   );
+  it.each([
+    { code: 124, stderr: 'git fetch timed out after 300 s' },
+    { code: -1, stderr: 'git ended without an exit status (EMFILE)', noExit: 'EMFILE' },
+  ])('preserves a fallback fetch that gave no answer: $code', async (failure) => {
+    setup();
+    const previous = git.getMockImplementation()!;
+    git.mockImplementation(async (cwd: string, args: string[], env: unknown, io: unknown) => {
+      if (args.includes('fetch'))
+        return args.at(-1) === sha
+          ? { code: 128, stdout: '', stderr: 'object wants not supported' }
+          : { ...failure, stdout: '' };
+      return previous(cwd, args, env, io);
+    });
+    const pin = vi.fn();
+    const resolved = vi.fn();
+    await expect(
+      fetchModuleSource(
+        { ...source, resolvedSha: sha, resolvedRef: 'refs/heads/main' },
+        null,
+        pin,
+        resolved,
+      ),
+    ).rejects.toThrow('Module git fetch failed: ' + failure.stderr);
+    expect(pin).not.toHaveBeenCalled();
+    expect(resolved).not.toHaveBeenCalled();
+    expect(git.mock.calls.some(([, args]) => args.includes('checkout'))).toBe(false);
+  });
   it.each(['refs/remotes/origin/main', 'refs/heads/other', 'refs/tags/other'])(
     'rejects invalid recorded namespace %s before git',
     async (resolvedRef) => {
