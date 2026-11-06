@@ -34,10 +34,11 @@ export function sourceFetchError(error: unknown, token: string | null): string {
 
 const MODULE_TREE_BYTES = 64 * 1024 * 1024;
 
-/** Bound git's on-disk transfer too, including temporary packfiles before checkout. */
+/** Bound git writes on disk: packed objects during fetch, expanded work-tree files during checkout. */
 async function boundedTransfer<T>(
   root: string,
   transfer: (signal: AbortSignal) => Promise<T>,
+  worktreeOnly = false,
 ): Promise<T> {
   const controller = new AbortController();
   let failure: unknown;
@@ -49,6 +50,7 @@ async function boundedTransfer<T>(
     const walk = async (rel: string, depth: number): Promise<void> => {
       if (depth > 32) throw new Error('Module tree exceeds depth limit');
       for (const entry of (await readdirSizesNoFollow(root, rel)) ?? []) {
+        if (worktreeOnly && rel === '' && entry.name === '.git') continue;
         if (entry.isDirectory) await walk(rel ? `${rel}/${entry.name}` : entry.name, depth + 1);
         else bytes += entry.size ?? 0;
         if (bytes > MODULE_TREE_BYTES) throw new Error('Module tree exceeds size limit');
@@ -233,7 +235,8 @@ export async function fetchModuleSource(
         );
       return result.stdout.trim();
     };
-    const run = async (args: string[]) => output(await gitRun(tree, [...auth, ...args], env, io));
+    const run = async (args: string[], signal?: AbortSignal) =>
+      output(await gitRun(tree, [...auth, ...args], env, { ...io, signal }));
     await run(['init']);
     await run(['remote', 'add', 'origin', url.href]);
     const heads = `refs/heads/${ref}`;
@@ -293,7 +296,7 @@ export async function fetchModuleSource(
     if (commit !== sha)
       throw new Error('module_source_ref_moved: Fetched commit does not match the pinned SHA');
     await resolved(sha, qualifiedRef ?? null);
-    await run(['checkout', '--detach', sha, '--']);
+    await boundedTransfer(tree, (signal) => run(['checkout', '--detach', sha, '--'], signal), true);
     await removeNoFollow(tree, '.git', { recursive: true });
     await validateTree(tree, source.moduleId);
     await writeFileNoFollow(

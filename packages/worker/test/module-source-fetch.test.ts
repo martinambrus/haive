@@ -102,6 +102,62 @@ describe('fetch and pin a module source', () => {
     expect(pin).not.toHaveBeenCalled();
     await expect(access(temporary)).rejects.toThrow();
   });
+  it('aborts an oversized checkout before completion and removes the expanded tree', async () => {
+    setup();
+    const previous = git.getMockImplementation()!;
+    let aborted = false;
+    let completed = false;
+    let temporary = '';
+    git.mockImplementation(
+      async (cwd: string, args: string[], env: unknown, io: { signal?: AbortSignal }) => {
+        const result = await previous(cwd, args, env, io);
+        if (args.includes('checkout')) {
+          temporary = dirname(cwd);
+          await truncate(join(cwd, 'value'), 65 * 1024 * 1024);
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(() => {
+              completed = true;
+              resolve();
+            }, 500);
+            io.signal?.addEventListener(
+              'abort',
+              () => {
+                aborted = true;
+                clearTimeout(timer);
+                resolve();
+              },
+              { once: true },
+            );
+          });
+        }
+        return result;
+      },
+    );
+    const pin = vi.fn();
+    await expect(fetchModuleSource(source, null, pin)).rejects.toThrow(
+      'Module tree exceeds size limit',
+    );
+    expect(aborted).toBe(true);
+    expect(completed).toBe(false);
+    expect(pin).not.toHaveBeenCalled();
+    await expect(access(temporary)).rejects.toThrow();
+  });
+  it('counts only the expanded work tree during checkout, excluding fetched git objects', async () => {
+    setup();
+    const previous = git.getMockImplementation()!;
+    git.mockImplementation(async (cwd: string, args: string[], env: unknown, io: unknown) => {
+      const result = await previous(cwd, args, env, io);
+      if (args.includes('checkout')) {
+        await writeFile(join(cwd, '.git', 'objects', 'aa', 'large'), '');
+        await truncate(join(cwd, '.git', 'objects', 'aa', 'large'), 40 * 1024 * 1024);
+        await truncate(join(cwd, 'value'), 40 * 1024 * 1024);
+      }
+      return result;
+    });
+    const pin = vi.fn();
+    await expect(fetchModuleSource(source, null, pin)).resolves.toBe(sha);
+    expect(pin).toHaveBeenCalledOnce();
+  });
   it.each(['link', 'size', 'name'])('refuses a fetched tree with an invalid %s', async (kind) => {
     setup();
     const previous = git.getMockImplementation()!;
