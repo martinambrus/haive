@@ -276,7 +276,11 @@ export async function fetchModuleSource(
     let sha = source.resolvedSha;
     if (!sha) {
       const refs = await listRefs();
-      sha = refs.get(heads) ?? refs.get(`${tags}^{}`) ?? refs.get(tags) ?? null;
+      sha =
+        refs.get(heads) ??
+        refs.get(`${tags}^{}`) ??
+        refs.get(tags) ??
+        (/^[a-f0-9]{40}$/.test(ref) ? ref : null);
       if (!sha || !/^[a-f0-9]{40}$/.test(sha))
         throw new Error('Module branch or tag was not found');
     }
