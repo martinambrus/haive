@@ -30,7 +30,7 @@ const DAEMON_NOT_FOUND = (ref) =>
   new RegExp(`^ERROR: ${ref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: not found$`, 'm');
 const DAEMON_DENIED = /failed to authorize|unauthorized|\bdenied\b|\b40[13]\b|forbidden/i;
 const DAEMON_TRANSPORT_ERROR =
-  /\b(?:5\d\d|network|connection|timeout|timed out|no such host|credential helper|tls|certificate|eof)\b/i;
+  /\b(?:5\d\d|networks?|connections?|timeouts?|timed out|no such host|credential helpers?|tls|certificates?|eof)\b/i;
 const USAGE =
   'usage: node scripts/publish-channel.mjs --record <build-record.json> [--registry <prefix; defaults to record api prefix>] [--out <dir; defaults beside record>] [--dry-run] [--confirm-absent <exact destination ref; repeatable>] [--timeout-ms <boot-stage timeout>] — writes release.json locally and publishes its manifest image last';
 

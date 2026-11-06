@@ -856,3 +856,16 @@ test('failed local tag cleanup is reported and keeps exit 2', async (t) => {
   assert.equal(await f.invoke(['--registry', LOCAL_TEST_PREFIX]), 2);
   assert.match(f.logs.join('\n'), /cleanup failed.*local tag.*customer-worker/);
 });
+
+for (const word of ['connections', 'timeouts', 'networks', 'certificates', 'credential helpers']) {
+  test(`plural transport diagnostic ${word} refuses even alongside an exact absence line`, async (t) => {
+    const f = fixture(t, {
+      request: async () => ({ status: 403 }),
+      inspectError: (ref) => `ERROR: ${ref}: not found\nmultiple ${word} failed`,
+    });
+    assert.equal(await f.invoke(['--dry-run', '--confirm-absent', destination('api')]), 2);
+    assert.deepEqual(f.attempted, []);
+    assert.equal(f.requests.length, 0);
+    assert.match(f.logs.join('\n'), /absence of .*could not be proven/);
+  });
+}
