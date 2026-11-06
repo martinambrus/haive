@@ -257,6 +257,62 @@ describe('fetch and pin a module source', () => {
       expect(resolved).toHaveBeenCalledWith(sha, 'refs/tags/v1');
     },
   );
+  it('keeps the recorded branch namespace when a same-named tag appears', async () => {
+    setup();
+    const previous = git.getMockImplementation()!;
+    git.mockImplementation(async (cwd: string, args: string[], env: unknown, io: unknown) => {
+      if (args.includes('ls-remote')) throw new Error('Recorded namespace must not be re-resolved');
+      if (args.includes('fetch') && args.at(-1) === sha)
+        return { code: 1, stdout: '', stderr: 'object wants not supported' };
+      return previous(cwd, args, env, io);
+    });
+    const resolved = vi.fn();
+    await expect(
+      fetchModuleSource(
+        { ...source, resolvedSha: sha, resolvedRef: 'refs/heads/main' },
+        null,
+        vi.fn(),
+        resolved,
+      ),
+    ).resolves.toBe(sha);
+    expect(resolved).toHaveBeenCalledWith(sha, 'refs/heads/main');
+    expect(
+      git.mock.calls.filter(([, args]) => args.includes('fetch')).map(([, args]) => args.at(-1)),
+    ).toEqual([sha, 'refs/heads/main']);
+  });
+  it.each([null, 'refs/heads/main', 'refs/tags/main'])(
+    'reports a deleted pinned ref consistently with recorded namespace %s',
+    async (resolvedRef) => {
+      setup();
+      const previous = git.getMockImplementation()!;
+      git.mockImplementation(async (cwd: string, args: string[], env: unknown, io: unknown) => {
+        if (args.includes('ls-remote')) return { code: 0, stdout: '', stderr: '' };
+        if (args.includes('fetch'))
+          return { code: 128, stdout: '', stderr: "couldn't find remote ref" };
+        return previous(cwd, args, env, io);
+      });
+      const pin = vi.fn();
+      const resolved = vi.fn();
+      await expect(
+        fetchModuleSource({ ...source, resolvedSha: sha, resolvedRef }, null, pin, resolved),
+      ).rejects.toThrow('module_source_ref_unavailable: Module branch or tag was not found');
+      expect(resolved).not.toHaveBeenCalled();
+      expect(pin).not.toHaveBeenCalled();
+      expect(git.mock.calls.some(([, args]) => args.includes('checkout'))).toBe(false);
+    },
+  );
+  it.each(['refs/remotes/origin/main', 'refs/heads/other', 'refs/tags/other'])(
+    'rejects invalid recorded namespace %s before git',
+    async (resolvedRef) => {
+      setup();
+      const resolved = vi.fn();
+      await expect(
+        fetchModuleSource({ ...source, resolvedSha: sha, resolvedRef }, null, vi.fn(), resolved),
+      ).rejects.toThrow('Invalid recorded ref namespace');
+      expect(git).not.toHaveBeenCalled();
+      expect(resolved).not.toHaveBeenCalled();
+    },
+  );
   it('refuses a moved fallback ref rather than replacing the pinned commit', async () => {
     setup();
     const previous = git.getMockImplementation()!;

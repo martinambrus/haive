@@ -286,9 +286,8 @@ export async function fetchModuleSource(
     const byObject = await fetch(sha);
     if (byObject.code !== 0) {
       if (!qualifiedRef) await listRefs();
-      if (!qualifiedRef)
+      if (!qualifiedRef || (await fetch(qualifiedRef)).code !== 0)
         throw new Error('module_source_ref_unavailable: Module branch or tag was not found');
-      output(await fetch(qualifiedRef));
     }
     const commit = await run(['rev-parse', '--verify', '--end-of-options', 'FETCH_HEAD^{commit}']);
     if (commit !== sha)
