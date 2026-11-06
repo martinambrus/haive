@@ -23,13 +23,20 @@ const PREFIX = '127.0.0.1:5050/vendor';
 const IDS = Object.fromEntries(
   DESTINATIONS.map((host, i) => [host, `sha256:${String(i + 1).repeat(64)}`]),
 );
+const configBodies = Object.fromEntries(
+  DESTINATIONS.map((host) => [
+    host,
+    JSON.stringify({ os: 'linux', architecture: 'amd64', config: { Labels: { host } } }),
+  ]),
+);
+const sha256 = (raw) => `sha256:${createHash('sha256').update(raw).digest('hex')}`;
 const bodies = Object.fromEntries(
   DESTINATIONS.map((host) => [
     host,
     JSON.stringify({
       schemaVersion: 2,
       mediaType: 'application/vnd.oci.image.manifest.v1+json',
-      config: { digest: IDS[host] },
+      config: { digest: sha256(configBodies[host]) },
       layers: [{ digest: `sha256:${'a'.repeat(64)}` }],
     }),
   ]),
@@ -43,6 +50,21 @@ const digests = Object.fromEntries(
 const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
 
 function fixture(t, config = {}) {
+  const archiveConfigs = {
+    ...configBodies,
+    ...(config.stockConfig ? { web: JSON.stringify(config.stockConfig) } : {}),
+  };
+  const archiveBodies = Object.fromEntries(
+    DESTINATIONS.map((host) => {
+      const manifest = JSON.parse(bodies[host]);
+      manifest.config.digest = sha256(archiveConfigs[host]);
+      config.editManifest?.(manifest, host);
+      return [host, JSON.stringify(manifest)];
+    }),
+  );
+  const archiveDigests = Object.fromEntries(
+    DESTINATIONS.map((host) => [host, sha256(archiveBodies[host])]),
+  );
   const dir = mkdtempSync(join(tmpdir(), 't352-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const root = join(dir, 'repo');
@@ -176,10 +198,14 @@ function fixture(t, config = {}) {
         const ref = args.at(-1);
         if (args.includes('--raw')) {
           assert.equal(ref, record.images.web.repoDigest);
+          if (config.singleManifestRemote) return ok(archiveBodies.web);
           return ok(
             JSON.stringify({
               manifests: [
-                { digest: digests.web, platform: { os: 'linux', architecture: 'amd64' } },
+                {
+                  digest: archiveDigests.web,
+                  platform: { os: 'linux', architecture: record.platform.split('/')[1] },
+                },
               ],
             }),
           );
@@ -197,7 +223,9 @@ function fixture(t, config = {}) {
           if (KEYS.includes(host) && published.has(host) && config.rereadMismatch !== host)
             runtimeDigestsRead.add(host);
           return ok(
-            JSON.stringify({ digest: config.rereadMismatch === host ? IDS.api : digests[host] }),
+            JSON.stringify({
+              digest: config.rereadMismatch === host ? IDS.api : archiveDigests[host],
+            }),
           );
         }
         if (config.rereadFailure === host && attempted.includes(host)) return { status: 1 };
@@ -221,7 +249,7 @@ function fixture(t, config = {}) {
         }
         if (copy) {
           assert.ok(args.includes('--prefer-index=false'));
-          assert.equal(args.at(-1), `${PREFIX}/haive-web@${digests.web}`);
+          assert.equal(args.at(-1), `${PREFIX}/haive-web@${archiveDigests.web}`);
         } else assert.equal(args[args.indexOf('--platform') + 1], record.platform);
         if (config.rereadFailure !== host) published.add(host);
         if (config.prematureManifest && host === 'builder')
@@ -232,23 +260,45 @@ function fixture(t, config = {}) {
     }
     if (cmd === 'tar' && args.includes('-xOf')) {
       if (args.at(-1) === 'index.json') {
+        const entries = [
+          {
+            digest: archiveDigests[archiveHost],
+            platform: { os: 'linux', architecture: record.platform.split('/')[1] },
+          },
+          ...(config.platformArtifacts && archiveHost === 'web'
+            ? [
+                {
+                  digest: IDS.web,
+                  artifactType: 'application/vnd.docker.attestation.manifest.v1+json',
+                },
+                {
+                  digest: IDS.web,
+                  annotations: { 'vnd.docker.reference.type': 'attestation-manifest' },
+                },
+              ]
+            : []),
+        ];
+        config.editIndex?.(entries, archiveHost);
         return ok(
           JSON.stringify({
-            manifests: [
-              { digest: digests[archiveHost], platform: { os: 'linux', architecture: 'amd64' } },
-              ...(config.platformArtifacts && archiveHost === 'web'
-                ? [
-                    {
-                      digest: IDS.web,
-                      artifactType: 'application/vnd.docker.attestation.manifest.v1+json',
-                    },
-                  ]
-                : []),
-            ],
+            manifests: entries,
           }),
         );
       }
-      return ok(config.corruptManifest ? '{}' : bodies[archiveHost]);
+      if (args.at(-1) === `blobs/sha256/${sha256(archiveConfigs[archiveHost]).slice(7)}`) {
+        if (config.missingConfig) return { status: 1, stderr: 'config blob not found' };
+        return ok(
+          config.corruptConfig
+            ? JSON.stringify({ ...JSON.parse(archiveConfigs[archiveHost]), corrupted: true })
+            : archiveConfigs[archiveHost],
+        );
+      }
+      assert.equal(args.at(-1), `blobs/sha256/${archiveDigests[archiveHost].slice(7)}`);
+      return ok(
+        config.corruptManifest === true || config.corruptManifest === archiveHost
+          ? '{}'
+          : archiveBodies[archiveHost],
+      );
     }
     return spawnSync(cmd, args, { ...options, encoding: 'utf8' });
   };
@@ -276,6 +326,7 @@ function fixture(t, config = {}) {
     out,
     manifest,
     record,
+    digests: archiveDigests,
     calls,
     requests,
     logs,
@@ -446,6 +497,222 @@ test('a pulled OCI 1.1 web archive may also hold a subject attestation', async (
     JSON.parse(readFileSync(f.manifest, 'utf8')).images.web,
     `${PREFIX}/haive-customer-web@${digests.web}`,
   );
+});
+
+const omitStockPlatform = (entries, host) => {
+  if (host === 'web') delete entries[0].platform;
+};
+
+for (const platformArtifacts of [false, true]) {
+  test(`platform-less stock archive publishes with verified config (artifacts: ${platformArtifacts})`, async (t) => {
+    const f = fixture(t, { editIndex: omitStockPlatform, platformArtifacts });
+    assert.equal(await f.invoke(), 0, f.logs.join('\n'));
+    assert.deepEqual(f.attempted, DESTINATIONS);
+    assert.equal(
+      JSON.parse(readFileSync(f.manifest, 'utf8')).images.web,
+      `${PREFIX}/haive-customer-web@${digests.web}`,
+    );
+    assert.ok(
+      f.calls.some(
+        ({ cmd, args }) =>
+          cmd === 'tar' && args.at(-1) === `blobs/sha256/${sha256(configBodies.web).slice(7)}`,
+      ),
+      'the config is read from the saved archive by its digest',
+    );
+  });
+}
+
+test('platform-less arm64 stock config matches an arm64 record', async (t) => {
+  const f = fixture(t, {
+    editIndex: omitStockPlatform,
+    stockConfig: { os: 'linux', architecture: 'arm64' },
+    editRecord: (record) => {
+      record.platform = 'linux/arm64';
+    },
+  });
+  assert.equal(await f.invoke(), 0, f.logs.join('\n'));
+  assert.deepEqual(f.attempted, DESTINATIONS);
+  assert.equal(
+    JSON.parse(readFileSync(f.manifest, 'utf8')).images.web,
+    `${PREFIX}/haive-customer-web@${f.digests.web}`,
+  );
+});
+
+for (const [name, edit] of [
+  [
+    'a non-matching platform',
+    (entries) => {
+      entries[0].platform = { os: 'linux', architecture: 'arm64' };
+    },
+  ],
+  [
+    'a null platform',
+    (entries) => {
+      entries[0].platform = null;
+    },
+  ],
+  [
+    'an empty platform',
+    (entries) => {
+      entries[0].platform = {};
+    },
+  ],
+  [
+    'two platform-less entries',
+    (entries) => {
+      delete entries[0].platform;
+      entries.push({ ...entries[0] });
+    },
+  ],
+  [
+    'a platform-less entry beside a non-matching platform',
+    (entries) => {
+      delete entries[0].platform;
+      entries.push({ digest: digests.web, platform: { os: 'linux', architecture: 'arm64' } });
+    },
+  ],
+  [
+    'no manifest entries',
+    (entries) => {
+      entries.length = 0;
+    },
+  ],
+  [
+    'two matching platforms',
+    (entries) => {
+      entries.push({ ...entries[0] });
+    },
+  ],
+]) {
+  test(`stock archive refuses ${name} before any push`, async (t) => {
+    const f = fixture(t, {
+      editIndex: (entries, host) => {
+        if (host === 'web') edit(entries);
+      },
+    });
+    assert.equal(await f.invoke(), 2, f.logs.join('\n'));
+    assert.deepEqual(f.attempted, []);
+    assert.ok(!existsSync(f.manifest));
+    assert.match(f.logs.join('\n'), /cannot identify one gated platform manifest for web/);
+  });
+}
+
+for (const [name, config, error] of [
+  [
+    'config os mismatch',
+    { stockConfig: { os: 'windows', architecture: 'amd64' } },
+    /invalid gated platform config for web/,
+  ],
+  [
+    'config architecture mismatch',
+    { stockConfig: { os: 'linux', architecture: 'arm64' } },
+    /invalid gated platform config for web/,
+  ],
+  ['config digest mismatch', { corruptConfig: true }, /invalid gated platform config for web/],
+  ['missing config blob', { missingConfig: true }, /tar -xOf failed/],
+  [
+    'malformed config digest',
+    {
+      editManifest: (manifest, host) => {
+        if (host === 'web') manifest.config.digest = '../config';
+      },
+    },
+    /invalid gated platform config for web/,
+  ],
+  [
+    'manifest digest mismatch',
+    { corruptManifest: 'web' },
+    /invalid gated platform manifest for web/,
+  ],
+  ...[
+    [
+      'artifact type',
+      (m) => {
+        m.artifactType = 'application/example';
+      },
+    ],
+    [
+      'subject',
+      (m) => {
+        m.subject = { digest: IDS.web };
+      },
+    ],
+    [
+      'missing config',
+      (m) => {
+        delete m.config;
+      },
+    ],
+    [
+      'invalid layers',
+      (m) => {
+        m.layers = {};
+      },
+    ],
+    [
+      'invalid media type',
+      (m) => {
+        m.mediaType = 'application/example';
+      },
+    ],
+  ].map(([name, edit]) => [
+    name,
+    {
+      editManifest: (manifest, host) => {
+        if (host === 'web') edit(manifest);
+      },
+    },
+    /invalid gated platform manifest for web/,
+  ]),
+]) {
+  test(`platform-less stock archive refuses ${name} before any push`, async (t) => {
+    const f = fixture(t, { editIndex: omitStockPlatform, ...config });
+    assert.equal(await f.invoke(), 2, f.logs.join('\n'));
+    assert.deepEqual(f.attempted, []);
+    assert.ok(!existsSync(f.manifest));
+    assert.match(f.logs.join('\n'), error);
+  });
+}
+
+for (const platformless of [false, true]) {
+  test(`single-manifest stock remote accepts its exact repoDigest (platform-less archive: ${platformless})`, async (t) => {
+    const f = fixture(t, {
+      singleManifestRemote: true,
+      ...(platformless ? { editIndex: omitStockPlatform } : {}),
+      editRecord: (record) => {
+        record.images.web.repoDigest = `${PREFIX}/haive-web@${digests.web}`;
+      },
+    });
+    assert.equal(await f.invoke(), 0, f.logs.join('\n'));
+    assert.deepEqual(f.attempted, DESTINATIONS);
+  });
+
+  test(`single-manifest stock remote refuses a different repoDigest (platform-less archive: ${platformless})`, async (t) => {
+    const f = fixture(t, {
+      singleManifestRemote: true,
+      ...(platformless ? { editIndex: omitStockPlatform } : {}),
+    });
+    assert.equal(await f.invoke(), 2, f.logs.join('\n'));
+    assert.deepEqual(f.attempted, []);
+    assert.ok(!existsSync(f.manifest));
+    assert.match(
+      f.logs.join('\n'),
+      /stock web repoDigest does not contain the gated platform manifest/,
+    );
+  });
+}
+
+test('a platform variant in the record is refused before gates or pushes', async (t) => {
+  const f = fixture(t, {
+    editIndex: omitStockPlatform,
+    editRecord: (record) => {
+      record.platform = 'linux/arm64/v8';
+    },
+  });
+  assert.equal(await f.invoke(), 2);
+  assert.deepEqual(f.attempted, []);
+  assert.equal(f.bootCalls.length, 0);
+  assert.match(f.logs.join('\n'), /record has an invalid platform/);
 });
 
 test('contracting migrations are derived from the record commit', async (t) => {

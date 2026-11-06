@@ -320,14 +320,20 @@ export async function run(
       const archive = join(scratch, `${host}.tar`);
       await docker(['image', 'save', '--platform', record.platform, '--output', archive, image.id]);
       const index = JSON.parse((await command('tar', ['-xOf', archive, 'index.json'])).stdout);
-      const candidates = index.manifests?.filter(
+      const manifests = index.manifests?.filter(
         (entry) =>
           !entry.artifactType &&
-          entry.annotations?.['vnd.docker.reference.type'] !== 'attestation-manifest' &&
-          `${entry.platform?.os}/${entry.platform?.architecture}` === record.platform,
+          entry.annotations?.['vnd.docker.reference.type'] !== 'attestation-manifest',
       );
-      const descriptor = candidates?.[0];
-      if (candidates?.length !== 1 || !DIGEST.test(descriptor?.digest))
+      const candidates = manifests?.filter(
+        (entry) => `${entry.platform?.os}/${entry.platform?.architecture}` === record.platform,
+      );
+      const platformless =
+        candidates?.length === 0 &&
+        manifests.length === 1 &&
+        !Object.hasOwn(manifests[0], 'platform');
+      const descriptor = platformless ? manifests[0] : candidates?.[0];
+      if ((!platformless && candidates?.length !== 1) || !DIGEST.test(descriptor?.digest))
         throw new Error(`cannot identify one gated platform manifest for ${host}`);
       const raw = (
         await command('tar', ['-xOf', archive, `blobs/sha256/${descriptor.digest.slice(7)}`])
@@ -345,6 +351,21 @@ export async function run(
         ].includes(manifest.mediaType)
       )
         throw new Error(`invalid gated platform manifest for ${host}`);
+      if (platformless) {
+        if (!DIGEST.test(manifest.config.digest))
+          throw new Error(`invalid gated platform config for ${host}`);
+        const rawConfig = (
+          await command('tar', ['-xOf', archive, `blobs/sha256/${manifest.config.digest.slice(7)}`])
+        ).stdout;
+        const config = JSON.parse(rawConfig);
+        // parseRecord admits only os/architecture, matching the descriptor comparison above.
+        if (
+          `sha256:${createHash('sha256').update(rawConfig).digest('hex')}` !==
+            manifest.config.digest ||
+          `${config.os}/${config.architecture}` !== record.platform
+        )
+          throw new Error(`invalid gated platform config for ${host}`);
+      }
       rmSync(archive, { force: true });
       return descriptor.digest;
     };
