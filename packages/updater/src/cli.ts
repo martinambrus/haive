@@ -327,7 +327,7 @@ export async function main(): Promise<number> {
     if (channel !== 'public') channelImagePlan(target.version, imageSettings, target.images);
 
     const previousImages = await readImageOverrides(envFile, imageSettings);
-    if (channel !== 'public' && Object.values(previousImages).every((ref) => !ref)) {
+    if (channel !== 'public' && Object.values(previousImages).some((ref) => !ref)) {
       emit('refused', {
         refusal: 'rollback-images-missing',
         message: 'channel install has no pinned current images',

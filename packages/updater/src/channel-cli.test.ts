@@ -235,22 +235,27 @@ it('rollback pins use the settings refreshed after taking the lock', async () =>
   expect(images.readImageSettings).toHaveBeenCalledTimes(2);
 });
 
-it('an unpinned channel refuses before inventory without naming public image refs', async () => {
-  vi.mocked(images.readImageSettings).mockResolvedValue({
-    ...settings,
-    ...images.emptyOverrides(),
-  });
-  expect(await main()).toBe(3);
-  const output = vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line)));
-  expect(output).toContainEqual(
-    expect.objectContaining({
-      event: 'refused',
-      message: 'channel install has no pinned current images',
-    }),
-  );
-  expect(JSON.stringify(output)).not.toContain('ghcr.io/martinambrus/haive-');
-  expect(dk.localImages).not.toHaveBeenCalled();
-});
+it.each([0, 1, 2, 3, 4, 5, 6])(
+  'channel pin mask %i refuses before inventory without naming public refs',
+  async (mask) => {
+    vi.mocked(images.readImageSettings).mockResolvedValue({
+      ...settings,
+      HAIVE_API_IMAGE: mask & 1 ? settings.HAIVE_API_IMAGE : '',
+      HAIVE_WORKER_IMAGE: mask & 2 ? settings.HAIVE_WORKER_IMAGE : '',
+      HAIVE_WEB_IMAGE: mask & 4 ? settings.HAIVE_WEB_IMAGE : '',
+    });
+    expect(await main()).toBe(3);
+    const output = vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line)));
+    expect(output).toContainEqual(
+      expect.objectContaining({
+        event: 'refused',
+        message: 'channel install has no pinned current images',
+      }),
+    );
+    expect(JSON.stringify(output)).not.toContain('ghcr.io/martinambrus/haive-');
+    expect(dk.localImages).not.toHaveBeenCalled();
+  },
+);
 it('an unpinned public install retains its original tag-based preflight', async () => {
   process.argv = [
     'node',
