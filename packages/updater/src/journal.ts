@@ -75,6 +75,24 @@ export async function startRun(
   return rows[0]!.id;
 }
 
+/** A terminal preflight attempt is history only: it can neither resume nor pin a channel. */
+export async function recordAttempt(
+  sql: Sql,
+  entry: {
+    fromVersion: string;
+    toVersion: string;
+    channel: string;
+    status: 'refused' | 'failed';
+    error: string;
+    metadata: RunMetadata;
+  },
+): Promise<void> {
+  await sql`
+    INSERT INTO upgrade_runs (from_version, to_version, channel, phase, status, error, metadata, ended_at)
+    VALUES (${entry.fromVersion}, ${entry.toVersion}, ${entry.channel}, 'preflight', ${entry.status},
+            ${entry.error}, ${sql.json(entry.metadata)}, now())`;
+}
+
 /** Record the phase BEFORE doing it. A journal written after the fact cannot say what was in
  *  progress when the process died, which is the only question it exists to answer. */
 export async function enterPhase(sql: Sql, id: string, phase: UpgradePhase): Promise<void> {

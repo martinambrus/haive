@@ -3,6 +3,7 @@ import { readFile, realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import postgres from 'postgres';
+import { safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
 import { configService, networkName } from '@haive/shared';
 import { CHANNEL_PATTERN, parseReleaseManifest, type ReleaseManifest } from '@haive/shared/release';
 import * as dk from './docker.js';
@@ -11,6 +12,7 @@ import {
   findLiveRun,
   lastDoneChannel,
   recordRunError,
+  recordAttempt,
   startRun,
   tryLock,
 } from './journal.js';
@@ -191,27 +193,34 @@ export async function main(): Promise<number> {
     files: ['docker-compose.yml', 'docker-compose.run.yml'],
   };
 
-  let imageSettings = await readImageSettings(envFile);
-  const channel = resolveChannel(arg('channel'), imageSettings.HAIVE_CHANNEL);
-  const manifestOptions = {
-    manifest: arg('manifest'),
-    manifestImage: arg('manifest-image'),
-    channelRegistry: imageSettings.HAIVE_CHANNEL_REGISTRY,
-    channel,
-    version: arg('version'),
-  };
-  // Recovery needs no target, so a missing one is refused only where a target is read.
-  const missingTarget = (): string | undefined =>
-    channel !== 'public' && !manifestOptions.manifestImage
-      ? 'channel installs require --manifest-image'
-      : !manifestOptions.manifest && !manifestOptions.manifestImage
-        ? '--manifest <url|path> or --manifest-image <ref> is required'
-        : undefined;
+  let channel = 'public';
   const launchDockerConfig = process.env.DOCKER_CONFIG;
-  applyInstallDockerConfig(imageSettings, installDir, launchDockerConfig);
+  const readInstall = async () => {
+    const imageSettings = await readImageSettings(envFile);
+    channel = imageSettings.HAIVE_CHANNEL || 'public';
+    resolveChannel(arg('channel'), imageSettings.HAIVE_CHANNEL);
+    const manifestOptions = {
+      manifest: arg('manifest'),
+      manifestImage: arg('manifest-image'),
+      channelRegistry: imageSettings.HAIVE_CHANNEL_REGISTRY,
+      channel,
+      version: arg('version'),
+    };
+    // Recovery needs no target, so a missing one is refused only where a target is read.
+    const missingTarget = (): string | undefined =>
+      channel !== 'public' && !manifestOptions.manifestImage
+        ? 'channel installs require --manifest-image'
+        : !manifestOptions.manifest && !manifestOptions.manifestImage
+          ? '--manifest <url|path> or --manifest-image <ref> is required'
+          : undefined;
+    applyInstallDockerConfig(imageSettings, installDir, launchDockerConfig);
+
+    return { imageSettings, manifestOptions, missingTarget };
+  };
 
   // The dry plan reads no journal. Normal starts recover an interrupted run before fetching a target.
   if (flag('dry-plan')) {
+    const { imageSettings, manifestOptions, missingTarget } = await readInstall();
     if (channel === 'public') {
       emit('error', { message: '--dry-plan requires a channel install' });
       return EXIT.usage;
@@ -230,6 +239,27 @@ export async function main(): Promise<number> {
     return EXIT.ok;
   }
 
+  let locked = false;
+  let hasRun = false;
+  let fromVersion = 'unknown';
+  let toVersion = arg('version') ?? 'unknown';
+  let terminal:
+    | {
+        status: 'refused' | 'failed';
+        error: string;
+        metadata: { refusal?: string };
+      }
+    | undefined;
+  const report = (event: string, fields: Record<string, unknown> = {}) => {
+    if (event === 'refused' || event === 'error') {
+      terminal = {
+        status: event === 'refused' ? 'refused' : 'failed',
+        error: String(fields.message ?? 'unknown error'),
+        metadata: typeof fields.refusal === 'string' ? { refusal: fields.refusal } : {},
+      };
+    }
+    emit(event, fields);
+  };
   const sql = postgres(databaseUrl!, { max: 1, max_lifetime: 0 });
   try {
     await configService.initialize(redisUrl!);
@@ -238,18 +268,15 @@ export async function main(): Promise<number> {
     // One upgrade at a time. The lock guards concurrency; the journal's partial unique index is
     // what survives a crashed updater, and is why an interrupted run is FOUND rather than raced.
     if (!(await tryLock(sql))) {
-      emit('error', { message: 'another upgrade holds the lock' });
+      report('error', { message: 'another upgrade holds the lock' });
       return EXIT.busy;
     }
 
-    // A preceding upgrader may have changed the pins while this run waited for the lock.
-    imageSettings = await readImageSettings(envFile);
-    resolveChannel(channel, imageSettings.HAIVE_CHANNEL);
-    manifestOptions.channelRegistry = imageSettings.HAIVE_CHANNEL_REGISTRY;
-    applyInstallDockerConfig(imageSettings, installDir, launchDockerConfig);
-
-    const fromVersion = (await readEnvVar(envFile, 'HAIVE_VERSION')) ?? 'unknown';
+    locked = true;
     const live = await findLiveRun(sql);
+    hasRun = live !== null;
+    fromVersion = (await readEnvVar(envFile, 'HAIVE_VERSION')) ?? 'unknown';
+    const { imageSettings, manifestOptions, missingTarget } = await readInstall();
 
     // An interrupted run is finished or undone before anything new is considered. Starting a
     // second upgrade over a half-finished one is the one thing that must never happen.
@@ -292,11 +319,11 @@ export async function main(): Promise<number> {
     const changeChannel = arg('change-channel');
     if (flag('change-channel')) {
       if (!changeChannel || !CHANNEL_PATTERN.test(changeChannel)) {
-        emit('error', { message: '--change-channel requires a valid recorded channel name' });
+        report('error', { message: '--change-channel requires a valid recorded channel name' });
         return EXIT.usage;
       }
       if (recordedChannel === null || recordedChannel === channel) {
-        emit('error', {
+        report('error', {
           message:
             '--change-channel requires a recorded channel different from the current channel',
         });
@@ -308,7 +335,7 @@ export async function main(): Promise<number> {
       recordedChannel !== channel &&
       changeChannel !== recordedChannel
     ) {
-      emit('refused', {
+      report('refused', {
         refusal: 'channel-changed',
         message:
           `upgrade journal records channel ${recordedChannel}, but the resolved channel is ${channel}; ` +
@@ -319,16 +346,17 @@ export async function main(): Promise<number> {
 
     const usage = missingTarget();
     if (usage) {
-      emit('error', { message: usage });
+      report('error', { message: usage });
       return EXIT.usage;
     }
     const target = await loadManifest(manifestOptions);
+    toVersion = target.version;
 
     if (channel !== 'public') channelImagePlan(target.version, imageSettings, target.images);
 
     const previousImages = await readImageOverrides(envFile, imageSettings);
     if (channel !== 'public' && Object.values(previousImages).some((ref) => !ref)) {
-      emit('refused', {
+      report('refused', {
         refusal: 'rollback-images-missing',
         message: 'channel install has no pinned current images',
       });
@@ -348,16 +376,16 @@ export async function main(): Promise<number> {
       snapshotBytes: Number(arg('snapshot-bytes', '0')),
     });
     if (!check.ok) {
-      emit('refused', { refusal: check.refusal, message: check.message });
+      report('refused', { refusal: check.refusal, message: check.message });
       return EXIT.refused;
     }
-    emit('preflight-ok', { from: fromVersion, to: target.version });
+    report('preflight-ok', { from: fromVersion, to: target.version });
 
     // `--check` stops here, having changed nothing. This is also where a support conversation
     // should begin.
     if (flag('check')) {
       if (channel !== 'public')
-        emit('image-plan', channelImagePlan(target.version, imageSettings, target.images));
+        report('image-plan', channelImagePlan(target.version, imageSettings, target.images));
       return EXIT.ok;
     }
 
@@ -370,7 +398,7 @@ export async function main(): Promise<number> {
       imageSettings,
       channel !== 'public' ? target.images : undefined,
     );
-    emit('pulled', { version: target.version });
+    report('pulled', { version: target.version });
 
     const runId = await startRun(sql, {
       fromVersion,
@@ -384,6 +412,7 @@ export async function main(): Promise<number> {
       },
     });
 
+    hasRun = true;
     const ctx: UpgradeContext = {
       sql,
       runId,
@@ -411,14 +440,14 @@ export async function main(): Promise<number> {
         const file = await phaseSnapshot(ctx);
         await recordSnapshot(ctx, file);
       } else {
-        emit('snapshot-skipped', { reason: 'no --postgres-volume given' });
+        report('snapshot-skipped', { reason: 'no --postgres-volume given' });
       }
       await phaseMigrate(ctx);
 
       verifyFailed = !(await phaseVerify(ctx));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      emit('error', { message });
+      report('error', { message });
       // Anything that throws before commit is reversible by construction; say so and undo it
       // rather than leaving the install held.
       return await undo(ctx, message);
@@ -433,10 +462,20 @@ export async function main(): Promise<number> {
       return EXIT.ok;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      emit('error', { message, phase: 'commit', next: 'run the updater again to finish it' });
+      report('error', { message, phase: 'commit', next: 'run the updater again to finish it' });
       return EXIT.failed;
     }
+  } catch (err) {
+    terminal = { status: 'failed', error: scrubErrorPaths(safeErrorMessage(err)), metadata: {} };
+    throw err;
   } finally {
+    if (locked && !hasRun && !flag('check') && terminal) {
+      try {
+        await recordAttempt(sql, { fromVersion, toVersion, channel, ...terminal });
+      } catch (err) {
+        emit('attempt-record-failed', { message: safeErrorMessage(err) });
+      }
+    }
     await sql.end({ timeout: 5 }).catch(() => {});
   }
 }
@@ -449,7 +488,7 @@ if (
   try {
     process.exit(await main());
   } catch (err) {
-    emit('error', { message: err instanceof Error ? err.message : String(err) });
+    emit('error', { message: scrubErrorPaths(safeErrorMessage(err)) });
     process.exit(EXIT.failed);
   }
 }

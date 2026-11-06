@@ -1,7 +1,7 @@
 import { UPGRADE_JOURNAL_DDL } from '@haive/database';
 import type { Sql } from 'postgres';
 import { describe, expect, it, vi } from 'vitest';
-import { ensureJournal, lastDoneChannel } from './journal.js';
+import { ensureJournal, lastDoneChannel, recordAttempt } from './journal.js';
 
 describe('ensureJournal', () => {
   it('runs exactly the journal DDL the database package exports', async () => {
@@ -33,4 +33,37 @@ describe('lastDoneChannel', () => {
     const sql = vi.fn(async () => []);
     expect(await lastDoneChannel(sql as unknown as Sql)).toBeNull();
   });
+});
+
+describe('recordAttempt', () => {
+  it.each(['refused', 'failed'] as const)(
+    'inserts one terminal %s row with an end timestamp',
+    async (status) => {
+      const sql = Object.assign(
+        vi.fn(async (..._args: unknown[]) => []),
+        { json: vi.fn((v: unknown) => v) },
+      );
+      await recordAttempt(sql as unknown as Sql, {
+        fromVersion: '1.0.0',
+        toVersion: '2.0.0',
+        channel: 'public',
+        status,
+        error: 'reason',
+        metadata: status === 'refused' ? { refusal: 'same-version' } : {},
+      });
+      expect(sql).toHaveBeenCalledTimes(1);
+      const [parts, ...values] = sql.mock.calls[0]!;
+      expect((parts as TemplateStringsArray).join('?').replace(/\s+/g, ' ').trim()).toBe(
+        "INSERT INTO upgrade_runs (from_version, to_version, channel, phase, status, error, metadata, ended_at) VALUES (?, ?, ?, 'preflight', ?, ?, ?, now())",
+      );
+      expect(values).toEqual([
+        '1.0.0',
+        '2.0.0',
+        'public',
+        status,
+        'reason',
+        status === 'refused' ? { refusal: 'same-version' } : {},
+      ]);
+    },
+  );
 });

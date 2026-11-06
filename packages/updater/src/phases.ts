@@ -31,7 +31,7 @@ export const UPGRADE_PHASES = [
 
 export type UpgradePhase = (typeof UPGRADE_PHASES)[number];
 
-export type RunStatus = 'running' | 'done' | 'failed' | 'rolled_back';
+export type RunStatus = 'running' | 'done' | 'failed' | 'rolled_back' | 'refused';
 
 /** What a restarted updater should do about a run it found still marked `running`. */
 export type ResumeAction =

@@ -35,7 +35,7 @@ export async function listUpgradeRuns(db: UpgradeRunDb): Promise<UpgradeRunRow[]
   if (!(await journalExists(db))) return [];
   const rows = await db.execute<UpgradeRunRow>(
     sql`SELECT id, from_version, to_version, phase, status, error, started_at, ended_at
-            FROM upgrade_runs ORDER BY started_at DESC LIMIT 20`,
+            FROM upgrade_runs ORDER BY started_at DESC, id DESC LIMIT 20`,
   );
   return rows as unknown as UpgradeRunRow[];
 }
@@ -53,4 +53,39 @@ export async function findLiveUpgradeRun(db: UpgradeRunDb): Promise<LiveUpgradeR
   const row = rows[0];
   if (!row) return null;
   return { id: row.id, fromVersion: row.from_version, toVersion: row.to_version, phase: row.phase };
+}
+
+export interface UpgradeAttempt {
+  status: 'refused' | 'failed';
+  refusal: string | null;
+  error: string | null;
+  startedAt: Date;
+  toVersion: string;
+  channel: string;
+}
+
+/** Read independently of the capped history: many refusals must not hide a newer real run. */
+export async function lastUpgradeAttempt(db: UpgradeRunDb): Promise<UpgradeAttempt | null> {
+  if (!(await journalExists(db))) return null;
+  const rows = (await db.execute<UpgradeRunRow & { channel: string; refusal: string | null }>(sql`
+    SELECT id, from_version, to_version, channel, phase, status, error, started_at, ended_at,
+           metadata ->> 'refusal' AS refusal
+      FROM upgrade_runs
+     WHERE status IN ('done', 'running', 'rolled_back')
+        OR (phase = 'preflight' AND status IN ('refused', 'failed'))
+     ORDER BY started_at DESC,
+              CASE WHEN status IN ('done', 'running', 'rolled_back') THEN 0 ELSE 1 END,
+              id DESC LIMIT 1
+  `)) as unknown as (UpgradeRunRow & { channel: string; refusal: string | null })[];
+  const row = rows[0];
+  if (!row || row.phase !== 'preflight' || (row.status !== 'refused' && row.status !== 'failed'))
+    return null;
+  return {
+    status: row.status,
+    refusal: row.refusal ?? null,
+    error: row.error,
+    startedAt: row.started_at,
+    toVersion: row.to_version,
+    channel: row.channel,
+  };
 }
