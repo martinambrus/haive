@@ -208,7 +208,8 @@ export async function gitRun(
       const finish = (code: number | null, signal?: string | null, errorCode?: string) => {
         const out = Buffer.concat(stdout).toString(output.encoding ?? 'utf8');
         const err = Buffer.concat(stderr).toString(output.encoding ?? 'utf8');
-        if (timedOut && !errorCode && !overflow) {
+        // A git that handles SIGTERM and exits by itself still supplies a real answer.
+        if (timedOut && code === null && !errorCode && !overflow) {
           resolve({
             stdout: out,
             stderr: withLine(err, timedOutLine(argv, timeout)),
@@ -231,6 +232,7 @@ export async function gitRun(
       child.once('close', (code, signal) => finish(code, signal));
       if (timeout > 0)
         timer = setTimeout(() => {
+          if (child.exitCode !== null || child.signalCode !== null) return;
           timedOut = true;
           if (abortWait) abortWait.stop();
           else stop();
