@@ -232,10 +232,58 @@ read_channel_manifest() {
   trap 'exit 1' HUP INT TERM
   mkdir "$CHANNEL_SCRATCH/.docker"
   chmod 700 "$CHANNEL_SCRATCH/.docker"
+  CHANNEL_USER_CONFIG=${DOCKER_CONFIG:-${HOME:-/}/.docker}
+  CHANNEL_CONTEXT=''
+  if [ -f "$CHANNEL_USER_CONFIG/config.json" ]; then
+    # Copy only the top-level selection, preserving its JSON string escaping. Never
+    # copy the user config itself: it may name auths or credential helpers.
+    CHANNEL_CONTEXT=$(LC_ALL=C awk '
+      { s=s $0 "\n" }
+      END {
+        depth=0
+        for(p=1;p<=length(s);p++) {
+          c=substr(s,p,1)
+          if(c=="\"") {
+            start=p++
+            while(p<=length(s)) {
+              c=substr(s,p,1)
+              if(c=="\\") p++
+              else if(c=="\"") break
+              p++
+            }
+            token=substr(s,start,p-start+1)
+            if(depth==1 && token=="\"currentContext\"") {
+              q=p+1; while(substr(s,q,1) ~ /[ \t\r\n]/) q++
+              if(substr(s,q,1)!=":") continue
+              p=q+1
+              while(substr(s,p,1) ~ /[ \t\r\n]/) p++
+              if(substr(s,p,1)!="\"") exit 1
+              start=p++
+              while(p<=length(s)) {
+                c=substr(s,p,1)
+                if(c=="\\") p++
+                else if(c=="\"") { print substr(s,start,p-start+1); exit }
+                p++
+              }
+              exit 1
+            }
+          } else if(c=="{" || c=="[") depth++
+          else if(c=="}" || c=="]") depth--
+        }
+      }
+    ' "$CHANNEL_USER_CONFIG/config.json") || die "cannot read Docker currentContext"
+  fi
+  if [ -d "$CHANNEL_USER_CONFIG/contexts" ]; then
+    cp -R "$CHANNEL_USER_CONFIG/contexts" "$CHANNEL_SCRATCH/.docker/contexts"
+    chmod -R go-rwx "$CHANNEL_SCRATCH/.docker/contexts"
+  fi
   export DOCKER_CONFIG="$CHANNEL_SCRATCH/.docker"
   # A nonempty auth map prevents Docker from automatically selecting a Desktop credential
   # helper. Login replaces this empty credential; this config must remain self-contained.
   printf '{"auths":{"%s":{"auth":"Og=="}}}\n' "${CHANNEL_REGISTRY%%/*}" > "$DOCKER_CONFIG/config.json"
+  if [ -n "$CHANNEL_CONTEXT" ]; then
+    printf '{"auths":{"%s":{"auth":"Og=="}},"currentContext":%s}\n' "${CHANNEL_REGISTRY%%/*}" "$CHANNEL_CONTEXT" > "$DOCKER_CONFIG/config.json"
+  fi
   chmod 600 "$DOCKER_CONFIG/config.json"
   [ -n "$REGISTRY_USER" ] || die "--registry-user is required for a channel install"
   if [ -z "$REGISTRY_TOKEN" ]; then
@@ -574,6 +622,23 @@ fi
 
 if [ "$CHANNEL" != "public" ]; then
   [ ! -e .docker ] && [ ! -L .docker ] || die "$INSTALL_DIR/.docker already exists; choose a clean install directory"
+  # The helper also uses this config. Keep nondefault contexts so it reaches the
+  # same daemon; default-daemon installs retain only the channel credential.
+  case "$CHANNEL_CONTEXT" in
+    ''|'""'|'"default"')
+      if [ -z "${DOCKER_CONTEXT:-}" ] || [ "$DOCKER_CONTEXT" = default ]; then
+        rm -rf "$DOCKER_CONFIG/contexts"
+        awk '
+          { s=s $0 "\n" }
+          END {
+            gsub(/,[ \t\r\n]*"currentContext"[ \t\r\n]*:[ \t\r\n]*"(default)?"/, "", s)
+            gsub(/"currentContext"[ \t\r\n]*:[ \t\r\n]*"(default)?"[ \t\r\n]*,/, "", s)
+            printf "%s", s
+          }
+        ' "$DOCKER_CONFIG/config.json" > "$CHANNEL_SCRATCH/config.json"
+        mv "$CHANNEL_SCRATCH/config.json" "$DOCKER_CONFIG/config.json"
+      fi ;;
+  esac
   mv "$CHANNEL_SCRATCH/.docker" .docker
   export DOCKER_CONFIG="$INSTALL_DIR/.docker"
 fi

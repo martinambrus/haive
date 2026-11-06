@@ -39,7 +39,7 @@ printf '\\n' >> "$CALLS"
 if [ "$EXPECT_CHANNEL" = 1 ] && [ -n "$HAIVE_REGISTRY_TOKEN" ]; then echo token_in_environment >&2; exit 91; fi
 case "$1" in
  run) printf '%s\\n%s\\n' "$DATABASE_URL" "$CONFIG_ENCRYPTION_KEY" > "$CASE_ROOT/updater-env" ;;
- login) cat > "$CASE_ROOT/stdin"; [ "$FAIL_AT" != login ] || exit 1; printf '{"auths":{}}' > "$DOCKER_CONFIG/config.json" ;;
+ login) cp "$DOCKER_CONFIG/config.json" "$CASE_ROOT/login-config.json"; if [ -d "$DOCKER_CONFIG/contexts" ]; then cp -R "$DOCKER_CONFIG/contexts" "$CASE_ROOT/seen-contexts"; fi; printf '%s\\n%s\\n' "$DOCKER_HOST" "$DOCKER_CONTEXT" > "$CASE_ROOT/daemon-env"; cat > "$CASE_ROOT/stdin"; [ "$FAIL_AT" != login ] || exit 1 ;;
  pull) [ "$FAIL_AT" != pull ] || exit 1 ;;
  create) [ "$FAIL_AT" != create ] || exit 1; echo unit-manifest; touch "$CASE_ROOT/container" ;;
  cp) [ "$FAIL_AT" != cp ] || exit 1; cp "$CASE_ROOT/manifest.json" "$3" ;;
@@ -141,6 +141,11 @@ function fixture(
     FAIL_AT: fail,
     EXPECT_CHANNEL: publicInstall ? '0' : '1',
     TMPDIR: root,
+    HOME: tmpdir(),
+    USERPROFILE: tmpdir(),
+    DOCKER_CONFIG: join(tmpdir(), 'installer-empty-config'),
+    DOCKER_HOST: '',
+    DOCKER_CONTEXT: '',
   };
   const invoke = (file, args) => {
     const childEnv = { ...env, EXPECT_CHANNEL: file === script ? env.EXPECT_CHANNEL : '0' };
@@ -155,13 +160,13 @@ function fixture(
     if (hostPwsh)
       return spawnSync('pwsh', ['-NoProfile', '-File', wrapper], {
         cwd: root,
-        env: { ...childEnv, USERPROFILE: '/tmp' },
+        env: childEnv,
         encoding: 'utf8',
       });
     const pass = Object.entries({
       ...childEnv,
       PATH: `${bin}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
-      USERPROFILE: '/tmp',
+      USERPROFILE: childEnv.USERPROFILE,
     })
       .filter(([key]) =>
         [
@@ -174,6 +179,10 @@ function fixture(
           'FAIL_AT',
           'EXPECT_CHANNEL',
           'TMPDIR',
+          'HOME',
+          'DOCKER_CONFIG',
+          'DOCKER_HOST',
+          'DOCKER_CONTEXT',
         ].includes(key),
       )
       .flatMap(([k, v]) => ['-e', `${k}=${v}`]);
@@ -182,6 +191,8 @@ function fixture(
       [
         'run',
         '--rm',
+        '--name',
+        `t536-installer-${process.pid}-${Math.random().toString(16).slice(2)}`,
         '--pull',
         'never',
         '--network',
@@ -251,6 +262,46 @@ for (const lang of ['sh', 'ps1']) {
         : false,
   };
   const check = (name, fn) => test(`${lang}: ${name}`, options, fn);
+  for (const selection of ['config', 'host env', 'context env', 'default'])
+    check(`daemon context preserved without user credentials: ${selection}`, () => {
+      const f = fixture(lang);
+      const userConfig = join(f.root, 'user-docker');
+      f.env.DOCKER_CONFIG = userConfig;
+      const currentContext = selection === 'default' ? 'default' : 'x';
+      const original = JSON.stringify({
+        auths: { private: { auth: 'user-secret' } },
+        credsStore: 'currentContext',
+        credHelpers: { private: 'helper' },
+        currentContext,
+      });
+      try {
+        mkdirSync(join(userConfig, 'contexts/meta/example'), { recursive: true });
+        writeFileSync(join(userConfig, 'config.json'), original);
+        writeFileSync(join(userConfig, 'contexts/meta/example/meta.json'), '{"Name":"x"}');
+        if (selection === 'host env') f.env.DOCKER_HOST = 'unix:///selected.sock';
+        if (selection === 'context env') f.env.DOCKER_CONTEXT = 'override';
+        const r = f.install();
+        assert.equal(r.status, 0, r.stdout + r.stderr);
+        const staged = JSON.parse(readFileSync(join(f.root, 'login-config.json'), 'utf8'));
+        assert.equal(staged.currentContext, currentContext);
+        assert.deepEqual(Object.keys(staged).sort(), ['auths', 'currentContext']);
+        assert.deepEqual(Object.keys(staged.auths), ['127.0.0.1:54321']);
+        assert.equal(
+          readFileSync(join(f.root, 'seen-contexts/meta/example/meta.json'), 'utf8'),
+          '{"Name":"x"}',
+        );
+        assert.equal(
+          readFileSync(join(f.root, 'daemon-env'), 'utf8'),
+          `${f.env.DOCKER_HOST}\n${f.env.DOCKER_CONTEXT}\n`,
+        );
+        assert.equal(readFileSync(join(userConfig, 'config.json'), 'utf8'), original);
+        assert.equal(existsSync(join(f.dir, '.docker/contexts')), selection !== 'default');
+        const final = JSON.parse(readFileSync(join(f.dir, '.docker/config.json'), 'utf8'));
+        assert.equal(final.currentContext, selection === 'default' ? undefined : 'x');
+      } finally {
+        f.clean();
+      }
+    });
   check('shared GNU flag spellings install the same channel', () => {
     const f = fixture(lang);
     try {

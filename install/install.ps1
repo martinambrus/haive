@@ -251,10 +251,24 @@ function Read-ChannelManifest {
     $null = New-Item -ItemType Directory -Path (Join-Path $scratch '.docker')
     Protect-RegistryCredentials $scratch
     Protect-RegistryCredentials (Join-Path $scratch '.docker')
+    $userConfig = if ($env:DOCKER_CONFIG) { $env:DOCKER_CONFIG } else { Join-Path $HOME '.docker' }
+    $script:ChannelContext = $null
+    if (Test-Path -LiteralPath (Join-Path $userConfig 'config.json')) {
+      $userSettings = [IO.File]::ReadAllText((Join-Path $userConfig 'config.json')) | ConvertFrom-Json
+      if ($userSettings.currentContext -is [string]) { $script:ChannelContext = $userSettings.currentContext }
+    }
+    if (Test-Path -LiteralPath (Join-Path $userConfig 'contexts')) {
+      Copy-Item -LiteralPath (Join-Path $userConfig 'contexts') -Destination (Join-Path $scratch '.docker/contexts') -Recurse
+    }
     $env:DOCKER_CONFIG = Join-Path $scratch '.docker'
     $server = ($ChannelRegistry -split '/')[0]
     # Prevent Docker auto-selecting a machine credential helper for an empty config.
     [IO.File]::WriteAllText((Join-Path $env:DOCKER_CONFIG 'config.json'), ('{"auths":{"' + $server + '":{"auth":"Og=="}}}'))
+    if ($null -ne $script:ChannelContext) {
+      $settings = [IO.File]::ReadAllText((Join-Path $env:DOCKER_CONFIG 'config.json')) | ConvertFrom-Json
+      $settings | Add-Member -NotePropertyName currentContext -NotePropertyValue $script:ChannelContext
+      [IO.File]::WriteAllText((Join-Path $env:DOCKER_CONFIG 'config.json'), ($settings | ConvertTo-Json -Depth 10 -Compress))
+    }
     if (-not $RegistryUser) { throw '-RegistryUser is required for a channel install' }
     if (-not $script:RegistryToken) {
       $secure = Read-Host 'Registry token' -AsSecureString
@@ -501,6 +515,14 @@ if (-not (Test-Path $envPath)) {
 if ($Channel -cne 'public') {
   if (Test-Path -LiteralPath (Join-Path $Dir '.docker')) { Remove-Item -LiteralPath $ChannelScratch -Recurse -Force; Die "$Dir/.docker already exists; choose a clean install directory" }
   try {
+    # The helper needs a nondefault context too; default-daemon installs keep
+    # only the channel credential in the final directory.
+    if ((-not $script:ChannelContext -or $script:ChannelContext -ceq 'default') -and (-not $env:DOCKER_CONTEXT -or $env:DOCKER_CONTEXT -ceq 'default')) {
+      Remove-Item -LiteralPath (Join-Path $env:DOCKER_CONFIG 'contexts') -Recurse -Force -ErrorAction SilentlyContinue
+      $settings = [IO.File]::ReadAllText((Join-Path $env:DOCKER_CONFIG 'config.json')) | ConvertFrom-Json
+      $settings.PSObject.Properties.Remove('currentContext')
+      [IO.File]::WriteAllText((Join-Path $env:DOCKER_CONFIG 'config.json'), ($settings | ConvertTo-Json -Depth 10 -Compress))
+    }
     Move-Item -LiteralPath (Join-Path $ChannelScratch '.docker') -Destination (Join-Path $Dir '.docker')
     try { Protect-RegistryCredentials (Join-Path $Dir '.docker') }
     catch { Remove-Item -LiteralPath (Join-Path $Dir '.docker') -Recurse -Force; throw }
