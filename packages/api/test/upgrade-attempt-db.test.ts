@@ -15,6 +15,7 @@ describe.skipIf(!url)('lastUpgradeAttempt on PostgreSQL', () => {
 
   it('keeps real runs visible behind 25 newer refusals and caps attempts separately', async () => {
     await db!.transaction(async (tx) => {
+      await tx.execute(sql`SELECT set_config('TimeZone', 'UTC', true)`);
       await tx.execute(sql`SET LOCAL search_path TO pg_temp`);
       await tx.execute(sql.raw(UPGRADE_JOURNAL_DDL));
       await tx.execute(sql`INSERT INTO upgrade_runs
