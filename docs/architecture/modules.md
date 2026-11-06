@@ -374,12 +374,15 @@ step that reads its record.
   into a temp dir outside the repository; never the working tree. `<file.json>` is a JSON array of exact
   `@haive-module/<id>@<version>` specifications. The channel name is 1-32 lowercase letters, digits or dashes.
 - Preflight, before any network use: the tag's tree must hold `scripts/module.mjs`, `scripts/gen-modules.mjs`,
-  `scripts/own-module-builder.mjs`, `docker/own-module-builder/Dockerfile` and an `id=npmrc` secret mount in
-  each of the api, worker and web Dockerfiles. v0.2.0 and older are refused
-  (exit 2, the missing file named). The working tree's `scripts/channel-gate.mjs` and
+  `scripts/own-module-builder.mjs`, `docker/own-module-builder/Dockerfile`, `packages/api/package.json`, and, in
+  each of the builder, api, worker and web Dockerfiles, an `id=npmrc` secret mount and a `production` stage
+  (whole comment lines ignored, as Docker ignores them). v0.2.0 and older are refused
+  (exit 2, the missing or unreadable file or the missing stage named). The working tree's `scripts/channel-gate.mjs` and
   `scripts/smoke/scan-image.sh` must be clean, because the gate runs from this checkout, not from the tag.
-- Modules: `module add` runs once per entitled package inside the tree. Every `modules/<dir>/package.json`
-  in the tree is expected as a local module, with web parts read from its `./dashboard` and `./web` exports.
+- Modules: `module add` runs once per entitled package inside the tree. A `modules/<dir>` counts as a local module
+  only as `gen-modules` counts it: its package exports `./manifest` and the tag's api `package.json` depends on
+  it. Its web parts are read from its `./dashboard` and `./web` exports; a folder without `package.json` is
+  skipped, an unreadable or malformed one stops the build with its path named.
 - Token: it reaches pnpm and BuildKit only as a private 0600 `.npmrc` in scratch (`--secret id=npmrc`), never
   argv, env or a build ARG. Streamed output is scrubbed of it across chunk boundaries. Scratch, the pnpm cache
   (`XDG_CACHE_HOME`) and the secret are removed on every path; a cleanup failure prints the leftover path and
