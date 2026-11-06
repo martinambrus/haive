@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import postgres from 'postgres';
 import { configService, networkName } from '@haive/shared';
-import { parseReleaseManifest, type ReleaseManifest } from '@haive/shared/release';
+import { CHANNEL_PATTERN, parseReleaseManifest, type ReleaseManifest } from '@haive/shared/release';
 import * as dk from './docker.js';
 import {
   ensureJournal,
@@ -70,9 +70,6 @@ const flag = (name: string): boolean => process.argv.includes(`--${name}`);
 function emit(event: string, fields: Record<string, unknown> = {}): void {
   console.log(JSON.stringify({ t: new Date().toISOString(), event, ...fields }));
 }
-
-/** Match scripts/build-channel.mjs; an unset install channel means public. */
-const CHANNEL_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 
 export function resolveChannel(requested: string | undefined, installed: string): string {
   const channel = installed || 'public';

@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, desc, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { CHANNEL_PATTERN, REGISTRY_PREFIX_PATTERN } from '@haive/shared/release';
 import {
   CONFIG_KEYS,
   CONTAINER_FAMILY,
@@ -483,14 +484,8 @@ maintenanceRoutes.post('/upgrade', async (c) => {
   const channel = process.env.HAIVE_CHANNEL || 'public';
   const channelRegistry = process.env.HAIVE_CHANNEL_REGISTRY || '';
   // Same CHANNEL/PREFIX rules as scripts/build-channel.mjs; names only, never credentials.
-  if (!/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(channel))
-    throw new HttpError(400, 'invalid HAIVE_CHANNEL');
-  if (
-    channel !== 'public' &&
-    !/^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/.test(
-      channelRegistry,
-    )
-  )
+  if (!CHANNEL_PATTERN.test(channel)) throw new HttpError(400, 'invalid HAIVE_CHANNEL');
+  if (channel !== 'public' && !REGISTRY_PREFIX_PATTERN.test(channelRegistry))
     throw new HttpError(400, 'invalid HAIVE_CHANNEL_REGISTRY');
 
   const current = getHaiveVersion();
