@@ -97,6 +97,7 @@ function fixture(t, config = {}) {
   const requests = [];
   const logs = [];
   const published = new Set();
+  const runtimeDigestsRead = new Set();
   const localTags = new Map(Object.values(record.images).map((image) => [image.ref, image.id]));
   const priorLocalId = `sha256:${'e'.repeat(64)}`;
   if (config.existingLocal)
@@ -113,7 +114,7 @@ function fixture(t, config = {}) {
   const runner = async (cmd, args, options) => {
     calls.push({ cmd, args });
     assert.ok(options.timeout > 0);
-    if (!config.existingManifest && attempted.length < KEYS.length)
+    if (!config.existingManifest && runtimeDigestsRead.size < KEYS.length)
       assert.ok(!existsSync(manifest), 'manifest is absent until runtime images finish');
     if (config.abortOn?.(cmd, args)) options.signal?.throwIfAborted();
     if (cmd === 'docker') {
@@ -188,6 +189,8 @@ function fixture(t, config = {}) {
           published.has(host) ||
           (config.appeared === host && inspections.get(host) > 1)
         ) {
+          if (KEYS.includes(host) && published.has(host) && config.rereadMismatch !== host)
+            runtimeDigestsRead.add(host);
           return ok(
             JSON.stringify({ digest: config.rereadMismatch === host ? IDS.api : digests[host] }),
           );
@@ -216,6 +219,8 @@ function fixture(t, config = {}) {
           assert.equal(args.at(-1), `${PREFIX}/haive-web@${digests.web}`);
         } else assert.equal(args[args.indexOf('--platform') + 1], record.platform);
         if (config.rereadFailure !== host) published.add(host);
+        if (config.prematureManifest && host === 'builder')
+          writeFileSync(manifest, 'premature manifest');
         return ok();
       }
       assert.fail(`unexpected docker command: ${args.join(' ')}`);
@@ -953,3 +958,14 @@ for (const failure of ['releaseAbsenceFailure', 'releaseSaveFailure']) {
     });
   }
 }
+
+test('the manifest guard covers the digest re-read after the fourth runtime push', async (t) => {
+  const f = fixture(t, { prematureManifest: true });
+  assert.equal(await f.invoke(), 2);
+  assert.deepEqual(f.attempted, KEYS);
+  assert.match(f.logs.join('\n'), /manifest is absent until runtime images finish/);
+  assert.ok(
+    f.calls.some(({ args }) => args[2] === 'inspect' && args.at(-1) === destination('builder')),
+  );
+  assert.equal(f.releaseBytes, undefined, 'release build never starts');
+});
