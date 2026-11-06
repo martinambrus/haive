@@ -494,3 +494,21 @@ describe('journal channel pin', () => {
     expect(dk.readReleaseManifestImage).toHaveBeenCalled();
   });
 });
+
+it('public dry-plan emits a usage error without reading a target or journal', async () => {
+  process.argv = ['node', 'updater', '--install-dir', '/host/install', '--dry-plan'];
+  vi.stubEnv('DATABASE_URL', '');
+  vi.stubEnv('REDIS_URL', '');
+  vi.mocked(images.readImageSettings).mockResolvedValue({
+    ...settings,
+    HAIVE_CHANNEL: 'public',
+  });
+  expect(await main()).toBe(2);
+  expect(vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line)))).toEqual([
+    expect.objectContaining({ event: 'error', message: '--dry-plan requires a channel install' }),
+  ]);
+  expect(journal.ensureJournal).not.toHaveBeenCalled();
+  expect(h.initialize).not.toHaveBeenCalled();
+  expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
+  expect(dk.localImages).not.toHaveBeenCalled();
+});

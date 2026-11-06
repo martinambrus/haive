@@ -212,7 +212,10 @@ export async function main(): Promise<number> {
 
   // The dry plan reads no journal. Normal starts recover an interrupted run before fetching a target.
   if (flag('dry-plan')) {
-    if (channel === 'public') throw new Error('--dry-plan requires a channel install');
+    if (channel === 'public') {
+      emit('error', { message: '--dry-plan requires a channel install' });
+      return EXIT.usage;
+    }
     const usage = missingTarget();
     if (usage) {
       emit('error', { message: usage });
