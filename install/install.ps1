@@ -621,6 +621,7 @@ if (-not (Test-Path $envPath)) {
 
 if ($Channel -cne 'public') {
   $claimed = $false
+  $channelPlaced = $false
   $credentialDir = Join-Path $Dir '.docker'
   try {
     # Exclusively claim the name before moving any credential into the install.
@@ -648,11 +649,7 @@ if ($Channel -cne 'public') {
       Move-Item -LiteralPath $entry.FullName -Destination (Join-Path $credentialDir $entry.Name)
     }
     Protect-RegistryCredentials $credentialDir
-  }
-  catch {
-    if ($claimed) { Remove-Item -LiteralPath $credentialDir -Recurse -Force }
-    if ($channelEnvCreated) { Remove-Item -LiteralPath $envPath -Force }
-    throw
+    $channelPlaced = $true
   }
   finally { Remove-Item -LiteralPath $ChannelScratch -Recurse -Force }
   $env:DOCKER_CONFIG = Join-Path $Dir '.docker'
@@ -1045,6 +1042,12 @@ Write-Host "    root on the host. Run Haive on a machine where that is acceptabl
 Write-Host ""
 
 } finally {
+  # Pipeline cancellation skips catch, but still runs finally. Remove only names
+  # this run created until credential placement has completed successfully.
+  if ($Channel -cne 'public' -and -not $channelPlaced) {
+    if ($claimed) { Remove-Item -LiteralPath $credentialDir -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($channelEnvCreated) { Remove-Item -LiteralPath $envPath -Force -ErrorAction SilentlyContinue }
+  }
   if ($ChannelScratch) {
     Remove-Item -LiteralPath $ChannelScratch -Recurse -Force -ErrorAction SilentlyContinue
   }

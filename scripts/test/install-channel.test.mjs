@@ -178,7 +178,7 @@ exec /bin/${command} "$@"
     const wrapper = join(root, 'invoke.ps1');
     writeFileSync(
       wrapper,
-      `$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction Move-Item { param($LiteralPath,$Destination); if($env:FAIL_AT -eq 'race' -and $Destination -eq (Join-Path $env:CASE_ROOT 'install/.docker') -and -not (Test-Path -LiteralPath $Destination)){ [IO.Directory]::CreateDirectory($Destination) | Out-Null; [IO.File]::WriteAllText((Join-Path $Destination 'config.json'), 'user-owned') }; if($env:FAIL_AT -eq 'credential-move' -and $LiteralPath -like '*/.docker/config.json'){ throw 'credential move failure' }; Microsoft.PowerShell.Management\\Move-Item @PSBoundParameters; if($env:FAIL_AT -eq 'unprotect-move'){ & chmod 755 (Split-Path $Destination); & chmod 644 $Destination } }\nfunction New-Item { param($ItemType,$Path,[switch]$Force); if($env:FAIL_AT -eq 'race' -and $Path -eq (Join-Path $env:CASE_ROOT 'install/.docker')){ [IO.Directory]::CreateDirectory($Path) | Out-Null; [IO.File]::WriteAllText((Join-Path $Path 'config.json'), 'user-owned') }; if($Path -like '*/snapshots' -and $env:FAIL_AT -in @('mkdir','pipeline-stop')) { if($env:FAIL_AT -eq 'pipeline-stop'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; throw 'post-verification mkdir failure' }; Microsoft.PowerShell.Management\\New-Item @PSBoundParameters }\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-RestMethod { param($Uri); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); [pscustomobject]@{tag_name='v9.9.9'} }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); if($OutFile){ if($env:FAIL_AT -eq 'bundle'){ throw 'bundle failure' }; [IO.File]::WriteAllText($OutFile, "services: {}\\n") } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|force|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
+      `$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction Move-Item { param($LiteralPath,$Destination); if($env:FAIL_AT -eq 'credential-move' -and $LiteralPath -like '*/.docker/config.json'){ throw 'credential move failure' }; Microsoft.PowerShell.Management\\Move-Item @PSBoundParameters; if($env:FAIL_AT -eq 'credential-stop' -and $LiteralPath -like '*/.docker/config.json'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; if($env:FAIL_AT -eq 'unprotect-move'){ & chmod 755 (Split-Path $Destination); & chmod 644 $Destination } }\nfunction New-Item { param($ItemType,$Path,[switch]$Force); if($Path -like '*/snapshots' -and $env:FAIL_AT -in @('mkdir','pipeline-stop')) { if($env:FAIL_AT -eq 'pipeline-stop'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; throw 'post-verification mkdir failure' }; Microsoft.PowerShell.Management\\New-Item @PSBoundParameters }\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-RestMethod { param($Uri); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); [pscustomobject]@{tag_name='v9.9.9'} }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); if($OutFile){ if($env:FAIL_AT -eq 'bundle'){ throw 'bundle failure' }; [IO.File]::WriteAllText($OutFile, "services: {}\\n") } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|force|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
     );
     if (hostPwsh)
       return spawnSync('pwsh', ['-NoProfile', '-File', wrapper], {
@@ -556,6 +556,26 @@ for (const lang of ['sh', 'ps1']) {
         );
         assert.equal((r.stdout + r.stderr).match(/error:/g)?.length, 1);
         assert.equal(r.stderr, '', 'no second PowerShell cleanup error');
+      } finally {
+        f.clean();
+      }
+    });
+    check('pipeline stop after credential claim removes credentials and env', () => {
+      const f = fixture(lang, { fail: 'credential-stop' });
+      try {
+        f.install();
+        assert.ok(
+          !existsSync(join(f.dir, '.docker')),
+          'remove claimed credentials after pipeline stop',
+        );
+        assert.ok(!existsSync(join(f.dir, '.env')), 'remove this run’s env after pipeline stop');
+        assert.deepEqual(
+          readdirSync(f.root).filter((x) => x.startsWith('haive-install')),
+          [],
+        );
+        f.env.FAIL_AT = '';
+        const retry = f.install([f.flag('force')]);
+        assert.equal(retry.status, 0, retry.stdout + retry.stderr);
       } finally {
         f.clean();
       }
