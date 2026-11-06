@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   archiveExpansionBanner,
+  upgradeAttemptBanner,
   deadBanner,
   failureBanner,
   invocationBanner,
@@ -603,5 +604,36 @@ it('a continuation with no active integration cause displays the current hold co
   });
   expect(parkBanner(held, { taskEnded: false })).toEqual({
     text: 'Module fx schema is being set up.',
+  });
+});
+
+describe('upgradeAttemptBanner', () => {
+  const attempt = {
+    status: 'refused',
+    startedAt: '2026-11-06T10:00:00.000Z',
+    toVersion: '2.0.0',
+    error: 'reason',
+  };
+
+  it('does not attribute an attempt at exactly the launch time to that launch', () => {
+    expect(upgradeAttemptBanner(attempt, Date.parse(attempt.startedAt))).toBeNull();
+  });
+
+  it('refuses an unparseable instant', () => {
+    expect(upgradeAttemptBanner({ ...attempt, startedAt: 'not a date' })).toBeNull();
+  });
+
+  it('does not turn an unknown status into an attempt banner, whatever the error says', () => {
+    expect(upgradeAttemptBanner({ ...attempt, status: 'unknown' })).toBeNull();
+  });
+
+  it('uses fallback words for a terminal attempt with null error', () => {
+    expect(upgradeAttemptBanner({ ...attempt, error: null })).toEqual({
+      kind: 'refused',
+      text: 'Upgrade refused (`2.0.0`). The updater stopped before starting the upgrade.',
+    });
+    expect(upgradeAttemptBanner({ ...attempt, status: 'failed', error: null })?.kind).toBe(
+      'failed',
+    );
   });
 });
