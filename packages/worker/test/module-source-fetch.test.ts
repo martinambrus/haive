@@ -475,14 +475,23 @@ describe('fetch and pin a module source', () => {
       return previous(cwd, args, env);
     });
     const pin = vi.fn();
-    await expect(fetchModuleSource({ ...source, resolvedSha: sha }, null, pin)).rejects.toThrow(
-      'module_source_ref_moved',
-    );
+    const resolved = vi.fn();
+    await expect(
+      fetchModuleSource({ ...source, resolvedSha: sha, resolvedRef: null }, null, pin, resolved),
+    ).rejects.toThrow('module_source_ref_moved');
     expect(pin).not.toHaveBeenCalled();
+    expect(resolved).not.toHaveBeenCalled();
   });
-  it('re-fetches the recorded SHA without re-resolving the branch', async () => {
+  it('keeps a legacy pin namespace NULL when object fetch succeeds without resolving a ref', async () => {
     setup();
-    await fetchModuleSource({ ...source, resolvedSha: sha }, null, vi.fn());
+    const resolved = vi.fn();
+    await fetchModuleSource(
+      { ...source, resolvedSha: sha, resolvedRef: null },
+      null,
+      vi.fn(),
+      resolved,
+    );
+    expect(resolved).toHaveBeenCalledWith(sha, null);
     expect(git.mock.calls.some(([, args]) => args.includes('ls-remote'))).toBe(false);
   });
   it.each(['--upload-pack=bad', 'refs/heads/main', 'main~1', 'main:other', '+main', 'bad.lock'])(
