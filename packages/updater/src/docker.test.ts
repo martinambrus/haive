@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFile, type ChildProcess } from 'node:child_process';
-import { redactSecrets, resolveImageSettings } from './docker.js';
+import { buildOwnModules, redactSecrets, resolveImageSettings } from './docker.js';
 
-vi.mock('node:child_process', () => ({ execFile: vi.fn() }));
+const builderExec = vi.hoisted(() => vi.fn());
+vi.mock('node:child_process', () => ({
+  execFile: Object.assign(vi.fn(), { [Symbol.for('nodejs.util.promisify.custom')]: builderExec }),
+}));
 afterEach(() => {
   vi.resetAllMocks();
   vi.unstubAllEnvs();
@@ -132,4 +135,33 @@ it('keeps Docker transport --config explicit while clearing new install interpol
   const env = (options as { env: NodeJS.ProcessEnv }).env;
   for (const key of Object.keys(values)) expect(env).not.toHaveProperty(key);
   expect(process.env.DOCKER_CONFIG).toBe('/ambient-credentials');
+});
+
+it('pins the credential-mounted own-module builder to its mounted Docker socket before the image', async () => {
+  builderExec.mockResolvedValue({ stdout: '' });
+  const image = 'registry.test/haive-builder:9.9.9';
+  const plan = { version: '9.9.9' };
+  await buildOwnModules(image, '/host/modules', plan, '/host/install/.docker');
+  expect(builderExec.mock.calls[0]?.slice(0, 2)).toEqual(['docker', ['pull', image]]);
+  const [command, argv] = builderExec.mock.calls[1]!;
+  expect(command).toBe('docker');
+  expect(argv).toEqual([
+    'run',
+    '--rm',
+    '--mount',
+    'type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock',
+    '--mount',
+    'type=bind,src=/host/modules,dst=/input,readonly',
+    '-e',
+    `HAIVE_BUILD_PLAN=${JSON.stringify(plan)}`,
+    '--mount',
+    'type=bind,src=/host/install/.docker,dst=/run/haive-docker-config,readonly',
+    '-e',
+    'DOCKER_CONFIG=/run/haive-docker-config',
+    '-e',
+    'BUILDX_CONFIG=/tmp/buildx',
+    '-e',
+    'DOCKER_HOST=unix:///var/run/docker.sock',
+    image,
+  ]);
 });
