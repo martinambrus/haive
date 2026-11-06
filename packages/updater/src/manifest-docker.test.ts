@@ -33,14 +33,21 @@ let chunks: Iterable<Buffer>;
 let cpError: Error | undefined;
 let killed: boolean;
 let delivered: number;
+let cached: boolean;
 beforeEach(() => {
   vi.stubEnv('HAIVE_INSTALL_ID', 't534_test');
   chunks = [tar()];
   cpError = undefined;
   killed = false;
   delivered = 0;
+  cached = true;
   h.exec.mockReset().mockImplementation(async (_command: string, args: string[]) => ({
-    stdout: args[0] === 'create' ? 'container-id\n' : '',
+    stdout:
+      args[0] === 'create'
+        ? 'container-id\n'
+        : args[0] === 'image' && args[1] === 'ls' && cached
+          ? 'existing-image'
+          : '',
   }));
   h.spawn.mockReset().mockImplementation(() => {
     let stopped = false;
@@ -78,7 +85,9 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 it('streams a single regular manifest and removes its scratch-compatible container', async () => {
   expect(await readReleaseManifestImage('private/release:1')).toBe('{"manifestVersion":1}');
-  const calls = h.exec.mock.calls.map((c) => c[1] as string[]);
+  const calls = h.exec.mock.calls
+    .map((c) => c[1] as string[])
+    .filter((args) => args[0] !== 'image' || args[1] !== 'ls');
   expect(calls[0]).toEqual(['pull', 'private/release:1']);
   expect(calls[1]).toEqual([
     'create',
@@ -99,7 +108,7 @@ it.each(['create', 'cp'])('temp manifest container is removed on %s failure', as
   else
     h.exec.mockImplementation(async (_command: string, args: string[]) => {
       if (args[0] === failure) throw new Error('fixture create failure');
-      return { stdout: '' };
+      return { stdout: args[0] === 'image' && args[1] === 'ls' ? 'existing-image' : '' };
     });
   await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow('fixture');
   expect(h.exec.mock.calls.at(-1)![1]).toEqual([
@@ -109,9 +118,12 @@ it.each(['create', 'cp'])('temp manifest container is removed on %s failure', as
   ]);
 });
 it('an unpullable manifest cannot create or use a cached image', async () => {
-  h.exec.mockRejectedValue(new Error('pull denied'));
+  h.exec.mockImplementation(async (_command: string, args: string[]) => {
+    if (args[0] === 'pull') throw new Error('pull denied');
+    return { stdout: 'existing-image' };
+  });
   await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow('pull denied');
-  expect(h.exec).toHaveBeenCalledTimes(1);
+  expect(h.exec.mock.calls.filter((call) => call[1][0] !== 'image')).toHaveLength(1);
   expect(h.spawn).not.toHaveBeenCalled();
 });
 it('channel rollback inventory includes digest pins while public inventory stays unchanged', async () => {
@@ -196,4 +208,40 @@ it('bounds the tar stream even when a small declared file is followed by unbound
   await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow('release manifest');
   expect(killed).toBe(true);
   expect(delivered).toBeLessThan(20);
+});
+
+it.each([true, false])(
+  'removes the release image only when absent before this pull (cached=%s)',
+  async (present) => {
+    cached = present;
+    expect(await readReleaseManifestImage('private/release:1')).toBe('{"manifestVersion":1}');
+    const calls = h.exec.mock.calls.map((call) => call[1]);
+    expect(calls[0]).toEqual([
+      'image',
+      'ls',
+      '--quiet',
+      '--no-trunc',
+      '--filter',
+      'reference=private/release:1',
+    ]);
+    expect(calls[1]).toEqual(['pull', 'private/release:1']);
+    const removals = calls.filter((args) => args[0] === 'image' && args[1] === 'rm');
+    expect(removals).toEqual(present ? [] : [['image', 'rm', 'private/release:1']]);
+    if (!present) expect(calls.at(-2)).toEqual(['rm', '-f', 'container-id']);
+  },
+);
+it('removes a newly pulled release image when the copy fails', async () => {
+  cached = false;
+  cpError = new Error('fixture copy failure');
+  await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow(
+    'fixture copy failure',
+  );
+  expect(h.exec.mock.calls.at(-1)![1]).toEqual(['image', 'rm', 'private/release:1']);
+});
+it('an inventory failure refuses before pulling or removing any image', async () => {
+  h.exec.mockRejectedValue(new Error('daemon unavailable'));
+  await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow('daemon unavailable');
+  expect(h.exec.mock.calls.map((call) => call[1])).toEqual([
+    ['image', 'ls', '--quiet', '--no-trunc', '--filter', 'reference=private/release:1'],
+  ]);
 });
