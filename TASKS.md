@@ -637,13 +637,12 @@ status: parked · kind: design · was modular #270 · reason: diminishing return
 `maintenance.auto=false` closes gc.recentObjectsHook. An explicit gc still runs that hook.
 Measure growth, then find a safe repack/prune under hardened args.
 
-### T392 · FNF[dispatch-adapter-build-error] · an adapter build error aborts the whole dispatch instead of trying the next provider
+### T392 · FNF[start-check-provider] · the persona start check names only the first dispatch candidate (+1)
 
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-worker dispatcher.ts ~:622 calls buildCliSidePlan outside a try (e.g. ollama.ts ~:106 with no model).
-Recommendation: fall through only for the implicit default; an explicit CLI stays loud.
+status: open · kind: fix · found: T392 driver 2026-11-06 · priority: P4
 
-User decision 2026-11-01: Fallback only for an implicit default; keep an explicitly selected CLI failure visible.
+1. `providerNameFor` in the persona start check (packages/worker/src/queues/task-queue.ts ~:2737) takes the first `dispatchCandidates(...)` entry. It ignores subagent and MCP eligibility, and since PR #1025 also a first implicit candidate that fails to build while dispatch lands on the next one. Advisory only (records an unresolved-persona event). PRE-EXISTING. Fix direction: resolve the provider through `resolveDispatch` or share its candidate filter.
+2. `resolveTaskDispatch` calls `resolveDispatch` a second time with the codex extras (packages/worker/src/orchestrator/dispatcher.ts ~:436), so the new "provider could not build a command" warning logs twice per dispatch for the same implicit candidate. REGRESSION (log volume only). Fix direction: warn only on the outer call, or dedupe by provider id.
 
 ### T393 · FNF[stop-no-settle] · an api Stop with no pass in flight never runs settleFailedTask
 
@@ -1357,6 +1356,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T392 — an implicit dispatch candidate whose adapter throws `ProviderBuildError` is logged and skipped for the next one; an explicitly selected provider rethrows; no candidate building throws the first error; docs cli-adapters.md — PR #1025 (e2e8ffd42), 2026-11-06. CI green; merged without bot review. Sonnet driver (one build round, red control confirmed on unchanged code, full worker suite green). Follow-ups filed under the same id. Evidence .claude/tmp/sonnet-run/T392/.
 - T531 items 1-3, 5-7 — module source fetch counts entries while git writes; a 40-hex ref with no same-named ref is fetched by object on first resolution, and one whose branch or tag points at another commit refuses (`module_source_ref_ambiguous`); a no-answer by-SHA fetch fails instead of falling back; v-flag-safe module id pattern exported from shared; millisecond `updated_at` compare-and-swap (required gated CI row); real-git tests; docs modules.md. Item 4 disproved (no path records a namespace that does not point at the pin) — PR #1024 (5a597ee7e), 2026-11-06. CI green; merged without bot review. Sonnet reviews: FIX (1 M security, fixed in one round), then ACCEPT (4 L, filed as items 8-10). Evidence .claude/tmp/sonnet-run/T531b/.
 - T539 items 3-5 — sh installer context reader linear (mawk 29.04 to 0.26 s, busybox 87.27 to 1.05 s); both readers bounded on one long line (busybox ~20 s to ~1.2 s); split-token rejects shared with ps1 — PR #1023 (d20349a2d), 2026-11-06. CI green; merged without bot review. Sonnet review ACCEPT (3 L; filed as T539 items 3-4). Evidence .claude/tmp/sonnet-run/T539b/.
 - T533 item 23 — build-channel image builds get a 2 h deadline; `capture` stops every child by SIGTERM then SIGKILL after a 30 s grace on deadline, output overflow and abort; a timed-out command or gate is a failure even on exit 0 — PR #1022 (9ced42f3c), 2026-11-06. CI green; merged without bot review (Codex and Greptile out of allowance). Sonnet review ACCEPT (5 L; L1, L2, L4, L5 folded in one round). Evidence .claude/tmp/sonnet-run/T533d/.
