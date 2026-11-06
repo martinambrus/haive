@@ -340,7 +340,9 @@ export async function main(): Promise<number> {
     const check = preflight({
       currentVersion: fromVersion,
       target,
-      localImages: await dk.localImages(channel !== 'public'),
+      localImages: await dk.localImages(
+        channel !== 'public' || Object.values(previousImages).some((ref) => ref.includes('@')),
+      ),
       currentImages,
       freeBytes: Number(arg('free-bytes', String(Number.MAX_SAFE_INTEGER))),
       snapshotBytes: Number(arg('snapshot-bytes', '0')),

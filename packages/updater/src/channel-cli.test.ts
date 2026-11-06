@@ -256,38 +256,46 @@ it.each([0, 1, 2, 3, 4, 5, 6])(
     expect(dk.localImages).not.toHaveBeenCalled();
   },
 );
-it('an unpinned public install retains its original tag-based preflight', async () => {
-  process.argv = [
-    'node',
-    'updater',
-    '--install-dir',
-    '/host/install',
-    '--manifest-image',
-    'public/release:9.9.9',
-    '--version',
-    '9.9.9',
-    '--check',
-  ];
-  vi.mocked(images.readImageSettings).mockResolvedValue({
-    ...settings,
-    ...images.emptyOverrides(),
-    HAIVE_CHANNEL: 'public',
-  });
-  vi.mocked(dk.readReleaseManifestImage).mockResolvedValue(
-    JSON.stringify({
-      manifestVersion: 1,
-      channel: 'public',
-      version: '9.9.9',
-      builtAt: '2026-11-05',
-      migrationHead: '0221',
-    }),
-  );
-  vi.mocked(dk.localImages).mockResolvedValue(
-    ['api', 'worker', 'web'].map((host) => `ghcr.io/martinambrus/haive-${host}:1.0.0`),
-  );
-  expect(await main()).toBe(0);
-  expect(dk.localImages).toHaveBeenCalledWith(false);
-});
+it.each([0, 1, 2, 3, 4, 5, 6, 7])(
+  'public rollback pin mask %i selects the required inventory',
+  async (mask) => {
+    process.argv = [
+      'node',
+      'updater',
+      '--install-dir',
+      '/host/install',
+      '--manifest-image',
+      'public/release:9.9.9',
+      '--version',
+      '9.9.9',
+      '--check',
+    ];
+    vi.mocked(images.readImageSettings).mockResolvedValue({
+      ...settings,
+      HAIVE_API_IMAGE: mask & 1 ? settings.HAIVE_API_IMAGE : '',
+      HAIVE_WORKER_IMAGE: mask & 2 ? settings.HAIVE_WORKER_IMAGE : '',
+      HAIVE_WEB_IMAGE: mask & 4 ? settings.HAIVE_WEB_IMAGE : '',
+      HAIVE_CHANNEL: 'public',
+    });
+    vi.mocked(dk.readReleaseManifestImage).mockResolvedValue(
+      JSON.stringify({
+        manifestVersion: 1,
+        channel: 'public',
+        version: '9.9.9',
+        builtAt: '2026-11-05',
+        migrationHead: '0221',
+      }),
+    );
+    vi.mocked(dk.localImages).mockImplementation(async (digests) => [
+      ...['api', 'worker', 'web'].map((host) => `ghcr.io/martinambrus/haive-${host}:1.0.0`),
+      ...(digests
+        ? [settings.HAIVE_API_IMAGE, settings.HAIVE_WORKER_IMAGE, settings.HAIVE_WEB_IMAGE]
+        : []),
+    ]);
+    expect(await main()).toBe(0);
+    expect(dk.localImages).toHaveBeenCalledWith(mask !== 0);
+  },
+);
 
 describe('journal channel pin', () => {
   function publicInstall(installed = '') {
