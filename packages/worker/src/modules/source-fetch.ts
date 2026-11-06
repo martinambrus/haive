@@ -9,6 +9,7 @@ import {
   removeNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
+import { MODULE_ID_PATTERN } from '@haive/shared/modularity';
 import { isBranchName } from '@haive/shared/git-args';
 import { safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
 import { assertCloneUrl } from '../repo/clone.js';
@@ -141,7 +142,7 @@ export async function fetchModuleSource(
     );
   if (source.kind !== 'git')
     throw new Error('Registry fetch is unavailable: the builder requires rebuildable sources');
-  if (!/^[a-z0-9][a-z0-9-]{0,22}$/.test(source.moduleId)) throw new Error('Invalid module id');
+  if (!MODULE_ID_PATTERN.test(source.moduleId)) throw new Error('Invalid module id');
   const ref = source.ref;
   if (
     !ref ||

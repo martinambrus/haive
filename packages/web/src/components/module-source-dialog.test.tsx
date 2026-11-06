@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { isValidElement, type ComponentProps, type ReactElement, type ReactNode } from 'react';
+import { MODULE_ID_PATTERN_SOURCE, MODULE_ID_MAX_LENGTH } from '@haive/shared/modularity';
 import { Dialog } from '@/components/dialog';
 import { FormError, Input } from '@/components/ui';
 import { ModuleSourceDialog, type ModuleSourceTarget } from './module-source-dialog';
@@ -29,6 +30,8 @@ vi.mock('react', async (original) => ({
 type El = ReactElement<{
   children?: ReactNode;
   id?: string;
+  pattern?: string;
+  maxLength?: number;
   body?: string;
   message?: string;
   type?: string;
@@ -96,6 +99,13 @@ beforeEach(() => {
   for (const fn of Object.values(api)) fn.mockReset().mockResolvedValue({});
 });
 describe('install source dialog', () => {
+  it('uses the shared module id limits in the browser input', () => {
+    const view = mount({ mode: 'add' });
+    expect(view.field('source-module-id').props).toMatchObject({
+      pattern: MODULE_ID_PATTERN_SOURCE,
+      maxLength: MODULE_ID_MAX_LENGTH,
+    });
+  });
   it('keeps a stored token blank and omits it from an edit', async () => {
     const view = mount({ mode: 'edit', source });
     expect(view.field('source-token').type).toBe(Input);

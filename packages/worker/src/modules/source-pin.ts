@@ -6,12 +6,13 @@ import { safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
 import { basename, dirname } from 'node:path';
 import { CONTAINER_FAMILY, containerName, logger } from '@haive/shared';
 import { openDirNoFollow, openFileNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
+import { MODULE_ID_PATTERN_SOURCE } from '@haive/shared/modularity';
 import { childFd, runTool } from '../repo/tool-spawn.js';
 
 export const PIN_SCRIPT = String.raw`
 import ctypes, fcntl, json, os, re, shutil, stat, sys, tarfile, uuid
 root, module = sys.argv[1:]
-if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,22}', module):
+if not re.fullmatch(r'${MODULE_ID_PATTERN_SOURCE}', module):
     raise RuntimeError('invalid module id')
 flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 owner = os.stat(root, follow_symlinks=False)
