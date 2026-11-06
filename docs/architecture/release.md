@@ -142,6 +142,27 @@ The updater creates the journal table itself, at every start: `ensureJournal` ru
 `UPGRADE_JOURNAL_DDL`, which `@haive/database` exports once and the api's tests build the table
 from, so nothing keeps a copy of it.
 
+A start that ends before any run exists also leaves a row, so an administrator sees why an upgrade
+did not happen, from the admin page or from `./haive upgrade`, after the api that launched it is
+gone. When the updater held the database and the lock, then neither created nor resumed a run, and
+the start was not `--check` or a dry plan, its last step (`recordAttempt`) writes one row with
+phase `preflight`: status `refused` with `metadata.refusal` (channel-changed,
+rollback-images-missing, a preflight refusal), or `failed` for an error. `error` is capped at 2048
+characters, `channel` is the resolved one, and an unusable `--version` is stored as `unknown`. No
+reader of a run matches these rows: `findLiveRun` wants `running`, `lastDoneChannel` wants `done`,
+and the one-live index covers only `running`. A failed insert is reported as `attempt-record-failed`
+and changes neither the exit code nor the outcome. A busy lock writes nothing. A start that fails
+before the database or the lock (bad argv, missing `DATABASE_URL`/`REDIS_URL`), an updater killed
+before its last step, and a target release older than this updater all leave no row.
+
+`GET /admin/maintenance/upgrade` returns the newest such row as `lastAttempt` only while no `done`,
+`running` or `rolled_back` run is newer (`lastUpgradeAttempt`, read apart from the 20-row history
+so repeated refusals cannot hide a real run); a tie goes to the real run. The admin page shows it as
+a banner (`upgradeAttemptBanner`, gated on status and time, the error rendered as markdown) that
+replaces the launch box once it is newer than the launch, and History lists the rows. Every instant
+in that response is ISO 8601 with an offset: the columns are `timestamp` holding the session's wall
+clock, and a zone-less string would be parsed as browser-local time.
+
 ## Own-module images
 
 The release matrix also publishes `haive-builder` from the repository-root context using
