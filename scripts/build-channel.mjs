@@ -18,6 +18,8 @@ import { idOf, parseExpect, parseToken } from './channel-gate.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const PUBLIC_REGISTRY = 'ghcr.io/martinambrus';
+const BUILD_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+const COMMAND_KILL_GRACE_MS = 30_000;
 const USAGE =
   'usage: node scripts/build-channel.mjs --tag vX.Y.Z --channel <name> --modules <file.json> --token-file <file> [--registry <output-prefix>] [--source-registry <stock-prefix>] [--out <dir>] [--replace]';
 const FINAL = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -57,26 +59,40 @@ export function parseModules(value) {
 
 export function capture(command, args, options) {
   return new Promise((resolveResult) => {
-    const { onOutput, timeout, ...spawnOptions } = options;
+    const {
+      onOutput,
+      timeout,
+      signal: abortSignal,
+      killGrace = COMMAND_KILL_GRACE_MS,
+      ...spawnOptions
+    } = options;
     const child = spawn(command, args, { ...spawnOptions, stdio: ['ignore', 'pipe', 'pipe'] });
     let timedOut = false;
+    let error;
+    let forceTimer;
+    const stop = (cause) => {
+      error ??= cause;
+      if (forceTimer) return;
+      child.kill('SIGTERM');
+      forceTimer = setTimeout(() => child.kill('SIGKILL'), killGrace);
+      forceTimer.unref();
+    };
+    const abort = () => stop(new Error('interrupted'));
     const timer =
       timeout > 0
         ? setTimeout(() => {
             timedOut = true;
-            child.kill('SIGTERM');
+            stop();
           }, timeout)
         : undefined;
     timer?.unref();
     const stdout = [];
     const stderr = [];
     let size = 0;
-    let error;
     const collect = (chunks) => (chunk) => {
       size += chunk.length;
       if (size > 32 * 1024 * 1024) {
-        error = new Error('command output exceeded 32 MiB');
-        child.kill('SIGTERM');
+        stop(new Error('command output exceeded 32 MiB'));
       } else chunks.push(chunk);
     };
     if (onOutput) {
@@ -96,6 +112,8 @@ export function capture(command, args, options) {
     });
     child.on('close', (status, signal) => {
       clearTimeout(timer);
+      clearTimeout(forceTimer);
+      abortSignal?.removeEventListener('abort', abort);
       resolveResult({
         signal,
         timedOut,
@@ -105,6 +123,8 @@ export function capture(command, args, options) {
         error,
       });
     });
+    abortSignal?.addEventListener('abort', abort, { once: true });
+    if (abortSignal?.aborted) abort();
   });
 }
 
@@ -235,7 +255,7 @@ export async function run(
         emit(result.stdout);
         emit(result.stderr);
       }
-      if (!allowFailure && (result.status !== 0 || result.error)) {
+      if (!allowFailure && (result.status !== 0 || result.error || result.timedOut)) {
         if (quiet) {
           emit(result.stdout);
           emit(result.stderr);
@@ -481,7 +501,7 @@ export async function run(
           images[host],
           tree,
         ],
-        { cwd: tree, stream: true, timeout: 0 },
+        { cwd: tree, stream: true, timeout: BUILD_TIMEOUT_MS },
       );
       retainedImages.push(images[host]);
     }
@@ -510,7 +530,7 @@ export async function run(
       ],
       { allowFailure: true },
     );
-    if (gate.error || ![0, 1, 2].includes(gate.status))
+    if (gate.error || gate.timedOut || ![0, 1, 2].includes(gate.status))
       throw new Error('channel gate could not finish');
     const afterGate = await readIds();
     for (const host of Object.keys(images)) {
