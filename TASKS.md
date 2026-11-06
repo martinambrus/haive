@@ -357,25 +357,22 @@ status: open · last: 2026-11-06 · kind: fix · found: T531 reviews 2026-11-06 
 
 status: open · last: 2026-11-06 · kind: fix · found: T351 reviews 2026-11-05 · priority: P3
 
-23. build-channel: streamed commands (the image builds) bypass the 32 MiB capture cap and run with no timeout (scripts/build-channel.mjs ~:82). PRE-EXISTING; found T533 review. Fix direction: a separate generous build deadline that kills the process group, and a byte cap on the streamed tail kept for errors.
+24. build-channel stops only the direct `docker` child (scripts/build-channel.mjs ~:69, `capture`); no process-group kill, and whether BuildKit stops the solve server-side when the CLI dies is unverified. PRE-EXISTING; found T533d review. Fix direction: spawn detached and signal the group, then measure a killed build on a live daemon.
 
-### T538 · FNF[updater-manifest] · release manifest read and refusal-row leftovers from T534/T537 (+6)
+### T538 · FNF[updater-manifest] · release manifest read and refusal-row leftovers from T534/T537 (+1)
 
 status: open · kind: fix · found: T534 review 1 2026-11-06 · priority: P4
 
-1. A concurrent pull of the same release ref between the presence probe and the pull makes `--check` remove an image another process just added (packages/updater/src/docker.ts `readReleaseManifestImage`, presence probe then pull). PRE-EXISTING design edge, low likelihood (refs are `<registry>/haive-<channel>-release:<version>`). Fix direction: remove by the pulled image id only if no other tag references it, or skip removal.
-2. When the read failed, a failed cleanup (`docker rm -f`, `docker image rm`) is swallowed with no log, so a leaked manifest container or image is invisible (same function, `finally`). PRE-EXISTING. Fix direction: emit a `warning` event naming the container or image.
-3. A preflight refusal tells the admin to rerun with `--no-rollback`, a flag the updater never parses (packages/updater/src/preflight.ts ~:124). PRE-EXISTING. Fix direction: drop the hint or add the flag with a control.
 4. Some refusals still write no attempt row: argv errors, missing `DATABASE_URL`/`REDIS_URL`, failures before the journal or the lock, and a failed insert. The admin page then shows only the launch box. PRE-EXISTING. Fix direction: an api-side follow of the container's exit code for the cases the updater cannot record.
-5. `cli-diagnostics.test.ts` "keeps safe filesystem diagnostics at the actual CLI catch boundary" hit the 5000 ms default timeout in CI (PR #1018 run 42275972202, passed on rerun); locally about 1.3 s for the file. PRE-EXISTING, from #1013. Fix direction: give the test an explicit timeout or cut what it spawns.
 
-### T539 · FNF[installer-manifest-reader] · installer manifest reader leftovers from T536 (+3)
+### T539 · FNF[installer-manifest-reader] · installer manifest reader leftovers from T536 (+4)
 
 status: open · kind: fix · found: T536 reviews 2026-11-06 · priority: P4
 
-1. The sh awk manifest reader still concatenates per line and per string character (install/install.sh ~:414 `t=t c`, ~:456 `s=s $0 "\n"`), quadratic under mawk: about 40 s on a 990 KB newline-separated manifest (gawk is fine). PRE-EXISTING; the 1 MiB cap bounds it. Fix direction: read with RS set to an impossible record separator, or collect into an array and join once.
 2. install.ps1 ~:408 `ConvertFrom-Json` rejects a valid 513-digit numeric value in an unknown key that the sh reader accepts. PRE-EXISTING, low; no published manifest carries one. Fix direction: parity control and a pre-scan, or document the difference.
-3. scripts/test/install-channel.test.mjs ~:234 hardcodes `t536-*` throwaway names, so two concurrent runs (or a leftover from a killed run) collide. Found T531 review 2. Fix direction: derive the names from a per-run random suffix.
+3. A single-line (minified) manifest is unmeasured on busybox and BWK awk, where `length(s)`/`substr` per character may be strlen-based and so quadratic within one 1 MiB record (install/install.sh ~:410-445). PRE-EXISTING; mawk measured linear (0.14 s). Found T539 review. Fix direction: measure busybox on a 990 KB single line; if slow, cache the record length and document.
+4. The Docker-context reader still concatenates input per line (install/install.sh ~:255): 25 s on 989 KB. PRE-EXISTING; found T539 run. Fix direction: the same line-array approach as the manifest reader.
+5. The new split-token rejects (string, number, keyword, escape split across lines) are sh-only (scripts/test/install-manifest.test.mjs ~:63-76); the ps1 reader is not asserted on them. Found T539 review. Fix direction: add them to the shared sh/ps1 loop in install-channel.test.mjs ~:1036-1090.
 
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
@@ -1362,6 +1359,9 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T533 item 23 — build-channel image builds get a 2 h deadline; `capture` stops every child by SIGTERM then SIGKILL after a 30 s grace on deadline, output overflow and abort; a timed-out command or gate is a failure even on exit 0 — PR #1022 (9ced42f3c), 2026-11-06. CI green; merged without bot review (Codex and Greptile out of allowance). Sonnet review ACCEPT (5 L; L1, L2, L4, L5 folded in one round). Evidence .claude/tmp/sonnet-run/T533d/.
+- T539 items 1, 3 — sh installer manifest reader linear under mawk (20.78 to 1.54 s) and busybox (77.32 to 2.43 s), 142 parity cases identical; installer tests use per-fixture HOME and DOCKER_CONFIG — PR #1021 (42715eac0), 2026-11-06. CI green; merged without bot review. Sonnet review ACCEPT (1 M pre-existing, 3 L; filed as items 4-6). Evidence .claude/tmp/sonnet-run/T539/.
+- T538 items 1, 2, 3, 5 — the release manifest image is kept after a read (no probe, no removal race); a failed container cleanup after a failed read emits a `warning`; the dead `--no-rollback` hint is gone; cli-diagnostics test gets a 30 s timeout; docs modules.md — PR #1020 (9daabf579), 2026-11-06. CI green; merged without bot review. Sonnet review FIX (1 M docs, session-written). Evidence .claude/tmp/sonnet-run/T538b/.
 - T538 item 4 — upgrade History caps real runs (20) and preflight attempt rows (10) apart; `recordAttempt` prunes attempt rows beyond the newest 50 in the insert transaction, never the row it just wrote; docs release.md — PR #1019 (83a94fa62), 2026-11-06. CI green; merged without bot review (Codex and Greptile out of allowance). Sonnet review FIX (1 M docs, 4 L), all applied in one round. Evidence .claude/tmp/sonnet-run/T538/.
 - T533 item 22 — publish-channel accepts a saved archive with one platform-less manifest when its sha256-verified config os/arch match the record; every other shape still exits 2 before any push — PR #1018 (0bfee4355), 2026-11-06. CI green after one rerun (unrelated updater timeout, T538 item 6); merged without bot review. Sonnet review ACCEPT (3 L, no change). Evidence .claude/tmp/sonnet-run/T533c/.
 - Dependabot alert 118 (minimatch GHSA-g3hv-75wg-m249, via archiver -> readdir-glob) — pnpm override minimatch ^11.0.5 — PR #1017 (8317ecc31), 2026-11-06. CI green; merged without bot review (Codex and Greptile out of allowance). Alert state fixed. Dev stack needs `pnpm docker rebuild` for the lockfile.
