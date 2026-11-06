@@ -1166,7 +1166,7 @@ describe('the command line: a run that cannot look exits 2', () => {
   it('when one image does not exist, naming every image it checked first', (t) => {
     const stub = `#!/bin/sh
 case "$*" in *a-worker*) echo "Error response from daemon: No such image: a-worker:1" >&2; exit 1 ;; esac
-echo '[]'
+echo '["HAIVE_VERSION=0.9.0.1"]'
 `;
     const result = runGate(t, { files: GOOD_FILES, stub });
     assert.equal(result.status, 2);
@@ -1503,5 +1503,52 @@ describe('builder dependency reader', () => {
     assert.match(read().entries[0].problem, /different api\/worker dependency declarations/);
     rmSync(join(dir, 'packages/worker/node_modules/@haive-module/alpha'), { recursive: true });
     assert.match(read().entries[0].problem, /worker installed module metadata is unreadable/);
+  });
+});
+
+describe('missing images do not suppress checks of present images', () => {
+  for (const missing of ['api', 'worker']) {
+    it(`prints findings for the other image when ${missing} is missing`, (t) => {
+      const image = fakeImage(t, {
+        env: ['HAIVE_VERSION=9.9.9'],
+        layers: [{ ...CLEAN_LAYER, 'app/token': TOKEN }],
+      });
+      image.stub = image.stub.replace(
+        'case "$1" in',
+        `
+if [ "$1" = image ] && [ "$2" = inspect ]; then
+  case "$*" in *a-${missing}:1*) echo 'No such image' >&2; exit 1 ;; esac
+fi
+case "$1" in`,
+      );
+      const result = runGate(t, { files: GOOD_FILES, ...image });
+      const present = missing === 'api' ? 'worker' : 'api';
+      assert.equal(result.status, 2);
+      assert.match(
+        result.stderr,
+        new RegExp(`could not look: ${missing}: a-${missing}:1 cannot be inspected`),
+      );
+      assert.match(result.stdout, new RegExp(`OFFENDER ${present} stamp`));
+      assert.match(result.stdout, new RegExp(`OFFENDER ${present} token`));
+      assert.doesNotMatch(result.stdout, new RegExp(`OFFENDER ${missing} `));
+      assert.match(result.stderr, new RegExp(`${present} a-${present}:1: 2 offender`));
+      assert.ok(!result.stdout.includes(TOKEN) && !result.stderr.includes(TOKEN));
+      assert.deepEqual(result.leftovers, []);
+    });
+  }
+
+  it('exits 2 with all missing images reported and no scans attempted', (t) => {
+    const stub = `#!/bin/sh
+if [ "$1" = image ]; then echo 'No such image' >&2; exit 1; fi
+echo 'unexpected scan attempted' >&2
+exit 1
+`;
+    const result = runGate(t, { files: GOOD_FILES, stub });
+    assert.equal(result.status, 2);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /could not look: api:/);
+    assert.match(result.stderr, /could not look: worker:/);
+    assert.doesNotMatch(result.stderr, /unexpected scan attempted/);
+    assert.deepEqual(result.leftovers, []);
   });
 });
