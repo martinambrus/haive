@@ -252,37 +252,53 @@ read_channel_manifest() {
     # Copy only the top-level selection, preserving its JSON string escaping. Never
     # copy the user config itself: it may name auths or credential helpers.
     CHANNEL_CONTEXT=$(LC_ALL=C awk '
-      { s=s $0 "\n" }
+      # Keep records separate; concatenating the whole config per line is quadratic.
+      # Retain the records so a selected string can be printed with its exact escaping.
+      # BusyBox recomputes the source length in substr(); scan bounded windows.
+      function slice(pos,n) {
+        if (pos > size) return ""
+        if (n > 4096) return substr(s,pos,n)
+        if (pos < windowStart || pos+n > windowEnd) {
+          windowStart=pos; window=substr(s,pos,4096); windowEnd=pos+length(window)
+        }
+        return substr(window,pos-windowStart+1,n)
+      }
+      function ch() {
+        while (p > size && line < NR) { s=lines[++line]; size=length(s); windowStart=windowEnd=0; p=1 }
+        return slice(p,1)
+      }
+      function quoted(   c) {
+        tokenLine=line; tokenStart=p++
+        while ((c=ch()) != "") {
+          if (c=="\\") { p++; if (ch()!="") p++ }
+          else if (c=="\"") { p++; return 1 }
+          else p++
+        }
+        return 0
+      }
+      function ws() { while (ch() ~ /^[ \t\r\n]$/) p++ }
+      { lines[NR]=$0 "\n" }
       END {
-        depth=0
-        for(p=1;p<=length(s);p++) {
-          c=substr(s,p,1)
-          if(c=="\"") {
-            start=p++
-            while(p<=length(s)) {
-              c=substr(s,p,1)
-              if(c=="\\") p++
-              else if(c=="\"") break
-              p++
-            }
-            token=substr(s,start,p-start+1)
-            if(depth==1 && token=="\"currentContext\"") {
-              q=p+1; while(substr(s,q,1) ~ /[ \t\r\n]/) q++
-              if(substr(s,q,1)!=":") continue
-              p=q+1
-              while(substr(s,p,1) ~ /[ \t\r\n]/) p++
-              if(substr(s,p,1)!="\"") exit 1
-              start=p++
-              while(p<=length(s)) {
-                c=substr(s,p,1)
-                if(c=="\\") p++
-                else if(c=="\"") { print substr(s,start,p-start+1); exit }
-                p++
+        line=1; s=lines[line]; size=length(s); windowStart=windowEnd=0; p=1; depth=0
+        while ((c=ch()) != "") {
+          if (c=="\"") {
+            if (!quoted()) break
+            if (depth==1 && tokenLine==line && slice(tokenStart,p-tokenStart)=="\"currentContext\"") {
+              ws(); if (ch()!=":") continue
+              p++; ws()
+              if (ch()!="\"" || !quoted()) exit 1
+              if (tokenLine==line) print slice(tokenStart,p-tokenStart)
+              else {
+                printf "%s",substr(lines[tokenLine],tokenStart)
+                for (i=tokenLine+1;i<line;i++) printf "%s",lines[i]
+                print substr(s,1,p-1)
               }
-              exit 1
+              exit
             }
-          } else if(c=="{" || c=="[") depth++
-          else if(c=="}" || c=="]") depth--
+            continue
+          } else if (c=="{" || c=="[") depth++
+          else if (c=="}" || c=="]") depth--
+          p++
         }
       }
     ' "$CHANNEL_USER_CONFIG/config.json") || die "cannot read Docker currentContext"
@@ -400,27 +416,36 @@ read_channel_manifest() {
   if ! LC_ALL=C awk -v channel="$CHANNEL" -v version="$PINNED" -v registry="$CHANNEL_REGISTRY" '
     # Keep records separate: repeatedly appending the whole input is quadratic in mawk.
     # Only whitespace can cross records; an actual newline inside a string is invalid.
+    # BusyBox recomputes the source length in substr(); scan bounded windows.
+    function slice(pos,n) {
+      if (pos > size) return ""
+      if (n > 4096) return substr(s,pos,n)
+      if (pos < windowStart || pos+n > windowEnd) {
+        windowStart=pos; window=substr(s,pos,4096); windowEnd=pos+length(window)
+      }
+      return substr(window,pos-windowStart+1,n)
+    }
     function ws() {
       while (1) {
-        if (p > length(s)) {
+        if (p > size) {
           if (line >= NR) return
-          s=lines[++line]; delete lines[line]; p=1
-        } else if (substr(s,p,1) ~ /[ \t\r\n]/) p++
+          s=lines[++line]; delete lines[line]; size=length(s); windowStart=windowEnd=0; p=1
+        } else if (slice(p,1) ~ /[ \t\r\n]/) p++
         else return
       }
     }
     function fail() { bad=1; exit 1 }
     function str(   c,start,e,h) {
-      if (substr(s,p++,1) != "\"") fail()
+      if (slice(p++,1) != "\"") fail()
       start=p
-      while (p <= length(s)) {
-        c=substr(s,p++,1)
+      while (p <= size) {
+        c=slice(p++,1)
         # Escapes are validated, not decoded. Return one slice, even for many escapes.
-        if (c == "\"") return substr(s,start,p-start-1)
+        if (c == "\"") return slice(start,p-start-1)
         if (c ~ /[[:cntrl:]]/) fail()
         if (c == "\\") {
-          e=substr(s,p++,1)
-          if (e == "u") { h=substr(s,p,4); if (length(h)!=4 || h ~ /[^0-9a-fA-F]/) fail(); p+=4 }
+          e=slice(p++,1)
+          if (e == "u") { h=slice(p,4); if (length(h)!=4 || h ~ /[^0-9a-fA-F]/) fail(); p+=4 }
           else if (e !~ /^["\\\/bfnrt]$/) fail()
         }
       }
@@ -428,38 +453,38 @@ read_channel_manifest() {
     }
     function val(path,depth,   c,k,t,n,seen,a) {
       if (depth > 64) fail()
-      ws(); c=substr(s,p,1)
+      ws(); c=slice(p,1)
       if (c == "{") {
-        p++; ws(); if (substr(s,p,1)=="}") { p++; return }
+        p++; ws(); if (slice(p,1)=="}") { p++; return }
         while (1) {
           ws(); k=str(); if (index(k,"\\") || index(k,"/")) fail()
           if ((path SUBSEP k) in keys) fail(); keys[path SUBSEP k]=1
-          ws(); if (substr(s,p++,1)!=":") fail()
-          val(path "/" k,depth+1); ws(); c=substr(s,p++,1)
+          ws(); if (slice(p++,1)!=":") fail()
+          val(path "/" k,depth+1); ws(); c=slice(p++,1)
           if (c=="}") return
           if (c!=",") fail()
         }
       } else if (c == "[") {
-        p++; ws(); if (substr(s,p,1)=="]") { p++; return }
-        n=0; while (1) { val(path "/[" n++ "]",depth+1); ws(); c=substr(s,p++,1); if (c=="]") return; if(c!=",") fail() }
+        p++; ws(); if (slice(p,1)=="]") { p++; return }
+        n=0; while (1) { val(path "/[" n++ "]",depth+1); ws(); c=slice(p++,1); if (c=="]") return; if(c!=",") fail() }
       } else if (c == "\"") { t=str(); strings[path]=t }
-      else if (match(substr(s,p,5),/^(true|false|null)/)) p+=RLENGTH
+      else if (match(slice(p,5),/^(true|false|null)/)) p+=RLENGTH
       else if (c == "-" || c ~ /^[0-9]$/) {
         if (c == "-") p++
-        c=substr(s,p,1)
+        c=slice(p,1)
         if (c == "0") p++
         else {
           if (c !~ /^[1-9]$/) fail()
-          do { p++ } while (substr(s,p,1) ~ /^[0-9]$/)
+          do { p++ } while (slice(p,1) ~ /^[0-9]$/)
         }
-        if (substr(s,p,1) == ".") {
-          p++; if (substr(s,p,1) !~ /^[0-9]$/) fail()
-          do { p++ } while (substr(s,p,1) ~ /^[0-9]$/)
+        if (slice(p,1) == ".") {
+          p++; if (slice(p,1) !~ /^[0-9]$/) fail()
+          do { p++ } while (slice(p,1) ~ /^[0-9]$/)
         }
-        if (substr(s,p,1) ~ /^[eE]$/) {
-          p++; if (substr(s,p,1) ~ /^[+-]$/) p++
-          if (substr(s,p,1) !~ /^[0-9]$/) fail()
-          do { p++ } while (substr(s,p,1) ~ /^[0-9]$/)
+        if (slice(p,1) ~ /^[eE]$/) {
+          p++; if (slice(p,1) ~ /^[+-]$/) p++
+          if (slice(p,1) !~ /^[0-9]$/) fail()
+          do { p++ } while (slice(p,1) ~ /^[0-9]$/)
         }
       }
       else fail()
@@ -467,8 +492,8 @@ read_channel_manifest() {
     { lines[NR]=$0 "\n" }
     END {
       if (bad) exit 1
-      line=1; s=lines[line]; delete lines[line]
-      p=1; ws(); if(substr(s,p,1)!="{") fail(); val("",0); ws(); if(p<=length(s)) fail()
+      line=1; s=lines[line]; delete lines[line]; size=length(s); windowStart=windowEnd=0
+      p=1; ws(); if(slice(p,1)!="{") fail(); val("",0); ws(); if(p<=size) fail()
       if(strings["/channel"]!=channel || strings["/version"]!=version) fail()
       split("api worker web builder",hosts," ")
       for(i=1;i<=4;i++) {

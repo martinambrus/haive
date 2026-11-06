@@ -1032,6 +1032,17 @@ for (const lang of ['sh', 'ps1']) {
     }
   });
   for (const [name, data, fail] of [
+    ...[
+      ['split string', '"ab\ncd"'],
+      ['split escape', '"ab\\\nn"'],
+      ['split unicode escape', '"ab\\u00\n00"'],
+      ['split number', '1\n2'],
+      ['split keyword', 'tr\nue'],
+    ].map(([name, value]) => [
+      name,
+      '{"extra":' + value + ',' + JSON.stringify(manifest).slice(1),
+      '',
+    ]),
     ...['01', '-', '-01', '1.', '1e', '1e+', '1e-', 'truex', 'nullx'].map((value) => [
       `invalid JSON scalar ${value}`,
       '{"extra":' + value + ',' + JSON.stringify(manifest).slice(1),
