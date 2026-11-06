@@ -57,6 +57,7 @@ import {
   type RepoResourceCleanupPayload,
   type ExecutionPath,
   type FormSchema,
+  type StopSettlePayload,
   type TaskJobPayload,
   type TaskStatus,
   type WorkflowType,
@@ -4102,6 +4103,25 @@ export async function backfillMissingRunSeq(db: Database): Promise<void> {
   }
 }
 
+/** Settles a task a Stop failed when no pass was running, so nothing else would. A Retry moves the
+ *  task off failed and any later failure stamps its own instant and settles itself, so either
+ *  leaves nothing to do. It never writes the task row, and runTaskJob's catch skips this name so
+ *  a failed settlement is never the task's failure. */
+async function handleSettleStoppedTask(db: Database, payload: StopSettlePayload): Promise<void> {
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, payload.taskId),
+    columns: { status: true, completedAt: true },
+  });
+  if (task?.status !== 'failed' || task.completedAt?.getTime() !== Date.parse(payload.failedAt)) {
+    logger.info(
+      { taskId: payload.taskId },
+      'stop settlement skipped: the task is no longer the one the Stop failed',
+    );
+    return;
+  }
+  await settleFailedTask(db, payload.taskId);
+}
+
 async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<void> {
   const outcome = await markTaskCancelled(db, payload.taskId);
   if (outcome === 'completed' || outcome === 'gone') {
@@ -4447,6 +4467,8 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
       });
     } else if (job.name === TASK_JOB_NAMES.CANCEL) {
       await handleCancelTask(db, payload);
+    } else if (job.name === TASK_JOB_NAMES.SETTLE_STOPPED) {
+      await handleSettleStoppedTask(db, payload as StopSettlePayload);
     } else {
       throw new Error(`unknown task job ${job.name}`);
     }
@@ -4459,7 +4481,8 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
       taskId &&
       job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RAG &&
       job.name !== TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES &&
-      job.name !== TASK_JOB_NAMES.ABORT_LEFT_MERGE
+      job.name !== TASK_JOB_NAMES.ABORT_LEFT_MERGE &&
+      job.name !== TASK_JOB_NAMES.SETTLE_STOPPED
     ) {
       // Only at the epoch this job holds the task at: a Retry that moved it on owns it now.
       const epoch =

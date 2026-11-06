@@ -367,6 +367,8 @@ export const TASK_JOB_NAMES = {
   CLEANUP_REPO_RESOURCES: 'cleanup-repo-resources',
   /** Aborts the merge a cancelled task left open in `dir`, on the person's confirmed click. */
   ABORT_LEFT_MERGE: 'abort-left-merge',
+  /** Releases what a task holds after an api Stop failed it with no pass running. The worker settles only while the task still reads failed at the Stop's failedAt. */
+  SETTLE_STOPPED: 'settle-stopped-task',
 } as const;
 
 export interface TaskJobPayload {
@@ -386,6 +388,11 @@ export interface TaskJobPayload {
 export interface AbortLeftMergePayload extends TaskJobPayload {
   dir: string;
   mergeHead: string;
+}
+
+/** Payload for TASK_JOB_NAMES.SETTLE_STOPPED. failedAt is the ISO instant the Stop stamped on tasks.completed_at. */
+export interface StopSettlePayload extends TaskJobPayload {
+  failedAt: string;
 }
 
 /** Payload for `TASK_JOB_NAMES.CLEANUP_REPO_RAG`. For each of `projectNames` the worker

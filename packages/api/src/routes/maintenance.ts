@@ -28,6 +28,7 @@ import {
   recordAuditEvent,
   type AuditEvent,
 } from '../lib/audit.js';
+import { enqueueStopSettle } from '../lib/cancel-task.js';
 import { clearTaskPause, stopActiveCliInvocations } from '../lib/task-control.js';
 import {
   appendPauseEvent,
@@ -388,6 +389,7 @@ maintenanceRoutes.post('/tasks/:id/action', async (c) => {
         failTask: true,
         actor: 'admin',
       });
+      await enqueueStopSettle(taskId, task.userId, result.failedAt);
       // The owner and the audit trail hear of a stop only when a run ended or a step failed.
       if (result.cancelled > 0 || result.stopped > 0) {
         await appendTaskEvent(db, taskId, null, 'task.stopped', {

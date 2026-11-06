@@ -210,9 +210,11 @@ describe.skipIf(!url)('Stop over a fix-loop gate row on Postgres', () => {
     expect(after.formSchema).toBeNull();
     expect(after.formValues).toBeNull();
     expect((await taskOf(task.id)).status).toBe('running');
-    expect(h.queued).toHaveLength(1);
-    expect(h.queued[0]!.name).toBe(TASK_JOB_NAMES.ADVANCE_STEP);
-    expect(h.queued[0]!.payload).toMatchObject({ stepId: STEP, round: 1, epoch: 4 });
+    expect(h.queued.map((q) => q.name)).toEqual([
+      TASK_JOB_NAMES.SETTLE_STOPPED,
+      TASK_JOB_NAMES.ADVANCE_STEP,
+    ]);
+    expect(h.queued[1]!.payload).toMatchObject({ stepId: STEP, round: 1, epoch: 4 });
   });
 
   const retryByTask = (id: string) => post(`/tasks/${id}/action`, { action: 'retry' });
@@ -226,7 +228,7 @@ describe.skipIf(!url)('Stop over a fix-loop gate row on Postgres', () => {
     },
     { name: 're-offered never-answered gate', row: { formValues: null } },
   ])('Stop over $name', ({ row: over }) => {
-    it('fails the row and the task and queues nothing', async () => {
+    it('fails the row and the task and queues only its settlement', async () => {
       const task = await seedTask('running');
       const row = await seedRow(task.id, over);
       const before = await rowOf(row.id);
@@ -249,7 +251,12 @@ describe.skipIf(!url)('Stop over a fix-loop gate row on Postgres', () => {
       expect(t.errorMessage).toBe('Stopped by user');
       expect(t.completedAt).not.toBeNull();
       expect(t.orchestrationEpoch).toBe(3);
-      expect(h.queued).toEqual([]);
+      expect(h.queued).toEqual([
+        {
+          name: TASK_JOB_NAMES.SETTLE_STOPPED,
+          payload: { taskId: task.id, userId: USER, failedAt: t.completedAt!.toISOString() },
+        },
+      ]);
     });
 
     it('answers a second Stop with nothing stopped and changes nothing', async () => {
@@ -266,7 +273,16 @@ describe.skipIf(!url)('Stop over a fix-loop gate row on Postgres', () => {
 
       expect(await rowOf(row.id)).toEqual(rowBefore);
       expect(await taskOf(task.id)).toEqual(taskBefore);
-      expect(h.queued).toEqual([]);
+      expect(h.queued).toEqual([
+        {
+          name: TASK_JOB_NAMES.SETTLE_STOPPED,
+          payload: {
+            taskId: task.id,
+            userId: USER,
+            failedAt: taskBefore.completedAt!.toISOString(),
+          },
+        },
+      ]);
     });
 
     it.each([
@@ -290,9 +306,11 @@ describe.skipIf(!url)('Stop over a fix-loop gate row on Postgres', () => {
       const t = await taskOf(task.id);
       expect(t.status).toBe('running');
       expect(t.orchestrationEpoch).toBe(4);
-      expect(h.queued).toHaveLength(1);
-      expect(h.queued[0]!.name).toBe(TASK_JOB_NAMES.ADVANCE_STEP);
-      expect(h.queued[0]!.payload).toMatchObject({ stepId: STEP, round: 1, epoch: 4 });
+      expect(h.queued.map((q) => q.name)).toEqual([
+        TASK_JOB_NAMES.SETTLE_STOPPED,
+        TASK_JOB_NAMES.ADVANCE_STEP,
+      ]);
+      expect(h.queued[1]!.payload).toMatchObject({ stepId: STEP, round: 1, epoch: 4 });
     });
   });
 

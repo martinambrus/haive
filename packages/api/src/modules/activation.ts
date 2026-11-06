@@ -5,6 +5,7 @@ import { logger } from '@haive/shared';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { isStepOfModule } from '@haive/shared/modularity';
 import { insertAuditEvent, recordAuditEvent } from '../lib/audit.js';
+import { enqueueStopSettle } from '../lib/cancel-task.js';
 import { killTaskSandboxesOrThrow } from '../lib/sandbox-kill.js';
 import { supersedeLiveRuns } from '../lib/task-control.js';
 import { appendTaskEvent } from '../routes/tasks/_helpers.js';
@@ -213,6 +214,7 @@ export async function deactivateUrgently(
     }
     try {
       const { killError, ...result } = await stopTask(db, id);
+      await enqueueStopSettle(id, ownerId, result.failedAt);
       if (result.cancelled === 0 && result.stopped === 0) {
         report.left.push({ id, title, status, currentStepId });
         continue;
