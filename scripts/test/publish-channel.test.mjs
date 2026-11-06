@@ -96,6 +96,13 @@ function fixture(t, config = {}) {
   const requests = [];
   const logs = [];
   const published = new Set();
+  const localTags = new Map(Object.values(record.images).map((image) => [image.ref, image.id]));
+  const priorLocalId = `sha256:${'e'.repeat(64)}`;
+  if (config.existingLocal)
+    localTags.set(
+      `${config.localPrefix ?? PREFIX}/haive-customer-${config.existingLocal}:9.9.9`,
+      priorLocalId,
+    );
   const attempted = [];
   const bootCalls = [];
   const inspections = new Map();
@@ -111,6 +118,10 @@ function fixture(t, config = {}) {
     if (cmd === 'docker') {
       if (args[0] === 'image' && args[1] === 'inspect') {
         const host = KEYS.find((key) => record.images[key].ref === args.at(-1));
+        if (!host) {
+          const id = localTags.get(args.at(-1));
+          return id ? ok(id) : { status: 1, stderr: 'No such image' };
+        }
         idReads++;
         return ok(
           config.mismatch === host || (config.retagAfterBoot && idReads > KEYS.length)
@@ -125,7 +136,16 @@ function fixture(t, config = {}) {
         assert.equal(args[args.indexOf('--platform') + 1], record.platform);
         return config.saveFailure ? { status: 1 } : ok();
       }
-      if (args[0] === 'image' && args[1] === 'tag') return ok();
+      if (args[0] === 'image' && args[1] === 'tag') {
+        localTags.set(args.at(-1), args.at(-2));
+        return ok();
+      }
+      if (args[0] === 'image' && args[1] === 'rm') {
+        assert.equal(options.signal, undefined, 'cleanup ignores an aborted signal');
+        if (config.localCleanupFailure) return { status: 1 };
+        localTags.delete(args.at(-1));
+        return ok();
+      }
       if (args[0] === 'buildx' && args[1] === 'build') {
         assert.deepEqual(attempted, KEYS, 'release build follows every runtime push');
         assert.ok(existsSync(manifest), 'release build follows the local write');
@@ -135,6 +155,7 @@ function fixture(t, config = {}) {
           readFileSync(join(context, 'Dockerfile'), 'utf8'),
           'FROM scratch\nCOPY release.json /release.json\nLABEL org.haive.release=1\n',
         );
+        localTags.set(args[args.indexOf('--tag') + 1], IDS.release);
         releaseBytes = readFileSync(join(context, 'release.json'));
         assert.deepEqual(releaseBytes, readFileSync(manifest));
         assert.equal(args[args.indexOf('--platform') + 1], record.platform);
@@ -181,7 +202,10 @@ function fixture(t, config = {}) {
         const ref = copy ? args[args.indexOf('--tag') + 1] : args.at(-1);
         const host = DESTINATIONS.find((key) => ref.includes(`customer-${key}:`));
         attempted.push(host);
-        if (config.pushFailure === host) return { status: 1, stderr: 'push failed' };
+        if (config.pushFailure === host) {
+          config.abortPush?.();
+          return { status: 1, stderr: 'push failed' };
+        }
         if (copy) {
           assert.ok(args.includes('--prefer-index=false'));
           assert.equal(args.at(-1), `${PREFIX}/haive-web@${digests.web}`);
@@ -231,6 +255,8 @@ function fixture(t, config = {}) {
   };
   return {
     path,
+    localTags,
+    priorLocalId,
     root,
     out,
     manifest,
@@ -784,3 +810,49 @@ for (const phase of ['fetch resolves', 'fetch rejects', 'body rejects']) {
     assert.doesNotMatch(f.logs.join('\n'), /absence of .*could not be proven/);
   });
 }
+
+const LOCAL_TEST_PREFIX = '127.0.0.1:5051/other';
+const localDestination = (host) => destination(host).replace(PREFIX, LOCAL_TEST_PREFIX);
+
+for (const host of ['api', 'worker', 'builder', 'release']) {
+  test(`failed ${host} push removes only its new local destination tag`, async (t) => {
+    const f = fixture(t, { pushFailure: host });
+    assert.equal(await f.invoke(['--registry', LOCAL_TEST_PREFIX]), 2);
+    assert.equal(f.localTags.has(localDestination(host)), false);
+    assert.ok(
+      f.calls.some(
+        ({ args }) =>
+          args[0] === 'image' && args[1] === 'rm' && args.at(-1) === localDestination(host),
+      ),
+    );
+    assert.equal(
+      f.localTags.get(
+        `${PREFIX}/haive-${host === 'release' ? 'customer-api' : 'customer-' + host}:9.9.9`,
+      ),
+      host === 'release' ? IDS.api : IDS[host],
+    );
+  });
+}
+
+test('a failed push restores a pre-existing local destination tag', async (t) => {
+  const f = fixture(t, {
+    pushFailure: 'api',
+    existingLocal: 'api',
+    localPrefix: LOCAL_TEST_PREFIX,
+  });
+  assert.equal(await f.invoke(['--registry', LOCAL_TEST_PREFIX]), 2);
+  assert.equal(f.localTags.get(localDestination('api')), f.priorLocalId);
+});
+
+test('an aborted push still removes its new local destination tag', async (t) => {
+  const controller = new AbortController();
+  const f = fixture(t, { pushFailure: 'builder', abortPush: () => controller.abort() });
+  assert.equal(await f.invoke(['--registry', LOCAL_TEST_PREFIX], { signal: controller.signal }), 2);
+  assert.equal(f.localTags.has(localDestination('builder')), false);
+});
+
+test('failed local tag cleanup is reported and keeps exit 2', async (t) => {
+  const f = fixture(t, { pushFailure: 'worker', localCleanupFailure: true });
+  assert.equal(await f.invoke(['--registry', LOCAL_TEST_PREFIX]), 2);
+  assert.match(f.logs.join('\n'), /cleanup failed.*local tag.*customer-worker/);
+});

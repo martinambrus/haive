@@ -64,6 +64,33 @@ export async function run(
   const docker = (args, allowFailure) => command('docker', args, allowFailure);
   const inspect = (ref) =>
     docker(['buildx', 'imagetools', 'inspect', '--format', '{{json .Manifest}}', ref], true);
+  const localTag = async (ref) => {
+    const result = await docker(['image', 'inspect', '--format', '{{.Id}}', ref], true);
+    if (result.status === 0 && !result.error && DIGEST.test(result.stdout.trim()))
+      return result.stdout.trim();
+    if (result.status === 1 && !result.error && /No such image/i.test(result.stderr ?? ''))
+      return undefined;
+    throw new Error(`could not inspect local tag ${ref}`);
+  };
+  const pushLocal = async (ref, previous, platform) => {
+    try {
+      await docker(['push', '--platform', platform, ref]);
+    } catch (error) {
+      // Keep the recorded source image and any tag that existed before this run.
+      try {
+        const result = await runner(
+          'docker',
+          previous ? ['image', 'tag', previous, ref] : ['image', 'rm', ref],
+          { cwd: root, env, timeout: 15_000 },
+        );
+        if (result.status !== 0 || result.error) throw new Error('local tag cleanup failed');
+      } catch {
+        emit(`publish-channel: cleanup failed; local tag retained at ${ref}`);
+      }
+      throw error;
+    }
+  };
+
   let confirmations = new Set();
   const absent = async (ref) => {
     const result = await inspect(ref);
@@ -387,6 +414,7 @@ export async function run(
         );
         return attempted.length ? 2 : 1;
       }
+      const previous = record.images[host].built ? await localTag(destinations[host]) : undefined;
       if (record.images[host].built)
         await docker(['image', 'tag', record.images[host].id, destinations[host]]);
       attempted.push(destinations[host]);
@@ -400,7 +428,7 @@ export async function run(
           destinations[host],
           sources[host],
         ]);
-      else await docker(['push', '--platform', record.platform, destinations[host]]);
+      else await pushLocal(destinations[host], previous, record.platform);
       const pushed = await inspect(destinations[host]);
       if (
         pushed.status !== 0 ||
@@ -430,6 +458,7 @@ export async function run(
       'FROM scratch\nCOPY release.json /release.json\nLABEL org.haive.release=1\n',
       { mode: 0o600, flag: 'wx' },
     );
+    const previousRelease = await localTag(destinations.release);
     await docker([
       'buildx',
       'build',
@@ -444,7 +473,7 @@ export async function run(
     if (!(await absent(destinations.release)))
       throw new Error('release tag appeared before its push');
     attempted.push(destinations.release);
-    await docker(['push', '--platform', record.platform, destinations.release]);
+    await pushLocal(destinations.release, previousRelease, record.platform);
     const pushed = await inspect(destinations.release);
     if (
       pushed.status !== 0 ||
