@@ -518,10 +518,16 @@ export async function run(
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const controller = new AbortController();
+  // A terminal may close stdout before sending SIGHUP; keep abort cleanup alive.
+  process.stdout.on('error', (error) => {
+    if (!controller.signal.aborted) throw error;
+  });
   const stop = () => controller.abort();
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
+  process.once('SIGHUP', stop);
   process.exitCode = await run(process.argv.slice(2), { signal: controller.signal });
   process.removeListener('SIGINT', stop);
   process.removeListener('SIGTERM', stop);
+  process.removeListener('SIGHUP', stop);
 }

@@ -478,6 +478,10 @@ function isEntryPoint() {
 
 if (isEntryPoint()) {
   const controller = new AbortController();
+  // A terminal may close stdout before sending SIGHUP; keep abort cleanup alive.
+  process.stdout.on('error', (error) => {
+    if (!controller.signal.aborted) throw error;
+  });
   for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(name, () => controller.abort());
   process.exitCode = await run(process.argv.slice(2), { signal: controller.signal });
 }

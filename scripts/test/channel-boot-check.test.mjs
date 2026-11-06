@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -537,27 +537,55 @@ for (const [label, config] of [
   });
 }
 
-for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-  test(`CLI ${signal} cleans up after Docker creates a container`, (t) => {
-    const f = fixture(t);
-    const dir = dirname(f.path);
-    const bin = join(dir, 'bin');
-    const calls = join(dir, 'docker-calls.jsonl');
-    const envFiles = join(dir, 'env-files.jsonl');
-    mkdirSync(bin);
-    const fakeDocker = join(bin, 'docker');
-    writeFileSync(
-      fakeDocker,
-      `#!${process.execPath}
-import {appendFileSync,readFileSync} from 'node:fs';
+for (const cli of ['channel-boot-check', 'publish-channel']) {
+  for (const [signal, closedStdout] of [
+    ['SIGINT', false],
+    ['SIGTERM', false],
+    ['SIGHUP', false],
+    ['SIGHUP', true],
+  ]) {
+    test(`${cli} CLI ${signal}${closedStdout ? ' with closed stdout' : ''} cleans up after Docker creates a container`, async (t) => {
+      const f = fixture(t, {
+        editRecord(record) {
+          record.schema = 2;
+          record.images.web.built = true;
+          record.images.builder = {
+            ref: 'example.test/haive-test-builder:9.9.9',
+            id: `sha256:${'5'.repeat(64)}`,
+            built: true,
+          };
+        },
+      });
+      const dir = dirname(f.path);
+      const bin = join(dir, 'bin');
+      const calls = join(dir, 'docker-calls.jsonl');
+      const envFiles = join(dir, 'env-files.jsonl');
+      const closed = join(dir, 'stdout-closed');
+      const ready = join(dir, 'worker-ready');
+      mkdirSync(bin);
+      const fakeDocker = join(bin, 'docker');
+      writeFileSync(
+        fakeDocker,
+        `#!${process.execPath}
+import {appendFileSync,readFileSync,existsSync} from 'node:fs';
 const args=process.argv.slice(2);
 appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args)+'\\n');
 if(args[0]==='run') {
   for(let i=0;i<args.length;i++) if(args[i]==='--env-file') appendFileSync(${JSON.stringify(envFiles)}, JSON.stringify({path:args[i+1],body:readFileSync(args[i+1],'utf8')})+'\\n');
-  if(args[args.indexOf('--name')+1].endsWith('-worker')) process.kill(process.ppid,${JSON.stringify(signal)});
+  if(args[args.indexOf('--name')+1].endsWith('-worker')) {
+    if (${closedStdout}) {
+      appendFileSync(${JSON.stringify(ready)}, 'ready');
+      const deadline = Date.now() + 5000;
+      while (!existsSync(${JSON.stringify(closed)})) {
+        if (Date.now() > deadline) throw new Error('stdout did not close');
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    }
+    process.kill(process.ppid,${JSON.stringify(signal)});
+  }
 }
 if(args[0]==='image' && args[1]==='inspect') {
-  const images=${JSON.stringify(Object.fromEntries(Object.entries(IDS).map(([key, id]) => [`example.test/haive-test-${key}:9.9.9`, id])))};
+  const images=${JSON.stringify(Object.fromEntries(Object.values(JSON.parse(readFileSync(f.path, 'utf8')).images).map((image) => [image.ref, image.id])))};
   process.stdout.write(images[args.at(-1)] ?? 'sha256:'+'4'.repeat(64));
 } else if(args[0]==='inspect') process.stdout.write(JSON.stringify(args.at(-1).endsWith('-migrate')?{Running:false,Status:'exited',ExitCode:0}:{Running:true,Status:'running',ExitCode:0}));
 else if(args[0]==='exec') process.stdout.write('PONG');
@@ -566,50 +594,77 @@ else if(args[0]==='logs') {
   process.stdout.write(lines.map(line=>JSON.parse(line).body).join('\\n'));
 }
 `,
-    );
-    chmodSync(fakeDocker, 0o700);
-    const result = spawnSync(
-      process.execPath,
-      [new URL('../channel-boot-check.mjs', import.meta.url).pathname, '--record', f.path],
-      {
-        encoding: 'utf8',
-        timeout: 15_000,
-        env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}`, TMPDIR: tmpdir() },
-      },
-    );
-    assert.equal(result.status, 2, result.stdout + result.stderr);
-    assert.equal(result.signal, null);
-    const history = readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse);
-    const started = history
-      .filter((args) => args[0] === 'run')
-      .map((args) => args[args.indexOf('--name') + 1]);
-    const removed = history.filter((args) => args[0] === 'rm').map((args) => args.at(-1));
-    assert.equal(started.length, 5);
-    assert.deepEqual([...removed].sort(), [...started].sort());
-    for (const kind of ['network', 'volume']) {
-      assert.deepEqual(
-        history
-          .filter((args) => args[0] === kind && args[1] === 'rm')
-          .map((args) => args.at(-1))
-          .sort(),
-        history
-          .filter((args) => args[0] === kind && args[1] === 'create')
-          .map((args) => args.at(-1))
-          .sort(),
       );
-    }
-    for (const { path, body } of readFileSync(envFiles, 'utf8')
-      .trim()
-      .split('\n')
-      .map(JSON.parse)) {
-      assert.ok(!existsSync(path));
-      for (const line of body.trim().split('\n')) {
-        const [key, ...rest] = line.split('=');
-        if (/PASSWORD|ENCRYPTION_KEY|SETUP_TOKEN/.test(key))
-          assert.ok(!result.stdout.includes(rest.join('=')));
+      chmodSync(fakeDocker, 0o700);
+      const child = spawn(
+        process.execPath,
+        [new URL(`../${cli}.mjs`, import.meta.url).pathname, '--record', f.path],
+        {
+          timeout: 15_000,
+          env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}`, TMPDIR: tmpdir() },
+        },
+      );
+      t.after(() => {
+        if (child.exitCode === null) child.kill('SIGKILL');
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk;
+      });
+      const closeOutput = closedStdout
+        ? setInterval(() => {
+            if (existsSync(ready)) {
+              clearInterval(closeOutput);
+              child.stdout.destroy();
+            }
+          }, 10)
+        : undefined;
+      t.after(() => clearInterval(closeOutput));
+      child.stdout.on('close', () => {
+        if (closedStdout) writeFileSync(closed, 'closed');
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk;
+      });
+      const [status, exitSignal] = await new Promise((resolve, reject) => {
+        child.on('error', reject);
+        child.on('close', (...result) => resolve(result));
+      });
+      assert.equal(status, 2, stdout + stderr);
+      assert.equal(exitSignal, null);
+      const history = readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse);
+      const started = history
+        .filter((args) => args[0] === 'run')
+        .map((args) => args[args.indexOf('--name') + 1]);
+      const removed = history.filter((args) => args[0] === 'rm').map((args) => args.at(-1));
+      assert.equal(started.length, 5);
+      assert.deepEqual([...removed].sort(), [...started].sort());
+      for (const kind of ['network', 'volume']) {
+        assert.deepEqual(
+          history
+            .filter((args) => args[0] === kind && args[1] === 'rm')
+            .map((args) => args.at(-1))
+            .sort(),
+          history
+            .filter((args) => args[0] === kind && args[1] === 'create')
+            .map((args) => args.at(-1))
+            .sort(),
+        );
       }
-    }
-  });
+      for (const { path, body } of readFileSync(envFiles, 'utf8')
+        .trim()
+        .split('\n')
+        .map(JSON.parse)) {
+        assert.ok(!existsSync(path));
+        for (const line of body.trim().split('\n')) {
+          const [key, ...rest] = line.split('=');
+          if (/PASSWORD|ENCRYPTION_KEY|SETUP_TOKEN/.test(key))
+            assert.ok(!stdout.includes(rest.join('=')));
+        }
+      }
+    });
+  }
 }
 
 test('schema 2 validates builder metadata but never boots the builder', async (t) => {
