@@ -17,12 +17,15 @@ describe.skipIf(!url)('lastUpgradeAttempt on PostgreSQL', () => {
     await db!.transaction(async (tx) => {
       await tx.execute(sql`SET LOCAL search_path TO pg_temp`);
       await tx.execute(sql.raw(UPGRADE_JOURNAL_DDL));
+      // A refusal sorts first by id alone, so a tie must be decided by the real-run CASE.
       await tx.execute(sql`INSERT INTO upgrade_runs
-        (from_version, to_version, phase, status, started_at, ended_at)
-        VALUES ('1.0.0', '2.0.0', 'done', 'done', '2026-11-06 10:00:00', now())`);
+        (id, from_version, to_version, phase, status, started_at, ended_at)
+        VALUES ('00000000-0000-4000-8000-000000000001',
+          '1.0.0', '2.0.0', 'done', 'done', '2026-11-06 10:00:00', now())`);
       await tx.execute(sql`INSERT INTO upgrade_runs
-        (from_version, to_version, channel, phase, status, metadata, error, started_at, ended_at)
-        VALUES ('2.0.0', '3.0.0', 'acme', 'preflight', 'refused',
+        (id, from_version, to_version, channel, phase, status, metadata, error, started_at, ended_at)
+        VALUES ('00000000-0000-4000-8000-000000000002',
+          '2.0.0', '3.0.0', 'acme', 'preflight', 'refused',
           '{"refusal":"channel-changed"}'::jsonb, 'reason', '2026-11-06 10:00:01', now())`);
       expect(await lastUpgradeAttempt(tx)).toMatchObject({
         status: 'refused',
