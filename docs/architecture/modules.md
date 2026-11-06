@@ -534,15 +534,19 @@ per-customer.
   (MEASURED: `mkdir ...: read-only file system`). A public install's docker calls see no change.
 - Manifest: `--manifest-image` and `--manifest` are exclusive, and a channel install requires the image (with
   `--version`); argv errors exit 2. A run with no target still finishes an interrupted upgrade first. The image must be `${HAIVE_CHANNEL_REGISTRY}/haive-<channel>-release:`; the
-  updater reads `/release.json` by `docker create` + `docker cp` + `docker rm -f` of a temp container, removed on
-  every path, through `readFileNoFollow` with a 1 MiB cap. A manifest whose `channel` or `version` differs, or an
-  image that cannot be pulled, refuses. There is no public fallback.
+  updater reads `/release.json` by `docker create` + `docker cp <ctr>:/release.json -` + `docker rm -f` of a temp
+  container, removed on every path. The tar stream is capped while it is read (1 MiB payload) and must hold one
+  plain `release.json` entry with a valid header checksum; anything else refuses, and nothing is extracted. The
+  image is pulled even when cached, and removed afterwards only when this read pulled it and its ref has no digest
+  (a digest ref cannot prove it was absent). The first error wins over a cleanup error. A manifest whose `channel`
+  or `version` differs, or an image that cannot be pulled, refuses. There is no public fallback.
 - Images: without own modules the overrides are the manifest's pinned api/worker/web; with own modules the base
   images and the builder come from the manifest, and a manifest without `builder` refuses. Every pin must be in
   `${HAIVE_CHANNEL_REGISTRY}/haive-<channel>-<host>`. The `.env` settings are re-read under the upgrade lock, so
-  the journal's previous images are the ones in force; a channel install with no current pins refuses
-  (`rollback-images-missing`). Rollback inventory lists digests for a channel install, so digest pins pass
-  preflight.
+  the journal's previous images are the ones in force; a channel install with no current pins, or with only some
+  of the three, refuses (`rollback-images-missing`). Rollback inventory lists digest forms (`repo@digest` and
+  `repo:tag@digest`) for a channel install and for a public install whose overrides carry a digest, so digest
+  pins pass preflight.
 - `--dry-plan` (channel installs only) prints the computed image plan from the manifest and touches no database.
 - Revocation: the vendor revokes the token; the next pull fails closed and the running stack keeps running.
 
