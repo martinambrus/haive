@@ -135,7 +135,9 @@ function fixture(t, config = {}) {
           ? 'release'
           : DESTINATIONS.find((host) => IDS[host] === args.at(-1));
         assert.equal(args[args.indexOf('--platform') + 1], record.platform);
-        return config.saveFailure ? { status: 1 } : ok();
+        return config.saveFailure || (config.releaseSaveFailure && archiveHost === 'release')
+          ? { status: 1 }
+          : ok();
       }
       if (args[0] === 'image' && args[1] === 'tag') {
         localTags.set(args.at(-1), args.at(-2));
@@ -178,6 +180,8 @@ function fixture(t, config = {}) {
         }
         const host = DESTINATIONS.find((key) => ref.includes(`customer-${key}:`));
         inspections.set(host, (inspections.get(host) ?? 0) + 1);
+        if (config.releaseAbsenceFailure && host === 'release' && inspections.get(host) > 1)
+          throw new Error('release absence check failed');
         if (config.inspectCaptureError) return { status: 1, error: new Error('transport failed') };
         if (
           config.existing === host ||
@@ -928,4 +932,24 @@ appendFileSync(${JSON.stringify(captured)}, JSON.stringify({args, ...(build ? {b
     assert.equal(existsSync(calls[0].args.at(-1)), false, 'recovery context removed');
     assert.doesNotMatch(recovery, /\bT\d+\b/);
   });
+}
+
+for (const failure of ['releaseAbsenceFailure', 'releaseSaveFailure']) {
+  for (const preExisting of [false, true]) {
+    test(`${failure} before release push restores the local tag (pre-existing: ${preExisting})`, async (t) => {
+      const f = fixture(t, {
+        [failure]: true,
+        ...(preExisting ? { existingLocal: 'release' } : {}),
+      });
+      assert.equal(await f.invoke(), 2);
+      assert.deepEqual(f.attempted, KEYS);
+      assert.ok(existsSync(f.manifest));
+      assert.ok(f.releaseBytes, 'the release image was loaded before the failure');
+      assert.equal(
+        f.localTags.get(destination('release')),
+        preExisting ? f.priorLocalId : undefined,
+      );
+      assert.match(f.logs.join('\n'), /local manifest retained/);
+    });
+  }
 }

@@ -74,9 +74,10 @@ export async function run(
       return undefined;
     throw new Error(`could not inspect local tag ${ref}`);
   };
-  const pushLocal = async (ref, previous, platform) => {
+  const withLocalTag = async (ref, publish) => {
+    const previous = await localTag(ref);
     try {
-      await docker(['push', '--platform', platform, ref]);
+      await publish();
     } catch (error) {
       // Keep the recorded source image and any tag that existed before this run.
       try {
@@ -417,11 +418,8 @@ export async function run(
         );
         return attempted.length ? 2 : 1;
       }
-      const previous = record.images[host].built ? await localTag(destinations[host]) : undefined;
-      if (record.images[host].built)
-        await docker(['image', 'tag', record.images[host].id, destinations[host]]);
-      attempted.push(destinations[host]);
-      if (sources[host])
+      if (sources[host]) {
+        attempted.push(destinations[host]);
         await docker([
           'buildx',
           'imagetools',
@@ -431,7 +429,13 @@ export async function run(
           destinations[host],
           sources[host],
         ]);
-      else await pushLocal(destinations[host], previous, record.platform);
+      } else {
+        await withLocalTag(destinations[host], async () => {
+          await docker(['image', 'tag', record.images[host].id, destinations[host]]);
+          attempted.push(destinations[host]);
+          await docker(['push', '--platform', record.platform, destinations[host]]);
+        });
+      }
       const pushed = await inspect(destinations[host]);
       if (
         pushed.status !== 0 ||
@@ -461,22 +465,23 @@ export async function run(
       'FROM scratch\nCOPY release.json /release.json\nLABEL org.haive.release=1\n',
       { mode: 0o600, flag: 'wx' },
     );
-    const previousRelease = await localTag(destinations.release);
-    await docker([
-      'buildx',
-      'build',
-      '--platform',
-      record.platform,
-      '--load',
-      '--tag',
-      destinations.release,
-      context,
-    ]);
-    expected.release = await platformDigest('release', { id: destinations.release });
-    if (!(await absent(destinations.release)))
-      throw new Error('release tag appeared before its push');
-    attempted.push(destinations.release);
-    await pushLocal(destinations.release, previousRelease, record.platform);
+    await withLocalTag(destinations.release, async () => {
+      await docker([
+        'buildx',
+        'build',
+        '--platform',
+        record.platform,
+        '--load',
+        '--tag',
+        destinations.release,
+        context,
+      ]);
+      expected.release = await platformDigest('release', { id: destinations.release });
+      if (!(await absent(destinations.release)))
+        throw new Error('release tag appeared before its push');
+      attempted.push(destinations.release);
+      await docker(['push', '--platform', record.platform, destinations.release]);
+    });
     const pushed = await inspect(destinations.release);
     if (
       pushed.status !== 0 ||
