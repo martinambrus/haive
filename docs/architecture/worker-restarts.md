@@ -60,7 +60,8 @@ failed row back as its failure, as it hands back a done or skipped one. A
 START on the queue is no such job for a task still waiting to start (`taskQueueOwed`): it only claims
 such a task, so one a dead worker left `active` under its 30-minute lock would otherwise hold a claimed
 task for that long and then do nothing. It does hold a task parked or running on its first step,
-since it runs that step inside the job (below).
+since it runs that step inside the job (below). A `settle-stopped-task` job owes no step either
+(`taskQueueOwed` skips it): it only releases what a failed task holds.
 
 **A park whose poll chain was lost is re-driven.** A parked row (`pending` with
 `waiting_started_at`: a runtime slot, a pause, module schema setup or a required integration) is
@@ -365,7 +366,16 @@ task it returns that update's `completedAt` as `failedAt`, and the `task.stopped
 administrator's Stop writes carries it: the task page and the task list name a stop as the cause of
 a failure only when that stamp equals the task's `completedAt` (`loadTaskStop`, and `loadTaskStops`
 for a page of the list in one query, both reading a task's newest 50 stops), since the event is
-written after the kill and a Retry that failed in between would otherwise read as the stop's. The allowance auto-resume
+written after the kill and a Retry that failed in between would otherwise read as the stop's. The same `failedAt` goes to the
+settlement a Stop owes: after the commit and the kill, the owner's Stop, an administrator's stop and
+an urgent module deactivation each queue one `settle-stopped-task` job (`enqueueStopSettle`),
+because a Stop that finds no pass never reaches the pass's own `settleFailedTask`. The wait is
+bounded to 2 s and the helper never throws, so a Redis outage never delays or fails the answer. The
+worker (`handleSettleStoppedTask`) settles only while the task still reads `failed` with a
+`completedAt` equal to that `failedAt`: a Retry takes the task out of `failed`, and a later failure
+stamps its own instant and settles itself, so either leaves the job nothing to do. The job never
+writes the task row, `runTaskJob`'s catch skips its name so a failed settlement is never the task's
+failure, and `taskQueueOwed` skips it so a retained job holds no stalled redrive. The allowance auto-resume
 (`autoResumeFailedStep`) writes in the same order, its claim on the failed task last, and a claim it
 loses takes back every write before it. While new work is refused it does nothing at all, whatever status it read — no write,
 no job, no attempt spent — and the next poll resumes the task once the state is normal again. When the state cannot be read
@@ -382,7 +392,8 @@ written. Its repository-row take has a separate 30 s bound, so a relink holding 
 leave the delete waiting without a bound after it obtained the task-creation key. The plan advisory route takes the same key, before its plan node row, since the delete
 holds the key and cascades into the node rows. The cancel itself is described after this paragraph. A pass a Stop cut off
 mid-apply then releases what the failed task holds (`settleFailedTask`), as its own failure would
-have. The cancel poll also stops a
+have; a Stop that finds no pass queues the same release as a `settle-stopped-task` job (see
+`failedAt` above), and when both run a second settlement of one failure is harmless. The cancel poll also stops a
 pass whose task moved to a newer epoch. Either way the pass stops there, records no recap and
 hands nothing off (`superseded`), and the Retry's pass runs once it lets go. The writes that open a
 pass on its `pending` row, claiming it, skipping it, failing a deactivated module's step or failing a
@@ -448,7 +459,10 @@ cancelled, completed or dead), `warn` for a row or task that no longer exists or
 explains it.
 The allowance watch a failure arms is fenced the same way, and only while the task still reads
 `failed`: the teardown before it can outlast a Retry clicked on that failure, which clears the
-watch as every other exit from `failed` does. The hint it leaves on the row (`writeStepHint`) lands
+watch as every other exit from `failed` does. The settle job reads its fence once, at its start,
+so a Retry that commits after that read can still meet the teardown in progress, as after a
+failure's own settlement. What it removes is rebuilt by the next ensure (task auth volume, terminal
+shell); only the shell's state is lost. The hint it leaves on the row (`writeStepHint`) lands
 only while the row still reads `failed` and the task is still failed at that epoch, since a reset
 clears a hint written before it but not one written after; a finished fan-out's timeout hint lands
 only on a row still `done` under the pass's fence, and a login hint only while its run stands.
