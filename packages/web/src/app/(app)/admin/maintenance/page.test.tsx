@@ -505,3 +505,28 @@ describe('upgrade timestamp display', () => {
     expect(findAll(view.tree(), (h) => h.props.role === 'alert')).toHaveLength(0);
   });
 });
+
+it.each(['running', 'done', 'rolled_back'])(
+  'keeps the launch container and outage explanation after a newer %s run appears',
+  async (status) => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    vi.setSystemTime(new Date('2026-11-06T09:59:59.000Z'));
+    launchStartedAt = '2026-11-06T09:59:59.000Z';
+    canUpgrade = true;
+    const view = await mount();
+    fire.type(findAll(view.tree(), (h) => h.props.id === 'target-version')[0]!, '9.9.9');
+    await view.flush();
+    fire.click(stateButton(view, 'Start upgrade'));
+    await view.flush();
+    fire.click(findAll(view.tree(), (h) => h.tag === 'button' && textOf(h) === 'Upgrade')[0]!);
+    for (let i = 0; i < 5; i++) await view.flush();
+    runs = [{ ...upgradeRun(status), started_at: '2026-11-06T10:00:00.000Z' }];
+    vi.advanceTimersByTime(5000);
+    for (let i = 0; i < 5; i++) await view.flush();
+    const text = textOf(view.tree());
+    expect(text).toContain('running as container');
+    expect(text).toContain('new-containe');
+    expect(text).toContain('stop responding while the api is replaced');
+    expect(text).toContain('docker logs');
+  },
+);

@@ -236,13 +236,6 @@ export default function MaintenancePage() {
 
   const liveRun = upgrade?.runs.find((r) => r.status === 'running') ?? null;
   const attemptBanner = upgradeAttemptBanner(upgrade?.lastAttempt, launched?.startedAt);
-  const launchHasRun =
-    launched &&
-    upgrade?.runs.some(
-      (r) =>
-        ['running', 'done', 'rolled_back'].includes(r.status) &&
-        parseUpgradeInstant(r.started_at) > launched.startedAt,
-    );
 
   const parked = blocking?.parked ?? [];
 
@@ -439,7 +432,7 @@ export default function MaintenancePage() {
           </Card>
         ) : null}
 
-        {launched && !attemptBanner && !launchHasRun ? (
+        {launched && !attemptBanner ? (
           <div className="rounded-md border border-sky-900 bg-sky-950/40 px-3 py-2 text-sm text-sky-300">
             The updater is running as container{' '}
             <code className="text-sky-200">{launched.container.slice(0, 12)}</code>. This page will
