@@ -149,13 +149,24 @@ export async function gitRun(
   const { input, allowFileTransport, ...output } = io ?? {};
   const argv = hardenGitArgs(args, { allowFileTransport });
   const timeout = output.timeout ?? gitDefaultTimeoutMs(argv);
-  const child = spawn('git', argv, {
-    cwd,
-    env: gitEnv(env),
-    timeout,
-    detached: !!output.signal,
-    signal: output.signal,
-  });
+  let child: ChildProcess;
+  try {
+    child = spawn('git', argv, {
+      cwd,
+      env: gitEnv(env),
+      timeout,
+      detached: !!output.signal,
+      signal: output.signal,
+    });
+  } catch (error) {
+    const noExit = (error as NodeJS.ErrnoException).code ?? 'unknown';
+    return {
+      stdout: '',
+      stderr: withLine('', `git ended without an exit status in ${cwd} (${noExit})`),
+      code: GIT_NO_EXIT,
+      noExit,
+    };
+  }
   const abortWait = output.signal ? abortExitWait(child, output.signal) : undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
@@ -166,11 +177,11 @@ export async function gitRun(
   let stderrBytes = 0;
   const maxBuffer = output.maxBuffer ?? GIT_MAX_BUFFER;
   const stop = () => {
-    child.stdout.destroy();
-    child.stderr.destroy();
+    child.stdout?.destroy();
+    child.stderr?.destroy();
     child.kill();
   };
-  child.stdout.on('data', (chunk: Buffer) => {
+  child.stdout?.on('data', (chunk: Buffer) => {
     stdoutBytes += chunk.length;
     if (stdoutBytes <= maxBuffer) stdout.push(chunk);
     else {
@@ -178,7 +189,7 @@ export async function gitRun(
       stop();
     }
   });
-  child.stderr.on('data', (chunk: Buffer) => {
+  child.stderr?.on('data', (chunk: Buffer) => {
     stderrBytes += chunk.length;
     if (stderrBytes <= maxBuffer) stderr.push(chunk);
     else {
@@ -187,8 +198,8 @@ export async function gitRun(
     }
   });
   if (input) {
-    child.stdin.on('error', () => undefined);
-    child.stdin.end(input);
+    child.stdin?.on('error', () => undefined);
+    child.stdin?.end(input);
   }
   try {
     const result = await new Promise<GitRunResult>((resolve) => {

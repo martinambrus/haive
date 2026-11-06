@@ -42,6 +42,15 @@ describe('gitRun when git ends without an exit status', () => {
     expect(res.stderr).toContain('ENOENT');
   });
 
+  it('a file as cwd is GIT_NO_EXIT with ENOTDIR', async () => {
+    const cwd = path.join(await scratch('no-exit-file-'), 'file');
+    await writeFile(cwd, 'not a directory');
+    const res = await gitRun(cwd, ['status']);
+    expect(res).toMatchObject({ code: GIT_NO_EXIT, noExit: 'ENOTDIR', stdout: '' });
+    expect(res.stderr).toContain(cwd);
+    expect(res.stderr).toContain('ENOTDIR');
+  });
+
   it('an output overflow is GIT_NO_EXIT', async () => {
     const res = await gitRun(tmpdir(), ['--version'], undefined, { maxBuffer: 4 });
     expect(res.code).toBe(GIT_NO_EXIT);
