@@ -140,6 +140,7 @@ export async function run(
         interrupted();
         return response;
       } catch {
+        interrupted();
         throw unproven();
       }
     };
@@ -147,6 +148,7 @@ export async function run(
       try {
         return await response.json();
       } catch {
+        interrupted();
         throw unproven();
       }
     };
@@ -169,6 +171,7 @@ export async function run(
       try {
         realm = new URL(params.get('realm'));
       } catch {
+        interrupted();
         throw unproven();
       }
       if (

@@ -758,3 +758,29 @@ test('a failed release build retains the local manifest and returns 2 after runt
   assert.deepEqual(f.attempted, KEYS);
   assert.match(f.logs.at(-1), /local manifest retained/);
 });
+
+for (const phase of ['fetch resolves', 'fetch rejects', 'body rejects']) {
+  test(`registry abort during ${phase} preserves the interruption reason`, async (t) => {
+    const controller = new AbortController();
+    const abort = () => controller.abort(new Error('operator interrupted publication'));
+    const f = fixture(t, {
+      request: async () => {
+        if (phase === 'body rejects')
+          return {
+            status: 404,
+            json: async () => {
+              abort();
+              throw new Error('body stopped');
+            },
+          };
+        abort();
+        if (phase === 'fetch rejects') throw new Error('fetch stopped');
+        return { status: 404 };
+      },
+    });
+    assert.equal(await f.invoke([], { signal: controller.signal }), 2);
+    assert.deepEqual(f.attempted, []);
+    assert.match(f.logs.join('\n'), /operator interrupted publication/);
+    assert.doesNotMatch(f.logs.join('\n'), /absence of .*could not be proven/);
+  });
+}
