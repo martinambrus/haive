@@ -271,8 +271,9 @@ export async function run(
           listed.stdout.trim() !== ''
         )
           throw new Error(`could not inspect dependency image ${image}`);
-        await docker(['pull', image]);
+        // The daemon may finish a pull after the client is interrupted.
         pulledImages.push({ kind: 'image', name: image });
+        await docker(['pull', image]);
       }
     }
     await create('network', prefix, [

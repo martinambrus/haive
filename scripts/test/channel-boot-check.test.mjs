@@ -73,6 +73,10 @@ function fixture(t, config = {}) {
     }
     if (args[0] === 'pull') {
       created.images.push(args.at(-1));
+      if (config.abortPull) {
+        controller.abort();
+        return { status: null, error: new Error('interrupted') };
+      }
       return ok();
     }
     if (args[0] === 'image' && args[1] === 'rm') {
@@ -614,4 +618,12 @@ test('every boot-check resource carries the same run label without changing name
   for (const { args } of creations) {
     assert.equal(args[args.indexOf('--label') + 1], `haive.boot-check=${prefix}`);
   }
+});
+
+test('abort during a dependency pull removes the image this run may have pulled', async (t) => {
+  const f = fixture(t, { pullDependencies: true, abortPull: true });
+  assert.equal(await f.check(), 2);
+  assert.deepEqual(f.created.images, ['pgvector/pgvector:pg18']);
+  assert.deepEqual(f.removed.images, f.created.images);
+  assert.equal(f.created.networks.length, 0);
 });
