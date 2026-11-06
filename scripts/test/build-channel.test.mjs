@@ -136,6 +136,7 @@ function fixture(t, config = {}) {
         ])
           options.onOutput(chunk, stream);
       }
+      if (config.buildThrow) throw new Error('child output interrupted');
       return {
         status: config.buildFailure ? 1 : 0,
         stdout: options.onOutput ? '' : `build output ${TOKEN}\n`,
@@ -818,3 +819,20 @@ test('streamed chunks preserve spaces and line boundaries with a raw writer', as
   assert.equal(await f.execute(), 0);
   assert.equal(f.writes.join(''), chunks.join('').repeat(3));
 });
+
+for (const ending of ['success', 'failure', 'throw']) {
+  test(`drops a held token prefix at end of stream: ${ending}`, async (t) => {
+    const prefix = TOKEN.slice(0, -1);
+    const f = fixture(t, {
+      buildFailure: ending === 'failure',
+      buildThrow: ending === 'throw',
+      buildChunks: [
+        ['visible\n' + prefix, 'stdout'],
+        ['diagnostic\n' + prefix, 'stderr'],
+      ],
+    });
+    assert.equal(await f.execute(), ending === 'success' ? 0 : 2);
+    assert.ok(!f.logs.join('').includes(prefix));
+    assert.equal(f.writes.join(''), 'visible\ndiagnostic\n'.repeat(ending === 'success' ? 3 : 1));
+  });
+}

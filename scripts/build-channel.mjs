@@ -193,19 +193,16 @@ export async function run(
         const ready = keep ? text.slice(0, -keep) : text;
         if (ready) write(ready);
       };
-      let result;
-      try {
-        result = await runner(cmd, args, {
-          cwd,
-          env: childEnv,
-          timeout: 1_800_000,
-          signal,
-          ...options,
-          ...(stream ? { onOutput } : {}),
-        });
-      } finally {
-        for (const text of buffers.values()) emit(text);
-      }
+      // A held suffix is a proper prefix of the secret. Never flush it, even if the
+      // child exits successfully: a truncated token must stay private too.
+      const result = await runner(cmd, args, {
+        cwd,
+        env: childEnv,
+        timeout: 1_800_000,
+        signal,
+        ...options,
+        ...(stream ? { onOutput } : {}),
+      });
       if (!quiet) {
         emit(result.stdout);
         emit(result.stderr);
