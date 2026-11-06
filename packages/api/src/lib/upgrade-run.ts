@@ -17,11 +17,18 @@ export type UpgradeRunRow = {
   phase: string;
   status: string;
   error: string | null;
-  started_at: Date;
-  ended_at: Date | null;
+  started_at: string;
+  ended_at: string | null;
 };
 
 type UpgradeRunDb = Pick<DbTx, 'execute'>;
+
+// These timestamp columns hold now() in the session TimeZone's wall clock. Convert in SQL,
+// before any driver parser can mistake it for UTC, and return text with an explicit offset.
+const instant = (column: 'started_at' | 'ended_at') => sql`to_char(
+  ${sql.identifier(column)} AT TIME ZONE current_setting('TimeZone') AT TIME ZONE 'UTC',
+  'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+)`;
 
 async function journalExists(db: UpgradeRunDb): Promise<boolean> {
   // The updater creates upgrade_runs, and a failed SELECT would abort the transaction.
@@ -34,7 +41,8 @@ async function journalExists(db: UpgradeRunDb): Promise<boolean> {
 export async function listUpgradeRuns(db: UpgradeRunDb): Promise<UpgradeRunRow[]> {
   if (!(await journalExists(db))) return [];
   const rows = await db.execute<UpgradeRunRow>(
-    sql`SELECT id, from_version, to_version, phase, status, error, started_at, ended_at
+    sql`SELECT id, from_version, to_version, phase, status, error, ${instant('started_at')} AS started_at,
+           ${instant('ended_at')} AS ended_at
             FROM upgrade_runs ORDER BY started_at DESC, id DESC LIMIT 20`,
   );
   return rows as unknown as UpgradeRunRow[];
@@ -59,7 +67,7 @@ export interface UpgradeAttempt {
   status: 'refused' | 'failed';
   refusal: string | null;
   error: string | null;
-  startedAt: Date;
+  startedAt: string;
   toVersion: string;
   channel: string;
 }
@@ -68,7 +76,8 @@ export interface UpgradeAttempt {
 export async function lastUpgradeAttempt(db: UpgradeRunDb): Promise<UpgradeAttempt | null> {
   if (!(await journalExists(db))) return null;
   const rows = (await db.execute<UpgradeRunRow & { channel: string; refusal: string | null }>(sql`
-    SELECT id, from_version, to_version, channel, phase, status, error, started_at, ended_at,
+    SELECT id, from_version, to_version, channel, phase, status, error, ${instant('started_at')} AS started_at,
+           ${instant('ended_at')} AS ended_at,
            metadata ->> 'refusal' AS refusal
       FROM upgrade_runs
      WHERE status IN ('done', 'running', 'rolled_back')

@@ -421,7 +421,7 @@ describe('upgrade attempt banners', () => {
     status,
     refusal: status === 'refused' ? 'channel-changed' : null,
     error: 'Journal channel differs; use --change-channel acme to acknowledge the move',
-    startedAt: '2026-11-06T10:00:00.000Z',
+    startedAt: '2026-11-06T11:00:00.000000+01:00',
     toVersion: '9.9.9',
     channel: 'public',
   });
@@ -480,4 +480,28 @@ describe('upgrade attempt banners', () => {
       expect(alerts(view)).toHaveLength(1);
     },
   );
+});
+
+describe('upgrade timestamp display', () => {
+  it('shortTime displays offset instants in the browser timezone for both history columns', async () => {
+    runs = [
+      {
+        ...upgradeRun('done'),
+        started_at: '2026-11-06T11:00:00.123456+01:00',
+        ended_at: '2026-11-06T05:05:00.123456-05:00',
+      },
+    ];
+    const text = textOf((await mount()).tree());
+    expect(text).toContain(new Date('2026-11-06T10:00:00.123Z').toLocaleString());
+    expect(text).toContain(new Date('2026-11-06T10:05:00.123Z').toLocaleString());
+  });
+
+  it('refuses zone-less timestamps in History shortTime and attempt comparisons', async () => {
+    const zoneless = '2026-11-06 10:00:00.123456';
+    runs = [{ ...upgradeRun('done'), started_at: zoneless, ended_at: zoneless }];
+    lastAttempt = { status: 'refused', startedAt: zoneless, error: 'reason', toVersion: '9.9.9' };
+    const view = await mount();
+    expect(textOf(view.tree())).not.toContain(new Date(zoneless).toLocaleString());
+    expect(findAll(view.tree(), (h) => h.props.role === 'alert')).toHaveLength(0);
+  });
 });

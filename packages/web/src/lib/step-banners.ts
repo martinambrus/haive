@@ -1,4 +1,5 @@
 import { leftOpenMerges, type MergeLeftOpenOutcome } from '@haive/shared/merge-left-open';
+import { parseUpgradeInstant } from './upgrade-time';
 import { parseStepId } from '@haive/shared/modularity';
 
 /** Banner visibility for step cards, invocation terminals and attachment rows.
@@ -385,7 +386,7 @@ export function upgradeAttemptBanner(
   launchStartedAt?: number,
 ): { kind: 'refused' | 'failed'; text: string } | null {
   if (!attempt || (attempt.status !== 'refused' && attempt.status !== 'failed')) return null;
-  const startedAt = Date.parse(attempt.startedAt);
+  const startedAt = parseUpgradeInstant(attempt.startedAt);
   if (
     !Number.isFinite(startedAt) ||
     (launchStartedAt !== undefined && startedAt <= launchStartedAt)

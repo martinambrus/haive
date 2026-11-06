@@ -1,5 +1,7 @@
 'use client';
 
+import { parseUpgradeInstant } from '@/lib/upgrade-time';
+
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   maintenanceApi,
@@ -54,7 +56,8 @@ const RUN_STATUS_VARIANT: Record<string, 'success' | 'warning' | 'error' | 'info
 
 function shortTime(iso: string | null): string {
   if (!iso) return '—';
-  return new Date(iso).toLocaleString();
+  const instant = parseUpgradeInstant(iso);
+  return Number.isFinite(instant) ? new Date(instant).toLocaleString() : '—';
 }
 
 function TaskRow({
@@ -238,7 +241,7 @@ export default function MaintenancePage() {
     upgrade?.runs.some(
       (r) =>
         ['running', 'done', 'rolled_back'].includes(r.status) &&
-        Date.parse(r.started_at) > launched.startedAt,
+        parseUpgradeInstant(r.started_at) > launched.startedAt,
     );
 
   const parked = blocking?.parked ?? [];
