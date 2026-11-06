@@ -112,7 +112,8 @@ export function ModuleSourceDialog({
                 value={moduleId}
                 required
                 maxLength={MODULE_ID_MAX_LENGTH}
-                pattern={MODULE_ID_PATTERN_SOURCE}
+                // HTML compiles patterns with the v flag, which requires literal hyphens escaped.
+                pattern={MODULE_ID_PATTERN_SOURCE.replaceAll('-]', '\\-]')}
                 disabled={running}
                 onChange={(event) => setModuleId(event.target.value)}
               />
