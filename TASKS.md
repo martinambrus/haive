@@ -377,24 +377,19 @@ status: open · kind: fix · found: T351 reviews 2026-11-05 · priority: P3
 21. publish-channel test fake: the guard `attempted.length < KEYS.length` (scripts/test/publish-channel.test.mjs:107) stops checking manifest absence before the builder (fourth) push, and the release-build failure tests (:143) assert no log text. Fix: cover the last runtime push and assert exit plus log. Low.
 22. publish-channel: a stock web whose saved archive has no per-entry platform (a hand-made single-manifest image) is refused, exit 2 before any push (scripts/publish-channel.mjs ~:315-323). PRE-EXISTING; release.yml publishes multi-arch indexes, so it bites only hand-made stock images. Fix needs approval: accept one manifest with no platform when its config os/arch matches the record.
 
-### T536 · FNF[installer-channel] · install.sh/install.ps1 channel-install follow-ups from T335 PR C (+7)
-
-status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-06 · last: 2026-11-06 · kind: fix · found: T335 PR C reviews 2026-11-05 · priority: P3
-
-1. The scratch `DOCKER_CONFIG` used for the channel login and manifest read hides the user's docker contexts, CLI plugins and credential helpers (install/install.sh ~:235, install/install.ps1 ~:254). A host whose daemon is reached only through a non-default context fails verification. UNVERIFIED, consequential for that setup; copy `currentContext` and `contexts/` into the scratch config, or honour `DOCKER_HOST`/`DOCKER_CONTEXT`.
-2. A channel install's `latest`/`next` resolve through the public GitHub releases (install.sh ~:194, install.ps1 ~:183), so a channel that has not published that version refuses (fail closed). PRE-EXISTING shape, consequential; require `--version` for a channel or resolve from the channel registry's release tags.
-3. The public install's `umask 077` (set for `.env`) stays in effect for the rest of the script (install.sh ~:526). PRE-EXISTING, minor; scope it to the `.env` write as the channel path now does.
-4. The awk JSON validator is quadratic (`substr` per character) and its time on a large manifest is unmeasured; the 1 MiB cap bounds it (install.sh ~:276). Minor; measure, then index by position if it matters.
-5. The final `.docker` guard (install.sh ~:576, install.ps1 ~:502) runs after `.env` is written, so a `.docker` created between the early guard and the move still leaves a half install. Narrow race, minor; create the destination with an exclusive mkdir-and-rename.
-6. PowerShell reads the manifest with `ConvertFrom-Json` plus `Assert-ManifestKeys`, which is looser than the sh awk reader on some shapes (review-1 L4). Minor; add parity controls for the shapes the awk reader refuses.
-7. Test gap: no control for a bare positional after the value of `--dir`/`--install-id` in install.ps1 (scripts/test/install-channel.test.mjs ~:412-471). Minor.
-
 ### T538 · FNF[updater-manifest] · release manifest read leftovers from T534 (+2)
 
 status: open · kind: fix · found: T534 review 1 2026-11-06 · priority: P4
 
 1. A concurrent pull of the same release ref between the presence probe and the pull makes `--check` remove an image another process just added (packages/updater/src/docker.ts `readReleaseManifestImage`, presence probe then pull). PRE-EXISTING design edge, low likelihood (refs are `<registry>/haive-<channel>-release:<version>`). Fix direction: remove by the pulled image id only if no other tag references it, or skip removal.
 2. When the read failed, a failed cleanup (`docker rm -f`, `docker image rm`) is swallowed with no log, so a leaked manifest container or image is invisible (same function, `finally`). PRE-EXISTING. Fix direction: emit a `warning` event naming the container or image.
+
+### T539 · FNF[installer-manifest-reader] · installer manifest reader leftovers from T536 (+2)
+
+status: open · kind: fix · found: T536 reviews 2026-11-06 · priority: P4
+
+1. The sh awk manifest reader still concatenates per line and per string character (install/install.sh ~:414 `t=t c`, ~:456 `s=s $0 "\n"`), quadratic under mawk: about 40 s on a 990 KB newline-separated manifest (gawk is fine). PRE-EXISTING; the 1 MiB cap bounds it. Fix direction: read with RS set to an impossible record separator, or collect into an array and join once.
+2. install.ps1 ~:408 `ConvertFrom-Json` rejects a valid 513-digit numeric value in an unknown key that the sh reader accepts. PRE-EXISTING, low; no published manifest carries one. Fix direction: parity control and a pre-scan, or document the difference.
 
 ### T537 · D3 · updater refusals are invisible on the admin page (design)
 
@@ -1387,6 +1382,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T536 — channel installer follow-ups (sh and ps1 together): explicit version required for a channel; selected Docker contexts copied by hash and kept in the final `.docker`; `DOCKER_HOST` pinned on every updater/builder container that reads the install `.docker` (both helpers, POST /upgrade, own-module builder); exclusive `.docker` claim with run-owned cleanup; bounded awk scanner (5.86 s to 0.44 s on 1 MiB); ps1 reader parity and argument forwarding; docs modules.md — PR #1012 (04a24a4c1), 2026-11-06. CI 17/17 green; merged without bot review (Codex and Greptile out of allowance). Sonnet reviews 1-3, last ACCEPT (1 L, documented). Leftovers T539. Evidence .claude/tmp/sonnet-run/T536/.
 - T534 — updater channel-upgrade follow-ups: partial pins refuse; the release manifest is read as a capped tar stream (checked against real `docker cp` output); digest-form rollback inventory for public digest overrides (incl. `repo:tag@digest`); one shared channel/prefix pattern; `--check` removes only a release image it pulled by tag; first error kept over cleanup; public `--dry-plan` exits 2 — PR #1011 (9166a6efa), 2026-11-06. CI green; merged without bot review. Sonnet review ACCEPT (3 L: 2 fixed, pax header checked live and dropped). Leftovers T538. Evidence .claude/tmp/sonnet-run/T534/.
 - T535 — the updater pins an install to the channel of its last completed upgrade (`upgrade_runs.channel`, no schema change) and refuses a changed `.env` channel with `channel-changed` before any manifest read; a deliberate move needs `--change-channel <recorded>`, exact match — PR #1010 (280b96763), 2026-11-06. CI green; merged without bot review (Codex and Greptile out of allowance). Sonnet review ACCEPT (3 L). Follow-ups: PowerShell helper argument forwarding and usage text ride in T536; admin refusal visibility is T537. Evidence .claude/tmp/sonnet-run/T535/.
 - T335 — channel install and upgrade (plan D2b), in three PRs. PR A #1007 (4d4193768): builder + `haive-<channel>-release` manifest image. PR B #1008 (d71934772): the updater reads `--manifest-image` with pins bound to `HAIVE_CHANNEL_REGISTRY` and an install-local `DOCKER_CONFIG`; the api passes the channel. PR C #1009 (d94aafc00), 2026-11-05: install.sh/install.ps1 `--channel`/`--channel-registry`/`--registry-user`, login and verified manifest before any write, channel `./haive upgrade`, uninstall removes `.docker`; public path fixes (ps1 `HAIVE_INSTALL_ID` order, updater secrets by name). CI 17/17 green (one macOS GitHub-API flake re-run); merged without bot review (Codex and Greptile out of allowance); Sonnet reviews 1-3, last ACCEPT; real throwaway-registry runs per PR. Docs modules.md "Installing a channel". Follow-ups T534, T535, T536. Evidence .claude/tmp/sonnet-run/T335/.
