@@ -2912,6 +2912,7 @@ export interface ModuleInstallSource {
   version: string | null;
   hasToken: boolean;
   resolvedSha: string | null;
+  resolvedRef: string | null;
   fetchStatus: string | null;
   fetchedAt: string | null;
   lastError: string | null;
