@@ -794,3 +794,11 @@ test('a failed dependency pull with no image does not report a cleanup failure',
   assert.doesNotMatch(f.logs.join('\n'), /cleanup failed|removed image/);
   assert.ok(f.calls.some(({ args }) => args[0] === 'image' && args[1] === 'rm'));
 });
+
+test('a module-report response clears an earlier fetch error before a worker timeout', async (t) => {
+  const f = fixture(t, { transientReport: true, noWorker: true });
+  assert.equal(await f.check(), 2);
+  assert.ok(f.requests.filter(({ url }) => url.endsWith('/modules/loaded')).length > 1);
+  assert.match(f.logs.join('\n'), /timed out waiting for .*module report/);
+  assert.doesNotMatch(f.logs.join('\n'), /last fetch error|connection reset/);
+});

@@ -384,6 +384,7 @@ export async function run(
           response = await http(`${base}/modules/loaded`, {
             headers: { Cookie: cookies.join('; ') },
           });
+          reportFetchError = undefined;
         } catch (error) {
           interrupted();
           reportFetchError = lastLines(
