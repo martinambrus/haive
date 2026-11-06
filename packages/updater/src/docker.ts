@@ -407,15 +407,24 @@ export async function readReleaseManifestImage(image: string): Promise<string> {
   await run('docker', ['pull', image], undefined, 1_800_000);
   const name = containerName(CONTAINER_FAMILY.upgrade, 'manifest', randomUUID());
   let id = name;
+  let failed = false;
   try {
     // A scratch release image has no CMD. This command is never executed.
     id = await run('docker', ['create', '--name', name, image, '/unused']);
     return await streamReleaseManifest(id);
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
-    try {
-      await run('docker', ['rm', '-f', id]);
-    } finally {
-      if (!present) await run('docker', ['image', 'rm', image]);
+    // Attempt both cleanups, preserving the read/create error or the first cleanup error.
+    let cleanupError: unknown;
+    for (const args of [['rm', '-f', id], ...(!present ? [['image', 'rm', image]] : [])]) {
+      try {
+        await run('docker', args);
+      } catch (error) {
+        cleanupError ??= error;
+      }
     }
+    if (!failed && cleanupError) throw cleanupError;
   }
 }

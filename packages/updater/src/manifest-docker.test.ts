@@ -245,3 +245,40 @@ it('an inventory failure refuses before pulling or removing any image', async ()
     ['image', 'ls', '--quiet', '--no-trunc', '--filter', 'reference=private/release:1'],
   ]);
 });
+
+it.each(['create', 'copy', 'parse'])(
+  'preserves the first %s error when both cleanups fail',
+  async (failure) => {
+    cached = false;
+    const base = h.exec.getMockImplementation()!;
+    h.exec.mockImplementation(async (command: string, args: string[]) => {
+      if (args[0] === 'create' && failure === 'create') throw new Error('original create failure');
+      if (args[0] === 'rm') throw new Error('container cleanup failed');
+      if (args[0] === 'image' && args[1] === 'rm') throw new Error('image cleanup failed');
+      return base(command, args);
+    });
+    if (failure === 'copy') cpError = new Error('original copy failure');
+    if (failure === 'parse') chunks = [tar(Buffer.from('{}'), header('wrong.json', 2))];
+    await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow(
+      failure === 'parse' ? 'invalid release manifest tar header' : `original ${failure} failure`,
+    );
+    expect(h.exec.mock.calls.at(-1)![1]).toEqual(['image', 'rm', 'private/release:1']);
+  },
+);
+it.each(['container', 'image', 'both'])(
+  'surfaces the first cleanup error after a successful read: %s',
+  async (failure) => {
+    cached = false;
+    const base = h.exec.getMockImplementation()!;
+    h.exec.mockImplementation(async (command: string, args: string[]) => {
+      if (args[0] === 'rm' && failure !== 'image') throw new Error('container cleanup failed');
+      if (args[0] === 'image' && args[1] === 'rm' && failure !== 'container')
+        throw new Error('image cleanup failed');
+      return base(command, args);
+    });
+    await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow(
+      failure === 'image' ? 'image cleanup failed' : 'container cleanup failed',
+    );
+    expect(h.exec.mock.calls.at(-1)![1]).toEqual(['image', 'rm', 'private/release:1']);
+  },
+);
