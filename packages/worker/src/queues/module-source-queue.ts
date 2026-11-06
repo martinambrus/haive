@@ -9,7 +9,11 @@ import {
 } from '@haive/shared';
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
-import { recoverModuleSourceFetches, runModuleSourceFetch } from '../modules/source-jobs.js';
+import {
+  moduleSourceUpdatedAtMatches,
+  recoverModuleSourceFetches,
+  runModuleSourceFetch,
+} from '../modules/source-jobs.js';
 import { safeProcessor } from './safe-processor.js';
 
 const log = logger.child({ module: 'module-source' });
@@ -47,7 +51,7 @@ export function startModuleSourceWorker(): Worker<ModuleSourcePayload, void> {
         and(
           eq(schema.moduleSources.id, sourceId),
           inArray(schema.moduleSources.fetchStatus, ['queued', 'fetching']),
-          eq(schema.moduleSources.updatedAt, new Date(requestedAt)),
+          moduleSourceUpdatedAtMatches(new Date(requestedAt)),
         ),
       )
       .catch((error) => log.error({ err: error }, 'Could not record module fetch failure'));

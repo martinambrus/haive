@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { configService, SecretsService, secretsService } from '@haive/shared';
-import { eq } from 'drizzle-orm';
+import { eq, sql, type SQL } from 'drizzle-orm';
 import { runModuleSourceFetch, recoverModuleSourceFetches } from '../src/modules/source-jobs.js';
 
 const h = vi.hoisted(() => ({ fetch: vi.fn(), pin: vi.fn() }));
@@ -31,7 +31,7 @@ describe.skipIf(!url)('module fetch job persistence', () => {
     vi.unstubAllEnvs();
     await db.$client.end({ timeout: 5 });
   });
-  async function source() {
+  async function source(updatedAt: Date | SQL = new Date()) {
     return (
       await db
         .insert(schema.moduleSources)
@@ -41,11 +41,30 @@ describe.skipIf(!url)('module fetch job persistence', () => {
           url: 'https://example.com/a',
           ref: 'main',
           fetchStatus: 'queued',
-          updatedAt: new Date(),
+          updatedAt,
         })
         .returning()
     )[0]!;
   }
+  it.each(['pinned', 'failed'])('claims a microsecond timestamp and records %s', async (status) => {
+    const row = await source(sql`TIMESTAMP '2026-11-06 12:00:00.123999'`);
+    // postgres.js constructs a Date, truncating (not rounding) the microseconds.
+    expect(row.updatedAt.toISOString()).toBe('2026-11-06T12:00:00.123Z');
+    h.fetch.mockImplementation(async (_source, _token, pin, resolved) => {
+      await resolved(sha, 'refs/heads/main');
+      if (status === 'failed') throw new Error('fixture fetch failed');
+      await pin('fake', 'fake', 'alpha');
+      return sha;
+    });
+    const fetch = runModuleSourceFetch(db, row.id, row.updatedAt.toISOString());
+    if (status === 'failed') await expect(fetch).rejects.toThrow('fixture fetch failed');
+    else await fetch;
+    expect(h.fetch).toHaveBeenCalledOnce();
+    expect(h.pin).toHaveBeenCalledTimes(status === 'pinned' ? 1 : 0);
+    expect(await db.select().from(schema.moduleSources)).toMatchObject([
+      { fetchStatus: status, resolvedSha: sha, resolvedRef: 'refs/heads/main' },
+    ]);
+  });
   it('reads the fresh secret, publishes fetching and SHA, and admits only one concurrent fetch', async () => {
     const row = await source();
     const key = 'module_source:' + row.id + ':token';
