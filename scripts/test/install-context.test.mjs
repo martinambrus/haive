@@ -43,6 +43,24 @@ for (const [name, data, status, stdout] of [
   // This reader copies the existing token; JSON validation belongs to Docker.
   ['selection crossing records', '{"currentContext":"ab\ncd"}', 0, '"ab\ncd"\n'],
   ['escape crossing records', '{"currentContext":"ab\\\nn"}', 0, '"ab\\\nn"\n'],
+  [
+    'long single-line config within the reader budget',
+    JSON.stringify({ extra: 'x'.repeat(989000), currentContext: 'remote' }),
+    0,
+    '"remote"\n',
+  ],
+  [
+    'long selected token retains every byte',
+    JSON.stringify({ currentContext: 'x'.repeat(989000) }),
+    0,
+    '"' + 'x'.repeat(989000) + '"\n',
+  ],
+  [
+    'escape and quote across scan windows',
+    JSON.stringify({ extra: ('x'.repeat(4092) + '\\"').repeat(4), currentContext: 'remote' }),
+    0,
+    '"remote"\n',
+  ],
   ['non-string selection', '{"currentContext":null}', 1, ''],
   ['unfinished selection', '{"currentContext":"abc', 1, ''],
   ['unfinished escape', '{"currentContext":"abc\\', 1, ''],

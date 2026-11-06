@@ -52,6 +52,14 @@ for (const [name, data] of [
     JSON.stringify({ ...manifest, extra: 'x'.repeat(989000) }),
   ],
   [
+    'tokens crossing scan windows',
+    JSON.stringify({
+      ...manifest,
+      extra: ('x'.repeat(4092) + '\\"').repeat(4),
+      values: ['y'.repeat(4093), true, null, -1.25e12],
+    }).replace('"values":', '"number":1' + '0'.repeat(9890) + ',"values":'),
+  ],
+  [
     'many escaped slices within the reader budget',
     JSON.stringify({ ...manifest, extra: 'x\n\\"'.repeat(120000) }),
   ],
