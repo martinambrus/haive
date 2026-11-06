@@ -55,6 +55,51 @@ function setup() {
   });
 }
 describe('fetch and pin a module source', () => {
+  it.each(['fetch', 'checkout'])(
+    'aborts an entry-heavy %s while it is still running',
+    async (phase) => {
+      setup();
+      const previous = git.getMockImplementation()!;
+      let aborted = false;
+      let completed = false;
+      let temporary = '';
+      git.mockImplementation(
+        async (cwd: string, args: string[], env: unknown, io: { signal?: AbortSignal }) => {
+          const result = await previous(cwd, args, env, io);
+          if (args.includes(phase)) {
+            temporary = dirname(cwd);
+            await Promise.all(
+              Array.from({ length: 5001 }, (_, i) => writeFile(join(cwd, `empty-${i}`), '')),
+            );
+            await new Promise<void>((resolve) => {
+              const timer = setTimeout(() => {
+                completed = true;
+                resolve();
+              }, 10_000);
+              const abort = () => {
+                aborted = true;
+                clearTimeout(timer);
+                resolve();
+              };
+              if (io.signal?.aborted) abort();
+              else io.signal?.addEventListener('abort', abort, { once: true });
+            });
+          }
+          return result;
+        },
+      );
+      const pin = vi.fn();
+      await expect(fetchModuleSource(source, null, pin)).rejects.toThrow(
+        'Module tree exceeds entry limit',
+      );
+      expect(aborted).toBe(true);
+      expect(completed).toBe(false);
+      expect(pin).not.toHaveBeenCalled();
+      if (phase === 'fetch')
+        expect(git.mock.calls.some(([, args]) => args.includes('checkout'))).toBe(false);
+      await expect(access(temporary)).rejects.toThrow();
+    },
+  );
   it('fails image resolution before git or persisting a SHA', async () => {
     setup();
     image.mockRejectedValueOnce(new Error('module_source_worker_image_unavailable'));

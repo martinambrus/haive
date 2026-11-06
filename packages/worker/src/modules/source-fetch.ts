@@ -33,6 +33,7 @@ export function sourceFetchError(error: unknown, token: string | null): string {
 }
 
 const MODULE_TREE_BYTES = 64 * 1024 * 1024;
+const MODULE_TREE_ENTRIES = 5000;
 
 /** Bound git writes on disk: packed objects during fetch, expanded work-tree files during checkout. */
 async function boundedTransfer<T>(
@@ -47,10 +48,12 @@ async function boundedTransfer<T>(
   let checking = Promise.resolve();
   const check = async () => {
     let bytes = 0;
+    let count = 0;
     const walk = async (rel: string, depth: number): Promise<void> => {
       if (depth > 32) throw new Error('Module tree exceeds depth limit');
       for (const entry of (await readdirSizesNoFollow(root, rel)) ?? []) {
         if (worktreeOnly && rel === '' && entry.name === '.git') continue;
+        if (++count > MODULE_TREE_ENTRIES) throw new Error('Module tree exceeds entry limit');
         if (entry.isDirectory) await walk(rel ? `${rel}/${entry.name}` : entry.name, depth + 1);
         else bytes += entry.size ?? 0;
         if (bytes > MODULE_TREE_BYTES) throw new Error('Module tree exceeds size limit');
@@ -93,7 +96,7 @@ async function validateTree(root: string, moduleId: string): Promise<void> {
     if (!entries) throw new Error('Module tree is missing');
     for (const entry of entries) {
       count++;
-      if (count > 5000) throw new Error('Module tree exceeds entry limit');
+      if (count > MODULE_TREE_ENTRIES) throw new Error('Module tree exceeds entry limit');
       const child = rel ? `${rel}/${entry.name}` : entry.name;
       if (entry.name === '.git') throw new Error('Nested git metadata is refused');
       if (entry.isDirectory) await walk(child, depth + 1);
