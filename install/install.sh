@@ -339,6 +339,8 @@ read_channel_manifest() {
       die "selected Docker contexts require sha256sum or shasum -a 256"
     fi
     CHANNEL_HASH=${CHANNEL_HASH%% *}
+    [ "${#CHANNEL_HASH}" -eq 64 ] || die "invalid selected Docker context hash"
+    case "$CHANNEL_HASH" in *[!0-9a-f]*) die "invalid selected Docker context hash" ;; esac
     [ -d "$CHANNEL_USER_CONFIG/contexts/meta/$CHANNEL_HASH" ] \
       || die "selected Docker context $1 has no metadata directory"
     for kind in meta tls; do

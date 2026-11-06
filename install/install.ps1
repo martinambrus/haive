@@ -355,6 +355,7 @@ function Read-ChannelManifest {
       $sha = [Security.Cryptography.SHA256]::Create()
       try { $hash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($name)))).Replace('-', '').ToLowerInvariant() }
       finally { $sha.Dispose() }
+      if ($hash -cnotmatch '\A[0-9a-f]{64}\z') { throw 'invalid selected Docker context hash' }
       if (-not (Test-Path -LiteralPath (Join-Path $userConfig "contexts/meta/$hash") -PathType Container)) { throw "selected Docker context $name has no metadata directory" }
       foreach ($kind in @('meta', 'tls')) {
         $source = Join-Path $userConfig "contexts/$kind/$hash"
@@ -713,7 +714,7 @@ param([Parameter(Position=0)][string]$Command = 'help', [string]$Version, [switc
   [Parameter(ValueFromRemainingArguments=$true)][string[]]$RemainingArgs)
 '@)
   # Append only after the image and updater options, never to docker run options.
-  $haivePs1 = $haivePs1.Replace("    if (`$ForceDrain) { `$dargs += '--force' }", "    if (`$ForceDrain) { `$dargs += '--force' }`n    `$dargs += `$RemainingArgs")
+  $haivePs1 = $haivePs1.Replace("    if (`$ForceDrain) { `$dargs += '--force' }", "    if (`$ForceDrain) { `$dargs += '--force' }`n    if (`$RemainingArgs.Count -gt 0) { `$dargs += `$RemainingArgs }")
   $haivePs1 = $haivePs1.Replace('upgrade -Version <v>', 'upgrade -Version <v> [--change-channel <channel>]')
   $haivePs1 = $haivePs1.Replace('switch ($Command) {', @'
 Remove-Item Env:HAIVE_REGISTRY_TOKEN -ErrorAction SilentlyContinue

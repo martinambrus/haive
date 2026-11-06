@@ -42,6 +42,7 @@ printf '\\n' >> "$CALLS"
 if [ "$EXPECT_CHANNEL" = 1 ] && [ -n "$HAIVE_REGISTRY_TOKEN" ]; then echo token_in_environment >&2; exit 91; fi
 # Enforce context-store lookup on commands that reach the daemon. Configs in
 # this fixture use ASCII context names, including JSON's escaped spelling of x.
+case "$*" in 'compose version'*) echo 2.30.0; exit 0 ;; esac
 case "$1" in
  pull|create|run|compose)
   selected=$DOCKER_CONTEXT
@@ -49,7 +50,9 @@ case "$1" in
     selected=$(tr -d '\\r\\n' < "$DOCKER_CONFIG/config.json" | sed -n 's/.*"currentContext"[[:space:]]*:[[:space:]]*"\\([^" ]*\\)".*/\\1/p' | sed 's/\\\\u0078/x/g')
   fi
   if [ -n "$selected" ] && [ "$selected" != default ]; then
-    hash=$(printf '%s' "$selected" | sha256sum); hash=\${hash%% *}
+    if command -v sha256sum >/dev/null 2>&1; then hash=$(printf '%s' "$selected" | sha256sum)
+    else hash=$(printf '%s' "$selected" | shasum -a 256); fi
+    hash=\${hash%% *}
     [ -d "$DOCKER_CONFIG/contexts/meta/$hash" ] || { echo "missing selected context metadata: $selected" >&2; exit 92; }
   fi ;;
 esac
@@ -191,7 +194,7 @@ exec /bin/${command} "$@"
     const wrapper = join(root, 'invoke.ps1');
     writeFileSync(
       wrapper,
-      `$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction Move-Item { param($LiteralPath,$Destination); if($env:FAIL_AT -eq 'credential-move' -and $LiteralPath -like '*/.docker/config.json'){ throw 'credential move failure' }; Microsoft.PowerShell.Management\\Move-Item @PSBoundParameters; if($env:FAIL_AT -eq 'credential-stop' -and $LiteralPath -like '*/.docker/config.json'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; if($env:FAIL_AT -eq 'unprotect-move'){ & chmod 755 (Split-Path $Destination); & chmod 644 $Destination } }\nfunction New-Item { param($ItemType,$Path,[switch]$Force); if($Path -like '*/snapshots' -and $env:FAIL_AT -in @('mkdir','pipeline-stop')) { if($env:FAIL_AT -eq 'pipeline-stop'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; throw 'post-verification mkdir failure' }; Microsoft.PowerShell.Management\\New-Item @PSBoundParameters }\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-RestMethod { param($Uri); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); [pscustomobject]@{tag_name='v9.9.9'} }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method,$TimeoutSec); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); if($OutFile){ if($env:FAIL_AT -eq 'bundle'){ throw 'bundle failure' }; [IO.File]::WriteAllText($OutFile, "services: {}\\n") } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|force|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
+      `${file === script ? '' : `function docker { if ($args[0] -eq 'run') { [IO.File]::WriteAllText((Join-Path $env:CASE_ROOT 'helper-argv.json'), (ConvertTo-Json -InputObject @($args) -Compress -Depth 10)) }; & (Join-Path $env:CASE_ROOT 'bin/docker') @args }\n`}$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction Move-Item { param($LiteralPath,$Destination); if($env:FAIL_AT -eq 'credential-move' -and $LiteralPath -like '*/.docker/config.json'){ throw 'credential move failure' }; Microsoft.PowerShell.Management\\Move-Item @PSBoundParameters; if($env:FAIL_AT -eq 'credential-stop' -and $LiteralPath -like '*/.docker/config.json'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; if($env:FAIL_AT -eq 'unprotect-move'){ & chmod 755 (Split-Path $Destination); & chmod 644 $Destination } }\nfunction New-Item { param($ItemType,$Path,[switch]$Force); if($Path -like '*/snapshots' -and $env:FAIL_AT -in @('mkdir','pipeline-stop')) { if($env:FAIL_AT -eq 'pipeline-stop'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; throw 'post-verification mkdir failure' }; Microsoft.PowerShell.Management\\New-Item @PSBoundParameters }\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-RestMethod { param($Uri); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); [pscustomobject]@{tag_name='v9.9.9'} }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method,$TimeoutSec); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); if($OutFile){ if($env:FAIL_AT -eq 'bundle'){ throw 'bundle failure' }; [IO.File]::WriteAllText($OutFile, "services: {}\\n") } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|force|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
     );
     if (hostPwsh)
       return spawnSync('pwsh', ['-NoProfile', '-File', wrapper], {
@@ -468,6 +471,59 @@ for (const lang of ['sh', 'ps1']) {
           f.clean();
         }
       });
+  for (const hash of ['a'.repeat(63), 'a'.repeat(65), 'A'.repeat(64), 'g'.repeat(64)])
+    check(`invalid computed context hash fails closed: ${hash}`, () => {
+      const original = readFileSync(join(repo, `install/install.${lang}`), 'utf8');
+      const marker =
+        lang === 'sh' ? '    CHANNEL_HASH=${CHANNEL_HASH%% *}' : '      finally { $sha.Dispose() }';
+      assert.ok(original.includes(marker));
+      const source = original.replace(
+        marker,
+        `${marker}\n${lang === 'sh' ? `    CHANNEL_HASH='${hash}'` : `      $hash = '${hash}'`}`,
+      );
+      const f = fixture(lang, { source });
+      try {
+        const config = join(f.root, 'user-docker');
+        // Supply metadata at the corrupt hash so metadata existence cannot mask a missing validator.
+        mkdirSync(join(config, 'contexts/meta', hash), { recursive: true });
+        writeFileSync(join(config, 'contexts/meta', hash, 'meta.json'), '{"Name":"x"}');
+        writeFileSync(join(config, 'config.json'), '{"currentContext":"x"}');
+        f.env.DOCKER_CONFIG = config;
+        const r = f.install([f.flag('check')]);
+        assert.notEqual(r.status, 0, r.stdout + r.stderr);
+        assert.match(r.stdout + r.stderr, /invalid.*Docker context hash/i);
+        assert.ok(!f.calls().includes('\tlogin\t'));
+        assert.ok(!existsSync(f.dir));
+      } finally {
+        f.clean();
+      }
+    });
+  check('generated helper upgrade without extra arguments has clean argv', () => {
+    const f = fixture(lang);
+    try {
+      assert.equal(f.install().status, 0);
+      const r = f.invoke(
+        join(f.dir, lang === 'sh' ? 'haive' : 'haive.ps1'),
+        lang === 'sh' ? ['upgrade', '--version', '10.0.0'] : ['upgrade', '-Version', '10.0.0'],
+      );
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      // Preserve trailing tabs: trim() would hide a null/empty final argument.
+      const argv = f.calls().split('\n').filter(Boolean).at(-1).split('\t').slice(1);
+      assert.ok(
+        argv.every((arg) => arg.length > 0),
+        JSON.stringify(argv),
+      );
+      if (lang === 'ps1') {
+        const splatted = JSON.parse(readFileSync(join(f.root, 'helper-argv.json'), 'utf8'));
+        assert.ok(
+          splatted.every((arg) => typeof arg === 'string' && arg.length > 0),
+          JSON.stringify(splatted),
+        );
+      }
+    } finally {
+      f.clean();
+    }
+  });
   for (const version of [undefined, 'latest', 'next'])
     check(`channel requires explicit version before network: ${version ?? 'omitted'}`, () => {
       const f = fixture(lang);
@@ -1134,6 +1190,9 @@ for (const lang of ['sh', 'ps1']) {
       const argv = call.split('\t').slice(1);
       const imageAt = argv.indexOf('ghcr.io/martinambrus/haive-updater:10.0.0');
       assert.ok(imageAt > 0);
+      const hostAt = argv.indexOf('DOCKER_HOST=unix:///var/run/docker.sock');
+      assert.ok(hostAt > 0 && hostAt < imageAt);
+      assert.equal(argv[hostAt - 1], '-e');
       for (let i = 0; i < argv.length; i++) {
         if (argv[i] === '-e') assert.ok(i < imageAt, `docker env option at ${i} after image`);
         if (
