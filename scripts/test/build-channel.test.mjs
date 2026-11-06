@@ -72,6 +72,7 @@ function fixture(t, config = {}) {
   const violations = [];
   t.after(() => assert.deepEqual(violations, []));
   const logs = [];
+  const writes = [];
   let expectation;
   let scratch;
   let secret;
@@ -128,9 +129,12 @@ function fixture(t, config = {}) {
       assert.ok(!readFileSync(join(context, '.npmrc'), 'utf8').includes(TOKEN));
       if (config.delegate) assert.equal(readFileSync(join(context, 'marker'), 'utf8'), 'tag');
       if (options.onOutput) {
-        options.onOutput('build output ' + TOKEN.slice(0, 10), 'stdout');
-        options.onOutput('stderr progress\n', 'stderr');
-        options.onOutput(TOKEN.slice(10) + '\n', 'stdout');
+        for (const [chunk, stream] of config.buildChunks ?? [
+          ['build output ' + TOKEN.slice(0, 10), 'stdout'],
+          ['stderr progress\n', 'stderr'],
+          [TOKEN.slice(10) + '\n', 'stdout'],
+        ])
+          options.onOutput(chunk, stream);
       }
       return {
         status: config.buildFailure ? 1 : 0,
@@ -195,6 +199,7 @@ function fixture(t, config = {}) {
     out,
     calls,
     logs,
+    writes,
     argv,
     dir,
     get expectation() {
@@ -213,6 +218,10 @@ function fixture(t, config = {}) {
         env: { PATH: process.env.PATH, UNRELATED_SECRET: TOKEN, ...config.env },
         signal: config.signal,
         say: (line) => logs.push(line),
+        write: (text) => {
+          writes.push(text);
+          logs.push(text);
+        },
       });
     },
   };
@@ -779,7 +788,8 @@ if (args[0] === 'buildx') {
   const code = await run(f.argv, {
     root: f.root,
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
-    say(line) {
+    say() {},
+    write(line) {
       bytes += line.length;
       scrubbed ||= line.includes('[token]');
       assert.ok(!line.includes(TOKEN));
@@ -801,3 +811,10 @@ for (const source of [[], ['--source-registry', 'wrong.example/vendor']]) {
     assert.ok(f.logs.some((line) => line.includes('manifest unknown')));
   });
 }
+
+test('streamed chunks preserve spaces and line boundaries with a raw writer', async (t) => {
+  const chunks = ['first ', 'line\nsecond', ' line  ', '\n\nlast\rprogress\n'];
+  const f = fixture(t, { buildChunks: chunks.map((chunk) => [chunk, 'stdout']) });
+  assert.equal(await f.execute(), 0);
+  assert.equal(f.writes.join(''), chunks.join('').repeat(3));
+});

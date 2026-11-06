@@ -118,6 +118,7 @@ export async function run(
     runner = capture,
     env = process.env,
     say = (line) => process.stdout.write(`${line}\n`),
+    write = (text) => process.stdout.write(text),
     signal,
   } = {},
 ) {
@@ -189,7 +190,8 @@ export async function run(
         let keep = Math.min(text.length, token.length - 1);
         while (keep > 0 && !text.endsWith(token.slice(0, keep))) keep--;
         buffers.set(name, keep ? text.slice(-keep) : '');
-        emit(keep ? text.slice(0, -keep) : text);
+        const ready = keep ? text.slice(0, -keep) : text;
+        if (ready) write(ready);
       };
       let result;
       try {
