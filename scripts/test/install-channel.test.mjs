@@ -180,9 +180,9 @@ exec /bin/${command} "$@"
     FAIL_AT: fail,
     EXPECT_CHANNEL: publicInstall ? '0' : '1',
     TMPDIR: root,
-    HOME: tmpdir(),
-    USERPROFILE: tmpdir(),
-    DOCKER_CONFIG: join(tmpdir(), 'installer-empty-config'),
+    HOME: root,
+    USERPROFILE: root,
+    DOCKER_CONFIG: join(root, 'installer-empty-config'),
     DOCKER_HOST: '',
     DOCKER_CONTEXT: '',
   };
@@ -301,6 +301,24 @@ for (const lang of ['sh', 'ps1']) {
         : false,
   };
   const check = (name, fn) => test(`${lang}: ${name}`, options, fn);
+  check('leftover fixture config and home cannot affect another run', () => {
+    const leftover = fixture(lang);
+    const current = fixture(lang);
+    try {
+      for (const key of ['DOCKER_CONFIG', 'HOME', 'USERPROFILE'])
+        assert.notEqual(current.env[key], leftover.env[key], `${key} belongs to each fixture`);
+      // A killed run may leave a selected context whose metadata no longer exists.
+      mkdirSync(leftover.env.DOCKER_CONFIG);
+      const stale = JSON.stringify({ currentContext: 'missing', auths: {} });
+      writeFileSync(join(leftover.env.DOCKER_CONFIG, 'config.json'), stale);
+      const r = current.install();
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      assert.equal(readFileSync(join(leftover.env.DOCKER_CONFIG, 'config.json'), 'utf8'), stale);
+    } finally {
+      leftover.clean();
+      current.clean();
+    }
+  });
   for (const selection of [
     'config',
     'host env',
@@ -1243,6 +1261,8 @@ for (const lang of ['sh', 'ps1']) {
     }
     const f = fixture(lang, { publicInstall: true });
     const old = fixture(lang, { publicInstall: true, source: base.stdout, installDir: f.dir });
+    // Both versions run on the same simulated host, inside this test's private root.
+    for (const key of ['DOCKER_CONFIG', 'HOME', 'USERPROFILE']) old.env[key] = f.env[key];
     try {
       const oldCheck = old.install([old.flag('check')]);
       const currentCheck = f.install([f.flag('check')]);
