@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   sql: Object.assign(vi.fn(), { end: vi.fn() }),
   initialize: vi.fn(),
@@ -11,6 +11,7 @@ vi.mock('@haive/shared', async (original) => ({
 vi.mock('./journal.js', () => ({
   ensureJournal: vi.fn(),
   findLiveRun: vi.fn(),
+  lastDoneChannel: vi.fn(),
   recordRunError: vi.fn(),
   startRun: vi.fn(),
   tryLock: vi.fn(),
@@ -19,6 +20,11 @@ vi.mock('./run.js', async (original) => ({
   ...(await original<typeof import('./run.js')>()),
   readEnvVar: vi.fn(),
   resume: vi.fn(),
+  phaseDraining: vi.fn(),
+  phaseMaintenance: vi.fn(),
+  phaseMigrate: vi.fn(),
+  phaseVerify: vi.fn(),
+  phaseCommit: vi.fn(),
 }));
 import { main } from './cli.js';
 import * as images from './images.js';
@@ -62,6 +68,10 @@ beforeEach(() => {
   vi.spyOn(images, 'readImageSettings').mockResolvedValue({ ...settings });
   vi.mocked(journal.tryLock).mockResolvedValue(true);
   vi.mocked(journal.findLiveRun).mockResolvedValue(null);
+  vi.mocked(journal.lastDoneChannel).mockResolvedValue(null);
+  vi.mocked(journal.startRun).mockResolvedValue('new-run');
+  vi.mocked(run.phaseVerify).mockResolvedValue(true);
+  vi.spyOn(images, 'prepareImages').mockResolvedValue(images.emptyOverrides());
   vi.mocked(run.readEnvVar).mockResolvedValue('1.0.0');
   h.sql.end.mockResolvedValue(undefined);
   vi.spyOn(dk, 'localImages').mockResolvedValue([
@@ -85,6 +95,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.clearAllMocks();
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
 });
 it('check applies install credentials before manifest IO, emits pins, and starts no run', async () => {
   vi.mocked(dk.readReleaseManifestImage).mockImplementation(async () => {
@@ -127,6 +138,7 @@ it('an interrupted channel run resumes before any new manifest pull', async () =
   expect(run.resume).toHaveBeenCalled();
   expect(process.env.DOCKER_CONFIG).toBe('/host/install/.docker');
   expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
+  expect(journal.lastDoneChannel).not.toHaveBeenCalled();
 });
 it('a mismatched manifest creates no upgrade run', async () => {
   process.argv[process.argv.indexOf('--version') + 1] = '8.8.8';
@@ -270,4 +282,202 @@ it('an unpinned public install retains its original tag-based preflight', async 
   );
   expect(await main()).toBe(0);
   expect(dk.localImages).toHaveBeenCalledWith(false);
+});
+
+describe('journal channel pin', () => {
+  function publicInstall(installed = '') {
+    process.argv = [
+      'node',
+      'updater',
+      '--install-dir',
+      '/host/install',
+      '--manifest',
+      'https://example.invalid/release.json',
+    ];
+    vi.mocked(images.readImageSettings).mockResolvedValue({
+      ...settings,
+      HAIVE_CHANNEL: installed,
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        text: async () =>
+          JSON.stringify({
+            manifestVersion: 1,
+            channel: 'public',
+            version: '9.9.9',
+            builtAt: '2026-11-05',
+            migrationHead: '0221',
+          }),
+      }),
+    );
+  }
+
+  function noTargetIO() {
+    expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
+    expect(images.prepareImages).not.toHaveBeenCalled();
+    expect(dk.localImages).not.toHaveBeenCalled();
+    expect(journal.startRun).not.toHaveBeenCalled();
+    expect(run.phaseDraining).not.toHaveBeenCalled();
+    if (vi.isMockFunction(globalThis.fetch)) expect(fetch).not.toHaveBeenCalled();
+  }
+
+  function expectChannelRefusal(recorded: string, current: string) {
+    const output = vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line)));
+    const refused = output.find((v) => v.event === 'refused');
+    expect(refused).toMatchObject({ refusal: 'channel-changed' });
+    expect(refused.message).toContain(recorded);
+    expect(refused.message).toContain(current);
+    expect(refused.message).toContain(`--change-channel ${recorded}`);
+    noTargetIO();
+  }
+
+  it.each(['', 'public'])(
+    'recorded acme refuses resolved public from .env %j',
+    async (installed) => {
+      publicInstall(installed);
+      vi.mocked(journal.lastDoneChannel).mockResolvedValue('acme');
+      expect(await main()).toBe(3);
+      expectChannelRefusal('acme', 'public');
+      expect(journal.lastDoneChannel).toHaveBeenCalledWith(h.sql);
+      expect(vi.mocked(journal.tryLock).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(journal.lastDoneChannel).mock.invocationCallOrder[0]!,
+      );
+      expect(images.readImageSettings).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('recorded public refuses resolved acme even with --check', async () => {
+    vi.mocked(journal.lastDoneChannel).mockResolvedValue('public');
+    expect(await main()).toBe(3);
+    expectChannelRefusal('public', 'acme');
+  });
+
+  it('channel refusal precedes a missing target', async () => {
+    publicInstall();
+    process.argv = process.argv.slice(0, 4);
+    vi.mocked(journal.lastDoneChannel).mockResolvedValue('acme');
+    expect(await main()).toBe(3);
+    expectChannelRefusal('acme', 'public');
+  });
+
+  it('the exact recorded channel acknowledges a move and starts the new channel', async () => {
+    publicInstall();
+    process.argv.push('--change-channel', 'acme');
+    vi.mocked(journal.lastDoneChannel).mockResolvedValue('acme');
+    expect(await main()).toBe(0);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(journal.lastDoneChannel).toHaveBeenCalledWith(h.sql);
+    expect(journal.startRun).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({ channel: 'public' }),
+    );
+    expect(run.phaseCommit).toHaveBeenCalled();
+  });
+
+  it('acknowledging public allows a move to acme', async () => {
+    process.argv = process.argv.filter((v) => v !== '--check');
+    process.argv.push('--change-channel', 'public');
+    vi.mocked(journal.lastDoneChannel).mockResolvedValue('public');
+    expect(await main()).toBe(0);
+    expect(journal.lastDoneChannel).toHaveBeenCalledWith(h.sql);
+    expect(journal.startRun).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({ channel: 'acme' }),
+    );
+  });
+
+  it('an acknowledgement that disagrees with the record is refused', async () => {
+    publicInstall();
+    process.argv.push('--change-channel', 'other');
+    vi.mocked(journal.lastDoneChannel).mockResolvedValue('acme');
+    expect(await main()).toBe(3);
+    expectChannelRefusal('acme', 'public');
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('journal records'));
+  });
+
+  it.each([null, 'public'])(
+    'an acknowledgement with record %j is a usage error',
+    async (recorded) => {
+      publicInstall();
+      process.argv.push('--change-channel', recorded ?? 'acme');
+      vi.mocked(journal.lastDoneChannel).mockResolvedValue(recorded);
+      expect(await main()).toBe(2);
+      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('--change-channel'));
+      noTargetIO();
+    },
+  );
+
+  it.each([undefined, '', 'Acme', 'bad_name', '-acme', 'acme-', 'a'.repeat(33)])(
+    'invalid acknowledgement %j is a usage error',
+    async (value) => {
+      publicInstall();
+      process.argv.push('--change-channel', ...(value === undefined ? [] : [value]));
+      vi.mocked(journal.lastDoneChannel).mockResolvedValue('acme');
+      expect(await main()).toBe(2);
+      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('--change-channel'));
+      noTargetIO();
+    },
+  );
+
+  it.each(['a', 'a'.repeat(32), 'acme-2'])(
+    'accepts valid recorded channel %j',
+    async (recorded) => {
+      publicInstall();
+      process.argv.push('--change-channel', recorded);
+      vi.mocked(journal.lastDoneChannel).mockResolvedValue(recorded);
+      expect(await main()).toBe(0);
+      expect(journal.lastDoneChannel).toHaveBeenCalledWith(h.sql);
+      expect(journal.startRun).toHaveBeenCalled();
+    },
+  );
+
+  it.each(['no runs', 'only rolled_back', 'only failed'])(
+    '%s leaves the channel unpinned',
+    async () => {
+      // The journal query filters to done rows; all three histories return null.
+      vi.mocked(journal.lastDoneChannel).mockResolvedValue(null);
+      expect(await main()).toBe(0);
+      expect(journal.lastDoneChannel).toHaveBeenCalledWith(h.sql);
+      expect(dk.readReleaseManifestImage).toHaveBeenCalled();
+    },
+  );
+
+  it('an unchanged recorded channel proceeds without acknowledgement', async () => {
+    vi.mocked(journal.lastDoneChannel).mockResolvedValue('acme');
+    expect(await main()).toBe(0);
+    expect(journal.lastDoneChannel).toHaveBeenCalledWith(h.sql);
+    expect(dk.readReleaseManifestImage).toHaveBeenCalled();
+  });
+
+  it('a live run resumes without consulting the pin or acknowledgement', async () => {
+    publicInstall();
+    process.argv.push('--change-channel', 'other');
+    vi.mocked(journal.lastDoneChannel).mockResolvedValue('acme');
+    vi.mocked(journal.findLiveRun).mockResolvedValue({
+      id: 'live-run',
+      fromVersion: '1.0.0',
+      toVersion: '9.9.9',
+      channel: 'acme',
+      status: 'running',
+      error: null,
+      startedAt: new Date(),
+      phase: 'migrate',
+      metadata: { migrationHead: '0221' },
+    });
+    expect(await main()).toBe(0);
+    expect(run.resume).toHaveBeenCalled();
+    expect(journal.lastDoneChannel).not.toHaveBeenCalled();
+    noTargetIO();
+  });
+
+  it('dry-plan reads no journal even when a different channel was recorded', async () => {
+    process.argv = process.argv.filter((v) => v !== '--check');
+    process.argv.push('--dry-plan');
+    vi.mocked(journal.lastDoneChannel).mockResolvedValue('public');
+    expect(await main()).toBe(0);
+    expect(journal.ensureJournal).not.toHaveBeenCalled();
+    expect(journal.lastDoneChannel).not.toHaveBeenCalled();
+    expect(dk.readReleaseManifestImage).toHaveBeenCalled();
+  });
 });

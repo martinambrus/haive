@@ -6,7 +6,14 @@ import postgres from 'postgres';
 import { configService, networkName } from '@haive/shared';
 import { parseReleaseManifest, type ReleaseManifest } from '@haive/shared/release';
 import * as dk from './docker.js';
-import { ensureJournal, findLiveRun, recordRunError, startRun, tryLock } from './journal.js';
+import {
+  ensureJournal,
+  findLiveRun,
+  lastDoneChannel,
+  recordRunError,
+  startRun,
+  tryLock,
+} from './journal.js';
 import { preflight } from './preflight.js';
 import {
   phaseCommit,
@@ -65,10 +72,11 @@ function emit(event: string, fields: Record<string, unknown> = {}): void {
 }
 
 /** Match scripts/build-channel.mjs; an unset install channel means public. */
+const CHANNEL_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
+
 export function resolveChannel(requested: string | undefined, installed: string): string {
   const channel = installed || 'public';
-  if (!/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(channel))
-    throw new Error('invalid install channel');
+  if (!CHANNEL_PATTERN.test(channel)) throw new Error('invalid install channel');
   if (requested !== undefined && requested !== channel)
     throw new Error('--channel disagrees with install HAIVE_CHANNEL');
   return channel;
@@ -278,6 +286,35 @@ export async function main(): Promise<number> {
         return rollbackFailed(ctx, err);
       }
       return EXIT.ok;
+    }
+
+    const recordedChannel = await lastDoneChannel(sql);
+    const changeChannel = arg('change-channel');
+    if (flag('change-channel')) {
+      if (!changeChannel || !CHANNEL_PATTERN.test(changeChannel)) {
+        emit('error', { message: '--change-channel requires a valid recorded channel name' });
+        return EXIT.usage;
+      }
+      if (recordedChannel === null || recordedChannel === channel) {
+        emit('error', {
+          message:
+            '--change-channel requires a recorded channel different from the current channel',
+        });
+        return EXIT.usage;
+      }
+    }
+    if (
+      recordedChannel !== null &&
+      recordedChannel !== channel &&
+      changeChannel !== recordedChannel
+    ) {
+      emit('refused', {
+        refusal: 'channel-changed',
+        message:
+          `upgrade journal records channel ${recordedChannel}, but the resolved channel is ${channel}; ` +
+          `use --change-channel ${recordedChannel} to acknowledge the move`,
+      });
+      return EXIT.refused;
     }
 
     const usage = missingTarget();

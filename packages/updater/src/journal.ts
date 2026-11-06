@@ -55,6 +55,14 @@ export async function findLiveRun(sql: Sql): Promise<UpgradeRun | null> {
   };
 }
 
+/** Failed and rolled-back runs leave the install on its last completed channel. */
+export async function lastDoneChannel(sql: Sql): Promise<string | null> {
+  const rows = await sql<{ channel: string }[]>`
+    SELECT channel FROM upgrade_runs WHERE status = 'done'
+    ORDER BY started_at DESC, id DESC LIMIT 1`;
+  return rows[0]?.channel ?? null;
+}
+
 export async function startRun(
   sql: Sql,
   entry: { fromVersion: string; toVersion: string; channel: string; metadata?: RunMetadata },
