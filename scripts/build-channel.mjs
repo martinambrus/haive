@@ -18,6 +18,8 @@ import { idOf, parseExpect, parseToken } from './channel-gate.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const PUBLIC_REGISTRY = 'ghcr.io/martinambrus';
+const BUILD_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+const COMMAND_KILL_GRACE_MS = 30_000;
 const USAGE =
   'usage: node scripts/build-channel.mjs --tag vX.Y.Z --channel <name> --modules <file.json> --token-file <file> [--registry <output-prefix>] [--source-registry <stock-prefix>] [--out <dir>] [--replace]';
 const FINAL = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -60,11 +62,14 @@ export function capture(command, args, options) {
     const { onOutput, timeout, ...spawnOptions } = options;
     const child = spawn(command, args, { ...spawnOptions, stdio: ['ignore', 'pipe', 'pipe'] });
     let timedOut = false;
+    let forceTimer;
     const timer =
       timeout > 0
         ? setTimeout(() => {
             timedOut = true;
             child.kill('SIGTERM');
+            forceTimer = setTimeout(() => child.kill('SIGKILL'), COMMAND_KILL_GRACE_MS);
+            forceTimer.unref();
           }, timeout)
         : undefined;
     timer?.unref();
@@ -96,6 +101,7 @@ export function capture(command, args, options) {
     });
     child.on('close', (status, signal) => {
       clearTimeout(timer);
+      clearTimeout(forceTimer);
       resolveResult({
         signal,
         timedOut,
@@ -481,7 +487,7 @@ export async function run(
           images[host],
           tree,
         ],
-        { cwd: tree, stream: true, timeout: 0 },
+        { cwd: tree, stream: true, timeout: BUILD_TIMEOUT_MS },
       );
       retainedImages.push(images[host]);
     }

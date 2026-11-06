@@ -965,11 +965,12 @@ test('stock RepoDigest selection ignores other repositories and deduplicates ide
   assert.equal(f.calls.filter((c) => c.args.includes('{{json .RepoDigests}}')).length, 2);
 });
 
-test('builds have no command timeout while preflight commands retain their limit', async (t) => {
+test('streamed builds have a two-hour deadline while preflight commands retain their limit', async (t) => {
   const f = fixture(t);
   assert.equal(await f.execute(), 0);
   for (const call of f.calls) {
-    assert.equal(call.options.timeout, call.args[0] === 'buildx' ? 0 : 1_800_000);
+    assert.equal(call.options.timeout, call.args[0] === 'buildx' ? 7_200_000 : 1_800_000);
+    if (call.args[0] === 'buildx') assert.equal(typeof call.options.onOutput, 'function');
   }
 });
 
@@ -1075,3 +1076,64 @@ test('default capture decodes multibyte characters split across stdout and stder
   assert.equal(output.stdout, 'café 🌍 漢字\n');
   assert.equal(output.stderr, 'café 🌍 漢字\n');
 });
+
+test(
+  'default capture escalates a timeout when the child ignores SIGTERM',
+  { concurrency: true },
+  async (t) => {
+    const { capture } = await import('../build-channel.mjs');
+    await Promise.all(
+      [false, true].map((stream) =>
+        t.test(stream ? 'streamed output' : 'collected output', async () => {
+          const controller = new AbortController();
+          const timeout = 1000;
+          const grace = 30_000;
+          const margin = 3000;
+          let watchdogFired = false;
+          const watchdog = setTimeout(
+            () => {
+              watchdogFired = true;
+              controller.abort();
+            },
+            timeout + grace + margin,
+          );
+          let output = '';
+          const started = performance.now();
+          try {
+            const result = await capture(
+              process.execPath,
+              [
+                '-e',
+                "process.on('SIGTERM', () => process.stdout.write('ignored SIGTERM\\n')); setInterval(() => {}, 1000);",
+              ],
+              {
+                timeout,
+                signal: controller.signal,
+                // The watchdog kills a broken implementation too, so a red control leaves no child.
+                killSignal: 'SIGKILL',
+                ...(stream ? { onOutput: (text) => (output += text) } : {}),
+              },
+            );
+            assert.equal(
+              watchdogFired,
+              false,
+              'capture did not close within the grace plus margin',
+            );
+            assert.ok(performance.now() - started < timeout + grace + margin);
+            assert.equal(result.timedOut, true);
+            assert.equal(result.status, null);
+            assert.equal(result.signal, 'SIGKILL');
+            assert.equal(stream ? output : result.stdout, 'ignored SIGTERM\n');
+            if (stream) {
+              assert.equal(result.stdout, '');
+              assert.equal(result.stderr, '');
+            }
+          } finally {
+            clearTimeout(watchdog);
+            controller.abort();
+          }
+        }),
+      ),
+    );
+  },
+);
