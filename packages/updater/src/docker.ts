@@ -397,15 +397,6 @@ async function streamReleaseManifest(id: string): Promise<string> {
 
 /** Pull even when cached: revoked credentials and missing remote tags must refuse preflight. */
 export async function readReleaseManifestImage(image: string): Promise<string> {
-  // A failed inventory must refuse, since guessing absence could delete a pre-existing image.
-  const present = await run('docker', [
-    'image',
-    'ls',
-    '--quiet',
-    '--no-trunc',
-    '--filter',
-    `reference=${image}`,
-  ]);
   await run('docker', ['pull', image], undefined, 1_800_000);
   const name = containerName(CONTAINER_FAMILY.upgrade, 'manifest', randomUUID());
   let id = name;
@@ -418,17 +409,12 @@ export async function readReleaseManifestImage(image: string): Promise<string> {
     failed = true;
     throw error;
   } finally {
-    // Attempt both cleanups, preserving the read/create error or the first cleanup error.
-    let cleanupError: unknown;
-    // A digest ref may not match the reference filter, so absence is unproven: keep the image.
-    const pulledHere = !present && !image.includes('@');
-    for (const args of [['rm', '-f', id], ...(pulledHere ? [['image', 'rm', image]] : [])]) {
-      try {
-        await run('docker', args);
-      } catch (error) {
-        cleanupError ??= error;
-      }
+    // Keep the few-KB release image: a prior presence probe cannot prove ownership when another
+    // process may pull the same ref concurrently. Only the manifest container belongs to this read.
+    try {
+      await run('docker', ['rm', '-f', id]);
+    } catch (error) {
+      if (!failed) throw error;
     }
-    if (!failed && cleanupError) throw cleanupError;
   }
 }
