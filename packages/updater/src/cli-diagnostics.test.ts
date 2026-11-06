@@ -39,4 +39,6 @@ it.each(['filesystem', 'bound-query'])(
       message: kind === 'filesystem' ? message : 'Database operation failed',
     });
   },
+  // Importing the CLI and its dependency graph can exceed the default timeout on CI.
+  30_000,
 );
