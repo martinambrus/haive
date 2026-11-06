@@ -97,6 +97,7 @@ export async function recordAttempt(
       VALUES (${entry.fromVersion}, ${attemptVersion(entry.toVersion)}, ${entry.channel}, 'preflight', ${entry.status},
               ${error}, ${tx.json(entry.metadata)}, now())
       RETURNING id`;
+    // Must change together with attemptRow in packages/api/src/lib/upgrade-run.ts.
     await tx`DELETE FROM upgrade_runs WHERE id IN (
       SELECT id FROM (
         SELECT id FROM upgrade_runs

@@ -23,6 +23,7 @@ export type UpgradeRunRow = {
 
 type UpgradeRunDb = Pick<DbTx, 'execute'>;
 
+// Must change together with the attempt predicate in packages/updater/src/journal.ts.
 const attemptRow = sql`phase = 'preflight' AND status IN ('refused', 'failed')`;
 
 // These timestamp columns hold now() in the session TimeZone's wall clock. Convert in SQL,
