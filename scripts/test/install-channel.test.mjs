@@ -50,6 +50,7 @@ esac
 exit 0
 `;
 const curl = `#!/bin/sh
+printf network >> "$CASE_ROOT/network-calls"
 [ "$FAIL_AT" != bundle ] || exit 1
 prev=; out=
 for arg do [ "$prev" != -o ] || out=$arg; prev=$arg; done
@@ -155,7 +156,7 @@ function fixture(
     const wrapper = join(root, 'invoke.ps1');
     writeFileSync(
       wrapper,
-      `$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction Move-Item { param($LiteralPath,$Destination); Microsoft.PowerShell.Management\\Move-Item @PSBoundParameters; if($env:FAIL_AT -eq 'unprotect-move'){ & chmod 755 $Destination; & chmod 644 (Join-Path $Destination 'config.json') } }\nfunction New-Item { param($ItemType,$Path,[switch]$Force); if($Path -like '*/snapshots' -and $env:FAIL_AT -in @('mkdir','pipeline-stop')) { if($env:FAIL_AT -eq 'pipeline-stop'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; throw 'post-verification mkdir failure' }; Microsoft.PowerShell.Management\\New-Item @PSBoundParameters }\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method); if($OutFile){ if($env:FAIL_AT -eq 'bundle'){ throw 'bundle failure' }; [IO.File]::WriteAllText($OutFile, "services: {}\\n") } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|force|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
+      `$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction Move-Item { param($LiteralPath,$Destination); Microsoft.PowerShell.Management\\Move-Item @PSBoundParameters; if($env:FAIL_AT -eq 'unprotect-move'){ & chmod 755 $Destination; & chmod 644 (Join-Path $Destination 'config.json') } }\nfunction New-Item { param($ItemType,$Path,[switch]$Force); if($Path -like '*/snapshots' -and $env:FAIL_AT -in @('mkdir','pipeline-stop')) { if($env:FAIL_AT -eq 'pipeline-stop'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; throw 'post-verification mkdir failure' }; Microsoft.PowerShell.Management\\New-Item @PSBoundParameters }\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-RestMethod { param($Uri); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); [pscustomobject]@{tag_name='v9.9.9'} }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); if($OutFile){ if($env:FAIL_AT -eq 'bundle'){ throw 'bundle failure' }; [IO.File]::WriteAllText($OutFile, "services: {}\\n") } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|force|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
     );
     if (hostPwsh)
       return spawnSync('pwsh', ['-NoProfile', '-File', wrapper], {
@@ -298,6 +299,31 @@ for (const lang of ['sh', 'ps1']) {
         assert.equal(existsSync(join(f.dir, '.docker/contexts')), selection !== 'default');
         const final = JSON.parse(readFileSync(join(f.dir, '.docker/config.json'), 'utf8'));
         assert.equal(final.currentContext, selection === 'default' ? undefined : 'x');
+      } finally {
+        f.clean();
+      }
+    });
+  for (const version of [undefined, 'latest', 'next'])
+    check(`channel requires explicit version before network: ${version ?? 'omitted'}`, () => {
+      const f = fixture(lang);
+      try {
+        const r = f.invoke(f.script, [
+          ...(version === undefined ? [] : [f.flag('version'), version]),
+          f.flag('dir'),
+          f.dir,
+          f.flag('install-id'),
+          'unit',
+          f.flag('channel'),
+          'customer',
+          f.flag('registry-user'),
+          'installer',
+          f.flag('no-start'),
+        ]);
+        assert.notEqual(r.status, 0, r.stdout + r.stderr);
+        assert.match(r.stdout + r.stderr, /channel.*explicit.*version/i);
+        assert.ok(!existsSync(join(f.root, 'network-calls')), 'no network calls');
+        assert.equal(f.calls(), '', 'no Docker calls');
+        assert.ok(!existsSync(f.dir));
       } finally {
         f.clean();
       }

@@ -97,6 +97,12 @@ printf '%s\n' "$CHANNEL" | LC_ALL=C grep -Eq '^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])
 printf '%s\n' "$CHANNEL_REGISTRY" | LC_ALL=C grep -Eq '^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*$' \
   || die "invalid --channel-registry (use a registry host and optional repository prefix, without a scheme)"
 
+if [ "$CHANNEL" != "public" ]; then
+  case "$VERSION" in
+    ''|latest|next) die "channel installs require an explicit --version <v>; latest and next are public release aliases" ;;
+  esac
+fi
+
 # ── Preflight ────────────────────────────────────────────────────────────────
 # Prerequisites are CHECKED, never installed. Docker is privileged, OS-specific, and on
 # macOS/Windows it is Docker Desktop, whose licence nobody can accept on the user's behalf.

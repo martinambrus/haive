@@ -118,6 +118,10 @@ if ($Channel -cne 'public') {
 if ($Channel -cnotmatch '\A[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?\z') { Die "invalid -Channel (use 1-32 lowercase letters, digits or dashes; start and end with a letter or digit)" }
 if ($ChannelRegistry -cnotmatch '\A[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*\z') { Die "invalid -ChannelRegistry (use a registry host and optional repository prefix, without a scheme)" }
 
+if ($Channel -cne 'public' -and (-not $Version -or $Version -in @('latest', 'next'))) {
+  Die 'channel installs require an explicit -Version <v>; latest and next are public release aliases'
+}
+
 # ── Preflight ────────────────────────────────────────────────────────────────
 # Prerequisites are CHECKED, never installed. Docker Desktop is a GUI application with a licence
 # agreement that is commercial above a company-size threshold; nobody can accept that on the
