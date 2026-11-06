@@ -5,7 +5,7 @@ import { ensureJournal, lastDoneChannel, recordAttempt } from './journal.js';
 
 function mockAttemptSql() {
   const sql = Object.assign(
-    vi.fn(async (..._args: unknown[]) => []),
+    vi.fn(async (..._args: unknown[]) => [{ id: 'attempt-id' }]),
     {
       json: vi.fn((v: unknown) => v),
     },
@@ -64,7 +64,7 @@ describe('recordAttempt', () => {
       expect(sql).toHaveBeenCalledTimes(2);
       const [parts, ...values] = sql.mock.calls[0]!;
       expect((parts as TemplateStringsArray).join('?').replace(/\s+/g, ' ').trim()).toBe(
-        "INSERT INTO upgrade_runs (from_version, to_version, channel, phase, status, error, metadata, ended_at) VALUES (?, ?, ?, 'preflight', ?, ?, ?, now())",
+        "INSERT INTO upgrade_runs (from_version, to_version, channel, phase, status, error, metadata, ended_at) VALUES (?, ?, ?, 'preflight', ?, ?, ?, now()) RETURNING id",
       );
       expect(values).toEqual([
         '1.0.0',

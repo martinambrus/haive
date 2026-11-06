@@ -73,6 +73,16 @@ describe.skipIf(!url)('terminal attempts on PostgreSQL', () => {
     ).toEqual(realRuns);
   });
 
+  it('preserves the new attempt when 50 existing attempts have future timestamps', async () => {
+    await seedAttempts(50);
+    await sql`UPDATE upgrade_runs SET started_at = now() + interval '1 day'`;
+    await recordAttempt(sql, attempt);
+    const rows = await sql`SELECT * FROM upgrade_runs WHERE error = ${attempt.error}`;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ phase: 'preflight', status: 'refused' });
+    expect(await sql`SELECT id FROM upgrade_runs`).toHaveLength(51);
+  });
+
   it('rolls back both the insertion and pruning if a delete fails', async () => {
     await seedAttempts(54);
     const before = await sql`SELECT * FROM upgrade_runs ORDER BY id`;

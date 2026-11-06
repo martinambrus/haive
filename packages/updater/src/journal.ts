@@ -92,14 +92,17 @@ export async function recordAttempt(
   const error =
     entry.error.length > 2048 ? entry.error.slice(0, 2048 - marker.length) + marker : entry.error;
   await sql.begin(async (tx) => {
-    await tx`
+    const rows = await tx<{ id: string }[]>`
       INSERT INTO upgrade_runs (from_version, to_version, channel, phase, status, error, metadata, ended_at)
       VALUES (${entry.fromVersion}, ${attemptVersion(entry.toVersion)}, ${entry.channel}, 'preflight', ${entry.status},
-              ${error}, ${tx.json(entry.metadata)}, now())`;
+              ${error}, ${tx.json(entry.metadata)}, now())
+      RETURNING id`;
     await tx`DELETE FROM upgrade_runs WHERE id IN (
-      SELECT id FROM upgrade_runs
-       WHERE phase = 'preflight' AND status IN ('refused', 'failed')
-       ORDER BY started_at DESC, id DESC OFFSET 50
+      SELECT id FROM (
+        SELECT id FROM upgrade_runs
+         WHERE phase = 'preflight' AND status IN ('refused', 'failed')
+         ORDER BY started_at DESC, id DESC OFFSET 50
+      ) AS stale_attempts WHERE id <> ${rows[0]!.id}
     )`;
   });
 }
