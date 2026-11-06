@@ -488,7 +488,7 @@ if (
   try {
     process.exit(await main());
   } catch (err) {
-    emit('error', { message: scrubErrorPaths(safeErrorMessage(err)) });
+    emit('error', { message: safeErrorMessage(err) });
     process.exit(EXIT.failed);
   }
 }
