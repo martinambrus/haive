@@ -20,7 +20,7 @@ afterEach(async () => {
   if (scratch) await rm(scratch, { recursive: true, force: true });
 });
 
-it('keeps the stored size refusal and cleans up only after an aborted git and index-pack exit', async () => {
+async function prepareAbortedFetch() {
   scratch = await mkdtemp(join(tmpdir(), 'module-abort-'));
   const childScript = join(scratch, 'index-pack.cjs');
   await writeFile(
@@ -70,25 +70,54 @@ if (args.includes('fetch')) {
   vi.stubEnv('PATH', `${scratch}:${process.env.PATH}`);
   vi.stubEnv('HAIVE_PUBLISHED_INSTALL', 'true');
   vi.stubEnv('HAIVE_OWN_MODULES_HOST_DIR', '/prepared');
+}
+
+const source = {
+  id: '00000000-0000-4000-8000-000000000531',
+  moduleId: 'alpha',
+  kind: 'git' as const,
+  url: 'https://example.com/alpha.git',
+  ref: 'main',
+  resolvedSha: null,
+};
+
+const url = process.env.MODULE_SOURCE_ABORT_TEST_URL;
+if (url && !new URL(url).pathname.startsWith('/module_sources_test_abort'))
+  throw new Error('Use a dedicated module_sources_test_abort database');
+
+async function expectCleanup() {
+  expect(await readFile(join(scratch, 'git-exited'), 'utf8')).toBe('yes');
+  expect(await readFile(join(scratch, 'index-pack-exited'), 'utf8')).toBe('yes');
+  const tree = await readFile(join(scratch, 'tree'), 'utf8');
+  await expect(access(join(tree, '..'))).rejects.toThrow();
+}
+
+it('keeps the size refusal and cleans up after an aborted git and index-pack exit', async () => {
+  await prepareAbortedFetch();
   const pin = vi.fn();
-  const source = {
-    id: '00000000-0000-4000-8000-000000000531',
-    moduleId: 'alpha',
-    kind: 'git' as const,
-    url: 'https://example.com/alpha.git',
-    ref: 'main',
-    resolvedSha: null,
-  };
-  const databaseUrl = process.env.MODULE_SOURCE_ABORT_TEST_URL;
-  if (databaseUrl) {
-    if (!new URL(databaseUrl).pathname.startsWith('/module_sources_test_abort'))
-      throw new Error('Use a dedicated module_sources_test_abort database');
-    const db = createDatabase(databaseUrl);
+  let storedError = '';
+  try {
+    await fetchModuleSource(source, null, pin);
+  } catch (error) {
+    storedError = sourceFetchError(error, null);
+  }
+  expect(storedError).toBe('Module tree exceeds size limit');
+  await expectCleanup();
+  expect(pin).not.toHaveBeenCalled();
+});
+
+it.skipIf(!url)(
+  'stores the abort refusal in PostgreSQL and cleans up after git exits',
+  async () => {
+    await prepareAbortedFetch();
+    const db = createDatabase(url!);
     try {
       vi.spyOn(secretsService, 'getFresh').mockResolvedValue(null);
-      await db
-        .insert(schema.moduleSources)
-        .values({ ...source, fetchStatus: 'queued', updatedAt: new Date() });
+      await db.insert(schema.moduleSources).values({
+        ...source,
+        fetchStatus: 'queued',
+        updatedAt: new Date(),
+      });
       await expect(runModuleSourceFetch(db, source.id)).rejects.toThrow(
         'Module tree exceeds size limit',
       );
@@ -100,25 +129,13 @@ if (args.includes('fetch')) {
         fetchStatus: 'failed',
         lastError: 'Module tree exceeds size limit',
       });
+      await expectCleanup();
     } finally {
       await db.delete(schema.moduleSources).where(eq(schema.moduleSources.id, source.id));
       await db.$client.end({ timeout: 5 });
     }
-  } else {
-    let storedError = '';
-    try {
-      await fetchModuleSource(source, null, pin);
-    } catch (error) {
-      storedError = sourceFetchError(error, null);
-    }
-    expect(storedError).toBe('Module tree exceeds size limit');
-  }
-  expect(await readFile(join(scratch, 'git-exited'), 'utf8')).toBe('yes');
-  expect(await readFile(join(scratch, 'index-pack-exited'), 'utf8')).toBe('yes');
-  const tree = await readFile(join(scratch, 'tree'), 'utf8');
-  await expect(access(join(tree, '..'))).rejects.toThrow();
-  expect(pin).not.toHaveBeenCalled();
-});
+  },
+);
 
 it('forces an aborted git to exit within a bounded wait when it ignores SIGTERM', async () => {
   scratch = await mkdtemp(join(tmpdir(), 'module-abort-stubborn-'));
