@@ -17,7 +17,7 @@ import { parseArgs } from 'node:util';
 import { parseReleaseManifest } from '../packages/shared/src/release/manifest.ts';
 import { parseRecord, run as checkBoot } from './channel-boot-check.mjs';
 
-import { createCapture } from './channel-capture.mjs';
+import { createCapture, LOCAL_IMAGE_NOT_FOUND } from './channel-capture.mjs';
 
 const capture = createCapture(4);
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -70,7 +70,7 @@ export async function run(
     const result = await inspectLocal(['image', 'inspect', '--format', '{{.Id}}', ref], true);
     if (result.status === 0 && !result.error && DIGEST.test(result.stdout.trim()))
       return result.stdout.trim();
-    if (result.status === 1 && !result.error && /No such image/i.test(result.stderr ?? ''))
+    if (result.status === 1 && !result.error && LOCAL_IMAGE_NOT_FOUND.test(result.stderr ?? ''))
       return undefined;
     throw new Error(`could not inspect local tag ${ref}`);
   };

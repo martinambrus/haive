@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { formatOffender, idOf, parseExpect } from './channel-gate.mjs';
 
-import { createCapture } from './channel-capture.mjs';
+import { createCapture, LOCAL_IMAGE_NOT_FOUND } from './channel-capture.mjs';
 
 const capture = createCapture(2);
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -17,7 +17,6 @@ const USAGE =
 const POSTGRES = 'pgvector/pgvector:pg18';
 const REDIS = 'redis:8.4-alpine';
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
-const DAEMON_NOT_FOUND = /No such image/i;
 const lastLines = (text) =>
   String(text ?? '')
     .trim()
@@ -238,7 +237,7 @@ export async function run(
         if (
           found.error ||
           found.status !== 1 ||
-          !DAEMON_NOT_FOUND.test(found.stderr ?? '') ||
+          !LOCAL_IMAGE_NOT_FOUND.test(found.stderr ?? '') ||
           listed.stdout.trim() !== ''
         )
           throw new Error(`could not inspect dependency image ${image}`);
@@ -449,7 +448,7 @@ export async function run(
           kind === 'image' &&
           existing.status === 1 &&
           !existing.error &&
-          DAEMON_NOT_FOUND.test(existing.stderr ?? '')
+          LOCAL_IMAGE_NOT_FOUND.test(existing.stderr ?? '')
         )
           continue;
         status = 2;

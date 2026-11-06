@@ -1,5 +1,8 @@
 import { spawn } from 'node:child_process';
 
+// Volatile Docker daemon wording for a local image inspect, with exit 1 and no spawn error.
+export const LOCAL_IMAGE_NOT_FOUND = /No such image/i;
+
 // Preserve each caller's output cap while sharing cancellation and process cleanup.
 export function createCapture(outputMiB) {
   return function capture(command, args, { timeout, signal, ...options }) {
