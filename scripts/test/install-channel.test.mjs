@@ -887,6 +887,7 @@ for (const lang of ['sh', 'ps1']) {
         '--version',
         '10.0.0',
         'DOCKER_CONFIG=/install/.docker',
+        'DOCKER_HOST=unix:///var/run/docker.sock',
         `HAIVE_INSTALL_DIR_HOST=${f.dir}`,
         '--force',
       ])

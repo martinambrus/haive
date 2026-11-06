@@ -698,6 +698,7 @@ switch ($Command) {
   'pull' { docker compose @files pull }
 '@)
   $haivePs1 = $haivePs1.Replace('      "$($e[''HAIVE_REGISTRY''])/haive-updater:$v",', @'
+      '-e', 'DOCKER_HOST=unix:///var/run/docker.sock',
       '-e', 'DOCKER_CONFIG=/install/.docker',
       '-e', "HAIVE_INSTALL_DIR_HOST=$($e['HAIVE_INSTALL_DIR_HOST'])",
       "$($e['HAIVE_REGISTRY'])/haive-updater:$v",

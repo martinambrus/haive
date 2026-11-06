@@ -94,6 +94,11 @@ it('channel argv selects image/channel/version and mounted Docker config without
   expect(args.indexOf('HAIVE_INSTALL_DIR_HOST=/host/install')).toBeLessThan(
     args.indexOf('ghcr.io/martinambrus/haive-updater:9.9.9'),
   );
+  expect(args).toContain('DOCKER_HOST=unix:///var/run/docker.sock');
+  expect(args[args.indexOf('DOCKER_HOST=unix:///var/run/docker.sock') - 1]).toBe('-e');
+  expect(args.indexOf('DOCKER_HOST=unix:///var/run/docker.sock')).toBeLessThan(
+    args.indexOf('ghcr.io/martinambrus/haive-updater:9.9.9'),
+  );
   expect(args).toContain('DOCKER_CONFIG=/install/.docker');
   expect(args.indexOf('DOCKER_CONFIG=/install/.docker')).toBeLessThan(
     args.indexOf('ghcr.io/martinambrus/haive-updater:9.9.9'),
@@ -102,7 +107,7 @@ it('channel argv selects image/channel/version and mounted Docker config without
   expect(args).toContain('DATABASE_URL');
   expect(args).toContain('CONFIG_ENCRYPTION_KEY');
 });
-it('public argv remains byte-for-byte unchanged', async () => {
+it('public argv pins the mounted socket', async () => {
   expect((await post()).status).toBe(202);
   expect(h.spawn.mock.calls[0]).toEqual([
     'docker',
@@ -127,6 +132,8 @@ it('public argv remains byte-for-byte unchanged', async () => {
       'COMPOSE_PROJECT_NAME=haive',
       '-e',
       'HAIVE_INSTALL_ID=haive',
+      '-e',
+      'DOCKER_HOST=unix:///var/run/docker.sock',
       'ghcr.io/martinambrus/haive-updater:9.9.9',
       '--manifest',
       'https://github.com/martinambrus/haive/releases/download/v9.9.9/release.json',

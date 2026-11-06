@@ -689,7 +689,8 @@ done < .env
   CHANNEL_PULL='  pull)    shift; $DC pull "$@" ;;
 '
   LOAD_INSTALL_ENV=': # install settings were read above as data'
-  CHANNEL_UPGRADE_ENV='      -e DOCKER_CONFIG=/install/.docker \
+  CHANNEL_UPGRADE_ENV='      -e DOCKER_HOST=unix:///var/run/docker.sock \
+      -e DOCKER_CONFIG=/install/.docker \
       -e HAIVE_INSTALL_DIR_HOST="${HAIVE_INSTALL_DIR_HOST}" \
 '
   MANIFEST_ARGS='      --channel "${HAIVE_CHANNEL}" \
