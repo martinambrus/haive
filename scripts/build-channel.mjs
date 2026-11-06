@@ -55,10 +55,19 @@ export function parseModules(value) {
   });
 }
 
-function capture(command, args, options) {
+export function capture(command, args, options) {
   return new Promise((resolveResult) => {
-    const { onOutput, ...spawnOptions } = options;
+    const { onOutput, timeout, ...spawnOptions } = options;
     const child = spawn(command, args, { ...spawnOptions, stdio: ['ignore', 'pipe', 'pipe'] });
+    let timedOut = false;
+    const timer =
+      timeout > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            child.kill('SIGTERM');
+          }, timeout)
+        : undefined;
+    timer?.unref();
     const stdout = [];
     const stderr = [];
     let size = 0;
@@ -85,14 +94,17 @@ function capture(command, args, options) {
     child.on('error', (cause) => {
       error = cause;
     });
-    child.on('close', (status) =>
+    child.on('close', (status, signal) => {
+      clearTimeout(timer);
       resolveResult({
+        signal,
+        timedOut,
         status,
         stdout: Buffer.concat(stdout).toString('utf8'),
         stderr: Buffer.concat(stderr).toString('utf8'),
         error,
-      }),
-    );
+      });
+    });
   });
 }
 
@@ -181,7 +193,14 @@ export async function run(
     const command = async (
       cmd,
       args,
-      { cwd = root, quiet = false, allowFailure = false, stream = false, ...options } = {},
+      {
+        cwd = root,
+        quiet = false,
+        allowFailure = false,
+        stream = false,
+        timeout = 1_800_000,
+        ...options
+      } = {},
     ) => {
       if (signal?.aborted) throw new Error('interrupted');
       const buffers = new Map();
@@ -198,7 +217,7 @@ export async function run(
       const result = await runner(cmd, args, {
         cwd,
         env: childEnv,
-        timeout: 1_800_000,
+        timeout,
         signal,
         ...options,
         ...(stream ? { onOutput } : {}),
@@ -212,9 +231,12 @@ export async function run(
           emit(result.stdout);
           emit(result.stderr);
         }
-        throw new Error(
-          `${cmd} failed (${result.status ?? 'no exit code'})${result.error ? `: ${result.error.message}` : ''}`,
-        );
+        const reason = result.timedOut
+          ? `timed out after ${timeout} ms`
+          : result.signal
+            ? `terminated by ${result.signal}`
+            : `failed (${result.status ?? 'no exit code'})`;
+        throw new Error(`${cmd} ${reason}${result.error ? `: ${result.error.message}` : ''}`);
       }
       return result;
     };
@@ -272,14 +294,29 @@ export async function run(
       } catch {
         throw new Error(`preflight ${tag}: missing ${file}`);
       }
+      if (!file.endsWith('/Dockerfile')) continue;
+      // Docker ignores whole comment lines, including within continued instructions.
+      const instructions = content
+        .split(/\r?\n/)
+        .filter((line) => !/^\s*#/.test(line))
+        .join('\n')
+        .replace(/\\\r?\n/g, ' ');
+      const mounts = [...instructions.matchAll(/^[ \t]*RUN[ \t]+((?:--\S+[ \t]+)*)/gim)].flatMap(
+        (run) => [...run[1].matchAll(/--mount=([^\s\\]+)/g)],
+      );
       if (
-        file.endsWith('/Dockerfile') &&
-        ![...content.matchAll(/--mount=([^\s\\]+)/g)].some((match) => {
+        !mounts.some((match) => {
           const fields = match[1].split(',');
           return fields.includes('type=secret') && fields.includes('id=npmrc');
         })
       )
         throw new Error(`preflight ${tag}: ${file} lacks an id=npmrc secret mount`);
+      if (
+        !/^[ \t]*FROM[ \t]+(?:--\S+[ \t]+)*\S+[ \t]+AS[ \t]+production[ \t]*\r?$/im.test(
+          instructions,
+        )
+      )
+        throw new Error(`preflight ${tag}: ${file} lacks a production stage`);
     }
     const apiPackage = json(join(tree, 'packages', 'api', 'package.json'));
     for (const entry of readdirSync(join(tree, 'modules'), { withFileTypes: true })) {
@@ -402,7 +439,6 @@ export async function run(
     if (!rebuildWeb) {
       emit(`build-channel: pulling stock web ${images.web} for ${platform}`);
       await command('docker', ['pull', '--platform', platform, images.web]);
-      retainedImages.push(images.web);
       repoDigest = await readRepoDigest();
     }
     for (const host of hosts) {
@@ -429,7 +465,7 @@ export async function run(
           images[host],
           tree,
         ],
-        { cwd: tree, stream: true },
+        { cwd: tree, stream: true, timeout: 0 },
       );
       retainedImages.push(images[host]);
     }

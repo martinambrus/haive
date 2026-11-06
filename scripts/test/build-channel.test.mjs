@@ -35,9 +35,10 @@ function seedTree(tree, config = {}) {
     mkdirSync(dirname(join(tree, file)), { recursive: true });
     writeFileSync(
       join(tree, file),
-      config.missingTool === file
-        ? 'RUN pnpm install'
-        : 'RUN --mount=type=secret,id=npmrc,target=/root/.npmrc pnpm install',
+      config.dockerfiles?.[file] ??
+        (config.missingTool === file
+          ? 'FROM node:26 AS production\nRUN pnpm install'
+          : 'FROM node:26 AS production\nRUN --mount=type=secret,id=npmrc,target=/root/.npmrc pnpm install'),
     );
   }
   for (const host of ['api', 'worker', 'web']) {
@@ -104,7 +105,10 @@ function fixture(t, config = {}) {
       return spawnSync(cmd, args, { ...options, encoding: 'utf8' });
     }
     if (cmd === 'git' && args.includes('rev-parse')) {
-      return config.missingTag ? { status: 128, stderr: 'unknown tag' } : ok(`${SHA}\n`);
+      return (
+        config.resolveResult ??
+        (config.missingTag ? { status: 128, stderr: 'unknown tag' } : ok(`${SHA}\n`))
+      );
     }
     if (cmd === 'git' && args.includes('archive')) {
       const output = args.find((arg) => arg.startsWith('--output=')).slice('--output='.length);
@@ -914,4 +918,115 @@ test('stock RepoDigest selection ignores other repositories and deduplicates ide
   const record = JSON.parse(readFileSync(join(f.out, 'build-record.json'), 'utf8'));
   assert.equal(record.images.web.repoDigest, digest);
   assert.equal(f.calls.filter((c) => c.args.includes('{{json .RepoDigests}}')).length, 2);
+});
+
+test('builds have no command timeout while preflight commands retain their limit', async (t) => {
+  const f = fixture(t);
+  assert.equal(await f.execute(), 0);
+  for (const call of f.calls) {
+    assert.equal(call.options.timeout, call.args[0] === 'buildx' ? 0 : 1_800_000);
+  }
+});
+
+for (const [result, message] of [
+  [{ status: null, signal: 'SIGTERM', timedOut: true }, 'git timed out after 1800000 ms'],
+  [{ status: null, signal: 'SIGKILL' }, 'git terminated by SIGKILL'],
+]) {
+  test(`command failures explain timeout or termination: ${message}`, async (t) => {
+    const f = fixture(t, { resolveResult: { stdout: '', stderr: '', ...result } });
+    assert.equal(await f.execute(), 2);
+    assert.ok(f.logs.some((line) => line.includes(message)));
+  });
+}
+
+for (const file of [
+  'packages/api/Dockerfile',
+  'packages/worker/Dockerfile',
+  'packages/web/Dockerfile',
+  'docker/own-module-builder/Dockerfile',
+]) {
+  for (const [content, message] of [
+    [
+      'FROM node:26 AS production\n# RUN --mount=type=secret,id=npmrc pnpm install\nRUN pnpm install',
+      'secret mount',
+    ],
+    ['FROM node:26 AS production\nRUN echo "--mount=type=secret,id=npmrc"', 'secret mount'],
+    [
+      '# FROM node:26 AS production\nFROM node:26 AS builder\nRUN --mount=type=secret,id=npmrc pnpm install',
+      'production stage',
+    ],
+  ]) {
+    test(`preflight requires an actual ${message} in ${file}`, async (t) => {
+      const f = fixture(t, { dockerfiles: { [file]: content } });
+      assert.equal(await f.execute(), 2);
+      assert.ok(f.logs.some((line) => line.includes(file) && line.includes(message)));
+      assert.ok(!f.calls.some((c) => c.cmd === 'pnpm' || c.cmd === 'docker'));
+      assert.ok(!existsSync(f.scratch));
+    });
+  }
+}
+
+test('preflight accepts case-insensitive instructions and continued RUN mount options', async (t) => {
+  const f = fixture(t, {
+    dockerfiles: {
+      'packages/api/Dockerfile': [
+        'from --platform=$BUILDPLATFORM node:26 as production',
+        'run --mount=type=cache,target=/cache ' + String.fromCharCode(92),
+        '# a comment in a continuation',
+        '  --mount=target=/root/.npmrc,id=npmrc,type=secret pnpm install',
+      ].join('\n'),
+    },
+  });
+  assert.equal(await f.execute(), 0);
+});
+
+test('failure diagnostics retain only built output tags', async (t) => {
+  const f = fixture(t, { gateCode: 1 });
+  assert.equal(await f.execute(), 1);
+  const retained = f.logs.filter((line) => line.includes('tags retained'));
+  assert.equal(retained.length, 1);
+  assert.ok(retained[0].includes('haive-acme-builder:1.2.3'));
+  assert.ok(!retained[0].includes('/haive-web:'));
+});
+
+test('default capture identifies its own timeout', async () => {
+  const { capture } = await import('../build-channel.mjs');
+  assert.equal(typeof capture, 'function');
+  const result = await capture(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    timeout: 100,
+  });
+  assert.equal(result.status, null);
+  assert.equal(result.signal, 'SIGTERM');
+  assert.equal(result.timedOut, true);
+});
+
+test('default capture decodes multibyte characters split across stdout and stderr chunks', async () => {
+  const { capture } = await import('../build-channel.mjs');
+  assert.equal(typeof capture, 'function');
+  const output = { stdout: '', stderr: '' };
+  const result = await capture(
+    process.execPath,
+    [
+      '-e',
+      `
+    (async () => {
+      for (const name of ['stdout', 'stderr']) {
+        for (const byte of Buffer.from('café 🌍 漢字\\n')) {
+          await new Promise(resolve => process[name].write(Buffer.from([byte]), resolve));
+          await new Promise(resolve => setTimeout(resolve, 2));
+        }
+      }
+    })();
+  `,
+    ],
+    {
+      timeout: 5000,
+      onOutput: (text, name) => {
+        output[name] += text;
+      },
+    },
+  );
+  assert.equal(result.status, 0);
+  assert.equal(output.stdout, 'café 🌍 漢字\n');
+  assert.equal(output.stderr, 'café 🌍 漢字\n');
 });
