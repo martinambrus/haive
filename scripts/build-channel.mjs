@@ -59,29 +59,40 @@ export function parseModules(value) {
 
 export function capture(command, args, options) {
   return new Promise((resolveResult) => {
-    const { onOutput, timeout, ...spawnOptions } = options;
+    const {
+      onOutput,
+      timeout,
+      signal: abortSignal,
+      killGrace = COMMAND_KILL_GRACE_MS,
+      ...spawnOptions
+    } = options;
     const child = spawn(command, args, { ...spawnOptions, stdio: ['ignore', 'pipe', 'pipe'] });
     let timedOut = false;
+    let error;
     let forceTimer;
+    const stop = (cause) => {
+      error ??= cause;
+      if (forceTimer) return;
+      child.kill('SIGTERM');
+      forceTimer = setTimeout(() => child.kill('SIGKILL'), killGrace);
+      forceTimer.unref();
+    };
+    const abort = () => stop(new Error('interrupted'));
     const timer =
       timeout > 0
         ? setTimeout(() => {
             timedOut = true;
-            child.kill('SIGTERM');
-            forceTimer = setTimeout(() => child.kill('SIGKILL'), COMMAND_KILL_GRACE_MS);
-            forceTimer.unref();
+            stop();
           }, timeout)
         : undefined;
     timer?.unref();
     const stdout = [];
     const stderr = [];
     let size = 0;
-    let error;
     const collect = (chunks) => (chunk) => {
       size += chunk.length;
       if (size > 32 * 1024 * 1024) {
-        error = new Error('command output exceeded 32 MiB');
-        child.kill('SIGTERM');
+        stop(new Error('command output exceeded 32 MiB'));
       } else chunks.push(chunk);
     };
     if (onOutput) {
@@ -102,6 +113,7 @@ export function capture(command, args, options) {
     child.on('close', (status, signal) => {
       clearTimeout(timer);
       clearTimeout(forceTimer);
+      abortSignal?.removeEventListener('abort', abort);
       resolveResult({
         signal,
         timedOut,
@@ -111,6 +123,8 @@ export function capture(command, args, options) {
         error,
       });
     });
+    abortSignal?.addEventListener('abort', abort, { once: true });
+    if (abortSignal?.aborted) abort();
   });
 }
 

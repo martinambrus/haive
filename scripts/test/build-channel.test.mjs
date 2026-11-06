@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { ChildProcess, spawnSync } from 'node:child_process';
 import {
   existsSync,
   chmodSync,
@@ -13,6 +13,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { test } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { run } from '../build-channel.mjs';
 import { parseExpect } from '../channel-gate.mjs';
 
@@ -1089,63 +1090,114 @@ test('default capture decodes multibyte characters split across stdout and stder
   assert.equal(output.stderr, 'café 🌍 漢字\n');
 });
 
-test(
-  'default capture escalates a timeout when the child ignores SIGTERM',
-  { concurrency: true },
-  async (t) => {
+// Observe real child signals and retain an independent kill path for broken controls.
+function captureWatchdog(t, onSpawn = () => {}) {
+  const children = [];
+  const signals = [];
+  const spawnChild = ChildProcess.prototype.spawn;
+  const killChild = ChildProcess.prototype.kill;
+  let fired = false;
+  t.mock.method(ChildProcess.prototype, 'spawn', function (options) {
+    const result = spawnChild.call(this, options);
+    children.push(this);
+    onSpawn(this);
+    return result;
+  });
+  t.mock.method(ChildProcess.prototype, 'kill', function (signal = 'SIGTERM') {
+    signals.push(signal);
+    return killChild.call(this, signal);
+  });
+  const kill = () => {
+    for (const child of children) {
+      if (child.pid && child.exitCode === null && child.signalCode === null)
+        killChild.call(child, 'SIGKILL');
+    }
+  };
+  const watchdog = setTimeout(() => {
+    fired = true;
+    kill();
+  }, 5000);
+  t.after(() => {
+    clearTimeout(watchdog);
+    kill();
+  });
+  return {
+    signals,
+    get fired() {
+      return fired;
+    },
+  };
+}
+
+for (const stream of [false, true]) {
+  test(`default capture escalates a timeout: ${stream ? 'streamed' : 'collected'} output`, async (t) => {
     const { capture } = await import('../build-channel.mjs');
-    await Promise.all(
-      [false, true].map((stream) =>
-        t.test(stream ? 'streamed output' : 'collected output', async () => {
-          const controller = new AbortController();
-          const timeout = 1000;
-          const grace = 30_000;
-          const margin = 3000;
-          let watchdogFired = false;
-          const watchdog = setTimeout(
-            () => {
-              watchdogFired = true;
-              controller.abort();
-            },
-            timeout + grace + margin,
-          );
-          let output = '';
-          const started = performance.now();
-          try {
-            const result = await capture(
-              process.execPath,
-              [
-                '-e',
-                "process.on('SIGTERM', () => process.stdout.write('ignored SIGTERM\\n')); setInterval(() => {}, 1000);",
-              ],
-              {
-                timeout,
-                signal: controller.signal,
-                // The watchdog kills a broken implementation too, so a red control leaves no child.
-                killSignal: 'SIGKILL',
-                ...(stream ? { onOutput: (text) => (output += text) } : {}),
-              },
-            );
-            assert.equal(
-              watchdogFired,
-              false,
-              'capture did not close within the grace plus margin',
-            );
-            assert.ok(performance.now() - started < timeout + grace + margin);
-            assert.equal(result.timedOut, true);
-            assert.equal(result.status, null);
-            assert.equal(result.signal, 'SIGKILL');
-            assert.equal(stream ? output : result.stdout, 'ignored SIGTERM\n');
-            if (stream) {
-              assert.equal(result.stdout, '');
-              assert.equal(result.stderr, '');
-            }
-          } finally {
-            clearTimeout(watchdog);
-            controller.abort();
-          }
-        }),
-      ),
+    const watch = captureWatchdog(t);
+    let output = '';
+    const result = await capture(
+      process.execPath,
+      [
+        '-e',
+        "process.on('SIGTERM', () => process.stdout.write('ignored SIGTERM\\n')); setInterval(() => {}, 1000);",
+      ],
+      {
+        timeout: 1000,
+        killGrace: 200,
+        ...(stream ? { onOutput: (text) => (output += text) } : {}),
+      },
     );
-  },
-);
+    assert.equal(watch.fired, false, 'capture did not close before the watchdog');
+    assert.equal(result.timedOut, true);
+    assert.equal(result.status, null);
+    assert.equal(result.signal, 'SIGKILL');
+    assert.equal(stream ? output : result.stdout, 'ignored SIGTERM\n');
+    assert.deepEqual(watch.signals, ['SIGTERM', 'SIGKILL']);
+    if (stream) {
+      assert.equal(result.stdout, '');
+      assert.equal(result.stderr, '');
+    }
+  });
+}
+
+for (const trigger of ['overflow', 'abort', 'timeout']) {
+  for (const cooperative of [false, true]) {
+    // Timeout escalation is already covered above; keep a separate close/cleanup control.
+    if (trigger === 'timeout' && !cooperative) continue;
+    test(`default capture stops on ${trigger}: ${cooperative ? 'cooperative' : 'SIGTERM-ignoring'} child`, async (t) => {
+      const { capture } = await import('../build-channel.mjs');
+      const controller = new AbortController();
+      const watch = captureWatchdog(t, (child) => {
+        if (trigger === 'abort') child.stdout.once('data', () => controller.abort());
+      });
+      const result = await capture(
+        process.execPath,
+        [
+          '-e',
+          `
+            process.on('SIGTERM', () => { ${cooperative ? 'process.exit(0);' : ''} });
+            process.stdout.write(${trigger === 'overflow' ? "Buffer.alloc(33 * 1024 * 1024, 'x')" : "'ready\\n'"});
+            setInterval(() => {}, 1000);
+          `,
+        ],
+        { timeout: trigger === 'timeout' ? 1000 : 0, killGrace: 200, signal: controller.signal },
+      );
+      assert.equal(watch.fired, false, 'capture did not close before the watchdog');
+      assert.equal(result.timedOut, trigger === 'timeout');
+      if (trigger === 'overflow')
+        assert.match(result.error?.message ?? '', /output exceeded 32 MiB/);
+      if (trigger === 'abort') assert.ok(result.error, 'aborting must report a failure');
+      if (cooperative) {
+        assert.equal(result.status, 0);
+        assert.equal(result.signal, null);
+        // Wait past the grace to catch a kill timer left armed after close.
+        await delay(300);
+        controller.abort();
+        assert.deepEqual(watch.signals, ['SIGTERM']);
+      } else {
+        assert.equal(result.status, null);
+        assert.equal(result.signal, 'SIGKILL');
+        assert.deepEqual(watch.signals, ['SIGTERM', 'SIGKILL']);
+      }
+    });
+  }
+}
