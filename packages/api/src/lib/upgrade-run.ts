@@ -23,6 +23,9 @@ export type UpgradeRunRow = {
 
 type UpgradeRunDb = Pick<DbTx, 'execute'>;
 
+// Must change together with the attempt predicate in packages/updater/src/journal.ts.
+const attemptRow = sql`phase = 'preflight' AND status IN ('refused', 'failed')`;
+
 // These timestamp columns hold now() in the session TimeZone's wall clock. Convert in SQL,
 // before any driver parser can mistake it for UTC, and return text with an explicit offset.
 const instant = (column: 'started_at' | 'ended_at') => sql`to_char(
@@ -41,9 +44,16 @@ async function journalExists(db: UpgradeRunDb): Promise<boolean> {
 export async function listUpgradeRuns(db: UpgradeRunDb): Promise<UpgradeRunRow[]> {
   if (!(await journalExists(db))) return [];
   const rows = await db.execute<UpgradeRunRow>(
-    sql`SELECT id, from_version, to_version, phase, status, error, ${instant('started_at')} AS started_at,
+    sql`WITH history AS (
+          (SELECT * FROM upgrade_runs WHERE NOT (${attemptRow})
+           ORDER BY started_at DESC, id DESC LIMIT 20)
+          UNION ALL
+          (SELECT * FROM upgrade_runs WHERE ${attemptRow}
+           ORDER BY started_at DESC, id DESC LIMIT 10)
+        )
+        SELECT id, from_version, to_version, phase, status, error, ${instant('started_at')} AS started_at,
            ${instant('ended_at')} AS ended_at
-            FROM upgrade_runs ORDER BY started_at DESC, id DESC LIMIT 20`,
+            FROM history ORDER BY history.started_at DESC, id DESC`,
   );
   return rows as unknown as UpgradeRunRow[];
 }
@@ -81,7 +91,7 @@ export async function lastUpgradeAttempt(db: UpgradeRunDb): Promise<UpgradeAttem
            metadata ->> 'refusal' AS refusal
       FROM upgrade_runs
      WHERE status IN ('done', 'running', 'rolled_back')
-        OR (phase = 'preflight' AND status IN ('refused', 'failed'))
+        OR (${attemptRow})
      ORDER BY started_at DESC,
               CASE WHEN status IN ('done', 'running', 'rolled_back') THEN 0 ELSE 1 END,
               id DESC LIMIT 1

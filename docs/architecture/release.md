@@ -148,7 +148,13 @@ gone. When the updater held the database and the lock, then neither created nor 
 the start was not `--check` or a dry plan, its last step (`recordAttempt`) writes one row with
 phase `preflight`: status `refused` with `metadata.refusal` (channel-changed,
 rollback-images-missing, a preflight refusal), or `failed` for an error. `error` is capped at 2048
-characters, `channel` is the resolved one, and an unusable `--version` is stored as `unknown`. No
+characters, `channel` is the resolved one, and an unusable `--version` is stored as `unknown`. In
+the same transaction, after the insert, it deletes the attempt rows beyond the newest 50 (ordered
+`started_at DESC, id DESC`, never the row it just wrote), so repeated refusals cannot grow the
+table. An attempt row is exactly `phase = 'preflight' AND status IN ('refused', 'failed')`; no real
+run ends that way (`finishRun` writes only `done` or `rolled_back`, and a failed rollback leaves the
+run `running`). That predicate lives twice, as `attemptRow` in the api and in the updater's prune,
+and the two must change together. No
 reader of a run matches these rows: `findLiveRun` wants `running`, `lastDoneChannel` wants `done`,
 and the one-live index covers only `running`. A failed insert is reported as `attempt-record-failed`
 and changes neither the exit code nor the outcome. A busy lock writes nothing. A start that fails
@@ -156,8 +162,10 @@ before the database or the lock (bad argv, missing `DATABASE_URL`/`REDIS_URL`), 
 before its last step, and a target release older than this updater all leave no row.
 
 `GET /admin/maintenance/upgrade` returns the newest such row as `lastAttempt` only while no `done`,
-`running` or `rolled_back` run is newer (`lastUpgradeAttempt`, read apart from the 20-row history
-so repeated refusals cannot hide a real run); a tie goes to the real run. The admin page shows it as
+`running` or `rolled_back` run is newer (`lastUpgradeAttempt`, read apart from the history so
+repeated refusals cannot hide a real run); a tie goes to the real run. The history
+(`listUpgradeRuns`) caps the two kinds apart: the 20 newest real runs and the 10 newest attempt
+rows, merged newest first, so refusals never push a completed run out of it. The admin page shows it as
 a banner (`upgradeAttemptBanner`, gated on status and time, the error rendered as markdown) that
 replaces the launch box once it is newer than the launch, and History lists the rows. Every instant
 in that response is ISO 8601 with an offset: the columns are `timestamp` holding the session's wall
