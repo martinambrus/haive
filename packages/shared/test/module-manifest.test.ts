@@ -5,6 +5,7 @@ import {
   dashboardSpecSchema,
   dashboardWidgetSchema,
   moduleManifestSchema,
+  MODULE_ID_PATTERN,
   chartResponseSchema,
   kpiResponseSchema,
   meterResponseSchema,
@@ -327,3 +328,13 @@ describe('collectFieldIds', () => {
     expect([...collectFieldIds(form as never)].sort()).toEqual(['apiUrl', 'group', 'nested']);
   });
 });
+
+// .test must reject the final line terminators that JavaScript's $ anchor accepts.
+it.each(['\n', '\r', '\r\n', '\u2028', '\u2029'])(
+  'rejects a module id ending with %j',
+  (ending) => {
+    const id = 'alpha' + ending;
+    expect(MODULE_ID_PATTERN.test(id)).toBe(false);
+    expect(moduleManifestSchema.safeParse({ ...manifest, id }).success).toBe(false);
+  },
+);

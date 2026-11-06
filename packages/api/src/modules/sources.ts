@@ -13,7 +13,7 @@ import { isUuid } from '../lib/uuid.js';
 import { getModuleSourceQueue } from '../queues.js';
 
 const registryPrefix = '@haive-module/';
-const moduleId = z.string().refine((value) => MODULE_ID_PATTERN.exec(value)?.[0] === value);
+const moduleId = z.string().refine((value) => MODULE_ID_PATTERN.test(value));
 const numeric = '(?:0|[1-9][0-9]*)';
 const prerelease = '(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)';
 const semver = new RegExp(
