@@ -141,12 +141,14 @@ function fixture(t, config = {}) {
           : ok();
       }
       if (args[0] === 'image' && args[1] === 'tag') {
+        if (config.tagFailure) return { status: 1 };
         localTags.set(args.at(-1), args.at(-2));
         return ok();
       }
       if (args[0] === 'image' && args[1] === 'rm') {
         assert.equal(options.signal, undefined, 'cleanup ignores an aborted signal');
         if (config.localCleanupFailure) return { status: 1 };
+        if (!localTags.has(args.at(-1))) return { status: 1, stderr: 'removal refused' };
         localTags.delete(args.at(-1));
         return ok();
       }
@@ -159,13 +161,16 @@ function fixture(t, config = {}) {
           readFileSync(join(context, 'Dockerfile'), 'utf8'),
           'FROM scratch\nCOPY release.json /release.json\nLABEL org.haive.release=1\n',
         );
-        localTags.set(args[args.indexOf('--tag') + 1], IDS.release);
+        if (!config.releaseBuildBeforeLoadFailure)
+          localTags.set(args[args.indexOf('--tag') + 1], IDS.release);
         releaseBytes = readFileSync(join(context, 'release.json'));
         assert.deepEqual(releaseBytes, readFileSync(manifest));
         assert.equal(args[args.indexOf('--platform') + 1], record.platform);
         assert.ok(args.includes('--load'));
         assert.ok(!args.includes('--push'));
-        return config.releaseBuildFailure ? { status: 1 } : ok();
+        return config.releaseBuildFailure || config.releaseBuildBeforeLoadFailure
+          ? { status: 1 }
+          : ok();
       }
       if (args[0] === 'buildx' && args[2] === 'inspect') {
         const ref = args.at(-1);
@@ -866,6 +871,32 @@ test('failed local tag cleanup is reported and keeps exit 2', async (t) => {
   assert.equal(await f.invoke(['--registry', LOCAL_TEST_PREFIX]), 2);
   assert.match(f.logs.join('\n'), /cleanup failed.*local tag.*customer-worker/);
 });
+
+for (const [stage, config, host] of [
+  ['tag', { tagFailure: true }, 'api'],
+  ['build before load', { releaseBuildBeforeLoadFailure: true }, 'release'],
+]) {
+  test(`failed ${stage} leaves no local tag and reports no cleanup failure`, async (t) => {
+    const f = fixture(t, config);
+    assert.equal(await f.invoke(['--registry', LOCAL_TEST_PREFIX]), 2);
+    assert.equal(f.localTags.has(localDestination(host)), false);
+    assert.doesNotMatch(f.logs.join('\n'), /cleanup failed; local tag retained/);
+    const cleanup = f.calls.findIndex(
+      ({ args }) =>
+        args[0] === 'image' && args[1] === 'rm' && args.at(-1) === localDestination(host),
+    );
+    assert.ok(cleanup >= 0);
+    assert.ok(
+      f.calls
+        .slice(cleanup + 1)
+        .some(
+          ({ args }) =>
+            args[0] === 'image' && args[1] === 'inspect' && args.at(-1) === localDestination(host),
+        ),
+      'failed removal re-inspects the ref instead of reading removal diagnostics',
+    );
+  });
+}
 
 for (const word of ['connections', 'timeouts', 'networks', 'certificates', 'credential helpers']) {
   test(`plural transport diagnostic ${word} refuses even alongside an exact absence line`, async (t) => {

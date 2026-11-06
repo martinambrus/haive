@@ -66,8 +66,8 @@ export async function run(
   const docker = (args, allowFailure) => command('docker', args, allowFailure);
   const inspect = (ref) =>
     docker(['buildx', 'imagetools', 'inspect', '--format', '{{json .Manifest}}', ref], true);
-  const localTag = async (ref) => {
-    const result = await docker(['image', 'inspect', '--format', '{{.Id}}', ref], true);
+  const localTag = async (ref, inspectLocal = docker) => {
+    const result = await inspectLocal(['image', 'inspect', '--format', '{{.Id}}', ref], true);
     if (result.status === 0 && !result.error && DIGEST.test(result.stdout.trim()))
       return result.stdout.trim();
     if (result.status === 1 && !result.error && /No such image/i.test(result.stderr ?? ''))
@@ -88,7 +88,16 @@ export async function run(
         );
         if (result.status !== 0 || result.error) throw new Error('local tag cleanup failed');
       } catch {
-        emit(`publish-channel: cleanup failed; local tag retained at ${ref}`);
+        let absent = false;
+        try {
+          absent =
+            (await localTag(ref, (args) =>
+              runner('docker', args, { cwd: root, env, timeout: 15_000 }),
+            )) === undefined;
+        } catch {
+          // An inconclusive inspect cannot prove cleanup succeeded.
+        }
+        if (!absent) emit(`publish-channel: cleanup failed; local tag retained at ${ref}`);
       }
       throw error;
     }
