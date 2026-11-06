@@ -204,24 +204,33 @@ export async function run(
     ) => {
       if (signal?.aborted) throw new Error('interrupted');
       const buffers = new Map();
+      let needsNewline = false;
       const onOutput = (chunk, name = 'stdout') => {
         const text = scrub((buffers.get(name) ?? '') + chunk);
         let keep = Math.min(text.length, token.length - 1);
         while (keep > 0 && !text.endsWith(token.slice(0, keep))) keep--;
         buffers.set(name, keep ? text.slice(-keep) : '');
         const ready = keep ? text.slice(0, -keep) : text;
-        if (ready) write(ready);
+        if (ready) {
+          write(ready);
+          needsNewline = !ready.endsWith('\n');
+        }
       };
       // A held suffix is a proper prefix of the secret. Never flush it, even if the
       // child exits successfully: a truncated token must stay private too.
-      const result = await runner(cmd, args, {
-        cwd,
-        env: childEnv,
-        timeout,
-        signal,
-        ...options,
-        ...(stream ? { onOutput } : {}),
-      });
+      let result;
+      try {
+        result = await runner(cmd, args, {
+          cwd,
+          env: childEnv,
+          timeout,
+          signal,
+          ...options,
+          ...(stream ? { onOutput } : {}),
+        });
+      } finally {
+        if (needsNewline) write('\n');
+      }
       if (!quiet) {
         emit(result.stdout);
         emit(result.stderr);

@@ -94,6 +94,7 @@ function fixture(t, config = {}) {
   t.after(() => assert.deepEqual(violations, []));
   const logs = [];
   const writes = [];
+  const output = [];
   let expectation;
   let scratch;
   let secret;
@@ -229,6 +230,7 @@ function fixture(t, config = {}) {
     calls,
     logs,
     writes,
+    output,
     argv,
     dir,
     get expectation() {
@@ -246,9 +248,13 @@ function fixture(t, config = {}) {
         runner,
         env: { PATH: process.env.PATH, UNRELATED_SECRET: TOKEN, ...config.env },
         signal: config.signal,
-        say: (line) => logs.push(line),
+        say: (line) => {
+          logs.push(line);
+          output.push(`${line}\n`);
+        },
         write: (text) => {
           writes.push(text);
+          output.push(text);
           logs.push(text);
         },
       });
@@ -847,6 +853,25 @@ test('streamed chunks preserve spaces and line boundaries with a raw writer', as
   assert.equal(await f.execute(), 0);
   assert.equal(f.writes.join(''), chunks.join('').repeat(3));
 });
+
+for (const ending of ['success', 'failure', 'throw']) {
+  test(`terminates streamed output before the next status line: ${ending}`, async (t) => {
+    const f = fixture(t, {
+      buildFailure: ending === 'failure',
+      buildThrow: ending === 'throw',
+      buildChunks: [
+        ['first ', 'stdout'],
+        ['line\ndiagnostic', 'stderr'],
+      ],
+    });
+    assert.equal(await f.execute(), ending === 'success' ? 0 : 2);
+    assert.equal(
+      f.writes.join(''),
+      'first line\ndiagnostic\n'.repeat(ending === 'success' ? 3 : 1),
+    );
+    assert.match(f.output.join(''), /diagnostic\nbuild-channel:/);
+  });
+}
 
 for (const ending of ['success', 'failure', 'throw']) {
   test(`drops a held token prefix at end of stream: ${ending}`, async (t) => {
