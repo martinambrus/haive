@@ -276,11 +276,12 @@ export async function fetchModuleSource(
     let sha = source.resolvedSha;
     if (!sha) {
       const refs = await listRefs();
-      sha =
-        refs.get(heads) ??
-        refs.get(`${tags}^{}`) ??
-        refs.get(tags) ??
-        (/^[a-f0-9]{40}$/.test(ref) ? ref : null);
+      const branch = refs.get(heads);
+      const tag = refs.get(`${tags}^{}`) ?? refs.get(tags);
+      const literal = /^[a-f0-9]{40}$/.test(ref) ? ref : null;
+      if (literal && [branch, tag].some((named) => named && named !== literal))
+        throw new Error('module_source_ref_ambiguous: A branch or tag is named like this commit');
+      sha = branch ?? tag ?? literal;
       if (!sha || !/^[a-f0-9]{40}$/.test(sha))
         throw new Error('Module branch or tag was not found');
     }

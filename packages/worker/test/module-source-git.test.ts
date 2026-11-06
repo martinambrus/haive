@@ -150,6 +150,95 @@ it('resolves a raw SHA on its first real-git fetch and reports an unavailable ob
     await rm(root, { recursive: true, force: true });
   }
 });
+it.each(['branch', 'tag', 'annotated tag'] as const)(
+  'refuses a conflicting SHA-shaped %s before checkout and accepts one at the same commit',
+  async (kind) => {
+    const root = await mkdtemp(join(tmpdir(), 'module-source-ambiguous-'));
+    const fixture = await startGitHttpServer(root);
+    const run = async (args: string[]) => {
+      const result = await gitRun(root, args);
+      expect(result.code, result.stderr).toBe(0);
+      return result.stdout.trim();
+    };
+    try {
+      vi.stubEnv('HAIVE_PUBLISHED_INSTALL', 'true');
+      vi.stubEnv('HAIVE_OWN_MODULES_HOST_DIR', '/prepared');
+      await run(['init', '-b', 'main']);
+      await writeFile(
+        join(root, 'package.json'),
+        JSON.stringify({ name: '@haive-module/alpha', exports: { './manifest': './manifest.js' } }),
+      );
+      await run(['add', 'package.json']);
+      const commit = async () =>
+        run([
+          '-c',
+          'user.name=Fixture',
+          '-c',
+          'user.email=fixture@example.test',
+          'commit',
+          '--allow-empty',
+          '-m',
+          'fixture',
+        ]);
+      await commit();
+      const first = await run(['rev-parse', 'HEAD']);
+      await commit();
+      const second = await run(['rev-parse', 'HEAD']);
+      const nameRef = async (sha: string) => {
+        // Use unambiguous revision expressions to create the deliberately ambiguous names.
+        const target = sha === first ? 'HEAD~1' : 'HEAD';
+        if (kind === 'branch') await run(['branch', '-f', first, target]);
+        else {
+          // A same-named branch at the requested commit must not hide a conflicting tag.
+          await run(['branch', '-f', first, 'HEAD~1']);
+          await run([
+            '-c',
+            'user.name=Fixture',
+            '-c',
+            'user.email=fixture@example.test',
+            'tag',
+            '-f',
+            ...(kind === 'annotated tag' ? ['-a', '-m', 'fixture'] : []),
+            first,
+            target,
+          ]);
+        }
+      };
+      const pin = vi.fn();
+      const resolved = vi.fn();
+      const fetch = () =>
+        fetchModuleSource(
+          {
+            id: 'test',
+            moduleId: 'alpha',
+            kind: 'git',
+            url: fixture.httpOrigin(root),
+            ref: first,
+            resolvedSha: null,
+          },
+          null,
+          pin,
+          resolved,
+          (raw) => new URL(raw),
+        );
+      await nameRef(second);
+      await expect(fetch()).rejects.toThrow(
+        'module_source_ref_ambiguous: A branch or tag is named like this commit',
+      );
+      expect(checkout.attempts).toBe(0);
+      expect(pin).not.toHaveBeenCalled();
+      expect(resolved).not.toHaveBeenCalled();
+      await nameRef(first);
+      expect(await fetch()).toBe(first);
+      expect(checkout.count).toBe(1);
+      expect(pin).toHaveBeenCalledOnce();
+      expect(resolved).toHaveBeenCalledWith(first, `refs/heads/${first}`);
+    } finally {
+      await fixture.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 it('fetches real branches and tags, preserves a pin, and re-resolves only on Refresh', async () => {
   const root = await mkdtemp(join(tmpdir(), 't337-source-git-'));
   const fixture = await startGitHttpServer(root);
