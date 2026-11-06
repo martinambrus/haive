@@ -341,14 +341,17 @@ All PRE-EXISTING.
 
 User decision 2026-11-01: Reconcile runtime before validation; revalidate affected final changes after a later fixer edits code or tests
 
-### T531 · FNF[module-sources] · install-source fetch/pin follow-ups from T337 (+3)
+### T531 · FNF[module-sources] · install-source fetch/pin follow-ups from T337 reviews (+7)
 
-status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-06 · last: 2026-11-06 · kind: fix · found: T337 reviews 2026-11-05 · priority: P3
+status: open · last: 2026-11-06 · kind: fix · found: T531 reviews 2026-11-06 · priority: P4
 
-1. REGRESSION, minor (cost only): `resolveWorkerImage()` runs at the top of `pinModuleTree` (worker modules/source-pin.ts:139), after the clone, validation and the `resolved(sha)` write, so a worker topology that cannot resolve its own image (host networking, rootless or remote DOCKER_HOST) pays the whole transfer before failing. Fix: resolve the image before the first git call, or once at boot with a warning.
-2. Minor: the 64 MiB tree cap is checked only after the transfer (worker modules/source-fetch.ts:49, validation after fetch ~:207). Fix: bound the fetch (git `--filter`/size probe, or abort on a byte counter of the transfer dir).
-3. PRE-EXISTING order, fails closed: when `refs/heads/<ref>` and `refs/tags/<ref>` both exist the branch wins in both the first resolution and the fallback (source-fetch.ts:197, :203); a source pinned from a tag that later gets a same-named branch fails `module_source_ref_moved` on servers that refuse object-name fetches. Fix: remember which namespace resolved (store the qualified ref) and reuse it.
-4. PRE-EXISTING, minor: the module-id pattern `[a-z0-9][a-z0-9-]{0,22}` is duplicated across ~7 files (manifest, gen-modules, module.mjs, api sources, migration 0221 CHECK, web dialog). Fix: one exported constant in @haive/shared reused by the TS sites; the SQL CHECK stays literal with a test pinning equality.
+1. `boundedTransfer` bounds bytes and depth during the transfer but not entries (packages/worker/src/modules/source-fetch.ts ~:53); a pack of many empty files costs inodes and time up to the 300 s limit, and the 5000-entry limit applies only on the finished checkout. PRE-EXISTING. Fix direction: count entries in the poll.
+2. A raw 40-hex SHA ref is refused on its first resolution although the docs allow one (source-fetch.ts ~:275). PRE-EXISTING. Fix direction: fetch by SHA first when the ref is 40 hex, or change the docs.
+3. The first by-SHA fetch's no-answer (timeout 124, no exit status) falls into the ref fallback and can end as `module_source_ref_unavailable` or succeed on a different namespace (source-fetch.ts ~:287). PRE-EXISTING. Fix direction: `if (gitGaveNoAnswer(byObject)) output(byObject);` before the fallback.
+4. A row pinned before migration 0222 keeps a NULL `resolved_ref` after a by-SHA success (source-fetch.ts ~:302). PRE-EXISTING. Fix direction: backfill the namespace when the fallback resolves it.
+5. module-source-dialog.tsx ~:115 `pattern` is ignored under the HTML `v` flag for the class it uses. PRE-EXISTING. Fix direction: escape for the `v` flag and add a control.
+6. packages/worker/src/modules/source-jobs.ts ~:28-75 and module-source-queue.ts ~:50 compare a microsecond `updated_at` with a millisecond JavaScript Date for equality, so a claim can miss and a failed row stay `fetching` until the sweep. PRE-EXISTING. Fix direction: compare `date_trunc('milliseconds', updated_at)` or give the column millisecond precision.
+7. Test gaps: no real-git large-blob test of the transfer bound (the abort tests drive `gitRun` with a fake git), and git-exec-timeout.test.ts's describe title "the limit that reaches execFile" now covers `gitExec` only. Nit.
 
 ### T533 · FNF[build-channel] · build-channel.mjs, channel-gate, channel-boot-check and publish-channel follow-ups from T351/T353/T352 (+1)
 
@@ -367,12 +370,13 @@ status: open · kind: fix · found: T534 review 1 2026-11-06 · priority: P4
 4. Refused and failed attempt rows share the 20-row History cap with real runs and have no retention or de-duplication, so repeated refusals push completed runs out of History (packages/api/src/routes/upgrade-run.ts ~:46). Found T537 review 1 (L4). Owner call: separate cap, collapse identical consecutive refusals, or age them out.
 5. Some refusals still write no attempt row: argv errors, missing `DATABASE_URL`/`REDIS_URL`, failures before the journal or the lock, and a failed insert. The admin page then shows only the launch box. PRE-EXISTING. Fix direction: an api-side follow of the container's exit code for the cases the updater cannot record.
 
-### T539 · FNF[installer-manifest-reader] · installer manifest reader leftovers from T536 (+2)
+### T539 · FNF[installer-manifest-reader] · installer manifest reader leftovers from T536 (+3)
 
 status: open · kind: fix · found: T536 reviews 2026-11-06 · priority: P4
 
 1. The sh awk manifest reader still concatenates per line and per string character (install/install.sh ~:414 `t=t c`, ~:456 `s=s $0 "\n"`), quadratic under mawk: about 40 s on a 990 KB newline-separated manifest (gawk is fine). PRE-EXISTING; the 1 MiB cap bounds it. Fix direction: read with RS set to an impossible record separator, or collect into an array and join once.
 2. install.ps1 ~:408 `ConvertFrom-Json` rejects a valid 513-digit numeric value in an unknown key that the sh reader accepts. PRE-EXISTING, low; no published manifest carries one. Fix direction: parity control and a pre-scan, or document the difference.
+3. scripts/test/install-channel.test.mjs ~:234 hardcodes `t536-*` throwaway names, so two concurrent runs (or a leftover from a killed run) collide. Found T531 review 2. Fix direction: derive the names from a per-run random suffix.
 
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
@@ -1359,6 +1363,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T531 — module source fetch resolves the worker image before any git process; the 64 MiB tree limit is enforced while git writes (fetch counts packed objects, checkout the work tree, exact check on exit) and the git group is stopped and awaited before cleanup; the pinned namespace is recorded in `resolved_ref` (migration 0222) so a by-SHA fallback never reads a tag as a same-named branch; one module id constant across the TypeScript sites with the SQL CHECK pinned; `gitRun` moved to spawn with abort, keeping the no-exit shape, real exit codes at the timeout boundary and exact `maxBuffer` truncation — PR #1016 (73d91b2c8), 2026-11-06. CI green; merged without bot review (Codex and Greptile out of allowance). Three Sonnet reviews (review-3 FIX L4, fixed in a third round, checked by the session). Abort test's PG half added to the CI GATED list. Follow-ups: T531 items 1-7 (reopened as FNF), T539 item 3. Evidence .claude/tmp/sonnet-run/T531/.
 - T533 items 9-21 — channel-boot-check labels every resource it creates (`haive.boot-check=<name>`), aborts into cleanup on SIGINT/SIGTERM/SIGHUP (repeat signals do not interrupt it, EPIPE/EIO on stdout never kills it), tracks a dependency image only once proven absent before the pull, names the last fetch error on a stage timeout and removes a create killed by timeout; publish-channel rethrows an abort, restores or removes a local destination tag when a push fails, counts plural transport words and prints recovery lines after a failed manifest push; both scripts share `scripts/channel-capture.mjs` and one volatile not-found constant — PR #1015 (6b4ae3ebe), 2026-11-06. CI green; merged without bot review (Codex and Greptile out of allowance). Sonnet reviews (review-2 ACCEPT, fixed). Closed without change: 10 (an image's own printed secrets have no known value to scrub), 11 (no caller needs an overall deadline; per-stage bound documented), 21 (already covered, controls added). Item 22 awaits owner approval; 23 open. Evidence .claude/tmp/sonnet-run/T533b/.
 - T533 items 1-8 — build-channel pulls the stock web before the builds, writes streamed output raw (one newline at the end), drops a partial token tail, counts local modules the way gen-modules does (path named on a malformed package.json), re-reads the repo digest after the gate, refuses a missing `packages/api/package.json`, npmrc mount or production stage with exit 2, and channel-gate reports every missing image while still scanning the present ones — PR #1014 (c68c57093), 2026-11-06. CI green; merged without bot review (Codex and Greptile out of allowance). Sonnet review ACCEPT (3 L, fixed). Items 9-22 continue in the second PR. Evidence .claude/tmp/sonnet-run/T533a/.
 - T537 — the updater records every refused or failed upgrade start that began no run as an `upgrade_runs` attempt row (status `refused`/`failed`, capped error text, refusal code, zone-aware timestamps), and the admin maintenance page shows the latest attempt newer than the last completed run as a banner with reason and remedy, listed in History too; `.env` is read at lock time — PR #1013 (eb13a5427), 2026-11-06. CI green; merged without bot review (Codex and Greptile out of allowance). Sonnet reviews (review-1 FIX H1 M2 L5, fixed in two rounds). PG-gated tests added to the CI GATED list. Follow-ups: T538 items 3-5. Evidence .claude/tmp/sonnet-run/T537/.
