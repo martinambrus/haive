@@ -670,3 +670,61 @@ test('command timeout while the daemon creates a container still removes it', as
   assert.ok(f.removed.containers.some((name) => name.endsWith('-api')));
   assert.match(f.logs.join('\n'), /command timed out/);
 });
+
+for (const [limit, size, fails] of [
+  [2, 3, true],
+  [4, 3, false],
+  [4, 5, true],
+]) {
+  test(`shared child runner keeps the ${limit} MiB cap for ${size} MiB of output`, async () => {
+    const { createCapture } = await import('../channel-capture.mjs');
+    const result = await createCapture(limit)(
+      process.execPath,
+      ['-e', `process.stdout.write(Buffer.alloc(${size} * 1024 * 1024, 120))`],
+      { timeout: 5000 },
+    );
+    if (fails) {
+      assert.equal(result.error?.message, `command output exceeded ${limit} MiB`);
+      assert.ok(Buffer.byteLength(result.stdout) <= limit * 1024 * 1024);
+    } else {
+      assert.equal(result.status, 0);
+      assert.equal(result.error, undefined);
+      assert.equal(Buffer.byteLength(result.stdout), size * 1024 * 1024);
+    }
+  });
+}
+
+test('shared child runner bounds combined stdout and stderr', async () => {
+  const { createCapture } = await import('../channel-capture.mjs');
+  const result = await createCapture(2)(
+    process.execPath,
+    [
+      '-e',
+      'process.stdout.write(Buffer.alloc(1536 * 1024)); process.stderr.write(Buffer.alloc(1536 * 1024))',
+    ],
+    { timeout: 5000 },
+  );
+  assert.equal(result.error?.message, 'command output exceeded 2 MiB');
+  assert.ok(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr) <= 2 * 1024 * 1024);
+});
+
+test('shared child runner preserves timeout, interruption and spawn errors', async () => {
+  const { createCapture } = await import('../channel-capture.mjs');
+  const capture = createCapture(2);
+  const timeout = await capture(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    timeout: 50,
+  });
+  assert.equal(timeout.error?.code, 'ETIMEDOUT');
+  assert.equal(timeout.error?.message, 'command timed out');
+  const aborted = await capture(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    timeout: 5000,
+    signal: AbortSignal.abort(),
+  });
+  assert.equal(aborted.error?.message, 'interrupted');
+  const missing = await capture(join(tmpdir(), 'nonexistent-channel-capture-command'), [], {
+    timeout: 1000,
+  });
+  assert.equal(missing.error?.code, 'ENOENT');
+  assert.equal(missing.stdout, '');
+  assert.equal(missing.stderr, '');
+});

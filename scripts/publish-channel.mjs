@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
@@ -18,6 +17,9 @@ import { parseArgs } from 'node:util';
 import { parseReleaseManifest } from '../packages/shared/src/release/manifest.ts';
 import { parseRecord, run as checkBoot } from './channel-boot-check.mjs';
 
+import { createCapture } from './channel-capture.mjs';
+
+const capture = createCapture(4);
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const KEYS = ['api', 'worker', 'web', 'builder'];
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
@@ -31,47 +33,6 @@ const DAEMON_TRANSPORT_ERROR =
   /\b(?:5\d\d|network|connection|timeout|timed out|no such host|credential helper|tls|certificate|eof)\b/i;
 const USAGE =
   'usage: node scripts/publish-channel.mjs --record <build-record.json> [--registry <prefix; defaults to record api prefix>] [--out <dir; defaults beside record>] [--dry-run] [--confirm-absent <exact destination ref; repeatable>] [--timeout-ms <boot-stage timeout>] — writes release.json locally and publishes its manifest image last';
-
-function capture(command, args, { timeout, signal, ...options }) {
-  return new Promise((resolveResult) => {
-    const stdout = [];
-    const stderr = [];
-    let error;
-    let bytes = 0;
-    let forceTimer;
-    const child = spawn(command, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'] });
-    const stop = (cause) => {
-      error ??= cause;
-      child.kill('SIGTERM');
-      forceTimer ??= setTimeout(() => child.kill('SIGKILL'), 1000);
-    };
-    const abort = () => stop(new Error('interrupted'));
-    signal?.addEventListener('abort', abort, { once: true });
-    if (signal?.aborted) abort();
-    const timer = setTimeout(() => stop(new Error('command timed out')), timeout);
-    const collect = (chunks) => (chunk) => {
-      bytes += chunk.length;
-      if (bytes > 4 * 1024 * 1024) stop(new Error('command output exceeded 4 MiB'));
-      else chunks.push(chunk);
-    };
-    child.stdout.on('data', collect(stdout));
-    child.stderr.on('data', collect(stderr));
-    child.on('error', (cause) => {
-      error = cause;
-    });
-    child.on('close', (status) => {
-      clearTimeout(timer);
-      clearTimeout(forceTimer);
-      signal?.removeEventListener('abort', abort);
-      resolveResult({
-        status,
-        error,
-        stdout: Buffer.concat(stdout).toString('utf8'),
-        stderr: Buffer.concat(stderr).toString('utf8'),
-      });
-    });
-  });
-}
 
 export async function run(
   argv,

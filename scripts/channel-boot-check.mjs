@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,6 +8,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { formatOffender, idOf, parseExpect } from './channel-gate.mjs';
 
+import { createCapture } from './channel-capture.mjs';
+
+const capture = createCapture(2);
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const USAGE =
   'usage: node scripts/channel-boot-check.mjs --record <build-record.json> [--timeout-ms <1..600000; default 180000 per boot stage>]';
@@ -65,50 +67,6 @@ export function parseRecord(text) {
     JSON.stringify({ version: doc.version, images: refs, modules: doc.modules }),
   );
   return { ...doc, entitled: expectation.modules.map((m) => m.id).sort() };
-}
-
-function capture(command, args, { timeout, signal, ...options }) {
-  return new Promise((resolveResult) => {
-    const stdout = [];
-    const stderr = [];
-    let error;
-    let bytes = 0;
-    let forceTimer;
-    const child = spawn(command, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'] });
-    const stop = (cause) => {
-      error ??= cause;
-      child.kill('SIGTERM');
-      forceTimer ??= setTimeout(() => child.kill('SIGKILL'), 1000);
-    };
-    const abort = () => stop(new Error('interrupted'));
-    signal?.addEventListener('abort', abort, { once: true });
-    if (signal?.aborted) abort();
-    const timer = setTimeout(
-      () => stop(Object.assign(new Error('command timed out'), { code: 'ETIMEDOUT' })),
-      timeout,
-    );
-    const collect = (chunks) => (chunk) => {
-      bytes += chunk.length;
-      if (bytes > 2 * 1024 * 1024) stop(new Error('command output exceeded 2 MiB'));
-      else chunks.push(chunk);
-    };
-    child.stdout.on('data', collect(stdout));
-    child.stderr.on('data', collect(stderr));
-    child.on('error', (cause) => {
-      error = cause;
-    });
-    child.on('close', (status) => {
-      clearTimeout(timer);
-      clearTimeout(forceTimer);
-      signal?.removeEventListener('abort', abort);
-      resolveResult({
-        status,
-        error,
-        stdout: Buffer.concat(stdout).toString('utf8'),
-        stderr: Buffer.concat(stderr).toString('utf8'),
-      });
-    });
-  });
 }
 
 function readModules(half, key) {
