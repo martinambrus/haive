@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   MODULE_ID_PATTERN,
   MODULE_ID_PATTERN_SOURCE,
+  MODULE_ID_HTML_PATTERN_SOURCE,
   MODULE_ID_MAX_LENGTH,
   moduleManifestSchema,
   modulePackageId,
@@ -24,6 +25,24 @@ describe('module id contract', () => {
   it('keeps the database identifier length bound', () => {
     expect(MODULE_ID_PATTERN.test('a'.repeat(MODULE_ID_MAX_LENGTH))).toBe(true);
     expect(MODULE_ID_PATTERN.test('a'.repeat(MODULE_ID_MAX_LENGTH + 1))).toBe(false);
+  });
+  it('exports an HTML pattern that compiles with Unicode flags and matches the module id contract', () => {
+    expect(MODULE_ID_HTML_PATTERN_SOURCE).toBeTypeOf('string');
+    for (const flag of ['u', 'v']) {
+      const pattern = new RegExp(`^(?:${MODULE_ID_HTML_PATTERN_SOURCE})$`, flag);
+      for (const id of [
+        'alpha',
+        '0',
+        'a-b',
+        'a'.repeat(MODULE_ID_MAX_LENGTH),
+        '',
+        '-bad',
+        'Bad',
+        'a_b',
+        'a'.repeat(MODULE_ID_MAX_LENGTH + 1),
+      ])
+        expect(pattern.test(id), `${flag}: ${id}`).toBe(MODULE_ID_PATTERN.test(id));
+    }
   });
   // Scripts run before shared is built. Database cannot import shared, which depends on it.
   // Pin every intentional literal, including the builder's embedded Python staging pattern.

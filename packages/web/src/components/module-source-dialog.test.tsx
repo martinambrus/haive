@@ -102,9 +102,25 @@ describe('install source dialog', () => {
   it('uses the shared module id limits in the browser input', () => {
     const view = mount({ mode: 'add' });
     expect(view.field('source-module-id').props).toMatchObject({
-      pattern: MODULE_ID_PATTERN_SOURCE,
       maxLength: MODULE_ID_MAX_LENGTH,
     });
+    const pattern = view.field('source-module-id').props.pattern!;
+    const browserPattern = new RegExp(`^(?:${pattern})$`, 'v');
+    const sharedPattern = new RegExp(`^(?:${MODULE_ID_PATTERN_SOURCE})$`);
+    for (const value of [
+      'alpha',
+      'alpha-2',
+      '9',
+      'a'.repeat(MODULE_ID_MAX_LENGTH),
+      '-alpha',
+      'Alpha',
+      'alpha_beta',
+      'a'.repeat(MODULE_ID_MAX_LENGTH + 1),
+    ]) {
+      expect(browserPattern.test(value), value).toBe(sharedPattern.test(value));
+    }
+    expect(browserPattern.test('alpha-2')).toBe(true);
+    expect(browserPattern.test('alpha_beta')).toBe(false);
   });
   it('keeps a stored token blank and omits it from an edit', async () => {
     const view = mount({ mode: 'edit', source });

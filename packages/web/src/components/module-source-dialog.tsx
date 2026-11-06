@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, type FormEvent } from 'react';
-import { MODULE_ID_PATTERN_SOURCE, MODULE_ID_MAX_LENGTH } from '@haive/shared/modularity';
+import { MODULE_ID_HTML_PATTERN_SOURCE, MODULE_ID_MAX_LENGTH } from '@haive/shared/modularity';
 import {
   createModuleSource,
   updateModuleSource,
@@ -112,7 +112,8 @@ export function ModuleSourceDialog({
                 value={moduleId}
                 required
                 maxLength={MODULE_ID_MAX_LENGTH}
-                pattern={MODULE_ID_PATTERN_SOURCE}
+                // HTML compiles patterns with the v flag, which requires literal hyphens escaped.
+                pattern={MODULE_ID_HTML_PATTERN_SOURCE}
                 disabled={running}
                 onChange={(event) => setModuleId(event.target.value)}
               />

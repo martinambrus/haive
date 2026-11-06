@@ -5,6 +5,11 @@ import type { Queue } from 'bullmq';
 import { fetchModuleSource, sourceFetchError } from './source-fetch.js';
 import { pinModuleTree } from './source-pin.js';
 
+/** postgres.js/Date truncates fractional milliseconds; match request identities at that precision. */
+export function moduleSourceUpdatedAtMatches(at: Date) {
+  return eq(sql`date_trunc('milliseconds', ${schema.moduleSources.updatedAt})`, at.toISOString());
+}
+
 export async function runModuleSourceFetch(
   db: Database,
   sourceId: string,
@@ -25,7 +30,7 @@ export async function runModuleSourceFetch(
           and(
             eq(schema.moduleSources.id, sourceId),
             inArray(schema.moduleSources.fetchStatus, ['queued', 'fetching']),
-            requestedAt ? eq(schema.moduleSources.updatedAt, new Date(requestedAt)) : undefined,
+            requestedAt ? moduleSourceUpdatedAtMatches(new Date(requestedAt)) : undefined,
           ),
         )
         .returning();
@@ -33,7 +38,7 @@ export async function runModuleSourceFetch(
       claimedAt = source.updatedAt;
       const identity = and(
         eq(schema.moduleSources.id, sourceId),
-        eq(schema.moduleSources.updatedAt, source.updatedAt),
+        moduleSourceUpdatedAtMatches(source.updatedAt),
         eq(schema.moduleSources.fetchStatus, 'fetching'),
       );
       token = await secretsService.getFresh('module_source:' + source.id + ':token');
@@ -72,7 +77,7 @@ export async function runModuleSourceFetch(
         .where(
           and(
             eq(schema.moduleSources.id, sourceId),
-            eq(schema.moduleSources.updatedAt, claimedAt),
+            moduleSourceUpdatedAtMatches(claimedAt),
             eq(schema.moduleSources.fetchStatus, 'fetching'),
           ),
         );

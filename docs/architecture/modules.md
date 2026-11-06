@@ -672,9 +672,15 @@ module applies at the next upgrade or an explicit build of the one-shot above.
   missing image fails before any git process or transfer. It clones through the hardened git path,
   resolves the ref to a commit SHA once and stores it in `resolved_sha`, with the namespace it came
   from (`refs/heads/<ref>`, else `refs/tags/<ref>`; a branch wins when both exist) in
-  `resolved_ref` (migration 0222); later fetches build that SHA, and when a fetch by SHA fails for
-  any reason the fallback fetches the recorded namespace, so a tag is never read as a same-named
-  branch. A row pinned before 0222 has no namespace: the fallback lists both and takes the one still
+  `resolved_ref` (migration 0222); later fetches build that SHA, and when a fetch by SHA exits
+  non-zero the fallback fetches the recorded namespace, so a tag is never read as a same-named
+  branch. A fetch by SHA that gives no answer (timed out, no exit status) does not fall back; it
+  fails as "Module git fetch failed". A ref that is itself 40 lowercase hex and names no branch or
+  tag on the remote is taken as that SHA on its first resolution: it is fetched by object,
+  `resolved_ref` stays NULL, and a server that refuses the object ends `module_source_ref_unavailable`.
+  A branch or tag with that name pointing at a different commit refuses
+  (`module_source_ref_ambiguous`), so a SHA pin never builds another commit. A row pinned before
+  0222 has no namespace: the fallback lists both and takes the one still
   pointing at the pin, else the branch; a ref that moved refuses (`module_source_ref_moved`), a ref
   that exists as neither refuses (`module_source_ref_unavailable`), and a fallback fetch that gives
   no answer (timed out, no exit status) fails as "Module git fetch failed". Only Refresh (`refresh: true`) re-resolves
@@ -688,8 +694,11 @@ module applies at the next upgrade or an explicit build of the one-shot above.
   (SIGTERM, SIGKILL after 1 s, released after 2 s) and awaited before the temporary tree is removed,
   so no index-pack writes behind the removal; a size breach fails the row with "Module tree exceeds
   size limit". The poll is approximate by one interval; the exit check is exact, and pack overhead
-  counts. The poll also refuses a tree deeper than 32 levels; the entry limit (5000) is checked
-  only on the finished checkout.
+  counts. The poll also refuses a tree deeper than 32 levels or past 5000 entries (files,
+  directories and links alike; the same `MODULE_TREE_ENTRIES` limit the finished-checkout
+  validation applies), failing the row with "Module tree exceeds entry limit". A single
+  directory is listed whole before its entries are counted, so the entry poll is bounded by one
+  directory listing rather than one interval.
 - Registry fetch is refused with 409 `registry_fetch_unsupported`: published packages ship `dist`
   only, which the own-module builder cannot rebuild. Use a git source.
 - The worker never resolves the host directory by name. It streams the validated tree (no nested

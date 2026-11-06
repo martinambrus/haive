@@ -150,7 +150,7 @@ describe('gitDefaultTimeoutMs', () => {
   });
 });
 
-describe('the limit that reaches execFile', () => {
+describe('the timeout options passed through gitExec', () => {
   it('is the default for the subcommand, an explicit value wins, and 0 stays unlimited', async () => {
     seen.options.length = 0;
     await gitExec(['--version']);

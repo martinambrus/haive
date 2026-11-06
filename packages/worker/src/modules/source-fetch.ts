@@ -33,6 +33,7 @@ export function sourceFetchError(error: unknown, token: string | null): string {
 }
 
 const MODULE_TREE_BYTES = 64 * 1024 * 1024;
+const MODULE_TREE_ENTRIES = 5000;
 
 /** Bound git writes on disk: packed objects during fetch, expanded work-tree files during checkout. */
 async function boundedTransfer<T>(
@@ -47,10 +48,12 @@ async function boundedTransfer<T>(
   let checking = Promise.resolve();
   const check = async () => {
     let bytes = 0;
+    let count = 0;
     const walk = async (rel: string, depth: number): Promise<void> => {
       if (depth > 32) throw new Error('Module tree exceeds depth limit');
       for (const entry of (await readdirSizesNoFollow(root, rel)) ?? []) {
         if (worktreeOnly && rel === '' && entry.name === '.git') continue;
+        if (++count > MODULE_TREE_ENTRIES) throw new Error('Module tree exceeds entry limit');
         if (entry.isDirectory) await walk(rel ? `${rel}/${entry.name}` : entry.name, depth + 1);
         else bytes += entry.size ?? 0;
         if (bytes > MODULE_TREE_BYTES) throw new Error('Module tree exceeds size limit');
@@ -93,7 +96,7 @@ async function validateTree(root: string, moduleId: string): Promise<void> {
     if (!entries) throw new Error('Module tree is missing');
     for (const entry of entries) {
       count++;
-      if (count > 5000) throw new Error('Module tree exceeds entry limit');
+      if (count > MODULE_TREE_ENTRIES) throw new Error('Module tree exceeds entry limit');
       const child = rel ? `${rel}/${entry.name}` : entry.name;
       if (entry.name === '.git') throw new Error('Nested git metadata is refused');
       if (entry.isDirectory) await walk(child, depth + 1);
@@ -273,7 +276,12 @@ export async function fetchModuleSource(
     let sha = source.resolvedSha;
     if (!sha) {
       const refs = await listRefs();
-      sha = refs.get(heads) ?? refs.get(`${tags}^{}`) ?? refs.get(tags) ?? null;
+      const branch = refs.get(heads);
+      const tag = refs.get(`${tags}^{}`) ?? refs.get(tags);
+      const literal = /^[a-f0-9]{40}$/.test(ref) ? ref : null;
+      if (literal && [branch, tag].some((named) => named && named !== literal))
+        throw new Error('module_source_ref_ambiguous: A branch or tag is named like this commit');
+      sha = branch ?? tag ?? literal;
       if (!sha || !/^[a-f0-9]{40}$/.test(sha))
         throw new Error('Module branch or tag was not found');
     }
@@ -288,6 +296,7 @@ export async function fetchModuleSource(
       );
     const byObject = await fetch(sha);
     if (byObject.code !== 0) {
+      if (gitGaveNoAnswer(byObject)) output(byObject);
       if (!qualifiedRef) await listRefs();
       if (!qualifiedRef)
         throw new Error('module_source_ref_unavailable: Module branch or tag was not found');

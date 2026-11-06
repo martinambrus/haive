@@ -55,6 +55,51 @@ function setup() {
   });
 }
 describe('fetch and pin a module source', () => {
+  it.each(['fetch', 'checkout'])(
+    'aborts an entry-heavy %s while it is still running',
+    async (phase) => {
+      setup();
+      const previous = git.getMockImplementation()!;
+      let aborted = false;
+      let completed = false;
+      let temporary = '';
+      git.mockImplementation(
+        async (cwd: string, args: string[], env: unknown, io: { signal?: AbortSignal }) => {
+          const result = await previous(cwd, args, env, io);
+          if (args.includes(phase)) {
+            temporary = dirname(cwd);
+            await Promise.all(
+              Array.from({ length: 5001 }, (_, i) => writeFile(join(cwd, `empty-${i}`), '')),
+            );
+            await new Promise<void>((resolve) => {
+              const timer = setTimeout(() => {
+                completed = true;
+                resolve();
+              }, 10_000);
+              const abort = () => {
+                aborted = true;
+                clearTimeout(timer);
+                resolve();
+              };
+              if (io.signal?.aborted) abort();
+              else io.signal?.addEventListener('abort', abort, { once: true });
+            });
+          }
+          return result;
+        },
+      );
+      const pin = vi.fn();
+      await expect(fetchModuleSource(source, null, pin)).rejects.toThrow(
+        'Module tree exceeds entry limit',
+      );
+      expect(aborted).toBe(true);
+      expect(completed).toBe(false);
+      expect(pin).not.toHaveBeenCalled();
+      if (phase === 'fetch')
+        expect(git.mock.calls.some(([, args]) => args.includes('checkout'))).toBe(false);
+      await expect(access(temporary)).rejects.toThrow();
+    },
+  );
   it('fails image resolution before git or persisting a SHA', async () => {
     setup();
     image.mockRejectedValueOnce(new Error('module_source_worker_image_unavailable'));
@@ -363,6 +408,27 @@ describe('fetch and pin a module source', () => {
   it.each([
     { code: 124, stderr: 'git fetch timed out after 300 s' },
     { code: -1, stderr: 'git ended without an exit status (EMFILE)', noExit: 'EMFILE' },
+  ])('preserves a by-object fetch that gave no answer without fallback: $code', async (failure) => {
+    setup();
+    const previous = git.getMockImplementation()!;
+    git.mockImplementation(async (cwd: string, args: string[], env: unknown, io: unknown) => {
+      if (args.includes('fetch') && args.at(-1) === sha) return { ...failure, stdout: '' };
+      return previous(cwd, args, env, io);
+    });
+    const pin = vi.fn();
+    const resolved = vi.fn();
+    await expect(
+      fetchModuleSource({ ...source, resolvedSha: sha }, null, pin, resolved),
+    ).rejects.toThrow('Module git fetch failed: ' + failure.stderr);
+    expect(git.mock.calls.filter(([, args]) => args.includes('fetch'))).toHaveLength(1);
+    expect(git.mock.calls.some(([, args]) => args.includes('ls-remote'))).toBe(false);
+    expect(git.mock.calls.some(([, args]) => args.includes('checkout'))).toBe(false);
+    expect(pin).not.toHaveBeenCalled();
+    expect(resolved).not.toHaveBeenCalled();
+  });
+  it.each([
+    { code: 124, stderr: 'git fetch timed out after 300 s' },
+    { code: -1, stderr: 'git ended without an exit status (EMFILE)', noExit: 'EMFILE' },
   ])('preserves a fallback fetch that gave no answer: $code', async (failure) => {
     setup();
     const previous = git.getMockImplementation()!;
@@ -409,14 +475,23 @@ describe('fetch and pin a module source', () => {
       return previous(cwd, args, env);
     });
     const pin = vi.fn();
-    await expect(fetchModuleSource({ ...source, resolvedSha: sha }, null, pin)).rejects.toThrow(
-      'module_source_ref_moved',
-    );
+    const resolved = vi.fn();
+    await expect(
+      fetchModuleSource({ ...source, resolvedSha: sha, resolvedRef: null }, null, pin, resolved),
+    ).rejects.toThrow('module_source_ref_moved');
     expect(pin).not.toHaveBeenCalled();
+    expect(resolved).not.toHaveBeenCalled();
   });
-  it('re-fetches the recorded SHA without re-resolving the branch', async () => {
+  it('keeps a legacy pin namespace NULL when object fetch succeeds without resolving a ref', async () => {
     setup();
-    await fetchModuleSource({ ...source, resolvedSha: sha }, null, vi.fn());
+    const resolved = vi.fn();
+    await fetchModuleSource(
+      { ...source, resolvedSha: sha, resolvedRef: null },
+      null,
+      vi.fn(),
+      resolved,
+    );
+    expect(resolved).toHaveBeenCalledWith(sha, null);
     expect(git.mock.calls.some(([, args]) => args.includes('ls-remote'))).toBe(false);
   });
   it.each(['--upload-pack=bad', 'refs/heads/main', 'main~1', 'main:other', '+main', 'bad.lock'])(
