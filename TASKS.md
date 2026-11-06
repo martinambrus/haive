@@ -389,12 +389,6 @@ status: open · kind: fix · found: T335 PR B reviews 2026-11-05 · priority: P3
 6. `docker rm -f` in the manifest read's `finally` can replace the original error with its own (docker.ts:313-316). Minor; keep the first error.
 7. A public `--dry-plan` now throws (exit 1) instead of returning usage (exit 2) (cli.ts:209-210), and no test pins it. Minor; emit and return `EXIT.usage`.
 
-### T535 · D2c · pin the install channel in the upgrade journal (design)
-
-status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-06 · last: 2026-11-06 · kind: design · user decision: resolved 2026-11-06 (journal last done run + --change-channel <recorded>) · found: T335 PR B review 1 2026-11-05 · priority: P3
-
-If `.env` loses `HAIVE_CHANNEL`, `resolveChannel` (packages/updater/src/cli.ts ~:67-74) returns `public` and only the pre-existing "image overrides require HAIVE_OWN_MODULES_HOST_DIR" refusal in `prepareImages` stops the upgrade. Fixing T534 item 3 or relaxing that refusal for public would let a channel install silently fall to the public registry. Proposal: record the channel on the first channel run (journal or a dedicated row) and refuse a change unless an explicit flag allows it. Needs a decision on where it lives and how a deliberate channel move is authorised.
-
 ### T536 · FNF[installer-channel] · install.sh/install.ps1 channel-install follow-ups from T335 PR C (+7)
 
 status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-06 · last: 2026-11-06 · kind: fix · found: T335 PR C reviews 2026-11-05 · priority: P3
@@ -406,6 +400,12 @@ status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-06 · last: 2
 5. The final `.docker` guard (install.sh ~:576, install.ps1 ~:502) runs after `.env` is written, so a `.docker` created between the early guard and the move still leaves a half install. Narrow race, minor; create the destination with an exclusive mkdir-and-rename.
 6. PowerShell reads the manifest with `ConvertFrom-Json` plus `Assert-ManifestKeys`, which is looser than the sh awk reader on some shapes (review-1 L4). Minor; add parity controls for the shapes the awk reader refuses.
 7. Test gap: no control for a bare positional after the value of `--dir`/`--install-id` in install.ps1 (scripts/test/install-channel.test.mjs ~:412-471). Minor.
+
+### T537 · D3 · updater refusals are invisible on the admin page (design)
+
+status: open · kind: design · found: T535 review 1 2026-11-06 · priority: P3
+
+The api starts the updater with `docker run -d` and never reads its events or exit code (packages/api/src/routes/maintenance.ts ~:477-577). A refusal (preflight, `rollback-images-missing`, and now `channel-changed`) writes no `upgrade_runs` row, so the admin page shows only the generic "updater is running as container X ... docker logs" box (packages/web/src/app/(app)/admin/maintenance/page.tsx ~:417-422) and the History panel stays empty. PRE-EXISTING mechanism; T535 made `channel-changed` newly reachable, and its remedy (`--change-channel`) is CLI-only. Needs a decision on the surface: the updater records refused attempts (a `refused` status row, which the one-live index allows), or the api follows the container and stores its last event.
 
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
@@ -1392,6 +1392,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T535 — the updater pins an install to the channel of its last completed upgrade (`upgrade_runs.channel`, no schema change) and refuses a changed `.env` channel with `channel-changed` before any manifest read; a deliberate move needs `--change-channel <recorded>`, exact match — PR #1010 (280b96763), 2026-11-06. CI green; merged without bot review (Codex and Greptile out of allowance). Sonnet review ACCEPT (3 L). Follow-ups: PowerShell helper argument forwarding and usage text ride in T536; admin refusal visibility is T537. Evidence .claude/tmp/sonnet-run/T535/.
 - T335 — channel install and upgrade (plan D2b), in three PRs. PR A #1007 (4d4193768): builder + `haive-<channel>-release` manifest image. PR B #1008 (d71934772): the updater reads `--manifest-image` with pins bound to `HAIVE_CHANNEL_REGISTRY` and an install-local `DOCKER_CONFIG`; the api passes the channel. PR C #1009 (d94aafc00), 2026-11-05: install.sh/install.ps1 `--channel`/`--channel-registry`/`--registry-user`, login and verified manifest before any write, channel `./haive upgrade`, uninstall removes `.docker`; public path fixes (ps1 `HAIVE_INSTALL_ID` order, updater secrets by name). CI 17/17 green (one macOS GitHub-API flake re-run); merged without bot review (Codex and Greptile out of allowance); Sonnet reviews 1-3, last ACCEPT; real throwaway-registry runs per PR. Docs modules.md "Installing a channel". Follow-ups T534, T535, T536. Evidence .claude/tmp/sonnet-run/T335/.
 - T352 — scripts/publish-channel.mjs publishes a gated channel build. It re-checks the ids and runs the boot check, then proves tag absence fail-closed (Bearer-token aware, anchored daemon line, `--confirm-absent`). It pushes the platform manifest only, copies the web by digest, verifies the digests, and writes release.json last from record.commit — PR #1006 (65063fc37), 2026-11-05. CI green; merged without bot review (Codex and Greptile out of allowance). Three Sonnet reviews (review-3 ACCEPT). Real throwaway-registry run: dry-run 0, publish 0, repeat 1. ghcr.io anonymous 401/DENIED measured. Follow-ups: T533 items 16-19 and T335 inputs. Evidence .claude/tmp/sonnet-run/T352/.
 - T353 — scripts/channel-boot-check.mjs live boot check of a channel build (no docker.sock), /modules/loaded vs entitled set in api and worker — PR #1005 (e81805a35), 2026-11-05; CI 13/13 green, merged without bot review (Codex and Greptile out of allowance); three Sonnet reviews ACCEPT; real scratch-channel run exit 0, extra-statistics negative exit 1 in both halves, pre-existing postgres/redis images kept, all resources removed. Follow-ups T533 items 9-15, T352 note. Evidence .claude/tmp/sonnet-run/T353/.
