@@ -341,17 +341,16 @@ All PRE-EXISTING.
 
 User decision 2026-11-01: Reconcile runtime before validation; revalidate affected final changes after a later fixer edits code or tests
 
-### T531 · FNF[module-sources] · install-source fetch/pin follow-ups from T337 reviews (+7)
+### T531 · FNF[module-sources] · install-source fetch/pin follow-ups from T337 and T531 reviews (+6)
 
-status: open · last: 2026-11-06 · kind: fix · found: T531 reviews 2026-11-06 · priority: P4
+status: open · last: 2026-11-06 · kind: fix · found: T531b reviews 2026-11-06 · priority: P4
 
-1. `boundedTransfer` bounds bytes and depth during the transfer but not entries (packages/worker/src/modules/source-fetch.ts ~:53); a pack of many empty files costs inodes and time up to the 300 s limit, and the 5000-entry limit applies only on the finished checkout. PRE-EXISTING. Fix direction: count entries in the poll.
-2. A raw 40-hex SHA ref is refused on its first resolution although the docs allow one (source-fetch.ts ~:275). PRE-EXISTING. Fix direction: fetch by SHA first when the ref is 40 hex, or change the docs.
-3. The first by-SHA fetch's no-answer (timeout 124, no exit status) falls into the ref fallback and can end as `module_source_ref_unavailable` or succeed on a different namespace (source-fetch.ts ~:287). PRE-EXISTING. Fix direction: `if (gitGaveNoAnswer(byObject)) output(byObject);` before the fallback.
-4. A row pinned before migration 0222 keeps a NULL `resolved_ref` after a by-SHA success (source-fetch.ts ~:302). PRE-EXISTING. Fix direction: backfill the namespace when the fallback resolves it.
-5. module-source-dialog.tsx ~:115 `pattern` is ignored under the HTML `v` flag for the class it uses. PRE-EXISTING. Fix direction: escape for the `v` flag and add a control.
-6. packages/worker/src/modules/source-jobs.ts ~:28-75 and module-source-queue.ts ~:50 compare a microsecond `updated_at` with a millisecond JavaScript Date for equality, so a claim can miss and a failed row stay `fetching` until the sweep. PRE-EXISTING. Fix direction: compare `date_trunc('milliseconds', updated_at)` or give the column millisecond precision.
-7. Test gaps: no real-git large-blob test of the transfer bound (the abort tests drive `gitRun` with a fake git), and git-exec-timeout.test.ts's describe title "the limit that reaches execFile" now covers `gitExec` only. Nit.
+8. The SHA-pin guard keys on lowercase 40-hex only (packages/worker/src/modules/source-fetch.ts ~:281). An uppercase 40-hex ref is a plain name: it fails closed unless someone has created a branch or tag with that uppercase name, which is then built without the `module_source_ref_ambiguous` refusal. PRE-EXISTING, low (needs ref-write access plus an uppercase paste). Fix direction: compare case-insensitively and refuse a named ref that differs from the lowercased value, or document lowercase-only.
+9. Rows pinned before PR #1024 whose 40-hex ref resolved to a same-named branch keep building that `resolved_sha` until Refresh (source-fetch.ts ~:277 runs the guard only when `resolvedSha` is null). PRE-EXISTING, near-zero exposure. Fix direction: refuse when the ref is 40 hex and `resolvedSha` differs from it.
+10. Test gaps: the ambiguous-ref refusal test does not assert `checkout.transfers` is empty (packages/worker/test/module-source-git.test.ts ~:225); no tag-only conflict case without a same-named branch (~:178-195). Nit.
+11. The entry poll lists a directory whole before counting (`readdirSizesNoFollow`, packages/shared/src/fs-safe.ts ~:674), so one flat directory of many files costs one full lstat pass per poll before the limit fires (documented in modules.md). PRE-EXISTING. Fix direction: a `limit` option that stops before the lstat loop, with the fs-ratchet check.
+12. A raw SHA that is an annotated tag object ID reports `module_source_ref_moved` (source-fetch.ts ~:309), a misleading message; safe. PRE-EXISTING.
+13. packages/worker/src/modules/source-pin.ts ~:53 embeds literal `5000` and `64 * 1024 * 1024` in the Python pin helper, untied to `MODULE_TREE_ENTRIES`/`MODULE_TREE_BYTES`. PRE-EXISTING. Fix direction: interpolate the constants.
 
 ### T533 · FNF[build-channel] · build-channel.mjs, channel-gate, channel-boot-check and publish-channel follow-ups from T351/T353/T352 (+1)
 
@@ -365,14 +364,13 @@ status: open · kind: fix · found: T534 review 1 2026-11-06 · priority: P4
 
 4. Some refusals still write no attempt row: argv errors, missing `DATABASE_URL`/`REDIS_URL`, failures before the journal or the lock, and a failed insert. The admin page then shows only the launch box. PRE-EXISTING. Fix direction: an api-side follow of the container's exit code for the cases the updater cannot record.
 
-### T539 · FNF[installer-manifest-reader] · installer manifest reader leftovers from T536 (+4)
+### T539 · FNF[installer-manifest-reader] · installer manifest reader leftovers from T536 (+3)
 
 status: open · kind: fix · found: T536 reviews 2026-11-06 · priority: P4
 
 2. install.ps1 ~:408 `ConvertFrom-Json` rejects a valid 513-digit numeric value in an unknown key that the sh reader accepts. PRE-EXISTING, low; no published manifest carries one. Fix direction: parity control and a pre-scan, or document the difference.
-3. A single-line (minified) manifest is unmeasured on busybox and BWK awk, where `length(s)`/`substr` per character may be strlen-based and so quadratic within one 1 MiB record (install/install.sh ~:410-445). PRE-EXISTING; mawk measured linear (0.14 s). Found T539 review. Fix direction: measure busybox on a 990 KB single line; if slow, cache the record length and document.
-4. The Docker-context reader still concatenates input per line (install/install.sh ~:255): 25 s on 989 KB. PRE-EXISTING; found T539 run. Fix direction: the same line-array approach as the manifest reader.
-5. The new split-token rejects (string, number, keyword, escape split across lines) are sh-only (scripts/test/install-manifest.test.mjs ~:63-76); the ps1 reader is not asserted on them. Found T539 review. Fix direction: add them to the shared sh/ps1 loop in install-channel.test.mjs ~:1036-1090.
+3. `quoted()` in the Docker-context reader (install/install.sh ~:270) accepts a literal newline or an unknown escape inside a JSON string. PRE-EXISTING; fails closed downstream. Found T539b review. Fix direction: reject both, with a parity case.
+4. The context reader tests run on the host awk only (scripts/test/install-context.test.mjs); mawk and busybox parity was measured by hand. Found T539b review. Fix direction: run the context cases under the pinned mawk/busybox images like the manifest tests.
 
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
@@ -1359,6 +1357,8 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T531 items 1-3, 5-7 — module source fetch counts entries while git writes; a 40-hex ref with no same-named ref is fetched by object on first resolution, and one whose branch or tag points at another commit refuses (`module_source_ref_ambiguous`); a no-answer by-SHA fetch fails instead of falling back; v-flag-safe module id pattern exported from shared; millisecond `updated_at` compare-and-swap (required gated CI row); real-git tests; docs modules.md. Item 4 disproved (no path records a namespace that does not point at the pin) — PR #1024 (5a597ee7e), 2026-11-06. CI green; merged without bot review. Sonnet reviews: FIX (1 M security, fixed in one round), then ACCEPT (4 L, filed as items 8-10). Evidence .claude/tmp/sonnet-run/T531b/.
+- T539 items 3-5 — sh installer context reader linear (mawk 29.04 to 0.26 s, busybox 87.27 to 1.05 s); both readers bounded on one long line (busybox ~20 s to ~1.2 s); split-token rejects shared with ps1 — PR #1023 (d20349a2d), 2026-11-06. CI green; merged without bot review. Sonnet review ACCEPT (3 L; filed as T539 items 3-4). Evidence .claude/tmp/sonnet-run/T539b/.
 - T533 item 23 — build-channel image builds get a 2 h deadline; `capture` stops every child by SIGTERM then SIGKILL after a 30 s grace on deadline, output overflow and abort; a timed-out command or gate is a failure even on exit 0 — PR #1022 (9ced42f3c), 2026-11-06. CI green; merged without bot review (Codex and Greptile out of allowance). Sonnet review ACCEPT (5 L; L1, L2, L4, L5 folded in one round). Evidence .claude/tmp/sonnet-run/T533d/.
 - T539 items 1, 3 — sh installer manifest reader linear under mawk (20.78 to 1.54 s) and busybox (77.32 to 2.43 s), 142 parity cases identical; installer tests use per-fixture HOME and DOCKER_CONFIG — PR #1021 (42715eac0), 2026-11-06. CI green; merged without bot review. Sonnet review ACCEPT (1 M pre-existing, 3 L; filed as items 4-6). Evidence .claude/tmp/sonnet-run/T539/.
 - T538 items 1, 2, 3, 5 — the release manifest image is kept after a read (no probe, no removal race); a failed container cleanup after a failed read emits a `warning`; the dead `--no-rollback` hint is gone; cli-diagnostics test gets a 30 s timeout; docs modules.md — PR #1020 (9daabf579), 2026-11-06. CI green; merged without bot review. Sonnet review FIX (1 M docs, session-written). Evidence .claude/tmp/sonnet-run/T538b/.
