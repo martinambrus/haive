@@ -13,8 +13,7 @@
   "packages/worker/src/sandbox/docker-runner.ts": 1,
   "packages/worker/src/step-engine/steps/onboarding/_credential-scan.ts": 1,
   "scripts/build-channel.mjs": 1,
-  "scripts/channel-boot-check.mjs": 1,
+  "scripts/channel-capture.mjs": 1,
   "scripts/channel-gate.mjs": 1,
-  "scripts/module.mjs": 1,
-  "scripts/publish-channel.mjs": 1
+  "scripts/module.mjs": 1
 }
