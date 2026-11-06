@@ -350,11 +350,9 @@ read_channel_manifest() {
     done
   }
   copy_channel_context "${DOCKER_CONTEXT:-}"
-  CHANNEL_CONTEXT_HASH=''
   if [ -n "$CHANNEL_CONTEXT_NAME" ] && [ "$CHANNEL_CONTEXT_NAME" != default ]; then
     if [ "$CHANNEL_CONTEXT_NAME" != "${DOCKER_CONTEXT:-}" ]; then copy_channel_context "$CHANNEL_CONTEXT_NAME"
     fi
-    CHANNEL_CONTEXT_HASH=$CHANNEL_HASH
   fi
   if [ -d "$CHANNEL_SCRATCH/.docker/contexts" ]; then chmod -R go-rwx "$CHANNEL_SCRATCH/.docker/contexts"; fi
   export DOCKER_CONFIG="$CHANNEL_SCRATCH/.docker"
@@ -724,11 +722,10 @@ if [ "$CHANNEL" != "public" ]; then
   # directory, instead of mv merging the credential into someone else’s tree.
   mkdir -m 700 .docker 2>/dev/null || die "$INSTALL_DIR/.docker already exists or cannot be created; choose a clean install directory"
   CHANNEL_FINAL_CLAIMED=1
-  # The helper also uses this config. Keep nondefault contexts so it reaches the
-  # same daemon; default-daemon installs retain only the channel credential.
+  # Keep both environment and config selections for install-time compose and
+  # the host helper. Scratch already holds only the selected contexts.
   case "$CHANNEL_CONTEXT" in
     ''|'""'|'"default"')
-        rm -rf "$DOCKER_CONFIG/contexts"
         awk '
           { s=s $0 "\n" }
           END {
@@ -741,12 +738,6 @@ if [ "$CHANNEL" != "public" ]; then
         chmod 600 "$DOCKER_CONFIG/config.json"
       ;;
   esac
-  # The environment override is only needed during this install. The host helper
-  # retains the config selection, with no unrelated endpoints or TLS keys.
-  for entry in "$DOCKER_CONFIG/contexts/"*/*; do
-    [ -e "$entry" ] || continue
-    [ "${entry##*/}" = "$CHANNEL_CONTEXT_HASH" ] || rm -rf "$entry"
-  done
   for entry in "$CHANNEL_SCRATCH/.docker/"*; do
     mv "$entry" ".docker/${entry##*/}" || die "could not place registry credentials; retry the install"
   done

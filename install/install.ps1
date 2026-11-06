@@ -350,13 +350,11 @@ function Read-ChannelManifest {
         else { [IO.File]::Copy($entry.FullName, $target, $true) }
       }
     }
-    $script:ChannelContextHash = $null
     foreach ($name in @($env:DOCKER_CONTEXT, $script:ChannelContext) | Select-Object -Unique) {
       if (-not $name -or $name -ceq 'default') { continue }
       $sha = [Security.Cryptography.SHA256]::Create()
       try { $hash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($name)))).Replace('-', '').ToLowerInvariant() }
       finally { $sha.Dispose() }
-      if ($name -ceq $script:ChannelContext) { $script:ChannelContextHash = $hash }
       if (-not (Test-Path -LiteralPath (Join-Path $userConfig "contexts/meta/$hash") -PathType Container)) { throw "selected Docker context $name has no metadata directory" }
       foreach ($kind in @('meta', 'tls')) {
         $source = Join-Path $userConfig "contexts/$kind/$hash"
@@ -630,21 +628,12 @@ if ($Channel -cne 'public') {
     catch { throw "$Dir/.docker already exists or cannot be created; choose a clean install directory" }
     $claimed = $true
     Protect-RegistryCredentials $credentialDir
-    # The helper needs a nondefault context too; default-daemon installs keep
-    # only the channel credential in the final directory.
+    # Keep both environment and config selections for install-time compose and
+    # the host helper. Scratch already holds only the selected contexts.
     if (-not $script:ChannelContext -or $script:ChannelContext -ceq 'default') {
-      Remove-Item -LiteralPath (Join-Path $env:DOCKER_CONFIG 'contexts') -Recurse -Force -ErrorAction SilentlyContinue
       $settings = [IO.File]::ReadAllText((Join-Path $env:DOCKER_CONFIG 'config.json')) | ConvertFrom-Json
       $settings.PSObject.Properties.Remove('currentContext')
       [IO.File]::WriteAllText((Join-Path $env:DOCKER_CONFIG 'config.json'), ($settings | ConvertTo-Json -Depth 10 -Compress))
-    }
-    foreach ($kind in @('meta', 'tls')) {
-      $contextDir = Join-Path $env:DOCKER_CONFIG "contexts/$kind"
-      if (Test-Path -LiteralPath $contextDir) {
-        foreach ($entry in Get-ChildItem -LiteralPath $contextDir -Force) {
-          if ($entry.Name -cne $script:ChannelContextHash) { Remove-Item -LiteralPath $entry.FullName -Recurse -Force }
-        }
-      }
     }
     foreach ($entry in Get-ChildItem -LiteralPath (Join-Path $ChannelScratch '.docker') -Force) {
       Move-Item -LiteralPath $entry.FullName -Destination (Join-Path $credentialDir $entry.Name)

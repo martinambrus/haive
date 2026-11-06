@@ -40,6 +40,19 @@ printf 'config=%s' "$DOCKER_CONFIG" >> "$CALLS"
 for arg do printf '\\t%s' "$arg" >> "$CALLS"; done
 printf '\\n' >> "$CALLS"
 if [ "$EXPECT_CHANNEL" = 1 ] && [ -n "$HAIVE_REGISTRY_TOKEN" ]; then echo token_in_environment >&2; exit 91; fi
+# Enforce context-store lookup on commands that reach the daemon. Configs in
+# this fixture use ASCII context names, including JSON's escaped spelling of x.
+case "$1" in
+ pull|create|run|compose)
+  selected=$DOCKER_CONTEXT
+  if [ -z "$selected" ] && [ -f "$DOCKER_CONFIG/config.json" ]; then
+    selected=$(tr -d '\\r\\n' < "$DOCKER_CONFIG/config.json" | sed -n 's/.*"currentContext"[[:space:]]*:[[:space:]]*"\\([^" ]*\\)".*/\\1/p' | sed 's/\\\\u0078/x/g')
+  fi
+  if [ -n "$selected" ] && [ "$selected" != default ]; then
+    hash=$(printf '%s' "$selected" | sha256sum); hash=\${hash%% *}
+    [ -d "$DOCKER_CONFIG/contexts/meta/$hash" ] || { echo "missing selected context metadata: $selected" >&2; exit 92; }
+  fi ;;
+esac
 case "$1" in
  run) printf '%s\\n%s\\n' "$DATABASE_URL" "$CONFIG_ENCRYPTION_KEY" > "$CASE_ROOT/updater-env" ;;
  login) cp "$DOCKER_CONFIG/config.json" "$CASE_ROOT/login-config.json"; if [ -d "$DOCKER_CONFIG/contexts" ]; then cp -R "$DOCKER_CONFIG/contexts" "$CASE_ROOT/seen-contexts"; fi; printf '%s\\n%s\\n' "$DOCKER_HOST" "$DOCKER_CONTEXT" > "$CASE_ROOT/daemon-env"; cat > "$CASE_ROOT/stdin"; [ "$FAIL_AT" != login ] || exit 1 ;;
@@ -98,7 +111,7 @@ function approvedPublicSecrets(lang, text) {
 }
 function fixture(
   lang,
-  { publicInstall = false, data = manifest, fail = '', source, installDir } = {},
+  { publicInstall = false, data = manifest, fail = '', source, installDir, start = false } = {},
 ) {
   const root = mkdtempSync(join(tmpdir(), 'channel-installer-'));
   const bin = join(root, 'bin');
@@ -178,7 +191,7 @@ exec /bin/${command} "$@"
     const wrapper = join(root, 'invoke.ps1');
     writeFileSync(
       wrapper,
-      `$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction Move-Item { param($LiteralPath,$Destination); if($env:FAIL_AT -eq 'credential-move' -and $LiteralPath -like '*/.docker/config.json'){ throw 'credential move failure' }; Microsoft.PowerShell.Management\\Move-Item @PSBoundParameters; if($env:FAIL_AT -eq 'credential-stop' -and $LiteralPath -like '*/.docker/config.json'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; if($env:FAIL_AT -eq 'unprotect-move'){ & chmod 755 (Split-Path $Destination); & chmod 644 $Destination } }\nfunction New-Item { param($ItemType,$Path,[switch]$Force); if($Path -like '*/snapshots' -and $env:FAIL_AT -in @('mkdir','pipeline-stop')) { if($env:FAIL_AT -eq 'pipeline-stop'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; throw 'post-verification mkdir failure' }; Microsoft.PowerShell.Management\\New-Item @PSBoundParameters }\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-RestMethod { param($Uri); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); [pscustomobject]@{tag_name='v9.9.9'} }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); if($OutFile){ if($env:FAIL_AT -eq 'bundle'){ throw 'bundle failure' }; [IO.File]::WriteAllText($OutFile, "services: {}\\n") } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|force|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
+      `$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\nfunction Move-Item { param($LiteralPath,$Destination); if($env:FAIL_AT -eq 'credential-move' -and $LiteralPath -like '*/.docker/config.json'){ throw 'credential move failure' }; Microsoft.PowerShell.Management\\Move-Item @PSBoundParameters; if($env:FAIL_AT -eq 'credential-stop' -and $LiteralPath -like '*/.docker/config.json'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; if($env:FAIL_AT -eq 'unprotect-move'){ & chmod 755 (Split-Path $Destination); & chmod 644 $Destination } }\nfunction New-Item { param($ItemType,$Path,[switch]$Force); if($Path -like '*/snapshots' -and $env:FAIL_AT -in @('mkdir','pipeline-stop')) { if($env:FAIL_AT -eq 'pipeline-stop'){ throw [System.Management.Automation.PipelineStoppedException]::new() }; throw 'post-verification mkdir failure' }; Microsoft.PowerShell.Management\\New-Item @PSBoundParameters }\nfunction Get-CimInstance { [pscustomobject]@{TotalPhysicalMemory=16GB} }\nfunction Get-Date { '2000-01-01T00:00:00Z' }\nfunction Invoke-RestMethod { param($Uri); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); [pscustomobject]@{tag_name='v9.9.9'} }\nfunction Invoke-WebRequest { param($Uri,$OutFile,[switch]$UseBasicParsing,$Method,$TimeoutSec); [IO.File]::AppendAllText((Join-Path $env:CASE_ROOT 'network-calls'), $Uri); if($OutFile){ if($env:FAIL_AT -eq 'bundle'){ throw 'bundle failure' }; [IO.File]::WriteAllText($OutFile, "services: {}\\n") } }\n& '${file.replaceAll("'", "''")}' ${args.map((x) => (/^--?(version|dir|install-id|installId|no-start|noStart|channel|channel-registry|registry-user|channelRegistry|registryUser|check|force|yes|ForceDrain)$/i.test(x) ? x : `'${x.replaceAll("'", "''")}'`)).join(' ')}\nexit $LASTEXITCODE\n`,
     );
     if (hostPwsh)
       return spawnSync('pwsh', ['-NoProfile', '-File', wrapper], {
@@ -247,7 +260,7 @@ exec /bin/${command} "$@"
       dir,
       flag('install-id'),
       'unit',
-      flag('no-start'),
+      ...(start ? [] : [flag('no-start')]),
       ...(publicInstall
         ? []
         : [
@@ -285,12 +298,25 @@ for (const lang of ['sh', 'ps1']) {
         : false,
   };
   const check = (name, fn) => test(`${lang}: ${name}`, options, fn);
-  for (const selection of ['config', 'host env', 'context env', 'default', 'symlink', 'escaped'])
+  for (const selection of [
+    'config',
+    'host env',
+    'context env',
+    'context env default',
+    'context env empty',
+    'default',
+    'symlink',
+    'escaped',
+  ])
     check(`daemon context preserved without user credentials: ${selection}`, () => {
-      const f = fixture(lang);
+      const f = fixture(lang, { start: true });
       const userConfig = join(f.root, 'user-docker');
       f.env.DOCKER_CONFIG = userConfig;
-      const currentContext = selection === 'default' ? 'default' : 'x';
+      const currentContext = selection.includes('default')
+        ? 'default'
+        : selection.endsWith('empty')
+          ? ''
+          : 'x';
       let original = JSON.stringify({
         auths: { private: { auth: 'user-secret' } },
         credsStore: 'currentContext',
@@ -328,15 +354,16 @@ for (const lang of ['sh', 'ps1']) {
           }
         writeFileSync(join(userConfig, 'config.json'), original);
         if (selection === 'host env') f.env.DOCKER_HOST = 'unix:///selected.sock';
-        if (selection === 'context env') f.env.DOCKER_CONTEXT = 'override';
+        if (selection.startsWith('context env')) f.env.DOCKER_CONTEXT = 'override';
         const r = f.install();
         assert.equal(r.status, 0, r.stdout + r.stderr);
         const staged = JSON.parse(readFileSync(join(f.root, 'login-config.json'), 'utf8'));
         assert.equal(staged.currentContext, currentContext);
         assert.deepEqual(Object.keys(staged).sort(), ['auths', 'currentContext']);
         assert.deepEqual(Object.keys(staged.auths), ['127.0.0.1:54321']);
-        const wanted =
-          selection === 'default' ? [] : selection === 'context env' ? ['x', 'override'] : ['x'];
+        const wanted = [...new Set([currentContext, f.env.DOCKER_CONTEXT])].filter(
+          (name) => name && name !== 'default',
+        );
         for (const kind of ['meta', 'tls']) {
           const seen = join(f.root, 'seen-contexts', kind);
           assert.deepEqual(
@@ -346,10 +373,10 @@ for (const lang of ['sh', 'ps1']) {
           const final = join(f.dir, '.docker/contexts', kind);
           assert.deepEqual(
             existsSync(final) ? readdirSync(final).sort() : [],
-            (selection === 'default' ? [] : ['x']).map(hash),
+            wanted.map(hash).sort(),
           );
-          if (selection !== 'default')
-            assert.equal(lstatSync(join(final, hash('x'))).isSymbolicLink(), false);
+          for (const name of wanted)
+            assert.equal(lstatSync(join(final, hash(name))).isSymbolicLink(), false);
           for (const name of ['x', 'override']) {
             assert.equal(statSync(join(store, kind, hash(name))).mode & 0o777, 0o755);
             assert.equal(
@@ -365,7 +392,29 @@ for (const lang of ['sh', 'ps1']) {
         );
         assert.equal(readFileSync(join(userConfig, 'config.json'), 'utf8'), original);
         const final = JSON.parse(readFileSync(join(f.dir, '.docker/config.json'), 'utf8'));
-        assert.equal(final.currentContext, selection === 'default' ? undefined : 'x');
+        assert.equal(
+          final.currentContext,
+          currentContext && currentContext !== 'default' ? currentContext : undefined,
+        );
+        for (const verb of ['pull', 'up']) {
+          assert.ok(
+            f
+              .calls()
+              .split('\n')
+              .some(
+                (line) =>
+                  line.startsWith(`config=${f.dir}/.docker\tcompose\t`) &&
+                  line.split('\t').includes(verb),
+              ),
+            `install-time ${verb} uses final config`,
+          );
+          const helper = join(f.dir, lang === 'sh' ? 'haive' : 'haive.ps1');
+          const r = f.invoke(helper, [verb]);
+          assert.equal(r.status, 0, r.stdout + r.stderr);
+          const call = f.calls().trim().split('\n').at(-1);
+          assert.ok(call.startsWith(`config=${f.dir}/.docker\tcompose\t`));
+          assert.ok(call.split('\t').includes(verb));
+        }
       } finally {
         f.clean();
       }
