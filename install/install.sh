@@ -252,37 +252,44 @@ read_channel_manifest() {
     # Copy only the top-level selection, preserving its JSON string escaping. Never
     # copy the user config itself: it may name auths or credential helpers.
     CHANNEL_CONTEXT=$(LC_ALL=C awk '
-      { s=s $0 "\n" }
+      # Keep records separate; concatenating the whole config per line is quadratic.
+      # Retain the records so a selected string can be printed with its exact escaping.
+      function ch() {
+        while (p > length(s) && line < NR) { s=lines[++line]; p=1 }
+        return substr(s,p,1)
+      }
+      function quoted(   c) {
+        tokenLine=line; tokenStart=p++
+        while ((c=ch()) != "") {
+          if (c=="\\") { p++; if (ch()!="") p++ }
+          else if (c=="\"") { p++; return 1 }
+          else p++
+        }
+        return 0
+      }
+      function ws() { while (ch() ~ /^[ \t\r\n]$/) p++ }
+      { lines[NR]=$0 "\n" }
       END {
-        depth=0
-        for(p=1;p<=length(s);p++) {
-          c=substr(s,p,1)
-          if(c=="\"") {
-            start=p++
-            while(p<=length(s)) {
-              c=substr(s,p,1)
-              if(c=="\\") p++
-              else if(c=="\"") break
-              p++
-            }
-            token=substr(s,start,p-start+1)
-            if(depth==1 && token=="\"currentContext\"") {
-              q=p+1; while(substr(s,q,1) ~ /[ \t\r\n]/) q++
-              if(substr(s,q,1)!=":") continue
-              p=q+1
-              while(substr(s,p,1) ~ /[ \t\r\n]/) p++
-              if(substr(s,p,1)!="\"") exit 1
-              start=p++
-              while(p<=length(s)) {
-                c=substr(s,p,1)
-                if(c=="\\") p++
-                else if(c=="\"") { print substr(s,start,p-start+1); exit }
-                p++
+        line=1; s=lines[line]; p=1; depth=0
+        while ((c=ch()) != "") {
+          if (c=="\"") {
+            if (!quoted()) break
+            if (depth==1 && tokenLine==line && substr(s,tokenStart,p-tokenStart)=="\"currentContext\"") {
+              ws(); if (ch()!=":") continue
+              p++; ws()
+              if (ch()!="\"" || !quoted()) exit 1
+              if (tokenLine==line) print substr(s,tokenStart,p-tokenStart)
+              else {
+                printf "%s",substr(lines[tokenLine],tokenStart)
+                for (i=tokenLine+1;i<line;i++) printf "%s",lines[i]
+                print substr(s,1,p-1)
               }
-              exit 1
+              exit
             }
-          } else if(c=="{" || c=="[") depth++
-          else if(c=="}" || c=="]") depth--
+            continue
+          } else if (c=="{" || c=="[") depth++
+          else if (c=="}" || c=="]") depth--
+          p++
         }
       }
     ' "$CHANNEL_USER_CONFIG/config.json") || die "cannot read Docker currentContext"
