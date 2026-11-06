@@ -281,6 +281,7 @@ export async function run(
       )
         throw new Error(`preflight ${tag}: ${file} lacks an id=npmrc secret mount`);
     }
+    const apiPackage = json(join(tree, 'packages', 'api', 'package.json'));
     for (const entry of readdirSync(join(tree, 'modules'), { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
       let pkg;
@@ -290,6 +291,13 @@ export async function run(
         if (error.code === 'ENOENT') continue;
         throw error;
       }
+      // Match gen-modules: a folder is installed only when the api depends on
+      // it, and only packages exporting ./manifest enter the generated lists.
+      if (
+        pkg.exports?.['./manifest'] === undefined ||
+        apiPackage.dependencies?.[pkg.name] === undefined
+      )
+        continue;
       if (typeof pkg.name !== 'string' || idOf(pkg.name) === null)
         throw new Error(`invalid local module package name in modules/${entry.name}/package.json`);
       modules.push({

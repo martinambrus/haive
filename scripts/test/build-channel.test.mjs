@@ -40,6 +40,18 @@ function seedTree(tree, config = {}) {
         : 'RUN --mount=type=secret,id=npmrc,target=/root/.npmrc pnpm install',
     );
   }
+  for (const host of ['api', 'worker', 'web']) {
+    writeFileSync(
+      join(tree, 'packages', host, 'package.json'),
+      JSON.stringify({
+        name: `@haive/${host}`,
+        dependencies:
+          config.local && config.localInstalled !== false
+            ? { [config.localName ?? '@haive/module-statistics']: 'workspace:*' }
+            : {},
+      }),
+    );
+  }
   writeFileSync(
     join(tree, '.npmrc'),
     `@haive-module:registry=${config.scope ?? 'https://npm.pkg.github.com'}\n`,
@@ -52,7 +64,11 @@ function seedTree(tree, config = {}) {
       join(tree, 'modules', 'statistics', 'package.json'),
       JSON.stringify({
         name: config.localName ?? '@haive/module-statistics',
-        exports: { './web': './dist/web/index.js', './dashboard': './dist/dashboard/index.js' },
+        exports: {
+          ...(config.localManifest === false ? {} : { './manifest': './dist/manifest.js' }),
+          './web': './dist/web/index.js',
+          './dashboard': './dist/dashboard/index.js',
+        },
       }),
     );
   }
@@ -834,5 +850,14 @@ for (const ending of ['success', 'failure', 'throw']) {
     assert.equal(await f.execute(), ending === 'success' ? 0 : 2);
     assert.ok(!f.logs.join('').includes(prefix));
     assert.equal(f.writes.join(''), 'visible\ndiagnostic\n'.repeat(ending === 'success' ? 3 : 1));
+  });
+}
+
+for (const config of [{ localInstalled: false }, { localManifest: false }]) {
+  test(`local expectations use the generator's installed and manifest filters: ${JSON.stringify(config)}`, async (t) => {
+    const f = fixture(t, { local: true, ...config });
+    assert.equal(await f.execute(), 0);
+    assert.deepEqual(f.expectation.modules, []);
+    assert.ok(!JSON.parse(readFileSync(join(f.out, 'build-record.json'), 'utf8')).modules.length);
   });
 }
