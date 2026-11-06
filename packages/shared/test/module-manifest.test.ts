@@ -329,7 +329,6 @@ describe('collectFieldIds', () => {
   });
 });
 
-// .test must reject the final line terminators that JavaScript's $ anchor accepts.
 it.each(['\n', '\r', '\r\n', '\u2028', '\u2029'])(
   'rejects a module id ending with %j',
   (ending) => {
