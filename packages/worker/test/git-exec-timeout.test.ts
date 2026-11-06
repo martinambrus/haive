@@ -23,10 +23,6 @@ vi.mock('node:child_process', async (importActual) => {
   return {
     ...actual,
     execFile: wrapped,
-    spawn: (...args: Parameters<typeof actual.spawn>) => {
-      seen.options.push(args[2] as Record<string, unknown>);
-      return actual.spawn(...args);
-    },
   };
 });
 
@@ -82,14 +78,10 @@ describe('gitDefaultTimeoutMs', () => {
 describe('the limit that reaches execFile', () => {
   it('is the default for the subcommand, an explicit value wins, and 0 stays unlimited', async () => {
     seen.options.length = 0;
-    await gitRun(tmpdir(), ['--version']);
-    await gitRun(tmpdir(), ['--version'], undefined, { timeout: 12_345 });
-    await gitRun(tmpdir(), ['--version'], undefined, { timeout: 0 });
-    await gitRun(tmpdir(), ['--version'], undefined, { timeout: undefined });
     await gitExec(['--version']);
     await gitExec(['--version'], { timeout: 0 });
     await gitExec(['--version'], { timeout: 777 });
-    expect(seen.options.map((o) => o.timeout)).toEqual([SHORT, 12_345, 0, SHORT, SHORT, 0, 777]);
+    expect(seen.options.map((o) => o.timeout)).toEqual([SHORT, 0, 777]);
   });
 });
 
@@ -148,6 +140,25 @@ describe('a git that hangs', () => {
     expect(r.code).toBe(124);
     expect(r.stderr.trimEnd().split('\n').at(-1)).toBe('git ls-remote timed out after 1 s');
     expect(Date.now() - started).toBeLessThan(1900);
+  });
+
+  it('keeps zero unlimited even when the default would kill the run', async () => {
+    const bin = path.join(dir, 'git');
+    await writeFile(bin, '#!/bin/sh\nsleep 0.2\nprintf finished\n');
+    await chmod(bin, 0o755);
+    gitTimeoutLimits.short = 20;
+    try {
+      const r = await gitRun(
+        dir,
+        ['status'],
+        { PATH: `${dir}:${process.env.PATH}` },
+        { timeout: 0 },
+      );
+      expect(r).toMatchObject({ code: 0, stdout: 'finished' });
+      expect(r.stderr).not.toContain('timed out');
+    } finally {
+      gitTimeoutLimits.short = 2000;
+    }
   });
 
   it('does not call an ordinary non-zero exit a timeout', async () => {

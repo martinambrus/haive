@@ -142,3 +142,53 @@ setInterval(() => {}, 1000);
   expect(Date.now() - start).toBeLessThan(3000);
   expect(() => process.kill(pid, 0)).toThrow();
 });
+
+it('waits for a timed-out git group when index-pack outlives its leader', async () => {
+  scratch = await mkdtemp(join(tmpdir(), 'module-timeout-child-'));
+  const childScript = join(scratch, 'index-pack.cjs');
+  await writeFile(
+    childScript,
+    `
+const fs = require('node:fs');
+process.on('SIGTERM', () => setTimeout(() => {
+  fs.writeFileSync(${JSON.stringify(join(scratch, 'child-exited'))}, 'yes');
+  process.exit(0);
+}, 150));
+fs.writeFileSync(${JSON.stringify(join(scratch, 'child-ready'))}, String(process.pid));
+setInterval(() => {}, 1000);
+`,
+  );
+  await writeFile(
+    join(scratch, 'git'),
+    `#!${process.execPath}
+require('node:child_process').spawn(process.execPath, [${JSON.stringify(childScript)}], { stdio: 'inherit' });
+setInterval(() => {}, 1000);
+`,
+  );
+  await chmod(join(scratch, 'git'), 0o755);
+  const { gitRun, GIT_TIMED_OUT } = await import('../src/repo/git-exec.js');
+  const controller = new AbortController();
+  const run = gitRun(
+    scratch,
+    ['fetch'],
+    { PATH: scratch },
+    {
+      signal: controller.signal,
+      timeout: 500,
+    },
+  );
+  await vi.waitFor(() => access(join(scratch, 'child-ready')));
+  const pid = Number(await readFile(join(scratch, 'child-ready'), 'utf8'));
+  try {
+    expect(await run).toMatchObject({ code: GIT_TIMED_OUT });
+    expect(await readFile(join(scratch, 'child-exited'), 'utf8')).toBe('yes');
+    expect(() => process.kill(pid, 0)).toThrow();
+    expect(controller.signal.aborted).toBe(false);
+  } finally {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      /* Already exited. */
+    }
+  }
+});

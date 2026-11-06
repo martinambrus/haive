@@ -88,6 +88,7 @@ function gitEnv(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
  * wait for its pipes to close before a caller removes files the group could still write. */
 function abortExitWait(child: ChildProcess, signal: AbortSignal) {
   let closed = false;
+  let stopping = false;
   let killTimer: ReturnType<typeof setTimeout> | undefined;
   let waitTimer: ReturnType<typeof setTimeout> | undefined;
   let finish!: () => void;
@@ -103,7 +104,8 @@ function abortExitWait(child: ChildProcess, signal: AbortSignal) {
     }
   };
   const abort = () => {
-    if (closed) return;
+    if (closed || stopping) return;
+    stopping = true;
     killGroup('SIGTERM');
     killTimer = setTimeout(() => killGroup('SIGKILL'), 1000);
     // Even an uninterruptible child must not hold the worker forever.
@@ -120,6 +122,7 @@ function abortExitWait(child: ChildProcess, signal: AbortSignal) {
   if (signal.aborted) abort();
   return {
     wait,
+    stop: abort,
     dispose: () => {
       signal.removeEventListener('abort', abort);
       child.removeListener('close', close);
@@ -154,7 +157,6 @@ export async function gitRun(
     child = spawn('git', argv, {
       cwd,
       env: gitEnv(env),
-      timeout,
       detached: !!output.signal,
       signal: output.signal,
     });
@@ -206,7 +208,7 @@ export async function gitRun(
       const finish = (code: number | null, signal?: string | null, errorCode?: string) => {
         const out = Buffer.concat(stdout).toString(output.encoding ?? 'utf8');
         const err = Buffer.concat(stderr).toString(output.encoding ?? 'utf8');
-        if (timedOut && code === null && !errorCode && !overflow) {
+        if (timedOut && !errorCode && !overflow) {
           resolve({
             stdout: out,
             stderr: withLine(err, timedOutLine(argv, timeout)),
@@ -230,10 +232,11 @@ export async function gitRun(
       if (timeout > 0)
         timer = setTimeout(() => {
           timedOut = true;
-          stop();
+          if (abortWait) abortWait.stop();
+          else stop();
         }, timeout);
     });
-    if (output.signal?.aborted) await abortWait?.wait;
+    if (timedOut || output.signal?.aborted) await abortWait?.wait;
     return result;
   } finally {
     clearTimeout(timer);
