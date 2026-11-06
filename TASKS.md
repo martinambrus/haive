@@ -377,18 +377,6 @@ status: open · kind: fix · found: T351 reviews 2026-11-05 · priority: P3
 21. publish-channel test fake: the guard `attempted.length < KEYS.length` (scripts/test/publish-channel.test.mjs:107) stops checking manifest absence before the builder (fourth) push, and the release-build failure tests (:143) assert no log text. Fix: cover the last runtime push and assert exit plus log. Low.
 22. publish-channel: a stock web whose saved archive has no per-entry platform (a hand-made single-manifest image) is refused, exit 2 before any push (scripts/publish-channel.mjs ~:315-323). PRE-EXISTING; release.yml publishes multi-arch indexes, so it bites only hand-made stock images. Fix needs approval: accept one manifest with no platform when its config os/arch matches the record.
 
-### T534 · FNF[updater-channel] · updater and api channel-upgrade follow-ups from T335 PR B (+7)
-
-status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-06 · last: 2026-11-06 · kind: fix · found: T335 PR B reviews 2026-11-05 · priority: P3
-
-1. Partial pins (some `HAIVE_*_IMAGE` set, not all) on a channel install fail closed, but the refusal names a public tag-composed ref (packages/updater/src/cli.ts ~:293 checks only the all-empty case). Minor; refuse partial pins with the channel message.
-2. `docker cp` writes the whole `/release.json` to disk before the 1 MiB cap applies (packages/updater/src/docker.ts:306-309). PRE-EXISTING shape, minor; stream with `docker cp ... -` and cap the tar read.
-3. A public install with digest overrides fails the tag-only rollback inventory: `localImages(false)` lists `repo:tag` only (docker.ts:65-77). PRE-EXISTING, consequential for that rare setup; use the digest form whenever an override is a digest ref.
-4. The channel and registry-prefix patterns are written in three places with no parity test (scripts/build-channel.mjs:26-27, packages/updater/src/cli.ts:70 and images.ts:151, packages/api/src/routes/maintenance.ts:486-490). Minor; one constant in @haive/shared reused by the TS sites, a test pinning the .mjs copy.
-5. `--check` leaves the pulled release image on the daemon (docker.ts ~:299-318). Cosmetic; remove it when the check pulled it.
-6. `docker rm -f` in the manifest read's `finally` can replace the original error with its own (docker.ts:313-316). Minor; keep the first error.
-7. A public `--dry-plan` now throws (exit 1) instead of returning usage (exit 2) (cli.ts:209-210), and no test pins it. Minor; emit and return `EXIT.usage`.
-
 ### T536 · FNF[installer-channel] · install.sh/install.ps1 channel-install follow-ups from T335 PR C (+7)
 
 status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-06 · last: 2026-11-06 · kind: fix · found: T335 PR C reviews 2026-11-05 · priority: P3
@@ -400,6 +388,13 @@ status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-06 · last: 2
 5. The final `.docker` guard (install.sh ~:576, install.ps1 ~:502) runs after `.env` is written, so a `.docker` created between the early guard and the move still leaves a half install. Narrow race, minor; create the destination with an exclusive mkdir-and-rename.
 6. PowerShell reads the manifest with `ConvertFrom-Json` plus `Assert-ManifestKeys`, which is looser than the sh awk reader on some shapes (review-1 L4). Minor; add parity controls for the shapes the awk reader refuses.
 7. Test gap: no control for a bare positional after the value of `--dir`/`--install-id` in install.ps1 (scripts/test/install-channel.test.mjs ~:412-471). Minor.
+
+### T538 · FNF[updater-manifest] · release manifest read leftovers from T534 (+2)
+
+status: open · kind: fix · found: T534 review 1 2026-11-06 · priority: P4
+
+1. A concurrent pull of the same release ref between the presence probe and the pull makes `--check` remove an image another process just added (packages/updater/src/docker.ts `readReleaseManifestImage`, presence probe then pull). PRE-EXISTING design edge, low likelihood (refs are `<registry>/haive-<channel>-release:<version>`). Fix direction: remove by the pulled image id only if no other tag references it, or skip removal.
+2. When the read failed, a failed cleanup (`docker rm -f`, `docker image rm`) is swallowed with no log, so a leaked manifest container or image is invisible (same function, `finally`). PRE-EXISTING. Fix direction: emit a `warning` event naming the container or image.
 
 ### T537 · D3 · updater refusals are invisible on the admin page (design)
 
@@ -1392,6 +1387,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T534 — updater channel-upgrade follow-ups: partial pins refuse; the release manifest is read as a capped tar stream (checked against real `docker cp` output); digest-form rollback inventory for public digest overrides (incl. `repo:tag@digest`); one shared channel/prefix pattern; `--check` removes only a release image it pulled by tag; first error kept over cleanup; public `--dry-plan` exits 2 — PR #1011 (9166a6efa), 2026-11-06. CI green; merged without bot review. Sonnet review ACCEPT (3 L: 2 fixed, pax header checked live and dropped). Leftovers T538. Evidence .claude/tmp/sonnet-run/T534/.
 - T535 — the updater pins an install to the channel of its last completed upgrade (`upgrade_runs.channel`, no schema change) and refuses a changed `.env` channel with `channel-changed` before any manifest read; a deliberate move needs `--change-channel <recorded>`, exact match — PR #1010 (280b96763), 2026-11-06. CI green; merged without bot review (Codex and Greptile out of allowance). Sonnet review ACCEPT (3 L). Follow-ups: PowerShell helper argument forwarding and usage text ride in T536; admin refusal visibility is T537. Evidence .claude/tmp/sonnet-run/T535/.
 - T335 — channel install and upgrade (plan D2b), in three PRs. PR A #1007 (4d4193768): builder + `haive-<channel>-release` manifest image. PR B #1008 (d71934772): the updater reads `--manifest-image` with pins bound to `HAIVE_CHANNEL_REGISTRY` and an install-local `DOCKER_CONFIG`; the api passes the channel. PR C #1009 (d94aafc00), 2026-11-05: install.sh/install.ps1 `--channel`/`--channel-registry`/`--registry-user`, login and verified manifest before any write, channel `./haive upgrade`, uninstall removes `.docker`; public path fixes (ps1 `HAIVE_INSTALL_ID` order, updater secrets by name). CI 17/17 green (one macOS GitHub-API flake re-run); merged without bot review (Codex and Greptile out of allowance); Sonnet reviews 1-3, last ACCEPT; real throwaway-registry runs per PR. Docs modules.md "Installing a channel". Follow-ups T534, T535, T536. Evidence .claude/tmp/sonnet-run/T335/.
 - T352 — scripts/publish-channel.mjs publishes a gated channel build. It re-checks the ids and runs the boot check, then proves tag absence fail-closed (Bearer-token aware, anchored daemon line, `--confirm-absent`). It pushes the platform manifest only, copies the web by digest, verifies the digests, and writes release.json last from record.commit — PR #1006 (65063fc37), 2026-11-05. CI green; merged without bot review (Codex and Greptile out of allowance). Three Sonnet reviews (review-3 ACCEPT). Real throwaway-registry run: dry-run 0, publish 0, repeat 1. ghcr.io anonymous 401/DENIED measured. Follow-ups: T533 items 16-19 and T335 inputs. Evidence .claude/tmp/sonnet-run/T352/.
