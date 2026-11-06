@@ -731,6 +731,19 @@ for (const lang of ['sh', 'ps1']) {
           f.clean();
         }
       });
+  check('valid JSON extras retain escape, scalar and nesting support', () => {
+    const data = JSON.stringify({
+      ...manifest,
+      extra: { text: '\"\\/\n\u0001', values: [null, true, false, -1.25e12, {}, []] },
+    }).replace('"extra":', '"boundary":' + '['.repeat(63) + '0' + ']'.repeat(63) + ',"extra":');
+    const f = fixture(lang, { data });
+    try {
+      const r = f.install();
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+    } finally {
+      f.clean();
+    }
+  });
   for (const [name, data, fail] of [
     ['wrong channel', { ...manifest, channel: 'other' }, ''],
     ['wrong version', { ...manifest, version: '1.0.0' }, ''],
@@ -763,6 +776,24 @@ for (const lang of ['sh', 'ps1']) {
       '',
     ],
     ['escaped-quote key', '{"escaped\\\"key":0,' + JSON.stringify(manifest).slice(1), ''],
+    ['non-object array root', JSON.stringify([manifest]), ''],
+    ['non-object string root', JSON.stringify(JSON.stringify(manifest)), ''],
+    ['non-object null root', 'null', ''],
+    ['trailing garbage', JSON.stringify(manifest) + 'garbage', ''],
+    ['second JSON object', JSON.stringify(manifest) + '{}', ''],
+    ['JSON comment', '{/* comment */' + JSON.stringify(manifest).slice(1), ''],
+    ['trailing object comma', JSON.stringify(manifest).slice(0, -1) + ',}', ''],
+    ['trailing array comma', '{"extra":[0,],' + JSON.stringify(manifest).slice(1), ''],
+    ['escaped unicode key', '{"extra\\u0061":0,' + JSON.stringify(manifest).slice(1), ''],
+    ['slash key', '{"extra/key":0,' + JSON.stringify(manifest).slice(1), ''],
+    ['unescaped control character', '{"extra":"\u0001",' + JSON.stringify(manifest).slice(1), ''],
+    [
+      'deep nesting',
+      '{"extra":' + '['.repeat(65) + '0' + ']'.repeat(65) + ',' + JSON.stringify(manifest).slice(1),
+      '',
+    ],
+    ['array channel', { ...manifest, channel: ['customer'] }, ''],
+    ['array version', { ...manifest, version: ['9.9.9'] }, ''],
     ['oversized manifest', JSON.stringify(manifest) + ' '.repeat(1048576), ''],
     ['malformed JSON', '{"channel":', ''],
     ['missing pin', { ...manifest, images: { ...pins, web: null } }, ''],

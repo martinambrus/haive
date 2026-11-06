@@ -246,23 +246,79 @@ function Protect-RegistryCredentials([string]$directory) {
   }
 }
 
-# Validate object keys before ConvertFrom-Json (which otherwise keeps the last duplicate).
-# Tokenize complete strings so braces/colons inside values cannot be mistaken for object syntax.
-# This uses the same .NET/PowerShell runtime as the original installer, including Windows PS 5.1.
+# Validate JSON grammar before ConvertFrom-Json, whose accepted extensions and
+# pipeline array unwrapping differ between PowerShell versions. Keep the shell
+# reader's object root, key restrictions and 64-level nesting limit on PS 5.1 too.
 function Assert-ManifestKeys([string]$json) {
-  $tokens = [regex]::Matches($json, '"(?:[^"\\]|\\.)*"|[{}:]', [Text.RegularExpressions.RegexOptions]::CultureInvariant, [TimeSpan]::FromSeconds(2))
-  $objects = [Collections.Generic.Stack[object]]::new()
-  for ($i = 0; $i -lt $tokens.Count; $i++) {
-    $token = $tokens[$i].Value
-    if ($token -eq '{') {
-      $objects.Push([Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase))
-    } elseif ($token -eq '}') {
-      $null = $objects.Pop()
-    } elseif ($token.StartsWith('"') -and $i + 1 -lt $tokens.Count -and $tokens[$i + 1].Value -eq ':') {
-      $key = $token.Substring(1, $token.Length - 2)
-      if ($key.IndexOfAny([char[]]'"\/') -ge 0 -or -not $objects.Peek().Add($key)) { throw 'invalid channel manifest object key' }
+  $reader = @{
+    pos = 0
+    literal = [regex]::new('\G(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)', [Text.RegularExpressions.RegexOptions]::CultureInvariant, [TimeSpan]::FromSeconds(2))
+  }
+  function Skip-JsonSpace {
+    while ($reader.pos -lt $json.Length -and " `t`r`n".Contains([string]$json[$reader.pos])) { $reader.pos++ }
+  }
+  function Read-JsonString {
+    if ($reader.pos -ge $json.Length -or $json[$reader.pos] -cne '"') { throw 'expected JSON string' }
+    $start = $reader.pos
+    $reader.pos++
+    while ($reader.pos -lt $json.Length) {
+      $c = $json[$reader.pos]
+      $reader.pos++
+      if ($c -ceq '"') { return $json.Substring($start, $reader.pos - $start) }
+      if ([int]$c -lt 32) { throw 'invalid JSON control character' }
+      if ($c -ceq '\') {
+        if ($reader.pos -ge $json.Length) { throw 'incomplete JSON escape' }
+        $escape = $json[$reader.pos]
+        $reader.pos++
+        if ($escape -ceq 'u') {
+          if ($reader.pos + 4 -gt $json.Length -or $json.Substring($reader.pos, 4) -cnotmatch '\A[0-9a-fA-F]{4}\z') { throw 'invalid JSON unicode escape' }
+          $reader.pos += 4
+        } elseif (-not '"\/bfnrt'.Contains([string]$escape)) { throw 'invalid JSON escape' }
+      }
+    }
+    throw 'unclosed JSON string'
+  }
+  function Read-JsonValue([int]$depth) {
+    if ($depth -gt 64) { throw 'JSON nesting exceeds 64' }
+    Skip-JsonSpace
+    if ($reader.pos -ge $json.Length) { throw 'missing JSON value' }
+    $c = $json[$reader.pos]
+    if ($c -ceq '{' -or $c -ceq '[') {
+      $object = $c -ceq '{'
+      $close = if ($object) { '}' } else { ']' }
+      $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+      $reader.pos++
+      Skip-JsonSpace
+      if ($reader.pos -lt $json.Length -and $json[$reader.pos] -ceq $close) { $reader.pos++; return }
+      while ($true) {
+        if ($object) {
+          Skip-JsonSpace
+          $key = Read-JsonString
+          if ($key.Contains('\') -or $key.Contains('/') -or -not $seen.Add($key)) { throw 'invalid channel manifest object key' }
+          Skip-JsonSpace
+          if ($reader.pos -ge $json.Length -or $json[$reader.pos] -cne ':') { throw 'missing JSON colon' }
+          $reader.pos++
+        }
+        Read-JsonValue ($depth + 1)
+        Skip-JsonSpace
+        if ($reader.pos -ge $json.Length) { throw 'unclosed JSON container' }
+        $c = $json[$reader.pos]
+        $reader.pos++
+        if ($c -ceq $close) { return }
+        if ($c -cne ',') { throw 'missing JSON comma' }
+      }
+    } elseif ($c -ceq '"') { $null = Read-JsonString }
+    else {
+      $match = $reader.literal.Match($json, $reader.pos)
+      if (-not $match.Success) { throw 'invalid JSON value' }
+      $reader.pos += $match.Length
     }
   }
+  Skip-JsonSpace
+  if ($reader.pos -ge $json.Length -or $json[$reader.pos] -cne '{') { throw 'manifest must be a JSON object' }
+  Read-JsonValue 0
+  Skip-JsonSpace
+  if ($reader.pos -ne $json.Length) { throw 'trailing JSON content' }
 }
 
 # Stage credentials until verification succeeds; no failed manifest creates an install.
@@ -327,7 +383,7 @@ function Read-ChannelManifest {
       foreach ($name in @('channel','version','images')) {
         if (@($manifest.PSObject.Properties.Name) -cnotcontains $name) { throw 'missing manifest key' }
       }
-      if ($manifest.channel -cne $Channel -or $manifest.version -cne $pinned) { throw 'channel or version differs' }
+      if ($manifest.channel -isnot [string] -or $manifest.version -isnot [string] -or $manifest.channel -cne $Channel -or $manifest.version -cne $pinned) { throw 'channel or version differs' }
       foreach ($hostName in @('api','worker','web','builder')) {
         if (@($manifest.images.PSObject.Properties.Name) -cnotcontains $hostName) { throw 'missing image pin' }
         $pin = $manifest.images.$hostName
