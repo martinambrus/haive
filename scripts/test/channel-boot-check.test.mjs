@@ -506,7 +506,7 @@ for (const [label, config] of [
   });
 }
 
-for (const signal of ['SIGINT', 'SIGTERM']) {
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   test(`CLI ${signal} cleans up after Docker creates a container`, (t) => {
     const f = fixture(t);
     const dir = dirname(f.path);
@@ -600,4 +600,18 @@ test('schema 2 validates builder metadata but never boots the builder', async (t
         args.includes(`sha256:${'b'.repeat(64)}`),
     ),
   );
+});
+
+test('every boot-check resource carries the same run label without changing names', async (t) => {
+  const f = fixture(t);
+  assert.equal(await f.check(), 0);
+  const prefix = f.created.networks[0];
+  const creations = f.calls.filter(
+    ({ args }) =>
+      args[0] === 'run' || (['network', 'volume'].includes(args[0]) && args[1] === 'create'),
+  );
+  assert.equal(creations.length, 8);
+  for (const { args } of creations) {
+    assert.equal(args[args.indexOf('--label') + 1], `haive.boot-check=${prefix}`);
+  }
 });

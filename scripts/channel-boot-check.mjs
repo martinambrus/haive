@@ -275,14 +275,36 @@ export async function run(
         pulledImages.push({ kind: 'image', name: image });
       }
     }
-    await create('network', prefix, ['network', 'create', prefix]);
+    await create('network', prefix, [
+      'network',
+      'create',
+      '--label',
+      `haive.boot-check=${prefix}`,
+      prefix,
+    ]);
     for (const suffix of ['postgres-data', 'redis-data']) {
       const name = `${prefix}-${suffix}`;
-      await create('volume', name, ['volume', 'create', name]);
+      await create('volume', name, [
+        'volume',
+        'create',
+        '--label',
+        `haive.boot-check=${prefix}`,
+        name,
+      ]);
     }
     const start = async (suffix, args) => {
       const name = `${prefix}-${suffix}`;
-      await create('container', name, ['run', '-d', '--name', name, '--network', prefix, ...args]);
+      await create('container', name, [
+        'run',
+        '-d',
+        '--label',
+        `haive.boot-check=${prefix}`,
+        '--name',
+        name,
+        '--network',
+        prefix,
+        ...args,
+      ]);
       emit(`channel-boot-check: started ${name}`);
       return name;
     };
@@ -476,6 +498,6 @@ function isEntryPoint() {
 
 if (isEntryPoint()) {
   const controller = new AbortController();
-  for (const name of ['SIGINT', 'SIGTERM']) process.on(name, () => controller.abort());
+  for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(name, () => controller.abort());
   process.exitCode = await run(process.argv.slice(2), { signal: controller.signal });
 }
