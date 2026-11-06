@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -90,7 +91,7 @@ function fixture(t, config = {}) {
   config.editRecord?.(record);
   const path = join(dir, 'build-record.json');
   writeFileSync(path, config.raw ?? JSON.stringify(record));
-  const out = join(dir, 'out');
+  const out = join(dir, config.outName ?? 'out');
   const manifest = join(out, 'release.json');
   const calls = [];
   const requests = [];
@@ -867,5 +868,64 @@ for (const word of ['connections', 'timeouts', 'networks', 'certificates', 'cred
     assert.deepEqual(f.attempted, []);
     assert.equal(f.requests.length, 0);
     assert.match(f.logs.join('\n'), /absence of .*could not be proven/);
+  });
+}
+
+for (const failure of [
+  { releaseBuildFailure: true },
+  { pushFailure: 'release' },
+  { rereadFailure: 'release' },
+  { rereadMismatch: 'release' },
+]) {
+  test(`retained manifest recovery rebuilds and pushes identical bytes: ${JSON.stringify(failure)}`, async (t) => {
+    const f = fixture(t, { ...failure, outName: "out with ' quotes $(false)" });
+    assert.equal(await f.invoke(), 2);
+    assert.match(f.logs.join('\n'), /recovery: inspect .*customer-release.* before retrying/);
+    const recovery = f.logs.find((line) => line.startsWith('publish-channel: recovery command: '));
+    assert.ok(recovery, f.logs.join('\n'));
+    const bin = join(f.root, 'bin');
+    mkdirSync(bin);
+    const captured = join(f.root, 'recovery.jsonl');
+    const docker = join(bin, 'docker');
+    writeFileSync(
+      docker,
+      `#!${process.execPath}
+import {appendFileSync, readFileSync} from 'node:fs';
+import {join} from 'node:path';
+const args=process.argv.slice(2);
+const build=args[0]==='buildx' && args[1]==='build';
+appendFileSync(${JSON.stringify(captured)}, JSON.stringify({args, ...(build ? {body:readFileSync(join(args.at(-1),'release.json'),'utf8'), dockerfile:readFileSync(join(args.at(-1),'Dockerfile'),'utf8')} : {})})+'\\n');
+`,
+    );
+    chmodSync(docker, 0o700);
+    const result = spawnSync(
+      'sh',
+      ['-c', recovery.slice('publish-channel: recovery command: '.length)],
+      {
+        cwd: f.root,
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      },
+    );
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const calls = readFileSync(captured, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[0].args.slice(0, -1), [
+      'buildx',
+      'build',
+      '--platform',
+      'linux/amd64',
+      '--load',
+      '--tag',
+      destination('release'),
+    ]);
+    assert.equal(calls[0].body, readFileSync(f.manifest, 'utf8'));
+    assert.equal(
+      calls[0].dockerfile,
+      'FROM scratch\nCOPY release.json /release.json\nLABEL org.haive.release=1\n',
+    );
+    assert.deepEqual(calls[1].args, ['push', '--platform', 'linux/amd64', destination('release')]);
+    assert.equal(existsSync(calls[0].args.at(-1)), false, 'recovery context removed');
+    assert.doesNotMatch(recovery, /\bT\d+\b/);
   });
 }

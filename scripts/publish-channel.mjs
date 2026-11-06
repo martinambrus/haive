@@ -23,6 +23,7 @@ const capture = createCapture(4);
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const KEYS = ['api', 'worker', 'web', 'builder'];
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
+const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
 const PREFIX = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
 // Volatile Docker daemon wording; used only with exit 1 and no spawn error.
 // A normalized or reworded ref is not proof of absence and refuses with exit 2.
@@ -49,6 +50,7 @@ export async function run(
   let scratch;
   let output;
   let manifestWritten = false;
+  let recovery;
   const attempted = [];
   const verified = [];
   const emit = (line) => say(String(line).replace(/[\u0000-\u001f\u007f-\u009f]/g, '?'));
@@ -256,6 +258,7 @@ export async function run(
         `${registry}/haive-${record.channel}-${host}:${record.version}`,
       ]),
     );
+    recovery = { ref: destinations.release, platform: record.platform };
     confirmations = new Set(values['confirm-absent'] ?? []);
     for (const ref of confirmations)
       if (!Object.values(destinations).includes(ref))
@@ -486,6 +489,17 @@ export async function run(
     emit(`publish-channel: passed; manifest ${output}`);
     return 0;
   } catch (error) {
+    if (manifestWritten) {
+      emit(
+        `publish-channel: recovery: inspect ${recovery.ref} before retrying; if it is already published, verify its /release.json against the retained file`,
+      );
+      emit(
+        `publish-channel: recovery inspect: docker buildx imagetools inspect ${shellQuote(recovery.ref)}`,
+      );
+      emit(
+        `publish-channel: recovery command: ( recovery_dir=$(mktemp -d) && trap 'rm -rf -- "$recovery_dir"' EXIT && cp -- ${shellQuote(output)} "$recovery_dir/release.json" && printf '%s\\n' 'FROM scratch' 'COPY release.json /release.json' 'LABEL org.haive.release=1' > "$recovery_dir/Dockerfile" && docker buildx build --platform ${shellQuote(recovery.platform)} --load --tag ${shellQuote(recovery.ref)} "$recovery_dir" && docker push --platform ${shellQuote(recovery.platform)} ${shellQuote(recovery.ref)} )`,
+      );
+    }
     emit(
       `publish-channel: could not publish: ${error.message}; ${manifestWritten ? `local manifest retained at ${output}` : 'no manifest written'}; attempted: ${attempted.join(', ') || 'none'}; verified: ${verified.join(', ') || 'none'}`,
     );
