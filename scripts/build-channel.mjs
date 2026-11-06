@@ -284,12 +284,13 @@ export async function run(
     const apiPackage = json(join(tree, 'packages', 'api', 'package.json'));
     for (const entry of readdirSync(join(tree, 'modules'), { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
+      const file = `modules/${entry.name}/package.json`;
       let pkg;
       try {
-        pkg = json(join(tree, 'modules', entry.name, 'package.json'));
+        pkg = json(join(tree, file));
       } catch (error) {
         if (error.code === 'ENOENT') continue;
-        throw error;
+        throw new Error(`could not read ${file}: ${error.message}`);
       }
       // Match gen-modules: a folder is installed only when the api depends on
       // it, and only packages exporting ./manifest enter the generated lists.

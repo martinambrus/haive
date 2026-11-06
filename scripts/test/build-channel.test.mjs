@@ -60,16 +60,18 @@ function seedTree(tree, config = {}) {
   writeFileSync(join(tree, 'modules', '.gitkeep'), '');
   if (config.local) {
     mkdirSync(join(tree, 'modules', 'statistics'));
+    if (config.localMissingPackage) return;
     writeFileSync(
       join(tree, 'modules', 'statistics', 'package.json'),
-      JSON.stringify({
-        name: config.localName ?? '@haive/module-statistics',
-        exports: {
-          ...(config.localManifest === false ? {} : { './manifest': './dist/manifest.js' }),
-          './web': './dist/web/index.js',
-          './dashboard': './dist/dashboard/index.js',
-        },
-      }),
+      config.localPackageText ??
+        JSON.stringify({
+          name: config.localName ?? '@haive/module-statistics',
+          exports: {
+            ...(config.localManifest === false ? {} : { './manifest': './dist/manifest.js' }),
+            './web': './dist/web/index.js',
+            './dashboard': './dist/dashboard/index.js',
+          },
+        }),
     );
   }
 }
@@ -861,3 +863,19 @@ for (const config of [{ localInstalled: false }, { localManifest: false }]) {
     assert.ok(!JSON.parse(readFileSync(join(f.out, 'build-record.json'), 'utf8')).modules.length);
   });
 }
+
+test('ignores local directories with no package.json', async (t) => {
+  const f = fixture(t, { local: true, localMissingPackage: true });
+  assert.equal(await f.execute(), 0);
+  assert.deepEqual(f.expectation.modules, []);
+  assert.ok(!existsSync(f.scratch));
+});
+
+test('malformed local package.json names its path before network or builds', async (t) => {
+  const f = fixture(t, { local: true, localPackageText: '{ broken json' });
+  assert.equal(await f.execute(), 2);
+  assert.ok(f.logs.some((line) => line.includes('modules/statistics/package.json')));
+  assert.ok(!f.calls.some((c) => c.cmd === 'pnpm' || c.cmd === 'docker'));
+  assert.ok(!existsSync(f.scratch));
+  assert.ok(!existsSync(join(f.out, 'build-record.json')));
+});
