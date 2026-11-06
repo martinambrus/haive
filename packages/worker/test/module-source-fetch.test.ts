@@ -408,6 +408,27 @@ describe('fetch and pin a module source', () => {
   it.each([
     { code: 124, stderr: 'git fetch timed out after 300 s' },
     { code: -1, stderr: 'git ended without an exit status (EMFILE)', noExit: 'EMFILE' },
+  ])('preserves a by-object fetch that gave no answer without fallback: $code', async (failure) => {
+    setup();
+    const previous = git.getMockImplementation()!;
+    git.mockImplementation(async (cwd: string, args: string[], env: unknown, io: unknown) => {
+      if (args.includes('fetch') && args.at(-1) === sha) return { ...failure, stdout: '' };
+      return previous(cwd, args, env, io);
+    });
+    const pin = vi.fn();
+    const resolved = vi.fn();
+    await expect(
+      fetchModuleSource({ ...source, resolvedSha: sha }, null, pin, resolved),
+    ).rejects.toThrow('Module git fetch failed: ' + failure.stderr);
+    expect(git.mock.calls.filter(([, args]) => args.includes('fetch'))).toHaveLength(1);
+    expect(git.mock.calls.some(([, args]) => args.includes('ls-remote'))).toBe(false);
+    expect(git.mock.calls.some(([, args]) => args.includes('checkout'))).toBe(false);
+    expect(pin).not.toHaveBeenCalled();
+    expect(resolved).not.toHaveBeenCalled();
+  });
+  it.each([
+    { code: 124, stderr: 'git fetch timed out after 300 s' },
+    { code: -1, stderr: 'git ended without an exit status (EMFILE)', noExit: 'EMFILE' },
   ])('preserves a fallback fetch that gave no answer: $code', async (failure) => {
     setup();
     const previous = git.getMockImplementation()!;

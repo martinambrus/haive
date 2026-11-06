@@ -295,6 +295,7 @@ export async function fetchModuleSource(
       );
     const byObject = await fetch(sha);
     if (byObject.code !== 0) {
+      if (gitGaveNoAnswer(byObject)) output(byObject);
       if (!qualifiedRef) await listRefs();
       if (!qualifiedRef)
         throw new Error('module_source_ref_unavailable: Module branch or tag was not found');
