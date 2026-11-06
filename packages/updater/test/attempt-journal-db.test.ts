@@ -1,5 +1,5 @@
 import postgres, { type Sql } from 'postgres';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   ensureJournal,
   findLiveRun,
@@ -22,49 +22,103 @@ describe.skipIf(!url)('terminal attempts on PostgreSQL', () => {
     await sql?.end({ timeout: 5 });
   });
 
+  beforeEach(async () => {
+    // max: 1 keeps the temporary journal on the connection used by recordAttempt's transaction.
+    await sql`SET search_path TO pg_temp`;
+    await ensureJournal(sql);
+  });
+  afterEach(async () => {
+    await sql`DROP TABLE upgrade_runs`;
+  });
+
+  async function seedAttempts(count: number): Promise<void> {
+    await sql`INSERT INTO upgrade_runs
+      (id, from_version, to_version, phase, status, error, started_at, ended_at)
+      SELECT lpad(n::text, 32, '0')::uuid, '1.0.0', '2.0.0', 'preflight',
+             CASE WHEN n % 2 = 0 THEN 'failed' ELSE 'refused' END, n::text,
+             timestamp '2020-02-01' + (n / 2) * interval '1 second', now()
+        FROM generate_series(1, ${count}::int) AS n`;
+  }
+
+  const attempt = {
+    fromVersion: '1.0.0',
+    toVersion: '2.0.0',
+    channel: 'public',
+    status: 'refused' as const,
+    error: '55',
+    metadata: {},
+  };
+
+  it('retains only the newest 50 attempts, preserving every older non-attempt', async () => {
+    await sql`INSERT INTO upgrade_runs
+      (from_version, to_version, phase, status, started_at)
+      VALUES ('1.0.0', '2.0.0', 'commit', 'done', '2020-01-01'),
+             ('1.0.0', '2.0.0', 'verify', 'rolled_back', '2020-01-01'),
+             ('1.0.0', '2.0.0', 'preflight', 'running', '2020-01-01'),
+             ('1.0.0', '2.0.0', 'migrate', 'failed', '2020-01-01'),
+             ('1.0.0', '2.0.0', 'verify', 'refused', '2020-01-01')`;
+    const realRuns = await sql`SELECT * FROM upgrade_runs ORDER BY id`;
+    // An existing backlog plus this write makes 55; pairs share timestamps to exercise id ties.
+    await seedAttempts(54);
+    await recordAttempt(sql, attempt);
+    const attempts = await sql`SELECT error FROM upgrade_runs
+      WHERE phase = 'preflight' AND status IN ('refused', 'failed')
+      ORDER BY started_at DESC, id DESC`;
+    expect(attempts.map((r) => r.error)).toEqual(
+      Array.from({ length: 50 }, (_, i) => String(55 - i)),
+    );
+    expect(
+      await sql`SELECT * FROM upgrade_runs
+      WHERE NOT (phase = 'preflight' AND status IN ('refused', 'failed')) ORDER BY id`,
+    ).toEqual(realRuns);
+  });
+
+  it('rolls back both the insertion and pruning if a delete fails', async () => {
+    await seedAttempts(54);
+    const before = await sql`SELECT * FROM upgrade_runs ORDER BY id`;
+    await sql`CREATE FUNCTION pg_temp.reject_attempt_delete() RETURNS trigger
+      LANGUAGE plpgsql AS $$ BEGIN
+        RAISE EXCEPTION 'attempt pruning rejected';
+      END $$`;
+    await sql`CREATE TRIGGER reject_attempt_delete BEFORE DELETE ON upgrade_runs
+      FOR EACH ROW EXECUTE FUNCTION pg_temp.reject_attempt_delete()`;
+    await expect(recordAttempt(sql, attempt)).rejects.toThrow('attempt pruning rejected');
+    expect(await sql`SELECT * FROM upgrade_runs ORDER BY id`).toEqual(before);
+  });
+
   it('records a refusal without holding the live slot or changing the completed channel', async () => {
-    // A reserved session keeps this temporary journal isolated from every other test file.
-    const session = await sql.reserve();
-    try {
-      await session`BEGIN`;
-      await session`SET LOCAL search_path TO pg_temp`;
-      await ensureJournal(session as unknown as Sql);
-      const done = await startRun(session as unknown as Sql, {
-        fromVersion: '1.0.0',
-        toVersion: '2.0.0',
-        channel: 'public',
-      });
-      await finishRun(session as unknown as Sql, done, 'done');
-      await recordAttempt(session as unknown as Sql, {
-        fromVersion: '2.0.0',
-        toVersion: '3.0.0',
-        channel: 'acme',
-        status: 'refused',
-        error: 'channel changed',
-        metadata: { refusal: 'channel-changed' },
-      });
-      const rows = await session`SELECT * FROM upgrade_runs WHERE status = 'refused'`;
-      expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({
-        phase: 'preflight',
-        error: 'channel changed',
-        metadata: { refusal: 'channel-changed' },
-      });
-      expect(rows[0]!.ended_at).not.toBeNull();
-      expect(await findLiveRun(session as unknown as Sql)).toBeNull();
-      expect(await lastDoneChannel(session as unknown as Sql)).toBe('public');
-      const next = await startRun(session as unknown as Sql, {
-        fromVersion: '2.0.0',
-        toVersion: '3.0.0',
-        channel: 'acme',
-      });
-      expect(await findLiveRun(session as unknown as Sql)).toMatchObject({
-        id: next,
-        status: 'running',
-      });
-    } finally {
-      await session`ROLLBACK`;
-      session.release();
-    }
+    const done = await startRun(sql, {
+      fromVersion: '1.0.0',
+      toVersion: '2.0.0',
+      channel: 'public',
+    });
+    await finishRun(sql, done, 'done');
+    await recordAttempt(sql, {
+      fromVersion: '2.0.0',
+      toVersion: '3.0.0',
+      channel: 'acme',
+      status: 'refused',
+      error: 'channel changed',
+      metadata: { refusal: 'channel-changed' },
+    });
+    const rows = await sql`SELECT * FROM upgrade_runs WHERE status = 'refused'`;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      phase: 'preflight',
+      error: 'channel changed',
+      metadata: { refusal: 'channel-changed' },
+    });
+    expect(rows[0]!.ended_at).not.toBeNull();
+    expect(await findLiveRun(sql)).toBeNull();
+    expect(await lastDoneChannel(sql)).toBe('public');
+    const next = await startRun(sql, {
+      fromVersion: '2.0.0',
+      toVersion: '3.0.0',
+      channel: 'acme',
+    });
+    expect(await findLiveRun(sql)).toMatchObject({
+      id: next,
+      status: 'running',
+    });
   });
 });

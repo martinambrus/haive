@@ -3,6 +3,18 @@ import type { Sql } from 'postgres';
 import { describe, expect, it, vi } from 'vitest';
 import { ensureJournal, lastDoneChannel, recordAttempt } from './journal.js';
 
+function mockAttemptSql() {
+  const sql = Object.assign(
+    vi.fn(async (..._args: unknown[]) => []),
+    {
+      json: vi.fn((v: unknown) => v),
+    },
+  );
+  return Object.assign(sql, {
+    begin: vi.fn(async (work: (tx: typeof sql) => Promise<void>) => work(sql)),
+  });
+}
+
 describe('ensureJournal', () => {
   it('runs exactly the journal DDL the database package exports', async () => {
     const unsafe = vi.fn(async (..._args: unknown[]) => []);
@@ -39,10 +51,7 @@ describe('recordAttempt', () => {
   it.each(['refused', 'failed'] as const)(
     'inserts one terminal %s row with an end timestamp',
     async (status) => {
-      const sql = Object.assign(
-        vi.fn(async (..._args: unknown[]) => []),
-        { json: vi.fn((v: unknown) => v) },
-      );
+      const sql = mockAttemptSql();
       await recordAttempt(sql as unknown as Sql, {
         fromVersion: '1.0.0',
         toVersion: '2.0.0',
@@ -51,7 +60,8 @@ describe('recordAttempt', () => {
         error: 'reason',
         metadata: status === 'refused' ? { refusal: 'same-version' } : {},
       });
-      expect(sql).toHaveBeenCalledTimes(1);
+      expect(sql.begin).toHaveBeenCalledTimes(1);
+      expect(sql).toHaveBeenCalledTimes(2);
       const [parts, ...values] = sql.mock.calls[0]!;
       expect((parts as TemplateStringsArray).join('?').replace(/\s+/g, ' ').trim()).toBe(
         "INSERT INTO upgrade_runs (from_version, to_version, channel, phase, status, error, metadata, ended_at) VALUES (?, ?, ?, 'preflight', ?, ?, ?, now())",
@@ -69,10 +79,7 @@ describe('recordAttempt', () => {
 });
 
 it.each([2048, 2049, 1000000])('bounds stored attempt errors of length %i', async (length) => {
-  const sql = Object.assign(
-    vi.fn(async (..._args: unknown[]) => []),
-    { json: (v: unknown) => v },
-  );
+  const sql = mockAttemptSql();
   const error = 'x'.repeat(length);
   await recordAttempt(sql as unknown as Sql, {
     fromVersion: '1.0.0',
@@ -89,10 +96,7 @@ it.each([2048, 2049, 1000000])('bounds stored attempt errors of length %i', asyn
 });
 
 it('stores a validated fallback for an invalid target in the non-nullable column', async () => {
-  const sql = Object.assign(
-    vi.fn(async (..._args: unknown[]) => []),
-    { json: (v: unknown) => v },
-  );
+  const sql = mockAttemptSql();
   await recordAttempt(sql as unknown as Sql, {
     fromVersion: '1.0.0',
     toVersion: 'bad/version',
