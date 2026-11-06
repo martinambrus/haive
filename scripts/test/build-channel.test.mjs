@@ -207,6 +207,7 @@ function fixture(t, config = {}) {
       assert.equal(readFileSync(args[args.indexOf('--token-file') + 1], 'utf8').trim(), TOKEN);
       return {
         status: 'gateCode' in config ? config.gateCode : 0,
+        timedOut: config.gateTimedOut,
         stdout: config.gateCode ? `OFFENDER api token ${TOKEN}\n` : '',
       };
     }
@@ -975,13 +976,24 @@ test('streamed builds have a two-hour deadline while preflight commands retain t
 });
 
 for (const [result, message] of [
+  [{ status: 0, timedOut: true }, 'git timed out after 1800000 ms'],
   [{ status: null, signal: 'SIGTERM', timedOut: true }, 'git timed out after 1800000 ms'],
   [{ status: null, signal: 'SIGKILL' }, 'git terminated by SIGKILL'],
 ]) {
   test(`command failures explain timeout or termination: ${message}`, async (t) => {
-    const f = fixture(t, { resolveResult: { stdout: '', stderr: '', ...result } });
+    const f = fixture(t, { resolveResult: { stdout: `${SHA}\n`, stderr: '', ...result } });
     assert.equal(await f.execute(), 2);
     assert.ok(f.logs.some((line) => line.includes(message)));
+  });
+}
+
+for (const gateCode of [0, 1, 2]) {
+  test(`a timed-out gate exiting ${gateCode} cannot supply a verdict`, async (t) => {
+    const f = fixture(t, { gateCode, gateTimedOut: true });
+    assert.equal(await f.execute(), 2);
+    assert.ok(f.logs.some((line) => line.includes('channel gate could not finish')));
+    assert.ok(!existsSync(join(f.out, 'build-record.json')));
+    assert.equal(f.calls.filter((c) => c.args.includes('{{.Id}}')).length, 4);
   });
 }
 

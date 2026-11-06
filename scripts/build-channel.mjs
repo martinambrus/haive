@@ -241,7 +241,7 @@ export async function run(
         emit(result.stdout);
         emit(result.stderr);
       }
-      if (!allowFailure && (result.status !== 0 || result.error)) {
+      if (!allowFailure && (result.status !== 0 || result.error || result.timedOut)) {
         if (quiet) {
           emit(result.stdout);
           emit(result.stderr);
@@ -516,7 +516,7 @@ export async function run(
       ],
       { allowFailure: true },
     );
-    if (gate.error || ![0, 1, 2].includes(gate.status))
+    if (gate.error || gate.timedOut || ![0, 1, 2].includes(gate.status))
       throw new Error('channel gate could not finish');
     const afterGate = await readIds();
     for (const host of Object.keys(images)) {
