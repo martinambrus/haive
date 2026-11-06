@@ -1,5 +1,11 @@
 import { z } from 'zod';
 
+/** Install channels and repository prefixes shared by the updater and upgrade API.
+ * Plain-JS and installer copies are pinned by channel-patterns.test.ts. */
+export const CHANNEL_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
+export const REGISTRY_PREFIX_PATTERN =
+  /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
+
 /**
  * The release manifest — what an install reads to decide whether, and to what, it may upgrade.
  *

@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import postgres from 'postgres';
 import { configService, networkName } from '@haive/shared';
-import { parseReleaseManifest, type ReleaseManifest } from '@haive/shared/release';
+import { CHANNEL_PATTERN, parseReleaseManifest, type ReleaseManifest } from '@haive/shared/release';
 import * as dk from './docker.js';
 import {
   ensureJournal,
@@ -70,9 +70,6 @@ const flag = (name: string): boolean => process.argv.includes(`--${name}`);
 function emit(event: string, fields: Record<string, unknown> = {}): void {
   console.log(JSON.stringify({ t: new Date().toISOString(), event, ...fields }));
 }
-
-/** Match scripts/build-channel.mjs; an unset install channel means public. */
-const CHANNEL_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 
 export function resolveChannel(requested: string | undefined, installed: string): string {
   const channel = installed || 'public';
@@ -215,7 +212,10 @@ export async function main(): Promise<number> {
 
   // The dry plan reads no journal. Normal starts recover an interrupted run before fetching a target.
   if (flag('dry-plan')) {
-    if (channel === 'public') throw new Error('--dry-plan requires a channel install');
+    if (channel === 'public') {
+      emit('error', { message: '--dry-plan requires a channel install' });
+      return EXIT.usage;
+    }
     const usage = missingTarget();
     if (usage) {
       emit('error', { message: usage });
@@ -327,7 +327,7 @@ export async function main(): Promise<number> {
     if (channel !== 'public') channelImagePlan(target.version, imageSettings, target.images);
 
     const previousImages = await readImageOverrides(envFile, imageSettings);
-    if (channel !== 'public' && Object.values(previousImages).every((ref) => !ref)) {
+    if (channel !== 'public' && Object.values(previousImages).some((ref) => !ref)) {
       emit('refused', {
         refusal: 'rollback-images-missing',
         message: 'channel install has no pinned current images',
@@ -340,7 +340,9 @@ export async function main(): Promise<number> {
     const check = preflight({
       currentVersion: fromVersion,
       target,
-      localImages: await dk.localImages(channel !== 'public'),
+      localImages: await dk.localImages(
+        channel !== 'public' || Object.values(previousImages).some((ref) => ref.includes('@')),
+      ),
       currentImages,
       freeBytes: Number(arg('free-bytes', String(Number.MAX_SAFE_INTEGER))),
       snapshotBytes: Number(arg('snapshot-bytes', '0')),

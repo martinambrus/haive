@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ReleaseImages } from '@haive/shared/release';
+import { REGISTRY_PREFIX_PATTERN, type ReleaseImages } from '@haive/shared/release';
 import { imageRepo } from '@haive/shared/naming';
 import type { ComposeContext } from './docker.js';
 import * as dk from './docker.js';
@@ -147,9 +147,7 @@ export async function prepareImages(
 
 /** Match the repository prefix accepted by the channel publisher. */
 export function requireChannelRegistry(registry: string): string {
-  if (
-    !/^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/.test(registry)
-  )
+  if (!REGISTRY_PREFIX_PATTERN.test(registry))
     throw new Error('channel install requires a valid HAIVE_CHANNEL_REGISTRY');
   return registry;
 }
