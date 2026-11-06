@@ -909,6 +909,26 @@ for (const lang of ['sh', 'ps1']) {
     ['trailing array comma', '{"extra":[0,],' + JSON.stringify(manifest).slice(1), ''],
     ['escaped unicode key', '{"extra\\u0061":0,' + JSON.stringify(manifest).slice(1), ''],
     ['slash key', '{"extra/key":0,' + JSON.stringify(manifest).slice(1), ''],
+    ['DEL in string', '{"extra":"\u007f",' + JSON.stringify(manifest).slice(1), ''],
+    ['UTF-8 BOM prefix', '\ufeff' + JSON.stringify(manifest), ''],
+    [
+      'escaped channel value',
+      JSON.stringify(manifest).replace('customer', String.raw`\u0063ustomer`),
+      '',
+    ],
+    [
+      'escaped version value',
+      JSON.stringify(manifest).replace('9.9.9', String.raw`\u0039.9.9`),
+      '',
+    ],
+    ...Object.keys(pins).map((host) => [
+      `escaped ${host} pin value`,
+      JSON.stringify(manifest).replace(
+        JSON.stringify(pins[host]),
+        JSON.stringify(pins[host]).replace('127', String.raw`\u003127`),
+      ),
+      '',
+    ]),
     ['unescaped control character', '{"extra":"\u0001",' + JSON.stringify(manifest).slice(1), ''],
     [
       'deep nesting',

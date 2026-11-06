@@ -265,7 +265,7 @@ function Assert-ManifestKeys([string]$json) {
       $c = $json[$reader.pos]
       $reader.pos++
       if ($c -ceq '"') { return $json.Substring($start, $reader.pos - $start) }
-      if ([int]$c -lt 32) { throw 'invalid JSON control character' }
+      if ([int]$c -lt 32 -or [int]$c -eq 127) { throw 'invalid JSON control character' }
       if ($c -ceq '\') {
         if ($reader.pos -ge $json.Length) { throw 'incomplete JSON escape' }
         $escape = $json[$reader.pos]
@@ -278,7 +278,7 @@ function Assert-ManifestKeys([string]$json) {
     }
     throw 'unclosed JSON string'
   }
-  function Read-JsonValue([int]$depth) {
+  function Read-JsonValue([int]$depth, [string]$path) {
     if ($depth -gt 64) { throw 'JSON nesting exceeds 64' }
     Skip-JsonSpace
     if ($reader.pos -ge $json.Length) { throw 'missing JSON value' }
@@ -299,7 +299,8 @@ function Assert-ManifestKeys([string]$json) {
           if ($reader.pos -ge $json.Length -or $json[$reader.pos] -cne ':') { throw 'missing JSON colon' }
           $reader.pos++
         }
-        Read-JsonValue ($depth + 1)
+        $childPath = if ($object) { $path + '/' + $key.Substring(1, $key.Length - 2) } else { $path + '/[]' }
+        Read-JsonValue ($depth + 1) $childPath
         Skip-JsonSpace
         if ($reader.pos -ge $json.Length) { throw 'unclosed JSON container' }
         $c = $json[$reader.pos]
@@ -307,7 +308,10 @@ function Assert-ManifestKeys([string]$json) {
         if ($c -ceq $close) { return }
         if ($c -cne ',') { throw 'missing JSON comma' }
       }
-    } elseif ($c -ceq '"') { $null = Read-JsonString }
+    } elseif ($c -ceq '"') {
+      $value = Read-JsonString
+      if ($path -cin @('/channel', '/version', '/images/api', '/images/worker', '/images/web', '/images/builder') -and $value.Contains('\')) { throw 'escaped channel manifest selection or pin' }
+    }
     else {
       $match = $reader.literal.Match($json, $reader.pos)
       if (-not $match.Success) { throw 'invalid JSON value' }
@@ -316,7 +320,7 @@ function Assert-ManifestKeys([string]$json) {
   }
   Skip-JsonSpace
   if ($reader.pos -ge $json.Length -or $json[$reader.pos] -cne '{') { throw 'manifest must be a JSON object' }
-  Read-JsonValue 0
+  Read-JsonValue 0 ''
   Skip-JsonSpace
   if ($reader.pos -ne $json.Length) { throw 'trailing JSON content' }
 }
@@ -398,7 +402,8 @@ function Read-ChannelManifest {
     $entry = Get-Item -LiteralPath $file -Force
     if ($entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $entry.Length -gt 1048576) { throw 'channel manifest must be a regular file of at most 1 MiB' }
     try {
-      $json = [IO.File]::ReadAllText($file)
+      # GetString retains a BOM so the grammar rejects it, like the shell reader.
+      $json = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($file))
       Assert-ManifestKeys $json
       $manifest = $json | ConvertFrom-Json
       foreach ($name in @('channel','version','images')) {
