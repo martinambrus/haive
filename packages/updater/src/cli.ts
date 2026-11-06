@@ -122,7 +122,12 @@ export async function loadManifest(options: {
       throw new Error('manifest image release repository differs from install channel registry');
   }
   const text = image
-    ? await dk.readReleaseManifestImage(image)
+    ? await dk.readReleaseManifestImage(image, (container, error) => {
+        emit('warning', {
+          container,
+          message: `could not remove release manifest container ${container}: ${safeErrorMessage(error)}`,
+        });
+      })
     : /^https?:\/\//.test(source!)
       ? await (await fetch(source!)).text()
       : await readFile(source!, 'utf8');

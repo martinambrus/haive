@@ -396,7 +396,10 @@ async function streamReleaseManifest(id: string): Promise<string> {
 }
 
 /** Pull even when cached: revoked credentials and missing remote tags must refuse preflight. */
-export async function readReleaseManifestImage(image: string): Promise<string> {
+export async function readReleaseManifestImage(
+  image: string,
+  onCleanupError?: (container: string, error: unknown) => void,
+): Promise<string> {
   await run('docker', ['pull', image], undefined, 1_800_000);
   const name = containerName(CONTAINER_FAMILY.upgrade, 'manifest', randomUUID());
   let id = name;
@@ -415,6 +418,7 @@ export async function readReleaseManifestImage(image: string): Promise<string> {
       await run('docker', ['rm', '-f', id]);
     } catch (error) {
       if (!failed) throw error;
+      onCleanupError?.(id, error);
     }
   }
 }

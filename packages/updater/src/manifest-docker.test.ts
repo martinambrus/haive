@@ -7,6 +7,7 @@ vi.mock('node:child_process', () => ({
   spawn: h.spawn,
 }));
 import { readReleaseManifestImage } from './docker.js';
+import { loadManifest } from './cli.js';
 
 const MAX = 1024 * 1024;
 function header(name = 'release.json', size = 21, type = '0') {
@@ -75,7 +76,10 @@ beforeEach(() => {
     return child;
   });
 });
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+});
 it('streams a single regular manifest and removes its scratch-compatible container', async () => {
   expect(await readReleaseManifestImage('private/release:1')).toBe('{"manifestVersion":1}');
   const calls = h.exec.mock.calls.map((c) => c[1] as string[]);
@@ -259,3 +263,29 @@ it('surfaces the container cleanup error after a successful read', async () => {
   );
   expect(h.exec.mock.calls.at(-1)![1]).toEqual(['rm', '-f', 'container-id']);
 });
+
+it.each(['create', 'copy', 'parse'])(
+  'warns once through the CLI when %s and container cleanup both fail',
+  async (failure) => {
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const base = h.exec.getMockImplementation()!;
+    h.exec.mockImplementation(async (command: string, args: string[]) => {
+      if (args[0] === 'create' && failure === 'create') throw new Error('original create failure');
+      if (args[0] === 'rm') throw new Error('container cleanup failed');
+      return base(command, args);
+    });
+    if (failure === 'copy') cpError = new Error('original copy failure');
+    if (failure === 'parse') chunks = [tar(Buffer.from('{}'), header('wrong.json', 2))];
+    await expect(
+      loadManifest({ manifestImage: 'private/release:1', channel: 'public', version: '1' }),
+    ).rejects.toThrow(
+      failure === 'parse' ? 'invalid release manifest tar header' : `original ${failure} failure`,
+    );
+    const container = h.exec.mock.calls.at(-1)![1][2] as string;
+    expect(logs).toHaveBeenCalledTimes(1);
+    const event = JSON.parse(logs.mock.calls[0]![0] as string);
+    expect(event).toMatchObject({ event: 'warning', container });
+    expect(event.message).toContain(container);
+    expect(event.message).toContain('container cleanup failed');
+  },
+);
