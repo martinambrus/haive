@@ -391,13 +391,13 @@ status: open · kind: fix · found: T335 PR B reviews 2026-11-05 · priority: P3
 
 ### T535 · D2c · pin the install channel in the upgrade journal (design)
 
-status: open · kind: design · found: T335 PR B review 1 2026-11-05 · priority: P3
+status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-06 · last: 2026-11-06 · kind: design · user decision: resolved 2026-11-06 (journal last done run + --change-channel <recorded>) · found: T335 PR B review 1 2026-11-05 · priority: P3
 
 If `.env` loses `HAIVE_CHANNEL`, `resolveChannel` (packages/updater/src/cli.ts ~:67-74) returns `public` and only the pre-existing "image overrides require HAIVE_OWN_MODULES_HOST_DIR" refusal in `prepareImages` stops the upgrade. Fixing T534 item 3 or relaxing that refusal for public would let a channel install silently fall to the public registry. Proposal: record the channel on the first channel run (journal or a dedicated row) and refuse a change unless an explicit flag allows it. Needs a decision on where it lives and how a deliberate channel move is authorised.
 
 ### T536 · FNF[installer-channel] · install.sh/install.ps1 channel-install follow-ups from T335 PR C (+7)
 
-status: open · kind: fix · found: T335 PR C reviews 2026-11-05 · priority: P3
+status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-06 · last: 2026-11-06 · kind: fix · found: T335 PR C reviews 2026-11-05 · priority: P3
 
 1. The scratch `DOCKER_CONFIG` used for the channel login and manifest read hides the user's docker contexts, CLI plugins and credential helpers (install/install.sh ~:235, install/install.ps1 ~:254). A host whose daemon is reached only through a non-default context fails verification. UNVERIFIED, consequential for that setup; copy `currentContext` and `contexts/` into the scratch config, or honour `DOCKER_HOST`/`DOCKER_CONTEXT`.
 2. A channel install's `latest`/`next` resolve through the public GitHub releases (install.sh ~:194, install.ps1 ~:183), so a channel that has not published that version refuses (fail closed). PRE-EXISTING shape, consequential; require `--version` for a channel or resolve from the channel registry's release tags.
