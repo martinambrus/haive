@@ -49,10 +49,10 @@ export async function runModuleSourceFetch(
           if (!current) throw new Error('Module fetch request was superseded');
           await pinModuleTree(tree, hostDir, moduleId, image);
         },
-        async (resolvedSha) => {
+        async (resolvedSha, resolvedRef) => {
           const changed = await db
             .update(schema.moduleSources)
-            .set({ resolvedSha })
+            .set({ resolvedSha, resolvedRef })
             .where(identity)
             .returning({ id: schema.moduleSources.id });
           if (!changed.length) throw new Error('Module fetch request was superseded');

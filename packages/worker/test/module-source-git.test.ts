@@ -95,14 +95,14 @@ it('fetches real branches and tags, preserves a pin, and re-resolves only on Ref
       fetchModuleSource(row, null, pin, resolved, (raw) => new URL(raw));
     let second = '';
     expect(await fetch(source)).toBe(first);
-    expect(resolved).toHaveBeenLastCalledWith(first);
+    expect(resolved).toHaveBeenLastCalledWith(first, 'refs/heads/main');
     expect(await fetch({ ...source, ref: 'v1' })).toBe(first);
     await writeFile(join(root, 'value'), 'second');
     second = await commit();
     expect(second).not.toBe(first);
     expect(await fetch({ ...source, resolvedSha: first })).toBe(first);
     expect(await fetch({ ...source, resolvedSha: null })).toBe(second);
-    expect(resolved).toHaveBeenLastCalledWith(second);
+    expect(resolved).toHaveBeenLastCalledWith(second, 'refs/heads/main');
     await expect(fetch({ ...source, ref: '--upload-pack=bad' })).rejects.toThrow(
       'Invalid module branch or tag ref',
     );

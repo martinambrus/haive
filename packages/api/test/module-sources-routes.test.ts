@@ -122,7 +122,7 @@ describe.skipIf(!url)('module install sources (real database)', () => {
     const source = await add();
     await db
       .update(schema.moduleSources)
-      .set({ resolvedSha: 'a'.repeat(40) })
+      .set({ resolvedSha: 'a'.repeat(40), resolvedRef: 'refs/heads/main' })
       .where(eq(schema.moduleSources.id, source.id));
     expect((await send('POST', '/' + source.id + '/fetch', {})).status).toBe(202);
     expect(h.enqueue).toHaveBeenCalledOnce();
@@ -130,7 +130,7 @@ describe.skipIf(!url)('module install sources (real database)', () => {
     expect((await send('PUT', '/' + source.id, { ...git, ref: 'other' })).status).toBe(409);
     expect((await send('DELETE', '/' + source.id)).status).toBe(409);
     expect(await db.select().from(schema.moduleSources)).toMatchObject([
-      { fetchStatus: 'queued', resolvedSha: 'a'.repeat(40) },
+      { fetchStatus: 'queued', resolvedSha: 'a'.repeat(40), resolvedRef: 'refs/heads/main' },
     ]);
     expect(
       await db.execute(sql.raw("SELECT id FROM audit_events WHERE action='module_source.fetch'")),
@@ -140,7 +140,9 @@ describe.skipIf(!url)('module install sources (real database)', () => {
       .set({ fetchStatus: 'pinned' })
       .where(eq(schema.moduleSources.id, source.id));
     expect((await send('POST', '/' + source.id + '/fetch', { refresh: true })).status).toBe(202);
-    expect(await db.select().from(schema.moduleSources)).toMatchObject([{ resolvedSha: null }]);
+    expect(await db.select().from(schema.moduleSources)).toMatchObject([
+      { resolvedSha: null, resolvedRef: null },
+    ]);
   });
   it('rolls enqueue-state back when its audit fails', async () => {
     const source = await add();
@@ -305,6 +307,7 @@ describe.skipIf(!url)('module install sources (real database)', () => {
   describe('fetch pin invalidation', () => {
     const pin = {
       resolvedSha: 'a'.repeat(40),
+      resolvedRef: 'refs/heads/main',
       fetchStatus: 'fetched',
       fetchedAt: new Date('2026-01-01T00:00:00Z'),
       lastError: 'old fetch diagnostic',
@@ -328,6 +331,7 @@ describe.skipIf(!url)('module install sources (real database)', () => {
       expect(await res.json()).toMatchObject({
         ...changed,
         resolvedSha: null,
+        resolvedRef: null,
         fetchStatus: null,
         fetchedAt: null,
         lastError: null,

@@ -24,6 +24,7 @@ export type FetchSource = {
   url: string | null;
   ref: string | null;
   resolvedSha: string | null;
+  resolvedRef?: string | null;
 };
 
 export function sourceFetchError(error: unknown, token: string | null): string {
@@ -128,7 +129,7 @@ export async function fetchModuleSource(
     moduleId: string,
     image: string,
   ) => Promise<void> = pinModuleTree,
-  resolved: (sha: string) => Promise<void> = async () => {},
+  resolved: (sha: string, ref: string | null) => Promise<void> = async () => {},
   validateUrl: (raw: string) => URL = moduleSourceUrl,
 ): Promise<string> {
   if (process.env.HAIVE_PUBLISHED_INSTALL !== 'true')
@@ -153,6 +154,8 @@ export async function fetchModuleSource(
   const url = validateUrl(source.url ?? '');
   if (source.resolvedSha !== null && !/^[a-f0-9]{40}$/.test(source.resolvedSha))
     throw new Error('Invalid recorded SHA');
+  if (source.resolvedRef && ![`refs/heads/${ref}`, `refs/tags/${ref}`].includes(source.resolvedRef))
+    throw new Error('Invalid recorded ref namespace');
   const image = await resolveWorkerImage();
   const temporary = await mkdtemp(join(tmpdir(), 'haive-worker-module-source-'));
   const sockets = new Set<Socket>();
@@ -234,7 +237,7 @@ export async function fetchModuleSource(
     await run(['remote', 'add', 'origin', url.href]);
     const heads = `refs/heads/${ref}`;
     const tags = `refs/tags/${ref}`;
-    let qualifiedRef: string | undefined;
+    let qualifiedRef = source.resolvedSha ? (source.resolvedRef ?? undefined) : undefined;
     const listRefs = async () => {
       const listing = output(
         await originGitRun(
@@ -250,7 +253,17 @@ export async function fetchModuleSource(
           .map((line) => line.split('\t') as [string, string])
           .map(([sha, name]) => [name, sha]),
       );
-      qualifiedRef = refs.has(heads) ? heads : refs.has(tags) ? tags : undefined;
+      // Legacy pins have no recorded namespace. Prefer a namespace still pointing at the pin.
+      qualifiedRef ??=
+        source.resolvedSha &&
+        refs.get(heads) !== source.resolvedSha &&
+        (refs.get(`${tags}^{}`) ?? refs.get(tags)) === source.resolvedSha
+          ? tags
+          : refs.has(heads)
+            ? heads
+            : refs.has(tags)
+              ? tags
+              : undefined;
       return refs;
     };
     let sha = source.resolvedSha;
@@ -279,7 +292,7 @@ export async function fetchModuleSource(
     const commit = await run(['rev-parse', '--verify', '--end-of-options', 'FETCH_HEAD^{commit}']);
     if (commit !== sha)
       throw new Error('module_source_ref_moved: Fetched commit does not match the pinned SHA');
-    await resolved(sha);
+    await resolved(sha, qualifiedRef ?? null);
     await run(['checkout', '--detach', sha, '--']);
     await removeNoFollow(tree, '.git', { recursive: true });
     await validateTree(tree, source.moduleId);

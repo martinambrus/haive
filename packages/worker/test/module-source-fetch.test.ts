@@ -134,7 +134,9 @@ describe('fetch and pin a module source', () => {
           }
         : previous(cwd, args, env),
     );
-    expect(await fetchModuleSource({ ...source, ref: 'v1' }, null, vi.fn())).toBe(sha);
+    const resolved = vi.fn();
+    expect(await fetchModuleSource({ ...source, ref: 'v1' }, null, vi.fn(), resolved)).toBe(sha);
+    expect(resolved).toHaveBeenCalledWith(sha, 'refs/tags/v1');
   });
   it('serves the token only over the credential helper protocol for the stored HTTPS host', async () => {
     setup();
@@ -216,6 +218,43 @@ describe('fetch and pin a module source', () => {
       );
       expect(fallback).toBeDefined();
       expect(fallback![1].slice(-3)).toEqual(['--end-of-options', source.url, qualified]);
+    },
+  );
+  it.each([null, 'refs/tags/v1'])(
+    'keeps a pinned tag namespace (%s) when a same-named branch appears',
+    async (resolvedRef) => {
+      setup();
+      const previous = git.getMockImplementation()!;
+      let target = '';
+      git.mockImplementation(async (cwd: string, args: string[], env: unknown, io: unknown) => {
+        if (args.includes('ls-remote'))
+          return {
+            code: 0,
+            stdout: `${'b'.repeat(40)}\trefs/heads/v1\n${'c'.repeat(40)}\trefs/tags/v1\n${sha}\trefs/tags/v1^{}\n`,
+            stderr: '',
+          };
+        if (args.includes('fetch')) {
+          target = args.at(-1)!;
+          if (target === sha) return { code: 1, stdout: '', stderr: 'object wants not supported' };
+        }
+        if (args.includes('rev-parse'))
+          return {
+            code: 0,
+            stdout: target === 'refs/tags/v1' ? sha : 'b'.repeat(40),
+            stderr: '',
+          };
+        return previous(cwd, args, env, io);
+      });
+      const resolved = vi.fn();
+      await expect(
+        fetchModuleSource(
+          { ...source, ref: 'v1', resolvedSha: sha, resolvedRef },
+          null,
+          vi.fn(),
+          resolved,
+        ),
+      ).resolves.toBe(sha);
+      expect(resolved).toHaveBeenCalledWith(sha, 'refs/tags/v1');
     },
   );
   it('refuses a moved fallback ref rather than replacing the pinned commit', async () => {

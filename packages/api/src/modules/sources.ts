@@ -181,7 +181,7 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
             fetchStatus: 'queued',
             lastError: null,
             updatedAt: new Date(Math.max(Date.now(), row.updatedAt.getTime() + 1)),
-            ...(body.refresh ? { resolvedSha: null } : {}),
+            ...(body.refresh ? { resolvedSha: null, resolvedRef: null } : {}),
           })
           .where(eq(schema.moduleSources.id, id))
           .returning();
@@ -255,7 +255,13 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
               (field) => previous[field] !== values[field],
             );
           const fetchState = sourceChanged
-            ? { resolvedSha: null, fetchStatus: null, fetchedAt: null, lastError: null }
+            ? {
+                resolvedSha: null,
+                resolvedRef: null,
+                fetchStatus: null,
+                fetchedAt: null,
+                lastError: null,
+              }
             : {};
           const [row] =
             id === null
