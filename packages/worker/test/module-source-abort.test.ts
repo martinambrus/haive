@@ -191,7 +191,7 @@ setInterval(() => {}, 1000);
     { PATH: scratch },
     {
       signal: controller.signal,
-      timeout: 500,
+      timeout: 1500,
     },
   );
   await vi.waitFor(() => access(join(scratch, 'child-ready')));

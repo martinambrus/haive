@@ -1,9 +1,26 @@
 import { execFile } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const spawnFailure = vi.hoisted(() => ({ noStdio: false }));
+vi.mock('node:child_process', async (importActual) => {
+  const actual = await importActual<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawn: (...args: Parameters<typeof actual.spawn>) => {
+      if (!spawnFailure.noStdio) return actual.spawn(...args);
+      const child = new EventEmitter();
+      queueMicrotask(() =>
+        child.emit('error', Object.assign(new Error('EMFILE'), { code: 'EMFILE' })),
+      );
+      return child;
+    },
+  };
+});
 import { GIT_NO_EXIT, GIT_TIMED_OUT, gitGaveNoAnswer, gitRun } from '../src/repo/git-exec.js';
 
 const exec = promisify(execFile);
@@ -28,10 +45,18 @@ async function git(dir: string, args: string[]): Promise<string> {
 }
 
 afterEach(async () => {
+  spawnFailure.noStdio = false;
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
 describe('gitRun when git ends without an exit status', () => {
+  it('returns EMFILE when spawn emits error without creating any stdio', async () => {
+    spawnFailure.noStdio = true;
+    const res = await gitRun(tmpdir(), ['status'], undefined, { input: Buffer.from('input') });
+    expect(res).toMatchObject({ code: GIT_NO_EXIT, noExit: 'EMFILE', stdout: '' });
+    expect(res.stderr).toContain('EMFILE');
+  });
+
   it('a missing cwd is GIT_NO_EXIT, not exit 1', async () => {
     const cwd = path.join(await scratch('no-exit-cwd-'), 'never-created');
     const res = await gitRun(cwd, ['status']);
