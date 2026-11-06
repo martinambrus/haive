@@ -189,22 +189,25 @@ export async function gitRun(
   let stderrBytes = 0;
   const maxBuffer = output.maxBuffer ?? GIT_MAX_BUFFER;
   const stop = () => {
+    if (abortWait) abortWait.stop();
+    else child.kill();
     child.stdout?.destroy();
     child.stderr?.destroy();
-    child.kill();
   };
   child.stdout?.on('data', (chunk: Buffer) => {
+    const remaining = Math.max(0, maxBuffer - stdoutBytes);
+    stdout.push(chunk.subarray(0, remaining));
     stdoutBytes += chunk.length;
-    if (stdoutBytes <= maxBuffer) stdout.push(chunk);
-    else {
+    if (stdoutBytes > maxBuffer) {
       overflow = true;
       stop();
     }
   });
   child.stderr?.on('data', (chunk: Buffer) => {
+    const remaining = Math.max(0, maxBuffer - stderrBytes);
+    stderr.push(chunk.subarray(0, remaining));
     stderrBytes += chunk.length;
-    if (stderrBytes <= maxBuffer) stderr.push(chunk);
-    else {
+    if (stderrBytes > maxBuffer) {
       overflow = true;
       stop();
     }
@@ -244,14 +247,10 @@ export async function gitRun(
         timer = setTimeout(() => {
           if (child.exitCode !== null || child.signalCode !== null) return;
           timedOut = true;
-          if (abortWait) {
-            abortWait.stop();
-            child.stdout?.destroy();
-            child.stderr?.destroy();
-          } else stop();
+          stop();
         }, timeout);
     });
-    if (timedOut || output.signal?.aborted) await abortWait?.wait;
+    if (timedOut || overflow || output.signal?.aborted) await abortWait?.wait;
     return result;
   } finally {
     clearTimeout(timer);
