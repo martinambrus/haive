@@ -7,6 +7,7 @@ vi.mock('node:child_process', () => ({
   spawn: h.spawn,
 }));
 import { readReleaseManifestImage } from './docker.js';
+import { loadManifest } from './cli.js';
 
 const MAX = 1024 * 1024;
 function header(name = 'release.json', size = 21, type = '0') {
@@ -33,21 +34,14 @@ let chunks: Iterable<Buffer>;
 let cpError: Error | undefined;
 let killed: boolean;
 let delivered: number;
-let cached: boolean;
 beforeEach(() => {
   vi.stubEnv('HAIVE_INSTALL_ID', 't534_test');
   chunks = [tar()];
   cpError = undefined;
   killed = false;
   delivered = 0;
-  cached = true;
   h.exec.mockReset().mockImplementation(async (_command: string, args: string[]) => ({
-    stdout:
-      args[0] === 'create'
-        ? 'container-id\n'
-        : args[0] === 'image' && args[1] === 'ls' && cached
-          ? 'existing-image'
-          : '',
+    stdout: args[0] === 'create' ? 'container-id\n' : '',
   }));
   h.spawn.mockReset().mockImplementation(() => {
     let stopped = false;
@@ -82,12 +76,13 @@ beforeEach(() => {
     return child;
   });
 });
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+});
 it('streams a single regular manifest and removes its scratch-compatible container', async () => {
   expect(await readReleaseManifestImage('private/release:1')).toBe('{"manifestVersion":1}');
-  const calls = h.exec.mock.calls
-    .map((c) => c[1] as string[])
-    .filter((args) => args[0] !== 'image' || args[1] !== 'ls');
+  const calls = h.exec.mock.calls.map((c) => c[1] as string[]);
   expect(calls[0]).toEqual(['pull', 'private/release:1']);
   expect(calls[1]).toEqual([
     'create',
@@ -108,7 +103,7 @@ it.each(['create', 'cp'])('temp manifest container is removed on %s failure', as
   else
     h.exec.mockImplementation(async (_command: string, args: string[]) => {
       if (args[0] === failure) throw new Error('fixture create failure');
-      return { stdout: args[0] === 'image' && args[1] === 'ls' ? 'existing-image' : '' };
+      return { stdout: '' };
     });
   await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow('fixture');
   expect(h.exec.mock.calls.at(-1)![1]).toEqual([
@@ -123,7 +118,7 @@ it('an unpullable manifest cannot create or use a cached image', async () => {
     return { stdout: 'existing-image' };
   });
   await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow('pull denied');
-  expect(h.exec.mock.calls.filter((call) => call[1][0] !== 'image')).toHaveLength(1);
+  expect(h.exec.mock.calls.map((call) => call[1])).toEqual([['pull', 'private/release:1']]);
   expect(h.spawn).not.toHaveBeenCalled();
 });
 it('channel rollback inventory includes digest pins while public inventory stays unchanged', async () => {
@@ -216,59 +211,33 @@ it('bounds the tar stream even when a small declared file is followed by unbound
   expect(delivered).toBeLessThan(20);
 });
 
-it.each([true, false])(
-  'removes the release image only when absent before this pull (cached=%s)',
-  async (present) => {
-    cached = present;
-    expect(await readReleaseManifestImage('private/release:1')).toBe('{"manifestVersion":1}');
+it.each(['private/release:1', `private/release@sha256:${'b'.repeat(64)}`])(
+  'keeps the pulled release image without probing ownership: %s',
+  async (ref) => {
+    expect(await readReleaseManifestImage(ref)).toBe('{"manifestVersion":1}');
     const calls = h.exec.mock.calls.map((call) => call[1]);
-    expect(calls[0]).toEqual([
-      'image',
-      'ls',
-      '--quiet',
-      '--no-trunc',
-      '--filter',
-      'reference=private/release:1',
-    ]);
-    expect(calls[1]).toEqual(['pull', 'private/release:1']);
-    const removals = calls.filter((args) => args[0] === 'image' && args[1] === 'rm');
-    expect(removals).toEqual(present ? [] : [['image', 'rm', 'private/release:1']]);
-    if (!present) expect(calls.at(-2)).toEqual(['rm', '-f', 'container-id']);
+    expect(calls[0]).toEqual(['pull', ref]);
+    expect(calls.filter((args) => args[0] === 'image')).toEqual([]);
+    expect(calls.at(-1)).toEqual(['rm', '-f', 'container-id']);
   },
 );
-it('removes a newly pulled release image when the copy fails', async () => {
-  cached = false;
+it('keeps the pulled release image when the copy fails', async () => {
   cpError = new Error('fixture copy failure');
   await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow(
     'fixture copy failure',
   );
-  expect(h.exec.mock.calls.at(-1)![1]).toEqual(['image', 'rm', 'private/release:1']);
-});
-it('keeps a release image named by digest, whose absence the reference filter cannot prove', async () => {
-  cached = false;
-  const ref = `private/release@sha256:${'b'.repeat(64)}`;
-  expect(await readReleaseManifestImage(ref)).toBe('{"manifestVersion":1}');
-  expect(h.exec.mock.calls.filter((call) => call[1][0] === 'image' && call[1][1] === 'rm')).toEqual(
-    [],
-  );
-});
-it('an inventory failure refuses before pulling or removing any image', async () => {
-  h.exec.mockRejectedValue(new Error('daemon unavailable'));
-  await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow('daemon unavailable');
-  expect(h.exec.mock.calls.map((call) => call[1])).toEqual([
-    ['image', 'ls', '--quiet', '--no-trunc', '--filter', 'reference=private/release:1'],
-  ]);
+  const calls = h.exec.mock.calls.map((call) => call[1]);
+  expect(calls.filter((args) => args[0] === 'image')).toEqual([]);
+  expect(calls.at(-1)).toEqual(['rm', '-f', 'container-id']);
 });
 
 it.each(['create', 'copy', 'parse'])(
-  'preserves the first %s error when both cleanups fail',
+  'preserves the first %s error when container cleanup fails',
   async (failure) => {
-    cached = false;
     const base = h.exec.getMockImplementation()!;
     h.exec.mockImplementation(async (command: string, args: string[]) => {
       if (args[0] === 'create' && failure === 'create') throw new Error('original create failure');
       if (args[0] === 'rm') throw new Error('container cleanup failed');
-      if (args[0] === 'image' && args[1] === 'rm') throw new Error('image cleanup failed');
       return base(command, args);
     });
     if (failure === 'copy') cpError = new Error('original copy failure');
@@ -276,23 +245,47 @@ it.each(['create', 'copy', 'parse'])(
     await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow(
       failure === 'parse' ? 'invalid release manifest tar header' : `original ${failure} failure`,
     );
-    expect(h.exec.mock.calls.at(-1)![1]).toEqual(['image', 'rm', 'private/release:1']);
+    expect(h.exec.mock.calls.at(-1)![1]).toEqual([
+      'rm',
+      '-f',
+      failure === 'create' ? expect.stringMatching(/^t534_test-upgrade-manifest-/) : 'container-id',
+    ]);
   },
 );
-it.each(['container', 'image', 'both'])(
-  'surfaces the first cleanup error after a successful read: %s',
+it('surfaces the container cleanup error after a successful read', async () => {
+  const base = h.exec.getMockImplementation()!;
+  h.exec.mockImplementation(async (command: string, args: string[]) => {
+    if (args[0] === 'rm') throw new Error('container cleanup failed');
+    return base(command, args);
+  });
+  await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow(
+    'container cleanup failed',
+  );
+  expect(h.exec.mock.calls.at(-1)![1]).toEqual(['rm', '-f', 'container-id']);
+});
+
+it.each(['create', 'copy', 'parse'])(
+  'warns once through the CLI when %s and container cleanup both fail',
   async (failure) => {
-    cached = false;
+    const logs = vi.spyOn(console, 'log').mockImplementation(() => {});
     const base = h.exec.getMockImplementation()!;
     h.exec.mockImplementation(async (command: string, args: string[]) => {
-      if (args[0] === 'rm' && failure !== 'image') throw new Error('container cleanup failed');
-      if (args[0] === 'image' && args[1] === 'rm' && failure !== 'container')
-        throw new Error('image cleanup failed');
+      if (args[0] === 'create' && failure === 'create') throw new Error('original create failure');
+      if (args[0] === 'rm') throw new Error('container cleanup failed');
       return base(command, args);
     });
-    await expect(readReleaseManifestImage('private/release:1')).rejects.toThrow(
-      failure === 'image' ? 'image cleanup failed' : 'container cleanup failed',
+    if (failure === 'copy') cpError = new Error('original copy failure');
+    if (failure === 'parse') chunks = [tar(Buffer.from('{}'), header('wrong.json', 2))];
+    await expect(
+      loadManifest({ manifestImage: 'private/release:1', channel: 'public', version: '1' }),
+    ).rejects.toThrow(
+      failure === 'parse' ? 'invalid release manifest tar header' : `original ${failure} failure`,
     );
-    expect(h.exec.mock.calls.at(-1)![1]).toEqual(['image', 'rm', 'private/release:1']);
+    const container = h.exec.mock.calls.at(-1)![1][2] as string;
+    expect(logs).toHaveBeenCalledTimes(1);
+    const event = JSON.parse(logs.mock.calls[0]![0] as string);
+    expect(event).toMatchObject({ event: 'warning', container });
+    expect(event.message).toContain(container);
+    expect(event.message).toContain('container cleanup failed');
   },
 );

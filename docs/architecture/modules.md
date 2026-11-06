@@ -566,8 +566,10 @@ per-customer.
   updater reads `/release.json` by `docker create` + `docker cp <ctr>:/release.json -` + `docker rm -f` of a temp
   container, removed on every path. The tar stream is capped while it is read (1 MiB payload) and must hold one
   plain `release.json` entry with a valid header checksum; anything else refuses, and nothing is extracted. The
-  image is pulled even when cached, and removed afterwards only when this read pulled it and its ref has no digest
-  (a digest ref cannot prove it was absent). The first error wins over a cleanup error. A manifest whose `channel`
+  image is pulled even when cached and kept afterwards (a few KB per version): a presence probe cannot prove this
+  read owns it while another process may pull the same ref. A failed container removal after a successful read
+  throws; after a failed read the read error wins and the removal failure is reported as a `warning` event naming
+  the container. A manifest whose `channel`
   or `version` differs, or an image that cannot be pulled, refuses. There is no public fallback.
 - Images: without own modules the overrides are the manifest's pinned api/worker/web; with own modules the base
   images and the builder come from the manifest, and a manifest without `builder` refuses. Every pin must be in

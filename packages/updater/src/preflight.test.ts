@@ -65,6 +65,8 @@ describe('preflight', () => {
     expect(r.refusal).toBe('rollback-images-missing');
     expect(r.message).toContain('haive-worker:0.1.0');
     expect(r.message).toContain('haive-web:0.1.0');
+    expect(r.message).toContain('Re-pull them.');
+    expect(r.message).not.toContain('--no-rollback');
   });
 
   it('refuses when the snapshot would not fit', () => {
