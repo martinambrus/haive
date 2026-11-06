@@ -649,10 +649,28 @@ module applies at the next upgrade or an explicit build of the one-shot above.
   refresh writes its audit row in the same transaction and fails with it. Changing a source's
   identity clears `resolved_sha` and its fetch state.
 - Fetch (`POST /modules/sources/:id/fetch`) queues a job on its own queue (`QUEUE_NAMES.MODULE_SOURCE`,
-  concurrency 1). The worker clones through the hardened git path, resolves the ref to a commit SHA
-  once and stores it in `resolved_sha`; later fetches build that SHA. Only Refresh (`refresh: true`)
-  re-resolves the ref to a newer commit. Status moves `queued`, `fetching`, then `pinned` or
-  `failed` with a scrubbed `last_error`; a 10s sweep re-queues rows left `queued` or `fetching`.
+  concurrency 1). The worker resolves its own image first (the pin helper runs from it), so a
+  missing image fails before any git process or transfer. It clones through the hardened git path,
+  resolves the ref to a commit SHA once and stores it in `resolved_sha`, with the namespace it came
+  from (`refs/heads/<ref>`, else `refs/tags/<ref>`; a branch wins when both exist) in
+  `resolved_ref` (migration 0222); later fetches build that SHA, and when a fetch by SHA fails for
+  any reason the fallback fetches the recorded namespace, so a tag is never read as a same-named
+  branch. A row pinned before 0222 has no namespace: the fallback lists both and takes the one still
+  pointing at the pin, else the branch; a ref that moved refuses (`module_source_ref_moved`), a ref
+  that exists as neither refuses (`module_source_ref_unavailable`), and a fallback fetch that gives
+  no answer (timed out, no exit status) fails as "Module git fetch failed". Only Refresh (`refresh: true`) re-resolves
+  the ref to a newer commit, and it clears `resolved_ref` with `resolved_sha`. Status moves
+  `queued`, `fetching`, then `pinned` or `failed` with a scrubbed `last_error`; a 10s sweep
+  re-queues rows left `queued` or `fetching`.
+- Size: the module tree limit (64 MiB) is enforced while git writes, not only afterwards
+  (`boundedTransfer`). The fetch counts the packed objects under `.git`, the checkout counts the
+  expanded work tree, each polled every 25 ms through no-follow reads and checked once more on
+  exit. Past the limit, on a timeout or on overflowing output the git process group is stopped
+  (SIGTERM, SIGKILL after 1 s, released after 2 s) and awaited before the temporary tree is removed,
+  so no index-pack writes behind the removal; a size breach fails the row with "Module tree exceeds
+  size limit". The poll is approximate by one interval; the exit check is exact, and pack overhead
+  counts. The poll also refuses a tree deeper than 32 levels; the entry limit (5000) is checked
+  only on the finished checkout.
 - Registry fetch is refused with 409 `registry_fetch_unsupported`: published packages ship `dist`
   only, which the own-module builder cannot rebuild. Use a git source.
 - The worker never resolves the host directory by name. It streams the validated tree (no nested
