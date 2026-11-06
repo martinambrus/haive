@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import { gitSubcommandIndex, hardenGitArgs } from '@haive/shared/git-args';
 
@@ -84,6 +84,51 @@ function gitEnv(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return { ...process.env, ...GIT_BASE_ENV, ...(env ?? {}) };
 }
 
+/** An abort callback precedes exit. Stop the whole git group (including index-pack), then
+ * wait for its pipes to close before a caller removes files the group could still write. */
+function abortExitWait(child: ChildProcess, signal: AbortSignal) {
+  let closed = false;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  let waitTimer: ReturnType<typeof setTimeout> | undefined;
+  let finish!: () => void;
+  const wait = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const killGroup = (name: NodeJS.Signals) => {
+    if (!child.pid) return;
+    try {
+      process.kill(-child.pid, name);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') child.kill(name);
+    }
+  };
+  const abort = () => {
+    if (closed) return;
+    killGroup('SIGTERM');
+    killTimer = setTimeout(() => killGroup('SIGKILL'), 1000);
+    // Even an uninterruptible child must not hold the worker forever.
+    waitTimer = setTimeout(finish, 2000);
+  };
+  const close = () => {
+    closed = true;
+    clearTimeout(killTimer);
+    clearTimeout(waitTimer);
+    finish();
+  };
+  child.once('close', close);
+  signal.addEventListener('abort', abort, { once: true });
+  if (signal.aborted) abort();
+  return {
+    wait,
+    dispose: () => {
+      signal.removeEventListener('abort', abort);
+      child.removeListener('close', close);
+      clearTimeout(killTimer);
+      clearTimeout(waitTimer);
+    },
+  };
+}
+
 /** Run a git command, capturing stdout/stderr/exit code instead of throwing. The
  *  identical helper was inlined in several steps (11a-gate-4-push, 12-worktree-cleanup);
  *  centralised here. `env` merges over process.env when provided. `io.timeout` (ms, 0 for none)
@@ -104,51 +149,84 @@ export async function gitRun(
   const { input, allowFileTransport, ...output } = io ?? {};
   const argv = hardenGitArgs(args, { allowFileTransport });
   const timeout = output.timeout ?? gitDefaultTimeoutMs(argv);
+  const child = spawn('git', argv, {
+    cwd,
+    env: gitEnv(env),
+    timeout,
+    detached: !!output.signal,
+    signal: output.signal,
+  });
+  const abortWait = output.signal ? abortExitWait(child, output.signal) : undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  let overflow = false;
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
+  const maxBuffer = output.maxBuffer ?? GIT_MAX_BUFFER;
+  const stop = () => {
+    child.stdout.destroy();
+    child.stderr.destroy();
+    child.kill();
+  };
+  child.stdout.on('data', (chunk: Buffer) => {
+    stdoutBytes += chunk.length;
+    if (stdoutBytes <= maxBuffer) stdout.push(chunk);
+    else {
+      overflow = true;
+      stop();
+    }
+  });
+  child.stderr.on('data', (chunk: Buffer) => {
+    stderrBytes += chunk.length;
+    if (stderrBytes <= maxBuffer) stderr.push(chunk);
+    else {
+      overflow = true;
+      stop();
+    }
+  });
+  if (input) {
+    child.stdin.on('error', () => undefined);
+    child.stdin.end(input);
+  }
   try {
-    const run = exec('git', argv, {
-      cwd,
-      env: gitEnv(env),
-      maxBuffer: GIT_MAX_BUFFER,
-      ...output,
-      timeout,
+    const result = await new Promise<GitRunResult>((resolve) => {
+      const finish = (code: number | null, signal?: string | null, errorCode?: string) => {
+        const out = Buffer.concat(stdout).toString(output.encoding ?? 'utf8');
+        const err = Buffer.concat(stderr).toString(output.encoding ?? 'utf8');
+        if (timedOut && code === null && !errorCode && !overflow) {
+          resolve({
+            stdout: out,
+            stderr: withLine(err, timedOutLine(argv, timeout)),
+            code: GIT_TIMED_OUT,
+          });
+        } else if (errorCode || overflow || code === null) {
+          const noExit =
+            errorCode ?? (overflow ? 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' : (signal ?? 'unknown'));
+          resolve({
+            stdout: out,
+            stderr: withLine(err, `git ended without an exit status in ${cwd} (${noExit})`),
+            code: GIT_NO_EXIT,
+            noExit,
+          });
+        } else resolve({ stdout: out, stderr: err, code });
+      };
+      child.once('error', (error: NodeJS.ErrnoException) =>
+        finish(null, null, error.code ?? 'unknown'),
+      );
+      child.once('close', (code, signal) => finish(code, signal));
+      if (timeout > 0)
+        timer = setTimeout(() => {
+          timedOut = true;
+          stop();
+        }, timeout);
     });
-    if (input) {
-      // git can exit before reading all of it, which fails that write rather than the run.
-      run.child.stdin?.on('error', () => undefined);
-      run.child.stdin?.end(input);
-    }
-    const { stdout, stderr } = await run;
-    return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
-  } catch (err) {
-    const e = err as {
-      stdout?: string;
-      stderr?: string;
-      code?: unknown;
-      killed?: boolean;
-      signal?: string;
-    };
-    const stderr = (e.stderr ?? '').toString();
-    if (timeout > 0 && killedByTimeout(e)) {
-      return {
-        stdout: (e.stdout ?? '').toString(),
-        stderr: withLine(stderr, timedOutLine(argv, timeout)),
-        code: GIT_TIMED_OUT,
-      };
-    }
-    if (typeof e.code !== 'number') {
-      const noExit = typeof e.code === 'string' ? e.code : (e.signal ?? 'unknown');
-      return {
-        stdout: (e.stdout ?? '').toString(),
-        stderr: withLine(stderr, `git ended without an exit status in ${cwd} (${noExit})`),
-        code: GIT_NO_EXIT,
-        noExit,
-      };
-    }
-    return {
-      stdout: (e.stdout ?? '').toString(),
-      stderr,
-      code: e.code,
-    };
+    if (output.signal?.aborted) await abortWait?.wait;
+    return result;
+  } finally {
+    clearTimeout(timer);
+    abortWait?.dispose();
   }
 }
 

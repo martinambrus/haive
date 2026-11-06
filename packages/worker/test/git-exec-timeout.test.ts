@@ -20,7 +20,14 @@ vi.mock('node:child_process', async (importActual) => {
       return real(cmd, args, opts);
     },
   });
-  return { ...actual, execFile: wrapped };
+  return {
+    ...actual,
+    execFile: wrapped,
+    spawn: (...args: Parameters<typeof actual.spawn>) => {
+      seen.options.push(args[2] as Record<string, unknown>);
+      return actual.spawn(...args);
+    },
+  };
 });
 
 import { gitDefaultTimeoutMs, gitExec, gitRun, gitTimeoutLimits } from '../src/repo/git-exec.js';
