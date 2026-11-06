@@ -17,6 +17,7 @@ const USAGE =
 const POSTGRES = 'pgvector/pgvector:pg18';
 const REDIS = 'redis:8.4-alpine';
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
+const DAEMON_NOT_FOUND = /No such image/i;
 const lastLines = (text) =>
   String(text ?? '')
     .trim()
@@ -237,7 +238,7 @@ export async function run(
         if (
           found.error ||
           found.status !== 1 ||
-          !/No such image/i.test(found.stderr ?? '') ||
+          !DAEMON_NOT_FOUND.test(found.stderr ?? '') ||
           listed.stdout.trim() !== ''
         )
           throw new Error(`could not inspect dependency image ${image}`);
@@ -439,11 +440,18 @@ export async function run(
         });
         emit(`channel-boot-check: removed ${kind} ${name}`);
       } catch (error) {
-        status = 2;
         const existing = await docker([kind, 'inspect', name], {
           cleanup: true,
           allowFailure: true,
         });
+        if (
+          kind === 'image' &&
+          existing.status === 1 &&
+          !existing.error &&
+          DAEMON_NOT_FOUND.test(existing.stderr ?? '')
+        )
+          continue;
+        status = 2;
         if (existing.status === 0 && !existing.error)
           emit(`channel-boot-check: cleanup failed; leftover ${kind} ${name}: ${error.message}`);
         else emit(`channel-boot-check: cleanup failed for ${kind} ${name}: ${error.message}`);

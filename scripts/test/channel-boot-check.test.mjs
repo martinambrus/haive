@@ -72,6 +72,7 @@ function fixture(t, config = {}) {
         : ok(config.pullDependencies ? '' : `sha256:${'4'.repeat(64)}`);
     }
     if (args[0] === 'pull') {
+      if (config.pullFailure) return { status: 1, stderr: 'pull refused' };
       created.images.push(args.at(-1));
       if (config.abortPull) {
         controller.abort();
@@ -80,6 +81,8 @@ function fixture(t, config = {}) {
       return ok();
     }
     if (args[0] === 'image' && args[1] === 'rm') {
+      if (config.pullFailure)
+        return { status: 1, stderr: 'Error response from daemon: No such image: ' + args.at(-1) };
       removed.images.push(args.at(-1));
       return ok();
     }
@@ -782,4 +785,12 @@ test('shared child runner preserves timeout, interruption and spawn errors', asy
   assert.equal(missing.error?.code, 'ENOENT');
   assert.equal(missing.stdout, '');
   assert.equal(missing.stderr, '');
+});
+
+test('a failed dependency pull with no image does not report a cleanup failure', async (t) => {
+  const f = fixture(t, { pullDependencies: true, pullFailure: true });
+  assert.equal(await f.check(), 2);
+  assert.match(f.logs.join('\n'), /pull.*failed.*pull refused/);
+  assert.doesNotMatch(f.logs.join('\n'), /cleanup failed|removed image/);
+  assert.ok(f.calls.some(({ args }) => args[0] === 'image' && args[1] === 'rm'));
 });
