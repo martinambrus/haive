@@ -379,7 +379,7 @@ status: open · kind: fix · found: T351 reviews 2026-11-05 · priority: P3
 
 ### T534 · FNF[updater-channel] · updater and api channel-upgrade follow-ups from T335 PR B (+7)
 
-status: open · kind: fix · found: T335 PR B reviews 2026-11-05 · priority: P3
+status: taken · owner: codex-sonnet@zathrus-wsl · since: 2026-11-06 · last: 2026-11-06 · kind: fix · found: T335 PR B reviews 2026-11-05 · priority: P3
 
 1. Partial pins (some `HAIVE_*_IMAGE` set, not all) on a channel install fail closed, but the refusal names a public tag-composed ref (packages/updater/src/cli.ts ~:293 checks only the all-empty case). Minor; refuse partial pins with the channel message.
 2. `docker cp` writes the whole `/release.json` to disk before the 1 MiB cap applies (packages/updater/src/docker.ts:306-309). PRE-EXISTING shape, minor; stream with `docker cp ... -` and cap the tar read.
