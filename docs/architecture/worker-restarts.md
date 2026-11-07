@@ -63,10 +63,19 @@ task for that long and then do nothing. It does hold a task parked or running on
 since it runs that step inside the job (below). A `settle-stopped-task` job owes no step either
 (`taskQueueOwed` skips it): it only releases what a failed task holds.
 
+**A step whose CLI provider is switched off is held.** A fresh step that dispatches a CLI or is
+provider-sensitive is held (`providerHoldFor`, `task-queue.ts`) while the provider its task, step or
+saved choice names is listed but disabled. Precedence is pause, then module schema, then provider.
+The hold is evaluated only for fresh entries, never for a continuation, so a disable mid-step fails
+with the dispatcher's named skip and Retry works once the provider is enabled. START takes the same
+check and queues the advance; a held first step leaves a `pending` row without the park stamp, which
+the stalled sweep treats like a missing row and re-drives. Only the `default` role is checked here;
+role and seat picks rely on the dispatcher rule.
+
 **A park whose poll chain was lost is re-driven.** A parked row (`pending` with
-`waiting_started_at`: a runtime slot, a pause, module schema setup or a required integration) is
+`waiting_started_at`: a runtime slot, a pause, module schema setup, a required integration or a disabled explicit CLI provider) is
 driven by a chain of delayed advances, each queueing the next and rewriting the row's `updated_at`
-(15 s, 30 s, 5 s; integration waits use 30 s). A
+(15 s, 30 s, 5 s; integration and provider waits use 30 s). A
 chain whose job was lost (Redis restored without it, a queue cleaned by hand) leaves the row parked
 with a stale stamp, and the sweep takes it once the ROW's stamp is older than the cutoff. The task's
 stamp cannot tell a dead chain from a live one, since a tick that finds the pointer right never
