@@ -323,6 +323,9 @@ describe.skipIf(!url)('a fresh step on a disabled explicit CLI provider, on Post
     await tick(SENSITIVE, { formValues: { answer: 'now' } });
     const [row] = await rows();
     expect(row!.waitingStartedAt).toBeNull();
+    expect(phases.detect).toHaveBeenCalledTimes(1);
+    expect(phases.apply).toHaveBeenCalledTimes(1);
+    expect(row!.status).toBe('done');
     await expectNotHeld();
   });
 
