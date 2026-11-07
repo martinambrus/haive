@@ -7,7 +7,6 @@ import {
   type DbTx,
 } from '@haive/database';
 import {
-  logger,
   TASK_JOB_NAMES,
   type RepoRagCleanupPayload,
   type RepoResourceCleanupPayload,
@@ -17,6 +16,7 @@ import {
 import { repoRagIdentityFromMirror } from '@haive/shared/global-kb';
 import type { getDb } from '../db.js';
 import { getTaskQueue } from '../queues.js';
+import { addBestEffort, boundedAdd } from './queue-bounded.js';
 
 type Db = ReturnType<typeof getDb>;
 /** Accepts either the top-level db handle or the `tx` param drizzle yields
@@ -119,19 +119,19 @@ export async function cancelTaskRow(
 /** Enqueue the worker-side cancel job that tears down sandboxes, terminal
  *  sessions, env images, and auth volumes for the cancelled task. Must be
  *  called AFTER the row update has committed. Idempotent on the worker side.
- *  Never throws: the cancel already stands, and the worker's stalled sweep queues a lost teardown. */
+ *  Never throws and waits a bounded time: the cancel already stands, and the worker's stalled
+ *  sweep queues a lost teardown. */
 export async function enqueueCancelJob(taskId: string, userId: string): Promise<void> {
-  try {
-    await getTaskQueue().add(TASK_JOB_NAMES.CANCEL, { taskId, userId } as TaskJobPayload, {
-      removeOnComplete: 50,
-      removeOnFail: 50,
-    });
-  } catch (err) {
-    logger.warn({ err, taskId }, 'cancel teardown not queued; the stalled sweep will queue it');
-  }
+  await addBestEffort(
+    () =>
+      getTaskQueue().add(TASK_JOB_NAMES.CANCEL, { taskId, userId } as TaskJobPayload, {
+        removeOnComplete: 50,
+        removeOnFail: 50,
+      }),
+    'cancel teardown not queued; the stalled sweep will queue it',
+    { taskId },
+  );
 }
-
-const STOP_SETTLE_QUEUE_WAIT_MS = 2_000;
 
 /** Queues the worker-side settlement of a task an api Stop failed with no pass running. Call it
  *  after the Stop committed and its kill ran. Never throws; the wait is bounded because `add`
@@ -142,34 +142,21 @@ export async function enqueueStopSettle(
   failedAt: string | null,
 ): Promise<void> {
   if (failedAt === null) return;
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    const pending = getTaskQueue().add(
-      TASK_JOB_NAMES.SETTLE_STOPPED,
-      { taskId, userId, failedAt } satisfies StopSettlePayload,
-      {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 5_000 },
-        removeOnComplete: 50,
-        removeOnFail: 50,
-      },
-    );
-    pending.catch(() => undefined);
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new Error('redis did not answer in time')),
-        STOP_SETTLE_QUEUE_WAIT_MS,
-      );
-    });
-    await Promise.race([pending, timeout]);
-  } catch (err) {
-    logger.warn(
-      { err, taskId },
-      'stop settlement not queued; it waits for a Retry, a Cancel or the next worker start',
-    );
-  } finally {
-    clearTimeout(timer);
-  }
+  await addBestEffort(
+    () =>
+      getTaskQueue().add(
+        TASK_JOB_NAMES.SETTLE_STOPPED,
+        { taskId, userId, failedAt } satisfies StopSettlePayload,
+        {
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 5_000 },
+          removeOnComplete: 50,
+          removeOnFail: 50,
+        },
+      ),
+    'stop settlement not queued; it waits for a Retry, a Cancel or the next worker start',
+    { taskId },
+  );
 }
 
 /** Find every non-terminal task pinned to the given repository for the given
@@ -328,13 +315,15 @@ export async function collectInternalRagProjectNamesForRepo(
  *  re-decides) and `55006 object_in_use` is genuinely transient. */
 export async function enqueueRepoRagCleanupJob(payload: RepoRagCleanupPayload): Promise<void> {
   if (payload.projectNames.length === 0) return;
-  await getTaskQueue().add(TASK_JOB_NAMES.CLEANUP_REPO_RAG, payload, {
-    ...(payload.cleanupId ? { jobId: `repo-cleanup-${payload.cleanupId}-0` } : {}),
-    removeOnComplete: 50,
-    removeOnFail: 50,
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 2000 },
-  });
+  await boundedAdd(() =>
+    getTaskQueue().add(TASK_JOB_NAMES.CLEANUP_REPO_RAG, payload, {
+      ...(payload.cleanupId ? { jobId: `repo-cleanup-${payload.cleanupId}-0` } : {}),
+      removeOnComplete: 50,
+      removeOnFail: 50,
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 2000 },
+    }),
+  );
 }
 
 /** Enqueue the worker-side job that tears down the Docker resources + on-disk
@@ -343,9 +332,11 @@ export async function enqueueRepoRagCleanupJob(payload: RepoRagCleanupPayload): 
 export async function enqueueRepoResourceCleanupJob(
   payload: RepoResourceCleanupPayload,
 ): Promise<void> {
-  await getTaskQueue().add(TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES, payload, {
-    ...(payload.cleanupId ? { jobId: `repo-cleanup-${payload.cleanupId}-0` } : {}),
-    removeOnComplete: 50,
-    removeOnFail: 50,
-  });
+  await boundedAdd(() =>
+    getTaskQueue().add(TASK_JOB_NAMES.CLEANUP_REPO_RESOURCES, payload, {
+      ...(payload.cleanupId ? { jobId: `repo-cleanup-${payload.cleanupId}-0` } : {}),
+      removeOnComplete: 50,
+      removeOnFail: 50,
+    }),
+  );
 }
