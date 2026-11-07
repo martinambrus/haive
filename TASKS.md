@@ -609,7 +609,7 @@ From the T393 build (2026-11-07):
 
 ### T346 · FNF[custom-tool-start-hint] · a broken or switched-off custom tool fails only at its step (+5)
 
-status: open · kind: feature · user decision: resolved 2026-11-01 · priority: P2
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-11-07T15:17Z · last: 2026-11-07T15:17Z
 
 1. A task runs every earlier step and fails only at the prompt step whose custom tool is invalid or switched off. Fix direction: a start-time pass records a task event (custom_tool.unusable) and never blocks. Whether it should block instead needs the user.
 2. CUSTOM_MCP_TOOLS_ENABLED is read at three sites (worker step-runner.ts ~:571, cli-exec/resolvers.ts ~:260, api custom-mcp.ts ~:240). Use one shared reader.
