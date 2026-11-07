@@ -28,6 +28,10 @@ vi.mock('@haive/shared', async (importOriginal) => {
     },
   };
 });
+vi.mock('@haive/shared/egress', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@haive/shared/egress')>()),
+  guardedFetch: vi.fn((...args: Parameters<typeof fetch>) => globalThis.fetch(...args)),
+}));
 vi.mock('../src/lib/integration-call-limits.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   INTEGRATION_CALL_DEADLINE_MS: h.deadlineMs,
@@ -41,6 +45,7 @@ import {
   logger,
   secretsService,
 } from '@haive/shared';
+import { guardedFetch } from '@haive/shared/egress';
 import { getConnectionCredential } from '@haive/shared/integrations';
 import { signTaskToken, type TaskTokenClaims } from '@haive/shared/task-token';
 import { createApiApp } from '../src/index.js';
@@ -575,6 +580,7 @@ describe.skipIf(!url)('the integration broker routes, on Postgres', () => {
     vi.stubEnv('CONFIG_ENCRYPTION_KEY', SECRET);
     vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue(KEK);
     vi.stubGlobal('fetch', vendorFetch);
+    vi.mocked(guardedFetch).mockClear();
     vendor.calls = [];
     vendor.respond = defaultReply;
     vendor.pending = [];
@@ -1532,6 +1538,10 @@ describe.skipIf(!url)('the integration broker routes, on Postgres', () => {
         served(await call(w, GET, { prNumber: '42' }));
 
         expect(vendor.calls).toHaveLength(1);
+        expect(guardedFetch).toHaveBeenCalledWith(
+          `${API}/repos/acme/widgets/pulls/42`,
+          expect.objectContaining({ method: 'GET', redirect: 'manual' }),
+        );
         expect(vendor.calls[0]).toMatchObject({
           method: 'GET',
           url: `${API}/repos/acme/widgets/pulls/42`,

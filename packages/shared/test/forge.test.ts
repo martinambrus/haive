@@ -14,6 +14,7 @@ import { GitlabForgeProvider } from '../src/forge/gitlab.js';
 import {
   ForgeAuthError,
   ForgeConflictError,
+  ForgeError,
   type ForgeContext,
   type ForgeProvider,
   type ForgeProviderName,
@@ -472,24 +473,83 @@ describe('a forge credential reaches only the origin it was sent to', () => {
       await readPullRequest(make, provider, forge.origin);
 
       expect(carrying(forge.seen[0]!.headers)).not.toEqual([]);
-      expect(other.seen.flatMap((request) => carrying(request.headers))).toEqual([]);
+      expect(other.seen).toEqual([]);
     },
     10_000,
   );
 
   it.each(ADAPTERS)(
-    '%s keeps its credential across a redirect within the forge',
+    '%s does not follow a redirect within the forge',
     async (provider, make) => {
       const forge = await listen((url, res) =>
-        url.startsWith('/first') ? redirectTo('/second')(url, res) : answerOpen(url, res),
+        url.startsWith('/first') ? redirectTo('/second-target')(url, res) : answerOpen(url, res),
       );
 
-      await readPullRequest(make, provider, `${forge.origin}/first`);
+      const outcome = await make()
+        .getPullRequestState(ctx({ provider, apiBase: `${forge.origin}/first`, token: TOKEN }), '1')
+        .catch((err: unknown) => err);
 
-      expect(forge.seen.map((request) => request.url.split('/')[1])).toEqual(['first', 'second']);
-      expect(carrying(forge.seen[0]!.headers)).not.toEqual([]);
-      expect(carrying(forge.seen[1]!.headers)).toEqual(carrying(forge.seen[0]!.headers));
+      expect(forge.seen.map((request) => request.url.split('/')[1])).toEqual(['first']);
+      expect(outcome).toBeInstanceOf(ForgeError);
+      expect((outcome as ForgeError).status).toBe(302);
+      expect((outcome as ForgeError).message).toContain('HTTP 302');
+      expect((outcome as ForgeError).message).toContain('redirect');
+      expect((outcome as ForgeError).message).not.toContain('second-target');
     },
     10_000,
   );
+
+  it.each([301, 302, 303, 307, 308])(
+    'answers a %s to a poll and to an open-PR POST with a ForgeError, sending each once',
+    async (status) => {
+      const forge = await listen((_url, res) => {
+        res.writeHead(status, { location: '/moved' });
+        res.end();
+      });
+      const provider = new GiteaForgeProvider(5_000);
+      const base = ctx({ provider: 'gitea', apiBase: forge.origin, token: TOKEN });
+
+      const poll = await provider.getPullRequestState(base, '1').catch((err: unknown) => err);
+      const open = await provider.openPullRequest(base, OPEN_INPUT).catch((err: unknown) => err);
+
+      for (const outcome of [poll, open]) {
+        expect(outcome).toBeInstanceOf(ForgeError);
+        expect((outcome as ForgeError).status).toBe(status);
+        expect((outcome as ForgeError).message).toContain(`HTTP ${status}`);
+      }
+      expect(forge.seen.map((request) => request.url.includes('/moved'))).toEqual([false, false]);
+      expect(forge.seen).toHaveLength(2);
+    },
+    10_000,
+  );
+
+  it('sends through ctx.fetchFn when it is set, with redirects left to the caller', async () => {
+    const global = vi.fn();
+    vi.stubGlobal('fetch', global);
+    const fetchFn = vi.fn(async (_url: string, _init?: RequestInit) =>
+      jsonResponse({ state: 'open' }),
+    );
+
+    await new GiteaForgeProvider(5_000).getPullRequestState(
+      ctx({ provider: 'gitea', apiBase: 'https://git.example/api/v1', fetchFn }),
+      '1',
+    );
+
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(fetchFn.mock.calls[0]![1]).toMatchObject({ redirect: 'manual' });
+    expect(global).not.toHaveBeenCalled();
+  });
+
+  it('looks the global fetch up at call time when ctx.fetchFn is not set', async () => {
+    const provider = new GiteaForgeProvider(5_000);
+    const global = vi.fn(async () => jsonResponse({ state: 'open' }));
+    vi.stubGlobal('fetch', global);
+
+    await provider.getPullRequestState(
+      ctx({ provider: 'gitea', apiBase: 'https://git.example/api/v1' }),
+      '1',
+    );
+
+    expect(global).toHaveBeenCalledTimes(1);
+  });
 });

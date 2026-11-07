@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { encrypt, encryptDek, generateDek, secretsService } from '@haive/shared';
+import { guardedFetch } from '@haive/shared/egress';
 import { ForgeError } from '@haive/shared/forge';
 import { resolveForgeContext } from '../src/forge/resolve-forge-context.js';
 
@@ -107,6 +108,7 @@ describe('resolveForgeContext', () => {
       repo: 'app',
       token: 'tok',
       username: 'u',
+      fetchFn: guardedFetch,
     });
   });
 
