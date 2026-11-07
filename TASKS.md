@@ -444,6 +444,24 @@ PRE-EXISTING, from the T355 build. Use `boundedAdd`/`addBestEffort`/`addOrRefuse
 status: open · kind: fix · priority: P4
 From the T355 build, cosmetic. The web client renders the 503 as a generic failure; name it as a temporary outage with a retry hint. Nits for the same pass: `readTolerant` duplicated in worker 08c ~:129 and 08d ~:140; dead `runtimeOccupancyMb` at runtime-admission.ts ~:438 (mention only, pre-existing).
 
+### T552 · disabled provider in task terminal shells (design)
+
+status: open · kind: design · priority: P3
+PRE-EXISTING, from T406 item 2. The shell sockets check ownership only, never `enabled` (api terminal-shell.ts ~:495-531; worker terminal-container.ts ~:173-196), while web deliberately keeps a disabled task-bound CLI in its terminal (web page-cli-fallback.test.tsx ~:353, tasks/[id]/page.tsx ~:2677). Decide whether a disabled provider may still open a task terminal; then enforce it server-side or document the web-only rule.
+
+### T553 · FNF[disabled-task-cli-2] · leftovers after the disabled-provider hold
+
+status: open · kind: fix · priority: P3
+From the T406/T408 build (2026-11-07).
+
+1. Disabling a provider gives no warning that it now holds tasks and steps pinned to it (api cli-providers.ts PATCH ~:441-512). Introduced by the hold's semantics.
+2. A provider-hold park shows the "runtime slot" list badge: `deriveSlotWait` (shared step-engine/slot-wait.ts ~:97) has no structural column for a provider wait. Cosmetic, introduced.
+3. The hold copy names only enabling the provider, not switching the step's CLI (worker orchestrator/provider-hold.ts).
+4. A step held on a disabled provider shows "usage not connected": the usage poll covers enabled providers only (worker usage-poll-queue.ts ~:424). PRE-EXISTING, widened.
+5. The recap filters `summaryCliProviderId` to enabled only and falls to the step CLI; a recap whose resolved CLI is a disabled explicit pick is skipped silently (worker step-runner.ts ~:3999-4000). PRE-EXISTING.
+6. The module-schema-wins precedence of the hold is untested.
+7. Nits: `step-context-usage.ts` ~:51 throws "invs is not iterable" under mock-DB unit runs (harmless); stale "web package has no vitest config" header in web lib/step-cli-providers.ts ~:20; `providerLabel` in provider-hold.ts shares a name with sandbox/mcp-surface.ts ~:389.
+
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
 status: open · kind: design · user decision: resolved 2026-11-05 · found: T337 run 2 · priority: P3
@@ -734,24 +752,6 @@ The LiteLLM max_input_tokens value is fetched and dropped (shared model-pricing.
 status: parked · was modular #287 · reason: diminishing returns (2026-11-01 scan): Suspected image-failure misrouting remains unmeasured and explicitly requires a real failure; resume when resume when an image failure demonstrably enters the implementation loop · priority: P4
 isDdevAgentFixableFailure (ddev-build-guard.ts ~:467) matches "failed to solve". 08 (~:954) and 08b (~:755) are fixLoopOnError; build errors are thrown at images.ts ~:122, :140 and composed-image-cache.ts ~:130.
 Fix: classify by error type. Measure a real failure first.
-
-### T406 · FNF[disabled-task-cli] · a disabled own CLI is handled three ways (+2)
-
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-step-command.ts ~:62-64 and 01b read it; dispatch drops it (dispatcher.ts ~:583, ~:646-655); the strip shows it (api tasks/_helpers.ts ~:385).
-Recommendation: fall back to the default at run time, plus T391's create refusal.
-
-1. (T391 review) PRE-EXISTING, minor: the effort dropdown stays enabled for a step whose effective CLI is the task's own disabled provider and sends that id (web cli-picker-grid.tsx ~:100-139, ~:193; tasks/[id]/page.tsx ~:1452), so an effort change is refused (409 before T391, 400 after) until the CLI is switched.
-2. (T391 review) PRE-EXISTING, informational: the shell sockets check ownership only, never `enabled` (api terminal-shell.ts ~:513-531, ~:553-586; worker terminal-container.ts ~:181-186), so "disabled providers are not offered in terminals" is enforced by the web alone.
-
-User decision 2026-11-01: Pause explicitly selected unavailable providers; re-detect affected steps before adopting a changed implicit default.
-
-### T408 · FNF[default-change-provider-sensitive] · disabling/deleting the oldest provider moves the default CLI but parked provider-sensitive steps keep old detect output
-
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-PROVIDER_SENSITIVE_STEP_IDS reset only from PATCH /tasks/:id/cli-provider. Decide: re-detect on resume, or freeze the default per task.
-
-User decision 2026-11-01: Pause explicitly selected unavailable providers; re-detect affected steps before adopting a changed implicit default.
 
 ### T409 · FNF[pause-attribution] · whose pause stands is derived from the task_events log (+2)
 
@@ -1413,6 +1413,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T406 + T408 — a listed-but-disabled explicit CLI provider (task, step or saved choice) holds a fresh CLI-consuming or provider-sensitive step (30 s poll; START too) and the dispatcher refuses it with a named skip instead of the next-oldest CLI; `task_steps.detect_cli_provider_id` (migration 0223) re-detects a parked provider-sensitive step when the implicit default moved; api and web keep a disabled pick listed and disable its effort dropdown; docs cli-adapters.md, worker-restarts.md, step-summaries.md — PR #1028 (e241910fa), 2026-11-07. CI green; merged without bot review. T406 item 2 moved to T552; follow-ups T553.
 - T355 — ConfigService Redis calls bounded (own connection, 2 s commandTimeout, no offline queue) and reject with `ConfigUnavailableError`; the api answers 503 `config_unavailable`; 17 request-path `Queue.add` sites bounded (`api/src/lib/queue-bounded.ts`); worker and updater readers hold or fail rather than guess (pause and caps read as held, runtime not admitted, maintenance tri-state, 08c/08d settings read in detect, updater leaves a hold it never recorded); docs error-diagnostics.md, release.md, worker-restarts.md — PR #1027 (13f92a753), 2026-11-07. CI green; merged without bot review. Follow-ups: T318 (+2), T540 (+1), T544-T551.
 - T393 — an api Stop (owner, admin, urgent module deactivation) queues one `settle-stopped-task` job after its commit and kill (`enqueueStopSettle`, 2 s bound, never throws); the worker settles only while the task still reads failed at the Stop's `failedAt`; the job never fails the task and holds no stalled redrive; docs worker-restarts.md — PR #1026 (eb925108b), 2026-11-07. CI green; merged without bot review. Follow-ups: T345 items 12-13, T355 (+1), T540-T543.
 - T392 — an implicit dispatch candidate whose adapter throws `ProviderBuildError` is logged and skipped for the next one; an explicitly selected provider rethrows; no candidate building throws the first error; docs cli-adapters.md — PR #1025 (e2e8ffd42), 2026-11-06. CI green; merged without bot review. Sonnet driver (one build round, red control confirmed on unchanged code, full worker suite green). Follow-ups filed under the same id. Evidence .claude/tmp/sonnet-run/T392/.
