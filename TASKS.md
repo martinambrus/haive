@@ -508,7 +508,7 @@ Each needs a per-dial decision (guard, admin-trust, or remove).
 status: open · kind: design · found: T347 run · priority: P2
 `putConfig` (api routes/global-kb.ts:449) lets any signed-in user save the Ollama URL and embed model, and the upgrade seed trusts what is stored. The egress guard now refuses private targets unless listed, but the value still steers every user's embeds. Decide: admin-only write, or keep open. PRE-EXISTING.
 
-### T559 · FNF[gated-test-hygiene] · gated test addresses and the gated-list check in driver gates
+### T559 · FNF[gated-test-hygiene] · gated test addresses and the gated-list check in driver gates (+1)
 
 status: open · kind: fix · found: T347 run · priority: P3
 
@@ -516,6 +516,7 @@ status: open · kind: fix · found: T347 run · priority: P3
 2. `scripts/test/ci-gated-list.test.mjs` is the only definition of "gated"; add `pnpm test:scripts` to the review and feature gates whenever a test file or ci.yml changes (it caught a `pathname !==` guard the list did not recognise). Process.
 3. The backwards-clock throttle control in shared test/probe-egress-log.test.ts passes on unchanged source (a guard, not a red-able test). NEW-LIMIT (hygiene).
 4. AGENTS.md is 32767 of 32768 bytes and its topic index lacks api-auth.md; needs an equal cut to add it. PRE-EXISTING (docs, session).
+5. worker test/upgrade-cli-addition-db.test.ts fails 7/28 against a scratch database; not in the CI gated list, so CI never runs it. PRE-EXISTING.
 
 ### T560 · FNF[postgresjs-closed-rejections] · patched postgres.js leaves unattributed CONNECTION_CLOSED rejections (third-party, needs approval)
 
@@ -523,6 +524,26 @@ status: open · kind: third-party · needs approval · found: T347 run · priori
 
 1. The patched postgres.js 3.4.9 (`patches/postgres@3.4.9.patch`) still emits unattributed unhandled `CONNECTION_CLOSED` rejections. Extend the patch or report upstream. PRE-EXISTING.
 2. worker package.json has no `postgres` dependency (the guarded DSN host goes through shared `dsnDialHost`); adding it changes the lockfile and needs `pnpm docker rebuild`. PRE-EXISTING.
+
+### T561 · FNF[npm-cache-hardening] · shared npm cache base: pruning, retries, races, warm input
+
+status: open · kind: fix · found: T354 run · priority: P3
+
+1. Seed warning says "empty private cache" but a partial copy is not empty (worker sandbox/npm-cache.ts:51). NEW-LIMIT (wording).
+2. The read-only base is never pruned; seed time grows with it (0.36 s at 47 MB). PRE-EXISTING.
+3. A failed align or wipe retries only at the next worker boot (npm-cache.ts:87-125). PRE-EXISTING.
+4. Two workers booting together could race the one-time wipe; a seed can race a concurrent warm. PRE-EXISTING (latent).
+5. `warmNpmPackage` accepts any spec (npm-cache.ts:184-214); warm runs without `--prefer-offline` (mcp-config.ts:257). PRE-EXISTING.
+6. `purgeNpxTrees` leaves corrupt `_cacache` blobs (npm-cache.ts:149-172). PRE-EXISTING.
+7. Other npx/npm users not reviewed for the same shared-cache rule: 08b-test-management, 06a-db-migrate, _test-env-guard, ddev-playwright, resolvers, codex-app-server-probe.ts:322, 01b-install-plugins.ts:286, cli-versions/codegen.ts. Audit.
+
+### T562 · FNF[tooling-version-pins] · stored tooling version pins are not revalidated at their sinks
+
+status: open · kind: fix · found: T354 run · priority: P3
+
+1. Stored `chrome_devtools_mcp_version` rows written before the PATCH validation reach `npx` and Dockerfile `RUN` sinks unchecked: exec-core.ts:543, mcp-config.ts:295, env-replicate/01-declare-deps.ts:847, 02-generate-dockerfile.ts:800-801. Fix: call `normalizeChromeDevtoolsMcpVersion` at each sink (or one reader). PRE-EXISTING.
+2. Upgrade-apply writes the feed's `latest` unchecked (tooling-upgrades.ts:127). PRE-EXISTING.
+3. `rtk-version` validation is loose (settings.ts:236, tooling-upgrades.ts:843). PRE-EXISTING.
 
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
@@ -608,18 +629,6 @@ Fix direction: publish the per-module runtime state (schema pending/failed/ready
 1. (minor) api modules/activation.ts:8 imports appendTaskEvent from ../routes/tasks/_helpers.js (module→route layering).
 
 User decision 2026-11-01: Show configured-active but runtime/schema-unready modules as failed/unready with an explicit Retry action
-
-### T354 · FNF[npm-cache-shared] · the shared npm cache volume is mounted read-write into every agent sandbox
-
-status: open · kind: security · user decision: resolved 2026-11-01 · priority: P2
-PRE-EXISTING. haive_npm_cache (worker sandbox/npm-cache.ts:32-34, mounted at cli-exec/exec-core.ts:1575) is read-write in every sandbox. This is deliberate for speed: a cold install takes 146 s, a warm one 4 s.
-Options:
-
-- a per-user cache;
-- a read-only shared cache with a per-task overlay.
-  Measure first whether npm trusts a planted index entry.
-
-User decision 2026-11-01: Use a read-only shared npm cache base with a private writable overlay per task.
 
 ### T358 · J6e · provider-pinned requirements (pin table, grants.provider_id, resolver tiers, drop the dispatch refusal)
 
@@ -1452,6 +1461,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T354 — the shared npm cache volume is mounted read-only in every sandbox (`npmCacheMount()`), and each invocation seeds a private writable copy under `/tmp` that dies with its `--rm` container; only the worker's warm, purge and align containers write the volume; the first align after upgrade empties a volume written while read-write (`.haive-cache-ro-migrated`); chrome-devtools-mcp version pin accepts only a plain npm version or dist-tag (tooling PATCH 400); docs sandbox.md, onboarding-upgrades.md — PR #1030 (0d5190e56), 2026-11-07. CI green; merged without bot review. Behaviour change: agent-fetched npm content no longer persists between runs. Follow-ups T561-T562, T559 (+1).
 - T347 + T399 — stored targets (Global KB Ollama URL, repository RAG stores and embedder URLs, forge hosts) and non-admin probes dial through one egress guard in `@haive/shared/egress`; admin private-endpoint allowlist (`config:security:privateEndpointAllowlist`, audited GET/PUT and data-tab card; hostname entries never lift link-local or unspecified addresses; read lazily); built-ins are the in-stack Ollama names and exactly `http://host.docker.internal:11434`; forge requests never follow redirects (a renamed repository's 301 is now a `ForgeError`); Ollama pull relay bounded; one-time idempotent upgrade seed lists the private hosts an install already stores; docs api-auth.md, integrations.md, global-kb.md, rag-embedding-failures.md, error-diagnostics.md, task-types.md — PR #1029 (02af88738), 2026-11-07. CI green; merged without bot review. Follow-ups T554-T560.
 - T406 + T408 — a listed-but-disabled explicit CLI provider (task, step or saved choice) holds a fresh CLI-consuming or provider-sensitive step (30 s poll; START too) and the dispatcher refuses it with a named skip instead of the next-oldest CLI; `task_steps.detect_cli_provider_id` (migration 0223) re-detects a parked provider-sensitive step when the implicit default moved; api and web keep a disabled pick listed and disable its effort dropdown; docs cli-adapters.md, worker-restarts.md, step-summaries.md — PR #1028 (e241910fa), 2026-11-07. CI green; merged without bot review. T406 item 2 moved to T552; follow-ups T553.
 - T355 — ConfigService Redis calls bounded (own connection, 2 s commandTimeout, no offline queue) and reject with `ConfigUnavailableError`; the api answers 503 `config_unavailable`; 17 request-path `Queue.add` sites bounded (`api/src/lib/queue-bounded.ts`); worker and updater readers hold or fail rather than guess (pause and caps read as held, runtime not admitted, maintenance tri-state, 08c/08d settings read in detect, updater leaves a hold it never recorded); docs error-diagnostics.md, release.md, worker-restarts.md — PR #1027 (13f92a753), 2026-11-07. CI green; merged without bot review. Follow-ups: T318 (+2), T540 (+1), T544-T551.
