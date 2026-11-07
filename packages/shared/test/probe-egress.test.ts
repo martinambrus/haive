@@ -46,11 +46,12 @@ beforeAll(async () => {
         res.end(Buffer.concat(chunks));
       });
     } else if (req.url === '/gzip' || req.url === '/deflate' || req.url === '/br') {
-      const encode = {
-        '/gzip': zlib.gzipSync,
-        '/deflate': zlib.deflateSync,
-        '/br': zlib.brotliCompressSync,
-      }[req.url];
+      const encode =
+        req.url === '/gzip'
+          ? zlib.gzipSync
+          : req.url === '/deflate'
+            ? zlib.deflateSync
+            : zlib.brotliCompressSync;
       const body = encode(Buffer.from('decoded body'));
       res.writeHead(200, {
         'content-encoding': req.url.slice(1),
