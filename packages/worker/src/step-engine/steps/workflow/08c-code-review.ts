@@ -60,7 +60,7 @@ import {
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { PROMPT_DEFECT_INSTRUCTION } from './_prompt-defect.js';
 import { isStepGuidanceEnabled } from '../../guidance-context.js';
-import { CONFIG_KEYS, configService } from '@haive/shared';
+import { CONFIG_KEYS, configService, rethrowIfConfigUnavailable } from '@haive/shared';
 import { resolveSpecView } from './_spec-artifact.js';
 import {
   coerceReviewSeverity,
@@ -116,6 +116,23 @@ interface CodeReviewDetect {
    *  back to the repository policy. Carried as ids for the same reason 07b does:
    *  a replayed detect_output survives a catalog change. */
   reviewDimensionIds: string[];
+  /** Refuters per finding, resolved in detect() so an unreadable config store fails the
+   *  step before the review wave is paid for. Absent on a detect stored earlier: apply
+   *  then reads the live value. */
+  refuteLensCount?: number;
+  /** Whether the refutation pass runs; resolved and absent exactly like `refuteLensCount`. */
+  refuteEnabled?: boolean;
+}
+
+/** One config read for detect(): an outage propagates, any other failure leaves the value
+ *  unset so apply() reads it live as it always did. */
+async function readTolerant<T>(read: () => Promise<T>): Promise<T | undefined> {
+  try {
+    return await read();
+  } catch (err) {
+    rethrowIfConfigUnavailable(err);
+    return undefined;
+  }
 }
 
 interface PeerFinding {
@@ -1208,6 +1225,12 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       reviewDimensionIds: (await resolveTaskReviewDimensions(ctx.db, ctx.taskId)).enabled.map(
         (d) => d.id,
       ),
+      refuteLensCount: await readTolerant(() =>
+        configService.getNumber(CONFIG_KEYS.REVIEW_REFUTE_LENSES, REFUTE_LENSES.length),
+      ),
+      refuteEnabled: await readTolerant(() =>
+        configService.getBoolean(CONFIG_KEYS.REVIEW_REFUTE_ENABLED, true),
+      ),
     };
   },
 
@@ -1433,14 +1456,14 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
     // and there is no claim to disprove.
     const waveRan = results.some((r) => r.agentId.startsWith(REFUTER_PREFIX));
     let refutedCount = 0;
-    // How many angles each finding is attacked from. Read on BOTH passes — the one that
-    // dispatches the wave and the one that reads it back — so the ids cannot disagree. An
-    // admin who changes it mid-review just leaves the panel short a voter, which fails
-    // closed. Read lazily, inside the refutation branches, so a review with nothing
+    // How many angles each finding is attacked from. Both passes use the value detect()
+    // resolved, so the ids cannot disagree. A detect stored before it was carried falls back
+    // to the live read, lazily inside the refutation branches, so a review with nothing
     // blocking touches the config service no more than it did before.
     if (waveRan) {
       const refuteLenses = refuteLensesFor(
-        await configService.getNumber(CONFIG_KEYS.REVIEW_REFUTE_LENSES, REFUTE_LENSES.length),
+        d.refuteLensCount ??
+          (await configService.getNumber(CONFIG_KEYS.REVIEW_REFUTE_LENSES, REFUTE_LENSES.length)),
       );
       refutedCount = applyRefutations(
         results,
@@ -1459,10 +1482,12 @@ export const codeReviewStep: StepDefinition<CodeReviewDetect, CodeReviewApply> =
       const refutable = collectRefutable(peerOut, securityOut, extraLenses, given);
       if (
         refutable.length > 0 &&
-        (await configService.getBoolean(CONFIG_KEYS.REVIEW_REFUTE_ENABLED, true))
+        (d.refuteEnabled ??
+          (await configService.getBoolean(CONFIG_KEYS.REVIEW_REFUTE_ENABLED, true)))
       ) {
         const refuteLenses = refuteLensesFor(
-          await configService.getNumber(CONFIG_KEYS.REVIEW_REFUTE_LENSES, REFUTE_LENSES.length),
+          d.refuteLensCount ??
+            (await configService.getNumber(CONFIG_KEYS.REVIEW_REFUTE_LENSES, REFUTE_LENSES.length)),
         );
         // Worst first (severityRank: lower is more severe), so a capped wave spends its
         // invocations on the findings that hurt most if they are wrong.

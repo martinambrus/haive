@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { CONFIG_KEYS, configService } from '@haive/shared';
+import { CONFIG_KEYS, configService, rethrowIfConfigUnavailable } from '@haive/shared';
 import { MiningRetryError, MiningWaveError } from '../../step-definition.js';
 import type {
   StepContext,
@@ -127,6 +127,23 @@ interface AdversarialDetect {
    *  INSTRUCTION defect behind what it found. Resolved in detect() and carried on the
    *  payload because the prompt builder is pure. */
   promptDefectCapture: boolean;
+  /** Verifiers per root cause, resolved in detect() so an unreadable config store fails the
+   *  step before the adversary wave is paid for. Absent on a detect stored earlier: apply
+   *  then reads the live value. */
+  verifyLensCount?: number;
+  /** Whether the verification pass runs; resolved and absent exactly like `verifyLensCount`. */
+  verifyEnabled?: boolean;
+}
+
+/** One config read for detect(): an outage propagates, any other failure leaves the value
+ *  unset so apply() reads it live as it always did. */
+async function readTolerant<T>(read: () => Promise<T>): Promise<T | undefined> {
+  try {
+    return await read();
+  } catch (err) {
+    rethrowIfConfigUnavailable(err);
+    return undefined;
+  }
 }
 
 interface AdversarialFinding {
@@ -968,6 +985,12 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
       appLogin,
       debtBlock,
       promptDefectCapture: await isStepGuidanceEnabled(ctx.db, ctx.taskId),
+      verifyLensCount: await readTolerant(() =>
+        configService.getNumber(CONFIG_KEYS.QA_VERIFY_LENSES, VERIFY_LENSES.length),
+      ),
+      verifyEnabled: await readTolerant(() =>
+        configService.getBoolean(CONFIG_KEYS.QA_VERIFY_ENABLED, true),
+      ),
     };
   },
 
@@ -1107,11 +1130,11 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
       reach.mode === 'none' && isRuntimeOnlyFinding(f);
 
     if (waveRan) {
-      // Lens count is read on BOTH passes — the one that dispatches and the one that reads
-      // back — so the agent ids cannot disagree. An admin who changes it mid-step leaves the
-      // panel short a voter, which fails closed (a missing verdict keeps the finding).
+      // Both passes use the lens count detect() resolved, so the agent ids cannot disagree.
+      // A detect stored before it was carried falls back to the live read.
       const lenses = verifyLensesFor(
-        await configService.getNumber(CONFIG_KEYS.QA_VERIFY_LENSES, VERIFY_LENSES.length),
+        detected.verifyLensCount ??
+          (await configService.getNumber(CONFIG_KEYS.QA_VERIFY_LENSES, VERIFY_LENSES.length)),
       );
       // Read back through the SAME tier split that dispatched, so each finding is scored
       // against the panel it actually got: the blocking tier against the full lens set, the
@@ -1183,9 +1206,13 @@ export const adversarialQaStep: StepDefinition<AdversarialDetect, AdversarialApp
       // on the lens count, so a round with nothing to verify — every finding non-blocking and
       // PoC-less, which is what a roster that produced only qa-gap entries looks like — should
       // not touch config at all. It also keeps the common no-op path free of an await.
-      if (await configService.getBoolean(CONFIG_KEYS.QA_VERIFY_ENABLED, true)) {
+      if (
+        detected.verifyEnabled ??
+        (await configService.getBoolean(CONFIG_KEYS.QA_VERIFY_ENABLED, true))
+      ) {
         const lenses = verifyLensesFor(
-          await configService.getNumber(CONFIG_KEYS.QA_VERIFY_LENSES, VERIFY_LENSES.length),
+          detected.verifyLensCount ??
+            (await configService.getNumber(CONFIG_KEYS.QA_VERIFY_LENSES, VERIFY_LENSES.length)),
         );
         const tiers = verificationTiers(findings, lenses);
         for (const tier of tiers) {
