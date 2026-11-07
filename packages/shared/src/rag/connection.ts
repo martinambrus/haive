@@ -112,6 +112,25 @@ export async function ragRowsAwaitReembed(
   return found.length > 0;
 }
 
+/** The host a stored connection string dials, read as postgres.js reads it for the guarded socket:
+ *  one name, no socket path, no slash. Null when that socket would refuse the string whatever the
+ *  allowlist says, or when it does not parse. The parse error is dropped: Node's invalid-URL error
+ *  carries its input, a password included. */
+export function dsnDialHost(dsn: string): string | null {
+  let client: postgres.Sql | undefined;
+  try {
+    client = postgres(dsn, { max: 1 });
+    const hosts = client.options.host as string[] | undefined;
+    if (client.options.path || hosts?.length !== 1) return null;
+    const host = hosts[0]!;
+    return host.includes('/') ? null : host;
+  } catch {
+    return null;
+  } finally {
+    if (client) void client.end({ timeout: 0 });
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Database name helpers                                               */
 /* ------------------------------------------------------------------ */
