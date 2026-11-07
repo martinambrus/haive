@@ -228,10 +228,12 @@ async function main(): Promise<void> {
 
   async function embed(text: string): Promise<number[] | null> {
     if (forceLexicalOnly) return null;
+    // The operator typed this URL and this process has no config store, so the private-address guard does not apply.
     const vec = await embedQueryOrNull(text, {
       ollamaUrl: prefs.ollamaUrl,
       model: prefs.embeddingModel,
       dimensions: prefs.embeddingDimensions,
+      fetchFn: fetch,
     });
     if (vec === null) console.error('query could not be embedded: ranking on full text alone');
     return vec;

@@ -526,7 +526,8 @@ async function build(
   console.log(`store holds ${existing.size} rows for ${repositoryId} before this run`);
   const produced = new Set<string>();
 
-  const warmed = await warmOllamaModel(opts.ollamaUrl, opts.model);
+  // The operator typed this URL and this process has no config store, so the private-address guard does not apply.
+  const warmed = await warmOllamaModel(opts.ollamaUrl, opts.model, undefined, fetch);
   if (!warmed) console.warn(`warning: ${opts.model} at ${opts.ollamaUrl} did not warm`);
   const { embedTimeoutMs } = await resolveEmbedBudget();
 
@@ -553,7 +554,8 @@ async function build(
             opts.ollamaUrl,
             opts.model,
             batch.map((c) => c.content),
-            { timeoutMs: embedTimeoutMs },
+            // Operator-typed URL, no config store: the private-address guard does not apply.
+            { timeoutMs: embedTimeoutMs, fetchFn: fetch },
           ),
           batch.length,
           opts.dims,

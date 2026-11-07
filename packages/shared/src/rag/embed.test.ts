@@ -6,6 +6,13 @@ vi.mock('../logger/index.js', () => ({
   logger: { child: () => ({ warn: h.warn }), info: () => {}, warn: () => {}, error: () => {} },
 }));
 
+// The guard dials a real socket; these tests stub global fetch to check request shapes.
+vi.mock('../egress/index.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../egress/index.js')>()),
+  createGuardedFetch: () => (input: string | URL, init?: RequestInit) =>
+    globalThis.fetch(input, init),
+}));
+
 import {
   OLLAMA_QUERY_TIMEOUT_MS,
   OLLAMA_TIMEOUT_MS,
