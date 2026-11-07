@@ -571,6 +571,51 @@ describe('maintenance state while the config store is unavailable', () => {
     expect(unlocks()).toBe(1);
   });
 
+  it('leaves the stored hold alone on a rollback after the drain failed on its first read', async () => {
+    stored = 'maintenance';
+    const ctx = rollbackContext();
+    vi.mocked(configService.getFresh).mockRejectedValueOnce(new ConfigUnavailableError('get'));
+    await expect(phaseDraining(ctx)).rejects.toBeInstanceOf(ConfigUnavailableError);
+
+    await rollback(ctx, 'verify failed');
+
+    expect(stateWrites()).toEqual([]);
+    expect(stored).toBe('maintenance');
+    expect(logs).toContain('maintenance-restore-skipped');
+    expect(logs).toContain('rolled-back');
+  });
+
+  it('leaves the stored hold alone on a rollback after the drain failed before it recorded what it found', async () => {
+    stored = 'maintenance';
+    const ctx = rollbackContext({ sql: fakeSql('lock') as unknown as UpgradeContext['sql'] });
+    await expect(phaseDraining(ctx)).rejects.toThrow('lock failed');
+
+    await rollback(ctx, 'verify failed');
+
+    expect(stateWrites()).toEqual([]);
+    expect(stored).toBe('maintenance');
+    expect(logs).toContain('maintenance-restore-skipped');
+    expect(logs).toContain('rolled-back');
+  });
+
+  it('still puts back normal on a fresh context with no journal record', async () => {
+    await rollback(rollbackContext(), 'verify failed');
+
+    expect(stateWrites()).toEqual(['set:normal']);
+  });
+
+  it('still restores what it found when the run recorded it and then rolls back', async () => {
+    foundRow = 'maintenance';
+    stored = 'maintenance';
+    const ctx = rollbackContext();
+    await phaseDraining(ctx);
+
+    await rollback(ctx, 'verify failed');
+
+    expect(stateWrites()).toEqual(['set:maintenance']);
+    expect(logs).not.toContain('maintenance-restore-skipped');
+  });
+
   it('restores a journaled found state of maintenance', async () => {
     foundRow = 'maintenance';
 

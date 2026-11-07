@@ -62,6 +62,10 @@ export interface UpgradeContext {
   drainForced?: boolean;
   /** The maintenance state at the last look (draining phase, then each recount); the waits use it. */
   lastState?: MaintenanceState;
+  /** Set when the draining phase starts and cleared once this run has recorded the state it found:
+   *  while set it has written no maintenance state, so a rollback leaves the stored one alone. A
+   *  restarted updater never runs that phase, so it never sets it and puts back what the journal holds. */
+  stateUntouched?: boolean;
   log: (event: string, fields?: Record<string, unknown>) => void;
 }
 
@@ -216,6 +220,7 @@ async function holdDraining(ctx: UpgradeContext): Promise<MaintenanceState> {
       await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE),
     );
     await recordFoundState(fence, ctx.runId, found);
+    ctx.stateUntouched = false;
     if (found === 'normal') await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'draining');
     return found;
   });
@@ -223,6 +228,12 @@ async function holdDraining(ctx: UpgradeContext): Promise<MaintenanceState> {
 
 /** Read from the journal, not the context: a restarted updater never ran the draining phase. */
 async function restoreMaintenanceState(ctx: UpgradeContext): Promise<void> {
+  if (ctx.stateUntouched) {
+    ctx.log('maintenance-restore-skipped', {
+      reason: 'this run recorded no found state and wrote none',
+    });
+    return;
+  }
   await setMaintenanceState(ctx, await readFoundState(ctx.sql, ctx.runId));
 }
 
@@ -292,6 +303,7 @@ async function awaitDrain(ctx: UpgradeContext): Promise<boolean> {
 }
 
 export async function phaseDraining(ctx: UpgradeContext): Promise<void> {
+  ctx.stateUntouched = true;
   await enterPhase(ctx.sql, ctx.runId, 'draining');
   const found = await holdDraining(ctx);
   ctx.lastState = found;
