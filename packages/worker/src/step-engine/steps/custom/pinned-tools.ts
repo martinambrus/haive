@@ -1,9 +1,10 @@
+import { eq } from 'drizzle-orm';
+import { schema, type Database } from '@haive/database';
 import {
-  INVALID_TOOLS_SHOWN,
-  describeInvalidTools,
+  describeToolProblems,
+  parsePinnedCustomSteps,
   validateCustomTools,
   type CustomTool,
-  type CustomToolProblem,
 } from '@haive/shared/modularity';
 
 export const CUSTOM_TOOL_INVALID_REASON = 'custom-tool-invalid';
@@ -11,18 +12,30 @@ export const CUSTOM_TOOL_INVALID_REASON = 'custom-tool-invalid';
 export const invalidToolsFailure = (found: string): string =>
   `${CUSTOM_TOOL_INVALID_REASON}: this step's tools no longer pass their checks: ${found} The task pinned them when it was created; fix them in the task type and start a new task.`;
 
-/** The problems of a step's tools, each led by its tool as inline code: at most 8, then how many more. */
-function describeToolProblems(problems: readonly CustomToolProblem[]): string {
-  const shown = problems
-    .slice(0, INVALID_TOOLS_SHOWN)
-    .map((problem) => `${describeInvalidTools([problem.tool])}: ${problem.message}`);
-  const more = problems.length - shown.length;
-  return `${shown.join(' ')}${more > 0 ? ` And ${more} more.` : ''}`;
+/** The failure for pinned tools that fail the checks a save runs today, or null when they all pass. */
+export function pinnedToolsFailure(
+  tools: readonly CustomTool[],
+  requiresRepository: boolean,
+): string | null {
+  const problems = validateCustomTools(tools, { requiresRepository });
+  return problems.length > 0 ? invalidToolsFailure(describeToolProblems(problems)) : null;
 }
 
-/** The failure for pinned tools that fail the checks a save runs today, or null when they all pass. */
-export function pinnedToolsFailure(tools: readonly CustomTool[]): string | null {
-  // The type's requiresRepository is not known here; it only decides a rag-query tool's scope.
-  const problems = validateCustomTools(tools, { requiresRepository: true });
-  return problems.length > 0 ? invalidToolsFailure(describeToolProblems(problems)) : null;
+/** The tools a task pinned for a step, and whether its task type requires a repository (true when the type has no row). */
+export async function loadPinnedTools(
+  db: Database,
+  taskId: string,
+  stepId: string,
+): Promise<{ tools: CustomTool[]; requiresRepository: boolean }> {
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { customSteps: true, type: true },
+  });
+  const tools = parsePinnedCustomSteps(task?.customSteps)[stepId]?.tools ?? [];
+  if (tools.length === 0 || !task) return { tools, requiresRepository: true };
+  const row = await db.query.taskTypeDefinitions.findFirst({
+    where: eq(schema.taskTypeDefinitions.slug, task.type),
+    columns: { requiresRepository: true },
+  });
+  return { tools, requiresRepository: row?.requiresRepository ?? true };
 }

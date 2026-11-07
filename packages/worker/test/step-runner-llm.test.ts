@@ -47,6 +47,8 @@ interface MockState {
   taskEvents?: { payload: Record<string, unknown>; taskStepId: string | null }[];
   /** The task's `custom_steps` as stored; unset means the read of it finds no task. */
   customSteps?: unknown;
+  /** The task type's `requires_repository`; unset means the type has no row. */
+  requiresRepository?: boolean;
   updates: Record<string, unknown>[];
   inserts: { table: string; row: Record<string, unknown> }[];
 }
@@ -166,8 +168,14 @@ function makeMockDb(state: MockState): Database {
       tasks: {
         findFirst: async (opts?: { columns?: { customSteps?: boolean } }) =>
           opts?.columns?.customSteps && state.customSteps !== undefined
-            ? { customSteps: state.customSteps }
+            ? { customSteps: state.customSteps, type: 'custom-type' }
             : undefined,
+      },
+      taskTypeDefinitions: {
+        findFirst: async () =>
+          state.requiresRepository === undefined
+            ? undefined
+            : { requiresRepository: state.requiresRepository },
       },
       // resolveTaskDispatch resolves the invocation's MCP surface so the prompt can
       // state it; that reads the step-04 tooling output and the env template.
@@ -1652,11 +1660,13 @@ describe('advanceStep and the custom tools of a prompt step', () => {
       cliProviderId?: string;
       step?: object;
       invocation?: Record<string, unknown>;
+      requiresRepository?: boolean;
     } = {},
   ) {
     const state = freshState();
     state.taskStepRow.stepId = stepDef.metadata.id;
     state.customSteps = storedBy.get(stepDef);
+    state.requiresRepository = opts.requiresRepository;
     Object.assign(state.taskStepRow, opts.step);
     if (opts.invocation) state.cliInvocationRow = opts.invocation;
     const enqueued: CliExecJobPayload[] = [];
@@ -1691,11 +1701,34 @@ describe('advanceStep and the custom tools of a prompt step', () => {
     expect(String(state.cliInvocationRow!.prompt)).toContain(LINE);
   });
 
-  it('dispatches a pinned project-scope search, since the type that allowed it is not known here', async () => {
+  it('dispatches a pinned project-scope search on a type that requires a repository', async () => {
+    const tool = { ...ragTool, name: 'project_rules', scope: 'project' };
+    const { result, enqueued } = await run(promptStep([tool]), { requiresRepository: true });
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued[0]!.customTools).toEqual(['project_rules']);
+  });
+
+  it('dispatches a pinned project-scope search when the task type has no row', async () => {
     const tool = { ...ragTool, name: 'project_rules', scope: 'project' };
     const { result, enqueued } = await run(promptStep([tool]));
     expect(result.status).toBe('waiting_cli');
     expect(enqueued[0]!.customTools).toEqual(['project_rules']);
+  });
+
+  it('fails a step whose pinned project-scope search is on a type without a repository, before any invocation row', async () => {
+    const tool = { ...ragTool, name: 'project_rules', scope: 'project' };
+    const { result, rows, enqueued } = await run(promptStep([tool]), {
+      requiresRepository: false,
+    });
+    const [problem] = validateCustomTools([customToolSchema.parse(tool)], {
+      requiresRepository: false,
+    });
+    expect(result.status).toBe('failed');
+    expect(failure(result)).toContain(CUSTOM_TOOL_INVALID_REASON);
+    expect(failure(result)).toContain('`project_rules`');
+    expect(failure(result)).toContain(problem!.message);
+    expect(rows).toEqual([]);
+    expect(enqueued).toEqual([]);
   });
 
   it('carries them onto the fresh invocation that replaces one killed mid-run', async () => {

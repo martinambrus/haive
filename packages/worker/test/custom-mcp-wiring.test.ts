@@ -93,11 +93,25 @@ const pinned = (tools: unknown[]) => ({
   },
 });
 
-function dbFor(customSteps: unknown, stepId = STEP_ID, stepRow = true): Database {
+function dbFor(
+  customSteps: unknown,
+  stepId = STEP_ID,
+  stepRow = true,
+  requiresRepository?: boolean,
+): Database {
   return {
     query: {
       tasks: {
-        findFirst: async () => ({ envTemplateId: null, repositoryId: null, customSteps }),
+        findFirst: async () => ({
+          envTemplateId: null,
+          repositoryId: null,
+          customSteps,
+          type: 'custom-type',
+        }),
+      },
+      taskTypeDefinitions: {
+        findFirst: async () =>
+          requiresRepository === undefined ? undefined : { requiresRepository },
       },
       envTemplates: { findFirst: async () => undefined },
       taskSteps: { findFirst: async () => (stepRow ? { output: null, stepId } : undefined) },
@@ -452,14 +466,32 @@ describe.each<Provider>(['claude-code', 'codex', 'gemini'])(
       expect(message).toContain('And 8 more.');
     });
 
-    it('wires a pinned project-scope search, since the type that allowed it is not known here', async () => {
+    it.each([
+      ['a type that requires a repository', true],
+      ['a type with no row', undefined],
+    ])('wires a pinned project-scope search on %s', async (_label, requiresRepository) => {
       const tool = { ...houseRules, name: 'project_rules', scope: 'project' };
       const { files } = await extra(
         provider,
-        dbFor(pinned([tool])),
+        dbFor(pinned([tool]), STEP_ID, true, requiresRepository),
         run({ customTools: ['project_rules'] }),
       );
       expect(toolsIn(files).map((t) => t.name)).toEqual(['project_rules']);
+    });
+
+    it('fails a run whose pinned project-scope search is on a type without a repository, before anything is written', async () => {
+      const tool = { ...houseRules, name: 'project_rules', scope: 'project' };
+      const message = await invalid(
+        provider,
+        dbFor(pinned([tool]), STEP_ID, true, false),
+        run({ customTools: ['project_rules'] }),
+      );
+      const [problem] = validateCustomTools([customToolSchema.parse(tool)], {
+        requiresRepository: false,
+      });
+      expect(message).toContain(CUSTOM_TOOL_INVALID_REASON);
+      expect(message).toContain('`project_rules`');
+      expect(message).toContain(problem!.message);
     });
 
     it('wires a run while the switch is on, reading it as the step runner does', async () => {
@@ -613,8 +645,10 @@ describe('the pinned step', () => {
           findFirst: async () => ({
             envTemplateId: null,
             customSteps: pinned([repoStatus, houseRules]),
+            type: 'custom-type',
           }),
         },
+        taskTypeDefinitions: { findFirst: async () => undefined },
         envTemplates: { findFirst: async () => undefined },
         taskSteps: {
           findFirst: async (arg?: { columns?: Record<string, boolean> }) => {
