@@ -6,6 +6,7 @@ import { z } from 'zod';
 import {
   deriveRenderTargets,
   normalizeAgentRulesOverride,
+  normalizeChromeDevtoolsMcpVersion,
   readRenderContextColumn,
   recordedCliTargets,
   sameValue,
@@ -841,7 +842,15 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
       Object.assign(updates, rtkEnabledUpdate(body.rtkEnabled));
     if (body.rtkVersion !== undefined) updates.rtkVersion = body.rtkVersion?.trim() || null;
     if (body.chromeDevtoolsMcpVersion !== undefined) {
-      updates.chromeDevtoolsMcpVersion = body.chromeDevtoolsMcpVersion?.trim() || null;
+      const trimmed = body.chromeDevtoolsMcpVersion?.trim() || null;
+      if (trimmed === null) {
+        updates.chromeDevtoolsMcpVersion = null;
+      } else {
+        const checked = normalizeChromeDevtoolsMcpVersion(trimmed);
+        if (!checked.ok)
+          throw new HttpError(400, `Invalid chrome-devtools-mcp version: ${checked.reason}`);
+        updates.chromeDevtoolsMcpVersion = checked.value;
+      }
     }
     if (Array.isArray(body.lspServers)) {
       updates.lspServers = [...new Set(body.lspServers.filter((s) => LSP_KEY_SET.has(s)))];

@@ -200,6 +200,24 @@ export function normalizeAgentRulesOverride(value: unknown): AgentRulesCheck {
   return { ok: true, value: text };
 }
 
+export type ChromeDevtoolsMcpVersionCheck =
+  { ok: true; value: string } | { ok: false; reason: string };
+
+/** The text `repositories.chrome_devtools_mcp_version` is stored as. Interpolated unescaped into
+ *  `npx -y chrome-devtools-mcp@<value>` (exec-core.ts, mcp-config.ts) and into an unquoted
+ *  Dockerfile RUN line (02-generate-dockerfile.ts), so it must read as a plain npm version or
+ *  dist-tag and nothing either a shell or a Dockerfile RUN line would act on. */
+export function normalizeChromeDevtoolsMcpVersion(value: unknown): ChromeDevtoolsMcpVersionCheck {
+  const text = nonEmptyText(value);
+  if (text === null) return refuse('is not non-empty text');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(text)) {
+    return refuse(
+      'is not a plain npm version or dist-tag (letters, digits, dot, dash, underscore, max 64 chars)',
+    );
+  }
+  return { ok: true, value: text };
+}
+
 /** A setting as the column stores it, by the same rules the repository routes apply to what a person
  *  sends; `ok: false` for a value the column could not hold, with a `reason` where the setting has one. */
 export function normalizeSetting(name: string, value: unknown): SettingCheck {
@@ -215,10 +233,13 @@ export function normalizeSetting(name: string, value: unknown): SettingCheck {
         : { ok: false };
     case 'rtk-enabled':
       return typeof value === 'boolean' ? valid(value) : { ok: false };
-    case 'rtk-version':
-    case 'chrome-devtools-mcp-version': {
+    case 'rtk-version': {
       const text = nonEmptyText(value);
       return text === null ? { ok: false } : valid(text);
+    }
+    case 'chrome-devtools-mcp-version': {
+      const checked = normalizeChromeDevtoolsMcpVersion(value);
+      return checked.ok ? valid(checked.value) : checked;
     }
     case 'lsp-servers':
       return isStringList(value)

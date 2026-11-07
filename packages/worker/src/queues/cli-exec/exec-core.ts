@@ -18,7 +18,12 @@ import {
   type ModelIdentity,
 } from '@haive/shared';
 import { DEFAULT_RUN_TIMEOUT_MS, type DockerVolumeMount } from '../../sandbox/docker-runner.js';
-import { NPM_CACHE_ENV, npmCacheMount, warmNpmPackage } from '../../sandbox/npm-cache.js';
+import {
+  NPM_CACHE_ENV,
+  NPM_CACHE_SEED_PRELUDE,
+  npmCacheMount,
+  warmNpmPackage,
+} from '../../sandbox/npm-cache.js';
 import { resolveMcpSurface } from '../../sandbox/mcp-surface.js';
 import { resolveAppReach, type AppReach } from './app-reach.js';
 import { SANDBOX_WORKDIR, type SandboxExtraFile } from '../../sandbox/sandbox-runner.js';
@@ -1577,6 +1582,7 @@ export function createSandboxSpawner(
     // Shared npm cache: the sandbox is --rm, so without this every `npx`-launched MCP
     // server re-downloads on every invocation. See sandbox/npm-cache.ts for what that
     // silently cost browser verification.
+    // The mount is read-only; the prelude seeds this invocation's private copy.
     allMounts.push(npmCacheMount());
     // Repo customizations a CLI reads only from its home (agy), from this invocation's own tree.
     // `maskAgentDefinitions` drops the AGENT mirror for an isolated run and keeps the skills one —
@@ -1626,7 +1632,7 @@ export function createSandboxSpawner(
         // appReach's CA vars go BEFORE spec.env so a provider that sets its own bundle wins.
         env: { ...NPM_CACHE_ENV, ...(appReach?.env ?? {}), ...spec.env },
         wrapperContent: wrapperContent ?? undefined,
-        ...(forward ? { prelude: forward.prefix } : {}),
+        prelude: NPM_CACHE_SEED_PRELUDE + (forward ? forward.prefix : ''),
         // The adapter's config files and a prompt too large for argv (both grok), and
         // its mirrored agent files (agy), are appended to whatever masking already
         // contributed rather than replacing it — the mask list is a security control

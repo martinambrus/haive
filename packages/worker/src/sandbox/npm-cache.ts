@@ -21,23 +21,46 @@ const log = logger.child({ module: 'npm-cache' });
  *  each one fast after its first fetch — MEASURED 146s cold, 4s warm. */
 export const NPM_CACHE_VOLUME = volumeName(SHARED_VOLUME.npmCache);
 
-/** Where the volume is mounted inside a sandbox. Not under the sandbox user's home: the
- *  auth-volume machinery already owns paths there, and a bind over part of it is
- *  destructive (see mergeCliMcpIntoTaskVolume). */
-export const NPM_CACHE_DIR = '/haive-npm-cache';
+/** Where the cache lives inside a container: the warm and purge containers mount the volume
+ *  here, and a sandbox keeps its PRIVATE copy here (see `NPM_CACHE_BASE_DIR`). One path for
+ *  both, so a tree installed by the warm run is read back from the path it was installed at.
+ *
+ *  Under /tmp, not at the container root: `/` is root-owned and the sandbox runs as uid 1000,
+ *  so it cannot create a directory there (the volume mount used to create it). /tmp is 1777 on
+ *  the image's writable layer, which `--rm` reaps with the container. Not under the sandbox
+ *  user's home either: the auth-volume machinery already owns paths there, and a bind over
+ *  part of it is destructive (see mergeCliMcpIntoTaskVolume). */
+export const NPM_CACHE_DIR = '/tmp/haive-npm-cache';
+
+/** Where a sandbox mounts the shared volume, read-only: only the worker's warm path writes
+ *  the volume. `NPM_CACHE_SEED_PRELUDE` copies it into `NPM_CACHE_DIR` before the real command
+ *  execs, so each invocation gets a private writable cache that dies with its container. */
+export const NPM_CACHE_BASE_DIR = '/haive-npm-cache-base';
 
 /** npm reads this env var for its cache location; `npx` inherits it. */
 export const NPM_CACHE_ENV = { npm_config_cache: NPM_CACHE_DIR } as const;
 
 export function npmCacheMount(): DockerVolumeMount {
-  return { source: NPM_CACHE_VOLUME, target: NPM_CACHE_DIR };
+  return { source: NPM_CACHE_VOLUME, target: NPM_CACHE_BASE_DIR, readOnly: true };
 }
+
+/** Shell prelude that seeds the private `NPM_CACHE_DIR` from the read-only base. No `set -e`:
+ *  a failed or absent base warns on stderr and the command still runs on an empty private
+ *  cache, never on the shared one. MUST end in `; ` so callers can append their own prelude
+ *  text. */
+export const NPM_CACHE_SEED_PRELUDE = `mkdir -p ${NPM_CACHE_DIR} && cp -a ${NPM_CACHE_BASE_DIR}/. ${NPM_CACHE_DIR}/ 2>/dev/null || echo 'haive: npm cache seed skipped; using an empty private cache' >&2; `;
 
 let ensured = false;
 
 /** Marker recording that the volume has been chowned to the sandbox identity. Keyed on the
  *  uid so changing SANDBOX_UID re-runs the alignment instead of trusting a stale marker. */
 const OWNERSHIP_MARKER = `${NPM_CACHE_DIR}/.haive-cache-owner-${SANDBOX_UID}`;
+
+/** An existing base may already hold content a sandbox planted while the volume was still
+ *  mounted read-write. The first align after the upgrade empties the volume of everything but
+ *  the markers, in the align container; the warm that every invocation already runs then
+ *  refills it. Written after the wipe, so a wipe that dies midway runs again next boot. */
+const RO_MIGRATION_MARKER = `${NPM_CACHE_DIR}/.haive-cache-ro-migrated`;
 
 /**
  * Give the cache to the uid that actually consumes it.
@@ -56,8 +79,10 @@ const OWNERSHIP_MARKER = `${NPM_CACHE_DIR}/.haive-cache-owner-${SANDBOX_UID}`;
  *
  * Runs as root (no `--user`) because chown is what we are here to do, and is skipped after
  * the first success via a marker file, so this costs one container per volume rather than
- * one per worker boot. Best-effort like everything else here: a failure leaves the old
- * behaviour rather than failing the invocation.
+ * one per worker boot. The same container empties pre-read-only cache content once
+ * (RO_MIGRATION_MARKER). Best-effort like everything else here: a failure leaves the old
+ * behaviour rather than failing the invocation, and the unwritten marker retries the wipe at
+ * the next boot.
  */
 async function alignNpmCacheOwnership(image: string): Promise<void> {
   try {
@@ -72,12 +97,15 @@ async function alignNpmCacheOwnership(image: string): Promise<void> {
         'sh',
         image,
         '-c',
-        `test -f ${OWNERSHIP_MARKER} || { chown -R ${SANDBOX_UID}:${SANDBOX_GID} ${NPM_CACHE_DIR} && touch ${OWNERSHIP_MARKER}; }`,
+        `test -f ${RO_MIGRATION_MARKER} || { find ${NPM_CACHE_DIR} -mindepth 1 -maxdepth 1 ! -path ${OWNERSHIP_MARKER} ! -path ${RO_MIGRATION_MARKER} -exec rm -rf -- {} + && touch ${RO_MIGRATION_MARKER}; }; test -f ${OWNERSHIP_MARKER} || { chown -R ${SANDBOX_UID}:${SANDBOX_GID} ${NPM_CACHE_DIR} && touch ${OWNERSHIP_MARKER}; }`,
       ],
       { timeout: 120_000 },
     );
   } catch (err) {
-    log.warn({ err }, 'could not align npm cache ownership; npx may fail as the sandbox user');
+    log.warn(
+      { err },
+      'could not align npm cache ownership or empty its pre-read-only content; npx may fail as the sandbox user',
+    );
   }
 }
 

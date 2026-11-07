@@ -7,6 +7,7 @@ vi.mock('../src/sandbox/sandbox-runner.js', async (importOriginal) => ({
 }));
 
 import { createSandboxSpawner } from '../src/queues/cli-exec/exec-core.js';
+import { NPM_CACHE_SEED_PRELUDE } from '../src/sandbox/npm-cache.js';
 import { SANDBOX_WORKDIR } from '../src/sandbox/sandbox-runner.js';
 import type { AppReach } from '../src/queues/cli-exec/app-reach.js';
 import type { CliCommandSpec } from '../src/cli-adapters/types.js';
@@ -67,7 +68,8 @@ describe('the agent sandbox loopback forwarder', () => {
     expect(call().command).toBe('claude');
     expect(call().args).toEqual(['-p', 'x y']);
     expect(call().extraFiles).toBeUndefined();
-    expect(call().prelude).toBeUndefined();
+    // The only prelude is the npm cache seed: no forwarder text rides along.
+    expect(call().prelude).toBe(NPM_CACHE_SEED_PRELUDE);
   });
 
   it('starts it as a prelude and leaves the command and its argv alone', async () => {
@@ -76,6 +78,7 @@ describe('the agent sandbox loopback forwarder', () => {
     expect(c.command).toBe('claude');
     expect(c.args).toEqual(['-p', 'x y']);
     expect(c.prelude).toContain(`'3000' 'app'\\''; x'`);
+    expect(c.prelude?.startsWith(NPM_CACHE_SEED_PRELUDE)).toBe(true);
     expect(c.extraFiles?.map((f) => f.containerPath).join()).toContain('loopback-forward');
   });
 
