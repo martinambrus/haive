@@ -13,7 +13,7 @@ export function egressFor(
   allowHosts?: ReadonlySet<string>,
 ): {
   fetchFn: typeof fetch;
-  pgSocket: ((options: PgSocketOptions) => net.Socket) | undefined;
+  pgSocket: ((options: PgSocketOptions) => Promise<net.Socket>) | undefined;
 } {
   if (role === 'admin') return { fetchFn: fetch, pgSocket: undefined };
   if (allowHosts === undefined || allowHosts.size === 0) {

@@ -129,6 +129,11 @@ export const CONFIG_KEYS = {
    *  and no live-retune channel (same reasoning as GLOBAL_PAUSE above). */
   REGISTRATION_MODE: 'config:auth:registrationMode',
 
+  /** Private, loopback or link-local targets an administrator allows the probe egress guard to
+   *  reach: one entry per line or comma-separated, each an IP, a CIDR or a hostname. Empty means
+   *  none. Read per dial off the ~30s config cache. */
+  PRIVATE_ENDPOINT_ALLOWLIST: 'config:security:privateEndpointAllowlist',
+
   // Catch-up for commits that reached a repository without Haive making them. Off makes
   // 01e-external-kb-sync and 01f-external-plan-sync self-skip, which restores byte-identical
   // prior behaviour: no extra prompt, no extra form, no watermark write. This is the
@@ -680,6 +685,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.CUSTOM_TASK_TYPES_ENABLED]: 'false',
   [CONFIG_KEYS.MODULE_TASK_TYPES_ENABLED]: 'false',
   [CONFIG_KEYS.REGISTRATION_MODE]: 'closed',
+  [CONFIG_KEYS.PRIVATE_ENDPOINT_ALLOWLIST]: '',
   [CONFIG_KEYS.EXTERNAL_SYNC_ENABLED]: 'true',
   [CONFIG_KEYS.SECRET_MASK_ENABLED]: 'true',
   [CONFIG_KEYS.AGENT_ISOLATION_ENABLED]: 'true',

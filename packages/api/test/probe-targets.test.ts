@@ -11,18 +11,10 @@ const h = vi.hoisted(() => ({
   db: undefined as unknown,
   fake: undefined as unknown as { insert(table: unknown, row: unknown): unknown },
   open: false,
+  ollamaUrl: null as string | null,
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
-vi.mock('../../shared/dist/egress/egress-guard.js', async (importOriginal) => {
-  const real = await importOriginal<typeof import('../../shared/dist/egress/egress-guard.js')>();
-  return {
-    ...real,
-    isBlockedAddress: (address: string) =>
-      h.open && address === '127.0.0.1' ? false : real.isBlockedAddress(address),
-  };
-});
-
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -130,6 +122,12 @@ beforeEach(() => {
   h.db = fake.db;
   h.fake = fake;
   h.open = false;
+  h.ollamaUrl = null;
+  vi.spyOn(configService, 'get').mockImplementation(async (key: string) => {
+    if (key === CONFIG_KEYS.PRIVATE_ENDPOINT_ALLOWLIST) return h.open ? '127.0.0.1/32' : null;
+    if (key === CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL) return h.ollamaUrl;
+    return null;
+  });
   ollama.hits = 0;
   ollama.mode = 'normal';
   target.hits = 0;
@@ -601,12 +599,9 @@ describe("PR-9 a user may probe the install's own Ollama and DDEV hosts", () => 
     for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
   });
 
-  const configuredOllama = (url: string | null) =>
-    vi
-      .spyOn(configService, 'get')
-      .mockImplementation(async (key: string) =>
-        key === CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL ? url : null,
-      );
+  const configuredOllama = (url: string | null) => {
+    h.ollamaUrl = url;
+  };
 
   async function repoWithDdev(owner: string, config: string | null): Promise<string> {
     const root = await mkdtemp(path.join(os.tmpdir(), 'probe-ddev-'));
@@ -634,17 +629,19 @@ describe("PR-9 a user may probe the install's own Ollama and DDEV hosts", () => 
       expect(probe.works(reply)).toBe(true);
     });
 
-    it('B1 reaches host.docker.internal for a user only when it is the configured Ollama host', async () => {
+    it('B1 refuses a user whose stored Ollama URL names the target host (no config-derived exemption)', async () => {
       stubNames({ 'host.docker.internal': ['127.0.0.1'] });
-      const url = `http://host.docker.internal:${ollama.port}`;
-      const before = await within(post('user', probe.path, probe.body(url)));
-      await settle();
-      expect(probe.refused(before as Reply)).toBe(true);
+      configuredOllama(`http://127.0.0.1:11434`);
+      for (const url of [
+        `http://host.docker.internal:${ollama.port}`,
+        `http://127.0.0.1:${ollama.port}`,
+      ]) {
+        const reply = await within(post('user', probe.path, probe.body(url)));
+        await settle();
+        expect(reply).not.toBe(NO_ANSWER);
+        expect(probe.refused(reply as Reply)).toBe(true);
+      }
       expect(ollama.hits).toBe(0);
-      configuredOllama(`http://host.docker.internal:11434`);
-      const reply = await post('user', probe.path, probe.body(url));
-      expect(ollama.hits).toBeGreaterThanOrEqual(1);
-      expect(probe.works(reply)).toBe(true);
     });
 
     it('B3 still refuses another private name and an IP literal', async () => {
