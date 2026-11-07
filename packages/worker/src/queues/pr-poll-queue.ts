@@ -4,6 +4,7 @@ import { Queue, Worker } from 'bullmq';
 import { and, desc, eq, isNotNull, isNull } from 'drizzle-orm';
 import {
   CONFIG_KEYS,
+  ConfigUnavailableError,
   QUEUE_NAMES,
   TASK_JOB_NAMES,
   configService,
@@ -101,7 +102,13 @@ interface PrWaitTask {
 }
 
 export async function runPrPollTick(db: Database): Promise<void> {
-  if (!(await configService.getBoolean(CONFIG_KEYS.PR_WORKFLOW_ENABLED, false))) return;
+  try {
+    if (!(await configService.getBoolean(CONFIG_KEYS.PR_WORKFLOW_ENABLED, false))) return;
+  } catch (err) {
+    if (!(err instanceof ConfigUnavailableError)) throw err;
+    log.warn({ err }, 'pr poll tick skipped: the config store is unavailable');
+    return;
+  }
   // Every parked PR-wait task, not just prState='open': a task already flipped to
   // 'merged' but still parked means a prior auto-advance was lost — re-drive it. A
   // completed task is no longer 'waiting_pr', so it drops out of this set.

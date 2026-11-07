@@ -14,6 +14,7 @@ const h = vi.hoisted(() => ({
   facets: undefined as unknown,
   bools: {} as Record<string, boolean>,
   switchReadFails: false,
+  switchReadError: null as unknown,
   storeFails: null as unknown,
   facetsFail: false,
   calls: [] as unknown[],
@@ -26,6 +27,7 @@ vi.mock('@haive/shared', async (importOriginal) => {
     configService: {
       ...actual.configService,
       getBoolean: async (key: string, fallback: boolean) => {
+        if (h.switchReadError) throw h.switchReadError;
         if (h.switchReadFails) throw new Error('redis is down');
         return key in h.bools ? h.bools[key]! : fallback;
       },
@@ -48,7 +50,7 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => {
   };
 });
 
-import { CONFIG_KEYS } from '@haive/shared';
+import { CONFIG_KEYS, ConfigUnavailableError } from '@haive/shared';
 import { resolveGlobalKbContext } from '../src/orchestrator/global-kb-context.js';
 
 const at = (minute: number): Date => new Date(Date.UTC(2026, 9, 3, 12, minute));
@@ -137,6 +139,7 @@ const ask = (houseRules = true) => resolveGlobalKbContext(TASK_DB, 'task-1', { h
 beforeEach(() => {
   h.bools = {};
   h.switchReadFails = false;
+  h.switchReadError = null;
   h.storeFails = null;
   h.facetsFail = false;
   h.facets = undefined;
@@ -403,6 +406,13 @@ describe('resolveGlobalKbContext: switches and failures', () => {
     h.switchReadFails = true;
     const out = await ask(true);
     expect(out).toMatchObject({ status: 'unavailable', errorClass: 'other', rules: [] });
+    expect(out.digest.entries).toEqual([]);
+  });
+
+  it('settles unavailable, never rejecting, when the config store is unavailable', async () => {
+    h.switchReadError = new ConfigUnavailableError('getBoolean');
+    const out = await ask(true);
+    expect(out).toMatchObject({ status: 'unavailable', rules: [] });
     expect(out.digest.entries).toEqual([]);
   });
 

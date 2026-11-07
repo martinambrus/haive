@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DbTx } from '@haive/database';
 import { ConfigUnavailableError, configService, logger } from '@haive/shared';
-import { admitReopen, readMaintenanceState } from '../src/queues/_revive-check.js';
+import { admitReopen, holdsNewWork, readMaintenanceState } from '../src/queues/_revive-check.js';
 
 const TASK = '00000000-0000-4000-8000-000000000001';
 
@@ -126,15 +126,26 @@ describe('readMaintenanceState, the early checks outside the fence', () => {
     );
   });
 
-  it('answers maintenance and warns when the config store is unavailable', async () => {
+  it('answers unreadable and warns when the config store is unavailable', async () => {
     setup().stored(new ConfigUnavailableError('get'));
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
 
-    await expect(readMaintenanceState(TASK)).resolves.toBe('maintenance');
+    await expect(readMaintenanceState(TASK)).resolves.toBe('unreadable');
 
     expect(warn).toHaveBeenCalledWith(
       expect.objectContaining({ taskId: TASK, err: expect.any(ConfigUnavailableError) }),
       'maintenance state unreadable; treated as held',
     );
+  });
+});
+
+describe('holdsNewWork', () => {
+  it.each([
+    ['unreadable', true],
+    ['draining', true],
+    ['maintenance', true],
+    ['normal', false],
+  ] as const)('answers %s as %s', (state, held) => {
+    expect(holdsNewWork(state)).toBe(held);
   });
 });

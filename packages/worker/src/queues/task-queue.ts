@@ -50,7 +50,6 @@ import {
   logger,
   OPEN_TASK_STATUSES,
   parseAllowanceWatchMode,
-  refusesNewWork,
   type CliExecJobPayload,
   type AbortLeftMergePayload,
   type RepoRagCleanupPayload,
@@ -185,7 +184,13 @@ import {
   updateOwnedStep,
   type TaskFence,
 } from '../step-engine/step-ownership.js';
-import { admitReopen, NewWorkHeld, readMaintenanceState, refuseRevive } from './_revive-check.js';
+import {
+  admitReopen,
+  holdsNewWork,
+  NewWorkHeld,
+  readMaintenanceState,
+  refuseRevive,
+} from './_revive-check.js';
 import { resetStepAndDownstream } from './_step-reset.js';
 import {
   foldAbandonedPark,
@@ -3007,7 +3012,7 @@ async function handleAdvanceStep(
     jobTimestamp,
   );
   const newWorkHeld =
-    ctx.status === 'failed' && refusesNewWork(await readMaintenanceState(ctx.taskId));
+    ctx.status === 'failed' && holdsNewWork(await readMaintenanceState(ctx.taskId));
   if (
     failedTaskRefusesAdvance(
       ctx.status,

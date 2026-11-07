@@ -1,6 +1,6 @@
 import { and, asc, eq, gt, isNotNull, or, sql } from 'drizzle-orm';
 import { lockRepositoryTasksKey, schema, type Database } from '@haive/database';
-import { CONFIG_KEYS, configService, logger } from '@haive/shared';
+import { CONFIG_KEYS, ConfigUnavailableError, configService, logger } from '@haive/shared';
 import { readNamedCheckout } from '../repo/checkout-head.js';
 import { syncPlanFromCheckout } from '../plan/sync-checkout.js';
 import { PlanMirrorHeldError } from '../plan/mirror.js';
@@ -17,8 +17,17 @@ export async function watchCheckout(
   db: Database,
   repositoryId: string,
 ): Promise<CheckoutWatchResult> {
-  if (!(await configService.getBoolean(CONFIG_KEYS.PROJECT_STATE_SYNC_ENABLED, true)))
-    return 'disabled';
+  try {
+    if (!(await configService.getBoolean(CONFIG_KEYS.PROJECT_STATE_SYNC_ENABLED, true)))
+      return 'disabled';
+  } catch (err) {
+    if (!(err instanceof ConfigUnavailableError)) throw err;
+    logger.warn(
+      { err, repositoryId },
+      'checkout observation skipped: the config store is unavailable',
+    );
+    return 'held';
+  }
   const [repo] = await db
     .select({
       storagePath: schema.repositories.storagePath,
@@ -122,7 +131,13 @@ export async function sweepCheckoutRepositories(
   db: Database,
   enqueue: (repositoryId: string) => Promise<unknown>,
 ): Promise<number> {
-  if (!(await configService.getBoolean(CONFIG_KEYS.PROJECT_STATE_SYNC_ENABLED, true))) return 0;
+  try {
+    if (!(await configService.getBoolean(CONFIG_KEYS.PROJECT_STATE_SYNC_ENABLED, true))) return 0;
+  } catch (err) {
+    if (!(err instanceof ConfigUnavailableError)) throw err;
+    logger.warn({ err }, 'checkout sweep skipped: the config store is unavailable');
+    return 0;
+  }
   let after: string | undefined;
   let queued = 0;
   for (;;) {
