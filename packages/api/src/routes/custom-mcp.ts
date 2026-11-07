@@ -18,7 +18,7 @@ import {
   guardedGet,
   type GuardReason,
   type GuardedResponse,
-} from '../lib/egress-guard.js';
+} from '@haive/shared/egress';
 import { assertInvocationLive, claimsFromBearer } from '../lib/task-call-auth.js';
 import { cutToBytes, describeIssue } from '../lib/tool-call-text.js';
 import { sandboxBodyLimit } from '../middleware/sandbox-body-limit.js';

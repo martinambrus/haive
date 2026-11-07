@@ -169,6 +169,8 @@ interface Route {
   initial: Settings;
   a: Settings;
   b: Settings;
+  /** Bodies the route must refuse; defaults to an empty body and a bare `x` in the first field. */
+  refuse?: Settings[];
 }
 
 const flag = (name: string, fallback: boolean, field = 'enabled'): Route => ({
@@ -376,6 +378,19 @@ const ROUTES: Route[] = [
     a: { retentionDays: 30 },
     b: { retentionDays: 90 },
   },
+  {
+    name: 'private-endpoint-allowlist',
+    initial: { allowlist: '' },
+    a: { allowlist: '10.0.0.0/8\nhost.docker.internal' },
+    b: { allowlist: 'gitlab.corp.example' },
+    refuse: [
+      {},
+      { allowlist: 'not a host!' },
+      { allowlist: '10.0.0.0/0' },
+      { allowlist: 5 },
+      { allowlist: Array.from({ length: 257 }, (_, i) => `h${i}.example`).join('\n') },
+    ],
+  },
 ];
 
 const send = (method: 'GET' | 'PUT', name: string, body?: unknown) =>
@@ -446,7 +461,7 @@ describe('every PUT /admin/config route', () => {
       .map((route) => route.path.slice('/config/'.length))
       .sort();
     expect(registered).toEqual(ROUTES.map((route) => route.name).sort());
-    expect(ROUTES).toHaveLength(39);
+    expect(ROUTES).toHaveLength(40);
   });
 
   it('keeps the action names that were audited before', async () => {
@@ -459,7 +474,7 @@ describe('every PUT /admin/config route', () => {
   });
 });
 
-describe.each(ROUTES)('PUT /admin/config/$name', ({ name, initial, a, b }) => {
+describe.each(ROUTES)('PUT /admin/config/$name', ({ name, initial, a, b, refuse }) => {
   it('records who changed it, from what to what', async () => {
     expect(await read(name)).toMatchObject(initial);
 
@@ -493,7 +508,7 @@ describe.each(ROUTES)('PUT /admin/config/$name', ({ name, initial, a, b }) => {
 
   it('records nothing for a body it refuses', async () => {
     const first = Object.keys(a)[0]!;
-    for (const body of [{}, { ...a, [first]: 'x' }]) {
+    for (const body of refuse ?? [{}, { ...a, [first]: 'x' }]) {
       expect((await put(name, body)).status, JSON.stringify(body)).toBe(400);
     }
     expect([h.audits, h.writes]).toEqual([[], []]);
@@ -595,6 +610,26 @@ describe.each(ROUTES.filter(({ a }) => Object.keys(a).length > 1))(
     });
   },
 );
+
+describe('PUT /admin/config/private-endpoint-allowlist', () => {
+  it('refuses an invalid entry by name, and writes and audits nothing', async () => {
+    const res = await put('private-endpoint-allowlist', {
+      allowlist: 'gitlab.corp.example\nbad host!',
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain('bad host!');
+    expect([h.audits, h.writes]).toEqual([[], []]);
+  });
+
+  it('gives the reason alone when the whole list is refused for size', async () => {
+    const list = Array.from({ length: 257 }, (_, i) => `h${i}.example`).join('\n');
+    const res = await put('private-endpoint-allowlist', { allowlist: list });
+    expect(res.status).toBe(400);
+    const { error } = (await res.json()) as { error: string };
+    expect(error).toContain('more than 256 entries');
+    expect(error).not.toContain('""');
+  });
+});
 
 describe('PUT /admin/config/cli-timeout-ladder', () => {
   it('records nothing for a ladder with no usable rung', async () => {

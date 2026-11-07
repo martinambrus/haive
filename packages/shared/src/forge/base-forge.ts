@@ -67,14 +67,23 @@ export abstract class BaseForgeProvider implements ForgeProvider {
 
     let res: Response;
     try {
-      res = await fetch(url, {
+      res = await (ctx.fetchFn ?? fetch)(url, {
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
         signal,
+        redirect: 'manual',
       });
     } catch (err) {
       throw failure(err);
+    }
+
+    if (res.status >= 300 && res.status < 400) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new ForgeError(
+        `${this.name} ${method} ${path} -> HTTP ${res.status}: the server answered with a redirect and redirects are not followed. Set the credential's API base to the final address, or check the repository was not renamed or moved.`,
+        res.status,
+      );
     }
 
     if (!res.ok) {

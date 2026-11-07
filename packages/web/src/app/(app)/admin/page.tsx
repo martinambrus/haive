@@ -229,6 +229,9 @@ function AdminPageInner() {
   const [planCanvasEnabled, setPlanCanvasEnabled] = useState<boolean | null>(null);
   const [registrationMode, setRegistrationMode] = useState<RegistrationMode | null>(null);
   const [savingRegistrationMode, setSavingRegistrationMode] = useState(false);
+  const [privateAllowlist, setPrivateAllowlist] = useState<string | null>(null);
+  const [privateAllowlistInput, setPrivateAllowlistInput] = useState('');
+  const [savingPrivateAllowlist, setSavingPrivateAllowlist] = useState(false);
   const [savingPlanCanvas, setSavingPlanCanvas] = useState(false);
   const [taskTypes, setTaskTypes] = useState<{
     customEnabled: boolean;
@@ -320,6 +323,7 @@ function AdminPageInner() {
         planCanvasData,
         taskTypesData,
         registrationModeData,
+        privateAllowlistData,
         debugModeData,
         browserAccessData,
         dbAccessData,
@@ -364,6 +368,7 @@ function AdminPageInner() {
         api.get<{ enabled: boolean }>('/admin/config/plan-canvas'),
         api.get<{ customEnabled: boolean; moduleEnabled: boolean }>('/admin/config/task-types'),
         api.get<{ mode: RegistrationMode }>('/admin/config/registration-mode'),
+        api.get<{ allowlist: string }>('/admin/config/private-endpoint-allowlist'),
         api.get<{ enabled: boolean }>('/admin/config/debug-mode'),
         api.get<{ enabled: boolean }>('/admin/config/browser-access'),
         api.get<{ enabled: boolean }>('/admin/config/db-access'),
@@ -423,6 +428,8 @@ function AdminPageInner() {
       setPlanCanvasEnabled(planCanvasData.enabled);
       setTaskTypes(taskTypesData);
       setRegistrationMode(registrationModeData.mode);
+      setPrivateAllowlist(privateAllowlistData.allowlist);
+      setPrivateAllowlistInput(privateAllowlistData.allowlist);
       setDebugModeEnabled(debugModeData.enabled);
       setBrowserAccessEnabled(browserAccessData.enabled);
       setDbAccessEnabled(dbAccessData.enabled);
@@ -1080,6 +1087,23 @@ function AdminPageInner() {
       setError((err as Error).message ?? 'Failed to update the registration mode');
     } finally {
       setSavingRegistrationMode(false);
+    }
+  }
+
+  async function savePrivateAllowlist(raw: string) {
+    setSavingPrivateAllowlist(true);
+    try {
+      const result = await api.put<{ allowlist: string }>(
+        '/admin/config/private-endpoint-allowlist',
+        { allowlist: raw },
+      );
+      setPrivateAllowlist(result.allowlist);
+      setPrivateAllowlistInput(result.allowlist);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update the private endpoint allowlist');
+    } finally {
+      setSavingPrivateAllowlist(false);
     }
   }
 
@@ -2511,6 +2535,42 @@ function AdminPageInner() {
                 start tasks on it.
               </p>
             )}
+          </div>
+        </Card>
+      )}
+
+      {tab === 'data' && privateAllowlist !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Private endpoint allowlist</CardTitle>
+            <CardDescription>
+              Endpoints a user can type in (an Ollama URL, an external RAG database, a forge host)
+              are refused when they resolve to a private, loopback or link-local address, unless
+              they are listed here. One entry per line or comma-separated: an IP address, a CIDR
+              range (10.0.0.0/8) or a hostname. An address or range is checked against the address
+              the name resolves to when the connection opens; a hostname entry trusts every address
+              that name resolves to except link-local and unspecified ones, which only an address or
+              range entry can allow. Built-in services need no entry. A refused endpoint fails with
+              a host-not-found error, and a name defined only in /etc/hosts needs a hostname entry.
+              Applies within about 30 seconds.
+            </CardDescription>
+          </CardHeader>
+          <textarea
+            rows={6}
+            aria-label="Private endpoint allowlist"
+            className="block w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100"
+            value={privateAllowlistInput}
+            onChange={(e) => setPrivateAllowlistInput(e.target.value)}
+          />
+          <div className="mt-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={savingPrivateAllowlist}
+              onClick={() => void savePrivateAllowlist(privateAllowlistInput)}
+            >
+              {savingPrivateAllowlist ? 'Saving...' : 'Save'}
+            </Button>
           </div>
         </Card>
       )}

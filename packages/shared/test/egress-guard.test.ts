@@ -24,10 +24,11 @@ import {
   guardedGet,
   guardedLookup,
   isBlockedAddress,
+  isUnliftableByHostname,
   type GuardedGetOptions,
   type NameResolverFactory,
   type Resolver,
-} from '../src/lib/egress-guard.js';
+} from '../src/egress/egress-guard.js';
 import { selfSignedCertificate } from './self-signed-cert.js';
 
 const HOST = 'guard.test';
@@ -308,6 +309,61 @@ describe('isBlockedAddress', () => {
     expect(isBlockedAddress('2002:a00:1::')).toBe(true);
     expect(isBlockedAddress('::ffff:8.8.8.8')).toBe(false);
     expect(isBlockedAddress('::ffff:10.0.0.1')).toBe(true);
+  });
+});
+
+describe('isUnliftableByHostname', () => {
+  const UNLIFTABLE = [
+    '169.254.0.0',
+    '169.254.169.254',
+    '169.254.255.255',
+    '0.0.0.0',
+    '0.255.255.255',
+    '::ffff:169.254.169.254',
+    '64:ff9b::a9fe:a9fe',
+    '2002:a9fe:a9fe::',
+    '::ffff:0:a9fe:a9fe',
+    'fe80::1',
+    'fe80::1%eth0',
+    'febf:ffff::1',
+    '::',
+    '64:ff9b::1',
+    '::ffff:0.0.0.1',
+    '2002:1::',
+    '::ffff:0:1',
+  ];
+  const LIFTABLE = [
+    '127.0.0.1',
+    '::1',
+    '10.0.0.5',
+    '172.16.0.1',
+    '192.168.1.1',
+    '100.100.100.200',
+    '169.253.255.255',
+    '169.255.0.0',
+    '1.0.0.0',
+    '8.8.8.8',
+    '::ffff:127.0.0.1',
+    '64:ff9b::7f00:1',
+    'fc00::1',
+    'fd00:ec2::254',
+    'fec0::1',
+    '::2',
+    '::a9fe:a9fe',
+    'not-an-address',
+    '',
+  ];
+
+  it.each(UNLIFTABLE)('cannot be lifted by a hostname entry: %s', (address) => {
+    expect(isUnliftableByHostname(address)).toBe(true);
+  });
+
+  it.each(LIFTABLE)('leaves %j liftable by a hostname entry', (address) => {
+    expect(isUnliftableByHostname(address)).toBe(false);
+  });
+
+  it.each(UNLIFTABLE)('is a subset of the block table: %s', (address) => {
+    expect(isBlockedAddress(address)).toBe(true);
   });
 });
 

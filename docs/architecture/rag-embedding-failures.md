@@ -99,6 +99,21 @@ healthy sync indexes them normally. This matters especially for greenfield initi
 whose saved explicit URL does not set `ollamaUrlDerived`; hash rows written there would
 otherwise survive every incremental sync after the service recovered.
 
+**Private endpoints.** The Ollama helpers in `rag/embed.ts` dial through a guarded fetch by default
+(`createGuardedFetch`, the built-in hosts exempt): an embedder URL that resolves to a private, loopback or
+link-local address is refused unless the administrator's private-endpoint allowlist lists it
+(`api-auth.md`), the shipped default `http://host.docker.internal:11434` excepted (built in by exact
+origin). A refusal reads as an unreachable endpoint (the probe says down and `embedBatch` takes its
+failure path) and the worker log carries an `egress guard refused a private or unresolvable target` warn
+with the host. The allowlist is read only when a dial needs it, so a public Ollama endpoint is unaffected
+by a config-store outage; when it is needed and the store is down the dial rejects with
+`ConfigUnavailableError`, which these helpers report as down, never as a pass. `resolveRagConnection`
+dials a `ddev` or `external` store through the guarded socket the same way; for it the rejection arrives
+as the socket's `error` event, and only a blocked IP literal rejects the factory itself. An operator
+script that dials a target typed on its command line passes `fetchFn: fetch` (`rag-build-store.ts`,
+`rag-eval.ts`) or `trustedTarget: true` (`rag-eval.ts`, the pg drop smoke).
+`backfill-task-embeddings.ts` initialises the config store so it can read the list.
+
 **What a failure does depends on WHEN the step runs.** `10-rag-populate` FAILS — "the index
 is populated" is its whole contract and a human is watching onboarding. `02-pre-rag-sync`
 and `11c-rag-reindex` leave the chunks UNINDEXED and carry on: 02 runs at the start of every

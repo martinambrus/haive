@@ -28,6 +28,10 @@ vi.mock('@haive/shared', async (importOriginal) => {
     },
   };
 });
+vi.mock('@haive/shared/egress', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@haive/shared/egress')>()),
+  guardedFetch: vi.fn((...args: Parameters<typeof fetch>) => globalThis.fetch(...args)),
+}));
 vi.mock('../src/lib/integration-call-limits.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   INTEGRATION_CALL_DEADLINE_MS: h.deadlineMs,

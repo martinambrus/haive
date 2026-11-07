@@ -10,6 +10,7 @@ vi.mock('postgres', () => ({
   },
 }));
 
+import { guardedPgSocket } from '../src/egress/index.js';
 import { resolveRagConnection, type RagToolingPrefs } from '../src/rag/connection.js';
 
 const prefs = (over: Partial<RagToolingPrefs>): RagToolingPrefs => ({
@@ -45,12 +46,23 @@ describe('resolveRagConnection pool options', () => {
     async (_mode, over) => {
       await resolveRagConnection(prefs(over), existingDatabase, 'project');
       expect(Object.keys(h.calls[0]![1]).sort()).toEqual(
-        _mode === 'internal' ? ['connection', 'max', 'onnotice'] : ['max', 'onnotice'],
+        _mode === 'internal' ? ['connection', 'max', 'onnotice'] : ['max', 'onnotice', 'socket'],
       );
       expect(h.calls[0]![1].connection).toEqual(
         _mode === 'internal' ? { client_connection_check_interval: 500 } : undefined,
       );
       expect(h.calls[0]![1].max).toBe(5);
+      expect(h.calls[0]![1].socket).toBe(_mode === 'internal' ? undefined : guardedPgSocket);
+    },
+  );
+
+  it.each(MODES.slice(0, 2))(
+    'leaves the guard off a trusted operator target (%s)',
+    async (_mode, over) => {
+      await resolveRagConnection(prefs(over), existingDatabase, 'project', {
+        trustedTarget: true,
+      });
+      expect('socket' in h.calls[0]![1]).toBe(false);
     },
   );
 

@@ -119,38 +119,94 @@ instance per install. The limits are the constants above; the unused `RATE_LIMIT
 **A caller who is not an administrator cannot aim the probe routes at a blocked address.**
 `POST /tooling/test-postgres`, `/tooling/test-ollama`, `/tooling/ollama-model-capabilities`, the
 `/tooling/pull-ollama-model` stream and `POST /global-kb/test-ollama` connect to an address the caller
-types and report what came back. `egressFor(role)` (`lib/probe-egress.ts`) gives an administrator the
-plain global `fetch` and plain postgres.js, and everyone else a guarded pair built on the egress guard's
-own rules (`isBlockedAddress`, `dnsResolver`, `guardedLookup`, nothing in `egress-guard.ts` changed). The
-guarded fetch is `http(s).request` with the guard's lookup, so the address that is checked is the
-address that is connected; an IP literal is classified before connecting (a public one is allowed); a
-redirect is returned and never followed; and every connect-level failure is the `TypeError('fetch
-failed')` a missing name gives, a blocked answer included (`getaddrinfo ENOTFOUND <host>` for the
-pg driver), so a name that resolves to a private address reads like one that does not exist and the
-response never carries a resolved address. postgres.js has no lookup option, so it gets a `socket`
-factory that refuses unix paths, several hosts and blocked literals and otherwise connects through the
-same lookup. `probeOllama` and `ollamaEmbed` in shared take an optional `fetchFn`; the worker keeps the
-default. `POST /global-kb/test-db` was already `requireAdmin`.
+types and report what came back. `egressFor(role, allowHosts?)` (`lib/probe-egress.ts`) gives an
+administrator the plain global `fetch` and plain postgres.js, and everyone else the guarded pair from
+`@haive/shared/egress` (node-only subpath, not in the root barrel and not web-reachable): `egress-guard.ts`
+(`isBlockedAddress`, `dnsResolver`, `guardedLookup`), `probe-egress.ts` (`createGuardedFetch`,
+`createGuardedPgSocket`) and `allowlist.ts`. The guarded fetch is `http(s).request` with the guard's lookup,
+so the address that is checked is the address that is connected; an IP literal is classified before
+connecting (a public one is allowed); a redirect is returned and never followed; and every connect-level
+failure is the `TypeError('fetch failed')` a missing name gives, a blocked answer included (`getaddrinfo
+ENOTFOUND <host>` for the pg driver), so a name that resolves to a private address reads like one that does
+not exist and the response never carries a resolved address. The server log carries one `egress guard
+refused a private or unresolvable target` warn with the host, at most one per host per 60 s (the key is
+lower-cased and cut to 253 characters, at most 256 hosts tracked with the oldest evicted, a backwards clock
+warns again); the response never does. postgres.js has no lookup option, so it gets a `socket` factory that
+refuses unix paths, several hosts and blocked literals and otherwise connects through the same lookup. The
+Ollama helpers in `rag/embed.ts` take an optional `fetchFn` and default to a guarded fetch that exempts the
+built-in hosts, so the worker's dials are guarded too. `POST /global-kb/test-db` was already `requireAdmin`.
 
-What a non-admin keeps: a target whose HOST (the parsed hostname, never a prefix) equals one of the install's
-own known hosts is allowed although it resolves private. `probeEgressFor(c)` (`lib/probe-hosts.ts`) builds
-that set per request for a non-admin and hands it to `egressFor(role, hosts)`: the in-stack Ollama names
-(`IN_STACK_OLLAMA_HOSTS`: `ollama` and its container name), the host of the configured Global KB Ollama URL
-(so `host.docker.internal` is exempt only when that is what is configured, and not otherwise). A project's
-`<name>.ddev.site` is NOT exempt: it resolves to 127.0.0.1 in public DNS, so from the api container it
-reaches the api's own loopback and never a DDEV Postgres. The exemption lifts only the address classification: the
-name must still resolve (through the system resolver, so a `host-gateway` name in `/etc/hosts` works; every
-other host resolves through c-ares, which never reads that file), and the guarded fetch still never follows a redirect, so an exempt host cannot
-hand the request on to one that is not listed. An IP literal that is not itself listed, any other private
-name, and everything for a multi-host Postgres string stay refused. Anything that cannot be read adds no host. The probe sends
-no credential and reports only what the guarded fetch reports.
+**The private-endpoint allowlist.** An administrator lists the private, loopback or link-local endpoints the
+install may dial: `config:security:privateEndpointAllowlist`, `GET`/`PUT /admin/config/private-endpoint-allowlist`
+(an audit row `config.private_endpoint_allowlist` per change), a card on the admin data tab. The key has no
+stored default: it does not exist until an administrator saves it or the upgrade seed runs, and a missing key
+reads as an empty list. Entries are separated by newlines or commas: an IPv4 or IPv6 address, a CIDR range
+(/1-32, /1-128) or a hostname (lower-cased; no wildcard, port, scheme or path); at most 256 entries and 16 KiB.
+`PUT` answers 400 naming the offending entry; the read path skips an invalid one. An address or CIDR entry is
+matched against the RESOLVED address at connect time (an IPv4 rule also matches the IPv4-mapped form), so a
+name that later resolves elsewhere is judged by where it connects. A hostname entry matches the dialed
+hostname exactly and trusts every address that name resolves to EXCEPT link-local (169.254.0.0/16, fe80::/10,
+and their IPv4-mapped, NAT64, 6to4 and SIIT forms) and unspecified (0.0.0.0/8, `::`) addresses, which only an
+address or CIDR entry can allow (`isUnliftableByHostname`); only address entries are rebinding-proof. The DNS
+servers are asked first; the system resolver (hosts file) only when DNS fails and a hostname entry names the
+host, so a name defined only in `/etc/hosts` needs a hostname entry. One resolution per dial; an answer that
+mixes allowed and refused addresses is refused whole; a redirect is never followed. The list is read lazily,
+at most once per dial, through the cached `configService.get` (a change applies within about 30 s), and only
+when the dial needs it: a blocked address literal, a blocked resolved address, or a name that did not
+resolve. A public-only answer and a built-in host never read it, so public forge and embed dials keep working
+while the config store is down. With a cold cache and the store down, a dial that needs the list rejects with
+`ConfigUnavailableError` (`error-diagnostics.md`); any other read failure (an uninitialised store included)
+counts as an empty list with a warn. The card says a hostname entry cannot lift link-local or unspecified
+addresses, that a refusal reads as host-not-found, and that a hosts-file-only name needs a hostname entry.
 
-Targets that are a STORED setting are not
-covered, deliberately: `POST /global-kb/release-embed-model`, the RAG store and embedder URL read by rag
-search and `PATCH /repositories/:id/tooling`, and the forge calls in integration-mcp. Private stores and
-forges are legitimate there (`integrations.md`, the closed embedder-settings decision, the pin in
-`global-kb-config-gate.test.ts`), and the worker uses the same stored values unguarded. A new route that
-connects to an address from the request body should take `egressFor(c.get('userRole'))` and add a case
-to `probe-targets.test.ts`.
+**Upgrade seed.** `seedPrivateEndpointAllowlist` (`packages/worker/src/private-endpoint-seed.ts`) is a
+convergent `DATA_MIGRATIONS` entry that runs while the key was never written; an empty value counts as
+written, so a cleared list is never re-seeded and a fresh install stays empty. It lists the private targets
+the install already stores: the Global KB Ollama URL; per repository the external or ddev RAG connection
+string and the Ollama URL (the committed tooling mirror, else the newest onboarding task's
+`04-tooling-infrastructure` output); the host and API base of each forge credential. A name is listed only if
+it resolves (DNS first, the system resolver for a name that exists only in `/etc/hosts`) into 10/8, 172.16/12,
+192.168/16, 100.64/10 or fc00::/7. Public names, built-in hosts, loopback, link-local, unspecified and
+100.100.100.200 / fd00:ec2::254 are never listed, so a stored loopback target stays refused until an
+administrator lists it. An address literal becomes an address entry, a name a hostname entry. Lookups take
+5 s each, 8 at once, 20 s overall; the entry and byte caps apply. The write is one transaction under the admin
+save's advisory lock (`admin-config:private-endpoint-allowlist`): an audit row
+`config.private_endpoint_allowlist` by the nil-UUID system actor with metadata `{from, to, seeded: true}`, then
+`SET NX`; a lost race rolls the row back. An empty plan writes an empty value and no audit row. A throw writes
+nothing and the next boot retries. A name that did not resolve at the one boot that seeds is skipped, not
+retried. The api's 30 s cache delays the effect there. Undo: clear the list in the card (never re-seeded), or
+`DEL` the key to have the next worker boot seed once more.
+
+What a non-admin keeps: the built-in hosts, the only targets a request-typed probe may reach while they
+resolve private. They are the in-stack Ollama names (`IN_STACK_OLLAMA_HOSTS`: `ollama` and its container
+name; host only, fetch and pg socket) and the exact origin `http://host.docker.internal:11434`
+(`BUILT_IN_PRIVATE_ORIGINS`, `packages/shared/src/constants/index.ts`, the shipped
+`DEFAULT_EXTERNAL_OLLAMA_URL`), matched by scheme, host and port and for fetch only (not pg, forge or custom
+tools). `probeEgressFor(c)` (`lib/probe-hosts.ts`) passes both static sets and reads no config.
+`host.docker.internal` on any other port or scheme, the `ddev` and `external` RAG database strings, any other
+compose name and every forge host are NOT built in and need an allowlist entry (the seed lists those an
+install already stores). Stores Haive derives from `DATABASE_URL` (internal RAG, Global KB, module stores),
+Redis, Mailpit, the ddev runner, VNC and the IDE are never guarded. A project's `<name>.ddev.site` is NOT
+exempt: it resolves to 127.0.0.1 in public DNS, so from the api container it reaches the api's own loopback
+and never a DDEV Postgres. The exemption lifts only the address classification: the name must still resolve,
+and the guarded fetch still never follows a redirect, so an exempt host cannot hand the request on to one
+that is not listed. An IP literal that is not itself listed, any other private name, and everything for a
+multi-host Postgres string stay refused unless the allowlist lists them. The probe sends no credential and
+reports only what the guarded fetch reports.
+
+Stored targets are guarded for every caller, an administrator included, because the value may have been
+written by someone else (the Global KB Ollama URL and embed model are saved by any signed-in user;
+`global-kb.ts` `putConfig` blocks non-admins only from enabled, namespace, mode and the connection string):
+`POST /global-kb/release-embed-model`, the RAG store and embedder URL read by rag search and
+`PATCH /repositories/:id/tooling`, the forge calls in integration-mcp, and the worker's counterparts. The
+guard sits at the lowest layer: the embed helpers default to the guarded fetch, `resolveRagConnection` dials
+an `external` or `ddev` store through the guarded socket unless `trustedTarget: true` is passed (operator
+scripts that dial a target typed on their command line pass that or `fetchFn: fetch`), and a forge request
+goes through `ForgeContext.fetchFn` (`integrations.md`). An install that already stores private targets keeps
+them across the upgrade through the seed. Not guarded, by decision: the Global KB's admin-only external
+connection string and `POST /global-kb/test-db`, and an administrator's request-typed probe (so an admin Test
+can succeed where the runtime still refuses until the target is listed). A new route that connects to an
+address from the request body should take `egressFor(c.get('userRole'))` and add a case to
+`probe-targets.test.ts`.
 
 The IDE proxy's credential rule is in [Sandbox](sandbox.md).

@@ -62,6 +62,13 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => {
     },
   };
 });
+// The guard dials a real socket; this test stubs global fetch to check the embed request.
+vi.mock('@haive/shared/egress', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@haive/shared/egress')>()),
+  createGuardedFetch: () => (input: string | URL, init?: RequestInit) =>
+    globalThis.fetch(input, init),
+}));
+
 vi.mock('@haive/shared/rag', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@haive/shared/rag')>();
   return {
@@ -216,7 +223,12 @@ beforeEach(() => {
     [CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, GLOBAL_OLLAMA],
     [CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, 'global-model'],
   ]);
-  vi.spyOn(configService, 'get').mockImplementation(async (key) => config.get(key) ?? null);
+  vi.spyOn(configService, 'get').mockImplementation(async (key) =>
+    // The real-store tests dial a loopback fake; the guard refuses it unless the allowlist covers it.
+    key === CONFIG_KEYS.PRIVATE_ENDPOINT_ALLOWLIST && h.realLocalStore
+      ? '127.0.0.1'
+      : (config.get(key) ?? null),
+  );
   vi.spyOn(configService, 'getFresh').mockImplementation(async (key) => config.get(key) ?? null);
   vi.spyOn(configService, 'getBoolean').mockImplementation(
     async (_key, fallback = false) => fallback,

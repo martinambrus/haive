@@ -96,6 +96,11 @@ decides.
   default is stamped), and the prompt-cache TTL behind a cost (the cost stays NULL). The 08c and 08d
   review and QA settings are read in `detect()`, before the paid wave, and frozen on the detect
   output. A row persisted by an older build lacks them and falls back to a live read that rethrows.
+- The private-endpoint allowlist read (`allowlistFor`, `packages/shared/src/egress/probe-egress.ts`) is a
+  gate: it calls `rethrowIfConfigUnavailable` first, so a dial that needs the list (a blocked literal, a
+  blocked resolved address or an unresolved name) rejects with `ConfigUnavailableError` while the store
+  is down and the cache is cold; any other read error (an uninitialised `ConfigService` included) counts
+  as an empty list with a warn. A built-in host and a public-only answer skip the read.
 - A documented fail-open contract keeps its contract: the global KB context still settles
   `unavailable` instead of rejecting. `readMaintenanceState` returns `ObservedMaintenanceState`, with
   `'unreadable'` on an outage (`holdsNewWork` is true for it), so a log line names the state as

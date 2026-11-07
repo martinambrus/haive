@@ -1,8 +1,18 @@
 import { createHash } from 'node:crypto';
 import { configService, CONFIG_KEYS } from '../config/config.service.js';
 import { logger } from '../logger/index.js';
+import { BUILT_IN_PRIVATE_ORIGINS, IN_STACK_OLLAMA_HOSTS } from '../constants/index.js';
+import { createGuardedFetch } from '../egress/index.js';
 
 const log = logger.child({ module: 'rag-embed' });
+
+/** The Ollama URL is a stored value any signed-in user can write, so every dial is denied a
+ *  private, loopback or link-local address unless the admin allowlist covers it. The in-stack
+ *  Ollama names and the shipped external default origin are exempt. */
+const ollamaFetch = createGuardedFetch({
+  allowHosts: IN_STACK_OLLAMA_HOSTS,
+  allowOrigins: BUILT_IN_PRIVATE_ORIGINS,
+}) as typeof fetch;
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
@@ -77,7 +87,10 @@ export async function resolveEmbedBudget(): Promise<EmbedBudget> {
 /* Ollama connectivity                                                 */
 /* ------------------------------------------------------------------ */
 
-export async function probeOllama(url: string, fetchFn: typeof fetch = fetch): Promise<boolean> {
+export async function probeOllama(
+  url: string,
+  fetchFn: typeof fetch = ollamaFetch,
+): Promise<boolean> {
   try {
     const resp = await fetchFn(`${url}/api/tags`, {
       signal: AbortSignal.timeout(5000),
@@ -98,7 +111,7 @@ export async function ollamaEmbed(
   opts: { timeoutMs?: number; fetchFn?: typeof fetch } = {},
 ): Promise<number[][]> {
   const timeoutMs = opts.timeoutMs ?? (await resolveEmbedBudget()).embedTimeoutMs;
-  const resp = await (opts.fetchFn ?? fetch)(`${url}/api/embed`, {
+  const resp = await (opts.fetchFn ?? ollamaFetch)(`${url}/api/embed`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model, input: inputs, keep_alive: OLLAMA_KEEP_ALIVE }),
@@ -124,10 +137,11 @@ export async function warmOllamaModel(
   url: string,
   model: string,
   timeoutMs?: number,
+  fetchFn: typeof fetch = ollamaFetch,
 ): Promise<boolean> {
   try {
     const budget = timeoutMs ?? (await resolveEmbedBudget()).warmupTimeoutMs;
-    const resp = await fetch(`${url}/api/embed`, {
+    const resp = await fetchFn(`${url}/api/embed`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, input: 'warmup', keep_alive: OLLAMA_KEEP_ALIVE }),
@@ -149,9 +163,10 @@ export async function unloadOllamaModel(
   url: string,
   model: string,
   timeoutMs = 10_000,
+  fetchFn: typeof fetch = ollamaFetch,
 ): Promise<boolean> {
   try {
-    const resp = await fetch(`${url}/api/embed`, {
+    const resp = await fetchFn(`${url}/api/embed`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, input: 'unload', keep_alive: 0 }),
@@ -172,9 +187,10 @@ export async function unloadOllamaModel(
 export async function listResidentOllamaModels(
   url: string,
   timeoutMs = 5000,
+  fetchFn: typeof fetch = ollamaFetch,
 ): Promise<string[] | null> {
   try {
-    const resp = await fetch(`${url}/api/ps`, { signal: AbortSignal.timeout(timeoutMs) });
+    const resp = await fetchFn(`${url}/api/ps`, { signal: AbortSignal.timeout(timeoutMs) });
     if (!resp.ok) return null;
     const data = (await resp.json()) as { models?: Array<{ name?: string; model?: string }> };
     const names = new Set<string>();
@@ -203,9 +219,10 @@ export async function getOllamaModelPlacement(
   url: string,
   model: string,
   timeoutMs = 5000,
+  fetchFn: typeof fetch = ollamaFetch,
 ): Promise<EmbedDevicePlacement> {
   try {
-    const resp = await fetch(`${url}/api/ps`, { signal: AbortSignal.timeout(timeoutMs) });
+    const resp = await fetchFn(`${url}/api/ps`, { signal: AbortSignal.timeout(timeoutMs) });
     if (!resp.ok) return 'unreachable';
     const data = (await resp.json()) as {
       models?: Array<{ name?: string; model?: string; size_vram?: number }>;
@@ -276,7 +293,12 @@ export function cosineSimilarity(a: number[], b: number[]): number {
  *  path's behaviour so query vectors live in the same space as stored rows. */
 export async function embedQuery(
   text: string,
-  opts: { ollamaUrl: string | null; model: string | null; dimensions: number },
+  opts: {
+    ollamaUrl: string | null;
+    model: string | null;
+    dimensions: number;
+    fetchFn?: typeof fetch;
+  },
 ): Promise<number[]> {
   return (await embedQueryOrNull(text, opts)) ?? hashEmbed(text, opts.dimensions);
 }
@@ -290,13 +312,21 @@ export async function embedQuery(
  *  fallback for callers that must have a vector of the right width. */
 export async function embedQueryOrNull(
   text: string,
-  opts: { ollamaUrl: string | null; model: string | null; dimensions: number },
+  opts: {
+    ollamaUrl: string | null;
+    model: string | null;
+    dimensions: number;
+    fetchFn?: typeof fetch;
+  },
 ): Promise<number[] | null> {
   const { ollamaUrl, model } = opts;
   if (ollamaUrl && model) {
     try {
       const { queryTimeoutMs } = await resolveEmbedBudget();
-      const [vec] = await ollamaEmbed(ollamaUrl, model, [text], { timeoutMs: queryTimeoutMs });
+      const [vec] = await ollamaEmbed(ollamaUrl, model, [text], {
+        timeoutMs: queryTimeoutMs,
+        fetchFn: opts.fetchFn,
+      });
       if (vec && vec.length > 0) {
         if (vec.length === opts.dimensions) return vec;
         log.warn(

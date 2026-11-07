@@ -3,6 +3,13 @@ import type { Database } from '@haive/database';
 import { listResidentOllamaModels } from '../src/rag/embed.js';
 import { releaseEmbedModelIfUnused, resolveTaskEmbedTarget } from '../src/rag/embed-residency.js';
 
+// The guard dials a real socket; these tests stub global fetch to check request shapes.
+vi.mock('../src/egress/index.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/egress/index.js')>()),
+  createGuardedFetch: () => (input: string | URL, init?: RequestInit) =>
+    globalThis.fetch(input, init),
+}));
+
 const URL = 'http://ollama:11434';
 const MODEL = 'qwen3-embedding:4b';
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BUILT_IN_PRIVATE_ORIGINS,
   DEFAULT_EXTERNAL_OLLAMA_URL,
   IN_STACK_OLLAMA_HOSTS,
   IN_STACK_OLLAMA_URL,
@@ -28,5 +29,12 @@ describe('in-stack Ollama constants', () => {
     // Otherwise picking "external Ollama server" would resolve back to the
     // bundled one and the choice would do nothing.
     expect(IN_STACK_OLLAMA_HOSTS.has(new URL(DEFAULT_EXTERNAL_OLLAMA_URL).hostname)).toBe(false);
+  });
+
+  it('builds in exactly the shipped external default origin', () => {
+    expect(BUILT_IN_PRIVATE_ORIGINS).toEqual(new Set(['http://host.docker.internal:11434']));
+    for (const origin of BUILT_IN_PRIVATE_ORIGINS) {
+      expect(origin).toBe(new URL(DEFAULT_EXTERNAL_OLLAMA_URL).origin);
+    }
   });
 });

@@ -1,5 +1,6 @@
 import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
+import { guardedFetch } from '@haive/shared/egress';
 import { decryptCredentialRow } from '../repo/credentials.js';
 import {
   ForgeError,
@@ -75,5 +76,15 @@ export async function resolveForgeContext(args: {
     );
   }
 
-  return { provider, apiBase, host, owner, repo, token: creds.secret, username: creds.username };
+  // The host is stored or user-typed, so the request is guarded on purpose.
+  return {
+    provider,
+    apiBase,
+    host,
+    owner,
+    repo,
+    token: creds.secret,
+    username: creds.username,
+    fetchFn: guardedFetch,
+  };
 }

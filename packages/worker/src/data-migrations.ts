@@ -43,6 +43,7 @@ import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { resolveToolingOllamaUrl } from '@haive/shared/rag';
 import { TOOLING_ID_PATTERN } from './cli-executor/tool-usage.js';
 import { classifyGlobalKbVectorProvenance } from './global-kb-vector-provenance.js';
+import { seedPrivateEndpointAllowlist } from './private-endpoint-seed.js';
 import { getBullRedis } from './redis.js';
 import { getCliExecQueue } from './queues/cli-exec/_shared.js';
 import { backfillToolUsageAtBoot } from './queues/cli-exec/tool-usage-backfill.js';
@@ -161,6 +162,12 @@ export const DATA_MIGRATIONS: DataMigration[] = [
     id: 'classifyGlobalKbVectorProvenance',
     kind: 'convergent',
     run: classifyGlobalKbVectorProvenance,
+  },
+  // Convergent: a re-run is a no-op once the key exists, and the previous release never reads it.
+  {
+    id: 'seedPrivateEndpointAllowlist',
+    kind: 'convergent',
+    run: (db) => seedPrivateEndpointAllowlist(db),
   },
   // It issues a raw `DELETE FROM ai_rag_embeddings` against the global KB store —
   // a SEPARATE database, so outside any core-DB transaction and outside a core-DB snapshot.

@@ -19,6 +19,7 @@
  *  - Dry-run by default. Set APPLY=1 to embed + write.
  *  - Best-effort per repo: a repo whose ollama is unreachable / connection fails is logged and
  *    skipped without aborting the rest.
+ *  - A stored private host is skipped unless the admin allowlist covers it.
  *
  * Run (inside the worker container):
  *   docker exec haive-worker sh -lc 'cd /app/packages/worker && pnpm exec tsx scripts/backfill-task-embeddings.ts'         # dry run
@@ -34,6 +35,7 @@ import {
   ONBOARDING_TOOLING_SCHEMA_VERSION,
   type OnboardingEnvironmentMirror,
   type OnboardingToolingMirror,
+  configService,
 } from '@haive/shared';
 import { probeOllama } from '@haive/shared/rag';
 import {
@@ -69,6 +71,8 @@ function projectNameOf(envMirror: OnboardingEnvironmentMirror | null | undefined
 }
 
 async function main(): Promise<void> {
+  // Stored targets are guarded, and the allowlist is read from the config store.
+  await configService.initialize();
   const tasks = await db.query.tasks.findMany({
     where: and(eq(schema.tasks.type, 'workflow'), eq(schema.tasks.status, 'completed')),
     columns: { id: true, repositoryId: true, title: true, description: true },

@@ -93,6 +93,13 @@ export const IN_STACK_OLLAMA_HOSTS: ReadonlySet<string> = new Set([
  *  edit, not a fallback anything silently relies on. */
 export const DEFAULT_EXTERNAL_OLLAMA_URL = 'http://host.docker.internal:11434';
 
+/** Origins that are reachable although they resolve to a private address, so the egress guard
+ *  never reads the allowlist for them. Each entry is an exact `URL.origin` (scheme, host and
+ *  port), never the bare host: the same name on another port is not exempt. */
+export const BUILT_IN_PRIVATE_ORIGINS: ReadonlySet<string> = new Set([
+  new URL(DEFAULT_EXTERNAL_OLLAMA_URL).origin,
+]);
+
 export const QUEUE_NAMES = {
   TASK: 'haive-task',
   CLI_EXEC: 'haive-cli-exec',

@@ -122,7 +122,14 @@ lock before the row's, with a 30 s wait limit answering 503: MEASURED, a DELETE 
 activation of a draft that supersedes it deadlocked in 23 of 23 rounds before. The store settings
 that could switch every rule off at once (Enabled, namespace, mode, connection string) are
 admin-only. A non-admin's save never writes them: a re-sent value is accepted and skipped, so a
-save that read the page before an admin's change cannot revert it. An admin's save that sets the
+save that read the page before an admin's change cannot revert it. The Ollama URL and embed model are
+NOT among those settings: any signed-in user can save them, so every dial to the stored URL (sync,
+`release-embed-model`, the embed helpers) goes through the egress guard: a host that resolves to a
+private, loopback or link-local address is refused unless it is built in or the administrator's
+private-endpoint allowlist lists it (`api-auth.md`). The old exemption for the configured Global KB
+Ollama host is gone. The shipped default `http://host.docker.internal:11434` stays built in by its exact
+origin; any other private host (another port, `https`) needs an allowlist entry, and the upgrade seed
+lists the Ollama host an install already stores. An admin's save that sets the
 connection string writes an audit row (`global_kb.connection_string.update`,
 `{connectionStringSet: true}`), never any part of the string. A blank string on a save means
 "keep"; removing the stored one takes an explicit `clearConnectionString: true`, refused with 409

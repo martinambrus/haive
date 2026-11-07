@@ -612,10 +612,20 @@ change.
   `/rest/api/1.0`.
 - **Auth headers**: GitHub and Bitbucket Server Bearer, Gitea `token`, Bitbucket Cloud Basic
   `username:password` when the credential has a username. GitLab uses `Authorization: Bearer`, never
-  `PRIVATE-TOKEN`: fetch drops `Authorization` on a cross-origin redirect but keeps a custom header.
+  `PRIVATE-TOKEN`: fetch drops `Authorization` on a cross-origin redirect but keeps a custom header (redirects are no longer followed, see below,
+  so this is now defence in depth).
 - **Errors**: 401/403 `ForgeAuthError`, 404 `ForgeNotFoundError`, 409/422 `ForgeConflictError`, 429
   `ForgeRateLimitError` with `Retry-After`. On a 409/422 from a create, the adapter looks up the open
   pull request for the branch pair and returns it when one exists; otherwise the conflict stands.
+- **Dialing and redirects**: `BaseForgeProvider.request` sends through `ctx.fetchFn ?? fetch` with
+  `redirect: 'manual'`; a 3xx answer cancels its body and throws a `ForgeError` carrying the status that
+  says redirects are not followed (set the credential's API base to the final address, or check the
+  repository was not renamed or moved: GitHub answers a renamed repository with a 301). Both places that
+  build a `ForgeContext` (worker `resolveForgeContext`, api `integration-mcp.ts`) pass `guardedFetch`
+  from `@haive/shared/egress`, so a forge host that resolves to a private, loopback or link-local address
+  is refused unless the administrator's private-endpoint allowlist lists it (`api-auth.md`); a refusal
+  reads as a connect failure (`fetch failed`). A new construction site must pass `fetchFn`: left out it
+  falls back to the global fetch with no guard.
 - **Deadline**: `FORGE_REQUEST_TIMEOUT_MS` (30 s) per request, headers and body, injectable through
   the constructor. `openPullRequest` can make two requests, so one call can take up to twice that.
   An error response whose body stalls is still reported as its HTTP status, not as a timeout: the
@@ -654,7 +664,9 @@ destination is decided. The host is stored trimmed and lower case and must survi
 `https://<host>/` parsing unchanged, which refuses numeric forms such as `2130706433` and `0x7f.1`; it
 says nothing about the kind of destination, so `localhost` and dotted IPv4 literals are accepted (a
 bracketed IPv6 literal does not match the host grammar and is refused; self-hosted
-forges on a private network are legitimate, and the host is set by the user, never by an agent). A set
+forges on a private network are legitimate, and the host is set by the user, never by an agent; a private host needs an entry in the administrator's
+private-endpoint allowlist before any forge call reaches it, and the upgrade seed lists the hosts and API
+bases of credentials already stored, `api-auth.md`). A set
 API base must be `https:`, carry no user or password, contain no `?` or `#` (endpoint paths are
 appended to the stored text), and sit on the credential's host (port included) or on the host of the
 forge's default API base (api.github.com, api.bitbucket.org). An edit reads, checks and writes under
@@ -758,7 +770,12 @@ title's `minLength: 1` is published too.
   `readForgeErrorExcerpt` (`@haive/shared/forge`), so the worker's forge calls are bounded too. The
   api uses `readForgeJson` for GitHub's repository pages (`github-oauth.ts`: one bounded read per
   page, paging stopped when GitHub sends no next link) and `readForgeErrorExcerpt` for an Ollama
-  pull's error body (`tooling.ts`).
+  pull's error body (`tooling.ts`). The Ollama pull stream (`POST /tooling/pull-ollama-model`,
+  `routes/tooling.ts`) relays a stream from a user-typed URL and is bounded in the api: a pending line
+  over 64 KiB, more than 64 MiB in total, or 10 minutes with nothing received (the idle timer covers the
+  connect, a non-OK excerpt read and every chunk; it is not a total-duration cap) ends the pull with one
+  `error` event naming the cause, never `cancelled` or `done`; an in-stream `error` text is cut to 200
+  characters; the upstream is aborted and its reader cancelled on every exit.
 - **One scrub** (`redactSecrets`, `api/src/lib/module-vendor-client.ts`) removes the secrets from every
   vendor answer before a module executor sees it, and from every error text, every module result and
   every forge success text the broker answers, in every spelling a vendor's encoder may echo: each

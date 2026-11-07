@@ -35,6 +35,7 @@ import {
   type IntegrationBinding,
   type IntegrationTool,
 } from '@haive/shared/integrations';
+import { guardedFetch } from '@haive/shared/egress';
 import { parseProviderId } from '@haive/shared/modularity';
 import { getDb, type Database } from '../db.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -502,6 +503,8 @@ integrationMcpRoutes.post('/call', async (c) => {
     token: credential.accessToken,
     username: credential.username ?? '',
     signal: deadline,
+    // Stored or user-typed host: guarded on purpose.
+    fetchFn: guardedFetch,
   };
   let result: unknown;
   try {
