@@ -334,13 +334,16 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
  *  ollama ones, and the strip therefore drew nothing at all while both subscriptions had live
  *  meters.
  *
- *  Same fall-through, `enabled` filter and dedup as web's `stepCliProviderIds`, which does
+ *  Same fall-through and dedup as web's `stepCliProviderIds`, which does
  *  this on the task DETAIL page from the already-enriched step objects. This is the batched
  *  server-side twin for listing rows, which carry no steps: a few queries for a whole page.
  *
  *  A task with no current step (or whose step has no pref) yields just its own provider, i.e.
  *  what the listing already showed. The result is never empty-by-accident: an empty array
- *  means the user has no enabled provider to default to (and no saved pref names one). */
+ *  means the user has no enabled provider to default to (and no saved pref names one). A pick
+ *  whose provider exists is kept even when it is switched off, since the worker holds the step
+ *  on it; only a provider that no longer exists falls through, and the task's implicit default
+ *  stays the oldest enabled one. */
 export async function resolveCurrentStepCliProviderIds(
   db: ReturnType<typeof getDb>,
   flags: StepFlagMap,
@@ -355,17 +358,17 @@ export async function resolveCurrentStepCliProviderIds(
   const out = new Map<string, string[]>();
   if (tasks.length === 0) return out;
   const stepIds = [...new Set(tasks.map((t) => t.currentStepId).filter((s): s is string => !!s))];
-  // A pref pointing at a deleted or disabled provider is ignored, exactly as the worker
-  // ignores it — the step runs on the fallback, so the fallback is what the strip must meter.
-  const enabledRows = await db
+  // A pick on a provider that exists is kept even when it is switched off: the worker holds
+  // the step on it. Only a pick whose provider no longer exists falls through to the default.
+  const providerRows = await db
     .select({
       id: schema.cliProviders.id,
       enabled: schema.cliProviders.enabled,
       createdAt: schema.cliProviders.createdAt,
     })
     .from(schema.cliProviders)
-    .where(and(eq(schema.cliProviders.userId, userId), eq(schema.cliProviders.enabled, true)));
-  const enabled = new Set(enabledRows.map((p) => p.id));
+    .where(eq(schema.cliProviders.userId, userId));
+  const listed = new Set(providerRows.map((p) => p.id));
   const prefs = await loadStepCliPrefRows(db, flags, userId, stepIds);
   const touched = await loadTouchedRoles(
     db,
@@ -386,12 +389,12 @@ export async function resolveCurrentStepCliProviderIds(
       const choice = stepChoices?.get(role);
       return choice ? choice.cliProviderId : honor(role, saved);
     };
-    const usable = (id: string | null): string | null => (id && enabled.has(id) ? id : null);
+    const usable = (id: string | null): string | null => (id && listed.has(id) ? id : null);
     const roleProviders =
       (stepId ? prefs.roleByStep.get(stepId) : undefined) ?? new Map<string, string>();
     const stepDefault =
       usable(stepId ? slot('default', prefs.byStep.get(stepId) ?? null) : null) ??
-      resolveTaskCliProviderId(task.cliProviderId, enabledRows);
+      resolveTaskCliProviderId(task.cliProviderId, providerRows);
 
     const ids: string[] = [];
     const push = (id: string | null) => {

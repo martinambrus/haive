@@ -11,6 +11,7 @@ const TASK_CLI = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const SAVED_CLI = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const PICKED_CLI = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 const DISABLED_CLI = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+const UNLISTED_CLI = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
 const PROVIDERS = [
   { id: TASK_CLI, enabled: true },
   { id: SAVED_CLI, enabled: true },
@@ -80,10 +81,48 @@ describe('resolvePreferredCli', () => {
     expect(await resolve(db)).toEqual({ cliProviderId: TASK_CLI, effortLevel: null });
   });
 
-  it('falls back to the task CLI when the picked one was disabled since', async () => {
+  it('keeps the CLI picked in this task when it was disabled since', async () => {
     const db = fakeDb({
       choices: { default: { cliProviderId: DISABLED_CLI, effortLevel: 'max' } },
       saved: { default: { cliProviderId: SAVED_CLI, effortLevel: null } },
+    });
+    expect(await resolve(db)).toEqual({ cliProviderId: DISABLED_CLI, effortLevel: 'max' });
+  });
+
+  it('keeps a disabled role pick made in this task', async () => {
+    const db = fakeDb({
+      choices: { reviewer: { cliProviderId: DISABLED_CLI, effortLevel: 'low' } },
+    });
+    expect(await resolve(db, 'reviewer')).toEqual({
+      cliProviderId: DISABLED_CLI,
+      effortLevel: 'low',
+    });
+  });
+
+  it('keeps a disabled saved default preference', async () => {
+    const db = fakeDb({ saved: { default: { cliProviderId: DISABLED_CLI, effortLevel: 'low' } } });
+    expect(await resolve(db)).toEqual({ cliProviderId: DISABLED_CLI, effortLevel: 'low' });
+  });
+
+  it('keeps a disabled saved role preference', async () => {
+    const db = fakeDb({ saved: { reviewer: { cliProviderId: DISABLED_CLI, effortLevel: 'low' } } });
+    expect(await resolve(db, 'reviewer')).toEqual({
+      cliProviderId: DISABLED_CLI,
+      effortLevel: 'low',
+    });
+  });
+
+  it('leaves a disabled saved preference out under ignore_saved_step_clis with no touch marker', async () => {
+    const db = fakeDb({ saved: { default: { cliProviderId: DISABLED_CLI, effortLevel: 'low' } } });
+    expect(await resolve(db, 'default', true)).toEqual({
+      cliProviderId: TASK_CLI,
+      effortLevel: null,
+    });
+  });
+
+  it('falls back to the task CLI when the picked id has no provider row', async () => {
+    const db = fakeDb({
+      choices: { default: { cliProviderId: UNLISTED_CLI, effortLevel: 'max' } },
     });
     expect(await resolve(db)).toEqual({ cliProviderId: TASK_CLI, effortLevel: null });
   });

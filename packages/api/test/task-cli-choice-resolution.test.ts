@@ -8,6 +8,7 @@ import {
   enrichStepsWithCliPreferences,
   resolveCurrentStepCliProviderIds,
 } from '../src/routes/tasks/_helpers.js';
+import { STEP_MINING_SEATS } from '@haive/shared';
 import { staticStepFlags } from './step-flags-fixture.js';
 
 const flags = staticStepFlags();
@@ -167,13 +168,30 @@ describe("the listing's usage strip", () => {
     expect(b.get(TASK)?.[0]).toBe(TASK_CLI);
   });
 
-  it('falls back to the task CLI when the picked one was disabled since', async () => {
+  it("keeps this task's pick when its provider is disabled since", async () => {
     const { fake, db, save, choose } = setup();
     save('08c-code-review', SAVED_CLI);
     choose('08c-code-review', PICKED_CLI);
     fake.patch(schema.cliProviders, PICKED_CLI, { enabled: false });
     const out = await resolveCurrentStepCliProviderIds(db, flags, USER, [task('08c-code-review')]);
-    expect(out.get(TASK)?.[0]).toBe(TASK_CLI);
+    expect(out.get(TASK)?.[0]).toBe(PICKED_CLI);
+  });
+
+  it('keeps a saved step pick whose provider is disabled', async () => {
+    const { fake, db, save } = setup();
+    save('08c-code-review', SAVED_CLI);
+    fake.patch(schema.cliProviders, SAVED_CLI, { enabled: false });
+    const out = await resolveCurrentStepCliProviderIds(db, flags, USER, [task('08c-code-review')]);
+    expect(out.get(TASK)?.[0]).toBe(SAVED_CLI);
+  });
+
+  it('keeps a fan-out seat pick on a disabled provider', async () => {
+    const { fake, db, save } = setup();
+    const seat = STEP_MINING_SEATS['08c-code-review']![0]!.id;
+    save('08c-code-review', SAVED_CLI, seat);
+    fake.patch(schema.cliProviders, SAVED_CLI, { enabled: false });
+    const out = await resolveCurrentStepCliProviderIds(db, flags, USER, [task('08c-code-review')]);
+    expect(out.get(TASK)).toContain(SAVED_CLI);
   });
 });
 

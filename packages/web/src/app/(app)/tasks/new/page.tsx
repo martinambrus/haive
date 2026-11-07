@@ -153,9 +153,9 @@ function SavedStepClis({
   steps: UpcomingCliStep[];
   providers: CliProvider[];
 }) {
-  const enabledProviderIds = new Set(providers.filter((p) => p.enabled).map((p) => p.id));
+  const listedProviderIds = new Set(providers.map((p) => p.id));
   const rows = steps.flatMap((step) => {
-    const ids = stepCliProviderIds({ step, taskCliProviderId: null, enabledProviderIds });
+    const ids = stepCliProviderIds({ step, taskCliProviderId: null, listedProviderIds });
     return ids.length > 0 ? [{ step, ids }] : [];
   });
   if (rows.length === 0) return null;

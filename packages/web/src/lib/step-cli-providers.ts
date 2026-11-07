@@ -6,10 +6,11 @@
  *  step's single `preferredCliProviderId` — the `'default'` row only — and therefore named a
  *  CLI that no agent of a seat-configured step was running.
  *
- *  Mirrors `resolvePreferredCli`'s fall-through exactly: an unset or disabled seat falls to
- *  the step default, and that falls to the task provider. `enabled` is checked on the
- *  PREFERENCE rows only, like the worker does — the task's own provider is the fallback of
- *  last resort and is passed through as-is.
+ *  Mirrors `resolvePreferredCli`'s fall-through exactly: an unset seat, or one whose provider
+ *  row no longer exists, falls to the step default, and that falls to the task provider. A
+ *  pick whose provider row exists is kept even when it is switched off, since the worker
+ *  holds the step on it — so callers pass EVERY provider row, not only the enabled ones.
+ *  The task's own provider is the fallback of last resort and is passed through as-is.
  *
  *  The step default is kept even when every seat is set: it is the fallthrough for a seat
  *  the user never touched, it runs the mining summary pass, and keeping it means this can
@@ -31,13 +32,14 @@ export interface StepCliProviderSource {
 export function stepCliProviderIds(args: {
   step: StepCliProviderSource | null;
   taskCliProviderId: string | null;
-  enabledProviderIds: ReadonlySet<string>;
+  listedProviderIds: ReadonlySet<string>;
 }): string[] {
-  const { step, taskCliProviderId, enabledProviderIds } = args;
-  // A pref pointing at a deleted or disabled provider is ignored, exactly as the worker
-  // ignores it — the seat runs on the fallback, so the fallback is what the header must name.
+  const { step, taskCliProviderId, listedProviderIds } = args;
+  // A pref pointing at a deleted provider is ignored, exactly as the worker ignores it — the
+  // seat runs on the fallback, so the fallback is what the header must name. A disabled one
+  // still has its row, so it is kept: the worker holds the step on it.
   const usable = (id: string | null | undefined): string | null =>
-    id && enabledProviderIds.has(id) ? id : null;
+    id && listedProviderIds.has(id) ? id : null;
 
   const stepDefault = usable(step?.preferredCliProviderId) ?? taskCliProviderId ?? null;
 

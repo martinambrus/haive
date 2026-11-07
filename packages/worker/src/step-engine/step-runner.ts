@@ -225,10 +225,12 @@ async function loadLastCompletedFormValues(
 }
 
 /** Returns the CLI chosen for this (step, role) in this task, else the user's explicit
- *  saved per-step override, validated as enabled, plus the effort/reasoning override
- *  stored beside it (null when none). Falls back to the task default CLI (and null
- *  effort) when neither exists or the chosen provider is disabled/deleted. Legacy
- *  auto-recorded rows (explicit=false) are ignored so the task provider wins. */
+ *  saved per-step override, plus the effort/reasoning override stored beside it (null when
+ *  none). Falls back to the task default CLI (and null effort) when neither exists or the
+ *  chosen id has no provider row (a deleted provider). A provider that is switched off is
+ *  still an explicit pick: the step hold parks on it and the dispatcher refuses it, so it
+ *  is never swapped for another CLI here. Legacy auto-recorded rows (explicit=false) are
+ *  ignored so the task provider wins. */
 export async function resolvePreferredCli(
   db: Database,
   userId: string,
@@ -239,8 +241,7 @@ export async function resolvePreferredCli(
   taskId?: string,
   ignoreSaved = false,
 ): Promise<{ cliProviderId: string | null; effortLevel: string | null }> {
-  const usable = (id: string | null): id is string =>
-    !!id && providers.some((p) => p.id === id && p.enabled);
+  const listed = (id: string | null): id is string => !!id && providers.some((p) => p.id === id);
   // A NULL provider is this task clearing the slot, so the saved preference stays out of it.
   const taskChoice = (r: string) =>
     taskId
@@ -274,7 +275,7 @@ export async function resolvePreferredCli(
   if (role !== 'default') {
     const roleChoice = await taskChoice(role);
     if (roleChoice) {
-      if (usable(roleChoice.cliProviderId)) {
+      if (listed(roleChoice.cliProviderId)) {
         return { cliProviderId: roleChoice.cliProviderId, effortLevel: roleChoice.effortLevel };
       }
     } else {
@@ -288,7 +289,7 @@ export async function resolvePreferredCli(
       });
       if (roleRow) {
         const p = providers.find((p) => p.id === roleRow.cliProviderId);
-        if (p && p.enabled && (!ignoreSaved || (await isTouched(role)))) {
+        if (p && (!ignoreSaved || (await isTouched(role)))) {
           return { cliProviderId: roleRow.cliProviderId, effortLevel: roleRow.effortLevel };
         }
       }
@@ -296,7 +297,7 @@ export async function resolvePreferredCli(
   }
   const defaultChoice = await taskChoice('default');
   if (defaultChoice) {
-    return usable(defaultChoice.cliProviderId)
+    return listed(defaultChoice.cliProviderId)
       ? { cliProviderId: defaultChoice.cliProviderId, effortLevel: defaultChoice.effortLevel }
       : { cliProviderId: fallback, effortLevel: null };
   }
@@ -309,7 +310,7 @@ export async function resolvePreferredCli(
   });
   if (!row) return { cliProviderId: fallback, effortLevel: null };
   const provider = providers.find((p) => p.id === row.cliProviderId);
-  if (!provider || !provider.enabled) return { cliProviderId: fallback, effortLevel: null };
+  if (!provider) return { cliProviderId: fallback, effortLevel: null };
   // Gate the 'default' read by its own marker so a flagged multi-role step can't
   // leak a pre-existing default pref via the role->default fallthrough above.
   if (ignoreSaved && !(await isTouched('default')))
@@ -377,6 +378,7 @@ type UpdatePatch = Partial<{
   integrationWait: TaskStepRow['integrationWait'];
   status: StepStatus;
   detectOutput: unknown;
+  detectCliProviderId: string | null;
   formSchema: unknown;
   formValues: Record<string, unknown> | null;
   output: unknown;
@@ -2926,10 +2928,37 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       await foldCliParkOnResume(db, current.id);
     }
 
+    let redetected = false;
+    if (
+      meta.providerSensitive === true &&
+      stepDef.detect &&
+      (row.status === 'pending' || row.status === 'waiting_form') &&
+      current.detectOutput !== null &&
+      current.detectOutput !== undefined &&
+      current.detectCliProviderId !== null &&
+      current.detectCliProviderId !== (ctx.cliProviderId ?? null)
+    ) {
+      ctx.logger.info(
+        { stepId: meta.id, from: current.detectCliProviderId, to: ctx.cliProviderId ?? null },
+        'default CLI provider changed; re-detecting parked step',
+      );
+      current = await updateRow(db, current.id, {
+        detectOutput: null,
+        formSchema: null,
+        formValues: null,
+        detectCliProviderId: null,
+      });
+      redetected = true;
+    }
+
     let detected = current.detectOutput;
     if (detected === null || detected === undefined) {
       detected = stepDef.detect ? await stepDef.detect(ctx) : null;
-      current = await updateRow(db, current.id, { detectOutput: detected, statusMessage: null });
+      current = await updateRow(db, current.id, {
+        detectOutput: detected,
+        detectCliProviderId: ctx.cliProviderId ?? null,
+        statusMessage: null,
+      });
     }
 
     // --- Pre-form LLM phase ---
@@ -3062,7 +3091,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
 
     // A form held by a Retry or a reopen (pauseFormOnRetry) has not been offered since the hold was
     // set, so values a job carries can only be a submit sent before it: the form parks instead.
-    const submitted = current.pauseFormOnRetry ? undefined : params.formValues;
+    const submitted = redetected || current.pauseFormOnRetry ? undefined : params.formValues;
 
     // Manual mode: EVERY step pauses before apply. Formless steps get a
     // synthesized confirm-only schema so the existing waiting_form plumbing
@@ -3407,6 +3436,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           current = await updateRow(db, current.id, {
             status: 'waiting_form',
             detectOutput: refreshedDetected,
+            detectCliProviderId: ctx.cliProviderId ?? null,
             formSchema: refreshedSchema,
             formValues: null,
             pauseFormOnRetry: false,

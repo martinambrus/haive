@@ -250,10 +250,11 @@ export function PlanChat({
         // task's. Changing the CLI mid-conversation records a step choice for this task and
         // leaves the task column alone, so reading the column put the old CLI back while the new
         // one ran.
+        // The picker offers enabled providers only, so only those can be preselected here.
         const [running] = stepCliProviderIds({
           step,
           taskCliProviderId: res.task.cliProviderId,
-          enabledProviderIds: new Set(providersRef.current.map((p) => p.id)),
+          listedProviderIds: new Set(providersRef.current.map((p) => p.id)),
         });
         if (running) setProviderId(running);
         const settled =

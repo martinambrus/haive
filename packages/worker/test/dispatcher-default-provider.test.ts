@@ -83,7 +83,13 @@ describe('the default provider when nothing is preferred', () => {
     }
   });
 
-  it('falls to the default when the preferred id is disabled or unknown', () => {
+  it('falls to the default when the preferred id matches no provider', () => {
+    for (const order of permutations([newest, oldest, middle])) {
+      expect(sequence(order, 'no-such-id')).toEqual(['z', 'm', 'a']);
+    }
+  });
+
+  it('yields no candidate when the preferred id is a disabled provider', () => {
     const off = makeProvider({
       id: 'off',
       name: 'amp',
@@ -91,8 +97,28 @@ describe('the default provider when nothing is preferred', () => {
       enabled: false,
     });
     for (const order of permutations([off, newest, oldest, middle])) {
-      expect(sequence(order, 'off')).toEqual(['z', 'm', 'a']);
-      expect(sequence(order, 'no-such-id')).toEqual(['z', 'm', 'a']);
+      expect(sequence(order, 'off')).toEqual([]);
+    }
+  });
+
+  it('skips with the provider label when the preferred provider is disabled, even if it is the only one', () => {
+    const off = makeProvider({
+      id: 'off',
+      name: 'amp',
+      label: 'My Amp',
+      createdAt: at('2025-01-01T00:00:00Z'),
+      enabled: false,
+    });
+    for (const providers of [[off], [off, oldest, middle]]) {
+      const plan = resolveDispatch({
+        providers,
+        preferredProviderId: 'off',
+        input: { kind: 'prompt', prompt: 'p', capabilities: [] },
+        invokeOpts: {},
+      });
+      expect(plan.mode).toBe('skip');
+      expect(plan.providerId).toBeNull();
+      expect(plan.reason).toContain('My Amp');
     }
   });
 

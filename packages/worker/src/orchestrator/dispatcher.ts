@@ -29,6 +29,7 @@ import type {
 } from '../cli-adapters/types.js';
 import type { IntegrationBinding } from '@haive/shared/integrations';
 import { TEMPLATE_PERSONA_MARKER_PATTERN } from '@haive/shared/modularity';
+import { disabledProvider, providerLabel } from './provider-hold.js';
 import { splitSubAgentForProvider } from '../sub-agent-emulator/splitter.js';
 import {
   adaptPromptForCliCapabilities,
@@ -582,6 +583,7 @@ export function* dispatchCandidates(
   preferredProviderId: string | null,
   opts: { needsVision: boolean; preferVision?: boolean; registry?: CliAdapterRegistry },
 ): Generator<{ provider: CliProviderRecord; adapter: BaseCliAdapter }> {
+  if (disabledProvider(providers, preferredProviderId)) return;
   const registry = opts.registry ?? cliAdapterRegistry;
   const enabled = providers.filter((p) => p.enabled);
   for (const provider of orderProviders(enabled, preferredProviderId, opts.preferVision === true)) {
@@ -598,6 +600,12 @@ export function* dispatchCandidates(
 }
 
 export function resolveDispatch(req: DispatchRequest): DispatchPlan {
+  const off = disabledProvider(req.providers, req.preferredProviderId ?? null);
+  if (off) {
+    return skipPlan(
+      `the selected cli provider "${providerLabel(off)}" is disabled; enable it again or choose another CLI for this step`,
+    );
+  }
   const enabled = req.providers.filter((p) => p.enabled);
 
   if (enabled.length === 0) {

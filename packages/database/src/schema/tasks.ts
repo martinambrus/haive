@@ -653,6 +653,8 @@ export const taskSteps = pgTable(
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
     integrationWait: jsonb('integration_wait').$type<IntegrationWait>(),
+    /** The provider id the stored detect output was computed for; null means unknown (rows older than this column). */
+    detectCliProviderId: uuid('detect_cli_provider_id'),
   },
   (table) => [
     index('task_steps_task_id_idx').on(table.taskId),
