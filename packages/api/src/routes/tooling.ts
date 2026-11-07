@@ -14,6 +14,12 @@ import { requireAuth } from '../middleware/auth.js';
 import type { AppEnv } from '../context.js';
 
 const CONNECT_TIMEOUT_MS = 10_000;
+// A partial line (no newline yet) from the pull stream longer than this stops the pull.
+const PULL_LINE_MAX_BYTES = 64 * 1024;
+// Total bytes read from the pull stream; over this the pull stops.
+const PULL_STREAM_MAX_BYTES = 64 * 1024 * 1024;
+// No progress (headers, a chunk) from the pull upstream for this long stops the pull; not a total cap.
+const PULL_IDLE_MS = 10 * 60_000;
 
 const tooling = new Hono<AppEnv>();
 tooling.use('*', requireAuth);
@@ -258,17 +264,49 @@ tooling.post('/pull-ollama-model', async (c) => {
       event: 'start',
     });
 
-    try {
-      const resp = await fetchFn(`${url}/api/pull`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, stream: true }),
-        signal: controller.signal,
+    // A cap trip is an error, not a cancel: the catch tells them apart by this cause.
+    let stopCause: string | null = null;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    let rejectWait: ((reason: Error) => void) | undefined;
+    const stop = (cause: string) => {
+      if (stopCause) return;
+      stopCause = cause;
+      controller.abort();
+      reader?.cancel().catch(() => {});
+      rejectWait?.(new Error(cause));
+    };
+    const armIdle = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(
+        () => stop('Ollama pull stopped: the server sent nothing for 10 minutes'),
+        PULL_IDLE_MS,
+      );
+    };
+    // A custom fetchFn may ignore the signal, so every wait is cut short by the stop.
+    // One reject slot, overwritten per wait: nothing accumulates per read.
+    const guarded = <T>(wait: Promise<T>) =>
+      new Promise<T>((resolve, reject) => {
+        if (stopCause) return reject(new Error(stopCause));
+        rejectWait = reject;
+        wait.then(resolve, reject);
       });
+
+    try {
+      armIdle();
+      const resp = await guarded(
+        fetchFn(`${url}/api/pull`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model, stream: true }),
+          signal: controller.signal,
+        }),
+      );
+      armIdle();
 
       if (!resp.ok) {
         // A user-supplied URL: only a bounded excerpt of its error body is read (no credential here).
-        const text = await readForgeErrorExcerpt(resp, '');
+        const text = await guarded(readForgeErrorExcerpt(resp, ''));
         await stream.writeSSE({
           data: JSON.stringify({
             error: `Ollama returned HTTP ${resp.status}: ${text.slice(0, 200)}`,
@@ -278,7 +316,7 @@ tooling.post('/pull-ollama-model', async (c) => {
         return;
       }
 
-      const reader = resp.body?.getReader();
+      reader = resp.body?.getReader();
       if (!reader) {
         await stream.writeSSE({
           data: JSON.stringify({ error: 'No response body from Ollama' }),
@@ -289,14 +327,25 @@ tooling.post('/pull-ollama-model', async (c) => {
 
       const decoder = new TextDecoder();
       let buffer = '';
+      let streamed = 0;
 
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await guarded(reader.read());
         if (done) break;
+        armIdle();
 
+        streamed += value.byteLength;
+        if (streamed > PULL_STREAM_MAX_BYTES) {
+          stop('Ollama pull stopped: more than 64 MiB of progress was streamed');
+          break;
+        }
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
         buffer = lines.pop() ?? '';
+        if (Buffer.byteLength(buffer) > PULL_LINE_MAX_BYTES) {
+          stop('Ollama pull stopped: a line from the server exceeded 64 KiB');
+          break;
+        }
 
         for (const line of lines) {
           const trimmed = line.trim();
@@ -307,11 +356,11 @@ tooling.post('/pull-ollama-model', async (c) => {
               digest?: string;
               total?: number;
               completed?: number;
-              error?: string;
+              error?: unknown;
             };
             if (obj.error) {
               await stream.writeSSE({
-                data: JSON.stringify({ error: obj.error }),
+                data: JSON.stringify({ error: String(obj.error).slice(0, 200) }),
                 event: 'error',
               });
               return;
@@ -331,12 +380,18 @@ tooling.post('/pull-ollama-model', async (c) => {
         }
       }
 
+      if (stopCause) throw new Error(stopCause);
       await stream.writeSSE({
         data: JSON.stringify({ status: 'success', model }),
         event: 'done',
       });
     } catch (err) {
-      if (controller.signal.aborted) {
+      if (stopCause) {
+        await stream.writeSSE({
+          data: JSON.stringify({ error: stopCause }),
+          event: 'error',
+        });
+      } else if (controller.signal.aborted) {
         await stream.writeSSE({
           data: JSON.stringify({ status: 'cancelled' }),
           event: 'cancelled',
@@ -348,7 +403,11 @@ tooling.post('/pull-ollama-model', async (c) => {
         });
       }
     } finally {
+      clearTimeout(idleTimer);
       activePulls.delete(pullId);
+      // An early return (an in-stream error line) must release the upstream; a no-op after a finished stream.
+      controller.abort();
+      reader?.cancel().catch(() => {});
     }
   });
 });
