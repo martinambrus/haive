@@ -1,5 +1,7 @@
-import { describe, it, expect } from 'vitest';
-import { subscriptionClaudeIsAlready1h } from './invocation-cost.js';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+import type { Database } from '@haive/database';
+import { CONFIG_KEYS, ConfigUnavailableError, configService } from '@haive/shared';
+import { resolveInvocationCost, subscriptionClaudeIsAlready1h } from './invocation-cost.js';
 
 // Anthropic gives subscription auth the 1-hour prompt cache unconditionally, so the
 // 5-minute write rate understates those writes by 1.6x on claude-opus-5. The flag that
@@ -32,5 +34,52 @@ describe('subscriptionClaudeIsAlready1h', () => {
   it('is false when either half is unknown, so an unattributable row keeps the old path', () => {
     expect(subscriptionClaudeIsAlready1h(null, 'subscription')).toBe(false);
     expect(subscriptionClaudeIsAlready1h('claude-code', null)).toBe(false);
+  });
+});
+
+// The cache-write rate is persisted on the invocation row, so a store that cannot be read must
+// not be answered with the 5m guess: the cost resolution rejects and the row stays unpriced.
+describe('cache TTL resolution when the config store is unreadable', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function stubDb(authMode: string): Database {
+    return {
+      query: {
+        cliProviders: { findFirst: async () => ({ authMode, model: null }) },
+        cliPricingSync: { findFirst: async () => undefined },
+      },
+      select: () => ({ from: () => ({ where: async () => [] }) }),
+    } as unknown as Database;
+  }
+
+  const input = {
+    cliProviderId: 'prov-1',
+    providerName: 'claude-code',
+    tokenUsage: { inputTokens: 1, outputTokens: 1 } as never,
+    modelIdentity: null,
+  };
+
+  it('rejects with the outage error instead of pricing cache writes at 5m', async () => {
+    const outage = new ConfigUnavailableError('get boolean');
+    const spy = vi.spyOn(configService, 'getBoolean').mockRejectedValue(outage);
+    await expect(resolveInvocationCost(stubDb('api_key'), input)).rejects.toBe(outage);
+    expect(spy).toHaveBeenCalledWith(CONFIG_KEYS.PROMPT_CACHING_1H, false);
+  });
+
+  it('still prices at 5m when the read fails for any other reason', async () => {
+    vi.spyOn(configService, 'getBoolean').mockRejectedValue(new Error('ConfigService not ready'));
+    const cost = await resolveInvocationCost(stubDb('api_key'), input);
+    expect(cost?.cacheTtl).toBe('5m');
+  });
+
+  it('uses 1h for subscription claude-code without reading the config at all', async () => {
+    const spy = vi
+      .spyOn(configService, 'getBoolean')
+      .mockRejectedValue(new ConfigUnavailableError('get boolean'));
+    const cost = await resolveInvocationCost(stubDb('subscription'), input);
+    expect(cost?.cacheTtl).toBe('1h');
+    expect(spy).not.toHaveBeenCalled();
   });
 });

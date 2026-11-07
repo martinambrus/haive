@@ -25,6 +25,7 @@ import {
   IN_STACK_OLLAMA_URL,
   STEP_CAPABILITIES,
   configService,
+  rethrowIfConfigUnavailable,
   escalatedFromDeclaredMs,
   escalatedTimeoutMs,
   extractFormDefaults,
@@ -450,7 +451,9 @@ async function enforceLocalModelGuard(
   let allow = false;
   try {
     allow = await configService.getBoolean(CONFIG_KEYS.ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS, false);
-  } catch {
+  } catch (err) {
+    // An outage must fail the step, not be reported as the local-model block.
+    rethrowIfConfigUnavailable(err);
     // Config store unavailable (e.g. not initialized) → safe default: block.
     allow = false;
   }
@@ -541,7 +544,8 @@ function retryWarning(attempt: number, maxAttempts: number | null, reason: strin
 async function resolveSteeringEnabled(): Promise<boolean> {
   try {
     return await configService.getBoolean(CONFIG_KEYS.STEERING_ENABLED, true);
-  } catch {
+  } catch (err) {
+    rethrowIfConfigUnavailable(err);
     return false;
   }
 }
@@ -5130,6 +5134,8 @@ async function resolveDispatchTimeoutMs(
     );
     ladder = parseTimeoutLadder(await configService.get(CONFIG_KEYS.CLI_TIMEOUT_LADDER));
   } catch (err) {
+    // An outage must reject before the caller stamps a ladder it only guessed.
+    rethrowIfConfigUnavailable(err);
     logger.warn({ err }, 'cli timeout ladder config unreadable; using built-in defaults');
   }
   const learnedMs = await learnedTimeoutMs(db, step.taskId, step.stepId, step.id);
@@ -5188,6 +5194,8 @@ async function resolveMiningTimeoutMs(
     );
     ladder = parseTimeoutLadder(await configService.get(CONFIG_KEYS.CLI_TIMEOUT_LADDER));
   } catch (err) {
+    // An outage must reject before the caller stamps a ladder it only guessed.
+    rethrowIfConfigUnavailable(err);
     logger.warn({ err }, 'cli timeout ladder config unreadable; using built-in defaults');
   }
   const declared = declaredMs && declaredMs > 0 ? declaredMs : baseMinutes * 60_000;

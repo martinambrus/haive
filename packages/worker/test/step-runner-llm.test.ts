@@ -10,7 +10,12 @@ vi.mock('../src/orchestrator/global-kb-context.js', async (importOriginal) => ({
     status: 'ok',
   }),
 }));
-import { CONFIG_KEYS, configService, type CliExecJobPayload } from '@haive/shared';
+import {
+  CONFIG_KEYS,
+  ConfigUnavailableError,
+  configService,
+  type CliExecJobPayload,
+} from '@haive/shared';
 import {
   customToolSchema,
   parsePinnedCustomSteps,
@@ -1910,5 +1915,126 @@ describe('advanceStep and the custom tools of a prompt step', () => {
     expect(enqueued[0]).not.toHaveProperty('customTools');
     expect(enqueued[0]!.toolProfile).toBe('rag_only');
     expect(String(state.cliInvocationRow!.prompt)).not.toContain('haive-custom');
+  });
+});
+
+// A value read that picks a setting the step then uses must not be answered with a guess when
+// the store cannot be read: the step fails with the outage's own message and Retry re-runs it.
+describe('advanceStep when the config store is unreadable', () => {
+  const outage = new ConfigUnavailableError('get boolean');
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function ollamaProvider(): CliProviderRecord {
+    return {
+      ...makeProvider(),
+      id: 'prov-ollama',
+      name: 'ollama',
+      authMode: 'api_key',
+      model: 'qwen3-coder:30b',
+      envVars: null,
+    } as CliProviderRecord;
+  }
+
+  function advance(state: MockState, stepDef: StepDefinition, provider = makeProvider()) {
+    return advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: provider.id,
+      stepDef,
+      providers: [provider],
+      deps: { async enqueueCliInvocation() {} },
+    });
+  }
+
+  /** getBoolean answers `rejection` for one key and the caller's default for every other. */
+  function failBoolean(key: string, rejection: Error) {
+    return vi.spyOn(configService, 'getBoolean').mockImplementation(async (k, fallback) => {
+      if (k === key) throw rejection;
+      return fallback ?? false;
+    });
+  }
+
+  const learnedStamps = (state: MockState) =>
+    state.updates.filter((u) => 'cliTimeoutLearnedMs' in u);
+
+  it('fails a local-model step with the outage message, not the local-model block text', async () => {
+    failBoolean(CONFIG_KEYS.ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS, outage);
+    const stepDef = baseStep();
+    stepDef.metadata.unsafeForLocalModels = true;
+    const state = freshState();
+    const result = await advance(state, stepDef, ollamaProvider());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toBe(outage.message);
+      expect(result.error).not.toMatch(/blocked for local Ollama models/i);
+    }
+    expect(state.taskStepRow.errorMessage).toBe(outage.message);
+    expect(state.taskStepRow.errorHint).toBeUndefined();
+    expect(state.inserts.find((i) => i.table === 'cli_invocations')).toBeUndefined();
+  });
+
+  it('still blocks a local-model step as before when the flag read fails for another reason', async () => {
+    failBoolean(CONFIG_KEYS.ALLOW_LOCAL_MODEL_DESTRUCTIVE_STEPS, new Error('not initialized'));
+    const stepDef = baseStep();
+    stepDef.metadata.unsafeForLocalModels = true;
+    const result = await advance(freshState(), stepDef, ollamaProvider());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed')
+      expect(result.error).toMatch(/blocked for local Ollama models/i);
+  });
+
+  it('fails the step instead of silently turning steering off', async () => {
+    failBoolean(CONFIG_KEYS.STEERING_ENABLED, outage);
+    const state = freshState();
+    const result = await advance(state, baseStep());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') expect(result.error).toBe(outage.message);
+    expect(state.inserts.find((i) => i.table === 'cli_invocations')).toBeUndefined();
+  });
+
+  it('still dispatches without steering when the steering read fails for another reason', async () => {
+    failBoolean(CONFIG_KEYS.STEERING_ENABLED, new Error('not initialized'));
+    const state = freshState();
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: baseStep(),
+      providers: [makeProvider()],
+      deps: {
+        async enqueueCliInvocation(payload) {
+          enqueued.push(payload);
+        },
+      },
+    });
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueued).toHaveLength(1);
+  });
+
+  it('fails before stamping a learned timeout when the ladder cannot be read', async () => {
+    vi.spyOn(configService, 'getNumber').mockRejectedValue(outage);
+    const state = freshState();
+    const result = await advance(state, baseStep());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') expect(result.error).toBe(outage.message);
+    expect(learnedStamps(state)).toEqual([]);
+    expect(state.inserts.find((i) => i.table === 'cli_invocations')).toBeUndefined();
+  });
+
+  it('keeps the built-in ladder and stamps it when the read fails for another reason', async () => {
+    vi.spyOn(configService, 'getNumber').mockRejectedValue(new Error('not initialized'));
+    const state = freshState();
+    const result = await advance(state, baseStep());
+    expect(result.status).toBe('waiting_cli');
+    expect(learnedStamps(state)).toHaveLength(1);
   });
 });

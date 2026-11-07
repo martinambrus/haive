@@ -4,6 +4,7 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import { schema, type Database } from '@haive/database';
 import {
   CONFIG_KEYS,
+  ConfigUnavailableError,
   configService,
   type CliExecJobPayload,
   type StepCapability,
@@ -3439,5 +3440,49 @@ describe('the 08c fan-out and the house rules', () => {
     expect(none.stamp).toEqual({ mode: 'review', entries: [], omitted: [] });
     expect(none.prompt).not.toContain(HOUSE_RULES_MARKER);
     expect(stripHaivePreamble(shown.prompt)).toBe(stripHaivePreamble(none.prompt));
+  });
+});
+
+describe('a fan-out dispatch when the config store is unreadable', () => {
+  const outage = new ConfigUnavailableError('get boolean');
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const stamps = (state: MockState) => state.updates.filter((u) => 'cliTimeoutLearnedMs' in u);
+  const sent = (state: MockState) => state.inserts.filter((i) => i.table === 'cli_invocations');
+
+  it('fails before stamping a learned timeout when the ladder cannot be read', async () => {
+    vi.spyOn(configService, 'getNumber').mockRejectedValue(outage);
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), waveStep([], ['refute-abc']), enqueued);
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') expect(result.error).toBe(outage.message);
+    expect(stamps(state)).toEqual([]);
+    expect(enqueued).toEqual([]);
+    // The row inserted for the agent before the read is superseded, never sent.
+    expect(sent(state)).toHaveLength(1);
+    expect(state.updates.some((u) => u.table === 'cli_invocations' && u.supersededAt)).toBe(true);
+  });
+
+  it('keeps the built-in ladder and stamps it when the read fails for another reason', async () => {
+    vi.spyOn(configService, 'getNumber').mockRejectedValue(new Error('not initialized'));
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    await run(makeMockDb(state), waveStep([], ['refute-abc']), []);
+    expect(stamps(state).length).toBeGreaterThan(0);
+  });
+
+  it('fails the fan-out instead of turning steering off when its read hits the outage', async () => {
+    vi.spyOn(configService, 'getBoolean').mockImplementation(async (key, fallback) => {
+      if (key === CONFIG_KEYS.STEERING_ENABLED) throw outage;
+      return fallback ?? false;
+    });
+    const state = freshState([miningRow('peer-reviewer', 1)]);
+    const enqueued: CliExecJobPayload[] = [];
+    const result = await run(makeMockDb(state), waveStep([], ['refute-abc']), enqueued);
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') expect(result.error).toBe(outage.message);
+    expect(enqueued).toEqual([]);
   });
 });
