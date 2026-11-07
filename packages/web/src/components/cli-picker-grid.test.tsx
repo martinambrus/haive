@@ -124,3 +124,45 @@ describe('seat inheritance', () => {
     expect(textOf(empty[0]!)).toBe('(none — use the step’s CLI)');
   });
 });
+
+describe('the effort dropdown of a switched-off provider', () => {
+  const scale = { values: ['low', 'high'], max: 'high' };
+  const scaled = [
+    { id: 'on', name: 'codex', label: 'Codex', enabled: true, effortScale: scale },
+    { id: 'off', name: 'claude', label: 'Claude', enabled: false, effortScale: scale },
+  ] as never;
+
+  function efforts(props: Record<string, unknown>) {
+    const view = createRenderer(() => (
+      <CliPickerGrid
+        providers={scaled}
+        idPrefix="s"
+        defaultProviderId="on"
+        taskCliProviderId={null}
+        onChange={() => {}}
+        {...props}
+      />
+    ));
+    return findAll(
+      view.tree(),
+      (h) => h.tag === 'select' && h.props['aria-label'] === 'reasoning effort',
+    );
+  }
+
+  it.each([
+    ['the single dropdown', { defaultProviderId: 'off' }],
+    ['a role dropdown', { roles: slots, roleProviders: { a: 'off' } }],
+  ])('is disabled and says why in %s', (_n, props) => {
+    const [select] = efforts(props);
+    expect(select?.props.disabled).toBe(true);
+    expect(String(select?.props.title)).toMatch(/is disabled/);
+  });
+
+  it.each([
+    ['the single dropdown', { defaultProviderId: 'on' }],
+    ['a role dropdown', { roles: slots, roleProviders: { a: 'on' } }],
+  ])('stays editable for an enabled provider in %s', (_n, props) => {
+    const [select] = efforts(props);
+    expect(select?.props.disabled).toBeFalsy();
+  });
+});

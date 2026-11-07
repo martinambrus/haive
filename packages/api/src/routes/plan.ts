@@ -1164,8 +1164,8 @@ async function resolveProvider(
 ): Promise<string | null> {
   const db = getDb();
   if (cliProviderId) {
-    // A disabled provider is refused here rather than dispatched: the dispatcher drops it and
-    // runs the default provider, which is not the CLI the person picked.
+    // A disabled provider is refused here rather than dispatched: the plan task would park on
+    // it until it is enabled again.
     await loadUsableProvider(db, userId, cliProviderId);
     return cliProviderId;
   }

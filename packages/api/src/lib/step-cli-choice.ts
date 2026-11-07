@@ -14,7 +14,7 @@ function clampEffort(name: CliProviderName, level: string | null | undefined): s
 }
 
 /** The user's provider, refused with 404 when it is not theirs and 400 when it is disabled.
- * A disabled id would silently hand the work to the default provider. */
+ * A disabled id would leave the work parked until the provider is enabled again. */
 export async function loadUsableProvider(
   db: Pick<Database, 'query'>,
   userId: string,

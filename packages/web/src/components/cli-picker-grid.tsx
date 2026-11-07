@@ -121,11 +121,16 @@ export function CliPickerGrid({
         </select>
       );
     const value = rememberedEffort ?? prov?.effortLevel ?? scale.max;
+    const switchedOff = prov?.enabled === false;
     return (
       <select
         aria-label="reasoning effort"
-        title="Reasoning/effort level for this step's CLI (overrides the CLI's default)"
-        disabled={locked || busy}
+        title={
+          switchedOff
+            ? `${prov.label} is disabled, so this step's effort cannot be changed. Enable it again or choose another CLI for the step.`
+            : "Reasoning/effort level for this step's CLI (overrides the CLI's default)"
+        }
+        disabled={locked || busy || switchedOff}
         value={value}
         onChange={(e) => void onChange(providerId || null, roleId, e.target.value, remember)}
         className={effortSelectClass}

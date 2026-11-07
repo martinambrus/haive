@@ -1207,7 +1207,7 @@ describe('the steps that keep a saved CLI under the none option', () => {
     expect(page(view)).not.toContain('08-implement');
   });
 
-  it('drops a step whose only saved CLI is disabled, and lists both CLIs of a step saved on two', async () => {
+  it('keeps a step whose only saved CLI is disabled, and lists both CLIs of a step saved on two', async () => {
     disabledClis.add(P3);
     const view = await onScoped([
       savedStep('08-implement', 'Implementation', {
@@ -1219,7 +1219,7 @@ describe('the steps that keep a saved CLI under the none option', () => {
     ]);
     expect(page(view)).toContain('08-implement');
     expect(page(view)).toContain('cli-1 (cli-1), cli-2 (cli-2)');
-    expect(page(view)).not.toContain('09-review');
+    expect(page(view)).toContain('09-review');
   });
 
   it.each([404, 500])(

@@ -239,6 +239,34 @@ describe('task page: a task with no CLI of its own runs on the default provider'
     expect(titles.every((t) => t.startsWith('Codex'))).toBe(true);
   });
 
+  it('header chip: a step saved on a disabled CLI still shows that CLI usage window', async () => {
+    net.providers = [
+      providerRow('p-claude', 'claude-code', 'Claude'),
+      { ...providerRow('p-codex', 'codex', 'Codex'), enabled: false },
+    ];
+    try {
+      const view = await mount(
+        { cliProviderId: 'p-claude', effectiveCliProviderId: 'p-claude', currentStepId: 's1' },
+        [{ ...stepRow(), preferredCliProviderId: 'p-codex' }],
+      );
+      const titles = usageTitles(view);
+      expect(titles.length).toBeGreaterThan(0);
+      expect(titles.every((t) => t.startsWith('Codex'))).toBe(true);
+    } finally {
+      net.providers = null;
+    }
+  });
+
+  it('header chip GUARD: a step saved on an enabled CLI shows that CLI usage window', async () => {
+    const view = await mount(
+      { cliProviderId: 'p-claude', effectiveCliProviderId: 'p-claude', currentStepId: 's1' },
+      [{ ...stepRow(), preferredCliProviderId: 'p-codex' }],
+    );
+    const titles = usageTitles(view);
+    expect(titles.length).toBeGreaterThan(0);
+    expect(titles.every((t) => t.startsWith('Codex'))).toBe(true);
+  });
+
   it('step card: a none task whose effective provider is Claude names it in the empty option', async () => {
     const view = await mount(
       { cliProviderId: null, effectiveCliProviderId: 'p-claude', currentStepId: 's1' },

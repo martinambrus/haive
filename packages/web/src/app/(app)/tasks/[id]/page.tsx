@@ -1669,7 +1669,7 @@ export default function TaskDetailPage() {
   const usageProviderIds = stepCliProviderIds({
     step: currentStep ?? null,
     taskCliProviderId: taskEffectiveCliProviderId,
-    enabledProviderIds: new Set(providers.filter((p) => p.enabled).map((p) => p.id)),
+    listedProviderIds: new Set(providers.map((p) => p.id)),
   });
 
   return (

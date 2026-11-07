@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { stepCliProviderIds, type StepCliProviderSource } from './step-cli-providers';
 
-const ENABLED = new Set(['codex', 'claude', 'gemini']);
+const LISTED = new Set(['codex', 'claude', 'gemini']);
 
 const step = (over: Partial<StepCliProviderSource> = {}): StepCliProviderSource => ({
   preferredCliProviderId: null,
@@ -16,13 +16,13 @@ const seats = [
 describe('stepCliProviderIds', () => {
   it('names just the task provider for a step with nothing configured', () => {
     expect(
-      stepCliProviderIds({ step: step(), taskCliProviderId: 'codex', enabledProviderIds: ENABLED }),
+      stepCliProviderIds({ step: step(), taskCliProviderId: 'codex', listedProviderIds: LISTED }),
     ).toEqual(['codex']);
   });
 
   it('names nothing when there is no task provider either', () => {
     expect(
-      stepCliProviderIds({ step: step(), taskCliProviderId: null, enabledProviderIds: ENABLED }),
+      stepCliProviderIds({ step: step(), taskCliProviderId: null, listedProviderIds: LISTED }),
     ).toEqual([]);
   });
 
@@ -35,7 +35,7 @@ describe('stepCliProviderIds', () => {
           miningSeatProviders: { 'security-code-reviewer': 'claude' },
         }),
         taskCliProviderId: 'gemini',
-        enabledProviderIds: ENABLED,
+        listedProviderIds: LISTED,
       }),
     ).toEqual(['codex', 'claude']);
   });
@@ -46,12 +46,12 @@ describe('stepCliProviderIds', () => {
       stepCliProviderIds({
         step: step({ preferredCliProviderId: 'codex', miningSeats: seats }),
         taskCliProviderId: 'gemini',
-        enabledProviderIds: ENABLED,
+        listedProviderIds: LISTED,
       }),
     ).toEqual(['codex']);
   });
 
-  it('falls a seat on a disabled provider back to the default, like the worker does', () => {
+  it('falls a seat on a deleted provider back to the default, like the worker does', () => {
     expect(
       stepCliProviderIds({
         step: step({
@@ -60,17 +60,17 @@ describe('stepCliProviderIds', () => {
           miningSeatProviders: { 'peer-reviewer': 'retired-row' },
         }),
         taskCliProviderId: 'gemini',
-        enabledProviderIds: ENABLED,
+        listedProviderIds: LISTED,
       }),
     ).toEqual(['codex']);
   });
 
-  it('ignores a step default on a disabled provider', () => {
+  it('ignores a step default on a deleted provider', () => {
     expect(
       stepCliProviderIds({
         step: step({ preferredCliProviderId: 'retired-row' }),
         taskCliProviderId: 'gemini',
-        enabledProviderIds: ENABLED,
+        listedProviderIds: LISTED,
       }),
     ).toEqual(['gemini']);
   });
@@ -86,7 +86,7 @@ describe('stepCliProviderIds', () => {
           miningSeatProviders: { 'peer-reviewer': 'codex', 'security-code-reviewer': 'claude' },
         }),
         taskCliProviderId: null,
-        enabledProviderIds: ENABLED,
+        listedProviderIds: LISTED,
       }),
     ).toEqual(['gemini', 'codex', 'claude']);
   });
@@ -102,7 +102,7 @@ describe('stepCliProviderIds', () => {
           cliRoleProviders: { fixer: 'claude' },
         }),
         taskCliProviderId: 'codex',
-        enabledProviderIds: ENABLED,
+        listedProviderIds: LISTED,
       }),
     ).toEqual(['codex', 'claude']);
   });
@@ -116,14 +116,32 @@ describe('stepCliProviderIds', () => {
           miningSeatProviders: { 'peer-reviewer': 'claude', 'security-code-reviewer': 'claude' },
         }),
         taskCliProviderId: null,
-        enabledProviderIds: ENABLED,
+        listedProviderIds: LISTED,
       }),
     ).toEqual(['codex', 'claude']);
   });
 
   it('names the task provider when no step row has loaded yet', () => {
     expect(
-      stepCliProviderIds({ step: null, taskCliProviderId: 'codex', enabledProviderIds: ENABLED }),
+      stepCliProviderIds({ step: null, taskCliProviderId: 'codex', listedProviderIds: LISTED }),
     ).toEqual(['codex']);
+  });
+
+  it('counts every provider row passed, so a pick on a switched-off provider is kept', () => {
+    const everyRow = new Set([...LISTED, 'switched-off']);
+    expect(
+      stepCliProviderIds({
+        step: step({
+          preferredCliProviderId: 'switched-off',
+          miningSeats: seats,
+          miningSeatProviders: {
+            'peer-reviewer': 'switched-off',
+            'security-code-reviewer': 'claude',
+          },
+        }),
+        taskCliProviderId: 'gemini',
+        listedProviderIds: everyRow,
+      }),
+    ).toEqual(['switched-off', 'claude']);
   });
 });
