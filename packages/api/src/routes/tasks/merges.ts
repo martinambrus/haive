@@ -13,6 +13,7 @@ import {
 import { getDb } from '../../db.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { getTaskQueue } from '../../queues.js';
+import { addOrRefuse } from '../../lib/queue-bounded.js';
 
 // Merges a cancelled task left open. Auth + task ownership come from the parent taskRoutes
 // (requireAuth + userId), mirroring browser-access.ts. The abort runs in the worker: the api
@@ -57,16 +58,21 @@ mergeRoutes.post('/:id/merges/abort', async (c) => {
     throw new HttpError(404, 'No open merge is reported for that directory');
   }
 
-  await getTaskQueue().add(
-    TASK_JOB_NAMES.ABORT_LEFT_MERGE,
-    { taskId, userId, dir, mergeHead } satisfies AbortLeftMergePayload,
-    {
-      jobId: `abort-left-merge-${taskId}-${createHash('sha1').update(`${dir}\0${mergeHead}`).digest('hex')}`,
-      attempts: 5,
-      backoff: { type: 'exponential', delay: 2000 },
-      removeOnComplete: true,
-      removeOnFail: true,
-    },
+  await addOrRefuse(
+    () =>
+      getTaskQueue().add(
+        TASK_JOB_NAMES.ABORT_LEFT_MERGE,
+        { taskId, userId, dir, mergeHead } satisfies AbortLeftMergePayload,
+        {
+          jobId: `abort-left-merge-${taskId}-${createHash('sha1').update(`${dir}\0${mergeHead}`).digest('hex')}`,
+          attempts: 5,
+          backoff: { type: 'exponential', delay: 2000 },
+          removeOnComplete: true,
+          removeOnFail: true,
+        },
+      ),
+    'abort left merge',
+    { taskId },
   );
   return c.json({ queued: true }, 202);
 });

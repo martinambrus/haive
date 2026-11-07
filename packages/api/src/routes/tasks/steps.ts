@@ -67,6 +67,7 @@ import {
   CLEAR_ALLOWANCE_WATCH,
 } from '../../lib/cancel-task.js';
 import { getTaskQueue } from '../../queues.js';
+import { addBestEffort } from '../../lib/queue-bounded.js';
 import { writeStepCliChoice } from '../../lib/step-cli-choice.js';
 import { refuseDeadTask } from '../../lib/task-dead.js';
 import { loadStepFlags, loadTaskStepFlags } from '../../lib/step-flags.js';
@@ -495,21 +496,26 @@ export async function retryTaskAtStep(
     const killed = await killTaskSandboxes(taskId);
     logger.info({ taskId, killed }, 'killed task sandboxes for task retry');
   }
-  await getTaskQueue().add(
-    TASK_JOB_NAMES.ADVANCE_STEP,
-    {
-      taskId,
-      userId,
-      stepId: target.stepId,
-      round: target.round,
-      epoch: moved.epoch,
-    } as TaskJobPayload,
-    {
-      attempts: 3,
-      backoff: { type: 'exponential', delay: 5000 },
-      removeOnComplete: 100,
-      removeOnFail: 100,
-    },
+  await addBestEffort(
+    () =>
+      getTaskQueue().add(
+        TASK_JOB_NAMES.ADVANCE_STEP,
+        {
+          taskId,
+          userId,
+          stepId: target.stepId,
+          round: target.round,
+          epoch: moved.epoch,
+        } as TaskJobPayload,
+        {
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 5000 },
+          removeOnComplete: 100,
+          removeOnFail: 100,
+        },
+      ),
+    'step advance not queued; the stalled sweep will queue it',
+    { taskId, stepId: target.stepId },
   );
   return { epoch: moved.epoch };
 }
@@ -898,7 +904,6 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     await reopenFailedTask(tx, id, now);
   });
 
-  const queue = getTaskQueue();
   const payload: TaskJobPayload = {
     taskId: id,
     userId,
@@ -906,14 +911,19 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     round: step.round,
     formValues: values,
   };
-  await queue.add(TASK_JOB_NAMES.ADVANCE_STEP, payload, {
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 5000 },
-    removeOnComplete: 100,
-    removeOnFail: 100,
-  });
+  const queued = await addBestEffort(
+    () =>
+      getTaskQueue().add(TASK_JOB_NAMES.ADVANCE_STEP, payload, {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5000 },
+        removeOnComplete: 100,
+        removeOnFail: 100,
+      }),
+    'step advance not queued; the stalled sweep will queue it',
+    { taskId: id, stepId },
+  );
 
-  return c.json({ ok: true, queued: true });
+  return c.json({ ok: true, queued });
 });
 
 // Mid-step clarification answer (e.g. the merge-resolver asking how to resolve a
@@ -976,16 +986,20 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
     await reopenFailedTask(tx, id, now);
   });
 
-  const queue = getTaskQueue();
   const payload: TaskJobPayload = { taskId: id, userId, stepId, round: step.round };
-  await queue.add(TASK_JOB_NAMES.ADVANCE_STEP, payload, {
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 5000 },
-    removeOnComplete: 100,
-    removeOnFail: 100,
-  });
+  const queued = await addBestEffort(
+    () =>
+      getTaskQueue().add(TASK_JOB_NAMES.ADVANCE_STEP, payload, {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5000 },
+        removeOnComplete: 100,
+        removeOnFail: 100,
+      }),
+    'step advance not queued; the stalled sweep will queue it',
+    { taskId: id, stepId },
+  );
 
-  return c.json({ ok: true, queued: true });
+  return c.json({ ok: true, queued });
 });
 
 /** Skip applies to a row that is failed or parked on its form. */
@@ -1169,18 +1183,23 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       const killed = await killTaskSandboxes(id);
       logger.info({ taskId: id, stepId, killed }, 'killed task sandboxes for retry-while-active');
     }
-    await getTaskQueue().add(
-      TASK_JOB_NAMES.ADVANCE_STEP,
-      // round is essential: handleAdvanceStep defaults a missing round to 0, so it
-      // would resolve the round-0 (done) sibling of a fix-loop step and advance PAST
-      // the pending retried round instead of re-running it (round-drop, cf. 1408fc9).
-      { taskId: id, userId, stepId, round: step.round, epoch: newEpoch } as TaskJobPayload,
-      {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 5000 },
-        removeOnComplete: 100,
-        removeOnFail: 100,
-      },
+    await addBestEffort(
+      () =>
+        getTaskQueue().add(
+          TASK_JOB_NAMES.ADVANCE_STEP,
+          // round is essential: handleAdvanceStep defaults a missing round to 0, so it
+          // would resolve the round-0 (done) sibling of a fix-loop step and advance PAST
+          // the pending retried round instead of re-running it (round-drop, cf. 1408fc9).
+          { taskId: id, userId, stepId, round: step.round, epoch: newEpoch } as TaskJobPayload,
+          {
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 5000 },
+            removeOnComplete: 100,
+            removeOnFail: 100,
+          },
+        ),
+      'step advance not queued; the stalled sweep will queue it',
+      { taskId: id, stepId },
     );
     return c.json({ ok: true, status: 'pending' });
   }
@@ -1382,21 +1401,26 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         const killed = await killTaskSandboxes(id);
         logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for fan-out resume');
       }
-      await getTaskQueue().add(
-        TASK_JOB_NAMES.ADVANCE_STEP,
-        {
-          taskId: id,
-          userId,
-          stepId,
-          round: step.round,
-          epoch: newEpoch,
-        } as TaskJobPayload,
-        {
-          attempts: 3,
-          backoff: { type: 'exponential', delay: 5000 },
-          removeOnComplete: 100,
-          removeOnFail: 100,
-        },
+      await addBestEffort(
+        () =>
+          getTaskQueue().add(
+            TASK_JOB_NAMES.ADVANCE_STEP,
+            {
+              taskId: id,
+              userId,
+              stepId,
+              round: step.round,
+              epoch: newEpoch,
+            } as TaskJobPayload,
+            {
+              attempts: 3,
+              backoff: { type: 'exponential', delay: 5000 },
+              removeOnComplete: 100,
+              removeOnFail: 100,
+            },
+          ),
+        'step advance not queued; the stalled sweep will queue it',
+        { taskId: id, stepId },
       );
       return c.json({ ok: true, status: 'running', retriedAgents });
     }
@@ -1478,21 +1502,26 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     // advance survived a retry and re-dispatched a step the restart had moved past. The
     // form submit / clarify endpoints stay unstamped on purpose: their job carries the
     // user's just-entered values, and silently dropping that reads as "nothing happened".
-    await getTaskQueue().add(
-      TASK_JOB_NAMES.ADVANCE_STEP,
-      {
-        taskId: id,
-        userId,
-        stepId,
-        round: step.round,
-        epoch: moved.epoch,
-      } as TaskJobPayload,
-      {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 5000 },
-        removeOnComplete: 100,
-        removeOnFail: 100,
-      },
+    await addBestEffort(
+      () =>
+        getTaskQueue().add(
+          TASK_JOB_NAMES.ADVANCE_STEP,
+          {
+            taskId: id,
+            userId,
+            stepId,
+            round: step.round,
+            epoch: moved.epoch,
+          } as TaskJobPayload,
+          {
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 5000 },
+            removeOnComplete: 100,
+            removeOnFail: 100,
+          },
+        ),
+      'step advance not queued; the stalled sweep will queue it',
+      { taskId: id, stepId },
     );
     return c.json({ ok: true, status: 'running', resumedFromIteration });
   }
@@ -1584,21 +1613,26 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       const killed = await killTaskSandboxes(id);
       logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for retry_ai');
     }
-    await getTaskQueue().add(
-      TASK_JOB_NAMES.ADVANCE_STEP,
-      {
-        taskId: id,
-        userId,
-        stepId,
-        round: step.round,
-        epoch: moved.epoch,
-      } as TaskJobPayload,
-      {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 5000 },
-        removeOnComplete: 100,
-        removeOnFail: 100,
-      },
+    await addBestEffort(
+      () =>
+        getTaskQueue().add(
+          TASK_JOB_NAMES.ADVANCE_STEP,
+          {
+            taskId: id,
+            userId,
+            stepId,
+            round: step.round,
+            epoch: moved.epoch,
+          } as TaskJobPayload,
+          {
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 5000 },
+            removeOnComplete: 100,
+            removeOnFail: 100,
+          },
+        ),
+      'step advance not queued; the stalled sweep will queue it',
+      { taskId: id, stepId },
     );
     return c.json({ ok: true, status: 'running' });
   }
@@ -1667,21 +1701,26 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     // step. Enqueue an advance for the SKIPPED step; the worker sees it is already
     // terminal and advances to the next step via the registry run list — the same
     // path a step's own `skipped`/`done` result takes (handleResult → buildRunList).
-    await getTaskQueue().add(
-      TASK_JOB_NAMES.ADVANCE_STEP,
-      {
-        taskId: id,
-        userId,
-        stepId,
-        round: step.round,
-        epoch: moved.epoch,
-      } as TaskJobPayload,
-      {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 5000 },
-        removeOnComplete: 100,
-        removeOnFail: 100,
-      },
+    await addBestEffort(
+      () =>
+        getTaskQueue().add(
+          TASK_JOB_NAMES.ADVANCE_STEP,
+          {
+            taskId: id,
+            userId,
+            stepId,
+            round: step.round,
+            epoch: moved.epoch,
+          } as TaskJobPayload,
+          {
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 5000 },
+            removeOnComplete: 100,
+            removeOnFail: 100,
+          },
+        ),
+      'step advance not queued; the stalled sweep will queue it',
+      { taskId: id, stepId },
     );
     return c.json({ ok: true, status: 'skipped', nextStepId: null });
   }
@@ -2122,21 +2161,26 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
   // CLI. Without this the step would sit in 'pending' forever and the user
   // would be stuck (no form to fill, no job in flight).
   if (redrive) {
-    await getTaskQueue().add(
-      TASK_JOB_NAMES.ADVANCE_STEP,
-      {
-        taskId: id,
-        userId,
-        stepId,
-        round: step.round,
-        epoch: redrive.epoch,
-      } as TaskJobPayload,
-      {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 5000 },
-        removeOnComplete: 100,
-        removeOnFail: 100,
-      },
+    await addBestEffort(
+      () =>
+        getTaskQueue().add(
+          TASK_JOB_NAMES.ADVANCE_STEP,
+          {
+            taskId: id,
+            userId,
+            stepId,
+            round: step.round,
+            epoch: redrive.epoch,
+          } as TaskJobPayload,
+          {
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 5000 },
+            removeOnComplete: 100,
+            removeOnFail: 100,
+          },
+        ),
+      'step advance not queued; the stalled sweep will queue it',
+      { taskId: id, stepId },
     );
   }
 

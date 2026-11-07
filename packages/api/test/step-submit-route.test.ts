@@ -77,3 +77,55 @@ it.each(['running', 'done', 'failed'])(
     expect(h.add).not.toHaveBeenCalled();
   },
 );
+
+it('answers 200 with queued false when the queue never answers, the form write standing', async () => {
+  const fake = createFakeDb({
+    tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+    taskEvents: schema.taskEvents,
+  });
+  fake.insert(schema.tasks, { id: TASK, userId: USER, status: 'waiting_user' });
+  fake.insert(schema.taskSteps, {
+    taskId: TASK,
+    stepId: STEP,
+    status: 'waiting_form',
+    round: 0,
+    idleMs: 0,
+    waitingStartedAt: fake.now(),
+  });
+  h.db = fake.db;
+  h.add.mockImplementationOnce(() => new Promise(() => undefined));
+  const res = await app.request(`/${TASK}/steps/${STEP}/submit`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ values: { message: 'Follow up' } }),
+  });
+  expect(res.status).toBe(200);
+  expect(await res.json()).toEqual({ ok: true, queued: false });
+  expect(fake.rows(schema.taskSteps)[0]).toMatchObject({ formValues: { message: 'Follow up' } });
+}, 10_000);
+
+it('answers queued true when the queue accepts', async () => {
+  const fake = createFakeDb({
+    tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+    taskEvents: schema.taskEvents,
+  });
+  fake.insert(schema.tasks, { id: TASK, userId: USER, status: 'waiting_user' });
+  fake.insert(schema.taskSteps, {
+    taskId: TASK,
+    stepId: STEP,
+    status: 'waiting_form',
+    round: 0,
+    idleMs: 0,
+    waitingStartedAt: fake.now(),
+  });
+  h.db = fake.db;
+  h.add.mockResolvedValueOnce(undefined);
+  const res = await app.request(`/${TASK}/steps/${STEP}/submit`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ values: { message: 'Follow up' } }),
+  });
+  expect(await res.json()).toEqual({ ok: true, queued: true });
+});
