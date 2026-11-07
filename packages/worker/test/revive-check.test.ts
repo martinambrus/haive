@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DbTx } from '@haive/database';
-import { configService, logger } from '@haive/shared';
+import { ConfigUnavailableError, configService, logger } from '@haive/shared';
 import { admitReopen, readMaintenanceState } from '../src/queues/_revive-check.js';
 
 const TASK = '00000000-0000-4000-8000-000000000001';
@@ -123,6 +123,18 @@ describe('readMaintenanceState, the early checks outside the fence', () => {
     expect(warn).toHaveBeenCalledWith(
       expect.objectContaining({ taskId: TASK, err: expect.any(Error) }),
       expect.any(String),
+    );
+  });
+
+  it('answers maintenance and warns when the config store is unavailable', async () => {
+    setup().stored(new ConfigUnavailableError('get'));
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    await expect(readMaintenanceState(TASK)).resolves.toBe('maintenance');
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: TASK, err: expect.any(ConfigUnavailableError) }),
+      'maintenance state unreadable; treated as held',
     );
   });
 });

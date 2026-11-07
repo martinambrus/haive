@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { configService } from '@haive/shared';
-import { phaseDraining, phaseMaintenance, type UpgradeContext } from './run.js';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { ConfigUnavailableError, configService } from '@haive/shared';
+import * as dk from './docker.js';
+import { phaseDraining, phaseMaintenance, rollback, type UpgradeContext } from './run.js';
 
 const FENCE = 'haive-new-work-fence';
 
@@ -14,6 +18,8 @@ const events: string[] = [];
 const statements: Statement[] = [];
 const logs: string[] = [];
 const logFields: Record<string, unknown>[] = [];
+/** What the journal's found-state read answers: a state, or undefined for a row without one. */
+let foundRow: string | undefined;
 
 function kindOf(text: string): string {
   if (/pg_advisory_unlock\(/.test(text)) return 'unlock';
@@ -34,6 +40,9 @@ function fakeSql(failOn?: string, live: number | (() => number) = 0) {
       statements.push({ kind, values, connection: connection() });
       events.push(kind);
       if (kind === failOn) return Promise.reject(new Error(`${kind} failed`));
+      if (kind === 'journal' && /foundState/.test(strings.join('?'))) {
+        return Promise.resolve([{ found: foundRow ?? null }]);
+      }
       return Promise.resolve(
         kind === 'count' ? [{ n: String(typeof live === 'function' ? live() : live) }] : [],
       );
@@ -81,6 +90,7 @@ beforeEach(() => {
   logs.length = 0;
   logFields.length = 0;
   writeFails = false;
+  foundRow = undefined;
   stored = 'draining';
   vi.spyOn(configService, 'set').mockImplementation(async (_key, value) => {
     events.push(`set:${value}`);
@@ -525,5 +535,82 @@ describe('the drain wait, on a clock', () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(counts).toBe(2);
     await waiting;
+  });
+});
+
+describe('maintenance state while the config store is unavailable', () => {
+  let dir = '';
+  let envFile = '';
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'haive-run-rollback-'));
+    envFile = join(dir, '.env');
+    await writeFile(envFile, 'HAIVE_VERSION=1.1.0\n');
+    vi.spyOn(dk, 'composeUp').mockResolvedValue(undefined);
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const rollbackContext = (over: Partial<UpgradeContext> = {}) =>
+    context(fakeSql(), {
+      envFile,
+      fromVersion: '1.0.0',
+      registry: 'customer',
+      compose: { dir, files: [] },
+      maintenanceWritePauseMs: 1,
+      ...over,
+    } as Partial<UpgradeContext>);
+  const unlocks = () => events.filter((e) => e === 'unlock').length;
+
+  it('fails the drain, writing no state and releasing the fence, when the first state read cannot be answered', async () => {
+    vi.mocked(configService.getFresh).mockRejectedValueOnce(new ConfigUnavailableError('get'));
+
+    await expect(phaseDraining(rollbackContext())).rejects.toBeInstanceOf(ConfigUnavailableError);
+
+    expect(configService.set).not.toHaveBeenCalled();
+    expect(unlocks()).toBe(1);
+  });
+
+  it('restores a journaled found state of maintenance', async () => {
+    foundRow = 'maintenance';
+
+    await rollback(rollbackContext(), 'verify failed');
+
+    expect(stateWrites()).toEqual(['set:maintenance']);
+  });
+
+  it('retries a write that fails while the config store is unavailable, releasing the fence between attempts', async () => {
+    foundRow = 'maintenance';
+    vi.mocked(configService.set)
+      .mockRejectedValueOnce(new ConfigUnavailableError('set'))
+      .mockRejectedValueOnce(new ConfigUnavailableError('set'));
+
+    await rollback(rollbackContext(), 'verify failed');
+
+    expect(configService.set).toHaveBeenCalledTimes(3);
+    expect(unlocks()).toBe(3);
+    expect(events.filter((e) => e === 'lock')).toHaveLength(3);
+    expect(logs.filter((e) => e === 'maintenance-write-retry')).toHaveLength(2);
+  });
+
+  it('throws the last error after 20 attempts', async () => {
+    foundRow = 'maintenance';
+    vi.mocked(configService.set).mockRejectedValue(new ConfigUnavailableError('set'));
+
+    await expect(rollback(rollbackContext(), 'verify failed')).rejects.toBeInstanceOf(
+      ConfigUnavailableError,
+    );
+
+    expect(configService.set).toHaveBeenCalledTimes(20);
+    expect(unlocks()).toBe(20);
+  });
+
+  it('does not retry any other error', async () => {
+    foundRow = 'maintenance';
+    vi.mocked(configService.set).mockRejectedValue(new Error('redis down'));
+
+    await expect(rollback(rollbackContext(), 'verify failed')).rejects.toThrow('redis down');
+
+    expect(configService.set).toHaveBeenCalledTimes(1);
   });
 });

@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { schema, type DbTx } from '@haive/database';
 import {
   CONFIG_KEYS,
+  ConfigUnavailableError,
   configService,
   lockNewWorkFenceShared,
   logger,
@@ -36,6 +37,10 @@ export class MaintenanceStateUnreadable extends Error {
 export async function readMaintenanceState(taskId: string): Promise<MaintenanceState> {
   return parseMaintenanceState(
     await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE).catch((err: unknown) => {
+      if (err instanceof ConfigUnavailableError) {
+        logger.warn({ err, taskId }, 'maintenance state unreadable; treated as held');
+        return 'maintenance';
+      }
       logger.warn({ err, taskId }, 'maintenance state unreadable; not held');
       return null;
     }),

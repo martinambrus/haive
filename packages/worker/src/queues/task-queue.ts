@@ -3471,7 +3471,12 @@ async function handleAdvanceStep(
       epoch: ctx.orchestrationEpoch,
       reviveFailed: ctx.status === 'failed',
     },
-  );
+  ).catch(async (err: unknown) => {
+    // The fenced reopen can throw (MaintenanceStateUnreadable); the reservation would otherwise
+    // hold a slot for its 45-min expiry, since the try/finally below is not reached.
+    if (runtimeKind) await releaseRuntimeReservation(ctx.taskId);
+    throw err;
+  });
   if (!running) {
     logger.info(
       { taskId: ctx.taskId, stepId: payload.stepId, round },
