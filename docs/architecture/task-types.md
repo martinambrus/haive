@@ -370,7 +370,8 @@ with it.
   written — before the claim rows, parallel calls overshot to 57. `custom_tool_calls` never stores an
   argument or a result, and the agent-facing message never carries the cause (it could name a
   compose-network address).
-- **The egress guard** (`egress-guard.ts`): an IP literal is refused before any lookup; names resolve
+- **The egress guard** (`egress-guard.ts`, in `@haive/shared/egress`; custom tools use `guardedGet`,
+  which takes no allowlist by design: a custom tool never reaches a private address): an IP literal is refused before any lookup; names resolve
   with c-ares, not getaddrinfo (a stalled getaddrinfo pins a libuv threadpool slot no deadline can take
   back — MEASURED 19.9 s vs 11 ms behind 8 stalled calls), with the deadline split across the nameservers;
   the connect-time lookup refuses the whole answer if any address is blocked (the v4 rules repeated
