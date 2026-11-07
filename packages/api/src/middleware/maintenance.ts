@@ -56,17 +56,21 @@ async function isAdmin(c: Parameters<MiddlewareHandler<AppEnv>>[0]): Promise<boo
  * happens once the system is actually in maintenance, so this is not a per-request auth
  * duplication in the case that matters.
  *
+ * The always-open paths never touch the store. An unreadable state is a retryable 503
+ * (`config_unavailable`, from the error handler) for everyone, admins included, not a pass.
+ *
  * A 503 carries the state in its body, which is what lets the web app render a maintenance page
  * instead of a screenful of failed requests. `Retry-After` is deliberately omitted: a maintenance
  * window has no honest duration to advertise, and a wrong one is worse than none.
  */
 export const maintenanceGate: MiddlewareHandler<AppEnv> = async (c, next) => {
+  if (ALWAYS_OPEN.some((p) => p.test(c.req.path))) return next();
+
   const state: MaintenanceState = parseMaintenanceState(
     await configService.get(CONFIG_KEYS.MAINTENANCE_STATE),
   );
 
   if (!locksOutNonAdmins(state)) return next();
-  if (ALWAYS_OPEN.some((p) => p.test(c.req.path))) return next();
   if (await isAdmin(c)) return next();
 
   return c.json(

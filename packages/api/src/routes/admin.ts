@@ -543,7 +543,7 @@ adminRoutes.put('/config/concurrency', async (c) => {
     maxParallelAgents: [CONFIG_KEYS.MAX_PARALLEL_AGENTS, maxParallelAgents, 0],
   });
   // Live-retune the worker's cli-exec queue concurrency without a restart.
-  await configService.getRedis().publish(CONFIG_CONCURRENCY_CHANNEL, String(maxParallelAgents));
+  await configService.publish(CONFIG_CONCURRENCY_CHANNEL, String(maxParallelAgents));
   log.info({ maxParallelAgents }, 'max parallel agents updated');
   return c.json({ maxParallelAgents });
 });
@@ -784,7 +784,7 @@ adminRoutes.put('/config/runtime-limits', async (c) => {
   });
   // Retune the admission gate AND the agent pool live (both subscribe to this channel); the
   // per-container caps re-read at the next runner start within the config cache.
-  await configService.getRedis().publish(CONFIG_RUNTIME_LIMITS_CHANNEL, String(body.maxConcurrent));
+  await configService.publish(CONFIG_RUNTIME_LIMITS_CHANNEL, String(body.maxConcurrent));
   log.info({ ...body }, 'runtime resource limits updated');
   return c.json({ ...body, capacity: deriveCapacityPreview(body) });
 });

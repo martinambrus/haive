@@ -73,6 +73,7 @@ import { createFakeDb, type FakeDbHandle } from '@haive/database/testing';
 import {
   BUNDLE_JOB_NAMES,
   CLI_EXEC_JOB_NAMES,
+  ConfigUnavailableError,
   configService,
   DEFAULT_AGENT_RULES,
   REPO_JOB_NAMES,
@@ -317,6 +318,55 @@ describe('the real maintenance gate', () => {
     expect(await res.json()).toMatchObject({ maintenance: 'maintenance' });
     expect(fake.rows(schema.tasks).length).toBe(seeded);
     expect(stored).not.toHaveBeenCalled();
+  });
+});
+
+describe('an unreadable configuration store', () => {
+  const OUTAGE = { error: 'Service temporarily unavailable', code: 'config_unavailable' };
+  const unavailable = () => new ConfigUnavailableError('get', { cause: new Error('down') });
+
+  it('answers 503 config_unavailable behind requireNewWorkAllowed and runs no handler', async () => {
+    const { fake, seeded } = setup();
+    vi.spyOn(configService, 'getFresh').mockRejectedValue(unavailable());
+
+    const res = await post(ROUTES[0]!);
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual(OUTAGE);
+    expect(fake.rows(schema.tasks).length).toBe(seeded);
+    expect(h.dbCalls).toBe(0);
+  });
+
+  describe('behind the real maintenance gate', () => {
+    const open = new Hono<AppEnv>();
+    open.use('*', maintenanceGate);
+    open.all('*', (c) => c.json({ ok: true }));
+    open.onError(errorHandler);
+
+    it.each(['/health', '/version', '/auth/x', '/system/x'])(
+      'lets %s through without reading the state',
+      async (path) => {
+        const read = vi.spyOn(configService, 'get').mockRejectedValue(unavailable());
+        const res = await open.request(path);
+        expect(res.status).toBe(200);
+        expect(read).not.toHaveBeenCalled();
+      },
+    );
+
+    it('answers 503 config_unavailable on any other path, with or without a cookie', async () => {
+      vi.spyOn(configService, 'get').mockRejectedValue(unavailable());
+      for (const headers of [{}, { cookie: 'haive_access=admin' }]) {
+        const res = await open.request('/tasks', { headers });
+        expect(res.status).toBe(503);
+        expect(await res.json()).toEqual(OUTAGE);
+      }
+    });
+
+    it('changes nothing while the state reads normal', async () => {
+      vi.spyOn(configService, 'get').mockResolvedValue('normal');
+      expect((await open.request('/tasks')).status).toBe(200);
+      expect((await open.request('/health')).status).toBe(200);
+    });
   });
 });
 

@@ -11,8 +11,8 @@ import { getPlanMirrorQueue, getPlanMirrorQueueEvents } from '../queues.js';
 
 /** Best-effort page hint; the complete periodic scan is the durable backstop. */
 export async function enqueueCheckoutSync(repositoryId: string, userId: string): Promise<void> {
-  if (!(await configService.getBoolean(CONFIG_KEYS.PROJECT_STATE_SYNC_ENABLED, true))) return;
   try {
+    if (!(await configService.getBoolean(CONFIG_KEYS.PROJECT_STATE_SYNC_ENABLED, true))) return;
     await getPlanMirrorQueue().add(
       PLAN_MIRROR_JOB_NAMES.SYNC_CHECKOUT,
       { repositoryId, userId } satisfies PlanMirrorJobPayload,
