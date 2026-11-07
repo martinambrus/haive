@@ -280,11 +280,13 @@ sync.ts:514 (`row !== null`) and :528; pinned by project-state-sync.test.ts:1850
 
 User decision 2026-11-01: A stamped local RTK choice wins against first imported record.
 
-### T318 · FNF[task-lock-wait-2] · remaining unbounded waits on start paths (+5)
+### T318 · FNF[task-lock-wait-2] · remaining unbounded waits on start paths (+7)
 
 status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 
 1. /clarify takes the creation lock for a live task (api tasks/steps.ts:821). 2. Worker revival wait unbounded (_revive-check.ts:86); needs a soft-fail path first. 3. reviveDeadTask takes no creation lock. 4. mergeInScratch uses the pool inside the plan-merge transaction. 5. New-work fence and the advisory start's plan_nodes lock wait unbounded. 6. Ten waiting starts can starve the api pool for 30 s.
+
+From the T355 build (2026-11-07), PRE-EXISTING: 7. api middleware/maintenance.ts ~:45-54 fence read sits inside the start path with no bound of its own beyond the config store's 2 s. 8. worker `_revive-check.ts` ~:60 revival read: decide hold vs fail now that the read can reject.
 
 User decision 2026-11-01: Bound conflicting task-start waits and report a clear retryable busy response; do not proceed from stale state.
 
@@ -377,6 +379,8 @@ status: open · kind: fix · found: T536 reviews 2026-11-06 · priority: P4
 status: open · kind: design · priority: P3
 PRE-EXISTING, from the T393 build (2026-11-07). A `settle-stopped-task` job that was never queued (Redis down past the 2 s bound) or exhausted its attempts has no re-drive; `redriveCancelledTasks` (worker queues/stalled-redrive.ts ~:586) covers cancelled tasks only. Backstops by what is held: task auth volumes, the boot reaper only; terminal shells, the idle reaper; onboarding re-sync, the 60 s checkout sweep (project-state/watch.ts ~:121); embed model, the boot reconcile; Ollama CLI models, keep_alive; a kb_author 'enriching' entry, none. Decide: a sweep over failed tasks with unsettled holdings, or accept the backstops.
 
+From the T355 build: `enqueueCancelJob` (api lib/cancel-task.ts ~:125, ~:145) is now bounded and can return without queueing; the same sweep would cover a Cancel whose job never reached Redis.
+
 ### T541 · FNF[kb-author-failed-then-cancel] · a Stop-settled kb_author entry stays 'failed' after a later Cancel
 
 status: open · kind: design · priority: P3
@@ -399,6 +403,46 @@ PRE-EXISTING, from the T393 build (2026-11-07).
 1. The boot reaper removes failed-task volumes without syncing a rotated single-use token back (worker auth-volume-reaper.ts ~:19, 125, 148).
 2. `clearTaskAuthPreparationState` without a provider drops in-flight locks (task-auth-volume.ts ~:293-302).
 3. Concurrent auth syncs share the `.haive-tmp` name (task-auth-volume.ts ~:1363-1366); likelier now that a Stop with a pass in flight runs two settlements.
+
+### T544 · FNF[config-service-boot-outage] · ConfigService boot and encryption-key paths still wait out a Redis outage
+
+status: open · kind: fix · priority: P2
+PRE-EXISTING, from the T355 build (2026-11-07). 1. Encryption key read and plain SET at shared config.service.ts ~:884, ~:976 bypass the bounded wrapper. 2. `initialize` (~:798) and modules loader.ts ~:208 at boot hang without a deadline. 3. global-kb boot hangs the same way. 4. Under `tsx watch` a boot that rejects does not restart; check the process stays up and retries.
+
+### T545 · FNF[updater-found-state-fallback] · updater residual double failure and unbounded version wait
+
+status: open · kind: fix · priority: P3
+PRE-EXISTING, from the T355 build. 1. updater run.ts ~:394-395: a rollback whose found-state read and write both fail leaves no record of the hold. 2. run.ts ~:115-130 `awaitVersion` has no timeout.
+
+### T546 · FNF[config-outage-failopen-gates] · remaining readers that default open when the config store is down
+
+status: open · kind: fix · priority: P2
+PRE-EXISTING, from the T355 build. 1. worker runtime-runner-reaper.ts ~:482-488 uses the default grace on a failed read. 2. `moveToDelayed` paths fail the run on a config read error: cli-exec/handlers.ts ~:1426, ~:1472, ~:1504; agent-reserve.ts ~:344, ~:429. 3. task-queue.ts ~:1821 classifies a `ConfigUnavailableError` as a genuine failure.
+
+### T547 · FNF[config-write-unknown-outcome] · a write that times out may still land
+
+status: open · kind: design · priority: P3
+PRE-EXISTING class, sharper since T355 bounds writes at 2 s. A rejected SET may have reached Redis; callers report failure (or roll back audit rows) for a value that is live. Sites: api maintenance.ts ~:91-93, admin.ts ~:471, ~:1233, ~:1270; modules loader.ts ~:580, ~:598; global-kb.ts ~:499, ~:747-763. Same for a bounded `Queue.add` that lands after its race: a retried request can queue the job twice. Decide: read-back after timeout, idempotent job ids, or accept and document.
+
+### T548 · FNF[config-blip-tolerance] · a sub-second Redis blip now fails requests
+
+status: open · kind: design · priority: P3
+From the T355 build. With no offline queue, a reconnect window fails every config read at once (503 or held work). Decide whether a short retry inside the bound is worth it, measured against a restarted Redis.
+
+### T549 · FNF[api-redis-bound] · the api's shared Redis client is unbounded
+
+status: open · kind: fix · priority: P2
+PRE-EXISTING, from the T355 build. api/src/redis.ts ~:17 (`maxRetriesPerRequest: null`, offline queue on); about 21 `getRedis` call sites wait out an outage; `/health` (admin.ts ~:391) hangs instead of reporting down.
+
+### T550 · FNF[queue-add-unbounded-rest] · about 34 api `Queue.add` sites still unbounded
+
+status: open · kind: fix · priority: P3
+PRE-EXISTING, from the T355 build. Use `boundedAdd`/`addBestEffort`/`addOrRefuse` (api lib/queue-bounded.ts) and check each failure path. Sites: repos.ts ~:228, ~:560, ~:831, ~:3605; bundles.ts ~:360, ~:434, ~:697, ~:920, ~:965; cli-providers.ts list paths; plan-mirror.ts; browser-access.ts; browser-vnc.ts ~:225; cli-login-banner.ts; ide.ts ~:453; ddev-control.ts ~:55; modules/sources.ts ~:194; loader.ts ~:389; project-state-resolve.ts ~:14; cli-version-refresh.ts; reprice-cli-jobs.ts ~:38; cli-job-poll.ts ~:26.
+
+### T551 · FNF[outage-503-web-copy] · web shows a generic error for 503 config_unavailable
+
+status: open · kind: fix · priority: P4
+From the T355 build, cosmetic. The web client renders the 503 as a generic failure; name it as a temporary outage with a retry hint. Nits for the same pass: `readTolerant` duplicated in worker 08c ~:129 and 08d ~:140; dead `runtimeOccupancyMb` at runtime-admission.ts ~:438 (mention only, pre-existing).
 
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
@@ -509,20 +553,6 @@ Options:
   Measure first whether npm trusts a planted index entry.
 
 User decision 2026-11-01: Use a read-only shared npm cache base with a private writable overlay per task.
-
-### T355 · FNF[redis-outage-hangs] · ConfigService Redis calls never reject during a Redis outage (+1)
-
-status: open · kind: fix · policy: covered by accepted bounded-wait/consistency rules · priority: P2
-In redis-factory.ts:18-27, `maxRetriesPerRequest: null` plus `enableOfflineQueue: true` mean ConfigService get/set wait out an outage. Instances:
-
-- the maintenance fence read holds the shared fence;
-- admin config saves pin a Postgres connection inside an advisory-lock transaction;
-- the dead-task revival's fenced read hangs the same way.
-  Fix direction: a per-command deadline (commandTimeout on a dedicated connection, or enableOfflineQueue false), measured against a stopped Redis, with every caller's failure path checked.
-
-Engineering scope derived from the accepted policy (2026-11-01), not a new owner decision: Apply bounded configuration reads and explicit retryable/unavailable failures. Preserve existing fail-closed new-work/maintenance fences; Redis unavailability must not silently bypass them.
-
-From the T393 build (2026-11-07), same class: unbounded `Queue.add` in request paths hangs while Redis is down (PRE-EXISTING). `enqueueStopSettle` (api lib/cancel-task.ts) shows the bounded shape: 2 s race, never throws. Sites: cancel-task.ts ~:125 (`enqueueCancelJob`), ~:331, ~:346; task-start.ts ~:82 (overlaps T318); repos.ts ~:3485-3487 (serial loop); merges.ts ~:60; steps.ts ~:498, 1172, 1385, 1481, 1587, 1670, 2125; tasks/index.ts ~:1271. Each needs its failure path checked: a job that must be queued cannot just be dropped.
 
 ### T358 · J6e · provider-pinned requirements (pin table, grants.provider_id, resolver tiers, drop the dispatch refusal)
 
@@ -1383,6 +1413,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T355 — ConfigService Redis calls bounded (own connection, 2 s commandTimeout, no offline queue) and reject with `ConfigUnavailableError`; the api answers 503 `config_unavailable`; 17 request-path `Queue.add` sites bounded (`api/src/lib/queue-bounded.ts`); worker and updater readers hold or fail rather than guess (pause and caps read as held, runtime not admitted, maintenance tri-state, 08c/08d settings read in detect, updater leaves a hold it never recorded); docs error-diagnostics.md, release.md, worker-restarts.md — PR #1027 (13f92a753), 2026-11-07. CI green; merged without bot review. Follow-ups: T318 (+2), T540 (+1), T544-T551.
 - T393 — an api Stop (owner, admin, urgent module deactivation) queues one `settle-stopped-task` job after its commit and kill (`enqueueStopSettle`, 2 s bound, never throws); the worker settles only while the task still reads failed at the Stop's `failedAt`; the job never fails the task and holds no stalled redrive; docs worker-restarts.md — PR #1026 (eb925108b), 2026-11-07. CI green; merged without bot review. Follow-ups: T345 items 12-13, T355 (+1), T540-T543.
 - T392 — an implicit dispatch candidate whose adapter throws `ProviderBuildError` is logged and skipped for the next one; an explicitly selected provider rethrows; no candidate building throws the first error; docs cli-adapters.md — PR #1025 (e2e8ffd42), 2026-11-06. CI green; merged without bot review. Sonnet driver (one build round, red control confirmed on unchanged code, full worker suite green). Follow-ups filed under the same id. Evidence .claude/tmp/sonnet-run/T392/.
 - T531 items 1-3, 5-7 — module source fetch counts entries while git writes; a 40-hex ref with no same-named ref is fetched by object on first resolution, and one whose branch or tag points at another commit refuses (`module_source_ref_ambiguous`); a no-answer by-SHA fetch fails instead of falling back; v-flag-safe module id pattern exported from shared; millisecond `updated_at` compare-and-swap (required gated CI row); real-git tests; docs modules.md. Item 4 disproved (no path records a namespace that does not point at the pin) — PR #1024 (5a597ee7e), 2026-11-06. CI green; merged without bot review. Sonnet reviews: FIX (1 M security, fixed in one round), then ACCEPT (4 L, filed as items 8-10). Evidence .claude/tmp/sonnet-run/T531b/.
