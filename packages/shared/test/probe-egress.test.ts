@@ -291,6 +291,55 @@ describe('private endpoint allowlist', () => {
     expect((await fetchFn(url('db.test.'))).status).toBe(200);
   });
 
+  it.each([['169.254.169.254'], ['fe80::1'], ['0.0.0.0'], ['127.0.0.1', '169.254.169.254']])(
+    'a hostname entry never lifts a link-local or unspecified answer %j',
+    async (...answers) => {
+      const r = resolverOf(() => answers);
+      const err = await failure(
+        createGuardedFetch({ resolve: r.resolve, privateAllowlist: allow('meta.test') })(
+          url('meta.test'),
+          { signal: AbortSignal.timeout(500) },
+        ),
+      );
+      expect(err.cause.code).toBe('ENOTFOUND');
+    },
+  );
+
+  it('an address entry or a CIDR entry still lifts a link-local answer', async () => {
+    for (const entry of ['169.254.169.254', '169.254.0.0/16']) {
+      const r = resolverOf(() => ['169.254.169.254']);
+      const err = await failure(
+        createGuardedFetch({ resolve: r.resolve, privateAllowlist: allow(entry) })(
+          url('meta.test'),
+          { signal: AbortSignal.timeout(500) },
+        ),
+      );
+      expect(err.cause?.code).not.toBe('ENOTFOUND');
+    }
+  });
+
+  it('a hostname entry still lifts an ordinary private answer', async () => {
+    const r = resolverOf(() => ['10.1.2.3']);
+    const err = await failure(
+      createGuardedFetch({ resolve: r.resolve, privateAllowlist: allow('gitea.lan') })(
+        url('gitea.lan'),
+        { signal: AbortSignal.timeout(500) },
+      ),
+    );
+    expect(err.cause?.code).not.toBe('ENOTFOUND');
+  });
+
+  it('a pg socket under a hostname entry refuses a link-local answer', async () => {
+    const r = resolverOf(() => ['169.254.169.254']);
+    const socket = await createGuardedPgSocket({
+      resolve: r.resolve,
+      privateAllowlist: allow('meta.test'),
+    })({ host: ['meta.test'], port: [5432] });
+    const err = await new Promise<NodeJS.ErrnoException>((resolve) => socket.on('error', resolve));
+    socket.destroy();
+    expect(err.code).toBe('ENOTFOUND');
+  });
+
   it('passes an unlisted name that resolves to a listed address, by policy', async () => {
     const r = loopback();
     const res = await createGuardedFetch({

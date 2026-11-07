@@ -12,6 +12,7 @@ import {
   EgressGuardError,
   guardedLookup,
   isBlockedAddress,
+  isUnliftableByHostname,
   type Classifier,
   type Resolver,
 } from './egress-guard.js';
@@ -51,7 +52,7 @@ function classifierFor(host: string, seams: ProbeSeams, allow: ParsedAllowlist):
   if (isBuiltIn(seams, host)) return () => false;
   const base = seams.isBlocked ?? ((a) => isBlockedAddress(a));
   const hostAllowed = allow.hosts.has(bareHost(host));
-  return (a) => base(a) && !(hostAllowed || allow.matches(a));
+  return (a) => base(a) && !((hostAllowed && !isUnliftableByHostname(a)) || allow.matches(a));
 }
 
 function warnRefused(host: string): void {

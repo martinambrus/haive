@@ -111,6 +111,29 @@ export function isBlockedAddress(address: string): boolean {
   return family === 0 || BLOCKED.check(address, family === 4 ? 'ipv4' : 'ipv6');
 }
 
+// A hostname allowlist entry must never reach cloud metadata or the unspecified address, whatever its name resolves to.
+const UNLIFTABLE_BY_HOSTNAME = new net.BlockList();
+for (const [network, prefix] of [
+  ['169.254.0.0', 16],
+  ['0.0.0.0', 8],
+] as const) {
+  UNLIFTABLE_BY_HOSTNAME.addSubnet(network, prefix, 'ipv4');
+  const [a, b, c, d] = network.split('.').map(Number) as [number, number, number, number];
+  const high = ((a << 8) | b).toString(16);
+  const low = ((c << 8) | d).toString(16);
+  UNLIFTABLE_BY_HOSTNAME.addSubnet(`64:ff9b::${high}:${low}`, 96 + prefix, 'ipv6');
+  UNLIFTABLE_BY_HOSTNAME.addSubnet(`2002:${high}:${low}::`, 16 + prefix, 'ipv6');
+  UNLIFTABLE_BY_HOSTNAME.addSubnet(`::ffff:0:${high}:${low}`, 96 + prefix, 'ipv6');
+}
+UNLIFTABLE_BY_HOSTNAME.addSubnet('fe80::', 10, 'ipv6');
+UNLIFTABLE_BY_HOSTNAME.addSubnet('::', 128, 'ipv6');
+
+/** True for a link-local or unspecified address, including its IPv6 embeddings. */
+export function isUnliftableByHostname(address: string): boolean {
+  const family = net.isIP(address);
+  return family !== 0 && UNLIFTABLE_BY_HOSTNAME.check(address, family === 4 ? 'ipv4' : 'ipv6');
+}
+
 /** c-ares, not getaddrinfo: a stalled getaddrinfo keeps a libuv threadpool slot that no deadline can take back. */
 export function dnsResolver(servers?: readonly string[]): NameResolverFactory {
   return (timeoutMs) => {
