@@ -1,9 +1,12 @@
-import { describe, it, expect } from 'vitest';
-import type { JobType } from 'bullmq';
-import { CLI_EXEC_JOB_NAMES } from '@haive/shared';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+import { DelayedError, type Job, type JobType } from 'bullmq';
+import type { Database } from '@haive/database';
+import { CLI_EXEC_JOB_NAMES, ConfigUnavailableError, configService } from '@haive/shared';
 import {
   agentReserveDecision,
   countWaitingHolderJobs,
+  enforceRuntimeHolderReserve,
+  reserveAllowsAnyOf,
   QUEUED_STATES,
   type AgentReserveInput,
   type QueuedJobSource,
@@ -170,5 +173,44 @@ describe('countWaitingHolderJobs', () => {
   it('returns 0 when no holder has anything queued', async () => {
     const { source } = fakeQueue({ prioritized: [invoke('runner-less')] });
     expect(await countWaitingHolderJobs(source, new Set(['holder']))).toBe(0);
+  });
+});
+
+describe('an unreadable config store at the reserve gates', () => {
+  afterEach(() => vi.restoreAllMocks());
+  const db = {} as unknown as Database;
+  const cue = () => new ConfigUnavailableError('test');
+
+  it('reserveAllowsAnyOf lets no candidate take the slot when config is unavailable', async () => {
+    vi.spyOn(configService, 'getBoolean').mockRejectedValue(cue());
+    expect(await reserveAllowsAnyOf(db, [{ taskId: 'a', voteScore: 1 }])).toBe(false);
+  });
+
+  it('reserveAllowsAnyOf keeps assuming a candidate can run on any other read error', async () => {
+    vi.spyOn(configService, 'getBoolean').mockRejectedValue(new Error('not initialized'));
+    expect(await reserveAllowsAnyOf(db, [{ taskId: 'a', voteScore: 1 }])).toBe(true);
+  });
+
+  const holderJob = () => ({ moveToDelayed: vi.fn(async () => undefined) });
+  const payload = { taskId: 't', invocationId: 'inv' } as never;
+
+  it('enforceRuntimeHolderReserve defers the job when config is unavailable', async () => {
+    vi.spyOn(configService, 'getBoolean').mockRejectedValue(cue());
+    vi.spyOn(configService, 'getNumber').mockRejectedValue(cue());
+    const job = holderJob();
+    await expect(
+      enforceRuntimeHolderReserve(db, payload, job as unknown as Job as never, 'tok'),
+    ).rejects.toBeInstanceOf(DelayedError);
+    expect(job.moveToDelayed).toHaveBeenCalledTimes(1);
+  });
+
+  it('enforceRuntimeHolderReserve lets the job run on any other read error', async () => {
+    vi.spyOn(configService, 'getBoolean').mockRejectedValue(new Error('not initialized'));
+    vi.spyOn(configService, 'getNumber').mockRejectedValue(new Error('not initialized'));
+    const job = holderJob();
+    await expect(
+      enforceRuntimeHolderReserve(db, payload, job as unknown as Job as never, 'tok'),
+    ).resolves.toBeUndefined();
+    expect(job.moveToDelayed).not.toHaveBeenCalled();
   });
 });

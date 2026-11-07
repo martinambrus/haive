@@ -3268,7 +3268,9 @@ async function handleAdvanceStep(
       delayMs: hold.pollMs,
     });
     const parkedFields = { taskId: ctx.taskId, stepId: payload.stepId, round, scope: hold.scope };
-    if (pause) {
+    if (pause === 'unreadable') {
+      logger.warn(parkedFields, 'pause: parked step (the pause state cannot be read)');
+    } else if (pause) {
       logger.info(parkedFields, 'pause: parked step (task is held)');
     } else if (alreadyParked) {
       logger.debug(parkedFields, 'module schema: still parked (schema setup has not finished)');
