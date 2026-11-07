@@ -35,9 +35,14 @@ const merged = vi.hoisted(() => ({
   cli: [] as unknown[][],
   gemini: [] as unknown[][],
 }));
-const writers = vi.hoisted(() => ({ landed: true, file: [] as unknown[][] }));
+const writers = vi.hoisted(() => ({
+  landed: true,
+  failed: [] as string[],
+  file: [] as unknown[][],
+}));
 vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
+  failedMcpAddNames: () => writers.failed,
   mergeCliMcpIntoTaskVolume: async (...args: unknown[]) => {
     merged.cli.push(args);
     return writers.landed;
@@ -211,6 +216,7 @@ beforeEach(() => {
   process.env.CONFIG_ENCRYPTION_KEY = SECRET;
   delete process.env.RAG_API_INTERNAL_URL;
   writers.landed = true;
+  writers.failed = [];
   writers.file.length = 0;
   merged.cli.length = 0;
   merged.gemini.length = 0;
@@ -477,6 +483,16 @@ describe.each<Provider>(['codex', 'gemini'])(
     });
   },
 );
+
+describe('a stamped run on a cli-merge CLI whose mcp add failed for a server', () => {
+  it('[C2] names the server whose add failed in the unwired cause', async () => {
+    writers.landed = false;
+    writers.failed = ['haive-rag'];
+    const message = await unwired('codex', stampedDatabase(), run());
+    expect(message).toContain('`haive-rag`');
+    expect(message).toContain('mcp add');
+  });
+});
 
 describe('a CLI whose configuration is bound into each invocation', () => {
   it('[W3] wires a stamped run whatever the volume writers report', async () => {

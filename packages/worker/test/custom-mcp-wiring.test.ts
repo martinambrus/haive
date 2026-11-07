@@ -36,9 +36,14 @@ const merged = vi.hoisted(() => ({
   cli: [] as unknown[][],
   gemini: [] as unknown[][],
 }));
-const writers = vi.hoisted(() => ({ landed: true, file: [] as unknown[][] }));
+const writers = vi.hoisted(() => ({
+  landed: true,
+  failed: [] as string[],
+  file: [] as unknown[][],
+}));
 vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
+  failedMcpAddNames: () => writers.failed,
   mergeCliMcpIntoTaskVolume: async (...args: unknown[]) => {
     merged.cli.push(args);
     return writers.landed;
@@ -239,6 +244,7 @@ beforeEach(() => {
   process.env.CONFIG_ENCRYPTION_KEY = SECRET;
   delete process.env.RAG_API_INTERNAL_URL;
   writers.landed = true;
+  writers.failed = [];
   writers.file.length = 0;
   vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
   vi.spyOn(configService, 'getNumber').mockImplementation(async (_key, fallback = 0) => fallback);
@@ -531,6 +537,28 @@ describe.each<Provider>(['codex', 'gemini'])(
     });
   },
 );
+
+describe('a cli-merge CLI whose mcp add failed for a server', () => {
+  const db = () => dbFor(pinned([repoStatus, houseRules]));
+
+  it('[C1] names the server whose add failed in the cause', async () => {
+    writers.landed = false;
+    writers.failed = ['haive-rag'];
+    const message = await notWritten('codex', db(), run());
+    expect(message).toContain('`haive-rag`');
+    expect(message).toContain('mcp add');
+    expect(message).toContain('repo_status, house_rules');
+  });
+
+  it('keeps the default cause when no name is known', async () => {
+    writers.landed = false;
+    const message = await notWritten('codex', db(), run());
+    expect(message).toContain(
+      "the CLI's MCP configuration could not be written to its task volume",
+    );
+    expect(message).not.toContain('mcp add');
+  });
+});
 
 describe('a CLI whose configuration is bound into each invocation', () => {
   it('wires a run whatever the volume writers report', async () => {

@@ -59,6 +59,7 @@ import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import type { CliProviderRecord } from '../../cli-adapters/types.js';
 import {
   ensureTaskAuthVolumes,
+  failedMcpAddNames,
   mergeCliMcpIntoTaskVolume,
   mergeGeminiMcpIntoSettings,
   resolveTaskAuthMounts,
@@ -74,7 +75,7 @@ import { resolveSandboxImageTag } from './images.js';
 import { hasReadyLspBridge } from '../../lsp/configured-lsp.js';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { parseIntegrationBindings } from '@haive/shared/integrations';
-import { customToolInputSchema } from '@haive/shared/modularity';
+import { customToolInputSchema, describeInvalidTools } from '@haive/shared/modularity';
 import { resolveCustomToolsEnabled } from '@haive/shared/modularity-server';
 import {
   loadPinnedTools,
@@ -575,16 +576,22 @@ export async function resolveMcpExtraFiles(
         await mergeGeminiMcpIntoSettings(taskId, serversToJsonObject(servers, userServers)),
       );
       return { files: serverFiles, extraArgs: [] };
-    case 'cli-merge':
+    case 'cli-merge': {
+      const merged = await mergeCliMcpIntoTaskVolume(
+        taskId,
+        providerName,
+        sandboxImage,
+        resolveStdioMcpServers(servers, userServers),
+      );
+      const failed = merged ? [] : failedMcpAddNames(taskId, providerName);
       requireWritten(
-        await mergeCliMcpIntoTaskVolume(
-          taskId,
-          providerName,
-          sandboxImage,
-          resolveStdioMcpServers(servers, userServers),
-        ),
+        merged,
+        failed.length > 0
+          ? `the CLI's MCP configuration could not be written to its task volume (the \`mcp add\` of ${describeInvalidTools(failed)} failed)`
+          : undefined,
       );
       return { files: serverFiles, extraArgs: [] };
+    }
     case 'volume-write':
       requireWritten(
         await writeMcpFileIntoTaskVolume(taskId, providerName, config.path, config.content),
