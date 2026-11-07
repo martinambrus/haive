@@ -88,9 +88,11 @@ async function findInvocation(db: Database, invocationId: string) {
       customSteps: schema.tasks.customSteps,
       taskMetadata: schema.tasks.metadata,
       providerPolicy: schema.cliProviders.networkPolicy,
+      requiresRepository: schema.taskTypeDefinitions.requiresRepository,
     })
     .from(schema.cliInvocations)
     .innerJoin(schema.tasks, eq(schema.tasks.id, schema.cliInvocations.taskId))
+    .leftJoin(schema.taskTypeDefinitions, eq(schema.taskTypeDefinitions.slug, schema.tasks.type))
     .leftJoin(schema.taskSteps, eq(schema.taskSteps.id, schema.cliInvocations.taskStepId))
     .leftJoin(schema.cliProviders, eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId))
     .where(eq(schema.cliInvocations.id, invocationId))
@@ -199,17 +201,19 @@ customMcpRoutes.post('/call', async (c) => {
     return refuse(400, 'invalid-arguments', describeIssue(args.error, ISSUE_MAX_LENGTH));
   }
 
+  const problems = validateCustomTool(tool, {
+    requiresRepository: invocation.requiresRepository ?? true,
+  });
+  if (problems.length > 0) {
+    const kinds = problems.map((problem) => problem.kind);
+    log.warn(
+      { taskId: invocation.taskId, tool: tool.name, kinds },
+      'a pinned tool failed its checks',
+    );
+    return refuse(403, 'tool-invalid', 'this tool is not valid on this install');
+  }
+
   if (tool.action === 'http-get') {
-    // requiresRepository only matters to the scope of a rag-query tool.
-    const problems = validateCustomTool(tool, { requiresRepository: true });
-    if (problems.length > 0) {
-      const kinds = problems.map((problem) => problem.kind);
-      log.warn(
-        { taskId: invocation.taskId, tool: tool.name, kinds },
-        'a pinned http-get tool failed its checks',
-      );
-      return refuse(403, 'tool-invalid', 'this tool is not valid on this install');
-    }
     const target = customToolUrl(tool, args.data);
     if (!target.ok) {
       return refuse(
