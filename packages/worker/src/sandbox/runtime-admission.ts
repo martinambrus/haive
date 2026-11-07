@@ -11,6 +11,8 @@ import {
   deriveAgentSafetyMb,
   logger,
   readHostAvailableMb,
+  rethrowIfConfigUnavailable,
+  ConfigUnavailableError,
   type AgentPoolMeasurement,
   type RuntimeCaps,
 } from '@haive/shared';
@@ -50,6 +52,8 @@ const ADMISSION_TIMEOUT_MS = 8 * 60_000;
 /** Re-evaluate waiters periodically so capacity freed OUTSIDE the gate (a runner reaped or
  *  torn down at task end) gets picked up without waiting for the full timeout. */
 const REPUMP_INTERVAL_MS = 15_000;
+/** How often a cold-boot re-reads an unreadable config store while it waits. */
+const CONFIG_RETRY_MS = 2_000;
 
 type ReleaseFn = () => void;
 const NOOP_RELEASE: ReleaseFn = () => {};
@@ -207,13 +211,16 @@ async function liveRuntimeWeights(caps: RuntimeCaps): Promise<Map<string, number
   return merged;
 }
 
-/** The governor's resolved sizing, or null when it is off (the gate becomes a no-op). Also null
- *  when config is unavailable — fail open, never block a task because Redis blinked. */
+/** The governor's resolved sizing, or null when it is off (the gate becomes a no-op) or the
+ *  sizing failed for a reason other than the config store. An unreadable config store
+ *  (ConfigUnavailableError) propagates: the gate cannot tell "off" from "unknown", so each caller
+ *  decides what not being admitted means for it. */
 async function governor(): Promise<RuntimeCaps | null> {
-  if (!(await resourceLimitsEnabled())) return null;
+  if (!(await resourceLimitsEnabled({ strict: true }))) return null;
   try {
     return await resolveRuntimeCaps();
-  } catch {
+  } catch (err) {
+    rethrowIfConfigUnavailable(err);
     return null;
   }
 }
@@ -694,23 +701,53 @@ export function runtimeAdmissionDecision(input: RuntimeAdmissionInput): 'proceed
   return input.busyMb + aheadMb + input.myWeightMb <= input.budgetMb ? 'proceed' : 'park';
 }
 
-/** Non-blocking, TASK-level runtime admission — the pre-step gate the orchestrator consults
- *  BEFORE running a step that would bring up a runtime, so it can PARK the task (release the
- *  worker, re-drive later) instead of blocking in `acquireRuntimeSlot` and overcommitting the
- *  pool past the budget. Counts in-flight boots so a task mid-cold-boot also occupies capacity
- *  here, closing most of the pre-check -> cold-boot race. The docker count is skipped when the
- *  task already holds a runner (short-circuit to proceed). */
-export async function runtimeAdmission(
-  taskId: string,
-  kind: RuntimeKind,
-): Promise<{
+export interface RuntimeAdmissionResult {
   decision: 'proceed' | 'park';
   busyMb: number;
   budgetMb: number;
   myWeightMb: number;
   position: number;
   waiting: number;
-}> {
+  /** Set when the config store could not be read: the park means "not admitted", not "pool full". */
+  unreadable?: true;
+}
+
+/** Non-blocking, TASK-level runtime admission — the pre-step gate the orchestrator consults
+ *  BEFORE running a step that would bring up a runtime, so it can PARK the task (release the
+ *  worker, re-drive later) instead of blocking in `acquireRuntimeSlot` and overcommitting the
+ *  pool past the budget. Counts in-flight boots so a task mid-cold-boot also occupies capacity
+ *  here, closing most of the pre-check -> cold-boot race. The docker count is skipped when the
+ *  task already holds a runner (short-circuit to proceed). An unreadable config store parks the
+ *  task (`unreadable: true`, park queue untouched): a readable "off" proceeds, an unknown state
+ *  does not. */
+export async function runtimeAdmission(
+  taskId: string,
+  kind: RuntimeKind,
+): Promise<RuntimeAdmissionResult> {
+  try {
+    return await decideRuntimeAdmission(taskId, kind);
+  } catch (err) {
+    if (!(err instanceof ConfigUnavailableError)) throw err;
+    log.warn(
+      { err, taskId, kind },
+      'runtime admission: config store unreadable; parking (not admitted)',
+    );
+    return {
+      decision: 'park',
+      busyMb: 0,
+      budgetMb: 0,
+      myWeightMb: 0,
+      position: 1,
+      waiting: 0,
+      unreadable: true,
+    };
+  }
+}
+
+async function decideRuntimeAdmission(
+  taskId: string,
+  kind: RuntimeKind,
+): Promise<RuntimeAdmissionResult> {
   const idle = { decision: 'proceed' as const, busyMb: 0, budgetMb: 0, position: 1, waiting: 0 };
   const caps = await governor();
   if (!caps) {
@@ -790,7 +827,19 @@ async function pump(): Promise<void> {
     do {
       pumpAgain = false;
       while (waiters.length > 0) {
-        const caps = await governor();
+        let caps: RuntimeCaps | null;
+        try {
+          caps = await governor();
+        } catch (err) {
+          if (!(err instanceof ConfigUnavailableError)) throw err;
+          // Not readable is not "off": keep every waiter queued. The repump interval retries and
+          // each waiter's own deadline timer is the bound.
+          log.warn(
+            { err, waiting: waiters.length },
+            'runtime pump: config store unreadable; waiters stay queued',
+          );
+          break;
+        }
         if (!caps) {
           for (const w of waiters.splice(0)) w.admit('disabled');
           break;
@@ -832,16 +881,53 @@ async function pump(): Promise<void> {
   }
 }
 
+/** Wait for the master switch and the sizing to be readable; true when the governor is on.
+ *  Bounded by ADMISSION_TIMEOUT_MS, after which the ConfigUnavailableError is thrown (retryable).
+ *  Any other error propagates, an abort rejects as RuntimeSlotAbortedError. */
+async function awaitReadableLimits(taskId: string, signal?: AbortSignal): Promise<boolean> {
+  const start = Date.now();
+  let warned = false;
+  for (;;) {
+    try {
+      const enabled = await resourceLimitsEnabled({ strict: true });
+      if (enabled) await resolveRuntimeCaps();
+      if (warned) log.info({ taskId }, 'runtime slot: config store readable again');
+      return enabled;
+    } catch (err) {
+      if (!(err instanceof ConfigUnavailableError)) throw err;
+      if (signal?.aborted) throw new RuntimeSlotAbortedError(taskId);
+      if (Date.now() >= start + ADMISSION_TIMEOUT_MS) throw err;
+      if (!warned) {
+        warned = true;
+        log.warn({ err, taskId }, 'runtime slot: config store unreadable; waiting');
+      }
+      await new Promise<void>((resolve) => {
+        const onAbort = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          signal?.removeEventListener('abort', onAbort);
+          resolve();
+        }, CONFIG_RETRY_MS);
+        signal?.addEventListener('abort', onAbort, { once: true });
+      });
+    }
+  }
+}
+
 /** Acquire admission before booting a runtime runner. Resolves with a release function the
  *  caller MUST invoke (in a finally) once the runner is up or the boot failed. When the
- *  governor is disabled, resolves immediately with a no-op release. */
+ *  governor is readable and disabled, resolves immediately with a no-op release. While the config
+ *  store is unreadable it waits (up to ADMISSION_TIMEOUT_MS, then rejects with the config error)
+ *  instead of booting past a gate it cannot read. */
 export async function acquireRuntimeSlot(
   taskId: string,
   kind: RuntimeKind,
   onWait?: (busyMb: number, budgetMb: number) => void,
   signal?: AbortSignal,
 ): Promise<ReleaseFn> {
-  if (!(await resourceLimitsEnabled())) return NOOP_RELEASE;
+  if (!(await awaitReadableLimits(taskId, signal))) return NOOP_RELEASE;
   // Already stopped before we even queued — don't take capacity at all.
   if (signal?.aborted) throw new RuntimeSlotAbortedError(taskId);
 
