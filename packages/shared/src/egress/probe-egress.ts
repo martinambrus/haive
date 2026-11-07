@@ -25,6 +25,8 @@ export interface ProbeSeams {
   resolve?: Resolver;
   isBlocked?: Classifier;
   allowHosts?: ReadonlySet<string>;
+  /** Normalized `URL.origin` strings, compared as is; fetch only (a database dial has no URL). */
+  allowOrigins?: ReadonlySet<string>;
   privateAllowlist?: () => ParsedAllowlist | Promise<ParsedAllowlist>;
 }
 
@@ -148,10 +150,26 @@ function decoderFor(
   }
 }
 
-export function createGuardedFetch(seams: ProbeSeams = {}) {
+// A built-in origin runs as a built-in host for this dial only.
+function seamsFor(input: string | URL, seams: ProbeSeams): ProbeSeams {
+  if (!seams.allowOrigins?.size) return seams;
+  try {
+    const target = new URL(input);
+    if (!seams.allowOrigins.has(target.origin)) return seams;
+    return {
+      ...seams,
+      allowHosts: new Set([...(seams.allowHosts ?? []), stripBrackets(target.hostname)]),
+    };
+  } catch {
+    return seams;
+  }
+}
+
+export function createGuardedFetch(baseSeams: ProbeSeams = {}) {
   return async (input: string | URL, init: RequestInit = {}): Promise<Response> => {
     const signal = init.signal ?? undefined;
     if (signal?.aborted) throw signal.reason;
+    const seams = seamsFor(input, baseSeams);
     const lazy = lazyAllowlist(seams);
     let refusedLiteral = false;
     try {

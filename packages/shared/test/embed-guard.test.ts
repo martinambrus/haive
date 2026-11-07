@@ -3,6 +3,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { CONFIG_KEYS, configService } from '../src/config/index.js';
+import { DEFAULT_EXTERNAL_OLLAMA_URL } from '../src/constants/index.js';
 import { composeContainerName } from '../src/naming/index.js';
 import {
   embedQuery,
@@ -97,5 +98,18 @@ describe('Ollama helpers dial through the egress guard by default', () => {
     expect(await embedQueryOrNull('q', opts)).toEqual([1, 2]);
     expect(calls).toHaveLength(6);
     expect(hits).toBe(0);
+  });
+
+  it('dials the shipped external default as built in, with no allowlist read', async () => {
+    allowlist('');
+    // The lookup fails, so the dial never connects: port 11434 may answer on a developer machine.
+    const lookup = vi
+      .spyOn(dns.promises, 'lookup')
+      .mockRejectedValue(Object.assign(new Error('not found'), { code: 'ENOTFOUND' }));
+    expect(await probeOllama(DEFAULT_EXTERNAL_OLLAMA_URL)).toBe(false);
+    expect(lookup).toHaveBeenCalledWith('host.docker.internal', { all: true });
+    expect(vi.mocked(configService.get)).not.toHaveBeenCalledWith(
+      CONFIG_KEYS.PRIVATE_ENDPOINT_ALLOWLIST,
+    );
   });
 });

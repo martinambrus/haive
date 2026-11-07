@@ -1,15 +1,18 @@
 import { createHash } from 'node:crypto';
 import { configService, CONFIG_KEYS } from '../config/config.service.js';
 import { logger } from '../logger/index.js';
-import { IN_STACK_OLLAMA_HOSTS } from '../constants/index.js';
+import { BUILT_IN_PRIVATE_ORIGINS, IN_STACK_OLLAMA_HOSTS } from '../constants/index.js';
 import { createGuardedFetch } from '../egress/index.js';
 
 const log = logger.child({ module: 'rag-embed' });
 
 /** The Ollama URL is a stored value any signed-in user can write, so every dial is denied a
  *  private, loopback or link-local address unless the admin allowlist covers it. The in-stack
- *  Ollama names are exempt. */
-const ollamaFetch = createGuardedFetch({ allowHosts: IN_STACK_OLLAMA_HOSTS }) as typeof fetch;
+ *  Ollama names and the shipped external default origin are exempt. */
+const ollamaFetch = createGuardedFetch({
+  allowHosts: IN_STACK_OLLAMA_HOSTS,
+  allowOrigins: BUILT_IN_PRIVATE_ORIGINS,
+}) as typeof fetch;
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */

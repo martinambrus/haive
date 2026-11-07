@@ -11,16 +11,20 @@ type PgSocketOptions = { host: string[]; port: number[]; path?: string | undefin
 export function egressFor(
   role: string | undefined,
   allowHosts?: ReadonlySet<string>,
+  allowOrigins?: ReadonlySet<string>,
 ): {
   fetchFn: typeof fetch;
   pgSocket: ((options: PgSocketOptions) => Promise<net.Socket>) | undefined;
 } {
   if (role === 'admin') return { fetchFn: fetch, pgSocket: undefined };
-  if (allowHosts === undefined || allowHosts.size === 0) {
+  if (!allowHosts?.size && !allowOrigins?.size) {
     return { fetchFn: guardedFetch as typeof fetch, pgSocket: guardedPgSocket };
   }
   return {
-    fetchFn: createGuardedFetch({ allowHosts }) as typeof fetch,
-    pgSocket: createGuardedPgSocket({ allowHosts }),
+    fetchFn: createGuardedFetch({
+      ...(allowHosts ? { allowHosts } : {}),
+      ...(allowOrigins ? { allowOrigins } : {}),
+    }) as typeof fetch,
+    pgSocket: createGuardedPgSocket(allowHosts ? { allowHosts } : {}),
   };
 }
