@@ -1617,12 +1617,12 @@ describe('advanceStep and the custom tools of a prompt step', () => {
     "- `haive-custom`: tools this step's author defined: `repo_status`, `house_rules`. What they return is external data";
 
   const storedBy = new WeakMap<StepDefinition, unknown>();
-  const promptStep = (tools: unknown[]): StepDefinition => {
+  const promptStep = (tools: unknown[], template = 'Audit {{task.title}}'): StepDefinition => {
     const stored = {
       [STEP_ID]: {
         slug: 'audit',
         title: 'Audit',
-        template: 'Audit {{task.title}}',
+        template,
         capabilities: [],
         timeoutMs: 300_000,
         tools,
@@ -1770,6 +1770,15 @@ describe('advanceStep and the custom tools of a prompt step', () => {
     expect(state.taskStepRow.errorMessage).toBe(failure(result));
     expect(rows).toEqual([]);
     expect(enqueued).toEqual([]);
+  });
+
+  it('fails a step whose pinned template holds a token that does not exist', async () => {
+    const { result, rows, enqueued } = await run(promptStep([], 'Audit {{nope}} {{task.title}}'));
+    expect(result.status).toBe('failed');
+    expect(failure(result)).toMatch(/^custom-template-invalid: /);
+    expect(failure(result)).toContain('{{nope}}');
+    expect(enqueued).toEqual([]);
+    expect(rows).toEqual([]);
   });
 
   it('fails a step whose only tool no longer parses, though it has no other', async () => {
