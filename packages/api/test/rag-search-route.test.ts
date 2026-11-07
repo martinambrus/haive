@@ -223,7 +223,12 @@ beforeEach(() => {
     [CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, GLOBAL_OLLAMA],
     [CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, 'global-model'],
   ]);
-  vi.spyOn(configService, 'get').mockImplementation(async (key) => config.get(key) ?? null);
+  vi.spyOn(configService, 'get').mockImplementation(async (key) =>
+    // The real-store tests dial a loopback fake; the guard refuses it unless the allowlist covers it.
+    key === CONFIG_KEYS.PRIVATE_ENDPOINT_ALLOWLIST && h.realLocalStore
+      ? '127.0.0.1'
+      : (config.get(key) ?? null),
+  );
   vi.spyOn(configService, 'getFresh').mockImplementation(async (key) => config.get(key) ?? null);
   vi.spyOn(configService, 'getBoolean').mockImplementation(
     async (_key, fallback = false) => fallback,

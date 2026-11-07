@@ -198,7 +198,8 @@ async function main(): Promise<void> {
       process.exit(1);
     }
   } else {
-    conn = await resolveRagConnection(prefs, db, projectName);
+    // RAG_CONN is typed by the operator on this command line, not stored data.
+    conn = await resolveRagConnection(prefs, db, projectName, { trustedTarget: true });
     if (!conn) {
       console.error(`rag disabled for mode=${prefs.ragMode}`);
       process.exit(1);

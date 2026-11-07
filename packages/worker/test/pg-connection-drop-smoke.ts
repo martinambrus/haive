@@ -102,6 +102,8 @@ async function main(): Promise<void> {
       { ragMode: 'external', ragConnectionString: url, embeddingDimensions: 8 } as RagToolingPrefs,
       db,
       'drop-smoke',
+      // The smoke dials its own loopback Postgres, not stored data.
+      { trustedTarget: true },
     );
     const ragMarker = `haive_drop_smoke_rag_${RUN_ID}`;
     await Promise.all([rag!.pg.unsafe(sleeper(ragMarker)).catch(() => {}), dropBackend(ragMarker)]);

@@ -4,6 +4,7 @@ import { sql } from 'drizzle-orm';
 import { hasPgCode, isDuplicateDatabase, type Database } from '@haive/database';
 import { IN_STACK_OLLAMA_URL } from '../constants/index.js';
 import { logger } from '../logger/index.js';
+import { guardedPgSocket } from '../egress/index.js';
 
 const log = logger.child({ module: 'rag-connection' });
 const CONNECTION_CHECK_MS = 500;
@@ -137,6 +138,9 @@ export interface RagConnectOptions {
   connectTimeoutSeconds?: number;
   /** False skips the query that teaches the driver the array types of the store. */
   fetchTypes?: boolean;
+  /** True only for a connection string an operator typed into a command-line tool or a smoke.
+   *  Left out, the store's string is stored data and the dial goes through the egress guard. */
+  trustedTarget?: boolean;
 }
 
 const poolOptions = (opts: RagConnectOptions) => ({
@@ -238,7 +242,10 @@ function resolveExternal(
   embeddingDimensions: number,
   opts: RagConnectOptions,
 ): RagConnection {
-  const pg = postgres(connectionString, poolOptions(opts));
+  const pg = postgres(connectionString, {
+    ...poolOptions(opts),
+    ...(opts.trustedTarget ? {} : { socket: guardedPgSocket }),
+  });
   return {
     mode: 'external',
     pg,

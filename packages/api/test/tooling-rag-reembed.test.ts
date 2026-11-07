@@ -98,7 +98,7 @@ vi.mock('@haive/shared/rag', async (importOriginal) => {
 import net from 'node:net';
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
-import { userSecretsService } from '@haive/shared';
+import { CONFIG_KEYS, configService, userSecretsService } from '@haive/shared';
 import { createFakeDb } from '@haive/database/testing';
 import { ONBOARDING_TOOLING_SCHEMA_VERSION } from '@haive/shared';
 import { toolingUpgradeRoutes } from '../src/routes/tooling-upgrades.js';
@@ -181,6 +181,14 @@ afterEach(async () => {
   vi.restoreAllMocks();
   await Promise.all(stores.splice(0).map((close) => close()));
 });
+
+/** The guard refuses a loopback store unless the allowlist covers it. */
+function allowLoopbackStore() {
+  h.realStore = true;
+  vi.spyOn(configService, 'get').mockImplementation(async (key) =>
+    key === CONFIG_KEYS.PRIVATE_ENDPOINT_ALLOWLIST ? '127.0.0.1' : null,
+  );
+}
 
 /** A Postgres that accepts the connection and never speaks. */
 async function mutePostgres() {
@@ -312,7 +320,7 @@ describe('forcing a re-embed of a repository', () => {
   it('answers its error within the connect timeout when the store accepts the connection and never speaks', async () => {
     const store = await mutePostgres();
     setup(store.url);
-    h.realStore = true;
+    allowLoopbackStore();
 
     const started = Date.now();
     const res = await rebuild();
@@ -412,7 +420,7 @@ describe('retrying the embedding of a degraded repository', () => {
   it('keeps the degradation, within the connect timeout, when the store accepts the connection and never speaks', async () => {
     const store = await mutePostgres();
     const fake = setup(store.url, true, true);
-    h.realStore = true;
+    allowLoopbackStore();
 
     const started = Date.now();
     const res = await retry();
