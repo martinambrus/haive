@@ -50,7 +50,6 @@ import {
   logger,
   OPEN_TASK_STATUSES,
   parseAllowanceWatchMode,
-  refusesNewWork,
   type CliExecJobPayload,
   type AbortLeftMergePayload,
   type RepoRagCleanupPayload,
@@ -185,7 +184,13 @@ import {
   updateOwnedStep,
   type TaskFence,
 } from '../step-engine/step-ownership.js';
-import { admitReopen, NewWorkHeld, readMaintenanceState, refuseRevive } from './_revive-check.js';
+import {
+  admitReopen,
+  holdsNewWork,
+  NewWorkHeld,
+  readMaintenanceState,
+  refuseRevive,
+} from './_revive-check.js';
 import { resetStepAndDownstream } from './_step-reset.js';
 import {
   foldAbandonedPark,
@@ -3007,7 +3012,7 @@ async function handleAdvanceStep(
     jobTimestamp,
   );
   const newWorkHeld =
-    ctx.status === 'failed' && refusesNewWork(await readMaintenanceState(ctx.taskId));
+    ctx.status === 'failed' && holdsNewWork(await readMaintenanceState(ctx.taskId));
   if (
     failedTaskRefusesAdvance(
       ctx.status,
@@ -3268,7 +3273,9 @@ async function handleAdvanceStep(
       delayMs: hold.pollMs,
     });
     const parkedFields = { taskId: ctx.taskId, stepId: payload.stepId, round, scope: hold.scope };
-    if (pause) {
+    if (pause === 'unreadable') {
+      logger.warn(parkedFields, 'pause: parked step (the pause state cannot be read)');
+    } else if (pause) {
       logger.info(parkedFields, 'pause: parked step (task is held)');
     } else if (alreadyParked) {
       logger.debug(parkedFields, 'module schema: still parked (schema setup has not finished)');
@@ -3350,10 +3357,11 @@ async function handleAdvanceStep(
       // re-runs every RUNTIME_PARK_POLL_MS, so the position counts down as capacity frees. The
       // MB figures say WHY it waits: a light runner queued behind a DDEV reads very differently
       // from one that cannot fit at all.
-      const parkMessage =
-        `Waiting for a free runtime slot — #${admission.position} of ${admission.waiting} ` +
-        `waiting (${admission.busyMb} MB of ${admission.budgetMb} MB in use, ` +
-        `this one needs ${admission.myWeightMb} MB)`;
+      const parkMessage = admission.unreadable
+        ? 'Waiting for the configuration store — the runtime limits cannot be read, so this step is held until they can'
+        : `Waiting for a free runtime slot — #${admission.position} of ${admission.waiting} ` +
+          `waiting (${admission.busyMb} MB of ${admission.budgetMb} MB in use, ` +
+          `this one needs ${admission.myWeightMb} MB)`;
       // `pending` + a live waiting_started_at is this park's structural signature: every other
       // pending writer nulls the marker, so deriveSlotWait (@haive/shared) reads exactly this
       // row as "queued for a runtime slot" and computeStepContribution bills the open wait as
@@ -3435,6 +3443,13 @@ async function handleAdvanceStep(
       await enqueueAdvance(ctx.taskId, ctx.userId, payload.stepId, round, ctx.orchestrationEpoch, {
         delayMs: RUNTIME_PARK_POLL_MS,
       });
+      if (admission.unreadable) {
+        logger.warn(
+          { taskId: ctx.taskId, stepId: payload.stepId, runtimeKind },
+          'runtime admission: parked step (the runtime limits cannot be read)',
+        );
+        return;
+      }
       logger.info(
         {
           taskId: ctx.taskId,
@@ -3471,7 +3486,12 @@ async function handleAdvanceStep(
       epoch: ctx.orchestrationEpoch,
       reviveFailed: ctx.status === 'failed',
     },
-  );
+  ).catch(async (err: unknown) => {
+    // The fenced reopen can throw (MaintenanceStateUnreadable); the reservation would otherwise
+    // hold a slot for its 45-min expiry, since the try/finally below is not reached.
+    if (runtimeKind) await releaseRuntimeReservation(ctx.taskId);
+    throw err;
+  });
   if (!running) {
     logger.info(
       { taskId: ctx.taskId, stepId: payload.stepId, round },

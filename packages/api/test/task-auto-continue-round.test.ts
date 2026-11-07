@@ -56,4 +56,27 @@ describe('switching auto-continue on while a task waits on a form', () => {
       expect.anything(),
     );
   });
+
+  it('answers 503 queue_unavailable when the queue never answers', async () => {
+    const fake = createFakeDb({ tasks: schema.tasks, taskEvents: schema.taskEvents });
+    fake.insert(schema.tasks, {
+      id: TASK,
+      userId: USER,
+      status: 'waiting_user',
+      autoContinue: false,
+      currentStepId: '07-phase-2-implement',
+      currentRound: 2,
+    });
+    h.db = fake.db;
+    h.add.mockImplementationOnce(() => new Promise(() => undefined));
+
+    const res = await app.request(`/${TASK}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ autoContinue: true }),
+    });
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ code: 'queue_unavailable' });
+  }, 10_000);
 });

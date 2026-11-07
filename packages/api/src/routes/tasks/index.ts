@@ -62,6 +62,7 @@ import {
   loadPlanSkeletons,
 } from '@haive/shared/plan';
 import { requireJsonObject } from '../../lib/json-object.js';
+import { addOrRefuse } from '../../lib/queue-bounded.js';
 import { markPlanNodesTaskable } from '../../lib/mark-plan-node-taskable.js';
 import { loadStepFlags, loadTaskStepFlags } from '../../lib/step-flags.js';
 import {
@@ -1268,20 +1269,25 @@ taskRoutes.patch('/:id', async (c) => {
       task.currentStepId &&
       !isTaskDead(task)
     ) {
-      await getTaskQueue().add(
-        TASK_JOB_NAMES.ADVANCE_STEP,
-        {
-          taskId: id,
-          userId,
-          stepId: task.currentStepId,
-          round: task.currentRound,
-        } as TaskJobPayload,
-        {
-          attempts: 3,
-          backoff: { type: 'exponential', delay: 5000 },
-          removeOnComplete: 100,
-          removeOnFail: 100,
-        },
+      await addOrRefuse(
+        () =>
+          getTaskQueue().add(
+            TASK_JOB_NAMES.ADVANCE_STEP,
+            {
+              taskId: id,
+              userId,
+              stepId: task.currentStepId,
+              round: task.currentRound,
+            } as TaskJobPayload,
+            {
+              attempts: 3,
+              backoff: { type: 'exponential', delay: 5000 },
+              removeOnComplete: 100,
+              removeOnFail: 100,
+            },
+          ),
+        'auto-continue advance',
+        { taskId: id },
       );
     }
   }

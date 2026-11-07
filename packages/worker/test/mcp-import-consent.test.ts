@@ -1,5 +1,13 @@
-import { describe, expect, it } from 'vitest';
-import { decideImportedMcpServers, mcpAcceptanceMark, sha256Hex } from '@haive/shared';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  ConfigUnavailableError,
+  configService,
+  decideImportedMcpServers,
+  mcpAcceptanceMark,
+  sha256Hex,
+} from '@haive/shared';
+import type { Database } from '@haive/database';
+import { holdImportedMcpServerLists } from '../src/data-migrations.js';
 import {
   DEFAULT_MCP_SETTINGS_JSON,
   holdImportedMcpServers,
@@ -85,5 +93,27 @@ describe('holdImportedMcpServers', () => {
     expect(holdImportedMcpServers(accepted.tooling, KEY)).toBeNull();
     const discarded = decideImportedMcpServers(mirror, 'discard', KEY)!;
     expect(holdImportedMcpServers(discarded.tooling, KEY)).toBeNull();
+  });
+});
+
+describe('holdImportedMcpServerLists with an unreadable config store', () => {
+  const fakeDb = {
+    query: { repositories: { findMany: async () => [] } },
+    update: () => {
+      throw new Error('wrote');
+    },
+  } as unknown as Database;
+  afterEach(() => vi.restoreAllMocks());
+
+  it('rejects and writes nothing when the encryption key cannot be read', async () => {
+    vi.spyOn(configService, 'getEncryptionKey').mockRejectedValue(
+      new ConfigUnavailableError('get'),
+    );
+    await expect(holdImportedMcpServerLists(fakeDb)).rejects.toBeInstanceOf(ConfigUnavailableError);
+  });
+
+  it('keeps the null-key path for any other failure', async () => {
+    vi.spyOn(configService, 'getEncryptionKey').mockRejectedValue(new Error('not initialized'));
+    await expect(holdImportedMcpServerLists(fakeDb)).resolves.toBeUndefined();
   });
 });

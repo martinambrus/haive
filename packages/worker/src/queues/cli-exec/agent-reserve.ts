@@ -4,6 +4,7 @@ import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
   CONFIG_KEYS,
+  ConfigUnavailableError,
   configService,
   type CliExecJobPayload,
 } from '@haive/shared';
@@ -265,8 +266,10 @@ async function markWaiting(db: Database, invocationId: string, holders: number):
  *  the hatch a moment later, and destroying a running agent to hurry that along is the trade
  *  this guard exists to refuse — so only the structural allows (and the vote) can answer yes.
  *
- *  Fail-open (true) on any read failure, preserving the sweeper's own previous behaviour: a
- *  docker or config hiccup must not quietly disable preemption. Every other eviction guard —
+ *  Fail-open (true) on a read failure, preserving the sweeper's own previous behaviour: a
+ *  docker or config hiccup must not quietly disable preemption. The exception is an unavailable
+ *  config store: then the reserve cannot be evaluated, so the answer is false (hold) and the
+ *  sweeper evicts nothing on a guess. Every other eviction guard —
  *  strict outscoring, the min-run age, one victim per pass — still applies. */
 export async function reserveAllowsAnyOf(
   db: Database,
@@ -276,7 +279,7 @@ export async function reserveAllowsAnyOf(
   try {
     const [reserve, governor] = await Promise.all([
       configService.getBoolean(CONFIG_KEYS.AGENT_RESERVE_ENABLED, true),
-      resourceLimitsEnabled(),
+      resourceLimitsEnabled({ strict: true }),
     ]);
     const enabled = reserve && governor;
     // With the reserve off nothing yields, so every candidate can run. The hand-rolled copy
@@ -297,6 +300,10 @@ export async function reserveAllowsAnyOf(
         }) === 'allow',
     );
   } catch (err) {
+    if (err instanceof ConfigUnavailableError) {
+      log.warn({ err }, 'reserve pre-check failed (config store unavailable); holding');
+      return false;
+    }
     log.warn({ err }, 'reserve pre-check failed; assuming a candidate can take the slot');
     return true;
   }
@@ -304,9 +311,11 @@ export async function reserveAllowsAnyOf(
 
 /** The gate. Resolves to nothing when the job may run; throws DelayedError when it yielded.
  *
- *  Fail-open on every error, matching its siblings — a docker hiccup, an unavailable config or a
- *  Redis blip must never stop an agent from running. The `!token` skip has to stay: moveToDelayed
- *  cannot be called without a worker token, so there is no way to hold the job at all. */
+ *  Fail-open on every error but one, matching its siblings — a docker hiccup or an uninitialised
+ *  config must not stop an agent from running. An unavailable config store (the reserve and
+ *  governor switches cannot be read) defers the job instead, like the other gates. The `!token`
+ *  skip has to stay: moveToDelayed cannot be called without a worker token, so there is no way
+ *  to hold the job at all. */
 export async function enforceRuntimeHolderReserve(
   db: Database,
   payload: CliExecJobPayload,
@@ -320,13 +329,27 @@ export async function enforceRuntimeHolderReserve(
   try {
     const [reserve, governor, holdMinutes] = await Promise.all([
       configService.getBoolean(CONFIG_KEYS.AGENT_RESERVE_ENABLED, true),
-      resourceLimitsEnabled(),
+      resourceLimitsEnabled({ strict: true }),
       configService.getNumber(CONFIG_KEYS.AGENT_RESERVE_MAX_HOLD_MINUTES, 3),
     ]);
     enabled = reserve && governor;
     maxHoldMs = Math.max(0, Math.floor(holdMinutes)) * 60_000;
-  } catch {
-    return; // config unavailable — don't hold the job
+  } catch (err) {
+    if (!(err instanceof ConfigUnavailableError)) return; // not initialised — don't hold the job
+    try {
+      await job.moveToDelayed(Date.now() + DEFER_MS, token);
+    } catch (deferErr) {
+      log.warn(
+        { err: deferErr, taskId: payload.taskId },
+        'agent reserve defer failed; allowing job',
+      );
+      return;
+    }
+    log.warn(
+      { taskId: payload.taskId, invocationId: payload.invocationId },
+      'agent reserve switches unreadable (config store unavailable); deferring invocation',
+    );
+    throw new DelayedError();
   }
   if (!enabled) return;
 

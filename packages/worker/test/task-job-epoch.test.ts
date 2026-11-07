@@ -1590,6 +1590,17 @@ describe('a park or a step start that a Retry or a Stop overtakes', () => {
       parkQueued(15_000);
     });
 
+    it('says the runtime limits cannot be read, not that the pool is full, when admission is unreadable', async () => {
+      h.state.readsAnswer = true;
+      h.state.admission = { ...full, waiting: 0, unreadable: true };
+      h.state.parkRow = unparked;
+      await processTaskJob(job('epoch-chain-runtime'), 'tok');
+      const park = h.state.stepPatches.find((p) => p.waitingStartedAt instanceof Date);
+      expect(String(park?.statusMessage)).toMatch(/configuration store/i);
+      expect(String(park?.statusMessage)).not.toMatch(/free runtime slot/i);
+      parkQueued(15_000);
+    });
+
     it('parks nothing once a Retry moved the task on', async () => {
       h.state.readsAnswer = true;
       h.state.admission = full;

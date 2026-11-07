@@ -5,7 +5,7 @@ import { routePath } from 'hono/route';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { ZodError } from 'zod';
 import { hasPgCode, isUniqueViolationOf, ONE_LIVE_UPGRADE_INDEX } from '@haive/database';
-import { logger } from '@haive/shared';
+import { ConfigUnavailableError, logger } from '@haive/shared';
 import { HttpError, type AppEnv } from '../context.js';
 import { isUuid } from '../lib/uuid.js';
 
@@ -22,6 +22,10 @@ export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
       { error: err.message, code: err.code ?? null },
       err.status as ContentfulStatusCode,
     );
+  }
+  // Not logged per request: the config service logs an outage once per interval.
+  if (err instanceof ConfigUnavailableError) {
+    return c.json({ error: 'Service temporarily unavailable', code: 'config_unavailable' }, 503);
   }
   if (err instanceof HTTPException) {
     // A thrown response keeps its own body and headers (WWW-Authenticate, Retry-After).

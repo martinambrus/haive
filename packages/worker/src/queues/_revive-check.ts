@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { schema, type DbTx } from '@haive/database';
 import {
   CONFIG_KEYS,
+  ConfigUnavailableError,
   configService,
   lockNewWorkFenceShared,
   logger,
@@ -32,14 +33,26 @@ export class MaintenanceStateUnreadable extends Error {
   }
 }
 
+/** What a read outside the fence saw: a stored state, or that the config store could not be read. */
+export type ObservedMaintenanceState = MaintenanceState | 'unreadable';
+
+/** An unreadable state is held, the restrictive answer; otherwise the state decides. */
+export function holdsNewWork(state: ObservedMaintenanceState): boolean {
+  return state === 'unreadable' || refusesNewWork(state);
+}
+
 /** The stored state, past the config cache since the api that sets it is another process. */
-export async function readMaintenanceState(taskId: string): Promise<MaintenanceState> {
-  return parseMaintenanceState(
-    await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE).catch((err: unknown) => {
-      logger.warn({ err, taskId }, 'maintenance state unreadable; not held');
-      return null;
-    }),
-  );
+export async function readMaintenanceState(taskId: string): Promise<ObservedMaintenanceState> {
+  try {
+    return parseMaintenanceState(await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE));
+  } catch (err) {
+    if (err instanceof ConfigUnavailableError) {
+      logger.warn({ err, taskId }, 'maintenance state unreadable; treated as held');
+      return 'unreadable';
+    }
+    logger.warn({ err, taskId }, 'maintenance state unreadable; not held');
+    return parseMaintenanceState(null);
+  }
 }
 
 /** The shared fence, then the stored state past the cache; throws MaintenanceStateUnreadable when it cannot be read. */

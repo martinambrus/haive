@@ -138,13 +138,15 @@ vi.mock('@haive/shared', async (importOriginal) => {
         h.stored.set(key, value);
         if (!h.external) h.cache.delete(key);
       },
-      getRedis: () => ({ publish: async () => 1 }),
+      publish: async () => 1,
     },
   };
 });
 
 import { Hono } from 'hono';
 import {
+  ConfigUnavailableError,
+  configService,
   DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS,
   DEFAULT_CLI_PROMPT_RETENTION_DAYS,
   DEFAULT_CLI_STREAM_LOG_RETENTION_DAYS,
@@ -502,6 +504,20 @@ describe.each(ROUTES)('PUT /admin/config/$name', ({ name, initial, a, b }) => {
     expect((await put(name, a)).status).toBe(500);
     expect(h.audits).toEqual([]);
   });
+
+  it.runIf(['concurrency', 'runtime-limits'].includes(name))(
+    'answers the typed 503 when only the publish after the save is rejected',
+    async () => {
+      vi.spyOn(configService, 'publish').mockRejectedValue(new ConfigUnavailableError('publish'));
+      const res = await put(name, a);
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({
+        error: 'Service temporarily unavailable',
+        code: 'config_unavailable',
+      });
+      vi.restoreAllMocks();
+    },
+  );
 
   it('saves one at a time, so the second records what the first wrote', async () => {
     const park = parkNextWrite();

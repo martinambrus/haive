@@ -360,7 +360,8 @@ describe.skipIf(!url)('global KB config and enforcement write audit rows first o
   it('C2: a Redis failure on the first write leaves no row and Redis unchanged', async () => {
     failOnWrite = 1;
     const res = await put({ digestEnabled: false, archiveRetentionDays: 7 });
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ code: 'config_unavailable' });
     expect(await rows()).toEqual([]);
     expect(redisValues.has(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED)).toBe(false);
     expect(redisValues.has(CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS)).toBe(false);
@@ -369,7 +370,8 @@ describe.skipIf(!url)('global KB config and enforcement write audit rows first o
   it('C3: a Redis failure on the second write leaves one partial row naming the written key', async () => {
     failOnWrite = 2;
     const res = await put({ digestEnabled: false, archiveRetentionDays: 7 });
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ code: 'config_unavailable' });
     const all = await rows();
     expect(all).toHaveLength(1);
     expect(all[0]!.action).toBe(CONFIG_ACTION);

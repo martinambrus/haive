@@ -25,6 +25,7 @@ import {
   configService,
   logger,
   QUEUE_NAMES,
+  rethrowIfConfigUnavailable,
   type BundleJobPayload,
   type OnboardingToolingMirror,
   type RepoJobPayload,
@@ -695,7 +696,10 @@ export async function holdImportedMcpServerLists(db: Database): Promise<void> {
   const repos = await db.query.repositories.findMany({
     columns: { id: true, onboardingTooling: true },
   });
-  const installKey = await configService.getEncryptionKey().catch(() => null);
+  const installKey = await configService.getEncryptionKey().catch((err: unknown) => {
+    rethrowIfConfigUnavailable(err);
+    return null;
+  });
   for (const repo of repos) {
     const stored = repo.onboardingTooling;
     if (!stored) continue;

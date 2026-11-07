@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { logger } from '@haive/shared';
+import { ConfigUnavailableError, logger } from '@haive/shared';
 import { HttpError, type AppEnv } from '../src/context.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 
@@ -191,5 +191,35 @@ describe('email index conflicts', () => {
     } finally {
       logged.mockRestore();
     }
+  });
+});
+
+describe('a configuration outage', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('answers a retryable 503 without the cause or the operation, and logs nothing', async () => {
+    const logged = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const err = new ConfigUnavailableError('secret-op', {
+      cause: new Error('connect ECONNREFUSED 10.1.2.3:6379'),
+    });
+    const res = await appThrowing(err).request('/');
+    const text = await res.text();
+    expect(res.status).toBe(503);
+    expect(JSON.parse(text)).toEqual({
+      error: 'Service temporarily unavailable',
+      code: 'config_unavailable',
+    });
+    expect(text).not.toContain('ECONNREFUSED');
+    expect(text).not.toContain('secret-op');
+    expect(logged).not.toHaveBeenCalled();
+  });
+
+  it('keeps a plain Error with the same words a logged 500', async () => {
+    const logged = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const res = await appThrowing(new Error('Configuration store unavailable (get)')).request('/');
+    expect(res.status).toBe(500);
+    expect(logged).toHaveBeenCalledTimes(1);
   });
 });

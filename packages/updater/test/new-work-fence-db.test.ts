@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import postgres, { type Sql, type TransactionSql } from 'postgres';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { configService } from '@haive/shared';
+import { ConfigUnavailableError, configService } from '@haive/shared';
 import { ensureJournal, enterPhase, finishRun, startRun } from '../src/journal.js';
 import {
   phaseCommit,
@@ -803,6 +803,20 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
         await run(upgrade());
 
         expect(stored).toBe('normal');
+      });
+
+      it('leaves an administrator hold alone when the run failed its first state read', async () => {
+        stored = 'maintenance';
+        vi.mocked(configService.getFresh).mockRejectedValueOnce(new ConfigUnavailableError('get'));
+        const ctx = upgrade();
+        await expect(phaseDraining(ctx)).rejects.toBeInstanceOf(ConfigUnavailableError);
+
+        await run(ctx);
+
+        expect(stored).toBe('maintenance');
+        expect(written).toEqual([]);
+        expect(logged.at(-1)?.event).toBe(finished);
+        expect(await fenceIsFree()).toBe(true);
       });
 
       describe.each([

@@ -4,6 +4,7 @@ import {
   deriveRuntimeCaps,
   logger,
   readHostResources,
+  rethrowIfConfigUnavailable,
   type HostResources,
   type RuntimeCaps,
 } from '@haive/shared';
@@ -65,11 +66,13 @@ function formatCpus(cpus: number): string {
 }
 
 /** Master kill-switch. Fail-open to false (no caps) when config is unavailable — a
- *  focused smoke without Redis must still spawn. */
-export async function resourceLimitsEnabled(): Promise<boolean> {
+ *  focused smoke without Redis must still spawn. With `strict`, an unreadable config store
+ *  (ConfigUnavailableError) is rethrown instead, for the spawn path that stamps caps for life. */
+export async function resourceLimitsEnabled(opts: { strict?: boolean } = {}): Promise<boolean> {
   try {
     return await configService.getBoolean(CONFIG_KEYS.RESOURCE_LIMITS_ENABLED, true);
-  } catch {
+  } catch (err) {
+    if (opts.strict) rethrowIfConfigUnavailable(err);
     return false;
   }
 }
@@ -150,13 +153,15 @@ export async function resolveRuntimeWeightMb(taskId: string, kind: RuntimeKind):
 
 /** Effective per-container caps for a task's runner, or null when the governor is
  *  disabled (caller then spawns with no cap flags). Layers the per-task
- *  tasks.memoryLimitMb/cpuLimitMilli override on top of the derived caps. */
+ *  tasks.memoryLimitMb/cpuLimitMilli override on top of the derived caps. An unreadable config
+ *  store rejects (the caps are stamped into the container for its whole life, so the spawn fails). */
 export async function resolveRunnerCaps(taskId: string): Promise<EffectiveRuntimeCaps | null> {
-  if (!(await resourceLimitsEnabled())) return null;
+  if (!(await resourceLimitsEnabled({ strict: true }))) return null;
   let caps: RuntimeCaps;
   try {
     caps = await resolveRuntimeCaps();
   } catch (err) {
+    rethrowIfConfigUnavailable(err);
     log.warn({ err }, 'runtime cap resolve failed; spawning without caps');
     return null;
   }

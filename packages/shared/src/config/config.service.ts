@@ -1,6 +1,7 @@
-import { Redis } from 'ioredis';
+import { Redis, ReplyError } from 'ioredis';
 import { randomBytes } from 'node:crypto';
-import { createRedisConnection } from '../utils/redis-factory.js';
+import { createRedisConnection, type RedisFactoryOptions } from '../utils/redis-factory.js';
+import { ConfigUnavailableError } from './config-unavailable.js';
 import { logger } from '../logger/index.js';
 import {
   DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS,
@@ -768,6 +769,26 @@ const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.RUNTIME_IDLE_REAP_MINUTES]: '180',
 };
 
+/** How long one command may wait for Redis before it rejects with ConfigUnavailableError. */
+const CONFIG_COMMAND_TIMEOUT_MS = 2_000;
+
+/** The connection-error log is throttled to one line per this window: ioredis emits an 'error'
+ *  per reconnect attempt, about two a second while Redis is down. */
+const CONFIG_ERROR_LOG_INTERVAL_MS = 10_000;
+
+/** Options for the config client, which must fail fast instead of queueing while Redis is down. */
+const CONFIG_REDIS_OPTIONS: RedisFactoryOptions = {
+  // A silent socket rejects the command after this long.
+  commandTimeout: CONFIG_COMMAND_TIMEOUT_MS,
+  // A command issued while reconnecting rejects at once instead of waiting in a queue.
+  enableOfflineQueue: false,
+  // Together with the offline queue off, a timed-out or in-flight command is never replayed
+  // after the reconnect: a write that was reported failed must not be applied later.
+  autoResendUnfulfilledCommands: false,
+  // The default backoff reaches 5 s, which would delay the first good command after recovery.
+  retryStrategy: (times) => Math.min(times * 50, 500),
+};
+
 export class ConfigService {
   private redis: Redis | null = null;
   private initialized = false;
@@ -782,7 +803,17 @@ export class ConfigService {
       throw new Error('REDIS_URL environment variable is required');
     }
 
-    this.redis = createRedisConnection(url);
+    this.redis = createRedisConnection(url, CONFIG_REDIS_OPTIONS);
+
+    // Persistent listener: without one ioredis writes a raw "Unhandled error event" to stderr per
+    // reconnect attempt. Throttled for the same reason.
+    let lastErrorLogAt = 0;
+    this.redis.on('error', (err) => {
+      const now = Date.now();
+      if (now - lastErrorLogAt < CONFIG_ERROR_LOG_INTERVAL_MS) return;
+      lastErrorLogAt = now;
+      logger.warn({ err }, 'ConfigService Redis connection error');
+    });
 
     await new Promise<void>((resolve, reject) => {
       this.redis!.once('ready', resolve);
@@ -803,6 +834,10 @@ export class ConfigService {
       pipeline.setnx(key, value);
     }
     const results = await pipeline.exec();
+    // exec() resolves per-command errors on a transport failure instead of rejecting; a drop
+    // mid-seed must fail boot rather than silently skip seeding.
+    const failed = results?.find(([err]) => err);
+    if (failed?.[0]) throw failed[0];
     if (results?.some(([, result]) => result === 1)) {
       logger.info('Default configuration seeded');
     }
@@ -881,7 +916,7 @@ export class ConfigService {
     if (cached && Date.now() < cached.expiresAt) {
       return cached.value;
     }
-    const value = await this.redis!.get(key);
+    const value = await this.redisCall('get', (redis) => redis.get(key));
     this.localCache.set(key, {
       value,
       expiresAt: Date.now() + ConfigService.LOCAL_CACHE_TTL_MS,
@@ -892,7 +927,7 @@ export class ConfigService {
   /** Reads Redis past the local cache, for a value another process may have just written. */
   async getFresh(key: string): Promise<string | null> {
     this.ensureInitialized();
-    const value = await this.redis!.get(key);
+    const value = await this.redisCall('getFresh', (redis) => redis.get(key));
     this.localCache.set(key, { value, expiresAt: Date.now() + ConfigService.LOCAL_CACHE_TTL_MS });
     return value;
   }
@@ -912,15 +947,26 @@ export class ConfigService {
 
   async set(key: string, value: string): Promise<void> {
     this.ensureInitialized();
-    await this.redis!.set(key, value);
-    this.localCache.delete(key);
+    try {
+      await this.redisCall('set', (redis) => redis.set(key, value));
+    } finally {
+      // A rejected write may still have been applied, so never keep a cached copy of the old value.
+      this.localCache.delete(key);
+    }
   }
 
   async setIfAbsent(key: string, value: string): Promise<boolean> {
     this.ensureInitialized();
-    const written = (await this.redis!.set(key, value, 'NX')) === 'OK';
-    this.localCache.delete(key);
-    return written;
+    try {
+      return (await this.redisCall('setIfAbsent', (redis) => redis.set(key, value, 'NX'))) === 'OK';
+    } finally {
+      this.localCache.delete(key);
+    }
+  }
+
+  async publish(channel: string, message: string): Promise<void> {
+    this.ensureInitialized();
+    await this.redisCall('publish', (redis) => redis.publish(channel, message));
   }
 
   clearCache(): void {
@@ -932,7 +978,9 @@ export class ConfigService {
     if (!key) {
       const envKey = this.getEnvEncryptionKey();
       if (envKey) {
-        await this.redis!.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey);
+        await this.redisCall('getEncryptionKey', (redis) =>
+          redis.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey),
+        );
         return envKey;
       }
       throw new Error('Encryption key not found');
@@ -946,10 +994,26 @@ export class ConfigService {
   }
 
   async close(): Promise<void> {
-    if (this.redis) {
-      await this.redis.quit();
+    const redis = this.redis;
+    if (!redis) return;
+    try {
+      await redis.quit();
+    } catch {
+      // quit() rejects at once while the socket is down and the client keeps reconnecting.
+      redis.disconnect();
+    } finally {
       this.redis = null;
       this.initialized = false;
+    }
+  }
+
+  /** Runs one Redis command; anything but a server error reply means the store was unreachable. */
+  private async redisCall<T>(operation: string, run: (redis: Redis) => Promise<T>): Promise<T> {
+    try {
+      return await run(this.redis!);
+    } catch (err) {
+      if (err instanceof ReplyError) throw err;
+      throw new ConfigUnavailableError(operation, { cause: err });
     }
   }
 

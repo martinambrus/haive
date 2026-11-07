@@ -63,7 +63,7 @@ vi.mock('@haive/shared', async (importOriginal) => ({
       h.written += 1;
       h.stored.set(key, value);
     },
-    getRedis: () => ({ publish: async () => 1 }),
+    publish: async () => 1,
   },
 }));
 vi.mock('../src/modules/activation.js', () => ({

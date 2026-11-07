@@ -4,6 +4,7 @@ import { schema, type Database } from '@haive/database';
 import {
   CLI_PROVIDER_LIST,
   CONFIG_KEYS,
+  ConfigUnavailableError,
   configService,
   ECB_DAILY_FX_URL,
   LITELLM_PRICES_URL,
@@ -62,12 +63,21 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
   // Global kill-switch. OFF means no feed is fetched at all and every stored rate stays
   // exactly as it is, which is the posture an install on negotiated rates wants once it
   // has entered its own. Deliberately a clean no-op rather than an error: nothing is
-  // wrong, the operator asked for this. Fail-open on a config read failure — pricing is
-  // observability, and a Redis blip should not silently freeze it.
+  // wrong, the operator asked for this. An unreadable config store (ConfigUnavailableError)
+  // skips this cycle with a recorded error, since proceeding could overwrite rates an admin
+  // froze; any other read failure proceeds, as pricing is observability.
   let enabledGlobally = true;
   try {
     enabledGlobally = await configService.getBoolean(CONFIG_KEYS.PRICING_AUTO_UPDATE_ENABLED, true);
   } catch (err) {
+    if (err instanceof ConfigUnavailableError) {
+      log.warn({ err }, 'pricing auto-update config store unavailable; skipping this cycle');
+      return {
+        ok: false,
+        refreshed: [],
+        errors: [{ name: 'price:config', error: safeErrorMessage(err) }],
+      };
+    }
     log.debug({ err }, 'pricing auto-update config unavailable; proceeding');
   }
   if (!enabledGlobally) {

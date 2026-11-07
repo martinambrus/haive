@@ -1,10 +1,29 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { CONFIG_KEYS, ConfigUnavailableError, configService } from '@haive/shared';
+import { getRedis } from '../redis.js';
 import {
+  RuntimeSlotAbortedError,
+  acquireRuntimeSlot,
+  runtimeAdmission,
   runtimeAdmissionDecision,
   parseRunnerWeights,
   type BrowserSurcharge,
   type RuntimeAdmissionInput,
 } from './runtime-admission.js';
+
+// docker ps answers nothing and Redis is not initialised: the gate sees an idle host and every
+// Redis side effect is a soft failure, so only the config reads steer these tests.
+vi.mock('node:child_process', () => ({
+  execFile: (...args: unknown[]) => {
+    const cb = args[args.length - 1] as (err: null, out: { stdout: string }) => void;
+    cb(null, { stdout: '' });
+  },
+}));
+vi.mock('../redis.js', () => ({
+  getRedis: vi.fn(() => {
+    throw new Error('Redis not initialized');
+  }),
+}));
 
 /** A 16 GB host: budget 11469 MB, ddev 4096 MB, app 2048 MB. */
 const BUDGET = 11469;
@@ -186,5 +205,126 @@ describe('parseRunnerWeights browser surcharge', () => {
     expect(parseRunnerWeights(`task-a|c001|${DDEV_BASE}|haive-ddev-aaaa\n`, DDEV_BASE)).toEqual(
       new Map([['task-a', DDEV_BASE]]),
     );
+  });
+});
+
+type ReadMode = 'ok' | 'down' | 'plain' | 'off';
+
+describe('runtime admission over an unreadable config store', () => {
+  let mode: ReadMode;
+  let maxConcurrent: number;
+  const down = () => new ConfigUnavailableError('get');
+
+  beforeEach(() => {
+    mode = 'ok';
+    maxConcurrent = 0;
+    vi.mocked(getRedis).mockClear();
+    vi.spyOn(configService, 'getBoolean').mockImplementation(async () => {
+      if (mode === 'down') throw down();
+      if (mode === 'plain') throw new Error('ConfigService not initialized');
+      return mode !== 'off';
+    });
+    vi.spyOn(configService, 'getNumber').mockImplementation(async (key: string) => {
+      if (mode === 'down') throw down();
+      if (mode === 'plain') throw new Error('ConfigService not initialized');
+      return key === CONFIG_KEYS.MAX_CONCURRENT_RUNTIMES ? maxConcurrent : 0;
+    });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  describe('runtimeAdmission', () => {
+    it('parks, flagged unreadable, and touches no park queue', async () => {
+      mode = 'down';
+      const r = await runtimeAdmission('task-a', 'app');
+      expect(r.decision).toBe('park');
+      expect(r.unreadable).toBe(true);
+      expect(getRedis).not.toHaveBeenCalled();
+    });
+
+    it('still proceeds idle when the switch is readable and off', async () => {
+      mode = 'off';
+      const r = await runtimeAdmission('task-a', 'app');
+      expect(r.decision).toBe('proceed');
+      expect(r.unreadable).toBeUndefined();
+    });
+
+    it('keeps the lenient result for a non-config error', async () => {
+      mode = 'plain';
+      const r = await runtimeAdmission('task-a', 'app');
+      expect(r.decision).toBe('proceed');
+      expect(r.unreadable).toBeUndefined();
+    });
+  });
+
+  describe('pump', () => {
+    it('keeps a queued waiter queued while the store is unreadable, then follows the normal decision', async () => {
+      vi.useFakeTimers();
+      maxConcurrent = 1;
+      const first = await acquireRuntimeSlot('pump-1', 'app');
+      let second: (() => void) | null = null;
+      let secondErr: unknown = null;
+      void acquireRuntimeSlot('pump-2', 'app').then(
+        (rel) => (second = rel),
+        (e) => (secondErr = e),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(second).toBeNull();
+
+      mode = 'down';
+      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(second).toBeNull();
+      expect(secondErr).toBeNull();
+
+      mode = 'ok';
+      await vi.advanceTimersByTimeAsync(15_000);
+      // pool is still full, so the normal decision keeps it waiting
+      expect(second).toBeNull();
+      first();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(second).not.toBeNull();
+      (second as unknown as () => void)();
+    });
+  });
+
+  describe('acquireRuntimeSlot', () => {
+    it('stays pending while reads fail and resolves once they answer', async () => {
+      vi.useFakeTimers();
+      mode = 'down';
+      let rel: (() => void) | null = null;
+      void acquireRuntimeSlot('acq-1', 'app').then((r) => (rel = r));
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(rel).toBeNull();
+      mode = 'ok';
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(rel).not.toBeNull();
+      (rel as unknown as () => void)();
+    });
+
+    it('rejects with the config error once the admission deadline passes', async () => {
+      vi.useFakeTimers();
+      mode = 'down';
+      const result = expect(acquireRuntimeSlot('acq-2', 'app')).rejects.toBeInstanceOf(
+        ConfigUnavailableError,
+      );
+      await vi.advanceTimersByTimeAsync(8 * 60_000 + 4_000);
+      await result;
+    });
+
+    it('rejects as aborted when the signal fires while waiting', async () => {
+      vi.useFakeTimers();
+      mode = 'down';
+      const ac = new AbortController();
+      const result = expect(
+        acquireRuntimeSlot('acq-3', 'app', undefined, ac.signal),
+      ).rejects.toBeInstanceOf(RuntimeSlotAbortedError);
+      await vi.advanceTimersByTimeAsync(3_000);
+      ac.abort();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await result;
+    });
   });
 });

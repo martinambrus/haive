@@ -86,4 +86,17 @@ describe('answering a clarification', () => {
     expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'waiting_user' });
     expect(h.add).toHaveBeenCalledTimes(1);
   });
+
+  it('answers 200 with queued false when the queue never answers, the answer standing', async () => {
+    const fake = setup('waiting_user');
+    h.add.mockImplementationOnce(() => new Promise(() => undefined));
+    const res = await app.request(`/${TASK}/steps/${STEP}/clarify`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ answer: 'keep both changes' }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, queued: false });
+    expect(fake.rows(schema.taskEvents).length).toBeGreaterThan(0);
+  }, 10_000);
 });

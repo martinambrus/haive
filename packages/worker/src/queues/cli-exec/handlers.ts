@@ -14,6 +14,7 @@ import {
   CLI_POLLABLE_JOB_OPTS,
   CONFIG_CONCURRENCY_CHANNEL,
   CONFIG_KEYS,
+  ConfigUnavailableError,
   CONFIG_RUNTIME_LIMITS_CHANNEL,
   QUEUE_NAMES,
   configService,
@@ -1417,17 +1418,25 @@ async function enforcePauseGate(
   token: string | undefined,
 ): Promise<void> {
   if (!token) return;
-  if (!(await resolvePause(db, payload.taskId))) return;
+  const pause = await resolvePause(db, payload.taskId);
+  if (!pause) return;
   try {
     await job.moveToDelayed(Date.now() + PAUSE_DEFER_MS, token);
   } catch (err) {
     log.warn({ err, taskId: payload.taskId }, 'pause defer failed; allowing job');
     return;
   }
-  log.info(
-    { taskId: payload.taskId, invocationId: payload.invocationId },
-    'task is paused; deferring invocation',
-  );
+  if (pause === 'unreadable') {
+    log.warn(
+      { taskId: payload.taskId, invocationId: payload.invocationId },
+      'pause state unreadable (config store unavailable); deferring invocation',
+    );
+  } else {
+    log.info(
+      { taskId: payload.taskId, invocationId: payload.invocationId },
+      'task is paused; deferring invocation',
+    );
+  }
   throw new DelayedError();
 }
 
@@ -1435,9 +1444,10 @@ async function enforcePauseGate(
  *  CLI invocations (started, not ended/superseded) from the DB; if at/over the
  *  admin MAX_PARALLEL_AGENTS_PER_TASK cap, move this job back to delayed so its
  *  slot frees for other tasks/users, then throw DelayedError so BullMQ treats it
- *  as deferred (not failed) and redelivers it later. Fail-open: any error, a
- *  missing worker token, or the step_summary helper lets the job run rather than
- *  block. The DB count is authoritative (no counter to leak); ended_at is set on
+ *  as deferred (not failed) and redelivers it later. The cap read fails closed
+ *  on an unavailable config store (the job is deferred, since the cap cannot be checked);
+ *  every other error, a missing worker token, or the step_summary helper lets the job run
+ *  rather than block. The DB count is authoritative (no counter to leak); ended_at is set on
  *  every terminal outcome, so a finished agent stops counting against the cap. */
 async function enforceTaskAgentCap(
   db: Database,
@@ -1452,8 +1462,22 @@ async function enforceTaskAgentCap(
       1,
       Math.floor(await configService.getNumber(CONFIG_KEYS.MAX_PARALLEL_AGENTS_PER_TASK, 5)),
     );
-  } catch {
-    return; // config unavailable — don't block the job
+  } catch (err) {
+    if (!(err instanceof ConfigUnavailableError)) return; // not initialised — don't block the job
+    try {
+      await job.moveToDelayed(Date.now() + TASK_AGENT_CAP_DEFER_MS, token);
+    } catch (deferErr) {
+      log.warn(
+        { err: deferErr, taskId: payload.taskId },
+        'per-task cap defer failed; allowing job',
+      );
+      return;
+    }
+    log.warn(
+      { taskId: payload.taskId, invocationId: payload.invocationId },
+      'per-task agent cap unreadable (config store unavailable); deferring invocation',
+    );
+    throw new DelayedError();
   }
   let running: number;
   try {

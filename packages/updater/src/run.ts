@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import type { Sql } from 'postgres';
 import {
   CONFIG_KEYS,
+  ConfigUnavailableError,
   configService,
   drainTaskStatuses,
   NEW_WORK_FENCE_KEY,
@@ -53,12 +54,18 @@ export interface UpgradeContext {
   drainDeadlineAt?: number;
   /** Milliseconds between live-work counts and between recounts; 5000 when unset. */
   drainPollMs?: number;
+  /** Milliseconds between retries of a maintenance-state write; 3000 when unset. */
+  maintenanceWritePauseMs?: number;
   /** Force past the drain deadline instead of failing. */
   forceDrain: boolean;
   /** Set by phaseDraining when it forced past live work, so phaseMaintenance skips the recount. */
   drainForced?: boolean;
   /** The maintenance state at the last look (draining phase, then each recount); the waits use it. */
   lastState?: MaintenanceState;
+  /** Set when the draining phase starts and cleared once this run has recorded the state it found:
+   *  while set it has written no maintenance state, so a rollback leaves the stored one alone. A
+   *  restarted updater never runs that phase, so it never sets it and puts back what the journal holds. */
+  stateUntouched?: boolean;
   log: (event: string, fields?: Record<string, unknown>) => void;
 }
 
@@ -184,8 +191,26 @@ async function underFence<T>(sql: Sql, work: (fence: Sql) => Promise<T>): Promis
   }
 }
 
-async function setMaintenanceState(sql: Sql, state: MaintenanceState): Promise<void> {
-  await underFence(sql, () => configService.set(CONFIG_KEYS.MAINTENANCE_STATE, state));
+/** A recreated Redis needs 1-3 s; 20 x 3 s rides that out. */
+const MAINTENANCE_WRITE_ATTEMPTS = 20;
+const MAINTENANCE_WRITE_PAUSE_MS = 3000;
+
+/** Retries only while the config store is unavailable. Each attempt takes and releases the fence, so no sleep holds it. */
+async function setMaintenanceState(ctx: UpgradeContext, state: MaintenanceState): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await underFence(ctx.sql, () => configService.set(CONFIG_KEYS.MAINTENANCE_STATE, state));
+      return;
+    } catch (err) {
+      if (!(err instanceof ConfigUnavailableError) || attempt >= MAINTENANCE_WRITE_ATTEMPTS) {
+        throw err;
+      }
+      ctx.log('maintenance-write-retry', { state, attempt });
+      await new Promise((resolve) =>
+        setTimeout(resolve, ctx.maintenanceWritePauseMs ?? MAINTENANCE_WRITE_PAUSE_MS),
+      );
+    }
+  }
 }
 
 /** Writes draining over normal only: a draining or maintenance an administrator set is already a hold. */
@@ -195,6 +220,7 @@ async function holdDraining(ctx: UpgradeContext): Promise<MaintenanceState> {
       await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE),
     );
     await recordFoundState(fence, ctx.runId, found);
+    ctx.stateUntouched = false;
     if (found === 'normal') await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'draining');
     return found;
   });
@@ -202,7 +228,13 @@ async function holdDraining(ctx: UpgradeContext): Promise<MaintenanceState> {
 
 /** Read from the journal, not the context: a restarted updater never ran the draining phase. */
 async function restoreMaintenanceState(ctx: UpgradeContext): Promise<void> {
-  await setMaintenanceState(ctx.sql, await readFoundState(ctx.sql, ctx.runId));
+  if (ctx.stateUntouched) {
+    ctx.log('maintenance-restore-skipped', {
+      reason: 'this run recorded no found state and wrote none',
+    });
+    return;
+  }
+  await setMaintenanceState(ctx, await readFoundState(ctx.sql, ctx.runId));
 }
 
 /** Recounts under the fence: a draining or held install with nothing live enters maintenance. */
@@ -271,6 +303,7 @@ async function awaitDrain(ctx: UpgradeContext): Promise<boolean> {
 }
 
 export async function phaseDraining(ctx: UpgradeContext): Promise<void> {
+  ctx.stateUntouched = true;
   await enterPhase(ctx.sql, ctx.runId, 'draining');
   const found = await holdDraining(ctx);
   ctx.lastState = found;
@@ -289,7 +322,7 @@ export async function phaseMaintenance(ctx: UpgradeContext): Promise<void> {
     if (!forced) await pause(ctx);
     await enterPhase(ctx.sql, ctx.runId, 'maintenance');
   }
-  if (forced) await setMaintenanceState(ctx.sql, 'maintenance');
+  if (forced) await setMaintenanceState(ctx, 'maintenance');
   ctx.log('maintenance');
 }
 

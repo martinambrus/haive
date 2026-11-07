@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
   task: null as { id: string; status: string } | null,
   events: [] as { eventType: string; payload: Record<string, unknown> }[],
   added: [] as unknown[][],
+  hang: false,
 }));
 
 vi.mock('../src/db.js', () => ({
@@ -22,6 +23,7 @@ vi.mock('../src/queues.js', async (importOriginal) => ({
   getTaskQueue: () => ({
     add: async (...args: unknown[]) => {
       state.added.push(args);
+      if (state.hang) await new Promise(() => undefined);
     },
   }),
 }));
@@ -55,6 +57,7 @@ beforeEach(() => {
   state.task = { id: TASK, status: 'cancelled' };
   state.events = [leftOpen];
   state.added = [];
+  state.hang = false;
 });
 
 describe('POST /tasks/:id/merges/abort', () => {
@@ -65,6 +68,16 @@ describe('POST /tasks/:id/merges/abort', () => {
     expect(state.added[0]![0]).toBe(TASK_JOB_NAMES.ABORT_LEFT_MERGE);
     expect(state.added[0]![1]).toEqual({ taskId: TASK, userId: 'u1', dir: DIR, mergeHead: 'm1' });
   });
+
+  it('answers 503 queue_unavailable when the queue never answers', async () => {
+    state.hang = true;
+    const res = await abort();
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      error: 'Queue temporarily unavailable, try again shortly',
+      code: 'queue_unavailable',
+    });
+  }, 10_000);
 
   it('is a 404 for a task the user does not own, queueing nothing', async () => {
     state.task = null;

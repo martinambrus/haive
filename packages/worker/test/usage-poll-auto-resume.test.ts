@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getTableName } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
-import { CONFIG_KEYS, TASK_JOB_NAMES, configService, logger } from '@haive/shared';
+import {
+  CONFIG_KEYS,
+  ConfigUnavailableError,
+  TASK_JOB_NAMES,
+  configService,
+  logger,
+} from '@haive/shared';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 
@@ -27,7 +33,7 @@ vi.mock('../src/queues/task-queue.js', async (importOriginal) => ({
   }),
 }));
 
-import { checkProviderRecovery } from '../src/queues/usage-poll-queue.js';
+import { checkProviderRecovery, runUsagePollTick } from '../src/queues/usage-poll-queue.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const TASK = '00000000-0000-4000-8000-000000000001';
@@ -323,6 +329,26 @@ describe('the allowance auto-resume when the stored state cannot be read', () =>
       { name: TASK_JOB_NAMES.ADVANCE_STEP, data: { taskId: TASK } },
       { name: TASK_JOB_NAMES.ADVANCE_STEP, data: { taskId: NEXT_TASK } },
     ]);
+  });
+
+  it('holds a recovered task and says the state is unreadable when the config store is unavailable', async () => {
+    storedStates(new ConfigUnavailableError('getFresh'));
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+    const t = setup();
+
+    await checkProviderRecovery(t.db);
+
+    expect(t.task()).toMatchObject({ status: 'failed', allowanceAutoResumeCount: 0 });
+    expect(h.queued).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: TASK, providerId: PROVIDER, state: 'unreadable' }),
+      'provider recovered; auto-resume held: the maintenance state cannot be read',
+    );
+    expect(info).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining('auto-resume held while the system drains'),
+    );
   });
 
   describe('under the fence', () => {
@@ -624,5 +650,65 @@ describe('the provider recovery when one armed task fails on its own writes', ()
     expect(t.task()).toMatchObject({ allowanceResetAt: expect.any(Date) });
     expect(t.task(NEXT_TASK)).toMatchObject({ status: 'running', allowanceAutoResumeCount: 1 });
     expect(h.queued).toMatchObject(advanceOfNext);
+  });
+});
+
+describe('the usage ticks when the config store is unavailable', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  /** A database and a fetch that fail the test on first touch. */
+  function untouched() {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('fetch touched'));
+    const db = new Proxy(
+      {},
+      {
+        get(_target, prop) {
+          throw new Error(`db touched: ${String(prop)}`);
+        },
+      },
+    ) as unknown as Database;
+    return { db, fetchSpy };
+  }
+
+  it('skips checkProviderRecovery with a warning when its first read rejects', async () => {
+    vi.spyOn(configService, 'get').mockRejectedValue(new ConfigUnavailableError('get'));
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const { db, fetchSpy } = untouched();
+
+    await expect(checkProviderRecovery(db)).resolves.toBeUndefined();
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(ConfigUnavailableError) }),
+      expect.any(String),
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('skips runUsagePollTick with a warning when its first read rejects', async () => {
+    vi.spyOn(configService, 'getBoolean').mockRejectedValue(new ConfigUnavailableError('get'));
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const { db, fetchSpy } = untouched();
+
+    await expect(runUsagePollTick(db)).resolves.toBeUndefined();
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(ConfigUnavailableError) }),
+      expect.any(String),
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('still rejects checkProviderRecovery on any other error', async () => {
+    const boom = new Error('ConfigService not initialized');
+    vi.spyOn(configService, 'get').mockRejectedValue(boom);
+    await expect(checkProviderRecovery(untouched().db)).rejects.toBe(boom);
+  });
+
+  it('still rejects runUsagePollTick on any other error', async () => {
+    const boom = new Error('ConfigService not initialized');
+    vi.spyOn(configService, 'getBoolean').mockRejectedValue(boom);
+    await expect(runUsagePollTick(untouched().db)).rejects.toBe(boom);
   });
 });

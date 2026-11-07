@@ -38,8 +38,11 @@ is (the `draining` log line carries what it `found`). It keeps that state in the
 (`upgrade_runs.metadata.foundState`, written once, before the `draining` write) and puts it back when
 the run ends, on the commit and on the rollback alike: an upgrade over `maintenance` ends in
 `maintenance`, over `draining` in `draining`, over `normal` in `normal`. A restarted updater reads it
-from the journal, so a resumed run puts back the same state; a run with no record (it died before
-the drain, or an older updater started it) puts back `normal`. It then waits until no work is live,
+from the journal, so a resumed run puts back the same state; a resumed run with no record (the first run died before
+the drain, or an older updater started it) puts back `normal`. A run still in its own draining phase
+that has not recorded the found state (its first read, the fence or the record failed) has written
+nothing, so its rollback leaves the stored state alone. The updater's state writes retry only on
+`ConfigUnavailableError`: 20 attempts, 3 s apart, with the fence released between attempts. It then waits until no work is live,
 recounts under the fence and sets `maintenance` only from that recount: the fresh state must still be
 `draining` (or an administrator's `maintenance`, which it leaves as it is) with nothing live. A
 recount that finds work admitted after the count, or the state set back to `normal`, writes
@@ -80,7 +83,8 @@ containers), cleanup, the plan mirror outbox (it resumes) and the price refresh.
 authority is `admitNewWork`: a read of the state past ConfigService's 30 s cache inside the
 transaction that records the work, under a shared
 database fence (`lockNewWorkFenceShared`, an advisory lock on `NEW_WORK_FENCE_KEY`); most routes
-also answer an early 503 from the same fresh read before they start (`assertNewWorkAllowed`). An
+also answer an early 503 from the same fresh read before they start (`assertNewWorkAllowed`). A state that cannot be read within the bounded
+wait refuses new work with a retryable 503 rather than admitting it. An
 upload complete makes that read once more right before it claims its session, since the claim is a
 write, so a drain that began after the early check refuses with the session untouched. Every
 updater state write (`draining`, the recount's `maintenance`, and the return to the state it found

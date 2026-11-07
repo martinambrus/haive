@@ -3,12 +3,12 @@ import { Queue, Worker, type Job } from 'bullmq';
 import { and, eq, inArray, isNull, isNotNull } from 'drizzle-orm';
 import {
   CONFIG_KEYS,
+  ConfigUnavailableError,
   QUEUE_NAMES,
   TASK_JOB_NAMES,
   configService,
   logger,
   parseAllowanceWatchMode,
-  refusesNewWork,
   type AuthMode,
   type CliProviderName,
 } from '@haive/shared';
@@ -37,7 +37,12 @@ import { refreshExpiringCliCredentials } from '../usage-window/credential-refres
 import { authDenialSeverity, nextAuthStrike } from '../usage-window/types.js';
 import type { UsageFetchContext, UsageFetchOutcome } from '../usage-window/types.js';
 import { getTaskQueue, REDRIVE_RETRY_DELAYS_MS, retrying } from './task-queue.js';
-import { MaintenanceStateUnreadable, NewWorkHeld, readMaintenanceState } from './_revive-check.js';
+import {
+  holdsNewWork,
+  MaintenanceStateUnreadable,
+  NewWorkHeld,
+  readMaintenanceState,
+} from './_revive-check.js';
 import { autoResumeFailedStep } from './_step-reset.js';
 import { pruneJobSchedulers } from './job-scheduler-prune.js';
 
@@ -405,8 +410,14 @@ async function pollProvider(db: Database, provider: ProviderRow): Promise<void> 
   await upsertSnapshot(db, provider, outcome);
 }
 
-async function runUsagePollTick(db: Database): Promise<void> {
-  if (!(await configService.getBoolean(CONFIG_KEYS.USAGE_WINDOW_ENABLED, true))) return;
+export async function runUsagePollTick(db: Database): Promise<void> {
+  try {
+    if (!(await configService.getBoolean(CONFIG_KEYS.USAGE_WINDOW_ENABLED, true))) return;
+  } catch (err) {
+    if (!(err instanceof ConfigUnavailableError)) throw err;
+    log.warn({ err }, 'usage poll tick skipped: the config store is unavailable');
+    return;
+  }
 
   const supported = new Set(Object.keys(USAGE_PROVIDERS));
   const providers = (await db.query.cliProviders.findMany({
@@ -452,9 +463,14 @@ async function runUsagePollTick(db: Database): Promise<void> {
  *  watch mode 'off': armed rows simply stop resolving, and resume resolving if the mode is
  *  turned back on. */
 export async function checkProviderRecovery(db: Database): Promise<void> {
-  const watchMode = parseAllowanceWatchMode(
-    await configService.get(CONFIG_KEYS.ALLOWANCE_WATCH_MODE),
-  );
+  let watchMode: ReturnType<typeof parseAllowanceWatchMode>;
+  try {
+    watchMode = parseAllowanceWatchMode(await configService.get(CONFIG_KEYS.ALLOWANCE_WATCH_MODE));
+  } catch (err) {
+    if (!(err instanceof ConfigUnavailableError)) throw err;
+    log.warn({ err }, 'provider recovery check skipped: the config store is unavailable');
+    return;
+  }
   if (watchMode === 'off') return;
 
   const armed = await db
@@ -576,8 +592,15 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
       ) {
         // Past the config cache: the api that sets the state is another process.
         const state = await readMaintenanceState(task.id);
-        if (refusesNewWork(state)) {
-          log.info({ taskId: task.id, providerId: task.providerId, state }, AUTO_RESUME_HELD);
+        if (holdsNewWork(state)) {
+          if (state === 'unreadable') {
+            log.warn(
+              { taskId: task.id, providerId: task.providerId, state },
+              'provider recovered; auto-resume held: the maintenance state cannot be read',
+            );
+          } else {
+            log.info({ taskId: task.id, providerId: task.providerId, state }, AUTO_RESUME_HELD);
+          }
           continue;
         }
         let resumed: boolean;

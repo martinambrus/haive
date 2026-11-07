@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import { OPEN_WAIT_INTO_IDLE_MS, schema, type Database } from '@haive/database';
-import { configService, TASK_JOB_NAMES } from '@haive/shared';
+import { ConfigUnavailableError, configService, logger, TASK_JOB_NAMES } from '@haive/shared';
 
 const h = vi.hoisted(() => ({
   /** What the task queue was asked to enqueue. */
@@ -171,5 +171,42 @@ describe('the PR poller finalizing a merged pull request', () => {
     expect(closedQuery.params).toEqual([STEP_ROW_ID, 'waiting_form']);
     expect(closedQuery.sql).toMatch(/"status" = \$\d+/);
     expect(closedQuery.sql).toContain('"waiting_started_at" is null');
+  });
+});
+
+describe('the PR poller when the config store is unavailable', () => {
+  beforeEach(() => {
+    h.tries = 0;
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  const untouched = () =>
+    new Proxy(
+      {},
+      {
+        get(_target, prop) {
+          throw new Error(`db touched: ${String(prop)}`);
+        },
+      },
+    ) as unknown as Database;
+
+  it('skips the tick with a warning when its first read rejects', async () => {
+    vi.spyOn(configService, 'getBoolean').mockRejectedValue(new ConfigUnavailableError('get'));
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    await expect(runPrPollTick(untouched())).resolves.toBeUndefined();
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(ConfigUnavailableError) }),
+      expect.any(String),
+    );
+    expect(h.tries).toBe(0);
+  });
+
+  it('still rejects on any other error', async () => {
+    const boom = new Error('ConfigService not initialized');
+    vi.spyOn(configService, 'getBoolean').mockRejectedValue(boom);
+    await expect(runPrPollTick(untouched())).rejects.toBe(boom);
   });
 });

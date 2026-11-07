@@ -3482,9 +3482,7 @@ repoRoutes.delete('/:id', async (c) => {
   // Enqueue CANCEL jobs AFTER commit. Pre-commit enqueueing would race
   // with rollback (worker would tear down sandboxes for tasks still marked
   // running in the DB).
-  for (const t of cancelled) {
-    await enqueueCancelJob(t.id, userId);
-  }
+  await Promise.all(cancelled.map((t) => enqueueCancelJob(t.id, userId)));
 
   // The per-project RAG cleanup is queued AFTER commit so the worker's collision check sees the
   // post-delete state of the tasks table. External and ddev RAG modes were filtered out at

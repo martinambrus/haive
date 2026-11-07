@@ -115,4 +115,11 @@ describe('a step action on a task that has ended', () => {
       expect(h.add).toHaveBeenCalledTimes(1);
     },
   );
+
+  it('answers 2xx, never 503, when the queue never answers after the row moved', async () => {
+    const fake = setup('failed');
+    h.add.mockImplementationOnce(() => new Promise(() => undefined));
+    expect(await act('skip')).toBe(200);
+    expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'running', orchestrationEpoch: 4 });
+  }, 10_000);
 });

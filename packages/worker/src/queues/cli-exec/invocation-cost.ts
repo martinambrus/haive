@@ -9,6 +9,7 @@ import {
   inputIncludesCache,
   pickLivePrice,
   resolveCostDecision,
+  rethrowIfConfigUnavailable,
   type CacheTtl,
   type CliProviderName,
   type CliTokenUsage,
@@ -253,6 +254,7 @@ async function resolveCacheTtl(
   try {
     return (await configService.getBoolean(CONFIG_KEYS.PROMPT_CACHING_1H, false)) ? '1h' : '5m';
   } catch (err) {
+    rethrowIfConfigUnavailable(err);
     log.debug({ err }, 'prompt-caching-1h config unavailable; pricing cache writes at 5m');
     return '5m';
   }
