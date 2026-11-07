@@ -579,6 +579,8 @@ jobs:
           api test/login-audit-db.test.ts LOGIN_AUDIT_TEST_URL login_audit_test pg
           api test/repository-security-audit-db.test.ts REPOSITORY_SECURITY_AUDIT_TEST_URL repository_security_audit_test pg
           api test/forced-throttled-audit-db.test.ts FORCED_THROTTLED_AUDIT_TEST_URL forced_throttled_audit_test pg
+          api test/stop-settle-db.test.ts STOP_SETTLE_TEST_URL stop_settle_test pg
+          worker test/settle-stopped-task-db.test.ts WORKER_SETTLE_STOPPED_TEST_URL worker_settle_stopped_test pg
           GATED
           exit "$failed"
 

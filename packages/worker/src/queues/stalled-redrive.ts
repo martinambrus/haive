@@ -101,6 +101,8 @@ export function taskQueueOwed(
   for (const job of jobs) {
     const id = (job?.data as { taskId?: unknown } | undefined)?.taskId;
     if (typeof id !== 'string') continue;
+    // A settlement releases what a failed task holds and never advances it.
+    if (job?.name === TASK_JOB_NAMES.SETTLE_STOPPED) continue;
     (job?.name === TASK_JOB_NAMES.START ? owed.starts : owed.steps).add(id);
   }
   return owed;

@@ -86,6 +86,7 @@ import { HttpError, type AppEnv } from '../../context.js';
 import {
   cancelTaskIfOpen,
   enqueueCancelJob,
+  enqueueStopSettle,
   CLEAR_ALLOWANCE_WATCH,
 } from '../../lib/cancel-task.js';
 import {
@@ -1573,7 +1574,10 @@ taskRoutes.post('/:id/cancel-active-cli', async (c) => {
 
   // Stop the running CLI (supersede its invocation, fail the step + task) and
   // force-remove only the cli sandboxes — the DDEV/app runtime is left running.
-  const { killed, cancelled, stopped } = await stopActiveCliInvocations(db, id, { failTask: true });
+  const { killed, cancelled, stopped, failedAt } = await stopActiveCliInvocations(db, id, {
+    failTask: true,
+  });
+  await enqueueStopSettle(id, userId, failedAt);
   logger.info({ taskId: id, killed, cancelled, stopped }, 'cancel-active-cli');
   return c.json({ ok: true, killed, cancelled, stopped });
 });

@@ -11,6 +11,7 @@ import {
   TASK_JOB_NAMES,
   type RepoRagCleanupPayload,
   type RepoResourceCleanupPayload,
+  type StopSettlePayload,
   type TaskJobPayload,
 } from '@haive/shared';
 import { repoRagIdentityFromMirror } from '@haive/shared/global-kb';
@@ -127,6 +128,47 @@ export async function enqueueCancelJob(taskId: string, userId: string): Promise<
     });
   } catch (err) {
     logger.warn({ err, taskId }, 'cancel teardown not queued; the stalled sweep will queue it');
+  }
+}
+
+const STOP_SETTLE_QUEUE_WAIT_MS = 2_000;
+
+/** Queues the worker-side settlement of a task an api Stop failed with no pass running. Call it
+ *  after the Stop committed and its kill ran. Never throws; the wait is bounded because `add`
+ *  hangs while Redis is down. */
+export async function enqueueStopSettle(
+  taskId: string,
+  userId: string,
+  failedAt: string | null,
+): Promise<void> {
+  if (failedAt === null) return;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const pending = getTaskQueue().add(
+      TASK_JOB_NAMES.SETTLE_STOPPED,
+      { taskId, userId, failedAt } satisfies StopSettlePayload,
+      {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5_000 },
+        removeOnComplete: 50,
+        removeOnFail: 50,
+      },
+    );
+    pending.catch(() => undefined);
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('redis did not answer in time')),
+        STOP_SETTLE_QUEUE_WAIT_MS,
+      );
+    });
+    await Promise.race([pending, timeout]);
+  } catch (err) {
+    logger.warn(
+      { err, taskId },
+      'stop settlement not queued; it waits for a Retry, a Cancel or the next worker start',
+    );
+  } finally {
+    clearTimeout(timer);
   }
 }
 
