@@ -16,6 +16,7 @@ if (url && !new URL(url).pathname.startsWith('/task_custom_steps_test'))
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   switchOn: true,
+  switchOutage: false,
   switchReads: 0,
   adds: [] as { name: string; data: unknown }[],
 }));
@@ -44,6 +45,7 @@ vi.mock('@haive/shared', async (importOriginal) => ({
     getBoolean: async (key: string) => {
       if (key !== CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED) return true;
       h.switchReads += 1;
+      if (h.switchOutage) throw new ConfigUnavailableError('get');
       return h.switchOn;
     },
   },
@@ -54,7 +56,7 @@ vi.mock('@haive/shared/stats-server', async (importOriginal) => ({
 }));
 
 import { Hono } from 'hono';
-import { CONFIG_KEYS, TASK_JOB_NAMES } from '@haive/shared';
+import { CONFIG_KEYS, ConfigUnavailableError, TASK_JOB_NAMES } from '@haive/shared';
 import { markQueuedForStart } from '../src/lib/task-start.js';
 import { HttpError } from '../src/context.js';
 import { adminTaskTypeRoutes } from '../src/routes/task-types.js';
@@ -132,6 +134,7 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
   beforeEach(async () => {
     resetStepFlagsCache();
     h.switchOn = true;
+    h.switchOutage = false;
     h.switchReads = 0;
     h.adds = [];
     await clean();
@@ -540,6 +543,19 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
       expect(await res.json()).toEqual({ ok: true, started: true, status: 'queued' });
       expect(await statusOf(task.id)).toBe('queued');
       expect(startAdds()).toHaveLength(1);
+    });
+
+    it('start gate: a config store outage answers 503 and starts nothing', async () => {
+      await storeType([goodTool('good_tool')]);
+      const { task } = await insertTask(GATE, 'created');
+      h.switchOutage = true;
+      const res = await action(task.id, 'start');
+      expect(res.status).toBe(503);
+      expect(await res.json()).toMatchObject({ code: 'config_unavailable' });
+      await expectNothingStarted(task.id);
+
+      h.switchOutage = false;
+      expect(await (await action(task.id, 'start')).json()).toMatchObject({ started: true });
     });
 
     it('start gate: an unusable tool wins over the switch', async () => {
