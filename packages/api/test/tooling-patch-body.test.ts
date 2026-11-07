@@ -173,6 +173,19 @@ describe('PATCH tooling refuses a field of the wrong type, names it, and writes 
   });
 });
 
+describe('PATCH tooling refuses a chrome-devtools-mcp version that is not a plain version', () => {
+  it('answers 400 for shell metacharacters, and writes nothing', async () => {
+    const fake = setup();
+    const before = everything(fake);
+
+    const res = await patch(JSON.stringify({ chromeDevtoolsMcpVersion: '1.0.0; rm -rf /' }));
+
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(await res.json())).toContain('Invalid chrome-devtools-mcp version');
+    expect(everything(fake)).toEqual(before);
+  });
+});
+
 /** The app-login object the Tooling page sends, complete, so the row keeps it as it is. */
 const PAGE_APP_AUTH = {
   enabled: true,

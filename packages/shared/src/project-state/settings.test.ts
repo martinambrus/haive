@@ -6,6 +6,7 @@ import {
   intakeSettings,
   isUnsettableSetting,
   normalizeAgentRulesOverride,
+  normalizeChromeDevtoolsMcpVersion,
   normalizeEnvironment,
   normalizeSetting,
   portableSettingsOf,
@@ -166,8 +167,30 @@ describe('normalizeSetting', () => {
     expect(ok('rtk-enabled', false)).toEqual({ ok: true, value: false });
     expect(ok('rtk-enabled', 'false')).toEqual({ ok: false });
     expect(ok('rtk-version', ' 0.42.4 ')).toEqual({ ok: true, value: '0.42.4' });
-    expect(ok('chrome-devtools-mcp-version', '')).toEqual({ ok: false });
+    expect(ok('chrome-devtools-mcp-version', '')).toEqual({
+      ok: false,
+      reason: 'is not non-empty text',
+    });
     expect(ok('app-auth', {})).toEqual({ ok: false });
+  });
+
+  it('refuses a chrome-devtools-mcp version that is not a plain npm version or dist-tag', () => {
+    for (const bad of [
+      '1.0;x',
+      '1`x`',
+      '1$(x)',
+      '1&&x',
+      '1\nx',
+      '1/x',
+      '1:x',
+      '1@x',
+      '1 x',
+      'a'.repeat(65),
+    ]) {
+      expect(ok('chrome-devtools-mcp-version', bad).ok, JSON.stringify(bad)).toBe(false);
+    }
+    expect(ok('chrome-devtools-mcp-version', ' 1.12.0 ')).toEqual({ ok: true, value: '1.12.0' });
+    expect(ok('chrome-devtools-mcp-version', 'latest')).toEqual({ ok: true, value: 'latest' });
   });
 
   it('keeps the rules override as normalised text, and says why it refuses one', () => {
@@ -481,5 +504,31 @@ describe('T122 portable review progress', () => {
       planSyncedCommit: plan,
     });
     expect(normalizeSetting('review-watermarks', { kbSyncedCommit: 'main' }).ok).toBe(false);
+  });
+});
+
+describe('normalizeChromeDevtoolsMcpVersion', () => {
+  it.each(['1.12.0', 'latest', '1.2.3-beta.1', 'a'.repeat(64)])('accepts %s', (v) => {
+    expect(normalizeChromeDevtoolsMcpVersion(v)).toEqual({ ok: true, value: v });
+  });
+
+  it.each([
+    ['a semicolon', '1.0;x'],
+    ['a backtick', '1`x`'],
+    ['a command substitution', '1$(x)'],
+    ['&&', '1&&x'],
+    ['a newline', '1\nx'],
+    ['a slash', '1/x'],
+    ['a colon', '1:x'],
+    ['an at sign', '1@x'],
+    ['embedded whitespace', '1 x'],
+    ['65 characters', 'a'.repeat(65)],
+    ['a non-string', 5],
+    ['empty text', '  '],
+  ])('refuses %s', (_what, v) => {
+    expect(normalizeChromeDevtoolsMcpVersion(v)).toMatchObject({
+      ok: false,
+      reason: expect.any(String),
+    });
   });
 });
