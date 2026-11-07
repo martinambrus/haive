@@ -57,3 +57,60 @@ These rules govern new writes and replies. A git or filesystem failure shown to 
 not state: the structural banner rules in `web/src/lib/step-banners.ts` still apply.
 
 A repository-path read answers by what failed, never by the error's wording. A containment refusal keeps the status `containmentHttpError` (`api/src/lib/fs-http.ts`) gives it. Running out of descriptors (EMFILE, ENFILE; `isResourceLimitError`, `@haive/shared/fs-safe`) is the process's condition, not a fact about the path: on the strict path routes and in the walks it reaches the api's 500 and its error log, and it is never folded into absence. The bundle file listing walks the tree with `walkFilesNoFollow`, one held directory descriptor per level, and lists at most `FILES_LIST_CAP` (5000) entries, saying so with `truncated`; a tree deeper than `WALK_MAX_DEPTH` (128) levels is refused with `WalkDepthError` (code `EWALKDEPTH`), which the route answers as 409 `bundle_too_deep` with a warning, since only replacing the bundle helps. What the walk guarantees is narrower than a complete listing: running out of descriptors and the depth bound are thrown, never folded into a short listing, and the cap is reported with `truncated`; a missing, refused or moved directory contributes nothing (the walk has no strict mode), and a root the route cannot place lists as empty. The web panel shows the answer's `error`, trimmed, and falls back to the status.
+
+## Configuration store outage
+
+ConfigService runs on its own Redis connection with a per-command deadline: `commandTimeout` 2000 ms,
+`enableOfflineQueue: false`, `autoResendUnfulfilledCommands: false`,
+`retryStrategy: (n) => Math.min(n * 50, 500)`. A stopped or black-holed Redis rejects in about 2 s
+instead of hanging. The BullMQ Worker connections (`createBullRedisConnection`) keep
+`maxRetriesPerRequest: null` and are untouched.
+
+A failure that is not a server reply (`!(err instanceof ReplyError)`, never `constructor.name` or
+message text) becomes `ConfigUnavailableError` (`@haive/shared`; `operation`, `cause`; no `code`). A
+server reply passes through. A timeout means the outcome is unknown: a timed-out write may still have
+landed. `pipeline().exec()` resolves per-command errors, so `seedDefaults` throws on them. `close()`
+falls back to `disconnect()`.
+
+The api answers `ConfigUnavailableError` with 503
+`{ error: 'Service temporarily unavailable', code: 'config_unavailable' }` and leaks no key or host.
+The maintenance gate matches ALWAYS_OPEN routes before any read. `assertNewWorkAllowed` and
+`admitNewWork` fail closed: a state that cannot be read refuses new work. The worker's pre-check
+`readMaintenanceState` reads it as `'unreadable'`, and `readStateUnderFence` throws
+`MaintenanceStateUnreadable`.
+
+A catch that swallows a config read on purpose calls `rethrowIfConfigUnavailable(err)` first and keeps
+its lenient answer for any other error. What a site does with the outage depends on what the read
+decides.
+
+- A gate (an answer that lets work through) fails closed. An unreadable global pause setting holds the
+  step (`PauseScope` `'unreadable'`, parked with copy that says the setting cannot be read, never
+  "paused"). An unreadable runtime limits setting admits no runtime: the waiter keeps waiting under
+  its existing deadline (`acquireRuntimeSlot` polls the strict read,
+  `RuntimeAdmissionResult.unreadable`). An unreadable agent-reserve switch, runtime-holder reserve or
+  per-task agent cap defers the cli-exec job (`moveToDelayed`, `DelayedError`). `reserveAllowsAnyOf`
+  answers false, so nothing is evicted on a guess.
+- A value that would be a guess fails with the retryable `ConfigUnavailableError`: agent rules, agent
+  isolation, runner caps (`resourceLimitsEnabled({ strict: true })` in `resolveRunnerCaps`), the price
+  feed, MCP consent, the local-model guard, the steering switch, the dispatch and mining timeouts (no
+  default is stamped), and the prompt-cache TTL behind a cost (the cost stays NULL). The 08c and 08d
+  review and QA settings are read in `detect()`, before the paid wave, and frozen on the detect
+  output. A row persisted by an older build lacks them and falls back to a live read that rethrows.
+- A documented fail-open contract keeps its contract: the global KB context still settles
+  `unavailable` instead of rejecting. `readMaintenanceState` returns `ObservedMaintenanceState`, with
+  `'unreadable'` on an outage (`holdsNewWork` is true for it), so a log line names the state as
+  unreadable rather than as `maintenance`.
+- A background tick (PR poll, usage poll with its provider-recovery check, checkout watch and sweep)
+  catches `ConfigUnavailableError` at its first config read, logs a warning and skips the tick. The
+  next scheduled tick retries.
+
+A cli-exec gate defers through the job's own `moveToDelayed`. If that call itself fails, the job is
+allowed to run, as it was before.
+
+Request-path queue adds use `api/src/lib/queue-bounded.ts` (`QUEUE_ADD_WAIT_MS` 2000). `boundedAdd`
+rejects on timeout or on the add's own rejection. The add is not cancelled and can still land, so the
+work must be idempotent or guarded by the worker. `addBestEffort` never throws and returns a boolean:
+use it when committed state already records the work (step actions, cancel, task start, stop-settle).
+The stalled sweep re-drives step, cancel and start work; a lost stop-settle has no re-drive.
+`addOrRefuse` throws 503 `queue_unavailable` with a generic body: use it when nothing else will queue
+the work and a repeat is safe (auto-continue, merge abort).
