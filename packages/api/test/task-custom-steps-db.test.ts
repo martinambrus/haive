@@ -5,6 +5,7 @@ import {
   customToolSchema,
   describeInvalidTools,
   parsePinnedCustomSteps,
+  shownToolName,
   validateCustomTools,
 } from '@haive/shared/modularity';
 
@@ -403,7 +404,7 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
       });
     const storeType = async (
       tools: unknown[],
-      opts: { requiresRepository?: boolean; slug?: string } = {},
+      opts: { requiresRepository?: boolean; slug?: string; title?: string } = {},
     ) => {
       const slug = opts.slug ?? GATE;
       await db.insert(schema.taskTypeDefinitions).values({
@@ -411,7 +412,13 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
         displayName: 'Gate',
         runListStrategy: 'static',
         stepIds: ['tcs-a', `custom.${slug}.review`],
-        promptSteps: { review: { ...promptStep('Check {{task.title}}'), tools } },
+        promptSteps: {
+          review: {
+            ...promptStep('Check {{task.title}}'),
+            ...(opts.title ? { title: opts.title } : {}),
+            tools,
+          },
+        },
         requiresRepository: opts.requiresRepository ?? true,
         source: 'admin',
       });
@@ -477,6 +484,26 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
         describeInvalidTools(['bad_tool']),
       );
       await expectNothingStarted(task.id);
+    });
+
+    it('start gate: carries a stored step title on one line, cut like a tool name', async () => {
+      const title = `Audit \`it\`\n${'t'.repeat(200)}`;
+      const refusal = async (slug: string) => {
+        const { task } = await insertTask(slug, 'created');
+        return ((await (await action(task.id, 'start')).json()) as { error: string }).error;
+      };
+      await storeType([badUrlTool()], { title });
+      await storeType([goodTool('good_tool')], { title, slug: 'tcs-gate-title-off' });
+      h.switchOn = false;
+      for (const [slug, text] of [
+        [GATE, 'has custom tools'],
+        ['tcs-gate-title-off', 'uses custom tools'],
+      ] as const) {
+        const error = await refusal(slug);
+        expect(error).toContain(`The step "${shownToolName(title)}" ${text}`);
+        expect(error).not.toContain('\n');
+        expect(error.length).toBeLessThan(400);
+      }
     });
 
     it('start gate: judges the tool scope by the type repository flag', async () => {

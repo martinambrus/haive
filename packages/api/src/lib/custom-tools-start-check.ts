@@ -5,6 +5,7 @@ import {
   describeInvalidTools,
   describeToolProblems,
   parsePinnedCustomSteps,
+  shownToolName,
   validateCustomTools,
 } from '@haive/shared/modularity';
 import { resolveCustomToolsEnabled } from '@haive/shared/modularity-server';
@@ -25,6 +26,7 @@ export async function assertCustomToolsUsable(
     .from(schema.taskTypeDefinitions)
     .where(eq(schema.taskTypeDefinitions.slug, task.type));
   const requiresRepository = row?.requiresRepository ?? true;
+  // A step title is stored text: shown on one line and cut at 64 characters, as a tool name is.
   for (const entry of steps) {
     const invalid = entry.invalidTools ?? [];
     const found =
@@ -34,7 +36,7 @@ export async function assertCustomToolsUsable(
     if (invalid.length === 0 && found === '') continue;
     throw new HttpError(
       409,
-      `The step "${entry.title}" has custom tools that no longer pass their checks: ${found} The task pinned them when it was created; fix them in the task type and create a new task.`,
+      `The step "${shownToolName(entry.title)}" has custom tools that no longer pass their checks: ${found} The task pinned them when it was created; fix them in the task type and create a new task.`,
       'custom-tool-invalid',
     );
   }
@@ -42,7 +44,7 @@ export async function assertCustomToolsUsable(
   if (withTools && !(await resolveCustomToolsEnabled(configService))) {
     throw new HttpError(
       409,
-      `The step "${withTools.title}" uses custom tools (${describeInvalidTools(withTools.tools.map((t) => t.name))}), and custom tools are switched off on this install. Switch them on, then start the task.`,
+      `The step "${shownToolName(withTools.title)}" uses custom tools (${describeInvalidTools(withTools.tools.map((t) => t.name))}), and custom tools are switched off on this install. Switch them on, then start the task.`,
       'custom-tools-switched-off',
     );
   }
