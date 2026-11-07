@@ -14,8 +14,8 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
-vi.mock('../src/lib/egress-guard.js', async (importOriginal) => {
-  const real = await importOriginal<typeof import('../src/lib/egress-guard.js')>();
+vi.mock('../../shared/dist/egress/egress-guard.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../shared/dist/egress/egress-guard.js')>();
   return {
     ...real,
     isBlockedAddress: (address: string) =>

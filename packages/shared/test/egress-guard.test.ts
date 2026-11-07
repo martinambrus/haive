@@ -27,7 +27,7 @@ import {
   type GuardedGetOptions,
   type NameResolverFactory,
   type Resolver,
-} from '../src/lib/egress-guard.js';
+} from '../src/egress/egress-guard.js';
 import { selfSignedCertificate } from './self-signed-cert.js';
 
 const HOST = 'guard.test';

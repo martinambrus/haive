@@ -58,8 +58,8 @@ vi.mock('../src/routes/rag.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../src/lib/egress-guard.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/lib/egress-guard.js')>();
+vi.mock('@haive/shared/egress', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@haive/shared/egress')>();
   return {
     ...actual,
     guardedGet: (url: URL, options: { timeoutMs: number; maxBytes: number }) => {
@@ -79,7 +79,7 @@ vi.mock('../src/lib/egress-guard.js', async (importOriginal) => {
 import type { RagSearchHit } from '@haive/shared/rag';
 import { signTaskToken, type TaskTokenClaims } from '@haive/shared/task-token';
 import { createApiApp } from '../src/index.js';
-import type { GuardReason } from '../src/lib/egress-guard.js';
+import type { GuardReason } from '@haive/shared/egress';
 
 const SECRET = 'custom-mcp-route-test-secret';
 const USER = '00000000-0000-4000-8000-0000000000e1';
@@ -1450,7 +1450,7 @@ describe.skipIf(!url)('POST /custom-mcp/call, on Postgres', () => {
       it.each(failures)(
         'answers %s as %i, finishes the claimed row as %s, and leaks nothing of the failure',
         async (reason, status, outcome, httpStatus) => {
-          const { EgressGuardError } = await import('../src/lib/egress-guard.js');
+          const { EgressGuardError } = await import('@haive/shared/egress');
           h.get = async () => {
             throw new EgressGuardError(reason, httpStatus, {
               cause: new Error(

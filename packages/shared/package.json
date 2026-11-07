@@ -51,6 +51,10 @@
       "types": "./dist/attachments/index.d.ts",
       "import": "./dist/attachments/index.js"
     },
+    "./egress": {
+      "types": "./dist/egress/index.d.ts",
+      "import": "./dist/egress/index.js"
+    },
     "./rag": {
       "types": "./dist/rag/index.d.ts",
       "import": "./dist/rag/index.js"

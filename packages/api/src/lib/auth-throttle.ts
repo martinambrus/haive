@@ -5,7 +5,7 @@ import { HTTPException } from 'hono/http-exception';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import { logger } from '@haive/shared';
 import { getRedis } from '../redis.js';
-import { isBlockedAddress } from './egress-guard.js';
+import { isBlockedAddress } from '@haive/shared/egress';
 
 const log = logger.child({ module: 'auth-throttle' });
 
