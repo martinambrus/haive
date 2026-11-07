@@ -59,7 +59,8 @@ vi.mock('../src/queues/cli-exec/agent-definition-mask.js', () => ({
 vi.mock('../src/queues/cli-exec/app-reach.js', () => ({ resolveAppReach: async () => null }));
 
 const { executeByKind } = await import('../src/queues/cli-exec/exec-core.js');
-const { npmCacheMount } = await import('../src/sandbox/npm-cache.js');
+const { NPM_CACHE_ENV, NPM_CACHE_SEED_PRELUDE, npmCacheMount } =
+  await import('../src/sandbox/npm-cache.js');
 
 const USER_ID = '11111111-1111-1111-1111-111111111111';
 const REPO_ID = '22222222-2222-2222-2222-222222222222';
@@ -220,6 +221,19 @@ describe.each(KINDS)('exec-core, kind %s: the boundary mounts an agent sandbox g
         npmCacheMount(),
       ]);
       expect(spec.extraFiles).toContainEqual({ containerPath: `${WORKDIR}/.git`, content: '' });
+    }
+  });
+
+  it('seeds the private npm cache before the command runs, and points npm at it', async () => {
+    const repoMount = { source: 'haive_repos', target: WORKDIR, subpath: SUBPATH };
+    stubs.invocation = { repoMount, hasWorktree: false, hasRepo: true };
+
+    await executeByKind(db, payloadFor(kind), {} as never, {});
+
+    expect(stubs.runInSandbox).toHaveBeenCalled();
+    for (const [spec] of stubs.runInSandbox.mock.calls) {
+      expect(spec.prelude.startsWith(NPM_CACHE_SEED_PRELUDE)).toBe(true);
+      expect(spec.env).toMatchObject(NPM_CACHE_ENV);
     }
   });
 

@@ -19,7 +19,12 @@ import { resolveAppReach } from '../queues/cli-exec/app-reach.js';
 import type { DockerVolumeMount } from './docker-runner.js';
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { loopbackForwardSetup } from './loopback-forward.js';
-import { NPM_CACHE_ENV, ensureNpmCacheVolume, npmCacheMount } from './npm-cache.js';
+import {
+  NPM_CACHE_ENV,
+  NPM_CACHE_SEED_PRELUDE,
+  ensureNpmCacheVolume,
+  npmCacheMount,
+} from './npm-cache.js';
 import { runInSandbox, SANDBOX_WORKDIR } from './sandbox-runner.js';
 
 /** Exit status of the Haive-owned preamble when the command's binary is not on the image's PATH,
@@ -114,7 +119,7 @@ export async function runStepCommandInSandbox(
     if (provider.networkPolicy) runnerOptions.networkPolicy = provider.networkPolicy;
     const runSpec: Parameters<typeof runInSandbox>[0] = {
       command: 'sh',
-      args: ['-c', preamble, 'sh', ...options.argv],
+      args: ['-c', `${NPM_CACHE_SEED_PRELUDE}${preamble}`, 'sh', ...options.argv],
       env: { ...NPM_CACHE_ENV, ...appReach.env },
       timeoutMs: options.timeoutMs,
       signal: ctx.signal,
@@ -123,7 +128,12 @@ export async function runStepCommandInSandbox(
     if (appReach.loopbackForward) {
       const forward = loopbackForwardSetup(appReach.loopbackForward);
       extraFiles.push(forward.file);
-      runSpec.args = ['-c', `${forward.prefix}${preamble}`, 'sh', ...options.argv];
+      runSpec.args = [
+        '-c',
+        `${NPM_CACHE_SEED_PRELUDE}${forward.prefix}${preamble}`,
+        'sh',
+        ...options.argv,
+      ];
     }
     if (extraFiles.length > 0) runSpec.extraFiles = extraFiles;
     const result = await runInSandbox(runSpec, runnerOptions);

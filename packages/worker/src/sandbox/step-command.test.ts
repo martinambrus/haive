@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TaskCancelledError, type StepContext } from '../step-engine/step-definition.js';
+import { NPM_CACHE_SEED_PRELUDE } from './npm-cache.js';
 
 const runInSandbox = vi.fn();
 const release = vi.fn(async () => undefined);
@@ -145,6 +146,7 @@ describe('runStepCommandInSandbox', () => {
       extraFiles: { containerPath: string }[];
     };
     expect(plain.args[1]).not.toContain('loopback-forward');
+    expect(plain.args[1]!.startsWith(NPM_CACHE_SEED_PRELUDE)).toBe(true);
     expect(plain.extraFiles.map((f) => f.containerPath)).toEqual([
       '/haive/workdir/.env',
       '/haive/workdir/.git/config',
@@ -172,6 +174,7 @@ describe('runStepCommandInSandbox', () => {
     expect(script?.content).toContain("'::1'");
     const [, shellText, , ...argv] = fwd.args;
     expect(shellText).toContain(`'3000' 'app'\\''; touch /pwned #'`);
+    expect(shellText!.startsWith(NPM_CACHE_SEED_PRELUDE)).toBe(true);
     expect(shellText).toContain('command -v node');
     expect(argv).toEqual(['pnpm', 'test']);
     expect(shellText!.indexOf('loopback-forward')).toBeLessThan(
@@ -269,7 +272,7 @@ describe('runStepCommandInSandbox', () => {
     ran(0);
     await runStepCommandInSandbox(ctx(), { argv: ['pnpm', 'test'], cwdRel: 'web', timeoutMs: 1 });
     const [spec, options] = runInSandbox.mock.calls[0]!;
-    expect(spec.env).toEqual({ npm_config_cache: '/haive-npm-cache' });
+    expect(spec.env).toEqual({ npm_config_cache: '/tmp/haive-npm-cache' });
     expect(spec.wrapperContent).toBeUndefined();
     expect(options.extraMounts.some((m: { kind?: string }) => m.kind === 'auth')).toBe(false);
     expect(options.extraMounts.map((m: { target: string }) => m.target)).toEqual([
@@ -278,7 +281,7 @@ describe('runStepCommandInSandbox', () => {
       '/haive/workdir/.haive-data/knowledge_base',
       '/haive/workdir/.haive/worktrees',
       '/haive/workdir',
-      '/haive-npm-cache',
+      '/haive-npm-cache-base',
     ]);
     expect(haiveDataBoundary).toHaveBeenCalledWith(
       { source: 'haive_repos', target: '/haive/workdir', subpath: 'u/r/wt' },
@@ -357,12 +360,12 @@ describe('runStepCommandInSandbox', () => {
       '/haive/workdir/.haive/worktrees',
       '/haive/workdir',
       '/etc/ssl/certs/ca.pem',
-      '/haive-npm-cache',
+      '/haive-npm-cache-base',
     ]);
     expect(options.addHosts).toEqual(['app.ddev.site:172.20.0.5']);
     expect(options.noProxyHosts).toEqual(['app.ddev.site']);
     expect(spec.env).toEqual({
-      npm_config_cache: '/haive-npm-cache',
+      npm_config_cache: '/tmp/haive-npm-cache',
       NODE_EXTRA_CA_CERTS: '/etc/ssl/certs/ca.pem',
     });
   });
