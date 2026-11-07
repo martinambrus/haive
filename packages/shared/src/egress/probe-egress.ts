@@ -4,7 +4,7 @@ import https from 'node:https';
 import net from 'node:net';
 import { pipeline, Readable } from 'node:stream';
 import zlib from 'node:zlib';
-import { rethrowIfConfigUnavailable } from '../config/index.js';
+import { ConfigUnavailableError, rethrowIfConfigUnavailable } from '../config/index.js';
 import { logger } from '../logger/index.js';
 import { EMPTY, loadAllowlist, type ParsedAllowlist } from './allowlist.js';
 import {
@@ -48,9 +48,19 @@ function isBuiltIn(seams: ProbeSeams, host: string): boolean {
   return seams.allowHosts?.has(host.toLowerCase()) ?? false;
 }
 
+// One list read per dial, made only when an address needs it.
+function lazyAllowlist(seams: ProbeSeams): () => Promise<ParsedAllowlist> {
+  let pending: Promise<ParsedAllowlist> | undefined;
+  return () => (pending ??= allowlistFor(seams));
+}
+
+function baseClassifier(seams: ProbeSeams): Classifier {
+  return seams.isBlocked ?? ((a) => isBlockedAddress(a));
+}
+
 function classifierFor(host: string, seams: ProbeSeams, allow: ParsedAllowlist): Classifier {
   if (isBuiltIn(seams, host)) return () => false;
-  const base = seams.isBlocked ?? ((a) => isBlockedAddress(a));
+  const base = baseClassifier(seams);
   const hostAllowed = allow.hosts.has(bareHost(host));
   return (a) => base(a) && !((hostAllowed && !isUnliftableByHostname(a)) || allow.matches(a));
 }
@@ -70,13 +80,42 @@ function notFound(host: string): NodeJS.ErrnoException {
 // An exempt host may be named only in /etc/hosts (host-gateway), which c-ares never reads.
 const systemResolve: Resolver = (hostname) => dns.promises.lookup(hostname, { all: true });
 
-function probeLookup(host: string, seams: ProbeSeams, allow: ParsedAllowlist): net.LookupFunction {
-  const resolve =
-    seams.resolve ??
-    (isBuiltIn(seams, host) || allow.hosts.has(bareHost(host))
-      ? systemResolve
-      : dnsResolver()(LOOKUP_TIMEOUT_MS).resolve);
-  const inner = guardedLookup(resolve, classifierFor(host, seams, allow));
+// Only an IP literal the base classifier blocks can be lifted by the list, so only it reads it.
+async function literalRefused(
+  host: string,
+  seams: ProbeSeams,
+  lazy: () => Promise<ParsedAllowlist>,
+): Promise<boolean> {
+  if (net.isIP(host) === 0 || isBuiltIn(seams, host)) return false;
+  if (!baseClassifier(seams)(host)) return false;
+  return classifierFor(host, seams, await lazy())(host);
+}
+
+function probeLookup(
+  host: string,
+  seams: ProbeSeams,
+  lazy: () => Promise<ParsedAllowlist>,
+): net.LookupFunction {
+  const builtIn = isBuiltIn(seams, host);
+  const base = baseClassifier(seams);
+  let allow = EMPTY;
+  const primary =
+    seams.resolve ?? (builtIn ? systemResolve : dnsResolver()(LOOKUP_TIMEOUT_MS).resolve);
+  const resolve: Resolver = async (hostname) => {
+    let answers;
+    try {
+      answers = await primary(hostname);
+    } catch (err) {
+      if (builtIn) throw err;
+      allow = await lazy();
+      // A name defined only in /etc/hosts (host-gateway) is never seen by c-ares.
+      if (allow.hosts.has(bareHost(host))) return systemResolve(hostname);
+      throw err;
+    }
+    if (!builtIn && answers.some((entry) => base(entry.address))) allow = await lazy();
+    return answers;
+  };
+  const inner = guardedLookup(resolve, (a) => classifierFor(host, seams, allow)(a));
   return (hostname, options, callback) => {
     inner(hostname, options, (err, address, family) => {
       if (err instanceof EgressGuardError) {
@@ -113,13 +152,17 @@ export function createGuardedFetch(seams: ProbeSeams = {}) {
   return async (input: string | URL, init: RequestInit = {}): Promise<Response> => {
     const signal = init.signal ?? undefined;
     if (signal?.aborted) throw signal.reason;
-    let builtIn = false;
+    const lazy = lazyAllowlist(seams);
+    let refusedLiteral = false;
     try {
-      builtIn = isBuiltIn(seams, stripBrackets(new URL(input).hostname));
-    } catch {
-      // An invalid URL is refused below, after the list read as before.
+      const target = new URL(input);
+      if (target.protocol === 'http:' || target.protocol === 'https:') {
+        refusedLiteral = await literalRefused(stripBrackets(target.hostname), seams, lazy);
+      }
+    } catch (err) {
+      // An invalid URL is refused below; an unreadable list is not.
+      rethrowIfConfigUnavailable(err);
     }
-    const allow = builtIn ? EMPTY : await allowlistFor(seams);
     if (signal?.aborted) throw signal.reason;
     return new Promise<Response>((resolve, reject) => {
       const fail = (cause: unknown) => reject(new TypeError('fetch failed', { cause }));
@@ -135,7 +178,7 @@ export function createGuardedFetch(seams: ProbeSeams = {}) {
         return;
       }
       const host = stripBrackets(url.hostname);
-      if (net.isIP(host) !== 0 && classifierFor(host, seams, allow)(host)) {
+      if (refusedLiteral) {
         warnRefused(host);
         fail(notFound(host));
         return;
@@ -172,7 +215,7 @@ export function createGuardedFetch(seams: ProbeSeams = {}) {
           path: url.pathname + url.search,
           headers,
           agent,
-          lookup: probeLookup(host, seams, allow),
+          lookup: probeLookup(host, seams, lazy),
         },
         (res) => {
           done = true;
@@ -218,7 +261,8 @@ export function createGuardedFetch(seams: ProbeSeams = {}) {
         agent.destroy();
         if (!done) {
           done = true;
-          fail(err);
+          if (err instanceof ConfigUnavailableError) reject(err);
+          else fail(err);
         }
       });
       signal?.addEventListener('abort', onAbort, { once: true });
@@ -241,19 +285,19 @@ function refusedSocket(host: string): net.Socket {
 export function createGuardedPgSocket(seams: ProbeSeams = {}) {
   return async (options: PgSocketOptions): Promise<net.Socket> => {
     const host = options.host?.[0] ?? '';
-    const allow = isBuiltIn(seams, host) ? EMPTY : await allowlistFor(seams);
+    const lazy = lazyAllowlist(seams);
     if (
       options.path ||
       options.host?.length !== 1 ||
       host.includes('/') ||
-      (net.isIP(host) !== 0 && classifierFor(host, seams, allow)(host))
+      (await literalRefused(host, seams, lazy))
     ) {
       return refusedSocket(host);
     }
     const socket = net.connect({
       host,
       port: options.port[0]!,
-      lookup: probeLookup(host, seams, allow),
+      lookup: probeLookup(host, seams, lazy),
     });
     (socket as net.Socket & { host?: string }).host = host;
     return socket;

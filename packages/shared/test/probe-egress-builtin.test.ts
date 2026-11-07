@@ -73,10 +73,10 @@ describe('a host that is not built in keeps the outage behaviour', () => {
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
-  it('pg socket rejects with the outage error', async () => {
-    await expect(createGuardedPgSocket(seams())({ host: ['other'], port: [port] })).rejects.toBe(
-      outage,
-    );
+  it('pg socket emits the outage error', async () => {
+    const socket = await createGuardedPgSocket(seams())({ host: ['other'], port: [port] });
+    const err = await new Promise<unknown>((resolve) => socket.once('error', resolve));
+    expect(err).toBe(outage);
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
