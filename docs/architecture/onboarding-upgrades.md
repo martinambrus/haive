@@ -1130,7 +1130,7 @@ columns it moved. A set (`scope-exclude-globs`) moves member by member; review w
 by commit ancestry; every other setting is one value; the environment merges per key (`project/environment.json#envDetectData`, `#confirmedValues`).
 A value is normalised before it merges, by the rules of the routes that store it
 (`normalizeSetting`, shared: `stripManagedKnowledgeGlobs` and sorting for the scope list, the LSP key
-set, `normalizeReviewDimensionIds`, trimmed non-empty versions, `normalizeAgentRulesOverride` for
+set, `normalizeReviewDimensionIds`, trimmed non-empty versions (the chrome-devtools-mcp version only when `normalizeChromeDevtoolsMcpVersion` accepts it: a plain npm version or dist-tag, since it reaches an `npx` spec and a Dockerfile `RUN` line; the tooling PATCH answers 400 for any other text and stored rows are not revalidated), `normalizeAgentRulesOverride` for
 the rules text: a leading byte-order mark dropped, CRLF and CR read as LF, trailing whitespace
 stripped per line, blank-line runs collapsed, one final newline, and text of only whitespace read as
 `''`; the environment loses the `__` prompt-only fields and gets

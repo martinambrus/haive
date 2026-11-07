@@ -8,6 +8,27 @@ the run's own directory and mounts each one by subpath at its sandbox path, read
 root is never mounted: a whole-volume mount let any sandbox list the volume and read the token file of
 another live run, of any task or user.
 
+**The shared npm cache is read-only in a sandbox; each run seeds a private copy.** The `npm_cache`
+volume keeps what `npx` fetched, so an MCP server such as chrome-devtools-mcp does not repeat a cold
+fetch (MEASURED 111-146 s) in every `--rm` run. It used to be mounted read-write into every sandbox,
+so one task's agent could plant cache content that another task's `npx` then used. `npmCacheMount()`
+(`sandbox/npm-cache.ts`) now mounts it read-only at `NPM_CACHE_BASE_DIR`, and `NPM_CACHE_SEED_PRELUDE`
+copies it into `NPM_CACHE_DIR` under `/tmp` before the command execs, with `npm_config_cache` pointing
+there. The private copy lives in the container's writable layer and dies with the `--rm` container, so
+it has no volume and no reap path. It is per invocation, not per task: what an agent itself fetches no
+longer outlives its run (a per-task copy would need a second volume with its own create and teardown),
+and the platform MCP servers are warmed into the base on every invocation instead. The seed costs
+about 0.36 s at 47 MB and grows with the base. The prelude has no `set -e`: a failed seed writes a
+warning to stderr and the command runs on a private cache that may be empty or partial, never on the
+shared one. Both spawn sites carry it (`createSandboxSpawner` in `queues/cli-exec/exec-core.ts`,
+`runStepCommandInSandbox` in `sandbox/step-command.ts`); a new site mounts `npmCacheMount()` only with
+the prelude, and never read-write. Only the worker's warm, purge and align containers write the
+volume, mounting it at `NPM_CACHE_DIR` so a tree is read back from the path it was installed at. npm's
+hash check compares a blob with the index entry beside it, so it does not stop a writer of both: the
+base is read-only rather than verified. The first align after the upgrade empties a volume written
+while it was still read-write (`.haive-cache-ro-migrated`, written after the wipe so an interrupted
+wipe runs again at the next boot), and the warm path refills it.
+
 **The base image builds itself, and that is why there is no manual first-boot step.**
 `haive-cli-sandbox:latest` is built from `packages/worker/sandbox-image/` and pushed to no
 registry, so `docker image prune` — and a fresh checkout — leave docker resolving a
