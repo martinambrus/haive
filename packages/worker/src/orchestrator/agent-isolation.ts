@@ -21,6 +21,7 @@ import {
   configService,
   logger,
   promptNamesAgentPath,
+  rethrowIfConfigUnavailable,
 } from '@haive/shared';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { workspaceAnchor } from '../repo/worktree-paths.js';
@@ -49,11 +50,13 @@ const IMPORT_REFERENCE_RE = /(?:^|\s)@([A-Za-z0-9_./-]+)/g;
 
 /** The global kill switch. A failed read means OFF — today's behaviour — for the same reason
  *  `resolveCodexAppServerVerdicts` fails toward `codex exec`: a config fault must not silently
- *  enable a context control nobody asked for. */
+ *  enable a context control nobody asked for. An unreadable config store (ConfigUnavailableError)
+ *  rejects instead, so the dispatch fails rather than shipping unisolated and stamping "disabled". */
 export async function resolveAgentIsolationEnabled(): Promise<boolean> {
   try {
     return await configService.getBoolean(CONFIG_KEYS.AGENT_ISOLATION_ENABLED, true);
-  } catch {
+  } catch (err: unknown) {
+    rethrowIfConfigUnavailable(err);
     return false;
   }
 }

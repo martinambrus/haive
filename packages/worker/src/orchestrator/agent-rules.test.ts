@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { AGENT_RULES_MARKER, agentRulesOf, withAgentRules } from './agent-rules.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ConfigUnavailableError, configService } from '@haive/shared';
+import {
+  AGENT_RULES_MARKER,
+  agentRulesOf,
+  resolveAgentRulesInjectionEnabled,
+  withAgentRules,
+} from './agent-rules.js';
 
 const count = (text: string, needle: string): number => text.split(needle).length - 1;
 
@@ -67,5 +73,23 @@ describe('agentRulesOf', () => {
       hash: 'h',
       injected: false,
     });
+  });
+});
+
+describe('resolveAgentRulesInjectionEnabled', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('rejects when the config store is unreadable', async () => {
+    vi.spyOn(configService, 'getBoolean').mockRejectedValue(new ConfigUnavailableError('get'));
+    await expect(resolveAgentRulesInjectionEnabled()).rejects.toBeInstanceOf(
+      ConfigUnavailableError,
+    );
+  });
+
+  it('still reads any other failure as off', async () => {
+    vi.spyOn(configService, 'getBoolean').mockRejectedValue(
+      new Error('ConfigService not initialized'),
+    );
+    await expect(resolveAgentRulesInjectionEnabled()).resolves.toBe(false);
   });
 });

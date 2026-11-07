@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ConfigUnavailableError, configService } from '@haive/shared';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -6,6 +7,7 @@ import {
   MAX_PERSONA_BODY_BYTES,
   instructionsNameAgentPath,
   readPersonaBodies,
+  resolveAgentIsolationEnabled,
 } from './agent-isolation.js';
 import { secretMaskPolicy } from '../queues/cli-exec/secret-mask-policy.js';
 
@@ -434,5 +436,21 @@ describe('readPersonaBodies', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('resolveAgentIsolationEnabled', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('rejects when the config store is unreadable', async () => {
+    vi.spyOn(configService, 'getBoolean').mockRejectedValue(new ConfigUnavailableError('get'));
+    await expect(resolveAgentIsolationEnabled()).rejects.toBeInstanceOf(ConfigUnavailableError);
+  });
+
+  it('still reads any other failure as off', async () => {
+    vi.spyOn(configService, 'getBoolean').mockRejectedValue(
+      new Error('ConfigService not initialized'),
+    );
+    await expect(resolveAgentIsolationEnabled()).resolves.toBe(false);
   });
 });

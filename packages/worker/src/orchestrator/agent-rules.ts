@@ -1,4 +1,10 @@
-import { CONFIG_KEYS, configService, normalizeContent, sha256Hex } from '@haive/shared';
+import {
+  CONFIG_KEYS,
+  configService,
+  normalizeContent,
+  rethrowIfConfigUnavailable,
+  sha256Hex,
+} from '@haive/shared';
 import type { AgentRulesStamp } from '../cli-adapters/types.js';
 
 export const AGENT_RULES_MARKER = '<haive_agent_rules>';
@@ -10,11 +16,13 @@ const FRAMING =
   'block in AGENTS.md.';
 
 /** The global switch. A failed read means OFF, the behaviour from before the switch existed, as
- *  for agent isolation. */
+ *  for agent isolation. An unreadable config store (ConfigUnavailableError) rejects instead, so
+ *  the dispatch fails rather than shipping without rules and stamping "disabled". */
 export async function resolveAgentRulesInjectionEnabled(): Promise<boolean> {
   try {
     return await configService.getBoolean(CONFIG_KEYS.AGENT_RULES_INJECTION_ENABLED, true);
-  } catch {
+  } catch (err: unknown) {
+    rethrowIfConfigUnavailable(err);
     return false;
   }
 }
