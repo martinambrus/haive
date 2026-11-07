@@ -67,7 +67,20 @@ function classifierFor(host: string, seams: ProbeSeams, allow: ParsedAllowlist):
   return (a) => base(a) && !((hostAllowed && !isUnliftableByHostname(a)) || allow.matches(a));
 }
 
+const REFUSAL_WARN_INTERVAL_MS = 60_000;
+const REFUSAL_WARN_HOSTS_MAX = 256;
+const refusalWarnedAt = new Map<string, number>();
+
 function warnRefused(host: string): void {
+  const key = host.toLowerCase().slice(0, 253);
+  const now = Date.now();
+  const last = refusalWarnedAt.get(key);
+  if (last !== undefined && now - last >= 0 && now - last < REFUSAL_WARN_INTERVAL_MS) return;
+  refusalWarnedAt.delete(key);
+  while (refusalWarnedAt.size >= REFUSAL_WARN_HOSTS_MAX) {
+    refusalWarnedAt.delete(refusalWarnedAt.keys().next().value!);
+  }
+  refusalWarnedAt.set(key, now);
   log.warn({ host }, 'egress guard refused a private or unresolvable target');
 }
 

@@ -319,6 +319,22 @@ describe('admin page: private endpoint allowlist card', () => {
     ]);
   });
 
+  it('says how a refusal reads and what a hostname entry cannot lift', async () => {
+    const view = await mount({ enabled: true });
+    openTabWith(view, /Private endpoint allowlist/);
+    const text = textOf(view.tree());
+    for (const part of [
+      'host-not-found',
+      '/etc/hosts',
+      'hostname entry',
+      'except link-local and unspecified ones',
+      'Built-in services need no entry',
+      'Applies within about 30 seconds',
+    ]) {
+      expect(text).toContain(part);
+    }
+  });
+
   it('shows the error when the PUT is refused', async () => {
     net.refused[PATH] = 'Allowlist entry "bad host!" refused: not a valid hostname';
     const view = await mount({ enabled: true });
