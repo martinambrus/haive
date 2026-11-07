@@ -55,6 +55,7 @@ const GETS: Record<string, unknown> = {
   '/admin/config/plan-canvas': on,
   '/admin/config/task-types': { customEnabled: false, moduleEnabled: false },
   '/admin/config/registration-mode': { mode: 'open' },
+  '/admin/config/private-endpoint-allowlist': { allowlist: '' },
   '/admin/config/debug-mode': on,
   '/admin/config/browser-access': on,
   '/admin/config/db-access': on,
@@ -139,6 +140,7 @@ const net = vi.hoisted(() => ({
   gets: {} as Record<string, unknown>,
   calls: [] as Array<{ method: string; path: string; body: unknown }>,
   unstubbed: [] as string[],
+  refused: {} as Record<string, string>,
 }));
 
 const reply = (status: number, body: unknown) => ({
@@ -153,6 +155,7 @@ async function fakeFetch(input: unknown, init?: { method?: string; body?: string
   const body: unknown = init?.body === undefined ? undefined : JSON.parse(init.body);
   net.calls.push({ method, path, body });
   if (method === 'GET' && path in net.gets) return reply(200, net.gets[path]);
+  if (method === 'PUT' && path in net.refused) return reply(400, { error: net.refused[path] });
   if (method === 'PUT' && path.startsWith('/admin/config/')) return reply(200, body);
   net.unstubbed.push(`${method} ${path}`);
   return reply(404, { error: `not stubbed: ${method} ${path}` });
@@ -164,6 +167,7 @@ beforeEach(() => {
   nav.search = '';
   net.calls = [];
   net.unstubbed = [];
+  net.refused = {};
 });
 
 const CODEX_APP_SERVER_PATH = '/admin/config/codex-app-server';
@@ -288,5 +292,38 @@ describe('admin page: custom tools switch', () => {
       { method: 'PUT', path: CUSTOM_TOOLS_PATH, body: { enabled: false } },
     ]);
     expect(findSwitch(disabled, CUSTOM_TOOLS_CARD).props.checked).toBe(false);
+  });
+});
+
+describe('admin page: private endpoint allowlist card', () => {
+  const PATH = '/admin/config/private-endpoint-allowlist';
+  const TYPED = '10.0.0.0/8\nhost.docker.internal';
+
+  async function typeAndSave(view: Renderer): Promise<void> {
+    openTabWith(view, /Private endpoint allowlist/);
+    const box = findAll(view.tree(), (host) => host.tag === 'textarea')[0]!;
+    fire.type(box, TYPED);
+    view.draw();
+    net.calls = [];
+    const card = findAll(view.tree(), (host) => host.tag === 'textarea')[0]!.parent!;
+    fire.click(buttons(view.tree(), /^save$/, card)[0]!);
+    view.draw();
+    await view.flush();
+  }
+
+  it('sends what was typed with a PUT', async () => {
+    const view = await mount({ enabled: true });
+    await typeAndSave(view);
+    expect(net.calls.filter((call) => call.method === 'PUT')).toEqual([
+      { method: 'PUT', path: PATH, body: { allowlist: TYPED } },
+    ]);
+  });
+
+  it('shows the error when the PUT is refused', async () => {
+    net.refused[PATH] = 'Allowlist entry "bad host!" refused: not a valid hostname';
+    const view = await mount({ enabled: true });
+    await typeAndSave(view);
+    view.draw();
+    expect(textOf(view.tree())).toContain('bad host!');
   });
 });

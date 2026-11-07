@@ -34,6 +34,7 @@ import {
   readHostResources,
   secretsService,
 } from '@haive/shared';
+import { validateAllowlist } from '@haive/shared/egress';
 import { resolveHouseRulesEnabled } from '@haive/shared/global-kb';
 import { getDb } from '../db.js';
 import { hashPassword } from '../auth/password.js';
@@ -1464,6 +1465,36 @@ adminRoutes.put('/config/registration-mode', async (c) => {
   });
   log.info({ mode }, 'registration mode updated');
   return c.json({ mode });
+});
+
+const privateAllowlistSchema = z.object({ allowlist: z.string().max(16_384) });
+
+// Endpoints a user can type in (Ollama URL, external RAG database, forge host) are refused when
+// they resolve to a private, loopback or link-local address, unless this list names them. Entries
+// are an IP address, a CIDR range or a hostname, one per line or comma-separated. Read per probe
+// (within the ~30s config cache), so a change applies shortly, not instantly. Built-in services
+// need no entry. The text is stored as sent; only the guard normalises it.
+adminRoutes.get('/config/private-endpoint-allowlist', async (c) => {
+  const allowlist = (await configService.get(CONFIG_KEYS.PRIVATE_ENDPOINT_ALLOWLIST)) ?? '';
+  return c.json({ allowlist });
+});
+
+adminRoutes.put('/config/private-endpoint-allowlist', async (c) => {
+  const { allowlist } = privateAllowlistSchema.parse(await c.req.json());
+  const verdict = validateAllowlist(allowlist);
+  if (!verdict.ok) {
+    throw new HttpError(
+      400,
+      verdict.entry === ''
+        ? `Allowlist refused: ${verdict.reason}`
+        : `Allowlist entry "${verdict.entry}" refused: ${verdict.reason}`,
+    );
+  }
+  await saveConfig(c.get('userId'), 'private-endpoint-allowlist', {
+    allowlist: [CONFIG_KEYS.PRIVATE_ENDPOINT_ALLOWLIST, allowlist, ''],
+  });
+  log.info({ entries: verdict.entries }, 'private endpoint allowlist updated');
+  return c.json({ allowlist });
 });
 
 const ragEmbeddingSchema = z.object({
