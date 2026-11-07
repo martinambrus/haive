@@ -463,14 +463,18 @@ From the T406/T408 build (2026-11-07).
 7. Nits: `step-context-usage.ts` ~:51 throws "invs is not iterable" under mock-DB unit runs (harmless); stale "web package has no vitest config" header in web lib/step-cli-providers.ts ~:20; `providerLabel` in provider-hold.ts shares a name with sandbox/mcp-surface.ts ~:389.
 
 ### T554 · FNF[allowlist-seed-hardening] · the private-endpoint upgrade seed can lose entries for good
+
 status: open · kind: fix · found: T347 run · priority: P2
+
 1. A DNS outage at the one seeding boot leaves a permanent empty list: unresolved names are skipped (worker private-endpoint-seed.ts:196,227) and an empty plan writes `''` (:354), which counts as written. NEW-LIMIT. Fix: do not write the empty marker while a candidate is unresolved; retry on later boots with a cap.
 2. A transient DNS failure for one name is not retried (private-endpoint-seed.ts:146-216), so that name is skipped for good. NEW-LIMIT.
 3. The seed hard-codes the lock name `admin-config:private-endpoint-allowlist` (:30) while the admin save derives it from its route name (api routes/admin.ts:483); a rename silently breaks their serialisation. NEW-LIMIT. Fix: one shared constant.
 4. `reconcileEmbedModelResidency` (worker queues/task-queue.ts:1084-1098) dials a historical task's Ollama URL; a private one the seed did not list is refused and skipped silently. REGRESSION (minor, best-effort cleanup).
 
 ### T555 · FNF[egress-guard-hardening] · remaining liftable metadata addresses and optional forge fetchFn
+
 status: open · kind: fix · found: T347 run · priority: P2
+
 1. Other cloud-metadata addresses stay hostname-liftable: 100.100.100.200, 192.0.0.192, fd00:ec2::254 classify blocked but liftable (shared egress/egress-guard.ts:132). NEW-LIMIT. Fix: add them to the unliftable set.
 2. IPv4-compatible `::a9fe:a9fe` (deprecated ::/96) is blocked but liftable (egress-guard.ts:132). NEW-LIMIT (low).
 3. Hostname entries consult the hosts file only when DNS fails, so a name public in DNS but overridden in /etc/hosts dials the DNS answer (shared egress/probe-egress.ts:96,127,186,319). Accepted behaviour; revisit only on a report. NEW-LIMIT.
@@ -480,15 +484,19 @@ status: open · kind: fix · found: T347 run · priority: P2
 7. A `[::1]` host in a RAG DSN reports `ENOTFOUND [` (`dsnDialHost`, shared rag/connection.ts:119; postgres.js parses the host as `[`); still refused, only the message is wrong. PRE-EXISTING (low).
 
 ### T556 · FNF[ollama-pull-relay] · pull stream relay edges
+
 status: open · kind: fix · found: T347 run · priority: P3
+
 1. The pull route has no `stream.onAbort` (api routes/tooling.ts, `activePulls` ~:222); a closed tab frees the upstream only through the idle and size caps. PRE-EXISTING.
 2. Pull progress `status`/`digest` strings are relayed uncut (tooling.ts:370-371). PRE-EXISTING (low).
 3. `armIdle` re-arms only on upstream reads (tooling.ts:279-335), so a client that stops reading for 10 minutes can trip a misleading idle stop. NEW-LIMIT (edge).
 4. A late `fetchFn` resolve after an idle stop leaves its body unconsumed for a custom `fetchFn` that ignores `signal`. NEW-LIMIT (edge).
 
 ### T557 · FNF[unguarded-dial-audit] · dials that still bypass the egress guard (design)
+
 status: open · kind: design · found: T347 run · priority: P2
 Each needs a per-dial decision (guard, admin-trust, or remove).
+
 1. CLI provider base URLs: worker cli-exec/images.ts:457, cli-adapters/ollama-probe.ts:76 (`probeOllamaEndpoint`), api routes/cli-providers.ts:664, worker cli-adapters/zai.ts:63,106. PRE-EXISTING.
 2. Admin-trusted by decision: Global KB external DSN (shared global-kb/connection.ts:172,177), `POST /global-kb/test-db`, vendor/module admin config. PRE-EXISTING; confirm or guard.
 3. Dead SMTP keys (shared config/config.service.ts:40-44,666): defaults exist, nothing outside tests reads them. PRE-EXISTING; remove or wire.
@@ -496,18 +504,23 @@ Each needs a per-dial decision (guard, admin-trust, or remove).
 5. A user-typed git remote is dialed by the child `git` process outside the Node guard (worker repo clone.ts:74, bundle-sync.ts:18). A fix (protocol allowlist, network policy) changes product behaviour. PRE-EXISTING.
 
 ### T558 · FNF[global-kb-ollama-url-write] · any signed-in user can set the Global KB Ollama URL (design)
+
 status: open · kind: design · found: T347 run · priority: P2
 `putConfig` (api routes/global-kb.ts:449) lets any signed-in user save the Ollama URL and embed model, and the upgrade seed trusts what is stored. The egress guard now refuses private targets unless listed, but the value still steers every user's embeds. Decide: admin-only write, or keep open. PRE-EXISTING.
 
 ### T559 · FNF[gated-test-hygiene] · gated test addresses and the gated-list check in driver gates
+
 status: open · kind: fix · found: T347 run · priority: P3
+
 1. api test/task-integration-admission-db.test.ts is hard-wired to 127.0.0.1:45553 (or CI with localhost:5432), so a generic scratch beside the dev stack cannot run it. PRE-EXISTING.
 2. `scripts/test/ci-gated-list.test.mjs` is the only definition of "gated"; add `pnpm test:scripts` to the review and feature gates whenever a test file or ci.yml changes (it caught a `pathname !==` guard the list did not recognise). Process.
 3. The backwards-clock throttle control in shared test/probe-egress-log.test.ts passes on unchanged source (a guard, not a red-able test). NEW-LIMIT (hygiene).
 4. AGENTS.md is 32767 of 32768 bytes and its topic index lacks api-auth.md; needs an equal cut to add it. PRE-EXISTING (docs, session).
 
 ### T560 · FNF[postgresjs-closed-rejections] · patched postgres.js leaves unattributed CONNECTION_CLOSED rejections (third-party, needs approval)
+
 status: open · kind: third-party · needs approval · found: T347 run · priority: P3
+
 1. The patched postgres.js 3.4.9 (`patches/postgres@3.4.9.patch`) still emits unattributed unhandled `CONNECTION_CLOSED` rejections. Extend the patch or report upstream. PRE-EXISTING.
 2. worker package.json has no `postgres` dependency (the guarded DSN host goes through shared `dsnDialHost`); adding it changes the lockfile and needs `pnpm docker rebuild`. PRE-EXISTING.
 
