@@ -36,6 +36,7 @@ import {
 } from '@haive/shared';
 import { validateAllowlist } from '@haive/shared/egress';
 import { resolveHouseRulesEnabled } from '@haive/shared/global-kb';
+import { resolveCustomToolsEnabled } from '@haive/shared/modularity-server';
 import { getDb } from '../db.js';
 import { hashPassword } from '../auth/password.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
@@ -1662,7 +1663,7 @@ const customToolsSchema = z.object({ enabled: z.boolean() });
 
 // OFF fails a step that declares custom tools and refuses every tool call.
 adminRoutes.get('/config/custom-tools', async (c) => {
-  const enabled = await configService.getBoolean(CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED, true);
+  const enabled = await resolveCustomToolsEnabled(configService);
   return c.json({ enabled });
 });
 

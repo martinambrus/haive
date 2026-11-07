@@ -59,6 +59,7 @@ import {
   parseStepId,
   type IntegrationRequirement,
 } from '@haive/shared/modularity';
+import { resolveCustomToolsEnabled } from '@haive/shared/modularity-server';
 import {
   moduleDeactivationMessage,
   moduleSchemaFailedMessage,
@@ -614,7 +615,7 @@ async function resolveCustomTools(
     parsePinnedCustomSteps(task?.customSteps)[stepDef.metadata.id]?.tools ?? [],
   );
   if (invalid !== null) return { failure: invalid };
-  if (!(await configService.getBoolean(CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED, true))) {
+  if (!(await resolveCustomToolsEnabled(configService))) {
     return {
       failure: `${CUSTOM_TOOLS_SWITCHED_OFF_REASON}: custom tools are switched off on this install, so this step cannot run. Switch them on, then retry the step.`,
     };

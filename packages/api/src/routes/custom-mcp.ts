@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { count, eq, sql } from 'drizzle-orm';
 import { schema, type DbTx } from '@haive/database';
-import { CONFIG_KEYS, configService, effectiveNetworkPolicy, logger } from '@haive/shared';
+import { configService, effectiveNetworkPolicy, logger } from '@haive/shared';
 import {
   customToolArgsSchema,
   customToolUrl,
@@ -10,6 +10,7 @@ import {
   type CustomTool,
   type RagQueryTool,
 } from '@haive/shared/modularity';
+import { resolveCustomToolsEnabled } from '@haive/shared/modularity-server';
 import { formatRagHits } from '@haive/shared/rag';
 import { getDb, type Database } from '../db.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -189,7 +190,7 @@ customMcpRoutes.post('/call', async (c) => {
   tool = pinned?.tools.find((declared) => declared.name === name);
   if (!tool) return refuse(403, 'undeclared-tool', 'this step does not declare that tool');
 
-  if (!(await configService.getBoolean(CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED, true))) {
+  if (!(await resolveCustomToolsEnabled(configService))) {
     return refuse(403, 'switched-off', 'custom tools are switched off on this install');
   }
 

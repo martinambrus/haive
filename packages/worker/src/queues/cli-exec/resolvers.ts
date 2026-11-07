@@ -75,6 +75,7 @@ import { hasReadyLspBridge } from '../../lsp/configured-lsp.js';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { parseIntegrationBindings } from '@haive/shared/integrations';
 import { customToolInputSchema, parsePinnedCustomSteps } from '@haive/shared/modularity';
+import { resolveCustomToolsEnabled } from '@haive/shared/modularity-server';
 import { pinnedToolsFailure } from '../../step-engine/steps/custom/pinned-tools.js';
 import { signTaskToken } from '@haive/shared/task-token';
 import { ensureSandboxWritableTree } from '../../repo/worktree-permissions.js';
@@ -275,7 +276,7 @@ async function resolveCustomFiles(
   custom: NonNullable<McpSurface['custom']>,
 ): Promise<SandboxExtraFile[]> {
   const names = custom.tools;
-  if (!(await configService.getBoolean(CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED, true))) {
+  if (!(await resolveCustomToolsEnabled(configService))) {
     throw unwired('custom tools are switched off on this install', names);
   }
   if (!custom.enabled) {
