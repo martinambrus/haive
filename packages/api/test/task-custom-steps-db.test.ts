@@ -1,16 +1,32 @@
 import { eq, like, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
-import { customToolSchema, parsePinnedCustomSteps } from '@haive/shared/modularity';
+import {
+  customToolSchema,
+  describeInvalidTools,
+  parsePinnedCustomSteps,
+  validateCustomTools,
+} from '@haive/shared/modularity';
 
 const url = process.env.TASK_CUSTOM_STEPS_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/task_custom_steps_test'))
   throw new Error('Use a dedicated task_custom_steps_test database for custom step tests');
 
-const h = vi.hoisted(() => ({ db: undefined as unknown }));
+const h = vi.hoisted(() => ({
+  db: undefined as unknown,
+  switchOn: true,
+  switchReads: 0,
+  adds: [] as { name: string; data: unknown }[],
+}));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
-vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: async () => undefined }) }));
+vi.mock('../src/queues.js', () => ({
+  getTaskQueue: () => ({
+    add: async (name: string, data: unknown) => {
+      h.adds.push({ name, data });
+    },
+  }),
+}));
 vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/middleware/auth.js')>()),
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
@@ -24,7 +40,11 @@ vi.mock('@haive/shared', async (importOriginal) => ({
   configService: {
     get: async () => 'USD',
     getFresh: async () => 'normal',
-    getBoolean: async () => true,
+    getBoolean: async (key: string) => {
+      if (key !== CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED) return true;
+      h.switchReads += 1;
+      return h.switchOn;
+    },
   },
 }));
 vi.mock('@haive/shared/stats-server', async (importOriginal) => ({
@@ -33,6 +53,9 @@ vi.mock('@haive/shared/stats-server', async (importOriginal) => ({
 }));
 
 import { Hono } from 'hono';
+import { CONFIG_KEYS, TASK_JOB_NAMES } from '@haive/shared';
+import { markQueuedForStart } from '../src/lib/task-start.js';
+import { HttpError } from '../src/context.js';
 import { adminTaskTypeRoutes } from '../src/routes/task-types.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { definitionForCreate } from '../src/lib/task-type-definition.js';
@@ -70,6 +93,7 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
 
   const clean = async () => {
     await db.delete(schema.tasks).where(like(schema.tasks.type, 'tcs-%'));
+    await db.delete(schema.repositories).where(like(schema.repositories.name, 'tcs-gate-%'));
     await db
       .delete(schema.taskTypeDefinitions)
       .where(like(schema.taskTypeDefinitions.slug, 'tcs-%'));
@@ -106,6 +130,9 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
 
   beforeEach(async () => {
     resetStepFlagsCache();
+    h.switchOn = true;
+    h.switchReads = 0;
+    h.adds = [];
     await clean();
     await db.delete(schema.stepCatalog);
     await db.insert(schema.stepCatalog).values({
@@ -136,7 +163,7 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
     expect(created.status).toBe(201);
   });
 
-  const insertTask = async (type: string = TYPE) => {
+  const insertTask = async (type: string = TYPE, status: string = 'running') => {
     const def = await definitionForCreate(db, type, { generic: true });
     const [task] = await db
       .insert(schema.tasks)
@@ -144,7 +171,7 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
         userId: ACTOR_ID,
         type,
         title: 'pinned',
-        status: 'running',
+        status: status as 'running',
         runListSnapshot: def.runListSnapshot,
         customSteps: def.customSteps,
       })
@@ -360,6 +387,247 @@ describe.skipIf(!url)('prompt steps pinned on a task, on Postgres', () => {
       const pinned = await pinnedOf(task.id);
       expect(pinned[BAD_ID]).toEqual(stored);
       expect(parsePinnedCustomSteps(pinned)[BAD_ID]).not.toHaveProperty('invalidTools');
+    });
+  });
+
+  describe('start gate: unusable pinned custom tools', () => {
+    const GATE = 'tcs-gate';
+    const GATE_ID = `custom.${GATE}.review`;
+    const goodTool = (name: string, extra: Record<string, unknown> = {}) =>
+      customToolSchema.parse({
+        name,
+        description: 'Fetches the status.',
+        action: 'http-get',
+        url: 'https://api.example.com/v1/status',
+        ...extra,
+      });
+    const storeType = async (
+      tools: unknown[],
+      opts: { requiresRepository?: boolean; slug?: string } = {},
+    ) => {
+      const slug = opts.slug ?? GATE;
+      await db.insert(schema.taskTypeDefinitions).values({
+        slug,
+        displayName: 'Gate',
+        runListStrategy: 'static',
+        stepIds: ['tcs-a', `custom.${slug}.review`],
+        promptSteps: { review: { ...promptStep('Check {{task.title}}'), tools } },
+        requiresRepository: opts.requiresRepository ?? true,
+        source: 'admin',
+      });
+      return slug;
+    };
+    const action = (id: string, name: string) =>
+      send('POST', `/tasks/${id}/action`, { action: name });
+    const statusOf = async (id: string) =>
+      (await db.select().from(schema.tasks).where(eq(schema.tasks.id, id)))[0]!.status;
+    const startAdds = () => h.adds.filter((a) => a.name === TASK_JOB_NAMES.START);
+    const startedEvents = async (id: string) =>
+      (await db.select().from(schema.taskEvents).where(eq(schema.taskEvents.taskId, id))).filter(
+        (e) => e.eventType === 'task.started',
+      );
+    const expectRefused = async (res: Response, code: string, ...parts: string[]) => {
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { error: string; code: string };
+      expect(body.code).toBe(code);
+      for (const part of parts) expect(body.error).toContain(part);
+    };
+    const expectNothingStarted = async (id: string, status = 'created') => {
+      expect(await statusOf(id)).toBe(status);
+      expect(startAdds()).toEqual([]);
+      expect(await startedEvents(id)).toEqual([]);
+    };
+    const badUrlTool = () => goodTool('ip_tool', { url: 'https://127.0.0.1/status' });
+    const problemOf = (tool: ReturnType<typeof badUrlTool>, requiresRepository: boolean) =>
+      validateCustomTools([tool], { requiresRepository })[0]!;
+    const ragProject = () =>
+      customToolSchema.parse({
+        name: 'rag_tool',
+        description: 'Searches.',
+        action: 'rag-query',
+        scope: 'project',
+      });
+
+    it('start gate: refuses a tool whose URL now fails validation', async () => {
+      const tool = badUrlTool();
+      const problem = problemOf(tool, true);
+      expect(problem.kind).toBe('tool-host-ip-literal');
+      await storeType([tool]);
+      const { task } = await insertTask(GATE, 'created');
+      await expectRefused(
+        await action(task.id, 'start'),
+        'custom-tool-invalid',
+        'Review step',
+        '`ip_tool`',
+        problem.message,
+      );
+      await expectNothingStarted(task.id);
+    });
+
+    it('start gate: refuses a tool that no longer parses', async () => {
+      await storeType([
+        goodTool('good_tool'),
+        { ...goodTool('bad_tool'), description: 'd'.repeat(1025) },
+      ]);
+      const { task } = await insertTask(GATE, 'created');
+      await expectRefused(
+        await action(task.id, 'start'),
+        'custom-tool-invalid',
+        'Review step',
+        describeInvalidTools(['bad_tool']),
+      );
+      await expectNothingStarted(task.id);
+    });
+
+    it('start gate: judges the tool scope by the type repository flag', async () => {
+      const tool = ragProject();
+      const problem = problemOf(tool, false);
+      expect(problem.kind).toBe('tool-scope-needs-repository');
+      await storeType([tool], { requiresRepository: false });
+      const { task } = await insertTask(GATE, 'created');
+      await expectRefused(await action(task.id, 'start'), 'custom-tool-invalid', problem.message);
+      await expectNothingStarted(task.id);
+
+      await storeType([tool], { requiresRepository: true, slug: 'tcs-gate-repo' });
+      const { task: ok } = await insertTask('tcs-gate-repo', 'created');
+      const res = await action(ok.id, 'start');
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, started: true, status: 'queued' });
+    });
+
+    it('start gate: refuses valid tools while the switch is off, and starts them when it is on', async () => {
+      await storeType([goodTool('good_tool')]);
+      const { task } = await insertTask(GATE, 'created');
+      h.switchOn = false;
+      await expectRefused(
+        await action(task.id, 'start'),
+        'custom-tools-switched-off',
+        'Review step',
+        '`good_tool`',
+        'switched off',
+      );
+      await expectNothingStarted(task.id);
+
+      h.switchOn = true;
+      const res = await action(task.id, 'start');
+      expect(await res.json()).toEqual({ ok: true, started: true, status: 'queued' });
+      expect(await statusOf(task.id)).toBe('queued');
+      expect(startAdds()).toHaveLength(1);
+    });
+
+    it('start gate: an unusable tool wins over the switch', async () => {
+      await storeType([badUrlTool()]);
+      const { task } = await insertTask(GATE, 'created');
+      h.switchOn = false;
+      await expectRefused(await action(task.id, 'start'), 'custom-tool-invalid', '`ip_tool`');
+      await expectNothingStarted(task.id);
+    });
+
+    it('start gate: markQueuedForStart rejects with a 409 HttpError', async () => {
+      await storeType([badUrlTool()]);
+      const { task } = await insertTask(GATE, 'created');
+      const err = await markQueuedForStart(db, task.id).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(HttpError);
+      expect(err).toMatchObject({ status: 409, code: 'custom-tool-invalid' });
+      await expectNothingStarted(task.id);
+    });
+
+    it('start gate: a full retry of a failed task with no step row is refused', async () => {
+      await storeType([badUrlTool()]);
+      const { task } = await insertTask(GATE, 'failed');
+      await expectRefused(await action(task.id, 'retry'), 'custom-tool-invalid', '`ip_tool`');
+      expect(await statusOf(task.id)).toBe('failed');
+      expect(h.adds).toEqual([]);
+    });
+
+    it('start gate: a retry at an existing step row is not gated', async () => {
+      await storeType([goodTool('good_tool')]);
+      const { task } = await insertTask(GATE, 'failed');
+      await db.insert(schema.taskSteps).values({
+        taskId: task.id,
+        stepId: GATE_ID,
+        stepIndex: 1,
+        title: 'Review step',
+        status: 'failed',
+      });
+      await db
+        .update(schema.tasks)
+        .set({ currentStepId: GATE_ID })
+        .where(eq(schema.tasks.id, task.id));
+      h.switchOn = false;
+      const res = await action(task.id, 'retry');
+      const body = (await res.json()) as { code?: string };
+      expect(body.code ?? '').not.toMatch(/^custom-tool/);
+    });
+
+    it('start gate: create-and-start refuses and leaves no row', async () => {
+      await storeType([goodTool('good_tool')], { requiresRepository: false });
+      h.switchOn = false;
+      const res = await send('POST', '/tasks', {
+        type: GATE,
+        title: 'gate-create',
+        description: 'x',
+      });
+      await expectRefused(res, 'custom-tools-switched-off', '`good_tool`');
+      const rows = await db
+        .select()
+        .from(schema.tasks)
+        .where(eq(schema.tasks.title, 'gate-create'));
+      expect(rows).toEqual([]);
+    });
+
+    it('start gate: a deferred create succeeds and the later start refuses', async () => {
+      await storeType([goodTool('good_tool')]);
+      const [repo] = await db
+        .insert(schema.repositories)
+        .values({
+          userId: ACTOR_ID,
+          name: 'tcs-gate-repo',
+          status: 'ready',
+          source: 'local_path',
+          localPath: '/tmp/tcs-gate',
+          writable: true,
+          storagePath: '/tmp/tcs-gate-store',
+        })
+        .returning();
+      h.switchOn = false;
+      const res = await send('POST', '/tasks', {
+        type: GATE,
+        title: 'gate-defer',
+        description: 'x',
+        repositoryId: repo!.id,
+        deferStart: true,
+      });
+      expect(res.status).toBe(201);
+      const created = (await res.json()) as { task?: { id: string }; id?: string };
+      const id = created.task?.id ?? created.id!;
+      expect(await statusOf(id)).toBe('created');
+      await expectRefused(await action(id, 'start'), 'custom-tools-switched-off');
+      await expectNothingStarted(id);
+    });
+
+    it('start gate: a repeat start of a started task stays a no-op with the switch off', async () => {
+      await storeType([goodTool('good_tool')]);
+      const { task } = await insertTask(GATE, 'running');
+      h.switchOn = false;
+      const res = await action(task.id, 'start');
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ ok: true, started: false });
+    });
+
+    it('start gate: a task without pinned tools never reads the switch', async () => {
+      const { task: bare } = await insertTask(TYPE, 'created');
+      await storeType([], { slug: 'tcs-gate-empty' });
+      const { task: empty } = await insertTask('tcs-gate-empty', 'created');
+      await db.update(schema.tasks).set({ customSteps: null }).where(eq(schema.tasks.id, bare.id));
+      for (const t of [bare, empty]) {
+        const res = await action(t.id, 'start');
+        expect(await res.json()).toMatchObject({ ok: true, started: true });
+      }
+      expect(h.switchReads).toBe(0);
     });
   });
 });
