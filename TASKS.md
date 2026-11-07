@@ -462,6 +462,55 @@ From the T406/T408 build (2026-11-07).
 6. The module-schema-wins precedence of the hold is untested.
 7. Nits: `step-context-usage.ts` ~:51 throws "invs is not iterable" under mock-DB unit runs (harmless); stale "web package has no vitest config" header in web lib/step-cli-providers.ts ~:20; `providerLabel` in provider-hold.ts shares a name with sandbox/mcp-surface.ts ~:389.
 
+### T554 · FNF[allowlist-seed-hardening] · the private-endpoint upgrade seed can lose entries for good
+status: open · kind: fix · found: T347 run · priority: P2
+1. A DNS outage at the one seeding boot leaves a permanent empty list: unresolved names are skipped (worker private-endpoint-seed.ts:196,227) and an empty plan writes `''` (:354), which counts as written. NEW-LIMIT. Fix: do not write the empty marker while a candidate is unresolved; retry on later boots with a cap.
+2. A transient DNS failure for one name is not retried (private-endpoint-seed.ts:146-216), so that name is skipped for good. NEW-LIMIT.
+3. The seed hard-codes the lock name `admin-config:private-endpoint-allowlist` (:30) while the admin save derives it from its route name (api routes/admin.ts:483); a rename silently breaks their serialisation. NEW-LIMIT. Fix: one shared constant.
+4. `reconcileEmbedModelResidency` (worker queues/task-queue.ts:1084-1098) dials a historical task's Ollama URL; a private one the seed did not list is refused and skipped silently. REGRESSION (minor, best-effort cleanup).
+
+### T555 · FNF[egress-guard-hardening] · remaining liftable metadata addresses and optional forge fetchFn
+status: open · kind: fix · found: T347 run · priority: P2
+1. Other cloud-metadata addresses stay hostname-liftable: 100.100.100.200, 192.0.0.192, fd00:ec2::254 classify blocked but liftable (shared egress/egress-guard.ts:132). NEW-LIMIT. Fix: add them to the unliftable set.
+2. IPv4-compatible `::a9fe:a9fe` (deprecated ::/96) is blocked but liftable (egress-guard.ts:132). NEW-LIMIT (low).
+3. Hostname entries consult the hosts file only when DNS fails, so a name public in DNS but overridden in /etc/hosts dials the DNS answer (shared egress/probe-egress.ts:96,127,186,319). Accepted behaviour; revisit only on a report. NEW-LIMIT.
+4. `ForgeContext.fetchFn` is optional (shared forge/types.ts:28, forge/base-forge.ts:70); a third construction site fails open to the global fetch. NEW-LIMIT. Fix: make it required or default to the guarded fetch.
+5. `deflate` maps to `createInflate` (probe-egress.ts:158), so a raw-deflate body fails. PRE-EXISTING (moved code).
+6. The guard sends `accept-encoding: identity` by default (probe-egress.ts:219). PRE-EXISTING (low).
+7. A `[::1]` host in a RAG DSN reports `ENOTFOUND [` (`dsnDialHost`, shared rag/connection.ts:119; postgres.js parses the host as `[`); still refused, only the message is wrong. PRE-EXISTING (low).
+
+### T556 · FNF[ollama-pull-relay] · pull stream relay edges
+status: open · kind: fix · found: T347 run · priority: P3
+1. The pull route has no `stream.onAbort` (api routes/tooling.ts, `activePulls` ~:222); a closed tab frees the upstream only through the idle and size caps. PRE-EXISTING.
+2. Pull progress `status`/`digest` strings are relayed uncut (tooling.ts:370-371). PRE-EXISTING (low).
+3. `armIdle` re-arms only on upstream reads (tooling.ts:279-335), so a client that stops reading for 10 minutes can trip a misleading idle stop. NEW-LIMIT (edge).
+4. A late `fetchFn` resolve after an idle stop leaves its body unconsumed for a custom `fetchFn` that ignores `signal`. NEW-LIMIT (edge).
+
+### T557 · FNF[unguarded-dial-audit] · dials that still bypass the egress guard (design)
+status: open · kind: design · found: T347 run · priority: P2
+Each needs a per-dial decision (guard, admin-trust, or remove).
+1. CLI provider base URLs: worker cli-exec/images.ts:457, cli-adapters/ollama-probe.ts:76 (`probeOllamaEndpoint`), api routes/cli-providers.ts:664, worker cli-adapters/zai.ts:63,106. PRE-EXISTING.
+2. Admin-trusted by decision: Global KB external DSN (shared global-kb/connection.ts:172,177), `POST /global-kb/test-db`, vendor/module admin config. PRE-EXISTING; confirm or guard.
+3. Dead SMTP keys (shared config/config.service.ts:40-44,666): defaults exist, nothing outside tests reads them. PRE-EXISTING; remove or wire.
+4. `integration_provider_configs.api_base_url` is unused (database schema/integrations.ts:51); a future dial must use the guarded fetch. PRE-EXISTING.
+5. A user-typed git remote is dialed by the child `git` process outside the Node guard (worker repo clone.ts:74, bundle-sync.ts:18). A fix (protocol allowlist, network policy) changes product behaviour. PRE-EXISTING.
+
+### T558 · FNF[global-kb-ollama-url-write] · any signed-in user can set the Global KB Ollama URL (design)
+status: open · kind: design · found: T347 run · priority: P2
+`putConfig` (api routes/global-kb.ts:449) lets any signed-in user save the Ollama URL and embed model, and the upgrade seed trusts what is stored. The egress guard now refuses private targets unless listed, but the value still steers every user's embeds. Decide: admin-only write, or keep open. PRE-EXISTING.
+
+### T559 · FNF[gated-test-hygiene] · gated test addresses and the gated-list check in driver gates
+status: open · kind: fix · found: T347 run · priority: P3
+1. api test/task-integration-admission-db.test.ts is hard-wired to 127.0.0.1:45553 (or CI with localhost:5432), so a generic scratch beside the dev stack cannot run it. PRE-EXISTING.
+2. `scripts/test/ci-gated-list.test.mjs` is the only definition of "gated"; add `pnpm test:scripts` to the review and feature gates whenever a test file or ci.yml changes (it caught a `pathname !==` guard the list did not recognise). Process.
+3. The backwards-clock throttle control in shared test/probe-egress-log.test.ts passes on unchanged source (a guard, not a red-able test). NEW-LIMIT (hygiene).
+4. AGENTS.md is 32767 of 32768 bytes and its topic index lacks api-auth.md; needs an equal cut to add it. PRE-EXISTING (docs, session).
+
+### T560 · FNF[postgresjs-closed-rejections] · patched postgres.js leaves unattributed CONNECTION_CLOSED rejections (third-party, needs approval)
+status: open · kind: third-party · needs approval · found: T347 run · priority: P3
+1. The patched postgres.js 3.4.9 (`patches/postgres@3.4.9.patch`) still emits unattributed unhandled `CONNECTION_CLOSED` rejections. Extend the patch or report upstream. PRE-EXISTING.
+2. worker package.json has no `postgres` dependency (the guarded DSN host goes through shared `dsnDialHost`); adding it changes the lockfile and needs `pnpm docker rebuild`. PRE-EXISTING.
+
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
 status: open · kind: design · user decision: resolved 2026-11-05 · found: T337 run 2 · priority: P3
@@ -536,19 +585,6 @@ status: open · kind: feature · user decision: resolved 2026-11-01 · priority:
 6. templateTokens (worker steps/custom/prompt-step.ts:65-68) returns [] for a template that fails to parse. Re-validate at dispatch.
 
 User decision 2026-11-01: Block Start for unusable required tools; warn for optional tools.
-
-### T347 · FNF[forge-egress] · forge requests follow redirects and reach any credential host, internal addresses included
-
-status: open · kind: security · user decision: resolved 2026-11-01 · priority: P2
-PRE-EXISTING. BaseForgeProvider.request (shared forge/base-forge.ts) fetches with `redirect: 'follow'`. The host and API base of a self-hosted credential are typed in by the user.
-Measured: Authorization is dropped on a cross-origin hop.
-Fix direction:
-
-- `redirect: 'manual'`, with a 3xx treated as a ForgeError;
-- for self-hosted hosts, P14c's connect-time address guard.
-  Decision needed: a corporate GitLab on a 10.x address is legitimate.
-
-User decision 2026-11-01: Allow private endpoints only through an administrator-controlled allowlist; explicit built-in services keep their trusted configuration.
 
 ### T350 · FNF[module-runtime-status] · a module whose reactivation used every attempt shows active with no schema or jobs (+1)
 
@@ -731,16 +767,6 @@ status: open · kind: fix · found: T392 driver 2026-11-06 · priority: P4
 
 status: parked · kind: design · was modular #276 · reason: diminishing returns (2026-11-01 scan): Stop behavior concerns exceptional missing, finished, or already-answered current rows; resume when resume when these shapes obstruct a real Stop request · priority: P4
 See worker task-queue.ts ~:1806-1813, ~:356. Decide per shape: fail the task, or answer a named 409.
-
-### T399 · FNF[probe-stored-targets] · stored-target probes still reach any address for non-admins (+1)
-
-status: open · kind: security · user decision: resolved 2026-11-01 · priority: P2
-Sites: api global-kb.ts ~:623 (release-embed-model); the RAG store and embedder URL (rag.ts ~:324, tooling-upgrades.ts ~:727); forge calls (integration-mcp.ts ~:380-494); the worker counterparts.
-Decide which stored targets a non-admin may point at private addresses.
-
-1. The Ollama pull stream relays 200 chars of the remote error and has no size or time cap.
-
-User decision 2026-11-01: Allow private endpoints only through an administrator-controlled allowlist; explicit built-in services keep their trusted configuration.
 
 ### T403 · FNF[context-window-truth] · wrapper CLIs report the binary's 200k default; killed runs fall to the static table
 
@@ -1413,6 +1439,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T347 + T399 — stored targets (Global KB Ollama URL, repository RAG stores and embedder URLs, forge hosts) and non-admin probes dial through one egress guard in `@haive/shared/egress`; admin private-endpoint allowlist (`config:security:privateEndpointAllowlist`, audited GET/PUT and data-tab card; hostname entries never lift link-local or unspecified addresses; read lazily); built-ins are the in-stack Ollama names and exactly `http://host.docker.internal:11434`; forge requests never follow redirects (a renamed repository's 301 is now a `ForgeError`); Ollama pull relay bounded; one-time idempotent upgrade seed lists the private hosts an install already stores; docs api-auth.md, integrations.md, global-kb.md, rag-embedding-failures.md, error-diagnostics.md, task-types.md — PR #1029 (02af88738), 2026-11-07. CI green; merged without bot review. Follow-ups T554-T560.
 - T406 + T408 — a listed-but-disabled explicit CLI provider (task, step or saved choice) holds a fresh CLI-consuming or provider-sensitive step (30 s poll; START too) and the dispatcher refuses it with a named skip instead of the next-oldest CLI; `task_steps.detect_cli_provider_id` (migration 0223) re-detects a parked provider-sensitive step when the implicit default moved; api and web keep a disabled pick listed and disable its effort dropdown; docs cli-adapters.md, worker-restarts.md, step-summaries.md — PR #1028 (e241910fa), 2026-11-07. CI green; merged without bot review. T406 item 2 moved to T552; follow-ups T553.
 - T355 — ConfigService Redis calls bounded (own connection, 2 s commandTimeout, no offline queue) and reject with `ConfigUnavailableError`; the api answers 503 `config_unavailable`; 17 request-path `Queue.add` sites bounded (`api/src/lib/queue-bounded.ts`); worker and updater readers hold or fail rather than guess (pause and caps read as held, runtime not admitted, maintenance tri-state, 08c/08d settings read in detect, updater leaves a hold it never recorded); docs error-diagnostics.md, release.md, worker-restarts.md — PR #1027 (13f92a753), 2026-11-07. CI green; merged without bot review. Follow-ups: T318 (+2), T540 (+1), T544-T551.
 - T393 — an api Stop (owner, admin, urgent module deactivation) queues one `settle-stopped-task` job after its commit and kill (`enqueueStopSettle`, 2 s bound, never throws); the worker settles only while the task still reads failed at the Stop's `failedAt`; the job never fails the task and holds no stalled redrive; docs worker-restarts.md — PR #1026 (eb925108b), 2026-11-07. CI green; merged without bot review. Follow-ups: T345 items 12-13, T355 (+1), T540-T543.
