@@ -372,6 +372,34 @@ status: open · kind: fix · found: T536 reviews 2026-11-06 · priority: P4
 3. `quoted()` in the Docker-context reader (install/install.sh ~:270) accepts a literal newline or an unknown escape inside a JSON string. PRE-EXISTING; fails closed downstream. Found T539b review. Fix direction: reject both, with a parity case.
 4. The context reader tests run on the host awk only (scripts/test/install-context.test.mjs); mawk and busybox parity was measured by hand. Found T539b review. Fix direction: run the context cases under the pinned mawk/busybox images like the manifest tests.
 
+### T540 · FNF[stop-settle-sweep] · no sweep re-drives a lost settle or Cancel job
+
+status: open · kind: design · priority: P3
+PRE-EXISTING, from the T393 build (2026-11-07). A `settle-stopped-task` job that was never queued (Redis down past the 2 s bound) or exhausted its attempts has no re-drive; `redriveCancelledTasks` (worker queues/stalled-redrive.ts ~:586) covers cancelled tasks only. Backstops by what is held: task auth volumes, the boot reaper only; terminal shells, the idle reaper; onboarding re-sync, the 60 s checkout sweep (project-state/watch.ts ~:121); embed model, the boot reconcile; Ollama CLI models, keep_alive; a kb_author 'enriching' entry, none. Decide: a sweep over failed tasks with unsettled holdings, or accept the backstops.
+
+### T541 · FNF[kb-author-failed-then-cancel] · a Stop-settled kb_author entry stays 'failed' after a later Cancel
+
+status: open · kind: design · priority: P3
+PRE-EXISTING for worker-failed tasks; since T393 (PR #1026) a Stop then Cancel also leaves the entry 'failed' where it was deleted before. worker `_global-kb-promote.ts` ~:744-783 reconciles only skeleton and enriching entries. Decide whether a Cancel deletes a failed entry too.
+
+### T542 · FNF[settle-members-recheck] · settle members act on a task without re-reading its status after the job-start fence
+
+status: open · kind: fix · priority: P3
+PRE-EXISTING, from the T393 build (2026-11-07); cost is a cold start or lost shell state when a Retry races a settlement.
+
+1. Members that do not re-check: worker task-queue.ts ~:2045-2052 (the 'superseded' branch), cli-exec/handlers.ts ~:584-631 (`cleanupAuthAfterTerminalSummary`, status only), terminal-session-reaper.ts ~:161-193, ollama-provision.ts ~:292-349, embed-residency.ts ~:87-103.
+2. `cleanupTaskContainers` (task-queue.ts ~:1239, 1280, 1303) appends audit events on every run, so a Stop with a pass in flight (two settlements) can log a duplicate `auth_volumes.destroyed`. Informational.
+3. `defaultContainerCleanup` (task-queue.ts ~:1460-1474) is dead in production: nothing writes a task-bound containers row. Informational; do not delete without checking module consumers.
+
+### T543 · FNF[task-auth-volume-lifecycle] · task auth volume teardown leftovers
+
+status: open · kind: fix · priority: P3
+PRE-EXISTING, from the T393 build (2026-11-07).
+
+1. The boot reaper removes failed-task volumes without syncing a rotated single-use token back (worker auth-volume-reaper.ts ~:19, 125, 148).
+2. `clearTaskAuthPreparationState` without a provider drops in-flight locks (task-auth-volume.ts ~:293-302).
+3. Concurrent auth syncs share the `.haive-tmp` name (task-auth-volume.ts ~:1363-1366); likelier now that a Stop with a pass in flight runs two settlements.
+
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
 status: open · kind: design · user decision: resolved 2026-11-05 · found: T337 run 2 · priority: P3
@@ -429,6 +457,11 @@ Items 1-2 merged (#816). All PRE-EXISTING. 3. killTaskSandboxes (api lib/sandbox
 
 Execution fence 2026-11-01: Prioritize current Stop/kill correctness in3/4/7/8 only when reproduced. Error wording, statistics links and duplicate title components do not automatically join that fix.
 
+From the T393 build (2026-11-07):
+
+12. REGRESSION, accepted and bounded: urgent deactivation (api modules/activation.ts ~:217) waits up to 2 s per task serially for `enqueueStopSettle` while Redis is down. Fix direction: queue the settlements after the loop, or in parallel under one deadline.
+13. PRE-EXISTING: maintenance.ts ~:395 and activation.ts ~:234 write `task.stopped` only when a run ended or a step failed, and the owner's `cancel-active-cli` route writes none. Fix direction: one event rule for all three Stop producers.
+
 ### T346 · FNF[custom-tool-start-hint] · a broken or switched-off custom tool fails only at its step (+5)
 
 status: open · kind: feature · user decision: resolved 2026-11-01 · priority: P2
@@ -477,7 +510,7 @@ Options:
 
 User decision 2026-11-01: Use a read-only shared npm cache base with a private writable overlay per task.
 
-### T355 · FNF[redis-outage-hangs] · ConfigService Redis calls never reject during a Redis outage
+### T355 · FNF[redis-outage-hangs] · ConfigService Redis calls never reject during a Redis outage (+1)
 
 status: open · kind: fix · policy: covered by accepted bounded-wait/consistency rules · priority: P2
 In redis-factory.ts:18-27, `maxRetriesPerRequest: null` plus `enableOfflineQueue: true` mean ConfigService get/set wait out an outage. Instances:
@@ -488,6 +521,8 @@ In redis-factory.ts:18-27, `maxRetriesPerRequest: null` plus `enableOfflineQueue
   Fix direction: a per-command deadline (commandTimeout on a dedicated connection, or enableOfflineQueue false), measured against a stopped Redis, with every caller's failure path checked.
 
 Engineering scope derived from the accepted policy (2026-11-01), not a new owner decision: Apply bounded configuration reads and explicit retryable/unavailable failures. Preserve existing fail-closed new-work/maintenance fences; Redis unavailability must not silently bypass them.
+
+From the T393 build (2026-11-07), same class: unbounded `Queue.add` in request paths hangs while Redis is down (PRE-EXISTING). `enqueueStopSettle` (api lib/cancel-task.ts) shows the bounded shape: 2 s race, never throws. Sites: cancel-task.ts ~:125 (`enqueueCancelJob`), ~:331, ~:346; task-start.ts ~:82 (overlaps T318); repos.ts ~:3485-3487 (serial loop); merges.ts ~:60; steps.ts ~:498, 1172, 1385, 1481, 1587, 1670, 2125; tasks/index.ts ~:1271. Each needs its failure path checked: a job that must be queued cannot just be dropped.
 
 ### T358 · J6e · provider-pinned requirements (pin table, grants.provider_id, resolver tiers, drop the dispatch refusal)
 
@@ -643,14 +678,6 @@ status: open · kind: fix · found: T392 driver 2026-11-06 · priority: P4
 
 1. `providerNameFor` in the persona start check (packages/worker/src/queues/task-queue.ts ~:2737) takes the first `dispatchCandidates(...)` entry. It ignores subagent and MCP eligibility, and since PR #1025 also a first implicit candidate that fails to build while dispatch lands on the next one. Advisory only (records an unresolved-persona event). PRE-EXISTING. Fix direction: resolve the provider through `resolveDispatch` or share its candidate filter.
 2. `resolveTaskDispatch` calls `resolveDispatch` a second time with the codex extras (packages/worker/src/orchestrator/dispatcher.ts ~:436), so the new "provider could not build a command" warning logs twice per dispatch for the same implicit candidate. REGRESSION (log volume only). Fix direction: warn only on the outer call, or dedupe by provider id.
-
-### T393 · FNF[stop-no-settle] · an api Stop with no pass in flight never runs settleFailedTask
-
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-Containers, auth volumes, the kb_author entry and the onboarding re-sync wait for a Retry, Cancel or backstop.
-Decide: Stop enqueues a settle, or the backstop sweep settles promptly.
-
-User decision 2026-11-01: Queue prompt idempotent settlement after Stop; preserve state needed for Retry.
 
 ### T394 · FNF[stop-noop-missing-current] · Stop still answers 0 when the current row is missing, finished, or an unparked answered form
 
@@ -1356,6 +1383,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T393 — an api Stop (owner, admin, urgent module deactivation) queues one `settle-stopped-task` job after its commit and kill (`enqueueStopSettle`, 2 s bound, never throws); the worker settles only while the task still reads failed at the Stop's `failedAt`; the job never fails the task and holds no stalled redrive; docs worker-restarts.md — PR #1026 (eb925108b), 2026-11-07. CI green; merged without bot review. Follow-ups: T345 items 12-13, T355 (+1), T540-T543.
 - T392 — an implicit dispatch candidate whose adapter throws `ProviderBuildError` is logged and skipped for the next one; an explicitly selected provider rethrows; no candidate building throws the first error; docs cli-adapters.md — PR #1025 (e2e8ffd42), 2026-11-06. CI green; merged without bot review. Sonnet driver (one build round, red control confirmed on unchanged code, full worker suite green). Follow-ups filed under the same id. Evidence .claude/tmp/sonnet-run/T392/.
 - T531 items 1-3, 5-7 — module source fetch counts entries while git writes; a 40-hex ref with no same-named ref is fetched by object on first resolution, and one whose branch or tag points at another commit refuses (`module_source_ref_ambiguous`); a no-answer by-SHA fetch fails instead of falling back; v-flag-safe module id pattern exported from shared; millisecond `updated_at` compare-and-swap (required gated CI row); real-git tests; docs modules.md. Item 4 disproved (no path records a namespace that does not point at the pin) — PR #1024 (5a597ee7e), 2026-11-06. CI green; merged without bot review. Sonnet reviews: FIX (1 M security, fixed in one round), then ACCEPT (4 L, filed as items 8-10). Evidence .claude/tmp/sonnet-run/T531b/.
 - T539 items 3-5 — sh installer context reader linear (mawk 29.04 to 0.26 s, busybox 87.27 to 1.05 s); both readers bounded on one long line (busybox ~20 s to ~1.2 s); split-token rejects shared with ps1 — PR #1023 (d20349a2d), 2026-11-06. CI green; merged without bot review. Sonnet review ACCEPT (3 L; filed as T539 items 3-4). Evidence .claude/tmp/sonnet-run/T539b/.
