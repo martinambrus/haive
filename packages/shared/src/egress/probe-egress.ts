@@ -43,8 +43,12 @@ function bareHost(host: string): string {
   return name.endsWith('.') ? name.slice(0, -1) : name;
 }
 
+function isBuiltIn(seams: ProbeSeams, host: string): boolean {
+  return seams.allowHosts?.has(host.toLowerCase()) ?? false;
+}
+
 function classifierFor(host: string, seams: ProbeSeams, allow: ParsedAllowlist): Classifier {
-  if (seams.allowHosts?.has(host.toLowerCase())) return () => false;
+  if (isBuiltIn(seams, host)) return () => false;
   const base = seams.isBlocked ?? ((a) => isBlockedAddress(a));
   const hostAllowed = allow.hosts.has(bareHost(host));
   return (a) => base(a) && !(hostAllowed || allow.matches(a));
@@ -68,7 +72,7 @@ const systemResolve: Resolver = (hostname) => dns.promises.lookup(hostname, { al
 function probeLookup(host: string, seams: ProbeSeams, allow: ParsedAllowlist): net.LookupFunction {
   const resolve =
     seams.resolve ??
-    (seams.allowHosts?.has(host.toLowerCase()) || allow.hosts.has(bareHost(host))
+    (isBuiltIn(seams, host) || allow.hosts.has(bareHost(host))
       ? systemResolve
       : dnsResolver()(LOOKUP_TIMEOUT_MS).resolve);
   const inner = guardedLookup(resolve, classifierFor(host, seams, allow));
@@ -108,7 +112,13 @@ export function createGuardedFetch(seams: ProbeSeams = {}) {
   return async (input: string | URL, init: RequestInit = {}): Promise<Response> => {
     const signal = init.signal ?? undefined;
     if (signal?.aborted) throw signal.reason;
-    const allow = await allowlistFor(seams);
+    let builtIn = false;
+    try {
+      builtIn = isBuiltIn(seams, stripBrackets(new URL(input).hostname));
+    } catch {
+      // An invalid URL is refused below, after the list read as before.
+    }
+    const allow = builtIn ? EMPTY : await allowlistFor(seams);
     if (signal?.aborted) throw signal.reason;
     return new Promise<Response>((resolve, reject) => {
       const fail = (cause: unknown) => reject(new TypeError('fetch failed', { cause }));
@@ -229,8 +239,8 @@ function refusedSocket(host: string): net.Socket {
 
 export function createGuardedPgSocket(seams: ProbeSeams = {}) {
   return async (options: PgSocketOptions): Promise<net.Socket> => {
-    const allow = await allowlistFor(seams);
     const host = options.host?.[0] ?? '';
+    const allow = isBuiltIn(seams, host) ? EMPTY : await allowlistFor(seams);
     if (
       options.path ||
       options.host?.length !== 1 ||
