@@ -915,16 +915,6 @@ describe('dispatchCandidates', () => {
       'b',
     ],
     [
-      'the next enabled provider when the preferred one is disabled',
-      [
-        makeProvider({ id: 'a', name: 'gemini', enabled: false }),
-        makeProvider({ id: 'b', name: 'claude-code' }),
-      ],
-      'a',
-      false,
-      'b',
-    ],
-    [
       'the oldest enabled provider when nothing is preferred',
       [
         makeProvider({ id: 'a', name: 'gemini', createdAt: new Date('2026-02-01T00:00:00Z') }),
@@ -949,6 +939,15 @@ describe('dispatchCandidates', () => {
       expect(dispatchedId(providers, preferred, needsVision)).toBe(expected);
     });
   }
+
+  it('yields nothing when the preferred provider is disabled, even with another enabled', () => {
+    const providers = [
+      makeProvider({ id: 'a', name: 'gemini', enabled: false }),
+      makeProvider({ id: 'b', name: 'claude-code' }),
+    ];
+    expect(firstId(providers, 'a')).toBeNull();
+    expect(dispatchedId(providers, 'a')).toBeNull();
+  });
 
   it('yields nothing when every provider is disabled', () => {
     expect(firstId([makeProvider({ id: 'a', name: 'gemini', enabled: false })], 'a')).toBeNull();

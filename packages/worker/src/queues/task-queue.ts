@@ -90,6 +90,7 @@ import {
   finishedStepResult,
   isFreshStepEntry,
   willSkipBeforeAdmission,
+  dispatchesCli,
   miningTimeoutInfo,
   trailingTimeoutInfo,
   upsertRow,
@@ -105,6 +106,7 @@ import {
 import { computeFoldContribution } from '@haive/shared/timing';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { pauseParkMessage, resolvePause } from '../orchestrator/pause.js';
+import { providerHoldMessage } from '../orchestrator/provider-hold.js';
 import {
   AGENT_PERSONA_UNRESOLVED_EVENT,
   checkPinnedStepPersonas,
@@ -1488,6 +1490,10 @@ const RUNTIME_PARK_POLL_MS = 15_000;
  *  which is why it is not longer still. */
 const PAUSE_POLL_MS = 30_000;
 
+/** Poll interval for a step held on a disabled CLI provider. Like the pause hold it waits on a
+ *  person, here enabling the provider in settings or switching the step's CLI. */
+const PROVIDER_HOLD_POLL_MS = 30_000;
+
 /** Poll interval for a module step waiting on its module's schema setup on this worker. */
 const MODULE_SCHEMA_POLL_MS = 5_000;
 
@@ -1584,6 +1590,37 @@ async function loadProviders(db: Database, userId: string): Promise<CliProviderR
     .from(schema.cliProviders)
     .where(eq(schema.cliProviders.userId, userId));
   return rows;
+}
+
+/** The hold message for a fresh step whose resolved CLI is a listed provider that is switched
+ *  off, else null. Only a step that dispatches a CLI or reads the default one is asked, and a
+ *  step that will only skip is never held. */
+async function providerHoldFor(
+  db: Database,
+  ctx: ResolvedTaskContext,
+  stepDef: StepDefinition,
+  round: number,
+  runIdx: number,
+): Promise<string | null> {
+  if (!dispatchesCli(stepDef) && stepDef.metadata.providerSensitive !== true) return null;
+  const providers = await loadProviders(db, ctx.userId);
+  const { cliProviderId } = await resolvePreferredCli(
+    db,
+    ctx.userId,
+    stepDef.metadata.id,
+    ctx.cliProviderId,
+    providers,
+    'default',
+    ctx.taskId,
+    ctx.ignoreSavedStepClis,
+  );
+  const message = providerHoldMessage(providers, cliProviderId);
+  if (message === null) return null;
+  const skips = await willSkipBeforeAdmission(
+    { ...ctx, db, stepDef, round, providers },
+    await upsertRow(db, ctx.taskId, stepDef, round, runIdx >= 0 ? runIdx : undefined),
+  );
+  return skips ? null : message;
 }
 
 /** The three inputs `fairPriority` (@haive/shared/fair-priority) turns into a BullMQ priority,
@@ -2753,7 +2790,8 @@ async function handleStartTask(
   // which also gives the task the poll loop it needs to resume itself.
   if (
     (await resolvePause(db, ctx.taskId)) ||
-    (await moduleSchemaWaitMessage(db, first.metadata.id)) !== null
+    (await moduleSchemaWaitMessage(db, first.metadata.id)) !== null ||
+    (await providerHoldFor(db, ctx, first, 0, 0)) !== null
   ) {
     await enqueueAdvance(ctx.taskId, ctx.userId, first.metadata.id, 0, ctx.orchestrationEpoch);
     return;
@@ -3184,6 +3222,10 @@ async function handleAdvanceStep(
     );
     return;
   }
+  const providerWait =
+    pause || schemaWait !== null || !fresh
+      ? null
+      : await providerHoldFor(db, ctx, stepDef, round, runIdx);
   const hold = pause
     ? { message: pauseParkMessage(pause), pollMs: PAUSE_POLL_MS, label: 'pause', scope: pause }
     : schemaWait !== null
@@ -3193,7 +3235,14 @@ async function handleAdvanceStep(
           label: 'module schema',
           scope: undefined,
         }
-      : null;
+      : providerWait !== null
+        ? {
+            message: providerWait,
+            pollMs: PROVIDER_HOLD_POLL_MS,
+            label: 'provider hold',
+            scope: undefined,
+          }
+        : null;
   if (hold) {
     // Same duplicate-park-loop rule the runtime park uses, and for the same reason: a park
     // re-drives itself on a delayed job, so two advances for one task would each spawn a loop
@@ -3277,6 +3326,12 @@ async function handleAdvanceStep(
       logger.warn(parkedFields, 'pause: parked step (the pause state cannot be read)');
     } else if (pause) {
       logger.info(parkedFields, 'pause: parked step (task is held)');
+    } else if (providerWait !== null) {
+      if (alreadyParked) {
+        logger.debug(parkedFields, 'provider hold: still parked (the CLI provider is disabled)');
+      } else {
+        logger.info(parkedFields, 'provider hold: parked step (the CLI provider is disabled)');
+      }
     } else if (alreadyParked) {
       logger.debug(parkedFields, 'module schema: still parked (schema setup has not finished)');
     } else {

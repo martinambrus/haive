@@ -71,7 +71,7 @@ describe('a provider that cannot build a command', () => {
     expect(plan.providerId).toBe('prov-claude');
   });
 
-  it('treats a disabled explicit pick as no pick and falls through', () => {
+  it('skips, naming the provider, when the explicit pick is disabled', () => {
     const disabled = makeProvider({
       id: 'prov-disabled',
       name: 'claude-code',
@@ -79,7 +79,9 @@ describe('a provider that cannot build a command', () => {
       enabled: false,
     });
     const plan = dispatch([ollama, claude, disabled], 'prov-disabled');
-    expect(plan.providerId).toBe('prov-claude');
+    expect(plan.mode).toBe('skip');
+    expect(plan.providerId).toBeNull();
+    expect(plan.reason).toContain('claude-code label');
   });
 
   it('throws the first cause when no candidate builds', () => {
