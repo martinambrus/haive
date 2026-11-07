@@ -377,6 +377,7 @@ type UpdatePatch = Partial<{
   integrationWait: TaskStepRow['integrationWait'];
   status: StepStatus;
   detectOutput: unknown;
+  detectCliProviderId: string | null;
   formSchema: unknown;
   formValues: Record<string, unknown> | null;
   output: unknown;
@@ -2926,10 +2927,37 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       await foldCliParkOnResume(db, current.id);
     }
 
+    let redetected = false;
+    if (
+      meta.providerSensitive === true &&
+      stepDef.detect &&
+      (row.status === 'pending' || row.status === 'waiting_form') &&
+      current.detectOutput !== null &&
+      current.detectOutput !== undefined &&
+      current.detectCliProviderId !== null &&
+      current.detectCliProviderId !== (ctx.cliProviderId ?? null)
+    ) {
+      ctx.logger.info(
+        { stepId: meta.id, from: current.detectCliProviderId, to: ctx.cliProviderId ?? null },
+        'default CLI provider changed; re-detecting parked step',
+      );
+      current = await updateRow(db, current.id, {
+        detectOutput: null,
+        formSchema: null,
+        formValues: null,
+        detectCliProviderId: null,
+      });
+      redetected = true;
+    }
+
     let detected = current.detectOutput;
     if (detected === null || detected === undefined) {
       detected = stepDef.detect ? await stepDef.detect(ctx) : null;
-      current = await updateRow(db, current.id, { detectOutput: detected, statusMessage: null });
+      current = await updateRow(db, current.id, {
+        detectOutput: detected,
+        detectCliProviderId: ctx.cliProviderId ?? null,
+        statusMessage: null,
+      });
     }
 
     // --- Pre-form LLM phase ---
@@ -3062,7 +3090,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
 
     // A form held by a Retry or a reopen (pauseFormOnRetry) has not been offered since the hold was
     // set, so values a job carries can only be a submit sent before it: the form parks instead.
-    const submitted = current.pauseFormOnRetry ? undefined : params.formValues;
+    const submitted = redetected || current.pauseFormOnRetry ? undefined : params.formValues;
 
     // Manual mode: EVERY step pauses before apply. Formless steps get a
     // synthesized confirm-only schema so the existing waiting_form plumbing
@@ -3407,6 +3435,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           current = await updateRow(db, current.id, {
             status: 'waiting_form',
             detectOutput: refreshedDetected,
+            detectCliProviderId: ctx.cliProviderId ?? null,
             formSchema: refreshedSchema,
             formValues: null,
             pauseFormOnRetry: false,
