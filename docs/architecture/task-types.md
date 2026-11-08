@@ -324,10 +324,11 @@ with it.
 - **Wiring** (worker). Before a prompt step with tools dispatches, the runner (`resolveCustomTools`)
   re-checks the pinned tools against today's save rules that do not depend on the task type
   (`pinnedToolsFailure`: a release that tightened a bound fails the step as `custom-tool-invalid`, naming
-  the tool). It validates with `requiresRepository: true` because the type's trait is not known there,
-  so a `rag-query` scope a repository-less type could not save is not re-checked; nor is it at the call
-  route. The runner then checks the install switch `CUSTOM_MCP_TOOLS_ENABLED` and
-  `CONFIG_ENCRYPTION_KEY`; each failure names its fix. The dispatch
+  the tool). It validates with the task type's own `requiresRepository` (`loadPinnedTools`; a type row
+  that is gone reads `true`), as the call route does. A pinned template that no longer parses fails the
+  step at dispatch as `custom-template-invalid`, naming the first 8 problems. The runner then checks the
+  install switch `CUSTOM_MCP_TOOLS_ENABLED` and `CONFIG_ENCRYPTION_KEY`; each failure names its fix. The
+  dispatch
   requires a CLI that can host MCP servers (`requiresMcp`), and fails by name when no enabled one can.
   The cli-exec resolver repeats the pinned-tool check for a run executed later, signs a `custom-mcp`
   token for that task, step and invocation (valid for the run's timeout plus a grace) and mounts three
@@ -335,9 +336,20 @@ with it.
   (`/haive/haive-custom.tools.json`: name, description and the input schema the api also checks) and
   the token (`/haive/haive-custom.token`) — never an environment variable. A run naming custom tools
   fails (`custom-tools-unwired`) when their server could not be added to the CLI, a CLI with no MCP
-  configuration included; a best-effort server
+  configuration included; the failure names each server whose `mcp add` failed (`failedMcpAddNames`),
+  and keeps the general cause when none is known. A best-effort server
   failure elsewhere lets the run carry on.
 
+- **Start gate** (api). `assertCustomToolsUsable` (`lib/custom-tools-start-check.ts`) runs in
+  `markQueuedForStart`, so every first Start (create-and-start, the Start action, a plan-link spawn, a
+  draft run) passes it, and in the full-Retry branch of the task action. A step Retry, a resume and an
+  auto-resume are not gated: the runner's check covers them. It applies the runner's checks to every
+  pinned step and refuses with 409 `custom-tool-invalid` or `custom-tools-switched-off`, naming the
+  first failing step in id order (its title on one line, tool names cut to 64 characters, 8 listed then
+  "and N more"); the task stays as it was and nothing is queued. Every declared tool counts as required:
+  there is no tool-level optional flag. A repeat Start of a started task stays a no-op, a config store
+  outage answers 503 `config_unavailable` and starts nothing, and `start-entry-points.test.ts` pins that
+  only the two gated writers set `queued`. It does not check `CONFIG_ENCRYPTION_KEY`.
 - **Authoring and the switch.** An administrator adds tools in the prompt-step editor's Custom tools
   section (action, name, description, then the URL and query parameters or the scope and result count,
   and typed parameters); a new tool starts with the schema defaults, and switching its action keeps the
@@ -348,7 +360,9 @@ with it.
   that no longer passes the schema is named on load as `tool-no-longer-valid`.
   `GET|PUT /admin/config/custom-tools` reads and writes `CUSTOM_MCP_TOOLS_ENABLED` (default on; the
   "Custom tools" card on the admin page), and every PUT records `config.custom_tools` with
-  `{from, to}`.
+  `{from, to}`. `resolveCustomToolsEnabled` (`@haive/shared/modularity-server`) is the one reader: the
+  call route, that GET, the runner, the cli-exec resolver and the Start gate use it, and a config outage
+  propagates from it (fails closed). The admin PUT is the only writer.
 - **Schema** (`custom-tools.ts`): at most 10 typed params per tool, names matching `TOOL_NAME_PATTERN`,
   reserved names `rag_search`, `ddev_status`, `ddev_logs`, `ddev_restart`. `http-get`: an https URL of
   at most 2048 characters with `{name}` placeholders in the path only, a public DNS host (no IP literal
@@ -362,8 +376,8 @@ with it.
   task token carrying the step and the invocation (401 otherwise); a live invocation of that task and
   step (401 `invocation-not-live`, no row); the tool declared on that step of that task's pinned copy
   (403 `undeclared-tool`; a name the agent chose is never stored); the kill switch (403
-  `switched-off`); strict arguments (400); for `http-get`, the pinned tool re-validated (403
-  `tool-invalid`), its URL built from the arguments (400 `invalid-arguments`), and the run's network
+  `switched-off`); strict arguments (400); the pinned tool, of either kind, re-validated with the type's
+  `requiresRepository` (403 `tool-invalid`); for `http-get`, its URL built from the arguments (400 `invalid-arguments`), and the run's network
   policy `full` (403 `egress-restricted`). Every refusal past the liveness check is a claimed
   row; the budget (50 calls per invocation) is claimed under
   `pg_advisory_xact_lock('custom-mcp-budget:'||invocation)`, and at 50 the answer is 429 with nothing
