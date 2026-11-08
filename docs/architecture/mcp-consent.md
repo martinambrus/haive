@@ -14,7 +14,8 @@ under that name (`mcpServersNeedingConsent`), since a file can put any command u
 stripped from an incoming mirror and never committed. Acceptance is an HMAC of the list keyed with
 the install's encryption key (`mcpAcceptanceMark`), never a plain hash: an older release's import
 stored the committed tooling verbatim, so a file could carry a matching hash of its own list.
-`holdImportedMcpServerLists` holds such rows at boot. A record this install's own 04 wrote equals
+`holdImportedMcpServerLists` holds such rows at boot; during a configuration store outage boot
+retries it rather than skipping it until the next restart. A record this install's own 04 wrote equals
 that run's `output.tooling`, so only one matching no local 04 run is held, and the mark keeps an
 accepted list from being held again.
 The project state record carries the same list: `settings/onboarding-tooling.json` is the tooling

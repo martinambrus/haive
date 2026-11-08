@@ -13,7 +13,8 @@ redelivered after it was applied. A submission, a retry and a first run still fl
 `retryWhileConfigUnavailable` (see [Error diagnostics](error-diagnostics.md), "Configuration store
 outage"), and the step engine, the sandbox reap, the reconcile, the queues, the module jobs and
 `haive-worker ready` all follow it, so a worker booting during an outage waits up rather than half
-starting. Any error other than the typed outage still exits 1.
+starting. The boot data migrations are part of the retried `bootstrap()`. Any error other than the
+typed outage still exits 1.
 
 **Boot hands a dead worker's active jobs back before it starts its own.** BullMQ keeps a job
 `active` under its lock when its worker dies, and the task and cli-exec locks are 30 minutes, so
