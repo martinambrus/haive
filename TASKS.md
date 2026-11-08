@@ -413,11 +413,6 @@ From the T346 build (2026-11-08), PRE-EXISTING: 4. `failedMcpAddNames` (task-aut
 status: open · kind: fix · priority: P3
 PRE-EXISTING, from the T355 build. 1. updater run.ts ~:394-395: a rollback whose found-state read and write both fail leaves no record of the hold. 2. run.ts ~:115-130 `awaitVersion` has no timeout.
 
-### T546 · FNF[config-outage-failopen-gates] · remaining readers that default open when the config store is down
-
-status: in progress (sonnet-sonnet driver, 2026-11-08) · kind: fix · priority: P2
-PRE-EXISTING, from the T355 build. 1. worker runtime-runner-reaper.ts ~:482-488 uses the default grace on a failed read. 2. `moveToDelayed` paths fail the run on a config read error: cli-exec/handlers.ts ~:1426, ~:1472, ~:1504; agent-reserve.ts ~:344, ~:429. 3. task-queue.ts ~:1821 classifies a `ConfigUnavailableError` as a genuine failure. 4. (T544 run) worker data-migrations.ts `runOne` (~:262-268) logs and swallows a typed outage a boot migration throws, including the one `holdImportedMcpServerLists` rethrows on purpose (~:703-706).
-
 ### T547 · FNF[config-write-unknown-outcome] · a write that times out may still land
 
 status: open · kind: design · priority: P3
@@ -1519,6 +1514,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T546 — config-outage readers hold instead of defaulting open: the reaper keeps runners whose grace it cannot read, refused defers retry for 60 s, boot migrations rethrow a typed outage into the boot retry — PR #1036 (9d55b622c), 2026-11-09
 - T544 — a config store outage at boot: initialize fails typed within 10 s and api and worker retry boot instead of exiting — PR #1035 (1ffea2665), 2026-11-08
 - T549 — the api's shared Redis client is bounded (503 when Redis is down); /admin/health reports Redis (merged without bot review) — PR #1033 (79eecd7b7), 2026-11-08
 - T350 — module runtime status: Failed/Starting on the Modules tab with Retry (merged without bot review) — PR #1032 (bbea8d105), 2026-11-08
