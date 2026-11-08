@@ -408,11 +408,6 @@ PRE-EXISTING, from the T393 build (2026-11-07).
 
 From the T346 build (2026-11-08), PRE-EXISTING: 4. `failedMcpAddNames` (task-auth-volume.ts:962) can race a sibling run of another surface on the same volume and fall back to the general cause; `clearTaskAuthPreparationState` shares the in-flight state.
 
-### T544 · FNF[config-service-boot-outage] · ConfigService boot and encryption-key paths still wait out a Redis outage
-
-status: in progress (sonnet-sonnet driver, 2026-11-08) · kind: fix · priority: P2
-PRE-EXISTING, from the T355 build (2026-11-07). 1. Encryption key read and plain SET at shared config.service.ts ~:884, ~:976 bypass the bounded wrapper. 2. `initialize` (~:798) and modules loader.ts ~:208 at boot hang without a deadline. 3. global-kb boot hangs the same way. 4. Under `tsx watch` a boot that rejects does not restart; check the process stays up and retries.
-
 ### T545 · FNF[updater-found-state-fallback] · updater residual double failure and unbounded version wait
 
 status: open · kind: fix · priority: P3
@@ -1509,6 +1504,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T544 — a config store outage at boot: initialize fails typed within 10 s and api and worker retry boot instead of exiting — PR #1035 (1ffea2665), 2026-11-08
 - T549 — the api's shared Redis client is bounded (503 when Redis is down); /admin/health reports Redis (merged without bot review) — PR #1033 (79eecd7b7), 2026-11-08
 - T350 — module runtime status: Failed/Starting on the Modules tab with Retry (merged without bot review) — PR #1032 (bbea8d105), 2026-11-08
 - T346 — Start refuses a task whose pinned custom tools are unusable (`assertCustomToolsUsable` in `markQueuedForStart` and the full-Retry branch; 409 `custom-tool-invalid` / `custom-tools-switched-off`, 503 on a config outage); every declared tool counts as required (user decision 2026-11-08, no optional flag); one reader `resolveCustomToolsEnabled`; `POST /custom-mcp/call` re-validates every pinned tool kind; pinned-tool re-checks use the type's `requiresRepository`; an unparseable pinned template fails as `custom-template-invalid`; the unwired failures name the server whose `mcp add` failed; docs task-types.md, integrations.md — PR #1031 (d79572701), 2026-11-08. CI green; merged without bot review. Follow-ups T563, T564 (design), T318 (+2), T543 (+1), T551 note.
