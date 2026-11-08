@@ -8,7 +8,7 @@ import {
   rethrowIfConfigUnavailable,
 } from '../src/config/index.js';
 
-type Mode = 'healthy' | 'silent';
+type Mode = 'healthy' | 'silent' | 'loading';
 
 /** Just enough RESP2 for ioredis: arrays of bulk strings in, simple replies out. */
 class FakeRedis {
@@ -20,6 +20,8 @@ class FakeRedis {
   received: string[][] = [];
   store = new Map<string, string>();
   getError: string | null = null;
+  /** When set, INFO replies with this error text. */
+  infoError: string | null = null;
   /** Upper-case command names on which the server destroys the socket. */
   dropOn = new Set<string>();
   /** Upper-case command names the server swallows without replying. */
@@ -95,11 +97,18 @@ class FakeRedis {
     this.received.push(args);
     if (this.mode === 'silent') return;
     const name = args[0]!.toUpperCase();
+    if (this.mode === 'loading') {
+      if (name === 'INFO') {
+        return void socket.write(bulk('# Persistence\r\nloading:1\r\nloading_eta_seconds:2\r\n'));
+      }
+      return void socket.write('-LOADING Redis is loading the dataset in memory\r\n');
+    }
     if (this.silentOn.has(name)) return;
     if (this.dropOn.has(name)) return void socket.destroy();
     this.applied.push(args);
     switch (name) {
       case 'INFO':
+        if (this.infoError) return void socket.write(`-${this.infoError}\r\n`);
         return void socket.write(bulk('# Persistence\r\nloading:0\r\n'));
       case 'GET': {
         if (this.getError) return void socket.write(`-${this.getError}\r\n`);
@@ -179,11 +188,6 @@ describe('ConfigService while Redis is unavailable', () => {
     if (savedKey === undefined) delete process.env.CONFIG_ENCRYPTION_KEY;
     else process.env.CONFIG_ENCRYPTION_KEY = savedKey;
   });
-
-  /** A rejected initialize leaves its reconnecting client open; close it. */
-  function disconnectLeaked(): void {
-    (svc as unknown as { redis: { disconnect(): void } | null }).redis?.disconnect();
-  }
 
   async function boot(): Promise<void> {
     fake = new FakeRedis();
@@ -351,7 +355,6 @@ describe('ConfigService while Redis is unavailable', () => {
     await fake.start();
     svc = new ConfigService();
     const { err } = await timed(svc.initialize(fake.url()));
-    disconnectLeaked();
     expect(err).toBeInstanceOf(ConfigUnavailableError);
     expect((err as ConfigUnavailableError).operation).toBe('seedDefaults');
     expect((err as ConfigUnavailableError).cause).toBeDefined();
@@ -378,7 +381,6 @@ describe('ConfigService while Redis is unavailable', () => {
       await fake.start();
       svc = new ConfigService();
       const { err, ms } = await timed(svc.initialize(fake.url()));
-      disconnectLeaked();
       expect(err).toBeInstanceOf(ConfigUnavailableError);
       expect((err as ConfigUnavailableError).operation).toBe(op);
       expect(ms).toBeLessThan(3500);
@@ -391,7 +393,6 @@ describe('ConfigService while Redis is unavailable', () => {
     await fake.start();
     svc = new ConfigService();
     const { err, ms } = await timed(svc.initialize(fake.url()));
-    disconnectLeaked();
     expect(err).toBeInstanceOf(ConfigUnavailableError);
     expect((err as ConfigUnavailableError).operation).toBe('seedDefaults');
     expect(ms).toBeGreaterThan(1800);
@@ -404,9 +405,109 @@ describe('ConfigService while Redis is unavailable', () => {
     await fake.start();
     svc = new ConfigService();
     const { err } = await timed(svc.initialize(fake.url()));
-    disconnectLeaked();
     expect(err).toBeInstanceOf(ReplyError);
     expect(err).not.toBeInstanceOf(ConfigUnavailableError);
+  });
+
+  async function withReadyTimeout(ms: number, fn: () => Promise<void>): Promise<void> {
+    const cls = ConfigService as unknown as { READY_TIMEOUT_MS: number };
+    const saved = cls.READY_TIMEOUT_MS;
+    cls.READY_TIMEOUT_MS = ms;
+    try {
+      await fn();
+    } finally {
+      cls.READY_TIMEOUT_MS = saved;
+    }
+  }
+
+  it('rejects initialize typed after the deadline while Redis is LOADING', async () => {
+    await withReadyTimeout(400, async () => {
+      fake = new FakeRedis();
+      fake.mode = 'loading';
+      await fake.start();
+      svc = new ConfigService();
+      const { err, ms } = await timed(svc.initialize(fake.url()));
+      expect(err).toBeInstanceOf(ConfigUnavailableError);
+      expect((err as ConfigUnavailableError).operation).toBe('initialize');
+      expect((err as ConfigUnavailableError).cause).toBeDefined();
+      expect(ms).toBeGreaterThanOrEqual(350);
+      expect(ms).toBeLessThanOrEqual(1500);
+    });
+  });
+
+  it('does not reconnect after the LOADING deadline rejection', async () => {
+    await withReadyTimeout(400, async () => {
+      fake = new FakeRedis();
+      fake.mode = 'loading';
+      await fake.start();
+      svc = new ConfigService();
+      await timed(svc.initialize(fake.url()));
+      const seen = fake.connections;
+      await sleep(1500);
+      expect(fake.connections).toBe(seen);
+    });
+  });
+
+  it('rejects initialize typed against a refused store and leaks no client', async () => {
+    fake = new FakeRedis();
+    await fake.start();
+    await fake.refuse();
+    svc = new ConfigService();
+    const { err, ms } = await timed(svc.initialize(fake.url()));
+    expect(err).toBeInstanceOf(ConfigUnavailableError);
+    expect((err as ConfigUnavailableError).operation).toBe('initialize');
+    expect(ms).toBeLessThan(1500);
+    await fake.restart();
+    await sleep(1500);
+    expect(fake.connections).toBe(0);
+  });
+
+  it('lets the same instance initialize again after a failed initialize', async () => {
+    fake = new FakeRedis();
+    await fake.start();
+    await fake.refuse();
+    svc = new ConfigService();
+    await timed(svc.initialize(fake.url()));
+    await fake.restart();
+    await svc.initialize(fake.url());
+    expect(svc.getRedis()).toBeDefined();
+    expect(await svc.getFresh('again:key')).toBeNull();
+  });
+
+  it('rejects initialize typed after the deadline when the server is silent', async () => {
+    await withReadyTimeout(400, async () => {
+      fake = new FakeRedis();
+      fake.mode = 'silent';
+      await fake.start();
+      svc = new ConfigService();
+      const { err, ms } = await timed(svc.initialize(fake.url()));
+      expect(err).toBeInstanceOf(ConfigUnavailableError);
+      expect((err as ConfigUnavailableError).operation).toBe('initialize');
+      expect(ms).toBeLessThan(1500);
+    });
+  });
+
+  it('keeps a server error at the ready check a ReplyError', async () => {
+    fake = new FakeRedis();
+    fake.infoError = 'ERR boom';
+    await fake.start();
+    svc = new ConfigService();
+    const { err } = await timed(svc.initialize(fake.url()));
+    expect(err).toBeInstanceOf(ReplyError);
+    expect(err).not.toBeInstanceOf(ConfigUnavailableError);
+  });
+
+  it('closes its client when initialize fails mid-seed', async () => {
+    fake = new FakeRedis();
+    fake.dropOn.add('SETNX');
+    await fake.start();
+    svc = new ConfigService();
+    await timed(svc.initialize(fake.url()));
+    // A client left open would reconnect after the server drops it again.
+    const seen = fake.connections;
+    fake.dropConnections();
+    await sleep(800);
+    expect(fake.connections).toBe(seen);
   });
 
   it('keeps the production key mismatch a plain Error', async () => {
@@ -418,7 +519,6 @@ describe('ConfigService while Redis is unavailable', () => {
       await fake.start();
       svc = new ConfigService();
       const { err } = await timed(svc.initialize(fake.url()));
-      disconnectLeaked();
       expect(err).toBeInstanceOf(Error);
       expect(err).not.toBeInstanceOf(ConfigUnavailableError);
       expect(err).not.toBeInstanceOf(ReplyError);

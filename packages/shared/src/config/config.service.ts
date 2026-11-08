@@ -799,6 +799,8 @@ export class ConfigService {
   private initialized = false;
   private localCache = new Map<string, { value: string | null; expiresAt: number }>();
   private static LOCAL_CACHE_TTL_MS = 30_000;
+  // Bounds a Redis that stays LOADING: ioredis then neither becomes ready nor emits an error.
+  private static READY_TIMEOUT_MS = 10_000;
 
   async initialize(redisUrl?: string): Promise<void> {
     if (this.initialized) return;
@@ -808,7 +810,8 @@ export class ConfigService {
       throw new Error('REDIS_URL environment variable is required');
     }
 
-    this.redis = createRedisConnection(url, CONFIG_REDIS_OPTIONS);
+    const redis = createRedisConnection(url, CONFIG_REDIS_OPTIONS);
+    this.redis = redis;
 
     // Persistent listener: without one ioredis writes a raw "Unhandled error event" to stderr per
     // reconnect attempt. Throttled for the same reason.
@@ -820,17 +823,53 @@ export class ConfigService {
       logger.warn({ err }, 'ConfigService Redis connection error');
     });
 
-    await new Promise<void>((resolve, reject) => {
-      this.redis!.once('ready', resolve);
-      this.redis!.once('error', reject);
-    });
-
-    await this.seedDefaults();
-    await this.reconcileRaisedDefaults();
-    await this.ensureEncryptionKey();
+    try {
+      await this.waitUntilReady(redis);
+      await this.seedDefaults();
+      await this.reconcileRaisedDefaults();
+      await this.ensureEncryptionKey();
+    } catch (err) {
+      // Otherwise the failed client reconnects forever.
+      redis.disconnect();
+      this.redis = null;
+      throw err;
+    }
 
     this.initialized = true;
     logger.info('ConfigService initialized');
+  }
+
+  private waitUntilReady(redis: Redis): Promise<void> {
+    const timeoutMs = ConfigService.READY_TIMEOUT_MS;
+    return new Promise<void>((resolve, reject) => {
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        redis.off('ready', onReady);
+        redis.off('error', onError);
+      };
+      const onReady = (): void => {
+        cleanup();
+        resolve();
+      };
+      const onError = (err: Error): void => {
+        cleanup();
+        reject(
+          err instanceof ReplyError
+            ? err
+            : new ConfigUnavailableError('initialize', { cause: err }),
+        );
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(
+          new ConfigUnavailableError('initialize', {
+            cause: new Error(`Redis was not ready within ${timeoutMs} ms`),
+          }),
+        );
+      }, timeoutMs);
+      redis.once('ready', onReady);
+      redis.once('error', onError);
+    });
   }
 
   private async seedDefaults(): Promise<void> {
