@@ -5,7 +5,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 import { getDb } from '../db.js';
-import { getRedis } from '../redis.js';
+import { getPatientRedis, getRedis } from '../redis.js';
 import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
 import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
@@ -143,7 +143,7 @@ async function runStreamSession(
   if (ws.readyState !== WebSocket.OPEN) return;
 
   // Dedicated Redis connection — XREAD BLOCK monopolizes the socket.
-  const redis = getRedis().duplicate();
+  const redis = getPatientRedis().duplicate();
   await redis.connect().catch(() => undefined);
   if (ws.readyState !== WebSocket.OPEN) {
     await redis.quit().catch(() => undefined);

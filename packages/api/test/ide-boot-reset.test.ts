@@ -8,8 +8,8 @@ vi.mock('../src/queues.js', () => ({
   getIdeEnsureQueue: () => ({}),
   getIdeEnsureQueueEvents: () => ({}),
 }));
-vi.mock('../src/redis.js', () => ({
-  getRedis: () => ({
+vi.mock('../src/redis.js', () => {
+  const fake = () => ({
     scan: async () => ['0', [...h.store.keys()]],
     hget: async (key: string, field: string) => h.store.get(key)?.[field] ?? null,
     hset: async (key: string, ...pairs: string[]) => {
@@ -18,8 +18,9 @@ vi.mock('../src/redis.js', () => ({
       h.store.set(key, entry);
       return pairs.length / 2;
     },
-  }),
-}));
+  });
+  return { getRedis: fake, getPatientRedis: fake };
+});
 
 import { resetStaleIdeRefcounts } from '../src/routes/ide.js';
 

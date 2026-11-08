@@ -22,7 +22,7 @@ import {
   type TerminalOpenResult,
 } from '@haive/shared';
 import { getDb } from '../db.js';
-import { getRedis } from '../redis.js';
+import { getPatientRedis } from '../redis.js';
 import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
 import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
@@ -183,7 +183,7 @@ export async function runScopedShellSession(
 
   // Subscriber connection — ioredis subscribe-mode monopolises the socket so
   // we can't share with the publisher. duplicate() inherits config.
-  const subscriber = getRedis().duplicate();
+  const subscriber = getPatientRedis().duplicate();
   // Defensive error listener. ioredis emits 'error' on the instance for
   // socket-level failures; without a listener Node crashes the process. The
   // refcount fix triggers this because cleanup() can call subscriber.quit()
@@ -197,7 +197,7 @@ export async function runScopedShellSession(
     await subscriber.quit().catch(() => undefined);
     return;
   }
-  const publisher = getRedis();
+  const publisher = getPatientRedis();
 
   // Refcount/cleanup state — set up BEFORE the openSession await. React
   // StrictMode mounts the InteractiveShell effect twice; the first mount's
@@ -426,8 +426,8 @@ export async function runScopedShellSession(
 }
 
 interface OpenSessionArgs {
-  subscriber: ReturnType<typeof getRedis>;
-  publisher: ReturnType<typeof getRedis>;
+  subscriber: ReturnType<typeof getPatientRedis>;
+  publisher: ReturnType<typeof getPatientRedis>;
   correlationId: string;
   replyChannel: string;
   userId: string;
@@ -609,7 +609,7 @@ function sendJson(ws: WebSocket, frame: Record<string, unknown>): void {
  *  reaps on schedule. One that was held gets lastSeenAt = now: its tab is about to reconnect, and
  *  the time its last socket attached would read as idle for hours, so the worker's reaper could
  *  remove its container in the first sweep. Mirrors the editor registry's `resetStaleIdeRefcounts`. */
-export async function resetStaleRefcounts(redis: Redis = getRedis()): Promise<void> {
+export async function resetStaleRefcounts(redis: Redis = getPatientRedis()): Promise<void> {
   let cursor = '0';
   let cleared = 0;
   do {

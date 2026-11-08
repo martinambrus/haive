@@ -3,8 +3,8 @@ import { TERMINAL_IDLE_GRACE_MS, TERMINAL_SESSION_PREFIX } from '@haive/shared';
 
 const h = vi.hoisted(() => ({ store: new Map<string, Record<string, string>>() }));
 
-vi.mock('../src/redis.js', () => ({
-  getRedis: () => ({
+vi.mock('../src/redis.js', () => {
+  const fake = () => ({
     scan: async () => ['0', [...h.store.keys()]],
     hget: async (key: string, field: string) => h.store.get(key)?.[field] ?? null,
     hset: async (key: string, ...pairs: string[]) => {
@@ -13,8 +13,9 @@ vi.mock('../src/redis.js', () => ({
       h.store.set(key, entry);
       return pairs.length / 2;
     },
-  }),
-}));
+  });
+  return { getRedis: fake, getPatientRedis: fake };
+});
 
 import { resetStaleRefcounts } from '../src/routes/terminal-shell.js';
 
