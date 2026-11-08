@@ -834,15 +834,18 @@ export class ConfigService {
   }
 
   private async seedDefaults(): Promise<void> {
-    const pipeline = this.redis!.pipeline();
-    for (const [key, value] of Object.entries(DEFAULT_CONFIG)) {
-      pipeline.setnx(key, value);
-    }
-    const results = await pipeline.exec();
-    // exec() resolves per-command errors on a transport failure instead of rejecting; a drop
-    // mid-seed must fail boot rather than silently skip seeding.
-    const failed = results?.find(([err]) => err);
-    if (failed?.[0]) throw failed[0];
+    const results = await this.redisCall('seedDefaults', async (redis) => {
+      const pipeline = redis.pipeline();
+      for (const [key, value] of Object.entries(DEFAULT_CONFIG)) {
+        pipeline.setnx(key, value);
+      }
+      const res = await pipeline.exec();
+      // exec() resolves per-command errors on a transport failure instead of rejecting; a drop
+      // mid-seed must fail boot rather than silently skip seeding.
+      const failed = res?.find(([err]) => err);
+      if (failed?.[0]) throw failed[0];
+      return res;
+    });
     if (results?.some(([, result]) => result === 1)) {
       logger.info('Default configuration seeded');
     }
@@ -875,9 +878,11 @@ export class ConfigService {
       },
     ];
     for (const raise of raises) {
-      const stored = await this.redis!.get(raise.key);
+      const stored = await this.redisCall('reconcileRaisedDefaults', (redis) =>
+        redis.get(raise.key),
+      );
       if (stored !== raise.previous) continue;
-      await this.redis!.set(raise.key, raise.next);
+      await this.redisCall('reconcileRaisedDefaults', (redis) => redis.set(raise.key, raise.next));
       this.localCache.delete(raise.key);
       logger.info(
         { key: raise.key, from: raise.previous, to: raise.next, why: raise.why },
@@ -887,23 +892,31 @@ export class ConfigService {
   }
 
   private async ensureEncryptionKey(): Promise<void> {
-    const exists = await this.redis!.exists(CONFIG_KEYS.ENCRYPTION_KEY);
+    const exists = await this.redisCall('ensureEncryptionKey', (redis) =>
+      redis.exists(CONFIG_KEYS.ENCRYPTION_KEY),
+    );
     const envKey = this.getEnvEncryptionKey();
 
     if (!exists) {
       if (envKey) {
-        await this.redis!.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey);
+        await this.redisCall('ensureEncryptionKey', (redis) =>
+          redis.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey),
+        );
         logger.info('Seeded encryption key from CONFIG_ENCRYPTION_KEY');
         return;
       }
       const generated = randomBytes(32).toString('hex');
-      await this.redis!.set(CONFIG_KEYS.ENCRYPTION_KEY, generated);
+      await this.redisCall('ensureEncryptionKey', (redis) =>
+        redis.set(CONFIG_KEYS.ENCRYPTION_KEY, generated),
+      );
       logger.warn('Generated new encryption key (CONFIG_ENCRYPTION_KEY not set)');
       return;
     }
 
     if (envKey) {
-      const stored = await this.redis!.get(CONFIG_KEYS.ENCRYPTION_KEY);
+      const stored = await this.redisCall('ensureEncryptionKey', (redis) =>
+        redis.get(CONFIG_KEYS.ENCRYPTION_KEY),
+      );
       if (stored && stored !== envKey) {
         if (process.env.NODE_ENV === 'production') {
           throw new Error(

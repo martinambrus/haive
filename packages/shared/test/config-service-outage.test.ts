@@ -20,7 +20,10 @@ class FakeRedis {
   received: string[][] = [];
   store = new Map<string, string>();
   getError: string | null = null;
-  dropOnSetnx = false;
+  /** Upper-case command names on which the server destroys the socket. */
+  dropOn = new Set<string>();
+  /** Upper-case command names the server swallows without replying. */
+  silentOn = new Set<string>();
   connections = 0;
   private server: Server | null = null;
   private sockets = new Set<Socket>();
@@ -91,8 +94,10 @@ class FakeRedis {
   private handle(socket: Socket, args: string[]): void {
     this.received.push(args);
     if (this.mode === 'silent') return;
-    this.applied.push(args);
     const name = args[0]!.toUpperCase();
+    if (this.silentOn.has(name)) return;
+    if (this.dropOn.has(name)) return void socket.destroy();
+    this.applied.push(args);
     switch (name) {
       case 'INFO':
         return void socket.write(bulk('# Persistence\r\nloading:0\r\n'));
@@ -108,7 +113,6 @@ class FakeRedis {
         return void socket.write('+OK\r\n');
       }
       case 'SETNX': {
-        if (this.dropOnSetnx) return void socket.destroy();
         const had = this.store.has(args[1]!);
         if (!had) this.store.set(args[1]!, args[2]!);
         return void socket.write(had ? ':0\r\n' : ':1\r\n');
@@ -175,6 +179,11 @@ describe('ConfigService while Redis is unavailable', () => {
     if (savedKey === undefined) delete process.env.CONFIG_ENCRYPTION_KEY;
     else process.env.CONFIG_ENCRYPTION_KEY = savedKey;
   });
+
+  /** A rejected initialize leaves its reconnecting client open; close it. */
+  function disconnectLeaked(): void {
+    (svc as unknown as { redis: { disconnect(): void } | null }).redis?.disconnect();
+  }
 
   async function boot(): Promise<void> {
     fake = new FakeRedis();
@@ -338,10 +347,88 @@ describe('ConfigService while Redis is unavailable', () => {
 
   it('fails initialize when the connection drops mid-seed', async () => {
     fake = new FakeRedis();
-    fake.dropOnSetnx = true;
+    fake.dropOn.add('SETNX');
     await fake.start();
     svc = new ConfigService();
-    await expect(svc.initialize(fake.url())).rejects.toBeDefined();
+    const { err } = await timed(svc.initialize(fake.url()));
+    disconnectLeaked();
+    expect(err).toBeInstanceOf(ConfigUnavailableError);
+    expect((err as ConfigUnavailableError).operation).toBe('seedDefaults');
+    expect((err as ConfigUnavailableError).cause).toBeDefined();
+  });
+
+  const STALE_ATTACHMENT_CAP = String(25 * 1024 * 1024);
+
+  it.each([
+    { cmd: 'SETNX', op: 'seedDefaults', seed: {} },
+    { cmd: 'GET', op: 'reconcileRaisedDefaults', seed: {} },
+    {
+      cmd: 'SET',
+      op: 'reconcileRaisedDefaults',
+      seed: { [CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES]: STALE_ATTACHMENT_CAP },
+    },
+    { cmd: 'EXISTS', op: 'ensureEncryptionKey', seed: {} },
+    { cmd: 'SET', op: 'ensureEncryptionKey', seed: {} },
+  ])(
+    'fails initialize typed as $op when the connection drops on $cmd',
+    async ({ cmd, op, seed }) => {
+      fake = new FakeRedis();
+      fake.dropOn.add(cmd);
+      for (const [k, v] of Object.entries(seed)) fake.store.set(k, v);
+      await fake.start();
+      svc = new ConfigService();
+      const { err, ms } = await timed(svc.initialize(fake.url()));
+      disconnectLeaked();
+      expect(err).toBeInstanceOf(ConfigUnavailableError);
+      expect((err as ConfigUnavailableError).operation).toBe(op);
+      expect(ms).toBeLessThan(3500);
+    },
+  );
+
+  it('fails initialize typed as seedDefaults after the command timeout when SETNX is silent', async () => {
+    fake = new FakeRedis();
+    fake.silentOn.add('SETNX');
+    await fake.start();
+    svc = new ConfigService();
+    const { err, ms } = await timed(svc.initialize(fake.url()));
+    disconnectLeaked();
+    expect(err).toBeInstanceOf(ConfigUnavailableError);
+    expect((err as ConfigUnavailableError).operation).toBe('seedDefaults');
+    expect(ms).toBeGreaterThan(1800);
+    expect(ms).toBeLessThan(3500);
+  });
+
+  it('keeps a server error reply on a boot-time call as a ReplyError', async () => {
+    fake = new FakeRedis();
+    fake.getError = 'ERR boom';
+    await fake.start();
+    svc = new ConfigService();
+    const { err } = await timed(svc.initialize(fake.url()));
+    disconnectLeaked();
+    expect(err).toBeInstanceOf(ReplyError);
+    expect(err).not.toBeInstanceOf(ConfigUnavailableError);
+  });
+
+  it('keeps the production key mismatch a plain Error', async () => {
+    const savedEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      fake = new FakeRedis();
+      fake.store.set(CONFIG_KEYS.ENCRYPTION_KEY, 'cd'.repeat(32));
+      await fake.start();
+      svc = new ConfigService();
+      const { err } = await timed(svc.initialize(fake.url()));
+      disconnectLeaked();
+      expect(err).toBeInstanceOf(Error);
+      expect(err).not.toBeInstanceOf(ConfigUnavailableError);
+      expect(err).not.toBeInstanceOf(ReplyError);
+      // The abort exists to protect the stored key: it must not have been overwritten.
+      expect(fake.countApplied('SET', CONFIG_KEYS.ENCRYPTION_KEY)).toBe(0);
+      expect(fake.store.get(CONFIG_KEYS.ENCRYPTION_KEY)).toBe('cd'.repeat(32));
+    } finally {
+      if (savedEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = savedEnv;
+    }
   });
 
   it.each(['refused', 'silent'] as const)(
