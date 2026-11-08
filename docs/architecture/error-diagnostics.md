@@ -72,6 +72,23 @@ server reply passes through. A timeout means the outcome is unknown: a timed-out
 landed. `pipeline().exec()` resolves per-command errors, so `seedDefaults` throws on them. `close()`
 falls back to `disconnect()`.
 
+**Boot waits out a configuration store outage instead of exiting.** `initialize` waits for `ready` at
+most `READY_TIMEOUT_MS` (10 s): a Redis that stays `LOADING` neither becomes ready nor emits an error,
+and the wait never settled. A transport error or that deadline rejects with
+`ConfigUnavailableError('initialize')`; a server reply (a wrong password) stays a raw `ReplyError`. A
+failed `initialize` disconnects its client, which otherwise reconnected forever, so the same instance
+can initialize again. The boot seed and key calls (`seedDefaults`, `reconcileRaisedDefaults`,
+`ensureEncryptionKey`) run through `redisCall` like every other read. The api and the worker run
+`bootstrap()` through `retryWhileConfigUnavailable` (`config/retry-config-unavailable.ts`): 500 ms
+doubling to 5 s, one warn per attempt (`what`, `attempt`, `waitedMs`, `delayMs`, `err`), never giving
+up, the same in dev and production. MEASURED before: a refused store exited 1 in about 1.4 s, which
+under `tsx watch` leaves the watcher up with the app dead and nothing restarting it, and in production
+is a crash loop against a store still down; after, the api served 200 about 2.5 s after the store came
+back, same PID. Only `ConfigUnavailableError` is retried (`instanceof`); any other boot error (missing
+env var, wrong password, Postgres, key mismatch) still logs and exits 1. Every init step `bootstrap()`
+repeats on a retry is a no-op the second time. The cost: a permanently wrong `REDIS_URL` retries
+forever, one warn per attempt, instead of crash-looping.
+
 The api answers `ConfigUnavailableError` with 503
 `{ error: 'Service temporarily unavailable', code: 'config_unavailable' }` and leaks no key or host.
 The maintenance gate matches ALWAYS_OPEN routes before any read. `assertNewWorkAllowed` and

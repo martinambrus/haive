@@ -103,7 +103,11 @@ the module loads again.
   the module row's lock (5 s `lock_timeout`, 503 `module-busy`) it writes a `module.retry` audit row
   and moves only `updated_at` in one transaction (404 unknown, 409 `module_inactive` when
   deactivated, a drain left as it is), then publishes on `MODULE_ACTIVATED_CHANNEL`; the changed stamp
-  makes the worker's next pass start the module afresh with its attempts reset. Boot waits the same `MODULE_JOB_START_WAIT_MS` on each
+  makes the worker's next pass start the module afresh with its attempts reset. The api's loader
+  writes each module's settings defaults with `setIfAbsent` (SET NX) at boot and retries only that
+  write, per call, while the configuration store is unavailable, so a blip does not end the boot and
+  no route is mounted twice (`installModules` runs once). The worker writes its module report only
+  after bootstrap, so `GET /modules/loaded` lacks the worker half while the store is down. Boot waits the same `MODULE_JOB_START_WAIT_MS` on each
   module's schema ensure and job start: one still running then is named in a warn and boot goes on to
   `haive-worker ready` without it (a failure within the wait still stops boot); a late ensure is held
   back like a deactivated module, so the first pass ensures it again and then starts its jobs. Until an

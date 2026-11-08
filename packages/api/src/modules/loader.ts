@@ -12,6 +12,7 @@ import {
   configService,
   logger,
   MODULE_CONTROL_JOB_NAMES,
+  retryWhileConfigUnavailable,
   validateFormValues,
   type ModuleTeardownPayload,
   type ModuleTeardownResult,
@@ -206,9 +207,11 @@ export async function mountModules(
     for (const kind of ['global', 'admin'] as const) {
       const defaults = settingsOf(manifest, kind)?.defaults ?? {};
       for (const [field, value] of Object.entries(defaults)) {
-        await configService.setIfAbsent(
-          moduleSettingKey(manifest.id, kind, field),
-          JSON.stringify(value),
+        await retryWhileConfigUnavailable('module settings defaults', () =>
+          configService.setIfAbsent(
+            moduleSettingKey(manifest.id, kind, field),
+            JSON.stringify(value),
+          ),
         );
       }
     }

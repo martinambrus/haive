@@ -2,7 +2,7 @@ import type { Server } from 'node:http';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { logger } from '@haive/shared';
+import { logger, retryWhileConfigUnavailable } from '@haive/shared';
 import { bootstrap } from './bootstrap.js';
 import { HttpError, type AppEnv } from './context.js';
 import { isForeignOrigin, trustedOrigins } from './lib/request-origin.js';
@@ -140,7 +140,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
 }
 
 async function main(): Promise<void> {
-  const { apiPort, webOrigin } = await bootstrap();
+  const { apiPort, webOrigin } = await retryWhileConfigUnavailable('api bootstrap', bootstrap);
 
   const app = createApiApp(webOrigin);
   await installModules(app);

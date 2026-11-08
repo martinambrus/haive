@@ -799,6 +799,8 @@ export class ConfigService {
   private initialized = false;
   private localCache = new Map<string, { value: string | null; expiresAt: number }>();
   private static LOCAL_CACHE_TTL_MS = 30_000;
+  // Bounds a Redis that stays LOADING: ioredis then neither becomes ready nor emits an error.
+  private static READY_TIMEOUT_MS = 10_000;
 
   async initialize(redisUrl?: string): Promise<void> {
     if (this.initialized) return;
@@ -808,7 +810,8 @@ export class ConfigService {
       throw new Error('REDIS_URL environment variable is required');
     }
 
-    this.redis = createRedisConnection(url, CONFIG_REDIS_OPTIONS);
+    const redis = createRedisConnection(url, CONFIG_REDIS_OPTIONS);
+    this.redis = redis;
 
     // Persistent listener: without one ioredis writes a raw "Unhandled error event" to stderr per
     // reconnect attempt. Throttled for the same reason.
@@ -820,29 +823,68 @@ export class ConfigService {
       logger.warn({ err }, 'ConfigService Redis connection error');
     });
 
-    await new Promise<void>((resolve, reject) => {
-      this.redis!.once('ready', resolve);
-      this.redis!.once('error', reject);
-    });
-
-    await this.seedDefaults();
-    await this.reconcileRaisedDefaults();
-    await this.ensureEncryptionKey();
+    try {
+      await this.waitUntilReady(redis);
+      await this.seedDefaults();
+      await this.reconcileRaisedDefaults();
+      await this.ensureEncryptionKey();
+    } catch (err) {
+      // Otherwise the failed client reconnects forever.
+      redis.disconnect();
+      this.redis = null;
+      throw err;
+    }
 
     this.initialized = true;
     logger.info('ConfigService initialized');
   }
 
+  private waitUntilReady(redis: Redis): Promise<void> {
+    const timeoutMs = ConfigService.READY_TIMEOUT_MS;
+    return new Promise<void>((resolve, reject) => {
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        redis.off('ready', onReady);
+        redis.off('error', onError);
+      };
+      const onReady = (): void => {
+        cleanup();
+        resolve();
+      };
+      const onError = (err: Error): void => {
+        cleanup();
+        reject(
+          err instanceof ReplyError
+            ? err
+            : new ConfigUnavailableError('initialize', { cause: err }),
+        );
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(
+          new ConfigUnavailableError('initialize', {
+            cause: new Error(`Redis was not ready within ${timeoutMs} ms`),
+          }),
+        );
+      }, timeoutMs);
+      redis.once('ready', onReady);
+      redis.once('error', onError);
+    });
+  }
+
   private async seedDefaults(): Promise<void> {
-    const pipeline = this.redis!.pipeline();
-    for (const [key, value] of Object.entries(DEFAULT_CONFIG)) {
-      pipeline.setnx(key, value);
-    }
-    const results = await pipeline.exec();
-    // exec() resolves per-command errors on a transport failure instead of rejecting; a drop
-    // mid-seed must fail boot rather than silently skip seeding.
-    const failed = results?.find(([err]) => err);
-    if (failed?.[0]) throw failed[0];
+    const results = await this.redisCall('seedDefaults', async (redis) => {
+      const pipeline = redis.pipeline();
+      for (const [key, value] of Object.entries(DEFAULT_CONFIG)) {
+        pipeline.setnx(key, value);
+      }
+      const res = await pipeline.exec();
+      // exec() resolves per-command errors on a transport failure instead of rejecting; a drop
+      // mid-seed must fail boot rather than silently skip seeding.
+      const failed = res?.find(([err]) => err);
+      if (failed?.[0]) throw failed[0];
+      return res;
+    });
     if (results?.some(([, result]) => result === 1)) {
       logger.info('Default configuration seeded');
     }
@@ -875,9 +917,11 @@ export class ConfigService {
       },
     ];
     for (const raise of raises) {
-      const stored = await this.redis!.get(raise.key);
+      const stored = await this.redisCall('reconcileRaisedDefaults', (redis) =>
+        redis.get(raise.key),
+      );
       if (stored !== raise.previous) continue;
-      await this.redis!.set(raise.key, raise.next);
+      await this.redisCall('reconcileRaisedDefaults', (redis) => redis.set(raise.key, raise.next));
       this.localCache.delete(raise.key);
       logger.info(
         { key: raise.key, from: raise.previous, to: raise.next, why: raise.why },
@@ -887,23 +931,31 @@ export class ConfigService {
   }
 
   private async ensureEncryptionKey(): Promise<void> {
-    const exists = await this.redis!.exists(CONFIG_KEYS.ENCRYPTION_KEY);
+    const exists = await this.redisCall('ensureEncryptionKey', (redis) =>
+      redis.exists(CONFIG_KEYS.ENCRYPTION_KEY),
+    );
     const envKey = this.getEnvEncryptionKey();
 
     if (!exists) {
       if (envKey) {
-        await this.redis!.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey);
+        await this.redisCall('ensureEncryptionKey', (redis) =>
+          redis.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey),
+        );
         logger.info('Seeded encryption key from CONFIG_ENCRYPTION_KEY');
         return;
       }
       const generated = randomBytes(32).toString('hex');
-      await this.redis!.set(CONFIG_KEYS.ENCRYPTION_KEY, generated);
+      await this.redisCall('ensureEncryptionKey', (redis) =>
+        redis.set(CONFIG_KEYS.ENCRYPTION_KEY, generated),
+      );
       logger.warn('Generated new encryption key (CONFIG_ENCRYPTION_KEY not set)');
       return;
     }
 
     if (envKey) {
-      const stored = await this.redis!.get(CONFIG_KEYS.ENCRYPTION_KEY);
+      const stored = await this.redisCall('ensureEncryptionKey', (redis) =>
+        redis.get(CONFIG_KEYS.ENCRYPTION_KEY),
+      );
       if (stored && stored !== envKey) {
         if (process.env.NODE_ENV === 'production') {
           throw new Error(

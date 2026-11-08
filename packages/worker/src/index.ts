@@ -1,5 +1,5 @@
 import { finalizeModuleDrains } from '@haive/shared/modularity-server';
-import { logger, configService, CONFIG_KEYS } from '@haive/shared';
+import { logger, configService, CONFIG_KEYS, retryWhileConfigUnavailable } from '@haive/shared';
 import { bootstrap } from './bootstrap.js';
 import { initBuildStamp } from './build-stamp.js';
 import { getDb } from './db.js';
@@ -77,7 +77,10 @@ import { startModuleActivationWatch } from './modules/activation-watch.js';
 
 async function main(): Promise<void> {
   const buildStamp = initBuildStamp();
-  const { repoStoragePath, bundleStoragePath } = await bootstrap();
+  const { repoStoragePath, bundleStoragePath } = await retryWhileConfigUnavailable(
+    'worker bootstrap',
+    bootstrap,
+  );
   const {
     loaded: loadedModules,
     entries: moduleEntries,

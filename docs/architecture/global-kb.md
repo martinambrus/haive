@@ -267,6 +267,13 @@ that lock stayed on the server after the deadline had answered (MEASURED: 1 wait
 with them). On a large store the first ensure's backfill can outlast a short deadline, so bounded
 calls fail their ensure until an unbounded caller completes it.
 
+**Boot reads under a Redis outage are bounded; a stalled store is not.** At worker boot the two
+config reads in `resolveGlobalKbSettings` reject typed after about 2 s and `runOne`
+(`data-migrations.ts`) logs it and boot goes on. A KB store that accepts the connection and then
+stalls, or a held schema advisory lock, still waits without a deadline in `recomputeAliasedTopicKeys`,
+which runs every boot; a plain `deadlineMs` would skip the shared schema ensure above, so that needs
+its own design.
+
 **Each opted run records what it got** in `cli_invocations.house_rules` (migration 0176), written
 with `agent_rules` by the UPDATE that sets `started_at`: `{mode, entries: [{id, hash, title, why}],
 omitted: [{id, hash, title, why: 'budget' | 'refused'}], reason?, errorClass?,
