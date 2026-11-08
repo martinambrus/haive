@@ -1,5 +1,5 @@
 import type { Database } from '@haive/database';
-import { configService, logger } from '@haive/shared';
+import { configService, logger, rethrowIfConfigUnavailable } from '@haive/shared';
 import { resolveGlobalKbEnabled, withGlobalKb } from '@haive/shared/global-kb';
 import { cosineSimilarity, hashEmbed } from '@haive/shared/rag';
 
@@ -23,7 +23,8 @@ function vectorOf(value: unknown): number[] | null {
  *  Convergent: it selects only rows still NULL and writes only rows still NULL, so a second run
  *  and a concurrent sync change nothing; it never deletes. A row whose vector cannot be read stays
  *  NULL (excluded from dense ranking, still found by words). Best-effort: a disabled, unconfigured
- *  or unreachable store is logged and left for the next boot. */
+ *  or unreachable store is logged and left for the next boot. A configuration-store outage is not
+ *  that: it propagates so the boot retry, or the sweep that also calls this, runs it again. */
 export async function classifyGlobalKbVectorProvenance(db: Database): Promise<void> {
   try {
     if (!(await resolveGlobalKbEnabled(configService))) return;
@@ -67,6 +68,7 @@ export async function classifyGlobalKbVectorProvenance(db: Database): Promise<vo
       }
     });
   } catch (err) {
+    rethrowIfConfigUnavailable(err);
     log.warn({ err }, 'global KB vector provenance classification skipped');
   }
 }
