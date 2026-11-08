@@ -30,7 +30,7 @@ export function moduleSchemaFailedMessage(stepId: string): string | null {
   if (!moduleSchemaFailed(id) || moduleTeardownRunning(id)) return null;
   return (
     `Module ${id}'s schema setup failed on this worker and is no longer being retried (the worker log has the error), so step ${stepId} cannot run. ` +
-    `Deactivating and reactivating the module (Admin > Modules) runs the setup again; then Retry the step.`
+    `Retry on the module's row (Admin > Modules) runs the setup again; then Retry the step.`
   );
 }
 
@@ -57,7 +57,7 @@ export async function moduleSchemaWaitMessage(
   }
   return (
     `Module ${id}'s schema is being set up on this worker, so step ${stepId} starts when it is done. ` +
-    `If this stays here, the worker log has the setup error; deactivating and reactivating the module (Admin > Modules) runs the setup again.`
+    `If this stays here, the worker log has the setup error; Retry on the module's row (Admin > Modules) runs it again once the module shows Failed.`
   );
 }
 

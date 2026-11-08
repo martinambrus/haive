@@ -1,7 +1,8 @@
-import { isValidElement, type ReactElement, type ReactNode } from 'react';
+import { isValidElement, type ComponentProps, type ReactElement, type ReactNode } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { ModuleState } from '@haive/shared/modularity';
+import type { ModuleDiffRow, ModuleState } from '@haive/shared/modularity';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { ModuleActiveCell } from './module-active-cell';
 
 const SINCE = '2026-10-14T12:30:00.000Z';
@@ -218,5 +219,136 @@ describe('ModuleActiveCell purge control', () => {
     );
     found['Purge data of statistics']!();
     expect(calls).toEqual({ toggle: 0, teardown: 0, purge: 1 });
+  });
+});
+
+describe('ModuleActiveCell runtime state', () => {
+  type Props = ComponentProps<typeof ModuleActiveCell>;
+  type Runtime = NonNullable<ModuleDiffRow['runtime']>;
+  const REASON = 'schema migration 0007 refused: relation "x" is missing';
+  const runtime = (state: Runtime['state'], reason: string | null = REASON): Runtime => ({
+    state,
+    schema: state === 'ready' ? 'ready' : 'failed',
+    jobs: state === 'ready' ? 'running' : 'none',
+    attempts: 3,
+    reason,
+  });
+  const withRuntime = (r: Runtime, over: Parameters<typeof row>[0] = {}): Props['row'] => {
+    const base: Props['row'] = row(over);
+    return { ...base, runtime: r } as Props['row'];
+  };
+  const html = (r: Props['row'], busy = false) =>
+    renderToStaticMarkup(
+      <ModuleActiveCell
+        row={r}
+        busy={busy}
+        onToggle={() => {}}
+        onTeardown={() => {}}
+        onPurge={() => {}}
+        onRetry={() => {}}
+      />,
+    );
+  const elements = (node: ReactNode): ReactElement<Record<string, unknown>>[] =>
+    Array.isArray(node)
+      ? node.flatMap(elements)
+      : isValidElement<Record<string, unknown>>(node)
+        ? [node, ...elements(node.props.children as ReactNode)]
+        : [];
+  const tree = (r: Props['row'], busy = false, extra: Partial<Props> = {}) =>
+    elements(
+      ModuleActiveCell({
+        row: r,
+        busy,
+        onToggle: () => {},
+        onTeardown: () => {},
+        onPurge: () => {},
+        ...extra,
+      }) as ReactElement,
+    );
+  const reasonBodies = (r: Props['row']) =>
+    tree(r)
+      .filter((e) => e.type === InlineMarkdown)
+      .map((e) => String(e.props.body));
+  const RETRY_BUTTON = /<button[^>]*aria-label="Retry statistics"[^>]*>Retry<\/button>/;
+
+  it('U1 marks an active module with a failed runtime Failed, with the reason and an explicit Retry beside Deactivate', () => {
+    const out = html(withRuntime(runtime('failed')));
+    expect(out).toContain('>Failed<');
+    expect(out).toMatch(RETRY_BUTTON);
+    expect(out).toMatch(/<button[^>]*>Deactivate<\/button>/);
+    expect(reasonBodies(withRuntime(runtime('failed'))).some((b) => b.includes(REASON))).toBe(true);
+    expect(reasonBodies(withRuntime(runtime('failed', null)))).toEqual([]);
+    expect(html(withRuntime(runtime('failed', null)))).toMatch(RETRY_BUTTON);
+  });
+
+  it('U2 marks a pending runtime Starting, shows the reason and offers no Retry', () => {
+    const out = html(withRuntime(runtime('pending')));
+    expect(out).toContain('>Starting<');
+    expect(out).not.toContain('Failed');
+    expect(out).not.toContain('Retry');
+    expect(reasonBodies(withRuntime(runtime('pending'))).some((b) => b.includes(REASON))).toBe(
+      true,
+    );
+  });
+
+  it('U3 guard: a ready runtime, no runtime and a null reason render exactly as the row does today', () => {
+    const today = html(row());
+    expect(html(withRuntime(runtime('ready', null)))).toBe(today);
+    expect(html(withRuntime(runtime('ready')))).toBe(today);
+    expect(html(row())).toBe(today);
+    expect(today).not.toContain('Failed');
+    expect(today).not.toContain('Starting');
+    expect(today).not.toContain('Retry');
+  });
+
+  it('U4 guard: a deactivated row and a row with no recorded version ignore a failed runtime', () => {
+    const off = { deactivatedAt: SINCE };
+    expect(html(withRuntime(runtime('failed'), off))).toBe(html(row(off)));
+    expect(html(withRuntime(runtime('failed'), { rowVersion: null }))).toBe(
+      html(row({ rowVersion: null })),
+    );
+    for (const out of [
+      html(withRuntime(runtime('failed'), off)),
+      html(withRuntime(runtime('failed'), { rowVersion: null })),
+    ]) {
+      expect(out).not.toContain('Failed');
+      expect(out).not.toContain('Retry');
+    }
+  });
+
+  it('U5 keeps Failed, Retry and Cancel drain together on a draining module', () => {
+    const out = html(withRuntime(runtime('failed'), { drainingAt: SINCE }));
+    expect(out).toContain('>Failed<');
+    expect(out).toMatch(RETRY_BUTTON);
+    expect(out).toContain('Cancel drain');
+    expect(out).toContain('Draining since');
+  });
+
+  it('U6 wires Retry to onRetry alone, disables it while busy, and renders without onRetry', () => {
+    const calls = { toggle: 0, teardown: 0, purge: 0, retry: 0 };
+    const r = withRuntime(runtime('failed'));
+    const button = tree(r, false, {
+      onToggle: () => void (calls.toggle += 1),
+      onTeardown: () => void (calls.teardown += 1),
+      onPurge: () => void (calls.purge += 1),
+      onRetry: () => void (calls.retry += 1),
+    }).find((e) => e.props['aria-label'] === 'Retry statistics');
+    expect(button).toBeDefined();
+    (button!.props.onClick as () => void)();
+    expect(calls).toEqual({ toggle: 0, teardown: 0, purge: 0, retry: 1 });
+
+    expect(html(r, true)).toMatch(/<button[^>]*disabled=""[^>]*>Retry<\/button>/);
+    expect(html(r, false)).not.toContain('disabled=""');
+    expect(() =>
+      renderToStaticMarkup(
+        <ModuleActiveCell
+          row={r}
+          busy={false}
+          onToggle={() => {}}
+          onTeardown={() => {}}
+          onPurge={() => {}}
+        />,
+      ),
+    ).not.toThrow();
   });
 });

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { isValidElement, type ComponentProps, type ReactElement, type ReactNode } from 'react';
 import type { ModuleDiffRow } from '@haive/shared/modularity';
 import type { ModuleOpenTask, ModuleUrgentResponse } from '@/lib/api-client';
@@ -19,6 +19,7 @@ const api = vi.hoisted(() => ({
   patchModuleActive: vi.fn(),
   getModuleDependents: vi.fn(),
   cancelModuleDrain: vi.fn(),
+  retryModule: vi.fn(),
 }));
 const router = vi.hoisted(() => ({ refresh: vi.fn() }));
 
@@ -407,5 +408,166 @@ describe('editable install sources', () => {
     page.draw();
     page.click('Delete');
     expect(page.sourcesDialog()!.props.target).toEqual({ mode: 'delete', source });
+  });
+});
+
+describe('Modules page retry and runtime state', () => {
+  type Runtime = NonNullable<ModuleDiffRow['runtime']>;
+  type CellProps = { onRetry?: () => void; busy?: boolean };
+  const runtimeOf = (state: Runtime['state']): Runtime => ({
+    state,
+    schema: state === 'ready' ? 'ready' : 'failed',
+    jobs: state === 'ready' ? 'running' : 'none',
+    attempts: 2,
+    reason: state === 'ready' ? null : 'schema migration refused',
+  });
+  const serve = (...rows: ModuleDiffRow[]) =>
+    api.getModulesLoaded.mockResolvedValue({ intent: [], modules: { workerAt: null, rows } });
+  const failedAlpha = (): ModuleDiffRow => ({
+    ...row('alpha', 'Alpha Search'),
+    runtime: runtimeOf('failed'),
+  });
+
+  async function mountTree() {
+    hooks.slots = [];
+    hooks.mounting = true;
+    let tree: ReactNode = null;
+    const draw = () => {
+      for (let pass = 0; pass < 10; pass++) {
+        hooks.next = 0;
+        hooks.dirty = false;
+        tree = ModulesPage();
+        hooks.mounting = false;
+        if (!hooks.dirty) return;
+      }
+      throw new Error('the page kept updating its own state');
+    };
+    draw();
+    await flush();
+    draw();
+    const cell = (id: string) =>
+      flatten(tree).find((e) => e.type === ModuleActiveCell && e.props.row?.id === id)!;
+    return {
+      draw,
+      cell,
+      onRetry: (id: string) => {
+        const handler = (cell(id).props as CellProps).onRetry;
+        expect(typeof handler).toBe('function');
+        return handler!;
+      },
+      busy: (id: string) => (cell(id).props as CellProps).busy,
+      notice: () => flatten(tree).find((e) => e.props.role === 'status'),
+      error: () => flatten(tree).find((e) => e.type === FormError)?.props.message,
+    };
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('U7 retries a failed row once, reloads the table and names the module in the notice', async () => {
+    serve(failedAlpha(), row('beta', null));
+    api.retryModule.mockResolvedValue({ moduleId: 'alpha' });
+    const page = await mountTree();
+    page.onRetry('alpha')();
+    await flush();
+    page.draw();
+    expect(api.retryModule).toHaveBeenCalledTimes(1);
+    expect(api.retryModule).toHaveBeenCalledWith('alpha');
+    expect(api.getModulesLoaded).toHaveBeenCalledTimes(2);
+    expect(textOf(page.notice())).toContain('Alpha Search');
+    expect(flatten(page.notice()).some((e) => e.type === InlineMarkdown)).toBe(true);
+    expect(page.error()).toBeFalsy();
+    expect(page.busy('alpha')).toBe(false);
+  });
+
+  it('U8 shows a rejected retry through FormError, no notice, and frees the cell, never reading the body', async () => {
+    serve(failedAlpha());
+    let touched = false;
+    const body = new Proxy(
+      {},
+      {
+        get: () => {
+          touched = true;
+          return undefined;
+        },
+      },
+    );
+    api.retryModule.mockRejectedValue(
+      Object.assign(new Error('Another lifecycle action is changing this module'), {
+        status: 503,
+        body,
+      }),
+    );
+    const page = await mountTree();
+    page.onRetry('alpha')();
+    await flush();
+    page.draw();
+    expect(page.error()).toBe('Another lifecycle action is changing this module');
+    expect(page.notice()).toBeUndefined();
+    expect(page.busy('alpha')).toBe(false);
+    expect(touched).toBe(false);
+  });
+
+  it('U9 sends one request for two calls while the first is pending, with the cell busy meanwhile', async () => {
+    serve(failedAlpha());
+    let finish!: (value: unknown) => void;
+    api.retryModule.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const page = await mountTree();
+    const first = page.onRetry('alpha');
+    first();
+    page.draw();
+    expect(page.busy('alpha')).toBe(true);
+    first();
+    page.onRetry('alpha')();
+    page.draw();
+    expect(api.retryModule).toHaveBeenCalledTimes(1);
+    finish({ moduleId: 'alpha' });
+    await flush();
+    page.draw();
+    expect(page.busy('alpha')).toBe(false);
+  });
+
+  const polled = async (...rows: ModuleDiffRow[]) => {
+    serve(...rows);
+    const page = await mountTree();
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    hooks.mounting = true;
+    page.draw();
+    return page;
+  };
+
+  it.each([
+    ['U10a a failed active row', 'failed' as const],
+    ['U10b a pending active row', 'pending' as const],
+  ])('%s keeps the 5 s poll running', async (_name, state) => {
+    await polled({ ...row('alpha', 'Alpha Search'), runtime: runtimeOf(state) });
+    expect(vi.getTimerCount()).toBe(1);
+    api.getModulesLoaded.mockClear();
+    vi.advanceTimersByTime(5000);
+    expect(api.getModulesLoaded).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['ready rows', [{ ...row('alpha', 'Alpha Search'), runtime: runtimeOf('ready') }]],
+    ['rows without runtime', [row('alpha', 'Alpha Search'), row('beta', null)]],
+    [
+      'a deactivated row whose runtime is failed',
+      [
+        {
+          ...row('alpha', 'Alpha Search'),
+          deactivatedAt: '2026-10-15T09:00:00.000Z',
+          runtime: runtimeOf('failed'),
+        },
+      ],
+    ],
+  ])('U10c guard: %s schedule no poll', async (_name, rows) => {
+    await polled(...(rows as ModuleDiffRow[]));
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

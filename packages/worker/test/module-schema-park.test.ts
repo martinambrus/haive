@@ -376,7 +376,7 @@ describe.skipIf(!url)('a module step whose schema is unready, on Postgres', () =
     expect(row).toMatchObject({ status: 'failed', waitingStartedAt: null });
     expect(row!.errorMessage).toMatch(/no longer being retried/);
     expect(row!.errorMessage).toContain(MODULE);
-    expect(row!.errorMessage).toMatch(/reactivating the module/);
+    expect(row!.errorMessage).toMatch(/Retry on the module's row/);
     expect(advances()).toHaveLength(adds);
     expect((await task()).status).toBe('failed');
     noPhaseRan();

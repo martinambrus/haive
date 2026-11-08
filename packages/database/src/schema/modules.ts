@@ -2,7 +2,7 @@ import { pgTable, text, timestamp, check, uuid, primaryKey } from 'drizzle-orm/p
 import { tasks } from './tasks.js';
 import { sql } from 'drizzle-orm';
 
-/** Four writers, three of them on different columns: the worker boot writes what it loaded last and since when a module that loaded before is missing; the admin toggle writes `deactivatedAt`, null while the module is active, clears `tornDownAt` and moves `updatedAt`, which a running worker reads as the activation stamp; the worker's teardown job stamps `tornDownAt` once a deactivated module's own teardown has run; the api's purge deletes the row of a missing module. */
+/** Five writers, three of them on different columns: the worker boot writes what it loaded last and since when a module that loaded before is missing; the admin toggle writes `deactivatedAt`, null while the module is active, clears `tornDownAt` and moves `updatedAt`, which a running worker reads as the activation stamp; the worker's teardown job stamps `tornDownAt` once a deactivated module's own teardown has run; the api's purge deletes the row of a missing module; the admin retry moves only `updatedAt`, so the worker starts a module again that used all its attempts. */
 export const modules = pgTable(
   'modules',
   {

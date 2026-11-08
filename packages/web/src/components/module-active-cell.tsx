@@ -1,6 +1,7 @@
 'use client';
 
-import { Button } from '@/components/ui';
+import { Badge, Button } from '@/components/ui';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import type { ModuleDiffRow } from '@haive/shared/modularity';
 
 export function ModuleActiveCell({
@@ -10,20 +11,30 @@ export function ModuleActiveCell({
   onTeardown,
   onPurge,
   onCancelDrain,
+  onRetry,
 }: {
   row: Pick<
     ModuleDiffRow,
-    'id' | 'rowVersion' | 'deactivatedAt' | 'state' | 'tornDownAt' | 'missingAt' | 'drainingAt'
+    | 'id'
+    | 'rowVersion'
+    | 'deactivatedAt'
+    | 'state'
+    | 'tornDownAt'
+    | 'missingAt'
+    | 'drainingAt'
+    | 'runtime'
   >;
   busy: boolean;
   onToggle: () => void;
   onTeardown: () => void;
   onPurge: () => void;
   onCancelDrain?: () => void;
+  onRetry?: () => void;
 }) {
   if (row.rowVersion === null) return <span className="text-neutral-500">—</span>;
   const since = row.deactivatedAt;
   const draining = since === null && row.drainingAt != null;
+  const runtime = since === null && row.runtime?.state !== 'ready' ? row.runtime : undefined;
   const action = draining ? 'View dependents' : since === null ? 'Deactivate' : 'Activate';
   return (
     <div className="flex flex-col items-start gap-2">
@@ -34,6 +45,14 @@ export function ModuleActiveCell({
             ? 'Active'
             : `Deactivated since ${new Date(since).toLocaleString()}`}
       </span>
+      {runtime && (
+        <Badge variant={runtime.state === 'failed' ? 'error' : 'warning'}>
+          {runtime.state === 'failed' ? 'Failed' : 'Starting'}
+        </Badge>
+      )}
+      {runtime && runtime.reason !== null && (
+        <InlineMarkdown body={runtime.reason} className="max-w-xs text-xs text-neutral-400" />
+      )}
       <Button
         type="button"
         size="sm"
@@ -44,6 +63,18 @@ export function ModuleActiveCell({
       >
         {action}
       </Button>
+      {runtime?.state === 'failed' && (
+        <Button
+          type="button"
+          size="sm"
+          variant="secondary"
+          disabled={busy}
+          aria-label={`Retry ${row.id}`}
+          onClick={onRetry}
+        >
+          Retry
+        </Button>
+      )}
       {draining && (
         <Button
           type="button"

@@ -172,6 +172,32 @@ describe('GET /modules/loaded', () => {
     expect(await res.text()).not.toContain('intent');
   });
 
+  it('S6 carries a module runtime from the worker report into its row, and none for a module without one', async () => {
+    h.role = 'admin';
+    h.intentRows = [];
+    const runtime = {
+      state: 'failed',
+      schema: 'none',
+      jobs: 'stopped',
+      attempts: 3,
+      reason: 'jobs hook refused',
+    };
+    h.workerValue = JSON.stringify({
+      at: '2026-10-12T00:00:00.000Z',
+      modules: [
+        { id: 'with-routes', packageName: '@haive/module-with-routes', version: '1.2.3', runtime },
+        { id: 'no-routes', packageName: '@haive/module-no-routes', version: '1.2.3' },
+      ],
+    });
+    const res = await (await buildApp()).request('/modules/loaded');
+    const body = (await res.json()) as {
+      modules: { rows: { id: string; runtime?: unknown }[] };
+    };
+    const rowFor = (id: string) => body.modules.rows.find((r) => r.id === id)!;
+    expect(rowFor('with-routes').runtime).toEqual(runtime);
+    expect(rowFor('no-routes').runtime).toBeUndefined();
+  });
+
   it.each([null, 'not json'])('reports no worker half when the key holds %j', async (value) => {
     h.role = 'admin';
     h.workerValue = value;

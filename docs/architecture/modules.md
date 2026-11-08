@@ -76,9 +76,9 @@ the module loads again.
   starts the module again meanwhile, and a late success counts as started (until the deadline of a
   job start, below), so a pass that sees the module deactivated by then stops it. A failed
   ensure or start is tried again on the next passes, at most `MODULE_REACTIVATION_ATTEMPTS` (3) per
-  reactivation; after the last one only a worker error log says so, until the next deactivation and
-  activation. A pass sees an activation by the module row's `updated_at` too, which every activate
-  and deactivate moves: when the stamp differs from the previous pass's (the first pass only records
+  reactivation; after the last one the worker logs an error and its report marks the module failed
+  (below), until a Retry or the next deactivation and activation. A pass sees an activation by the
+  module row's `updated_at` too, which every activate, deactivate and Retry moves: when the stamp differs from the previous pass's (the first pass only records
   it), the module counts as activated again, so its attempts start afresh, a start still running from
   before is not counted if it fails, and a module that is not running its jobs is tried again. A
   deactivation and activation that both fall between two passes are seen this way; any other write
@@ -88,7 +88,22 @@ the module loads again.
   `ModulePassScheduler` (`modules/pass-scheduler.ts`) starts the pass without waiting for the
   interval. A request that arrives while a pass runs makes exactly one more pass run right after it,
   since the activation may have committed after that pass read the rows, and the 15 s interval stays
-  as the fallback for a message that never arrives. Boot waits the same `MODULE_JOB_START_WAIT_MS` on each
+  as the fallback for a message that never arrives. The worker's report in Redis
+  (`MODULES_LOADED_WORKER_KEY`, read by `GET /modules/loaded`) carries a `runtime` for each loaded
+  module that has jobs or an ensure and is not deactivated: `state` (`ready`, `pending`, or `failed`
+  once `MODULE_REACTIVATION_ATTEMPTS` are spent), `schema`, `jobs`, `attempts` and the last failure's
+  `reason` (through `scrubErrorPaths`, at most `MODULE_RUNTIME_REASON_MAX` = 500 characters). Boot
+  writes the report; after that the worker rewrites it, never awaited, when an attempt starts or ends
+  and at the end of each pass, only when some runtime changed, and a failed write is tried again at the
+  next change; `at` is the last write. A module held back at boot has no `runtime` until the first
+  pass. The Active column shows a configured-active module whose `runtime.state` is `failed` as
+  **Failed** with the reason and a **Retry**, and one that is `pending` as **Starting** with no Retry;
+  it keys on the state, never on the reason, and the page reloads every 5 s while a row that is not
+  deactivated is not ready. Retry is `POST /modules/:id/retry` (admin; foreign origin refused): under
+  the module row's lock (5 s `lock_timeout`, 503 `module-busy`) it writes a `module.retry` audit row
+  and moves only `updated_at` in one transaction (404 unknown, 409 `module_inactive` when
+  deactivated, a drain left as it is), then publishes on `MODULE_ACTIVATED_CHANNEL`; the changed stamp
+  makes the worker's next pass start the module afresh with its attempts reset. Boot waits the same `MODULE_JOB_START_WAIT_MS` on each
   module's schema ensure and job start: one still running then is named in a warn and boot goes on to
   `haive-worker ready` without it (a failure within the wait still stops boot); a late ensure is held
   back like a deactivated module, so the first pass ensures it again and then starts its jobs. Until an
@@ -123,9 +138,9 @@ the module loads again.
   the module stays marked not ready, so its steps keep waiting; the boot's hold (`bootEnsuresRunning`)
   or the pass's claim (`jobsStarted`, `starting`) is released, so a teardown is no longer refused for
   it; the attempt counts toward `MODULE_REACTIVATION_ATTEMPTS`, so the next active pass ensures
-  again, at most three times per reactivation, and after the third the flag reads failed (only the
-  worker error log and the waiting steps' line say so) until a deactivation and an activation try
-  again. On the server a statement the ensure had already sent ends about half a second after the pool
+  again, at most three times per reactivation, and after the third the flag reads failed (the worker
+  error log, the waiting steps' line and the module's **Failed** state on the Modules tab say so)
+  until a Retry, or a deactivation and an activation, tries again. On the server a statement the ensure had already sent ends about half a second after the pool
   closes and its transaction rolls back, since no COMMIT arrives: closing the pool alone cancels
   nothing (measured: a `pg_sleep` backend was still running 3 s after `close()`), so
   `openModuleDatabase` opens every connection of the pool with `client_connection_check_interval`

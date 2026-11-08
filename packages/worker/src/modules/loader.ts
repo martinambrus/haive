@@ -1,15 +1,18 @@
 import type { Redis } from 'ioredis';
 import type { Database } from '@haive/database';
 import { logger } from '@haive/shared';
+import { safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
 import {
   isCoreStepId,
   isModuleStepId,
+  MODULE_RUNTIME_REASON_MAX,
   MODULES_LOADED_WORKER_KEY,
   moduleManifestSchema,
   modulePackageId,
   type ComposableStepEntry,
   type CompositionIssue,
   type ModuleManifest,
+  type ModuleRuntime,
   type ModuleSource,
   type TaskTypeDefaultsIssue,
 } from '@haive/shared/modularity';
@@ -30,6 +33,7 @@ import {
   markModuleSchemaUnready,
   markModuleTeardownRunning,
   moduleSchemaFailed,
+  moduleSchemaUnready,
   moduleTeardownRunning,
 } from './schema-ready.js';
 
@@ -412,6 +416,46 @@ export async function startModuleJobs(
   // A start the pass went on without still runs; no pass begins another for that module.
   const starting = new Set<string>();
   const pending = new Set(deactivated);
+  // Display only: the last failed attempt of a module, for the worker report.
+  const failures = new Map<
+    string,
+    { attempts: number; reason: string; phase: 'schema' | 'jobs' }
+  >();
+  // The deactivated set last given: boot, then each reconcile pass's.
+  let current = deactivated;
+  const runtimes = (): Record<string, ModuleRuntime> => {
+    const out: Record<string, ModuleRuntime> = {};
+    for (const [index, module] of loaded.entries()) {
+      const entry = entries[index];
+      const moduleId = module.manifest.id;
+      if ((!entry?.jobs && !entry?.ensureSchema) || current.has(moduleId)) continue;
+      const failure = failures.get(moduleId);
+      const schema: ModuleRuntime['schema'] = !entry.ensureSchema
+        ? 'none'
+        : failure?.phase === 'schema'
+          ? 'failed'
+          : moduleSchemaUnready(moduleId)
+            ? 'pending'
+            : 'ready';
+      const jobs: ModuleRuntime['jobs'] = !entry.jobs
+        ? 'none'
+        : stops.has(moduleId)
+          ? 'running'
+          : 'stopped';
+      const attempts = failure?.attempts ?? 0;
+      const state: ModuleRuntime['state'] =
+        attempts >= MODULE_REACTIVATION_ATTEMPTS
+          ? 'failed'
+          : (schema === 'none' || schema === 'ready') &&
+              (jobs === 'none' || jobs === 'running') &&
+              !failure &&
+              !starting.has(moduleId)
+            ? 'ready'
+            : 'pending';
+      out[moduleId] = { state, schema, jobs, attempts, reason: failure?.reason ?? null };
+    }
+    return out;
+  };
   // A pass saw these deactivated or activated again while their start still ran: that start's outcome is not an attempt.
   const endedWhileStarting = new Set<string>();
   let closing = false;
@@ -502,6 +546,7 @@ export async function startModuleJobs(
         if (started) {
           logger.info({ module: moduleId }, 'module jobs started after boot went on without them');
         }
+        void republishReport(runtimes());
       },
       (err: unknown) => {
         pending.add(moduleId);
@@ -509,6 +554,7 @@ export async function startModuleJobs(
           { err, module: moduleId },
           'module jobs failed to start after boot went on without them; the first reconcile pass tries again',
         );
+        void republishReport(runtimes());
       },
     );
   };
@@ -534,11 +580,17 @@ export async function startModuleJobs(
     }
   }
 
+  void republishReport(runtimes());
+
   const held = new Set<string>();
   // Attempts made so far by a reactivation the next pass is to try again; that try takes them.
   const attemptsMade = new Map<string, number>();
-  // Every activate and deactivate moves a module's updated_at, so one that fell between two passes shows as a changed stamp.
+  // Every activate, deactivate and retry moves a module's updated_at, so one that fell between two passes shows as a changed stamp.
   const seenStamps = new Map<string, number>();
+  const forgetAttempts = (moduleId: string): void => {
+    attemptsMade.delete(moduleId);
+    failures.delete(moduleId);
+  };
   const stampChanged = (moduleId: string, stamp: number | undefined): boolean => {
     if (stamp === undefined) return false;
     const before = seenStamps.get(moduleId);
@@ -554,20 +606,24 @@ export async function startModuleJobs(
       const attempt = (attemptsMade.get(moduleId) ?? 0) + 1;
       attemptsMade.delete(moduleId);
       starting.add(moduleId);
+      void republishReport(runtimes());
       if (moduleSchemaFailed(moduleId)) markModuleSchemaUnready(moduleId);
       const timer = setTimeout(() => {
         warnStartOutlivedWait(moduleId);
         resolve();
       }, MODULE_JOB_START_WAIT_MS);
       void (async () => {
+        let phase: 'schema' | 'jobs' = 'schema';
         try {
           if (ensureSchema) {
             await bootstrapModuleSchema(getDb(), moduleId, ensureSchema);
             markModuleSchemaReady(moduleId);
           }
+          phase = 'jobs';
           if (jobs && (await start(moduleId, jobs))) {
             logger.info({ module: moduleId }, 'module jobs started: the module is active again');
           }
+          failures.delete(moduleId);
         } catch (err) {
           if (endedWhileStarting.has(moduleId)) {
             logger.warn(
@@ -575,6 +631,7 @@ export async function startModuleJobs(
               'module schema or jobs failed to start after the module was deactivated or activated again; its attempts start afresh',
             );
           } else if (attempt < MODULE_REACTIVATION_ATTEMPTS) {
+            failures.set(moduleId, { attempts: attempt, reason: failureReason(err), phase });
             attemptsMade.set(moduleId, attempt);
             pending.add(moduleId);
             logger.warn(
@@ -582,6 +639,7 @@ export async function startModuleJobs(
               `module schema or jobs failed to start (attempt ${attempt} of ${MODULE_REACTIVATION_ATTEMPTS}); trying again on the next pass`,
             );
           } else {
+            failures.set(moduleId, { attempts: attempt, reason: failureReason(err), phase });
             markModuleSchemaFailed(moduleId);
             logger.error(
               { err, module: moduleId },
@@ -594,6 +652,7 @@ export async function startModuleJobs(
           endedWhileStarting.delete(moduleId);
           clearTimeout(timer);
           resolve();
+          void republishReport(runtimes());
         }
       })();
     });
@@ -601,6 +660,7 @@ export async function startModuleJobs(
     nowDeactivated: ReadonlySet<string>,
     stamps?: ReadonlyMap<string, number>,
   ): Promise<void> => {
+    current = nowDeactivated;
     void retryLateStops();
     await stopModules([...stops.keys()].filter((moduleId) => nowDeactivated.has(moduleId)));
     for (const [index, module] of loaded.entries()) {
@@ -610,21 +670,21 @@ export async function startModuleJobs(
       const moduleId = module.manifest.id;
       if (!jobs && !ensureSchema) continue;
       if (stampChanged(moduleId, stamps?.get(moduleId)) && !nowDeactivated.has(moduleId)) {
-        attemptsMade.delete(moduleId);
+        forgetAttempts(moduleId);
         if (starting.has(moduleId)) endedWhileStarting.add(moduleId);
         if (!stops.has(moduleId)) pending.add(moduleId);
       }
       if (starting.has(moduleId) && nowDeactivated.has(moduleId)) {
         endedWhileStarting.add(moduleId);
         pending.add(moduleId);
-        attemptsMade.delete(moduleId);
+        forgetAttempts(moduleId);
         held.delete(moduleId);
         continue;
       }
       if (stops.has(moduleId) || starting.has(moduleId)) continue;
       if (nowDeactivated.has(moduleId)) {
         pending.add(moduleId);
-        attemptsMade.delete(moduleId);
+        forgetAttempts(moduleId);
         held.delete(moduleId);
         continue;
       }
@@ -643,14 +703,57 @@ export async function startModuleJobs(
       held.delete(moduleId);
       pending.delete(moduleId);
       // A teardown no pass saw ended the earlier activation, so this one starts its own count.
-      if (tornDown.delete(moduleId)) attemptsMade.delete(moduleId);
+      if (tornDown.delete(moduleId)) forgetAttempts(moduleId);
       // Claimed before the first await, so a teardown that checks now is refused.
       jobsStarted.add(moduleId);
       await reactivate(moduleId, ensureSchema, jobs);
     }
+    void republishReport(runtimes());
   };
 
   return { reconcile, stopAll, shutdown };
+}
+
+const failureReason = (err: unknown): string =>
+  scrubErrorPaths(safeErrorMessage(err)).slice(0, MODULE_RUNTIME_REASON_MAX);
+
+let reportState: {
+  redis: Redis;
+  loaded: readonly LoadedWorkerModule[];
+  schemas: Record<string, ModuleSchemaOutcome>;
+  taskTypes: Record<string, ModuleTaskTypeOutcome>;
+  published: string;
+} | null = null;
+
+function buildReport(runtimes: Record<string, ModuleRuntime>): string {
+  const { loaded, schemas, taskTypes } = reportState!;
+  return JSON.stringify({
+    at: new Date().toISOString(),
+    modules: loaded.map((m) => ({
+      id: m.manifest.id,
+      packageName: m.packageName,
+      version: m.manifest.version,
+      stepIds: m.stepIds,
+      composableStepIds: m.composable.map((c) => c.stepId),
+      ensureSchema: schemas[m.manifest.id] ?? 'none',
+      taskTypes: taskTypes[m.manifest.id] ?? { seeded: [], conflicts: [] },
+      ...(runtimes[m.manifest.id] ? { runtime: runtimes[m.manifest.id] } : {}),
+    })),
+  });
+}
+
+async function republishReport(runtimes: Record<string, ModuleRuntime>): Promise<void> {
+  if (!reportState) return;
+  const state = reportState;
+  const next = JSON.stringify(runtimes);
+  if (next === state.published) return;
+  state.published = next;
+  try {
+    await state.redis.set(MODULES_LOADED_WORKER_KEY, buildReport(runtimes));
+  } catch (err) {
+    state.published = '';
+    logger.warn({ err }, 'module report could not be republished; the next change tries again');
+  }
 }
 
 export async function publishWorkerBootReport(
@@ -659,19 +762,6 @@ export async function publishWorkerBootReport(
   schemas: Record<string, ModuleSchemaOutcome>,
   taskTypes: Record<string, ModuleTaskTypeOutcome>,
 ): Promise<void> {
-  await redis.set(
-    MODULES_LOADED_WORKER_KEY,
-    JSON.stringify({
-      at: new Date().toISOString(),
-      modules: loaded.map((m) => ({
-        id: m.manifest.id,
-        packageName: m.packageName,
-        version: m.manifest.version,
-        stepIds: m.stepIds,
-        composableStepIds: m.composable.map((c) => c.stepId),
-        ensureSchema: schemas[m.manifest.id] ?? 'none',
-        taskTypes: taskTypes[m.manifest.id] ?? { seeded: [], conflicts: [] },
-      })),
-    }),
-  );
+  reportState = { redis, loaded, schemas, taskTypes, published: JSON.stringify({}) };
+  await redis.set(MODULES_LOADED_WORKER_KEY, buildReport({}));
 }

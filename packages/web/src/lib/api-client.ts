@@ -2762,6 +2762,13 @@ export type ModuleTeardownResponse = ModuleTeardownDone | { status: 'running' };
 export const postModuleTeardown = (moduleId: string) =>
   api.post<ModuleTeardownResponse>(`/modules/${encodeURIComponent(moduleId)}/teardown`);
 
+export interface ModuleRetryResponse {
+  moduleId: string;
+}
+
+export const retryModule = (moduleId: string) =>
+  api.post<ModuleRetryResponse>(`/modules/${encodeURIComponent(moduleId)}/retry`);
+
 export interface ModuleIntegrationCounts {
   providerConfigs: number;
   connections: number;

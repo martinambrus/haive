@@ -8,7 +8,7 @@ import { insertAuditEvent, recordAuditEvent } from '../lib/audit.js';
 import { enqueueStopSettle } from '../lib/cancel-task.js';
 import { killTaskSandboxesOrThrow } from '../lib/sandbox-kill.js';
 import { supersedeLiveRuns } from '../lib/task-control.js';
-import { appendTaskEvent } from '../routes/tasks/_helpers.js';
+import { appendTaskEvent } from '../lib/task-events.js';
 
 type Reader = Pick<Database, 'select'>;
 
@@ -127,6 +127,37 @@ export function setModuleActive(
       .set({ deactivatedAt, drainingAt: null, drainingBy: null, updatedAt: deactivatedAt })
       .where(eq(schema.modules.moduleId, moduleId));
     return { kind: 'ok', deactivatedAt };
+  });
+}
+
+export type ModuleRetry = { kind: 'missing' } | { kind: 'inactive' } | { kind: 'ok' };
+
+/** Moves only the activation stamp, which the worker reads as a request to start the module again. */
+export function requestModuleRetry(
+  db: Database,
+  moduleId: string,
+  actorUserId: string,
+): Promise<ModuleRetry> {
+  return db.transaction(async (tx): Promise<ModuleRetry> => {
+    await tx.execute(sql`SET LOCAL lock_timeout = '5s'`);
+    const [row] = await tx
+      .select({ deactivatedAt: schema.modules.deactivatedAt })
+      .from(schema.modules)
+      .where(eq(schema.modules.moduleId, moduleId))
+      .for('update');
+    if (!row) return { kind: 'missing' };
+    if (row.deactivatedAt) return { kind: 'inactive' };
+    await insertAuditEvent(tx, {
+      actorUserId,
+      action: 'module.retry',
+      targetType: 'module',
+      metadata: { moduleId },
+    });
+    await tx
+      .update(schema.modules)
+      .set({ updatedAt: new Date() })
+      .where(eq(schema.modules.moduleId, moduleId));
+    return { kind: 'ok' };
   });
 }
 

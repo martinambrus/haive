@@ -25,8 +25,8 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
-vi.mock('../src/routes/tasks/_helpers.js', async (importOriginal) => {
-  const original = await importOriginal<typeof import('../src/routes/tasks/_helpers.js')>();
+vi.mock('../src/lib/task-events.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../src/lib/task-events.js')>();
   return {
     ...original,
     appendTaskEvent: async (...args: Parameters<typeof original.appendTaskEvent>) => {
@@ -1936,5 +1936,140 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       ]);
       expect(await typeTasks()).toHaveLength(0);
     });
+  });
+
+  describe('POST /modules/:id/retry', () => {
+    const OLD = new Date('2020-01-01T00:00:00.000Z');
+    const rows = async () =>
+      (await db.select().from(schema.modules)).sort((a, b) => a.moduleId.localeCompare(b.moduleId));
+    const withoutStamp = (r: typeof schema.modules.$inferSelect) => {
+      const { updatedAt: _updatedAt, ...rest } = r;
+      return rest;
+    };
+    const rowOf = async (id: string) => (await rows()).find((r) => r.moduleId === id)!;
+    const retry = (id = 'alpha') => send('POST', `/modules/${id}/retry`);
+    const age = () =>
+      db.update(schema.modules).set({ updatedAt: OLD }).where(eq(schema.modules.moduleId, 'alpha'));
+
+    it('D1 stamps an active module, writes one audit row and leaves every other column and module alone', async () => {
+      await age();
+      const before = await rows();
+      const res = await retry();
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ moduleId: 'alpha' });
+      const after = await rows();
+      const alpha = after.find((r) => r.moduleId === 'alpha')!;
+      expect(Math.abs(alpha.updatedAt.getTime() - Date.now())).toBeLessThan(5 * 60_000);
+      expect(alpha.updatedAt.getTime()).toBeGreaterThan(OLD.getTime());
+      expect(withoutStamp(alpha)).toEqual(
+        withoutStamp(before.find((r) => r.moduleId === 'alpha')!),
+      );
+      expect(after.filter((r) => r.moduleId !== 'alpha')).toEqual(
+        before.filter((r) => r.moduleId !== 'alpha'),
+      );
+      const written = await audits();
+      expect(written).toHaveLength(1);
+      expect(written[0]).toMatchObject({
+        action: 'module.retry',
+        targetType: 'module',
+        targetId: null,
+        actorUserId: ACTOR,
+        metadata: { moduleId: 'alpha' },
+      });
+    });
+
+    it('D2 guard: an unknown id is 404 with no audit row and no module row created', async () => {
+      const before = await rows();
+      expect((await retry('ghost')).status).toBe(404);
+      expect(await audits()).toEqual([]);
+      expect(await rows()).toEqual(before);
+    });
+
+    it('D3 refuses a deactivated module with 409 module_inactive and changes nothing', async () => {
+      await db
+        .update(schema.modules)
+        .set({ deactivatedAt: new Date('2026-01-01T00:00:00.000Z'), updatedAt: OLD })
+        .where(eq(schema.modules.moduleId, 'alpha'));
+      const before = await rows();
+      const res = await retry();
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'module_inactive' });
+      expect(await rows()).toEqual(before);
+      expect(await audits()).toEqual([]);
+    });
+
+    it('D4 refuses a role user with 403 and changes nothing', async () => {
+      await age();
+      const before = await rows();
+      h.role = 'user';
+      expect((await retry()).status).toBe(403);
+      expect(await rows()).toEqual(before);
+      expect(await audits()).toEqual([]);
+    });
+
+    it('D5 rolls the stamp back with the audit when the audit insert is refused', async () => {
+      await age();
+      const before = await rows();
+      try {
+        await db.execute(
+          sql`CREATE OR REPLACE FUNCTION reject_retry_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action = 'module.retry' THEN RAISE EXCEPTION 'fixture audit refusal'; END IF; RETURN NEW; END $$`,
+        );
+        await db.execute(
+          sql`CREATE TRIGGER reject_retry_audit BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION reject_retry_audit()`,
+        );
+        expect((await retry()).status).toBeGreaterThanOrEqual(500);
+        expect((await rowOf('alpha')).updatedAt).toEqual(OLD);
+        expect(await rows()).toEqual(before);
+      } finally {
+        await db.execute(sql`DROP TRIGGER IF EXISTS reject_retry_audit ON audit_events`);
+        await db.execute(sql`DROP FUNCTION IF EXISTS reject_retry_audit()`);
+      }
+      expect(await audits()).toEqual([]);
+    });
+
+    it('D6 retries a draining module like an active one and leaves its drain alone', async () => {
+      const t = await task();
+      await db
+        .update(schema.modules)
+        .set({
+          drainingAt: new Date('2026-01-02T00:00:00.000Z'),
+          drainingBy: ACTOR,
+          updatedAt: OLD,
+        })
+        .where(eq(schema.modules.moduleId, 'alpha'));
+      await db.insert(schema.moduleDrainTasks).values({ moduleId: 'alpha', taskId: t.id });
+      const before = await rowOf('alpha');
+      const res = await retry();
+      expect(res.status).toBe(200);
+      const after = await rowOf('alpha');
+      expect(after.updatedAt.getTime()).toBeGreaterThan(OLD.getTime());
+      expect(after.drainingAt).toEqual(before.drainingAt);
+      expect(after.drainingBy).toBe(ACTOR);
+      expect(withoutStamp(after)).toEqual(withoutStamp(before));
+      expect(await db.select().from(schema.moduleDrainTasks)).toEqual([
+        { moduleId: 'alpha', taskId: t.id },
+      ]);
+    });
+
+    it(
+      'D7 answers 503 module-busy when another transaction holds the module row',
+      { timeout: 20_000 },
+      async () => {
+        await age();
+        let res!: Response;
+        await db.transaction(async (tx) => {
+          await tx
+            .select()
+            .from(schema.modules)
+            .where(eq(schema.modules.moduleId, 'alpha'))
+            .for('update');
+          res = await retry();
+        });
+        expect(res.status).toBe(503);
+        expect(await res.json()).toMatchObject({ code: 'module-busy' });
+        expect((await rowOf('alpha')).updatedAt).toEqual(OLD);
+        expect(await audits()).toEqual([]);
+      },
+    );
   });
 });
