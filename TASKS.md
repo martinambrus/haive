@@ -433,11 +433,6 @@ PRE-EXISTING class, sharper since T355 bounds writes at 2 s. A rejected SET may 
 status: open · kind: design · priority: P3
 From the T355 build. With no offline queue, a reconnect window fails every config read at once (503 or held work). Decide whether a short retry inside the bound is worth it, measured against a restarted Redis. Since T549 the same holds for every request-path `getRedis()` call in the api (retryable 503 `redis_unavailable`); boot is safe because bootstrap awaits `configService.initialize` after `initRedis`.
 
-### T549 · FNF[api-redis-bound] · the api's shared Redis client is unbounded
-
-status: in progress (sonnet-sonnet driver, 2026-11-08) · kind: fix · priority: P2
-PRE-EXISTING, from the T355 build. api/src/redis.ts ~:17 (`maxRetriesPerRequest: null`, offline queue on); about 21 `getRedis` call sites wait out an outage; `/health` (admin.ts ~:391) hangs instead of reporting down.
-
 ### T550 · FNF[queue-add-unbounded-rest] · about 34 api `Queue.add` sites still unbounded
 
 status: open · kind: fix · priority: P3
@@ -1489,6 +1484,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T549 — the api's shared Redis client is bounded (503 when Redis is down); /admin/health reports Redis (merged without bot review) — PR #1033 (79eecd7b7), 2026-11-08
 - T350 — module runtime status: Failed/Starting on the Modules tab with Retry (merged without bot review) — PR #1032 (bbea8d105), 2026-11-08
 - T346 — Start refuses a task whose pinned custom tools are unusable (`assertCustomToolsUsable` in `markQueuedForStart` and the full-Retry branch; 409 `custom-tool-invalid` / `custom-tools-switched-off`, 503 on a config outage); every declared tool counts as required (user decision 2026-11-08, no optional flag); one reader `resolveCustomToolsEnabled`; `POST /custom-mcp/call` re-validates every pinned tool kind; pinned-tool re-checks use the type's `requiresRepository`; an unparseable pinned template fails as `custom-template-invalid`; the unwired failures name the server whose `mcp add` failed; docs task-types.md, integrations.md — PR #1031 (d79572701), 2026-11-08. CI green; merged without bot review. Follow-ups T563, T564 (design), T318 (+2), T543 (+1), T551 note.
 - T354 — the shared npm cache volume is mounted read-only in every sandbox (`npmCacheMount()`), and each invocation seeds a private writable copy under `/tmp` that dies with its `--rm` container; only the worker's warm, purge and align containers write the volume; the first align after upgrade empties a volume written while read-write (`.haive-cache-ro-migrated`); chrome-devtools-mcp version pin accepts only a plain npm version or dist-tag (tooling PATCH 400); docs sandbox.md, onboarding-upgrades.md — PR #1030 (0d5190e56), 2026-11-07. CI green; merged without bot review. Behaviour change: agent-fetched npm content no longer persists between runs. Follow-ups T561-T562, T559 (+1).
