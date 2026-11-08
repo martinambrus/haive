@@ -8,7 +8,7 @@ const log = logger.child({ module: 'rag-sync-lock' });
 const LOCK_TTL_MS = 120_000;
 const HEARTBEAT_MS = 30_000;
 const POLL_MS = 5_000;
-/** The shared Redis clients queue commands forever while Redis is stalled; no lock command waits longer. */
+/** The worker's shared Redis client queues commands forever while Redis is stalled; no lock command waits longer. */
 const COMMAND_TIMEOUT_MS = 5_000;
 
 const REFRESH_SCRIPT = `

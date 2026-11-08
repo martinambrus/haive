@@ -116,6 +116,22 @@ Request-path queue adds use `api/src/lib/queue-bounded.ts` (`QUEUE_ADD_WAIT_MS` 
 rejects on timeout or on the add's own rejection. The add is not cancelled and can still land, so the
 work must be idempotent or guarded by the worker. `addBestEffort` never throws and returns a boolean:
 use it when committed state already records the work (step actions, cancel, task start, stop-settle).
+
+The api's shared client (`getRedis()`, `api/src/redis.ts`) has the same deadline options as
+ConfigService. A failure that is not a server reply (`!(err instanceof ReplyError)`) becomes
+`RedisUnavailableError` (`api/src/lib/redis-unavailable.ts`), answered 503
+`{ error: 'Service temporarily unavailable', code: 'redis_unavailable' }`; a server reply passes
+through. A timed-out write may still have landed, and a command issued while the client connects or
+reconnects rejects at once. Request paths use `getRedis()`. Socket-lifetime and boot work (editor and
+shell refcounts, their boot resets, subscribers, the CLI stream's `XREAD BLOCK` reader, a shell
+socket's publisher) uses `getPatientRedis()`, which keeps the old unbounded options, and duplicates from
+it: `getRedis().duplicate()` throws. `getBullRedis()`, the worker and the `createRedisConnection`
+defaults are unchanged.
+
+`/admin/health` reports `redis: 'up' | 'down'` from a bounded `ping()` and is in the maintenance
+gate's ALWAYS_OPEN by exact path (`/^\/admin\/health$/`), still behind `requireAuth` and
+`requireAdmin`, so an unreadable config store does not hide the page that says why. The static
+`/health` never touches Redis.
 The stalled sweep re-drives step, cancel and start work; a lost stop-settle has no re-drive.
 `addOrRefuse` throws 503 `queue_unavailable` with a generic body: use it when nothing else will queue
 the work and a repeat is safe (auto-continue, merge abort).
