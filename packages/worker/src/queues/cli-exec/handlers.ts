@@ -92,6 +92,7 @@ import {
 import { reserveAgentSlot, type AgentSlot } from './agent-lease.js';
 import { STATIC_PARALLEL_AGENTS, currentAgentCap, publishAgentCap } from './agent-pool-cap.js';
 import { enforceRuntimeHolderReserve } from './agent-reserve.js';
+import { deferJob } from './defer-job.js';
 import { executeByKind, interpretCliFailure } from './exec-core.js';
 import { fatalClassFromMessage } from './failure-class.js';
 import {
@@ -1335,8 +1336,9 @@ const LANE_RETRY_POLL_MS = 50;
  *  enqueue is best-effort with a null taskStepId, and handleCliExecJob's step_summary branch
  *  never resumes a step). Observed as a defect first: two summaries ran under a global pause.
  *
- *  Fail-open on every error. The `!token` skip has to stay — moveToDelayed cannot be called
- *  without a worker token, so there is no way to hold the job at all. */
+ *  Fail-open on every error, a defer the store refuses included once `deferJob` has retried it
+ *  for its window. The `!token` skip has to stay — moveToDelayed cannot be called without a
+ *  worker token, so there is no way to hold the job at all. */
 /** Extra worker slots reserved for the jobs that are not sandboxed agents — version refreshes,
  *  auth probes, sign-ins, sign-outs, image builds, ollama pulls. The pool they used to share is
  *  sized in agent RAM (2048 MB apiece), and none of these is an agent, so a full pool must not
@@ -1370,7 +1372,8 @@ const LIGHT_JOB_LANE = 3;
  *  one script for both, so the cap is exact; the caller releases the returned slot when the job
  *  leaves the processor. A refused job retries for LANE_RETRY_WINDOW_MS before it defers, since
  *  the processor reserves ahead of the gates that may turn a holder away. A Redis failure lets
- *  the job through with no slot. */
+ *  the job through with no slot, and so does a defer the store keeps refusing past `deferJob`'s
+ *  window. */
 export async function enforceAgentLaneCap(
   _db: Database,
   job: Job<CliExecQueuePayload>,
@@ -1393,7 +1396,7 @@ export async function enforceAgentLaneCap(
     await new Promise((resolve) => setTimeout(resolve, LANE_RETRY_POLL_MS));
   }
   try {
-    await job.moveToDelayed(Date.now() + PAUSE_DEFER_MS, token);
+    await deferJob(job, PAUSE_DEFER_MS, token);
   } catch (err) {
     log.warn({ err }, 'agent-lane defer failed; allowing job');
     return undefined;
@@ -1421,7 +1424,7 @@ async function enforcePauseGate(
   const pause = await resolvePause(db, payload.taskId);
   if (!pause) return;
   try {
-    await job.moveToDelayed(Date.now() + PAUSE_DEFER_MS, token);
+    await deferJob(job, PAUSE_DEFER_MS, token);
   } catch (err) {
     log.warn({ err, taskId: payload.taskId }, 'pause defer failed; allowing job');
     return;
@@ -1447,7 +1450,8 @@ async function enforcePauseGate(
  *  as deferred (not failed) and redelivers it later. The cap read fails closed
  *  on an unavailable config store (the job is deferred, since the cap cannot be checked);
  *  every other error, a missing worker token, or the step_summary helper lets the job run
- *  rather than block. The DB count is authoritative (no counter to leak); ended_at is set on
+ *  rather than block, and so does a defer the store keeps refusing past `deferJob`'s window.
+ *  The DB count is authoritative (no counter to leak); ended_at is set on
  *  every terminal outcome, so a finished agent stops counting against the cap. */
 async function enforceTaskAgentCap(
   db: Database,
@@ -1465,7 +1469,7 @@ async function enforceTaskAgentCap(
   } catch (err) {
     if (!(err instanceof ConfigUnavailableError)) return; // not initialised — don't block the job
     try {
-      await job.moveToDelayed(Date.now() + TASK_AGENT_CAP_DEFER_MS, token);
+      await deferJob(job, TASK_AGENT_CAP_DEFER_MS, token);
     } catch (deferErr) {
       log.warn(
         { err: deferErr, taskId: payload.taskId },
@@ -1499,7 +1503,7 @@ async function enforceTaskAgentCap(
   }
   if (running < cap) return;
   try {
-    await job.moveToDelayed(Date.now() + TASK_AGENT_CAP_DEFER_MS, token);
+    await deferJob(job, TASK_AGENT_CAP_DEFER_MS, token);
   } catch (err) {
     log.warn({ err, taskId: payload.taskId }, 'per-task cap defer failed; allowing job');
     return;
