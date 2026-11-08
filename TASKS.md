@@ -632,19 +632,6 @@ From the T393 build (2026-11-07):
 12. REGRESSION, accepted and bounded: urgent deactivation (api modules/activation.ts ~:217) waits up to 2 s per task serially for `enqueueStopSettle` while Redis is down. Fix direction: queue the settlements after the loop, or in parallel under one deadline.
 13. PRE-EXISTING: maintenance.ts ~:395 and activation.ts ~:234 write `task.stopped` only when a run ended or a step failed, and the owner's `cancel-active-cli` route writes none. Fix direction: one event rule for all three Stop producers.
 
-### T346 · FNF[custom-tool-start-hint] · a broken or switched-off custom tool fails only at its step (+5)
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-11-07T15:17Z · last: 2026-11-07T15:17Z
-
-1. A task runs every earlier step and fails only at the prompt step whose custom tool is invalid or switched off. Fix direction: a start-time pass records a task event (custom_tool.unusable) and never blocks. Whether it should block instead needs the user.
-2. CUSTOM_MCP_TOOLS_ENABLED is read at three sites (worker step-runner.ts ~:571, cli-exec/resolvers.ts ~:260, api custom-mcp.ts ~:240). Use one shared reader.
-3. POST /custom-mcp/call re-validates only http-get tools. Re-check every pinned tool at call time.
-4. The custom-tools-unwired failure does not name the server whose `mcp add` failed.
-5. The pinned-tool re-checks use requiresRepository: true. Pass the task type's requiresRepository.
-6. templateTokens (worker steps/custom/prompt-step.ts:65-68) returns [] for a template that fails to parse. Re-validate at dispatch.
-
-User decision 2026-11-01: Block Start for unusable required tools; warn for optional tools.
-
 ### T350 · FNF[module-runtime-status] · a module whose reactivation used every attempt shows active with no schema or jobs (+1)
 
 status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
@@ -1486,6 +1473,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T346 — Start refuses a task whose pinned custom tools are unusable (`assertCustomToolsUsable` in `markQueuedForStart` and the full-Retry branch; 409 `custom-tool-invalid` / `custom-tools-switched-off`, 503 on a config outage); every declared tool counts as required (user decision 2026-11-08, no optional flag); one reader `resolveCustomToolsEnabled`; `POST /custom-mcp/call` re-validates every pinned tool kind; pinned-tool re-checks use the type's `requiresRepository`; an unparseable pinned template fails as `custom-template-invalid`; the unwired failures name the server whose `mcp add` failed; docs task-types.md, integrations.md — PR #1031 (d79572701), 2026-11-08. CI green; merged without bot review. Follow-ups T563, T564 (design), T318 (+2), T543 (+1), T551 note.
 - T354 — the shared npm cache volume is mounted read-only in every sandbox (`npmCacheMount()`), and each invocation seeds a private writable copy under `/tmp` that dies with its `--rm` container; only the worker's warm, purge and align containers write the volume; the first align after upgrade empties a volume written while read-write (`.haive-cache-ro-migrated`); chrome-devtools-mcp version pin accepts only a plain npm version or dist-tag (tooling PATCH 400); docs sandbox.md, onboarding-upgrades.md — PR #1030 (0d5190e56), 2026-11-07. CI green; merged without bot review. Behaviour change: agent-fetched npm content no longer persists between runs. Follow-ups T561-T562, T559 (+1).
 - T347 + T399 — stored targets (Global KB Ollama URL, repository RAG stores and embedder URLs, forge hosts) and non-admin probes dial through one egress guard in `@haive/shared/egress`; admin private-endpoint allowlist (`config:security:privateEndpointAllowlist`, audited GET/PUT and data-tab card; hostname entries never lift link-local or unspecified addresses; read lazily); built-ins are the in-stack Ollama names and exactly `http://host.docker.internal:11434`; forge requests never follow redirects (a renamed repository's 301 is now a `ForgeError`); Ollama pull relay bounded; one-time idempotent upgrade seed lists the private hosts an install already stores; docs api-auth.md, integrations.md, global-kb.md, rag-embedding-failures.md, error-diagnostics.md, task-types.md — PR #1029 (02af88738), 2026-11-07. CI green; merged without bot review. Follow-ups T554-T560.
 - T406 + T408 — a listed-but-disabled explicit CLI provider (task, step or saved choice) holds a fresh CLI-consuming or provider-sensitive step (30 s poll; START too) and the dispatcher refuses it with a named skip instead of the next-oldest CLI; `task_steps.detect_cli_provider_id` (migration 0223) re-detects a parked provider-sensitive step when the implicit default moved; api and web keep a disabled pick listed and disable its effort dropdown; docs cli-adapters.md, worker-restarts.md, step-summaries.md — PR #1028 (e241910fa), 2026-11-07. CI green; merged without bot review. T406 item 2 moved to T552; follow-ups T553.
