@@ -410,7 +410,7 @@ From the T346 build (2026-11-08), PRE-EXISTING: 4. `failedMcpAddNames` (task-aut
 
 ### T544 · FNF[config-service-boot-outage] · ConfigService boot and encryption-key paths still wait out a Redis outage
 
-status: open · kind: fix · priority: P2
+status: in progress (sonnet-sonnet driver, 2026-11-08) · kind: fix · priority: P2
 PRE-EXISTING, from the T355 build (2026-11-07). 1. Encryption key read and plain SET at shared config.service.ts ~:884, ~:976 bypass the bounded wrapper. 2. `initialize` (~:798) and modules loader.ts ~:208 at boot hang without a deadline. 3. global-kb boot hangs the same way. 4. Under `tsx watch` a boot that rejects does not restart; check the process stays up and retries.
 
 ### T545 · FNF[updater-found-state-fallback] · updater residual double failure and unbounded version wait
@@ -435,7 +435,7 @@ From the T355 build. With no offline queue, a reconnect window fails every confi
 
 ### T549 · FNF[api-redis-bound] · the api's shared Redis client is unbounded
 
-status: open · kind: fix · priority: P2
+status: in progress (sonnet-sonnet driver, 2026-11-08) · kind: fix · priority: P2
 PRE-EXISTING, from the T355 build. api/src/redis.ts ~:17 (`maxRetriesPerRequest: null`, offline queue on); about 21 `getRedis` call sites wait out an outage; `/health` (admin.ts ~:391) hangs instead of reporting down.
 
 ### T550 · FNF[queue-add-unbounded-rest] · about 34 api `Queue.add` sites still unbounded
