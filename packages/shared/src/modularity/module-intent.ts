@@ -9,6 +9,19 @@ export const MODULE_STATES = [
 export type ModuleState = (typeof MODULE_STATES)[number];
 
 export const MODULE_DEPENDENTS_CAP = 200;
+
+export const MODULE_RUNTIME_REASON_MAX = 500;
+export const MODULE_RUNTIME_STATES = ['ready', 'pending', 'failed'] as const;
+export const MODULE_RUNTIME_SCHEMA_STATES = ['none', 'ready', 'pending', 'failed'] as const;
+export const MODULE_RUNTIME_JOB_STATES = ['none', 'running', 'stopped'] as const;
+
+export interface ModuleRuntime {
+  state: (typeof MODULE_RUNTIME_STATES)[number];
+  schema: (typeof MODULE_RUNTIME_SCHEMA_STATES)[number];
+  jobs: (typeof MODULE_RUNTIME_JOB_STATES)[number];
+  attempts: number;
+  reason: string | null;
+}
 export type ModuleSource = 'local' | 'registry';
 
 export interface ModuleIntentRow {
@@ -44,6 +57,7 @@ export interface ModuleDiffRow {
   tornDownAt: string | null;
   drainingAt?: string | null;
   skippedSeeds: SkippedSeed[];
+  runtime?: ModuleRuntime;
 }
 
 export interface ModuleDiff {
@@ -78,31 +92,61 @@ function skippedSeedsOf(taskTypes: unknown): SkippedSeed[] {
   return out;
 }
 
+function runtimeOf(raw: unknown): ModuleRuntime | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const { state, schema, jobs, attempts, reason } = raw as Record<string, unknown>;
+  const oneOf = <T extends string>(list: readonly T[], value: unknown): value is T =>
+    typeof value === 'string' && (list as readonly string[]).includes(value);
+  if (
+    !oneOf(MODULE_RUNTIME_STATES, state) ||
+    !oneOf(MODULE_RUNTIME_SCHEMA_STATES, schema) ||
+    !oneOf(MODULE_RUNTIME_JOB_STATES, jobs) ||
+    typeof attempts !== 'number' ||
+    !Number.isInteger(attempts) ||
+    attempts < 0 ||
+    (reason !== null && typeof reason !== 'string')
+  ) {
+    return null;
+  }
+  return {
+    state,
+    schema,
+    jobs,
+    attempts,
+    reason: reason === null ? null : reason.slice(0, MODULE_RUNTIME_REASON_MAX),
+  };
+}
+
 function readWorkerReport(raw: unknown): {
   at: string | null;
   versions: Map<string, string>;
   skipped: Map<string, SkippedSeed[]>;
+  runtimes: Map<string, ModuleRuntime>;
 } {
   const versions = new Map<string, string>();
   const skipped = new Map<string, SkippedSeed[]>();
-  if (typeof raw !== 'object' || raw === null) return { at: null, versions, skipped };
+  const runtimes = new Map<string, ModuleRuntime>();
+  if (typeof raw !== 'object' || raw === null) return { at: null, versions, skipped, runtimes };
   const { at, modules } = raw as { at?: unknown; modules?: unknown };
   if (typeof at !== 'string' || Number.isNaN(Date.parse(at)) || !Array.isArray(modules)) {
-    return { at: null, versions, skipped };
+    return { at: null, versions, skipped, runtimes };
   }
   for (const entry of modules as unknown[]) {
-    const { id, version, taskTypes } = (entry ?? {}) as {
+    const { id, version, taskTypes, runtime } = (entry ?? {}) as {
       id?: unknown;
       version?: unknown;
       taskTypes?: unknown;
+      runtime?: unknown;
     };
     if (typeof id !== 'string' || typeof version !== 'string') {
-      return { at: null, versions: new Map(), skipped: new Map() };
+      return { at: null, versions: new Map(), skipped: new Map(), runtimes: new Map() };
     }
     versions.set(id, version);
     skipped.set(id, skippedSeedsOf(taskTypes));
+    const parsed = runtimeOf(runtime);
+    if (parsed) runtimes.set(id, parsed);
   }
-  return { at, versions, skipped };
+  return { at, versions, skipped, runtimes };
 }
 
 /**
@@ -133,6 +177,7 @@ export function diffModuleIntent(
     else if (!inApi && !inWorker) state = 'missing';
     else if (inApi && inWorker) state = 'loaded';
     else state = inApi ? 'api-only' : 'worker-only';
+    const runtime = worker.runtimes.get(id);
     const rowVersion = row?.installedVersion ?? null;
     const seen = [rowVersion, apiVersion, workerVersion].filter((v): v is string => v !== null);
     return {
@@ -151,6 +196,7 @@ export function diffModuleIntent(
       tornDownAt: row ? iso(row.tornDownAt) : null,
       drainingAt: row?.drainingAt ? iso(row.drainingAt) : null,
       skippedSeeds: worker.skipped.get(id) ?? [],
+      ...(runtime ? { runtime } : {}),
     };
   });
   return { workerAt: worker.at, rows: out };
