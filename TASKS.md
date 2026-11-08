@@ -420,8 +420,8 @@ PRE-EXISTING, from the T355 build. 1. updater run.ts ~:394-395: a rollback whose
 
 ### T546 · FNF[config-outage-failopen-gates] · remaining readers that default open when the config store is down
 
-status: open · kind: fix · priority: P2
-PRE-EXISTING, from the T355 build. 1. worker runtime-runner-reaper.ts ~:482-488 uses the default grace on a failed read. 2. `moveToDelayed` paths fail the run on a config read error: cli-exec/handlers.ts ~:1426, ~:1472, ~:1504; agent-reserve.ts ~:344, ~:429. 3. task-queue.ts ~:1821 classifies a `ConfigUnavailableError` as a genuine failure.
+status: in progress (sonnet-sonnet driver, 2026-11-08) · kind: fix · priority: P2
+PRE-EXISTING, from the T355 build. 1. worker runtime-runner-reaper.ts ~:482-488 uses the default grace on a failed read. 2. `moveToDelayed` paths fail the run on a config read error: cli-exec/handlers.ts ~:1426, ~:1472, ~:1504; agent-reserve.ts ~:344, ~:429. 3. task-queue.ts ~:1821 classifies a `ConfigUnavailableError` as a genuine failure. 4. (T544 run) worker data-migrations.ts `runOne` (~:262-268) logs and swallows a typed outage a boot migration throws, including the one `holdImportedMcpServerLists` rethrows on purpose (~:703-706).
 
 ### T547 · FNF[config-write-unknown-outcome] · a write that times out may still land
 
@@ -431,7 +431,7 @@ PRE-EXISTING class, sharper since T355 bounds writes at 2 s. A rejected SET may 
 ### T548 · FNF[config-blip-tolerance] · a sub-second Redis blip now fails requests
 
 status: open · kind: design · priority: P3
-From the T355 build. With no offline queue, a reconnect window fails every config read at once (503 or held work). Decide whether a short retry inside the bound is worth it, measured against a restarted Redis. Since T549 the same holds for every request-path `getRedis()` call in the api (retryable 503 `redis_unavailable`); boot is safe because bootstrap awaits `configService.initialize` after `initRedis`.
+From the T355 build. With no offline queue, a reconnect window fails every config read at once (503 or held work). Decide whether a short retry inside the bound is worth it, measured against a restarted Redis. Since T549 the same holds for every request-path `getRedis()` call in the api (retryable 503 `redis_unavailable`); boot is safe because bootstrap awaits `configService.initialize` after `initRedis`. (T544 run) Flaky timing test shared config-service-outage.test.ts ~:224 (800 ms bound; `FakeRedis.refuse()` ~:50-57 waits a fixed 100 ms) failed once under heavy concurrent load.
 
 ### T550 · FNF[queue-add-unbounded-rest] · about 34 api `Queue.add` sites still unbounded
 
@@ -583,12 +583,37 @@ PRE-EXISTING. T549 bounded the api's `getRedis()`; the worker's (worker src/redi
 ### T567 · FNF[api-redis-shutdown] · api shutdown never closes its Redis clients
 
 status: open · kind: fix · found: T549 run 2026-11-08 · priority: P4
-PRE-EXISTING. `closeRedis` (api src/redis.ts ~:101) has no production caller and the api has no SIGTERM or SIGINT handler, so shutdown never quits the three clients. `quit()` on a silent patient or bull client can wait forever; `closeRedis` falls back to `disconnect()` only for a non-ready client or a rejected `quit()`.
+PRE-EXISTING. `closeRedis` (api src/redis.ts ~:101) has no production caller and the api has no SIGTERM or SIGINT handler, so shutdown never quits the three clients. `quit()` on a silent patient or bull client can wait forever; `closeRedis` falls back to `disconnect()` only for a non-ready client or a rejected `quit()`. (T544 run) The api also runs node as PID 1 without `init: true` (api Dockerfile ~:90; the worker has it), so `docker stop` waits out the grace period, now also during T544's boot retry wait.
 
 ### T568 · FNF[terminal-open-late-replay] · a shell open request can reach the worker after its reply timeout
 
 status: open · kind: fix · found: T549 run 2026-11-08 · priority: P4
 PRE-EXISTING. terminal-shell.ts `openSession` (api routes ~:439-476) publishes the open request on the patient client, whose offline queue can deliver it after the 15 s `OPEN_REPLY_TIMEOUT_MS` (~:35) and the session's cleanup, so the worker may open a session nobody waits for.
+
+### T569 · FNF[configservice-wedged-connection] · ConfigService never recycles a wedged connection
+
+status: open · kind: fix · found: T544 run 2026-11-08 · priority: P4
+PRE-EXISTING. shared config.service.ts `CONFIG_REDIS_OPTIONS` (~:785) and `redisCall` (~:1068): after repeated 2 s command timeouts on a socket that stays open but loses bytes, ioredis keeps the timed-out commands queued and reply pairing can desync until the socket is destroyed. A drop, a restart-like drop and `docker pause` recover on the same client; only the lossy black-hole does not, and T544's boot retry then waits as long as it lasts. Related T548.
+
+### T570 · FNF[encryption-key-set-race] · two processes on a first boot can each generate the encryption key
+
+status: open · kind: fix · found: T544 run 2026-11-08 · priority: P3
+PRE-EXISTING. shared config.service.ts `ensureEncryptionKey` (~:938-951, EXISTS then plain SET; also ~:1039): with no key in Redis and no `CONFIG_ENCRYPTION_KEY`, api and worker initializing together each generate a key, the last SET wins, and the other may already encrypt with the overwritten one. Direction: SET NX, then re-read the winner.
+
+### T571 · FNF[global-kb-boot-store-stall] · worker boot waits forever on a stalled global KB store
+
+status: open · kind: design · found: T544 run 2026-11-08 · priority: P3
+PRE-EXISTING. shared global-kb/client.ts `withGlobalKb` (~:121) via `recomputeAliasedTopicKeys` (worker data-migrations.ts ~:134, ~:599, ungated, every boot): a store that accepts and then stalls, or a held schema advisory lock, has no deadline. A plain `deadlineMs` skips the shared schema ensure (global-kb.md, "A call with a deadline never starts the shared schema ensure"), so it needs its own design.
+
+### T572 · FNF[boot-failure-dead-watcher] · a Postgres outage past 30 s at boot still exits
+
+status: open · kind: fix · found: T544 run 2026-11-08 · priority: P4
+PRE-EXISTING. database wait-for-ready.ts ~:75-76 (called from api and worker bootstrap.ts) throws a plain error after its 30 s budget and `main().catch` exits 1 (api index.ts ~:167-169, worker index.ts ~:385-387): a dead `tsx watch` app in dev, a crash loop in production. T544 retries only `ConfigUnavailableError`. The worker's post-bootstrap awaits on its offline-queue Redis and BullMQ connections (worker index.ts ~:88-246) also wait silently during an outage; worker half beside T566.
+
+### T573 · FNF[redis-client-error-listeners] · Redis clients without an 'error' listener spam stderr
+
+status: open · kind: fix · found: T544 run 2026-11-08 · priority: P4
+PRE-EXISTING. No `'error'` listener on the api's patient and bull clients (api redis.ts ~:68, ~:71; shared utils/redis-factory.ts ~:18, ~:29 attach none) or the worker's two clients (worker redis.ts ~:11, ~:14): ioredis prints "[ioredis] Unhandled error event" per reconnect, 16 lines per 12-14 s outage. Log noise only. Api half beside T567, worker half beside T566.
 
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
