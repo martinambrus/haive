@@ -549,7 +549,7 @@ status: open · kind: fix · found: T354 run · priority: P3
 2. Upgrade-apply writes the feed's `latest` unchecked (tooling-upgrades.ts:127). PRE-EXISTING.
 3. `rtk-version` validation is loose (settings.ts:236, tooling-upgrades.ts:843). PRE-EXISTING.
 
-### T563 · FNF[custom-tool-start-gate] · start gate leftovers from the T346 build
+### T563 · FNF[custom-tool-start-gate] · start gate leftovers from the T346 build (+1)
 
 status: open · kind: fix · found: T346 run · priority: P3
 
@@ -564,6 +564,7 @@ status: open · kind: fix · found: T346 run · priority: P3
 9. `start-entry-points.test.ts` catches only known writer shapes of `status = 'queued'`, not raw SQL.
 10. [verify-first] Can an admin type reuse a builtin slug and carry `custom_steps` on plan, kb or upgrade tasks (task-types.ts:246, 272)? The plan-link refusal (spawn-plan-task.ts:71) is code-read only.
 11. A CLI that prints a line exactly `haive-mcp: add X failed` is listed as a failed server (worker sandbox/task-auth-volume.ts ~1098-1105). Diagnostic text only.
+12. The admin "Custom tools" card still says "Off: a step that declares tools fails with a clear reason" (web app/(app)/admin/page.tsx:2651-2653); since T346, Start (and full Retry) is refused first. Copy only; found in the T346 browser check.
 
 ### T564 · per-tool optional flag for custom tools (design)
 
