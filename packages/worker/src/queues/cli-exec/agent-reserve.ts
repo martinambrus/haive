@@ -12,6 +12,7 @@ import { getRedis } from '../../redis.js';
 import { runnerHoldingTaskIds } from '../../sandbox/runtime-admission.js';
 import { resourceLimitsEnabled } from '../../sandbox/runtime-caps.js';
 import { getCliExecQueue, log, type CliExecQueuePayload } from './_shared.js';
+import { deferJob } from './defer-job.js';
 
 /**
  * Runtime-holder reserve: a task that holds NO live runtime runner yields its cli-exec slot to
@@ -313,7 +314,8 @@ export async function reserveAllowsAnyOf(
  *
  *  Fail-open on every error but one, matching its siblings — a docker hiccup or an uninitialised
  *  config must not stop an agent from running. An unavailable config store (the reserve and
- *  governor switches cannot be read) defers the job instead, like the other gates. The `!token`
+ *  governor switches cannot be read) defers the job instead, like the other gates. A defer the
+ *  store keeps refusing past `deferJob`'s window lets the job run as well. The `!token`
  *  skip has to stay: moveToDelayed cannot be called without a worker token, so there is no way
  *  to hold the job at all. */
 export async function enforceRuntimeHolderReserve(
@@ -337,7 +339,7 @@ export async function enforceRuntimeHolderReserve(
   } catch (err) {
     if (!(err instanceof ConfigUnavailableError)) return; // not initialised — don't hold the job
     try {
-      await job.moveToDelayed(Date.now() + DEFER_MS, token);
+      await deferJob(job, DEFER_MS, token);
     } catch (deferErr) {
       log.warn(
         { err: deferErr, taskId: payload.taskId },
@@ -408,8 +410,16 @@ export async function enforceRuntimeHolderReserve(
     return;
   }
 
+  // The hold marker only dates the escape hatch, so a refused SET must not decide the defer: the
+  // store that refuses it (OOM, LOADING) refuses the defer too, and deferJob waits that out. A
+  // marker not written here is tried again on the next slice, so the hold clock starts late.
+  let first = false;
   try {
-    const first = await markHeld(payload.invocationId, Date.now());
+    first = await markHeld(payload.invocationId, Date.now());
+  } catch (err) {
+    log.warn({ err, invocationId: payload.invocationId }, 'agent reserve hold mark failed');
+  }
+  try {
     if (first) {
       await markWaiting(db, payload.invocationId, holders.size).catch((err: unknown) => {
         log.warn({ err, invocationId: payload.invocationId }, 'agent reserve status mark failed');
@@ -424,7 +434,7 @@ export async function enforceRuntimeHolderReserve(
         'agent reserve: yielding slot to a task holding a runtime runner',
       );
     }
-    await job.moveToDelayed(Date.now() + DEFER_MS, token);
+    await deferJob(job, DEFER_MS, token);
   } catch (err) {
     log.warn({ err, taskId: payload.taskId }, 'agent reserve defer failed; allowing job');
     return;

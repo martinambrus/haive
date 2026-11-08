@@ -268,8 +268,9 @@ with them). On a large store the first ensure's backfill can outlast a short dea
 calls fail their ensure until an unbounded caller completes it.
 
 **Boot reads under a Redis outage are bounded; a stalled store is not.** At worker boot the two
-config reads in `resolveGlobalKbSettings` reject typed after about 2 s and `runOne`
-(`data-migrations.ts`) logs it and boot goes on. A KB store that accepts the connection and then
+config reads in `resolveGlobalKbSettings` reject typed after about 2 s; `runOne`
+(`data-migrations.ts`) rethrows the typed outage and the boot retry runs the migrations again once
+the store answers. A KB store that accepts the connection and then
 stalls, or a held schema advisory lock, still waits without a deadline in `recomputeAliasedTopicKeys`,
 which runs every boot; a plain `deadlineMs` would skip the shared schema ensure above, so that needs
 its own design.

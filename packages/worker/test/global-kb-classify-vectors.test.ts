@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ConfigUnavailableError } from '@haive/shared';
 import { hashEmbed } from '@haive/shared/rag';
 
 type Row = { id: number; content: string; vec: number[]; kind: string | null };
@@ -144,5 +145,13 @@ describe('classifying global KB vectors when the store is not there', () => {
     h.storeError = new Error('connect ECONNREFUSED');
 
     await expect(classifyGlobalKbVectorProvenance({} as never)).resolves.toBeUndefined();
+  });
+
+  it('lets a configuration store outage through, so the boot retry or the sweep runs it again', async () => {
+    h.storeError = new ConfigUnavailableError('get');
+
+    await expect(classifyGlobalKbVectorProvenance({} as never)).rejects.toBeInstanceOf(
+      ConfigUnavailableError,
+    );
   });
 });

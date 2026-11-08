@@ -257,12 +257,18 @@ export async function scrubRepositoryErrors(db: Database): Promise<void> {
  *  worker because a cosmetic form relabel failed is the wrong trade. Logged at `error` so a
  *  persistent failure is still visible rather than merely swallowed.
  *
+ *  The one exception is a typed configuration-store outage, which is not the migration's
+ *  failure: it says the store is down. It is rethrown to `bootstrap()`, which the worker runs
+ *  under `retryWhileConfigUnavailable`, so a migration that needs the store (the private-endpoint
+ *  seed, the imported MCP server hold) runs once it answers rather than at the next boot.
+ *
  *  A backstop, not a replacement: the four helpers that already catch their own errors keep
  *  doing so, because they log context this cannot see. */
 async function runOne(db: Database, migration: DataMigration): Promise<void> {
   try {
     await migration.run(db);
   } catch (err) {
+    rethrowIfConfigUnavailable(err);
     log.error({ err, migration: migration.id, kind: migration.kind }, 'data migration failed');
   }
 }

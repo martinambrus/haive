@@ -86,7 +86,11 @@ under `tsx watch` leaves the watcher up with the app dead and nothing restarting
 is a crash loop against a store still down; after, the api served 200 about 2.5 s after the store came
 back, same PID. Only `ConfigUnavailableError` is retried (`instanceof`); any other boot error (missing
 env var, wrong password, Postgres, key mismatch) still logs and exits 1. Every init step `bootstrap()`
-repeats on a retry is a no-op the second time. The cost: a permanently wrong `REDIS_URL` retries
+repeats on a retry is a no-op the second time, and the worker's boot data migrations run inside it:
+`runOne` (`data-migrations.ts`) and `classifyGlobalKbVectorProvenance` rethrow a typed outage so the
+retry runs them again (MEASURED before: the private-endpoint seed and the imported MCP server hold were
+logged as failed and left until the next restart); any other migration error is still logged and
+skipped. The cost: a permanently wrong `REDIS_URL` retries
 forever, one warn per attempt, instead of crash-looping.
 
 The api answers `ConfigUnavailableError` with 503
@@ -124,10 +128,22 @@ decides.
   unreadable rather than as `maintenance`.
 - A background tick (PR poll, usage poll with its provider-recovery check, checkout watch and sweep)
   catches `ConfigUnavailableError` at its first config read, logs a warning and skips the tick. The
-  next scheduled tick retries.
+  next scheduled tick retries. The runtime runner reaper reads an unreadable failed/held grace as 0
+  for that pass, so it keeps failed and held runners (a reaped runner cannot be brought back, and the
+  operator may have raised or disabled the grace); the exited, orphan and terminal-task reaps still
+  run. Any other read error keeps the 180 min default.
+- A failed step's provider-outage watch is armed as if the mode were unset when
+  `ALLOWANCE_WATCH_MODE` cannot be read (`recordFailedStepHint`, `task-queue.ts`): nothing retries
+  the arm once the task is failed, while `checkProviderRecovery` re-reads the mode every tick and
+  leaves an armed row alone while it is `off`.
 
-A cli-exec gate defers through the job's own `moveToDelayed`. If that call itself fails, the job is
-allowed to run, as it was before.
+A cli-exec gate defers through the job's own `moveToDelayed`, by way of `deferJob`
+(`queues/cli-exec/defer-job.ts`). A defer the store refuses (a server reply such as `LOADING` after a
+restart, or OOM) is retried every second for `DEFER_RETRY_WINDOW_MS` (60 s, under the 2 min agent
+slot lease, since a held job still owns its slot), and only then is the job allowed to run. MEASURED
+before: a `LOADING` refusal let the job run ungated after 390 ms; after, the gate held it 14.2 s
+through the restart and it ran on its next pass. A transport outage never reaches the retry: the
+BullMQ connection queues the call and resolves it when the store is back.
 
 Request-path queue adds use `api/src/lib/queue-bounded.ts` (`QUEUE_ADD_WAIT_MS` 2000). `boundedAdd`
 rejects on timeout or on the add's own rejection. The add is not cancelled and can still land, so the

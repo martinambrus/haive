@@ -1,5 +1,6 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import type { Database } from '@haive/database';
+import { ConfigUnavailableError, configService } from '@haive/shared';
 import {
   reapDecision,
   pickPreemptibleRunner,
@@ -373,6 +374,104 @@ describe('RuntimeRunnerReaper.reclaimOnePreemptible: a dead task', () => {
     await expect(reaper.reclaimOnePreemptible()).resolves.toBe(false);
 
     expect(reap).not.toHaveBeenCalled();
+  });
+});
+
+describe('RuntimeRunnerReaper.sweep: the idle grace and a configuration store outage', () => {
+  const runner = (over: Partial<RunnerContainer> = {}): RunnerContainer => ({
+    id: 'c1',
+    taskId: 't1',
+    running: true,
+    startedAtMs: NOW - 5 * 60 * 60_000,
+    ...over,
+  });
+  const failedLongAgo = {
+    status: 'failed',
+    completedAt: ago(4 * 60 * 60_000),
+    pausedAt: null,
+    deadAt: null,
+  };
+  const pausedLongAgo = {
+    status: 'running',
+    completedAt: null,
+    pausedAt: ago(4 * 60 * 60_000),
+    deadAt: null,
+  };
+
+  function sweeperOf(containers: RunnerContainer[], task?: Record<string, unknown>) {
+    const db = {
+      query: { tasks: { findFirst: async () => task } },
+      select: () => ({ from: () => ({ where: async () => [{ n: 0 }] }) }), // no live CLI run
+    } as unknown as Database;
+    const reaper = new RuntimeRunnerReaper({ db });
+    const inner = reaper as unknown as {
+      listRunnerContainers: () => Promise<RunnerContainer[]>;
+      reap: (id: string) => Promise<void>;
+    };
+    vi.spyOn(inner, 'listRunnerContainers').mockResolvedValue(containers);
+    return { reaper, reap: vi.spyOn(inner, 'reap').mockResolvedValue(undefined) };
+  }
+  const graceIs = (minutes: number) =>
+    vi.spyOn(configService, 'getNumber').mockResolvedValue(minutes);
+  const storeIsDown = () =>
+    vi.spyOn(configService, 'getNumber').mockRejectedValue(new ConfigUnavailableError('get'));
+
+  // reapDecision reads the clock itself, so pin it to the instant the fixtures are relative to.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(NOW);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('reaps a task failed past the configured grace (the read works)', async () => {
+    graceIs(180);
+    const { reaper, reap } = sweeperOf([runner()], failedLongAgo);
+
+    await expect(reaper.sweep()).resolves.toEqual({ scanned: 1, reaped: 1 });
+
+    expect(reap).toHaveBeenCalledExactlyOnceWith('c1');
+  });
+
+  it('keeps a failed task’s runner for the pass when the grace cannot be read', async () => {
+    storeIsDown();
+    const { reaper, reap } = sweeperOf([runner()], failedLongAgo);
+
+    await expect(reaper.sweep()).resolves.toEqual({ scanned: 1, reaped: 0 });
+
+    expect(reap).not.toHaveBeenCalled();
+  });
+
+  it('keeps a settled paused task’s runner for the pass when the grace cannot be read', async () => {
+    storeIsDown();
+    const { reaper, reap } = sweeperOf([runner()], pausedLongAgo);
+
+    await expect(reaper.sweep()).resolves.toEqual({ scanned: 1, reaped: 0 });
+
+    expect(reap).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['an exited runner', runner({ running: false }), undefined],
+    ['an orphan runner', runner({ taskId: null }), undefined],
+    ['a completed task’s runner', runner(), { ...failedLongAgo, status: 'completed' }],
+  ])('still reaps %s while the grace cannot be read', async (_name, container, task) => {
+    storeIsDown();
+    const { reaper, reap } = sweeperOf([container], task);
+
+    await expect(reaper.sweep()).resolves.toEqual({ scanned: 1, reaped: 1 });
+
+    expect(reap).toHaveBeenCalledExactlyOnceWith('c1');
+  });
+
+  it('keeps the default grace when the read fails for a reason other than the outage', async () => {
+    vi.spyOn(configService, 'getNumber').mockRejectedValue(new Error('boom'));
+    const { reaper, reap } = sweeperOf([runner()], failedLongAgo);
+
+    await expect(reaper.sweep()).resolves.toEqual({ scanned: 1, reaped: 1 });
+
+    expect(reap).toHaveBeenCalledExactlyOnceWith('c1');
   });
 });
 
