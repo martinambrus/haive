@@ -571,6 +571,15 @@ status: open · kind: fix · found: T346 run · priority: P3
 status: open · kind: design · found: T346 run · priority: P4
 Custom tools have no required/optional flag, so the Start gate treats every declared tool as required (user decision 2026-11-08). An `optional?: boolean` per tool, modelled on integration requirements (prompt-steps.ts:57), would need the schema, a tool-editor control, a dispatch rule that drops an unusable optional tool (and what the agent is told when its template names it), a `custom_tool.unusable` task event at Start, and docs. Resume when a task type needs a tool it can run without.
 
+### T565 · FNF[module-runtime-report-gaps] · worker module report misses a few runtime transitions (+2)
+
+status: open · kind: fix · found: T350 run 2026-11-08 · priority: P4
+PRE-EXISTING limits of the per-module `runtime` in the worker report (`haive:modules:loaded:worker`), all minor.
+
+1. A module held back at boot (deactivated, or its schema ensure outlived the boot wait) is skipped by `runtimes()` (worker modules/loader.ts ~:431, index.ts ~:288-293), so the report has no `runtime` for it until the first pass (15 s at most).
+2. A start that fails after boot went on without it sets only `pending` and a log (loader.ts ~:551-558): no `failures` entry, so the report reads pending with reason null until the first pass tries, and that try is not one of the 3 attempts.
+3. The report is rewritten only on a runtime-signature change or after a failed write (loader.ts ~:745-767): a lost Redis key (flush, restart without data) stays lost until the next boot or runtime change, and `/admin/modules` loses the worker half meanwhile. Fix direction: rewrite on each pass when the key is absent, or a periodic refresh.
+
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
 status: open · kind: design · user decision: resolved 2026-11-05 · found: T337 run 2 · priority: P3
@@ -745,7 +754,7 @@ Sites:
   On a timeout they return different things: partial stdout, [], null, or "timed out".
   Fix: one shared runDockerCommand(args, {timeoutMs}) returning {stdout, stderr, exit, timedOut}, plus a test that kills a hung child.
 
-### T373 · FNF[audit-strict-admin-actions] · module/task-type/upgrade-start actions still audit best-effort (+6)
+### T373 · FNF[audit-strict-admin-actions] · module/task-type/upgrade-start actions still audit best-effort (+7)
 
 status: open · was modular #246 · priority: P2
 Sites:
@@ -763,6 +772,7 @@ Sites:
 4. `PATCH /cli-providers/:id` changes security-relevant non-secret fields with no row: `networkPolicy` and `egressDomains` (the sandbox egress allow-list), `wrapperContent`, `wrapperPath`, `executablePath`, `cliArgs`, `sandboxDockerfileExtra` and env names such as `ANTHROPIC_BASE_URL` (cli-providers.ts ~:455-511); the strict row fires only when env secrets are present. Record the changed field names, never code or values. PRE-EXISTING, moderate.
 5. `PUT /user-settings/password` checks the current password with no throttle and no failure row (user-settings.ts ~:108-109): the one password oracle outside the throttled `/auth/login`, open to any valid access cookie. PRE-EXISTING, moderate.
 6. A hand-made tooling PATCH that combines `ragEmbedAction` with a security field runs the RAG reset before the audited transaction, so a refused row leaves the reset done (tooling-upgrades.ts ~:946-958 vs ~:991); the page sends the action alone. PRE-EXISTING, minor.
+7. The strict in-transaction module audit rows (`module.drain_cancel`, graceful `module.deactivate`, `module.retry`; api modules/activation.ts) log no pino line after the commit, unlike the documented pattern (api lib/audit.ts docblock ~:36, integrations.md ~:813). PRE-EXISTING, minor. From the T350 run.
 
 ### T379 · FNF[git-tree-readers] · gitlink readers and literal-pathspec helpers duplicated with different failure contracts (+4)
 
