@@ -426,12 +426,12 @@ PRE-EXISTING, from the T355 build. 1. worker runtime-runner-reaper.ts ~:482-488 
 ### T547 · FNF[config-write-unknown-outcome] · a write that times out may still land
 
 status: open · kind: design · priority: P3
-PRE-EXISTING class, sharper since T355 bounds writes at 2 s. A rejected SET may have reached Redis; callers report failure (or roll back audit rows) for a value that is live. Sites: api maintenance.ts ~:91-93, admin.ts ~:471, ~:1233, ~:1270; modules loader.ts ~:580, ~:598; global-kb.ts ~:499, ~:747-763. Same for a bounded `Queue.add` that lands after its race: a retried request can queue the job twice. Decide: read-back after timeout, idempotent job ids, or accept and document.
+PRE-EXISTING class, sharper since T355 bounds writes at 2 s. A rejected SET may have reached Redis; callers report failure (or roll back audit rows) for a value that is live. Sites: api maintenance.ts ~:91-93, admin.ts ~:471, ~:1233, ~:1270; modules loader.ts ~:580, ~:598; global-kb.ts ~:499, ~:747-763. Same for a bounded `Queue.add` that lands after its race: a retried request can queue the job twice. Decide: read-back after timeout, idempotent job ids, or accept and document. Since T549 the api's shared `getRedis()` is bounded too (503 `redis_unavailable`), adding these sites where a timed-out write may land while the route answers 503 and skips its follow-up: api routes/tasks/index.ts ~:1658 (steer publish: no event persisted, the steer can still reach the CLI), cli-providers.ts ~:955, ~:978 (usage-auth state set and take), integrations.ts ~:199, ~:224 (OAuth attempt put and take), lib/integration-device.ts ~:72, ~:102 (device-flow state), lib/auth-throttle.ts ~:231-236 (an eval that lands after a sub-60 s freeze leaves a phantom attempt for up to 60 s; stricter only; fix as the sync lock does: queue the `zrem` on rejection). Residual of the sync-lock release (shared rag/sync-lock.ts ~:121-126): a SET sent just before the connection drops, with the release then refused on the closed connection, can still hold the key up to its 120 s TTL.
 
 ### T548 · FNF[config-blip-tolerance] · a sub-second Redis blip now fails requests
 
 status: open · kind: design · priority: P3
-From the T355 build. With no offline queue, a reconnect window fails every config read at once (503 or held work). Decide whether a short retry inside the bound is worth it, measured against a restarted Redis.
+From the T355 build. With no offline queue, a reconnect window fails every config read at once (503 or held work). Decide whether a short retry inside the bound is worth it, measured against a restarted Redis. Since T549 the same holds for every request-path `getRedis()` call in the api (retryable 503 `redis_unavailable`); boot is safe because bootstrap awaits `configService.initialize` after `initRedis`.
 
 ### T549 · FNF[api-redis-bound] · the api's shared Redis client is unbounded
 
@@ -446,7 +446,7 @@ PRE-EXISTING, from the T355 build. Use `boundedAdd`/`addBestEffort`/`addOrRefuse
 ### T551 · FNF[outage-503-web-copy] · web shows a generic error for 503 config_unavailable
 
 status: open · kind: fix · priority: P4
-From the T355 build, cosmetic. The web client renders the 503 as a generic failure; name it as a temporary outage with a retry hint. Nits for the same pass: `readTolerant` duplicated in worker 08c ~:129 and 08d ~:140; dead `runtimeOccupancyMb` at runtime-admission.ts ~:438 (mention only, pre-existing). The custom tool Start gate (T346) answers the same 503 on a config outage.
+From the T355 build, cosmetic. The web client renders the 503 as a generic failure; name it as a temporary outage with a retry hint. Nits for the same pass: `readTolerant` duplicated in worker 08c ~:129 and 08d ~:140; dead `runtimeOccupancyMb` at runtime-admission.ts ~:438 (mention only, pre-existing). The custom tool Start gate (T346) answers the same 503 on a config outage. Since T549: the same for 503 `redis_unavailable`, and `/admin/health` reports `redis: 'up' | 'down'` that the admin page does not show (web app/(app)/admin/page.tsx ~:356; `AdminHealthResponse` in lib/api-client.ts ~:1596 lacks the field).
 
 ### T552 · disabled provider in task terminal shells (design)
 
@@ -579,6 +579,21 @@ PRE-EXISTING limits of the per-module `runtime` in the worker report (`haive:mod
 1. A module held back at boot (deactivated, or its schema ensure outlived the boot wait) is skipped by `runtimes()` (worker modules/loader.ts ~:431, index.ts ~:288-293), so the report has no `runtime` for it until the first pass (15 s at most).
 2. A start that fails after boot went on without it sets only `pending` and a log (loader.ts ~:551-558): no `failures` entry, so the report reads pending with reason null until the first pass tries, and that try is not one of the 3 attempts.
 3. The report is rewritten only on a runtime-signature change or after a failed write (loader.ts ~:745-767): a lost Redis key (flush, restart without data) stays lost until the next boot or runtime change, and `/admin/modules` loses the worker half meanwhile. Fix direction: rewrite on each pass when the key is absent, or a periodic refresh.
+
+### T566 · FNF[worker-redis-bound] · the worker's shared Redis client is unbounded
+
+status: open · kind: fix · found: T549 run 2026-11-08 · priority: P3
+PRE-EXISTING. T549 bounded the api's `getRedis()`; the worker's (worker src/redis.ts) still has no command deadline and keeps an offline queue: 44 call sites in 16 files under packages/worker/src, not classified. Consequential if any of them decides a gate during an outage. Classify each (gate, best-effort, blocking reader, subscriber) the way T549 split the api into `getRedis()` and `getPatientRedis()`; raw Redis commands, not config reads, so not T546.
+
+### T567 · FNF[api-redis-shutdown] · api shutdown never closes its Redis clients
+
+status: open · kind: fix · found: T549 run 2026-11-08 · priority: P4
+PRE-EXISTING. `closeRedis` (api src/redis.ts ~:101) has no production caller and the api has no SIGTERM or SIGINT handler, so shutdown never quits the three clients. `quit()` on a silent patient or bull client can wait forever; `closeRedis` falls back to `disconnect()` only for a non-ready client or a rejected `quit()`.
+
+### T568 · FNF[terminal-open-late-replay] · a shell open request can reach the worker after its reply timeout
+
+status: open · kind: fix · found: T549 run 2026-11-08 · priority: P4
+PRE-EXISTING. terminal-shell.ts `openSession` (api routes ~:439-476) publishes the open request on the patient client, whose offline queue can deliver it after the 15 s `OPEN_REPLY_TIMEOUT_MS` (~:35) and the session's cleanup, so the worker may open a session nobody waits for.
 
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
