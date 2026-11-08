@@ -107,6 +107,15 @@ describe('a defer the store refuses at the reserve gate', () => {
       expect(moveToDelayed).toHaveBeenCalledTimes(DEFER_RETRY_WINDOW_MS / 1_000 + 1);
     });
 
+    it('is still deferred when the store refuses the hold marker', async () => {
+      const set = vi.spyOn(redisStore, 'set').mockRejectedValueOnce(loading());
+      moveToDelayed.mockRejectedValueOnce(loading());
+
+      expect(await runFor(5_000)).toBeInstanceOf(DelayedError);
+      expect(set).toHaveBeenCalledTimes(1);
+      expect(moveToDelayed).toHaveBeenCalledTimes(2);
+    });
+
     it('holds the job on the first try when the store takes the defer at once', async () => {
       // Control for the two cases above: the yield decision itself is reached, so the extra
       // attempts there come from the refusals and not from a changed rule.

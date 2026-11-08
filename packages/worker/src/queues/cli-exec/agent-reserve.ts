@@ -410,8 +410,16 @@ export async function enforceRuntimeHolderReserve(
     return;
   }
 
+  // The hold marker only dates the escape hatch, so a refused SET must not decide the defer: the
+  // store that refuses it (OOM, LOADING) refuses the defer too, and deferJob waits that out. A
+  // marker not written here is tried again on the next slice, so the hold clock starts late.
+  let first = false;
   try {
-    const first = await markHeld(payload.invocationId, Date.now());
+    first = await markHeld(payload.invocationId, Date.now());
+  } catch (err) {
+    log.warn({ err, invocationId: payload.invocationId }, 'agent reserve hold mark failed');
+  }
+  try {
     if (first) {
       await markWaiting(db, payload.invocationId, holders.size).catch((err: unknown) => {
         log.warn({ err, invocationId: payload.invocationId }, 'agent reserve status mark failed');
