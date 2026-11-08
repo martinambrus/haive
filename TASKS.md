@@ -421,12 +421,12 @@ PRE-EXISTING, from the T355 build. 1. worker runtime-runner-reaper.ts ~:482-488 
 ### T547 · FNF[config-write-unknown-outcome] · a write that times out may still land
 
 status: open · kind: design · priority: P3
-PRE-EXISTING class, sharper since T355 bounds writes at 2 s. A rejected SET may have reached Redis; callers report failure (or roll back audit rows) for a value that is live. Sites: api maintenance.ts ~:91-93, admin.ts ~:471, ~:1233, ~:1270; modules loader.ts ~:580, ~:598; global-kb.ts ~:499, ~:747-763. Same for a bounded `Queue.add` that lands after its race: a retried request can queue the job twice. Decide: read-back after timeout, idempotent job ids, or accept and document. Since T549 the api's shared `getRedis()` is bounded too (503 `redis_unavailable`), adding these sites where a timed-out write may land while the route answers 503 and skips its follow-up: api routes/tasks/index.ts ~:1658 (steer publish: no event persisted, the steer can still reach the CLI), cli-providers.ts ~:955, ~:978 (usage-auth state set and take), integrations.ts ~:199, ~:224 (OAuth attempt put and take), lib/integration-device.ts ~:72, ~:102 (device-flow state). (lib/auth-throttle.ts was fixed in #1034: the `zrem` is queued on rejection.) Residual of the sync-lock release (shared rag/sync-lock.ts ~:121-126): a SET sent just before the connection drops, with the release then refused on the closed connection, can still hold the key up to its 120 s TTL.
+PRE-EXISTING class, sharper since T355 bounds writes at 2 s. A rejected SET may have reached Redis; callers report failure (or roll back audit rows) for a value that is live. Sites: api maintenance.ts ~:91-93, admin.ts ~:471, ~:1233, ~:1270; modules loader.ts ~:580, ~:598; global-kb.ts ~:499, ~:747-763. Same for a bounded `Queue.add` that lands after its race: a retried request can queue the job twice. Decide: read-back after timeout, idempotent job ids, or accept and document. Since T549 the api's shared `getRedis()` is bounded too (503 `redis_unavailable`), adding these sites where a timed-out write may land while the route answers 503 and skips its follow-up: api routes/tasks/index.ts ~:1658 (steer publish: no event persisted, the steer can still reach the CLI), cli-providers.ts ~:955, ~:978 (usage-auth state set and take), integrations.ts ~:199, ~:224 (OAuth attempt put and take), lib/integration-device.ts ~:72, ~:102 (device-flow state). (lib/auth-throttle.ts was fixed in #1034: the `zrem` is queued on rejection.) Residual of the sync-lock release (shared rag/sync-lock.ts ~:121-126): a SET sent just before the connection drops, with the release then refused on the closed connection, can still hold the key up to its 120 s TTL. (T546 run) cli-exec `deferJob` (queues/cli-exec/defer-job.ts ~:35) retries a refused `moveToDelayed`; a defer that landed with a lost reply could then run the job twice (theoretical: a lost reply on BullMQ's connection hangs rather than rejects). A `job.isDelayed()` probe before each retry would close it.
 
 ### T548 · FNF[config-blip-tolerance] · a sub-second Redis blip now fails requests
 
 status: open · kind: design · priority: P3
-From the T355 build. With no offline queue, a reconnect window fails every config read at once (503 or held work). Decide whether a short retry inside the bound is worth it, measured against a restarted Redis. Since T549 the same holds for every request-path `getRedis()` call in the api (retryable 503 `redis_unavailable`); boot is safe because bootstrap awaits `configService.initialize` after `initRedis`. (T544 run) Flaky timing test shared config-service-outage.test.ts ~:224 (800 ms bound; `FakeRedis.refuse()` ~:50-57 waits a fixed 100 ms) failed once under heavy concurrent load.
+From the T355 build. With no offline queue, a reconnect window fails every config read at once (503 or held work). Decide whether a short retry inside the bound is worth it, measured against a restarted Redis. Since T549 the same holds for every request-path `getRedis()` call in the api (retryable 503 `redis_unavailable`); boot is safe because bootstrap awaits `configService.initialize` after `initRedis`. (T544 run) Flaky timing test shared config-service-outage.test.ts ~:224 (800 ms bound; `FakeRedis.refuse()` ~:50-57 waits a fixed 100 ms) failed once under heavy concurrent load. (T546 run) A watch armed on a typed outage while the stored mode is 'off' (task-queue.ts ~:1862) resolves or notifies if the admin later turns the mode on; inert while 'off'.
 
 ### T550 · FNF[queue-add-unbounded-rest] · about 34 api `Queue.add` sites still unbounded
 
@@ -573,7 +573,7 @@ PRE-EXISTING limits of the per-module `runtime` in the worker report (`haive:mod
 ### T566 · FNF[worker-redis-bound] · the worker's shared Redis client is unbounded
 
 status: open · kind: fix · found: T549 run 2026-11-08 · priority: P3
-PRE-EXISTING. T549 bounded the api's `getRedis()`; the worker's (worker src/redis.ts) still has no command deadline and keeps an offline queue: 44 call sites in 16 files under packages/worker/src, not classified. Consequential if any of them decides a gate during an outage. Classify each (gate, best-effort, blocking reader, subscriber) the way T549 split the api into `getRedis()` and `getPatientRedis()`; raw Redis commands, not config reads, so not T546.
+PRE-EXISTING. T549 bounded the api's `getRedis()`; the worker's (worker src/redis.ts) still has no command deadline and keeps an offline queue: 44 call sites in 16 files under packages/worker/src, not classified. Consequential if any of them decides a gate during an outage. Classify each (gate, best-effort, blocking reader, subscriber) the way T549 split the api into `getRedis()` and `getPatientRedis()`; raw Redis commands, not config reads, so not T546. (T546 run) LOADING makes raw `getRedis()` commands wait in the offline queue: gate-1 `reserveAgentSlot` (queues/cli-exec/agent-lease.ts ~:129, caught at handlers.ts ~:1391 "agent-lane reserve failed; allowing job") and the slot heartbeat, which bounds what the T546 defer retry can protect.
 
 ### T567 · FNF[api-redis-shutdown] · api shutdown never closes its Redis clients
 
@@ -598,7 +598,7 @@ PRE-EXISTING. shared config.service.ts `ensureEncryptionKey` (~:938-951, EXISTS 
 ### T571 · FNF[global-kb-boot-store-stall] · worker boot waits forever on a stalled global KB store
 
 status: open · kind: design · found: T544 run 2026-11-08 · priority: P3
-PRE-EXISTING. shared global-kb/client.ts `withGlobalKb` (~:121) via `recomputeAliasedTopicKeys` (worker data-migrations.ts ~:134, ~:599, ungated, every boot): a store that accepts and then stalls, or a held schema advisory lock, has no deadline. A plain `deadlineMs` skips the shared schema ensure (global-kb.md, "A call with a deadline never starts the shared schema ensure"), so it needs its own design.
+PRE-EXISTING. shared global-kb/client.ts `withGlobalKb` (~:121) via `recomputeAliasedTopicKeys` (worker data-migrations.ts ~:134, ~:599, ungated, every boot): a store that accepts and then stalls, or a held schema advisory lock, has no deadline. A plain `deadlineMs` skips the shared schema ensure (global-kb.md, "A call with a deadline never starts the shared schema ensure"), so it needs its own design. (T546 run) Same class: `dropHeadingOnlyGlobalKbChunks` (worker data-migrations.ts ~:1079, destructive, updater-only, documented best-effort) swallows a typed outage internally.
 
 ### T572 · FNF[boot-failure-dead-watcher] · a Postgres outage past 30 s at boot still exits
 
@@ -608,7 +608,22 @@ PRE-EXISTING. database wait-for-ready.ts ~:75-76 (called from api and worker boo
 ### T573 · FNF[redis-client-error-listeners] · Redis clients without an 'error' listener spam stderr
 
 status: open · kind: fix · found: T544 run 2026-11-08 · priority: P4
-PRE-EXISTING. No `'error'` listener on the api's patient and bull clients (api redis.ts ~:68, ~:71; shared utils/redis-factory.ts ~:18, ~:29 attach none) or the worker's two clients (worker redis.ts ~:11, ~:14): ioredis prints "[ioredis] Unhandled error event" per reconnect, 16 lines per 12-14 s outage. Log noise only. Api half beside T567, worker half beside T566.
+PRE-EXISTING. No `'error'` listener on the api's patient and bull clients (api redis.ts ~:68, ~:71; shared utils/redis-factory.ts ~:18, ~:29 attach none) or the worker's two clients (worker redis.ts ~:11, ~:14): ioredis prints "[ioredis] Unhandled error event" per reconnect, 16 lines per 12-14 s outage. Log noise only. Api half beside T567, worker half beside T566. (T546 run) A BullMQ Worker emits a flood of 'error' events during a LOADING reply (17 in a real restart, ~31k in 8 s through a fault proxy); the log side belongs here, any BullMQ-side change needs approval.
+
+### T574 · FNF[step-failure-outage-hint] · a step that fails on a config store outage looks like a code defect
+
+status: open · kind: design · found: T546 run 2026-11-08 · priority: P3
+PRE-EXISTING, accepted by T355. A step that meets a typed `ConfigUnavailableError` fails fast through `rethrowIfConfigUnavailable` (worker step-engine/step-runner.ts ~:462, ~:554, ~:5167, ~:5227) and ends as a plain failure with Retry; the UI cannot tell it from a code defect. Needs a structured outage hint (shared type plus web copy; overlaps T551), or a short retry inside the bound if T548 chooses one.
+
+### T575 · FNF[worker-queue-add-unbounded] · a failed step's watch-arm enqueue waits out a Redis outage
+
+status: open · kind: fix · found: T546 run 2026-11-08 · priority: P3
+PRE-EXISTING, unmeasured. `recordFailedStepHint` awaits `enqueueUsagePollTick()` (worker task-queue.ts ~:1905, ~:1907, ~:1922) on the BullMQ connection, which queues through a transport outage, so `finishFailedStep`'s remaining writes wait for the store. The api side is bounded (`queue-bounded.ts`); the worker has no equivalent. Related T566.
+
+### T576 · FNF[agent-reserve-stale-held-marker] · the reserve's held marker survives a fail-open defer
+
+status: open · kind: fix · found: T546 run 2026-11-08 · priority: P4
+PRE-EXISTING. `markHeld` (worker queues/cli-exec/agent-reserve.ts ~:133, set ~:414) is not cleared when "agent reserve defer failed; allowing job" falls open (~:346, ~:431); only its TTL prunes it. Also trivial while there: the header comment ~:35 still says "fail-open on everything", and handlers.ts ~:1317-1341 holds an orphaned pause-gate doc block above the `LIGHT_JOB_LANE` doc.
 
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
