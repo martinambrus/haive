@@ -228,12 +228,11 @@ export async function reserveAuthAttempt(
       ...limits,
     );
     const held = { keys, member };
-    late = () =>
-      void reservation.then(
-        () =>
-          Promise.all(held.keys.map((key) => redis.zrem(key, held.member))).catch(() => undefined),
-        () => undefined,
-      );
+    // A script the client rejected at its command deadline may still run, so the release is queued
+    // behind it on the same connection either way.
+    const release = () =>
+      Promise.all(held.keys.map((key) => redis.zrem(key, held.member))).catch(() => undefined);
+    late = () => void reservation.then(release, release);
     outcome = await bounded(reservation);
     if (!Array.isArray(outcome) || (outcome.length !== 2 && outcome.length !== 3)) {
       throw new Error('unexpected reply from the throttle script');

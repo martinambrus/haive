@@ -79,10 +79,11 @@ verbatim, and a browser cannot read `Retry-After` cross-origin, so the wait is i
 run no bcrypt; its only database work is the audit row below, written after the answer. A success removes its own member: only failures cost budget, because the e2e suite
 registers about 22 users a minute from one address and a count-all budget would have flaked it. The
 throttle runs after the body is validated and before any bcrypt or database work. If Redis is not ready,
-rejects, or does not answer within 400 ms the attempt is admitted and one warning is logged: the shared
-client queues commands forever while Redis is down, and a login that waits on that is worse than an
-unthrottled one. A reservation that still lands after the bound is released when it does, so a stall does
-not leave slots that no refund frees, and the wait in `Retry-After` is capped at the window. The address is the TCP peer (`getConnInfo`), an IPv4-mapped peer (dotted or hex, any spelling) read as IPv4 and an IPv6
+rejects, or does not answer within 400 ms the attempt is admitted and one warning is logged: a login that
+waits on a stalled Redis is worse than an unthrottled one. A reservation that still lands after the bound is
+released when it does, and so is one the shared client rejected at its own 2 s command deadline, since that
+script may still run: the release is queued behind it on the same connection either way. A stall therefore
+does not leave slots that no refund frees, and the wait in `Retry-After` is capped at the window. The address is the TCP peer (`getConnInfo`), an IPv4-mapped peer (dotted or hex, any spelling) read as IPv4 and an IPv6
 peer bucketed by its /64; with no address (a unit test, a dead socket) only the account bucket applies.
 `X-Forwarded-For` is never read unless the peer is inside `HAIVE_TRUSTED_PROXIES` (comma separated IPs or
 CIDRs, empty by default, passed through `docker-compose.yml`); then the right-most hop that is not itself

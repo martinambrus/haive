@@ -977,4 +977,22 @@ describe('TH-9 the throttle fails open', () => {
     expect(res.status).toBe(401);
     expect(h.warn).toHaveBeenCalledTimes(1);
   });
+
+  it('removes its reservation when the client rejects a script that may still land', async () => {
+    const calls: string[] = [];
+    h.redis = () =>
+      stub('ready', (name) => {
+        calls.push(name);
+        if (name === 'eval') {
+          return new Promise((_resolve, reject) =>
+            setTimeout(() => reject(new Error('Command timed out')), 2_000),
+          );
+        }
+        return Promise.resolve(1);
+      });
+    const res = await settle(login(mail('open'), PASSWORD, { peer: peer(1) }));
+    expect(res.status).toBe(200);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(calls.filter((name) => name === 'zrem')).toHaveLength(2);
+  });
 });
