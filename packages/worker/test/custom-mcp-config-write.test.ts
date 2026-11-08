@@ -50,6 +50,7 @@ const db = {
       findFirst: async () => ({
         envTemplateId: null,
         repositoryId: null,
+        type: 'custom-type',
         customSteps: {
           [STEP_ID]: {
             slug: 'audit',
@@ -69,6 +70,7 @@ const db = {
         },
       }),
     },
+    taskTypeDefinitions: { findFirst: async () => undefined },
     envTemplates: { findFirst: async () => undefined },
     taskSteps: { findFirst: async () => ({ output: null, stepId: STEP_ID }) },
     repositories: { findFirst: async () => undefined },

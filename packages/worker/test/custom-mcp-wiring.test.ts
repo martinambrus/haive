@@ -36,9 +36,14 @@ const merged = vi.hoisted(() => ({
   cli: [] as unknown[][],
   gemini: [] as unknown[][],
 }));
-const writers = vi.hoisted(() => ({ landed: true, file: [] as unknown[][] }));
+const writers = vi.hoisted(() => ({
+  landed: true,
+  failed: [] as string[],
+  file: [] as unknown[][],
+}));
 vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
+  failedMcpAddNames: () => writers.failed,
   mergeCliMcpIntoTaskVolume: async (...args: unknown[]) => {
     merged.cli.push(args);
     return writers.landed;
@@ -93,11 +98,25 @@ const pinned = (tools: unknown[]) => ({
   },
 });
 
-function dbFor(customSteps: unknown, stepId = STEP_ID, stepRow = true): Database {
+function dbFor(
+  customSteps: unknown,
+  stepId = STEP_ID,
+  stepRow = true,
+  requiresRepository?: boolean,
+): Database {
   return {
     query: {
       tasks: {
-        findFirst: async () => ({ envTemplateId: null, repositoryId: null, customSteps }),
+        findFirst: async () => ({
+          envTemplateId: null,
+          repositoryId: null,
+          customSteps,
+          type: 'custom-type',
+        }),
+      },
+      taskTypeDefinitions: {
+        findFirst: async () =>
+          requiresRepository === undefined ? undefined : { requiresRepository },
       },
       envTemplates: { findFirst: async () => undefined },
       taskSteps: { findFirst: async () => (stepRow ? { output: null, stepId } : undefined) },
@@ -225,6 +244,7 @@ beforeEach(() => {
   process.env.CONFIG_ENCRYPTION_KEY = SECRET;
   delete process.env.RAG_API_INTERNAL_URL;
   writers.landed = true;
+  writers.failed = [];
   writers.file.length = 0;
   vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
   vi.spyOn(configService, 'getNumber').mockImplementation(async (_key, fallback = 0) => fallback);
@@ -452,14 +472,32 @@ describe.each<Provider>(['claude-code', 'codex', 'gemini'])(
       expect(message).toContain('And 8 more.');
     });
 
-    it('wires a pinned project-scope search, since the type that allowed it is not known here', async () => {
+    it.each([
+      ['a type that requires a repository', true],
+      ['a type with no row', undefined],
+    ])('wires a pinned project-scope search on %s', async (_label, requiresRepository) => {
       const tool = { ...houseRules, name: 'project_rules', scope: 'project' };
       const { files } = await extra(
         provider,
-        dbFor(pinned([tool])),
+        dbFor(pinned([tool]), STEP_ID, true, requiresRepository),
         run({ customTools: ['project_rules'] }),
       );
       expect(toolsIn(files).map((t) => t.name)).toEqual(['project_rules']);
+    });
+
+    it('fails a run whose pinned project-scope search is on a type without a repository, before anything is written', async () => {
+      const tool = { ...houseRules, name: 'project_rules', scope: 'project' };
+      const message = await invalid(
+        provider,
+        dbFor(pinned([tool]), STEP_ID, true, false),
+        run({ customTools: ['project_rules'] }),
+      );
+      const [problem] = validateCustomTools([customToolSchema.parse(tool)], {
+        requiresRepository: false,
+      });
+      expect(message).toContain(CUSTOM_TOOL_INVALID_REASON);
+      expect(message).toContain('`project_rules`');
+      expect(message).toContain(problem!.message);
     });
 
     it('wires a run while the switch is on, reading it as the step runner does', async () => {
@@ -499,6 +537,28 @@ describe.each<Provider>(['codex', 'gemini'])(
     });
   },
 );
+
+describe('a cli-merge CLI whose mcp add failed for a server', () => {
+  const db = () => dbFor(pinned([repoStatus, houseRules]));
+
+  it('[C1] names the server whose add failed in the cause', async () => {
+    writers.landed = false;
+    writers.failed = ['haive-rag'];
+    const message = await notWritten('codex', db(), run());
+    expect(message).toContain('`haive-rag`');
+    expect(message).toContain('mcp add');
+    expect(message).toContain('repo_status, house_rules');
+  });
+
+  it('keeps the default cause when no name is known', async () => {
+    writers.landed = false;
+    const message = await notWritten('codex', db(), run());
+    expect(message).toContain(
+      "the CLI's MCP configuration could not be written to its task volume",
+    );
+    expect(message).not.toContain('mcp add');
+  });
+});
 
 describe('a CLI whose configuration is bound into each invocation', () => {
   it('wires a run whatever the volume writers report', async () => {
@@ -613,8 +673,10 @@ describe('the pinned step', () => {
           findFirst: async () => ({
             envTemplateId: null,
             customSteps: pinned([repoStatus, houseRules]),
+            type: 'custom-type',
           }),
         },
+        taskTypeDefinitions: { findFirst: async () => undefined },
         envTemplates: { findFirst: async () => undefined },
         taskSteps: {
           findFirst: async (arg?: { columns?: Record<string, boolean> }) => {

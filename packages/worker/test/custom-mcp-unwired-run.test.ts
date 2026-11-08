@@ -101,8 +101,14 @@ function fakeDb(customSteps: unknown) {
       },
       cliProviders: { findFirst: async () => ({ id: 'provider-1', name: 'claude-code' }) },
       tasks: {
-        findFirst: async () => ({ envTemplateId: null, repositoryId: null, customSteps }),
+        findFirst: async () => ({
+          envTemplateId: null,
+          repositoryId: null,
+          customSteps,
+          type: 'custom-type',
+        }),
       },
+      taskTypeDefinitions: { findFirst: async () => undefined },
       envTemplates: { findFirst: async () => undefined },
       taskSteps: { findFirst: async () => ({ output: null, stepId: STEP_ID }) },
       repositories: { findFirst: async () => undefined },

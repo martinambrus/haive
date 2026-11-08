@@ -7,6 +7,7 @@ import {
   customToolSchema,
   customToolUrl,
   describeInvalidTools,
+  describeToolProblems,
   shownToolName,
   validateCustomTool,
   validateCustomTools,
@@ -1597,5 +1598,31 @@ describe('describeInvalidTools', () => {
 
   it('is empty for no names', () => {
     expect(describeInvalidTools([])).toBe('');
+  });
+});
+
+describe('describeToolProblems', () => {
+  const problem = (tool: string, message: string) => ({
+    kind: 'tool-name-reserved' as const,
+    tool,
+    message,
+  });
+
+  it('leads each problem with its tool as inline code and joins them with one space', () => {
+    expect(describeToolProblems([problem('a', 'One.'), problem('b', 'Two.')])).toBe(
+      '`a`: One. `b`: Two.',
+    );
+  });
+
+  it('is empty for no problems', () => {
+    expect(describeToolProblems([])).toBe('');
+  });
+
+  it('shows 8 problems, then how many more', () => {
+    const problems = Array.from({ length: 12 }, (_, i) => problem(`t${i}`, 'Bad.'));
+    const text = describeToolProblems(problems);
+    expect(text).toContain('`t7`: Bad.');
+    expect(text).not.toContain('`t8`');
+    expect(text.endsWith(' And 4 more.')).toBe(true);
   });
 });

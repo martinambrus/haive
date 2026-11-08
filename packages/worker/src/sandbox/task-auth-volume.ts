@@ -295,6 +295,9 @@ export function clearTaskAuthPreparationState(taskId: string, providerName?: str
   for (const scope of appliedAuthPreparations.keys()) {
     if (scope.startsWith(prefix)) appliedAuthPreparations.delete(scope);
   }
+  for (const scope of failedMcpAdds.keys()) {
+    if (scope.startsWith(prefix)) failedMcpAdds.delete(scope);
+  }
   if (providerName) return;
   for (const scope of authPreparationLocks.keys()) {
     if (scope.startsWith(prefix)) authPreparationLocks.delete(scope);
@@ -947,6 +950,22 @@ chown 1000:1000 /vol/settings.json /vol/${MCP_MANAGED_MARKER}
  *  per-task auth volume, so it dies with the task. */
 const MCP_MANAGED_MARKER = '.haive-mcp-managed';
 
+const MCP_ADD_FAILED_PREFIX = 'haive-mcp: add ';
+const MCP_ADD_FAILED_SUFFIX = ' failed';
+
+// Servers whose `mcp add` failed in the last run of a scope (diagnostic; the exit code is the signal).
+const failedMcpAdds = new Map<string, string[]>();
+const cliMcpScope = (taskId: string, providerName: string): string =>
+  `${taskId}|${providerName}|cli-mcp`;
+
+/** The servers whose `mcp add` failed in the last merge for this task and CLI. */
+export function failedMcpAddNames(
+  taskId: string,
+  providerName: CliProviderName,
+): readonly string[] {
+  return failedMcpAdds.get(cliMcpScope(taskId, providerName)) ?? [];
+}
+
 /**
  * Write Haive's MCP servers into the task auth volume using the CLI's OWN `mcp add`.
  *
@@ -988,7 +1007,7 @@ export function mergeCliMcpIntoTaskVolume(
   const surfaceKey = contentKey(JSON.stringify({ image, servers }));
   return applyAuthPreparationOnce(
     cliMcpMergeRuns,
-    `${taskId}|${providerName}|cli-mcp`,
+    cliMcpScope(taskId, providerName),
     surfaceKey,
     () => mergeCliMcpIntoTaskVolumeUnlocked(taskId, providerName, image, servers, runner),
   );
@@ -1001,6 +1020,7 @@ async function mergeCliMcpIntoTaskVolumeUnlocked(
   servers: McpServerSpec[],
   runner: DockerRunner,
 ): Promise<boolean> {
+  failedMcpAdds.delete(cliMcpScope(taskId, providerName));
   const meta = getCliProviderMetadata(providerName);
   // Index 0 is the CLI's own home dir for both cli-merge providers (`~/.grok`, `~/.codex`).
   const authPath = meta.authConfigPaths[0];
@@ -1052,7 +1072,7 @@ async function mergeCliMcpIntoTaskVolumeUnlocked(
     'fi',
     ...servers.map((server) => {
       const argv = buildMcpAddArgv(providerName, server).map(shellQuote).join(' ');
-      const failure = shellQuote(`haive-mcp: add ${server.name} failed`);
+      const failure = shellQuote(`${MCP_ADD_FAILED_PREFIX}${server.name}${MCP_ADD_FAILED_SUFFIX}`);
       return `${runCli} ${argv} >/dev/null || { echo ${failure} >&2; add_failed=1; }`;
     }),
     // Written by the root shell (the redirection is the shell's, not the CLI's) and owned
@@ -1075,6 +1095,15 @@ async function mergeCliMcpIntoTaskVolumeUnlocked(
     timeoutMs: HELPER_TIMEOUT_MS,
   });
   if (result.exitCode !== 0) {
+    failedMcpAdds.set(
+      cliMcpScope(taskId, providerName),
+      result.stderr
+        .split('\n')
+        .filter(
+          (line) => line.startsWith(MCP_ADD_FAILED_PREFIX) && line.endsWith(MCP_ADD_FAILED_SUFFIX),
+        )
+        .map((line) => line.slice(MCP_ADD_FAILED_PREFIX.length, -MCP_ADD_FAILED_SUFFIX.length)),
+    );
     log.warn(
       { taskId, providerName, exitCode: result.exitCode, stderr: result.stderr.slice(-500) },
       'mcp merge helper exited non-zero',

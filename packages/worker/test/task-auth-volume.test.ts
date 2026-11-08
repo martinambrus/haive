@@ -16,6 +16,7 @@ import {
   userAuthVolumeExists,
   writeMcpFileIntoTaskVolume,
   type ProviderAuthCtx,
+  failedMcpAddNames,
 } from '../src/sandbox/task-auth-volume.js';
 import type { McpServerSpec } from '../src/sandbox/mcp-config.js';
 import { CORE_IDENTITY_LABEL, sandboxCoreIdentity } from '../src/sandbox/sandbox-core-image.js';
@@ -1097,6 +1098,7 @@ describe('mergeCliMcpIntoTaskVolume when an mcp add fails', () => {
       expect(await merge(runner)).toBe(false);
       expect(results[0]!.exitCode).not.toBe(0);
       expect(results[0]!.stderr).toContain(`haive-mcp: add ${broken.name} failed`);
+      expect(failedMcpAddNames(TASK, 'grok')).toEqual([broken.name]);
       // Both adds were tried, the marker lists both, and the closing ownership repair ran.
       expect(logged('grok.log').filter((line) => line.startsWith('mcp add'))).toHaveLength(2);
       expect(readFileSync(marker(), 'utf8')).toBe('haive-rag\nhaive-custom\n');
@@ -1106,8 +1108,33 @@ describe('mergeCliMcpIntoTaskVolume when an mcp add fails', () => {
       expect(await merge(runner)).toBe(true);
       expect(results[1]!.exitCode).toBe(0);
       expect(runner.runCalls).toHaveLength(2);
+      expect(failedMcpAddNames(TASK, 'grok')).toEqual([]);
     },
   );
+
+  it('forgets the failed names when the task state is cleared', async () => {
+    failing = 'haive-rag';
+    expect(await merge(shellRunner())).toBe(false);
+    expect(failedMcpAddNames(TASK, 'grok')).toEqual(['haive-rag']);
+    clearTaskAuthPreparationState(TASK);
+    expect(failedMcpAddNames(TASK, 'grok')).toEqual([]);
+  });
+
+  it('takes a name only from a line that carries both ends of the failure line', async () => {
+    stub('grok', [
+      'echo "mcp add haive-rag failed badly" >&2',
+      'echo "haive-mcp: add haive-rag failed badly" >&2',
+      'if [ "$2" = add ]; then',
+      '  for arg in "$@"; do',
+      '    [ "$arg" = "$STUB_FAIL" ] && exit 1',
+      '  done',
+      'fi',
+      'exit 0',
+    ]);
+    failing = 'haive-custom';
+    expect(await merge(shellRunner())).toBe(false);
+    expect(failedMcpAddNames(TASK, 'grok')).toEqual(['haive-custom']);
+  });
 
   it('answers true, and skips a repeat, when every add lands', async () => {
     const runner = shellRunner();

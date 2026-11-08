@@ -61,6 +61,7 @@ import {
   loadPlanEdges,
   loadPlanSkeletons,
 } from '@haive/shared/plan';
+import { assertCustomToolsUsable } from '../../lib/custom-tools-start-check.js';
 import { requireJsonObject } from '../../lib/json-object.js';
 import { addOrRefuse } from '../../lib/queue-bounded.js';
 import { markPlanNodesTaskable } from '../../lib/mark-plan-node-taskable.js';
@@ -1396,6 +1397,8 @@ taskRoutes.post('/:id/action', async (c) => {
         await retryTaskAtStep(db, id, userId, target, { liftPause });
         return c.json({ ok: true, status: 'running' });
       }
+      // A full restart from step 0 refuses pinned custom tools that would fail at their step.
+      await assertCustomToolsUsable(db, task);
       // Clear in-flight work FIRST. A retry restarts the task from step 0, and the
       // orchestrator refuses to advance any step while another one is still
       // running/waiting_cli (the other-step guard in task-queue.ts). A task that failed

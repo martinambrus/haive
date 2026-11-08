@@ -55,3 +55,4 @@ export async function readStepCatalog(
 
 export * from './module-dependencies.js';
 export * from './module-drain.js';
+export * from './custom-tools-switch.js';

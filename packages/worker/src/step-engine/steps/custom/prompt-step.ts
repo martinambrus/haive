@@ -22,6 +22,9 @@ export const PROMPT_STEP_OUTPUT_CAP_BYTES = 16 * 1024;
 export const PROMPT_STEP_OUTPUTS_BUDGET_BYTES = 64 * 1024;
 /** Every field, title, description and account text in one prompt together, the same way. */
 export const PROMPT_STEP_VALUES_BUDGET_BYTES = 64 * 1024;
+/** Starts the failure of a step whose pinned template no longer parses. */
+export const CUSTOM_TEMPLATE_INVALID_REASON = 'custom-template-invalid';
+const TEMPLATE_PROBLEMS_SHOWN = 8;
 const NO_STEP_OUTPUT = '(no output recorded for this step)';
 
 export interface PromptStepDetect {
@@ -68,7 +71,13 @@ const text = (value: unknown): string => (typeof value === 'string' ? value : ''
 
 function templateTokens(template: string) {
   const parsed = parsePromptTemplate(template);
-  return parsed.ok ? parsed.tokens : [];
+  if (parsed.ok) return parsed.tokens;
+  const shown = parsed.problems.slice(0, TEMPLATE_PROBLEMS_SHOWN).map((problem) => problem.message);
+  const more = parsed.problems.length - shown.length;
+  const problems = `${shown.join(' ')}${more > 0 ? ` And ${more} more.` : ''}`;
+  throw new Error(
+    `${CUSTOM_TEMPLATE_INVALID_REASON}: this step's template no longer passes its checks: ${problems} The task pinned it when it was created; fix it in the task type and start a new task.`,
+  );
 }
 
 /** The template with its values in. Quoted step output is left out when `quote` is false: it is

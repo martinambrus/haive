@@ -55,16 +55,20 @@ import type { IntegrationBinding } from '@haive/shared/integrations';
 import {
   TEMPLATE_PERSONA_MARKER_PATTERN,
   describeInvalidTools,
-  parsePinnedCustomSteps,
   parseStepId,
   type IntegrationRequirement,
 } from '@haive/shared/modularity';
+import { resolveCustomToolsEnabled } from '@haive/shared/modularity-server';
 import {
   moduleDeactivationMessage,
   moduleSchemaFailedMessage,
   moduleSchemaNotReady,
 } from '../modules/activation.js';
-import { invalidToolsFailure, pinnedToolsFailure } from './steps/custom/pinned-tools.js';
+import {
+  invalidToolsFailure,
+  loadPinnedTools,
+  pinnedToolsFailure,
+} from './steps/custom/pinned-tools.js';
 import {
   promptStepAccountIds,
   promptStepNamedText,
@@ -606,15 +610,10 @@ async function resolveCustomTools(
     return { failure: invalidToolsFailure(`${describeInvalidTools(tools.invalid)}.`) };
   }
   if (tools.names.length === 0) return null;
-  const task = await db.query.tasks.findFirst({
-    where: eq(schema.tasks.id, taskId),
-    columns: { customSteps: true },
-  });
-  const invalid = pinnedToolsFailure(
-    parsePinnedCustomSteps(task?.customSteps)[stepDef.metadata.id]?.tools ?? [],
-  );
+  const pinned = await loadPinnedTools(db, taskId, stepDef.metadata.id);
+  const invalid = pinnedToolsFailure(pinned.tools, pinned.requiresRepository);
   if (invalid !== null) return { failure: invalid };
-  if (!(await configService.getBoolean(CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED, true))) {
+  if (!(await resolveCustomToolsEnabled(configService))) {
     return {
       failure: `${CUSTOM_TOOLS_SWITCHED_OFF_REASON}: custom tools are switched off on this install, so this step cannot run. Switch them on, then retry the step.`,
     };

@@ -175,6 +175,15 @@ export function describeInvalidTools(names: readonly string[]): string {
   return `${shown.join(', ')}${more > 0 ? ` and ${more} more` : ''}`;
 }
 
+/** The problems of a step's tools, each led by its tool as inline code: at most 8, then how many more. */
+export function describeToolProblems(problems: readonly CustomToolProblem[]): string {
+  const shown = problems
+    .slice(0, INVALID_TOOLS_SHOWN)
+    .map((problem) => `${describeInvalidTools([problem.tool])}: ${problem.message}`);
+  const more = problems.length - shown.length;
+  return `${shown.join(' ')}${more > 0 ? ` And ${more} more.` : ''}`;
+}
+
 export interface CustomToolProblem {
   kind: CustomToolProblemKind;
   /** The name of the tool it is about, as written; empty for a problem of the whole list. */

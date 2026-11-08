@@ -712,7 +712,7 @@ follows an http(s) remote's host.
   stamped run whose server cannot be delivered (no `CONFIG_ENCRYPTION_KEY`, no step, a config the
   task volume did not take, a CLI with no MCP configuration such as amp) fails `integrations-unwired`
   before its CLI starts, rather than running
-  without the tools its prompt names.
+  without the tools its prompt names. The failure names each server whose `mcp add` failed.
 - **Tool names** (`integrationTools`): a tool is named by its operation id; when two declared tools
   share one, every holder becomes `<requirementId>_<opId>` (other characters replaced by `_`), and such
   a name longer than 40 characters keeps its first 31, then `_` and the first 8 hex characters of the

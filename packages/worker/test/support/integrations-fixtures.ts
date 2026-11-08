@@ -38,6 +38,7 @@ export function fakeDatabase(
 ): Database {
   const fake = createFakeDb({
     tasks: schema.tasks,
+    taskTypeDefinitions: schema.taskTypeDefinitions,
     envTemplates: schema.envTemplates,
     taskSteps: schema.taskSteps,
     repositories: schema.repositories,
@@ -48,6 +49,7 @@ export function fakeDatabase(
     envTemplateId: null,
     repositoryId: null,
     customSteps: opts.customSteps ?? null,
+    type: 'custom-type',
   });
   fake.insert(schema.taskSteps, {
     id: STEP_ROW_ID,

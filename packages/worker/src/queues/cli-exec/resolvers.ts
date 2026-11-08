@@ -59,6 +59,7 @@ import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import type { CliProviderRecord } from '../../cli-adapters/types.js';
 import {
   ensureTaskAuthVolumes,
+  failedMcpAddNames,
   mergeCliMcpIntoTaskVolume,
   mergeGeminiMcpIntoSettings,
   resolveTaskAuthMounts,
@@ -74,8 +75,12 @@ import { resolveSandboxImageTag } from './images.js';
 import { hasReadyLspBridge } from '../../lsp/configured-lsp.js';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { parseIntegrationBindings } from '@haive/shared/integrations';
-import { customToolInputSchema, parsePinnedCustomSteps } from '@haive/shared/modularity';
-import { pinnedToolsFailure } from '../../step-engine/steps/custom/pinned-tools.js';
+import { customToolInputSchema, describeInvalidTools } from '@haive/shared/modularity';
+import { resolveCustomToolsEnabled } from '@haive/shared/modularity-server';
+import {
+  loadPinnedTools,
+  pinnedToolsFailure,
+} from '../../step-engine/steps/custom/pinned-tools.js';
 import { signTaskToken } from '@haive/shared/task-token';
 import { ensureSandboxWritableTree } from '../../repo/worktree-permissions.js';
 import {
@@ -275,7 +280,7 @@ async function resolveCustomFiles(
   custom: NonNullable<McpSurface['custom']>,
 ): Promise<SandboxExtraFile[]> {
   const names = custom.tools;
-  if (!(await configService.getBoolean(CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED, true))) {
+  if (!(await resolveCustomToolsEnabled(configService))) {
     throw unwired('custom tools are switched off on this install', names);
   }
   if (!custom.enabled) {
@@ -290,12 +295,8 @@ async function resolveCustomFiles(
     columns: { stepId: true },
   });
   if (!step) throw unwired('the step of the run no longer exists', names);
-  const task = await db.query.tasks.findFirst({
-    where: eq(schema.tasks.id, taskId),
-    columns: { customSteps: true },
-  });
-  const pinnedTools = parsePinnedCustomSteps(task?.customSteps)[step.stepId]?.tools ?? [];
-  const invalid = pinnedToolsFailure(pinnedTools);
+  const { tools: pinnedTools, requiresRepository } = await loadPinnedTools(db, taskId, step.stepId);
+  const invalid = pinnedToolsFailure(pinnedTools, requiresRepository);
   if (invalid !== null) throw new Error(invalid);
   const tools = pinnedTools.filter((tool) => names.includes(tool.name));
   if (tools.length === 0) throw unwired('the step has none of them pinned', names);
@@ -575,16 +576,22 @@ export async function resolveMcpExtraFiles(
         await mergeGeminiMcpIntoSettings(taskId, serversToJsonObject(servers, userServers)),
       );
       return { files: serverFiles, extraArgs: [] };
-    case 'cli-merge':
+    case 'cli-merge': {
+      const merged = await mergeCliMcpIntoTaskVolume(
+        taskId,
+        providerName,
+        sandboxImage,
+        resolveStdioMcpServers(servers, userServers),
+      );
+      const failed = merged ? [] : failedMcpAddNames(taskId, providerName);
       requireWritten(
-        await mergeCliMcpIntoTaskVolume(
-          taskId,
-          providerName,
-          sandboxImage,
-          resolveStdioMcpServers(servers, userServers),
-        ),
+        merged,
+        failed.length > 0
+          ? `the CLI's MCP configuration could not be written to its task volume (the \`mcp add\` of ${describeInvalidTools(failed)} failed)`
+          : undefined,
       );
       return { files: serverFiles, extraArgs: [] };
+    }
     case 'volume-write':
       requireWritten(
         await writeMcpFileIntoTaskVolume(taskId, providerName, config.path, config.content),

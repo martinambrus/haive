@@ -1677,6 +1677,64 @@ describe.skipIf(!url)('POST /custom-mcp/call, on Postgres', () => {
     });
   });
 
+  describe('the pinned tool is checked again whatever its kind, against the real flag of its task type', () => {
+    const pinRag = (tool: unknown) =>
+      db
+        .update(schema.tasks)
+        .set({ customSteps: { [STEP_A]: entry('alpha', [tool]) } })
+        .where(eq(schema.tasks.id, fx.taskId));
+    const typeRow = (requiresRepository: boolean) =>
+      db.insert(schema.taskTypeDefinitions).values({
+        slug: TYPE,
+        displayName: 'Custom MCP test type',
+        runListStrategy: 'static',
+        stepIds: [],
+        source: 'admin',
+        requiresRepository,
+      });
+    const ragRow = (tool: string) => ({ tool, action: 'rag-query' });
+
+    afterEach(async () => {
+      await db.delete(schema.taskTypeDefinitions).where(eq(schema.taskTypeDefinitions.slug, TYPE));
+    });
+
+    it('refuses a project-scope search of a type without a repository as tool-invalid and runs no search', async () => {
+      await typeRow(false);
+      await pinRag(ragTool('project_notes', 'project', 5, 4096));
+
+      const res = await callTool('project_notes', { query: 'q' });
+
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: expect.any(String), code: 'tool-invalid' });
+      await expectOneRow(fx.invA, refusedRow('tool-invalid', ragRow('project_notes')));
+      expect(h.searches).toEqual([]);
+    });
+
+    it.each([
+      ['a type that requires a repository', true],
+      ['a type with no row', null],
+    ])('still runs a project-scope search of %s', async (_label, requiresRepository) => {
+      if (requiresRepository !== null) await typeRow(requiresRepository);
+      await pinRag(ragTool('project_notes', 'project', 5, 4096));
+
+      const res = await callTool('project_notes', { query: 'q' });
+
+      expect(res.status).toBe(200);
+      expect(h.searches).toHaveLength(1);
+    });
+
+    it("refuses a search tool named for one of Haive's own as tool-invalid and runs no search", async () => {
+      await pinRag(ragTool('rag_search', 'global', 3, 2048));
+
+      const res = await callTool('rag_search', { query: 'q' });
+
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: expect.any(String), code: 'tool-invalid' });
+      await expectOneRow(fx.invA, refusedRow('tool-invalid', ragRow('rag_search')));
+      expect(h.searches).toEqual([]);
+    });
+  });
+
   describe('the call log', () => {
     it('holds no argument, result or tool name an agent chose, across every kind of attempt', async () => {
       h.search = async () => [hit({ content: `found ${RESULT_MARKER}`, scope: 'global' })];

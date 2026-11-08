@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { count, eq, sql } from 'drizzle-orm';
 import { schema, type DbTx } from '@haive/database';
-import { CONFIG_KEYS, configService, effectiveNetworkPolicy, logger } from '@haive/shared';
+import { configService, effectiveNetworkPolicy, logger } from '@haive/shared';
 import {
   customToolArgsSchema,
   customToolUrl,
@@ -10,6 +10,7 @@ import {
   type CustomTool,
   type RagQueryTool,
 } from '@haive/shared/modularity';
+import { resolveCustomToolsEnabled } from '@haive/shared/modularity-server';
 import { formatRagHits } from '@haive/shared/rag';
 import { getDb, type Database } from '../db.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -87,9 +88,11 @@ async function findInvocation(db: Database, invocationId: string) {
       customSteps: schema.tasks.customSteps,
       taskMetadata: schema.tasks.metadata,
       providerPolicy: schema.cliProviders.networkPolicy,
+      requiresRepository: schema.taskTypeDefinitions.requiresRepository,
     })
     .from(schema.cliInvocations)
     .innerJoin(schema.tasks, eq(schema.tasks.id, schema.cliInvocations.taskId))
+    .leftJoin(schema.taskTypeDefinitions, eq(schema.taskTypeDefinitions.slug, schema.tasks.type))
     .leftJoin(schema.taskSteps, eq(schema.taskSteps.id, schema.cliInvocations.taskStepId))
     .leftJoin(schema.cliProviders, eq(schema.cliProviders.id, schema.cliInvocations.cliProviderId))
     .where(eq(schema.cliInvocations.id, invocationId))
@@ -189,7 +192,7 @@ customMcpRoutes.post('/call', async (c) => {
   tool = pinned?.tools.find((declared) => declared.name === name);
   if (!tool) return refuse(403, 'undeclared-tool', 'this step does not declare that tool');
 
-  if (!(await configService.getBoolean(CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED, true))) {
+  if (!(await resolveCustomToolsEnabled(configService))) {
     return refuse(403, 'switched-off', 'custom tools are switched off on this install');
   }
 
@@ -198,17 +201,19 @@ customMcpRoutes.post('/call', async (c) => {
     return refuse(400, 'invalid-arguments', describeIssue(args.error, ISSUE_MAX_LENGTH));
   }
 
+  const problems = validateCustomTool(tool, {
+    requiresRepository: invocation.requiresRepository ?? true,
+  });
+  if (problems.length > 0) {
+    const kinds = problems.map((problem) => problem.kind);
+    log.warn(
+      { taskId: invocation.taskId, tool: tool.name, kinds },
+      'a pinned tool failed its checks',
+    );
+    return refuse(403, 'tool-invalid', 'this tool is not valid on this install');
+  }
+
   if (tool.action === 'http-get') {
-    // requiresRepository only matters to the scope of a rag-query tool.
-    const problems = validateCustomTool(tool, { requiresRepository: true });
-    if (problems.length > 0) {
-      const kinds = problems.map((problem) => problem.kind);
-      log.warn(
-        { taskId: invocation.taskId, tool: tool.name, kinds },
-        'a pinned http-get tool failed its checks',
-      );
-      return refuse(403, 'tool-invalid', 'this tool is not valid on this install');
-    }
     const target = customToolUrl(tool, args.data);
     if (!target.ok) {
       return refuse(

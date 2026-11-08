@@ -1,6 +1,7 @@
 import { and, eq, isNull } from 'drizzle-orm';
 import { lockRepositoryTasksKey, schema, type DbTx } from '@haive/database';
 import { TASK_JOB_NAMES, type TaskJobPayload } from '@haive/shared';
+import { assertCustomToolsUsable } from './custom-tools-start-check.js';
 import { boundedLockWait } from './repository-busy.js';
 import type { getDb } from '../db.js';
 import { getTaskQueue } from '../queues.js';
@@ -30,9 +31,17 @@ export async function markQueuedForStart(
       .select({
         repositoryId: schema.tasks.repositoryId,
         expectedAttachmentCount: schema.tasks.expectedAttachmentCount,
+        status: schema.tasks.status,
+        deadAt: schema.tasks.deadAt,
+        type: schema.tasks.type,
+        customSteps: schema.tasks.customSteps,
       })
       .from(schema.tasks)
       .where(eq(schema.tasks.id, taskId));
+    // A start refuses pinned custom tools that would fail at their step; a started or dead task falls through.
+    if (task && task.status === 'created' && task.deadAt == null && task.customSteps != null) {
+      await assertCustomToolsUsable(tx, task);
+    }
     // A queued task holds the checkout, so its start waits out a move that holds this lock.
     const repositoryId = task?.repositoryId;
     if (repositoryId) await boundedLockWait(tx, () => lockRepositoryTasksKey(tx, repositoryId));
