@@ -635,7 +635,7 @@ From the T393 build (2026-11-07):
 
 ### T350 · FNF[module-runtime-status] · a module whose reactivation used every attempt shows active with no schema or jobs (+1)
 
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (sonnet-sonnet driver, 2026-11-08) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 PRE-EXISTING. publishWorkerBootReport (worker modules/loader.ts) is written once at boot.
 Fix direction: publish the per-module runtime state (schema pending/failed/ready, jobs, attempts, reason) to the same Redis report on every reconcile change, and show a failed module on the Modules tab with a "try again" hint. #205's schema state is a natural input.
 
