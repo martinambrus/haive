@@ -23,6 +23,7 @@ import {
 } from '@haive/shared/stats-server';
 import { getDb } from '../../db.js';
 import { clearTaskPause } from '../../lib/task-control.js';
+import { appendTaskEvent } from '../../lib/task-events.js';
 import { insertAuditEvent, type AuditEvent } from '../../lib/audit.js';
 import { HttpError } from '../../context.js';
 import { compositionSurvivesWithout, type StepFlagMap } from '../../lib/step-flags.js';
@@ -1116,20 +1117,7 @@ export async function resolveWorkspaceRoot(
   return { task, root: resolve(root), anchor };
 }
 
-export async function appendTaskEvent(
-  db: ReturnType<typeof getDb> | DbTx,
-  taskId: string,
-  taskStepId: string | null,
-  eventType: string,
-  payload: Record<string, unknown>,
-): Promise<void> {
-  await db.insert(schema.taskEvents).values({
-    taskId,
-    taskStepId,
-    eventType,
-    payload,
-  });
-}
+export { appendTaskEvent };
 
 /** Stamped at write time, which follows the task row lock: findAdminPausedTaskIds orders by it. */
 export async function appendPauseEvent(

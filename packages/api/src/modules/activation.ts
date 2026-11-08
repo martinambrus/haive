@@ -8,7 +8,7 @@ import { insertAuditEvent, recordAuditEvent } from '../lib/audit.js';
 import { enqueueStopSettle } from '../lib/cancel-task.js';
 import { killTaskSandboxesOrThrow } from '../lib/sandbox-kill.js';
 import { supersedeLiveRuns } from '../lib/task-control.js';
-import { appendTaskEvent } from '../routes/tasks/_helpers.js';
+import { appendTaskEvent } from '../lib/task-events.js';
 
 type Reader = Pick<Database, 'select'>;
 

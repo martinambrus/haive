@@ -82,8 +82,8 @@ vi.mock('../src/lib/sandbox-kill.js', () => ({
     return 0;
   },
 }));
-vi.mock('../src/routes/tasks/_helpers.js', async (importOriginal) => {
-  const original = await importOriginal<typeof import('../src/routes/tasks/_helpers.js')>();
+vi.mock('../src/lib/task-events.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../src/lib/task-events.js')>();
   return {
     ...original,
     appendTaskEvent: async (...args: Parameters<typeof original.appendTaskEvent>) => {
