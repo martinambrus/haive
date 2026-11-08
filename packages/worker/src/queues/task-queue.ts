@@ -1854,6 +1854,11 @@ async function recordFailedStepHint(
     // notification already told the user it stopped. Gated by the global watch mode:
     // 'off' means the admin wants no monitoring at all, so nothing is armed and the
     // poller has nothing to find (the errorHint banner above still writes either way).
+    //
+    // A mode that cannot be read, a ConfigUnavailableError among it, arms as if unset. The mode
+    // does not guard the task here: checkProviderRecovery reads it on every tick and leaves an
+    // armed row alone while it is 'off', so a row armed on a guess waits inertly, whereas a skipped
+    // arm is lost for good, since nothing retries this once the task is failed (finishFailedStep).
     const watchMode = parseAllowanceWatchMode(
       await configService.get(CONFIG_KEYS.ALLOWANCE_WATCH_MODE).catch((err: unknown) => {
         logger.warn({ err, taskId }, 'allowance watch mode unreadable; arming as if unset');

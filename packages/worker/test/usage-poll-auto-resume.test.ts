@@ -299,6 +299,42 @@ describe.each(['draining', 'maintenance'])(
   },
 );
 
+// The arm of a failed step rests on this: a mode it could not read arms as if unset, and the poller,
+// which reads the mode itself on every tick, is what keeps such a row from acting.
+describe('the allowance auto-resume while the watch mode is off', () => {
+  it('changes nothing, queues nothing and tells no one', async () => {
+    config('off', 'normal');
+    const t = setup();
+
+    await checkProviderRecovery(t.db);
+
+    expect(t.writes).toEqual([]);
+    expect(h.queued).toEqual([]);
+    expect(t.task()).toMatchObject({
+      status: 'failed',
+      allowanceAutoResumeCount: 0,
+      awaitingAllowanceProviderId: PROVIDER,
+      allowanceReplenishedAt: null,
+    });
+    expect(t.fake.rows(schema.taskEvents)).toEqual([]);
+  });
+
+  it('resolves it on a later poll once the mode is back on', async () => {
+    config('off', 'normal');
+    const t = setup();
+    await checkProviderRecovery(t.db);
+    expect(t.task().allowanceReplenishedAt).toBeNull();
+
+    config('notify', 'normal');
+    await checkProviderRecovery(t.db);
+
+    expect(t.task().allowanceReplenishedAt).toBeInstanceOf(Date);
+    expect(t.fake.rows(schema.taskEvents)).toMatchObject([
+      { eventType: 'task.allowance_replenished' },
+    ]);
+  });
+});
+
 describe('the allowance auto-resume when the stored state cannot be read', () => {
   const down = new Error('redis went away');
   afterEach(() => vi.restoreAllMocks());

@@ -1,6 +1,6 @@
 import type { Job } from 'bullmq';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { configService, logger, TASK_JOB_NAMES } from '@haive/shared';
+import { ConfigUnavailableError, configService, logger, TASK_JOB_NAMES } from '@haive/shared';
 import {
   finishFailedStep,
   handleResult,
@@ -609,6 +609,20 @@ describe("a failed step's hand-off", () => {
     vi.spyOn(configService, 'get').mockRejectedValue(new Error('config unreadable'));
     await expect(finish()).resolves.toBe(true);
     expect(armed()).toEqual([expect.objectContaining({ awaitingProviderReason: 'server_error' })]);
+  });
+
+  // Skipping the arm would lose the watch for good: nothing retries it once the task is failed. The
+  // poller reads the mode on every tick, so a row armed on a guess is the safer way to be wrong.
+  it('arms it as if unset when the config store is down', async () => {
+    outage('server_error');
+    vi.spyOn(configService, 'get').mockRejectedValue(new ConfigUnavailableError('test'));
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    await expect(finish()).resolves.toBe(true);
+    expect(armed()).toEqual([expect.objectContaining({ awaitingProviderReason: 'server_error' })]);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(ConfigUnavailableError) }),
+      expect.any(String),
+    );
   });
 
   it('arms nothing, and wakes no poller, once a Retry moved the task on', async () => {
