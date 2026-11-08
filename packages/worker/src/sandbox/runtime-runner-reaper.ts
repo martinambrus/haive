@@ -2,7 +2,13 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { APP_RUNNER_LABEL, CONFIG_KEYS, configService, logger } from '@haive/shared';
+import {
+  APP_RUNNER_LABEL,
+  CONFIG_KEYS,
+  ConfigUnavailableError,
+  configService,
+  logger,
+} from '@haive/shared';
 import { hasLiveCliInvocation } from '../orchestrator/pause.js';
 import { runnerExecLive, taskRunnerBusy, withRunnersFenced } from './runner-activity.js';
 import { markPreempted } from '../queues/cli-exec/preempt-mark.js';
@@ -476,12 +482,22 @@ export class RuntimeRunnerReaper {
     return true;
   }
 
-  /** Grace (ms) before a `failed` task's runner is reclaimed; 0 disables that path. */
+  /** Grace (ms) before a `failed` task's runner is reclaimed; 0 disables that path. An unreachable
+   *  configuration store answers 0 for this pass instead of the default: the operator may have
+   *  disabled or raised the grace, and a reaped runner cannot be brought back. The reaps that do
+   *  not depend on the grace (exited, orphan, terminal) still run. */
   private async failedGraceMs(): Promise<number> {
     try {
       const minutes = await configService.getNumber(CONFIG_KEYS.RUNTIME_IDLE_REAP_MINUTES, 180);
       return Math.max(0, minutes) * 60_000;
-    } catch {
+    } catch (err) {
+      if (err instanceof ConfigUnavailableError) {
+        log.warn(
+          { err },
+          'runtime reaper idle grace unreadable; keeping failed and held runners this pass',
+        );
+        return 0;
+      }
       return 180 * 60_000;
     }
   }
