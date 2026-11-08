@@ -29,13 +29,14 @@ vi.mock('../src/queues.js', () => ({
   }),
   getIdeEnsureQueueEvents: () => ({}),
 }));
-vi.mock('../src/redis.js', () => ({
-  getRedis: () => ({
+vi.mock('../src/redis.js', () => {
+  const fake = () => ({
     hincrby: async () => 1,
     hset: async () => 1,
     scan: async () => ['0', []],
-  }),
-}));
+  });
+  return { getRedis: fake, getPatientRedis: fake };
+});
 vi.mock('../src/auth/jwt.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/auth/jwt.js')>()),
   verifyAccessToken: async () => ({ sub: USER, tv: 0 }),

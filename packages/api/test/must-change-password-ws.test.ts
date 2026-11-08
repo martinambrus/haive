@@ -12,6 +12,9 @@ vi.mock('../src/redis.js', () => ({
   getRedis: () => {
     throw new Error('redis is not reachable in this test');
   },
+  getPatientRedis: () => {
+    throw new Error('redis is not reachable in this test');
+  },
   getBullRedis: () => {
     throw new Error('redis is not reachable in this test');
   },

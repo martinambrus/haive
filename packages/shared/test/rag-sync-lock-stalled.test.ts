@@ -82,6 +82,22 @@ describe('RAG sync lock against a Redis that does not answer', () => {
     expect(evalCalls[0]![3]).toBe(set.mock.calls[0]![1]);
   }, 3_000);
 
+  it('releases a key a rejected SET sets after all', async () => {
+    const set = vi.fn((..._args: unknown[]) => Promise.reject(new Error('unavailable')));
+    const evalCalls: unknown[][] = [];
+    const redis = asRedis({
+      set,
+      eval: (...args: unknown[]) => {
+        evalCalls.push(args);
+        return Promise.resolve(1);
+      },
+    });
+    await expect(tryAcquireRagSyncLock(redis, 'repo')).rejects.toThrow('unavailable');
+    await sleep(20);
+    expect(evalCalls).toHaveLength(1);
+    expect(evalCalls[0]![3]).toBe(set.mock.calls[0]![1]);
+  }, 3_000);
+
   it('does not mark a holder lost when a refresh gets no answer, and releases within the timeout', async () => {
     const redis = asRedis({ set: () => Promise.resolve('OK'), eval: never });
     const held = await tryAcquireRagSyncLock(redis, 'repo', {

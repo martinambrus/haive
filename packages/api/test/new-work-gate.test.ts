@@ -343,13 +343,23 @@ describe('an unreadable configuration store', () => {
     open.all('*', (c) => c.json({ ok: true }));
     open.onError(errorHandler);
 
-    it.each(['/health', '/version', '/auth/x', '/system/x'])(
+    it.each(['/health', '/version', '/auth/x', '/system/x', '/admin/health'])(
       'lets %s through without reading the state',
       async (path) => {
         const read = vi.spyOn(configService, 'get').mockRejectedValue(unavailable());
         const res = await open.request(path);
         expect(res.status).toBe(200);
         expect(read).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['/admin/maintenance', '/admin/health/x', '/admin/healthz'])(
+      'keeps %s behind the gate',
+      async (path) => {
+        vi.spyOn(configService, 'get').mockRejectedValue(unavailable());
+        const res = await open.request(path);
+        expect(res.status).toBe(503);
+        expect(await res.json()).toEqual(OUTAGE);
       },
     );
 

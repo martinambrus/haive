@@ -24,8 +24,17 @@ import { HttpError, type AppEnv } from '../context.js';
  *   key inside is the one failure this list prevents.
  * - `/system/*` — read-only system state, which is how the web app learns to render the
  *   maintenance page rather than a wall of failed requests.
+ * - `/admin/health` — the admin's own health read, which reports Redis down. An unreadable
+ *   maintenance state must not hide the page that says why; it stays behind `requireAuth` and
+ *   `requireAdmin` inside the router. Exact path only.
  */
-const ALWAYS_OPEN = [/^\/health$/, /^\/version(\/|$)/, /^\/auth(\/|$)/, /^\/system(\/|$)/];
+const ALWAYS_OPEN = [
+  /^\/health$/,
+  /^\/version(\/|$)/,
+  /^\/auth(\/|$)/,
+  /^\/system(\/|$)/,
+  /^\/admin\/health$/,
+];
 
 /** Resolve the caller's role WITHOUT throwing.
  *

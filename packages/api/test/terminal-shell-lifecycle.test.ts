@@ -194,7 +194,12 @@ let publisherFake: FakeRedis;
 
 vi.mock('../src/redis.js', () => ({
   getRedis: () => publisherFake,
-  initRedis: () => ({ redis: publisherFake, bullRedis: publisherFake }),
+  getPatientRedis: () => publisherFake,
+  initRedis: () => ({
+    redis: publisherFake,
+    bullRedis: publisherFake,
+    patientRedis: publisherFake,
+  }),
   getBullRedis: () => publisherFake,
   closeRedis: async () => undefined,
 }));

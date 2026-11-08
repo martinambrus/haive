@@ -45,7 +45,7 @@ vi.mock('../src/db.js', () => ({
 vi.mock('../src/auth/jwt.js', () => ({
   verifyAccessToken: async () => ({ sub: h.USER, role: 'user', tv: 0 }),
 }));
-vi.mock('../src/redis.js', () => ({ getRedis: () => h.redis }));
+vi.mock('../src/redis.js', () => ({ getRedis: () => h.redis, getPatientRedis: () => h.redis }));
 vi.mock('@haive/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared')>()),
   logger: h.logger,

@@ -161,7 +161,7 @@ vi.mock('../src/redis.js', () => {
       },
     });
   };
-  return { getRedis: redis };
+  return { getRedis: redis, getPatientRedis: redis };
 });
 
 import { installTerminalWebSocket } from '../src/routes/terminal.js';

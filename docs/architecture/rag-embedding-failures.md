@@ -157,6 +157,8 @@ over pending hash rows until the next sync (T516). A lock lost by expiry leaves 
 write the flag, and a flag restored needlessly is cleared by the next healthy sync. A statement
 already in flight when the lock is lost still lands: the store cannot see the lock, so closing that
 window would take a fencing token the store itself checks. A run with no repository id takes no lock.
+A take the client rejected is released behind itself: a SET rejected at a command deadline may
+still land, so a compare-and-delete with the owner token is queued after it on the same connection.
 Deleting a repository reclaims its internal store under the same lock (`cleanupRagForRepository`): while
 a sync holds it, or Redis cannot say, the cleanup defers by throwing `RagCleanupDeferredError` before it
 touches anything, the cleanup row stays, and the stalled-cleanup sweep retries it every 10 minutes; a deferral gives back the attempt it was counted

@@ -38,6 +38,7 @@ import { validateAllowlist } from '@haive/shared/egress';
 import { resolveHouseRulesEnabled } from '@haive/shared/global-kb';
 import { resolveCustomToolsEnabled } from '@haive/shared/modularity-server';
 import { getDb } from '../db.js';
+import { getRedis } from '../redis.js';
 import { hashPassword } from '../auth/password.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -391,6 +392,15 @@ adminRoutes.post('/users/:id/action', async (c) => {
 });
 
 adminRoutes.get('/health', async (c) => {
+  // The Redis client's own command deadline bounds this probe.
+  const redisStatus = (async () => {
+    try {
+      await getRedis().ping();
+      return 'up' as const;
+    } catch {
+      return 'down' as const;
+    }
+  })();
   const db = getDb();
   const now = new Date();
   const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
@@ -443,6 +453,7 @@ adminRoutes.get('/health', async (c) => {
       updatedAt: r.updatedAt.toISOString(),
     })),
     timestamp: now.toISOString(),
+    redis: await redisStatus,
   });
 });
 

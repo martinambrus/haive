@@ -8,7 +8,7 @@ const log = logger.child({ module: 'rag-sync-lock' });
 const LOCK_TTL_MS = 120_000;
 const HEARTBEAT_MS = 30_000;
 const POLL_MS = 5_000;
-/** The shared Redis clients queue commands forever while Redis is stalled; no lock command waits longer. */
+/** The worker's shared Redis client queues commands forever while Redis is stalled; no lock command waits longer. */
 const COMMAND_TIMEOUT_MS = 5_000;
 
 const REFRESH_SCRIPT = `
@@ -119,9 +119,10 @@ async function attempt(
   try {
     taken = await bounded(taking, commandTimeoutMs, signal);
   } catch (err) {
-    void taking
-      .then((late) => (late === 'OK' ? redis.eval(RELEASE_SCRIPT, 1, key, token) : null))
-      .catch(() => undefined);
+    // A client with its own command deadline rejects a SET that may still land; a release
+    // queued behind it on the same connection runs after it.
+    const release = () => redis.eval(RELEASE_SCRIPT, 1, key, token);
+    void taking.then((late) => (late === 'OK' ? release() : null), release).catch(() => undefined);
     throw err;
   }
   if (taken !== 'OK') return null;

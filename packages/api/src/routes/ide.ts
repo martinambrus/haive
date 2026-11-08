@@ -18,7 +18,7 @@ import {
   type IdeEnsureResult,
 } from '@haive/shared';
 import { getDb } from '../db.js';
-import { getRedis } from '../redis.js';
+import { getPatientRedis } from '../redis.js';
 import { getIdeEnsureQueue, getIdeEnsureQueueEvents } from '../queues.js';
 import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
 import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
@@ -407,14 +407,14 @@ function proxyWsUpgrade(
 
 async function acquireIdeSession(taskId: string): Promise<void> {
   const key = ideSessionKey(taskId);
-  const redis = getRedis();
+  const redis = getPatientRedis();
   await redis.hincrby(key, 'refcount', 1);
   await redis.hset(key, 'lastSeenAt', String(Date.now()));
 }
 
 async function releaseIdeSession(taskId: string): Promise<void> {
   const key = ideSessionKey(taskId);
-  const redis = getRedis();
+  const redis = getPatientRedis();
   const n = await redis.hincrby(key, 'refcount', -1);
   if (n < 0) await redis.hset(key, 'refcount', '0');
   await redis.hset(key, 'lastSeenAt', String(Date.now()));
@@ -429,7 +429,7 @@ async function releaseIdeSession(taskId: string): Promise<void> {
  *  would read as an editor idle for hours, to the reaper and to the worker's ensure
  *  (which replaces an idle editor started with a stale launch). */
 export async function resetStaleIdeRefcounts(): Promise<void> {
-  const redis = getRedis();
+  const redis = getPatientRedis();
   let cursor = '0';
   do {
     const [next, keys] = await redis.scan(
