@@ -130,6 +130,37 @@ export function setModuleActive(
   });
 }
 
+export type ModuleRetry = { kind: 'missing' } | { kind: 'inactive' } | { kind: 'ok' };
+
+/** Moves only the activation stamp, which the worker reads as a request to start the module again. */
+export function requestModuleRetry(
+  db: Database,
+  moduleId: string,
+  actorUserId: string,
+): Promise<ModuleRetry> {
+  return db.transaction(async (tx): Promise<ModuleRetry> => {
+    await tx.execute(sql`SET LOCAL lock_timeout = '5s'`);
+    const [row] = await tx
+      .select({ deactivatedAt: schema.modules.deactivatedAt })
+      .from(schema.modules)
+      .where(eq(schema.modules.moduleId, moduleId))
+      .for('update');
+    if (!row) return { kind: 'missing' };
+    if (row.deactivatedAt) return { kind: 'inactive' };
+    await insertAuditEvent(tx, {
+      actorUserId,
+      action: 'module.retry',
+      targetType: 'module',
+      metadata: { moduleId },
+    });
+    await tx
+      .update(schema.modules)
+      .set({ updatedAt: new Date() })
+      .where(eq(schema.modules.moduleId, moduleId));
+    return { kind: 'ok' };
+  });
+}
+
 // starts_with only narrows the rows in SQL; isStepOfModule is the exact test.
 const dependentsInModuleStep = async (db: Reader, moduleId: string): Promise<ModuleDependent[]> => {
   const rows = await dependentRows(

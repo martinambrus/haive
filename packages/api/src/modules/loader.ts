@@ -50,6 +50,7 @@ import {
   deactivateUrgently,
   isModuleDeactivated,
   liveDependents,
+  requestModuleRetry,
   setModuleActive,
 } from './activation.js';
 import { moduleSourceRoutes } from './sources.js';
@@ -370,6 +371,16 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
       active,
       deactivatedAt: result.deactivatedAt?.toISOString() ?? null,
     });
+  });
+
+  routes.post('/:id/retry', requireAdmin, async (c) => {
+    const id = c.req.param('id');
+    const result = await requestModuleRetry(getDb(), id, c.get('userId')).catch(moduleBusyError);
+    if (result.kind === 'missing') throw new HttpError(404, 'Module not found');
+    if (result.kind === 'inactive')
+      throw new HttpError(409, 'Activate the module before retrying it', 'module_inactive');
+    publishModuleActivated(id);
+    return c.json({ moduleId: id });
   });
 
   routes.post('/:id/teardown', requireAdmin, async (c) => {

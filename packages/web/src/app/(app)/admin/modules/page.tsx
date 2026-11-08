@@ -10,6 +10,7 @@ import {
   type ModuleSourcesResponse,
   getModuleDependents,
   cancelModuleDrain,
+  retryModule,
   patchModuleActive,
   type ApiError,
   type ModulePurgeResponse,
@@ -190,8 +191,37 @@ export default function ModulesPage() {
     }
   }
 
+  async function retry(row: ModuleDiffRow) {
+    if (pending.current.has(row.id)) return;
+    pending.current.add(row.id);
+    setBusy(new Set(pending.current));
+    setError(null);
+    setNotice(null);
+    try {
+      await retryModule(row.id);
+      setNotice(
+        `Asked the worker to start ${row.name ?? row.id} again. It picks this up within about 15 seconds; this table refreshes while it starts.`,
+      );
+      await load();
+    } catch (err) {
+      setError((err as ApiError).message ?? 'Failed to retry the module');
+    } finally {
+      pending.current.delete(row.id);
+      setBusy(new Set(pending.current));
+    }
+  }
+
   useEffect(() => {
-    if (!data?.modules.rows.some((row) => row.drainingAt)) return;
+    if (
+      !data?.modules.rows.some(
+        (row) =>
+          row.drainingAt ||
+          (row.deactivatedAt === null &&
+            row.runtime !== undefined &&
+            row.runtime.state !== 'ready'),
+      )
+    )
+      return;
     const timer = setInterval(() => {
       void load();
     }, 5000);
@@ -240,7 +270,8 @@ export default function ModulesPage() {
       <div>
         <p className="max-w-3xl text-sm text-neutral-400">
           The modules this install recorded, and which of them the api and the worker loaded. The
-          worker writes the record at each boot. Versions read as recorded / api / worker.
+          worker writes the record at each boot and again as module starts change. Versions read as
+          recorded / api / worker.
         </p>
         {data && (
           <p className="mt-1 text-sm text-neutral-500" data-testid="worker-report">
@@ -307,6 +338,7 @@ export default function ModulesPage() {
                       row={row}
                       busy={busy.has(row.id)}
                       onCancelDrain={() => void cancelDrain(row)}
+                      onRetry={() => void retry(row)}
                       onToggle={() => void toggle(row)}
                       onTeardown={() => setTearingDown(row.id)}
                       onPurge={() => setPurging({ id: row.id, tornDown: row.tornDownAt !== null })}

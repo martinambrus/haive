@@ -585,7 +585,7 @@ export async function startModuleJobs(
   const held = new Set<string>();
   // Attempts made so far by a reactivation the next pass is to try again; that try takes them.
   const attemptsMade = new Map<string, number>();
-  // Every activate and deactivate moves a module's updated_at, so one that fell between two passes shows as a changed stamp.
+  // Every activate, deactivate and retry moves a module's updated_at, so one that fell between two passes shows as a changed stamp.
   const seenStamps = new Map<string, number>();
   const forgetAttempts = (moduleId: string): void => {
     attemptsMade.delete(moduleId);
