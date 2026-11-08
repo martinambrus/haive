@@ -280,7 +280,7 @@ sync.ts:514 (`row !== null`) and :528; pinned by project-state-sync.test.ts:1850
 
 User decision 2026-11-01: A stamped local RTK choice wins against first imported record.
 
-### T318 · FNF[task-lock-wait-2] · remaining unbounded waits on start paths (+7)
+### T318 · FNF[task-lock-wait-2] · remaining unbounded waits on start paths (+9)
 
 status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 
@@ -289,6 +289,8 @@ status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 From the T355 build (2026-11-07), PRE-EXISTING: 7. api middleware/maintenance.ts ~:45-54 fence read sits inside the start path with no bound of its own beyond the config store's 2 s. 8. worker `_revive-check.ts` ~:60 revival read: decide hold vs fail now that the read can reject.
 
 User decision 2026-11-01: Bound conflicting task-start waits and report a clear retryable busy response; do not proceed from stale state.
+
+From the T346 build (2026-11-08), PRE-EXISTING: 9. `claimTaskStart` accepts `created` (worker task-queue.ts:351, 355, 390); dormant, no producer sends START for a created task. 10. A losing concurrent Start reports a stale `status: "created"` (api tasks/index.ts:1343-1344).
 
 ### T319 · FNF[set-aside-batch] · set-aside spends 20-24 git spawns per dirty path (+1)
 
@@ -395,7 +397,7 @@ PRE-EXISTING, from the T393 build (2026-11-07); cost is a cold start or lost she
 2. `cleanupTaskContainers` (task-queue.ts ~:1239, 1280, 1303) appends audit events on every run, so a Stop with a pass in flight (two settlements) can log a duplicate `auth_volumes.destroyed`. Informational.
 3. `defaultContainerCleanup` (task-queue.ts ~:1460-1474) is dead in production: nothing writes a task-bound containers row. Informational; do not delete without checking module consumers.
 
-### T543 · FNF[task-auth-volume-lifecycle] · task auth volume teardown leftovers
+### T543 · FNF[task-auth-volume-lifecycle] · task auth volume teardown leftovers (+1)
 
 status: open · kind: fix · priority: P3
 PRE-EXISTING, from the T393 build (2026-11-07).
@@ -403,6 +405,8 @@ PRE-EXISTING, from the T393 build (2026-11-07).
 1. The boot reaper removes failed-task volumes without syncing a rotated single-use token back (worker auth-volume-reaper.ts ~:19, 125, 148).
 2. `clearTaskAuthPreparationState` without a provider drops in-flight locks (task-auth-volume.ts ~:293-302).
 3. Concurrent auth syncs share the `.haive-tmp` name (task-auth-volume.ts ~:1363-1366); likelier now that a Stop with a pass in flight runs two settlements.
+
+From the T346 build (2026-11-08), PRE-EXISTING: 4. `failedMcpAddNames` (task-auth-volume.ts:962) can race a sibling run of another surface on the same volume and fall back to the general cause; `clearTaskAuthPreparationState` shares the in-flight state.
 
 ### T544 · FNF[config-service-boot-outage] · ConfigService boot and encryption-key paths still wait out a Redis outage
 
@@ -442,7 +446,7 @@ PRE-EXISTING, from the T355 build. Use `boundedAdd`/`addBestEffort`/`addOrRefuse
 ### T551 · FNF[outage-503-web-copy] · web shows a generic error for 503 config_unavailable
 
 status: open · kind: fix · priority: P4
-From the T355 build, cosmetic. The web client renders the 503 as a generic failure; name it as a temporary outage with a retry hint. Nits for the same pass: `readTolerant` duplicated in worker 08c ~:129 and 08d ~:140; dead `runtimeOccupancyMb` at runtime-admission.ts ~:438 (mention only, pre-existing).
+From the T355 build, cosmetic. The web client renders the 503 as a generic failure; name it as a temporary outage with a retry hint. Nits for the same pass: `readTolerant` duplicated in worker 08c ~:129 and 08d ~:140; dead `runtimeOccupancyMb` at runtime-admission.ts ~:438 (mention only, pre-existing). The custom tool Start gate (T346) answers the same 503 on a config outage.
 
 ### T552 · disabled provider in task terminal shells (design)
 
@@ -544,6 +548,27 @@ status: open · kind: fix · found: T354 run · priority: P3
 1. Stored `chrome_devtools_mcp_version` rows written before the PATCH validation reach `npx` and Dockerfile `RUN` sinks unchecked: exec-core.ts:543, mcp-config.ts:295, env-replicate/01-declare-deps.ts:847, 02-generate-dockerfile.ts:800-801. Fix: call `normalizeChromeDevtoolsMcpVersion` at each sink (or one reader). PRE-EXISTING.
 2. Upgrade-apply writes the feed's `latest` unchecked (tooling-upgrades.ts:127). PRE-EXISTING.
 3. `rtk-version` validation is loose (settings.ts:236, tooling-upgrades.ts:843). PRE-EXISTING.
+
+### T563 · FNF[custom-tool-start-gate] · start gate leftovers from the T346 build
+
+status: open · kind: fix · found: T346 run · priority: P3
+
+1. The Start gate does not check `CONFIG_ENCRYPTION_KEY`, which the runner does (worker step-runner.ts:621; api lib/custom-tools-start-check.ts:43-50). PRE-EXISTING scope gap.
+2. The refusal names only the first failing step, in string-id order rather than run order (custom-tools-start-check.ts:19-21, 30-42). Cosmetic.
+3. An unparseable or over-cap tool hides problems of the step's other tools; a step whose non-tool fields do not parse is dropped by `parsePinnedCustomSteps` (shared modularity/prompt-steps.ts:125-136), so Start passes. Same as the runner; hand-edited JSON only. PRE-EXISTING.
+4. The Start gate does not check an unparseable template (only dispatch does, prompt-step.ts:72).
+5. A gone task type row reads `requiresRepository: true` (custom-tools-start-check.ts:28, pinned-tools.ts). Verify whether such a task can exist.
+6. A broken tool in a step the user would skip still blocks Start (inherent to all-required).
+7. Refusal copy says "start the task" / "create a new task" on a full-Retry refusal too; the switch refusal text is duplicated in api and worker (custom-tools-start-check.ts:39, 47; step-runner.ts:616-619; resolvers.ts:283; custom-mcp.ts:195). Copy only.
+8. The admin PUT `saveConfig` tuple carries its own default `true` (api routes/admin.ts:1673). PRE-EXISTING.
+9. `start-entry-points.test.ts` catches only known writer shapes of `status = 'queued'`, not raw SQL.
+10. [verify-first] Can an admin type reuse a builtin slug and carry `custom_steps` on plan, kb or upgrade tasks (task-types.ts:246, 272)? The plan-link refusal (spawn-plan-task.ts:71) is code-read only.
+11. A CLI that prints a line exactly `haive-mcp: add X failed` is listed as a failed server (worker sandbox/task-auth-volume.ts ~1098-1105). Diagnostic text only.
+
+### T564 · per-tool optional flag for custom tools (design)
+
+status: open · kind: design · found: T346 run · priority: P4
+Custom tools have no required/optional flag, so the Start gate treats every declared tool as required (user decision 2026-11-08). An `optional?: boolean` per tool, modelled on integration requirements (prompt-steps.ts:57), would need the schema, a tool-editor control, a dispatch rule that drops an unusable optional tool (and what the agent is told when its template names it), a `custom_tool.unusable` task event at Start, and docs. Resume when a task type needs a tool it can run without.
 
 ### T532 · D4b · registry-kind install sources cannot be fetched (design)
 
