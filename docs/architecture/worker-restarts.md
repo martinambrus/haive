@@ -9,6 +9,12 @@ continuation that finds its answers saved uses them as they are, and the row sta
 Values the job carries are ignored there, since a parked step's only source of them is a submit
 redelivered after it was applied. A submission, a retry and a first run still flip to `running`.
 
+**Nothing starts before the configuration store answers.** `bootstrap()` runs through
+`retryWhileConfigUnavailable` (see [Error diagnostics](error-diagnostics.md), "Configuration store
+outage"), and the step engine, the sandbox reap, the reconcile, the queues, the module jobs and
+`haive-worker ready` all follow it, so a worker booting during an outage waits up rather than half
+starting. Any error other than the typed outage still exits 1.
+
 **Boot hands a dead worker's active jobs back before it starts its own.** BullMQ keeps a job
 `active` under its lock when its worker dies, and the task and cli-exec locks are 30 minutes, so
 such a job used to run only once that lock expired. `requeueOrphanedActiveJobs`
