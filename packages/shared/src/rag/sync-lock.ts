@@ -119,9 +119,10 @@ async function attempt(
   try {
     taken = await bounded(taking, commandTimeoutMs, signal);
   } catch (err) {
-    void taking
-      .then((late) => (late === 'OK' ? redis.eval(RELEASE_SCRIPT, 1, key, token) : null))
-      .catch(() => undefined);
+    // A client with its own command deadline rejects a SET that may still land; a release
+    // queued behind it on the same connection runs after it.
+    const release = () => redis.eval(RELEASE_SCRIPT, 1, key, token);
+    void taking.then((late) => (late === 'OK' ? release() : null), release).catch(() => undefined);
     throw err;
   }
   if (taken !== 'OK') return null;
