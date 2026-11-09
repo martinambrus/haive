@@ -9,6 +9,7 @@ function failedEntry(id: string, title: string, sourceTaskStatus: string) {
     id,
     namespace: 'default',
     userId: null,
+    canDelete: true,
     title,
     seedText: 'Seed notes the person wrote',
     body: '',

@@ -279,6 +279,19 @@ describe('DELETE /entries/:id authorization', () => {
     );
   });
 
+  it('lets an owner delete their own cleared entry while its enforcement settings remain', async () => {
+    h.role = 'user';
+    fake.patch(globalKbEntries, ENTRY, { enforce: ALWAYS, enforcedHash: null });
+
+    const res = await send('GET', `/entries/${ENTRY}`);
+    expect(res.status).toBe(200);
+    const { entry } = await asJson(res);
+
+    expect((await send('DELETE', `/entries/${ENTRY}`)).status).toBe(200);
+    expect(stored()).toBeUndefined();
+    expect(entry.canDelete).toBe(true);
+  });
+
   it.each([
     ['their own entry', ADMIN, false],
     ["another user's entry", OTHER, false],

@@ -1337,7 +1337,7 @@ export interface GlobalKbFacets {
  *  api test pins the two together. */
 export const GLOBAL_KB_DESCRIPTION_MAX = 300;
 
-/** A global (cross-repository) knowledge base entry. Managed by any signed-in user; retrieved by
+/** A global (cross-repository) knowledge base entry. Editable by any signed-in user; deletion follows `canDelete`; retrieved by
  *  tasks via rag_search, version-scoped by `facets`. */
 export interface GlobalKbEntry {
   id: string;
