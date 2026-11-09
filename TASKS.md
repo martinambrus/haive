@@ -517,7 +517,7 @@ status: open · kind: fix · found: T579 review 2026-11-09 · priority: P4
 
 ### T583 · FNF[global-kb-draft-owner-blind-link] · a non-admin's draft that replaces another owner's entry needs an admin to activate
 
-status: open · kind: design · found: T581 review 2026-11-09 · priority: P3
+status: parked · kind: design · found: T581 review 2026-11-09 · priority: P3 · user decision 2026-11-09: leave as is; revisit when a non-admin hits it
 PRE-EXISTING link, new consequence of #1044. Auto-link picks the entry a draft replaces without looking at its owner or approval (`steps/_global-kb-promote.ts`, `steps/kb-author/01-enrich.ts:673`), so a non-admin's draft can be linked over an entry they may not change. Since #1044 Activate refuses it with "Activating this entry would archive an entry you may not change; an admin is required", and only an admin can finish it. Needs a decision: leave it, let the author drop the link and publish beside the original, or skip auto-link on entries the author may not change.
 
 ### T577 · FNF[global-kb-config-untrimmed-write] · an admin's Ollama URL and embed model are stored untrimmed
