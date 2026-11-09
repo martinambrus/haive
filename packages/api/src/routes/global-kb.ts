@@ -587,9 +587,26 @@ const testOllamaSchema = z
   .strict();
 
 globalKbRoutes.post('/test-ollama', async (c) => {
-  const parsed = testOllamaSchema.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) throw new HttpError(400, 'invalid test request', 'invalid_body');
-  const { ollamaUrl, model, dimensions } = parsed.data;
+  let input: z.infer<typeof testOllamaSchema>;
+  if (c.get('userRole') === 'admin') {
+    const parsed = testOllamaSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HttpError(400, 'invalid test request', 'invalid_body');
+    input = parsed.data;
+  } else {
+    const saved = await resolveGlobalKbSettings();
+    if (!saved.ollamaUrl || !saved.embedModel) {
+      return c.json({
+        ok: false,
+        message: 'Global KB Ollama URL or embedding model is not configured',
+      });
+    }
+    input = {
+      ollamaUrl: saved.ollamaUrl,
+      model: saved.embedModel,
+      dimensions: saved.embeddingDimensions,
+    };
+  }
+  const { ollamaUrl, model, dimensions } = input;
   const { fetchFn } = await probeEgressFor(c);
   if (!(await probeOllama(ollamaUrl, fetchFn))) {
     return c.json({ ok: false, message: `Ollama unreachable at ${ollamaUrl}` });

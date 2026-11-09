@@ -12,13 +12,20 @@ const h = vi.hoisted(() => ({
   fake: undefined as unknown as { insert(table: unknown, row: unknown): unknown },
   open: false,
   ollamaUrl: null as string | null,
+  embedModel: null as string | null,
+  dimensions: '2',
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('@haive/shared/global-kb', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@haive/shared/global-kb')>();
+  return { ...actual, resolveGlobalKbSettings: vi.fn(actual.resolveGlobalKbSettings) };
+});
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { CONFIG_KEYS, configService, secretsService } from '@haive/shared';
+import { resolveGlobalKbSettings } from '@haive/shared/global-kb';
 import { ACCESS_COOKIE } from '../src/auth/cookies.js';
 import { signAccessToken } from '../src/auth/jwt.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -49,6 +56,7 @@ const ollama = {
 const target = { server: undefined as unknown as http.Server, port: 0, hits: 0 };
 const pg = { server: undefined as unknown as net.Server, port: 0, conns: 0, first: [] as Buffer[] };
 const held: http.ServerResponse[] = [];
+const embeds: unknown[] = [];
 
 function listen<T extends http.Server | net.Server>(server: T): Promise<number> {
   return new Promise((resolve) => {
@@ -74,6 +82,7 @@ beforeAll(async () => {
       } else if (req.url === '/api/show') {
         json({ capabilities: ['thinking'] });
       } else if (req.url === '/api/embed') {
+        embeds.push(JSON.parse(Buffer.concat(chunks).toString()));
         json({ embeddings: [[0.1, 0.2]] });
       } else if (req.url === '/api/pull' && ollama.mode === 'hold') {
         res.writeHead(200, { 'content-type': 'application/x-ndjson' });
@@ -123,9 +132,17 @@ beforeEach(() => {
   h.fake = fake;
   h.open = false;
   h.ollamaUrl = null;
+  h.embedModel = null;
+  h.dimensions = '2';
+  embeds.length = 0;
+  vi.mocked(resolveGlobalKbSettings).mockReset();
+  vi.spyOn(configService, 'getFresh').mockResolvedValue(null);
+  vi.spyOn(secretsService, 'getFresh').mockResolvedValue(null);
   vi.spyOn(configService, 'get').mockImplementation(async (key: string) => {
     if (key === CONFIG_KEYS.PRIVATE_ENDPOINT_ALLOWLIST) return h.open ? '127.0.0.1/32' : null;
     if (key === CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL) return h.ollamaUrl;
+    if (key === CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL) return h.embedModel;
+    if (key === CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS) return h.dimensions;
     return null;
   });
   ollama.hits = 0;
@@ -142,12 +159,12 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-async function post(role: Role, path: string, payload: unknown): Promise<Reply> {
+async function post(role: Role, path: string, payload: unknown, raw = false): Promise<Reply> {
   const token = await signAccessToken({ sub: role === 'admin' ? ADMIN : USER, role, tv: 0 });
   const res = await app.request(path, {
     method: 'POST',
     headers: { cookie: `${ACCESS_COOKIE}=${token}`, 'content-type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: raw ? (payload as string | undefined) : JSON.stringify(payload),
   });
   const text = await res.text();
   let body: any = null;
@@ -235,6 +252,10 @@ const OLLAMA_PROBES: Probe[] = [
     refused: (r) => pullEvents(r).includes('error') && !pullEvents(r).includes('done'),
     works: (r) => pullEvents(r).at(-1) === 'done',
   },
+];
+
+const ADMIN_OLLAMA_PROBES: Probe[] = [
+  ...OLLAMA_PROBES,
   {
     name: 'global-kb/test-ollama',
     path: '/global-kb/test-ollama',
@@ -308,7 +329,7 @@ describe('PR-1 a user cannot aim a probe at loopback', () => {
 });
 
 describe('PR-2 an admin keeps full reach', () => {
-  it.each(OLLAMA_PROBES)('$name reaches http://127.0.0.1 and succeeds', async (probe) => {
+  it.each(ADMIN_OLLAMA_PROBES)('$name reaches http://127.0.0.1 and succeeds', async (probe) => {
     const reply = await post('admin', probe.path, probe.body(`http://127.0.0.1:${ollama.port}`));
     expect(ollama.hits).toBeGreaterThanOrEqual(1);
     expect(probe.works(reply)).toBe(true);
@@ -430,7 +451,7 @@ describe('PR-4 a name that resolves to a blocked address', () => {
     expect(ollama.hits).toBe(0);
   });
 
-  it.each(OLLAMA_PROBES)('$name: an admin reaches http://localhost', async (probe) => {
+  it.each(ADMIN_OLLAMA_PROBES)('$name: an admin reaches http://localhost', async (probe) => {
     stubNames({ localhost: ['127.0.0.1'] });
     const reply = await post('admin', probe.path, probe.body(`http://localhost:${ollama.port}`));
     expect(ollama.hits).toBeGreaterThanOrEqual(1);
@@ -706,5 +727,135 @@ describe("PR-9 a user may probe the install's own Ollama and DDEV hosts", () => 
       dimensions: 2,
     });
     expect(reply.body?.ok).toBe(true);
+  });
+});
+
+describe('global KB Ollama probe uses role-appropriate settings', () => {
+  const route = '/global-kb/test-ollama';
+  const typed = () => ({
+    ollamaUrl: `http://127.0.0.1:${target.port}`,
+    model: 'typed-model',
+    dimensions: 7,
+  });
+
+  beforeEach(() => {
+    h.open = true;
+    h.ollamaUrl = `http://127.0.0.1:${ollama.port}`;
+    h.embedModel = 'stored-model';
+  });
+
+  it('ignores a user typed URL, model and dimensions and only dials the stored URL', async () => {
+    const reply = await post('user', route, typed());
+    expect({ typed: target.hits, stored: ollama.hits }).toEqual({ typed: 0, stored: 2 });
+    expect(reply.status).toBe(200);
+    expect(reply.body).toEqual({ ok: true, message: 'OK — stored-model returns 2 dims' });
+    expect(embeds).toEqual([
+      expect.objectContaining({ model: 'stored-model', input: ['healthcheck'] }),
+    ]);
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['malformed', '{'],
+    ['empty object', '{}'],
+    ['invalid fields', '{"ollamaUrl":42,"model":null,"dimensions":-1,"extra":true}'],
+  ])('ignores a user %s body and tests stored settings', async (_label, body) => {
+    const reply = await post('user', route, body, true);
+    expect(reply.status).toBe(200);
+    expect(reply.body).toEqual({ ok: true, message: 'OK — stored-model returns 2 dims' });
+    expect({ typed: target.hits, stored: ollama.hits }).toEqual({ typed: 0, stored: 2 });
+    expect(embeds).toEqual([expect.objectContaining({ model: 'stored-model' })]);
+  });
+
+  it.each([{ ollamaUrl: null }, { ollamaUrl: '' }, { embedModel: null }, { embedModel: '' }])(
+    'dials nothing when resolved settings are not configured: %j',
+    async (missing) => {
+      const saved = await resolveGlobalKbSettings();
+      vi.mocked(resolveGlobalKbSettings).mockResolvedValueOnce({ ...saved, ...missing });
+      const reply = await post('user', route, typed());
+      expect(reply.status).toBe(200);
+      expect(reply.body).toEqual({ ok: false, message: expect.stringMatching(/not configured/i) });
+      expect({ typed: target.hits, stored: ollama.hits }).toEqual({ typed: 0, stored: 0 });
+    },
+  );
+
+  it('still refuses a stored private URL through the user egress guard', async () => {
+    h.open = false;
+    const reply = await post('user', route, typed());
+    expect(reply.status).toBe(200);
+    expect(reply.body).toEqual({
+      ok: false,
+      message: `Ollama unreachable at ${h.ollamaUrl}`,
+    });
+    expect({ typed: target.hits, stored: ollama.hits }).toEqual({ typed: 0, stored: 0 });
+  });
+
+  it('allows the stored built-in Ollama host for a user', async () => {
+    h.open = false;
+    h.ollamaUrl = `http://ollama:${ollama.port}`;
+    stubNames({ ollama: ['127.0.0.1'] });
+    const reply = await post('user', route, typed());
+    expect(reply.body).toEqual({ ok: true, message: 'OK — stored-model returns 2 dims' });
+    expect({ typed: target.hits, stored: ollama.hits }).toEqual({ typed: 0, stored: 2 });
+  });
+
+  it('refuses a stored name resolving private for a user', async () => {
+    h.open = false;
+    h.ollamaUrl = `http://stored.test:${ollama.port}`;
+    stubNames({ 'stored.test': ['127.0.0.1'] });
+    const reply = await post('user', route, typed());
+    expect(reply.body).toEqual({
+      ok: false,
+      message: `Ollama unreachable at ${h.ollamaUrl}`,
+    });
+    expect({ typed: target.hits, stored: ollama.hits }).toEqual({ typed: 0, stored: 0 });
+  });
+
+  it('does not follow a redirect from the stored URL', async () => {
+    ollama.mode = 'redirect';
+    const reply = await post('user', route, typed());
+    expect(reply.body?.ok).toBe(false);
+    expect({ typed: target.hits, stored: ollama.hits }).toEqual({ typed: 0, stored: 1 });
+  });
+
+  it('keeps admin typed URL, model and dimensions without reading stored settings', async () => {
+    h.open = false;
+    h.ollamaUrl = `http://127.0.0.1:${target.port}`;
+    const reply = await post('admin', route, {
+      ollamaUrl: `http://127.0.0.1:${ollama.port}`,
+      model: 'typed-model',
+      dimensions: 2,
+    });
+    expect(reply.status).toBe(200);
+    expect(reply.body).toEqual({ ok: true, message: 'OK — typed-model returns 2 dims' });
+    expect(ollama.hits).toBe(2);
+    expect(target.hits).toBe(0);
+    expect(embeds).toEqual([expect.objectContaining({ model: 'typed-model' })]);
+    expect(resolveGlobalKbSettings).not.toHaveBeenCalled();
+  });
+
+  it('keeps admin typed dimensions on a mismatch', async () => {
+    const reply = await post('admin', route, {
+      ollamaUrl: `http://127.0.0.1:${ollama.port}`,
+      model: 'typed-model',
+      dimensions: 7,
+    });
+    expect(reply.body).toEqual({
+      ok: false,
+      message: 'Reachable, but typed-model returns 2 dims (config expects 7)',
+    });
+    expect(resolveGlobalKbSettings).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['malformed', '{'],
+    ['empty object', '{}'],
+    ['invalid fields', '{"ollamaUrl":42,"model":null,"dimensions":-1,"extra":true}'],
+  ])('keeps a 400 for an admin %s body without dialing', async (_label, body) => {
+    const reply = await post('admin', route, body, true);
+    expect(reply.status).toBe(400);
+    expect({ typed: target.hits, stored: ollama.hits }).toEqual({ typed: 0, stored: 0 });
+    expect(resolveGlobalKbSettings).not.toHaveBeenCalled();
   });
 });
