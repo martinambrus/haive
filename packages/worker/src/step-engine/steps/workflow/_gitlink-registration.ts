@@ -1,13 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { removeNoFollow } from '@haive/shared/fs-safe';
+import { lstatNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import {
   GIT_MAX_BUFFER,
   gitGaveNoAnswer,
   gitRun,
   type GitRunResult,
 } from '../../../repo/git-exec.js';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { StepContext } from '../../step-definition.js';
 import { parsePorcelainZ } from './_commit-diff.js';
 
@@ -131,6 +132,42 @@ async function copyIndexFlags(workspace: string, env: Record<string, string>): P
   }
 }
 
+/** Status lists files inside a tracked directory, so git add flattens a checkout there. */
+async function refuseFlattenedRepositories(
+  workspace: string,
+  status: string,
+  excluded: string[],
+): Promise<void> {
+  const { anchor, prefix } = workspaceAnchor(workspace);
+  const checked = new Map<string, boolean>();
+  const found = new Set<string>();
+  for (const entry of parsePorcelainZ(status)) {
+    for (const file of [entry.path, entry.oldPath]) {
+      if (!file || excluded.some((p) => file === p.slice(0, -1) || file.startsWith(p))) continue;
+      for (
+        let dir = path.posix.dirname(file.replace(/\/$/, ''));
+        dir !== '.';
+        dir = path.posix.dirname(dir)
+      ) {
+        let nested = checked.get(dir);
+        if (nested === undefined) {
+          nested = (await lstatNoFollow(anchor, `${prefix}${dir}/.git`, { strict: true })) !== null;
+          checked.set(dir, nested);
+        }
+        if (nested) found.add(dir);
+      }
+    }
+  }
+  if (found.size)
+    throw new Error(
+      [
+        'Nothing was committed. These nested git repositories occupy tracked directories; staging their files would discard their repository history:',
+        ...[...found].map((p) => `- ${JSON.stringify(p)}`),
+        'For each path, keep it out of the commit, or remove its `.git` to include the files on purpose. Then retry this step.',
+      ].join('\n'),
+    );
+}
+
 /**
  * Index paths of gitlinks the commit about to be made would add that no `.gitmodules` entry in that
  * commit registers with a url. What `git add -A` would stage is worked out on a scratch copy of the
@@ -141,6 +178,7 @@ export async function unregisteredGitlinks(
   status: string,
   excluded: string[],
 ): Promise<string[]> {
+  await refuseFlattenedRepositories(workspace, status, excluded);
   const staged = await newGitlinks(workspace);
   // A nested repository that replaces a tracked file shows as ` T path`, and one that replaces an
   // intent-to-add file as ` A path`, not as `?? path/`.

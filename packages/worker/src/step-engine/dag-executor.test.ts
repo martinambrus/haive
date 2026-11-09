@@ -2227,6 +2227,25 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
     });
 
+    it('refuses flattening a nested repository in a tracked directory before staging', async () => {
+      const { integrationDir, worktrees } = await setupLevel();
+      const issueDir = worktrees['ISSUE-1']!;
+      await mkdir(path.join(issueDir, 'sub'));
+      await writeFile(path.join(issueDir, 'sub/a'), 'old\n');
+      await git(issueDir, ['add', '-A']);
+      await git(issueDir, ['commit', '-m', 'directory']);
+      await rm(path.join(issueDir, 'sub/a'));
+      await nestedRepo(issueDir);
+      const before = await snapshot(integrationDir, issueDir);
+      const err = await thrown(
+        pass(dagDb(integrationDir, { worktreePath: issueDir }), integrationDir),
+      );
+      expect(err).toBeInstanceOf(Error);
+      for (const part of ['"sub"', 'keep it out', 'remove its `.git`'])
+        expect((err as Error).message).toContain(part);
+      expect(await snapshot(integrationDir, issueDir)).toEqual(before);
+    });
+
     it('refuses before staging anything and leaves the worktree, branch and temp dir as found', async () => {
       const { integrationDir, worktrees } = await setupLevel();
       const issueDir = worktrees['ISSUE-1']!;

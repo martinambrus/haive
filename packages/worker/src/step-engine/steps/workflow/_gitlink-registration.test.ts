@@ -368,3 +368,13 @@ it('an unborn nested checkout replacing a tracked file cannot be committed by ad
   expect((await gitRun(repo, ['add', '-A'])).code).toBe(128);
   expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
 });
+it('honours exclusions for nested repositories inside tracked directories', async () => {
+  const repo = await outer();
+  await ensureDirNoFollow(repo, 'dir');
+  await writeFileNoFollow(repo, 'dir/a', 'old\n');
+  await git(repo, ['add', '-A']);
+  await git(repo, ['commit', '-qm', 'directory']);
+  await removeNoFollow(repo, 'dir/a');
+  await nestedRepo(repo, 'dir');
+  expect(await find(repo, ['dir/'])).toEqual([]);
+});
