@@ -292,8 +292,17 @@ describe('private endpoint allowlist', () => {
     expect((await fetchFn(url('db.test.'))).status).toBe(200);
   });
 
-  it.each([['169.254.169.254'], ['fe80::1'], ['0.0.0.0'], ['127.0.0.1', '169.254.169.254']])(
-    'a hostname entry never lifts a link-local or unspecified answer %j',
+  it.each([
+    ['169.254.169.254'],
+    ['fe80::1'],
+    ['0.0.0.0'],
+    ['127.0.0.1', '169.254.169.254'],
+    ['100.100.100.200'],
+    ['192.0.0.192'],
+    ['fd00:ec2::254'],
+    ['10.1.2.3', '100.100.100.200'],
+  ])(
+    'a hostname entry never lifts a link-local, unspecified or cloud metadata answer %j',
     async (...answers) => {
       const r = resolverOf(() => answers);
       const err = await failure(

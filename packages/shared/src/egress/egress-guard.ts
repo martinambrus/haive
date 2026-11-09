@@ -116,6 +116,9 @@ const UNLIFTABLE_BY_HOSTNAME = new net.BlockList();
 for (const [network, prefix] of [
   ['169.254.0.0', 16],
   ['0.0.0.0', 8],
+  // The metadata endpoints of Alibaba Cloud ECS and Oracle Cloud Compute Classic.
+  ['100.100.100.200', 32],
+  ['192.0.0.192', 32],
 ] as const) {
   UNLIFTABLE_BY_HOSTNAME.addSubnet(network, prefix, 'ipv4');
   const [a, b, c, d] = network.split('.').map(Number) as [number, number, number, number];
@@ -127,8 +130,10 @@ for (const [network, prefix] of [
 }
 UNLIFTABLE_BY_HOSTNAME.addSubnet('fe80::', 10, 'ipv6');
 UNLIFTABLE_BY_HOSTNAME.addSubnet('::', 128, 'ipv6');
+// EC2's metadata endpoint over IPv6.
+UNLIFTABLE_BY_HOSTNAME.addAddress('fd00:ec2::254', 'ipv6');
 
-/** True for a link-local or unspecified address, including its IPv6 embeddings. */
+/** True for a link-local, unspecified or cloud metadata address, including its IPv6 embeddings. */
 export function isUnliftableByHostname(address: string): boolean {
   const family = net.isIP(address);
   return family !== 0 && UNLIFTABLE_BY_HOSTNAME.check(address, family === 4 ? 'ipv4' : 'ipv6');
