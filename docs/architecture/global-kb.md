@@ -121,9 +121,13 @@ the rendered entry (`houseRuleBytes`). Every writer of an entry takes the namesp
 lock before the row's, with a 30 s wait limit answering 503: MEASURED, a DELETE racing the
 activation of a draft that supersedes it deadlocked in 23 of 23 rounds before. The store settings
 that could switch every rule off at once (Enabled, namespace, mode, connection string) are
-admin-only. A non-admin's save never writes them: a re-sent value is accepted and skipped, so a
-save that read the page before an admin's change cannot revert it. The Ollama URL and embed model are
-NOT among those settings: any signed-in user can save them, so every dial to the stored URL (sync,
+admin-only, and so are the settings every user's embeds and the archive purge read (Ollama URL,
+embed model, dimensions, archive retention): the URL receives every entry's and query's text, a
+model or width change strands every stored vector, and a short retention hard-deletes the archive.
+A non-admin's save never writes them: a re-sent value is accepted and skipped (a blank URL or model
+compares as its default, as the resolver reads it), so a save that read the page before an admin's
+change cannot revert it, and the page shows those fields disabled to a non-admin. Only "List
+matching entry titles" stays open. The stored URL may still predate this rule, so every dial to it (sync,
 `release-embed-model`, the embed helpers) goes through the egress guard: a host that resolves to a
 private, loopback or link-local address is refused unless it is built in or the administrator's
 private-endpoint allowlist lists it (`api-auth.md`). The old exemption for the configured Global KB

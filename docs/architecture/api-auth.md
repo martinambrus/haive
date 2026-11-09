@@ -196,8 +196,8 @@ multi-host Postgres string stay refused unless the allowlist lists them. The pro
 reports only what the guarded fetch reports.
 
 Stored targets are guarded for every caller, an administrator included, because the value may have been
-written by someone else (the Global KB Ollama URL and embed model are saved by any signed-in user;
-`global-kb.ts` `putConfig` blocks non-admins only from enabled, namespace, mode and the connection string):
+written by someone else (the Global KB Ollama URL and embed model are admin-only since `putConfig`
+refuses a non-admin's change, but a value saved before that is still trusted nowhere):
 `POST /global-kb/release-embed-model`, the RAG store and embedder URL read by rag search and
 `PATCH /repositories/:id/tooling`, the forge calls in integration-mcp, and the worker's counterparts. The
 guard sits at the lowest layer: the embed helpers default to the guarded fetch, `resolveRagConnection` dials
