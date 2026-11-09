@@ -313,6 +313,26 @@ describe('isBlockedAddress', () => {
 });
 
 describe('isUnliftableByHostname', () => {
+  it.each([
+    '168.63.129.16',
+    '::ffff:168.63.129.16',
+    '::ffff:a83f:8110',
+    '64:ff9b::a83f:8110',
+    '2002:a83f:8110::',
+    '::ffff:0:a83f:8110',
+    '::a83f:8110',
+  ])('blocks the Azure host address %s, and a hostname entry cannot lift it', (address) => {
+    expect(isBlockedAddress(address)).toBe(true);
+    expect(isUnliftableByHostname(address)).toBe(true);
+  });
+
+  it.each(['168.63.129.15', '168.63.129.17', '::ffff:168.63.129.17'])(
+    'leaves %s, next to the Azure host address, public',
+    (address) => {
+      expect(isBlockedAddress(address)).toBe(false);
+    },
+  );
+
   const UNLIFTABLE = [
     '169.254.0.0',
     '169.254.169.254',

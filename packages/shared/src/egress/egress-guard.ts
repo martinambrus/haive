@@ -62,6 +62,8 @@ const BLOCKED_V4: ReadonlyArray<readonly [string, number]> = [
   ['10.0.0.0', 8],
   ['100.64.0.0', 10],
   ['127.0.0.0', 8],
+  // Azure's host virtual IP (WireServer): a public address that only the host node answers.
+  ['168.63.129.16', 32],
   ['169.254.0.0', 16],
   ['172.16.0.0', 12],
   ['192.0.0.0', 24],
@@ -119,6 +121,8 @@ for (const [network, prefix] of [
   // The metadata endpoints of Alibaba Cloud ECS and Oracle Cloud Compute Classic.
   ['100.100.100.200', 32],
   ['192.0.0.192', 32],
+  // Azure's host virtual IP.
+  ['168.63.129.16', 32],
 ] as const) {
   UNLIFTABLE_BY_HOSTNAME.addSubnet(network, prefix, 'ipv4');
   const [a, b, c, d] = network.split('.').map(Number) as [number, number, number, number];
