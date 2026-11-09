@@ -901,13 +901,6 @@ status: parked · area: modular-haive-plan owns merge-resolver.ts landing sectio
 1. merge-resolver.ts ~:1320-1322, ~:1362: persist baseShaBefore before the merge.
 2. reopen (~:1642) never calls ensureBaseWorktree.
 
-### T425 · FNF[orphan-gitlink] · gate 3 commits an agent-left nested repository as a gitlink with no .gitmodules entry
-
-status: in progress (sonnet-sonnet driver, 2026-11-09) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-From the T375 review (2026-10-24). PRE-EXISTING, consequential, low frequency. worker 10-gate-3-commit.ts ~:407-410: `git add -A` records an untracked nested repo that has a HEAD as a 160000 entry with no `.gitmodules` URL; the viewer labels it "submodule" and gate 3 reads only the exit code. Later `git submodule` commands and recursive clones meet a gitlink with no URL. Decide: refuse, warn, stage its files, or ask the user.
-
-User decision 2026-11-01: Refuse incomplete unregistered gitlinks and explain submodule registration or including ordinary files.
-
 ### T435 · FNF[web-api-cookie-transport] · different web/API hostnames cannot establish the server-rendered session
 
 status: open · kind: feature · user decision: resolved 2026-11-01 · priority: P2
@@ -1546,6 +1539,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T425 — gate 3 refuses an unregistered nested repository instead of committing a gitlink with no url — PR #1039 (435cc78c9), 2026-11-09
 - T558 — FNF[global-kb-ollama-url-write]: Global KB Ollama URL, embed model, dimensions and archive retention admin-only — PR #1037 (dd9d5a733), 2026-11-09
 - T546 — config-outage readers hold instead of defaulting open: the reaper keeps runners whose grace it cannot read, refused defers retry for 60 s, boot migrations rethrow a typed outage into the boot retry — PR #1036 (9d55b622c), 2026-11-09
 - T544 — a config store outage at boot: initialize fails typed within 10 s and api and worker retry boot instead of exiting — PR #1035 (1ffea2665), 2026-11-08
