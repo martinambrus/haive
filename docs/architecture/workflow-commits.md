@@ -31,8 +31,24 @@ stages the remaining changes and excludes that checkout. Apply rechecks its HEAD
 form is submitted, since it may have gained a commit while the gate was waiting. This proof
 precedes the dependency guard: only those exact untracked checkout boundaries are omitted
 from its proposed deliverables, with tracked changes against the fork point still checked
-in full. A nested repository with a commit keeps Git's existing gitlink behavior and ownership
-decision.
+in full.
+
+A nested repository with a commit is refused at gate 3 when the add would put a gitlink in the
+commit that HEAD does not hold and the commit's `.gitmodules` has no entry with that path and a
+non-empty url (`_gitlink-registration.ts`, right after `assertDependencyCommitSafe` and before
+`git add -A`). What the add would stage is worked out on a scratch index (`GIT_INDEX_FILE` in the
+temp dir, filled from the real index, same argv as the real add through `stageAllArgs`), so the
+real index is never written. `core.splitIndex=false` is set there because a split index writes
+`.git/sharedindex.*` into the repository. The check reads modes and exit codes only. It runs when
+the real index already holds a new gitlink, or the status lists an untracked directory (`?? dir/`),
+a work-tree type change (` T path`) or an intent-to-add entry (` A path`), the three shapes a
+repository can arrive in unstaged. A git failure refuses. It can leave unreachable blobs in
+`.git/objects` after a refusal: the same content gets the same id, so a retry adds none and gc
+prunes them. Unborn repositories stay excluded, and a gitlink HEAD already holds is left alone.
+The thrown text names each path and the two ways out, register it as a submodule or include its
+files as ordinary files. Detect carries an optional `unregisteredGitlinks`, optional because the
+payload is persisted and best effort since apply still decides, and the form lists it. The DAG
+issue committer has no such check, so a gitlink it commits is one gate 3 sees in HEAD.
 
 The invocation asks for a JSON `commitMessage` containing a subject and optional body and
 instructs the agent to answer from the supplied changes without using tools. `disableTools`
