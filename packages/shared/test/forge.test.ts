@@ -5,7 +5,7 @@ import {
   type ServerResponse,
 } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { BitbucketCloudForgeProvider } from '../src/forge/bitbucket-cloud.js';
 import { BitbucketServerForgeProvider } from '../src/forge/bitbucket-server.js';
 import { GiteaForgeProvider } from '../src/forge/gitea.js';
@@ -29,6 +29,7 @@ function ctx(over: Partial<ForgeContext> = {}): ForgeContext {
     repo: 'app',
     token: 'tok',
     username: 'user',
+    fetchFn: (input, init) => fetch(input, init),
     ...over,
   };
 }
@@ -540,16 +541,24 @@ describe('a forge credential reaches only the origin it was sent to', () => {
     expect(global).not.toHaveBeenCalled();
   });
 
-  it('looks the global fetch up at call time when ctx.fetchFn is not set', async () => {
-    const provider = new GiteaForgeProvider(5_000);
+  it('never falls back to the global fetch when ctx.fetchFn is missing', async () => {
     const global = vi.fn(async () => jsonResponse({ state: 'open' }));
     vi.stubGlobal('fetch', global);
+    const open: Partial<ForgeContext> = ctx({
+      provider: 'gitea',
+      apiBase: 'https://git.example/api/v1',
+    });
+    delete open.fetchFn;
 
-    await provider.getPullRequestState(
-      ctx({ provider: 'gitea', apiBase: 'https://git.example/api/v1' }),
-      '1',
-    );
+    await expect(
+      new GiteaForgeProvider(5_000).getPullRequestState(open as ForgeContext, '1'),
+    ).rejects.toBeInstanceOf(ForgeError);
+    expect(global).not.toHaveBeenCalled();
+  });
 
-    expect(global).toHaveBeenCalledTimes(1);
+  it('makes ctx.fetchFn a required function', () => {
+    expectTypeOf<ForgeContext['fetchFn']>().toEqualTypeOf<
+      (input: string, init?: RequestInit) => Promise<Response>
+    >();
   });
 });
