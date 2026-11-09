@@ -566,7 +566,7 @@ async function putConfig(c: Context<AppEnv>) {
 
 // --- Connection tests (the UI "Test" buttons). Both exercise the exact paths
 // the worker sync/query use, so a green result means the real embed/store path
-// works with the entered settings. ---
+// works with the settings tested (entered by an admin, stored for anyone else). ---
 function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   // Handle a late rejection (after the timeout already won the race) so it never
@@ -587,9 +587,28 @@ const testOllamaSchema = z
   .strict();
 
 globalKbRoutes.post('/test-ollama', async (c) => {
-  const parsed = testOllamaSchema.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) throw new HttpError(400, 'invalid test request', 'invalid_body');
-  const { ollamaUrl, model, dimensions } = parsed.data;
+  // Only an admin may aim this at a typed URL. Everyone else tests what is stored: both web
+  // callers run it for them on load, so requireAdmin would turn each load into a 403.
+  let input: z.infer<typeof testOllamaSchema>;
+  if (c.get('userRole') === 'admin') {
+    const parsed = testOllamaSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HttpError(400, 'invalid test request', 'invalid_body');
+    input = parsed.data;
+  } else {
+    const saved = await resolveGlobalKbSettings();
+    if (!saved.ollamaUrl || !saved.embedModel) {
+      return c.json({
+        ok: false,
+        message: 'Global KB Ollama URL or embedding model is not configured',
+      });
+    }
+    input = {
+      ollamaUrl: saved.ollamaUrl,
+      model: saved.embedModel,
+      dimensions: saved.embeddingDimensions,
+    };
+  }
+  const { ollamaUrl, model, dimensions } = input;
   const { fetchFn } = await probeEgressFor(c);
   if (!(await probeOllama(ollamaUrl, fetchFn))) {
     return c.json({ ok: false, message: `Ollama unreachable at ${ollamaUrl}` });
