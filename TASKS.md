@@ -461,14 +461,13 @@ status: open · kind: fix · found: T347 run · priority: P2
 4. `reconcileEmbedModelResidency` (worker queues/task-queue.ts:1084-1098) dials a historical task's Ollama URL; a private one the seed did not list is refused and skipped silently. REGRESSION (minor, best-effort cleanup).
 5. (T555 run, 2026-11-09) Seed `METADATA` (worker private-endpoint-seed.ts:70-73) is a second hand-kept list holding two of the guard's three metadata addresses. It can drift from the guard's set; no change needed today. PRE-EXISTING, minor.
 
-### T555 · FNF[egress-guard-hardening] · remaining liftable metadata addresses and optional forge fetchFn (+3)
+### T555 · FNF[egress-guard-hardening] · remaining egress guard gaps: Azure host address, local NAT64 and Teredo, probe details (+3)
 
-status: in progress (sonnet-sonnet driver, 2026-11-09) · kind: fix · found: T347 run · priority: P2
+status: open · kind: fix · found: T347 run · priority: P2
 
-1. Other cloud-metadata addresses stay hostname-liftable: 100.100.100.200, 192.0.0.192, fd00:ec2::254 classify blocked but liftable (shared egress/egress-guard.ts:132). NEW-LIMIT. Fix: add them to the unliftable set.
-2. IPv4-compatible `::a9fe:a9fe` (deprecated ::/96) is blocked but liftable (egress-guard.ts:132). NEW-LIMIT (low).
+Items 1, 2 and 4 shipped in PR #1040 (4dceda71f), 2026-11-09. Items 3, 5, 6 and 7 stay parked as before; item 8 needs a decision.
+
 3. Hostname entries consult the hosts file only when DNS fails, so a name public in DNS but overridden in /etc/hosts dials the DNS answer (shared egress/probe-egress.ts:96,127,186,319). Accepted behaviour; revisit only on a report. NEW-LIMIT.
-4. `ForgeContext.fetchFn` is optional (shared forge/types.ts:28, forge/base-forge.ts:70); a third construction site fails open to the global fetch. NEW-LIMIT. Fix: make it required or default to the guarded fetch.
 5. `deflate` maps to `createInflate` (probe-egress.ts:158), so a raw-deflate body fails. PRE-EXISTING (moved code).
 6. The guard sends `accept-encoding: identity` by default (probe-egress.ts:219). PRE-EXISTING (low).
 7. A `[::1]` host in a RAG DSN reports `ENOTFOUND [` (`dsnDialHost`, shared rag/connection.ts:119; postgres.js parses the host as `[`); still refused, only the message is wrong. PRE-EXISTING (low).
