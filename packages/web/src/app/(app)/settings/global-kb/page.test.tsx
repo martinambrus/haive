@@ -504,7 +504,7 @@ describe('entry deletion controls', () => {
     sourceTaskId: null,
     supersedesEntryId: null,
     embedStatus: 'embedded',
-    canDelete: true,
+    canManage: true,
     createdAt: '2026-11-09T00:00:00Z',
     updatedAt: '2026-11-09T00:00:00Z',
     ...over,
@@ -513,9 +513,9 @@ describe('entry deletion controls', () => {
     ui.all().filter((e) => e.type === Button && textOf(e) === 'Delete');
 
   it.each([false, undefined])(
-    'hides list and detail Delete for canDelete=%s',
-    async (canDelete) => {
-      const ui = await mount({}, [], [entry({ canDelete })]);
+    'hides list and detail Delete for canManage=%s',
+    async (canManage) => {
+      const ui = await mount({}, [], [entry({ canManage })]);
       expect(deleteButtons(ui)).toHaveLength(0);
       await ui.openEntry();
       expect(deleteButtons(ui)).toHaveLength(0);
@@ -574,12 +574,12 @@ describe('entry deletion controls', () => {
   });
 
   it.each([false, true])(
-    'gates in-progress enrichment cancellation on canDelete=%s',
-    async (canDelete) => {
+    'gates in-progress enrichment cancellation on canManage=%s',
+    async (canManage) => {
       const ui = await mount(
         {},
         [],
-        [entry({ status: 'enriching', sourceTaskId: 'enrich-task', canDelete })],
+        [entry({ status: 'enriching', sourceTaskId: 'enrich-task', canManage })],
       );
       const cancel = ui
         .all()
@@ -588,8 +588,8 @@ describe('entry deletion controls', () => {
             e.type === Button &&
             e.props.title === 'Cancel the enrichment task and discard this entry',
         );
-      expect(Boolean(cancel)).toBe(canDelete);
-      if (canDelete) {
+      expect(Boolean(cancel)).toBe(canManage);
+      if (canManage) {
         await ui.pressTarget(cancel, 'Cancel enrichment');
         expect(api.post).toHaveBeenCalledWith('/tasks/enrich-task/action', { action: 'cancel' });
       } else {

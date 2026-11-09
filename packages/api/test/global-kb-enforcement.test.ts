@@ -289,7 +289,7 @@ describe('DELETE /entries/:id authorization', () => {
 
     expect((await send('DELETE', `/entries/${ENTRY}`)).status).toBe(200);
     expect(stored()).toBeUndefined();
-    expect(entry.canDelete).toBe(true);
+    expect(entry.canManage).toBe(true);
   });
 
   it.each([
@@ -675,7 +675,7 @@ describe('DELETE /entries/:id/enforcement', () => {
   });
 });
 
-describe.each(['user', 'admin'])('canDelete for a signed-in %s', (role) => {
+describe.each(['user', 'admin'])('canManage for a signed-in %s', (role) => {
   beforeEach(() => {
     h.role = role;
     // The generic fake has no aggregate projections; the list's unfiltered count is enough here.
@@ -695,14 +695,15 @@ describe.each(['user', 'admin'])('canDelete for a signed-in %s', (role) => {
     ['own approved', ADMIN, true, false],
     ['foreign approved', SECOND, true, false],
     ['ownerless approved', null, true, false],
-  ])('on list and detail: %s', async (_label, userId, approved, ownerCanDelete) => {
+  ])('on list and detail: %s', async (_label, userId, approved, ownerCanManage) => {
     fake.patch(globalKbEntries, ENTRY, { userId });
     if (approved) approve(ENTRY, ALWAYS);
-    const allowed = role === 'admin' || ownerCanDelete;
+    const allowed = role === 'admin' || ownerCanManage;
     const detail = await asJson(await send('GET', `/entries/${ENTRY}`));
     const list = await asJson(await send('GET', '/entries'));
-    expect(detail.entry.canDelete).toBe(allowed);
-    expect(list.entries.find((entry: Json) => entry.id === ENTRY).canDelete).toBe(allowed);
+    expect(detail.entry.canManage).toBe(allowed);
+    expect(detail.entry).not.toHaveProperty('canDelete');
+    expect(list.entries.find((entry: Json) => entry.id === ENTRY).canManage).toBe(allowed);
   });
 
   it.each(['switched_off', 'other_namespace', 'edited'])(
@@ -715,7 +716,7 @@ describe.each(['user', 'admin'])('canDelete for a signed-in %s', (role) => {
       if (state === 'edited') fake.patch(globalKbEntries, ENTRY, { body: 'Edited outside PATCH' });
       const { entry } = await asJson(await send('GET', `/entries/${ENTRY}`));
       expect(entry.enforcementState.state).toBe(state);
-      expect(entry.canDelete).toBe(role === 'admin');
+      expect(entry.canManage).toBe(role === 'admin');
     },
   );
 
@@ -726,29 +727,29 @@ describe.each(['user', 'admin'])('canDelete for a signed-in %s', (role) => {
       category: 'best_practice',
     });
     expect(created.status).toBe(201);
-    expect((await asJson(created)).entry.canDelete).toBe(true);
+    expect((await asJson(created)).entry.canManage).toBe(true);
     const enriched = await send('POST', '/enrich', {
       title: TITLE,
       seedText: 'Seed',
       cliProviderId: PROVIDER,
     });
     expect(enriched.status).toBe(201);
-    expect((await asJson(enriched)).entry.canDelete).toBe(true);
+    expect((await asJson(enriched)).entry.canManage).toBe(true);
     if (role === 'admin') approve(ENTRY, ALWAYS);
     const edited = await patch({ body: 'Updated body' });
     expect(edited.status).toBe(200);
-    expect((await asJson(edited)).entry.canDelete).toBe(true);
+    expect((await asJson(edited)).entry.canManage).toBe(true);
   });
 });
 
-describe('canDelete on enforcement responses', () => {
+describe('canManage on enforcement responses', () => {
   it('is true for the admin both after enforcing and unenforcing', async () => {
     const enforced = await enforce(ALWAYS);
     expect(enforced.status).toBe(200);
-    expect((await asJson(enforced)).entry.canDelete).toBe(true);
+    expect((await asJson(enforced)).entry.canManage).toBe(true);
     const cleared = await unenforce();
     expect(cleared.status).toBe(200);
-    expect((await asJson(cleared)).entry.canDelete).toBe(true);
+    expect((await asJson(cleared)).entry.canManage).toBe(true);
   });
 });
 

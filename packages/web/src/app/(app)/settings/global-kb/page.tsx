@@ -1109,7 +1109,7 @@ export default function GlobalKbPage() {
   }
 
   async function remove(e: GlobalKbEntry) {
-    if (!e.canDelete) return;
+    if (!e.canManage) return;
     // Only a kb_author ENRICH entry (source='user' with its own task) should cascade
     // a cancel — that task exists solely to produce this row, so deleting the row
     // orphans it. A PROMOTED draft (source='promoted') is one incidental artifact of a
@@ -1151,7 +1151,7 @@ export default function GlobalKbPage() {
   // kb_author task; the worker then deletes this still-enriching row, and the list
   // poll drops it on the next refresh.
   async function cancelEnrich(e: GlobalKbEntry) {
-    if (!e.canDelete || !e.sourceTaskId) return;
+    if (!e.canManage || !e.sourceTaskId) return;
     if (!window.confirm(`Cancel enriching "${e.title}"? The draft entry is discarded.`)) return;
     setBusy(true);
     try {
@@ -2116,7 +2116,7 @@ export default function GlobalKbPage() {
                       </Badge>
                     )}
                     <div className="ml-auto flex items-center gap-2">
-                      {inProgress && e.canDelete && e.sourceTaskId && (
+                      {inProgress && e.canManage && e.sourceTaskId && (
                         <Button
                           size="sm"
                           variant="secondary"
@@ -2181,7 +2181,7 @@ export default function GlobalKbPage() {
                           Activate
                         </Button>
                       )}
-                      {!inProgress && e.canDelete && (
+                      {!inProgress && e.canManage && (
                         <Button
                           size="sm"
                           variant="destructive"
@@ -2611,7 +2611,7 @@ export default function GlobalKbPage() {
                     Archive
                   </Button>
                 )}
-                {selected.canDelete && (
+                {selected.canManage && (
                   <Button
                     size="sm"
                     variant="destructive"

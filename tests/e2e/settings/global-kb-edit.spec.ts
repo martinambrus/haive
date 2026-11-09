@@ -8,7 +8,7 @@ const PREDECESSOR_ID = '00000000-0000-4000-8000-0000000000d2';
 function article() {
   return {
     id: ENTRY_ID,
-    canDelete: true,
+    canManage: true,
     title: 'AI-written house rule',
     namespace: 'default',
     body: '## House rule\n\nKeep **important** text.\n\n- First rule\n- Second rule',

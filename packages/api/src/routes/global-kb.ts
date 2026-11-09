@@ -206,7 +206,7 @@ function presentEntry<T extends HouseRuleRow & Pick<GlobalKbEntry, 'userId'>>(
 ) {
   return {
     ...entry,
-    canDelete: canManageEntry(entry, actor),
+    canManage: canManageEntry(entry, actor),
     contentToken: houseRuleContentToken(entry),
     enforcementState: enforcementState(entry, ctx),
   };

@@ -1337,14 +1337,14 @@ export interface GlobalKbFacets {
  *  api test pins the two together. */
 export const GLOBAL_KB_DESCRIPTION_MAX = 300;
 
-/** A global (cross-repository) knowledge base entry. Editable by any signed-in user; deletion follows `canDelete`; retrieved by
+/** A global (cross-repository) knowledge base entry. Editable by any signed-in user; deletion follows `canManage`; retrieved by
  *  tasks via rag_search, version-scoped by `facets`. */
 export interface GlobalKbEntry {
   id: string;
   namespace: string;
   userId: string | null;
-  /** Server-authorized deletion for the current actor. */
-  canDelete: boolean;
+  /** Server-authorized changes and deletion for the current actor. */
+  canManage: boolean;
   title: string;
   seedText: string | null;
   body: string;
