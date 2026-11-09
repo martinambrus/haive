@@ -4110,7 +4110,7 @@ function StepCardImpl({
         // Only while the row has NOT ended successfully — see failureBanner (lib/step-banners) for
         // why a `done` row's error_message is either stale or a deliberate fix-loop diagnosis.
         // Steps that ended well but with caveats use degradedNote / warningMessage instead.
-        <div className="whitespace-pre-wrap rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-xs text-red-300">
+        <div className="whitespace-pre-wrap rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-xs text-red-300 [overflow-wrap:anywhere]">
           {failure.text}
         </div>
       )}
