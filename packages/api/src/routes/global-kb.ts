@@ -72,14 +72,11 @@ import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { admitNewWork, requireNewWorkAllowed } from '../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../context.js';
 
-// Global KB is instance/namespace-scoped (not per-user). haive is self-hosted
-// single-operator — every signed-in user manages their own repos, tasks and
-// settings — so the shared global KB is managed by any authenticated user too
-// (requireAuth only), with deletion restricted to owner-or-admin for unapproved
-// entries and admin-only for approved or ownerless entries. Enforcement and the
-// store settings are admin-only. The corpus lives in a
-// SEPARATE database reached via withGlobalKb; getDb() is the main DB, needed only to
-// CREATE the dedicated DB in internal mode.
+// Global KB is instance/namespace-scoped, shared across authenticated users. Changes and
+// deletion require an admin for approved or ownerless entries, otherwise the owner or an admin.
+// Enforcement and store settings are admin-only. The corpus lives in a SEPARATE database
+// reached via withGlobalKb; getDb() is the main DB, needed only to CREATE the dedicated DB
+// in internal mode.
 const CATEGORIES = [
   'general',
   'tech_pattern',

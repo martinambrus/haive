@@ -851,6 +851,7 @@ export default function GlobalKbPage() {
   }
 
   async function activate(e: GlobalKbEntry) {
+    if (!e.canManage) return;
     setDialogError(null);
     setBusy(true);
     try {
@@ -870,6 +871,7 @@ export default function GlobalKbPage() {
    *  and not a supersession: nothing replaced it, so `supersededAt` stays null. The successor
    *  warning tells a reviewer to do exactly this, and the page had no control to do it with. */
   async function archive(e: GlobalKbEntry) {
+    if (!e.canManage) return;
     if (
       carriesLiveApproval(e) &&
       !window.confirm(
@@ -1024,7 +1026,7 @@ export default function GlobalKbPage() {
    *  facets wholesale (it does not merge), which is exactly what an editor showing every
    *  dimension needs. */
   async function saveScope(e: GlobalKbEntry) {
-    if (!scopeEdit) return;
+    if (!e.canManage || !scopeEdit) return;
     // Said in the form rather than as a failed request: a bare major names no technology, so
     // the api refuses it and the reviewer would otherwise see only a 400.
     const scopeIssue = facetScopeError(facetsFromFields(scopeEdit));
@@ -1058,7 +1060,7 @@ export default function GlobalKbPage() {
   /** Bound to what the server STORED, not what was typed: it collapses the text to one line and
    *  clears a blank one. */
   async function saveDescription(e: GlobalKbEntry) {
-    if (descEdit === null) return;
+    if (!e.canManage || descEdit === null) return;
     if (collapseToLine(descEdit).length > GLOBAL_KB_DESCRIPTION_MAX) {
       setDescError(`Description must be at most ${GLOBAL_KB_DESCRIPTION_MAX} characters.`);
       return;
@@ -1081,7 +1083,7 @@ export default function GlobalKbPage() {
   }
 
   async function saveBody(e: GlobalKbEntry) {
-    if (bodyEdit === null) return;
+    if (!e.canManage || bodyEdit === null) return;
     if (!bodyEdit.trim()) {
       setBodyError('The article body cannot be empty.');
       return;
@@ -2169,7 +2171,7 @@ export default function GlobalKbPage() {
                           detail view is where the warning and the diff are, and where the scope
                           editor's own copy already sends the reviewer. Activating a draft carries
                           no such hazard: superseding its predecessor is the designed outcome. */}
-                      {e.status === 'draft' && (
+                      {e.canManage && e.status === 'draft' && (
                         <Button
                           size="sm"
                           disabled={busy}
@@ -2300,7 +2302,7 @@ export default function GlobalKbPage() {
                 )}
               </div>
               {renderEnforcement(selected)}
-              {descEdit !== null ? (
+              {selected.canManage && descEdit !== null ? (
                 <div className="mt-2 flex flex-col gap-2 rounded border border-neutral-800 p-2">
                   <Label
                     htmlFor="description-edit"
@@ -2354,20 +2356,22 @@ export default function GlobalKbPage() {
                   ) : (
                     <p className="min-w-0 text-xs text-neutral-500">No description.</p>
                   )}
-                  <button
-                    type="button"
-                    disabled={bodyBusy || enforceOpen}
-                    onClick={() => {
-                      setDescError(null);
-                      setDescEdit(selected.description ?? '');
-                    }}
-                    className="shrink-0 text-xs text-indigo-400 underline underline-offset-2 hover:text-indigo-300"
-                  >
-                    Edit description
-                  </button>
+                  {selected.canManage && (
+                    <button
+                      type="button"
+                      disabled={bodyBusy || enforceOpen}
+                      onClick={() => {
+                        setDescError(null);
+                        setDescEdit(selected.description ?? '');
+                      }}
+                      className="shrink-0 text-xs text-indigo-400 underline underline-offset-2 hover:text-indigo-300"
+                    >
+                      Edit description
+                    </button>
+                  )}
                 </div>
               )}
-              {scopeEdit ? (
+              {selected.canManage && scopeEdit ? (
                 <div className="mt-2 flex flex-col gap-2 rounded border border-neutral-800 p-2">
                   <span className="text-[11px] text-neutral-500">
                     Empty = applies to all values of that dimension. Comma-separated.
@@ -2416,22 +2420,24 @@ export default function GlobalKbPage() {
               ) : (
                 <p className="mt-2 flex items-center gap-2 text-xs text-neutral-400">
                   {facetsSummary(selected.facets)}
-                  <button
-                    type="button"
-                    disabled={bodyBusy || enforceOpen}
-                    onClick={() => {
-                      setScopeError(null);
-                      setScopeEdit(fieldsFromFacets(selected.facets));
-                    }}
-                    className="text-indigo-400 underline underline-offset-2 hover:text-indigo-300"
-                  >
-                    Edit scope
-                  </button>
+                  {selected.canManage && (
+                    <button
+                      type="button"
+                      disabled={bodyBusy || enforceOpen}
+                      onClick={() => {
+                        setScopeError(null);
+                        setScopeEdit(fieldsFromFacets(selected.facets));
+                      }}
+                      className="text-indigo-400 underline underline-offset-2 hover:text-indigo-300"
+                    >
+                      Edit scope
+                    </button>
+                  )}
                 </p>
               )}
               <div className="mt-3 flex items-center justify-between gap-2">
                 <span className="text-xs font-medium text-neutral-300">Article body</span>
-                {bodyEdit === null && (
+                {selected.canManage && bodyEdit === null && (
                   <button
                     type="button"
                     className="shrink-0 text-xs text-indigo-400 underline underline-offset-2 hover:text-indigo-300 disabled:cursor-not-allowed disabled:opacity-50"
@@ -2448,7 +2454,7 @@ export default function GlobalKbPage() {
               </div>
               {enforcePanel ? (
                 renderEnforcePanel(enforcePanel)
-              ) : bodyEdit !== null ? (
+              ) : selected.canManage && bodyEdit !== null ? (
                 <div className="mt-2 min-h-0 flex-1 overflow-y-auto rounded-md border border-neutral-800 p-3">
                   {carriesLiveApproval(selected) && (
                     <p className="mb-2 text-[11px] text-amber-400">
@@ -2581,26 +2587,27 @@ export default function GlobalKbPage() {
                     the now-active entry and does NOT bring the predecessor back. An open
                     description or body edit blocks it too: activating publishes the stored
                     article, so the reviewer must save or cancel their corrections first. */}
-                {(selected.status === 'draft' || selected.status === 'archived') && (
-                  <Button
-                    size="sm"
-                    disabled={
-                      busy || scopeBusy || descBusy || bodyBusy || editOpen || successorLoading
-                    }
-                    title={
-                      editOpenHint ??
-                      (successorLoading
-                        ? 'Checking whether an active entry already replaces this one…'
-                        : undefined)
-                    }
-                    onClick={() => void activate(selected)}
-                  >
-                    {selected.status === 'archived' ? 'Reactivate' : 'Activate'}
-                  </Button>
-                )}
+                {selected.canManage &&
+                  (selected.status === 'draft' || selected.status === 'archived') && (
+                    <Button
+                      size="sm"
+                      disabled={
+                        busy || scopeBusy || descBusy || bodyBusy || editOpen || successorLoading
+                      }
+                      title={
+                        editOpenHint ??
+                        (successorLoading
+                          ? 'Checking whether an active entry already replaces this one…'
+                          : undefined)
+                      }
+                      onClick={() => void activate(selected)}
+                    >
+                      {selected.status === 'archived' ? 'Reactivate' : 'Activate'}
+                    </Button>
+                  )}
                 {/* Same guard as Activate: archiving mid-edit changes which branch the pending scope
                     save takes, since the PATCH treats an archived entry's supersede link as clearable. */}
-                {selected.status === 'active' && (
+                {selected.canManage && selected.status === 'active' && (
                   <Button
                     size="sm"
                     variant="secondary"

@@ -3,6 +3,8 @@ import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { Dialog } from '@/components/dialog';
 import { Button, FormError, Label } from '@/components/ui';
 import GlobalKbPage from './page';
+import { MarkdownView } from '@/components/markdown/markdown-view';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 
 // No DOM in this package: the page's hooks run on a plain slot list, as in components/task-type-editor.test.tsx.
 const hooks = vi.hoisted(() => ({ slots: [] as unknown[], next: 0, dirty: false, mounting: true }));
@@ -73,6 +75,7 @@ afterAll(() => vi.unstubAllGlobals());
 
 type El = ReactElement<{
   children?: ReactNode;
+  body?: string;
   id?: string;
   htmlFor?: string;
   value?: string;
@@ -489,7 +492,7 @@ describe('the enrichment CLI picker', () => {
   });
 });
 
-describe('entry deletion controls', () => {
+describe('entry management controls', () => {
   const entry = (over: Record<string, unknown> = {}) => ({
     id: '00000000-0000-4000-8000-0000000000b1',
     namespace: 'default',
@@ -509,6 +512,55 @@ describe('entry deletion controls', () => {
     updatedAt: '2026-11-09T00:00:00Z',
     ...over,
   });
+
+  const namedControls = (ui: Awaited<ReturnType<typeof mount>>, label: string) =>
+    ui.all().filter((e) => (e.type === Button || e.type === 'button') && textOf(e) === label);
+
+  describe.each(['draft', 'active', 'archived'])('PATCH controls on %s entries', (status) => {
+    it.each([false, undefined, true])('uses canManage=%s in list and detail', async (canManage) => {
+      const row = entry({ status, canManage, description: 'Read this description' });
+      const ui = await mount({ canEnforce: false }, [], [row]);
+      const allowed = canManage === true;
+      expect(namedControls(ui, 'Activate')).toHaveLength(status === 'draft' && allowed ? 1 : 0);
+      await ui.openEntry();
+      for (const label of ['Edit description', 'Edit scope', 'Edit body']) {
+        expect(namedControls(ui, label)).toHaveLength(allowed ? 1 : 0);
+      }
+      expect(namedControls(ui, 'Activate')).toHaveLength(status === 'draft' && allowed ? 2 : 0);
+      expect(namedControls(ui, 'Reactivate')).toHaveLength(
+        status === 'archived' && allowed ? 1 : 0,
+      );
+      expect(namedControls(ui, 'Archive')).toHaveLength(status === 'active' && allowed ? 1 : 0);
+      expect(ui.all().some((e) => e.type === MarkdownView && e.props.body === row.body)).toBe(true);
+      expect(
+        ui.all().some((e) => e.type === InlineMarkdown && e.props.body === row.description),
+      ).toBe(true);
+    });
+  });
+
+  it.each([
+    ['Edit description', 'Save description'],
+    ['Edit scope', 'Save scope'],
+    ['Edit body', 'Save body'],
+  ])('hides an open %s editor after permission is lost', async (edit, save) => {
+    const row = entry();
+    const ui = await mount({ canEnforce: false }, [], [row]);
+    await ui.openEntry();
+    await ui.pressTarget(namedControls(ui, edit)[0], edit);
+    expect(namedControls(ui, save)).toHaveLength(1);
+    row.canManage = false;
+    await ui.settle();
+    expect(namedControls(ui, save)).toHaveLength(0);
+    expect(ui.all().some((e) => e.type === MarkdownView && e.props.body === row.body)).toBe(true);
+  });
+
+  it('keeps enforcement controls governed by canEnforce', async () => {
+    const ui = await mount({ canEnforce: true }, [], [entry({ canManage: false })]);
+    await ui.openEntry();
+    expect(namedControls(ui, 'Edit body')).toHaveLength(0);
+    expect(namedControls(ui, 'Enforce…')).toHaveLength(1);
+  });
+
   const deleteButtons = (ui: Awaited<ReturnType<typeof mount>>) =>
     ui.all().filter((e) => e.type === Button && textOf(e) === 'Delete');
 
