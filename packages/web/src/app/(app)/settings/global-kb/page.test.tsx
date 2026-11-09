@@ -76,6 +76,7 @@ type El = ReactElement<{
   htmlFor?: string;
   value?: string;
   disabled?: boolean;
+  'data-testid'?: string;
   open?: boolean;
   message?: string | null;
   onClick?: () => void;
@@ -172,6 +173,7 @@ async function mount(config: Record<string, unknown> = {}, providers: unknown[] 
   field('cfg-mode');
 
   return {
+    all,
     field,
     settle,
     button,
@@ -395,6 +397,55 @@ describe('Save connection', () => {
     expect(configPuts()).toEqual([
       [CONFIG_PATH, { mode: 'external', connectionString: 'postgres://typed:secret@elsewhere/kb' }],
     ]);
+  });
+});
+
+const EMBED_IDS = ['cfg-ollama-mode', 'cfg-model', 'cfg-dims', 'cfg-retention'];
+const EXTERNAL_OLLAMA = 'http://box.lan:11434';
+const ADMIN_NOTE = 'embed-admin-only';
+
+describe('the embedding settings on the Global KB settings page', () => {
+  it.each([
+    ['the built-in Ollama', {}, EMBED_IDS],
+    ['an external Ollama', { ollamaUrl: EXTERNAL_OLLAMA }, [...EMBED_IDS, 'cfg-ollama']],
+  ])('are disabled for a regular user with %s', async (_what, config, ids) => {
+    const view = await mount({ ...config, canEnforce: false });
+    for (const id of ids) expect(view.field(id).props.disabled, id).toBe(true);
+  });
+
+  it.each([
+    ['the built-in Ollama', {}, EMBED_IDS],
+    ['an external Ollama', { ollamaUrl: EXTERNAL_OLLAMA }, [...EMBED_IDS, 'cfg-ollama']],
+  ])('stay enabled for an admin with %s', async (_what, config, ids) => {
+    const view = await mount(config);
+    for (const id of ids) expect(view.field(id).props.disabled, id).not.toBe(true);
+  });
+
+  it('shows a regular user one short line saying an admin manages them', async () => {
+    const notes = (await mount({ canEnforce: false }))
+      .all()
+      .filter((e) => e.props['data-testid'] === ADMIN_NOTE);
+    expect(notes).toHaveLength(1);
+    expect(textOf(notes[0])).toMatch(/admin/i);
+    expect(textOf(notes[0]).length).toBeLessThan(140);
+  });
+
+  it('shows an admin no such line', async () => {
+    const view = await mount();
+    expect(view.all().filter((e) => e.props['data-testid'] === ADMIN_NOTE)).toHaveLength(0);
+  });
+
+  it('sends none of them when a regular user saves another edit', async () => {
+    const view = await mount({ canEnforce: false });
+    view.choose('cfg-namespace', 'elsewhere');
+
+    await view.press('Save connection');
+
+    const sent = configPuts().flatMap(([, body]) => Object.keys(body as object));
+    expect(configPuts()).toHaveLength(1);
+    for (const key of ['ollamaUrl', 'embedModel', 'embedDimensions', 'archiveRetentionDays']) {
+      expect(sent).not.toContain(key);
+    }
   });
 });
 

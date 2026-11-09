@@ -1710,6 +1710,7 @@ export default function GlobalKbPage() {
                 <select
                   id="cfg-ollama-mode"
                   value={cfg.ollamaMode}
+                  disabled={!canEnforce}
                   onChange={(e) => {
                     const ollamaMode = e.target.value as 'internal' | 'external';
                     setCfg((p) => ({
@@ -1734,6 +1735,7 @@ export default function GlobalKbPage() {
                   <Label htmlFor="cfg-ollama">External Ollama URL</Label>
                   <Input
                     id="cfg-ollama"
+                    disabled={!canEnforce}
                     value={cfg.ollamaUrl}
                     onChange={(e) => setCfg({ ...cfg, ollamaUrl: e.target.value })}
                     placeholder={DEFAULT_EXTERNAL_OLLAMA_URL}
@@ -1744,6 +1746,7 @@ export default function GlobalKbPage() {
                 <Label htmlFor="cfg-model">Embedding model</Label>
                 <Input
                   id="cfg-model"
+                  disabled={!canEnforce}
                   value={cfg.embedModel}
                   onChange={(e) => setCfg({ ...cfg, embedModel: e.target.value })}
                   placeholder="qwen3-embedding:4b"
@@ -1753,6 +1756,7 @@ export default function GlobalKbPage() {
                 <Label htmlFor="cfg-dims">Dimensions</Label>
                 <Input
                   id="cfg-dims"
+                  disabled={!canEnforce}
                   type="number"
                   min={1}
                   max={8192}
@@ -1766,6 +1770,7 @@ export default function GlobalKbPage() {
                 <Label htmlFor="cfg-retention">Archive retention (days)</Label>
                 <Input
                   id="cfg-retention"
+                  disabled={!canEnforce}
                   type="number"
                   min={0}
                   max={3650}
@@ -1781,6 +1786,12 @@ export default function GlobalKbPage() {
                 />
               </div>
             </div>
+            {!canEnforce && (
+              <p className="text-xs text-neutral-400" data-testid="embed-admin-only">
+                An admin manages the Ollama server, embedding model, dimensions and archive
+                retention.
+              </p>
+            )}
             {cfg.ollamaMode === 'internal' && (
               <p className="text-xs text-neutral-500">
                 Internal mode uses {IN_STACK_OLLAMA_URL} automatically.

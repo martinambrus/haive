@@ -14,6 +14,7 @@ import {
 import {
   CONFIG_KEYS,
   GLOBAL_KB_JOB_NAMES,
+  IN_STACK_OLLAMA_URL,
   SECRET_KEYS,
   collapseToLine,
   configService,
@@ -22,6 +23,7 @@ import {
   type GlobalKbSyncJobPayload,
 } from '@haive/shared';
 import {
+  DEFAULT_EMBED_MODEL,
   GLOBAL_KB_DESCRIPTION_MAX,
   HOUSE_RULES_ALWAYS_CAP_BYTES,
   enforcementState,
@@ -386,11 +388,27 @@ async function putConfig(c: Context<AppEnv>) {
   // The page sends every field on every save, so only a CHANGED value is refused.
   // An unchanged one is accepted and not written, so it cannot undo a concurrent admin change.
   if (!isAdmin) {
+    // The resolver turns a blank URL or model into its default, and the page sends either form.
+    const orDefault = (value: string | null | undefined, fallback: string) =>
+      value?.trim() || fallback;
     const changed = Object.entries({
       enabled: d.enabled !== undefined && d.enabled !== saved.enabled,
       namespace: d.namespace !== undefined && d.namespace !== saved.namespace,
       mode: d.mode !== undefined && d.mode !== saved.mode,
       connectionString: (given !== '' && given !== saved.connectionString) || clearing,
+      ollamaUrl:
+        d.ollamaUrl !== undefined &&
+        orDefault(d.ollamaUrl, IN_STACK_OLLAMA_URL) !==
+          orDefault(saved.ollamaUrl, IN_STACK_OLLAMA_URL),
+      embedModel:
+        d.embedModel !== undefined &&
+        orDefault(d.embedModel, DEFAULT_EMBED_MODEL) !==
+          orDefault(saved.embedModel, DEFAULT_EMBED_MODEL),
+      embedDimensions:
+        d.embedDimensions !== undefined && d.embedDimensions !== saved.embeddingDimensions,
+      archiveRetentionDays:
+        d.archiveRetentionDays !== undefined &&
+        d.archiveRetentionDays !== saved.archiveRetentionDays,
     })
       .filter(([, differs]) => differs)
       .map(([field]) => field);
@@ -446,13 +464,17 @@ async function putConfig(c: Context<AppEnv>) {
     ['digestEnabled', CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, d.digestEnabled?.toString()],
     ['mode', CONFIG_KEYS.GLOBAL_KB_MODE, isAdmin ? d.mode : undefined],
     ['namespace', CONFIG_KEYS.GLOBAL_KB_NAMESPACE, isAdmin ? d.namespace : undefined],
-    ['ollamaUrl', CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, d.ollamaUrl],
-    ['embedModel', CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, d.embedModel],
-    ['embedDimensions', CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, d.embedDimensions?.toString()],
+    ['ollamaUrl', CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, isAdmin ? d.ollamaUrl : undefined],
+    ['embedModel', CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, isAdmin ? d.embedModel : undefined],
+    [
+      'embedDimensions',
+      CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS,
+      isAdmin ? d.embedDimensions?.toString() : undefined,
+    ],
     [
       'archiveRetentionDays',
       CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS,
-      d.archiveRetentionDays?.toString(),
+      isAdmin ? d.archiveRetentionDays?.toString() : undefined,
     ],
   ];
   const write = async () => {

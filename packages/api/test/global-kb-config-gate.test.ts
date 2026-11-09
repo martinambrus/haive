@@ -250,6 +250,39 @@ describe('GET /global-kb/config', () => {
   });
 });
 
+// The four embedding and retention settings: admin-only to change, like the store settings.
+const EMBED_FIELDS = [
+  [
+    'ollamaUrl',
+    { ollamaUrl: 'http://elsewhere:11434' },
+    CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL,
+    'http://elsewhere:11434',
+    { ollamaUrl: 'http://ollama:11434' },
+  ],
+  [
+    'embedModel',
+    { embedModel: 'nomic-embed-text' },
+    CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL,
+    'nomic-embed-text',
+    { embedModel: 'qwen3-embedding:4b' },
+  ],
+  [
+    'embedDimensions',
+    { embedDimensions: 768 },
+    CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS,
+    '768',
+    { embedDimensions: 2560 },
+  ],
+  [
+    'archiveRetentionDays',
+    { archiveRetentionDays: 0 },
+    CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS,
+    '0',
+    { archiveRetentionDays: 30 },
+  ],
+] as const;
+const EMBED_NAMES: string[] = EMBED_FIELDS.map(([name]) => name);
+
 describe('PUT /global-kb/config by a regular user', () => {
   beforeEach(() => {
     h.role = 'user';
@@ -277,34 +310,121 @@ describe('PUT /global-kb/config by a regular user', () => {
     expect(h.set).not.toHaveBeenCalled();
   });
 
+  it.each(EMBED_FIELDS)(
+    'refuses a change of %s, naming only it, and records and writes nothing',
+    async (field, change) => {
+      const res = await put({ ...PAGE, connectionString: STORED_STRING, ...change });
+      const body = (await res.json()) as { code: string; error: string };
+
+      expect(res.status).toBe(403);
+      expect(body.code).toBe('admin_required');
+      expect(body.error).toContain(field);
+      for (const other of EMBED_NAMES.filter((name) => name !== field)) {
+        expect(body.error).not.toContain(other);
+      }
+      expect(h.set).not.toHaveBeenCalled();
+      expect(h.setSecret).not.toHaveBeenCalled();
+      expect(h.audits).toEqual([]);
+      expect(h.auditLog.info).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(EMBED_FIELDS)(
+    'refuses a change of %s alone, with nothing else in the request',
+    async (_f, change) => {
+      expect((await put(change)).status).toBe(403);
+      expect(h.set).not.toHaveBeenCalled();
+    },
+  );
+
+  it('refuses two of them changed at once, naming both', async () => {
+    const res = await put({
+      ...PAGE,
+      connectionString: STORED_STRING,
+      ollamaUrl: 'http://elsewhere:11434',
+      archiveRetentionDays: 0,
+    });
+    const body = (await res.json()) as { code: string; error: string };
+
+    expect(res.status).toBe(403);
+    expect(body.code).toBe('admin_required');
+    expect(body.error).toContain('ollamaUrl');
+    expect(body.error).toContain('archiveRetentionDays');
+    expect(h.set).not.toHaveBeenCalled();
+  });
+
   it('accepts the page sending back what is already stored, and the rest of what it edits', async () => {
     const res = await put({
       ...PAGE,
       connectionString: STORED_STRING,
-      archiveRetentionDays: 7,
       digestEnabled: false,
     });
 
     expect(res.status).toBe(200);
-    expect(written()).toContainEqual([CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS, '7']);
-    expect(written()).toContainEqual([CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, 'false']);
+    expect(written()).toEqual([[CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, 'false']]);
   });
 
-  it('writes only the open settings of a full page save, never the protected ones it re-sends', async () => {
+  it('writes only the open setting of a full page save, never the protected ones it re-sends', async () => {
     const res = await put({ ...PAGE, connectionString: STORED_STRING, digestEnabled: false });
 
     expect(res.status).toBe(200);
-    expect(written().map(([key]) => key)).toEqual(
-      expect.arrayContaining([
-        CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED,
-        CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL,
-        CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL,
-        CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS,
-        CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS,
-      ]),
-    );
-    expect(h.set).toHaveBeenCalledTimes(5);
+    expect(written()).toEqual([[CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, 'false']]);
     expect(h.setSecret).not.toHaveBeenCalled();
+  });
+
+  it.each(EMBED_FIELDS)(
+    'accepts %s re-sent as stored, alone, and writes nothing',
+    async (_f, _c, _k, _v, same) => {
+      expect((await put(same)).status).toBe(200);
+
+      expect(h.set).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['a blank Ollama URL, the default', {}, { ollamaUrl: '' }],
+    ['the default Ollama URL padded', {}, { ollamaUrl: '  http://ollama:11434  ' }],
+    ['a blank embed model, the default', {}, { embedModel: '' }],
+    ['the default embed model padded', {}, { embedModel: ' qwen3-embedding:4b ' }],
+    [
+      'the saved custom Ollama URL',
+      { ollamaUrl: 'http://ollama-box.lan:11434' },
+      { ollamaUrl: 'http://ollama-box.lan:11434' },
+    ],
+    [
+      'the saved custom Ollama URL padded',
+      { ollamaUrl: 'http://ollama-box.lan:11434' },
+      { ollamaUrl: '  http://ollama-box.lan:11434  ' },
+    ],
+    [
+      'the saved padded custom Ollama URL, trimmed',
+      { ollamaUrl: ' http://ollama-box.lan:11434 ' },
+      { ollamaUrl: 'http://ollama-box.lan:11434' },
+    ],
+  ])('accepts %s as unchanged, and writes nothing', async (_what, saved, sent) => {
+    h.settings = { ...h.settings, ...saved };
+
+    expect((await put(sent)).status).toBe(200);
+    expect(h.set).not.toHaveBeenCalled();
+  });
+
+  it('refuses a blank Ollama URL while a custom one is saved, as it would switch to the bundled server', async () => {
+    h.settings = { ...h.settings, ollamaUrl: 'http://ollama-box.lan:11434' };
+    const res = await put({ ollamaUrl: '' });
+
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toContain('ollamaUrl');
+    expect(h.set).not.toHaveBeenCalled();
+  });
+
+  it('refuses a changed embedding width before reading the store, not with 409', async () => {
+    h.vectorType = 'vector(2560)';
+    const res = await put({ ...PAGE, embedDimensions: 1024, digestEnabled: false });
+
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { code: string }).code).toBe('admin_required');
+    expect(h.set).not.toHaveBeenCalled();
+    expect(h.connect).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -323,15 +443,9 @@ describe('PUT /global-kb/config by a regular user', () => {
     expect((await put({ ...PAGE, connectionString: '  ' })).status).toBe(200);
   });
 
-  it.each([
-    ['the title list', { digestEnabled: false }],
-    ['the Ollama URL', { ollamaUrl: 'http://elsewhere:11434' }],
-    ['the embed model', { embedModel: 'nomic-embed-text' }],
-    ['the embed dimensions', { embedDimensions: 768 }],
-    ['the archive retention', { archiveRetentionDays: 0 }],
-  ])('still lets a regular user change %s alone', async (_what, change) => {
-    expect((await put(change)).status).toBe(200);
-    expect(h.set).toHaveBeenCalledTimes(1);
+  it('still lets a regular user change the title list alone', async () => {
+    expect((await put({ digestEnabled: false })).status).toBe(200);
+    expect(written()).toEqual([[CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, 'false']]);
   });
 });
 
@@ -346,6 +460,13 @@ describe('PUT /global-kb/config by an admin', () => {
       'external',
     ],
   ])('changes %s', async (_field, change, key, value) => {
+    const res = await put({ ...PAGE, ...change });
+
+    expect(res.status).toBe(200);
+    expect(written()).toContainEqual([key, value]);
+  });
+
+  it.each(EMBED_FIELDS)('changes %s', async (_field, change, key, value) => {
     const res = await put({ ...PAGE, ...change });
 
     expect(res.status).toBe(200);
@@ -792,12 +913,15 @@ describe('PUT /global-kb/config with a different embedding width', () => {
     expect(h.setSecret).not.toHaveBeenCalled();
   });
 
-  it('is refused for a regular user too, before any other field of the save is written', async () => {
+  it('is refused for a regular user as admin-only, before any other field of the save is written or the store is read', async () => {
     h.vectorType = 'vector(2560)';
     h.role = 'user';
+    const res = await put({ ...widen, digestEnabled: false });
 
-    expect((await put({ ...widen, digestEnabled: false })).status).toBe(409);
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { code: string }).code).toBe('admin_required');
     expect(h.set).not.toHaveBeenCalled();
+    expect(h.connect).not.toHaveBeenCalled();
   });
 
   it('reads the store under a connect timeout and a deadline', async () => {
