@@ -1,4 +1,8 @@
 import { assertDependencyCommitSafe } from './steps/workflow/_dependency-policy.js';
+import {
+  unregisteredGitlinks,
+  unregisteredGitlinksMessage,
+} from './steps/workflow/_gitlink-registration.js';
 import { and, asc, desc, eq, isNotNull, isNull, lt, or } from 'drizzle-orm';
 import { schema, isUniqueViolation, type Database } from '@haive/database';
 import {
@@ -474,6 +478,39 @@ async function commitIssueWork(
   gitEnv: Record<string, string>,
 ): Promise<void> {
   await assertDependencyCommitSafe(ctx, worktreePath);
+  // A nested repository no `.gitmodules` entry registers is refused before anything is staged: the add
+  // would record only its commit id, the level merge would leave an empty directory, and the content
+  // would go with this worktree.
+  const pending = await gitRun(worktreePath, [
+    '--no-optional-locks',
+    'status',
+    '--porcelain',
+    '-z',
+    '-uall',
+  ]);
+  if (pending.code !== 0) {
+    throw new Error(
+      `git status failed for DAG issue ${issue.issueKey}: ${(pending.stderr || pending.stdout).trim()}`,
+    );
+  }
+  let orphans: string[];
+  try {
+    orphans = await unregisteredGitlinks(worktreePath, pending.stdout, []);
+  } catch (err) {
+    // Git could not answer, so the add does not run: a refusal is never skipped.
+    throw new Error(
+      `gitlink check failed for DAG issue ${issue.issueKey}: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
+    );
+  }
+  if (orphans.length > 0) {
+    throw new Error(
+      unregisteredGitlinksMessage(orphans, {
+        key: issue.issueKey,
+        worktree: issue.sandboxWorktreePath,
+      }),
+    );
+  }
   const add = await gitRun(worktreePath, ['add', '-A']);
   if (add.code !== 0) {
     throw new Error(

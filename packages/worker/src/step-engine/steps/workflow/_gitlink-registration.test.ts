@@ -286,4 +286,47 @@ describe('unregisteredGitlinksMessage', () => {
     expect(text).not.toContain('(3)');
     expect(text).not.toMatch(/#\d/);
   });
+
+  it('keeps the gate-3 text exactly when no issue is given', () => {
+    expect(unregisteredGitlinksMessage(['one', 'q"x'])).toBe(
+      [
+        'Nothing was committed. These paths are nested git repositories that are not registered as a submodule:',
+        '- "one"',
+        '- "q\\"x"',
+        'Committing one would record only a commit id with no URL, so a clone could not fetch it.',
+        'There are two ways out, then retry this step:',
+        '(1) Register it as a submodule: a `.gitmodules` entry with its path and a url, for example `git submodule add URL PATH`.',
+        "(2) Include its files as ordinary files by removing its nested `.git` directory (this drops that repository's own history).",
+      ].join('\n'),
+    );
+  });
+
+  it('names the issue and its worktree when one is given', () => {
+    const worktree = '/haive/workdir/.haive/worktrees/x--ISSUE-7';
+    const text = unregisteredGitlinksMessage(['one', 'q"x'], { key: 'ISSUE-7', worktree });
+    for (const part of [
+      'ISSUE-7',
+      worktree,
+      JSON.stringify('one'),
+      JSON.stringify('q"x'),
+      '(1)',
+      '(2)',
+      '.gitmodules',
+      'ordinary files',
+    ]) {
+      expect(text).toContain(part);
+    }
+    expect(text).not.toContain('(3)');
+    expect(text).not.toMatch(/#\d/);
+  });
+
+  it('reads whole for an issue whose worktree path is not recorded', () => {
+    for (const worktree of [null, undefined]) {
+      const text = unregisteredGitlinksMessage(['one'], { key: 'ISSUE-7', worktree });
+      expect(text).toContain('ISSUE-7');
+      expect(text).toContain(JSON.stringify('one'));
+      expect(text).toContain("Act in that issue's worktree, then retry this step.");
+      expect(text).not.toMatch(/null|undefined/);
+    }
+  });
 });
