@@ -233,6 +233,89 @@ describe('the enforcement routes are for admins', () => {
   });
 });
 
+describe('DELETE /entries/:id authorization', () => {
+  const OTHER = '00000000-0000-4000-8000-0000000000a2';
+
+  const refuseWithoutChanges = async () => {
+    const before = structuredClone(fake.rows(globalKbEntries));
+    const res = await send('DELETE', `/entries/${ENTRY}`);
+    expect(res.status).toBe(403);
+    expect((await asJson(res)).code).toBe('admin_required');
+    expect(fake.rows(globalKbEntries)).toEqual(before);
+    expect(vectorStatements).toEqual([]);
+    expect(h.add).not.toHaveBeenCalled();
+  };
+
+  it.each([
+    ['another owner', OTHER, false],
+    ['an ownerless promotion', null, false],
+    ['another owner with approval', OTHER, true],
+    ['their own entry with approval', ADMIN, true],
+  ])(
+    'refuses a non-admin deleting %s without any side effects',
+    async (_label, userId, enforced) => {
+      h.role = 'user';
+      fake.patch(globalKbEntries, ENTRY, { userId, supersedesEntryId: PREDECESSOR });
+      addEntry(SECOND, { supersedesEntryId: ENTRY });
+      if (enforced) approve(ENTRY, ALWAYS);
+      await refuseWithoutChanges();
+    },
+  );
+
+  it('lets an owner delete their own unapproved entry and cleans its vectors and chain', async () => {
+    h.role = 'user';
+    fake.patch(globalKbEntries, ENTRY, { supersedesEntryId: PREDECESSOR });
+    addEntry(SECOND, { supersedesEntryId: ENTRY });
+    expect((await send('DELETE', `/entries/${ENTRY}`)).status).toBe(200);
+    expect(stored()).toBeUndefined();
+    expect(vectorStatements.some((text) => text.includes('DELETE FROM ai_rag_embeddings'))).toBe(
+      true,
+    );
+    expect(vectorStatements.some((text) => text.includes('UPDATE global_kb_entries'))).toBe(true);
+    expect(h.add).toHaveBeenCalledExactlyOnceWith(
+      expect.any(String),
+      { entryId: ENTRY, namespace: 'default', reason: 'delete' },
+      expect.any(Object),
+    );
+  });
+
+  it.each([
+    ['their own entry', ADMIN, false],
+    ["another user's entry", OTHER, false],
+    ['an ownerless entry', null, false],
+    ['an enforced entry', OTHER, true],
+    ['an enforced ownerless entry', null, true],
+  ])('lets an admin delete %s', async (_label, userId, enforced) => {
+    fake.patch(globalKbEntries, ENTRY, { userId });
+    if (enforced) approve(ENTRY, ALWAYS);
+    expect((await send('DELETE', `/entries/${ENTRY}`)).status).toBe(200);
+    expect(stored()).toBeUndefined();
+    expect(h.add).toHaveBeenCalledOnce();
+  });
+
+  it.each(['user', 'admin'])('keeps a missing entry 404 for %s', async (role) => {
+    h.role = role;
+    expect((await send('DELETE', `/entries/${MISSING}`)).status).toBe(404);
+    expect(vectorStatements).toEqual([]);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
+  it('reads the approval committed while deletion waits for the corpus lock', async () => {
+    h.role = 'user';
+    // lockEntry has already read the namespace; enforcement lands before its locked row read.
+    fake.hooks.beforeLock = () => {
+      fake.hooks.beforeLock = null;
+      approve(ENTRY, ALWAYS);
+    };
+    const res = await send('DELETE', `/entries/${ENTRY}`);
+    expect(res.status).toBe(403);
+    expect((await asJson(res)).code).toBe('admin_required');
+    expect(stored().enforcedHash).toBe(houseRuleApprovalHash(asEntry(), ALWAYS));
+    expect(vectorStatements).toEqual([]);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+});
+
 describe('PUT /entries/:id/enforcement', () => {
   it('stores what the admin approved, bound to the stored text, with who and when', async () => {
     const res = await enforce(FILES);
