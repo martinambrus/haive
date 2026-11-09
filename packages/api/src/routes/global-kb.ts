@@ -189,7 +189,7 @@ async function houseRuleContext(namespace: string): Promise<HouseRuleContext> {
   return { namespace, houseRulesEnabled: await resolveHouseRulesEnabled(configService) };
 }
 
-function canDeleteEntry(
+function canManageEntry(
   entry: Pick<GlobalKbEntry, 'userId' | 'enforcedHash'>,
   actor: Context<AppEnv>,
 ): boolean {
@@ -206,7 +206,7 @@ function presentEntry<T extends HouseRuleRow & Pick<GlobalKbEntry, 'userId'>>(
 ) {
   return {
     ...entry,
-    canDelete: canDeleteEntry(entry, actor),
+    canDelete: canManageEntry(entry, actor),
     contentToken: houseRuleContentToken(entry),
     enforcementState: enforcementState(entry, ctx),
   };
@@ -1124,6 +1124,13 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
           namespace: settings.namespace,
         };
       }
+      if (!canManageEntry(current, c)) {
+        throw new HttpError(
+          403,
+          'Only an owner or admin may change an unapproved entry; approved and ownerless entries require an admin',
+          'admin_required',
+        );
+      }
       const blocked = enrichmentBlocksEdit(current.status);
       if (blocked) throw new HttpError(409, blocked, 'entry_enrichment_pending');
       const set: Partial<typeof globalKbEntries.$inferInsert> = { updatedAt: new Date() };
@@ -1279,7 +1286,7 @@ globalKbRoutes.delete('/entries/:id', async (c) => {
     conn.transaction(async (db) => {
       const current = await lockEntry(db, id);
       if (!current) return undefined;
-      if (!canDeleteEntry(current, c)) {
+      if (!canManageEntry(current, c)) {
         throw new HttpError(
           403,
           'Only an owner or admin may delete an unapproved entry; approved and ownerless entries require an admin',
