@@ -87,6 +87,22 @@ describe('unregisteredGitlinks', () => {
     expect(await find(repo)).toEqual([]);
   });
 
+  it('names a nested repository that replaces an intent-to-add file', async () => {
+    const repo = await outer();
+    await writeFileNoFollow(repo, 'nested', 'file\n');
+    await git(repo, ['add', '-N', '--', 'nested']);
+    await removeNoFollow(repo, 'nested');
+    await nestedRepo(repo, 'nested');
+    expect(await find(repo)).toEqual(['nested']);
+  });
+
+  it('returns nothing for an intent-to-add file that is still a file', async () => {
+    const repo = await outer();
+    await writeFileNoFollow(repo, 'later.txt', 'file\n');
+    await git(repo, ['add', '-N', '--', 'later.txt']);
+    expect(await find(repo)).toEqual([]);
+  });
+
   it('returns nothing when no new gitlink or untracked repository exists', async () => {
     const repo = await outer();
     await writeFileNoFollow(repo, 'a.txt', 'after\n');

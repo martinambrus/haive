@@ -108,11 +108,13 @@ export async function unregisteredGitlinks(
   excluded: string[],
 ): Promise<string[]> {
   const staged = await newGitlinks(workspace);
-  // A nested repository that replaces a tracked file shows as ` T path`, not as `?? path/`.
+  // A nested repository that replaces a tracked file shows as ` T path`, and one that replaces an
+  // intent-to-add file as ` A path`, not as `?? path/`.
   const mayAddGitlink = parsePorcelainZ(status).some(
     (e) =>
       (e.x === '?' && e.y === '?' && e.path.endsWith('/') && !excluded.includes(e.path)) ||
-      e.y === 'T',
+      e.y === 'T' ||
+      e.y === 'A',
   );
   if (staged.length === 0 && !mayAddGitlink) return [];
   const name = `gate-3-gitlinks-index-${randomUUID()}`;
