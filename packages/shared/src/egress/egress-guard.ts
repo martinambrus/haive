@@ -113,7 +113,7 @@ export function isBlockedAddress(address: string): boolean {
   return family === 0 || BLOCKED.check(address, family === 4 ? 'ipv4' : 'ipv6');
 }
 
-// A hostname allowlist entry must never reach cloud metadata or the unspecified address, whatever its name resolves to.
+// A hostname entry must never lift link-local, unspecified, cloud metadata or local NAT64/Teredo addresses.
 const UNLIFTABLE_BY_HOSTNAME = new net.BlockList();
 for (const [network, prefix] of [
   ['169.254.0.0', 16],
@@ -134,6 +134,9 @@ for (const [network, prefix] of [
   // The deprecated IPv4-compatible form; for 0.0.0.0/8 it takes in ::1, which is held back below.
   UNLIFTABLE_BY_HOSTNAME.addSubnet(`::${high}:${low}`, 96 + prefix, 'ipv6');
 }
+// Local NAT64 embeds IPv4 at several offsets and Teredo obfuscates it, so cover each whole prefix.
+UNLIFTABLE_BY_HOSTNAME.addSubnet('64:ff9b:1::', 48, 'ipv6');
+UNLIFTABLE_BY_HOSTNAME.addSubnet('2001::', 32, 'ipv6');
 UNLIFTABLE_BY_HOSTNAME.addSubnet('fe80::', 10, 'ipv6');
 UNLIFTABLE_BY_HOSTNAME.addSubnet('::', 128, 'ipv6');
 // EC2's metadata endpoint over IPv6.
@@ -143,7 +146,7 @@ UNLIFTABLE_BY_HOSTNAME.addAddress('fd00:ec2::254', 'ipv6');
 const IPV6_LOOPBACK = new net.BlockList();
 IPV6_LOOPBACK.addAddress('::1', 'ipv6');
 
-/** True for a link-local, unspecified or cloud metadata address, including its IPv6 embeddings. */
+/** True for link-local, unspecified or cloud metadata addresses (including IPv6 embeddings), or any local NAT64/Teredo address. */
 export function isUnliftableByHostname(address: string): boolean {
   const family = net.isIP(address);
   if (family === 0) return false;

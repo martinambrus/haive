@@ -327,7 +327,8 @@ describe('admin page: private endpoint allowlist card', () => {
       'host-not-found',
       '/etc/hosts',
       'hostname entry',
-      'except link-local, unspecified and cloud metadata ones',
+      'except link-local, unspecified, cloud metadata and IPv6 tunnel',
+      'addresses (local NAT64, Teredo)',
       'Built-in services need no entry',
       'Applies within about 30 seconds',
     ]) {
