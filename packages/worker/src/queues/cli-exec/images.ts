@@ -274,7 +274,7 @@ export async function probeCliPath(
       // Ollama: nothing above this line looks at the endpoint or the model, so every
       // Ollama provider tested green regardless of how it was configured. See
       // ollama-probe.ts for what that cost.
-      const ollamaResult = await resolveOllamaProbeError(db, provider, secrets);
+      const ollamaResult = await resolveOllamaProbeOutcome(db, provider, secrets);
       if (ollamaResult) {
         return {
           ...ollamaResult,
@@ -325,7 +325,7 @@ export async function probeCliPath(
   } catch (err) {
     return {
       ok: false,
-      error: err instanceof Error ? err.message : String(err),
+      error: safeErrorMessage(err),
       durationMs: Date.now() - startedAt,
     };
   }
@@ -450,7 +450,7 @@ async function resolveOpenRouterCompatWarning(
  *
  *  The token falls back to the literal 'ollama' exactly as the adapter does, so a
  *  local-daemon provider with no key configured probes the way it will run. */
-async function resolveOllamaProbeError(
+async function resolveOllamaProbeOutcome(
   db: Database,
   provider: CliProviderRecord,
   secrets: Record<string, string>,

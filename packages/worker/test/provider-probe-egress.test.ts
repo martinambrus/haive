@@ -6,6 +6,7 @@ import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { eq } from 'drizzle-orm';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 import type { BaseCliAdapter } from '../src/cli-adapters/base-adapter.js';
 
@@ -118,6 +119,22 @@ afterEach(() => {
 });
 
 describe('provider probe egress', () => {
+  it.each(['ollama', 'openrouter'] as const)(
+    'sanitizes a rejecting owner role lookup for %s without dialing',
+    async (name) => {
+      const query = 'select role from users where id = $1';
+      const ownerId = provider(name).userId;
+      findOwner.mockRejectedValue(new DrizzleQueryError(query, [ownerId], new Error('offline')));
+      const result = await probe(provider(name));
+      expect(result.ok).toBe(false);
+      expect(globalFetch).not.toHaveBeenCalled();
+      expect(http.request).not.toHaveBeenCalled();
+      expect(result.error).toBeTypeOf('string');
+      expect(result.error).not.toContain(query);
+      expect(result.error).not.toContain(ownerId);
+    },
+  );
+
   it.each(['ollama', 'openrouter'] as const)(
     'guards a non-admin hand-set %s private literal before connecting',
     async (name) => {
@@ -261,6 +278,28 @@ describe('guarded Ollama probe warnings', () => {
     expect(unresolved).toEqual({ ...refused, durationMs: unresolved.durationMs });
     expect(unresolved.ok).toBe(true);
     expect(unresolved.error).toBeUndefined();
+  });
+
+  it('gives a non-built-in unresolved name the same warning through c-ares', async () => {
+    const refused = await probe(provider('ollama'));
+    const notFound = Object.assign(new Error('unknown name'), { code: 'ENOTFOUND' });
+    const resolve4 = vi
+      .spyOn(dns.promises.Resolver.prototype, 'resolve4')
+      .mockRejectedValue(notFound);
+    const resolve6 = vi
+      .spyOn(dns.promises.Resolver.prototype, 'resolve6')
+      .mockRejectedValue(notFound);
+    const systemLookup = vi.spyOn(dns.promises, 'lookup');
+    const connected = httpReply();
+    const unresolved = await probe(
+      provider('ollama', { envVars: { ANTHROPIC_BASE_URL: 'http://unknown-provider.invalid' } }),
+    );
+    expect(resolve4).toHaveBeenCalledExactlyOnceWith('unknown-provider.invalid');
+    expect(resolve6).toHaveBeenCalledExactlyOnceWith('unknown-provider.invalid');
+    expect(systemLookup).not.toHaveBeenCalled();
+    expect(connected).not.toHaveBeenCalled();
+    expect(globalFetch).not.toHaveBeenCalled();
+    expect(unresolved).toEqual({ ...refused, durationMs: unresolved.durationMs });
   });
 
   it('keeps an admin ENOTFOUND as the existing failure', async () => {
