@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { buildEstimationAccuracy, type EstimationDatum } from './estimation-accuracy.js';
+import {
+  buildEstimationAccuracy,
+  recordedEstimateHours,
+  type EstimationDatum,
+} from './estimation-accuracy.js';
 
 function datum(ai: number, actual: number, over: Partial<EstimationDatum> = {}): EstimationDatum {
   return {
@@ -58,5 +62,55 @@ describe('buildEstimationAccuracy', () => {
     expect(summary.overestimateCount).toBe(0);
     expect(summary.mapePct).toBe(0);
     expect(summary.medianBiasFactor).toBe(1);
+  });
+});
+
+describe('recordedEstimateHours', () => {
+  const event = (taskId: string, aiHours: unknown, at: number) => ({
+    taskId,
+    payload: { aiHours },
+    createdAt: new Date(at),
+  });
+
+  it.each([false, true])(
+    'selects the latest event without caller sorting (reverse=%s)',
+    (reverse) => {
+      const events = [event('a', 3, 1), event('a', 6.5, 2), event('b', 4, 1)];
+      expect(recordedEstimateHours(reverse ? events.reverse() : events)).toEqual(
+        new Map([
+          ['a', 6.5],
+          ['b', 4],
+        ]),
+      );
+    },
+  );
+
+  it.each(['6.5', 0, -1, NaN, Infinity, undefined])(
+    'does not revive an older valid estimate when the latest aiHours is %s',
+    (invalid) => {
+      const events = [event('a', 6.5, 1), event('a', invalid, 2)];
+      expect(recordedEstimateHours(events).has('a')).toBe(false);
+      expect(recordedEstimateHours(events.reverse()).has('a')).toBe(false);
+      expect(recordedEstimateHours([event('a', invalid, 2)]).has('a')).toBe(false);
+    },
+  );
+
+  it('handles missing, null and malformed payloads and empty history', () => {
+    expect(recordedEstimateHours([]).size).toBe(0);
+    for (const payload of [null, {}, 'bad', [], 6.5]) {
+      expect(recordedEstimateHours([{ taskId: 'a', payload, createdAt: new Date() }]).size).toBe(0);
+    }
+  });
+
+  it('includes heuristic estimates', () => {
+    expect(
+      recordedEstimateHours([
+        {
+          taskId: 'a',
+          payload: { aiHours: 2, source: 'heuristic' },
+          createdAt: new Date(),
+        },
+      ]).get('a'),
+    ).toBe(2);
   });
 });

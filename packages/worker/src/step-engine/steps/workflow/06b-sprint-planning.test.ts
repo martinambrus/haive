@@ -1,4 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
+import type { StepContext } from '../../step-definition.js';
+import { describe, it, expect, vi } from 'vitest';
 import { parseSprintPlan, sprintPlanningStep } from './06b-sprint-planning.js';
 
 it('plans against the original request even when the approved spec widens it', () => {
@@ -110,4 +113,91 @@ describe('sprintPlanningStep preForm retry gate', () => {
       '```json\n{"mode":"dag","rationale":"r","max_parallel":2,"issues":[{"id":"A","title":"a","depends_on":[],"level":0}],"levels":[["A"]]}\n```';
     expect(gate(raw)).toBe(false);
   });
+});
+
+it('still overwrites the current estimate and records the unchanged refinement payload', async () => {
+  const fake = createFakeDb({
+    tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+    taskEvents: schema.taskEvents,
+    repositories: schema.repositories,
+    taskDagPlans: schema.taskDagPlans,
+    taskDagLevels: schema.taskDagLevels,
+    taskDagIssues: schema.taskDagIssues,
+  });
+  fake.insert(schema.tasks, {
+    id: '00000000-0000-4000-8000-000000000001',
+    repositoryId: '00000000-0000-4000-8000-000000000002',
+    aiEstimatedTimeHours: 6.5,
+  });
+  for (const [id, hours] of [
+    ['00000000-0000-4000-8000-000000000004', 2],
+    ['00000000-0000-4000-8000-000000000005', 4],
+  ] as const) {
+    fake.insert(schema.tasks, {
+      id,
+      repositoryId: '00000000-0000-4000-8000-000000000002',
+      type: 'workflow',
+      status: 'completed',
+      title: id,
+      changedPaths: ['src/a.ts'],
+      completedAt: new Date(hours * 3_600_000),
+      aiEstimatedTimeHours: null,
+    });
+    fake.insert(schema.taskSteps, {
+      taskId: id,
+      startedAt: new Date(0),
+      endedAt: new Date(hours * 3_600_000),
+      idleMs: 0,
+      userActiveMs: 0,
+      waitingStartedAt: null,
+      status: 'done',
+    });
+  }
+  // The fake cannot evaluate PostgreSQL's jsonb ?| operator; supply its overlap rows.
+  vi.spyOn(fake.db, 'select').mockReturnValueOnce({
+    from: () => ({
+      where: async () =>
+        fake.rows(schema.tasks).filter((t) => t.id !== '00000000-0000-4000-8000-000000000001'),
+    }),
+  } as never);
+  const warn = vi.fn();
+  const ctx = {
+    db: fake.db,
+    taskId: '00000000-0000-4000-8000-000000000001',
+    taskStepId: '00000000-0000-4000-8000-000000000003',
+    logger: { info: vi.fn(), warn },
+  } as unknown as StepContext;
+  await sprintPlanningStep.apply(ctx, {
+    detected: {} as never,
+    iteration: 0,
+    previousIterations: [],
+    llmOutput: JSON.stringify({
+      mode: 'dag',
+      rationale: 'two areas',
+      issues: [{ id: 'A', title: 'A', estimated_files: ['src/a.ts'] }],
+      levels: [['A']],
+    }),
+    formValues: {},
+  });
+  expect(warn).not.toHaveBeenCalled();
+  expect(
+    fake.rows(schema.tasks).find((t) => t.id === '00000000-0000-4000-8000-000000000001')!
+      .aiEstimatedTimeHours,
+  ).toBe(3);
+  expect(fake.rows(schema.taskEvents)).toMatchObject([
+    {
+      eventType: 'estimate.refined',
+      payload: {
+        previous: 6.5,
+        refined: 3,
+        overlapAnchors: 2,
+        matchedFiles: 1,
+        predictedFileCount: 1,
+      },
+    },
+  ]);
+  expect(Object.keys(fake.rows(schema.taskEvents)[0]!.payload as object).sort()).toEqual(
+    ['previous', 'refined', 'overlapAnchors', 'matchedFiles', 'predictedFileCount'].sort(),
+  );
 });

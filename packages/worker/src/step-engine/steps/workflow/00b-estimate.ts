@@ -1,6 +1,11 @@
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { CONFIG_KEYS, configService, type FormSchema } from '@haive/shared';
+import {
+  CONFIG_KEYS,
+  configService,
+  ESTIMATE_RECORDED_EVENT,
+  type FormSchema,
+} from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { resolveRagSyncPrefs } from './_rag-index.js';
@@ -33,7 +38,7 @@ import {
 // it on the form. The LLM is optional — with no usable CLI it degrades to a deterministic
 // heuristic, so estimation never blocks task start.
 //
-// The RAW AI number is stored on tasks.ai_estimated_time_hours (never user-edited) so AI
+// The RAW AI number is stored in estimate.recorded (never user-edited) so AI
 // accuracy stays measurable against actual effort over time — that (aiEstimate, actual)
 // pair is the calibration signal. The CONFIRMED value goes to tasks.estimated_time_hours,
 // which the verdict card already compares against actual. The post-planning refinement
@@ -434,7 +439,7 @@ export const estimateStep: StepDefinition<EstimateDetect, EstimateApply> = {
     await ctx.db.insert(schema.taskEvents).values({
       taskId: ctx.taskId,
       taskStepId: ctx.taskStepId,
-      eventType: 'estimate.recorded',
+      eventType: ESTIMATE_RECORDED_EVENT,
       payload: {
         aiHours,
         confirmedHours,

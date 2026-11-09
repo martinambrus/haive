@@ -4,7 +4,11 @@ import type { SQL } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CONFIG_KEYS, configService, isDisplayCurrency, logger } from '@haive/shared';
 import { computeTaskTiming } from '@haive/shared/timing';
-import { buildEstimationAccuracy } from '@haive/shared';
+import {
+  buildEstimationAccuracy,
+  ESTIMATE_RECORDED_EVENT,
+  recordedEstimateHours,
+} from '@haive/shared';
 import {
   buildTaskTimeBreakdown,
   buildUnusedReport,
@@ -1793,6 +1797,21 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
         ),
       );
 
+    const recorded = recordedEstimateHours(
+      rows.length
+        ? await db.query.taskEvents.findMany({
+            where: and(
+              inArray(
+                schema.taskEvents.taskId,
+                rows.map((r) => r.id),
+              ),
+              eq(schema.taskEvents.eventType, ESTIMATE_RECORDED_EVENT),
+            ),
+            columns: { taskId: true, payload: true, createdAt: true },
+          })
+        : [],
+    );
+
     const effortByTask = new Map<string, number>();
     if (rows.length > 0) {
       const stepRows = await db
@@ -1836,7 +1855,7 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
         taskId: t.id,
         title: t.title,
         completedAt: t.completedAt ? t.completedAt.toISOString() : null,
-        aiEstimatedHours: t.aiEstimatedTimeHours ?? 0,
+        aiEstimatedHours: recorded.get(t.id) ?? t.aiEstimatedTimeHours ?? 0,
         confirmedHours: t.estimatedTimeHours ?? null,
         actualHours: Math.round((effortByTask.get(t.id) ?? 0) * 100) / 100,
       })),

@@ -1,5 +1,6 @@
 import { and, desc, eq, inArray, like, ne, or, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
+import { ESTIMATE_RECORDED_EVENT, recordedEstimateHours } from '@haive/shared';
 import { computeTaskTiming, type TaskTimingStep } from '@haive/shared/timing';
 
 // Shared building blocks for the task-effort estimator, used by BOTH the pre-flight
@@ -206,6 +207,18 @@ async function hydrateAnchors(
   crossRepo: boolean,
 ): Promise<EstimateAnchor[]> {
   const efforts = await measuredEfforts(db, priors);
+  const estimatedIds = priors.filter((p) => p.aiEstimatedTimeHours != null).map((p) => p.id);
+  const recorded = recordedEstimateHours(
+    estimatedIds.length
+      ? await db.query.taskEvents.findMany({
+          where: and(
+            inArray(schema.taskEvents.taskId, estimatedIds),
+            eq(schema.taskEvents.eventType, ESTIMATE_RECORDED_EVENT),
+          ),
+          columns: { taskId: true, payload: true, createdAt: true },
+        })
+      : [],
+  );
   const anchors: EstimateAnchor[] = [];
   for (const p of priors) {
     const effortHours = efforts.get(p.id);
@@ -216,7 +229,7 @@ async function hydrateAnchors(
       executionPath: p.executionPath ?? null,
       fixRounds: p.currentRound ?? 0,
       effortHours,
-      aiEstimateHours: p.aiEstimatedTimeHours ?? null,
+      aiEstimateHours: recorded.get(p.id) ?? p.aiEstimatedTimeHours ?? null,
       confirmedEstimateHours: p.estimatedTimeHours ?? null,
       changedPaths: p.changedPaths ?? [],
       crossRepo,

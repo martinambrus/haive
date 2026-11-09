@@ -32,6 +32,8 @@ import {
 import { isTaskClass, knownTaskTypes, typesForClass } from '@haive/shared/stats';
 import {
   buildEstimationAccuracy,
+  ESTIMATE_RECORDED_EVENT,
+  recordedEstimateHours,
   computeTaskTiming,
   configService,
   CONFIG_KEYS,
@@ -1022,7 +1024,7 @@ taskRoutes.get('/last-cli', async (c) => {
 });
 
 // Per-repo estimation-accuracy dashboard (task-time estimation v2.4). Completed workflow
-// tasks that carry a RAW AI estimate are paired with their MEASURED actual effort
+// tasks that carry an AI estimate are paired with their MEASURED actual effort
 // (computeTaskTiming), and the shared aggregator derives per-task error + the repo-level
 // MAPE / median bias / over-under split. Empty until tasks complete through 00b-estimate.
 // Static path — must stay ABOVE '/:id' so it is not captured as an id.
@@ -1051,6 +1053,17 @@ taskRoutes.get('/estimation-accuracy', async (c) => {
   });
 
   const taskIds = rows.map((r) => r.id);
+  const recorded = recordedEstimateHours(
+    taskIds.length
+      ? await db.query.taskEvents.findMany({
+          where: and(
+            inArray(schema.taskEvents.taskId, taskIds),
+            eq(schema.taskEvents.eventType, ESTIMATE_RECORDED_EVENT),
+          ),
+          columns: { taskId: true, payload: true, createdAt: true },
+        })
+      : [],
+  );
   const stepRows = taskIds.length
     ? await db
         .select({
@@ -1086,7 +1099,7 @@ taskRoutes.get('/estimation-accuracy', async (c) => {
       taskId: t.id,
       title: t.title,
       completedAt: t.completedAt ? t.completedAt.toISOString() : null,
-      aiEstimatedHours: t.aiEstimatedTimeHours ?? 0,
+      aiEstimatedHours: recorded.get(t.id) ?? t.aiEstimatedTimeHours ?? 0,
       confirmedHours: t.estimatedTimeHours ?? null,
       actualHours: Math.round(((workMs + userActiveMs) / 3_600_000) * 100) / 100,
     };
