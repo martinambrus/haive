@@ -499,7 +499,7 @@ Each needs a per-dial decision (guard, admin-trust, or remove).
 
 ### T578 · FNF[orphan-gitlink-2] · commit sites other than gate 3 still record an unregistered nested repository (+4)
 
-status: open · kind: fix · found: T425 run 2026-11-09 · priority: P2
+status: in progress (sonnet-sonnet driver, 2026-11-09) · kind: fix · found: T425 run 2026-11-09 · user decision: resolved 2026-11-09 (item 1: refuse before the merge) · priority: P2
 
 PRE-EXISTING. Gate 3 now refuses a new gitlink with no `.gitmodules` url (`_gitlink-registration.ts`); these do not.
 
@@ -511,7 +511,7 @@ PRE-EXISTING. Gate 3 now refuses a new gitlink with no `.gitmodules` url (`_gitl
 
 ### T579 · FNF[global-kb-entry-delete-any-user] · any signed-in user can delete any Global KB entry, an enforced house rule included
 
-status: open · kind: fix · user decision: resolved 2026-11-09 · found: T558 browser check 2026-11-09 · priority: P3
+status: claimed (sonnet-sonnet driver, 2026-11-09, runs after T578) · kind: fix · user decision: resolved 2026-11-09 · found: T558 browser check 2026-11-09 · priority: P3
 
 PRE-EXISTING, read in code, not exercised. api `routes/global-kb.ts` ~:1260 `DELETE /entries/:id` has no `requireAdmin` and no owner check, and the page shows Delete on every entry to a non-admin. Enforcing and un-enforcing a rule are admin-only (~:1310, ~:1403), yet deleting the enforced entry is not. User decision 2026-11-09: admin-only for an enforced entry, owner-or-admin for the rest. `user_id` is nullable and the promotion insert (`_global-kb-promote.ts` ~:681) sets none, so an entry with no owner is admin-only (session default, change if unwanted). The page must show Delete only where it will work. The entry edit route (`PATCH /entries/:id`, ~:1084) has the same gap and was not part of this decision.
 
