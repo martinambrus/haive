@@ -44,11 +44,21 @@ the real index already holds a new gitlink, or the status lists an untracked dir
 a work-tree type change (` T path`) or an intent-to-add entry (` A path`), the three shapes a
 repository can arrive in unstaged. A git failure refuses. It can leave unreachable blobs in
 `.git/objects` after a refusal: the same content gets the same id, so a retry adds none and gc
-prunes them. Unborn repositories stay excluded, and a gitlink HEAD already holds is left alone.
+prunes them. At gate 3 unborn repositories stay excluded, and a gitlink HEAD already holds is left alone.
 The thrown text names each path and the two ways out, register it as a submodule or include its
 files as ordinary files. Detect carries an optional `unregisteredGitlinks`, optional because the
-payload is persisted and best effort since apply still decides, and the form lists it. The DAG
-issue committer has no such check, so a gitlink it commits is one gate 3 sees in HEAD.
+payload is persisted and best effort since apply still decides, and the form lists it.
+
+The DAG issue committer (`commitIssueWork`, `dag-executor.ts`) runs the same check on the issue
+worktree, after `assertDependencyCommitSafe` and before its `git add -A`, with no exclusions, so
+an unborn nested repository makes the scratch add fail and the step fail loudly, nothing
+committed. The refusal is `unregisteredGitlinksMessage(paths, { key, worktree })`: the issue key,
+each path JSON-quoted, the worktree as the task terminal sees it, and the two ways out. Way 1 is a
+`.gitmodules` entry written into that worktree; the text gives no `git submodule add`, since git
+does not run there. Step 06c fails, the issue stays accepted with `merge_status` null, and
+`resetDagCurrentLevelForRetry` leaves it alone, so Retry commits it after the fix with no coder
+dispatch and siblings already merged stay merged. A git failure inside the check fails the step
+naming the issue, never skips the check.
 
 The invocation asks for a JSON `commitMessage` containing a subject and optional body and
 instructs the agent to answer from the supplied changes without using tools. `disableTools`
