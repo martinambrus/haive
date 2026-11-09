@@ -319,4 +319,14 @@ describe('unregisteredGitlinksMessage', () => {
     expect(text).not.toContain('(3)');
     expect(text).not.toMatch(/#\d/);
   });
+
+  it('reads whole for an issue whose worktree path is not recorded', () => {
+    for (const worktree of [null, undefined]) {
+      const text = unregisteredGitlinksMessage(['one'], { key: 'ISSUE-7', worktree });
+      expect(text).toContain('ISSUE-7');
+      expect(text).toContain(JSON.stringify('one'));
+      expect(text).toContain("Act in that issue's worktree, then retry this step.");
+      expect(text).not.toMatch(/null|undefined/);
+    }
+  });
 });
