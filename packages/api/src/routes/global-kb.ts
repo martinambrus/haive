@@ -199,9 +199,14 @@ function canDeleteEntry(
   );
 }
 
-function presentEntry<T extends HouseRuleRow>(entry: T, ctx: HouseRuleContext) {
+function presentEntry<T extends HouseRuleRow & Pick<GlobalKbEntry, 'userId'>>(
+  entry: T,
+  ctx: HouseRuleContext,
+  actor: Context<AppEnv>,
+) {
   return {
     ...entry,
+    canDelete: canDeleteEntry(entry, actor),
     contentToken: houseRuleContentToken(entry),
     enforcementState: enforcementState(entry, ctx),
   };
@@ -726,7 +731,7 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
         sourceTaskId: taskId,
       })
       .returning();
-    return presentEntry(row!, await houseRuleContext(settings.namespace));
+    return presentEntry(row!, await houseRuleContext(settings.namespace), c);
   });
 
   let queued: Awaited<ReturnType<typeof markQueuedForStart>>;
@@ -879,7 +884,7 @@ globalKbRoutes.get('/entries', async (c) => {
     ).sort();
 
     const ctx = await houseRuleContext(settings.namespace);
-    return { entries: entries.map((entry) => presentEntry(entry, ctx)), total, frameworks };
+    return { entries: entries.map((entry) => presentEntry(entry, ctx, c)), total, frameworks };
   });
 
   return c.json({
@@ -930,7 +935,7 @@ globalKbRoutes.get('/entries/:id', async (c) => {
         : [];
     const { usedBytes, entryBytes } = await alwaysBytes(db, settings.namespace, entry);
     return {
-      entry: presentEntry(entry, await houseRuleContext(settings.namespace)),
+      entry: presentEntry(entry, await houseRuleContext(settings.namespace), c),
       activeSuccessor: successors[0] ?? null,
       usedBytes,
       capBytes: HOUSE_RULES_ALWAYS_CAP_BYTES,
@@ -966,7 +971,7 @@ globalKbRoutes.post('/entries', async (c) => {
         embedStatus: 'pending',
       })
       .returning();
-    return presentEntry(row!, await houseRuleContext(settings.namespace));
+    return presentEntry(row!, await houseRuleContext(settings.namespace), c);
   });
 
   await enqueueSync(entry.id, entry.namespace, 'upsert');
@@ -1260,7 +1265,7 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
   if (!entry) throw new HttpError(404, 'global KB entry not found');
   if (result.reembed) await enqueueSync(entry.id, entry.namespace, 'upsert');
   if (result.supersededId) await enqueueSync(result.supersededId, entry.namespace, 'delete');
-  return c.json({ entry: presentEntry(entry, await houseRuleContext(result.namespace)) });
+  return c.json({ entry: presentEntry(entry, await houseRuleContext(result.namespace), c) });
 });
 
 // Hard delete is admin-only for approved or ownerless entries, otherwise owner-or-admin.
@@ -1415,7 +1420,7 @@ globalKbRoutes.put('/entries/:id/enforcement', requireAdmin, async (c) => {
     ),
   ).catch(lockBusyError);
 
-  return c.json({ entry: presentEntry(result.row, await houseRuleContext(result.namespace)) });
+  return c.json({ entry: presentEntry(result.row, await houseRuleContext(result.namespace), c) });
 });
 
 // Removes the approval and keeps the settings, as the last ones given.
@@ -1463,5 +1468,5 @@ globalKbRoutes.delete('/entries/:id/enforcement', requireAdmin, async (c) => {
         }),
     );
   }).catch(lockBusyError);
-  return c.json({ entry: presentEntry(result.row, await houseRuleContext(result.namespace)) });
+  return c.json({ entry: presentEntry(result.row, await houseRuleContext(result.namespace), c) });
 });

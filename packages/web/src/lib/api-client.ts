@@ -1343,6 +1343,8 @@ export interface GlobalKbEntry {
   id: string;
   namespace: string;
   userId: string | null;
+  /** Server-authorized deletion for the current actor. */
+  canDelete: boolean;
   title: string;
   seedText: string | null;
   body: string;
