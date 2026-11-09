@@ -253,7 +253,7 @@ async function fanOutDag(
 /** Post-planning refinement of the pre-flight effort estimate (00b-estimate). Once the
  *  planner names the files the task will touch (each issue's estimated_files), re-anchor
  *  on the prior tasks that ACTUALLY changed those files — a hard file-overlap signal the
- *  00b estimate could only predict. Overwrites the calibration estimate on the task row
+ *  00b estimate could only predict. Overwrites the current estimate on the task row
  *  (tasks.ai_estimated_time_hours) and records the delta; leaves the user's CONFIRMED
  *  estimated_time_hours untouched. Best-effort and no-op unless the planner decomposed
  *  (single mode emits no estimated_files) AND enough prior tasks overlap — a metadata

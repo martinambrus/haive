@@ -3112,12 +3112,12 @@ function HeaderPaceChip({
   const endMs = taskClockEndMs(task, now);
   const effortMs = liveEffortMs(steps, userActive, endMs);
   const confirmedHours = task.estimatedTimeHours ?? 0;
-  // AI's learned estimate (decimal hours). Zero on legacy tasks and on every task type
+  // AI's current estimate (decimal hours). Zero on legacy tasks and on every task type
   // that never runs 00b-estimate (onboarding, onboarding_upgrade, run_app, kb_author,
   // plan_build, plan_chat, advisory).
   const aiEstHours = task.aiEstimatedTimeHours ?? 0;
   // Budget the pace is measured against: the confirmed estimate when one was set, else
-  // the AI's own number — a task the user never estimated still gets a pace. With
+  // the AI's current number — a task the user never estimated still gets a pace. With
   // neither, the chip degrades to a bare effort timer instead of disappearing.
   const budgetHours = confirmedHours > 0 ? confirmedHours : aiEstHours;
   const budgetMs = budgetHours * 3_600_000;
@@ -3402,7 +3402,7 @@ function TaskTotalTime({
       : verdictPct <= 105
         ? 'Slightly over estimate'
         : 'Over estimate';
-  // The AI's own estimate (00b-estimate), shown alongside the confirmed one so its
+  // The AI's current estimate (possibly refined), shown alongside the confirmed one so its
   // accuracy vs actual effort is visible even when the user overrode it on the form.
   const aiEstimateHours = task.aiEstimatedTimeHours ?? null;
   const aiEstimateMs = (aiEstimateHours ?? 0) * 3_600_000;

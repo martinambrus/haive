@@ -136,7 +136,7 @@ describe('buildAnchors', () => {
     description: '',
     currentRound: 0,
     changedPaths: [],
-    aiEstimatedTimeHours: null,
+    aiEstimatedTimeHours: null as number | null,
     estimatedTimeHours: null,
     completedAt: new Date(3_600_000),
   });
@@ -147,6 +147,7 @@ describe('buildAnchors', () => {
     const db = {
       query: {
         tasks: { findMany },
+        taskEvents: { findMany: vi.fn().mockResolvedValue([]) },
         taskSteps: {
           findMany: vi.fn().mockResolvedValue(
             measured.map((taskId) => ({
@@ -172,9 +173,71 @@ describe('buildAnchors', () => {
       db: db as unknown as Database,
       findMany,
       timingFindMany: db.query.taskSteps.findMany,
+      eventsFindMany: db.query.taskEvents.findMany,
       repositories: db.query.repositories,
     };
   };
+
+  it('hydrates recorded estimates and calibrates from them rather than refined columns', async () => {
+    const priors = ['a', 'b'].map((id) => ({
+      ...prior(id, 'quick_bugfix'),
+      aiEstimatedTimeHours: 2.92,
+    }));
+    const { db, eventsFindMany } = mockDb([priors, []], ['a', 'b']);
+    eventsFindMany.mockResolvedValue(
+      priors.map((p) => ({
+        taskId: p.id,
+        payload: { aiHours: 6.5 },
+        createdAt: new Date(1),
+      })),
+    );
+    const anchors = await buildAnchors(db, 'current', 'repo', [], 'quick_bugfix');
+    expect(anchors.map((a) => a.aiEstimateHours)).toEqual([6.5, 6.5]);
+    expect(computeBiasFactor(anchors, 'quick_bugfix')).toBe(0.25);
+    const query = new PgDialect().sqlToQuery(eventsFindMany.mock.calls[0]![0].where);
+    expect(query.params).toEqual(['a', 'b', 'estimate.recorded']);
+  });
+
+  it('retains the column without a usable latest event', async () => {
+    const priors = ['missing', 'invalid'].map((id) => ({
+      ...prior(id, null),
+      aiEstimatedTimeHours: 2.92,
+    }));
+    const { db, eventsFindMany } = mockDb([priors], ['missing', 'invalid']);
+    eventsFindMany.mockResolvedValue([
+      { taskId: 'invalid', payload: { aiHours: 6.5 }, createdAt: new Date(1) },
+      { taskId: 'invalid', payload: { aiHours: 0 }, createdAt: new Date(2) },
+    ]);
+    expect((await buildAnchors(db, 'current', 'repo')).map((a) => a.aiEstimateHours)).toEqual([
+      2.92, 2.92,
+    ]);
+  });
+
+  it('does not query events for null estimate columns', async () => {
+    const { db, eventsFindMany } = mockDb([[prior('a', null)]], ['a']);
+    const anchors = await buildAnchors(db, 'current', 'repo');
+    expect(anchors[0]!.aiEstimateHours).toBeNull();
+    expect(eventsFindMany).not.toHaveBeenCalled();
+  });
+
+  it('hydrates a cross-repository recorded estimate', async () => {
+    const { db, repositories, eventsFindMany } = mockDb(
+      [[], [{ ...prior('cross', null), aiEstimatedTimeHours: 2.92 }]],
+      ['cross'],
+    );
+    repositories.findFirst.mockResolvedValue({ userId: 'user', detectedFramework: 'react' });
+    repositories.findMany.mockResolvedValue([{ id: 'other' }] as never);
+    eventsFindMany.mockResolvedValue([
+      { taskId: 'cross', payload: { aiHours: 6.5 }, createdAt: new Date(1) },
+    ]);
+    expect(await buildAnchors(db, 'current', 'repo')).toMatchObject([
+      { crossRepo: true, aiEstimateHours: 6.5 },
+    ]);
+    expect(new PgDialect().sqlToQuery(eventsFindMany.mock.calls[0]![0].where).params).toEqual([
+      'cross',
+      'estimate.recorded',
+    ]);
+  });
 
   it('finds older same-path runs beyond a full budget of preferred other-path runs', async () => {
     const preferred = Array.from({ length: MAX_ANCHORS }, (_, i) =>

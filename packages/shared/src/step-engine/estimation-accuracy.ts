@@ -1,5 +1,5 @@
 // Per-repo estimation-accuracy aggregation for the estimates dashboard (task-time
-// estimation v2.4). Pure: the API supplies each completed task's stored RAW AI estimate and
+// estimation v2.4). Pure: the API supplies each completed task's recorded AI estimate and
 // its MEASURED actual effort (computeTaskTiming), and these functions derive the per-task
 // error and the repo-level calibration summary (MAPE, median bias, over/under counts). The
 // target metric is EFFORT (agent work + user-active), matching 00b-estimate and the
@@ -10,7 +10,7 @@ export interface EstimationDatum {
   title: string;
   /** ISO completion timestamp, or null. */
   completedAt: string | null;
-  /** The RAW AI estimate stored on the task (ai_estimated_time_hours) — the calibration
+  /** The recorded AI estimate (falling back to ai_estimated_time_hours) — the calibration
    *  signal, never user-edited. */
   aiEstimatedHours: number;
   /** The human-confirmed estimate (estimated_time_hours), for reference on the row. */
@@ -88,4 +88,29 @@ export function buildEstimationAccuracy(data: EstimationDatum[]): {
       overestimateCount: over,
     },
   };
+}
+
+/** Use only the latest recorded estimate per task; an invalid latest value leaves the
+ *  caller's current-column fallback intact rather than reviving an older estimate. */
+export function recordedEstimateHours(
+  events: { taskId: string; payload: unknown; createdAt: Date }[],
+): Map<string, number> {
+  const latest = new Map<string, (typeof events)[number]>();
+  for (const event of events) {
+    const previous = latest.get(event.taskId);
+    if (!previous || event.createdAt.getTime() > previous.createdAt.getTime()) {
+      latest.set(event.taskId, event);
+    }
+  }
+  const recorded = new Map<string, number>();
+  for (const [taskId, event] of latest) {
+    const aiHours =
+      event.payload && typeof event.payload === 'object' && 'aiHours' in event.payload
+        ? event.payload.aiHours
+        : undefined;
+    if (typeof aiHours === 'number' && Number.isFinite(aiHours) && aiHours > 0) {
+      recorded.set(taskId, aiHours);
+    }
+  }
+  return recorded;
 }

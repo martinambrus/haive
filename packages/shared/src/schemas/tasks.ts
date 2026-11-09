@@ -244,6 +244,8 @@ export const MERGE_CLARIFICATION_ANSWERED_EVENT = 'merge_resolution.clarificatio
 /** task_events type the worker's markTaskDead writes with the unresolved step ids; the api reads it. */
 export const TASK_DEAD_EVENT = 'task.dead';
 
+export const ESTIMATE_RECORDED_EVENT = 'estimate.recorded';
+
 /** The worker (builds and resolves the gates) and the api (re-offers rows) key on one id: an
  *  answer carrying it as a string is a fix-loop gate decision. */
 export const FIX_LOOP_ACTION_FIELD = 'fixLoopAction';
