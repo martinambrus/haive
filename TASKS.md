@@ -451,7 +451,7 @@ From the T406/T408 build (2026-11-07).
 6. The module-schema-wins precedence of the hold is untested.
 7. Nits: `step-context-usage.ts` ~:51 throws "invs is not iterable" under mock-DB unit runs (harmless); stale "web package has no vitest config" header in web lib/step-cli-providers.ts ~:20; `providerLabel` in provider-hold.ts shares a name with sandbox/mcp-surface.ts ~:389.
 
-### T554 · FNF[allowlist-seed-hardening] · the private-endpoint upgrade seed can lose entries for good
+### T554 · FNF[allowlist-seed-hardening] · the private-endpoint upgrade seed can lose entries for good (+1)
 
 status: open · kind: fix · found: T347 run · priority: P2
 
@@ -459,8 +459,9 @@ status: open · kind: fix · found: T347 run · priority: P2
 2. A transient DNS failure for one name is not retried (private-endpoint-seed.ts:146-216), so that name is skipped for good. NEW-LIMIT.
 3. The seed hard-codes the lock name `admin-config:private-endpoint-allowlist` (:30) while the admin save derives it from its route name (api routes/admin.ts:483); a rename silently breaks their serialisation. NEW-LIMIT. Fix: one shared constant.
 4. `reconcileEmbedModelResidency` (worker queues/task-queue.ts:1084-1098) dials a historical task's Ollama URL; a private one the seed did not list is refused and skipped silently. REGRESSION (minor, best-effort cleanup).
+5. (T555 run, 2026-11-09) Seed `METADATA` (worker private-endpoint-seed.ts:70-73) is a second hand-kept list holding two of the guard's three metadata addresses. It can drift from the guard's set; no change needed today. PRE-EXISTING, minor.
 
-### T555 · FNF[egress-guard-hardening] · remaining liftable metadata addresses and optional forge fetchFn
+### T555 · FNF[egress-guard-hardening] · remaining liftable metadata addresses and optional forge fetchFn (+3)
 
 status: in progress (sonnet-sonnet driver, 2026-11-09) · kind: fix · found: T347 run · priority: P2
 
@@ -471,6 +472,9 @@ status: in progress (sonnet-sonnet driver, 2026-11-09) · kind: fix · found: T3
 5. `deflate` maps to `createInflate` (probe-egress.ts:158), so a raw-deflate body fails. PRE-EXISTING (moved code).
 6. The guard sends `accept-encoding: identity` by default (probe-egress.ts:219). PRE-EXISTING (low).
 7. A `[::1]` host in a RAG DSN reports `ENOTFOUND [` (`dsnDialHost`, shared rag/connection.ts:119; postgres.js parses the host as `[`); still refused, only the message is wrong. PRE-EXISTING (low).
+8. (T555 run, 2026-11-09) Azure host virtual IP 168.63.129.16 (WireServer) is a public address, so `isBlockedAddress` is false for it and its mapped form: the guard dials it for any stored or typed host with an empty allowlist. PRE-EXISTING, consequential on Azure installs. Decide: block it in the base table in all encodings and in the unliftable set.
+9. (T555 run) 64:ff9b:1::/48 (RFC 8215 local-use NAT64) and Teredo 2001::/32 are blocked but not unliftable, so a hostname entry lifts them, for example `64:ff9b:1::a9fe:a9fe`; through a gateway they can reach metadata. PRE-EXISTING, minor.
+10. (T555 run) `isUnliftableByHostname` returns false for a non-address string while the base table blocks it. Unreachable today, since resolvers return address literals. PRE-EXISTING, theoretical.
 
 ### T556 · FNF[ollama-pull-relay] · pull stream relay edges
 
@@ -481,7 +485,7 @@ status: open · kind: fix · found: T347 run · priority: P3
 3. `armIdle` re-arms only on upstream reads (tooling.ts:279-335), so a client that stops reading for 10 minutes can trip a misleading idle stop. NEW-LIMIT (edge).
 4. A late `fetchFn` resolve after an idle stop leaves its body unconsumed for a custom `fetchFn` that ignores `signal`. NEW-LIMIT (edge).
 
-### T557 · FNF[unguarded-dial-audit] · dials that still bypass the egress guard (design) (+1)
+### T557 · FNF[unguarded-dial-audit] · dials that still bypass the egress guard (design) (+2)
 
 status: open · kind: design · found: T347 run · priority: P2
 Each needs a per-dial decision (guard, admin-trust, or remove).
@@ -492,6 +496,7 @@ Each needs a per-dial decision (guard, admin-trust, or remove).
 4. `integration_provider_configs.api_base_url` is unused (database schema/integrations.ts:51); a future dial must use the guarded fetch. PRE-EXISTING.
 5. A user-typed git remote is dialed by the child `git` process outside the Node guard (worker repo clone.ts:74, bundle-sync.ts:18). A fix (protocol allowlist, network policy) changes product behaviour. PRE-EXISTING.
 6. (T558 run, 2026-11-09) `POST /global-kb/test-ollama` (api routes/global-kb.ts ~:575) lets any signed-in user make the api dial a request-typed URL through the guarded fetch; the page fires it on first load (settings/global-kb page.tsx ~:605) and the button stays usable for a non-admin, though the stored URL is now admin-only. PRE-EXISTING. Decide: admin-only, or restrict the probe to the stored URL.
+7. (T555 run, 2026-11-09) Provider probes dial a hand-set base URL through the global fetch: worker cli-adapters/openrouter-compat.ts:120 (`opts.fetchImpl ?? fetch`; base URL from `ANTHROPIC_BASE_URL`, reached from queues/cli-exec/images.ts:406-407). Item 1 lists images.ts:457 and ollama-probe.ts but not this one, and T511 item 2 treats openrouter-compat as a fixed vendor host, which is wrong for the probe. PRE-EXISTING, consequential.
 
 ### T578 · FNF[orphan-gitlink-2] · commit sites other than gate 3 still record an unregistered nested repository (+4)
 
@@ -503,7 +508,7 @@ PRE-EXISTING. Gate 3 now refuses a new gitlink with no `.gitmodules` url (`_gitl
 2. `steps/workflow/01-worktree-setup.ts:156`, `steps/onboarding/12-post-onboarding.ts:978`, `steps/onboarding-upgrade/03-upgrade-commit.ts:345`: `add -A` commits of a fresh or onboarded repo record a nested repo as a gitlink. Minor.
 3. An unborn nested repo that replaces a tracked file shows as ` D nested`, so the #424 exclusion (which reads `?? dir/`) misses it and the real `git add -A` exits 128. Loud, nothing wrong committed. Minor.
 4. A malformed `.gitmodules` next to a gitlink: `git commit` can land the commit and exit 128, so the step throws with HEAD advanced. The new refusal precedes this for an orphan; a malformed file next to an already tracked gitlink was not tried. Minor.
-5. Not exercised by the T425 run: open MERGE_HEAD and unmerged gitlinks, sparse-checkout or skip-worktree entries in the scratch index, and git 2.54 (host runs were 2.43).
+5. Not exercised by the T425 run: open MERGE_HEAD and unmerged gitlinks, and git 2.54 (host runs were 2.43).
 
 ### T579 · FNF[global-kb-entry-delete-any-user] · any signed-in user can delete any Global KB entry, an enforced house rule included
 
