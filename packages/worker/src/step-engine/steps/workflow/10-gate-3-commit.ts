@@ -71,6 +71,8 @@ interface CommitGateDetect {
   outOfScopeInsightsOmitted?: number;
   /** Only when no gate 2 decided on the house rules. Optional because this payload is persisted. */
   houseRules?: GateHouseRules | null;
+  /** Nested repositories the commit would record as a gitlink with no registered url. Optional because this payload is persisted. */
+  unregisteredGitlinks?: string[];
 }
 
 interface CommitGateApply {
@@ -284,6 +286,16 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     }
     const dirtyFiles = parsePorcelainZ(status.stdout).length;
     const excludedRepositories = await unbornRepositories(workspacePath, status.stdout);
+    let orphanGitlinks: string[] | undefined;
+    try {
+      orphanGitlinks = await unregisteredGitlinks(
+        workspacePath,
+        status.stdout,
+        excludedRepositories,
+      );
+    } catch (err) {
+      ctx.logger.warn({ err }, 'failed to find unregistered nested repositories');
+    }
     const diffStat = await gitRun(workspacePath, ['diff', '--stat', 'HEAD']);
     const summary =
       diffStat.stdout.trim().length > 0
@@ -330,6 +342,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
       outOfScopeInsights: insights.insights,
       outOfScopeInsightsOmitted: insights.omitted,
       houseRules,
+      unregisteredGitlinks: orphanGitlinks,
     };
   },
 
@@ -401,6 +414,14 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
               'These nested repositories have no checked-out commit and will be left out of this commit:',
               ...detected.excludedRepositories.map((p) => `- ${asPlainText(JSON.stringify(p))}`),
               'For each path, commit inside it, remove it, or leave it out. All other changes will be staged and committed.',
+            ]
+          : []),
+        ...(detected.unregisteredGitlinks?.length
+          ? [
+              '',
+              'These nested repositories are not registered as submodules, and committing them will be refused:',
+              ...detected.unregisteredGitlinks.map((p) => `- ${asPlainText(JSON.stringify(p))}`),
+              'For each path, register it as a submodule (a .gitmodules entry with its path and a url) or include its files as ordinary files by removing its nested .git directory.',
             ]
           : []),
         '',
