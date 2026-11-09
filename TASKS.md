@@ -462,7 +462,7 @@ status: open · kind: fix · found: T347 run · priority: P2
 
 ### T555 · FNF[egress-guard-hardening] · remaining liftable metadata addresses and optional forge fetchFn
 
-status: open · kind: fix · found: T347 run · priority: P2
+status: in progress (sonnet-sonnet driver, 2026-11-09) · kind: fix · found: T347 run · priority: P2
 
 1. Other cloud-metadata addresses stay hostname-liftable: 100.100.100.200, 192.0.0.192, fd00:ec2::254 classify blocked but liftable (shared egress/egress-guard.ts:132). NEW-LIMIT. Fix: add them to the unliftable set.
 2. IPv4-compatible `::a9fe:a9fe` (deprecated ::/96) is blocked but liftable (egress-guard.ts:132). NEW-LIMIT (low).
@@ -494,8 +494,10 @@ Each needs a per-dial decision (guard, admin-trust, or remove).
 
 ### T558 · FNF[global-kb-ollama-url-write] · any signed-in user can set the Global KB Ollama URL (design)
 
-status: open · kind: design · found: T347 run · priority: P2
+status: in progress (sonnet-sonnet driver, 2026-11-09) · kind: design · found: T347 run · priority: P2
 `putConfig` (api routes/global-kb.ts:449) lets any signed-in user save the Ollama URL and embed model, and the upgrade seed trusts what is stored. The egress guard now refuses private targets unless listed, but the value still steers every user's embeds. Decide: admin-only write, or keep open. PRE-EXISTING.
+
+User decision 2026-11-09: admin-only. A non-admin save that changes `ollamaUrl`, `embedModel` or `embedDimensions` is refused like the other admin fields (routes/global-kb.ts ~:388); the web form disables them for non-admins. Folded in: `archiveRetentionDays` (~:451) is also non-admin writable, and `purgeArchivedGlobalKbEntries` (worker global-kb-sync-queue.ts ~:347) hard-deletes archived entries older than it, so a non-admin setting 1 purges the archive; make it admin-only too.
 
 ### T559 · FNF[gated-test-hygiene] · gated test addresses and the gated-list check in driver gates (+1)
 
@@ -579,6 +581,7 @@ PRE-EXISTING. `closeRedis` (api src/redis.ts ~:101) has no production caller and
 
 status: open · kind: fix · found: T549 run 2026-11-08 · priority: P4
 PRE-EXISTING. terminal-shell.ts `openSession` (api routes ~:439-476) publishes the open request on the patient client, whose offline queue can deliver it after the 15 s `OPEN_REPLY_TIMEOUT_MS` (~:35) and the session's cleanup, so the worker may open a session nobody waits for.
+
 1. PRE-EXISTING (since ff4927bb6), seen in the T549 live check 2026-11-09 with Redis up. When the WebSocket closes during the open window (React StrictMode double-mount on every dev load, or a reload or tab close), `runShellSession` quits the reply subscriber (api terminal-shell.ts ~:186-200, logged "shell ws closed before refcount acquired" then "open-session request failed: worker did not reply within timeout" 15 s later), yet the worker still opens the PTY (`tmux new-session -A`) and replies to nobody (worker terminal-session-manager.ts ~:181-187). Nobody sends `close` for that sessionId, so the PTY and its `terminal:out:<sid>` publishing live until the container reap (~2 min after the last tab): 8 sessions torn down by `pty-end` at one reap. Bounded, but each dead tmux client stays attached while a tab keeps the container up. Fix direction: when the open resolves after the socket is gone (or after the timeout), publish `{op:'close', sessionId}`; the same closes the late-replay case above.
 
 ### T569 · FNF[configservice-wedged-connection] · ConfigService never recycles a wedged connection
@@ -872,7 +875,7 @@ status: parked · area: modular-haive-plan owns merge-resolver.ts landing sectio
 
 ### T425 · FNF[orphan-gitlink] · gate 3 commits an agent-left nested repository as a gitlink with no .gitmodules entry
 
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (sonnet-sonnet driver, 2026-11-09) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 From the T375 review (2026-10-24). PRE-EXISTING, consequential, low frequency. worker 10-gate-3-commit.ts ~:407-410: `git add -A` records an untracked nested repo that has a HEAD as a 160000 entry with no `.gitmodules` URL; the viewer labels it "submodule" and gate 3 reads only the exit code. Later `git submodule` commands and recursive clones meet a gitlink with no URL. Decide: refuse, warn, stage its files, or ask the user.
 
 User decision 2026-11-01: Refuse incomplete unregistered gitlinks and explain submodule registration or including ordinary files.
