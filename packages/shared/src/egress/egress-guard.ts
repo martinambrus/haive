@@ -127,16 +127,24 @@ for (const [network, prefix] of [
   UNLIFTABLE_BY_HOSTNAME.addSubnet(`64:ff9b::${high}:${low}`, 96 + prefix, 'ipv6');
   UNLIFTABLE_BY_HOSTNAME.addSubnet(`2002:${high}:${low}::`, 16 + prefix, 'ipv6');
   UNLIFTABLE_BY_HOSTNAME.addSubnet(`::ffff:0:${high}:${low}`, 96 + prefix, 'ipv6');
+  // The deprecated IPv4-compatible form; for 0.0.0.0/8 it takes in ::1, which is held back below.
+  UNLIFTABLE_BY_HOSTNAME.addSubnet(`::${high}:${low}`, 96 + prefix, 'ipv6');
 }
 UNLIFTABLE_BY_HOSTNAME.addSubnet('fe80::', 10, 'ipv6');
 UNLIFTABLE_BY_HOSTNAME.addSubnet('::', 128, 'ipv6');
 // EC2's metadata endpoint over IPv6.
 UNLIFTABLE_BY_HOSTNAME.addAddress('fd00:ec2::254', 'ipv6');
 
+// ::1 is the IPv6 loopback, not the IPv4-compatible form of 0.0.0.1: like 127.0.0.1 it stays liftable.
+const IPV6_LOOPBACK = new net.BlockList();
+IPV6_LOOPBACK.addAddress('::1', 'ipv6');
+
 /** True for a link-local, unspecified or cloud metadata address, including its IPv6 embeddings. */
 export function isUnliftableByHostname(address: string): boolean {
   const family = net.isIP(address);
-  return family !== 0 && UNLIFTABLE_BY_HOSTNAME.check(address, family === 4 ? 'ipv4' : 'ipv6');
+  if (family === 0) return false;
+  const type = family === 4 ? 'ipv4' : 'ipv6';
+  return UNLIFTABLE_BY_HOSTNAME.check(address, type) && !IPV6_LOOPBACK.check(address, type);
 }
 
 /** c-ares, not getaddrinfo: a stalled getaddrinfo keeps a libuv threadpool slot that no deadline can take back. */
