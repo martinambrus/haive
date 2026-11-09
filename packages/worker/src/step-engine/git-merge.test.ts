@@ -2350,6 +2350,34 @@ describe('#280 fix7 interrupted squash before containment', () => {
 });
 
 describe('nested repository merge controls', () => {
+  it.each([false, true])(
+    'commits a merge-brought orphan outside resolved paths (already staged: %s)',
+    async (alreadyStaged) => {
+      const dir = await setupConflict();
+      try {
+        await git(dir, ['checkout', 'feature/x']);
+        await mkdir(path.join(dir, 'nested'));
+        await initRepo(path.join(dir, 'nested'));
+        await writeFile(path.join(dir, 'nested/inner'), 'inner\n');
+        await git(path.join(dir, 'nested'), ['add', '-A']);
+        await git(path.join(dir, 'nested'), ['commit', '-m', 'nested']);
+        await git(dir, ['add', 'nested']);
+        await git(dir, ['commit', '-m', 'feature gitlink']);
+        const nestedHead = (await git(path.join(dir, 'nested'), ['rev-parse', 'HEAD'])).trim();
+        await git(dir, ['checkout', 'main']);
+        expect(await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x'])).toBe(1);
+        await writeFile(path.join(dir, 'base.txt'), 'resolved\n');
+        if (alreadyStaged) await git(dir, ['add', 'base.txt']);
+        expect(await unmergedPaths(dir)).toEqual(alreadyStaged ? [] : ['base.txt']);
+        expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(true);
+        expect(await mergeHead(dir)).toBe(1);
+        expect((await git(dir, ['rev-parse', 'HEAD:nested'])).trim()).toBe(nestedHead);
+      } finally {
+        await rm(dir, REMOVE);
+      }
+    },
+  );
+
   it('checks new gitlinks with MERGE_HEAD open without writing the real index', async () => {
     const dir = await setupConflict();
     try {
@@ -2414,17 +2442,18 @@ describe('nested repository merge controls', () => {
       await git(path.join(dir, 'foo'), ['commit', '-m', 'nested']);
       const head = await git(dir, ['rev-parse', 'HEAD']);
       const before = await git(dir, ['ls-files', '-s']);
-      const outcome = await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x').catch(
-        (err: unknown) => err,
-      );
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const outcome = await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x');
       expect({
         outcome,
         tree: await git(dir, ['ls-tree', 'HEAD', 'foo']),
         headMoved: (await git(dir, ['rev-parse', 'HEAD'])) !== head,
-      }).toMatchObject({ outcome: expect.any(Error), headMoved: false });
-      expect((outcome as Error).message).toContain('"foo"');
+      }).toMatchObject({ outcome: false, headMoved: false });
+      expect(warn).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('"foo"'));
+      warn.mockRestore();
       expect(await git(dir, ['rev-parse', 'HEAD'])).toBe(head);
       expect(await git(dir, ['ls-files', '-s'])).toBe(before);
+      expect(await mergeHead(dir)).toBe(0);
     } finally {
       await rm(dir, REMOVE);
     }

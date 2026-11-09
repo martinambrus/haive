@@ -1,4 +1,5 @@
 import {
+  FlattenedRepositoryError,
   unregisteredGitlinks,
   unregisteredGitlinksMessage,
 } from './steps/workflow/_gitlink-registration.js';
@@ -1351,17 +1352,29 @@ export async function completeMergeHostSide(
       throw err;
     }
   }
-  const status = await gitRun(worktreePath, [
-    '--no-optional-locks',
-    'status',
-    '--porcelain',
-    '-z',
-    '-uall',
-  ]);
-  if (status.code !== 0)
-    throw new Error(`git status failed in ${worktreePath}: ${gitDetail(status)}`);
-  const orphans = await unregisteredGitlinks(worktreePath, status.stdout, [], resolving);
-  if (orphans.length) throw new Error(unregisteredGitlinksMessage(orphans));
+  if (resolving.length > 0) {
+    const status = await gitRun(worktreePath, [
+      '--no-optional-locks',
+      'status',
+      '--porcelain',
+      '-z',
+      '-uall',
+    ]);
+    if (status.code !== 0)
+      throw new Error(`git status failed in ${worktreePath}: ${gitDetail(status)}`);
+    let orphans: string[];
+    try {
+      orphans = await unregisteredGitlinks(worktreePath, status.stdout, [], resolving);
+    } catch (err) {
+      if (!(err instanceof FlattenedRepositoryError)) throw err;
+      logger.warn({ worktreePath }, err.message);
+      return false;
+    }
+    if (orphans.length) {
+      logger.warn({ worktreePath }, unregisteredGitlinksMessage(orphans));
+      return false;
+    }
+  }
   // Only the paths the fixer was sent to resolve: the merge staged everything else itself, and what
   // else the tree holds is someone's own work or a fixer's stray change, neither of it the merge's.
   for (let i = 0; i < resolving.length; i += PATHSPEC_CHUNK) {

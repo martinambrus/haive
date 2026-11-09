@@ -132,6 +132,19 @@ async function copyIndexFlags(workspace: string, env: Record<string, string>): P
   }
 }
 
+export class FlattenedRepositoryError extends Error {
+  constructor(readonly paths: string[]) {
+    super(
+      [
+        'Nothing was committed. These nested git repositories occupy tracked directories; staging their files would discard their repository history:',
+        ...paths.map((p) => `- ${JSON.stringify(p)}`),
+        'For each path, keep it out of the commit, or remove its `.git` to include the files on purpose. Then retry this step.',
+      ].join('\n'),
+    );
+    this.name = 'FlattenedRepositoryError';
+  }
+}
+
 /** Status lists files inside a tracked directory, so git add flattens a checkout there. */
 async function refuseFlattenedRepositories(
   workspace: string,
@@ -165,14 +178,7 @@ async function refuseFlattenedRepositories(
       }
     }
   }
-  if (found.size)
-    throw new Error(
-      [
-        'Nothing was committed. These nested git repositories occupy tracked directories; staging their files would discard their repository history:',
-        ...[...found].map((p) => `- ${JSON.stringify(p)}`),
-        'For each path, keep it out of the commit, or remove its `.git` to include the files on purpose. Then retry this step.',
-      ].join('\n'),
-    );
+  if (found.size) throw new FlattenedRepositoryError([...found]);
 }
 
 /**
@@ -186,11 +192,11 @@ export async function unregisteredGitlinks(
   excluded: string[],
   scope?: readonly string[],
 ): Promise<string[]> {
-  const entries = parsePorcelainZ(status).filter(
-    (entry) => !scope || scope.some((p) => entry.path === p || entry.path.startsWith(`${p}/`)),
-  );
+  const inScope = (file: string) =>
+    !scope || scope.some((p) => file === p || file.startsWith(`${p}/`) || p.startsWith(`${file}/`));
+  const entries = parsePorcelainZ(status).filter((entry) => inScope(entry.path));
   await refuseFlattenedRepositories(workspace, entries, excluded);
-  const staged = await newGitlinks(workspace);
+  const staged = (await newGitlinks(workspace)).filter(inScope);
   // A nested repository that replaces a tracked file shows as ` T path`, and one that replaces an
   // intent-to-add file as ` A path`, not as `?? path/`.
   const mayAddGitlink = entries.some(
@@ -225,7 +231,7 @@ export async function unregisteredGitlinks(
       const add = await gitRun(workspace, [...NO_SPLIT_INDEX, ...args], env);
       expectOk('git add', add);
     }
-    const added = await newGitlinks(workspace, env);
+    const added = (await newGitlinks(workspace, env)).filter(inScope);
     if (added.length === 0) return [];
     const registered = await registeredPaths(workspace, env);
     return added.filter((p) => !registered.has(p));
