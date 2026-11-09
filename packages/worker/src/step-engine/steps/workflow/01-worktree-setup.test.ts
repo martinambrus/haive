@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, it, expect, vi } from 'vitest';
-import type { Database } from '@haive/database';
+import { schema, type Database } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import { nextFreeBranchName, worktreeSetupStep } from './01-worktree-setup.js';
 import type { StepApplyArgs, StepContext } from '../../step-definition.js';
 
@@ -220,8 +221,17 @@ it.each([false, true])(
       await git(path.join(root, 'nested'), ['commit', '-m', 'inner']);
       if (malformed) await writeFile(path.join(root, '.gitmodules'), '[broken\n');
       const ctx = mkCtx(root);
-      Object.assign(ctx.db.query, { users: { findFirst: async () => null } });
-      Object.assign(ctx.db, { update: () => ({ set: () => ({ where: async () => undefined }) }) });
+      const fake = createFakeDb({ taskSteps: schema.taskSteps, tasks: schema.tasks });
+      const id = '00000000-0000-4000-8000-000000000001';
+      fake.insert(schema.taskSteps, { id, status: 'running' });
+      ctx.taskStepId = id;
+      ctx.taskId = '00000000-0000-4000-8000-000000000002';
+      const warningRead = vi.fn(fake.db.query.taskSteps.findFirst);
+      Object.assign(ctx.db.query, {
+        users: { findFirst: async () => null },
+        taskSteps: { findFirst: warningRead },
+      });
+      Object.assign(ctx.db, { update: fake.db.update });
       const warn = vi.fn();
       ctx.logger = { ...logger, warn } as never;
       const detected = await worktreeSetupStep.detect!(ctx);
@@ -235,6 +245,11 @@ it.each([false, true])(
       expect(JSON.stringify(warn.mock.calls)).toContain(
         malformed ? 'commit landed' : 'empty in task worktrees',
       );
+      const row = await fake.db.query.taskSteps.findFirst();
+      const note = String(row?.warningMessage);
+      expect(note).toContain(malformed ? 'commit landed' : 'empty in task worktrees');
+      expect(note.match(malformed ? /commit landed/g : /empty in task worktrees/g)).toHaveLength(1);
+      expect(warningRead).toHaveBeenCalledTimes(1);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

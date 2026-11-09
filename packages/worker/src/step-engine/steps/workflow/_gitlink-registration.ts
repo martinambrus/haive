@@ -10,6 +10,7 @@ import {
 } from '../../../repo/git-exec.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { StepContext } from '../../step-definition.js';
+import { warnStep } from '../../../project-state/branch-revert.js';
 import { parsePorcelainZ } from './_commit-diff.js';
 
 const GITLINK_MODE = '160000';
@@ -289,7 +290,7 @@ export function unregisteredGitlinksMessage(
 
 /** An uploaded tree must remain onboardable even when the nested-check or warning write fails. */
 export async function initialGitlinkWarnings(
-  ctx: Pick<StepContext, 'repoPath' | 'logger'>,
+  ctx: Pick<StepContext, 'repoPath' | 'logger' | 'db' | 'taskStepId'>,
 ): Promise<string[]> {
   try {
     const status = await gitRun(ctx.repoPath, [
@@ -306,6 +307,11 @@ export async function initialGitlinkWarnings(
         `${JSON.stringify(p)} is a nested git repository without a registered submodule URL. The initial commit records only a commit id, so that directory will be empty in task worktrees and a clone cannot fetch it.`,
     );
     for (const warning of warnings) ctx.logger.warn(warning);
+    try {
+      await warnStep(ctx, warnings);
+    } catch (err) {
+      ctx.logger.warn({ err }, 'Could not save initial-commit warnings; continuing');
+    }
     return warnings;
   } catch (err) {
     ctx.logger.warn(

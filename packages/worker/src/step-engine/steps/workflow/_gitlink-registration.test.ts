@@ -9,7 +9,7 @@ import {
   unregisteredGitlinks,
   unregisteredGitlinksMessage,
 } from './_gitlink-registration.js';
-import { git, repoFixture } from '../../../../test/support/nested-repo.js';
+import { gateContext, git, repoFixture } from '../../../../test/support/nested-repo.js';
 import { gitRun } from '../../../repo/git-exec.js';
 import { failGit } from '../../../../test/support/fake-git.js';
 
@@ -354,9 +354,22 @@ it('warns about a real clone beside a tracked directory containing a stray .git'
   await nestedRepo(repo, 'nested');
   const index = await git(repo, ['ls-files', '-s']);
   const warn = vi.fn();
-  const warnings = await initialGitlinkWarnings({ repoPath: repo, logger: { warn } as never });
+  const ctx = gateContext(repo);
+  const failure = new Error('warning store unavailable');
+  Object.assign(ctx.db.query, {
+    taskSteps: {
+      findFirst: async () => {
+        throw failure;
+      },
+    },
+  });
+  const warnings = await initialGitlinkWarnings({ ...ctx, logger: { warn } as never });
   expect(warnings).toEqual([expect.stringContaining('"nested"')]);
   expect(warnings[0]).toContain('empty in task worktrees');
+  expect(warn).toHaveBeenCalledWith(
+    { err: failure },
+    'Could not save initial-commit warnings; continuing',
+  );
   expect(await git(repo, ['ls-files', '-s'])).toBe(index);
 });
 
@@ -366,7 +379,9 @@ it('an initial-commit warning check that fails logs and continues', async () => 
   const warn = vi.fn();
   const shim = await failGit(['diff-index'], { exit: 128 });
   try {
-    expect(await initialGitlinkWarnings({ repoPath: repo, logger: { warn } as never })).toEqual([]);
+    expect(
+      await initialGitlinkWarnings({ ...gateContext(repo), logger: { warn } as never }),
+    ).toEqual([]);
     expect(warn).toHaveBeenCalled();
   } finally {
     await shim.restore();
