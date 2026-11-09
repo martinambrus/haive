@@ -484,18 +484,22 @@ status: open · kind: fix · found: T347 run · priority: P3
 3. `armIdle` re-arms only on upstream reads (tooling.ts:279-335), so a client that stops reading for 10 minutes can trip a misleading idle stop. NEW-LIMIT (edge).
 4. A late `fetchFn` resolve after an idle stop leaves its body unconsumed for a custom `fetchFn` that ignores `signal`. NEW-LIMIT (edge).
 
-### T557 · FNF[unguarded-dial-audit] · dials that still bypass the egress guard (design) (+2)
+### T557 · FNF[unguarded-dial-audit] · dials that still bypass the egress guard (design) (+6)
 
 status: in progress, items 1 7 6 (codex-sonnet) · kind: design · found: T347 run · priority: P2
 Each needs a per-dial decision (guard, admin-trust, or remove).
 
-1. CLI provider base URLs: worker cli-exec/images.ts:457, cli-adapters/ollama-probe.ts:76 (`probeOllamaEndpoint`), api routes/cli-providers.ts:664, worker cli-adapters/zai.ts:63,106. PRE-EXISTING.
+1. Shipped in PR #1049 (provider Test connection guarded by the owner role). Correction: api routes/cli-providers.ts:664 only enqueues and cli-adapters/zai.ts only sets env for the sandboxed CLI; neither is a dial.
 2. Admin-trusted by decision: Global KB external DSN (shared global-kb/connection.ts:172,177), `POST /global-kb/test-db`, vendor/module admin config. PRE-EXISTING; confirm or guard.
 3. Dead SMTP keys (shared config/config.service.ts:40-44,666): defaults exist, nothing outside tests reads them. PRE-EXISTING; remove or wire.
 4. `integration_provider_configs.api_base_url` is unused (database schema/integrations.ts:51); a future dial must use the guarded fetch. PRE-EXISTING.
 5. A user-typed git remote is dialed by the child `git` process outside the Node guard (worker repo clone.ts:74, bundle-sync.ts:18). A fix (protocol allowlist, network policy) changes product behaviour. PRE-EXISTING.
 6. (T558 run, 2026-11-09) `POST /global-kb/test-ollama` (api routes/global-kb.ts ~:575) lets any signed-in user make the api dial a request-typed URL through the guarded fetch; the page fires it on first load (settings/global-kb page.tsx ~:605) and the button stays usable for a non-admin, though the stored URL is now admin-only. PRE-EXISTING. Decide: admin-only, or restrict the probe to the stored URL.
-7. (T555 run, 2026-11-09) Provider probes dial a hand-set base URL through the global fetch: worker cli-adapters/openrouter-compat.ts:120 (`opts.fetchImpl ?? fetch`; base URL from `ANTHROPIC_BASE_URL`, reached from queues/cli-exec/images.ts:406-407). Item 1 lists images.ts:457 and ollama-probe.ts but not this one, and T511 item 2 treats openrouter-compat as a fixed vendor host, which is wrong for the probe. PRE-EXISTING, consequential.
+7. Shipped in PR #1049 (the OpenRouter compat probe, same guard).
+8. (PR #1049 review) A Test connection buffers a whole response body from a user-set URL with no size cap, bounded only by the 20 s abort: worker cli-adapters/ollama-probe.ts ~:118 (`resp.text()`), openrouter-compat.ts ~:165 (`resp.json()`). A non-admin can hold that much worker memory per probe. PRE-EXISTING, consequential for availability.
+9. (PR #1049 run and review) Z.AI usage polling sends the provider's token over plain fetch to the origin of a hand-set `ANTHROPIC_BASE_URL` (worker usage-window/fetchers/zai.ts ~:71, usage-poll-queue.ts:342); no reply text is returned, but status and error text land on the usage row (240 characters), so a non-admin gets a blind reachability and status probe of private hosts on every poll. PRE-EXISTING, consequential. Fix direction: same owner-role rule.
+10. (PR #1049 review) For the exempt in-stack names a non-admin sees the transport text with the container address and open port (`describeTransportError`, ollama-probe.ts ~:62-72). PRE-EXISTING, minor, narrower than before.
+11. (PR #1049 review) The refused warning says "refused by the egress guard" also when a built-in host's DNS is down, and no test drives `ConfigUnavailableError` into the Ollama result. NEW, minor.
 
 ### T584 · FNF[nested-repo-commit-leftovers] · nested repository edge cases left after the commit-site work (+5)
 
@@ -1338,7 +1342,7 @@ status: open · gate: bounded verification · user decision: recheck risk-bearin
 From the T365 fix round 1 (2026-10-31), verified against cx-365. PRE-EXISTING, memory only (no secret path). See also T496 (vendor-call deadlines).
 
 1. User-supplied Ollama URLs: api routes/tooling.ts ~:89 and ~:191 (`resp.json()` of `/api/tags`, `/api/show`, bounded in time only); shared rag/embed.ts ~:108 (`resp.text()` then a cut), ~:111, ~:179, ~:210 (`resp.json()`); worker cli-adapters/ollama-probe.ts ~:107 (`resp.text()` of the error body).
-2. Fixed vendor hosts: claude-oauth.ts ~:158-162, grok-oauth.ts ~:140-145, usage-window/fetchers/claude-code.ts ~:54 and codex.ts ~:75, cli-versions/model-prices.ts ~:96, cli-versions/ruby-versions.ts ~:94, cli-adapters/openrouter-compat.ts ~:165, sandbox/integrations-mcp-server.ts ~:51/~:76, sandbox/rag-mcp-server.ts ~:71-74.
+2. Fixed vendor hosts: claude-oauth.ts ~:158-162, grok-oauth.ts ~:140-145, usage-window/fetchers/claude-code.ts ~:54 and codex.ts ~:75, cli-versions/model-prices.ts ~:96, cli-versions/ruby-versions.ts ~:94, sandbox/integrations-mcp-server.ts ~:51/~:76, sandbox/rag-mcp-server.ts ~:71-74.
 3. Two private chunked bounded-read copies (shared forge/base-forge.ts ~:106, api lib/module-vendor-client.ts ~:102) beside the exported `readForgeJson` and `readForgeErrorExcerpt` that T365 adds.
 4. Fix direction: reuse T365's `readForgeJson` / `readForgeErrorExcerpt` everywhere (bounded read, stream cancelled past the bound, fixed message without the body), after T365 lands.
 5. (T365 review 3) api github-oauth.ts ~:119: a bare `catch` words a timeout or network failure as "answered something other than a repository list". Key the message on the error class (timeout, abort, parse) instead. Minor.
