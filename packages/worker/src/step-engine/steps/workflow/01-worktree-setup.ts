@@ -1,3 +1,5 @@
+import { initialGitlinkWarnings } from './_gitlink-registration.js';
+import { warnStep } from '../../../project-state/branch-revert.js';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -153,6 +155,12 @@ async function initGitRepo(
   // excludes it BEFORE the initial `git add -A`; doing this after the commit allowed the
   // old ownership marker to become tracked and appear in every linked worktree.
   await initGitWorkspace(ctx.repoPath, initBranch);
+  const warnings = await initialGitlinkWarnings(ctx);
+  try {
+    await warnStep(ctx, warnings);
+  } catch (err) {
+    ctx.logger.warn({ err }, 'Could not save initial-commit warnings; continuing');
+  }
   const add = await gitRun(ctx.repoPath, ['add', '-A']);
   if (add.code !== 0) {
     throw new Error(`git add -A failed (exit ${add.code}): ${add.stderr || add.stdout}`);

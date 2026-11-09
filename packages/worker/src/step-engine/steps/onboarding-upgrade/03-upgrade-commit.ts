@@ -1,3 +1,4 @@
+import { initialGitlinkWarnings } from '../workflow/_gitlink-registration.js';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import type { FormField, FormSchema } from '@haive/shared';
 import {
@@ -342,6 +343,7 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
           (typeof values.initBranch === 'string' ? values.initBranch : '').trim() || 'main';
         await initGitWorkspace(ctx.repoPath, initBranch);
         didInit = true;
+        warnings.push(...(await initialGitlinkWarnings(ctx)));
         await gitExec(['add', '-A'], { cwd: ctx.repoPath, maxBuffer: GIT_MAX_BUFFER });
         ctx.logger.info({ initBranch }, 'upgrade-commit: initialized git repository');
       }

@@ -469,6 +469,36 @@ describe('commit steps stage only the paths their step outputs record', () => {
     expect(await tracked(repo)).not.toContain('.claude/knowledge_base/A.md');
   });
 
+  it.each(['12', '03'])('%s warns but commits a nested clone on first init', async (site) => {
+    const repo = await mkdtemp(path.join(tmpdir(), 'init-nested-'));
+    dirs.push(repo);
+    await put(repo, { 'AGENTS.md': 'rules\n', 'nested/inner.txt': 'inner\n' });
+    await git(path.join(repo, 'nested'), ['init', '-q', '-b', 'main']);
+    await git(path.join(repo, 'nested'), ['add', '-A']);
+    await git(path.join(repo, 'nested'), ['commit', '-qm', 'nested']);
+    stepOutputs.current =
+      site === '12'
+        ? { '07-generate-files': { output: { wroteFiles: ['AGENTS.md'], skippedFiles: [] } } }
+        : { '02-upgrade-apply': { output: { writtenPaths: ['AGENTS.md'] } } };
+    const step = site === '12' ? postOnboardingStep : upgradeCommitStep;
+    const out = await step.apply(ctxFor(repo), {
+      detected: { hasGit: false } as never,
+      formValues: { commit: true, initBranch: 'main' },
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(out.commitPerformed).toBe(true);
+    expect(await git(repo, ['ls-tree', 'HEAD', 'nested'])).toMatch(/^160000 /);
+    const text = out.warnings.join('\n');
+    for (const part of [
+      '"nested"',
+      'only a commit id',
+      'empty in task worktrees',
+      'clone cannot fetch',
+    ])
+      expect(text).toContain(part);
+  });
+
   it('12 commits the whole tree of a repository with no git, as before', async () => {
     const repo = await mkdtemp(path.join(tmpdir(), 'commit-scope-nogit-'));
     dirs.push(repo);

@@ -1,9 +1,10 @@
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ensureDirNoFollow, removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import {
+  initialGitlinkWarnings,
   stageAllArgs,
   unregisteredGitlinks,
   unregisteredGitlinksMessage,
@@ -40,6 +41,16 @@ async function find(repo: string, excluded: string[] = []) {
 }
 
 describe('unregisteredGitlinks', () => {
+  it('checks a repository before its first commit, without touching its index', async () => {
+    const repo = await outer();
+    await removeNoFollow(repo, '.git', { recursive: true });
+    await git(repo, ['init', '-q', '-b', 'main']);
+    await nestedRepo(repo, 'nested');
+    const before = await git(repo, ['ls-files', '-s']);
+    expect(await find(repo)).toEqual(['nested']);
+    expect(await git(repo, ['ls-files', '-s'])).toBe(before);
+  });
+
   it('leaves no sharedindex file when core.splitIndex is on', async () => {
     const repo = await outer();
     await nestedRepo(repo, 'nested');
@@ -232,11 +243,11 @@ describe('unregisteredGitlinks', () => {
     expect(await git(repo, ['ls-files', '-s'])).toBe(index);
   });
 
-  it('throws for an outer repository with no commit', async () => {
+  it('accepts an empty outer repository before its first commit', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'gitlink-unborn-'));
     cleanups.push(() => removeNoFollow(tmpdir(), path.basename(dir), { recursive: true }));
     await git(dir, ['init', '-q', '-b', 'main']);
-    await expect(unregisteredGitlinks(dir, '', [])).rejects.toThrow();
+    expect(await unregisteredGitlinks(dir, '', [])).toEqual([]);
   });
 
   it('throws for a malformed .gitmodules', async () => {
@@ -329,4 +340,17 @@ describe('unregisteredGitlinksMessage', () => {
       expect(text).not.toMatch(/null|undefined/);
     }
   });
+});
+
+it('an initial-commit warning check that fails logs and continues', async () => {
+  const repo = await outer();
+  await nestedRepo(repo, 'nested');
+  const warn = vi.fn();
+  const shim = await failGit(['diff-index'], { exit: 128 });
+  try {
+    expect(await initialGitlinkWarnings({ repoPath: repo, logger: { warn } as never })).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  } finally {
+    await shim.restore();
+  }
 });

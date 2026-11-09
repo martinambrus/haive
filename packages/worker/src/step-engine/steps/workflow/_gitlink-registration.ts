@@ -8,6 +8,7 @@ import {
   gitRun,
   type GitRunResult,
 } from '../../../repo/git-exec.js';
+import type { StepContext } from '../../step-definition.js';
 import { parsePorcelainZ } from './_commit-diff.js';
 
 const GITLINK_MODE = '160000';
@@ -39,17 +40,19 @@ function expectOk(what: string, res: GitRunResult): void {
 }
 
 async function newGitlinks(workspace: string, env?: Record<string, string>): Promise<string[]> {
+  const head = await gitRun(workspace, ['rev-parse', '-q', '--verify', 'HEAD']);
+  if (head.code !== 0 && head.code !== 1) throw failure('git HEAD read', head);
   const res = await gitRun(
     workspace,
     [
-      'diff-index',
+      head.code === 1 ? 'diff' : 'diff-index',
       '--cached',
       '--raw',
       '-z',
       '--no-renames',
       '--ignore-submodules=none',
       '--diff-filter=AT',
-      'HEAD',
+      ...(head.code === 1 ? [] : ['HEAD']),
     ],
     env,
   );
@@ -199,4 +202,33 @@ export function unregisteredGitlinksMessage(
         ]),
     "(2) Include its files as ordinary files by removing its nested `.git` directory (this drops that repository's own history).",
   ].join('\n');
+}
+
+/** An uploaded tree must remain onboardable even when the nested-check or warning write fails. */
+export async function initialGitlinkWarnings(
+  ctx: Pick<StepContext, 'repoPath' | 'logger'>,
+): Promise<string[]> {
+  try {
+    const status = await gitRun(ctx.repoPath, [
+      '--no-optional-locks',
+      'status',
+      '--porcelain',
+      '-z',
+      '-uall',
+    ]);
+    expectOk('git status', status);
+    const paths = await unregisteredGitlinks(ctx.repoPath, status.stdout, []);
+    const warnings = paths.map(
+      (p) =>
+        `${JSON.stringify(p)} is a nested git repository without a registered submodule URL. The initial commit records only a commit id, so that directory will be empty in task worktrees and a clone cannot fetch it.`,
+    );
+    for (const warning of warnings) ctx.logger.warn(warning);
+    return warnings;
+  } catch (err) {
+    ctx.logger.warn(
+      { err },
+      'Could not check nested repositories before the initial commit; continuing',
+    );
+    return [];
+  }
 }

@@ -1,9 +1,9 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { nextFreeBranchName, worktreeSetupStep } from './01-worktree-setup.js';
 import type { StepApplyArgs, StepContext } from '../../step-definition.js';
@@ -206,4 +206,31 @@ describe('01 worktree setup apply', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+});
+
+it('first init warns about nested clones without blocking the worktree', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'wt-nested-init-'));
+  try {
+    await mkdir(path.join(root, 'nested'));
+    await git(path.join(root, 'nested'), ['init', '-b', 'main']);
+    await writeFile(path.join(root, 'nested/inner.txt'), 'inner\n');
+    await git(path.join(root, 'nested'), ['add', '-A']);
+    await git(path.join(root, 'nested'), ['commit', '-m', 'inner']);
+    const ctx = mkCtx(root);
+    Object.assign(ctx.db.query, { users: { findFirst: async () => null } });
+    Object.assign(ctx.db, { update: () => ({ set: () => ({ where: async () => undefined }) }) });
+    const warn = vi.fn();
+    ctx.logger = { ...logger, warn } as never;
+    const detected = await worktreeSetupStep.detect!(ctx);
+    const out = await worktreeSetupStep.apply(ctx, {
+      detected,
+      formValues: { branchName: 'feature/test', initBranch: 'main' },
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(out.mode).toBe('worktree');
+    expect(JSON.stringify(warn.mock.calls)).toContain('empty in task worktrees');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
