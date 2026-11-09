@@ -493,13 +493,6 @@ Each needs a per-dial decision (guard, admin-trust, or remove).
 5. A user-typed git remote is dialed by the child `git` process outside the Node guard (worker repo clone.ts:74, bundle-sync.ts:18). A fix (protocol allowlist, network policy) changes product behaviour. PRE-EXISTING.
 6. (T558 run, 2026-11-09) `POST /global-kb/test-ollama` (api routes/global-kb.ts ~:575) lets any signed-in user make the api dial a request-typed URL through the guarded fetch; the page fires it on first load (settings/global-kb page.tsx ~:605) and the button stays usable for a non-admin, though the stored URL is now admin-only. PRE-EXISTING. Decide: admin-only, or restrict the probe to the stored URL.
 
-### T558 · FNF[global-kb-ollama-url-write] · any signed-in user can set the Global KB Ollama URL (design)
-
-status: in progress (sonnet-sonnet driver, 2026-11-09) · kind: design · found: T347 run · priority: P2
-`putConfig` (api routes/global-kb.ts:449) lets any signed-in user save the Ollama URL and embed model, and the upgrade seed trusts what is stored. The egress guard now refuses private targets unless listed, but the value still steers every user's embeds. Decide: admin-only write, or keep open. PRE-EXISTING.
-
-User decision 2026-11-09: admin-only. A non-admin save that changes `ollamaUrl`, `embedModel` or `embedDimensions` is refused like the other admin fields (routes/global-kb.ts ~:388); the web form disables them for non-admins. Folded in: `archiveRetentionDays` (~:451) is also non-admin writable, and `purgeArchivedGlobalKbEntries` (worker global-kb-sync-queue.ts ~:347) hard-deletes archived entries older than it, so a non-admin setting 1 purges the archive; make it admin-only too.
-
 ### T577 · FNF[global-kb-config-untrimmed-write] · an admin's Ollama URL and embed model are stored untrimmed
 
 status: open · kind: fix · found: T558 run 2026-11-09 · priority: P4
@@ -1524,6 +1517,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T558 — FNF[global-kb-ollama-url-write]: Global KB Ollama URL, embed model, dimensions and archive retention admin-only — PR #1037 (dd9d5a733), 2026-11-09
 - T546 — config-outage readers hold instead of defaulting open: the reaper keeps runners whose grace it cannot read, refused defers retry for 60 s, boot migrations rethrow a typed outage into the boot retry — PR #1036 (9d55b622c), 2026-11-09
 - T544 — a config store outage at boot: initialize fails typed within 10 s and api and worker retry boot instead of exiting — PR #1035 (1ffea2665), 2026-11-08
 - T549 — the api's shared Redis client is bounded (503 when Redis is down); /admin/health reports Redis (merged without bot review) — PR #1033 (79eecd7b7), 2026-11-08
