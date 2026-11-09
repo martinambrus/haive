@@ -465,7 +465,7 @@ status: open · kind: fix · found: T347 run · priority: P2
 
 status: open · kind: fix · found: T347 run · priority: P2
 
-Items 1, 2 and 4 shipped in PR #1040 (4dceda71f), 2026-11-09. Items 3, 5, 6 and 7 stay parked as before; item 8 needs a decision.
+Three items (metadata addresses, IPv4-compatible form, required fetchFn) shipped in PR #1040 (4dceda71f), 2026-11-09, and the list renumbered. Items 3 to 6 stay parked as before; item 7 needs a decision.
 
 3. Hostname entries consult the hosts file only when DNS fails, so a name public in DNS but overridden in /etc/hosts dials the DNS answer (shared egress/probe-egress.ts:96,127,186,319). Accepted behaviour; revisit only on a report. NEW-LIMIT.
 4. `deflate` maps to `createInflate` (probe-egress.ts:158), so a raw-deflate body fails. PRE-EXISTING (moved code).
