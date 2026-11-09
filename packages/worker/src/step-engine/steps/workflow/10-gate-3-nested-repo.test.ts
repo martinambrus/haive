@@ -30,6 +30,14 @@ async function fixture(committed = false, name = 'nested') {
   return repo;
 }
 
+async function register(repo: string, name: string) {
+  await writeFileNoFollow(
+    repo,
+    '.gitmodules',
+    `[submodule "lib"]\n\tpath = ${name}\n\turl = https://example.invalid/x.git\n`,
+  );
+}
+
 async function commit(repo: string) {
   const ctx = gateContext(repo);
   const detected = await gate3CommitStep.detect!(ctx);
@@ -67,8 +75,18 @@ describe('gate 3 nested repository controls', () => {
     },
   );
 
-  it('keeps the existing gitlink behavior for a nested repository with commits', async () => {
+  it('refuses a nested repository with commits that no .gitmodules entry registers', async () => {
     const repo = await fixture(true);
+    const head = await git(repo, ['rev-parse', 'HEAD']);
+    const index = await git(repo, ['ls-files', '-s']);
+    await expect(commit(repo)).rejects.toThrow('"nested"');
+    expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
+    expect(await git(repo, ['ls-files', '-s'])).toBe(index);
+  });
+
+  it('keeps the gitlink behavior for a registered nested repository with commits', async () => {
+    const repo = await fixture(true);
+    await register(repo, 'nested');
     const nestedHead = (await git(path.join(repo, 'nested'), ['rev-parse', 'HEAD'])).trim();
     expect((await commit(repo)).committed).toBe(true);
     expect(await git(repo, ['ls-tree', 'HEAD', '--', 'nested'])).toBe(
@@ -129,6 +147,8 @@ describe('gate 3 nested repository controls', () => {
         await git(repo, ['commit', '-q', '-m', 'operator ownership']);
       }
       if (owned) {
+        await expect(commit(repo)).rejects.toThrow(`"${nested}"`);
+        await register(repo, nested);
         expect((await commit(repo)).committed).toBe(true);
         expect(await git(repo, ['ls-tree', 'HEAD', '--', nested])).toMatch(/^160000 commit /);
       } else {
@@ -283,19 +303,20 @@ describe('gate 3 nested repository controls', () => {
         await git(path.join(repo, 'nested'), ['add', '-A']);
         await git(path.join(repo, 'nested'), ['commit', '-q', '-m', 'first commit']);
       }
-      expect(
-        (
-          await gate3CommitStep.apply(ctx, {
-            detected,
-            formValues: { commit: true, commitMessage: 'fix: finalize' },
-            iteration: 0,
-            previousIterations: [],
-          })
-        ).committed,
-      ).toBe(true);
-      const entry = await git(repo, ['ls-tree', 'HEAD', '--', 'nested']);
-      if (committed) expect(entry).toBe('');
-      else expect(entry).toMatch(/^160000 commit /);
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      const apply = gate3CommitStep.apply(ctx, {
+        detected,
+        formValues: { commit: true, commitMessage: 'fix: finalize' },
+        iteration: 0,
+        previousIterations: [],
+      });
+      if (committed) {
+        expect((await apply).committed).toBe(true);
+        expect(await git(repo, ['ls-tree', 'HEAD', '--', 'nested'])).toBe('');
+      } else {
+        await expect(apply).rejects.toThrow('"nested"');
+        expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
+      }
     },
   );
 

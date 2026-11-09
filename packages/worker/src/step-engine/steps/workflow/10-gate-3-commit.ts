@@ -30,6 +30,11 @@ import { gitCommitStaged } from '../../../repo/git-commit.js';
 import { nestedRepositoryHead } from '../../../repo/nested-repository.js';
 import { asPlainText } from './_similar-sites.js';
 import { warnStep } from '../../../project-state/branch-revert.js';
+import {
+  stageAllArgs,
+  unregisteredGitlinks,
+  unregisteredGitlinksMessage,
+} from './_gitlink-registration.js';
 
 /** Cap on how many changed paths we persist to tasks.changed_paths. The estimator's
  *  file-overlap anchor (00b-estimate) needs the touched-file SET, not every path in a
@@ -454,13 +459,9 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     if (status.code !== 0) throw new Error(`git status failed: ${status.stderr || status.stdout}`);
     const excludedRepositories = await unbornRepositories(workspace, status.stdout);
     await assertDependencyCommitSafe(ctx, workspace, excludedRepositories);
-    const add = await gitRun(workspace, [
-      'add',
-      '-A',
-      ...(excludedRepositories.length
-        ? ['--', '.', ...excludedRepositories.map((p) => `:(top,exclude,literal)${p.slice(0, -1)}`)]
-        : []),
-    ]);
+    const orphans = await unregisteredGitlinks(workspace, status.stdout, excludedRepositories);
+    if (orphans.length) throw new Error(unregisteredGitlinksMessage(orphans));
+    const add = await gitRun(workspace, stageAllArgs(excludedRepositories));
     if (add.code !== 0) {
       throw new Error(`git add failed: ${add.stderr || add.stdout}`);
     }
