@@ -86,9 +86,9 @@ reset, so a duration kept there loses every retried attempt. A row also carries 
   Implementation, and the page says so. In a small sample, `tool_use` and `tool_result` stream lines
   had no clock of their own, though some assistant events carry a `timestamp`. Deriving tool timing
   would be separate work per CLI.
-- Counting human time outside a waiting form on the task page: plan canvas, steering a running
-  agent, testing the app in another tab, or PR review on the forge. The tab lists these as not
-  counted.
+- Counting human time outside a waiting form on the task page: steering a running agent, testing the
+  app in another tab, or PR review on the forge. The tab lists these as not counted. Plan page time
+  and idle detection are `human-time-idle-detection`.
 - CSV export and per-day charts of human time, which has no timestamps.
 - Adding the verify step to `/m/statistics/steps`. The new tab covers it.
 
@@ -202,13 +202,10 @@ are not strictly comparable, which the tab's note states.
 
 - Relabel "Waiting on you" on the Time tab to "Idle", because 10,544 h of idle cannot be read as
   people. Correct the "time waiting on the user" comment on `TaskTiming.idleMs`.
-- `useUserActiveTimer`: stop counting after five minutes without pointer, key, wheel or scroll input,
-  as a named constant. Input inside an iframe never reaches the parent, so count while
-  `document.activeElement` is an `IFRAME`, which keeps the Editor and browser panels working.
-- Add the cutoff to the "What these figures cover" note.
+- Idle detection for `useUserActiveTimer` is delivered by `human-time-idle-detection` PR 1. Add its
+  rule to the "What these figures cover" note once both have shipped.
 
-Verify: unit tests with fake timers for the cutoff, resume on input, and iframe focus; a browser
-check that the timer stops and resumes on a parked form.
+Verify: the Time tab shows the new label and the comment matches what `idle_ms` holds.
 
 ## Critical files
 
