@@ -316,6 +316,37 @@ describe('private endpoint allowlist', () => {
     },
   );
 
+  it.each(['64:ff9b:1::a9fe:a9fe', '2001:0:4136:e378:8000:63bf:3fff:fdd2'])(
+    'a hostname entry cannot lift the IPv6 tunnel answer %s',
+    async (answer) => {
+      const r = resolverOf(() => [answer]);
+      const err = await failure(
+        createGuardedFetch({ resolve: r.resolve, privateAllowlist: allow('meta.test') })(
+          url('meta.test'),
+          { signal: AbortSignal.timeout(500) },
+        ),
+      );
+      expect(err.cause?.code).toBe('ENOTFOUND');
+      expect(r.calls).toEqual(['meta.test']);
+    },
+  );
+
+  it.each([
+    ['64:ff9b:1::a9fe:a9fe', '64:ff9b:1::a9fe:a9fe'],
+    ['64:ff9b:1::/48', '64:ff9b:1::a9fe:a9fe'],
+    ['2001:0:4136:e378:8000:63bf:3fff:fdd2', '2001:0:4136:e378:8000:63bf:3fff:fdd2'],
+    ['2001::/32', '2001:0:4136:e378:8000:63bf:3fff:fdd2'],
+  ])('the explicit entry %s still lifts the IPv6 tunnel answer %s', async (entry, answer) => {
+    const r = resolverOf(() => [answer]);
+    const err = await failure(
+      createGuardedFetch({ resolve: r.resolve, privateAllowlist: allow(entry) })(url('meta.test'), {
+        signal: AbortSignal.timeout(500),
+      }),
+    );
+    expect(err.cause?.code).not.toBe('ENOTFOUND');
+    expect(r.calls).toEqual(['meta.test']);
+  });
+
   it('an address entry or a CIDR entry still lifts a link-local answer', async () => {
     for (const entry of ['169.254.169.254', '169.254.0.0/16']) {
       const r = resolverOf(() => ['169.254.169.254']);
