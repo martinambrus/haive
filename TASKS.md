@@ -509,7 +509,7 @@ PRE-EXISTING. Gate 3 and the DAG issue commit now refuse a new gitlink with no `
 
 ### T581 · FNF[global-kb-entry-patch-any-user] · any signed-in user can edit any Global KB entry, which also undoes the delete rule
 
-status: open · kind: fix · user decision: needed (same rule as delete, or keep shared editing) · found: T579 review 2026-11-09 · priority: P2
+status: in progress (codex-sonnet, 2026-11-09) · kind: fix · user decision: resolved 2026-11-09 (same rule as delete) · found: T579 review 2026-11-09 · priority: P2
 
 PRE-EXISTING, consequential. api `routes/global-kb.ts` ~:1100 `PATCH /entries/:id` has no owner or admin check. A content edit clears `enforcedHash` (~:1157), a status change off `active` clears it through the trigger (`ensure-schema.ts:167-187`), and activating a draft that supersedes an enforced entry archives it (~:1234). So any signed-in user can take an admin-enforced rule out of force, and an enforced entry's owner can edit it and then delete it as unapproved, past the admin-only rule T579 shipped. Session recommendation: apply the delete rule to PATCH. Cost: non-owners lose shared editing, which the route comment allows today.
 
