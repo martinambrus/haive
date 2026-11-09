@@ -498,7 +498,7 @@ Each needs a per-dial decision (guard, admin-trust, or remove).
 
 ### T578 · FNF[orphan-gitlink-2] · commit sites other than gate 3 still record an unregistered nested repository (+7)
 
-status: open · kind: fix · found: T425 run 2026-11-09 · priority: P3
+status: in progress (codex-sonnet, 2026-11-09) · items 2-5 · kind: fix · found: T425 run 2026-11-09 · priority: P3
 
 PRE-EXISTING. Gate 3 and the DAG issue commit now refuse a new gitlink with no `.gitmodules` url (`_gitlink-registration.ts`; DAG commit shipped in #1042); these do not. A stale comment above `commitIssueWork` (`dag-executor.ts` ~:472, "the coder is told to commit") contradicts the coder prompt; fix with any edit there. A task in flight across the #1042 deploy whose issue commit already holds an orphan gitlink is not detected.
 
