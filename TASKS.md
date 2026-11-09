@@ -507,19 +507,19 @@ PRE-EXISTING. Gate 3 and the DAG issue commit now refuse a new gitlink with no `
 4. A malformed `.gitmodules` next to a gitlink: `git commit` can land the commit and exit 128, so the step throws with HEAD advanced. The new refusal precedes this for an orphan; a malformed file next to an already tracked gitlink was not tried. Minor. Next to it: editing inside a gitlink the branch already holds, with no `.gitmodules` and no nested commit, stages nothing, so the DAG `git commit` fails and Retry cannot pass without touching the nested repo (`dag-executor.ts` ~:520).
 5. Not exercised by the T425 run: open MERGE_HEAD and unmerged gitlinks, and git 2.54 (host runs were 2.43). Merge-fix `completeMergeHostSide` (`git-merge.ts:1313`, `add -A -- <conflicted paths>` :1355) could commit a nested repo inside a conflicted path; not tried.
 
-### T581 · FNF[global-kb-entry-patch-any-user] · any signed-in user can edit any Global KB entry, which also undoes the delete rule
-
-status: in progress (codex-sonnet, 2026-11-09) · kind: fix · user decision: resolved 2026-11-09 (same rule as delete) · found: T579 review 2026-11-09 · priority: P2
-
-PRE-EXISTING, consequential. api `routes/global-kb.ts` ~:1100 `PATCH /entries/:id` has no owner or admin check. A content edit clears `enforcedHash` (~:1157), a status change off `active` clears it through the trigger (`ensure-schema.ts:167-187`), and activating a draft that supersedes an enforced entry archives it (~:1234). So any signed-in user can take an admin-enforced rule out of force, and an enforced entry's owner can edit it and then delete it as unapproved, past the admin-only rule T579 shipped. Session recommendation: apply the delete rule to PATCH. Cost: non-owners lose shared editing, which the route comment allows today.
-
-### T582 · FNF[global-kb-delete-ui-followups] · small Global KB delete page gaps (+2)
+### T582 · FNF[global-kb-delete-ui-followups] · small Global KB delete page gaps (+3)
 
 status: open · kind: fix · found: T579 review 2026-11-09 · priority: P4
 
 1. PRE-EXISTING. An admin's Cancel on another user's enrichment is dead, and so is the cancel after an admin deletes that entry: the task route scopes to the task's owner (`routes/tasks/index.ts:1304-1306`) and answers 404 while `page.tsx` ~:2119 shows Cancel and ~:1120 promises it.
 2. Own change, cosmetic. After a refused delete the page shows the 403 but keeps the Delete button until a reload (`page.tsx` ~:1144); a non-admin owner also gets no explanation for a missing Delete on a lapsed or paused row.
-3. Own change, cosmetic. `api-client.ts:1340` comment line is 128 characters.
+3. PRE-EXISTING, minor. Re-scoping an entry and deleting one rewrite `supersedes_entry_id` on entries of other owners, which that actor may not change (`routes/global-kb.ts` ~:1217, ~:1324). Fix direction: decide whether link repair is exempt from the change rule, and say so in `docs/architecture/global-kb.md`.
+4. Coverage. The activation target's `FOR UPDATE` row lock is not pinned by a test: the fake DB ignores it. The advisory lock serializes API writers, so no live race is known.
+
+### T583 · FNF[global-kb-draft-owner-blind-link] · a non-admin's draft that replaces another owner's entry needs an admin to activate
+
+status: open · kind: design · found: T581 review 2026-11-09 · priority: P3
+PRE-EXISTING link, new consequence of #1044. Auto-link picks the entry a draft replaces without looking at its owner or approval (`steps/_global-kb-promote.ts`, `steps/kb-author/01-enrich.ts:673`), so a non-admin's draft can be linked over an entry they may not change. Since #1044 Activate refuses it with "Activating this entry would archive an entry you may not change; an admin is required", and only an admin can finish it. Needs a decision: leave it, let the author drop the link and publish beside the original, or skip auto-link on entries the author may not change.
 
 ### T577 · FNF[global-kb-config-untrimmed-write] · an admin's Ollama URL and embed model are stored untrimmed
 
@@ -1544,6 +1544,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T581 — restrict who may change a Global KB entry — PR #1044 (0d73cb579), 2026-11-09
 - T579 — restrict who may delete a Global KB entry — PR #1043 (4d7904a75), 2026-11-09
 - T425 — gate 3 refuses an unregistered nested repository instead of committing a gitlink with no url — PR #1039 (435cc78c9), 2026-11-09
 - T558 — FNF[global-kb-ollama-url-write]: Global KB Ollama URL, embed model, dimensions and archive retention admin-only — PR #1037 (dd9d5a733), 2026-11-09
