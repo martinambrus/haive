@@ -1109,6 +1109,7 @@ export default function GlobalKbPage() {
   }
 
   async function remove(e: GlobalKbEntry) {
+    if (!e.canDelete) return;
     // Only a kb_author ENRICH entry (source='user' with its own task) should cascade
     // a cancel — that task exists solely to produce this row, so deleting the row
     // orphans it. A PROMOTED draft (source='promoted') is one incidental artifact of a
@@ -1150,7 +1151,7 @@ export default function GlobalKbPage() {
   // kb_author task; the worker then deletes this still-enriching row, and the list
   // poll drops it on the next refresh.
   async function cancelEnrich(e: GlobalKbEntry) {
-    if (!e.sourceTaskId) return;
+    if (!e.canDelete || !e.sourceTaskId) return;
     if (!window.confirm(`Cancel enriching "${e.title}"? The draft entry is discarded.`)) return;
     setBusy(true);
     try {
@@ -2115,7 +2116,7 @@ export default function GlobalKbPage() {
                       </Badge>
                     )}
                     <div className="ml-auto flex items-center gap-2">
-                      {inProgress && e.sourceTaskId && (
+                      {inProgress && e.canDelete && e.sourceTaskId && (
                         <Button
                           size="sm"
                           variant="secondary"
@@ -2180,7 +2181,7 @@ export default function GlobalKbPage() {
                           Activate
                         </Button>
                       )}
-                      {!inProgress && (
+                      {!inProgress && e.canDelete && (
                         <Button
                           size="sm"
                           variant="destructive"
@@ -2610,15 +2611,17 @@ export default function GlobalKbPage() {
                     Archive
                   </Button>
                 )}
-                <Button
-                  size="sm"
-                  variant="destructive"
-                  disabled={busy || scopeBusy || descBusy || bodyBusy || editOpen}
-                  title={editOpenHint}
-                  onClick={() => void remove(selected)}
-                >
-                  Delete
-                </Button>
+                {selected.canDelete && (
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    disabled={busy || scopeBusy || descBusy || bodyBusy || editOpen}
+                    title={editOpenHint}
+                    onClick={() => void remove(selected)}
+                  >
+                    Delete
+                  </Button>
+                )}
               </div>
             </>
           )}
