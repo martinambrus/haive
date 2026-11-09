@@ -469,8 +469,7 @@ function issueRefused(issue: { errorMessage?: string | null }): boolean {
   return issue.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter) === true;
 }
 
-/** Commit any uncommitted work in an issue worktree (belt-and-suspenders — the
- *  coder is told to commit, but may not). No-op when the tree is clean. */
+/** Commit issue work host-side: the coder cannot run git. No-op when the tree is clean. */
 async function commitIssueWork(
   ctx: StepContext,
   worktreePath: string,
