@@ -507,11 +507,19 @@ PRE-EXISTING. Gate 3 and the DAG issue commit now refuse a new gitlink with no `
 4. A malformed `.gitmodules` next to a gitlink: `git commit` can land the commit and exit 128, so the step throws with HEAD advanced. The new refusal precedes this for an orphan; a malformed file next to an already tracked gitlink was not tried. Minor. Next to it: editing inside a gitlink the branch already holds, with no `.gitmodules` and no nested commit, stages nothing, so the DAG `git commit` fails and Retry cannot pass without touching the nested repo (`dag-executor.ts` ~:520).
 5. Not exercised by the T425 run: open MERGE_HEAD and unmerged gitlinks, and git 2.54 (host runs were 2.43). Merge-fix `completeMergeHostSide` (`git-merge.ts:1313`, `add -A -- <conflicted paths>` :1355) could commit a nested repo inside a conflicted path; not tried.
 
-### T579 · FNF[global-kb-entry-delete-any-user] · any signed-in user can delete any Global KB entry, an enforced house rule included
+### T581 · FNF[global-kb-entry-patch-any-user] · any signed-in user can edit any Global KB entry, which also undoes the delete rule
 
-status: in progress (codex-sonnet, 2026-11-09) · kind: fix · user decision: resolved 2026-11-09 · found: T558 browser check 2026-11-09 · priority: P3
+status: open · kind: fix · user decision: needed (same rule as delete, or keep shared editing) · found: T579 review 2026-11-09 · priority: P2
 
-PRE-EXISTING, read in code, not exercised. api `routes/global-kb.ts` ~:1260 `DELETE /entries/:id` has no `requireAdmin` and no owner check, and the page shows Delete on every entry to a non-admin. Enforcing and un-enforcing a rule are admin-only (~:1310, ~:1403), yet deleting the enforced entry is not. User decision 2026-11-09: admin-only for an enforced entry, owner-or-admin for the rest. `user_id` is nullable and the promotion insert (`_global-kb-promote.ts` ~:681) sets none, so an entry with no owner is admin-only (session default, change if unwanted). The page must show Delete only where it will work. The entry edit route (`PATCH /entries/:id`, ~:1084) has the same gap and was not part of this decision.
+PRE-EXISTING, consequential. api `routes/global-kb.ts` ~:1100 `PATCH /entries/:id` has no owner or admin check. A content edit clears `enforcedHash` (~:1157), a status change off `active` clears it through the trigger (`ensure-schema.ts:167-187`), and activating a draft that supersedes an enforced entry archives it (~:1234). So any signed-in user can take an admin-enforced rule out of force, and an enforced entry's owner can edit it and then delete it as unapproved, past the admin-only rule T579 shipped. Session recommendation: apply the delete rule to PATCH. Cost: non-owners lose shared editing, which the route comment allows today.
+
+### T582 · FNF[global-kb-delete-ui-followups] · small Global KB delete page gaps (+2)
+
+status: open · kind: fix · found: T579 review 2026-11-09 · priority: P4
+
+1. PRE-EXISTING. An admin's Cancel on another user's enrichment is dead, and so is the cancel after an admin deletes that entry: the task route scopes to the task's owner (`routes/tasks/index.ts:1304-1306`) and answers 404 while `page.tsx` ~:2119 shows Cancel and ~:1120 promises it.
+2. Own change, cosmetic. After a refused delete the page shows the 403 but keeps the Delete button until a reload (`page.tsx` ~:1144); a non-admin owner also gets no explanation for a missing Delete on a lapsed or paused row.
+3. Own change, cosmetic. `api-client.ts:1340` comment line is 128 characters.
 
 ### T577 · FNF[global-kb-config-untrimmed-write] · an admin's Ollama URL and embed model are stored untrimmed
 
@@ -1536,6 +1544,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T579 — restrict who may delete a Global KB entry — PR #1043 (4d7904a75), 2026-11-09
 - T425 — gate 3 refuses an unregistered nested repository instead of committing a gitlink with no url — PR #1039 (435cc78c9), 2026-11-09
 - T558 — FNF[global-kb-ollama-url-write]: Global KB Ollama URL, embed model, dimensions and archive retention admin-only — PR #1037 (dd9d5a733), 2026-11-09
 - T546 — config-outage readers hold instead of defaulting open: the reaper keeps runners whose grace it cannot read, refused defers retry for 60 s, boot migrations rethrow a typed outage into the boot retry — PR #1036 (9d55b622c), 2026-11-09
