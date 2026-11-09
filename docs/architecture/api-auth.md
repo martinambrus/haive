@@ -136,6 +136,9 @@ warns again); the response never does. postgres.js has no lookup option, so it g
 refuses unix paths, several hosts and blocked literals and otherwise connects through the same lookup. The
 Ollama helpers in `rag/embed.ts` take an optional `fetchFn` and default to a guarded fetch that exempts the
 built-in hosts, so the worker's dials are guarded too. `POST /global-kb/test-db` was already `requireAdmin`.
+`POST /global-kb/test-ollama` takes a typed address from an administrator only: anyone else's call reads the
+stored settings and ignores the body, so it dials only what an administrator saved, still through the guard. It
+stays open to them because the settings page and the status panel run it on load, where `requireAdmin` would 403.
 
 **A provider's Test connection follows the same rule in the worker.** `POST /cli-providers/:id/test` only queues
 a PROBE job, and for an OpenRouter or Ollama provider the worker then sends one request to the provider's base
