@@ -329,6 +329,25 @@ describe('private endpoint allowlist', () => {
     }
   });
 
+  it('an address entry or a CIDR entry still lifts a cloud metadata answer', async () => {
+    for (const [entry, answer] of [
+      ['100.100.100.200', '100.100.100.200'],
+      ['192.0.0.192/32', '192.0.0.192'],
+      ['fd00:ec2::254', 'fd00:ec2::254'],
+      ['fd00:ec2::/32', 'fd00:ec2::254'],
+      ['::a9fe:a9fe', '::a9fe:a9fe'],
+    ] as const) {
+      const r = resolverOf(() => [answer]);
+      const err = await failure(
+        createGuardedFetch({ resolve: r.resolve, privateAllowlist: allow(entry) })(
+          url('meta.test'),
+          { signal: AbortSignal.timeout(500) },
+        ),
+      );
+      expect(err.cause?.code).not.toBe('ENOTFOUND');
+    }
+  });
+
   it('a hostname entry still lifts an ordinary private answer', async () => {
     const r = resolverOf(() => ['10.1.2.3']);
     const err = await failure(
