@@ -25,6 +25,7 @@ const ctxWith = (token: string, over: Partial<ForgeContext> = {}): ForgeContext 
   repo: 'app',
   token,
   username: 'octocat',
+  fetchFn: (input, init) => fetch(input, init),
   ...over,
 });
 

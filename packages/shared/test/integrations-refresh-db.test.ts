@@ -802,6 +802,7 @@ describe.skipIf(!url)('connection access tokens on Postgres', () => {
       repo: 'app',
       token: credential.accessToken,
       username: credential.username ?? '',
+      fetchFn: (input, init) => fetch(input, init),
       ...over,
     });
 

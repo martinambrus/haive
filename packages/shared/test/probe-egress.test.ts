@@ -292,8 +292,18 @@ describe('private endpoint allowlist', () => {
     expect((await fetchFn(url('db.test.'))).status).toBe(200);
   });
 
-  it.each([['169.254.169.254'], ['fe80::1'], ['0.0.0.0'], ['127.0.0.1', '169.254.169.254']])(
-    'a hostname entry never lifts a link-local or unspecified answer %j',
+  it.each([
+    ['169.254.169.254'],
+    ['fe80::1'],
+    ['0.0.0.0'],
+    ['127.0.0.1', '169.254.169.254'],
+    ['100.100.100.200'],
+    ['192.0.0.192'],
+    ['fd00:ec2::254'],
+    ['::a9fe:a9fe'],
+    ['10.1.2.3', '100.100.100.200'],
+  ])(
+    'a hostname entry never lifts a link-local, unspecified or cloud metadata answer %j',
     async (...answers) => {
       const r = resolverOf(() => answers);
       const err = await failure(
@@ -319,6 +329,25 @@ describe('private endpoint allowlist', () => {
     }
   });
 
+  it('an address entry or a CIDR entry still lifts a cloud metadata answer', async () => {
+    for (const [entry, answer] of [
+      ['100.100.100.200', '100.100.100.200'],
+      ['192.0.0.192/32', '192.0.0.192'],
+      ['fd00:ec2::254', 'fd00:ec2::254'],
+      ['fd00:ec2::/32', 'fd00:ec2::254'],
+      ['::a9fe:a9fe', '::a9fe:a9fe'],
+    ] as const) {
+      const r = resolverOf(() => [answer]);
+      const err = await failure(
+        createGuardedFetch({ resolve: r.resolve, privateAllowlist: allow(entry) })(
+          url('meta.test'),
+          { signal: AbortSignal.timeout(500) },
+        ),
+      );
+      expect(err.cause?.code).not.toBe('ENOTFOUND');
+    }
+  });
+
   it('a hostname entry still lifts an ordinary private answer', async () => {
     const r = resolverOf(() => ['10.1.2.3']);
     const err = await failure(
@@ -328,6 +357,15 @@ describe('private endpoint allowlist', () => {
       ),
     );
     expect(err.cause?.code).not.toBe('ENOTFOUND');
+  });
+
+  it('a hostname entry still lifts a loopback answer that includes ::1', async () => {
+    const r = resolverOf(() => ['::1', '127.0.0.1']);
+    const res = await createGuardedFetch({
+      resolve: r.resolve,
+      privateAllowlist: allow('local.test'),
+    })(url('local.test'));
+    expect(res.status).toBe(200);
   });
 
   it('a pg socket under a hostname entry refuses a link-local answer', async () => {

@@ -617,15 +617,16 @@ change.
 - **Errors**: 401/403 `ForgeAuthError`, 404 `ForgeNotFoundError`, 409/422 `ForgeConflictError`, 429
   `ForgeRateLimitError` with `Retry-After`. On a 409/422 from a create, the adapter looks up the open
   pull request for the branch pair and returns it when one exists; otherwise the conflict stands.
-- **Dialing and redirects**: `BaseForgeProvider.request` sends through `ctx.fetchFn ?? fetch` with
+- **Dialing and redirects**: `BaseForgeProvider.request` sends through `ctx.fetchFn` with
   `redirect: 'manual'`; a 3xx answer cancels its body and throws a `ForgeError` carrying the status that
   says redirects are not followed (set the credential's API base to the final address, or check the
   repository was not renamed or moved: GitHub answers a renamed repository with a 301). Both places that
   build a `ForgeContext` (worker `resolveForgeContext`, api `integration-mcp.ts`) pass `guardedFetch`
   from `@haive/shared/egress`, so a forge host that resolves to a private, loopback or link-local address
   is refused unless the administrator's private-endpoint allowlist lists it (`api-auth.md`); a refusal
-  reads as a connect failure (`fetch failed`). A new construction site must pass `fetchFn`: left out it
-  falls back to the global fetch with no guard.
+  reads as a connect failure (`fetch failed`). `ForgeContext.fetchFn` is required with no default: a site
+  that leaves it out fails to typecheck, and a context built without it by a cast gets a `ForgeError` with
+  nothing sent.
 - **Deadline**: `FORGE_REQUEST_TIMEOUT_MS` (30 s) per request, headers and body, injectable through
   the constructor. `openPullRequest` can make two requests, so one call can take up to twice that.
   An error response whose body stalls is still reported as its HTTP status, not as a timeout: the

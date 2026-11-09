@@ -19,6 +19,7 @@ const ctx: ForgeContext = {
   repo: 'app',
   token: 'tok',
   username: 'user',
+  fetchFn: (input, init) => fetch(input, init),
 };
 
 const fetchMock = vi.fn<typeof fetch>();

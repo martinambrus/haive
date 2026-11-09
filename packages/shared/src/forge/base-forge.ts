@@ -67,7 +67,7 @@ export abstract class BaseForgeProvider implements ForgeProvider {
 
     let res: Response;
     try {
-      res = await (ctx.fetchFn ?? fetch)(url, {
+      res = await ctx.fetchFn(url, {
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),

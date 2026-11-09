@@ -22,10 +22,10 @@ export interface ForgeContext {
   username: string;
   /** Aborts every request made with this context, whatever its own timeout says. */
   signal?: AbortSignal;
-  /** How every request made with this context is sent. A caller that dials a stored or
-   *  user-typed host passes the guarded fetch from `@haive/shared/egress`; left out, the
-   *  global fetch is used. */
-  fetchFn?: (input: string, init?: RequestInit) => Promise<Response>;
+  /** How every request made with this context is sent. There is no default, so leaving it
+   *  out cannot reach the global fetch. A caller that dials a stored or user-typed host passes
+   *  the guarded fetch from `@haive/shared/egress`. */
+  fetchFn: (input: string, init?: RequestInit) => Promise<Response>;
 }
 
 export interface OpenPrInput {

@@ -244,6 +244,7 @@ describe('the adapters and a pull request number', () => {
     repo: 'app',
     token: 'tok',
     username: 'user',
+    fetchFn: (input, init) => fetch(input, init),
     ...over,
   });
 

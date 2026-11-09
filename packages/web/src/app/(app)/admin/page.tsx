@@ -2549,10 +2549,10 @@ function AdminPageInner() {
               they are listed here. One entry per line or comma-separated: an IP address, a CIDR
               range (10.0.0.0/8) or a hostname. An address or range is checked against the address
               the name resolves to when the connection opens; a hostname entry trusts every address
-              that name resolves to except link-local and unspecified ones, which only an address or
-              range entry can allow. Built-in services need no entry. A refused endpoint fails with
-              a host-not-found error, and a name defined only in /etc/hosts needs a hostname entry.
-              Applies within about 30 seconds.
+              that name resolves to except link-local, unspecified and cloud metadata ones, which
+              only an address or range entry can allow. Built-in services need no entry. A refused
+              endpoint fails with a host-not-found error, and a name defined only in /etc/hosts
+              needs a hostname entry. Applies within about 30 seconds.
             </CardDescription>
           </CardHeader>
           <textarea
