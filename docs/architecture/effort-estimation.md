@@ -80,6 +80,16 @@ orders same-path overlapping tasks first, then overlap and recency, so the 30-an
 not exclude them. With two measured local same-path overlaps, refinement uses their median;
 otherwise it retains the broader file-overlap fallback. The confirmed user estimate is unchanged.
 
+**Calibrate on what the LLM said, not on the refined number.** 06b overwrites
+`tasks.ai_estimated_time_hours`, so that column is the current estimate, which the task page's
+verdict card and pace chip show. Calibration anchors (`hydrateAnchors`), `GET /tasks/estimation-accuracy`
+and the statistics estimates report read `aiHours` of the task's latest `estimate.recorded` event
+(`recordedEstimateHours`) instead: a refined pair measures a file-overlap median against actuals,
+which pulls the bias toward 1 and under-corrects. A 00b Retry writes another event, so the latest
+wins. With no event, or a latest `aiHours` that is not a positive finite number, the column is
+used. An invalid latest event does not revive an older one. A refined task can therefore show one
+number on its verdict card and another in the accuracy reports, by design.
+
 The sample thresholds are conservative implementation choices, not measured accuracy gains.
 Historical evaluation must use only runs completed before the task's estimate, report error by
 path and disclose sample counts. Replaying deterministic baselines does not measure the AI's

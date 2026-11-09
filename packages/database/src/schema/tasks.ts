@@ -338,12 +338,12 @@ export const tasks = pgTable(
      *  header and a footer verdict card. NULL = no estimate; the comparison
      *  surfaces stay hidden. doublePrecision so it round-trips as a JS number. */
     estimatedTimeHours: doublePrecision('estimated_time_hours'),
-    /** The AI's learned effort estimate (decimal hours), written by 00b-estimate from
-     *  the repository's prior completed tasks and their MEASURED effort. Kept SEPARATE
-     *  from the human/confirmed estimatedTimeHours (the 00b form defaults to this value
-     *  and the user may accept or override it) so AI accuracy stays measurable against
-     *  actual effort over time — that (aiEstimate, actual) pair is the calibration
-     *  signal 00b feeds itself. NULL until 00b runs, and on legacy rows. */
+    /** The AI's current effort estimate (decimal hours), written by 00b-estimate from
+     *  the repository's prior completed tasks and their MEASURED effort, and overwritten
+     *  by 06b's file-overlap refinement. Kept SEPARATE from the human/confirmed
+     *  estimatedTimeHours (the 00b form defaults to this value and the user may accept or
+     *  override it). Calibration reads the LLM's own number from the latest
+     *  estimate.recorded event, not this column. NULL until 00b runs, and on legacy rows. */
     aiEstimatedTimeHours: doublePrecision('ai_estimated_time_hours'),
     /** Low/high effort band (decimal hours) around the AI estimate, from the spread of
      *  the anchor tasks' actual effort (p20/p80). Both NULL until 00b-estimate runs with

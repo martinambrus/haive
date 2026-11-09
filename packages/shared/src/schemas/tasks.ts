@@ -244,6 +244,7 @@ export const MERGE_CLARIFICATION_ANSWERED_EVENT = 'merge_resolution.clarificatio
 /** task_events type the worker's markTaskDead writes with the unresolved step ids; the api reads it. */
 export const TASK_DEAD_EVENT = 'task.dead';
 
+/** task_events type holding the LLM's own estimate in payload.aiHours; refinement never rewrites it. */
 export const ESTIMATE_RECORDED_EVENT = 'estimate.recorded';
 
 /** The worker (builds and resolves the gates) and the api (re-offers rows) key on one id: an

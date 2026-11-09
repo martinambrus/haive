@@ -110,6 +110,8 @@ positive finite number, or the task has no event, use the column as today.
 - `GET /tasks/estimation-accuracy` (api `routes/tasks/index.ts`): same lookup,
   `aiEstimatedHours: recorded.get(t.id) ?? t.aiEstimatedTimeHours ?? 0`. Its `medianBiasFactor` is
   documented as calibration and must agree with the hint.
+- The statistics module's estimates route (`modules/statistics/src/routes.ts`): the same lookup, since
+  it runs `buildEstimationAccuracy` on the same column and must agree with the report above.
 - Comments: state the real meaning of the column wherever it is called raw or the AI's own
   (00b header, `estimation-accuracy.ts` header and field, the verdict card in web `tasks/[id]/page.tsx`).
 - `effort-estimation.md`: in the 06b paragraph, say calibration and the accuracy report read the

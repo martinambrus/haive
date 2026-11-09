@@ -1024,7 +1024,7 @@ taskRoutes.get('/last-cli', async (c) => {
 });
 
 // Per-repo estimation-accuracy dashboard (task-time estimation v2.4). Completed workflow
-// tasks that carry a RAW AI estimate are paired with their MEASURED actual effort
+// tasks that carry an AI estimate are paired with their MEASURED actual effort
 // (computeTaskTiming), and the shared aggregator derives per-task error + the repo-level
 // MAPE / median bias / over-under split. Empty until tasks complete through 00b-estimate.
 // Static path — must stay ABOVE '/:id' so it is not captured as an id.
