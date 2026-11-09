@@ -148,7 +148,7 @@ matched against the RESOLVED address at connect time (an IPv4 rule also matches 
 name that later resolves elsewhere is judged by where it connects. A hostname entry matches the dialed
 hostname exactly and trusts every address that name resolves to EXCEPT link-local (169.254.0.0/16, fe80::/10),
 unspecified (0.0.0.0/8, `::`) and cloud metadata addresses (100.100.100.200 Alibaba ECS, 192.0.0.192 Oracle
-Compute Classic, fd00:ec2::254 EC2 over IPv6), each IPv4 one also in its IPv4-mapped, NAT64, 6to4, SIIT and
+Compute Classic, 168.63.129.16 the Azure host, fd00:ec2::254 EC2 over IPv6), each IPv4 one also in its IPv4-mapped, NAT64, 6to4, SIIT and
 IPv4-compatible (`::a9fe:a9fe`) forms. Only an address or CIDR entry can allow those
 (`isUnliftableByHostname`). `::1` is the IPv6 loopback and not the compatible form of 0.0.0.1, so like
 127.0.0.1 it stays liftable. Only address entries are rebinding-proof. The DNS
