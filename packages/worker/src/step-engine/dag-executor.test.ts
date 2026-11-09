@@ -2217,6 +2217,12 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       return message;
     }
 
+    function expectNoDispatch(h: ReturnType<typeof makeDagMergeWaitDb>, enqueued: unknown[]) {
+      expect(vi.mocked(resolveTaskDispatch)).not.toHaveBeenCalled();
+      expect(h.invocationInserts).toEqual([]);
+      expect(enqueued).toEqual([]);
+    }
+
     afterEach(async () => {
       for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
     });
@@ -2347,6 +2353,124 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       );
       expect(await out(integrationDir, ['show', 'main:new.txt'])).toBe('uncommitted');
       expect(h.issueUpdates.some((u) => u.mergeStatus === 'clean')).toBe(true);
+    });
+
+    it('a Retry after the nested .git is removed commits its files as ordinary files, with no fixer', async () => {
+      const { integrationDir, worktrees } = await setupLevel();
+      const issueDir = worktrees['ISSUE-1']!;
+      await nestedRepo(issueDir);
+      expectIssueRefusal(
+        await thrown(pass(dagDb(integrationDir, { worktreePath: issueDir }), integrationDir)),
+        'ISSUE-1',
+        SANDBOX_WORKTREE,
+      );
+      await rm(path.join(issueDir, 'sub', '.git'), { recursive: true, force: true });
+      const enqueued: unknown[] = [];
+      const h = dagDb(integrationDir, { worktreePath: issueDir });
+      const result = await pass(h, integrationDir, async () => void enqueued.push(1));
+      expect(result.resolved).toBe(true);
+      const tree = (await out(integrationDir, ['ls-tree', '-r', 'main--ISSUE-1', '--', 'sub']))
+        .split('\n')
+        .filter(Boolean);
+      expect(tree.length).toBeGreaterThan(0);
+      for (const line of tree) expect(line.split(' ')[0]).toBe('100644');
+      expect(await out(integrationDir, ['show', 'main:sub/inner.txt'])).toBe('inner');
+      expect(h.issueUpdates.some((u) => u.mergeStatus === 'clean')).toBe(true);
+      expectNoDispatch(h, enqueued);
+    });
+
+    it('a Retry after .gitmodules registers the nested repository commits it as a gitlink, with no fixer', async () => {
+      const { integrationDir, worktrees } = await setupLevel();
+      const issueDir = worktrees['ISSUE-1']!;
+      await nestedRepo(issueDir);
+      expectIssueRefusal(
+        await thrown(pass(dagDb(integrationDir, { worktreePath: issueDir }), integrationDir)),
+        'ISSUE-1',
+        SANDBOX_WORKTREE,
+      );
+      await writeFile(path.join(issueDir, '.gitmodules'), REGISTRATION, 'utf8');
+      const enqueued: unknown[] = [];
+      const h = dagDb(integrationDir, { worktreePath: issueDir });
+      const result = await pass(h, integrationDir, async () => void enqueued.push(1));
+      expect(result.resolved).toBe(true);
+      expect(await modeOf(integrationDir, 'main--ISSUE-1', 'sub')).toBe('160000');
+      expect(await modeOf(integrationDir, 'main--ISSUE-1', '.gitmodules')).not.toBeNull();
+      expect(h.issueUpdates.some((u) => u.mergeStatus === 'clean')).toBe(true);
+      expectNoDispatch(h, enqueued);
+    });
+
+    it('refuses one issue of a level without touching a merged sibling, and a retry commits the others once', async () => {
+      const { integrationDir, worktrees } = await setupLevel();
+      // S merged into main before the others fork, as an earlier pass of the level left it.
+      await git(integrationDir, ['checkout', '-b', 'main--ISSUE-0']);
+      await writeFile(path.join(integrationDir, 's.txt'), 's\n', 'utf8');
+      await git(integrationDir, ['add', '-A']);
+      await git(integrationDir, ['commit', '-m', 'ISSUE-0: s']);
+      await git(integrationDir, ['checkout', 'main']);
+      await git(integrationDir, ['merge', '--no-ff', '--no-edit', 'main--ISSUE-0']);
+      const sTip = await out(integrationDir, ['rev-parse', 'main--ISSUE-0']);
+      const merged = () =>
+        out(integrationDir, ['rev-list', '--merges', '--parents', 'main']).then(
+          (l) => l.split('\n').filter((line) => line.split(' ').slice(1).includes(sTip)).length,
+        );
+      expect(await merged()).toBe(1);
+      const aDir = worktrees['ISSUE-1']!;
+      const bDir = await mkdtemp(path.join(tmpdir(), 'dag-orphan-issue-'));
+      dirs.push(bDir);
+      await git(integrationDir, ['branch', 'main--ISSUE-2']);
+      await git(integrationDir, ['worktree', 'add', bDir, 'main--ISSUE-2']);
+      await writeFile(path.join(aDir, 'a.txt'), 'a\n', 'utf8');
+      await nestedRepo(bDir);
+      const sibling = (extra: Record<string, unknown>) => [
+        {
+          id: 'issueB',
+          issueKey: 'ISSUE-2',
+          title: 'Orphan',
+          branchName: 'main--ISSUE-2',
+          worktreePath: bDir,
+          sandboxWorktreePath: '/haive/workdir/.haive/worktrees/main--ISSUE-2',
+          mergeStatus: null,
+          ...extra,
+        },
+        {
+          id: 'issueS',
+          issueKey: 'ISSUE-0',
+          title: 'Merged sibling',
+          branchName: 'main--ISSUE-0',
+          worktreePath: path.join(integrationDir, 'gone', 'main--ISSUE-0'),
+          sandboxWorktreePath: '/haive/workdir/.haive/worktrees/main--ISSUE-0',
+          mergeStatus: 'clean',
+        },
+      ];
+      const mainBefore = await out(integrationDir, ['rev-parse', 'main']);
+      const aBase = await out(integrationDir, ['rev-parse', 'main--ISSUE-1']);
+
+      const h1 = dagDb(integrationDir, { worktreePath: aDir }, sibling({}));
+      expectIssueRefusal(
+        await thrown(pass(h1, integrationDir)),
+        'ISSUE-2',
+        '/haive/workdir/.haive/worktrees/main--ISSUE-2',
+      );
+      expect(await out(integrationDir, ['rev-parse', 'main'])).toBe(mainBefore);
+      expect(await out(integrationDir, ['show', 'main:s.txt'])).toBe('s');
+      expect(await merged()).toBe(1);
+      expect(h1.issueUpdateLog.filter((u) => u.id === 'issueS')).toEqual([]);
+      const aTip = await out(integrationDir, ['rev-parse', 'main--ISSUE-1']);
+      expect(aTip).not.toBe(aBase);
+      expect(await out(integrationDir, ['rev-parse', `${aTip}^`])).toBe(aBase);
+      expect(await gitCode(integrationDir, ['cat-file', '-e', 'main:a.txt'])).not.toBe(0);
+
+      await rm(path.join(bDir, 'sub', '.git'), { recursive: true, force: true });
+      const h2 = dagDb(integrationDir, { worktreePath: aDir }, sibling({}));
+      expect((await pass(h2, integrationDir)).resolved).toBe(true);
+      expect(await out(integrationDir, ['rev-parse', 'main--ISSUE-1'])).toBe(aTip);
+      expect(await modeOf(integrationDir, 'main--ISSUE-2', 'sub/inner.txt')).toBe('100644');
+      expect(h2.issueUpdateLog.filter((u) => u.id === 'issueS')).toEqual([]);
+      const clean = h2.issueUpdateLog.filter((u) => u.patch.mergeStatus === 'clean');
+      expect(clean.map((u) => u.id).sort()).toEqual(['issue1', 'issueB']);
+      expect(await out(integrationDir, ['show', 'main:a.txt'])).toBe('a');
+      expect(await out(integrationDir, ['show', 'main:sub/inner.txt'])).toBe('inner');
+      expect(await merged()).toBe(1);
     });
 
     it.each([
