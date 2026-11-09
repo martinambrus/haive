@@ -4101,7 +4101,7 @@ function StepCardImpl({
       )}
 
       {step.warningMessage && (
-        <div className="whitespace-pre-wrap rounded-md border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">
+        <div className="whitespace-pre-wrap rounded-md border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-300 [overflow-wrap:anywhere]">
           {step.warningMessage}
         </div>
       )}
