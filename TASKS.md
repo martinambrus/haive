@@ -463,7 +463,7 @@ status: open · kind: fix · found: T347 run · priority: P2
 
 ### T555 · FNF[egress-guard-hardening] · remaining egress guard gaps: local NAT64 and Teredo, probe details (+2)
 
-status: open · kind: fix · found: T347 run · priority: P2
+status: in progress, item 7 (codex-sonnet) · kind: fix · found: T347 run · priority: P2
 
 Three items (metadata addresses, IPv4-compatible form, required fetchFn) shipped in PR #1040 (4dceda71f) and the Azure host address in PR #1041 (aa529e991), 2026-11-09. Items 3 to 6 stay parked as before.
 
