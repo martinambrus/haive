@@ -60,6 +60,24 @@ does not run there. Step 06c fails, the issue stays accepted with `merge_status`
 dispatch and siblings already merged stay merged. A git failure inside the check fails the step
 naming the issue, never skips the check.
 
+A `.git` inside a tracked directory is a different shape: status lists its files one by one
+(`D dir/a`, `?? dir/inner.txt`), so no gitlink would appear and the add would flatten them, the
+repository's history lost with the worktree. Gate 3, the DAG issue commit and Run app Finish refuse
+it (`FlattenedRepositoryError`), scanning untracked entries only and reading no `.git` contents, so
+a stray `.git` is refused too and the text does not claim each one is a repository. Run app Finish
+also refuses the unregistered gitlink, with gate 3's text.
+
+The first commit of a repository that had no git (`01-worktree-setup`, `12-post-onboarding`,
+`03-upgrade-commit`) warns and continues (`initialGitlinkWarnings`), never refuses: a refusal would
+stop onboarding of any uploaded tree holding a nested clone. Each path is stored as a step warning,
+since the web does not render a step output's `warnings`. A failed check logs and continues. A first
+commit that exits nonzero with HEAD moved is recorded as landed in `01-worktree-setup`, the one site
+where it happens: 12 and 03 fail earlier, on the staged-name read.
+
+When the DAG commit's `git add -A` stages nothing though the status listed entries, the changes are
+inside a nested repository the branch already holds. The step commits nothing and stores a warning
+per path. Whether anything is staged comes from the exit code of `diff --cached --quiet`.
+
 The invocation asks for a JSON `commitMessage` containing a subject and optional body and
 instructs the agent to answer from the supplied changes without using tools. `disableTools`
 is a best-effort optimization: adapters that support it disable built-in tools; the others

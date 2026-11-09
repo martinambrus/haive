@@ -193,6 +193,7 @@ async function refuseFlattenedRepositories(
  * Index paths of gitlinks the commit about to be made would add that no `.gitmodules` entry in that
  * commit registers with a url. What `git add -A` would stage is worked out on a scratch copy of the
  * index, so the real index is never written. Throws when git cannot answer: a refusal is never skipped.
+ * Throws `FlattenedRepositoryError` when the add would flatten a nested repository in a tracked directory.
  */
 export async function unregisteredGitlinks(
   workspace: string,

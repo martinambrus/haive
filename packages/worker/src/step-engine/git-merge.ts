@@ -1313,8 +1313,8 @@ export function buildMergeFixPrompt(
  *  files. The agent cannot run git (the worktree's absolute gitdir path does not
  *  exist inside the sandbox), so the host verifies no conflict markers remain in
  *  the previously-unmerged paths, stages, and commits. Returns true when the merge
- *  commit landed. Returns false for an incomplete or containment-refused resolution, or a merge
- *  no longer open. Failed git reads, writes and genuine IO errors throw. */
+ *  commit landed. Returns false for an incomplete or containment-refused resolution, a nested
+ *  repository in a resolved path, or a merge no longer open. Failed git reads, writes and genuine IO errors throw. */
 export async function completeMergeHostSide(
   worktreePath: string,
   gitEnv: Record<string, string>,

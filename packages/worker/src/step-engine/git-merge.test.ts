@@ -2430,6 +2430,27 @@ describe('nested repository merge controls', () => {
     }
   });
 
+  it('does not commit a nested repository that replaces a conflicted file', async () => {
+    const dir = await setupConflict();
+    try {
+      expect(await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x'])).not.toBe(0);
+      await rm(path.join(dir, 'base.txt'));
+      await mkdir(path.join(dir, 'base.txt'));
+      await initRepo(path.join(dir, 'base.txt'));
+      await writeFile(path.join(dir, 'base.txt/inner'), 'inner\n');
+      await git(path.join(dir, 'base.txt'), ['add', '-A']);
+      await git(path.join(dir, 'base.txt'), ['commit', '-m', 'nested']);
+      const head = await git(dir, ['rev-parse', 'HEAD']);
+      const before = await git(dir, ['ls-files', '-s']);
+      expect(await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x')).toBe(false);
+      expect(await git(dir, ['rev-parse', 'HEAD'])).toBe(head);
+      expect(await git(dir, ['ls-files', '-s'])).toBe(before);
+      expect(await mergeHead(dir)).toBe(0);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
   it('refuses a nested repository in the directory side of a directory/file conflict', async () => {
     const dir = await setupDirectoryFileConflict('main');
     try {

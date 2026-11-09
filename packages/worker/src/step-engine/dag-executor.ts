@@ -472,7 +472,7 @@ function issueRefused(issue: { errorMessage?: string | null }): boolean {
   return issue.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter) === true;
 }
 
-/** Commit issue work host-side: the coder cannot run git. No-op when nothing is staged. */
+/** Commit issue work host-side: the coder cannot run git. Commits nothing when nothing is staged, and warns if edits stayed out. */
 async function commitIssueWork(
   ctx: StepContext,
   worktreePath: string,
