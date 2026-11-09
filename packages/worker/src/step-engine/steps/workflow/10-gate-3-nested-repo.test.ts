@@ -84,6 +84,26 @@ describe('gate 3 nested repository controls', () => {
     expect(await git(repo, ['ls-files', '-s'])).toBe(index);
   });
 
+  it('refuses a nested repository that replaces a tracked file', async () => {
+    const { repo, cleanup } = await repoFixture();
+    cleanups.push(cleanup);
+    await writeFileNoFollow(repo, 'nested', 'file\n');
+    await git(repo, ['add', '--', 'nested']);
+    await git(repo, ['commit', '-q', '-m', 'file']);
+    await removeNoFollow(repo, 'nested');
+    await ensureDirNoFollow(repo, 'nested');
+    await git(path.join(repo, 'nested'), ['init', '-q', '-b', 'main']);
+    await writeFileNoFollow(repo, 'nested/inside.txt', 'nested contents\n');
+    await git(path.join(repo, 'nested'), ['add', '-A']);
+    await git(path.join(repo, 'nested'), ['commit', '-q', '-m', 'nested seed']);
+    await writeFileNoFollow(repo, 'a.txt', 'after\n');
+    const head = await git(repo, ['rev-parse', 'HEAD']);
+    const index = await git(repo, ['ls-files', '-s']);
+    await expect(commit(repo)).rejects.toThrow('"nested"');
+    expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
+    expect(await git(repo, ['ls-files', '-s'])).toBe(index);
+  });
+
   it('keeps the gitlink behavior for a registered nested repository with commits', async () => {
     const repo = await fixture(true);
     await register(repo, 'nested');

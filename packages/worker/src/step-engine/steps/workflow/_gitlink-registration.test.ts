@@ -62,6 +62,31 @@ describe('unregisteredGitlinks', () => {
     expect(await find(repo)).toEqual(['nested']);
   });
 
+  it('names a nested repository that replaces a tracked file', async () => {
+    const repo = await outer();
+    await writeFileNoFollow(repo, 'nested', 'file\n');
+    await git(repo, ['add', '--', 'nested']);
+    await git(repo, ['commit', '-q', '-m', 'file']);
+    await removeNoFollow(repo, 'nested');
+    await nestedRepo(repo, 'nested');
+    expect(await find(repo)).toEqual(['nested']);
+  });
+
+  it('accepts a nested repository that replaces a tracked file when .gitmodules registers it', async () => {
+    const repo = await outer();
+    await writeFileNoFollow(repo, 'nested', 'file\n');
+    await git(repo, ['add', '--', 'nested']);
+    await git(repo, ['commit', '-q', '-m', 'file']);
+    await removeNoFollow(repo, 'nested');
+    await nestedRepo(repo, 'nested');
+    await writeFileNoFollow(
+      repo,
+      '.gitmodules',
+      gitmodules('\tpath = nested\n\turl = https://example.invalid/x.git\n'),
+    );
+    expect(await find(repo)).toEqual([]);
+  });
+
   it('returns nothing when no new gitlink or untracked repository exists', async () => {
     const repo = await outer();
     await writeFileNoFollow(repo, 'a.txt', 'after\n');
