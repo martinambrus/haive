@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { failGit } from '../../test/support/fake-git.js';
+import { FlattenedRepositoryError } from './steps/workflow/_gitlink-registration.js';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN, safeKey } from './steps/_untrusted-repo.js';
@@ -2271,8 +2272,17 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
         pass(dagDb(integrationDir, { worktreePath: issueDir }), integrationDir),
       );
       expect(err).toBeInstanceOf(Error);
-      for (const part of ['"sub"', 'keep it out', 'remove its `.git`'])
+      for (const part of [
+        '"sub"',
+        'keep it out',
+        'remove its `.git`',
+        'DAG issue ISSUE-1',
+        SANDBOX_WORKTREE,
+      ])
         expect((err as Error).message).toContain(part);
+      expect(err).toBeInstanceOf(FlattenedRepositoryError);
+      expect((err as Error).message).not.toContain('gitlink check failed');
+      expect((err as Error).message).toContain('`.git` sits inside these tracked directories');
       expect(await snapshot(integrationDir, issueDir)).toEqual(before);
     });
 
@@ -2445,6 +2455,8 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       expect(err).toBeInstanceOf(Error);
       expect((err as Error).message).not.toContain('not registered as a submodule');
       expect((err as Error).message).toContain('DAG issue ISSUE-1');
+      expect((err as Error).message).toContain('gitlink check failed');
+      expect(err).not.toBeInstanceOf(FlattenedRepositoryError);
       expect(await out(integrationDir, ['rev-parse', 'main--ISSUE-1'])).toBe(tip);
     });
 

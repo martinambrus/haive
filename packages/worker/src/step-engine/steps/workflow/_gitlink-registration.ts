@@ -134,11 +134,19 @@ async function copyIndexFlags(workspace: string, env: Record<string, string>): P
 }
 
 export class FlattenedRepositoryError extends Error {
-  constructor(readonly paths: string[]) {
+  constructor(
+    readonly paths: string[],
+    issue?: { key: string; worktree?: string | null },
+  ) {
     super(
       [
-        'Nothing was committed. These nested git repositories occupy tracked directories; staging their files would discard their repository history:',
+        `${issue ? `Nothing was committed for DAG issue ${issue.key}.` : 'Nothing was committed.'} A \`.git\` sits inside these tracked directories; staging their untracked files could discard repository history:`,
         ...paths.map((p) => `- ${JSON.stringify(p)}`),
+        ...(issue
+          ? [
+              `Act in that issue's worktree${issue.worktree ? `, ${issue.worktree}` : ''}, then retry this step. The issue is not coded again; its work is committed as it stands.`,
+            ]
+          : []),
         'For each path, keep it out of the commit, or remove its `.git` to include the files on purpose. Then retry this step.',
       ].join('\n'),
     );
@@ -146,7 +154,7 @@ export class FlattenedRepositoryError extends Error {
   }
 }
 
-/** Status lists files inside a tracked directory, so git add flattens a checkout there. */
+/** Untracked files inside a tracked directory with a `.git` would be flattened by git add. */
 async function refuseFlattenedRepositories(
   workspace: string,
   entries: ReturnType<typeof parsePorcelainZ>,
@@ -156,27 +164,26 @@ async function refuseFlattenedRepositories(
   const checked = new Map<string, { directory: boolean; nested: boolean }>();
   const found = new Set<string>();
   for (const entry of entries) {
-    for (const file of [entry.path, entry.oldPath]) {
-      if (!file || excluded.some((p) => file === p.slice(0, -1) || file.startsWith(p))) continue;
-      const segments = file.replace(/\/$/, '').split('/');
-      for (let i = 1; i < segments.length; i++) {
-        const dir = segments.slice(0, i).join('/');
-        let entry = checked.get(dir);
-        if (entry === undefined) {
-          const directory =
-            (await lstatNoFollow(anchor, `${prefix}${dir}`, { strict: true }))?.kind ===
-            'directory';
-          entry = {
-            directory,
-            nested:
-              directory &&
-              (await lstatNoFollow(anchor, `${prefix}${dir}/.git`, { strict: true })) !== null,
-          };
-          checked.set(dir, entry);
-        }
-        if (!entry.directory) break;
-        if (entry.nested) found.add(dir);
+    if (entry.x !== '?' || entry.y !== '?') continue;
+    const file = entry.path;
+    if (excluded.some((p) => file === p.slice(0, -1) || file.startsWith(p))) continue;
+    const segments = file.replace(/\/$/, '').split('/');
+    for (let i = 1; i < segments.length; i++) {
+      const dir = segments.slice(0, i).join('/');
+      let entry = checked.get(dir);
+      if (entry === undefined) {
+        const directory =
+          (await lstatNoFollow(anchor, `${prefix}${dir}`, { strict: true }))?.kind === 'directory';
+        entry = {
+          directory,
+          nested:
+            directory &&
+            (await lstatNoFollow(anchor, `${prefix}${dir}/.git`, { strict: true })) !== null,
+        };
+        checked.set(dir, entry);
       }
+      if (!entry.directory) break;
+      if (entry.nested) found.add(dir);
     }
   }
   if (found.size) throw new FlattenedRepositoryError([...found]);

@@ -42,6 +42,34 @@ async function find(repo: string, excluded: string[] = []) {
 }
 
 describe('unregisteredGitlinks', () => {
+  it('does not inspect the old path of a staged rename', async () => {
+    const repo = await outer();
+    await ensureDirNoFollow(repo, 'dir');
+    await writeFileNoFollow(repo, 'dir/a', 'old\n');
+    await git(repo, ['add', '-A']);
+    await git(repo, ['commit', '-qm', 'tracked directory']);
+    await ensureDirNoFollow(repo, 'dir/.git');
+    await git(repo, ['mv', 'dir/a', 'renamed']);
+    expect(await git(repo, ['status', '--porcelain', '-z', '-uall'])).toBe('R  renamed\0dir/a\0');
+    expect(await find(repo)).toEqual([]);
+  });
+
+  it.each(['directory', 'file'])(
+    'accepts only a modified tracked file under a stray .git %s',
+    async (kind) => {
+      const repo = await outer();
+      await ensureDirNoFollow(repo, 'dir');
+      await writeFileNoFollow(repo, 'dir/a', 'old\n');
+      await git(repo, ['add', '-A']);
+      await git(repo, ['commit', '-qm', 'tracked directory']);
+      if (kind === 'directory') await ensureDirNoFollow(repo, 'dir/.git');
+      else await writeFileNoFollow(repo, 'dir/.git', 'stray\n');
+      await writeFileNoFollow(repo, 'dir/a', 'changed\n');
+      expect(await git(repo, ['status', '--porcelain', '-z', '-uall'])).toBe(' M dir/a\0');
+      expect(await find(repo)).toEqual([]);
+    },
+  );
+
   it('checks a repository before its first commit, without touching its index', async () => {
     const repo = await outer();
     await removeNoFollow(repo, '.git', { recursive: true });

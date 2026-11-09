@@ -2,6 +2,7 @@ import { assertDependencyCommitSafe } from './steps/workflow/_dependency-policy.
 import { parsePorcelainZ } from './steps/workflow/_commit-diff.js';
 import { warnStep } from '../project-state/branch-revert.js';
 import {
+  FlattenedRepositoryError,
   unregisteredGitlinks,
   unregisteredGitlinksMessage,
 } from './steps/workflow/_gitlink-registration.js';
@@ -498,6 +499,12 @@ async function commitIssueWork(
   try {
     orphans = await unregisteredGitlinks(worktreePath, pending.stdout, []);
   } catch (err) {
+    if (err instanceof FlattenedRepositoryError) {
+      throw new FlattenedRepositoryError(err.paths, {
+        key: issue.issueKey,
+        worktree: issue.sandboxWorktreePath,
+      });
+    }
     // Git could not answer, so the add does not run: a refusal is never skipped.
     throw new Error(
       `gitlink check failed for DAG issue ${issue.issueKey}: ${err instanceof Error ? err.message : String(err)}`,
