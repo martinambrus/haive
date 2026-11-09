@@ -623,7 +623,8 @@ export interface CliProbePathResult {
   authMessage?: string;
   // Non-blocking advisory: credentials are valid (authStatus stays `ok`) but the
   // provider will fail at run time for a reason the probe can foresee — e.g. an
-  // amp account with $0 spendable balance, which can't run `amp -x`.
+  // amp account with $0 spendable balance, which can't run `amp -x` — or an endpoint
+  // the probe could not verify.
   warning?: string;
 }
 

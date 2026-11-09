@@ -38,8 +38,7 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => {
 // The guard dials a real socket; this test stubs global fetch to check the embed request.
 vi.mock('@haive/shared/egress', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared/egress')>()),
-  createGuardedFetch: () => (input: string | URL, init?: RequestInit) =>
-    globalThis.fetch(input, init),
+  guardedProbeFetch: (input: string | URL, init?: RequestInit) => globalThis.fetch(input, init),
 }));
 
 vi.mock('@haive/shared/rag', async (importOriginal) => ({

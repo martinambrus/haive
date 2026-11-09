@@ -106,3 +106,36 @@ describe('resolveOllamaBaseUrl', () => {
     );
   });
 });
+
+describe('Ollama transport structure', () => {
+  it.each(['ENOTFOUND', 'ECONNREFUSED', 'ETIMEDOUT'])(
+    'returns the structural %s cause code independently of detail',
+    async (code) => {
+      const result = await probe(throwingFetch(code));
+      expect(result.ok).toBe(false);
+      expect(result.transportCode).toBe(code);
+    },
+  );
+
+  it('does not derive a transport code from error wording', async () => {
+    const result = await probe(async () => {
+      throw new TypeError('ENOTFOUND');
+    });
+    expect(result.ok).toBe(false);
+    expect(result.transportCode).toBeUndefined();
+  });
+
+  it('keeps an aborted timeout a failure without a transport code', async () => {
+    const result = await probe(async () => {
+      throw new DOMException('deadline exceeded', 'TimeoutError');
+    });
+    expect(result.ok).toBe(false);
+    expect(result.transportCode).toBeUndefined();
+  });
+
+  it('does not derive a transport code from HTTP error text', async () => {
+    const result = await probe(fakeFetch(502, 'ENOTFOUND'));
+    expect(result.ok).toBe(false);
+    expect(result.transportCode).toBeUndefined();
+  });
+});
