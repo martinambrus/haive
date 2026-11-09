@@ -1189,6 +1189,25 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
         if (current.supersedesEntryId && scopeChanged(current.facets, set.facets)) {
           set.supersedesEntryId = null;
         }
+      }
+      // Authorize the link after a same-request re-scope has had a chance to clear it.
+      // The corpus advisory lock is already held; lock the predecessor in this transaction too.
+      const supersedesEntryId = { ...current, ...set }.supersedesEntryId;
+      if (becomesActive && supersedesEntryId) {
+        const [target] = await db
+          .select()
+          .from(globalKbEntries)
+          .where(eq(globalKbEntries.id, supersedesEntryId))
+          .for('update');
+        if (target && target.status !== 'archived' && !canManageEntry(target, c)) {
+          throw new HttpError(
+            403,
+            'This draft replaces an entry you may not change; an admin is required',
+            'admin_required',
+          );
+        }
+      }
+      if (data.facets !== undefined) {
         // The same holds for a link POINTING AT this entry: it was decided against the old scope
         // too. Left in place, activating that replacement — a reactivation included — archives
         // this entry although the two rules no longer share a scope, and the successor lookup

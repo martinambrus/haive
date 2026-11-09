@@ -1350,3 +1350,94 @@ describe('PATCH management authorization controls', () => {
     expect(h.add).not.toHaveBeenCalled();
   });
 });
+
+describe('PATCH supersession authorization controls', () => {
+  const OTHER = '00000000-0000-4000-8000-0000000000a2';
+  beforeEach(() => {
+    fake.patch(globalKbEntries, ENTRY, { status: 'draft', supersedesEntryId: PREDECESSOR });
+  });
+
+  it.each([
+    ['an approved predecessor', ADMIN, true],
+    ["another user's predecessor", OTHER, false],
+    ['an ownerless predecessor', null, false],
+  ] as const)('refuses replacing %s without side effects', async (_label, userId, enforced) => {
+    h.role = 'user';
+    addEntry(PREDECESSOR, { userId });
+    if (enforced) approve(PREDECESSOR, ALWAYS);
+    const before = structuredClone(fake.rows(globalKbEntries));
+    // Tags retain the replacement link but would write vector metadata if checked too late.
+    const res = await patch({
+      status: 'active',
+      facets: { framework: ['drupal'], tags: ['rule'] },
+    });
+    expect(res.status).toBe(403);
+    const json = await asJson(res);
+    expect(json.code).toBe('admin_required');
+    expect(json.error).toContain('replaces an entry');
+    expect(json.error).toContain('may not change');
+    expect(fake.rows(globalKbEntries)).toEqual(before);
+    expect(vectorStatements).toEqual([]);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['owner', 'user', ADMIN, false],
+    ['admin replacing another owner', 'admin', OTHER, false],
+    ['admin replacing an approved entry', 'admin', OTHER, true],
+    ['admin replacing an ownerless entry', 'admin', null, false],
+  ] as const)('allows %s to replace a predecessor', async (_label, role, userId, enforced) => {
+    h.role = role;
+    addEntry(PREDECESSOR, { userId });
+    if (enforced) approve(PREDECESSOR, ALWAYS);
+    expect((await patch({ status: 'active' })).status).toBe(200);
+    expect(stored().status).toBe('active');
+    expect(stored(PREDECESSOR).status).toBe('archived');
+    expect(h.add.mock.calls.map(([, payload]) => [payload.entryId, payload.reason])).toEqual([
+      [ENTRY, 'upsert'],
+      [PREDECESSOR, 'delete'],
+    ]);
+  });
+
+  it.each(['user', 'admin'])('allows a same-request re-scope for %s', async (role) => {
+    h.role = role;
+    addEntry(PREDECESSOR, { userId: OTHER });
+    approve(PREDECESSOR, ALWAYS);
+    const before = structuredClone(stored(PREDECESSOR));
+    expect((await patch({ status: 'active', facets: { framework: ['laravel'] } })).status).toBe(
+      200,
+    );
+    expect(stored().supersedesEntryId).toBeNull();
+    expect(stored().status).toBe('active');
+    expect(stored(PREDECESSOR)).toEqual(before);
+    expect(h.add).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['archived', 'missing'])('does not authorize an %s predecessor', async (state) => {
+    h.role = 'user';
+    if (state === 'archived') {
+      addEntry(PREDECESSOR, { userId: OTHER, status: 'archived' });
+      approve(PREDECESSOR, ALWAYS);
+    }
+    const before = structuredClone(stored(PREDECESSOR));
+    expect((await patch({ status: 'active' })).status).toBe(200);
+    expect(stored().status).toBe('active');
+    expect(stored(PREDECESSOR)).toEqual(before);
+    expect(h.add).toHaveBeenCalledTimes(1);
+  });
+
+  it('sees a predecessor approval landing while activation waits', async () => {
+    h.role = 'user';
+    addEntry(PREDECESSOR);
+    let before: unknown;
+    fake.hooks.beforeLock = () => {
+      fake.hooks.beforeLock = null;
+      approve(PREDECESSOR, ALWAYS);
+      before = structuredClone(fake.rows(globalKbEntries));
+    };
+    expect((await patch({ status: 'active' })).status).toBe(403);
+    expect(fake.rows(globalKbEntries)).toEqual(before);
+    expect(vectorStatements).toEqual([]);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+});
