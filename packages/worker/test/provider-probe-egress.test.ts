@@ -235,3 +235,82 @@ describe('provider probe egress', () => {
     expect(http.request).not.toHaveBeenCalled();
   });
 });
+
+describe('guarded Ollama probe warnings', () => {
+  it('reports a refused private literal as a warning with the version detail', async () => {
+    const result = await probe(provider('ollama'));
+    expect(result.ok).toBe(true);
+    expect(result.detail).toBe('2.0.0 (Claude Code)');
+    expect(result.warning).toContain('egress guard');
+    expect(result.warning).toContain('or the name does not resolve');
+    expect(result.error).toBeUndefined();
+    expect(http.request).not.toHaveBeenCalled();
+    expect(globalFetch).not.toHaveBeenCalled();
+  });
+
+  it('gives an unresolved name the same warning as a refused literal', async () => {
+    const refused = await probe(provider('ollama'));
+    vi.spyOn(dns.promises, 'lookup').mockRejectedValue(
+      Object.assign(new Error('unknown name'), { code: 'ENOTFOUND' }),
+    );
+    const connected = httpReply();
+    const unresolved = await probe(
+      provider('ollama', { envVars: { ANTHROPIC_BASE_URL: 'http://ollama:11434' } }),
+    );
+    expect(connected).not.toHaveBeenCalled();
+    expect(unresolved).toEqual({ ...refused, durationMs: unresolved.durationMs });
+    expect(unresolved.ok).toBe(true);
+    expect(unresolved.error).toBeUndefined();
+  });
+
+  it('keeps an admin ENOTFOUND as the existing failure', async () => {
+    findOwner.mockResolvedValue({ role: 'admin' });
+    globalFetch.mockRejectedValue(new TypeError('fetch failed', { cause: { code: 'ENOTFOUND' } }));
+    const result = await probe(provider('ollama'));
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('fetch failed (ENOTFOUND)');
+    expect(result.warning).toBeUndefined();
+    expect(globalFetch).toHaveBeenCalledOnce();
+  });
+
+  it('keeps platform-picked ENOTFOUND a failure', async () => {
+    globalFetch.mockRejectedValue(new TypeError('fetch failed', { cause: { code: 'ENOTFOUND' } }));
+    const result = await probe(provider('ollama', { envVars: null }));
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('fetch failed (ENOTFOUND)');
+    expect(result.warning).toBeUndefined();
+    expect(findOwner).not.toHaveBeenCalled();
+  });
+
+  it.each(['ECONNREFUSED', 'ETIMEDOUT'])('keeps guarded %s a failure', async (code) => {
+    httpReply(200, '{}', code);
+    const result = await probe(
+      provider('ollama', { envVars: { ANTHROPIC_BASE_URL: 'http://8.8.8.8' } }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain(code);
+    expect(result.warning).toBeUndefined();
+  });
+
+  it('does not turn an HTTP body mentioning ENOTFOUND into a warning', async () => {
+    httpReply(502, JSON.stringify({ error: 'ENOTFOUND' }));
+    const result = await probe(
+      provider('ollama', { envVars: { ANTHROPIC_BASE_URL: 'http://8.8.8.8' } }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('HTTP 502');
+    expect(result.warning).toBeUndefined();
+  });
+
+  it('rechecks the owner role for every probe', async () => {
+    const first = await probe(provider('ollama'));
+    findOwner.mockResolvedValue({ role: 'admin' });
+    const second = await probe(provider('ollama'));
+    expect(first.ok).toBe(true);
+    expect(first.warning).toBeDefined();
+    expect(second.ok).toBe(false);
+    expect(second.error).toContain(sentinel);
+    expect(findOwner).toHaveBeenCalledTimes(2);
+    expect(globalFetch).toHaveBeenCalledOnce();
+  });
+});

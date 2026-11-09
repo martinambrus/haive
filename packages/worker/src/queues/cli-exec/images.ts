@@ -274,12 +274,11 @@ export async function probeCliPath(
       // Ollama: nothing above this line looks at the endpoint or the model, so every
       // Ollama provider tested green regardless of how it was configured. See
       // ollama-probe.ts for what that cost.
-      const ollamaError = await resolveOllamaProbeError(db, provider, secrets);
-      if (ollamaError) {
+      const ollamaResult = await resolveOllamaProbeError(db, provider, secrets);
+      if (ollamaResult) {
         return {
-          ok: false,
+          ...ollamaResult,
           detail: versionDetail,
-          error: ollamaError,
           durationMs: Date.now() - startedAt,
         };
       }
@@ -436,8 +435,8 @@ async function resolveOpenRouterCompatWarning(
   );
 }
 
-/** The Test-connection failure for an Ollama provider that cannot actually serve a
- *  request, or null when one round-trip succeeded.
+/** The Test-connection outcome for an Ollama provider that could not be verified,
+ *  or null when one round-trip succeeded.
  *
  *  Two checks, cheapest first. The model field is required by the adapter itself
  *  (buildCliInvocation throws without it) and its absence is readable locally, so it
@@ -455,16 +454,18 @@ async function resolveOllamaProbeError(
   db: Database,
   provider: CliProviderRecord,
   secrets: Record<string, string>,
-): Promise<string | null> {
+): Promise<CliProbePathResult | null> {
   if (provider.name !== 'ollama') return null;
   const model = provider.model?.trim();
   if (!model) {
-    return (
-      'No model is set for this provider. Ollama has no default, so every task step ' +
-      'fails with "ollama provider requires a model" — and a step summary fails silently. ' +
-      'Set the Model field to a local name (qwen3-coder:30b) or a cloud one ' +
-      '(qwen3-coder:480b-cloud).'
-    );
+    return {
+      ok: false,
+      error:
+        'No model is set for this provider. Ollama has no default, so every task step ' +
+        'fails with "ollama provider requires a model" — and a step summary fails silently. ' +
+        'Set the Model field to a local name (qwen3-coder:30b) or a cloud one ' +
+        '(qwen3-coder:480b-cloud).',
+    };
   }
   const env = { ...(provider.envVars ?? {}), ...secrets };
   const token = env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY ?? env.OLLAMA_API_KEY ?? 'ollama';
@@ -475,6 +476,18 @@ async function resolveOllamaProbeError(
   const fetchImpl = await resolveProbeFetch(db, provider, env);
   const result = await probeOllamaEndpoint({ baseUrl, token, model, fetchImpl });
   if (result.ok) return null;
+  // The guard masks a refusal as ENOTFOUND, so this also covers a name that does not resolve.
+  if (fetchImpl === guardedProbeFetch && result.transportCode === 'ENOTFOUND') {
+    return {
+      ok: true,
+      warning:
+        'The Ollama endpoint probe was refused by the egress guard, or the name does not resolve. ' +
+        'Provider availability is unconfirmed. Task runs connect from inside the sandbox under ' +
+        'its own network policy. An administrator can add private endpoints to the allowlist ' +
+        'for this probe.',
+    };
+  }
+
   const because = result.detail ? ` It answered: "${result.detail}".` : '';
   // A hand-set base URL is the single likeliest cause, and the one the error text
   // cannot explain on its own: `localhost` names the SANDBOX from inside a run, not
@@ -487,7 +500,10 @@ async function resolveOllamaProbeError(
       `that localhost inside a sandbox is the sandbox, never this host.`
     : ` Check that the model tag exists and, for a -cloud model, that the ` +
       `ANTHROPIC_AUTH_TOKEN secret holds a valid ollama.com key.`;
-  return `Ollama could not serve a request for "${model}" at ${baseUrl}.${because}${hint}`;
+  return {
+    ok: false,
+    error: `Ollama could not serve a request for "${model}" at ${baseUrl}.${because}${hint}`,
+  };
 }
 
 function resolveProviderExecutable(adapter: BaseCliAdapter, provider: CliProviderRecord): string {

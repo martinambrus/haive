@@ -17,6 +17,8 @@ export interface OllamaProbeResult {
   ok: boolean;
   /** The upstream's own words (or the transport error), for the failure message. */
   detail?: string;
+  /** The transport cause code, never inferred from upstream text. */
+  transportCode?: string;
 }
 
 const PROBE_TIMEOUT_MS = 20_000;
@@ -98,7 +100,16 @@ export async function probeOllamaEndpoint(opts: {
   } catch (err) {
     // Unreachable or timed out. Reported, not swallowed — this is the failure mode
     // the check exists for.
-    return { ok: false, detail: describeTransportError(err) };
+    const cause = err instanceof Error ? err.cause : undefined;
+    const transportCode =
+      cause && typeof cause === 'object' && 'code' in cause && typeof cause.code === 'string'
+        ? cause.code
+        : undefined;
+    return {
+      ok: false,
+      detail: describeTransportError(err),
+      ...(transportCode ? { transportCode } : {}),
+    };
   }
 
   if (resp.ok) return { ok: true };
