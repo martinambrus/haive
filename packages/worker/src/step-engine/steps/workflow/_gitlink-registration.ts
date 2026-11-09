@@ -192,10 +192,28 @@ export async function unregisteredGitlinks(
   excluded: string[],
   scope?: readonly string[],
 ): Promise<string[]> {
-  const inScope = (file: string) =>
-    !scope || scope.some((p) => file === p || file.startsWith(`${p}/`) || p.startsWith(`${file}/`));
+  await refuseFlattenedRepositories(
+    workspace,
+    parsePorcelainZ(status).filter((entry) => pathInScope(entry.path, scope)),
+    excluded,
+  );
+  return computeUnregisteredGitlinks(workspace, status, excluded, scope);
+}
+
+function pathInScope(file: string, scope?: readonly string[]): boolean {
+  return (
+    !scope || scope.some((p) => file === p || file.startsWith(`${p}/`) || p.startsWith(`${file}/`))
+  );
+}
+
+async function computeUnregisteredGitlinks(
+  workspace: string,
+  status: string,
+  excluded: string[],
+  scope?: readonly string[],
+): Promise<string[]> {
+  const inScope = (file: string) => pathInScope(file, scope);
   const entries = parsePorcelainZ(status).filter((entry) => inScope(entry.path));
-  await refuseFlattenedRepositories(workspace, entries, excluded);
   const staged = (await newGitlinks(workspace)).filter(inScope);
   // A nested repository that replaces a tracked file shows as ` T path`, and one that replaces an
   // intent-to-add file as ` A path`, not as `?? path/`.
@@ -282,7 +300,7 @@ export async function initialGitlinkWarnings(
       '-uall',
     ]);
     expectOk('git status', status);
-    const paths = await unregisteredGitlinks(ctx.repoPath, status.stdout, []);
+    const paths = await computeUnregisteredGitlinks(ctx.repoPath, status.stdout, []);
     const warnings = paths.map(
       (p) =>
         `${JSON.stringify(p)} is a nested git repository without a registered submodule URL. The initial commit records only a commit id, so that directory will be empty in task worktrees and a clone cannot fetch it.`,

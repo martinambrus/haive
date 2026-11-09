@@ -343,6 +343,23 @@ describe('unregisteredGitlinksMessage', () => {
   });
 });
 
+it('warns about a real clone beside a tracked directory containing a stray .git', async () => {
+  const repo = await outer();
+  await ensureDirNoFollow(repo, 'dir');
+  await writeFileNoFollow(repo, 'dir/a', 'old\n');
+  await git(repo, ['add', '-A']);
+  await git(repo, ['commit', '-qm', 'tracked directory']);
+  await ensureDirNoFollow(repo, 'dir/.git');
+  await writeFileNoFollow(repo, 'dir/new', 'new\n');
+  await nestedRepo(repo, 'nested');
+  const index = await git(repo, ['ls-files', '-s']);
+  const warn = vi.fn();
+  const warnings = await initialGitlinkWarnings({ repoPath: repo, logger: { warn } as never });
+  expect(warnings).toEqual([expect.stringContaining('"nested"')]);
+  expect(warnings[0]).toContain('empty in task worktrees');
+  expect(await git(repo, ['ls-files', '-s'])).toBe(index);
+});
+
 it('an initial-commit warning check that fails logs and continues', async () => {
   const repo = await outer();
   await nestedRepo(repo, 'nested');
