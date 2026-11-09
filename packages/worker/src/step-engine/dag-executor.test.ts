@@ -1787,7 +1787,7 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
     }
   });
 
-  it.each(['add', 'status', 'commit'])(
+  it.each(['add', 'status', 'staged read', 'commit'])(
     'preserves the failed git %s error when committing an issue',
     async (command) => {
       const integrationDir = await setupConflictedIntegration(true);
@@ -1803,10 +1803,21 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
           autoResolveConflicts: false,
           issue: { mergeStatus: null, worktreePath: issueDir },
         });
-        // Three status reads match: the dependency check's, the gitlink check's, then this commit's own.
+        // Fail the gitlink check's status read after the dependency check's.
         shim = await failGit(
-          command === 'status' ? ['--no-optional-locks', 'status'] : [command],
-          command === 'status' ? { from: 3 } : {},
+          command === 'status'
+            ? ['--no-optional-locks', 'status']
+            : command === 'staged read'
+              ? [
+                  'diff',
+                  '--no-ext-diff',
+                  '--no-textconv',
+                  '--cached',
+                  '--quiet',
+                  '--ignore-submodules=none',
+                ]
+              : [command],
+          command === 'status' ? { from: 2 } : {},
         );
         await expect(
           resolveDagPhase(
@@ -2298,6 +2309,20 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       expect(await out(integrationDir, ['rev-parse', 'main--ISSUE-1:sub'])).toBe(nestedHead);
       expect(h.issueUpdates.some((u) => u.mergeStatus === 'clean')).toBe(true);
       expect(await modeOf(integrationDir, 'main', 'sub')).toBe('160000');
+    });
+
+    it('continues with no staged changes when only an existing gitlink is dirty', async () => {
+      const { integrationDir, worktrees } = await setupLevel();
+      const issueDir = worktrees['ISSUE-1']!;
+      await nestedRepo(issueDir);
+      await git(issueDir, ['add', '-A']);
+      await git(issueDir, ['commit', '-m', 'ISSUE-1: seed gitlink']);
+      const head = await out(issueDir, ['rev-parse', 'HEAD']);
+      await writeFile(path.join(issueDir, 'sub/inner.txt'), 'dirty only\n');
+      const h = dagDb(integrationDir, { worktreePath: issueDir });
+      expect((await pass(h, integrationDir)).resolved).toBe(true);
+      expect(await out(integrationDir, ['rev-parse', 'main--ISSUE-1'])).toBe(head);
+      expect(h.issueUpdates.some((u) => u.mergeStatus === 'clean')).toBe(true);
     });
 
     it('commits a new commit inside a gitlink the branch already holds, with no .gitmodules', async () => {

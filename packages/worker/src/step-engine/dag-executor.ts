@@ -469,7 +469,7 @@ function issueRefused(issue: { errorMessage?: string | null }): boolean {
   return issue.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter) === true;
 }
 
-/** Commit issue work host-side: the coder cannot run git. No-op when the tree is clean. */
+/** Commit issue work host-side: the coder cannot run git. No-op when nothing is staged. */
 async function commitIssueWork(
   ctx: StepContext,
   worktreePath: string,
@@ -516,13 +516,18 @@ async function commitIssueWork(
       `git add failed for DAG issue ${issue.issueKey}: ${(add.stderr || add.stdout).trim()}`,
     );
   }
-  const status = await gitRun(worktreePath, ['--no-optional-locks', 'status', '--porcelain']);
-  if (status.code !== 0) {
+  const staged = await gitRun(worktreePath, [
+    'diff',
+    '--cached',
+    '--quiet',
+    '--ignore-submodules=none',
+  ]);
+  if (staged.code === 0) return;
+  if (staged.code !== 1) {
     throw new Error(
-      `git status failed for DAG issue ${issue.issueKey}: ${(status.stderr || status.stdout).trim()}`,
+      `git staged read failed for DAG issue ${issue.issueKey}: ${(staged.stderr || staged.stdout).trim()}`,
     );
   }
-  if (status.stdout.trim().length === 0) return;
   const res = await gitRun(
     worktreePath,
     ['commit', '-m', `${issue.issueKey}: ${issue.title}`],
