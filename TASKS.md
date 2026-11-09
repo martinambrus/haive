@@ -527,7 +527,7 @@ PRE-EXISTING, minor. `configSchema` (api routes/global-kb.ts ~:292-293) accepts 
 
 ### T580 · plan[sleep-paper-lessons] · calibrate effort estimates on the LLM's recorded estimate; keep learnings reachable past 60
 
-status: open · kind: fix · found: SLEEP paper assessment 2026-11-09 · priority: P3
+status: claimed (PR 1, codex-sonnet) · kind: fix · found: SLEEP paper assessment 2026-11-09 · priority: P3
 Plan: `docs/plans/sleep-paper-lessons.md`. PR 1: `hydrateAnchors` and `GET /tasks/estimation-accuracy` read the latest `estimate.recorded.aiHours` instead of the column `06b-sprint-planning` overwrites. PR 2 (low urgency, when step 11 is next touched or a repository nears 60 learnings): list every learning id and title, not an unsorted first 60. Both PRE-EXISTING. P3 of the plan, the backtest, waits for its trigger query.
 
 ### T559 · FNF[gated-test-hygiene] · gated test addresses and the gated-list check in driver gates (+1)
