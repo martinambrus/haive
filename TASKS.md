@@ -484,9 +484,9 @@ status: open · kind: fix · found: T347 run · priority: P3
 3. `armIdle` re-arms only on upstream reads (tooling.ts:279-335), so a client that stops reading for 10 minutes can trip a misleading idle stop. NEW-LIMIT (edge).
 4. A late `fetchFn` resolve after an idle stop leaves its body unconsumed for a custom `fetchFn` that ignores `signal`. NEW-LIMIT (edge).
 
-### T557 · FNF[unguarded-dial-audit] · dials that still bypass the egress guard (design) (+6)
+### T557 · FNF[unguarded-dial-audit] · dials that still bypass the egress guard (design) (+8)
 
-status: in progress, items 1 7 6 (codex-sonnet) · kind: design · found: T347 run · priority: P2
+status: open · kind: design · found: T347 run · priority: P2
 Each needs a per-dial decision (guard, admin-trust, or remove).
 
 1. Shipped in PR #1049 (provider Test connection guarded by the owner role). Correction: api routes/cli-providers.ts:664 only enqueues and cli-adapters/zai.ts only sets env for the sandboxed CLI; neither is a dial.
@@ -494,12 +494,14 @@ Each needs a per-dial decision (guard, admin-trust, or remove).
 3. Dead SMTP keys (shared config/config.service.ts:40-44,666): defaults exist, nothing outside tests reads them. PRE-EXISTING; remove or wire.
 4. `integration_provider_configs.api_base_url` is unused (database schema/integrations.ts:51); a future dial must use the guarded fetch. PRE-EXISTING.
 5. A user-typed git remote is dialed by the child `git` process outside the Node guard (worker repo clone.ts:74, bundle-sync.ts:18). A fix (protocol allowlist, network policy) changes product behaviour. PRE-EXISTING.
-6. (T558 run, 2026-11-09) `POST /global-kb/test-ollama` (api routes/global-kb.ts ~:575) lets any signed-in user make the api dial a request-typed URL through the guarded fetch; the page fires it on first load (settings/global-kb page.tsx ~:605) and the button stays usable for a non-admin, though the stored URL is now admin-only. PRE-EXISTING. Decide: admin-only, or restrict the probe to the stored URL.
+6. Shipped in PR #1050 (a non-admin's call tests the stored settings and ignores the body; an admin keeps the typed URL).
 7. Shipped in PR #1049 (the OpenRouter compat probe, same guard).
 8. (PR #1049 review) A Test connection buffers a whole response body from a user-set URL with no size cap, bounded only by the 20 s abort: worker cli-adapters/ollama-probe.ts ~:118 (`resp.text()`), openrouter-compat.ts ~:165 (`resp.json()`). A non-admin can hold that much worker memory per probe. PRE-EXISTING, consequential for availability.
 9. (PR #1049 run and review) Z.AI usage polling sends the provider's token over plain fetch to the origin of a hand-set `ANTHROPIC_BASE_URL` (worker usage-window/fetchers/zai.ts ~:71, usage-poll-queue.ts:342); no reply text is returned, but status and error text land on the usage row (240 characters), so a non-admin gets a blind reachability and status probe of private hosts on every poll. PRE-EXISTING, consequential. Fix direction: same owner-role rule.
 10. (PR #1049 review) For the exempt in-stack names a non-admin sees the transport text with the container address and open port (`describeTransportError`, ollama-probe.ts ~:62-72). PRE-EXISTING, minor, narrower than before.
 11. (PR #1049 review) The refused warning says "refused by the egress guard" also when a built-in host's DNS is down, and no test drives `ConfigUnavailableError` into the Ollama result. NEW, minor.
+12. (PR #1050 review) `POST /tooling/pull-ollama-model` with the exempt in-stack host lets any signed-in user make the shared Ollama pull an arbitrary model (api routes/tooling.ts pull stream). Whether onboarding needs this for non-admins is unverified. PRE-EXISTING, possibly consequential (disk, bandwidth); needs a decision.
+13. (PR #1050 review) Minors: a stored Ollama URL with userinfo is returned to every role and echoed in the test message (global-kb.ts `configResponse`); the Test's `ollamaEmbed` passes no timeout, so a hung Ollama holds a non-admin page load up to 240 s (global-kb.ts, tooling.ts ~:117); the non-admin test path decrypts the external connection string only to read three fields (`resolveGlobalKbSettings`); that path's not-configured branch is unreachable with the real resolver and its spelling matrix left the shared table in probe-targets.test.ts. PRE-EXISTING or NEW, minor.
 
 ### T584 · FNF[nested-repo-commit-leftovers] · nested repository edge cases left after the commit-site work (+5)
 
