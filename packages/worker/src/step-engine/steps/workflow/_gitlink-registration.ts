@@ -98,6 +98,37 @@ async function registeredPaths(
 }
 
 /**
+ * `git add` passes over what these two flags hide, and `ls-files -s` does not carry them, so without
+ * this the scratch add stages an edit the real add would leave out.
+ */
+async function copyIndexFlags(workspace: string, env: Record<string, string>): Promise<void> {
+  const tagged = await gitRun(workspace, ['ls-files', '-v', '-z'], undefined, LISTING);
+  expectOk('git ls-files', tagged);
+  const assumed: string[] = [];
+  const skipped: string[] = [];
+  for (const record of tagged.stdout.split('\0')) {
+    if (!record) continue;
+    const tag = record.charAt(0);
+    const name = record.slice(2);
+    if (tag !== tag.toUpperCase()) assumed.push(name);
+    if (tag.toUpperCase() === 'S') skipped.push(name);
+  }
+  for (const [flag, names] of [
+    ['--assume-unchanged', assumed],
+    ['--skip-worktree', skipped],
+  ] as const) {
+    if (names.length === 0) continue;
+    const marked = await gitRun(
+      workspace,
+      [...NO_SPLIT_INDEX, 'update-index', '-z', flag, '--stdin'],
+      env,
+      { input: Buffer.from(`${names.join('\0')}\0`, 'latin1') },
+    );
+    expectOk('git update-index', marked);
+  }
+}
+
+/**
  * Index paths of gitlinks the commit about to be made would add that no `.gitmodules` entry in that
  * commit registers with a url. What `git add -A` would stage is worked out on a scratch copy of the
  * index, so the real index is never written. Throws when git cannot answer: a refusal is never skipped.
@@ -129,6 +160,7 @@ export async function unregisteredGitlinks(
       { input: Buffer.from(listing.stdout, 'latin1') },
     );
     expectOk('git update-index', fill);
+    await copyIndexFlags(workspace, env);
     const add = await gitRun(workspace, [...NO_SPLIT_INDEX, ...stageAllArgs(excluded)], env);
     expectOk('git add', add);
     const added = await newGitlinks(workspace, env);

@@ -37,8 +37,8 @@ A nested repository with a commit is refused at gate 3 when the add would put a 
 commit that HEAD does not hold and the commit's `.gitmodules` has no entry with that path and a
 non-empty url (`_gitlink-registration.ts`, right after `assertDependencyCommitSafe` and before
 `git add -A`). What the add would stage is worked out on a scratch index (`GIT_INDEX_FILE` in the
-temp dir, filled from the real index, same argv as the real add through `stageAllArgs`), so the
-real index is never written. `core.splitIndex=false` is set there because a split index writes
+temp dir, filled from the real index with its assume-unchanged and skip-worktree flags, same argv
+as the real add through `stageAllArgs`), so the real index is never written. `core.splitIndex=false` is set there because a split index writes
 `.git/sharedindex.*` into the repository. The check reads modes and exit codes only. It runs when
 the real index already holds a new gitlink, or the status lists an untracked directory (`?? dir/`),
 a work-tree type change (` T path`) or an intent-to-add entry (` A path`), the three shapes a

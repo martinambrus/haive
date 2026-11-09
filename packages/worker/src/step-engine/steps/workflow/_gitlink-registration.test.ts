@@ -103,6 +103,24 @@ describe('unregisteredGitlinks', () => {
     expect(await find(repo)).toEqual([]);
   });
 
+  it.each(['--assume-unchanged', '--skip-worktree'])(
+    'does not count a .gitmodules edit that %s keeps out of the commit',
+    async (flag) => {
+      const repo = await outer();
+      await writeFileNoFollow(repo, '.gitmodules', '# none yet\n');
+      await git(repo, ['add', '--', '.gitmodules']);
+      await git(repo, ['commit', '-q', '-m', 'empty gitmodules']);
+      await git(repo, ['update-index', flag, '--', '.gitmodules']);
+      await writeFileNoFollow(
+        repo,
+        '.gitmodules',
+        gitmodules('\tpath = nested\n\turl = https://example.invalid/x.git\n'),
+      );
+      await nestedRepo(repo, 'nested');
+      expect(await find(repo)).toEqual(['nested']);
+    },
+  );
+
   it('returns nothing when no new gitlink or untracked repository exists', async () => {
     const repo = await outer();
     await writeFileNoFollow(repo, 'a.txt', 'after\n');
