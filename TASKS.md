@@ -468,12 +468,12 @@ status: open · kind: fix · found: T347 run · priority: P2
 Items 1, 2 and 4 shipped in PR #1040 (4dceda71f), 2026-11-09. Items 3, 5, 6 and 7 stay parked as before; item 8 needs a decision.
 
 3. Hostname entries consult the hosts file only when DNS fails, so a name public in DNS but overridden in /etc/hosts dials the DNS answer (shared egress/probe-egress.ts:96,127,186,319). Accepted behaviour; revisit only on a report. NEW-LIMIT.
-5. `deflate` maps to `createInflate` (probe-egress.ts:158), so a raw-deflate body fails. PRE-EXISTING (moved code).
-6. The guard sends `accept-encoding: identity` by default (probe-egress.ts:219). PRE-EXISTING (low).
-7. A `[::1]` host in a RAG DSN reports `ENOTFOUND [` (`dsnDialHost`, shared rag/connection.ts:119; postgres.js parses the host as `[`); still refused, only the message is wrong. PRE-EXISTING (low).
-8. (T555 run, 2026-11-09) Azure host virtual IP 168.63.129.16 (WireServer) is a public address, so `isBlockedAddress` is false for it and its mapped form: the guard dials it for any stored or typed host with an empty allowlist. PRE-EXISTING, consequential on Azure installs. Decide: block it in the base table in all encodings and in the unliftable set.
-9. (T555 run) 64:ff9b:1::/48 (RFC 8215 local-use NAT64) and Teredo 2001::/32 are blocked but not unliftable, so a hostname entry lifts them, for example `64:ff9b:1::a9fe:a9fe`; through a gateway they can reach metadata. PRE-EXISTING, minor.
-10. (T555 run) `isUnliftableByHostname` returns false for a non-address string while the base table blocks it. Unreachable today, since resolvers return address literals. PRE-EXISTING, theoretical.
+4. `deflate` maps to `createInflate` (probe-egress.ts:158), so a raw-deflate body fails. PRE-EXISTING (moved code).
+5. The guard sends `accept-encoding: identity` by default (probe-egress.ts:219). PRE-EXISTING (low).
+6. A `[::1]` host in a RAG DSN reports `ENOTFOUND [` (`dsnDialHost`, shared rag/connection.ts:119; postgres.js parses the host as `[`); still refused, only the message is wrong. PRE-EXISTING (low).
+7. (T555 run, 2026-11-09) Azure host virtual IP 168.63.129.16 (WireServer) is a public address, so `isBlockedAddress` is false for it and its mapped form: the guard dials it for any stored or typed host with an empty allowlist. PRE-EXISTING, consequential on Azure installs. Decide: block it in the base table in all encodings and in the unliftable set.
+8. (T555 run) 64:ff9b:1::/48 (RFC 8215 local-use NAT64) and Teredo 2001::/32 are blocked but not unliftable, so a hostname entry lifts them, for example `64:ff9b:1::a9fe:a9fe`; through a gateway they can reach metadata. PRE-EXISTING, minor.
+9. (T555 run) `isUnliftableByHostname` returns false for a non-address string while the base table blocks it. Unreachable today, since resolvers return address literals. PRE-EXISTING, theoretical.
 
 ### T556 · FNF[ollama-pull-relay] · pull stream relay edges
 
