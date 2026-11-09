@@ -9,8 +9,7 @@ vi.mock('../logger/index.js', () => ({
 // The guard dials a real socket; these tests stub global fetch to check request shapes.
 vi.mock('../egress/index.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../egress/index.js')>()),
-  createGuardedFetch: () => (input: string | URL, init?: RequestInit) =>
-    globalThis.fetch(input, init),
+  guardedProbeFetch: (input: string | URL, init?: RequestInit) => globalThis.fetch(input, init),
 }));
 
 import {

@@ -6,8 +6,7 @@ import { releaseEmbedModelIfUnused, resolveTaskEmbedTarget } from '../src/rag/em
 // The guard dials a real socket; these tests stub global fetch to check request shapes.
 vi.mock('../src/egress/index.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/egress/index.js')>()),
-  createGuardedFetch: () => (input: string | URL, init?: RequestInit) =>
-    globalThis.fetch(input, init),
+  guardedProbeFetch: (input: string | URL, init?: RequestInit) => globalThis.fetch(input, init),
 }));
 
 const URL = 'http://ollama:11434';

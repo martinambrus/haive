@@ -2,6 +2,7 @@ import { asc, eq, inArray, ne, or } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { getCliProviderMetadata, splitSecretLikeEnv, type CliProviderName } from '@haive/shared';
 import type { CliProbePathResult } from '@haive/shared';
+import { guardedProbeFetch } from '@haive/shared/egress';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { defaultDockerRunner, type DockerRunner } from '../../sandbox/docker-runner.js';
 import { resolveImageTag } from '../../sandbox/image-cache.js';
@@ -260,7 +261,7 @@ export async function probeCliPath(
       // any step that has tools, which is nearly all of them. Returning ok:true
       // alongside "cannot run a task step" is a contradiction that reads as noise,
       // and it was reported as confusing the first time it fired.
-      const compatError = await resolveOpenRouterCompatWarning(provider, secrets);
+      const compatError = await resolveOpenRouterCompatWarning(db, provider, secrets);
       if (compatError) {
         return {
           ok: false,
@@ -273,7 +274,7 @@ export async function probeCliPath(
       // Ollama: nothing above this line looks at the endpoint or the model, so every
       // Ollama provider tested green regardless of how it was configured. See
       // ollama-probe.ts for what that cost.
-      const ollamaError = await resolveOllamaProbeError(provider, secrets);
+      const ollamaError = await resolveOllamaProbeError(db, provider, secrets);
       if (ollamaError) {
         return {
           ok: false,
@@ -379,6 +380,20 @@ function resolveMissingApiKeyError(
   );
 }
 
+async function resolveProbeFetch(
+  db: Database,
+  provider: CliProviderRecord,
+  env: Record<string, string>,
+): Promise<typeof fetch> {
+  // Platform-picked URLs include private sidecars outside the probe allow set.
+  if (env.ANTHROPIC_BASE_URL == null) return fetch;
+  const owner = await db.query.users.findFirst({
+    where: eq(schema.users.id, provider.userId),
+    columns: { role: true },
+  });
+  return owner?.role === 'admin' ? fetch : guardedProbeFetch;
+}
+
 /** The Test-connection advisory for an OpenRouter provider whose selected model
  *  rejects the claude binary's request shape, or null when there is nothing to say.
  *
@@ -394,6 +409,7 @@ function resolveMissingApiKeyError(
  *  the user to change a model that is actually fine, which is worse than staying
  *  quiet and letting the run report it. */
 async function resolveOpenRouterCompatWarning(
+  db: Database,
   provider: CliProviderRecord,
   secrets: Record<string, string>,
 ): Promise<string | null> {
@@ -404,7 +420,8 @@ async function resolveOpenRouterCompatWarning(
   const token = env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY;
   if (!token) return null;
   const baseUrl = resolveOpenRouterBaseUrl(env);
-  const compat = await probeOpenRouterModelCompat({ baseUrl, token, model });
+  const fetchImpl = await resolveProbeFetch(db, provider, env);
+  const compat = await probeOpenRouterModelCompat({ baseUrl, token, model, fetchImpl });
   if (compat.compatible) return null;
   const because = compat.detail ? ` Upstream said: "${compat.detail}".` : '';
   const custom = env.ANTHROPIC_BASE_URL
@@ -435,6 +452,7 @@ async function resolveOpenRouterCompatWarning(
  *  The token falls back to the literal 'ollama' exactly as the adapter does, so a
  *  local-daemon provider with no key configured probes the way it will run. */
 async function resolveOllamaProbeError(
+  db: Database,
   provider: CliProviderRecord,
   secrets: Record<string, string>,
 ): Promise<string | null> {
@@ -454,7 +472,8 @@ async function resolveOllamaProbeError(
     model,
     disableThinking: provider.disableThinking,
   });
-  const result = await probeOllamaEndpoint({ baseUrl, token, model });
+  const fetchImpl = await resolveProbeFetch(db, provider, env);
+  const result = await probeOllamaEndpoint({ baseUrl, token, model, fetchImpl });
   if (result.ok) return null;
   const because = result.detail ? ` It answered: "${result.detail}".` : '';
   // A hand-set base URL is the single likeliest cause, and the one the error text
