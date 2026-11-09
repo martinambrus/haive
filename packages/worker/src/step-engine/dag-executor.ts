@@ -1,4 +1,6 @@
 import { assertDependencyCommitSafe } from './steps/workflow/_dependency-policy.js';
+import { parsePorcelainZ } from './steps/workflow/_commit-diff.js';
+import { warnStep } from '../project-state/branch-revert.js';
 import {
   unregisteredGitlinks,
   unregisteredGitlinksMessage,
@@ -522,7 +524,18 @@ async function commitIssueWork(
     '--quiet',
     '--ignore-submodules=none',
   ]);
-  if (staged.code === 0) return;
+  if (staged.code === 0) {
+    const notes = parsePorcelainZ(pending.stdout).map(
+      ({ path }) =>
+        `${JSON.stringify(path)}: its uncommitted changes are inside a nested repository, are not part of this issue's commit, and stay out unless committed inside it before a retry.`,
+    );
+    try {
+      await warnStep(ctx, notes);
+    } catch (err) {
+      ctx.logger.warn({ err }, 'Could not save uncommitted nested-repository warnings; continuing');
+    }
+    return;
+  }
   if (staged.code !== 1) {
     throw new Error(
       `git staged read failed for DAG issue ${issue.issueKey}: ${(staged.stderr || staged.stdout).trim()}`,
