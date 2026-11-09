@@ -137,6 +137,20 @@ refuses unix paths, several hosts and blocked literals and otherwise connects th
 Ollama helpers in `rag/embed.ts` take an optional `fetchFn` and default to a guarded fetch that exempts the
 built-in hosts, so the worker's dials are guarded too. `POST /global-kb/test-db` was already `requireAdmin`.
 
+**A provider's Test connection follows the same rule in the worker.** `POST /cli-providers/:id/test` only queues
+a PROBE job, and for an OpenRouter or Ollama provider the worker then sends one request to the provider's base
+URL and shows the answer's text. The job carries no role, so `resolveProbeFetch` (`queues/cli-exec/images.ts`)
+reads the owner's `users.role` at probe time: `admin` gets the plain `fetch`, and any other value, a missing row
+included, gets `guardedProbeFetch` (`egress/probe-fetch.ts`, the allow set `rag/embed.ts` uses). Only a hand-set
+`ANTHROPIC_BASE_URL` is guarded, read from the same merged env the run resolves it from: a URL Haive picked itself
+(the OpenRouter compatibility proxy, the Ollama thinking proxy, the in-stack daemon, ollama.com) was typed by no
+one, and the two proxies are private sidecars outside the allow set, so guarding them would end the check for
+every non-administrator. A refused Ollama probe answers `ok: true` with a `warning` that names the guard rather
+than a failure, because a run dials from inside the sandbox under its own network policy and may well reach what
+this probe may not. The warning is keyed on the transport `cause.code` `ENOTFOUND` and also covers a name that
+does not resolve: telling the two apart would say which names resolve privately. An OpenRouter probe stays
+silent on any transport failure, as it does for every inconclusive outcome.
+
 **The private-endpoint allowlist.** An administrator lists the private, loopback or link-local endpoints the
 install may dial: `config:security:privateEndpointAllowlist`, `GET`/`PUT /admin/config/private-endpoint-allowlist`
 (an audit row `config.private_endpoint_allowlist` per change), a card on the admin data tab. The key has no

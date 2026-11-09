@@ -100,7 +100,7 @@ whose saved explicit URL does not set `ollamaUrlDerived`; hash rows written ther
 otherwise survive every incremental sync after the service recovered.
 
 **Private endpoints.** The Ollama helpers in `rag/embed.ts` dial through a guarded fetch by default
-(`createGuardedFetch`, the built-in hosts exempt): an embedder URL that resolves to a private, loopback or
+(`guardedProbeFetch`, the built-in hosts exempt): an embedder URL that resolves to a private, loopback or
 link-local address is refused unless the administrator's private-endpoint allowlist lists it
 (`api-auth.md`), the shipped default `http://host.docker.internal:11434` excepted (built in by exact
 origin). A refusal reads as an unreachable endpoint (the probe says down and `embedBatch` takes its
