@@ -496,16 +496,15 @@ Each needs a per-dial decision (guard, admin-trust, or remove).
 6. (T558 run, 2026-11-09) `POST /global-kb/test-ollama` (api routes/global-kb.ts ~:575) lets any signed-in user make the api dial a request-typed URL through the guarded fetch; the page fires it on first load (settings/global-kb page.tsx ~:605) and the button stays usable for a non-admin, though the stored URL is now admin-only. PRE-EXISTING. Decide: admin-only, or restrict the probe to the stored URL.
 7. (T555 run, 2026-11-09) Provider probes dial a hand-set base URL through the global fetch: worker cli-adapters/openrouter-compat.ts:120 (`opts.fetchImpl ?? fetch`; base URL from `ANTHROPIC_BASE_URL`, reached from queues/cli-exec/images.ts:406-407). Item 1 lists images.ts:457 and ollama-probe.ts but not this one, and T511 item 2 treats openrouter-compat as a fixed vendor host, which is wrong for the probe. PRE-EXISTING, consequential.
 
-### T578 · FNF[orphan-gitlink-2] · commit sites other than gate 3 still record an unregistered nested repository (+7)
+### T584 · FNF[nested-repo-commit-leftovers] · nested repository edge cases left after the commit-site work (+5)
 
-status: in progress (codex-sonnet, 2026-11-09) · items 2-5 · kind: fix · found: T425 run 2026-11-09 · priority: P3
+status: open · kind: fix · found: T578 review 2026-11-09 · priority: P4
 
-PRE-EXISTING. Gate 3 and the DAG issue commit now refuse a new gitlink with no `.gitmodules` url (`_gitlink-registration.ts`; DAG commit shipped in #1042); these do not. A stale comment above `commitIssueWork` (`dag-executor.ts` ~:472, "the coder is told to commit") contradicts the coder prompt; fix with any edit there. A task in flight across the #1042 deploy whose issue commit already holds an orphan gitlink is not detected.
-
-2. `steps/workflow/01-worktree-setup.ts:156`, `steps/onboarding/12-post-onboarding.ts:978`, `steps/onboarding-upgrade/03-upgrade-commit.ts:345`: `add -A` commits of a fresh or onboarded repo record a nested repo as a gitlink. Minor. Also `steps/run-app/99-run-app-ready.ts:331`, the Run app Finish commit.
-3. An unborn nested repo that replaces a tracked file shows as ` D nested`, so the #424 exclusion (which reads `?? dir/`) misses it and the real `git add -A` exits 128. Loud, nothing wrong committed. Minor. Same family, not unborn: a nested repo that replaces the FILES of a tracked directory shows `D dir/a` and `?? dir/inner.txt`, never `?? dir/`, so neither gate 3 nor the DAG check sees it and the add flattens it into ordinary files, its history lost with the worktree (`_gitlink-registration.ts:144-149`; identical before the DAG check).
-4. A malformed `.gitmodules` next to a gitlink: `git commit` can land the commit and exit 128, so the step throws with HEAD advanced. The new refusal precedes this for an orphan; a malformed file next to an already tracked gitlink was not tried. Minor. Next to it: editing inside a gitlink the branch already holds, with no `.gitmodules` and no nested commit, stages nothing, so the DAG `git commit` fails and Retry cannot pass without touching the nested repo (`dag-executor.ts` ~:520).
-5. Not exercised by the T425 run: open MERGE_HEAD and unmerged gitlinks, and git 2.54 (host runs were 2.43). Merge-fix `completeMergeHostSide` (`git-merge.ts:1313`, `add -A -- <conflicted paths>` :1355) could commit a nested repo inside a conflicted path; not tried.
+1. Own change, minor. A directory name that is not UTF-8 evades the flatten refusal: callers decode the status as UTF-8 and `lstatNoFollow` then finds no such name (`_gitlink-registration.ts` `refuseFlattenedRepositories`). `fs-safe` takes string paths, and failing closed would refuse legitimate legacy names.
+2. PRE-EXISTING. A merge that conflicts nowhere brings in an unregistered gitlink unchecked (`merge-resolver.ts` clean path).
+3. Own change, minor. A merge-side nested repository refusal is logged only: the fixer's next round gets the same prompt and the person reads "auto-resolution exhausted" (`git-merge.ts` `completeMergeHostSide`). A gitlink under a conflict partner path (directory/file conflict) can still cost retry attempts, though the fixer did not make it; telling them apart needs MERGE_HEAD's tree.
+4. Own change, minor. The DAG nothing-staged warning names the path, not the issue, and two issues sharing a path collapse to one note (`dag-executor.ts` `commitIssueWork`, `step-ownership.ts` `addStepWarning`). The warning cannot fire for edits in a gitlink directory holding no `.git`. Not run.
+5. Coverage. The unregistered-gitlink branch of `completeMergeHostSide` is not reached by a test, since a directory at a conflicted path is refused earlier by the marker read. New import cycle `_gitlink-registration` to `branch-revert` to `git-merge`, uses are all inside functions. `gitCommitStaged` and the DAG commit treat a nonzero commit exit as failure even if HEAD moved (unreachable today: pre-commit checks fail first on a malformed `.gitmodules`).
 
 ### T582 · FNF[global-kb-delete-ui-followups] · small Global KB delete page gaps (+3)
 
@@ -1544,6 +1543,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T578 — nested repositories at the remaining commit sites — PRs #1042, #1045 (63aad40c2), #1046 (df288e668), 2026-11-09
 - T581 — restrict who may change a Global KB entry — PR #1044 (0d73cb579), 2026-11-09
 - T579 — restrict who may delete a Global KB entry — PR #1043 (4d7904a75), 2026-11-09
 - T425 — gate 3 refuses an unregistered nested repository instead of committing a gitlink with no url — PR #1039 (435cc78c9), 2026-11-09
