@@ -172,13 +172,31 @@ export async function unregisteredGitlinks(
   }
 }
 
-export function unregisteredGitlinksMessage(paths: string[]): string {
+/**
+ * Without `issue` this is gate 3's text. With it, the refusal of a DAG issue commit: it names the issue
+ * and where to act, that issue's worktree, and leaves out `git submodule add`, since the worktree's
+ * gitfile names a host path the task terminal does not have, so git does not run there.
+ */
+export function unregisteredGitlinksMessage(
+  paths: string[],
+  issue?: { key: string; worktree?: string | null },
+): string {
   return [
-    'Nothing was committed. These paths are nested git repositories that are not registered as a submodule:',
+    issue
+      ? `Nothing was committed for DAG issue ${issue.key}. These paths in its worktree are nested git repositories that are not registered as a submodule:`
+      : 'Nothing was committed. These paths are nested git repositories that are not registered as a submodule:',
     ...paths.map((p) => `- ${JSON.stringify(p)}`),
     'Committing one would record only a commit id with no URL, so a clone could not fetch it.',
-    'There are two ways out, then retry this step:',
-    '(1) Register it as a submodule: a `.gitmodules` entry with its path and a url, for example `git submodule add URL PATH`.',
+    ...(issue
+      ? [
+          `Act in that issue's worktree${issue.worktree ? `, ${issue.worktree}` : ''}, then retry this step. The issue is not coded again; its work is committed as it stands.`,
+          'There are two ways out:',
+          "(1) Register it as a submodule: add a `.gitmodules` entry with its path and a url to that worktree's `.gitmodules` file.",
+        ]
+      : [
+          'There are two ways out, then retry this step:',
+          '(1) Register it as a submodule: a `.gitmodules` entry with its path and a url, for example `git submodule add URL PATH`.',
+        ]),
     "(2) Include its files as ordinary files by removing its nested `.git` directory (this drops that repository's own history).",
   ].join('\n');
 }
