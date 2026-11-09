@@ -486,7 +486,7 @@ status: open · kind: fix · found: T347 run · priority: P3
 
 ### T557 · FNF[unguarded-dial-audit] · dials that still bypass the egress guard (design) (+2)
 
-status: open · kind: design · found: T347 run · priority: P2
+status: in progress, items 1 7 6 (codex-sonnet) · kind: design · found: T347 run · priority: P2
 Each needs a per-dial decision (guard, admin-trust, or remove).
 
 1. CLI provider base URLs: worker cli-exec/images.ts:457, cli-adapters/ollama-probe.ts:76 (`probeOllamaEndpoint`), api routes/cli-providers.ts:664, worker cli-adapters/zai.ts:63,106. PRE-EXISTING.
