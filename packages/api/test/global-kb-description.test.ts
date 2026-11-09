@@ -74,6 +74,7 @@ beforeEach(() => {
   fake.insert(schema.cliProviders, { id: PROVIDER, userId: USER, enabled: true, name: 'codex' });
   fake.insert(globalKbEntries, {
     id: ENTRY,
+    userId: USER,
     namespace: 'default',
     title: 'Never inline SVG',
     body: 'body',

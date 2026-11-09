@@ -3,10 +3,18 @@ import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { Dialog } from '@/components/dialog';
 import { Button, FormError, Label } from '@/components/ui';
 import GlobalKbPage from './page';
+import { MarkdownView } from '@/components/markdown/markdown-view';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 
 // No DOM in this package: the page's hooks run on a plain slot list, as in components/task-type-editor.test.tsx.
 const hooks = vi.hoisted(() => ({ slots: [] as unknown[], next: 0, dirty: false, mounting: true }));
-const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() }));
+const api = vi.hoisted(() => ({
+  get: vi.fn(),
+  post: vi.fn(),
+  put: vi.fn(),
+  patch: vi.fn(),
+  delete: vi.fn(),
+}));
 type KeyListener = (event: {
   key: string;
   stopPropagation: () => void;
@@ -73,6 +81,7 @@ afterAll(() => vi.unstubAllGlobals());
 
 type El = ReactElement<{
   children?: ReactNode;
+  body?: string;
   id?: string;
   htmlFor?: string;
   value?: string;
@@ -231,6 +240,8 @@ beforeEach(() => {
   api.get.mockReset();
   api.post.mockReset();
   api.put.mockReset();
+  api.patch.mockReset();
+  api.patch.mockResolvedValue({});
   api.delete.mockReset();
   api.delete.mockResolvedValue({ ok: true });
   vi.mocked(window.confirm).mockClear();
@@ -489,7 +500,7 @@ describe('the enrichment CLI picker', () => {
   });
 });
 
-describe('entry deletion controls', () => {
+describe('entry management controls', () => {
   const entry = (over: Record<string, unknown> = {}) => ({
     id: '00000000-0000-4000-8000-0000000000b1',
     namespace: 'default',
@@ -504,18 +515,148 @@ describe('entry deletion controls', () => {
     sourceTaskId: null,
     supersedesEntryId: null,
     embedStatus: 'embedded',
-    canDelete: true,
+    canManage: true,
     createdAt: '2026-11-09T00:00:00Z',
     updatedAt: '2026-11-09T00:00:00Z',
     ...over,
   });
+
+  const namedControls = (ui: Awaited<ReturnType<typeof mount>>, label: string) =>
+    ui.all().filter((e) => (e.type === Button || e.type === 'button') && textOf(e) === label);
+
+  describe('activating a replacement', () => {
+    const predecessorId = '00000000-0000-4000-8000-0000000000b2';
+    const refusal =
+      'Activating this entry would archive an entry you may not change; an admin is required';
+
+    async function replacement(predecessor: Record<string, unknown> | Error) {
+      const row = entry({ status: 'draft', supersedesEntryId: predecessorId });
+      const ui = await mount({ canEnforce: false }, [], [row]);
+      const originalGet = api.get.getMockImplementation()!;
+      api.get.mockImplementation(async (path: string) => {
+        if (path !== `/global-kb/entries/${predecessorId}`) return originalGet(path);
+        if (predecessor instanceof Error) throw predecessor;
+        return { entry: entry({ id: predecessorId, title: 'Predecessor', ...predecessor }) };
+      });
+      return { ui, row };
+    }
+
+    it.each(['list', 'dialog'])(
+      'refuses an unmanageable live predecessor from the %s before confirm or PATCH',
+      async (surface) => {
+        const { ui } = await replacement({ canManage: false, enforcedHash: 'approval' });
+        if (surface === 'dialog') await ui.openEntry();
+
+        await ui.pressTarget(namedControls(ui, 'Activate').at(-1), 'Activate');
+
+        const scope =
+          surface === 'dialog'
+            ? flatten(ui.all().find((e) => e.type === Dialog && e.props.open)?.props.children)
+            : ui.all();
+        expect(
+          scope.filter((e) => e.type === FormError && e.props.message === refusal),
+        ).toHaveLength(1);
+        expect(window.confirm).not.toHaveBeenCalled();
+        expect(api.patch).not.toHaveBeenCalled();
+      },
+    );
+
+    it('keeps the approval confirm and PATCH for a manageable predecessor', async () => {
+      const { ui, row } = await replacement({ canManage: true, enforcedHash: 'approval' });
+
+      await ui.press('Activate');
+
+      expect(window.confirm).toHaveBeenCalledExactlyOnceWith(
+        `"${row.title}" replaces "Predecessor", which carries an admin's approval as a house rule. Activating archives it and ends that approval; an admin has to enforce the replacement. Activate anyway?`,
+      );
+      expect(api.patch).toHaveBeenCalledExactlyOnceWith(`/global-kb/entries/${row.id}`, {
+        status: 'active',
+      });
+    });
+
+    it('does not block an archived predecessor the user may not manage', async () => {
+      const { ui, row } = await replacement({ status: 'archived', canManage: false });
+
+      await ui.press('Activate');
+
+      expect(window.confirm).not.toHaveBeenCalled();
+      expect(api.patch).toHaveBeenCalledExactlyOnceWith(`/global-kb/entries/${row.id}`, {
+        status: 'active',
+      });
+    });
+
+    it.each([
+      ['a missing predecessor', Object.assign(new Error('Not found'), { status: 404 }), false],
+      ['a failed lookup', new Error('lookup failed'), true],
+    ] as const)('keeps activation behavior for %s', async (_label, error, confirms) => {
+      const { ui, row } = await replacement(error);
+
+      await ui.press('Activate');
+
+      expect(window.confirm).toHaveBeenCalledTimes(confirms ? 1 : 0);
+      if (confirms) {
+        expect(window.confirm).toHaveBeenCalledWith(
+          `Could not check whether the entry that "${row.title}" replaces carries an admin's approval as a house rule (lookup failed). If it does, activating archives it and ends that approval. Activate anyway?`,
+        );
+      }
+      expect(api.patch).toHaveBeenCalledExactlyOnceWith(`/global-kb/entries/${row.id}`, {
+        status: 'active',
+      });
+    });
+  });
+
+  describe.each(['draft', 'active', 'archived'])('PATCH controls on %s entries', (status) => {
+    it.each([false, undefined, true])('uses canManage=%s in list and detail', async (canManage) => {
+      const row = entry({ status, canManage, description: 'Read this description' });
+      const ui = await mount({ canEnforce: false }, [], [row]);
+      const allowed = canManage === true;
+      expect(namedControls(ui, 'Activate')).toHaveLength(status === 'draft' && allowed ? 1 : 0);
+      await ui.openEntry();
+      for (const label of ['Edit description', 'Edit scope', 'Edit body']) {
+        expect(namedControls(ui, label)).toHaveLength(allowed ? 1 : 0);
+      }
+      expect(namedControls(ui, 'Activate')).toHaveLength(status === 'draft' && allowed ? 2 : 0);
+      expect(namedControls(ui, 'Reactivate')).toHaveLength(
+        status === 'archived' && allowed ? 1 : 0,
+      );
+      expect(namedControls(ui, 'Archive')).toHaveLength(status === 'active' && allowed ? 1 : 0);
+      expect(ui.all().some((e) => e.type === MarkdownView && e.props.body === row.body)).toBe(true);
+      expect(
+        ui.all().some((e) => e.type === InlineMarkdown && e.props.body === row.description),
+      ).toBe(true);
+    });
+  });
+
+  it.each([
+    ['Edit description', 'Save description'],
+    ['Edit scope', 'Save scope'],
+    ['Edit body', 'Save body'],
+  ])('hides an open %s editor after permission is lost', async (edit, save) => {
+    const row = entry();
+    const ui = await mount({ canEnforce: false }, [], [row]);
+    await ui.openEntry();
+    await ui.pressTarget(namedControls(ui, edit)[0], edit);
+    expect(namedControls(ui, save)).toHaveLength(1);
+    row.canManage = false;
+    await ui.settle();
+    expect(namedControls(ui, save)).toHaveLength(0);
+    expect(ui.all().some((e) => e.type === MarkdownView && e.props.body === row.body)).toBe(true);
+  });
+
+  it('keeps enforcement controls governed by canEnforce', async () => {
+    const ui = await mount({ canEnforce: true }, [], [entry({ canManage: false })]);
+    await ui.openEntry();
+    expect(namedControls(ui, 'Edit body')).toHaveLength(0);
+    expect(namedControls(ui, 'Enforce…')).toHaveLength(1);
+  });
+
   const deleteButtons = (ui: Awaited<ReturnType<typeof mount>>) =>
     ui.all().filter((e) => e.type === Button && textOf(e) === 'Delete');
 
   it.each([false, undefined])(
-    'hides list and detail Delete for canDelete=%s',
-    async (canDelete) => {
-      const ui = await mount({}, [], [entry({ canDelete })]);
+    'hides list and detail Delete for canManage=%s',
+    async (canManage) => {
+      const ui = await mount({}, [], [entry({ canManage })]);
       expect(deleteButtons(ui)).toHaveLength(0);
       await ui.openEntry();
       expect(deleteButtons(ui)).toHaveLength(0);
@@ -574,12 +715,12 @@ describe('entry deletion controls', () => {
   });
 
   it.each([false, true])(
-    'gates in-progress enrichment cancellation on canDelete=%s',
-    async (canDelete) => {
+    'gates in-progress enrichment cancellation on canManage=%s',
+    async (canManage) => {
       const ui = await mount(
         {},
         [],
-        [entry({ status: 'enriching', sourceTaskId: 'enrich-task', canDelete })],
+        [entry({ status: 'enriching', sourceTaskId: 'enrich-task', canManage })],
       );
       const cancel = ui
         .all()
@@ -588,8 +729,8 @@ describe('entry deletion controls', () => {
             e.type === Button &&
             e.props.title === 'Cancel the enrichment task and discard this entry',
         );
-      expect(Boolean(cancel)).toBe(canDelete);
-      if (canDelete) {
+      expect(Boolean(cancel)).toBe(canManage);
+      if (canManage) {
         await ui.pressTarget(cancel, 'Cancel enrichment');
         expect(api.post).toHaveBeenCalledWith('/tasks/enrich-task/action', { action: 'cancel' });
       } else {

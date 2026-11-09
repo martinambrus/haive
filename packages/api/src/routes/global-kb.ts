@@ -72,14 +72,12 @@ import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { admitNewWork, requireNewWorkAllowed } from '../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../context.js';
 
-// Global KB is instance/namespace-scoped (not per-user). haive is self-hosted
-// single-operator — every signed-in user manages their own repos, tasks and
-// settings — so the shared global KB is managed by any authenticated user too
-// (requireAuth only), with deletion restricted to owner-or-admin for unapproved
-// entries and admin-only for approved or ownerless entries. Enforcement and the
-// store settings are admin-only. The corpus lives in a
-// SEPARATE database reached via withGlobalKb; getDb() is the main DB, needed only to
-// CREATE the dedicated DB in internal mode.
+// Global KB is instance/namespace-scoped, shared across authenticated users. Changes and
+// deletion require an admin for approved or ownerless entries, otherwise the owner or an admin.
+// Enforcement and connection and embedding store settings are admin-only. The corpus lives in a
+// SEPARATE database
+// reached via withGlobalKb; getDb() is the main DB, needed only to CREATE the dedicated DB
+// in internal mode.
 const CATEGORIES = [
   'general',
   'tech_pattern',
@@ -189,7 +187,7 @@ async function houseRuleContext(namespace: string): Promise<HouseRuleContext> {
   return { namespace, houseRulesEnabled: await resolveHouseRulesEnabled(configService) };
 }
 
-function canDeleteEntry(
+function canManageEntry(
   entry: Pick<GlobalKbEntry, 'userId' | 'enforcedHash'>,
   actor: Context<AppEnv>,
 ): boolean {
@@ -206,7 +204,7 @@ function presentEntry<T extends HouseRuleRow & Pick<GlobalKbEntry, 'userId'>>(
 ) {
   return {
     ...entry,
-    canDelete: canDeleteEntry(entry, actor),
+    canManage: canManageEntry(entry, actor),
     contentToken: houseRuleContentToken(entry),
     enforcementState: enforcementState(entry, ctx),
   };
@@ -1124,6 +1122,13 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
           namespace: settings.namespace,
         };
       }
+      if (!canManageEntry(current, c)) {
+        throw new HttpError(
+          403,
+          'Only an owner or admin may change an unapproved entry; approved and ownerless entries require an admin',
+          'admin_required',
+        );
+      }
       const blocked = enrichmentBlocksEdit(current.status);
       if (blocked) throw new HttpError(409, blocked, 'entry_enrichment_pending');
       const set: Partial<typeof globalKbEntries.$inferInsert> = { updatedAt: new Date() };
@@ -1182,7 +1187,26 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
         if (current.supersedesEntryId && scopeChanged(current.facets, set.facets)) {
           set.supersedesEntryId = null;
         }
-        // The same holds for a link POINTING AT this entry: it was decided against the old scope
+      }
+      // Authorize the link after a same-request re-scope has had a chance to clear it.
+      // The corpus advisory lock is already held; lock the predecessor in this transaction too.
+      const supersedesEntryId = { ...current, ...set }.supersedesEntryId;
+      if (becomesActive && supersedesEntryId) {
+        const [target] = await db
+          .select()
+          .from(globalKbEntries)
+          .where(eq(globalKbEntries.id, supersedesEntryId))
+          .for('update');
+        if (target && target.status !== 'archived' && !canManageEntry(target, c)) {
+          throw new HttpError(
+            403,
+            'Activating this entry would archive an entry you may not change; an admin is required',
+            'admin_required',
+          );
+        }
+      }
+      if (data.facets !== undefined) {
+        // A link POINTING AT this entry was decided against the old scope
         // too. Left in place, activating that replacement — a reactivation included — archives
         // this entry although the two rules no longer share a scope, and the successor lookup
         // keeps warning that it has been replaced. Their `updatedAt` is left alone, for the
@@ -1279,7 +1303,7 @@ globalKbRoutes.delete('/entries/:id', async (c) => {
     conn.transaction(async (db) => {
       const current = await lockEntry(db, id);
       if (!current) return undefined;
-      if (!canDeleteEntry(current, c)) {
+      if (!canManageEntry(current, c)) {
         throw new HttpError(
           403,
           'Only an owner or admin may delete an unapproved entry; approved and ownerless entries require an admin',

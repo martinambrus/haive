@@ -228,7 +228,7 @@ describe('the enforcement routes are for admins', () => {
     expect(stored().enforcedHash).toBe(before);
   });
 
-  it('leave every other global KB route to a regular user', async () => {
+  it('lets a regular user edit their own unapproved entry', async () => {
     expect((await patch({ description: 'Edited.' })).status).toBe(200);
   });
 });
@@ -289,7 +289,7 @@ describe('DELETE /entries/:id authorization', () => {
 
     expect((await send('DELETE', `/entries/${ENTRY}`)).status).toBe(200);
     expect(stored()).toBeUndefined();
-    expect(entry.canDelete).toBe(true);
+    expect(entry.canManage).toBe(true);
   });
 
   it.each([
@@ -675,7 +675,7 @@ describe('DELETE /entries/:id/enforcement', () => {
   });
 });
 
-describe.each(['user', 'admin'])('canDelete for a signed-in %s', (role) => {
+describe.each(['user', 'admin'])('canManage for a signed-in %s', (role) => {
   beforeEach(() => {
     h.role = role;
     // The generic fake has no aggregate projections; the list's unfiltered count is enough here.
@@ -695,14 +695,15 @@ describe.each(['user', 'admin'])('canDelete for a signed-in %s', (role) => {
     ['own approved', ADMIN, true, false],
     ['foreign approved', SECOND, true, false],
     ['ownerless approved', null, true, false],
-  ])('on list and detail: %s', async (_label, userId, approved, ownerCanDelete) => {
+  ])('on list and detail: %s', async (_label, userId, approved, ownerCanManage) => {
     fake.patch(globalKbEntries, ENTRY, { userId });
     if (approved) approve(ENTRY, ALWAYS);
-    const allowed = role === 'admin' || ownerCanDelete;
+    const allowed = role === 'admin' || ownerCanManage;
     const detail = await asJson(await send('GET', `/entries/${ENTRY}`));
     const list = await asJson(await send('GET', '/entries'));
-    expect(detail.entry.canDelete).toBe(allowed);
-    expect(list.entries.find((entry: Json) => entry.id === ENTRY).canDelete).toBe(allowed);
+    expect(detail.entry.canManage).toBe(allowed);
+    expect(detail.entry).not.toHaveProperty('canDelete');
+    expect(list.entries.find((entry: Json) => entry.id === ENTRY).canManage).toBe(allowed);
   });
 
   it.each(['switched_off', 'other_namespace', 'edited'])(
@@ -715,7 +716,7 @@ describe.each(['user', 'admin'])('canDelete for a signed-in %s', (role) => {
       if (state === 'edited') fake.patch(globalKbEntries, ENTRY, { body: 'Edited outside PATCH' });
       const { entry } = await asJson(await send('GET', `/entries/${ENTRY}`));
       expect(entry.enforcementState.state).toBe(state);
-      expect(entry.canDelete).toBe(role === 'admin');
+      expect(entry.canManage).toBe(role === 'admin');
     },
   );
 
@@ -726,29 +727,29 @@ describe.each(['user', 'admin'])('canDelete for a signed-in %s', (role) => {
       category: 'best_practice',
     });
     expect(created.status).toBe(201);
-    expect((await asJson(created)).entry.canDelete).toBe(true);
+    expect((await asJson(created)).entry.canManage).toBe(true);
     const enriched = await send('POST', '/enrich', {
       title: TITLE,
       seedText: 'Seed',
       cliProviderId: PROVIDER,
     });
     expect(enriched.status).toBe(201);
-    expect((await asJson(enriched)).entry.canDelete).toBe(true);
-    approve(ENTRY, ALWAYS);
-    const edited = await patch({ body: 'New body clears approval' });
+    expect((await asJson(enriched)).entry.canManage).toBe(true);
+    if (role === 'admin') approve(ENTRY, ALWAYS);
+    const edited = await patch({ body: 'Updated body' });
     expect(edited.status).toBe(200);
-    expect((await asJson(edited)).entry.canDelete).toBe(true);
+    expect((await asJson(edited)).entry.canManage).toBe(true);
   });
 });
 
-describe('canDelete on enforcement responses', () => {
+describe('canManage on enforcement responses', () => {
   it('is true for the admin both after enforcing and unenforcing', async () => {
     const enforced = await enforce(ALWAYS);
     expect(enforced.status).toBe(200);
-    expect((await asJson(enforced)).entry.canDelete).toBe(true);
+    expect((await asJson(enforced)).entry.canManage).toBe(true);
     const cleared = await unenforce();
     expect(cleared.status).toBe(200);
-    expect((await asJson(cleared)).entry.canDelete).toBe(true);
+    expect((await asJson(cleared)).entry.canManage).toBe(true);
   });
 });
 
@@ -1264,4 +1265,181 @@ it('refuses a removal if its audit context changed while waiting for the lock', 
   expect(res.status).toBe(409);
   expect((await asJson(res)).code).toBe('enforcement_changed');
   expect(stored().enforcedHash).not.toBeNull();
+});
+
+describe('PATCH management authorization controls', () => {
+  const OTHER = '00000000-0000-4000-8000-0000000000a2';
+  const changes = [
+    ['edit', { body: 'A changed body' }],
+    ['archive', { status: 'archived' }],
+    ['activate', { status: 'active' }],
+  ] as const;
+
+  const refuseWithoutChanges = async (body: Record<string, unknown>) => {
+    const before = structuredClone(fake.rows(globalKbEntries));
+    const res = await patch(body);
+    expect(res.status).toBe(403);
+    const json = await asJson(res);
+    expect(json.code).toBe('admin_required');
+    expect(json.error).toContain('may change');
+    expect(fake.rows(globalKbEntries)).toEqual(before);
+    expect(vectorStatements).toEqual([]);
+    expect(h.add).not.toHaveBeenCalled();
+  };
+
+  describe.each([
+    ['another owner', OTHER, false],
+    ['an ownerless entry', null, false],
+    ['their own approved entry', ADMIN, true],
+  ] as const)('%s', (_label, userId, enforced) => {
+    it.each(changes)('refuses a non-admin trying to %s', async (_action, body) => {
+      h.role = 'user';
+      fake.patch(globalKbEntries, ENTRY, { userId });
+      if (enforced) approve(ENTRY, ALWAYS);
+      await refuseWithoutChanges(body);
+    });
+  });
+
+  it('checks permission before the enrichment-state refusal', async () => {
+    h.role = 'user';
+    fake.patch(globalKbEntries, ENTRY, { userId: OTHER, status: 'enriching' });
+    await refuseWithoutChanges({ body: 'A changed body' });
+  });
+
+  it.each(changes)('lets the owner %s their unapproved entry', async (_action, body) => {
+    h.role = 'user';
+    fake.patch(globalKbEntries, ENTRY, { status: 'draft' });
+    expect((await patch(body)).status).toBe(200);
+    for (const [key, value] of Object.entries(body)) expect(stored()[key]).toBe(value);
+  });
+
+  describe.each([
+    ['own entry', ADMIN, false],
+    ['another owner', OTHER, false],
+    ['ownerless entry', null, false],
+    ['approved entry', OTHER, true],
+    ['approved ownerless entry', null, true],
+  ] as const)('admin with %s', (_label, userId, enforced) => {
+    it.each(changes)('may %s', async (_action, body) => {
+      fake.patch(globalKbEntries, ENTRY, { userId });
+      if (enforced) approve(ENTRY, ALWAYS);
+      expect((await patch(body)).status).toBe(200);
+      for (const [key, value] of Object.entries(body)) expect(stored()[key]).toBe(value);
+    });
+  });
+
+  it.each(['user', 'admin'])('keeps a missing entry 404 for %s', async (role) => {
+    h.role = role;
+    expect((await patch({ title: 'Missing' }, MISSING)).status).toBe(404);
+    expect(vectorStatements).toEqual([]);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
+  it.each(changes)('sees approval landing while a non-admin %s waits', async (_action, body) => {
+    h.role = 'user';
+    let before: unknown;
+    fake.hooks.beforeLock = () => {
+      fake.hooks.beforeLock = null;
+      approve(ENTRY, ALWAYS);
+      before = structuredClone(fake.rows(globalKbEntries));
+    };
+    const res = await patch(body);
+    expect(res.status).toBe(403);
+    expect((await asJson(res)).code).toBe('admin_required');
+    expect(fake.rows(globalKbEntries)).toEqual(before);
+    expect(vectorStatements).toEqual([]);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+});
+
+describe('PATCH supersession authorization controls', () => {
+  const OTHER = '00000000-0000-4000-8000-0000000000a2';
+  beforeEach(() => {
+    fake.patch(globalKbEntries, ENTRY, { status: 'draft', supersedesEntryId: PREDECESSOR });
+  });
+
+  it.each([
+    ['an approved predecessor', ADMIN, true],
+    ["another user's predecessor", OTHER, false],
+    ['an ownerless predecessor', null, false],
+  ] as const)('refuses replacing %s without side effects', async (_label, userId, enforced) => {
+    h.role = 'user';
+    addEntry(PREDECESSOR, { userId });
+    if (enforced) approve(PREDECESSOR, ALWAYS);
+    const before = structuredClone(fake.rows(globalKbEntries));
+    // Tags retain the replacement link but would write vector metadata if checked too late.
+    const res = await patch({
+      status: 'active',
+      facets: { framework: ['drupal'], tags: ['rule'] },
+    });
+    expect(res.status).toBe(403);
+    const json = await asJson(res);
+    expect(json.code).toBe('admin_required');
+    expect(json.error).toBe(
+      'Activating this entry would archive an entry you may not change; an admin is required',
+    );
+    expect(fake.rows(globalKbEntries)).toEqual(before);
+    expect(vectorStatements).toEqual([]);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['owner', 'user', ADMIN, false],
+    ['admin replacing another owner', 'admin', OTHER, false],
+    ['admin replacing an approved entry', 'admin', OTHER, true],
+    ['admin replacing an ownerless entry', 'admin', null, false],
+  ] as const)('allows %s to replace a predecessor', async (_label, role, userId, enforced) => {
+    h.role = role;
+    addEntry(PREDECESSOR, { userId });
+    if (enforced) approve(PREDECESSOR, ALWAYS);
+    expect((await patch({ status: 'active' })).status).toBe(200);
+    expect(stored().status).toBe('active');
+    expect(stored(PREDECESSOR).status).toBe('archived');
+    expect(h.add.mock.calls.map(([, payload]) => [payload.entryId, payload.reason])).toEqual([
+      [ENTRY, 'upsert'],
+      [PREDECESSOR, 'delete'],
+    ]);
+  });
+
+  it.each(['user', 'admin'])('allows a same-request re-scope for %s', async (role) => {
+    h.role = role;
+    addEntry(PREDECESSOR, { userId: OTHER });
+    approve(PREDECESSOR, ALWAYS);
+    const before = structuredClone(stored(PREDECESSOR));
+    expect((await patch({ status: 'active', facets: { framework: ['laravel'] } })).status).toBe(
+      200,
+    );
+    expect(stored().supersedesEntryId).toBeNull();
+    expect(stored().status).toBe('active');
+    expect(stored(PREDECESSOR)).toEqual(before);
+    expect(h.add).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['archived', 'missing'])('does not authorize an %s predecessor', async (state) => {
+    h.role = 'user';
+    if (state === 'archived') {
+      addEntry(PREDECESSOR, { userId: OTHER, status: 'archived' });
+      approve(PREDECESSOR, ALWAYS);
+    }
+    const before = structuredClone(stored(PREDECESSOR));
+    expect((await patch({ status: 'active' })).status).toBe(200);
+    expect(stored().status).toBe('active');
+    expect(stored(PREDECESSOR)).toEqual(before);
+    expect(h.add).toHaveBeenCalledTimes(1);
+  });
+
+  it('sees a predecessor approval landing while activation waits', async () => {
+    h.role = 'user';
+    addEntry(PREDECESSOR);
+    let before: unknown;
+    fake.hooks.beforeLock = () => {
+      fake.hooks.beforeLock = null;
+      approve(PREDECESSOR, ALWAYS);
+      before = structuredClone(fake.rows(globalKbEntries));
+    };
+    expect((await patch({ status: 'active' })).status).toBe(403);
+    expect(fake.rows(globalKbEntries)).toEqual(before);
+    expect(vectorStatements).toEqual([]);
+    expect(h.add).not.toHaveBeenCalled();
+  });
 });

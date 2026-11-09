@@ -1337,14 +1337,17 @@ export interface GlobalKbFacets {
  *  api test pins the two together. */
 export const GLOBAL_KB_DESCRIPTION_MAX = 300;
 
-/** A global (cross-repository) knowledge base entry. Editable by any signed-in user; deletion follows `canDelete`; retrieved by
- *  tasks via rag_search, version-scoped by `facets`. */
+/**
+ * A shared knowledge base entry. Changes and deletion follow the server's `canManage` flag:
+ * admins may manage any entry; otherwise only the owner of an unapproved entry may manage it.
+ * Tasks retrieve entries via rag_search, version-scoped by `facets`.
+ */
 export interface GlobalKbEntry {
   id: string;
   namespace: string;
   userId: string | null;
-  /** Server-authorized deletion for the current actor. */
-  canDelete: boolean;
+  /** Server-authorized changes and deletion for the current actor. */
+  canManage: boolean;
   title: string;
   seedText: string | null;
   body: string;

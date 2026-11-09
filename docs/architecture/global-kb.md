@@ -117,15 +117,19 @@ A lapse (an edit, a status change or a deletion of the entry) writes no row.
 
 An enforced entry needs a description and may not carry invisible or control characters or Haive
 prompt delimiters. `always` rules share an 8,000-byte cap per namespace, counted in UTF-8 bytes of
-the rendered entry (`houseRuleBytes`). Every writer of an entry takes the namespace's advisory
+the rendered entry (`houseRuleBytes`). Every API writer of an entry takes the namespace's advisory
 lock before the row's, with a 30 s wait limit answering 503: MEASURED, a DELETE racing the
-activation of a draft that supersedes it deadlocked in 23 of 23 rounds before. Deleting an entry
+activation of a draft that supersedes it deadlocked in 23 of 23 rounds before. Changing or deleting an entry
 needs an admin when it carries an approval (`enforcedHash` set, so a lapsed or paused rule counts)
 or has no owner, and otherwise its owner or an admin. `user_id` is opaque and comes from whichever
-install wrote the row, so another install's entry is admin-only here. `canDeleteEntry` decides from
-the row `lockEntry` returned, so an approval that lands while the delete waits is seen, and the same
-function sets `canDelete` on every entry the API returns; the page shows Delete and Cancel from it
-and never re-derives the rule. `PATCH` has no such check. The store settings
+install wrote the row, so another install's entry is admin-only here. `canManageEntry` decides from
+the row `lockEntry` returned, so an approval that lands while the request waits is seen, and the
+same function sets `canManage` on every entry the API returns; the page shows its change and delete
+controls from it and never re-derives the rule. An activation archives the entry `supersedesEntryId`
+names, so that entry must pass the same rule, read `FOR UPDATE` in the same transaction; one already
+archived or missing needs nothing. The link is written without regard to owner or approval, so a
+non-admin's draft that replaces someone else's entry needs an admin to activate, and the page says
+so before asking. The store settings
 that could switch every rule off at once (Enabled, namespace, mode, connection string) are
 admin-only, and so are the settings every user's embeds and the archive purge read (Ollama URL,
 embed model, dimensions, archive retention): the URL receives every entry's and query's text, a
