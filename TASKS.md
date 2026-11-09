@@ -493,6 +493,24 @@ Each needs a per-dial decision (guard, admin-trust, or remove).
 5. A user-typed git remote is dialed by the child `git` process outside the Node guard (worker repo clone.ts:74, bundle-sync.ts:18). A fix (protocol allowlist, network policy) changes product behaviour. PRE-EXISTING.
 6. (T558 run, 2026-11-09) `POST /global-kb/test-ollama` (api routes/global-kb.ts ~:575) lets any signed-in user make the api dial a request-typed URL through the guarded fetch; the page fires it on first load (settings/global-kb page.tsx ~:605) and the button stays usable for a non-admin, though the stored URL is now admin-only. PRE-EXISTING. Decide: admin-only, or restrict the probe to the stored URL.
 
+### T578 · FNF[orphan-gitlink-2] · commit sites other than gate 3 still record an unregistered nested repository (+4)
+
+status: open · kind: fix · found: T425 run 2026-11-09 · priority: P2
+
+PRE-EXISTING. Gate 3 now refuses a new gitlink with no `.gitmodules` url (`_gitlink-registration.ts`); these do not.
+
+1. Consequential: DAG issue commits. worker `dag-executor.ts` `commitIssueWork` ~:476-477 runs `add -A` with no such check, and at gate 3 that gitlink is one HEAD already holds, so gate 3 never refuses it. A DAG task can therefore still ship an orphan gitlink. The refusal must fit the issue failure path; decide how it surfaces.
+2. `steps/workflow/01-worktree-setup.ts:156`, `steps/onboarding/12-post-onboarding.ts:978`, `steps/onboarding-upgrade/03-upgrade-commit.ts:345`: `add -A` commits of a fresh or onboarded repo record a nested repo as a gitlink. Minor.
+3. An unborn nested repo that replaces a tracked file shows as ` D nested`, so the #424 exclusion (which reads `?? dir/`) misses it and the real `git add -A` exits 128. Loud, nothing wrong committed. Minor.
+4. A malformed `.gitmodules` next to a gitlink: `git commit` can land the commit and exit 128, so the step throws with HEAD advanced. The new refusal precedes this for an orphan; a malformed file next to an already tracked gitlink was not tried. Minor.
+5. Not exercised by the T425 run: open MERGE_HEAD and unmerged gitlinks, sparse-checkout or skip-worktree entries in the scratch index, and git 2.54 (host runs were 2.43).
+
+### T579 · FNF[global-kb-entry-delete-any-user] · any signed-in user can delete any Global KB entry, an enforced house rule included
+
+status: open · kind: decision · found: T558 browser check 2026-11-09 · priority: P3
+
+PRE-EXISTING, read in code, not exercised. api `routes/global-kb.ts` ~:1260 `DELETE /entries/:id` has no `requireAdmin` and no owner check, and the page shows Delete on every entry to a non-admin. Enforcing and un-enforcing a rule are admin-only (~:1310, ~:1403), yet deleting the enforced entry is not. Decide: admin-only for enforced entries, for all entries, or owner-or-admin; the same question applies to the entry edit routes, not read here.
+
 ### T577 · FNF[global-kb-config-untrimmed-write] · an admin's Ollama URL and embed model are stored untrimmed
 
 status: open · kind: fix · found: T558 run 2026-11-09 · priority: P4
@@ -807,7 +825,7 @@ Sites:
 6. A hand-made tooling PATCH that combines `ragEmbedAction` with a security field runs the RAG reset before the audited transaction, so a refused row leaves the reset done (tooling-upgrades.ts ~:946-958 vs ~:991); the page sends the action alone. PRE-EXISTING, minor.
 7. The strict in-transaction module audit rows (`module.drain_cancel`, graceful `module.deactivate`, `module.retry`; api modules/activation.ts) log no pino line after the commit, unlike the documented pattern (api lib/audit.ts docblock ~:36, integrations.md ~:813). PRE-EXISTING, minor. From the T350 run.
 
-### T379 · FNF[git-tree-readers] · gitlink readers and literal-pathspec helpers duplicated with different failure contracts (+4)
+### T379 · FNF[git-tree-readers] · gitlink readers and literal-pathspec helpers duplicated with different failure contracts (+5)
 
 status: parked · was modular #257 · reason: diminishing returns (2026-11-01 scan): Reader duplication and contract cleanup have no concrete consequence established in this entry; resume when resume when a reader failure demonstrates lost or incorrect state · priority: P4
 
@@ -816,6 +834,7 @@ status: parked · was modular #257 · reason: diminishing returns (2026-11-01 sc
 3. set-aside.ts ~:250 headOid, ~:1113 headEntry and projection-merge.ts ~:32 readBlob count a failed read as absent.
 4. git-merge.ts ~:632, :636, :1356, :1373, :1419: resolvingPaths and `rev-list --parents` failures.
 5. (T375 review) _commit-diff.ts checkedOutCommit ~:133-161 is one more gitlink reader with its own failure contract.
+6. (T425 run, 2026-11-09) worker `_gitlink-registration.ts` is one more gitlink and index reader, fail-closed.
    Fix: one shared reader module with an explicit failure contract. Do this after T396.
 
 User reconciliation 2026-11-01: helper/read-contract consolidation (members1/2/5) stays parked. Failed-read members3/4 transfer to T495 correctness verification and must be deduplicated against its members4/5/6/7/8 and the completed T397 work; no second refactoring batch.
