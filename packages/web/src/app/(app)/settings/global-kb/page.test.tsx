@@ -6,7 +6,7 @@ import GlobalKbPage from './page';
 
 // No DOM in this package: the page's hooks run on a plain slot list, as in components/task-type-editor.test.tsx.
 const hooks = vi.hoisted(() => ({ slots: [] as unknown[], next: 0, dirty: false, mounting: true }));
-const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), put: vi.fn() }));
+const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() }));
 type KeyListener = (event: {
   key: string;
   stopPropagation: () => void;
@@ -59,6 +59,7 @@ beforeAll(() => {
     history: { replaceState: () => {} },
     addEventListener: () => {},
     removeEventListener: () => {},
+    confirm: vi.fn(() => true),
   });
   vi.stubGlobal('document', {
     body: {},
@@ -79,7 +80,9 @@ type El = ReactElement<{
   'data-testid'?: string;
   open?: boolean;
   message?: string | null;
-  onClick?: () => void;
+  title?: string;
+  role?: string;
+  onClick?: (event?: { stopPropagation: () => void }) => void;
   onChange?: (event: { target: { value?: string } }) => void;
   onOpenChange?: (open: boolean) => void;
 }>;
@@ -121,10 +124,15 @@ const CONFIG = {
 
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-async function mount(config: Record<string, unknown> = {}, providers: unknown[] = []) {
+async function mount(
+  config: Record<string, unknown> = {},
+  providers: unknown[] = [],
+  entries: unknown[] = [],
+) {
   api.get.mockImplementation(async (path: string) => {
     if (path === CONFIG_PATH) return { ...CONFIG, ...config };
-    if (path.startsWith('/global-kb/entries')) return { entries: [], total: 0, frameworks: [] };
+    if (path.startsWith('/global-kb/entries'))
+      return { entries, total: entries.length, frameworks: [] };
     if (path === '/repos') return { repositories: [] };
     if (path === '/cli-providers') return { providers };
     throw new Error(`unexpected GET ${path}`);
@@ -166,7 +174,7 @@ async function mount(config: Record<string, unknown> = {}, providers: unknown[] 
   };
   const press = async (target: El | undefined, name: string) => {
     if (!target?.props.onClick) throw new Error(`no "${name}" button to press`);
-    target.props.onClick();
+    target.props.onClick({ stopPropagation: () => {} });
     await settle();
   };
   await press(button('Edit'), 'Edit');
@@ -174,6 +182,11 @@ async function mount(config: Record<string, unknown> = {}, providers: unknown[] 
 
   return {
     all,
+    pressTarget: press,
+    openEntry: async () => {
+      const card = all().find((e) => e.props.role === 'button' && e.props.onClick);
+      await press(card, 'entry card');
+    },
     field,
     settle,
     button,
@@ -218,6 +231,9 @@ beforeEach(() => {
   api.get.mockReset();
   api.post.mockReset();
   api.put.mockReset();
+  api.delete.mockReset();
+  api.delete.mockResolvedValue({ ok: true });
+  vi.mocked(window.confirm).mockClear();
   api.put.mockResolvedValue({ ...CONFIG, connectionStringSet: false });
   keys.listeners.length = 0;
 });
@@ -471,4 +487,115 @@ describe('the enrichment CLI picker', () => {
     ).toEqual(['', 'on']);
     expect(view.field('enrich-repo').props.value).toBe('repo-1');
   });
+});
+
+describe('entry deletion controls', () => {
+  const entry = (over: Record<string, unknown> = {}) => ({
+    id: '00000000-0000-4000-8000-0000000000b1',
+    namespace: 'default',
+    userId: '00000000-0000-4000-8000-0000000000a1',
+    title: 'A shared article',
+    body: 'Body',
+    description: null,
+    category: 'best_practice',
+    facets: {},
+    status: 'active',
+    source: 'user',
+    sourceTaskId: null,
+    supersedesEntryId: null,
+    embedStatus: 'embedded',
+    canDelete: true,
+    createdAt: '2026-11-09T00:00:00Z',
+    updatedAt: '2026-11-09T00:00:00Z',
+    ...over,
+  });
+  const deleteButtons = (ui: Awaited<ReturnType<typeof mount>>) =>
+    ui.all().filter((e) => e.type === Button && textOf(e) === 'Delete');
+
+  it.each([false, undefined])(
+    'hides list and detail Delete for canDelete=%s',
+    async (canDelete) => {
+      const ui = await mount({}, [], [entry({ canDelete })]);
+      expect(deleteButtons(ui)).toHaveLength(0);
+      await ui.openEntry();
+      expect(deleteButtons(ui)).toHaveLength(0);
+    },
+  );
+
+  it('uses the server flag even when admin controls are unavailable', async () => {
+    const ui = await mount(
+      { canEnforce: false },
+      [],
+      [entry({ userId: null, enforcedHash: 'approval-from-another-install' })],
+    );
+    expect(deleteButtons(ui)).toHaveLength(1);
+    await ui.openEntry();
+    expect(deleteButtons(ui)).toHaveLength(2);
+  });
+
+  it('never cancels enrichment after a delete is refused', async () => {
+    api.delete.mockRejectedValue({ message: 'Admin required' });
+    const row = entry({ sourceTaskId: 'enrich-task', status: 'failed' });
+    const ui = await mount({}, [], [row]);
+    await ui.press('Delete');
+    expect(api.delete).toHaveBeenCalledWith(`/global-kb/entries/${row.id}`);
+    expect(api.post).not.toHaveBeenCalled();
+  });
+
+  it('cancels user enrichment only after deletion succeeds', async () => {
+    const events: string[] = [];
+    api.delete.mockImplementation(async () => {
+      events.push('delete');
+      return { ok: true };
+    });
+    api.post.mockImplementation(async () => {
+      events.push('cancel');
+      return {};
+    });
+    const ui = await mount({}, [], [entry({ sourceTaskId: 'enrich-task', status: 'failed' })]);
+    await ui.press('Delete');
+    expect(events).toEqual(['delete', 'cancel']);
+    expect(api.post).toHaveBeenCalledWith('/tasks/enrich-task/action', { action: 'cancel' });
+  });
+
+  it('never cancels the workflow that promoted a deleted draft', async () => {
+    const ui = await mount({}, [], [entry({ source: 'promoted', sourceTaskId: 'workflow-task' })]);
+    await ui.press('Delete');
+    expect(api.delete).toHaveBeenCalledOnce();
+    expect(api.post).not.toHaveBeenCalled();
+  });
+
+  it('does not cancel a task after an unconfirmed deletion', async () => {
+    vi.mocked(window.confirm).mockReturnValueOnce(false);
+    const ui = await mount({}, [], [entry({ sourceTaskId: 'enrich-task', status: 'failed' })]);
+    await ui.press('Delete');
+    expect(api.delete).not.toHaveBeenCalled();
+    expect(api.post).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'gates in-progress enrichment cancellation on canDelete=%s',
+    async (canDelete) => {
+      const ui = await mount(
+        {},
+        [],
+        [entry({ status: 'enriching', sourceTaskId: 'enrich-task', canDelete })],
+      );
+      const cancel = ui
+        .all()
+        .find(
+          (e) =>
+            e.type === Button &&
+            e.props.title === 'Cancel the enrichment task and discard this entry',
+        );
+      expect(Boolean(cancel)).toBe(canDelete);
+      if (canDelete) {
+        await ui.pressTarget(cancel, 'Cancel enrichment');
+        expect(api.post).toHaveBeenCalledWith('/tasks/enrich-task/action', { action: 'cancel' });
+      } else {
+        expect(api.post).not.toHaveBeenCalled();
+      }
+      expect(api.delete).not.toHaveBeenCalled();
+    },
+  );
 });

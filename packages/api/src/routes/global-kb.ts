@@ -75,8 +75,9 @@ import { HttpError, type AppEnv } from '../context.js';
 // Global KB is instance/namespace-scoped (not per-user). haive is self-hosted
 // single-operator — every signed-in user manages their own repos, tasks and
 // settings — so the shared global KB is managed by any authenticated user too
-// (requireAuth only), except what puts an entry's text into agent prompts as an
-// instruction: enforcement and the store settings are admin-only. The corpus lives in a
+// (requireAuth only), with deletion restricted to owner-or-admin for unapproved
+// entries and admin-only for approved or ownerless entries. Enforcement and the
+// store settings are admin-only. The corpus lives in a
 // SEPARATE database reached via withGlobalKb; getDb() is the main DB, needed only to
 // CREATE the dedicated DB in internal mode.
 const CATEGORIES = [
@@ -188,9 +189,24 @@ async function houseRuleContext(namespace: string): Promise<HouseRuleContext> {
   return { namespace, houseRulesEnabled: await resolveHouseRulesEnabled(configService) };
 }
 
-function presentEntry<T extends HouseRuleRow>(entry: T, ctx: HouseRuleContext) {
+function canDeleteEntry(
+  entry: Pick<GlobalKbEntry, 'userId' | 'enforcedHash'>,
+  actor: Context<AppEnv>,
+): boolean {
+  return (
+    actor.get('userRole') === 'admin' ||
+    (entry.enforcedHash == null && entry.userId === actor.get('userId'))
+  );
+}
+
+function presentEntry<T extends HouseRuleRow & Pick<GlobalKbEntry, 'userId'>>(
+  entry: T,
+  ctx: HouseRuleContext,
+  actor: Context<AppEnv>,
+) {
   return {
     ...entry,
+    canDelete: canDeleteEntry(entry, actor),
     contentToken: houseRuleContentToken(entry),
     enforcementState: enforcementState(entry, ctx),
   };
@@ -715,7 +731,7 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
         sourceTaskId: taskId,
       })
       .returning();
-    return presentEntry(row!, await houseRuleContext(settings.namespace));
+    return presentEntry(row!, await houseRuleContext(settings.namespace), c);
   });
 
   let queued: Awaited<ReturnType<typeof markQueuedForStart>>;
@@ -868,7 +884,7 @@ globalKbRoutes.get('/entries', async (c) => {
     ).sort();
 
     const ctx = await houseRuleContext(settings.namespace);
-    return { entries: entries.map((entry) => presentEntry(entry, ctx)), total, frameworks };
+    return { entries: entries.map((entry) => presentEntry(entry, ctx, c)), total, frameworks };
   });
 
   return c.json({
@@ -919,7 +935,7 @@ globalKbRoutes.get('/entries/:id', async (c) => {
         : [];
     const { usedBytes, entryBytes } = await alwaysBytes(db, settings.namespace, entry);
     return {
-      entry: presentEntry(entry, await houseRuleContext(settings.namespace)),
+      entry: presentEntry(entry, await houseRuleContext(settings.namespace), c),
       activeSuccessor: successors[0] ?? null,
       usedBytes,
       capBytes: HOUSE_RULES_ALWAYS_CAP_BYTES,
@@ -955,7 +971,7 @@ globalKbRoutes.post('/entries', async (c) => {
         embedStatus: 'pending',
       })
       .returning();
-    return presentEntry(row!, await houseRuleContext(settings.namespace));
+    return presentEntry(row!, await houseRuleContext(settings.namespace), c);
   });
 
   await enqueueSync(entry.id, entry.namespace, 'upsert');
@@ -1249,11 +1265,11 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
   if (!entry) throw new HttpError(404, 'global KB entry not found');
   if (result.reembed) await enqueueSync(entry.id, entry.namespace, 'upsert');
   if (result.supersededId) await enqueueSync(result.supersededId, entry.namespace, 'delete');
-  return c.json({ entry: presentEntry(entry, await houseRuleContext(result.namespace)) });
+  return c.json({ entry: presentEntry(entry, await houseRuleContext(result.namespace), c) });
 });
 
-// Hard delete (single-operator instance; no shared-corpus concern). The UI guards this with a
-// confirm since it is irreversible. The row and its vectors go in ONE transaction: a chunk whose
+// Hard delete is admin-only for approved or ownerless entries, otherwise owner-or-admin.
+// The UI confirms this irreversible action. The row and its vectors go in ONE transaction: a chunk whose
 // entry is gone is still served — `expandGlobalHits` returns a global hit it has no body for
 // unchanged — so leaving the vectors to the enqueued sync kept a deleted rule retrievable whenever
 // that enqueue failed. The sync is still enqueued, and finds nothing left to remove.
@@ -1261,7 +1277,15 @@ globalKbRoutes.delete('/entries/:id', async (c) => {
   const id = entryIdParam(c.req.param('id'));
   const entry = await withGlobalKb(getDb(), async ({ db: conn }) =>
     conn.transaction(async (db) => {
-      if (!(await lockEntry(db, id))) return undefined;
+      const current = await lockEntry(db, id);
+      if (!current) return undefined;
+      if (!canDeleteEntry(current, c)) {
+        throw new HttpError(
+          403,
+          'Only an owner or admin may delete an unapproved entry; approved and ownerless entries require an admin',
+          'admin_required',
+        );
+      }
       const [row] = await db.delete(globalKbEntries).where(eq(globalKbEntries.id, id)).returning();
       if (row) {
         await db.execute(
@@ -1396,7 +1420,7 @@ globalKbRoutes.put('/entries/:id/enforcement', requireAdmin, async (c) => {
     ),
   ).catch(lockBusyError);
 
-  return c.json({ entry: presentEntry(result.row, await houseRuleContext(result.namespace)) });
+  return c.json({ entry: presentEntry(result.row, await houseRuleContext(result.namespace), c) });
 });
 
 // Removes the approval and keeps the settings, as the last ones given.
@@ -1444,5 +1468,5 @@ globalKbRoutes.delete('/entries/:id/enforcement', requireAdmin, async (c) => {
         }),
     );
   }).catch(lockBusyError);
-  return c.json({ entry: presentEntry(result.row, await houseRuleContext(result.namespace)) });
+  return c.json({ entry: presentEntry(result.row, await houseRuleContext(result.namespace), c) });
 });
