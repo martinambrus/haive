@@ -575,10 +575,11 @@ PRE-EXISTING. T549 bounded the api's `getRedis()`; the worker's (worker src/redi
 status: open · kind: fix · found: T549 run 2026-11-08 · priority: P4
 PRE-EXISTING. `closeRedis` (api src/redis.ts ~:101) has no production caller and the api has no SIGTERM or SIGINT handler, so shutdown never quits the three clients. `quit()` on a silent patient or bull client can wait forever; `closeRedis` falls back to `disconnect()` only for a non-ready client or a rejected `quit()`. (T544 run) The api also runs node as PID 1 without `init: true` (api Dockerfile ~:90; the worker has it), so `docker stop` waits out the grace period, now also during T544's boot retry wait.
 
-### T568 · FNF[terminal-open-late-replay] · a shell open request can reach the worker after its reply timeout
+### T568 · FNF[terminal-open-late-replay] · a shell open request can reach the worker after its reply timeout (+1)
 
 status: open · kind: fix · found: T549 run 2026-11-08 · priority: P4
 PRE-EXISTING. terminal-shell.ts `openSession` (api routes ~:439-476) publishes the open request on the patient client, whose offline queue can deliver it after the 15 s `OPEN_REPLY_TIMEOUT_MS` (~:35) and the session's cleanup, so the worker may open a session nobody waits for.
+1. PRE-EXISTING (since ff4927bb6), seen in the T549 live check 2026-11-09 with Redis up. When the WebSocket closes during the open window (React StrictMode double-mount on every dev load, or a reload or tab close), `runShellSession` quits the reply subscriber (api terminal-shell.ts ~:186-200, logged "shell ws closed before refcount acquired" then "open-session request failed: worker did not reply within timeout" 15 s later), yet the worker still opens the PTY (`tmux new-session -A`) and replies to nobody (worker terminal-session-manager.ts ~:181-187). Nobody sends `close` for that sessionId, so the PTY and its `terminal:out:<sid>` publishing live until the container reap (~2 min after the last tab): 8 sessions torn down by `pty-end` at one reap. Bounded, but each dead tmux client stays attached while a tab keeps the container up. Fix direction: when the open resolves after the socket is gone (or after the timeout), publish `{op:'close', sessionId}`; the same closes the late-replay case above.
 
 ### T569 · FNF[configservice-wedged-connection] · ConfigService never recycles a wedged connection
 
