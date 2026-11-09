@@ -10,6 +10,7 @@ import {
   unregisteredGitlinksMessage,
 } from './_gitlink-registration.js';
 import { git, repoFixture } from '../../../../test/support/nested-repo.js';
+import { gitRun } from '../../../repo/git-exec.js';
 import { failGit } from '../../../../test/support/fake-git.js';
 
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -353,4 +354,17 @@ it('an initial-commit warning check that fails logs and continues', async () => 
   } finally {
     await shim.restore();
   }
+});
+
+it('an unborn nested checkout replacing a tracked file cannot be committed by add -A', async () => {
+  const repo = await outer();
+  await writeFileNoFollow(repo, 'nested', 'old\n');
+  await git(repo, ['add', '-A']);
+  await git(repo, ['commit', '-qm', 'file']);
+  const head = await git(repo, ['rev-parse', 'HEAD']);
+  await removeNoFollow(repo, 'nested');
+  await nestedRepo(repo, 'nested', false);
+  expect(await git(repo, ['status', '--porcelain', '-z', '-uall'])).toBe(' D nested\0');
+  expect((await gitRun(repo, ['add', '-A'])).code).toBe(128);
+  expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
 });
