@@ -1,14 +1,16 @@
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ensureDirNoFollow, removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import {
+  initialGitlinkWarnings,
   stageAllArgs,
   unregisteredGitlinks,
   unregisteredGitlinksMessage,
 } from './_gitlink-registration.js';
-import { git, repoFixture } from '../../../../test/support/nested-repo.js';
+import { gateContext, git, repoFixture } from '../../../../test/support/nested-repo.js';
+import { gitRun } from '../../../repo/git-exec.js';
 import { failGit } from '../../../../test/support/fake-git.js';
 
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -40,6 +42,44 @@ async function find(repo: string, excluded: string[] = []) {
 }
 
 describe('unregisteredGitlinks', () => {
+  it('does not inspect the old path of a staged rename', async () => {
+    const repo = await outer();
+    await ensureDirNoFollow(repo, 'dir');
+    await writeFileNoFollow(repo, 'dir/a', 'old\n');
+    await git(repo, ['add', '-A']);
+    await git(repo, ['commit', '-qm', 'tracked directory']);
+    await ensureDirNoFollow(repo, 'dir/.git');
+    await git(repo, ['mv', 'dir/a', 'renamed']);
+    expect(await git(repo, ['status', '--porcelain', '-z', '-uall'])).toBe('R  renamed\0dir/a\0');
+    expect(await find(repo)).toEqual([]);
+  });
+
+  it.each(['directory', 'file'])(
+    'accepts only a modified tracked file under a stray .git %s',
+    async (kind) => {
+      const repo = await outer();
+      await ensureDirNoFollow(repo, 'dir');
+      await writeFileNoFollow(repo, 'dir/a', 'old\n');
+      await git(repo, ['add', '-A']);
+      await git(repo, ['commit', '-qm', 'tracked directory']);
+      if (kind === 'directory') await ensureDirNoFollow(repo, 'dir/.git');
+      else await writeFileNoFollow(repo, 'dir/.git', 'stray\n');
+      await writeFileNoFollow(repo, 'dir/a', 'changed\n');
+      expect(await git(repo, ['status', '--porcelain', '-z', '-uall'])).toBe(' M dir/a\0');
+      expect(await find(repo)).toEqual([]);
+    },
+  );
+
+  it('checks a repository before its first commit, without touching its index', async () => {
+    const repo = await outer();
+    await removeNoFollow(repo, '.git', { recursive: true });
+    await git(repo, ['init', '-q', '-b', 'main']);
+    await nestedRepo(repo, 'nested');
+    const before = await git(repo, ['ls-files', '-s']);
+    expect(await find(repo)).toEqual(['nested']);
+    expect(await git(repo, ['ls-files', '-s'])).toBe(before);
+  });
+
   it('leaves no sharedindex file when core.splitIndex is on', async () => {
     const repo = await outer();
     await nestedRepo(repo, 'nested');
@@ -232,11 +272,11 @@ describe('unregisteredGitlinks', () => {
     expect(await git(repo, ['ls-files', '-s'])).toBe(index);
   });
 
-  it('throws for an outer repository with no commit', async () => {
+  it('accepts an empty outer repository before its first commit', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'gitlink-unborn-'));
     cleanups.push(() => removeNoFollow(tmpdir(), path.basename(dir), { recursive: true }));
     await git(dir, ['init', '-q', '-b', 'main']);
-    await expect(unregisteredGitlinks(dir, '', [])).rejects.toThrow();
+    expect(await unregisteredGitlinks(dir, '', [])).toEqual([]);
   });
 
   it('throws for a malformed .gitmodules', async () => {
@@ -329,4 +369,72 @@ describe('unregisteredGitlinksMessage', () => {
       expect(text).not.toMatch(/null|undefined/);
     }
   });
+});
+
+it('warns about a real clone beside a tracked directory containing a stray .git', async () => {
+  const repo = await outer();
+  await ensureDirNoFollow(repo, 'dir');
+  await writeFileNoFollow(repo, 'dir/a', 'old\n');
+  await git(repo, ['add', '-A']);
+  await git(repo, ['commit', '-qm', 'tracked directory']);
+  await ensureDirNoFollow(repo, 'dir/.git');
+  await writeFileNoFollow(repo, 'dir/new', 'new\n');
+  await nestedRepo(repo, 'nested');
+  const index = await git(repo, ['ls-files', '-s']);
+  const warn = vi.fn();
+  const ctx = gateContext(repo);
+  const failure = new Error('warning store unavailable');
+  Object.assign(ctx.db.query, {
+    taskSteps: {
+      findFirst: async () => {
+        throw failure;
+      },
+    },
+  });
+  const warnings = await initialGitlinkWarnings({ ...ctx, logger: { warn } as never });
+  expect(warnings).toEqual([expect.stringContaining('"nested"')]);
+  expect(warnings[0]).toContain('empty in task worktrees');
+  expect(warn).toHaveBeenCalledWith(
+    { err: failure },
+    'Could not save initial-commit warnings; continuing',
+  );
+  expect(await git(repo, ['ls-files', '-s'])).toBe(index);
+});
+
+it('an initial-commit warning check that fails logs and continues', async () => {
+  const repo = await outer();
+  await nestedRepo(repo, 'nested');
+  const warn = vi.fn();
+  const shim = await failGit(['diff-index'], { exit: 128 });
+  try {
+    expect(
+      await initialGitlinkWarnings({ ...gateContext(repo), logger: { warn } as never }),
+    ).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+  } finally {
+    await shim.restore();
+  }
+});
+
+it('an unborn nested checkout replacing a tracked file cannot be committed by add -A', async () => {
+  const repo = await outer();
+  await writeFileNoFollow(repo, 'nested', 'old\n');
+  await git(repo, ['add', '-A']);
+  await git(repo, ['commit', '-qm', 'file']);
+  const head = await git(repo, ['rev-parse', 'HEAD']);
+  await removeNoFollow(repo, 'nested');
+  await nestedRepo(repo, 'nested', false);
+  expect(await git(repo, ['status', '--porcelain', '-z', '-uall'])).toBe(' D nested\0');
+  expect((await gitRun(repo, ['add', '-A'])).code).toBe(128);
+  expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
+});
+it('honours exclusions for nested repositories inside tracked directories', async () => {
+  const repo = await outer();
+  await ensureDirNoFollow(repo, 'dir');
+  await writeFileNoFollow(repo, 'dir/a', 'old\n');
+  await git(repo, ['add', '-A']);
+  await git(repo, ['commit', '-qm', 'directory']);
+  await removeNoFollow(repo, 'dir/a');
+  await nestedRepo(repo, 'dir');
+  expect(await find(repo, ['dir/'])).toEqual([]);
 });

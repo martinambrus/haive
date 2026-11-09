@@ -355,3 +355,38 @@ describe('gate 3 nested repository controls', () => {
     expect(await git(workspace, ['status', '--porcelain', '-z', '-uall'])).toBe('?? nested/\0');
   });
 });
+
+it.each(['directory', 'file'])(
+  'refuses flattening a tracked directory containing a .git %s',
+  async (kind) => {
+    const { repo, cleanup } = await repoFixture();
+    cleanups.push(cleanup);
+    await ensureDirNoFollow(repo, 'dir');
+    await writeFileNoFollow(repo, 'dir/a', 'old\n');
+    await git(repo, ['add', '-A']);
+    await git(repo, ['commit', '-qm', 'directory']);
+    await removeNoFollow(repo, 'dir/a');
+    await git(path.join(repo, 'dir'), ['init', '-q', '-b', 'main']);
+    await writeFileNoFollow(repo, 'dir/inner.txt', 'inner\n');
+    await git(path.join(repo, 'dir'), ['add', '-A']);
+    await git(path.join(repo, 'dir'), ['commit', '-qm', 'nested']);
+    if (kind === 'file') {
+      await git(path.join(repo, 'dir'), [
+        'init',
+        '--separate-git-dir',
+        path.join(repo, '.git', 'inner-git'),
+      ]);
+    }
+    const head = await git(repo, ['rev-parse', 'HEAD']);
+    const index = await git(repo, ['ls-files', '-s']);
+    const err = await commit(repo).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    expect(err).toBeInstanceOf(Error);
+    for (const part of ['"dir"', 'keep it out', 'remove its `.git`'])
+      expect((err as Error).message).toContain(part);
+    expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
+    expect(await git(repo, ['ls-files', '-s'])).toBe(index);
+  },
+);

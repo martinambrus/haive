@@ -85,6 +85,6 @@ describe('gate 3 unregistered nested repository preview', () => {
     await git(dir, ['init', '-q', '-b', 'main']);
     await writeFileNoFollow(dir, 'a.txt', 'new\n');
     const { detected } = await preview(dir);
-    expect(detected.unregisteredGitlinks).toBeUndefined();
+    expect(detected.unregisteredGitlinks).toEqual([]);
   });
 });

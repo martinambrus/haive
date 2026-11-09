@@ -112,6 +112,11 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   lost the dir can push only what it merged. The directory is keyed rather than the repository
   because two repository rows can share one local path. The DAG executor needs none: its integration
   worktree is the task's own feature worktree, which `findBranchClaimant` keeps to one task.
+- **A nested repository a fixer leaves in a resolved path is not committed** (`completeMergeHostSide`).
+  The check is limited to the resolved paths, since a gitlink the merge itself brought in elsewhere is
+  not the fixer's, and it is skipped when no path was sent to a fixer. A refusal returns false, the
+  same bounded path as an incomplete resolution; the reason is in the worker log only. A directory
+  that replaces a conflicted file never reaches this check: the marker read refuses it first.
 - **What a fixer changes outside the conflicted files is moved aside, never committed or lost.**
   Before a fixer is sent in, the merge dir is recorded as one git tree built in a scratch index,
   untracked files included, with what the merge staged (a tree built from

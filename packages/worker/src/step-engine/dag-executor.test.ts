@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { failGit } from '../../test/support/fake-git.js';
+import { FlattenedRepositoryError } from './steps/workflow/_gitlink-registration.js';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN, safeKey } from './steps/_untrusted-repo.js';
@@ -1046,6 +1047,7 @@ function makeDagMergeWaitDb(opts: {
 }) {
   let stepStatus = opts.stepRowStatus ?? 'running';
   let stepErrorMessage: string | null = null;
+  let stepWarningMessage: string | null = null;
   let issueMergeStatus = 'conflict';
   let levelMergeState: unknown = {
     activeConflict: 'ISSUE-1',
@@ -1135,6 +1137,9 @@ function makeDagMergeWaitDb(opts: {
     transaction: async (fn: (tx: unknown) => unknown) => fn(db),
     query: {
       taskDagPlans: { findFirst: async () => planRow },
+      taskSteps: {
+        findFirst: async () => ({ id: 'step1', warningMessage: stepWarningMessage }),
+      },
       tasks: { findFirst: async () => undefined },
       users: { findFirst: async () => undefined },
       cliInvocations: { findFirst: async () => opts.invocation },
@@ -1192,6 +1197,7 @@ function makeDagMergeWaitDb(opts: {
           if (table === schema.dagAgentRuns) agentRunUpdates.push(patch);
           if (table === schema.taskSteps) {
             if ('status' in patch) stepStatus = patch.status as string;
+            if ('warningMessage' in patch) stepWarningMessage = patch.warningMessage as string;
             if ('errorMessage' in patch) {
               stepErrorMessage = (patch.errorMessage as string | null) ?? null;
             }
@@ -1207,7 +1213,14 @@ function makeDagMergeWaitDb(opts: {
               }
               apply(cond);
               return table === schema.taskSteps
-                ? [{ id: 'step1', status: stepStatus, errorMessage: stepErrorMessage }]
+                ? [
+                    {
+                      id: 'step1',
+                      status: stepStatus,
+                      errorMessage: stepErrorMessage,
+                      warningMessage: stepWarningMessage,
+                    },
+                  ]
                 : [{}];
             },
             then: (resolve: (v: unknown) => void) => {
@@ -1223,6 +1236,7 @@ function makeDagMergeWaitDb(opts: {
     db,
     getStepStatus: () => stepStatus,
     getStepError: () => stepErrorMessage,
+    getStepWarning: () => stepWarningMessage,
     getLevelMergeState: () => levelMergeState,
     getIssueMergeStatus: () => issueMergeStatus,
     issueUpdates,
@@ -1729,6 +1743,7 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
 
   const mergeCtx = (integrationDir: string) =>
     ({
+      taskStepId: 'step1',
       taskId: 'task1',
       userId: 'user1',
       repoPath: integrationDir,
@@ -1787,7 +1802,7 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
     }
   });
 
-  it.each(['add', 'status', 'commit'])(
+  it.each(['add', 'status', 'staged read', 'commit'])(
     'preserves the failed git %s error when committing an issue',
     async (command) => {
       const integrationDir = await setupConflictedIntegration(true);
@@ -1803,10 +1818,21 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
           autoResolveConflicts: false,
           issue: { mergeStatus: null, worktreePath: issueDir },
         });
-        // Three status reads match: the dependency check's, the gitlink check's, then this commit's own.
+        // Fail the gitlink check's status read after the dependency check's.
         shim = await failGit(
-          command === 'status' ? ['--no-optional-locks', 'status'] : [command],
-          command === 'status' ? { from: 3 } : {},
+          command === 'status'
+            ? ['--no-optional-locks', 'status']
+            : command === 'staged read'
+              ? [
+                  'diff',
+                  '--no-ext-diff',
+                  '--no-textconv',
+                  '--cached',
+                  '--quiet',
+                  '--ignore-submodules=none',
+                ]
+              : [command],
+          command === 'status' ? { from: 2 } : {},
         );
         await expect(
           resolveDagPhase(
@@ -2105,15 +2131,20 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       return (await exec('git', args, { cwd: dir, env: GIT_ENV })).stdout.toString().trim();
     }
 
-    /** An integration repo on `main` with one commit, plus one branch and worktree per key at
-     *  that commit, so each level merge is clean. */
-    async function setupLevel(keys: string[] = ['ISSUE-1']) {
+    /** An integration repo on `main`, plus one branch and worktree per key at its tip,
+     *  so each level merge is clean. */
+    async function setupLevel(keys: string[] = ['ISSUE-1'], seedGitlink = false) {
       const integrationDir = await mkdtemp(path.join(tmpdir(), 'dag-orphan-int-'));
       dirs.push(integrationDir);
       await git(integrationDir, ['init', '-b', 'main']);
       await writeFile(path.join(integrationDir, 'base.txt'), 'base\n', 'utf8');
       await git(integrationDir, ['add', '-A']);
       await git(integrationDir, ['commit', '-m', 'initial']);
+      if (seedGitlink) {
+        await nestedRepo(integrationDir);
+        await git(integrationDir, ['add', '-A']);
+        await git(integrationDir, ['commit', '-m', 'seed gitlink at fork point']);
+      }
       const worktrees: Record<string, string> = {};
       for (const key of keys) {
         worktrees[key] = await mkdtemp(path.join(tmpdir(), 'dag-orphan-issue-'));
@@ -2227,6 +2258,34 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
     });
 
+    it('refuses flattening a nested repository in a tracked directory before staging', async () => {
+      const { integrationDir, worktrees } = await setupLevel();
+      const issueDir = worktrees['ISSUE-1']!;
+      await mkdir(path.join(issueDir, 'sub'));
+      await writeFile(path.join(issueDir, 'sub/a'), 'old\n');
+      await git(issueDir, ['add', '-A']);
+      await git(issueDir, ['commit', '-m', 'directory']);
+      await rm(path.join(issueDir, 'sub/a'));
+      await nestedRepo(issueDir);
+      const before = await snapshot(integrationDir, issueDir);
+      const err = await thrown(
+        pass(dagDb(integrationDir, { worktreePath: issueDir }), integrationDir),
+      );
+      expect(err).toBeInstanceOf(Error);
+      for (const part of [
+        '"sub"',
+        'keep it out',
+        'remove its `.git`',
+        'DAG issue ISSUE-1',
+        SANDBOX_WORKTREE,
+      ])
+        expect((err as Error).message).toContain(part);
+      expect(err).toBeInstanceOf(FlattenedRepositoryError);
+      expect((err as Error).message).not.toContain('gitlink check failed');
+      expect((err as Error).message).toContain('`.git` sits inside these tracked directories');
+      expect(await snapshot(integrationDir, issueDir)).toEqual(before);
+    });
+
     it('refuses before staging anything and leaves the worktree, branch and temp dir as found', async () => {
       const { integrationDir, worktrees } = await setupLevel();
       const issueDir = worktrees['ISSUE-1']!;
@@ -2279,6 +2338,66 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       expect(await out(integrationDir, ['rev-parse', 'main--ISSUE-1:sub'])).toBe(nestedHead);
       expect(h.issueUpdates.some((u) => u.mergeStatus === 'clean')).toBe(true);
       expect(await modeOf(integrationDir, 'main', 'sub')).toBe('160000');
+    });
+
+    it.each([false, true])(
+      'warns about dirty nested edits with no staged changes (at fork point: %s)',
+      async (atForkPoint) => {
+        const { integrationDir, worktrees } = await setupLevel(['ISSUE-1'], atForkPoint);
+        const issueDir = worktrees['ISSUE-1']!;
+        if (atForkPoint) {
+          await git(issueDir, ['clone', path.join(integrationDir, 'sub'), 'sub']);
+        } else {
+          await nestedRepo(issueDir);
+          await git(issueDir, ['add', '-A']);
+          await git(issueDir, ['commit', '-m', 'ISSUE-1: seed gitlink']);
+        }
+        const head = await out(issueDir, ['rev-parse', 'HEAD']);
+        await writeFile(path.join(issueDir, 'sub/inner.txt'), 'dirty only\n');
+        const h = dagDb(integrationDir, { worktreePath: issueDir });
+        expect((await pass(h, integrationDir)).resolved).toBe(!atForkPoint);
+        for (const part of [
+          '"sub"',
+          'inside a nested repository',
+          "not part of this issue's commit",
+          'before a retry',
+        ]) {
+          expect(h.getStepWarning()).toContain(part);
+        }
+        if (atForkPoint) {
+          expect(h.getStepStatus()).toBe('failed');
+          expect(h.getStepError()).toContain('produced no branch changes');
+        }
+        expect(await out(integrationDir, ['rev-parse', 'main--ISSUE-1'])).toBe(head);
+        expect(h.issueUpdates.some((u) => u.mergeStatus === 'clean')).toBe(!atForkPoint);
+      },
+    );
+
+    it('logs a failed nested-edit warning write without failing the commit pass', async () => {
+      const { integrationDir, worktrees } = await setupLevel();
+      const issueDir = worktrees['ISSUE-1']!;
+      await nestedRepo(issueDir);
+      await git(issueDir, ['add', '-A']);
+      await git(issueDir, ['commit', '-m', 'ISSUE-1: seed gitlink']);
+      await writeFile(path.join(issueDir, 'sub/inner.txt'), 'dirty only\n');
+      const h = dagDb(integrationDir, { worktreePath: issueDir });
+      const failure = new Error('warning store unavailable');
+      h.db.query.taskSteps.findFirst = async () => {
+        throw failure;
+      };
+      const childLogger = logger.child<string>({ test: 'nested-warning-write' });
+      const child = vi.spyOn(logger, 'child').mockReturnValue(childLogger);
+      const warn = vi.spyOn(childLogger, 'warn').mockImplementation(() => undefined);
+      try {
+        expect((await pass(h, integrationDir)).resolved).toBe(true);
+        expect(warn).toHaveBeenCalledWith(
+          { err: failure },
+          expect.stringContaining('Could not save'),
+        );
+      } finally {
+        warn.mockRestore();
+        child.mockRestore();
+      }
     });
 
     it('commits a new commit inside a gitlink the branch already holds, with no .gitmodules', async () => {
@@ -2336,6 +2455,8 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       expect(err).toBeInstanceOf(Error);
       expect((err as Error).message).not.toContain('not registered as a submodule');
       expect((err as Error).message).toContain('DAG issue ISSUE-1');
+      expect((err as Error).message).toContain('gitlink check failed');
+      expect(err).not.toBeInstanceOf(FlattenedRepositoryError);
       expect(await out(integrationDir, ['rev-parse', 'main--ISSUE-1'])).toBe(tip);
     });
 

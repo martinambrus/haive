@@ -1,3 +1,4 @@
+import { ensureGitExcludeEntry } from '../repo/git-init.js';
 import { fixtureBase, networkGitArgs } from '../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
 import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
@@ -380,6 +381,7 @@ describe('the pushes Haive makes of a task branch put its Haive files back first
 
   it('the run-app ready gate on the repository root itself has nothing to put back', async () => {
     const { parent, bare } = await fixture();
+    await ensureGitExcludeEntry(parent);
     await write(parent, stateFiles(BY_AGENT));
     const h = stubDb();
     const out = await runAppReadyStep.apply(stepCtx(parent, h.db), {

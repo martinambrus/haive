@@ -1,13 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { removeNoFollow } from '@haive/shared/fs-safe';
+import { lstatNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import {
   GIT_MAX_BUFFER,
   gitGaveNoAnswer,
   gitRun,
   type GitRunResult,
 } from '../../../repo/git-exec.js';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
+import type { StepContext } from '../../step-definition.js';
+import { warnStep } from '../../../project-state/branch-revert.js';
 import { parsePorcelainZ } from './_commit-diff.js';
 
 const GITLINK_MODE = '160000';
@@ -39,17 +42,19 @@ function expectOk(what: string, res: GitRunResult): void {
 }
 
 async function newGitlinks(workspace: string, env?: Record<string, string>): Promise<string[]> {
+  const head = await gitRun(workspace, ['rev-parse', '-q', '--verify', 'HEAD']);
+  if (head.code !== 0 && head.code !== 1) throw failure('git HEAD read', head);
   const res = await gitRun(
     workspace,
     [
-      'diff-index',
+      head.code === 1 ? 'diff' : 'diff-index',
       '--cached',
       '--raw',
       '-z',
       '--no-renames',
       '--ignore-submodules=none',
       '--diff-filter=AT',
-      'HEAD',
+      ...(head.code === 1 ? [] : ['HEAD']),
     ],
     env,
   );
@@ -128,20 +133,100 @@ async function copyIndexFlags(workspace: string, env: Record<string, string>): P
   }
 }
 
+export class FlattenedRepositoryError extends Error {
+  constructor(
+    readonly paths: string[],
+    issue?: { key: string; worktree?: string | null },
+  ) {
+    super(
+      [
+        `${issue ? `Nothing was committed for DAG issue ${issue.key}.` : 'Nothing was committed.'} A \`.git\` sits inside these tracked directories; staging their untracked files could discard repository history:`,
+        ...paths.map((p) => `- ${JSON.stringify(p)}`),
+        ...(issue
+          ? [
+              `Act in that issue's worktree${issue.worktree ? `, ${issue.worktree}` : ''}, then retry this step. The issue is not coded again; its work is committed as it stands.`,
+            ]
+          : []),
+        'For each path, keep it out of the commit, or remove its `.git` to include the files on purpose. Then retry this step.',
+      ].join('\n'),
+    );
+    this.name = 'FlattenedRepositoryError';
+  }
+}
+
+/** Untracked files inside a tracked directory with a `.git` would be flattened by git add. */
+async function refuseFlattenedRepositories(
+  workspace: string,
+  entries: ReturnType<typeof parsePorcelainZ>,
+  excluded: string[],
+): Promise<void> {
+  const { anchor, prefix } = workspaceAnchor(workspace);
+  const checked = new Map<string, { directory: boolean; nested: boolean }>();
+  const found = new Set<string>();
+  for (const entry of entries) {
+    if (entry.x !== '?' || entry.y !== '?') continue;
+    const file = entry.path;
+    if (excluded.some((p) => file === p.slice(0, -1) || file.startsWith(p))) continue;
+    const segments = file.replace(/\/$/, '').split('/');
+    for (let i = 1; i < segments.length; i++) {
+      const dir = segments.slice(0, i).join('/');
+      let entry = checked.get(dir);
+      if (entry === undefined) {
+        const directory =
+          (await lstatNoFollow(anchor, `${prefix}${dir}`, { strict: true }))?.kind === 'directory';
+        entry = {
+          directory,
+          nested:
+            directory &&
+            (await lstatNoFollow(anchor, `${prefix}${dir}/.git`, { strict: true })) !== null,
+        };
+        checked.set(dir, entry);
+      }
+      if (!entry.directory) break;
+      if (entry.nested) found.add(dir);
+    }
+  }
+  if (found.size) throw new FlattenedRepositoryError([...found]);
+}
+
 /**
  * Index paths of gitlinks the commit about to be made would add that no `.gitmodules` entry in that
  * commit registers with a url. What `git add -A` would stage is worked out on a scratch copy of the
  * index, so the real index is never written. Throws when git cannot answer: a refusal is never skipped.
+ * Throws `FlattenedRepositoryError` when the add would flatten a nested repository in a tracked directory.
  */
 export async function unregisteredGitlinks(
   workspace: string,
   status: string,
   excluded: string[],
+  scope?: readonly string[],
 ): Promise<string[]> {
-  const staged = await newGitlinks(workspace);
+  await refuseFlattenedRepositories(
+    workspace,
+    parsePorcelainZ(status).filter((entry) => pathInScope(entry.path, scope)),
+    excluded,
+  );
+  return computeUnregisteredGitlinks(workspace, status, excluded, scope);
+}
+
+function pathInScope(file: string, scope?: readonly string[]): boolean {
+  return (
+    !scope || scope.some((p) => file === p || file.startsWith(`${p}/`) || p.startsWith(`${file}/`))
+  );
+}
+
+async function computeUnregisteredGitlinks(
+  workspace: string,
+  status: string,
+  excluded: string[],
+  scope?: readonly string[],
+): Promise<string[]> {
+  const inScope = (file: string) => pathInScope(file, scope);
+  const entries = parsePorcelainZ(status).filter((entry) => inScope(entry.path));
+  const staged = (await newGitlinks(workspace)).filter(inScope);
   // A nested repository that replaces a tracked file shows as ` T path`, and one that replaces an
   // intent-to-add file as ` A path`, not as `?? path/`.
-  const mayAddGitlink = parsePorcelainZ(status).some(
+  const mayAddGitlink = entries.some(
     (e) =>
       (e.x === '?' && e.y === '?' && e.path.endsWith('/') && !excluded.includes(e.path)) ||
       e.y === 'T' ||
@@ -161,9 +246,19 @@ export async function unregisteredGitlinks(
     );
     expectOk('git update-index', fill);
     await copyIndexFlags(workspace, env);
-    const add = await gitRun(workspace, [...NO_SPLIT_INDEX, ...stageAllArgs(excluded)], env);
-    expectOk('git add', add);
-    const added = await newGitlinks(workspace, env);
+    const batches = scope
+      ? Array.from({ length: Math.ceil(scope.length / 128) }, (_, i) => [
+          'add',
+          '-A',
+          '--',
+          ...scope.slice(i * 128, (i + 1) * 128).map((p) => `:(top,literal)${p}`),
+        ])
+      : [stageAllArgs(excluded)];
+    for (const args of batches) {
+      const add = await gitRun(workspace, [...NO_SPLIT_INDEX, ...args], env);
+      expectOk('git add', add);
+    }
+    const added = (await newGitlinks(workspace, env)).filter(inScope);
     if (added.length === 0) return [];
     const registered = await registeredPaths(workspace, env);
     return added.filter((p) => !registered.has(p));
@@ -199,4 +294,38 @@ export function unregisteredGitlinksMessage(
         ]),
     "(2) Include its files as ordinary files by removing its nested `.git` directory (this drops that repository's own history).",
   ].join('\n');
+}
+
+/** An uploaded tree must remain onboardable even when the nested-check or warning write fails. */
+export async function initialGitlinkWarnings(
+  ctx: Pick<StepContext, 'repoPath' | 'logger' | 'db' | 'taskStepId'>,
+): Promise<string[]> {
+  try {
+    const status = await gitRun(ctx.repoPath, [
+      '--no-optional-locks',
+      'status',
+      '--porcelain',
+      '-z',
+      '-uall',
+    ]);
+    expectOk('git status', status);
+    const paths = await computeUnregisteredGitlinks(ctx.repoPath, status.stdout, []);
+    const warnings = paths.map(
+      (p) =>
+        `${JSON.stringify(p)} is a nested git repository without a registered submodule URL. The initial commit records only a commit id, so that directory will be empty in task worktrees and a clone cannot fetch it.`,
+    );
+    for (const warning of warnings) ctx.logger.warn(warning);
+    try {
+      await warnStep(ctx, warnings);
+    } catch (err) {
+      ctx.logger.warn({ err }, 'Could not save initial-commit warnings; continuing');
+    }
+    return warnings;
+  } catch (err) {
+    ctx.logger.warn(
+      { err },
+      'Could not check nested repositories before the initial commit; continuing',
+    );
+    return [];
+  }
 }

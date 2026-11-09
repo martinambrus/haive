@@ -1,10 +1,11 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { describe, it, expect } from 'vitest';
-import type { Database } from '@haive/database';
+import { describe, it, expect, vi } from 'vitest';
+import { schema, type Database } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import { nextFreeBranchName, worktreeSetupStep } from './01-worktree-setup.js';
 import type { StepApplyArgs, StepContext } from '../../step-definition.js';
 
@@ -207,3 +208,52 @@ describe('01 worktree setup apply', () => {
     }
   });
 });
+
+it.each([false, true])(
+  'first init warns without blocking the worktree (malformed gitmodules: %s)',
+  async (malformed) => {
+    const root = await mkdtemp(path.join(tmpdir(), 'wt-nested-init-'));
+    try {
+      await mkdir(path.join(root, 'nested'));
+      await git(path.join(root, 'nested'), ['init', '-b', 'main']);
+      await writeFile(path.join(root, 'nested/inner.txt'), 'inner\n');
+      await git(path.join(root, 'nested'), ['add', '-A']);
+      await git(path.join(root, 'nested'), ['commit', '-m', 'inner']);
+      if (malformed) await writeFile(path.join(root, '.gitmodules'), '[broken\n');
+      const ctx = mkCtx(root);
+      const fake = createFakeDb({ taskSteps: schema.taskSteps, tasks: schema.tasks });
+      const id = '00000000-0000-4000-8000-000000000001';
+      fake.insert(schema.taskSteps, { id, status: 'running' });
+      ctx.taskStepId = id;
+      ctx.taskId = '00000000-0000-4000-8000-000000000002';
+      const warningRead = vi.fn(fake.db.query.taskSteps.findFirst);
+      Object.assign(ctx.db.query, {
+        users: { findFirst: async () => null },
+        taskSteps: { findFirst: warningRead },
+      });
+      Object.assign(ctx.db, { update: fake.db.update });
+      const warn = vi.fn();
+      ctx.logger = { ...logger, warn } as never;
+      const detected = await worktreeSetupStep.detect!(ctx);
+      const out = await worktreeSetupStep.apply(ctx, {
+        detected,
+        formValues: { branchName: 'feature/test', initBranch: 'main' },
+        iteration: 0,
+        previousIterations: [],
+      });
+      expect(out.mode).toBe('worktree');
+      expect(JSON.stringify(warn.mock.calls)).toContain(
+        malformed ? 'commit landed' : 'empty in task worktrees',
+      );
+      const row = await fake.db.query.taskSteps.findFirst();
+      const note = String(row?.warningMessage);
+      expect(note).toContain(malformed ? 'commit landed' : 'empty in task worktrees');
+      expect(note).not.toContain(root);
+      expect(note).not.toMatch(/(?:^|[\s'"])(?:\/|[A-Za-z]:[\\/]|\\\\)/);
+      expect(note.match(malformed ? /commit landed/g : /empty in task worktrees/g)).toHaveLength(1);
+      expect(warningRead).toHaveBeenCalledTimes(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);

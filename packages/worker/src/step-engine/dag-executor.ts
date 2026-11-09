@@ -1,5 +1,8 @@
 import { assertDependencyCommitSafe } from './steps/workflow/_dependency-policy.js';
+import { parsePorcelainZ } from './steps/workflow/_commit-diff.js';
+import { warnStep } from '../project-state/branch-revert.js';
 import {
+  FlattenedRepositoryError,
   unregisteredGitlinks,
   unregisteredGitlinksMessage,
 } from './steps/workflow/_gitlink-registration.js';
@@ -469,8 +472,7 @@ function issueRefused(issue: { errorMessage?: string | null }): boolean {
   return issue.errorMessage?.startsWith(PROVIDER_FATAL_HEADLINES.content_filter) === true;
 }
 
-/** Commit any uncommitted work in an issue worktree (belt-and-suspenders — the
- *  coder is told to commit, but may not). No-op when the tree is clean. */
+/** Commit issue work host-side: the coder cannot run git. Commits nothing when nothing is staged, and warns if edits stayed out. */
 async function commitIssueWork(
   ctx: StepContext,
   worktreePath: string,
@@ -497,6 +499,12 @@ async function commitIssueWork(
   try {
     orphans = await unregisteredGitlinks(worktreePath, pending.stdout, []);
   } catch (err) {
+    if (err instanceof FlattenedRepositoryError) {
+      throw new FlattenedRepositoryError(err.paths, {
+        key: issue.issueKey,
+        worktree: issue.sandboxWorktreePath,
+      });
+    }
     // Git could not answer, so the add does not run: a refusal is never skipped.
     throw new Error(
       `gitlink check failed for DAG issue ${issue.issueKey}: ${err instanceof Error ? err.message : String(err)}`,
@@ -517,13 +525,29 @@ async function commitIssueWork(
       `git add failed for DAG issue ${issue.issueKey}: ${(add.stderr || add.stdout).trim()}`,
     );
   }
-  const status = await gitRun(worktreePath, ['--no-optional-locks', 'status', '--porcelain']);
-  if (status.code !== 0) {
+  const staged = await gitRun(worktreePath, [
+    'diff',
+    '--cached',
+    '--quiet',
+    '--ignore-submodules=none',
+  ]);
+  if (staged.code === 0) {
+    const notes = parsePorcelainZ(pending.stdout).map(
+      ({ path }) =>
+        `${JSON.stringify(path)}: its uncommitted changes are inside a nested repository, are not part of this issue's commit, and stay out unless committed inside it before a retry.`,
+    );
+    try {
+      await warnStep(ctx, notes);
+    } catch (err) {
+      ctx.logger.warn({ err }, 'Could not save uncommitted nested-repository warnings; continuing');
+    }
+    return;
+  }
+  if (staged.code !== 1) {
     throw new Error(
-      `git status failed for DAG issue ${issue.issueKey}: ${(status.stderr || status.stdout).trim()}`,
+      `git staged read failed for DAG issue ${issue.issueKey}: ${(staged.stderr || staged.stdout).trim()}`,
     );
   }
-  if (status.stdout.trim().length === 0) return;
   const res = await gitRun(
     worktreePath,
     ['commit', '-m', `${issue.issueKey}: ${issue.title}`],

@@ -1,3 +1,4 @@
+import { initialGitlinkWarnings } from '../workflow/_gitlink-registration.js';
 import {
   sameValue,
   readRenderContextColumn,
@@ -975,6 +976,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
           (typeof values.initBranch === 'string' ? values.initBranch : '').trim() || 'main';
         await initGitWorkspace(ctx.repoPath, initBranch);
         didInit = true;
+        warnings.push(...(await initialGitlinkWarnings(ctx)));
         await gitExec(['add', '-A'], { cwd: ctx.repoPath, maxBuffer: GIT_MAX_BUFFER });
         ctx.logger.info({ initBranch }, 'post-onboarding: initialized git repository');
       }

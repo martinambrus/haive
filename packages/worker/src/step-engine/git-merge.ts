@@ -1,3 +1,8 @@
+import {
+  FlattenedRepositoryError,
+  unregisteredGitlinks,
+  unregisteredGitlinksMessage,
+} from './steps/workflow/_gitlink-registration.js';
 import { isUtf8 } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
@@ -1308,8 +1313,8 @@ export function buildMergeFixPrompt(
  *  files. The agent cannot run git (the worktree's absolute gitdir path does not
  *  exist inside the sandbox), so the host verifies no conflict markers remain in
  *  the previously-unmerged paths, stages, and commits. Returns true when the merge
- *  commit landed. Returns false for an incomplete or containment-refused resolution, or a merge
- *  no longer open. Failed git reads, writes and genuine IO errors throw. */
+ *  commit landed. Returns false for an incomplete or containment-refused resolution, a nested
+ *  repository in a resolved path, or a merge no longer open. Failed git reads, writes and genuine IO errors throw. */
 export async function completeMergeHostSide(
   worktreePath: string,
   gitEnv: Record<string, string>,
@@ -1345,6 +1350,29 @@ export async function completeMergeHostSide(
     } catch (err) {
       if (isPathContainmentError(err)) return false; // bad fixer output costs one attempt
       throw err;
+    }
+  }
+  if (resolving.length > 0) {
+    const status = await gitRun(worktreePath, [
+      '--no-optional-locks',
+      'status',
+      '--porcelain',
+      '-z',
+      '-uall',
+    ]);
+    if (status.code !== 0)
+      throw new Error(`git status failed in ${worktreePath}: ${gitDetail(status)}`);
+    let orphans: string[];
+    try {
+      orphans = await unregisteredGitlinks(worktreePath, status.stdout, [], resolving);
+    } catch (err) {
+      if (!(err instanceof FlattenedRepositoryError)) throw err;
+      logger.warn({ worktreePath }, err.message);
+      return false;
+    }
+    if (orphans.length) {
+      logger.warn({ worktreePath }, unregisteredGitlinksMessage(orphans));
+      return false;
     }
   }
   // Only the paths the fixer was sent to resolve: the merge staged everything else itself, and what
