@@ -463,16 +463,17 @@ status: open · kind: fix · found: T347 run · priority: P2
 
 ### T555 · FNF[egress-guard-hardening] · remaining egress guard gaps: local NAT64 and Teredo, probe details (+2)
 
-status: in progress, item 7 (codex-sonnet) · kind: fix · found: T347 run · priority: P2
+status: open · kind: fix · found: T347 run · priority: P2
 
-Three items (metadata addresses, IPv4-compatible form, required fetchFn) shipped in PR #1040 (4dceda71f) and the Azure host address in PR #1041 (aa529e991), 2026-11-09. Items 3 to 6 stay parked as before.
+Three items (metadata addresses, IPv4-compatible form, required fetchFn) shipped in PR #1040 (4dceda71f), the Azure host address in PR #1041 (aa529e991) and item 7 (local NAT64, Teredo) in PR #1048 (82343cc60), 2026-11-09. Items 3 to 6 and 8 stay parked as before.
 
 3. Hostname entries consult the hosts file only when DNS fails, so a name public in DNS but overridden in /etc/hosts dials the DNS answer (shared egress/probe-egress.ts:96,127,186,319). Accepted behaviour; revisit only on a report. NEW-LIMIT.
 4. `deflate` maps to `createInflate` (probe-egress.ts:158), so a raw-deflate body fails. PRE-EXISTING (moved code).
 5. The guard sends `accept-encoding: identity` by default (probe-egress.ts:219). PRE-EXISTING (low).
 6. A `[::1]` host in a RAG DSN reports `ENOTFOUND [` (`dsnDialHost`, shared rag/connection.ts:119; postgres.js parses the host as `[`); still refused, only the message is wrong. PRE-EXISTING (low).
-7. (T555 run) 64:ff9b:1::/48 (RFC 8215 local-use NAT64) and Teredo 2001::/32 are blocked but not unliftable, so a hostname entry lifts them, for example `64:ff9b:1::a9fe:a9fe`; through a gateway they can reach metadata. PRE-EXISTING, minor.
+7. Shipped in PR #1048 (local NAT64 and Teredo cannot be lifted by a hostname entry).
 8. (T555 run) `isUnliftableByHostname` returns false for a non-address string while the base table blocks it. Unreachable today, since resolvers return address literals. PRE-EXISTING, theoretical.
+9. (T555 item 7 review) Tests only: the 'explicit entry still lifts' cases in shared test/probe-egress.test.ts ~:335-348 assert only that the code is not ENOTFOUND, so any other failure passes (house style, the link-local test beside them does the same), and no test pairs a built-in host with an answer in the tunnel ranges. NEW, minor.
 
 ### T556 · FNF[ollama-pull-relay] · pull stream relay edges
 
