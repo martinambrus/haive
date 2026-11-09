@@ -18,6 +18,10 @@ import { shellQuote } from '../../../sandbox/shell-quote.js';
 import { buildCommitDiffArtifact } from '../workflow/_commit-diff.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { detectOrigin, gitRun, pushBranch } from '../../../repo/git-push.js';
+import {
+  unregisteredGitlinks,
+  unregisteredGitlinksMessage,
+} from '../workflow/_gitlink-registration.js';
 import { gitCommitStaged } from '../../../repo/git-commit.js';
 import { gitWorkspaceStatus } from '../../../repo/git-workspace.js';
 import { putBackProjections, warnStep } from '../../../project-state/branch-revert.js';
@@ -328,6 +332,17 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
     // A push can publish commits already on the branch. Leaving commit unticked
     // must keep the user's index and uncommitted session edits untouched.
     if (values.commit) {
+      const status = await gitRun(workspace, [
+        '--no-optional-locks',
+        'status',
+        '--porcelain',
+        '-z',
+        '-uall',
+      ]);
+      if (status.code !== 0)
+        throw new Error(`git status failed: ${status.stderr || status.stdout}`);
+      const orphans = await unregisteredGitlinks(workspace, status.stdout, []);
+      if (orphans.length) throw new Error(unregisteredGitlinksMessage(orphans));
       const add = await gitRun(workspace, ['add', '-A']);
       if (add.code !== 0) {
         throw new Error(`git add failed: ${add.stderr || add.stdout}`);
