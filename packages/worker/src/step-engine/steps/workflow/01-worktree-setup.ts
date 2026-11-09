@@ -4,6 +4,7 @@ import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormField, FormSchema } from '@haive/shared';
+import { scrubErrorPaths } from '@haive/shared/logger';
 import { isBranchName } from '@haive/shared/git-args';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
@@ -177,7 +178,7 @@ async function initGitRepo(
     if (after.code !== 0 || (before.code === 0 && after.stdout.trim() === before.stdout.trim())) {
       throw new Error(`git commit failed (exit ${commit.code}): ${commit.stderr || commit.stdout}`);
     }
-    const note = `The initial commit landed, but git commit exited ${commit.code}: ${(commit.stderr || commit.stdout).trim()}`;
+    const note = `The initial commit landed, but git commit exited ${commit.code}: ${scrubErrorPaths((commit.stderr || commit.stdout).trim())}`;
     ctx.logger.warn(note);
     try {
       await warnStep(ctx, [note]);

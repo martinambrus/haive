@@ -248,6 +248,8 @@ it.each([false, true])(
       const row = await fake.db.query.taskSteps.findFirst();
       const note = String(row?.warningMessage);
       expect(note).toContain(malformed ? 'commit landed' : 'empty in task worktrees');
+      expect(note).not.toContain(root);
+      expect(note).not.toMatch(/(?:^|[\s'"])(?:\/|[A-Za-z]:[\\/]|\\\\)/);
       expect(note.match(malformed ? /commit landed/g : /empty in task worktrees/g)).toHaveLength(1);
       expect(warningRead).toHaveBeenCalledTimes(1);
     } finally {
