@@ -47,7 +47,8 @@ and that revoking the entitlement stops the next image being built.
 - `./manifest` — `hasSteps`, `composableSteps` (its steps, for the task-type composer),
   `taskTypes` (the `deep_scan` seed), `nav` + `pages` (a findings dashboard), `globalSettings`.
 - `./steps` — the pipeline below.
-- `./routes` — read API backing its dashboard.
+- `./routes` — read API backing its dashboard, plus its one write: lifting an ignore (see
+  `scan-triage`).
 
 The dashboard is worth calling out as product value, not decoration: **`review_findings` has no UI at
 all today** — nothing in `packages/web` or `packages/api` reads it. The module is its first consumer.
@@ -192,7 +193,9 @@ and whose dimension this scan ran is handed to the same panel as a claim, the le
 the defect still exists in the snapshot, and it is cleared only when the same 2-of-3 quorum says
 it is gone, each voter citing the current `file:line`; an unreadable voter never counts toward
 it. One outside the target, in a dimension not run or REFUSED, or in a file the per-file cap
-truncated is not re-checked and stays listed, carried into this scan's report as unconfirmed.
+truncated is not re-checked and stays listed, carried into this scan's report as unconfirmed. A
+finding a person ignored is none of these: its latest row says so (`raw.decision` or
+`raw.ignoredBy`), and it is neither re-checked nor carried.
 
 Every re-check outcome is written down, on a row of THIS scan as every later write is: a re-checked
 finding gets one carrying, in `raw`, the scan that first recorded it and the verdict, `cleared` or
@@ -200,6 +203,38 @@ finding gets one carrying, in `raw`, the scan that first recorded it and the ver
 are. Loading what is unresolved then reads each finding's latest row, so a finding scan B cleared
 is not handed to scan C again, and comes back only if scan C raises it anew — as a new finding,
 since the defect was gone in between.
+
+**The same panel says whether a fix is worth its cost.** Severity says how bad a defect is if it
+bites, not whether anyone should spend a fix round on it, and that gap is where a found-not-fixed
+list goes wrong: it grows fast and fills with real items and nits a product does not need fixed to
+be safe, secure, accessible and performant. So every voter, in the dimension-specific lenses too,
+answers one more question about a finding it does not refute: would leaving this unfixed cause
+concrete harm — to correctness, data, security, safety, accessibility, performance or compliance —
+on a path real use reaches, and which harm, in one line citing a `file:line`? A finding is
+`diminishing` when at least two voters answer no, and otherwise `worth_fixing`, an unreadable voter
+counting toward neither: a wrong `worth_fixing` costs a person a glance, a wrong `diminishing` buries
+a defect. `critical` is never `diminishing`. The panel answers rather than the analysis agent
+because the agent that raised a finding is the one with a stake in it, and the archive's escalation
+into "Black Swan" reviews is what a finder left to judge its own findings produces. The tier and the
+one-line reasons ride `review_findings.raw`, so no core schema change, and a finding not re-checked
+keeps the tier its earlier row holds. The tier is a label and never a filter: a `diminishing` finding
+is recorded, grouped, offered and reported like any other.
+
+**A finding a person ignored stays ignored, and this panel is what recognises it** (`scan-triage`
+creates the entries). The fingerprint cannot: MEASURED in `review-findings.md`, it matched across
+rounds 0.05% of the time, because two descriptions of one defect are different sentences, and the
+coarser `(reviewer, path)` key joins distinct defects in one file, which is tolerable for a counter
+and not for hiding something. So an ignored entry is matched in three layers. Each analysis prompt
+lists the entries for its dimension whose file is in the target, fenced as data, as known and decided
+and not to be reported; that only saves work, and a list that would overrun the prompt is cut.
+A finding whose dimension, path and exact issue text equal an entry's is matched with no vote. Any
+other finding sharing a dimension and path with an entry goes to this panel with those entries beside
+it, and 2-of-3 voters naming one entry as the same defect, each citing the current `file:line`,
+matches it. An unreadable voter never counts, and with no quorum the finding is offered at triage
+marked as possibly ignored: a wrong match hides a defect, a missed one costs a click. A matched
+finding gets a row of this scan marked `raw.ignoredBy` and `dismissed_human`, and from there reaches
+no theme, no triage entry and no report list, only the report's count. A file moved since the
+entry was written reads as new, the safer of the two mistakes.
 
 **A consolidator does not make this step redundant**, and the prompt should say so where a reader
 might assume otherwise. Consolidation reconciles drafts of one answer; refutation checks a claim
@@ -233,6 +268,8 @@ finding — triage's disposition, the issue it was planned into — lands on thi
 rewrites an earlier task's history, the current-scope rule `review-findings.md` keeps for both of
 its UPDATE paths.
 Out-of-scope output under a diff target is recorded with `raw.inScope = false` and listed apart.
+A finding `scan-verify` matched to an ignored entry is written here too, as `dismissed_human` with
+`raw.ignoredBy` naming the entry, and counts as neither new nor still present.
 
 **Its rows are the product, so its write is not the telemetry one.** `recordReviewFindings` is
 best-effort by design and never throws, because a core reviewer's findings live in its step output
@@ -254,11 +291,53 @@ digits and so can join two defects on one line — are that same finding and are
 before the assertion, keeping the first one's fix; one fingerprint over anything else is still
 the collision the assertion exists for.
 
-**5 · `scan-triage`** — form. The human picks which findings to fix. **This step is the entire answer
+**5 · `scan-group`** — one LLM call over the recorded findings, tools off, findings fenced under
+`REPO_IS_DATA_LINES`. A list of 120 findings is usually a handful of problems repeated, so this step
+turns this scan's rows, the ignored and cleared ones excepted, into **themes**. A theme is findings that one
+approach fixes and one check proves: "admin routes do not check the CSRF token", never "security".
+It may cross dimensions and directories. The call returns, per theme, a title, the shared fix, the
+shared check and the finding ids, and aims for five to ten themes, hard cap twelve.
+
+The contract is enforced in code, since the output is a model's. Every finding lands in exactly one
+theme: an unknown id is dropped, a finding named twice stays with the first theme, one named by none
+goes to a theme called `Other`, and past the cap the eleven largest stay and the rest join `Other`.
+A call that fails, is refused or returns nothing usable does not fail the scan: each dimension
+becomes one theme, and the coverage record says so. A list too long for one prompt is split by
+dimension, one call each, which means more themes and never a dropped finding. The first call is
+reserved out of step 1's budget before any analysis agent runs, and a later one the budget cannot pay
+for takes the per-dimension fallback.
+
+Each theme is then split so that `worth_fixing`, `diminishing` and out-of-scope findings never share
+one decision, the halves keeping one title. The theme is written to each row's `raw` in one
+transaction whose failure fails the step, as `scan-record`'s write does, since triage and remediation
+read it. A `carried` row gets a theme for the report; triage offers only what this scan confirmed.
+
+**6 · `scan-triage`** — form. The human picks which findings to fix. **This step is the entire answer
 to "502 tasks, 0 fixes"**: nothing proceeds to remediation that a person did not choose. A coherence
 finding asks one extra thing — **which side is authoritative** — because "these two disagree" has no
 fix until a person says which one is right. Left unanswered it stays recorded and unplanned rather
 than guessed at.
+
+**The form decides themes, and opens onto findings.** One `accordion` holds the `worth_fixing`
+themes, open, one holds the `diminishing` ones, collapsed, and a third any out-of-scope ones; each
+item names its theme, finding count, worst severity and files, and a `diminishing` finding shows the
+panel's one-line reason. Each theme has one radio — Fix, Leave for now, Ignore, Choose per finding —
+defaulting to Leave for now, so nothing is pre-chosen for a person. Choose per finding reveals, by
+`visibleWhen`, one radio per finding with the first three. These are existing field types, so no
+step-specific component. A coherence finding's authoritative-side question shows when its theme is
+on Fix or Choose per finding.
+
+**Leave for now and Ignore are different decisions.** Leave for now is about this moment: the row is
+written `dismissed_human`, the finding stays in `Found, not fixed`, a later scan re-checks it and may
+raise it again. Ignore is about the defect: keep it in mind, do not worry about it, do not discover it
+again. It writes an entry to the module's own table (repository, dimension, path, issue text, the
+scan and person that made it), and the row is written `dismissed_human` with `raw.decision =
+'ignored'`, so no new enum value; a Retry writes one entry, not two. An entry belongs to the
+repository and outlives the task. The dashboard lists every entry and can lift one, after which a
+later scan may raise that defect again; lifting rewrites no earlier row. `review-findings.md`'s rule
+that a waiver is context and never suppression stands for Leave for now and for all of core: 08d2's
+waiver is a person declining to spend a round, and only `deep_scan` reads an ignore, so the tail's
+own reviewers are not filtered by it.
 
 **Volume is the failure mode this step must survive**, and the two accretion dimensions are where it
 bites: every file has comments, and a long-lived tree collects unreferenced symbols the same way, so
@@ -278,22 +357,33 @@ and says why: a fix for code a branch never had is not a remediation. Remediatio
 landing branch's current tip, which can be ahead of what was scanned, so a finding in a file that
 differs between the scanned commit and that tip is marked — its line numbers describe the scanned
 revision, not the one a coder will edit. Findings recorded out of scope, and ones an earlier scan
-already recorded, are listed apart from the new in-scope ones. A read-only folder import is
-mounted read-only end to end, so nothing can remediate it: triage records its findings and offers
+already recorded, are told apart: out-of-scope ones sit in their own accordion, and re-found
+ones are marked inside their themes, since one fix covers them and a new finding alike. A
+read-only folder import is mounted read-only end to end, so nothing can remediate it: triage records its findings and offers
 no remediation, saying why.
 
-**6 · `scan-plan-remediation`** — deterministic, **no LLM**. Selected findings become DAG rows:
-`task_dag_plans` (mode `'dag'`), `task_dag_levels`, `task_dag_issues` (`title` ← issue,
-`description` ← issue + fix, `filesModified` ← path, `acceptanceCriteria` ← the fix's check).
-**One issue per file**, so several findings in one file are fixed by one agent — which removes
-intra-file merge conflicts by construction rather than predicting collisions the way the archive's
-planner did. A coherence finding names TWO files and so breaks that rule as stated: group by the
-**connected component** of the paths a finding names, not by a single path, or two issues could each
-claim one side of the same conflict and reintroduce exactly the collision the rule exists to prevent.
-Every other dimension names one path, where connected components degenerate to one-issue-per-file —
-so this changes nothing for the other sixteen, `comment-debt` and `dead-code` included: each of their
-findings names one path, and several such findings in a file being fixed by one agent is the right
-unit anyway. All at level 0 unless a dependency is declared. Every issue names the commit its
+**7 · `scan-plan-remediation`** — deterministic, **no LLM**. Selected findings become DAG rows:
+`task_dag_plans` (mode `'dag'`), `task_dag_levels`, `task_dag_issues` (`title` ← the theme's title,
+`description` ← its shared fix plus each picked finding's issue and fix, `filesModified` ← every path
+those findings name, `acceptanceCriteria` ← its shared check plus each finding's).
+**One issue per theme**, holding only the findings a person picked from it, whichever of its halves
+they sit in. This is where grouping
+pays: per-issue reviewers took about half of a DAG run's CLI time (MEASURED, `review-scope.md`), and
+one fix approach is tested once, where issues cut per file would pay that per file. A finding is
+never split across issues, so both sides of a coherence pair stay in one.
+
+**Two issues in one level never name one path, which sequencing guarantees instead of a merge
+resolver.** Themes cut across files, so two can name the same file, and running them side by side
+would reintroduce the intra-file conflicts the DAG exists to avoid. Themes naming a common path are
+placed on different levels by a greedy pass in stable order; themes sharing nothing stay together at
+level 0. Each later level branches from a tree holding the earlier merges. The planner writes levels
+only, never `depends_on`: the executor reads a `depends_on` edge as blocked-by, and a theme that
+failed must not stop an unrelated one that merely shared a file. A theme naming more than 25 files is
+cut in path order into parts of at most that many, each its own issue with the theme's title and
+check, disjoint and so on one level. A cut never divides a finding, and a pair larger than the limit
+keeps its issue whole. The 25 is a named constant and UNMEASURED; the first real run sets it.
+
+Every issue names the commit its
 findings were read at, so a coder working on a newer tip knows which revision their line numbers
 describe. Each finding's row from THIS scan (see `scan-record`, which gives a still-present
 finding one too) records the plan id and `issueKey` it was planned into, in `review_findings.raw`,
@@ -306,11 +396,11 @@ among them.
 
 One cheap post-check falls out of that: when every finding in an issue is `comment-debt`, the
 remediation diff must touch **comment lines only** — a mechanical assertion no other dimension can
-make. It is available only when the issue is single-dimension, which one-issue-per-file does not
+make. It is available only when the issue is single-dimension, which a theme does not
 guarantee, so it is a bonus gate and must not be turned into a requirement by making the grouping rule
 dimension-aware.
 
-**7 · `scan-remediate`** — declares the `dagExecute` hook and supplies a fix-oriented coder prompt.
+**8 · `scan-remediate`** — declares the `dagExecute` hook and supplies a fix-oriented coder prompt.
 **Reusing the executor needs no core change to find its plan:** `resolveDagPhase`
 (`step-engine/dag-executor.ts:1505`) loads its plan by `taskDagPlans.taskId`, not from `06b`, so the
 module inherits per-level isolated worktrees, parallel coders, the barrier, level-by-level merge,
@@ -368,7 +458,7 @@ transient fault as a verdict: an environment halt for a coder or a reviewer, an 
 crash, and a merge halt, whose conflict a person resolves with "Retry with LLM" once the automatic
 attempts are spent.
 
-**8 ·** Core steps composed from the catalog after remediation — verify, review, commit — exactly as
+**9 ·** Core steps composed from the catalog after remediation — verify, review, commit — exactly as
 a workflow task ends. Several of them emit `loop_back`, and the data-driven task types
 (`rippling-wibbling-puffin`) refuse a composition whose loop emitters have no declared
 `fixLoop.targetStepId` in its run list. `scan-remediate` cannot be that target: once its levels
@@ -382,7 +472,7 @@ the tail and declared as the seed's `fixLoop.targetStepId`. It skips round 0, wh
 each fix round reads the diagnosis (`loadFixLoopDiagnosis`) and edits `01-worktree-setup`'s
 integration worktree under `REPO_IS_DATA_ACTING_LINES`, the guard for a pass that edits.
 
-**9 · `scan-report`** — deterministic, **no LLM**, composed last, and the step that holds the
+**10 · `scan-report`** — deterministic, **no LLM**, composed last, and the step that holds the
 scan's report. It runs whatever triage chose, an empty selection included, since a scan whose
 triage picked nothing is a report and nothing else.
 
@@ -407,9 +497,10 @@ whose deliverable is a change. A scan's deliverable is the list of defects, so w
 did not fix is the report's main content, not a side note: the section has no form field, no
 setting and no `visibleWhen`, it renders open, and when it is empty it says so in one line rather
 than disappearing, since a missing section reads exactly like a clean one. It lists, grouped by
-reason and most severe first within each group:
+reason and then by theme, each theme one heading with its count over its findings, `worth_fixing`
+themes ahead of `diminishing` ones and most severe first within each:
 
-- verified findings triage did not pick, whose rows from this scan are written `dismissed_human`
+- verified findings triage left for now, neither picked nor ignored, whose rows from this scan are written `dismissed_human`
   the way 08d2 writes what gate 1.5 left out, an earlier scan's row untouched;
 - coherence findings left with no authoritative side, so recorded and never planned;
 - findings triage could offer no remediation for (a landing branch without the scanned commit, a
@@ -447,6 +538,12 @@ scan's affirmative re-check clears one. What the scan never looked at — a REFU
 escaping symlink, a submodule — is a coverage gap, not a found defect, and sits beside the section
 in the coverage record, never inside it. Nothing is capped here: the per-file cap upstream already
 bounds volume, the step shows counts per reason, and the dashboard lists every entry.
+
+Ignored findings are the one exception to listing, because a person asked not to be shown them:
+one line gives how many entries the repository holds and how many this scan re-raised, and links
+the dashboard. A count rather than nothing, since a section that quietly shrinks reads as a fix.
+Entries `scan-group` never saw, a core reviewer's finding or an insight, sit under their reason's
+`Other`.
 
 ### Scan targets
 
@@ -667,7 +764,8 @@ current intent.
 runs DE over the whole tree too, and DE's clause raises the same line. So DE keeps the question
 "should this comment exist at all", and `comment-debt` owns the REWRITE — long prose down to one or
 two lines, and the delete-vs-compact call. Both raising one line costs triage noise only:
-one-issue-per-file already folds them into a single DAG issue. Say so in both prompts, or each will
+`scan-group` is told to put two findings on one line into one theme, and where it does not, the two
+issues run in sequence and the second records no change. Say so in both prompts, or each will
 assume the other covered it.
 
 **The policy is the REPO's rules, never a constant in this module.** Scanning Haive with a fixed
@@ -772,7 +870,8 @@ parsed, unreferenced code. Say so in both prompts, as with the other two seams.
 There is none of the archive's kind. The run is bounded by **the budget chosen at step 1**, and
 repeat scans dedup against recorded findings, so a second run reports what is *new* — and lists what
 it re-found as still present rather than dropping it (see `scan-record`). No agent is ever penalised
-for finding nothing. If a "keep going until dry" mode is ever added it must key on *no new findings
+for finding nothing. A finding a person ignored does not come back (see `scan-verify`), so what
+repeat scans show narrows to what nobody has ruled on. If a "keep going until dry" mode is ever added it must key on *no new findings
 after verification*, never on empty output, and still stop at the budget.
 
 ## Core changes this needs (small, and in Haive rather than the module)
@@ -880,6 +979,10 @@ former, and this module does both kinds of write.
 - Findings persistence + fingerprint: `steps/workflow/_review-findings.ts` (its writer is
   best-effort by design, which is why `scan-record` writes strictly)
 - DAG rows + executor: `packages/database/src/schema/task-dag.ts`, `step-engine/dag-executor.ts`
+  (`depends_on` is what blocks a dependent, which is why themes are sequenced by level alone)
+- Waiver rule and measured fingerprint weakness the ignore sits beside:
+  `docs/architecture/review-findings.md`; per-issue review cost: `docs/architecture/review-scope.md`
+- Field types the themed triage form uses: `packages/shared/src/schemas/form.ts`
 - Untrusted-tree clause: `steps/_untrusted-repo.ts`
 - Comment policy `comment-debt` judges against: `packages/shared/src/constants/default-agent-rules.ts`
   and `resolveEffectiveRules` in `packages/shared/src/templates/cli-rules.ts`
@@ -926,13 +1029,29 @@ former, and this module does both kinds of write.
   asserted against the imported constant, not a literal, so a dimension added to core fails this test
   until the module handles it. No count is hardcoded anywhere but prose.
 - The verifier tally: 2-of-3 dismisses (inverted from `08c`), and an unreadable voter does not.
-- `scan-plan-remediation` puts two findings in one file into ONE issue, and two files into two.
+- `scan-plan-remediation` puts a theme's picked findings into ONE issue whatever files they name, and
+  two themes into two. Themes naming a common path land on different levels with no `depends_on`
+  between them, and a failed earlier one does not stop the later; themes sharing no path share level
+  0. A theme over the file limit becomes disjoint parts on one level.
+- `scan-group`'s contract: over a fixture reply with an unknown id, a finding named twice, a finding
+  named by none and fourteen themes, every finding ends in exactly one theme and at most twelve
+  remain. An unusable reply yields one theme per dimension, named in the coverage record.
+- A theme holding both tiers becomes two triage items with one title, and an out-of-scope finding
+  never shares a decision with an in-scope one.
+- The tier: two voters answering no make a finding `diminishing`; one no plus an unreadable voter
+  leaves it `worth_fixing`; `critical` is never `diminishing`; a `diminishing` finding is still
+  recorded, offered and reported.
+- The triage form pre-chooses nothing, and Choose per finding plans only the findings set to Fix.
+- Ignore: a reworded re-raise matched by a 2-of-3 panel reaches no theme, triage entry or report
+  list and adds to the report's count; exact text matches with no vote; without a quorum the finding
+  is offered marked possibly ignored; a Retry writes one entry; an ignored entry is not re-checked;
+  a lifted entry lets the next scan raise the defect; Leave for now writes no entry and is re-raised.
 - Findings already recorded are labelled still present on a re-scan, never new, and a
   coherence pair reported with its two sides swapped fingerprints identically.
 - Coherence raises a pair with both sides cited, and does NOT raise when one side states a carve-out
   naming the other.
-- A coherence finding across two files becomes ONE DAG issue owning both, and a separate finding in
-  either of those files joins that same issue rather than opening a second one.
+- A coherence finding across two files stays in ONE DAG issue owning both, a theme over the file
+  limit never divides it, and another theme's finding in either file runs on another level.
 - Two comment findings in ONE file, with the templated issue text, produce TWO rows — the regression
   test for the fingerprint collision. Mutation-check it by dropping the quoted comment text from
   `issue` and confirming the second row disappears.
@@ -1088,7 +1207,7 @@ former, and this module does both kinds of write.
 1. Scan this repository with 2 dimensions and a small budget; confirm findings land in
    `review_findings` with `deep-scan:` reviewer ids and the coverage record names the fifteen
    dimensions that did not run.
-2. Triage two findings in one file; confirm remediation creates one DAG issue, one worktree, and
+2. Set one theme of two findings to Fix; confirm remediation creates one DAG issue, one worktree, and
    merges, and that the report's `Found, not fixed` section lists every finding left unpicked, and
    the two merged ones as remediation attempted and unconfirmed.
 2b. Run a scan and pick nothing at triage; confirm the task ends on `scan-report` with the
@@ -1115,6 +1234,9 @@ former, and this module does both kinds of write.
    refusal cannot be provoked on demand, so drive it with a stubbed invocation that exits non-zero
    carrying the measured refusal text. Confirm the two land, security is REFUSED in the coverage
    record, and switching its seat and using Resume re-runs that one terminal.
+3h. Scan this repository with enough dimensions to raise at least thirty findings; confirm they
+   arrive as at most twelve themes, nits under `diminishing` with their reasons, and that a theme set
+   to Ignore is absent from a re-scan's triage and counted in its report.
 4. Install path: publish to the registry, install with a scoped token, verify `docker history` shows
    no token, and the module reaches `active` only on the loader's boot report.
 
