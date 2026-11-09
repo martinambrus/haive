@@ -1375,8 +1375,9 @@ describe('PATCH supersession authorization controls', () => {
     expect(res.status).toBe(403);
     const json = await asJson(res);
     expect(json.code).toBe('admin_required');
-    expect(json.error).toContain('replaces an entry');
-    expect(json.error).toContain('may not change');
+    expect(json.error).toBe(
+      'Activating this entry would archive an entry you may not change; an admin is required',
+    );
     expect(fake.rows(globalKbEntries)).toEqual(before);
     expect(vectorStatements).toEqual([]);
     expect(h.add).not.toHaveBeenCalled();

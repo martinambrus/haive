@@ -834,20 +834,27 @@ export default function GlobalKbPage() {
     else setLoadError(message);
   }
 
-  /** What to ask before activating a draft that replaces an enforced rule, or null when nothing
-   *  is lost. A failed lookup asks too: activating archives the predecessor and ends its rule. */
+  /** Refuse an unmanageable predecessor, otherwise ask before ending its rule, or return null
+   *  when nothing is lost. A failed lookup asks too: activating archives it and ends its rule. */
   async function replacedRuleWarning(e: GlobalKbEntry): Promise<string | null> {
     if (!e.supersedesEntryId) return null;
+    let predecessor: GlobalKbEntry;
     try {
       const res = await api.get<{ entry: GlobalKbEntry }>(
         `/global-kb/entries/${e.supersedesEntryId}`,
       );
-      if (!carriesLiveApproval(res.entry)) return null;
-      return `"${e.title}" replaces "${res.entry.title}", which carries an admin's approval as a house rule. Activating archives it and ends that approval; an admin has to enforce the replacement. Activate anyway?`;
+      predecessor = res.entry;
     } catch (err) {
       if ((err as ApiError).status === 404) return null;
       return `Could not check whether the entry that "${e.title}" replaces carries an admin's approval as a house rule (${(err as ApiError).message ?? 'lookup failed'}). If it does, activating archives it and ends that approval. Activate anyway?`;
     }
+    if (predecessor.status !== 'archived' && predecessor.canManage === false) {
+      throw new Error(
+        'Activating this entry would archive an entry you may not change; an admin is required',
+      );
+    }
+    if (!carriesLiveApproval(predecessor)) return null;
+    return `"${e.title}" replaces "${predecessor.title}", which carries an admin's approval as a house rule. Activating archives it and ends that approval; an admin has to enforce the replacement. Activate anyway?`;
   }
 
   async function activate(e: GlobalKbEntry) {

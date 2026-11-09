@@ -74,7 +74,8 @@ import { HttpError, type AppEnv } from '../context.js';
 
 // Global KB is instance/namespace-scoped, shared across authenticated users. Changes and
 // deletion require an admin for approved or ownerless entries, otherwise the owner or an admin.
-// Enforcement and store settings are admin-only. The corpus lives in a SEPARATE database
+// Enforcement and connection and embedding store settings are admin-only. The corpus lives in a
+// SEPARATE database
 // reached via withGlobalKb; getDb() is the main DB, needed only to CREATE the dedicated DB
 // in internal mode.
 const CATEGORIES = [
@@ -1199,13 +1200,13 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
         if (target && target.status !== 'archived' && !canManageEntry(target, c)) {
           throw new HttpError(
             403,
-            'This draft replaces an entry you may not change; an admin is required',
+            'Activating this entry would archive an entry you may not change; an admin is required',
             'admin_required',
           );
         }
       }
       if (data.facets !== undefined) {
-        // The same holds for a link POINTING AT this entry: it was decided against the old scope
+        // A link POINTING AT this entry was decided against the old scope
         // too. Left in place, activating that replacement — a reactivation included — archives
         // this entry although the two rules no longer share a scope, and the successor lookup
         // keeps warning that it has been replaced. Their `updatedAt` is left alone, for the
