@@ -499,6 +499,38 @@ describe('commit steps stage only the paths their step outputs record', () => {
       expect(text).toContain(part);
   });
 
+  it.each(['12', '03'])(
+    '%s refuses malformed gitmodules before the initial commit can advance HEAD',
+    async (site) => {
+      const repo = await mkdtemp(path.join(tmpdir(), 'init-malformed-'));
+      dirs.push(repo);
+      await put(repo, {
+        'AGENTS.md': 'rules\n',
+        '.gitmodules': '[broken\n',
+        'nested/inner.txt': 'inner\n',
+      });
+      await git(path.join(repo, 'nested'), ['init', '-q', '-b', 'main']);
+      await git(path.join(repo, 'nested'), ['add', '-A']);
+      await git(path.join(repo, 'nested'), ['commit', '-qm', 'nested']);
+      stepOutputs.current =
+        site === '12'
+          ? { '07-generate-files': { output: { wroteFiles: ['AGENTS.md'], skippedFiles: [] } } }
+          : { '02-upgrade-apply': { output: { writtenPaths: ['AGENTS.md'] } } };
+      const step = site === '12' ? postOnboardingStep : upgradeCommitStep;
+      await expect(
+        step.apply(ctxFor(repo), {
+          detected: { hasGit: false } as never,
+          formValues: { commit: true, initBranch: 'main' },
+          iteration: 0,
+          previousIterations: [],
+        }),
+      ).rejects.toThrow();
+      await expect(git(repo, ['rev-parse', '-q', '--verify', 'HEAD'])).rejects.toMatchObject({
+        code: 1,
+      });
+    },
+  );
+
   it('12 commits the whole tree of a repository with no git, as before', async () => {
     const repo = await mkdtemp(path.join(tmpdir(), 'commit-scope-nogit-'));
     dirs.push(repo);

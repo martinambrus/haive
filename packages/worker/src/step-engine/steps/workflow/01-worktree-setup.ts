@@ -165,13 +165,30 @@ async function initGitRepo(
   if (add.code !== 0) {
     throw new Error(`git add -A failed (exit ${add.code}): ${add.stderr || add.stdout}`);
   }
+  const before = await gitRun(ctx.repoPath, ['rev-parse', '-q', '--verify', 'HEAD']);
+  if (before.code !== 0 && before.code !== 1) {
+    throw new Error(
+      `git HEAD read failed (exit ${before.code}): ${before.stderr || before.stdout}`,
+    );
+  }
   const commit = await gitRun(
     ctx.repoPath,
     ['commit', '--allow-empty', '-m', commitMessage],
     commitEnv,
   );
   if (commit.code !== 0) {
-    throw new Error(`git commit failed (exit ${commit.code}): ${commit.stderr || commit.stdout}`);
+    // With malformed .gitmodules, git can fail after updating HEAD while inspecting the new gitlink.
+    const after = await gitRun(ctx.repoPath, ['rev-parse', '-q', '--verify', 'HEAD']);
+    if (after.code !== 0 || (before.code === 0 && after.stdout.trim() === before.stdout.trim())) {
+      throw new Error(`git commit failed (exit ${commit.code}): ${commit.stderr || commit.stdout}`);
+    }
+    const note = `The initial commit landed, but git commit exited ${commit.code}: ${(commit.stderr || commit.stdout).trim()}`;
+    ctx.logger.warn(note);
+    try {
+      await warnStep(ctx, [note]);
+    } catch (err) {
+      ctx.logger.warn({ err }, 'Could not save initial-commit outcome; continuing');
+    }
   }
   ctx.logger.info({ initBranch }, 'initialized new git repository');
 }

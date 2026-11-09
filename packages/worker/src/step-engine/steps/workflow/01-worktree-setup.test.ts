@@ -208,29 +208,35 @@ describe('01 worktree setup apply', () => {
   });
 });
 
-it('first init warns about nested clones without blocking the worktree', async () => {
-  const root = await mkdtemp(path.join(tmpdir(), 'wt-nested-init-'));
-  try {
-    await mkdir(path.join(root, 'nested'));
-    await git(path.join(root, 'nested'), ['init', '-b', 'main']);
-    await writeFile(path.join(root, 'nested/inner.txt'), 'inner\n');
-    await git(path.join(root, 'nested'), ['add', '-A']);
-    await git(path.join(root, 'nested'), ['commit', '-m', 'inner']);
-    const ctx = mkCtx(root);
-    Object.assign(ctx.db.query, { users: { findFirst: async () => null } });
-    Object.assign(ctx.db, { update: () => ({ set: () => ({ where: async () => undefined }) }) });
-    const warn = vi.fn();
-    ctx.logger = { ...logger, warn } as never;
-    const detected = await worktreeSetupStep.detect!(ctx);
-    const out = await worktreeSetupStep.apply(ctx, {
-      detected,
-      formValues: { branchName: 'feature/test', initBranch: 'main' },
-      iteration: 0,
-      previousIterations: [],
-    });
-    expect(out.mode).toBe('worktree');
-    expect(JSON.stringify(warn.mock.calls)).toContain('empty in task worktrees');
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
+it.each([false, true])(
+  'first init warns without blocking the worktree (malformed gitmodules: %s)',
+  async (malformed) => {
+    const root = await mkdtemp(path.join(tmpdir(), 'wt-nested-init-'));
+    try {
+      await mkdir(path.join(root, 'nested'));
+      await git(path.join(root, 'nested'), ['init', '-b', 'main']);
+      await writeFile(path.join(root, 'nested/inner.txt'), 'inner\n');
+      await git(path.join(root, 'nested'), ['add', '-A']);
+      await git(path.join(root, 'nested'), ['commit', '-m', 'inner']);
+      if (malformed) await writeFile(path.join(root, '.gitmodules'), '[broken\n');
+      const ctx = mkCtx(root);
+      Object.assign(ctx.db.query, { users: { findFirst: async () => null } });
+      Object.assign(ctx.db, { update: () => ({ set: () => ({ where: async () => undefined }) }) });
+      const warn = vi.fn();
+      ctx.logger = { ...logger, warn } as never;
+      const detected = await worktreeSetupStep.detect!(ctx);
+      const out = await worktreeSetupStep.apply(ctx, {
+        detected,
+        formValues: { branchName: 'feature/test', initBranch: 'main' },
+        iteration: 0,
+        previousIterations: [],
+      });
+      expect(out.mode).toBe('worktree');
+      expect(JSON.stringify(warn.mock.calls)).toContain(
+        malformed ? 'commit landed' : 'empty in task worktrees',
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
