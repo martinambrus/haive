@@ -146,9 +146,12 @@ reads as an empty list. Entries are separated by newlines or commas: an IPv4 or 
 `PUT` answers 400 naming the offending entry; the read path skips an invalid one. An address or CIDR entry is
 matched against the RESOLVED address at connect time (an IPv4 rule also matches the IPv4-mapped form), so a
 name that later resolves elsewhere is judged by where it connects. A hostname entry matches the dialed
-hostname exactly and trusts every address that name resolves to EXCEPT link-local (169.254.0.0/16, fe80::/10,
-and their IPv4-mapped, NAT64, 6to4 and SIIT forms) and unspecified (0.0.0.0/8, `::`) addresses, which only an
-address or CIDR entry can allow (`isUnliftableByHostname`); only address entries are rebinding-proof. The DNS
+hostname exactly and trusts every address that name resolves to EXCEPT link-local (169.254.0.0/16, fe80::/10),
+unspecified (0.0.0.0/8, `::`) and cloud metadata addresses (100.100.100.200 Alibaba ECS, 192.0.0.192 Oracle
+Compute Classic, fd00:ec2::254 EC2 over IPv6), each IPv4 one also in its IPv4-mapped, NAT64, 6to4, SIIT and
+IPv4-compatible (`::a9fe:a9fe`) forms. Only an address or CIDR entry can allow those
+(`isUnliftableByHostname`). `::1` is the IPv6 loopback and not the compatible form of 0.0.0.1, so like
+127.0.0.1 it stays liftable. Only address entries are rebinding-proof. The DNS
 servers are asked first; the system resolver (hosts file) only when DNS fails and a hostname entry names the
 host, so a name defined only in `/etc/hosts` needs a hostname entry. One resolution per dial; an answer that
 mixes allowed and refused addresses is refused whole; a redirect is never followed. The list is read lazily,
@@ -157,8 +160,8 @@ when the dial needs it: a blocked address literal, a blocked resolved address, o
 resolve. A public-only answer and a built-in host never read it, so public forge and embed dials keep working
 while the config store is down. With a cold cache and the store down, a dial that needs the list rejects with
 `ConfigUnavailableError` (`error-diagnostics.md`); any other read failure (an uninitialised store included)
-counts as an empty list with a warn. The card says a hostname entry cannot lift link-local or unspecified
-addresses, that a refusal reads as host-not-found, and that a hosts-file-only name needs a hostname entry.
+counts as an empty list with a warn. The card says a hostname entry cannot lift link-local, unspecified or
+cloud metadata addresses, that a refusal reads as host-not-found, and that a hosts-file-only name needs a hostname entry.
 
 **Upgrade seed.** `seedPrivateEndpointAllowlist` (`packages/worker/src/private-endpoint-seed.ts`) is a
 convergent `DATA_MIGRATIONS` entry that runs while the key was never written; an empty value counts as
@@ -168,7 +171,7 @@ string and the Ollama URL (the committed tooling mirror, else the newest onboard
 `04-tooling-infrastructure` output); the host and API base of each forge credential. A name is listed only if
 it resolves (DNS first, the system resolver for a name that exists only in `/etc/hosts`) into 10/8, 172.16/12,
 192.168/16, 100.64/10 or fc00::/7. Public names, built-in hosts, loopback, link-local, unspecified and
-100.100.100.200 / fd00:ec2::254 are never listed, so a stored loopback target stays refused until an
+100.100.100.200 / 192.0.0.192 / fd00:ec2::254 are never listed, so a stored loopback target stays refused until an
 administrator lists it. An address literal becomes an address entry, a name a hostname entry. Lookups take
 5 s each, 8 at once, 20 s overall; the entry and byte caps apply. The write is one transaction under the admin
 save's advisory lock (`admin-config:private-endpoint-allowlist`): an audit row
