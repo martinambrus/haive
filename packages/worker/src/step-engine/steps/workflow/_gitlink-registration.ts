@@ -135,26 +135,33 @@ async function copyIndexFlags(workspace: string, env: Record<string, string>): P
 /** Status lists files inside a tracked directory, so git add flattens a checkout there. */
 async function refuseFlattenedRepositories(
   workspace: string,
-  status: string,
+  entries: ReturnType<typeof parsePorcelainZ>,
   excluded: string[],
 ): Promise<void> {
   const { anchor, prefix } = workspaceAnchor(workspace);
-  const checked = new Map<string, boolean>();
+  const checked = new Map<string, { directory: boolean; nested: boolean }>();
   const found = new Set<string>();
-  for (const entry of parsePorcelainZ(status)) {
+  for (const entry of entries) {
     for (const file of [entry.path, entry.oldPath]) {
       if (!file || excluded.some((p) => file === p.slice(0, -1) || file.startsWith(p))) continue;
-      for (
-        let dir = path.posix.dirname(file.replace(/\/$/, ''));
-        dir !== '.';
-        dir = path.posix.dirname(dir)
-      ) {
-        let nested = checked.get(dir);
-        if (nested === undefined) {
-          nested = (await lstatNoFollow(anchor, `${prefix}${dir}/.git`, { strict: true })) !== null;
-          checked.set(dir, nested);
+      const segments = file.replace(/\/$/, '').split('/');
+      for (let i = 1; i < segments.length; i++) {
+        const dir = segments.slice(0, i).join('/');
+        let entry = checked.get(dir);
+        if (entry === undefined) {
+          const directory =
+            (await lstatNoFollow(anchor, `${prefix}${dir}`, { strict: true }))?.kind ===
+            'directory';
+          entry = {
+            directory,
+            nested:
+              directory &&
+              (await lstatNoFollow(anchor, `${prefix}${dir}/.git`, { strict: true })) !== null,
+          };
+          checked.set(dir, entry);
         }
-        if (nested) found.add(dir);
+        if (!entry.directory) break;
+        if (entry.nested) found.add(dir);
       }
     }
   }
@@ -177,12 +184,16 @@ export async function unregisteredGitlinks(
   workspace: string,
   status: string,
   excluded: string[],
+  scope?: readonly string[],
 ): Promise<string[]> {
-  await refuseFlattenedRepositories(workspace, status, excluded);
+  const entries = parsePorcelainZ(status).filter(
+    (entry) => !scope || scope.some((p) => entry.path === p || entry.path.startsWith(`${p}/`)),
+  );
+  await refuseFlattenedRepositories(workspace, entries, excluded);
   const staged = await newGitlinks(workspace);
   // A nested repository that replaces a tracked file shows as ` T path`, and one that replaces an
   // intent-to-add file as ` A path`, not as `?? path/`.
-  const mayAddGitlink = parsePorcelainZ(status).some(
+  const mayAddGitlink = entries.some(
     (e) =>
       (e.x === '?' && e.y === '?' && e.path.endsWith('/') && !excluded.includes(e.path)) ||
       e.y === 'T' ||
@@ -202,8 +213,18 @@ export async function unregisteredGitlinks(
     );
     expectOk('git update-index', fill);
     await copyIndexFlags(workspace, env);
-    const add = await gitRun(workspace, [...NO_SPLIT_INDEX, ...stageAllArgs(excluded)], env);
-    expectOk('git add', add);
+    const batches = scope
+      ? Array.from({ length: Math.ceil(scope.length / 128) }, (_, i) => [
+          'add',
+          '-A',
+          '--',
+          ...scope.slice(i * 128, (i + 1) * 128).map((p) => `:(top,literal)${p}`),
+        ])
+      : [stageAllArgs(excluded)];
+    for (const args of batches) {
+      const add = await gitRun(workspace, [...NO_SPLIT_INDEX, ...args], env);
+      expectOk('git add', add);
+    }
     const added = await newGitlinks(workspace, env);
     if (added.length === 0) return [];
     const registered = await registeredPaths(workspace, env);

@@ -1,3 +1,4 @@
+import { unregisteredGitlinks } from './steps/workflow/_gitlink-registration.js';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
@@ -2346,4 +2347,86 @@ describe('#280 fix7 interrupted squash before containment', () => {
       }
     },
   );
+});
+
+describe('nested repository merge controls', () => {
+  it('checks new gitlinks with MERGE_HEAD open without writing the real index', async () => {
+    const dir = await setupConflict();
+    try {
+      expect(await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x'])).toBe(1);
+      await mkdir(path.join(dir, 'nested'));
+      await initRepo(path.join(dir, 'nested'));
+      await writeFile(path.join(dir, 'nested/inner'), 'inner\n');
+      await git(path.join(dir, 'nested'), ['add', '-A']);
+      await git(path.join(dir, 'nested'), ['commit', '-m', 'nested']);
+      const before = await git(dir, ['ls-files', '-s']);
+      const status = await git(dir, ['status', '--porcelain', '-z', '-uall']);
+      expect(await unregisteredGitlinks(dir, status, [])).toEqual(['nested']);
+      expect(await git(dir, ['ls-files', '-s'])).toBe(before);
+      expect(await mergeHead(dir)).toBe(0);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('leaves an unmerged existing gitlink alone without changing the index', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'gm-gitlink-'));
+    try {
+      await initRepo(dir);
+      await mkdir(path.join(dir, 'sub'));
+      await initRepo(path.join(dir, 'sub'));
+      await writeFile(path.join(dir, 'sub/inner'), 'base\n');
+      await git(path.join(dir, 'sub'), ['add', '-A']);
+      await git(path.join(dir, 'sub'), ['commit', '-m', 'base']);
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'base']);
+      await git(dir, ['branch', 'feature/x']);
+      const subBase = (await git(path.join(dir, 'sub'), ['rev-parse', 'HEAD'])).trim();
+      for (const branch of ['feature/x', 'main']) {
+        await git(dir, ['checkout', branch]);
+        await git(path.join(dir, 'sub'), ['checkout', '-B', branch, subBase]);
+        await writeFile(path.join(dir, 'sub/inner'), branch + '\n');
+        await git(path.join(dir, 'sub'), ['commit', '-am', branch]);
+        await git(dir, ['add', 'sub']);
+        await git(dir, ['commit', '-m', branch]);
+      }
+      expect(await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x'])).toBe(1);
+      const before = await git(dir, ['ls-files', '-s']);
+      expect(before).toMatch(/160000 .* [123]\tsub/);
+      expect(
+        await unregisteredGitlinks(dir, await git(dir, ['status', '--porcelain', '-z']), []),
+      ).toEqual([]);
+      expect(await git(dir, ['ls-files', '-s'])).toBe(before);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('refuses a nested repository in the directory side of a directory/file conflict', async () => {
+    const dir = await setupDirectoryFileConflict('main');
+    try {
+      const unmerged = (await unmergedPaths(dir))!;
+      for (const file of unmerged) await rm(path.join(dir, file), { force: true });
+      await rm(path.join(dir, 'foo/bar'));
+      await initRepo(path.join(dir, 'foo'));
+      await writeFile(path.join(dir, 'foo/inner'), 'inner\n');
+      await git(path.join(dir, 'foo'), ['add', '-A']);
+      await git(path.join(dir, 'foo'), ['commit', '-m', 'nested']);
+      const head = await git(dir, ['rev-parse', 'HEAD']);
+      const before = await git(dir, ['ls-files', '-s']);
+      const outcome = await completeMergeHostSide(dir, COMMIT_ENV, 'feature/x').catch(
+        (err: unknown) => err,
+      );
+      expect({
+        outcome,
+        tree: await git(dir, ['ls-tree', 'HEAD', 'foo']),
+        headMoved: (await git(dir, ['rev-parse', 'HEAD'])) !== head,
+      }).toMatchObject({ outcome: expect.any(Error), headMoved: false });
+      expect((outcome as Error).message).toContain('"foo"');
+      expect(await git(dir, ['rev-parse', 'HEAD'])).toBe(head);
+      expect(await git(dir, ['ls-files', '-s'])).toBe(before);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
 });

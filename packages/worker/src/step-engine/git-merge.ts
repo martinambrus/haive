@@ -1,3 +1,7 @@
+import {
+  unregisteredGitlinks,
+  unregisteredGitlinksMessage,
+} from './steps/workflow/_gitlink-registration.js';
 import { isUtf8 } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
@@ -1347,6 +1351,17 @@ export async function completeMergeHostSide(
       throw err;
     }
   }
+  const status = await gitRun(worktreePath, [
+    '--no-optional-locks',
+    'status',
+    '--porcelain',
+    '-z',
+    '-uall',
+  ]);
+  if (status.code !== 0)
+    throw new Error(`git status failed in ${worktreePath}: ${gitDetail(status)}`);
+  const orphans = await unregisteredGitlinks(worktreePath, status.stdout, [], resolving);
+  if (orphans.length) throw new Error(unregisteredGitlinksMessage(orphans));
   // Only the paths the fixer was sent to resolve: the merge staged everything else itself, and what
   // else the tree holds is someone's own work or a fixer's stray change, neither of it the merge's.
   for (let i = 0; i < resolving.length; i += PATHSPEC_CHUNK) {
