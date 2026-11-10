@@ -837,13 +837,10 @@ Sites:
   On a timeout they return different things: partial stdout, [], null, or "timed out".
   Fix: one shared runDockerCommand(args, {timeoutMs}) returning {stdout, stderr, exit, timedOut}, plus a test that kills a hung child.
 
-### T373 · FNF[audit-strict-admin-actions] · password-change throttle, tooling reset order, module log lines; strict-audit leftovers (+12)
+### T373 · FNF[audit-strict-admin-actions] · strict-audit leftovers after #1058/#1059 (+9)
 
-status: in progress, items 5-7 (codex-sonnet); sites + items 1-4 shipped in PR #1058 (1f1064268), 2026-11-10 · was modular #246 · priority: P2
+status: open · was modular #246 · priority: P3 · sites + items 1-4 shipped in PR #1058 (1f1064268); items 5-7 shipped in PR #1059 (8a56956d9), 2026-11-10
 
-5. `PUT /user-settings/password` checks the current password with no throttle and no failure row (user-settings.ts ~:108-109): the one password oracle outside the throttled `/auth/login`, open to any valid access cookie. PRE-EXISTING, moderate.
-6. A hand-made tooling PATCH that combines `ragEmbedAction` with a security field runs the RAG reset before the audited transaction, so a refused row leaves the reset done (tooling-upgrades.ts ~:946-958 vs ~:991); the page sends the action alone. PRE-EXISTING, minor.
-7. The strict in-transaction module audit rows (`module.drain_cancel`, graceful `module.deactivate`, `module.retry`; api modules/activation.ts) log no pino line after the commit, unlike the documented pattern (api lib/audit.ts docblock ~:36, integrations.md ~:813). PRE-EXISTING, minor. From the T350 run.
 8. `PATCH /cli-providers/:id` leaves `enabled` and `model` unaudited (api cli-providers.ts ~:548). PRE-EXISTING, minor. From the #1058 review.
 9. A PATCH on a draining module writes two `module.deactivate` rows for one request: `setModuleActive` (activation.ts ~:120-126) and the loader (loader.ts ~:354). PRE-EXISTING, minor.
 10. `POST /cli-providers/:id/sandbox-image/build` (cli-providers.ts ~:666-700) queues a rebuild with no row. PRE-EXISTING, minor (no security state changes).
@@ -1556,6 +1553,7 @@ status: open · kind: fix · found: #1057 reviews 2026-11-10 · priority: P4
 
 ## Done
 
+- T373 sites + items 1-7 — strict admin audit rows (module, task-type, upgrade, CLI provider create/update/sign-out/login, admin pause lift), password-change throttle and failure row (400 `current_password_incorrect`), mixed RAG tooling save refused, module rows logged after commit — PRs #1058 (1f1064268), #1059 (8a56956d9), 2026-11-10. Leftovers 8-16 stay open under T373.
 - T504 + T505 — worker writes of repository settings (project-state sync and resolve, clone import, 09_7 RAG scope) leave strict audit rows with source and actor; gate 4 binds the remote with a bounded row lock, an in-transaction row, add-only origin and restore, repairs on Retry and refuses an origin changed since the form — PR #1057 (b7309577c), 2026-11-10. Follow-ups T588.
 - T492 — a house rule's approval lapse writes an audit row — PR #1056 (c58365e78), 2026-11-10
 - T326 — an unreadable house-rules fingerprint reads as unread (could-not-verify) — commit 941e23608; closed at owner triage 2026-11-10
