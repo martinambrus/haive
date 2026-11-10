@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
+  audits: [] as Record<string, unknown>[],
+  auditError: false,
   ws: undefined as unknown,
   log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
   save: vi.fn(),
@@ -103,9 +105,16 @@ beforeEach(() => {
     cli: { ok: true, authStatus: 'ok' },
   };
   providerName = 'claude-code';
+  h.audits = [];
+  h.auditError = false;
   h.db = {
     transaction: async (fn: (tx: unknown) => unknown) => fn(h.db),
-    insert: () => ({ values: async () => {} }),
+    insert: () => ({
+      values: async (ev: Record<string, unknown>) => {
+        if (h.auditError) throw new Error('audit refused');
+        h.audits.push(ev);
+      },
+    }),
     select: () => ({ from: () => ({ where: () => ({ for: async () => [{ envVars: {} }] }) }) }),
     query: {
       users: { findFirst: async () => ({ id: 'user', status: 'active', tokenVersion: 0 }) },
@@ -1506,6 +1515,9 @@ describe('CLI login banner auth URL chunking', () => {
     await vi.advanceTimersByTimeAsync(500);
     expect(frames().some((frame) => frame.type === 'auth-success')).toBe(true);
     expect(authUrlFrames().length).toBe(0);
+    expect(h.audits).toMatchObject([
+      { action: 'cli_provider.login', metadata: { source: 'volume' } },
+    ]);
     return release;
   }
 
@@ -1777,4 +1789,77 @@ describe('login success wire persistence boundary', () => {
       'saved',
     ]);
   });
+});
+
+describe('volume login audit', () => {
+  it('records a success before the post-login probe and keeps it when that probe fails', async () => {
+    providerName = 'grok';
+    await start();
+    h.probeError = new Error('probe failed after credential write');
+    stream.emit(
+      'data',
+      Buffer.from('https://accounts.x.ai/oauth2/device?user_code=ABCD-1234\n\nSigned in\n'),
+    );
+    await settle();
+    expect(h.audits).toMatchObject([
+      {
+        action: 'cli_provider.login',
+        actorUserId: 'user',
+        targetId: PROVIDER,
+        metadata: { source: 'volume' },
+      },
+    ]);
+    expect(h.save).not.toHaveBeenCalled();
+  });
+  it('a refused row cannot undo the CLI credential and does not block its probe', async () => {
+    providerName = 'grok';
+    await start();
+    h.auditError = true;
+    stream.emit(
+      'data',
+      Buffer.from('https://accounts.x.ai/oauth2/device?user_code=ABCD-1234\n\nSigned in\n'),
+    );
+    await settle();
+    expect(h.probe).toHaveBeenCalled();
+    expect(
+      h.log.error.mock.calls.some((args) => args.includes('failed to write audit event')),
+    ).toBe(true);
+  });
+  it('does not audit a login without a success signal', async () => {
+    providerName = 'grok';
+    await start();
+    stream.emit('data', Buffer.from('Waiting for login approval'));
+    await settle();
+    expect(h.audits).toEqual([]);
+  });
+});
+
+it.each(['codex', 'amp'] as const)(
+  '%s success writes exactly one volume login row',
+  async (name) => {
+    providerName = name;
+    await start();
+    const url =
+      name === 'codex'
+        ? 'https://auth.openai.com/codex/device'
+        : 'https://auth.ampcode.com/device?user_code=ABCD-1234';
+    stream.emit('data', Buffer.from(url + '\nABCD-12345\n\nSigned in\n'));
+    await settle();
+    expect(h.audits).toMatchObject([
+      { action: 'cli_provider.login', targetId: PROVIDER, metadata: { source: 'volume' } },
+    ]);
+    stream.emit('data', Buffer.from('Signed in'));
+    await settle();
+    expect(h.audits).toHaveLength(1);
+  },
+);
+it('amp credential-file success writes a volume login row', async () => {
+  providerName = 'amp';
+  h.exec
+    .mockResolvedValueOnce({ exitCode: 0, stdout: 'baseline', stderr: '' })
+    .mockResolvedValue({ exitCode: 0, stdout: 'changed', stderr: '' });
+  await start();
+  stream.emit('data', Buffer.from('https://auth.ampcode.com/device?user_code=ABCD-1234\n\n'));
+  await vi.advanceTimersByTimeAsync(2500);
+  expect(h.audits).toMatchObject([{ action: 'cli_provider.login', targetId: PROVIDER }]);
 });

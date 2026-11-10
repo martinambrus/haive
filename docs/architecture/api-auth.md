@@ -270,3 +270,11 @@ address from the request body should take `egressFor(c.get('userRole'))` and add
 `probe-targets.test.ts`.
 
 The IDE proxy's credential rule is in [Sandbox](sandbox.md).
+
+**CLI volume logins leave a row after the success signal.** Codex, Grok, Amp and
+Antigravity record cli_provider.login with source volume before their post-login
+probe. The CLI has already written the credential into its volume: a failed probe,
+closed dialog or refused audit cannot undo it, so the row is deliberately best-effort.
+Metadata never includes credentials, output, codes or environment values.
+Claude-family captured tokens already record cli_provider.secret.set atomically
+with encrypted-secret promotion; those keep their strict write.
