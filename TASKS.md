@@ -82,6 +82,12 @@ Owner resource update 2026-11-02: the C-drive test reserve is5GiB by explicit ow
 
 Owner review-gate update 2026-11-01: Greptile will not run until November9. Skip Greptile requests and waits before2026-11-09; Codex review and CI remain required.
 
+Owner triage 2026-11-10 (AskUserQuestion, 8 rounds; register `.claude/tmp/codex-run/triage-20261110/answers.md`). Recorded on the blocks: T300, T541, T552, the parks (T144, T147, T560, T585 and the diminishing-returns set) and T326 closed.
+
+- Activate (ready, owner-approved): T373, T570, T523, T505, T386, T443, T492, T504, T460, T286, T318, T484, T271, T291, T310, T329, T270, T497, T334, T317, T440, T512, T487, T435, T323, T554, T343, T532, T145, T199, T446, plus T541 and T552 per their decisions.
+- Bounded check first (one pass, at most 3 cases, about 30 min; nothing confirmed means park): T308, T450, T451, T490, T508, T562, T543, T510, T482, T483, T516, T309, T499, T500, T501, T515, T495, T526, T486, T472, T518, T519, T345, T369, T312, T316, T319, T511, T528, T563, T566 (T566 also covers T575).
+- Kept open over a park recommendation (owner): T557 (items 2-4, 10, 11, 13-15), T540, T542, T533, T538, T550, T569, T571, T572, T551, T553, T582, T577, T545, T576, T561, T392.
+
 T524's 2026-11-01 owner round answered 42 questions. Decisions are recorded on the affected task blocks; the durable local answer register is `.claude/tmp/codex-run/backlog-decisions-20261101/decisions.json`. No unanswered owner-policy question remains from this round.
 
 - T402: operator script with dry run, before-image and undo. The owner subsequently requested indefinite development-record retention: transcripts changed from 90 to 0/forever through the audited admin API; prompts were already 0. Historical expiry estimates no longer govern this install. Missing old logs remain unrecoverable.
@@ -191,7 +197,7 @@ Execution fence 2026-11-01: Reconcile closed and overlapping members first. Focu
 
 ### T144 · RAG F6 · the lexical half rarely co-supports a hit
 
-status: open · kind: ranking change (gated on the retrieval eval) · priority: P3
+status: parked · reason: no retrieval evaluation exists (owner triage 2026-11-10); resume when one does · kind: ranking change (gated on the retrieval eval) · priority: P3
 shared/src/rag/search.ts:449/:560 plainto_tsquery ANDs every term; 67.6% of logged searches with code hits had no two-ranker hit. TRAP: plain OR and coverage ranking measured WORSE (AGENTS.md "Identifier search"). Plan P2(b): a capped IDF ranker.
 
 ### T145 · RAG F13 · Slovak text matches only verbatim
@@ -203,7 +209,7 @@ User decision 2026-11-01: Approve bounded Slovak accent-insensitive retrieval wi
 
 ### T147 · RAG F5 · identical chunk bodies across files are never collapsed
 
-status: open · kind: ranking change (gated on the eval) · priority: P3
+status: parked · reason: no retrieval evaluation exists (owner triage 2026-11-10); resume when one does · kind: ranking change (gated on the eval) · priority: P3
 8.3% of chunks share a body with another file's chunk. A query-time collapse needs the SQL LIMIT widened past top_k. Plan P2(c).
 
 ### T149 · RAG F15 · deleted vectors keep their HNSW space
@@ -221,6 +227,7 @@ Reconciled 2026-11-01: Track B shipped in PR988. The dependency is resolved, but
 ### T300 · live re-checks owed at the next real onboarding + workflow run
 
 status: parked · reason: corrected capped attempt stopped after confirmed T293; remaining checks need a future authorized run · kind: capped validation · priority: P1
+Owner decision 2026-11-10: second capped run approved, same budget (one owned repository, one attempt, 90 min or $50 notional, no automatic retries); house-rules checks first. T298 and T299 stay blocked on it.
 Items 1-20 (each with its memory file): skills per CLI after 09_5; frontmatter YAML; agent_rules stamp; declared verify commands; invariants-doc lever; prompt guard/fence (07_7); onboarding artifacts; plan breadth refusals; agent isolation 1/2/4; fs-safe live verification; #169 DDEV runner boot-subpath; #241 Terminal cwd; AGENTS.md split citations; parked experiments (Astra vs Sol, container-cleanup race, global KB purge, haive_rag_ddevtest drop); T293; #287 EROFS on state; #800 mounts; #751 set-aside on a real merge; #806 put-back; #815 reindex spot-check; T375 gate 3 on a worktree holding an untracked nested repo, with and without a commit (#909); T395 Stop offered for a running task whose current row is pending, and the "Nothing was running to stop." notice (no such task on the dev install; pressing Stop changes a real task) (#908); T363 New Task with one failed upload, the plan starter and the task page Start, each with confirm yes and no (#913). Full list: task #300 text in the fnf-run ledger / memory. Also owed (T427): replay the raw attach bytes of one real `claude setup-token` run through the OAuth capture and pin its wrap, newline and escape shapes in a fixture.
 
 User decision 2026-11-01: schedule one dedicated capped validation run BEFORE feature work. Precise cap is being selected; one owned fixture/attempt, no automatic retry loops. A run does not by itself prove enough graded data for T298; report unverified members at the cap.
@@ -300,13 +307,6 @@ status: open · kind: performance · user decision: resolved 2026-11-01 · prior
 
 User decision 2026-11-01: Re-measure current batching gain and keep scope bounded; behind functionality unless current delay is material.
 
-### T326 · FNF[house-rules-unread] · a failed fingerprint read skips modifiedAfterCheck
-
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-house-rules-dispatch.ts:45 → _gate-house-rules.ts:283: a null fingerprint means the gate cannot tell files changed after the check; add an explicit "unread" marker.
-
-User decision 2026-11-01: Show could-not-verify explicitly and require acknowledgement when a fingerprint cannot be read.
-
 ### T329 · FNF[cancel-merge-commit] · cancel reports a merge left COMMITTED on local base + one-click undo (+2)
 
 status: open · was modular #3 · priority: P2
@@ -347,7 +347,7 @@ User decision 2026-11-01: Reconcile runtime before validation; revalidate affect
 
 ### T531 · FNF[module-sources] · install-source fetch/pin follow-ups from T337 and T531 reviews (+6)
 
-status: open · last: 2026-11-06 · kind: fix · found: T531b reviews 2026-11-06 · priority: P4
+status: parked · reason: diminishing returns (owner triage 2026-11-10); resume on a user report, a measured failure, or a change in the same code · kind: fix · found: T531b reviews 2026-11-06 · priority: P4
 
 8. The SHA-pin guard keys on lowercase 40-hex only (packages/worker/src/modules/source-fetch.ts ~:281). An uppercase 40-hex ref is a plain name: it fails closed unless someone has created a branch or tag with that uppercase name, which is then built without the `module_source_ref_ambiguous` refusal. PRE-EXISTING, low (needs ref-write access plus an uppercase paste). Fix direction: compare case-insensitively and refuse a named ref that differs from the lowercased value, or document lowercase-only.
 9. Rows pinned before PR #1024 whose 40-hex ref resolved to a same-named branch keep building that `resolved_sha` until Refresh (source-fetch.ts ~:277 runs the guard only when `resolvedSha` is null). PRE-EXISTING, near-zero exposure. Fix direction: refuse when the ref is 40 hex and `resolvedSha` differs from it.
@@ -370,7 +370,7 @@ status: open · kind: fix · found: T534 review 1 2026-11-06 · priority: P4
 
 ### T539 · FNF[installer-manifest-reader] · installer manifest reader leftovers from T536 (+3)
 
-status: open · kind: fix · found: T536 reviews 2026-11-06 · priority: P4
+status: parked · reason: diminishing returns (owner triage 2026-11-10); resume on a user report, a measured failure, or a change in the same code · kind: fix · found: T536 reviews 2026-11-06 · priority: P4
 
 2. install.ps1 ~:408 `ConvertFrom-Json` rejects a valid 513-digit numeric value in an unknown key that the sh reader accepts. PRE-EXISTING, low; no published manifest carries one. Fix direction: parity control and a pre-scan, or document the difference.
 3. `quoted()` in the Docker-context reader (install/install.sh ~:270) accepts a literal newline or an unknown escape inside a JSON string. PRE-EXISTING; fails closed downstream. Found T539b review. Fix direction: reject both, with a parity case.
@@ -386,6 +386,7 @@ From the T355 build: `enqueueCancelJob` (api lib/cancel-task.ts ~:125, ~:145) is
 ### T541 · FNF[kb-author-failed-then-cancel] · a Stop-settled kb_author entry stays 'failed' after a later Cancel
 
 status: open · kind: design · priority: P3
+Owner decision 2026-11-10: Cancel deletes a failed kb_author entry (restore the earlier behaviour).
 PRE-EXISTING for worker-failed tasks; since T393 (PR #1026) a Stop then Cancel also leaves the entry 'failed' where it was deleted before. worker `_global-kb-promote.ts` ~:744-783 reconciles only skeleton and enriching entries. Decide whether a Cancel deletes a failed entry too.
 
 ### T542 · FNF[settle-members-recheck] · settle members act on a task without re-reading its status after the job-start fence
@@ -415,12 +416,12 @@ PRE-EXISTING, from the T355 build. 1. updater run.ts ~:394-395: a rollback whose
 
 ### T547 · FNF[config-write-unknown-outcome] · a write that times out may still land
 
-status: open · kind: design · priority: P3
+status: parked · reason: diminishing returns (owner triage 2026-11-10); resume on a user report, a measured failure, or a change in the same code · kind: design · priority: P3
 PRE-EXISTING class, sharper since T355 bounds writes at 2 s. A rejected SET may have reached Redis; callers report failure (or roll back audit rows) for a value that is live. Sites: api maintenance.ts ~:91-93, admin.ts ~:471, ~:1233, ~:1270; modules loader.ts ~:580, ~:598; global-kb.ts ~:499, ~:747-763. Same for a bounded `Queue.add` that lands after its race: a retried request can queue the job twice. Decide: read-back after timeout, idempotent job ids, or accept and document. Since T549 the api's shared `getRedis()` is bounded too (503 `redis_unavailable`), adding these sites where a timed-out write may land while the route answers 503 and skips its follow-up: api routes/tasks/index.ts ~:1658 (steer publish: no event persisted, the steer can still reach the CLI), cli-providers.ts ~:955, ~:978 (usage-auth state set and take), integrations.ts ~:199, ~:224 (OAuth attempt put and take), lib/integration-device.ts ~:72, ~:102 (device-flow state). (lib/auth-throttle.ts was fixed in #1034: the `zrem` is queued on rejection.) Residual of the sync-lock release (shared rag/sync-lock.ts ~:121-126): a SET sent just before the connection drops, with the release then refused on the closed connection, can still hold the key up to its 120 s TTL. (T546 run) cli-exec `deferJob` (queues/cli-exec/defer-job.ts ~:35) retries a refused `moveToDelayed`; a defer that landed with a lost reply could then run the job twice (theoretical: a lost reply on BullMQ's connection hangs rather than rejects). A `job.isDelayed()` probe before each retry would close it.
 
 ### T548 · FNF[config-blip-tolerance] · a sub-second Redis blip now fails requests
 
-status: open · kind: design · priority: P3
+status: parked · reason: diminishing returns (owner triage 2026-11-10); resume on a user report, a measured failure, or a change in the same code · kind: design · priority: P3
 From the T355 build. With no offline queue, a reconnect window fails every config read at once (503 or held work). Decide whether a short retry inside the bound is worth it, measured against a restarted Redis. Since T549 the same holds for every request-path `getRedis()` call in the api (retryable 503 `redis_unavailable`); boot is safe because bootstrap awaits `configService.initialize` after `initRedis`. (T544 run) Flaky timing test shared config-service-outage.test.ts ~:224 (800 ms bound; `FakeRedis.refuse()` ~:50-57 waits a fixed 100 ms) failed once under heavy concurrent load. (T546 run) A watch armed on a typed outage while the stored mode is 'off' (task-queue.ts ~:1862) resolves or notifies if the admin later turns the mode on; inert while 'off'.
 
 ### T550 · FNF[queue-add-unbounded-rest] · about 34 api `Queue.add` sites still unbounded
@@ -436,6 +437,7 @@ From the T355 build, cosmetic. The web client renders the 503 as a generic failu
 ### T552 · disabled provider in task terminal shells (design)
 
 status: open · kind: design · priority: P3
+Owner decision 2026-11-10: block in the server: refuse a task terminal for a disabled provider; the web follows.
 PRE-EXISTING, from T406 item 2. The shell sockets check ownership only, never `enabled` (api terminal-shell.ts ~:495-531; worker terminal-container.ts ~:173-196), while web deliberately keeps a disabled task-bound CLI in its terminal (web page-cli-fallback.test.tsx ~:353, tasks/[id]/page.tsx ~:2677). Decide whether a disabled provider may still open a task terminal; then enforce it server-side or document the web-only rule.
 
 ### T553 · FNF[disabled-task-cli-2] · leftovers after the disabled-provider hold
@@ -463,7 +465,7 @@ status: open · kind: fix · found: T347 run · priority: P2
 
 ### T555 · FNF[egress-guard-hardening] · remaining egress guard gaps: local NAT64 and Teredo, probe details (+2)
 
-status: open · kind: fix · found: T347 run · priority: P2
+status: parked · reason: diminishing returns (owner triage 2026-11-10); resume on a user report, a measured failure, or a change in the same code · kind: fix · found: T347 run · priority: P2
 
 Three items (metadata addresses, IPv4-compatible form, required fetchFn) shipped in PR #1040 (4dceda71f), the Azure host address in PR #1041 (aa529e991) and item 7 (local NAT64, Teredo) in PR #1048 (82343cc60), 2026-11-09. Items 3 to 6 and 8 stay parked as before.
 
@@ -477,7 +479,7 @@ Three items (metadata addresses, IPv4-compatible form, required fetchFn) shipped
 
 ### T556 · FNF[ollama-pull-relay] · pull stream relay edges
 
-status: open · kind: fix · found: T347 run · priority: P3
+status: parked · reason: diminishing returns (owner triage 2026-11-10); resume on a user report, a measured failure, or a change in the same code · kind: fix · found: T347 run · priority: P3
 
 1. The pull route has no `stream.onAbort` (api routes/tooling.ts, `activePulls` ~:222); a closed tab frees the upstream only through the idle and size caps. PRE-EXISTING.
 2. Pull progress `status`/`digest` strings are relayed uncut (tooling.ts:370-371). PRE-EXISTING (low).
@@ -507,12 +509,12 @@ Each needs a per-dial decision (guard, admin-trust, or remove).
 
 ### T585 · git transport re-reads a config the user can change (design)
 
-status: open · kind: design · found: T557 item 5 (PR #1055 Greptile P1) · priority: P3
+status: parked · reason: accepted limit (owner triage 2026-11-10): owner accepts the residual risk; no network sandbox; resume only on a reachable exploit report · kind: design · found: T557 item 5 (PR #1055 Greptile P1) · priority: P3
 `originGitRun` checks the origin URLs and the checkout's transport config, resolves and pins, re-reads both right before spawning, and git then reads `.git/config` again itself (worker repo/git-push.ts). A writer in that millisecond window defeats the guard: the repo-scope Terminal keeps a writable `.git` by design (docs/architecture/sandbox-masking.md), and `POST /repos/:id/remote` rewrites origin. No `-c` neutralizes it: a URL-scoped key or `url.*.insteadOf` written mid-run outranks or adds to command-line config, and `-c remote.origin.url=` resets the list only on git >= 2.46 (MEASURED: 2.43 appends, 2.54 resets). A full fix needs git network operations that cannot read a config the user can change during the run, or run where private addresses are unreachable (the deferred option B: a network namespace or container with deny-private egress). PRE-EXISTING class; the PR narrowed it from an attacker-controlled DNS wait to milliseconds.
 
 ### T584 · FNF[nested-repo-commit-leftovers] · nested repository edge cases left after the commit-site work (+5)
 
-status: open · kind: fix · found: T578 review 2026-11-09 · priority: P4
+status: parked · reason: diminishing returns (owner triage 2026-11-10); resume on a user report, a measured failure, or a change in the same code · kind: fix · found: T578 review 2026-11-09 · priority: P4
 
 1. Own change, minor. A directory name that is not UTF-8 evades the flatten refusal: callers decode the status as UTF-8 and `lstatNoFollow` then finds no such name (`_gitlink-registration.ts` `refuseFlattenedRepositories`). `fs-safe` takes string paths, and failing closed would refuse legitimate legacy names.
 2. PRE-EXISTING. A merge that conflicts nowhere brings in an unregistered gitlink unchecked (`merge-resolver.ts` clean path).
@@ -541,12 +543,12 @@ PRE-EXISTING, minor. `configSchema` (api routes/global-kb.ts ~:292-293) accepts 
 
 ### T580 · plan[sleep-paper-lessons] · calibrate effort estimates on the LLM's recorded estimate; keep learnings reachable past 60
 
-status: open (PR 1 shipped #1047 884f5c074, 2026-11-09; PR 2 and P3 remain) · kind: fix · found: SLEEP paper assessment 2026-11-09 · priority: P3
+status: parked · reason: diminishing returns (owner triage 2026-11-10); PR 1 shipped #1047 884f5c074; resume when step 11 changes or a repository nears 60 learnings · kind: fix · found: SLEEP paper assessment 2026-11-09 · priority: P3
 Plan: `docs/plans/sleep-paper-lessons.md`. PR 1: `hydrateAnchors` and `GET /tasks/estimation-accuracy` read the latest `estimate.recorded.aiHours` instead of the column `06b-sprint-planning` overwrites. PR 2 (low urgency, when step 11 is next touched or a repository nears 60 learnings): list every learning id and title, not an unsorted first 60. Both PRE-EXISTING. P3 of the plan, the backtest, waits for its trigger query.
 
 ### T559 · FNF[gated-test-hygiene] · gated test addresses and the gated-list check in driver gates (+1)
 
-status: open · kind: fix · found: T347 run · priority: P3
+status: parked · reason: diminishing returns (owner triage 2026-11-10); resume on a user report, a measured failure, or a change in the same code · kind: fix · found: T347 run · priority: P3
 
 1. api test/task-integration-admission-db.test.ts is hard-wired to 127.0.0.1:45553 (or CI with localhost:5432), so a generic scratch beside the dev stack cannot run it. PRE-EXISTING.
 2. `scripts/test/ci-gated-list.test.mjs` is the only definition of "gated"; add `pnpm test:scripts` to the review and feature gates whenever a test file or ci.yml changes (it caught a `pathname !==` guard the list did not recognise). Process.
@@ -556,7 +558,7 @@ status: open · kind: fix · found: T347 run · priority: P3
 
 ### T560 · FNF[postgresjs-closed-rejections] · patched postgres.js leaves unattributed CONNECTION_CLOSED rejections (third-party, needs approval)
 
-status: open · kind: third-party · needs approval · found: T347 run · priority: P3
+status: parked · reason: owner left as is (owner triage 2026-11-10): third-party log noise only; resume on a user-facing effect · kind: third-party · needs approval · found: T347 run · priority: P3
 
 1. The patched postgres.js 3.4.9 (`patches/postgres@3.4.9.patch`) still emits unattributed unhandled `CONNECTION_CLOSED` rejections. Extend the patch or report upstream. PRE-EXISTING.
 2. worker package.json has no `postgres` dependency (the guarded DSN host goes through shared `dsnDialHost`); adding it changes the lockfile and needs `pnpm docker rebuild`. PRE-EXISTING.
@@ -605,7 +607,7 @@ Custom tools have no required/optional flag, so the Start gate treats every decl
 
 ### T565 · FNF[module-runtime-report-gaps] · worker module report misses a few runtime transitions (+2)
 
-status: open · kind: fix · found: T350 run 2026-11-08 · priority: P4
+status: parked · reason: diminishing returns (owner triage 2026-11-10); resume on a user report, a measured failure, or a change in the same code · kind: fix · found: T350 run 2026-11-08 · priority: P4
 PRE-EXISTING limits of the per-module `runtime` in the worker report (`haive:modules:loaded:worker`), all minor.
 
 1. A module held back at boot (deactivated, or its schema ensure outlived the boot wait) is skipped by `runtimes()` (worker modules/loader.ts ~:431, index.ts ~:288-293), so the report has no `runtime` for it until the first pass (15 s at most).
@@ -619,12 +621,12 @@ PRE-EXISTING. T549 bounded the api's `getRedis()`; the worker's (worker src/redi
 
 ### T567 · FNF[api-redis-shutdown] · api shutdown never closes its Redis clients
 
-status: open · kind: fix · found: T549 run 2026-11-08 · priority: P4
+status: parked · reason: diminishing returns (owner triage 2026-11-10); resume on a user report, a measured failure, or a change in the same code · kind: fix · found: T549 run 2026-11-08 · priority: P4
 PRE-EXISTING. `closeRedis` (api src/redis.ts ~:101) has no production caller and the api has no SIGTERM or SIGINT handler, so shutdown never quits the three clients. `quit()` on a silent patient or bull client can wait forever; `closeRedis` falls back to `disconnect()` only for a non-ready client or a rejected `quit()`. (T544 run) The api also runs node as PID 1 without `init: true` (api Dockerfile ~:90; the worker has it), so `docker stop` waits out the grace period, now also during T544's boot retry wait.
 
 ### T568 · FNF[terminal-open-late-replay] · a shell open request can reach the worker after its reply timeout (+1)
 
-status: open · kind: fix · found: T549 run 2026-11-08 · priority: P4
+status: parked · reason: diminishing returns (owner triage 2026-11-10); resume on a user report, a measured failure, or a change in the same code · kind: fix · found: T549 run 2026-11-08 · priority: P4
 PRE-EXISTING. terminal-shell.ts `openSession` (api routes ~:439-476) publishes the open request on the patient client, whose offline queue can deliver it after the 15 s `OPEN_REPLY_TIMEOUT_MS` (~:35) and the session's cleanup, so the worker may open a session nobody waits for.
 
 1. PRE-EXISTING (since ff4927bb6), seen in the T549 live check 2026-11-09 with Redis up. When the WebSocket closes during the open window (React StrictMode double-mount on every dev load, or a reload or tab close), `runShellSession` quits the reply subscriber (api terminal-shell.ts ~:186-200, logged "shell ws closed before refcount acquired" then "open-session request failed: worker did not reply within timeout" 15 s later), yet the worker still opens the PTY (`tmux new-session -A`) and replies to nobody (worker terminal-session-manager.ts ~:181-187). Nobody sends `close` for that sessionId, so the PTY and its `terminal:out:<sid>` publishing live until the container reap (~2 min after the last tab): 8 sessions torn down by `pty-end` at one reap. Bounded, but each dead tmux client stays attached while a tab keeps the container up. Fix direction: when the open resolves after the socket is gone (or after the timeout), publish `{op:'close', sessionId}`; the same closes the late-replay case above.
@@ -651,17 +653,17 @@ PRE-EXISTING. database wait-for-ready.ts ~:75-76 (called from api and worker boo
 
 ### T573 · FNF[redis-client-error-listeners] · Redis clients without an 'error' listener spam stderr
 
-status: open · kind: fix · found: T544 run 2026-11-08 · priority: P4
+status: parked · reason: diminishing returns (owner triage 2026-11-10); resume on a user report, a measured failure, or a change in the same code · kind: fix · found: T544 run 2026-11-08 · priority: P4
 PRE-EXISTING. No `'error'` listener on the api's patient and bull clients (api redis.ts ~:68, ~:71; shared utils/redis-factory.ts ~:18, ~:29 attach none) or the worker's two clients (worker redis.ts ~:11, ~:14): ioredis prints "[ioredis] Unhandled error event" per reconnect, 16 lines per 12-14 s outage. Log noise only. Api half beside T567, worker half beside T566. (T546 run) A BullMQ Worker emits a flood of 'error' events during a LOADING reply (17 in a real restart, ~31k in 8 s through a fault proxy); the log side belongs here, any BullMQ-side change needs approval.
 
 ### T574 · FNF[step-failure-outage-hint] · a step that fails on a config store outage looks like a code defect
 
-status: open · kind: design · found: T546 run 2026-11-08 · priority: P3
+status: parked · reason: diminishing returns (owner triage 2026-11-10); resume on a user report, a measured failure, or a change in the same code · kind: design · found: T546 run 2026-11-08 · priority: P3
 PRE-EXISTING, accepted by T355. A step that meets a typed `ConfigUnavailableError` fails fast through `rethrowIfConfigUnavailable` (worker step-engine/step-runner.ts ~:462, ~:554, ~:5167, ~:5227) and ends as a plain failure with Retry; the UI cannot tell it from a code defect. Needs a structured outage hint (shared type plus web copy; overlaps T551), or a short retry inside the bound if T548 chooses one.
 
 ### T575 · FNF[worker-queue-add-unbounded] · a failed step's watch-arm enqueue waits out a Redis outage
 
-status: open · kind: fix · found: T546 run 2026-11-08 · priority: P3
+status: parked · reason: diminishing returns (owner triage 2026-11-10); folded into the T566 bounded check; resume on a user report, a measured failure, or a change in the same code · kind: fix · found: T546 run 2026-11-08 · priority: P3
 PRE-EXISTING, unmeasured. `recordFailedStepHint` awaits `enqueueUsagePollTick()` (worker task-queue.ts ~:1905, ~:1907, ~:1922) on the BullMQ connection, which queues through a transport outage, so `finishFailedStep`'s remaining writes wait for the store. The api side is bounded (`queue-bounded.ts`); the worker has no equivalent. Related T566.
 
 ### T576 · FNF[agent-reserve-stale-held-marker] · the reserve's held marker survives a fail-open defer
@@ -1474,7 +1476,7 @@ Queued broader findings from T489 PR #975, review-6 and codex-rev-6/last.txt. PR
 
 ### T522 · FNF[git-text-redaction-limits] · unusual URL delimiters and pathless query-at-signs evade text redaction (+1)
 
-status: open · priority: P2
+status: parked · reason: diminishing returns (owner triage 2026-11-10); resume on a user report, a measured failure, or a change in the same code · priority: P2
 Queued connected findings from T376 review10, verified with synthetic pure-node inputs on both parent and final shared dist. PRE-EXISTING, low; neither measured git2.43.0 nor2.54.0 emits the whitespace placeholder shape. No broader implementation authorization.
 
 1. shared schemas/git-url.ts ~:252-270: an ordinary prefix ending in colon followed by whitespace/quotes or a placeholder with inner whitespace can keep username and trailing query text. Structural ambiguity with prose needs a caller-backed design; do not match a literal placeholder word.
@@ -1558,6 +1560,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T326 — an unreadable house-rules fingerprint reads as unread (could-not-verify) — commit 941e23608; closed at owner triage 2026-11-10
 - T578 — nested repositories at the remaining commit sites — PRs #1042, #1045 (63aad40c2), #1046 (df288e668), 2026-11-09
 - T581 — restrict who may change a Global KB entry — PR #1044 (0d73cb579), 2026-11-09
 - T579 — restrict who may delete a Global KB entry — PR #1043 (4d7904a75), 2026-11-09
