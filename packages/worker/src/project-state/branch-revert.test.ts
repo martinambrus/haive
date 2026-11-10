@@ -141,8 +141,9 @@ function stubDb() {
   const db = {
     query: {
       users: {
-        findFirst: async (): Promise<{ gitName: string; gitEmail: string } | undefined> =>
-          undefined,
+        findFirst: async (): Promise<
+          { role?: string; gitName?: string; gitEmail?: string } | undefined
+        > => ({ role: 'admin' }),
       },
       tasks: { findFirst: async () => ({ repositoryId: 'r1' }) },
       repositories: { findFirst: async () => ({ credentialsSecretId: null }) },

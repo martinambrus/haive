@@ -457,7 +457,7 @@ it.each(['http', 'remote'])(
     await exec('/usr/bin/git', ['init', work]);
     await exec('/usr/bin/git', ['-C', work, 'remote', 'add', 'origin', url]);
     const key = kind === 'http' ? `http.${url}.proxy` : 'remote.origin.proxy';
-    await exec('/usr/bin/git', ['-C', work, 'config', key, url]);
+    await exec('/usr/bin/git', ['-C', work, 'config', key, new URL(url).origin]);
     const run = vi.spyOn(gitExec, 'gitRun');
     const result = await originGitRun(
       work,

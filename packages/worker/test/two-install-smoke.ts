@@ -196,7 +196,7 @@ async function cloneInstall(
     emailEncrypted: `two-install-smoke-${name}`,
     emailBlindIndex: `two-install-smoke-${name}-${randomBytes(6).toString('hex')}`,
     passwordHash: 'smoke-not-real',
-    role: 'user',
+    role: 'admin',
     status: 'active',
     tokenVersion: 0,
     createdAt: now,

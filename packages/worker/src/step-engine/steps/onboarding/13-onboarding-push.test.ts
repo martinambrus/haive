@@ -1,4 +1,5 @@
 import { fixtureBase, networkGitArgs, httpOrigin } from '../../../../test/support/git-http.js';
+import { adminGitOwner } from '../../../../test/support/git-owner.js';
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -67,7 +68,7 @@ function mkCtx(repoPath: string): StepContext {
     userId: 'u1',
     taskId: 't1',
     taskStepId: 'step1',
-    db: {},
+    db: adminGitOwner.db,
     logger: { info: noop, warn: noop, error: noop, debug: noop },
   } as unknown as StepContext;
 }

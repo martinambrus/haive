@@ -1,10 +1,10 @@
 import { fixtureBase, networkGitArgs } from './support/git-http.js';
+import { adminGitOwner } from './support/git-owner.js';
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { Database } from '@haive/database';
 import type { RepoJobPayload } from '@haive/shared';
 import { fastForward } from '../src/repo/refresh.js';
 import { failGit, type FakeGit } from './support/fake-git.js';
@@ -23,7 +23,7 @@ async function git(dir: string, args: string[]): Promise<string> {
   return stdout.trim();
 }
 
-const db = {} as unknown as Database;
+const db = adminGitOwner.db;
 const payload = { source: 'github', repositoryId: 'r1', userId: 'u1' } as unknown as RepoJobPayload;
 
 describe('fastForward reads HEAD before it moves the checkout', () => {

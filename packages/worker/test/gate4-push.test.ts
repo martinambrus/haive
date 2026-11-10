@@ -75,6 +75,7 @@ function makeCtx(
   const credentials = opts.credentials ?? [{ id: 'cred-1', label: 'GH', host: 'github.com' }];
   const db = {
     query: {
+      users: { findFirst: async () => ({ role: 'admin' }) },
       tasks: { findFirst: async () => ({ repositoryId: 'repo-1' }) },
       repositories: {
         findFirst: async () => ({

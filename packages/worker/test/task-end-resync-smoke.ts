@@ -161,7 +161,7 @@ async function main(): Promise<void> {
       emailEncrypted: 'task-end-resync-smoke@test.local',
       emailBlindIndex: `task-end-resync-${randomBytes(4).toString('hex')}`,
       passwordHash: 'smoke-not-real',
-      role: 'user',
+      role: 'admin',
       status: 'active',
       tokenVersion: 0,
       createdAt: now,
