@@ -1174,7 +1174,7 @@ Execution fence 2026-11-01: Prioritize a supported credential-bearing error tran
 
 ### T492 · FNF[house-rule-lapse-audit] · a house rule's approval lapses with no audit row
 
-status: open · kind: audit · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (codex-sonnet) · kind: audit · user decision: resolved 2026-11-01 · priority: P2
 Split out of T376 (item 6) on 2026-10-31. A content PATCH clears `enforcedHash` (api routes/global-kb.ts ~:1124-1127), the store trigger clears it when an active entry leaves `active` (shared global-kb/ensure-schema.ts ~:168-186) and DELETE /entries/:id removes an enforced entry; global-kb.md calls the lapse deliberate, only the trail is missing. The global KB is always a separate database, so a main `audit_events` row cannot share the store's transaction. Codex's prototype (branch `keep/376-item6-store-audit`, 322483948) adds a store-local `global_kb_audit_events` table and a lapse trigger with session-setting attribution: atomic, but invisible to the admin audit page (admin.ts reads `audit_events`). Options: (a) API lapses through `auditedChange` like Enforce and Un-enforce (main row first, store write inside, the documented commit window), other writers unrecorded; (b) the store-local trail plus an admin reader for it; (c) both. Recommended: (a), consistent with Enforce and visible to admins.
 
 User decision 2026-11-01: Use the existing API audit pattern visible to administrators, documenting the cross-database commit window.
