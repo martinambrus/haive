@@ -372,6 +372,32 @@ it('re-reads generation after taking the lock and releases it on a thrown delete
   expect(lock.release).toHaveBeenCalledOnce();
 });
 
+it('retries under the new scope when auth settings changed while the lock was taken', async () => {
+  const calls: DbCalls = { updateSet: null };
+  const row = { ...makeProviderRow(), authGeneration: 'prior' };
+  lock.acquire.mockImplementationOnce(async () => {
+    row.isolateAuth = true;
+    return lock.release;
+  });
+  const runner = makeRunner({
+    existing: ['haive_cli_auth_user1_gemini_0', 'haive_cli_auth_prov-default_gemini_0'],
+  });
+  const job = { data: {}, token: 'token', moveToDelayed: vi.fn(async () => {}) };
+  await expect(
+    handleSignOutJob(
+      makeDb(row, calls),
+      { providerId: row.id, userId: row.userId, authGeneration: 'prior' },
+      runner,
+      job as any,
+    ),
+  ).rejects.toMatchObject({ name: 'DelayedError' });
+  expect(job.moveToDelayed).toHaveBeenCalledWith(expect.any(Number), 'token');
+  expect(runner.removed).toEqual([]);
+  expect(calls.updateSet).toBeNull();
+  expect(lock.release).toHaveBeenCalledOnce();
+  expect(lock.acquire).toHaveBeenCalledWith(expect.anything(), 'haive_cli_auth_user1_gemini_0');
+});
+
 it('keeps deletion behavior for legacy jobs without a generation even after a newer login', async () => {
   const row = { ...makeProviderRow({ name: 'claude-code' }), authGeneration: 'new-login' };
   const calls: DbCalls = { updateSet: null };

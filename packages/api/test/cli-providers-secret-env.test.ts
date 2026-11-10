@@ -528,6 +528,23 @@ describe('sign-out secret writers advance the generation under the auth lock', (
       expect(authLock.release).toHaveBeenCalledTimes(writes);
     },
   );
+  it('refuses a login-secret write whose auth scope changed while the lock was taken', async () => {
+    const fake = setup(true);
+    const before = fake.rows(schema.cliProviders)[0]!;
+    authLock.acquire.mockImplementationOnce(async () => {
+      fake.patch(schema.cliProviders, PROVIDER, { isolateAuth: true });
+      return authLock.release;
+    });
+    const res = await send('POST', `/${PROVIDER}/secrets`, {
+      secretName: 'CLAUDE_CODE_OAUTH_TOKEN',
+      value: 'new-token',
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'cli_auth_busy' });
+    expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+    expect(fake.rows(schema.cliProviders)[0]!.authGeneration).toBe(before.authGeneration);
+    expect(authLock.release).toHaveBeenCalledOnce();
+  });
   it.each(['POST', 'PATCH'])(
     'refuses a busy %s write with 409 and keeps the credential',
     async (method) => {

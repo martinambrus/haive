@@ -1144,7 +1144,8 @@ export async function handleSignOutJob(
     return { ok: false, removed: [], failed: [] };
   }
 
-  const release = await tryCliAuthLock(db, cliAuthScope(provider));
+  const lockedScope = cliAuthScope(provider);
+  const release = await tryCliAuthLock(db, lockedScope);
   if (!release) {
     if (!job) throw new Error('CLI authentication is busy');
     const startedAt = job.data?.authContentionStartedAt ?? Date.now();
@@ -1176,6 +1177,14 @@ export async function handleSignOutJob(
     });
     if (!provider || provider.userId !== payload.userId)
       return { ok: false, removed: [], failed: [] };
+    // A settings change between the read above and the lock moved the row to another scope:
+    // retry under that scope's lock rather than remove its volumes under this one.
+    if (cliAuthScope(provider) !== lockedScope) {
+      if (!job) throw new Error('CLI authentication settings changed');
+      log.debug({ providerId: provider.id }, 'cli sign-out retried: auth settings changed');
+      await deferJob(job, 1_000, job.token!);
+      throw new DelayedError();
+    }
     if (
       payload.authGeneration !== undefined &&
       payload.authGeneration !== provider.authGeneration
