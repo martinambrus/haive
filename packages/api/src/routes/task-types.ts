@@ -281,7 +281,7 @@ adminTaskTypeRoutes.post('/', async (c) => {
         sortOrder: body.sortOrder ?? 0,
         contentHash: null,
       })
-      .onConflictDoNothing({ target: schema.taskTypeDefinitions.slug })
+      .onConflictDoNothing()
       .returning();
     if (!created) throw new HttpError(409, 'That slug is already taken');
     await insertAuditEvent(tx, event);

@@ -110,9 +110,6 @@ it('a refused urgent-deactivation audit leaves the module active', async () => {
   fake.insert(schema.modules, { moduleId: 'alpha', deactivatedAt: null });
   const attempted = vi.fn();
   fake.hooks.beforeInsert = async (table) => {
-    if (table === schema.auditEvents) throw new Error('audit refused');
-  };
-  fake.hooks.beforeInsert = async (table) => {
     if (table === schema.auditEvents) {
       attempted();
       throw new Error('audit refused');
