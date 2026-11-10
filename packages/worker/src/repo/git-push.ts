@@ -92,17 +92,22 @@ async function gitTransportConfigError(
   cwd: string,
   env?: Parameters<typeof gitRun>[2],
 ): Promise<Error | undefined> {
-  // URL-scoped HTTP settings and remote proxies outrank the generic transport pins.
+  // URL-scoped HTTP settings and remote proxies outrank the generic transport pins, and a resolve
+  // entry is multi-valued, so a repository's own one still maps an IP literal that gets no pin.
   const config = await gitRun(
     cwd,
-    ['config', '--get-regexp', '^(http\\..*\\..*|remote\\..*\\.(proxy|proxyauthmethod))$'],
+    [
+      'config',
+      '--get-regexp',
+      '^(http\\..*\\..*|http\\.curloptresolve|remote\\..*\\.(proxy|proxyauthmethod))$',
+    ],
     env,
     { guardedRemote: {} },
   );
   if (config.code === 1) return;
   return new Error(
     config.code === 0
-      ? "Git transport config is not allowed: remove URL-specific http.* and remote.*.proxy / remote.*.proxyauthmethod settings from the repository's git config."
+      ? "Git transport config is not allowed: remove URL-specific http.*, http.curloptResolve and remote.*.proxy / remote.*.proxyauthmethod settings from the repository's git config."
       : 'Could not read the repository git transport config. Repair the git config and retry.',
   );
 }

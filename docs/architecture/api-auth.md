@@ -174,7 +174,8 @@ answer is pinned so git cannot resolve again: http(s) gets `http.curloptResolve`
 (`http.<url>.*`, or `remote.<name>.proxy`) outranks a generic `-c`, and git matches it against every spelling of
 the stored URL (userinfo, query, fragment), so pinning per URL was tried and kept missing one: `originGitRun`
 instead reads the checkout's effective config once (includes and worktree config) and refuses a guarded run that
-has any such key, with a message that names the setting to remove. An imported repository never has one (the
+has any such key, or a generic `http.curloptResolve` (resolve entries add up, and an IP literal gets no pin to
+outvote one), with a message that names the setting to remove. An imported repository never has one (the
 import strips `http.*`); an external checkout may. Git reads `.git/config` itself after the check, and the
 owner can rewrite it meanwhile (`POST /repos/:id/remote`, or the repo-scope Terminal, which keeps a writable
 `.git`), so after resolving `originGitRun` runs the scan and then reads the URLs again as its last steps before

@@ -222,7 +222,7 @@ it('does not pin an IP literal host but keeps redirect and proxy pins', async ()
     ['https://[2606:4700:4700::1111]/r', 'http://93.184.216.34/r'],
     'user',
   );
-  expect(argv.some((arg) => arg.startsWith('http.curloptResolve='))).toBe(false);
+  expect(argv.some((arg: string) => arg.startsWith('http.curloptResolve='))).toBe(false);
   expect(argv).toContain('http.followRedirects=false');
   expect(argv).toContain('http.proxy=');
 });
@@ -293,7 +293,6 @@ it.each([
     const planted = {
       proxy: 'http://127.0.0.1:1',
       followRedirects: 'true',
-      curloptResolve: `public.test:${new URL(target).port}:127.0.0.2`,
     };
     for (const [key, value] of Object.entries(planted)) {
       await exec('/usr/bin/git', ['-C', work, 'config', `http.${key}`, value]);
@@ -348,6 +347,7 @@ it.each([
   'worktree',
   'other-http',
   'other-remote',
+  'generic-resolve',
 ])('structural config refusal precedes any network or DNS for %s', async (kind) => {
   seams.resolve.mockResolvedValue([{ address: '127.0.0.1', family: 4 }]);
   seams.isBlocked.mockReturnValue(false);
@@ -369,13 +369,17 @@ it.each([
             ? 'remote.other.name.proxy'
             : kind === 'other-http'
               ? 'http.https://unrelated.test/r.sslverify'
-              : `http.${target.href}.proxy`;
+              : kind === 'generic-resolve'
+                ? 'http.curloptResolve'
+                : `http.${target.href}.proxy`;
     const value =
       kind === 'remote-auth'
         ? 'basic'
         : kind === 'other-http'
           ? 'false'
-          : proxy.httpOrigin(`${root}/repo.git`);
+          : kind === 'generic-resolve'
+            ? `${target.hostname}:${target.port || 80}:127.0.0.1`
+            : proxy.httpOrigin(`${root}/repo.git`);
     let configArgs = ['-C', work, 'config'];
     if (kind === 'include') {
       const include = `${root}/included-config`;
@@ -413,7 +417,7 @@ it.each([
     expect(reads).toHaveLength(1);
     const index = reads[0]!;
     const config = await run.mock.results[index]!.value;
-    expect(config.stdout).toContain(key);
+    expect(config.stdout.toLowerCase()).toContain(key.toLowerCase());
     if (process.env.HAIVE_GIT_GUARD_TRACE)
       process.stdout.write(
         `CONFIG TRACE ${kind}: ${JSON.stringify({ argv: run.mock.calls[index]![1], config, result, proxyStats, fixture: await stats() })}\n`,
