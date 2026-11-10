@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { DelayedError, Worker, type Job, type Queue } from 'bullmq';
+import { DelayedError, UnrecoverableError, Worker, type Job, type Queue } from 'bullmq';
 import { and, eq, inArray, isNotNull, isNull, notInArray, sql } from 'drizzle-orm';
 import { schema, tryCliAuthLock, type Database } from '@haive/database';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
@@ -1147,7 +1147,25 @@ export async function handleSignOutJob(
   const release = await tryCliAuthLock(db, cliAuthScope(provider));
   if (!release) {
     if (!job) throw new Error('CLI authentication is busy');
-    await job.moveToDelayed(Date.now() + 1_000, job.token);
+    const startedAt = job.data?.authContentionStartedAt ?? Date.now();
+    const waitedMs = Date.now() - startedAt;
+    if (waitedMs >= 30 * 60_000) {
+      throw new UnrecoverableError(
+        'A CLI sign-in or credential update kept this account busy. Nothing was removed.',
+      );
+    }
+    const attempt = (job.data?.authContentionAttempts ?? 0) + 1;
+    const delayMs = Math.min(2_000 * 2 ** Math.min(attempt - 1, 3), 15_000);
+    await job.updateData({
+      ...job.data,
+      authContentionStartedAt: startedAt,
+      authContentionAttempts: attempt,
+    });
+    log.debug(
+      { providerId: provider.id, scope: cliAuthScope(provider), attempt, waitedMs, delayMs },
+      'cli sign-out deferred: a sign-in or credential update holds authentication',
+    );
+    await deferJob(job, delayMs, job.token!);
     throw new DelayedError();
   }
   try {

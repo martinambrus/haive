@@ -116,7 +116,12 @@ describe.skipIf(!url)('sign-out generation and critical section on PostgreSQL', 
       const release = await tryCliAuthLock(db, volume);
       expect(release).not.toBeNull();
       try {
-        const job = { token: 'test', moveToDelayed: async () => {} };
+        const job = {
+          data: {},
+          updateData: async () => {},
+          token: 'test',
+          moveToDelayed: async () => {},
+        };
         await expect(handleSignOutJob(db, payload, runner, job as any)).rejects.toMatchObject({
           name: 'DelayedError',
         });

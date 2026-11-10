@@ -185,3 +185,9 @@ describe('superseded sign-out', () => {
     expect(signOutSummary({ ok: true, removed: ['volume'], failed: [] })).toBe('Signed out.');
   });
 });
+
+it('shows the worker auth-contention failure text for sign-out', async () => {
+  const error = 'A CLI sign-in or credential update kept this account busy. Nothing was removed.';
+  h.get.mockResolvedValue({ status: 'failed', error });
+  await expect(runCliSignOut('provider')).rejects.toThrow(error);
+});

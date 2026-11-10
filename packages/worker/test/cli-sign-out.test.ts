@@ -318,7 +318,12 @@ it('delays without touching credentials while a login may have written but not y
   const calls: DbCalls = { updateSet: null };
   const row = { ...makeProviderRow(), authGeneration: 'prior' };
   const runner = makeRunner({ existing: ['haive_cli_auth_user1_gemini_0'] });
-  const job = { token: 'token', moveToDelayed: vi.fn(async () => {}) };
+  const job = {
+    data: {},
+    updateData: vi.fn(async () => {}),
+    token: 'token',
+    moveToDelayed: vi.fn(async () => {}),
+  };
   await expect(
     handleSignOutJob(
       makeDb(row, calls),
@@ -378,4 +383,61 @@ it('keeps deletion behavior for legacy jobs without a generation even after a ne
   expect(runner.existing.size).toBe(0);
   expect(calls.deleted).toBe(true);
   expect(calls.updateSet?.authStatus).toBe('unknown');
+});
+
+it('backs off contended sign-out from two seconds to fifteen seconds', async () => {
+  vi.useFakeTimers();
+  try {
+    lock.acquire.mockResolvedValue(null);
+    const row = makeProviderRow();
+    const calls: DbCalls = { updateSet: null };
+    const job = {
+      timestamp: Date.now(),
+      token: 'token',
+      data: {},
+      updateData: vi.fn(async (data: unknown) => {
+        job.data = data as typeof job.data;
+      }),
+      moveToDelayed: vi.fn(async () => {}),
+    };
+    for (const delay of [2000, 4000, 8000, 15000, 15000]) {
+      await expect(
+        handleSignOutJob(
+          makeDb(row, calls),
+          { providerId: row.id, userId: row.userId },
+          makeRunner(),
+          job as any,
+        ),
+      ).rejects.toMatchObject({ name: 'DelayedError' });
+      expect(job.moveToDelayed).toHaveBeenLastCalledWith(Date.now() + delay, 'token');
+    }
+  } finally {
+    vi.useRealTimers();
+  }
+});
+it('fails after thirty minutes of auth contention without removing anything', async () => {
+  lock.acquire.mockResolvedValue(null);
+  const row = makeProviderRow();
+  const calls: DbCalls = { updateSet: null };
+  const runner = makeRunner({ existing: ['haive_cli_auth_user1_gemini_0'] });
+  const now = Date.now();
+  const job = {
+    token: 'token',
+    data: { authContentionStartedAt: now - 30 * 60_000, authContentionAttempts: 123 },
+    updateData: vi.fn(),
+    moveToDelayed: vi.fn(),
+  };
+  await expect(
+    handleSignOutJob(
+      makeDb(row, calls),
+      { providerId: row.id, userId: row.userId },
+      runner,
+      job as any,
+    ),
+  ).rejects.toThrow(
+    'A CLI sign-in or credential update kept this account busy. Nothing was removed.',
+  );
+  expect(job.moveToDelayed).not.toHaveBeenCalled();
+  expect(runner.removed).toEqual([]);
+  expect(calls.updateSet).toBeNull();
 });
