@@ -363,7 +363,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
             id: 'credentialId',
             label: 'Credential to push with',
             description:
-              'Used only for this push; the token is never written to git config. Choose "manually" for SSH or public remotes.',
+              'Used for this push; saved as the repository’s credential when it has none. The token is never written to git config. Choose "manually" for SSH or public remotes.',
             options: credentialOptions,
             default: defaultCredential,
           },
@@ -411,7 +411,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
           id: 'credentialId',
           label: 'Credential to push with',
           description:
-            'Used only for this push; the token is never written to git config. Choose "manually" for SSH or public remotes.',
+            'Used for this push; saved as the repository’s credential when it has none. The token is never written to git config. Choose "manually" for SSH or public remotes.',
           options: credentialOptions,
           default: defaultCredential,
           visibleWhen: { field: 'push', equals: true },
