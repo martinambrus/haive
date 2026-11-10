@@ -282,6 +282,13 @@ jobs:
         env:
           HAIVE_RAG_LOCK_TEST_REDIS_URL: redis://localhost:6379/14
 
+      - name: Private endpoint seed store on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
+        run: pnpm --filter @haive/shared exec vitest run test/private-endpoint-seed-store.test.ts
+        env:
+          CONFIG_SEED_REDIS_TEST_URL: redis://127.0.0.1:6379/4
+
       - name: Usage-auth stash script on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         timeout-minutes: 5

@@ -33,6 +33,12 @@ export const DEFAULT_CLI_STREAM_LOG_RETENTION_DAYS = 0;
  *  Admin-tunable via CONFIG_KEYS.CLI_PROMPT_RETENTION_DAYS. */
 export const DEFAULT_CLI_PROMPT_RETENTION_DAYS = 0;
 
+/** Shared with the administrator route so seed and save serialize on the same lock. */
+export const PRIVATE_ENDPOINT_ALLOWLIST_LOCK_NAME = 'admin-config:private-endpoint-allowlist';
+
+/** Seed ownership is cleared by every administrator write, including a same-value save. */
+export const PRIVATE_ENDPOINT_SEED_STATE_KEY = 'bootstrap:privateEndpointSeed';
+
 export const CONFIG_KEYS = {
   DATABASE_URL: 'config:database:url',
   API_PORT: 'config:server:apiPort',
@@ -937,33 +943,37 @@ export class ConfigService {
     const envKey = this.getEnvEncryptionKey();
 
     if (!exists) {
-      if (envKey) {
-        await this.redisCall('ensureEncryptionKey', (redis) =>
-          redis.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey),
-        );
-        logger.info('Seeded encryption key from CONFIG_ENCRYPTION_KEY');
-        return;
-      }
-      const generated = randomBytes(32).toString('hex');
-      await this.redisCall('ensureEncryptionKey', (redis) =>
-        redis.set(CONFIG_KEYS.ENCRYPTION_KEY, generated),
+      const seeded = await this.redisCall('ensureEncryptionKey', (redis) =>
+        redis.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey ?? randomBytes(32).toString('hex'), 'NX'),
       );
-      logger.warn('Generated new encryption key (CONFIG_ENCRYPTION_KEY not set)');
-      return;
+      if (seeded === 'OK') {
+        if (envKey) logger.info('Seeded encryption key from CONFIG_ENCRYPTION_KEY');
+        else logger.warn('Generated new encryption key (CONFIG_ENCRYPTION_KEY not set)');
+      } else {
+        logger.info('Found encryption key seeded by another process');
+      }
+    } else {
+      logger.info('Found existing encryption key');
     }
+    const stored = await this.redisCall('ensureEncryptionKey', (redis) =>
+      redis.get(CONFIG_KEYS.ENCRYPTION_KEY),
+    );
+    if (!stored) throw new Error('Encryption key not found');
+    this.checkEncryptionKey(stored, envKey);
+    this.localCache.set(CONFIG_KEYS.ENCRYPTION_KEY, {
+      value: stored,
+      expiresAt: Date.now() + ConfigService.LOCAL_CACHE_TTL_MS,
+    });
+  }
 
-    if (envKey) {
-      const stored = await this.redisCall('ensureEncryptionKey', (redis) =>
-        redis.get(CONFIG_KEYS.ENCRYPTION_KEY),
-      );
-      if (stored && stored !== envKey) {
-        if (process.env.NODE_ENV === 'production') {
-          throw new Error(
-            'CONFIG_ENCRYPTION_KEY does not match the key stored in Redis. Aborting to prevent data corruption.',
-          );
-        }
-        logger.warn('CONFIG_ENCRYPTION_KEY does not match Redis encryption key');
+  private checkEncryptionKey(stored: string, envKey: string | null): void {
+    if (envKey && stored !== envKey) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error(
+          'CONFIG_ENCRYPTION_KEY does not match the key stored in Redis. Aborting to prevent data corruption.',
+        );
       }
+      logger.warn('CONFIG_ENCRYPTION_KEY does not match Redis encryption key');
     }
   }
 
@@ -1005,7 +1015,17 @@ export class ConfigService {
   async set(key: string, value: string): Promise<void> {
     this.ensureInitialized();
     try {
-      await this.redisCall('set', (redis) => redis.set(key, value));
+      await this.redisCall('set', (redis) =>
+        key === CONFIG_KEYS.PRIVATE_ENDPOINT_ALLOWLIST
+          ? redis.eval(
+              "redis.call('SET', KEYS[1], ARGV[1]); redis.call('DEL', KEYS[2]); return 1",
+              2,
+              key,
+              PRIVATE_ENDPOINT_SEED_STATE_KEY,
+              value,
+            )
+          : redis.set(key, value),
+      );
     } finally {
       // A rejected write may still have been applied, so never keep a cached copy of the old value.
       this.localCache.delete(key);
@@ -1018,6 +1038,51 @@ export class ConfigService {
       return (await this.redisCall('setIfAbsent', (redis) => redis.set(key, value, 'NX'))) === 'OK';
     } finally {
       this.localCache.delete(key);
+    }
+  }
+
+  /** Atomically compare seed ownership and publish its next value and durable attempt state.
+   * Caller holds the admin advisory lock and writes any required audit row first. */
+  async comparePrivateEndpointSeed(
+    expected: string | null,
+    expectedState: string | null,
+    value: string | null,
+    state: string,
+  ): Promise<boolean> {
+    this.ensureInitialized();
+    try {
+      return (
+        (await this.redisCall('comparePrivateEndpointSeed', (redis) =>
+          redis.eval(
+            `local current = redis.call('GET', KEYS[1])
+         local state = redis.call('GET', KEYS[2])
+         local expected = false
+         if ARGV[1] == '1' then expected = ARGV[2] end
+         local expectedState = false
+         if ARGV[3] == '1' then expectedState = ARGV[4] end
+         if current ~= expected or state ~= expectedState then return 0 end
+         if ARGV[5] == '1' then
+           if not current then redis.call('SET', KEYS[1], ARGV[6], 'NX')
+           else redis.call('SET', KEYS[1], ARGV[6]) end
+         end
+         redis.call('SET', KEYS[2], ARGV[7])
+         return 1`,
+            2,
+            CONFIG_KEYS.PRIVATE_ENDPOINT_ALLOWLIST,
+            PRIVATE_ENDPOINT_SEED_STATE_KEY,
+            expected === null ? '0' : '1',
+            expected ?? '',
+            expectedState === null ? '0' : '1',
+            expectedState ?? '',
+            value === null ? '0' : '1',
+            value ?? '',
+            state,
+          ),
+        )) === 1
+      );
+    } finally {
+      this.localCache.delete(CONFIG_KEYS.PRIVATE_ENDPOINT_ALLOWLIST);
+      this.localCache.delete(PRIVATE_ENDPOINT_SEED_STATE_KEY);
     }
   }
 
@@ -1036,12 +1101,25 @@ export class ConfigService {
       const envKey = this.getEnvEncryptionKey();
       if (envKey) {
         await this.redisCall('getEncryptionKey', (redis) =>
-          redis.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey),
+          redis.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey, 'NX'),
         );
-        return envKey;
+        const stored = await this.redisCall('getEncryptionKey', (redis) =>
+          redis.get(CONFIG_KEYS.ENCRYPTION_KEY),
+        );
+        if (!stored) throw new Error('Encryption key not found');
+        this.checkEncryptionKey(stored, envKey);
+        this.localCache.set(CONFIG_KEYS.ENCRYPTION_KEY, {
+          value: stored,
+          expiresAt: Date.now() + ConfigService.LOCAL_CACHE_TTL_MS,
+        });
+        return stored;
       }
       throw new Error('Encryption key not found');
     }
+    // Production refuses a mismatch on every read, not only while a cached null lasts; elsewhere
+    // the boot check already warned once.
+    if (process.env.NODE_ENV === 'production')
+      this.checkEncryptionKey(key, this.getEnvEncryptionKey(false));
     return key;
   }
 
@@ -1074,7 +1152,8 @@ export class ConfigService {
     }
   }
 
-  private getEnvEncryptionKey(): string | null {
+  /** `warn` false on a per-read path: an invalid value is reported at boot, not on every request. */
+  private getEnvEncryptionKey(warn = true): string | null {
     const raw = process.env.CONFIG_ENCRYPTION_KEY?.trim();
     if (!raw) return null;
     if (/^[0-9a-fA-F]{64}$/.test(raw)) {
@@ -1088,7 +1167,7 @@ export class ConfigService {
     } catch {
       // Ignore invalid base64
     }
-    logger.warn('CONFIG_ENCRYPTION_KEY must be 64 hex chars or base64-encoded 32 bytes');
+    if (warn) logger.warn('CONFIG_ENCRYPTION_KEY must be 64 hex chars or base64-encoded 32 bytes');
     return null;
   }
 
