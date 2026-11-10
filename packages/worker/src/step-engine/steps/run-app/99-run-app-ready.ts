@@ -68,6 +68,8 @@ interface RunAppReadyDetect {
   diffArtifactPath: string | null;
   /** Absent on older parked forms or when the preview could not be read safely. */
   commitPreview?: GitPreview | null;
+  /** Optional for forms parked before preview availability was recorded. */
+  commitPreviewError?: string | null;
   changedFileCount: number;
   /** The branch 01 forked the worktree from; absent where 01 did not run or the output predates it. */
   baseBranch?: string | null;
@@ -186,6 +188,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
     let diffArtifactPath: string | null = null;
     let changedFileCount = 0;
     let commitPreview: GitPreview | null = null;
+    let commitPreviewError: string | null = null;
     if (hasGit) {
       const branchRes = await gitRun(workspacePath, ['rev-parse', '--abbrev-ref', 'HEAD']);
       branch = branchRes.code === 0 ? branchRes.stdout.trim() : null;
@@ -224,11 +227,15 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
             gitRun(cwd, argv.includes('status') ? [...argv, '--', ...RUN_APP_PATHSPECS] : argv),
           );
           const after = await gitPreview(workspacePath);
+          if (res.truncated) {
+            commitPreviewError =
+              'The commit preview is unavailable because not all changed files can be shown. Commit your edits from the Terminal tab, or finish without committing.';
+            throw new Error(commitPreviewError);
+          }
           if (
             before.head !== after.head ||
             before.ref !== after.ref ||
-            before.tree !== after.tree ||
-            res.truncated
+            before.tree !== after.tree
           ) {
             throw new Error(
               'The commit preview changed while it was being read; reopen it to review the current edits.',
@@ -241,6 +248,8 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
           commitPreview = await gitPreview(workspacePath, []);
         }
       } catch (err) {
+        commitPreviewError ??=
+          'The commit preview is unavailable because the edits could not be read safely. Commit your edits from the Terminal tab, or finish without committing.';
         ctx.logger.warn({ err }, 'run-app-ready: failed to build commit diff artifact');
       }
     }
@@ -261,6 +270,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       dirtyFiles,
       diffArtifactPath,
       commitPreview,
+      commitPreviewError,
       changedFileCount,
       baseBranch: worktreeOutput?.baseBranch ?? null,
     };
@@ -291,21 +301,35 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       '',
       'Only the edits shown below are committed. If they change, review the refreshed preview and finish again.',
     );
-    const fields: FormSchema['fields'] = [
-      {
-        type: 'checkbox',
-        id: 'commit',
-        label: 'Commit my session edits before finishing',
-        default: false,
-      },
-      {
-        type: 'textarea',
-        id: 'commitMessage',
-        label: 'Commit message',
-        rows: 3,
-        default: 'chore: run-app session edits',
-      },
-    ];
+    const fields: FormSchema['fields'] =
+      !detected.hasGit || detected.commitPreview
+        ? [
+            {
+              type: 'checkbox',
+              id: 'commit',
+              label: 'Commit my session edits before finishing',
+              default: false,
+            },
+            {
+              type: 'textarea',
+              id: 'commitMessage',
+              label: 'Commit message',
+              rows: 3,
+              default: 'chore: run-app session edits',
+            },
+          ]
+        : [];
+    if (detected.hasGit && !detected.commitPreview) {
+      fields.push({
+        type: 'note',
+        id: 'commitPreviewUnavailable',
+        label: 'Commit preview unavailable',
+        body:
+          detected.commitPreviewError ??
+          'The commit preview is unavailable. Commit your edits from the Terminal tab, or finish without committing.',
+        variant: 'warning',
+      });
+    }
     if (detected.hasOrigin && !detected.branchError) {
       fields.push({
         type: 'checkbox',
@@ -382,7 +406,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       const preview = detected.commitPreview;
       if (!preview?.ref) {
         throw new ReopenStepFormError(
-          'Reopen the commit preview and review the current edits before committing.',
+          'The edits need a fresh commit preview. Review the refreshed preview before finishing.',
         );
       }
       let current: GitPreview;
@@ -390,7 +414,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
         current = await gitPreview(workspace, preview.paths);
       } catch {
         throw new ReopenStepFormError(
-          'The commit preview changed or could not be read. Reopen it and review the current edits before committing.',
+          'The edits changed or could not be read. Review the refreshed preview before finishing.',
         );
       }
       if (
@@ -399,7 +423,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
         current.tree !== preview.tree
       ) {
         throw new ReopenStepFormError(
-          'The commit preview has changed. Reopen it and review the current edits before committing.',
+          'The edits changed since the commit preview. Review the refreshed preview before finishing.',
         );
       }
       const message = (values.commitMessage ?? '').trim() || 'chore: run-app session edits';

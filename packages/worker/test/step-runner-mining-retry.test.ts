@@ -710,7 +710,9 @@ function reopeningFormStep(): StepDefinition {
       },
     },
     async apply() {
-      throw new ReopenStepFormError('bounded batch finished');
+      throw new ReopenStepFormError(
+        'The edits changed. Review the refreshed preview before finishing.',
+      );
     },
   } as StepDefinition;
 }
@@ -733,6 +735,12 @@ describe('advanceStep apply-to-form continuation', () => {
     expect(state.taskStepRow.formSchema).toMatchObject({
       title: 'More work remains',
       description: '42 items remain',
+      fields: expect.arrayContaining([
+        expect.objectContaining({
+          type: 'note',
+          body: 'The edits changed. Review the refreshed preview before finishing.',
+        }),
+      ]),
     });
     const stamp = (state.miningUpdateLog ?? []).find((u) => u.set.consumedAt instanceof Date);
     expect(conditionValues(stamp?.where)).toEqual(

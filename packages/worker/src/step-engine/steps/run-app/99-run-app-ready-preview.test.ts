@@ -5,6 +5,7 @@ import { gateContext, git, repoFixture } from '../../../../test/support/nested-r
 vi.mock('../workflow/_app-runtime.js', () => ({
   ensureAppServing: async () => ({ mode: 'none', url: null }),
 }));
+import * as commitDiff from '../workflow/_commit-diff.js';
 import * as gitExec from '../../../repo/git-exec.js';
 import { runAppReadyStep } from './99-run-app-ready.js';
 
@@ -137,3 +138,40 @@ it('keeps a competing commit when HEAD moves after preview validation', async ()
   expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(otherHead);
   expect(await git(repo, ['show', 'HEAD:a.txt'])).toBe('before\n');
 });
+
+it.each(['unreadable', 'truncated'] as const)(
+  'allows finishing without committing when the preview is %s',
+  async (kind) => {
+    const { repo, ctx } = await setup();
+    const head = await git(repo, ['rev-parse', 'HEAD']);
+    if (kind === 'truncated') {
+      await Promise.all(
+        Array.from({ length: commitDiff.MAX_FILES + 1 }, (_, i) =>
+          writeFileNoFollow(repo, `file-${i}.txt`, 'session edit'),
+        ),
+      );
+    } else {
+      await writeFileNoFollow(repo, 'a.txt', 'session edit');
+      vi.spyOn(commitDiff, 'buildCommitDiffArtifact').mockRejectedValue(
+        new Error('diff unavailable'),
+      );
+    }
+    const detected = await runAppReadyStep.detect!(ctx);
+    expect(detected.commitPreview).toBeNull();
+    const form = runAppReadyStep.form!(ctx, detected)!;
+    expect(form.fields.some((field) => field.id === 'commit')).toBe(false);
+    expect(form.fields.some((field) => field.id === 'commitMessage')).toBe(false);
+    expect(JSON.stringify(form)).toMatch(/preview.*unavailable/i);
+    expect(JSON.stringify(form)).toMatch(/terminal/i);
+    if (kind === 'truncated') expect(JSON.stringify(form)).toMatch(/not all.*shown/i);
+    expect(
+      await runAppReadyStep.apply(ctx, {
+        detected,
+        formValues: { commit: false },
+        iteration: 0,
+        previousIterations: [],
+      }),
+    ).toMatchObject({ finished: true, committed: false, message: 'finished without committing' });
+    expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
+  },
+);
