@@ -1,10 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { useState } from 'react';
-import { Pencil } from 'lucide-react';
 import { Dialog, DialogContent, DialogTitle } from './dialog';
-import { ActionMenu } from './action-menu';
 
 beforeEach(() => {
   vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue([{}] as unknown as DOMRectList);

@@ -7,6 +7,7 @@ import {
   useInsertionEffect,
   useRef,
   type HTMLAttributes,
+  type RefObject,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { cn } from '@/lib/cn';
@@ -26,8 +27,18 @@ interface DialogProps {
 
 const TABBABLE =
   'a[href], button, input, select, textarea, [tabindex], summary, iframe, [contenteditable], audio[controls], video[controls], area[href]';
-const DialogDepth = createContext(0);
-const openPanels: { panel: HTMLElement; opener: HTMLElement | null; depth: number }[] = [];
+const DialogAncestors = createContext<RefObject<HTMLDivElement | null>[]>([]);
+const openPanels: {
+  panel: HTMLElement;
+  wrapper: HTMLElement;
+  opener: HTMLElement | null;
+  ancestors: (HTMLElement | null)[];
+}[] = [];
+function paintLayers() {
+  openPanels.forEach((entry, index) => {
+    entry.wrapper.style.zIndex = String(50 + index);
+  });
+}
 
 const isRadio = (el: Element): el is HTMLInputElement => (el as HTMLInputElement).type === 'radio';
 const inGroup = (a: HTMLInputElement, b: HTMLInputElement) =>
@@ -71,7 +82,9 @@ export function Dialog({
   backdropClassName,
   fallbackFocus,
 }: DialogProps) {
-  const depth = useContext(DialogDepth);
+  const ancestors = useContext(DialogAncestors);
+  const depth = ancestors.length;
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const fallbackFocusRef = useRef(fallbackFocus);
   fallbackFocusRef.current = fallbackFocus;
@@ -123,9 +136,17 @@ export function Dialog({
   useEffect(() => {
     const panel = panelRef.current;
     if (!open || !panel) return;
-    const entry = { panel, opener: openerRef.current, depth };
-    openPanels.push(entry);
-    openPanels.sort((a, b) => a.depth - b.depth);
+    const entry = {
+      panel,
+      wrapper: wrapperRef.current!,
+      opener: openerRef.current,
+      ancestors: ancestors.map((ref) => ref.current),
+    };
+    // Children mount first. Insert a newly mounted parent before its descendants,
+    // while a later sibling still opens above the entire existing stack.
+    const descendant = openPanels.findIndex((other) => other.ancestors.includes(panel));
+    openPanels.splice(descendant < 0 ? openPanels.length : descendant, 0, entry);
+    paintLayers();
     if (openPanels.at(-1) === entry && !panel.contains(document.activeElement)) panel.focus();
     const onTab = (e: KeyboardEvent) => {
       if (e.key !== 'Tab' || e.defaultPrevented || openPanels.at(-1) !== entry) return;
@@ -156,6 +177,7 @@ export function Dialog({
       const at = openPanels.indexOf(entry);
       const wasTop = at === openPanels.length - 1;
       openPanels.splice(at, 1);
+      paintLayers();
       // Still attached means Strict Mode's rehearsal, not a close.
       if (panel.isConnected) return;
       openerRef.current = null;
@@ -180,8 +202,9 @@ export function Dialog({
     // Marked so page-level Escape handlers can tell a dialog is on top and
     // leave the key to it: without that, one Escape closes the dialog AND
     // whatever was behind it.
-    <DialogDepth value={depth + 1}>
+    <DialogAncestors value={[...ancestors, panelRef]}>
       <div
+        ref={wrapperRef}
         data-haive-dialog=""
         style={{ zIndex: 50 + depth }}
         className="fixed inset-0 flex items-center justify-center"
@@ -201,7 +224,7 @@ export function Dialog({
           {children}
         </div>
       </div>
-    </DialogDepth>,
+    </DialogAncestors>,
     document.body,
   );
 }
