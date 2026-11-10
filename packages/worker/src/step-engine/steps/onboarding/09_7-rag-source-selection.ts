@@ -1,5 +1,4 @@
 import { auditRepositorySettings, logAuditEvent, type AuditEvent } from '../../../audit.js';
-import { sameValue } from '@haive/shared/project-state';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
@@ -226,7 +225,6 @@ export const ragSourceSelectionStep: StepDefinition<
           .where(eq(schema.repositories.id, repositoryId))
           .for('update');
         if (!stored) throw new Error('Repository no longer exists');
-        if (sameValue(stored.scopeExcludeGlobs, excludeGlobs)) return;
         auditEvents.push(
           ...(await auditRepositorySettings(tx, {
             repositoryId,

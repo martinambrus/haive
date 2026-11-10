@@ -327,3 +327,28 @@ describe('worker audited repository settings', () => {
     ]);
   });
 });
+
+describe('Fix-1 scope-save and metadata controls', () => {
+  it('an equal RAG selection still updates the timestamp and dirty revision without auditing', async () => {
+    const s = await setup();
+    s.fake.patch(schema.repositories, REPO, { scopeExcludeGlobs: [], updatedAt: new Date(0) });
+    await ragSourceSelectionStep.apply(
+      { db: s.db, taskId: TASK, userId: ACTOR, logger } as unknown as StepContext,
+      {
+        iteration: 0,
+        previousIterations: [],
+        detected: {
+          framework: null,
+          tree: [],
+          defaultExcludeGlobs: [],
+          extensionSet: [],
+          totalCodeFiles: 0,
+        },
+        formValues: { selectedDirs: [] },
+      },
+    );
+    expect(s.repo().updatedAt).not.toEqual(new Date(0));
+    expect(s.fake.rows(schema.projectStateOutbox)).toHaveLength(1);
+    expect(s.audits()).toEqual([]);
+  });
+});
