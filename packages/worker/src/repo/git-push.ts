@@ -88,6 +88,25 @@ export async function getOriginUrl(cwd: string): Promise<string | null> {
   return urls === null ? null : gitRemoteIdentity(urls[0]!);
 }
 
+async function gitTransportConfigError(
+  cwd: string,
+  env?: Parameters<typeof gitRun>[2],
+): Promise<Error | undefined> {
+  // URL-scoped HTTP settings and remote proxies outrank the generic transport pins.
+  const config = await gitRun(
+    cwd,
+    ['config', '--get-regexp', '^(http\\..*\\..*|remote\\..*\\.(proxy|proxyauthmethod))$'],
+    env,
+    { guardedRemote: {} },
+  );
+  if (config.code === 1) return;
+  return new Error(
+    config.code === 0
+      ? "Git transport config is not allowed: remove URL-specific http.* and remote.*.proxy / remote.*.proxyauthmethod settings from the repository's git config."
+      : 'Could not read the repository git transport config. Repair the git config and retry.',
+  );
+}
+
 /** Origin transports always re-read the checkout immediately before git talks to the remote. */
 export async function originGitRun(
   cwd: string,
@@ -102,24 +121,33 @@ export async function originGitRun(
   let configError: Error | undefined;
   try {
     guard = await gitRemoteGuardArgs(owner, urls, async () => {
-      // URL-scoped HTTP settings and remote proxies outrank the generic transport pins.
-      const config = await gitRun(
-        cwd,
-        ['config', '--get-regexp', '^(http\\..*\\..*|remote\\..*\\.(proxy|proxyauthmethod))$'],
-        env,
-        { guardedRemote: {} },
-      );
-      if (config.code === 1) return;
-      configError = new Error(
-        config.code === 0
-          ? "Git transport config is not allowed: remove URL-specific http.* and remote.*.proxy / remote.*.proxyauthmethod settings from the repository's git config."
-          : 'Could not read the repository git transport config. Repair the git config and retry.',
-      );
-      throw configError;
+      configError = await gitTransportConfigError(cwd, env);
+      if (configError) throw configError;
     });
   } catch (err) {
     if (err !== configError && (err as NodeJS.ErrnoException)?.code !== 'ENOTFOUND') throw err;
     return { code: 128, stdout: '', stderr: `${(err as Error).message}\n` };
+  }
+  if (guard.argv.length > 0) {
+    // Recheck after DNS; writable .git in the repo Terminal leaves a millisecond window to git's own config read.
+    let unchanged = false;
+    try {
+      const currentUrls = await originUrls(cwd);
+      const currentConfigError = await gitTransportConfigError(cwd, env);
+      unchanged =
+        !currentConfigError &&
+        currentUrls !== null &&
+        currentUrls.length === urls.length &&
+        currentUrls.every((url, index) => url === urls[index]);
+    } catch {
+      unchanged = false;
+    }
+    if (!unchanged) {
+      const error = new Error(
+        "The repository's remote or git transport config changed while Haive was checking it. Retry the operation.",
+      );
+      return { code: 128, stdout: '', stderr: `${error.message}\n` };
+    }
   }
   return gitRun(cwd, [...guard.argv, ...args], env, {
     ...io,

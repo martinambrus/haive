@@ -465,6 +465,67 @@ it.each(['http', 'remote'])(
     ]);
   },
 );
+it.each(['origin-url', 'http-proxy', 'second-push-url'])(
+  'refuses a guarded fetch when %s changes during resolution',
+  async (kind) => {
+    const work = `${root}/resolution-race-${kind}`;
+    await exec('/usr/bin/git', ['init', work]);
+    const target = url.replace('127.0.0.1', 'public.test');
+    await exec('/usr/bin/git', ['-C', work, 'remote', 'add', 'origin', target]);
+    if (kind === 'second-push-url') {
+      await exec('/usr/bin/git', ['-C', work, 'config', 'remote.origin.pushurl', target]);
+    }
+    seams.isBlocked.mockReturnValue(false);
+    seams.resolve.mockImplementationOnce(async () => {
+      const change =
+        kind === 'origin-url'
+          ? ['remote.origin.url', url]
+          : kind === 'http-proxy'
+            ? [`http.${target}.proxy`, url]
+            : ['--add', 'remote.origin.pushurl', url];
+      await exec('/usr/bin/git', ['-C', work, 'config', ...change]);
+      return [{ address: '127.0.0.1', family: 4 }];
+    });
+    const before = await stats();
+    const run = vi.spyOn(gitExec, 'gitRun');
+    const result = await originGitRun(
+      work,
+      ['fetch', 'origin'],
+      { db: dbFor('user'), userId: 'owner' },
+      undefined,
+      { timeout: 2000 },
+    );
+    expect.soft(result.code).toBe(128);
+    expect.soft(run.mock.calls.some(([, args]) => args.includes('fetch'))).toBe(false);
+    expect.soft((await stats()).requests).toBe(before.requests);
+    expect(seams.resolve).toHaveBeenCalledTimes(1);
+  },
+);
+it('admin fetch keeps its original read count when origin changes at the resolution boundary', async () => {
+  const work = `${root}/admin-resolution-race`;
+  await exec('/usr/bin/git', ['init', work]);
+  const target = url.replace('127.0.0.1', 'public.test');
+  await exec('/usr/bin/git', ['-C', work, 'remote', 'add', 'origin', target]);
+  const findFirst = vi.fn(async () => {
+    await exec('/usr/bin/git', ['-C', work, 'config', 'remote.origin.url', url]);
+    return { role: 'admin' };
+  });
+  const db = { query: { users: { findFirst } } } as unknown as Database;
+  const before = await stats();
+  const run = vi.spyOn(gitExec, 'gitRun');
+  const result = await originGitRun(work, ['fetch', 'origin'], { db, userId: 'owner' }, undefined, {
+    timeout: 2000,
+  });
+  expect(result.code, result.stderr).toBe(0);
+  expect((await stats()).requests).toBeGreaterThan(before.requests);
+  expect(run.mock.calls.filter(([, args]) => args.includes('get-url'))).toHaveLength(2);
+  expect(run.mock.calls.some(([, args]) => args.includes('--get-regexp'))).toBe(false);
+  expect(egress.resolveGuardedAddress).not.toHaveBeenCalled();
+  expect(run.mock.calls.find(([, args]) => args.includes('fetch'))?.[1]).toEqual([
+    'fetch',
+    'origin',
+  ]);
+});
 it.each([128, -1, 124])('refuses when effective config cannot be read (exit %s)', async (code) => {
   const work = `${root}/config-read-${code}`;
   await exec('/usr/bin/git', ['init', work]);
