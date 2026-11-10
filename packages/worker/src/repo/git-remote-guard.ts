@@ -28,13 +28,13 @@ function shellWord(value: string): string {
 export async function gitRemoteGuardArgs(
   owner: GitRemoteOwner,
   urls: readonly string[],
-): Promise<string[]> {
-  if ('trustedAdminModuleSource' in owner) return [];
+): Promise<{ argv: string[]; env: Record<string, string> }> {
+  if ('trustedAdminModuleSource' in owner) return { argv: [], env: {} };
   const user = await owner.db.query.users.findFirst({
     where: eq(schema.users.id, owner.userId),
     columns: { role: true },
   });
-  if (user?.role === 'admin') return [];
+  if (user?.role === 'admin') return { argv: [], env: {} };
   const addresses = new Map<string, string[]>();
   const http = new Map<string, string>();
   const httpUrls = new Map<string, string>();
@@ -72,20 +72,21 @@ export async function gitRemoteGuardArgs(
     argv.push('-c', `http.curloptResolve=${authority}:${address}`);
   }
   if (http.size) argv.push('-c', 'http.followRedirects=false');
+  const env: Record<string, string> = { GIT_CONFIG_COUNT: String(httpUrls.size * 4) };
+  let index = 0;
   for (const [url, pin] of httpUrls) {
     // Git splits -c at the first equals sign; percent-encoding it does not match the raw path.
-    if (url.includes('=')) continue;
     // URL-specific repository config outranks generic -c; a proxy would resolve the host again.
-    argv.push(
-      '-c',
-      `http.${url}.curloptResolve=`,
-      '-c',
-      `http.${url}.curloptResolve=${pin}`,
-      '-c',
-      `http.${url}.followRedirects=false`,
-      '-c',
-      `http.${url}.proxy=`,
-    );
+    for (const [key, value] of [
+      ['curloptResolve', ''],
+      ['curloptResolve', pin],
+      ['followRedirects', 'false'],
+      ['proxy', ''],
+    ] as const) {
+      env[`GIT_CONFIG_KEY_${index}`] = `http.${url}.${key}`;
+      env[`GIT_CONFIG_VALUE_${index}`] = value;
+      index++;
+    }
   }
   const sshCommands = [...ssh].map(([host, address]) => ({
     host,
@@ -102,5 +103,5 @@ export async function gitRemoteGuardArgs(
       `core.sshCommand=sh -c ${shellWord(`for arg do case "$arg" in ${cases} esac; done; exit 128`)} --`,
     );
   }
-  return argv;
+  return { argv, env };
 }

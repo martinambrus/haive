@@ -34,11 +34,14 @@ let url: string;
 beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), 'remote-guard-'));
   await exec('/usr/bin/git', ['init', '--bare', '-b', 'main', `${root}/repo.git`]);
+  await mkdir(`${root}/a=b`);
+  await exec('/usr/bin/git', ['init', '--bare', `${root}/a=b/r.git`]);
   fixture = await startGitHttpServer(root);
   url = fixture.httpOrigin(`${root}/repo.git`);
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   vi.clearAllMocks();
   seams.resolve.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
   seams.privateAllowlist.mockReturnValue(egress.EMPTY);
@@ -59,10 +62,13 @@ async function stats() {
     redirected: number;
   };
 }
-async function guardArgs(urls: string[], role?: string) {
+async function guardConfig(urls: string[], role?: string) {
   const guardPath = './git-remote-guard.js';
   const { gitRemoteGuardArgs } = await import(guardPath);
   return gitRemoteGuardArgs({ db: dbFor(role), userId: 'owner' }, urls);
+}
+async function guardArgs(urls: string[], role?: string) {
+  return (await guardConfig(urls, role)).argv;
 }
 it.each(['user', 'Admin', 'owner', undefined])(
   'refuses loopback clone before connecting (role %s)',
@@ -135,14 +141,14 @@ it('pins each public HTTP host and port and disables redirects', async () => {
   expect(seams.resolve).toHaveBeenCalledTimes(2);
 });
 it('keeps equals paths parseable by git for guarded HTTPS runs', async () => {
-  const args = await guardArgs(['https://public.test/a=b/r.git'], 'user');
-  const result = await exec('/usr/bin/git', [...args, 'config', '--list']);
+  const { argv: args, env } = await guardConfig(['https://public.test/a=b/r.git'], 'user');
+  const result = await exec('/usr/bin/git', [...args, 'config', '--list'], {
+    env: { ...process.env, ...env },
+  });
   expect(result.stdout.split('\n')).toContain('http.curloptresolve=public.test:443:93.184.216.34');
   expect(args).toContain('http.followRedirects=false');
 });
 it('clones a guarded HTTP equals path through the fixture', async () => {
-  await mkdir(`${root}/a=b`);
-  await exec('/usr/bin/git', ['init', '--bare', `${root}/a=b/r.git`]);
   seams.resolve.mockResolvedValue([{ address: '127.0.0.1', family: 4 }]);
   seams.isBlocked.mockReturnValue(false);
   const target = fixture
@@ -150,29 +156,42 @@ it('clones a guarded HTTP equals path through the fixture', async () => {
     .replace('%3D', '=')
     .replace('127.0.0.1', 'public.test');
   const before = await stats();
-  await gitClone(target, `${root}/equals-clone`, undefined, undefined, {
-    db: dbFor('user'),
-    userId: 'owner',
-  });
+  vi.stubEnv('GIT_CONFIG_COUNT', '99');
+  vi.stubEnv('GIT_CONFIG_PARAMETERS', `'http.${target}.followRedirects'='true'`);
+  await gitClone(
+    target,
+    `${root}/equals-clone`,
+    undefined,
+    {
+      argv: [],
+      env: {
+        GIT_CONFIG_COUNT: '1',
+        GIT_CONFIG_KEY_0: `http.${target}.proxy`,
+        GIT_CONFIG_VALUE_0: 'http://127.0.0.1:1',
+        GIT_CONFIG_PARAMETERS: `'http.${target}.curloptResolve'='public.test:${new URL(target).port}:127.0.0.2'`,
+      },
+      secret: '',
+    },
+    {
+      db: dbFor('user'),
+      userId: 'owner',
+    },
+  );
   expect((await stats()).requests).toBeGreaterThan(before.requests);
 });
 it('matches URL-specific overrides against the HTTP transport without userinfo', async () => {
-  const args = await guardArgs(['https://alice@public.test/r'], 'user');
-  const proxy = await exec('/usr/bin/git', [
-    ...args,
-    'config',
-    '--get-urlmatch',
-    'http.proxy',
-    'https://public.test/r',
-  ]);
+  const { argv: args, env } = await guardConfig(['https://alice@public.test/r'], 'user');
+  const proxy = await exec(
+    '/usr/bin/git',
+    [...args, 'config', '--get-urlmatch', 'http.proxy', 'https://public.test/r'],
+    { env: { ...process.env, ...env } },
+  );
   expect(proxy.stdout).toBe('\n');
-  const pin = await exec('/usr/bin/git', [
-    ...args,
-    'config',
-    '--get-urlmatch',
-    'http.curloptResolve',
-    'https://public.test/r',
-  ]);
+  const pin = await exec(
+    '/usr/bin/git',
+    [...args, 'config', '--get-urlmatch', 'http.curloptResolve', 'https://public.test/r'],
+    { env: { ...process.env, ...env } },
+  );
   expect(pin.stdout.trim()).toBe('public.test:443:93.184.216.34');
 });
 it('pins every checked public address for HTTP failover and keeps the first for SSH', async () => {
@@ -180,10 +199,14 @@ it('pins every checked public address for HTTP failover and keeps the first for 
     { address: '93.184.216.34', family: 4 },
     { address: '2606:4700:4700::1111', family: 6 },
   ]);
-  const args = await guardArgs(['https://public.test/r', 'git@public.test:r'], 'user');
+  const { argv: args, env } = await guardConfig(
+    ['https://public.test/r', 'git@public.test:r'],
+    'user',
+  );
   const pin = 'public.test:443:93.184.216.34,[2606:4700:4700::1111]';
   expect(args).toContain(`http.curloptResolve=${pin}`);
-  expect(args).toContain(`http.https://public.test/r.curloptResolve=${pin}`);
+  expect(env.GIT_CONFIG_KEY_1).toBe('http.https://public.test/r.curloptResolve');
+  expect(env.GIT_CONFIG_VALUE_1).toBe(pin);
   expect(args).toContain(
     'core.sshCommand=ssh -o HostName=93.184.216.34 -o HostKeyAlias=public.test',
   );
@@ -247,6 +270,66 @@ it('repository URL-specific HTTP config cannot override the checked pin or redir
   expect(after.redirected).toBe(before.redirected + 1);
   expect(after.requests).toBe(before.requests + 1);
 });
+it.each([
+  ['process', 'config'],
+  ['caller', 'config'],
+  ['process', 'fetch'],
+  ['caller', 'fetch'],
+])(
+  'keeps equals-path pins over repository and %s environment config during %s',
+  async (source, check) => {
+    const work = `${root}/equals-config-${source}-${check}`;
+    await exec('/usr/bin/git', ['init', work]);
+    const target = url.replace('127.0.0.1', 'public.test').replace('/repo.git', '/a=b/r.git');
+    await exec('/usr/bin/git', ['-C', work, 'remote', 'add', 'origin', target]);
+    const planted = {
+      proxy: 'http://127.0.0.1:1',
+      followRedirects: 'true',
+      curloptResolve: `public.test:${new URL(target).port}:127.0.0.2`,
+    };
+    for (const [key, value] of Object.entries(planted)) {
+      await exec('/usr/bin/git', ['-C', work, 'config', `http.${target}.${key}`, value]);
+    }
+    const ambient = {
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: `http.${target}.proxy`,
+      GIT_CONFIG_VALUE_0: planted.proxy,
+      GIT_CONFIG_PARAMETERS: `'http.${target}.followRedirects'='true'`,
+    };
+    if (source === 'process') {
+      for (const [key, value] of Object.entries(ambient)) vi.stubEnv(key, value);
+    }
+    const env = source === 'caller' ? ambient : undefined;
+    seams.resolve.mockResolvedValue([{ address: '127.0.0.1', family: 4 }]);
+    seams.isBlocked.mockReturnValue(false);
+    const owner = { db: dbFor('user'), userId: 'owner' };
+    const expected = {
+      proxy: '',
+      followRedirects: 'false',
+      curloptResolve: `public.test:${new URL(target).port}:127.0.0.1`,
+    };
+    if (check === 'config') {
+      for (const [key, value] of Object.entries(expected)) {
+        const result = await originGitRun(
+          work,
+          ['config', '--get-urlmatch', `http.${key}`, target],
+          owner,
+          env,
+        );
+        expect(result.code).toBe(0);
+        expect(result.stdout.trim()).toBe(value);
+      }
+      return;
+    }
+    const before = await stats();
+    const fetched = await originGitRun(work, ['fetch', 'origin'], owner, env, {
+      timeout: 2000,
+      signal: new AbortController().signal,
+    });
+    expect(fetched.code, fetched.stderr).toBe(0);
+    expect((await stats()).requests).toBeGreaterThan(before.requests);
+  },
+);
 it('pushBranch refuses a private second push URL before network I/O', async () => {
   const work = `${root}/push`;
   await exec('/usr/bin/git', ['init', work]);
@@ -317,17 +400,17 @@ it('git appends SSH port, login and remote command without an environment overri
   await exec('/usr/bin/git', ['init', work]);
   const remotes = ['ssh://git@public.test:2222/r', 'git@other.test:repo'];
   for (const urls of [[remotes[0]!], remotes]) {
-    const guard = await guardArgs(urls, 'user');
+    const guard = await guardConfig(urls, 'user');
     for (const remote of urls) {
       const res = await gitExec.gitRun(
         work,
-        [...guard, 'ls-remote', remote],
+        [...guard.argv, 'ls-remote', remote],
         {
           PATH: `${root}/bin:${process.env.PATH}`,
           GIT_SSH_COMMAND: 'exit 97',
           GIT_SSH: '/nonexistent-ssh',
         },
-        { guardedRemote: true },
+        { guardedRemote: guard.env },
       );
       const host = remote.includes('public.test') ? 'public.test' : 'other.test';
       expect(res.stderr).toContain('ARG:HostName=93.184.216.34');

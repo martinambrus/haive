@@ -98,14 +98,17 @@ export async function originGitRun(
 ): Promise<GitRunResult> {
   const urls = await originUrls(cwd);
   if (urls === null) throw new Error('origin remote is not configured');
-  let guard: string[];
+  let guard: Awaited<ReturnType<typeof gitRemoteGuardArgs>>;
   try {
     guard = await gitRemoteGuardArgs(owner, urls);
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code !== 'ENOTFOUND') throw err;
     return { code: 128, stdout: '', stderr: `${(err as Error).message}\n` };
   }
-  return gitRun(cwd, [...guard, ...args], env, { ...io, guardedRemote: guard.length > 0 });
+  return gitRun(cwd, [...guard.argv, ...args], env, {
+    ...io,
+    guardedRemote: guard.argv.length > 0 ? guard.env : undefined,
+  });
 }
 
 /** Add `origin` pointing at url, or replace all its URLs when it already exists. Idempotent.

@@ -73,14 +73,14 @@ export async function gitClone(
   owner: GitRemoteOwner,
 ): Promise<void> {
   assertCloneUrl(url);
-  let guard: string[];
+  let guard: Awaited<ReturnType<typeof gitRemoteGuardArgs>>;
   try {
     guard = await gitRemoteGuardArgs(owner, [url]);
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code !== 'ENOTFOUND') throw err;
     throw new Error(`git clone failed (exit 128): ${(err as Error).message}`, { cause: err });
   }
-  const args = [...guard, ...(auth?.argv ?? []), 'clone', '--depth', '1'];
+  const args = [...guard.argv, ...(auth?.argv ?? []), 'clone', '--depth', '1'];
   if (branch) args.push('--branch', branch);
   args.push('--', redactGitUrl(url, true), dest);
   // The destination does not exist yet: run in the worker's cwd, as spawn did,
@@ -92,7 +92,7 @@ export async function gitClone(
       GIT_ASKPASS: 'echo',
       ...(auth?.env ?? {}),
     },
-    { guardedRemote: guard.length > 0 },
+    { guardedRemote: guard.argv.length > 0 ? guard.env : undefined },
   );
   if (result.code !== 0) {
     const msg = scrubSecret(result.stderr, auth?.secret ?? null).trim();
