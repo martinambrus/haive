@@ -522,7 +522,7 @@ status: parked · reason: diminishing returns (owner triage 2026-11-10); resume 
 4. Own change, minor. The DAG nothing-staged warning names the path, not the issue, and two issues sharing a path collapse to one note (`dag-executor.ts` `commitIssueWork`, `step-ownership.ts` `addStepWarning`). The warning cannot fire for edits in a gitlink directory holding no `.git`. Not run.
 5. Coverage. The unregistered-gitlink branch of `completeMergeHostSide` is not reached by a test, since a directory at a conflicted path is refused earlier by the marker read. New import cycle `_gitlink-registration` to `branch-revert` to `git-merge`, uses are all inside functions. `gitCommitStaged` and the DAG commit treat a nonzero commit exit as failure even if HEAD moved (unreachable today: pre-commit checks fail first on a malformed `.gitmodules`).
 
-### T582 · FNF[global-kb-delete-ui-followups] · small Global KB delete page gaps (+3)
+### T582 · FNF[global-kb-delete-ui-followups] · small Global KB delete page gaps (+5)
 
 status: open · kind: fix · found: T579 review 2026-11-09 · priority: P4
 
@@ -530,6 +530,8 @@ status: open · kind: fix · found: T579 review 2026-11-09 · priority: P4
 2. Own change, cosmetic. After a refused delete the page shows the 403 but keeps the Delete button until a reload (`page.tsx` ~:1144); a non-admin owner also gets no explanation for a missing Delete on a lapsed or paused row.
 3. PRE-EXISTING, minor. Re-scoping an entry and deleting one rewrite `supersedes_entry_id` on entries of other owners, which that actor may not change (`routes/global-kb.ts` ~:1217, ~:1324). Fix direction: decide whether link repair is exempt from the change rule, and say so in `docs/architecture/global-kb.md`.
 4. Coverage. The activation target's `FOR UPDATE` row lock is not pinned by a test: the fake DB ignores it. The advisory lock serializes API writers, so no live race is known.
+5. PRE-EXISTING, minor. PATCH and DELETE call `enqueueSync` after the store (and, for an admin lapse, the audit row) committed; a Redis failure there answers 500 for a change that applied (`routes/global-kb.ts` PATCH ~:1357, DELETE ~:1408). Fix direction: log and let the worker reconciler repair, as the comment already says for upserts.
+6. Coverage. `smoke:house-rules-enforcement` races PATCH, DELETE and activation but asserts nothing about `audit_events` (one `global_kb.house_rule.lapse` row per lapse). From the T492 review.
 
 ### T583 · FNF[global-kb-draft-owner-blind-link] · a non-admin's draft that replaces another owner's entry needs an admin to activate
 
@@ -1172,13 +1174,6 @@ From the T478 fix rounds (2026-10-31). PRE-EXISTING, minor. T478 added `scrubErr
 
 Execution fence 2026-11-01: Prioritize a supported credential-bearing error transport or misleading operational failure. Cosmetic scrubber spellings, unreachable exception classes and hypothetical text shapes remain parked.
 
-### T492 · FNF[house-rule-lapse-audit] · a house rule's approval lapses with no audit row
-
-status: in progress (codex-sonnet) · kind: audit · user decision: resolved 2026-11-01 · priority: P2
-Split out of T376 (item 6) on 2026-10-31. A content PATCH clears `enforcedHash` (api routes/global-kb.ts ~:1124-1127), the store trigger clears it when an active entry leaves `active` (shared global-kb/ensure-schema.ts ~:168-186) and DELETE /entries/:id removes an enforced entry; global-kb.md calls the lapse deliberate, only the trail is missing. The global KB is always a separate database, so a main `audit_events` row cannot share the store's transaction. Codex's prototype (branch `keep/376-item6-store-audit`, 322483948) adds a store-local `global_kb_audit_events` table and a lapse trigger with session-setting attribution: atomic, but invisible to the admin audit page (admin.ts reads `audit_events`). Options: (a) API lapses through `auditedChange` like Enforce and Un-enforce (main row first, store write inside, the documented commit window), other writers unrecorded; (b) the store-local trail plus an admin reader for it; (c) both. Recommended: (a), consistent with Enforce and visible to admins.
-
-User decision 2026-11-01: Use the existing API audit pattern visible to administrators, documenting the cross-database commit window.
-
 ### T493 · FNF[audit-retention] [design] · audit_events has no retention and the admin audit page counts the whole table
 
 status: parked · reason: diminishing returns (2026-11-01 scan): Retention and full-table counting have no measured current performance consequence; resume when resume when audit growth causes measured latency or storage pressure · priority: P4
@@ -1560,6 +1555,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ## Done
 
+- T492 — a house rule's approval lapse writes an audit row — PR #1056 (c58365e78), 2026-11-10
 - T326 — an unreadable house-rules fingerprint reads as unread (could-not-verify) — commit 941e23608; closed at owner triage 2026-11-10
 - T578 — nested repositories at the remaining commit sites — PRs #1042, #1045 (63aad40c2), #1046 (df288e668), 2026-11-09
 - T581 — restrict who may change a Global KB entry — PR #1044 (0d73cb579), 2026-11-09
