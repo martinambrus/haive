@@ -179,6 +179,9 @@ async function foldPatch(
     await fold();
   } catch (err) {
     if (!(err instanceof PlanPatchError)) throw err;
+    if (err.kind === 'busy') {
+      throw new Error('The plan is busy. Retry this step to apply the saved planner reply.');
+    }
     if (err.kind === 'conflict') {
       throw new Error(
         'The plan was edited while the planner was working on it. Retry this step to fold the answers into the plan as it is now.',

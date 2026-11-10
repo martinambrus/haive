@@ -22,6 +22,7 @@ import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { PlanPatchError } from '@haive/shared/plan';
 import { configService } from '@haive/shared';
 import { planRoutes } from '../src/routes/plan.js';
 import {
@@ -148,4 +149,27 @@ describe('snapshot action failure text', () => {
       }
     },
   );
+});
+
+describe('a busy plan writer', () => {
+  it('returns an explicit retryable 409 without refreshing or authenticating again', async () => {
+    const fake = createFakeDb({ repositories: schema.repositories, planNodes: schema.planNodes });
+    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo' });
+    h.db = fake.db;
+    vi.spyOn(configService, 'get').mockResolvedValue('true');
+    vi.spyOn(fake.db, 'transaction').mockRejectedValueOnce(
+      new PlanPatchError('busy', 'The plan is busy. Try again.'),
+    );
+    const response = await app.request(`/${REPO}/plan/edges`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ fromNodeId: FROM, toNodeId: TO, kind: 'depends_on' }),
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      code: 'plan_busy',
+      error: 'The plan is busy. Try again.',
+    });
+    expect(enqueuePlanMirrorRefresh).not.toHaveBeenCalled();
+  });
 });

@@ -14,6 +14,7 @@ function fakeDb(version: number, afterUpdate?: (row: Record<string, unknown>) =>
     status: 'todo',
   };
   const tx = {
+    execute: async () => undefined,
     select: () => ({
       from: () => ({
         where: () => {

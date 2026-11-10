@@ -362,6 +362,21 @@ describe('00b-plan-clarify apply', () => {
     expect(err.message).toContain('Retry this step');
   });
 
+  it('fails a busy fold clearly without spending another planner turn', async () => {
+    const { mined, apply, fake } = setup();
+    plan.refuse = new PlanPatchError('busy', 'The plan is busy. Try again.');
+    const outline = mined(
+      'clarify-outline',
+      json({
+        ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }],
+      }),
+    );
+    const err = (await thrown(apply([outline], {}, false))) as Error;
+    expect(err).not.toBeInstanceOf(MiningRetryError);
+    expect(err.message).toContain('Retry this step');
+    expect(fake.rows(schema.taskStepAgentMinings)[0]?.consumedAt).toBeNull();
+  });
+
   // No planner reply can land in a repository that was deleted meanwhile, so a re-roll only spends
   // the planner again until its budget ends.
   it('fails an outline at once when its repository was deleted', async () => {

@@ -130,7 +130,7 @@ async function requireOwnedRepo(c: {
 function planError(err: unknown): never {
   if (err instanceof PlanPatchError) {
     const status =
-      err.kind === 'conflict'
+      err.kind === 'conflict' || err.kind === 'busy'
         ? 409
         : err.kind === 'not_found' || err.kind === 'repository_gone'
           ? 404

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
+import { PlanPatchError } from '@haive/shared/plan';
 import type { ApplyPlanPatchResult } from '@haive/shared/plan';
 import type { AgentMiningResult, StepContext } from '../../step-definition.js';
 import { applyAgentPatch, applyAgentPatchOnce } from './_plan-prompt.js';
@@ -154,6 +155,14 @@ describe('foldCoverageResults', () => {
   beforeEach(() => {
     vi.mocked(applyAgentPatch).mockReset();
     vi.mocked(applyAgentPatch).mockResolvedValue(applied);
+  });
+
+  it('fails a busy coverage fold without stamping the saved reply as unusable', async () => {
+    const busy = new PlanPatchError('busy', 'The plan is busy. Try again.');
+    vi.mocked(applyAgentPatch).mockRejectedValueOnce(busy);
+    const { db, stamps } = fakeDb();
+    await expect(foldCoverageResults(ctx(db), detected, [reply])).rejects.toBe(busy);
+    expect(stamps).toEqual([]);
   });
 
   it('folds a reply once it has claimed it', async () => {

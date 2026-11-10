@@ -1,3 +1,4 @@
+import { PlanPatchError } from '@haive/shared/plan';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -389,6 +390,14 @@ describe('foldSequenceResults', () => {
 
   beforeEach(() => {
     vi.mocked(applyAgentPatch).mockReset();
+  });
+
+  it('fails a busy ordering fold without discarding the saved reply', async () => {
+    const busy = new PlanPatchError('busy', 'The plan is busy. Try again.');
+    vi.mocked(applyAgentPatch).mockRejectedValueOnce(busy);
+    const { db, stamps } = fakeDb();
+    await expect(foldSequenceResults(ctx(db), 'r', [agentReply(ORDER)])).rejects.toBe(busy);
+    expect(stamps).toEqual([]);
   });
 
   it('records a reply that lost ops under the partial prefix, not as a failure', async () => {

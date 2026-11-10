@@ -23,6 +23,7 @@ import {
 } from '@haive/shared';
 import { planMirrorPayloadSchema, planMirrorV2Schema } from '@haive/shared/schemas';
 import {
+  lockPlanPatch,
   loadPlanEdges,
   loadPlanNodes,
   markPlanMirrorDirty,
@@ -367,6 +368,9 @@ async function writePlanMirrorLocked(
   repoPath: string,
   changes?: PlanMirrorChanges,
 ): Promise<{ written: string[]; failed?: unknown }> {
+  // A flush can reconcile plan.json; take the patch lock before even inserting a
+  // missing mirror-state row, so it cannot hold that row while waiting for a patch.
+  await lockPlanPatch(db, repositoryId);
   let state = await loadMirrorState(db, repositoryId);
   if (!state) {
     await db
@@ -647,6 +651,9 @@ export async function importPlanMirror(
     if (expectedCheckout) {
       await lockRepositoryTasksKey(tx, repositoryId);
       await lockPlanMirror(tx, repositoryId);
+    }
+    await lockPlanPatch(tx, repositoryId);
+    if (expectedCheckout) {
       if (!(await admitWatchedCheckout(tx, repositoryId, storagePath, expectedCheckout)))
         throw new PlanMirrorHeldError(HELD_MOVED, 'checkout_changed');
     }
@@ -774,6 +781,7 @@ export async function reconcilePlanFromCheckout(
   return db.transaction(async (tx) => {
     if (opts.expectedCheckout) await lockRepositoryTasksKey(tx, repositoryId);
     await lockPlanMirror(tx, repositoryId);
+    await lockPlanPatch(tx, repositoryId);
     if (
       opts.expectedCheckout &&
       !(await admitWatchedCheckout(tx, repositoryId, repoPath, opts.expectedCheckout))
@@ -1037,6 +1045,7 @@ async function reconcilePlanLocked(
   bytes: Buffer,
   opts: { requireStamp?: boolean },
 ): Promise<PlanPullOutcome> {
+  await lockPlanPatch(tx, repositoryId);
   const [state] = await tx
     .select({
       syncedHash: schema.planMirrorState.syncedHash,

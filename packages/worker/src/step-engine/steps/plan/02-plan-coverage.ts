@@ -3,7 +3,7 @@ import { readTextNoFollow } from '@haive/shared/fs-safe';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema, FormValues } from '@haive/shared';
-import { loadPlanSkeletons } from '@haive/shared/plan';
+import { PlanPatchError, loadPlanSkeletons } from '@haive/shared/plan';
 import type { PlanNodeSkeleton } from '@haive/shared/plan';
 import type { AgentMiningResult, StepContext, StepDefinition } from '../../step-definition.js';
 import { MiningWaveError, ReopenStepFormError } from '../../step-definition.js';
@@ -788,6 +788,8 @@ export async function foldCoverageResults(
         await recordCodeLinksDropped(ctx, result.agentId, applied.strippedCodeLinks);
       }
     } catch (err) {
+      // Contention can retry the saved reply; it is not a reason to re-prompt an agent.
+      if (err instanceof PlanPatchError && err.kind === 'busy') throw err;
       hadFailure = true;
       const message = err instanceof Error ? err.message : String(err);
       ctx.logger.warn({ err, agentId: result.agentId }, 'coverage decomposition patch failed');

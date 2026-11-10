@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { planBuildStep } from './01-plan-build.js';
 import { CODE_LINKS_DROPPED } from './_plan-events.js';
 import { applyAgentPatch } from './_plan-prompt.js';
+import { PlanPatchError } from '@haive/shared/plan';
 import { MiningRetryError } from '../../step-definition.js';
 
 vi.mock('./_plan-prompt.js', async (importOriginal) => {
@@ -162,6 +163,13 @@ describe('plan build wave re-roll', () => {
     expect(payload).toMatchObject({ agentId: agent.agentId, count: 7 });
     // The count carries the scale; the sample carries the shape.
     expect(payload.sample).toHaveLength(5);
+  });
+
+  it('fails a busy fold without re-prompting or stamping the reply as unusable', async () => {
+    const busy = new PlanPatchError('busy', 'The plan is busy. Try again.');
+    vi.mocked(applyAgentPatch).mockRejectedValueOnce(busy);
+    expect(await foldOneAgentWave()).toBe(busy);
+    expect(writes.stamps).toBe(0);
   });
 
   it('still re-rolls a one-agent wave whose reply wrote nothing', async () => {

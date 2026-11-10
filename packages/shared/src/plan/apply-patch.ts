@@ -10,6 +10,7 @@ import {
   type PlanPatchOp,
 } from '../schemas/plan.js';
 import { PlanPatchError } from './errors.js';
+import { lockPlanPatch } from './patch-lock.js';
 import { PLAN_NODE_REF_PREFIX } from './render.js';
 import {
   descendantPathSqlOffset,
@@ -440,6 +441,7 @@ async function applyOps(
   opts: ApplyPlanPatchOptions,
 ): Promise<ApplyPlanPatchResult> {
   const { repositoryId, origin, sourceTaskId = null, derivedAtCommit = null } = opts;
+  await lockPlanPatch(tx, repositoryId);
   const result: ApplyPlanPatchResult = {
     created: [],
     updated: [],

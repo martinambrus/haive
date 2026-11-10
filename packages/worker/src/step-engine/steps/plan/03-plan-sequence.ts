@@ -2,6 +2,7 @@ import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { PLAN_PATCH_MAX_OPS, type FormSchema, type FormValues } from '@haive/shared';
 import {
+  PlanPatchError,
   PLAN_NODE_REF_PREFIX,
   SEQUENCE_AGENTS_PER_PASS,
   SEQUENCE_MAX_RUN_CHILDREN,
@@ -626,6 +627,8 @@ export async function foldSequenceResults(
       if (!outcome) continue;
       applied += outcome.updated.length;
     } catch (err) {
+      // Contention can retry the saved reply; it is not a reason to re-prompt an agent.
+      if (err instanceof PlanPatchError && err.kind === 'busy') throw err;
       const message = err instanceof Error ? err.message : String(err);
       ctx.logger.warn({ err, agentId: result.agentId }, 'plan sequencing patch failed');
       await stampMiningError(ctx, result.agentId, `${APPLY_FAILURE_PREFIX} ${message}`);

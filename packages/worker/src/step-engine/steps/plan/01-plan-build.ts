@@ -9,6 +9,7 @@ import {
 } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import {
+  PlanPatchError,
   findPlanRoot,
   loadPlanEdges,
   loadPlanSkeletons,
@@ -880,6 +881,8 @@ export function createPlanBuildStep(
             await recordCodeLinksDropped(ctx, result.agentId, applied.strippedCodeLinks);
           }
         } catch (err) {
+          // Contention can retry the saved reply; it is not a reason to re-prompt an agent.
+          if (err instanceof PlanPatchError && err.kind === 'busy') throw err;
           notApplied += 1;
           const message = err instanceof Error ? err.message : String(err);
           failures.push(`${result.agentTitle ?? result.agentId}: ${message}`);
