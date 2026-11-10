@@ -216,3 +216,22 @@ it('writes the upgrade row before docker starts', async () => {
   expect((await post()).status).toBe(202);
   expect(h.rows).toHaveLength(1);
 });
+
+it('records the source and target versions and force flag before starting Docker', async () => {
+  const spawn = h.spawn.getMockImplementation()!;
+  h.spawn.mockImplementation((...args: unknown[]) => {
+    expect(h.rows).toMatchObject([{ metadata: { from: '1.0.0', to: '9.9.9', force: true } }]);
+    return spawn(...args);
+  });
+  const result = await app.request('/maintenance/upgrade', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ version: 'v9.9.9', force: true }),
+  });
+  expect(result.status).toBe(202);
+});
+
+it('records force false for an ordinary upgrade', async () => {
+  expect((await post()).status).toBe(202);
+  expect(h.rows).toMatchObject([{ metadata: { from: '1.0.0', to: '9.9.9', force: false } }]);
+});

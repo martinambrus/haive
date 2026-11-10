@@ -586,7 +586,7 @@ maintenanceRoutes.post('/upgrade', async (c) => {
     actorUserId: c.get('userId'),
     action: 'maintenance.start_upgrade',
     targetType: 'system',
-    metadata: { fields: Object.keys(body) },
+    metadata: { from: current, to: version, force: !!body.force },
   };
   const started = await db.transaction(async (tx) => {
     await insertAuditEvent(tx, event);
