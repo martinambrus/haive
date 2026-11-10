@@ -19,7 +19,8 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { REPOSITORY_ERROR_CODES, type TreeNode } from '@haive/shared';
+import type { TreeNode } from '@haive/shared';
+import { REPOSITORY_ERROR_CODES } from '@haive/shared/constants';
 import { api, API_BASE_URL, type Repository } from '@/lib/api-client';
 import { Button, Badge, Card, CardHeader, CardTitle, CardDescription } from '@/components/ui';
 import { DirectoryTreeSelect } from '@/components/directory-tree-select';
