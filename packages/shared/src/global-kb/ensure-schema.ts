@@ -7,7 +7,12 @@ import {
   identifierTsvSql,
 } from '../rag/identifiers.js';
 import type { GlobalKbConnection } from './connection.js';
-import { ensureRagLexicalConfig, RAG_TEXT_CONFIG_SQL } from '../rag/lexical-config.js';
+import {
+  ensureRagLexicalConfig,
+  RAG_TEXT_CONFIG_SQL,
+  RAG_ACCENT_STAMP_SQL,
+  RAG_TSV_BACKFILL_PREDICATE,
+} from '../rag/lexical-config.js';
 import { canonicalFacetValueSql, orphanFacetMajorSql, trimFacetValueSql } from './schema.js';
 
 const log = logger.child({ module: 'global-kb-schema' });
@@ -282,7 +287,8 @@ export async function ensureGlobalKbSchema(
     BEGIN
       NEW.content_tsv := to_tsvector(${RAG_TEXT_CONFIG_SQL}, COALESCE(NEW.content, ''))
         || ${identifierTsvSql("COALESCE(NEW.content, '')")}
-        || array_to_tsvector(ARRAY['${IDENTIFIER_TSV_SENTINEL}']);
+        || array_to_tsvector(ARRAY['${IDENTIFIER_TSV_SENTINEL}'])
+        || ${RAG_ACCENT_STAMP_SQL};
       RETURN NEW;
     END;
     $$ LANGUAGE plpgsql
@@ -403,15 +409,16 @@ export async function ensureGlobalKbSchema(
   return { usedPgvector, identifierBackfillDone };
 }
 
-/** Rewrites every global vector row whose `content_tsv` lacks the identifier stamp; warns, never
- *  throws, and answers whether it finished. No row cap: the ensure runs it once per process. */
+/** Rewrites global vectors missing their identifier or enabled accent stamp; warns, never throws,
+ *  and answers whether it finished. The existing owed-backfill sweep retries either kind of debt.
+ *  No row cap: the ensure runs it once per process. */
 export async function backfillGlobalIdentifierTsv(
   step: (
     run: (tx: postgres.TransactionSql) => Promise<postgres.RowList<postgres.Row[]>>,
   ) => Promise<postgres.RowList<postgres.Row[]>>,
 ): Promise<boolean> {
   try {
-    const unstamped = `FROM ${VECTORS_TABLE} WHERE content_tsv IS NULL OR NOT (content_tsv @@ $1::tsquery)`;
+    const unstamped = `FROM ${VECTORS_TABLE} WHERE ${RAG_TSV_BACKFILL_PREDICATE}`;
     const counted = await step((tx) =>
       tx.unsafe(`SELECT count(*)::int AS n ${unstamped}`, [identifierTsvSentinelQuery()]),
     );

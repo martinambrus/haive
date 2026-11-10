@@ -7,8 +7,13 @@ vi.mock('@haive/shared', async (importOriginal) => ({
   logger: { child: () => ({ warn: logged.warn, info: () => {} }) },
 }));
 import { ensureRagSchema } from '../src/step-engine/steps/onboarding/_rag-connection.js';
-import { IDENTIFIER_TSV_SENTINEL, identifierTsvSentinelQuery } from '@haive/shared/rag';
+import {
+  ACCENT_TSV_SENTINEL,
+  IDENTIFIER_TSV_SENTINEL,
+  identifierTsvSentinelQuery,
+} from '@haive/shared/rag';
 import type { RagConnection } from '@haive/shared/rag';
+import { ragHybridSearch } from '@haive/shared/rag';
 
 // Mirrors packages/shared/test/global-kb-schema.test.ts: no live Postgres — a
 // fake connection captures the generated SQL and we assert on it. This file
@@ -55,9 +60,9 @@ function fakeConn(
     if (q.includes('CREATE EXTENSION IF NOT EXISTS unaccent') && opts.unaccentThrows) {
       return Promise.reject(pgError(opts.unaccentThrows));
     }
-    if (q.includes('SELECT oid AS config')) {
+    if (q.startsWith('SELECT oid AS config')) {
       const name = /cfgname = '([^']+)'/.exec(q)![1]!;
-      return Promise.resolve([{ config: configs.has('public.' + name) ? name : null }]);
+      return Promise.resolve([{ config: configs.has(name) ? name : null }]);
     }
     if (q.includes('CREATE TEXT SEARCH CONFIGURATION')) {
       configs.add(/CONFIGURATION ([^\s]+)/.exec(q)![1]!);
@@ -101,12 +106,8 @@ describe('ensureRagSchema', () => {
       const { conn, queries } = fakeConn({ unaccentThrows: code });
       await expect(ensureRagSchema(conn)).resolves.toMatchObject({ usedPgvector: true });
       await expect(ensureRagSchema(conn)).resolves.toMatchObject({ usedPgvector: true });
-      expect(queries()).toContain(
-        'CREATE TEXT SEARCH CONFIGURATION public.haive_english_verbatim_v1',
-      );
-      expect(queries()).not.toContain(
-        'CREATE TEXT SEARCH CONFIGURATION public.haive_english_unaccent_v1',
-      );
+      expect(queries()).toContain('CREATE TEXT SEARCH CONFIGURATION haive_english_verbatim_v1');
+      expect(queries()).not.toContain('CREATE TEXT SEARCH CONFIGURATION haive_english_unaccent_v1');
       expect(logged.warn).toHaveBeenCalledTimes(1);
       expect(logged.warn.mock.calls[0]![0]).toMatchObject({ err: { code } });
     },
@@ -116,9 +117,7 @@ describe('ensureRagSchema', () => {
     const { conn, queries } = fakeConn();
     await ensureRagSchema(conn);
     expect(queries()).toContain('CREATE EXTENSION IF NOT EXISTS unaccent');
-    expect(queries()).toContain(
-      'CREATE TEXT SEARCH CONFIGURATION public.haive_english_unaccent_v1',
-    );
+    expect(queries()).toContain('CREATE TEXT SEARCH CONFIGURATION haive_english_unaccent_v1');
     expect(queries()).toContain('pg_catalog.english_stem');
     expect(queries()).toContain("'haive_english_unaccent_v1'");
   });
@@ -299,6 +298,171 @@ describe.skipIf(!ADMIN_URL)('the identifier backfill against Postgres', () => {
         section,
       ])
     )[0]!.x as string;
+
+  const search = async (query: string, lexicalOnly = true) =>
+    (
+      await ragHybridSearch(conn, Array(8).fill(0.1), query, { lexicalOnly, knowledgeReserve: 0 })
+    ).map((hit) => hit.sectionId);
+
+  it.each(['public', 'custom', 'dictionary-refused'])(
+    'keeps an external %s store searchable without extension privileges, warns once, and upgrades when restored',
+    async (schema) => {
+      const dbName = `${SCRATCH_DB}_fallback_${schema}`;
+      const roleName = `${SCRATCH_DB}_role_${schema}`;
+      await admin.unsafe(`CREATE DATABASE "${dbName}"`);
+      await admin.unsafe(`CREATE ROLE "${roleName}"`);
+      const url = new URL(ADMIN_URL);
+      url.pathname = `/${dbName}`;
+      const external = postgres(url.toString(), { max: 1, onnotice: () => {} });
+      try {
+        await external.unsafe('CREATE EXTENSION vector');
+        if (schema === 'custom') {
+          await external.unsafe(`CREATE SCHEMA custom AUTHORIZATION "${roleName}"`);
+          await external.unsafe('SET search_path = custom, public');
+        } else {
+          await external.unsafe(`GRANT CREATE, USAGE ON SCHEMA public TO "${roleName}"`);
+        }
+        if (schema === 'dictionary-refused') {
+          await external.unsafe('CREATE SCHEMA extensions');
+          await external.unsafe('CREATE EXTENSION unaccent WITH SCHEMA extensions');
+        }
+        await external.unsafe(`SET ROLE "${roleName}"`);
+        const extConn: RagConnection = {
+          mode: 'external',
+          pg: external,
+          embeddingDimensions: 8,
+          close: async () => {},
+        };
+        logged.warn.mockClear();
+        await ensureRagSchema(extConn);
+        await external.unsafe(
+          `INSERT INTO ai_rag_embeddings
+        (source_type, source_path, section_id, content, vector)
+        VALUES ('code', 'a.ts', 'verbatim', 'kotolňa čerpadlo runs', $1::vector)`,
+          [`[${Array(8).fill(0.1).join(',')}]`],
+        );
+        await ensureRagSchema(extConn);
+        expect(logged.warn).toHaveBeenCalledTimes(1);
+        expect(logged.warn.mock.calls[0]![0]).toMatchObject({ err: { code: '42501' } });
+        const lookup = async (query: string) =>
+          (await ragHybridSearch(extConn, [], query, { lexicalOnly: true })).map(
+            (hit) => hit.sectionId,
+          );
+        expect(await lookup('kotolňa')).toEqual(['verbatim']);
+        expect(await lookup('kotolna')).toEqual([]);
+        expect(await lookup('running')).toEqual(['verbatim']);
+        await external.unsafe('RESET ROLE');
+        if (schema === 'custom') {
+          await external.unsafe('CREATE SCHEMA extensions');
+          await external.unsafe('CREATE EXTENSION unaccent WITH SCHEMA extensions');
+        }
+        await ensureRagSchema(extConn);
+        expect(await lookup('kotolna')).toEqual(['verbatim']);
+        expect(await lookup('čerpadlo')).toEqual(['verbatim']);
+      } finally {
+        await external.end({ timeout: 5 });
+        await admin.unsafe(`DROP DATABASE "${dbName}" WITH (FORCE)`);
+        await admin.unsafe(`DROP ROLE "${roleName}"`);
+      }
+    },
+    30_000,
+  );
+
+  it('finds Slovak prose in either spelling and preserves English stemming in both search branches', async () => {
+    await ensureRagSchema(conn);
+    await insert('accented', 'kotolňa čerpadlo pdf_generator runs');
+    await insert('plain', 'kotolna cerpadlo');
+    for (const lexicalOnly of [true, false]) {
+      for (const query of ['kotolna', 'kotolňa', 'cerpadlo', 'čerpadlo']) {
+        // A high dense floor ensures the hybrid case must earn its lexical match too.
+        const hits = await ragHybridSearch(conn, Array(8).fill(-0.1), query, {
+          lexicalOnly,
+          denseFloor: 1,
+          codeDenseFloor: 1,
+          knowledgeReserve: 0,
+        });
+        expect(
+          hits.map((hit) => hit.sectionId),
+          query,
+        ).toEqual(expect.arrayContaining(['accented', 'plain']));
+      }
+      for (const query of ['running', 'cerpadlo pdf_generator', 'čerpadlo pdf_generator']) {
+        expect(await search(query, lexicalOnly)).toContain('accented');
+      }
+    }
+  }, 30_000);
+
+  it('backfills pre-existing vectors without content/hash edits and is a no-op on re-run', async () => {
+    await ensureRagSchema(conn);
+    await insert('accent-legacy', 'kotolňa čerpadlo');
+    await pg.unsafe(
+      `UPDATE ai_rag_embeddings SET content_tsv = to_tsvector('english', content)
+      || array_to_tsvector(ARRAY[$1]) WHERE section_id = 'accent-legacy'`,
+      [IDENTIFIER_TSV_SENTINEL],
+    );
+    expect(await search('kotolna')).not.toContain('accent-legacy');
+    const before = await xmin('accent-legacy');
+    await ensureRagSchema(conn);
+    expect(await search('kotolna')).toContain('accent-legacy');
+    expect(await xmin('accent-legacy')).not.toBe(before);
+    const upgraded = await xmin('accent-legacy');
+    await ensureRagSchema(conn);
+    expect(await xmin('accent-legacy')).toBe(upgraded);
+  }, 30_000);
+
+  it('resumes after an interrupted batch without rewriting completed rows', async () => {
+    await ensureRagSchema(conn);
+    await pg.unsafe(
+      `INSERT INTO ai_rag_embeddings
+      (source_type, source_path, section_id, content, vector)
+      SELECT 'code', 'resume.ts', 'resume-' || n, 'kotolňa čerpadlo', $1::vector
+      FROM generate_series(1, 2001) n`,
+      [`[${Array(8).fill(0.1).join(',')}]`],
+    );
+    await pg.unsafe(
+      `UPDATE ai_rag_embeddings SET content_tsv = to_tsvector('english', content)
+      || array_to_tsvector(ARRAY[$1]) WHERE source_path = 'resume.ts'`,
+      [IDENTIFIER_TSV_SENTINEL],
+    );
+    let batches = 0;
+    const interrupted = new Proxy(pg, {
+      get(target, key) {
+        if (key === 'unsafe')
+          return (query: string, params: never) => {
+            if (query.includes('SET content = content') && ++batches === 2)
+              throw new Error('interrupted fixture');
+            return target.unsafe(query, params);
+          };
+        return Reflect.get(target, key);
+      },
+    });
+    await expect(ensureRagSchema({ ...conn, pg: interrupted })).resolves.toBeDefined();
+    const upgraded = await pg.unsafe(
+      `SELECT id, xmin::text AS version FROM ai_rag_embeddings
+      WHERE source_path = 'resume.ts' AND content_tsv @@ $1::tsquery`,
+      [`'${ACCENT_TSV_SENTINEL}'`],
+    );
+    expect(upgraded).toHaveLength(2000);
+    await ensureRagSchema(conn);
+    const all = await pg.unsafe(
+      `SELECT id, xmin::text AS version, content_tsv @@ $1::tsquery AS stamped
+      FROM ai_rag_embeddings WHERE source_path = 'resume.ts'`,
+      [`'${ACCENT_TSV_SENTINEL}'`],
+    );
+    expect(all).toHaveLength(2001);
+    expect(all.every((row) => row.stamped)).toBe(true);
+    const versions = new Map(all.map((row) => [row.id, row.version]));
+    for (const row of upgraded) expect(versions.get(row.id)).toBe(row.version);
+    await pg.unsafe(`DELETE FROM ai_rag_embeddings WHERE source_path = 'resume.ts'`);
+  }, 30_000);
+
+  it('does not confuse prose containing the accent stamp with a normalized vector', async () => {
+    const rows = await pg.unsafe(`SELECT to_tsvector('english', $1) @@ $2::tsquery AS stamped`, [
+      ACCENT_TSV_SENTINEL,
+      `'${ACCENT_TSV_SENTINEL}'`,
+    ]);
+    expect(rows[0]!.stamped).toBe(false);
+  });
 
   it('stamps a legacy row whose prose carries every word of the stamp, and does not touch a stamped row again', async () => {
     await ensureRagSchema(conn);

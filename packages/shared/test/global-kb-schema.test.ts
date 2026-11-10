@@ -28,6 +28,7 @@ const pgError = (code: string) => Object.assign(new Error(`SQLSTATE ${code}`), {
 function fakeConn(
   opts: {
     vectorThrows?: string;
+    unaccentThrows?: string;
     lockThrowsOnce?: string;
     hnswThrows?: boolean;
     columnType?: string;
@@ -63,9 +64,12 @@ function fakeConn(
   const tx = Object.assign(tag, {
     unsafe: (q: string, params?: unknown[]) => {
       captured.push(q);
-      if (q.includes('SELECT oid AS config')) {
+      if (q.includes('CREATE EXTENSION IF NOT EXISTS unaccent') && opts.unaccentThrows) {
+        return Promise.reject(pgError(opts.unaccentThrows));
+      }
+      if (q.startsWith('SELECT oid AS config')) {
         const name = /cfgname = '([^']+)'/.exec(q)![1]!;
-        return Promise.resolve([{ config: configs.has('public.' + name) ? name : null }]);
+        return Promise.resolve([{ config: configs.has(name) ? name : null }]);
       }
       if (q.includes('CREATE TEXT SEARCH CONFIGURATION')) {
         configs.add(/CONFIGURATION ([^\s]+)/.exec(q)![1]!);
@@ -130,6 +134,20 @@ function fakeConn(
 }
 
 describe('ensureGlobalKbSchema', () => {
+  it.each(['42501', '58P01'])(
+    'records a verbatim fallback and warns once if unaccent is unavailable (%s)',
+    async (code) => {
+      logged.warn.mockClear();
+      const { conn, queries } = fakeConn({ unaccentThrows: code });
+      await ensureGlobalKbSchema(conn);
+      await ensureGlobalKbSchema(conn);
+      expect(queries()).toContain('CREATE TEXT SEARCH CONFIGURATION haive_english_verbatim_v1');
+      expect(queries()).not.toContain('CREATE TEXT SEARCH CONFIGURATION haive_english_unaccent_v1');
+      expect(logged.warn).toHaveBeenCalledTimes(1);
+      expect(logged.warn.mock.calls[0]![0]).toMatchObject({ err: { code } });
+    },
+  );
+
   it('creates both tables, the upsert key, facet indexes, checks, and trigger (pgvector path)', async () => {
     const { conn, queries } = fakeConn();
     const res = await ensureGlobalKbSchema(conn);

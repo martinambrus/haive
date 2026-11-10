@@ -10,6 +10,8 @@ import {
   fenceRagStore,
   ensureRagLexicalConfig,
   RAG_TEXT_CONFIG_SQL,
+  RAG_ACCENT_STAMP_SQL,
+  RAG_TSV_BACKFILL_PREDICATE,
   openExistingRagDatabase,
   ragDatabaseName,
   tryAcquireRagSyncLock,
@@ -150,7 +152,8 @@ export async function ensureRagSchema(
     BEGIN
       NEW.content_tsv := to_tsvector(${RAG_TEXT_CONFIG_SQL}, COALESCE(NEW.content, ''))
         || ${identifierTsvSql("COALESCE(NEW.content, '')")}
-        || array_to_tsvector(ARRAY['${IDENTIFIER_TSV_SENTINEL}']);
+        || array_to_tsvector(ARRAY['${IDENTIFIER_TSV_SENTINEL}'])
+        || ${RAG_ACCENT_STAMP_SQL};
       RETURN NEW;
     END;
     $$ LANGUAGE plpgsql
@@ -189,8 +192,9 @@ export async function ensureRagSchema(
  *  schema sweep rather than getting its own entry point, warns rather than
  *  throws, and keeps no "applied" record. Convergence is structural instead —
  *  `SET content = content` fires the BEFORE UPDATE trigger, which stamps the
- *  sentinel, and a stamped row never matches the predicate again, so a
- *  fully-upgraded store makes this a no-op.
+ *  sentinel (and the accent stamp when the stored configuration supports it),
+ *  and a stamped row never matches the predicate again. The same pass therefore
+ *  upgrades identifier-aware rows predating accent normalization, without changing hashes.
  *
  *  Capped per invocation because this runs inside a step that gates every
  *  workflow task: a large store finishes over the next few syncs instead of
@@ -206,8 +210,9 @@ async function backfillIdentifierTsv(conn: RagConnection): Promise<void> {
         `UPDATE ${RAG_TABLE} SET content = content
            WHERE id IN (
              SELECT id FROM ${RAG_TABLE}
-             WHERE content_tsv IS NULL OR NOT (content_tsv @@ $1::tsquery)
+             WHERE ${RAG_TSV_BACKFILL_PREDICATE}
              LIMIT $2
+             FOR UPDATE SKIP LOCKED
            )`,
         [identifierTsvSentinelQuery(), IDENTIFIER_BACKFILL_BATCH],
       );
@@ -216,7 +221,7 @@ async function backfillIdentifierTsv(conn: RagConnection): Promise<void> {
       if (rows < IDENTIFIER_BACKFILL_BATCH) break;
     }
     if (total > 0) {
-      log.info({ rows: total }, 'backfilled identifier lexemes into content_tsv');
+      log.info({ rows: total }, 'backfilled lexical text vectors');
     }
   } catch (err) {
     // Never fails the caller: a stale lexical index is a degraded search, while a

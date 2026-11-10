@@ -2,6 +2,7 @@ import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ensureGlobalKbSchema } from '../src/global-kb/ensure-schema.js';
 import { IDENTIFIER_TSV_SENTINEL } from '../src/rag/identifiers.js';
+import { ragHybridSearch } from '../src/rag/search.js';
 
 // Needs a server with pgvector. HAIVE_GKB_TEST_DB_URL is any superuser URL on it,
 // and the test works in a scratch database it creates and drops.
@@ -49,6 +50,40 @@ describe.skipIf(!ADMIN_URL)('identifier lexemes in the global KB store', () => {
         [query],
       )
     ).map((r) => r.section_id as string);
+
+  it('normalizes Slovak prose for new and pre-existing global chunks, keeping English stemming', async () => {
+    await ensure();
+    await insert('accent-new', 'kotolňa čerpadlo runs');
+    await insert('accent-plain', 'kotolna cerpadlo');
+    await insert('accent-legacy', 'kotolňa čerpadlo');
+    await pg.unsafe(
+      `UPDATE ai_rag_embeddings SET content_tsv = to_tsvector('english', content)
+      || array_to_tsvector(ARRAY[$1]) WHERE section_id = 'accent-legacy'`,
+      [IDENTIFIER_TSV_SENTINEL],
+    );
+    await ensure();
+    const conn = {
+      pg,
+      mode: 'internal',
+      embeddingDimensions: DIMS,
+      close: async () => {},
+    } as const;
+    for (const query of ['kotolna', 'kotolňa', 'cerpadlo', 'čerpadlo']) {
+      const hits = await ragHybridSearch(conn, [], query, { lexicalOnly: true });
+      expect(
+        hits.map((hit) => hit.sectionId),
+        query,
+      ).toEqual(expect.arrayContaining(['accent-new', 'accent-plain', 'accent-legacy']));
+    }
+    expect(
+      (await ragHybridSearch(conn, [], 'running', { lexicalOnly: true })).map(
+        (hit) => hit.sectionId,
+      ),
+    ).toContain('accent-new');
+    const before = await xmins();
+    await ensure();
+    expect(await xmins()).toEqual(before);
+  }, 30_000);
 
   it('matches a snake_case name whole, for a new row and for a row written before', async () => {
     await ensure();
