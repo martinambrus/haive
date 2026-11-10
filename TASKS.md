@@ -119,7 +119,7 @@ Verification fence: one short pass, at most three supported cases per candidate,
 
 ### T323 · FNF[uploads-3] · finished upload rows are never deleted; the reaper's removal is not identity-checked (+1)
 
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (item 4 in bundle D1, overnight run 2026-11-10) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 All PRE-EXISTING.
 
 4. PARKED (user): `complete` rows in repo_uploads/custom_bundle_uploads and `consumed` db_uploads rows are never deleted — needs a retention rule.
@@ -144,7 +144,7 @@ dag-executor.ts (~681, ~951) aborts level merges without resolveHaiveProjectionC
 
 ### T291 · FNF[fs-park] · a process death mid-park leaves the file under its park name (+2)
 
-status: open · priority: P2
+status: in progress (bundle D1, overnight run 2026-11-10, branch fix/D1-park-sweep-upload-retention) · priority: P2
 All PRE-EXISTING.
 
 1. fs-safe.ts ~1115-1262 parks as `.<leaf>.haive-park-<pid>-<uuid>`; a kill between rename and settle leaves it there; nothing sweeps it. Fix: boot/temp sweep puts it back when the name is free, else reports.
@@ -282,7 +282,7 @@ User decision 2026-11-01: Preserve captured owner/mode until recovery completes;
 
 ### T317 · FNF[rtk-first-import] · a stamped RTK choice loses to the first record import
 
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (bundle B, overnight run 2026-11-10, branch fix/B-upgrade-rtk) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 sync.ts:514 (`row !== null`) and :528; pinned by project-state-sync.test.ts:1850 and onboarding-upgrades.md. Fix if approved: drop `row !== null`, flip the test.
 
 User decision 2026-11-01: A stamped local RTK choice wins against first imported record.
@@ -852,7 +852,7 @@ User reconciliation 2026-11-01: helper/read-contract consolidation (members1/2/5
 
 ### T386 · FNF[upgrade-early-death-hold] · an upgrade that dies before recording its found state restores normal and lifts an admin's hold
 
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (bundle B, overnight run 2026-11-10, branch fix/B-upgrade-rtk) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 A run that dies between startRun (updater cli.ts ~:161) and recordFoundState (run.ts ~:181) has no metadata.foundState, so a later restore writes `normal`.
 Needs a marker that tells an older updater's run apart from a new run that died early.
 
@@ -937,7 +937,7 @@ From the T431 review (2026-10-30). PRE-EXISTING, minor, consequence unmeasured. 
 
 ### T443 · FNF[rules-override-retry] · a 02 retry after the record write moved the repository rules override refuses and the region stays at the old override until the next upgrade
 
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (bundle B, overnight run 2026-11-10, branch fix/B-upgrade-rtk) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 From the T119 review (2026-10-30). Introduced by T119, fails closed. worker onboarding-upgrade 02-upgrade-apply.ts ~:924-932 refuses the plan (`PLAN_NO_LONGER_HOLDS`) when `repositories.agent_rules_override` differs from the value 01 stamped; it has no counterpart of the render-context `ownRecordColumn` exemption (~:915-921). The writer-embedded import at 02's own record write (worker project-state write.ts ~:818) can import another install's override after 02 wrote the region, so the committed AGENTS.md block keeps the old override until the next upgrade heals it as `clean_update`, and a 02 retry needs a re-plan. Decide: defer the settings import while an upgrade is live, re-render the region on retry, or accept and document (the docs record it as a residual).
 
 User decision 2026-11-01: Defer imported repository-rules overrides until the running upgrade finishes, then reconcile.
@@ -949,7 +949,7 @@ From the T119 review (2026-10-30). Minor. shared project-state limits.ts ~:12 `M
 
 ### T446 · FNF[bundle-descriptor-removal] · document the chosen claim-based descriptor-removal rule in upgrade commits
 
-status: open · kind: documentation · user decision: resolved 2026-11-01 · priority: P3
+status: in progress (bundle B, overnight run 2026-11-10, branch fix/B-upgrade-rtk) · kind: documentation · user decision: resolved 2026-11-01 · priority: P3
 From the T119 review (2026-10-30). Verified 2026-10-31 by the T446 driver (evidence in .claude/tmp/sonnet-run/T446/): INTENDED by the documented rule in docs/architecture/onboarding-upgrades.md ~:662-671. A descriptor that the previous base names but no local bundle holds is kept while a claim names its source, and is removed and reported in `removed` once none does; it "can flap across pushes". Measured on real git with a two-install smoke harness (packages/worker/test/two-install-smoke.ts): B's record writer (worker project-state/write.ts ~:684-711, run by 12, 02, 04, the 10 s dirty sweep and the checkout watcher) removes A's claim-less descriptor; Haive's own 02+03 with the commit box ticked commits that removal; A writes the file again at its next record write. Nothing reads an unclaimed descriptor, and A's bundle row, storage, items and ledger are untouched, so nothing is lost.
 
 Question for the owner: keep the rule (recommended, adding to the docs that 12 and 03 stage the removal when their commit box is ticked), or make a claim-less descriptor team-wide. Option 2: a descriptor exists only while a claim names its source. Option 3: the sync adds a checkout descriptor to the base only if a local bundle, a claim or the previous base names it. The flip lists are in the driver report. If flipped, also make the two-install smoke assert the rule across installs: it commits B's deletion (~:2477) and `treesDiffer` skips `bundles/` (~:2879).
