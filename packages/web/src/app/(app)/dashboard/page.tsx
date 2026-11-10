@@ -4,7 +4,7 @@ import { LinkButton } from '@/components/ui';
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { api, type Task } from '@/lib/api-client';
-import { Button, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
+import { Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
 import { moduleDashboardWidgets } from '@/generated/module-dashboard';
 import { ModuleDashboardWidgets } from '@/lib/module-dashboard';
 import { useModules } from '@/lib/use-modules';

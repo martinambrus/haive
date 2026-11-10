@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import type { TreeNode } from '@haive/shared';
 import { api, API_BASE_URL, type Repository } from '@/lib/api-client';
-import { Button, Badge, Card, CardHeader, CardTitle, CardDescription } from '@/components/ui';
+import { Badge, Card, CardHeader, CardTitle, CardDescription } from '@/components/ui';
 import { DirectoryTreeSelect } from '@/components/directory-tree-select';
 import { UpgradeAvailableBanner } from '@/components/upgrade-available-banner';
 import { ProjectStateConflictsBanner } from '@/components/project-state-conflicts-banner';
