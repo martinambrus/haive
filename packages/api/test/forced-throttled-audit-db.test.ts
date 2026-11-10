@@ -117,6 +117,45 @@ describe.skipIf(!url)('Forced changes and throttled logins on Postgres', () => {
     await cleanActor(db, h.actor, { anonymous: true });
     vi.restoreAllMocks();
   });
+  it.each([false, true])(
+    'throttled password change keeps its 429 while the audit is delayed or refused (refused: %s)',
+    async (refused) => {
+      h.throttle.mockRejectedValue(
+        new AuthThrottleError(
+          Response.json(
+            { code: 'rate_limited' },
+            { status: 429, headers: { 'Retry-After': '60' } },
+          ),
+          true,
+          'account',
+        ),
+      );
+      h.auditDelayMs = refused ? 0 : 5500;
+      if (refused) await refuseAudit(db, h.actor);
+      const started = Date.now();
+      const res = await send('/user-settings/password', {
+        currentPassword: 'synthetic-password',
+        newPassword: 'synthetic-next-password',
+      });
+      expect(res.status).toBe(429);
+      expect(res.headers.get('Retry-After')).toBe('60');
+      expect(Date.now() - started).toBeLessThan(1000);
+      await expect.poll(() => h.auditDone.mock.calls.length, { timeout: 15_000 }).toBe(1);
+      const rows = await audits(db);
+      expect(rows).toHaveLength(refused ? 0 : 1);
+      if (!refused)
+        expect(rows[0]).toMatchObject({
+          action: 'user.password.change.throttled',
+          actorUserId: h.actor,
+          targetId: h.actor,
+          metadata: { reason: 'throttled', limiter: 'account' },
+        });
+      expect(JSON.stringify(rows)).not.toMatch(/synthetic-password|synthetic-next-password/);
+      expect(await sessions()).toEqual([]);
+    },
+    30_000,
+  );
+
   for (const refused of [false, true]) {
     for (const known of [true, false])
       it(`throttled ${known ? 'known' : 'unknown'} login: ${refused ? 'refused audit preserves 429' : 'eventually writes a safe row'}`, async () => {

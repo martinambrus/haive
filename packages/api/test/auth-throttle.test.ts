@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Redis } from 'ioredis';
+import { eq } from 'drizzle-orm';
 
 const h = vi.hoisted(() => {
   process.env.CONFIG_ENCRYPTION_KEY = 'ab'.repeat(32);
@@ -63,6 +64,8 @@ import { computeEmailBlindIndex, encryptEmail, secretsService } from '@haive/sha
 import { hashPassword, verifyPassword } from '../src/auth/password.js';
 import { createApiApp } from '../src/index.js';
 import { AuthThrottleError } from '../src/lib/auth-throttle.js';
+import { signAccessToken } from '../src/auth/jwt.js';
+import { ACCESS_COOKIE } from '../src/auth/cookies.js';
 
 // @ts-expect-error Every refusal must explicitly identify the rejecting limiter.
 new AuthThrottleError(new Response(null, { status: 429 }), true);
@@ -269,6 +272,94 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
     T0 = Math.floor(Date.now() / 1000) * 1000 + 250;
     vi.useFakeTimers({ toFake: ['Date'] });
     at(0);
+  });
+
+  describe('password-change oracle', () => {
+    async function change(email: string, currentPassword = WRONG, address?: string) {
+      const user = fake
+        .rows(schema.users)
+        .find((row) => row.emailBlindIndex === computeEmailBlindIndex(email, PEPPER))!;
+      const cookie = `${ACCESS_COOKIE}=${await signAccessToken({ sub: String(user.id), role: 'user', tv: Number(user.tokenVersion) })}`;
+      return app.request(
+        '/user-settings/password',
+        {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json', cookie },
+          body: JSON.stringify({ currentPassword, newPassword: 'a different synthetic password' }),
+        },
+        address ? { incoming: { socket: { remoteAddress: address } } } : undefined,
+      );
+    }
+
+    it('refuses the eleventh wrong current password before bcrypt and bounds throttle audits', async () => {
+      const email = mail('password-throttle');
+      addUser(email);
+      for (let i = 0; i < 10; i++) expect((await change(email)).status).toBe(401);
+      vi.mocked(verifyPassword).mockClear();
+      const res = await change(email);
+      expect(res.status).toBe(429);
+      const body = (await res.json()) as RefusedBody;
+      expect(
+        fake.rows(schema.auditEvents).filter((r) => r.action === 'user.password.change.failure'),
+      ).toHaveLength(10);
+      expect(body.code).toBe('rate_limited');
+      expect(body.retryAfterSeconds).toBe(Number(res.headers.get('Retry-After')));
+      expect(body.error).toContain(String(body.retryAfterSeconds));
+      expect(verifyPassword).not.toHaveBeenCalled();
+      await change(email);
+      await vi.waitFor(() =>
+        expect(
+          fake
+            .rows(schema.auditEvents)
+            .filter((r) => r.action === 'user.password.change.throttled'),
+        ).toHaveLength(1),
+      );
+    });
+
+    it.each(['login', 'password'] as const)(
+      'shares the sign-in account budget when %s fills it',
+      async (first) => {
+        const email = mail('shared');
+        addUser(email);
+        for (let i = 0; i < 10; i++) {
+          const res =
+            first === 'login'
+              ? await login(email, WRONG, { peer: peer(i) })
+              : await change(email, WRONG, peer(i));
+          expect(res.status).toBe(401);
+        }
+        vi.mocked(verifyPassword).mockClear();
+        const res =
+          first === 'login'
+            ? await change(email, WRONG, peer(99))
+            : await login(email, WRONG, { peer: peer(99) });
+        expect(res.status).toBe(429);
+        expect(verifyPassword).not.toHaveBeenCalled();
+      },
+    );
+
+    it('refunds a forced password change and keeps its existing flow working', async () => {
+      const email = mail('forced-refund');
+      addUser(email);
+      const user = fake.rows(schema.users)[0]!;
+      await fake.db
+        .update(schema.users)
+        .set({ mustChangePassword: true })
+        .where(eq(schema.users.id, String(user.id)));
+      (h.db as any).transaction = fake.db.transaction;
+      expect((await change(email, PASSWORD)).status).toBe(200);
+      expect(fake.rows(schema.users)[0]!.mustChangePassword).toBe(false);
+      expect(await client.zcard(acctKey('login', email))).toBe(0);
+    });
+
+    it('fails open on a stalled Redis before checking the current password', async () => {
+      const email = mail('password-stall');
+      addUser(email);
+      h.redis = () => ({ status: 'ready', eval: () => new Promise(() => {}) });
+      const res = await answeredWithin(1500, change(email));
+      expect(res.status).toBe(401);
+      expect(h.warn).toHaveBeenCalled();
+    });
   });
 
   describe('audit bound', () => {

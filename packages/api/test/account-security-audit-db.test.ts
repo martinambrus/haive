@@ -107,6 +107,32 @@ describe.skipIf(!url)('Account security audit on Postgres', () => {
     await cleanActor(db, h.actor);
     vi.restoreAllMocks();
   });
+  it.each([false, true])(
+    'wrong current password requires its audit before the 401 (audit refused: %s)',
+    async (refused) => {
+      const before = await user();
+      if (refused) await refuseAudit(db, h.actor);
+      const res = await send('/user-settings/password', {
+        currentPassword: 'wrong-current-password',
+        newPassword: 'synthetic-next-password',
+      });
+      expect(res.status).toBe(refused ? 500 : 401);
+      expect(await user()).toEqual(before);
+      expect(await sessions()).toEqual([]);
+      expect(res.headers.getSetCookie()).toEqual([]);
+      const rows = await audits(db);
+      expect(rows).toHaveLength(refused ? 0 : 1);
+      if (!refused)
+        expect(rows[0]).toMatchObject({
+          actorUserId: h.actor,
+          action: 'user.password.change.failure',
+          targetId: h.actor,
+          metadata: { reason: 'invalid_credentials' },
+        });
+      expect(JSON.stringify(rows)).not.toMatch(/wrong-current-password|synthetic-next-password/);
+    },
+  );
+
   for (const refused of [false, true]) {
     it(`password change: ${refused ? 'refusal undoes password and session' : 'commits one safe row'}`, async () => {
       const before = await user();
