@@ -1,4 +1,5 @@
-import { advanceVolumeLoginGeneration } from '@haive/shared/cli-auth-state';
+import { tryCliAuthLock } from '@haive/database';
+import { cliAuthScope, advanceVolumeLoginGeneration } from '@haive/shared/cli-auth-state';
 import { randomUUID } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq, sql } from 'drizzle-orm';
@@ -110,6 +111,50 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
     await cleanActor(db, h.actor);
     vi.restoreAllMocks();
   });
+  it.each(['manual', 'environment', 'usage'] as const)(
+    '%s credential writes fence and commit their generation atomically',
+    async (source) => {
+      const before = (await db.query.cliProviders.findFirst({
+        where: eq(schema.cliProviders.id, provider),
+      }))!;
+      const write = () =>
+        source === 'environment'
+          ? app.request(`/cli-providers/${provider}`, {
+              method: 'PATCH',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ envVars: { CLAUDE_CODE_OAUTH_TOKEN: 'synthetic-new' } }),
+            })
+          : send(
+              'POST',
+              source === 'manual' ? 'secrets' : 'usage-auth/complete',
+              source === 'manual'
+                ? { secretName: 'CLAUDE_CODE_OAUTH_TOKEN', value: 'synthetic-new' }
+                : { code: 'code#state' },
+            );
+      const release = await tryCliAuthLock(db, cliAuthScope(before));
+      expect(release).not.toBeNull();
+      try {
+        expect((await write()).status).toBe(409);
+      } finally {
+        await release?.();
+      }
+      expect(await secrets()).toHaveLength(0);
+      await refuseAudit(db, h.actor);
+      expect((await write()).status).toBe(500);
+      expect(
+        (await db.query.cliProviders.findFirst({ where: eq(schema.cliProviders.id, provider) }))!
+          .authGeneration,
+      ).toBe(before.authGeneration);
+      expect(await secrets()).toHaveLength(0);
+      await allowAudit(db);
+      expect([200, 201]).toContain((await write()).status);
+      expect(
+        (await db.query.cliProviders.findFirst({ where: eq(schema.cliProviders.id, provider) }))!
+          .authGeneration,
+      ).not.toBe(before.authGeneration);
+      expect(await secrets()).toHaveLength(1);
+    },
+  );
   it('audit refusal is scoped to this test actor', async () => {
     await refuseAudit(db, h.actor);
     let id: string | undefined;

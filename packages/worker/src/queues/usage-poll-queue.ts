@@ -12,7 +12,8 @@ import {
   type AuthMode,
   type CliProviderName,
 } from '@haive/shared';
-import { schema, type Database } from '@haive/database';
+import { cliAuthScope } from '@haive/shared/cli-auth-state';
+import { schema, tryCliAuthLock, type Database } from '@haive/database';
 import { getDb } from '../db.js';
 import { resolveProbeFetch } from '../cli-adapters/probe-fetch.js';
 import { getBullRedis } from '../redis.js';
@@ -171,58 +172,64 @@ async function resolveOauthRefreshToken(
   provider: ProviderRow,
   secretName: string,
 ): Promise<{ token: string } | null> {
-  const raw = await readProviderSecretToken(db, provider.id, secretName);
-  if (!raw) return null; // usage tracking not connected for this provider
-  let stored: ClaudeOauthTokens;
+  const release = await tryCliAuthLock(db, cliAuthScope(provider));
+  if (!release) return null;
   try {
-    stored = JSON.parse(raw) as ClaudeOauthTokens;
-  } catch {
-    return null;
-  }
-  if (!stored.accessToken) return null;
-
-  // Known-dead refresh token: skip both the guaranteed-400 refresh and the doomed 401
-  // fetch a stale access token would draw. Returns null so pollProvider treats the
-  // provider as not pollable and moves on — zero vendor calls. A reconnect writes a new
-  // refresh token, which no longer matches this entry, so the gate lifts on its own.
-  if (stored.refreshToken && deadUsageRefreshToken.get(provider.id) === stored.refreshToken) {
-    return null;
-  }
-
-  if (stored.refreshToken && claudeTokenNeedsRefresh(stored.expiresAt)) {
+    const raw = await readProviderSecretToken(db, provider.id, secretName);
+    if (!raw) return null; // usage tracking not connected for this provider
+    let stored: ClaudeOauthTokens;
     try {
-      const fresh = await refreshClaudeToken(stored.refreshToken);
-      await writeProviderSecret(db, provider.id, secretName, JSON.stringify(fresh));
-      deadUsageRefreshToken.delete(provider.id); // recovered (or was never dead)
-      return { token: fresh.accessToken };
-    } catch (err) {
-      if (isClaudeRefreshRejected(err)) {
-        // Permanently rejected (revoked, or superseded by a sibling provider sharing
-        // the account). Retrying only re-fires the 400/401 pair each tick. Mark it dead
-        // to stop the churn, and record ONE needs_reconnect snapshot so the UI can
-        // prompt a re-auth instead of the chip silently vanishing.
-        log.warn(
-          { providerId: provider.id },
-          'usage OAuth refresh rejected (invalid_grant); marking needs_reconnect, polling paused until re-auth',
-        );
-        deadUsageRefreshToken.set(provider.id, stored.refreshToken);
-        await upsertSnapshot(db, provider, {
-          ok: false,
-          error: 'Usage tracking token expired — reconnect this provider to restore its meters.',
-          reconnect: true,
-        }).catch(() => {});
-        return null;
-      }
-      // Transient (network / 5xx): try the stale token anyway; the fetch surfaces the
-      // state without marking the token permanently dead.
-      log.warn(
-        { providerId: provider.id, err },
-        'claude usage token refresh failed; using stale token',
-      );
-      return { token: stored.accessToken };
+      stored = JSON.parse(raw) as ClaudeOauthTokens;
+    } catch {
+      return null;
     }
+    if (!stored.accessToken) return null;
+
+    // Known-dead refresh token: skip both the guaranteed-400 refresh and the doomed 401
+    // fetch a stale access token would draw. Returns null so pollProvider treats the
+    // provider as not pollable and moves on — zero vendor calls. A reconnect writes a new
+    // refresh token, which no longer matches this entry, so the gate lifts on its own.
+    if (stored.refreshToken && deadUsageRefreshToken.get(provider.id) === stored.refreshToken) {
+      return null;
+    }
+
+    if (stored.refreshToken && claudeTokenNeedsRefresh(stored.expiresAt)) {
+      try {
+        const fresh = await refreshClaudeToken(stored.refreshToken);
+        await writeProviderSecret(db, provider.id, secretName, JSON.stringify(fresh));
+        deadUsageRefreshToken.delete(provider.id); // recovered (or was never dead)
+        return { token: fresh.accessToken };
+      } catch (err) {
+        if (isClaudeRefreshRejected(err)) {
+          // Permanently rejected (revoked, or superseded by a sibling provider sharing
+          // the account). Retrying only re-fires the 400/401 pair each tick. Mark it dead
+          // to stop the churn, and record ONE needs_reconnect snapshot so the UI can
+          // prompt a re-auth instead of the chip silently vanishing.
+          log.warn(
+            { providerId: provider.id },
+            'usage OAuth refresh rejected (invalid_grant); marking needs_reconnect, polling paused until re-auth',
+          );
+          deadUsageRefreshToken.set(provider.id, stored.refreshToken);
+          await upsertSnapshot(db, provider, {
+            ok: false,
+            error: 'Usage tracking token expired — reconnect this provider to restore its meters.',
+            reconnect: true,
+          }).catch(() => {});
+          return null;
+        }
+        // Transient (network / 5xx): try the stale token anyway; the fetch surfaces the
+        // state without marking the token permanently dead.
+        log.warn(
+          { providerId: provider.id, err },
+          'claude usage token refresh failed; using stale token',
+        );
+        return { token: stored.accessToken };
+      }
+    }
+    return { token: stored.accessToken };
+  } finally {
+    await release();
   }
-  return { token: stored.accessToken };
 }
 
 async function resolveToken(

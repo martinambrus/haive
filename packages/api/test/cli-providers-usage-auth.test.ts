@@ -1,3 +1,8 @@
+const authLock = vi.hoisted(() => ({ acquire: vi.fn(), release: vi.fn(async () => {}) }));
+vi.mock('@haive/database', async (original) => ({
+  ...(await original<typeof import('@haive/database')>()),
+  tryCliAuthLock: authLock.acquire,
+}));
 import { createHash, randomUUID } from 'node:crypto';
 import { Redis } from 'ioredis';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -82,6 +87,8 @@ app.onError(errorHandler);
 let fake: ReturnType<typeof createFakeDb>;
 
 beforeEach(() => {
+  authLock.acquire.mockReset().mockResolvedValue(authLock.release);
+  authLock.release.mockClear();
   h.user = randomUUID();
   h.redis = realRedis ?? memoryRedis();
   h.pollAdd.mockClear();
@@ -213,4 +220,26 @@ describe('POST /:providerId/usage-auth/complete', () => {
     expect(retry.status).toBe(200);
     expect(exchanges()).toHaveLength(1);
   });
+});
+
+it('fences a usage reconnect and advances the generation', async () => {
+  const before = fake.rows(schema.cliProviders)[0]!.authGeneration;
+  const { state } = await startAuthorization();
+  expect((await post('complete', { code: `${CODE}#${state}` })).status).toBe(200);
+  expect(fake.rows(schema.cliProviders)[0]!.authGeneration).not.toBe(before);
+  expect(authLock.acquire).toHaveBeenCalledOnce();
+  expect(authLock.release).toHaveBeenCalledOnce();
+  expect(authLock.release.mock.invocationCallOrder[0]).toBeLessThan(
+    h.pollAdd.mock.invocationCallOrder[0]!,
+  );
+});
+it('refuses a busy usage reconnect without consuming its authorization', async () => {
+  const { state } = await startAuthorization();
+  authLock.acquire.mockResolvedValueOnce(null);
+  const paste = { code: `${CODE}#${state}` };
+  const busy = await post('complete', paste);
+  expect(busy.status).toBe(409);
+  expect(await busy.json()).toMatchObject({ code: 'cli_auth_busy' });
+  expect(h.fetch).not.toHaveBeenCalled();
+  expect((await post('complete', paste)).status).toBe(200);
 });

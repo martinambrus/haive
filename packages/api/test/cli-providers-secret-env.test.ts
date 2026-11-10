@@ -1,3 +1,8 @@
+const authLock = vi.hoisted(() => ({ acquire: vi.fn(), release: vi.fn(async () => {}) }));
+vi.mock('@haive/database', async (original) => ({
+  ...(await original<typeof import('@haive/database')>()),
+  tryCliAuthLock: authLock.acquire,
+}));
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
@@ -87,6 +92,8 @@ function send(method: string, path: string, body: Record<string, unknown>) {
 const ENV = { ANTHROPIC_BASE_URL: 'https://api.example', ANTHROPIC_API_KEY: SECRET_VALUE };
 
 beforeEach(() => {
+  authLock.acquire.mockReset().mockResolvedValue(authLock.release);
+  authLock.release.mockClear();
   h.transactionOpen = false;
   h.auditLog.mockReset();
   h.add.mockReset();
@@ -492,4 +499,52 @@ it('a sign-out audit commit failure queues nothing', async () => {
   expect(h.add).not.toHaveBeenCalled();
   expect(fake.rows(schema.auditEvents)).toEqual([]);
   expect(h.auditLog).not.toHaveBeenCalled();
+});
+
+describe('sign-out secret writers advance the generation under the auth lock', () => {
+  it.each(['CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_USAGE_OAUTH'])(
+    'fences manual and environment writes of %s',
+    async (secretName) => {
+      const fake = setup(true);
+      for (const method of secretName === 'CLAUDE_CODE_OAUTH_TOKEN'
+        ? ['POST', 'PATCH']
+        : ['POST']) {
+        const before = fake.rows(schema.cliProviders)[0]!.authGeneration;
+        const res = await send(
+          method,
+          `/${PROVIDER}${method === 'POST' ? '/secrets' : ''}`,
+          method === 'POST'
+            ? { secretName, value: 'new-token' }
+            : { envVars: { [secretName]: 'new-token' } },
+        );
+        expect([200, 201]).toContain(res.status);
+        expect(fake.rows(schema.cliProviders)[0]!.authGeneration).not.toBe(before);
+      }
+      const writes = secretName === 'CLAUDE_CODE_OAUTH_TOKEN' ? 2 : 1;
+      expect(authLock.acquire).toHaveBeenCalledTimes(writes);
+      expect(authLock.release).toHaveBeenCalledTimes(writes);
+    },
+  );
+  it.each(['POST', 'PATCH'])(
+    'refuses a busy %s write with 409 and keeps the credential',
+    async (method) => {
+      const fake = setup(true);
+      authLock.acquire.mockResolvedValue(null);
+      const res = await send(
+        method,
+        `/${PROVIDER}${method === 'POST' ? '/secrets' : ''}`,
+        method === 'POST'
+          ? { secretName: 'CLAUDE_CODE_OAUTH_TOKEN', value: 'new-token' }
+          : { envVars: { CLAUDE_CODE_OAUTH_TOKEN: 'new-token' } },
+      );
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({
+        code: 'cli_auth_busy',
+        error:
+          'CLI authentication is busy. Finish the current sign-in or credential update and try again.',
+      });
+      expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+      expect(fake.rows(schema.auditEvents)).toHaveLength(0);
+    },
+  );
 });

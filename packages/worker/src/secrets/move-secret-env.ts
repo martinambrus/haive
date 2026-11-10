@@ -1,8 +1,13 @@
-import { eq } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { randomUUID } from 'node:crypto';
+import { cliAuthScope } from '@haive/shared/cli-auth-state';
+import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
+import { and, eq } from 'drizzle-orm';
+import { schema, tryCliAuthLock, type Database } from '@haive/database';
 import { logger, secretsService, splitSecretLikeEnv, upsertProviderSecret } from '@haive/shared';
 
 const log = logger.child({ module: 'move-secret-env' });
+const isAuthSecret = (name: string) =>
+  name === 'CLAUDE_CODE_OAUTH_TOKEN' || name === CLAUDE_USAGE_OAUTH_SECRET;
 
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 
@@ -15,11 +20,24 @@ async function forEachLegacyProvider(
 ): Promise<number> {
   let failed = 0;
   const providers = await db.query.cliProviders.findMany({
-    columns: { id: true, envVars: true },
+    columns: {
+      id: true,
+      envVars: true,
+      userId: true,
+      name: true,
+      authMode: true,
+      isolateAuth: true,
+    },
   });
   for (const provider of providers) {
     if (Object.keys(splitSecretLikeEnv(provider.envVars ?? {}).secrets).length === 0) continue;
+    let release: (() => Promise<void>) | null = null;
     try {
+      if (Object.keys(splitSecretLikeEnv(provider.envVars ?? {}).secrets).some(isAuthSecret)) {
+        release = await tryCliAuthLock(db, cliAuthScope(provider));
+        if (!release)
+          throw new Error('CLI authentication is busy; provider secret migration was deferred');
+      }
       await db.transaction(async (tx) => {
         const [locked] = await tx
           .select({ envVars: schema.cliProviders.envVars })
@@ -31,6 +49,8 @@ async function forEachLegacyProvider(
     } catch (err) {
       failed += 1;
       log.error({ err, providerId: provider.id, phase }, 'provider env secret migration failed');
+    } finally {
+      await release?.();
     }
   }
   return failed;
@@ -44,7 +64,22 @@ async function copyKeys(
   masterKek: string,
 ): Promise<void> {
   for (const [name, value] of Object.entries(keys)) {
+    const existing = isAuthSecret(name)
+      ? await tx.query.cliProviderSecrets.findFirst({
+          where: and(
+            eq(schema.cliProviderSecrets.providerId, providerId),
+            eq(schema.cliProviderSecrets.secretName, name),
+          ),
+          columns: { id: true },
+        })
+      : undefined;
     await upsertProviderSecret(tx, { providerId, name, value, masterKek, onExisting: 'keep' });
+    if (isAuthSecret(name) && !existing) {
+      await tx
+        .update(schema.cliProviders)
+        .set({ authGeneration: randomUUID() })
+        .where(eq(schema.cliProviders.id, providerId));
+    }
   }
 }
 
