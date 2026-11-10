@@ -407,6 +407,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       if (!preview?.ref) {
         throw new ReopenStepFormError(
           'The edits need a fresh commit preview. Review the refreshed preview before finishing.',
+          { notice: true },
         );
       }
       let current: GitPreview;
@@ -415,6 +416,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       } catch {
         throw new ReopenStepFormError(
           'The edits changed or could not be read. Review the refreshed preview before finishing.',
+          { notice: true },
         );
       }
       if (
@@ -424,6 +426,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       ) {
         throw new ReopenStepFormError(
           'The edits changed since the commit preview. Review the refreshed preview before finishing.',
+          { notice: true },
         );
       }
       const message = (values.commitMessage ?? '').trim() || 'chore: run-app session edits';

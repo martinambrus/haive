@@ -493,9 +493,13 @@ export class MiningWaveError extends Error {
  * to the person before another bounded batch is dispatched.
  */
 export class ReopenStepFormError extends Error {
-  constructor(message = 'step has another decision to present') {
+  /** True when `message` is written for the user: the refreshed form then shows it as a note.
+   *  Plan steps reopen with internal control text, which stays out of the form. */
+  readonly notice: boolean;
+  constructor(message = 'step has another decision to present', opts?: { notice?: boolean }) {
     super(message);
     this.name = 'ReopenStepFormError';
+    this.notice = opts?.notice === true;
   }
 }
 
