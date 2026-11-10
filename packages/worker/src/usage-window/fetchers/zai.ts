@@ -1,3 +1,4 @@
+import { readForgeJson } from '@haive/shared/forge';
 import {
   clampPct,
   errMsg,
@@ -15,6 +16,8 @@ import {
 // calls. Auth is the raw token with NO "Bearer " prefix.
 const ZAI_DEFAULT_BASE = 'https://api.z.ai';
 const ZAI_USAGE_PATH = '/api/monitor/usage/quota/limit';
+// A quota reply holds only a few windows; 64 KiB leaves ample room for added fields.
+const USAGE_BODY_MAX_BYTES = 64 * 1024;
 
 /** The limits array, from whichever envelope this deployment returns.
  *
@@ -76,7 +79,7 @@ export const fetchZaiUsage: UsageFetcher = async (token, ctx): Promise<UsageFetc
     });
     if (res.status === 429) return { ok: false, rateLimited: true, error: 'http 429' };
     if (!res.ok) return httpErrorOutcome(res.status);
-    const windows = parseZaiUsage(await res.json());
+    const windows = parseZaiUsage(await readForgeJson(res, USAGE_BODY_MAX_BYTES));
     // Either window alone is a usable reading — a plan may expose only the weekly one.
     if (!windows.fiveHour && !windows.sevenDay)
       return { ok: false, rateLimited: false, error: 'unexpected response shape' };

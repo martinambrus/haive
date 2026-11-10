@@ -1,3 +1,5 @@
+import { readBounded } from '@haive/shared/forge';
+
 /** Does this Ollama provider actually answer? — the Test-connection check.
  *
  *  `claude --version` succeeds no matter how the provider is configured, and ollama
@@ -23,6 +25,8 @@ export interface OllamaProbeResult {
 
 const PROBE_TIMEOUT_MS = 20_000;
 const DETAIL_MAX_CHARS = 300;
+// Error replies are small JSON or short text; 64 KiB leaves room for proxy details.
+const PROBE_BODY_MAX_BYTES = 64 * 1024;
 
 /** Pull the human-readable reason out of an error body. Ollama's Anthropic layer
  *  answers `{type:"error",error:{type,message}}`, its native layer `{error:"..."}`,
@@ -115,7 +119,8 @@ export async function probeOllamaEndpoint(opts: {
   if (resp.ok) return { ok: true };
   let body = '';
   try {
-    body = await resp.text();
+    const answer = await readBounded(resp, PROBE_BODY_MAX_BYTES);
+    if (!answer.truncated) body = answer.text;
   } catch {
     // Body unreadable; the status alone still names the failure.
   }

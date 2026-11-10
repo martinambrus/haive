@@ -112,7 +112,7 @@ export abstract class BaseForgeProvider implements ForgeProvider {
   }
 }
 
-async function readBounded(
+export async function readBounded(
   res: Response,
   maxBytes: number,
 ): Promise<{ text: string; truncated: boolean }> {
