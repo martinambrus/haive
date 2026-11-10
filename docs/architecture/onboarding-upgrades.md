@@ -261,7 +261,12 @@ because the form parks between the plan and the apply. A file is judged on the i
 so a save landing meanwhile makes a new file the delete never touches, and puts a refused one back
 without replacing a file written since. The rules region is stripped the same way
 (`rewriteFileIfNoFollow`): rewritten on the parked inode and put back, since a strip over the file at
-its path overwrote a save that landed between its read and its write. A file with no region, or no
+its path overwrote a save that landed between its read and its write. A process death between the
+park and the put-back leaves the file at its park name (`.<leaf>.haive-park-<pid>-<uuid>`); the
+worker's write-path sweep (the one `sweepStaleTemps` runs, streamed and budgeted, never the api and
+never a read) puts a park whose inode `ctime` is more than 24 hours old back when the name is free,
+and warns once per name when it is not. Age, not the pid: api and worker are separate pid namespaces
+on one volume. A file with no region, or no
 AGENTS.md at all, is left as it is; the strip used to write that absence as an empty AGENTS.md,
 which 03 then committed. Only a writer that already held the file open can still land between the
 judge and the act, and nothing short of a lock it takes too can exclude one. A link or a directory
@@ -460,7 +465,7 @@ wait for the next successful 12 or 02 record write, which retires them as below.
 out of AGENTS.md, CLAUDE.md and GEMINI.md by its markers, as a reset does, with the newline 07 wrote
 after it (`stripRtkBlocks`). A link is refused and reported, as is a file past the 1 MiB cap the
 plan reads with or one that is not valid UTF-8, and a `CLAUDE.md -> AGENTS.md` link is left to
-AGENTS.md's own pass. Each strip records what the file held before it changes (`rtkBlockStrips`),
+AGENTS.md's own pass. Each strip records what the file held before it parks the file (`rtkBlockStrips`), so no database wait runs while the file is away from its name,
 in a superseded row kept apart from the rows a rollback restores (`RTK_BLOCK_RECORD`), and a retry
 that finds the block gone takes the record an earlier attempt made while the file still holds what
 that strip left: a save that took the name while the strip was parked is not its doing. A rollback puts the blocks back
