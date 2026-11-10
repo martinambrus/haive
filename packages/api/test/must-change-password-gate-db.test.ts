@@ -224,12 +224,16 @@ describe.skipIf(!url)('a user who must change their password, on Postgres', () =
       expect((await send('GET', '/tasks', { cookie })).status).toBe(401);
     });
 
-    it('MC-8: PUT /user-settings/password with a wrong current password answers 401 and keeps the flag', async () => {
+    it('MC-8: PUT /user-settings/password with a wrong current password answers 400 and keeps the flag', async () => {
       const res = await send('PUT', '/user-settings/password', {
         cookie,
         body: { currentPassword: 'not-the-password-0', newPassword: OTHER_PASSWORD },
       });
-      expect(res.status).toBe(401);
+      expect(res.status).toBe(400);
+      expect(await json(res)).toMatchObject({
+        error: 'Current password is incorrect',
+        code: 'current_password_incorrect',
+      });
       expect((await userRow(user.id)).mustChangePassword).toBe(true);
     });
 

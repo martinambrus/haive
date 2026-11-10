@@ -294,7 +294,14 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
     it('refuses the eleventh wrong current password before bcrypt and bounds throttle audits', async () => {
       const email = mail('password-throttle');
       addUser(email);
-      for (let i = 0; i < 10; i++) expect((await change(email)).status).toBe(401);
+      for (let i = 0; i < 10; i++) {
+        const res = await change(email);
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({
+          error: 'Current password is incorrect',
+          code: 'current_password_incorrect',
+        });
+      }
       vi.mocked(verifyPassword).mockClear();
       const res = await change(email);
       expect(res.status).toBe(429);
@@ -326,7 +333,7 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
             first === 'login'
               ? await login(email, WRONG, { peer: peer(i) })
               : await change(email, WRONG, peer(i));
-          expect(res.status).toBe(401);
+          expect(res.status).toBe(first === 'login' ? 401 : 400);
         }
         vi.mocked(verifyPassword).mockClear();
         const res =
@@ -357,7 +364,7 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
       addUser(email);
       h.redis = () => ({ status: 'ready', eval: () => new Promise(() => {}) });
       const res = await answeredWithin(1500, change(email));
-      expect(res.status).toBe(401);
+      expect(res.status).toBe(400);
       expect(h.warn).toHaveBeenCalled();
     });
   });

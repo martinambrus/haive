@@ -108,7 +108,7 @@ describe.skipIf(!url)('Account security audit on Postgres', () => {
     vi.restoreAllMocks();
   });
   it.each([false, true])(
-    'wrong current password requires its audit before the 401 (audit refused: %s)',
+    'wrong current password requires its audit before the 400 (audit refused: %s)',
     async (refused) => {
       const before = await user();
       if (refused) await refuseAudit(db, h.actor);
@@ -116,7 +116,12 @@ describe.skipIf(!url)('Account security audit on Postgres', () => {
         currentPassword: 'wrong-current-password',
         newPassword: 'synthetic-next-password',
       });
-      expect(res.status).toBe(refused ? 500 : 401);
+      expect(res.status).toBe(refused ? 500 : 400);
+      if (!refused)
+        expect(await res.json()).toEqual({
+          error: 'Current password is incorrect',
+          code: 'current_password_incorrect',
+        });
       expect(await user()).toEqual(before);
       expect(await sessions()).toEqual([]);
       expect(res.headers.getSetCookie()).toEqual([]);

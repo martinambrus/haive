@@ -144,7 +144,7 @@ userSettingsRoutes.put('/password', requireAuthAllowingPasswordChange, async (c)
     };
     await insertAuditEvent(db, event);
     logAuditEvent(event);
-    throw new HttpError(401, 'Current password is incorrect');
+    throw new HttpError(400, 'Current password is incorrect', 'current_password_incorrect');
   }
 
   if (user.mustChangePassword && body.newPassword === body.currentPassword) {
