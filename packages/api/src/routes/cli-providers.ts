@@ -583,9 +583,13 @@ cliProviderRoutes.patch('/:id', async (c) => {
       }
     : undefined;
   const authSecretNames = Object.keys(split?.secrets ?? {}).filter(isSignOutSecret);
-  // Even an apparent no-op can become a change before the row lock is taken.
+  // The edit form sends both fields on every save: lock only for a real change, so an unrelated
+  // edit never waits on a login. A stale read of either field is refused below either way.
   const authSettingsRequested = body.authMode !== undefined || body.isolateAuth !== undefined;
-  const authProviders = authSettingsRequested
+  const authSettingsChanged =
+    (body.authMode !== undefined && body.authMode !== existing.authMode) ||
+    (body.isolateAuth !== undefined && body.isolateAuth !== existing.isolateAuth);
+  const authProviders = authSettingsChanged
     ? [
         existing,
         {
@@ -609,7 +613,7 @@ cliProviderRoutes.patch('/:id', async (c) => {
       // A concurrent PATCH may have committed between our read and lock acquisition.
       // Refuse rather than write under a lock for settings the row no longer has.
       if (
-        authProviders.length &&
+        (authProviders.length || authSettingsRequested) &&
         (current.authMode !== existing.authMode || current.isolateAuth !== existing.isolateAuth)
       ) {
         throw new HttpError(

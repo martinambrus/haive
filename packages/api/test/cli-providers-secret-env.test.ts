@@ -638,9 +638,23 @@ describe('provider auth scope changes', () => {
     expect(authLock.acquire).toHaveBeenCalledTimes(2);
     expect(authLock.release).toHaveBeenCalledTimes(2);
   });
+  it('takes no lock for unchanged auth settings and saves while the scope is held', async () => {
+    const fake = setup(true);
+    const before = fake.rows(schema.cliProviders)[0]!;
+    authLock.acquire.mockResolvedValue(null);
+    const res = await send('PATCH', `/${PROVIDER}`, {
+      authMode: before.authMode,
+      isolateAuth: before.isolateAuth,
+      label: 'Renamed while signing in',
+    });
+    expect(res.status).toBe(200);
+    expect(authLock.acquire).not.toHaveBeenCalled();
+    expect(fake.rows(schema.cliProviders)[0]!.label).toBe('Renamed while signing in');
+    expect(fake.rows(schema.cliProviders)[0]!.authGeneration).toBe(before.authGeneration);
+  });
   it.each([
     { isolateAuth: true, envVars: { CLAUDE_CODE_OAUTH_TOKEN: 'new-token' } },
-    { authMode: 'subscription' },
+    { authMode: 'api_key' },
   ])('refuses a stale scope read before writing %j', async (change) => {
     const fake = setup(true);
     authLock.acquire.mockImplementation(async () => {
@@ -653,6 +667,6 @@ describe('provider auth scope changes', () => {
     expect(fake.rows(schema.cliProviders)[0]!.isolateAuth).toBe(false);
     expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
     expect(fake.rows(schema.auditEvents)).toHaveLength(0);
-    expect(authLock.release).toHaveBeenCalledTimes(change.authMode ? 1 : 2);
+    expect(authLock.release).toHaveBeenCalledTimes(2);
   });
 });
