@@ -839,6 +839,15 @@ redacted structurally, including git's own password placeholder; the raw snapsho
 restoration. A placeholder containing whitespace is a known redaction limit; neither measured git
 version emits that form.
 
+Worker writes of the same repository settings use `worker/src/audit.ts`: project-state sync
+and take-theirs resolutions audit scope and agent rules; the legacy clone mirror import and
+RAG source selection audit scope. Each inserts its row in the settings transaction, only for
+changed columns, and logs after commit (including an import nested in the project-state writer's
+preparation transaction). Metadata contains `source`, `actorKind` and `fields` (column names
+only), never rule text, globs or other setting values. Task writes name the task user, conflict
+answers name the resolving user, and unattended imports name the repository owner. Other portable
+settings have no API audit action and do not gain one here.
+
 Disconnect (`integration.connection.disconnect`) is the one exception, on purpose: its row follows
 the vendor revoke, which cannot be undone and whose outcome (`revoked`) the row records, so it stays
 `recordAuditEvent` and a refused row is logged, not raised.

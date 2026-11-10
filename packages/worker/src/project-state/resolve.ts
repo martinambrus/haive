@@ -1,3 +1,4 @@
+import { auditRepositorySettings, logAuditEvent, type AuditEvent } from '../audit.js';
 import {
   REVIEW_WATERMARK_SETTING,
   watermarkKeyOfUnit,
@@ -117,6 +118,7 @@ interface PutBack {
 }
 
 interface After {
+  auditEvents: AuditEvent[];
   resync: string | null;
   putBack: PutBack | null;
   flushPlan: boolean;
@@ -129,10 +131,11 @@ export async function resolveProjectStateConflict(
   db: Database,
   payload: ProjectStateResolvePayload,
 ): Promise<ProjectStateResolveResult> {
-  const after: After = { resync: null, putBack: null, flushPlan: false };
+  const after: After = { auditEvents: [], resync: null, putBack: null, flushPlan: false };
   let result: ProjectStateResolveResult;
   try {
     result = await answerInTransaction(db, payload, after);
+    after.auditEvents.forEach(logAuditEvent);
   } catch (err) {
     if (err instanceof RenderFileMovedError) {
       result = { kind: 'moved' };
@@ -155,6 +158,7 @@ export async function resolveProjectStateConflict(
     await syncProjectStateFromCheckout(db, {
       repositoryId: payload.repositoryId,
       repoPath: after.resync,
+      actor: { userId: payload.userId, kind: 'resolving_user' },
     }).catch((err) =>
       logger.warn(
         { err, repositoryId: payload.repositoryId },
@@ -633,6 +637,15 @@ async function answerSettingsQuestion(
 
   const now = new Date();
   if (update !== null) {
+    after.auditEvents.push(
+      ...(await auditRepositorySettings(tx, {
+        repositoryId,
+        actor: { userId, kind: 'resolving_user' },
+        source: 'project_state_resolve',
+        before: columns,
+        updates: update,
+      })),
+    );
     await tx
       .update(schema.repositories)
       .set({ ...update, updatedAt: now })
