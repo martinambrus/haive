@@ -35,6 +35,13 @@ import { z } from 'zod';
  * anonymous `git://` protocol is deliberately absent: it is unauthenticated and
  * unencrypted, nothing in the product references it, and no stored repository
  * uses it.
+ *
+ * The host must also read the same to WHATWG and to git's transports. curl dials
+ * the raw authority text, so `http://public.example\@10.0.0.5/` (WHATWG host
+ * `public.example`, curl host 10.0.0.5 — MEASURED) would let a remote pass the
+ * worker's owner guard with one host and connect to another. A value holding
+ * whitespace or a control character, or whose raw host differs from the parsed
+ * one (IDN, percent-encoded or short IPv4 forms included), is refused.
  */
 const ALLOWED_GIT_URL_SCHEMES = new Set(['https:', 'http:', 'ssh:']);
 

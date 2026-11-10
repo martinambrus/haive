@@ -159,6 +159,31 @@ never an auth strike or a backoff. The Ollama and OpenRouter probes and the Z.AI
 reply (`readBounded`, `readForgeJson` from `@haive/shared/forge`, which cancel the stream past the cap) and
 treat a longer one as no answer: the bare HTTP status, an inconclusive compatibility check, a failed poll.
 
+**A git remote follows the same owner rule.** Any signed-in user can add a repository or a bundle with a git URL,
+or repoint a repository's origin (`POST /repos/:id/remote`), and the worker's child `git` then dials it and the
+clone or step error reaches the user. Every git network operation goes through one of two chokepoints, `gitClone`
+(`repo/clone.ts`) and `originGitRun` (`repo/git-push.ts`), and both take a required owner. `gitRemoteGuardArgs`
+(`repo/git-remote-guard.ts`) reads the owner's `users.role` per call: `admin` gets git unchanged, and any other
+value, a missing row included, has every fetch and push URL of the origin (insteadOf applied) resolved by
+`resolveGuardedAddress` (`egress/probe-egress.ts`: the probe's resolver, blocked ranges, private-endpoint
+allowlist and unliftable addresses) before git starts. A blocked answer is refused with git's own "Could not
+resolve host" text, which a name that does not exist also gets on this path, so the two read alike. The checked
+answer is pinned so git cannot resolve again: http(s) gets `http.curloptResolve` with every checked address,
+`http.followRedirects=false` and `http.proxy=`. A URL-scoped entry in the repository's own config
+(`http.<url>.*`, or `remote.<name>.proxy`) outranks a generic `-c`, and git matches it against every spelling of
+the stored URL (userinfo, query, fragment), so pinning per URL was tried and kept missing one: `originGitRun`
+instead reads the checkout's effective config once (includes and worktree config) and refuses a guarded run that
+has any such key, with a message that names the setting to remove. An imported repository never has one (the
+import strips `http.*`); an external checkout may. Any ambient `GIT_CONFIG_*` is dropped for that run; ssh gets `core.sshCommand` with
+`-o HostName=<address> -o HostKeyAlias=<host>`, and `GIT_SSH`/`GIT_SSH_COMMAND` are dropped for that run. The
+worker image has no ssh client, so that pin is tested on its argv only. A redirecting remote therefore fails for
+a non-administrator, and a private Git server needs an allowlist entry. Module sources are admin-only routes and
+pass a named admin-trusted owner. `isAllowedGitRemoteUrl` (`schemas/git-url.ts`) also refuses a URL whose raw
+authority holds a backslash, a control or whitespace character, or a host that differs from what `new URL`
+parses, because curl dials the raw text: `http://public.example\@10.0.0.5/` reads as `public.example` to
+WHATWG and connects to 10.0.0.5. That rule applies to every caller, administrators included, and also refuses
+IDN and percent-encoded hosts (write the punycode form).
+
 **The private-endpoint allowlist.** An administrator lists the private, loopback or link-local endpoints the
 install may dial: `config:security:privateEndpointAllowlist`, `GET`/`PUT /admin/config/private-endpoint-allowlist`
 (an audit row `config.private_endpoint_allowlist` per change), a card on the admin data tab. The key has no
