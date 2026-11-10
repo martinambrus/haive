@@ -1,3 +1,4 @@
+import { CLI_LOGIN_CLOSE_CODES } from '@haive/shared/constants';
 vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
   tryCliAuthLock: async () => {
@@ -15,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   authBusy: false,
+  upgrade: vi.fn(),
   onAuthLock: undefined as (() => Promise<void>) | undefined,
   releaseAuth: vi.fn(async () => {}),
   updates: [] as Record<string, unknown>[],
@@ -50,6 +52,7 @@ vi.mock('ws', async (original) => ({
   ...(await original<typeof import('ws')>()),
   WebSocketServer: class {
     handleUpgrade(_req: unknown, _socket: unknown, _head: unknown, cb: (ws: unknown) => void) {
+      h.upgrade();
       cb(h.ws);
     }
   },
@@ -167,10 +170,10 @@ beforeEach(() => {
     readyState: 1,
     send: vi.fn(),
     ping: vi.fn(),
-    close: () => {
+    close: vi.fn(() => {
       ws.readyState = 3;
       ws.emit('close');
-    },
+    }),
   });
   stream = new Duplex({
     read() {},
@@ -1909,7 +1912,12 @@ it('amp credential-file success writes a volume login row', async () => {
 describe('login generation and lock lifecycle', () => {
   it('rejects a conflicting login before creating any container', async () => {
     h.authBusy = true;
-    await start('', false);
+    const socket = await start('', false);
+    expect(h.upgrade).toHaveBeenCalledOnce();
+    expect(ws.close).toHaveBeenCalledWith(CLI_LOGIN_CLOSE_CODES.AUTH_BUSY);
+    expect(ws.listenerCount('error')).toBe(1);
+    expect(socket.write).not.toHaveBeenCalled();
+    expect(h.releaseAuth).not.toHaveBeenCalled();
     expect(h.attach).not.toHaveBeenCalled();
     expect(h.start).not.toHaveBeenCalled();
   });
@@ -2006,7 +2014,13 @@ it('refuses a login when its settings change between the provider read and auth 
     });
   };
   const socket = await start('', false);
-  expect(socket.write).toHaveBeenCalledWith(expect.stringContaining('409'));
+  expect(h.upgrade).toHaveBeenCalledOnce();
+  expect(ws.close).toHaveBeenCalledWith(CLI_LOGIN_CLOSE_CODES.SETTINGS_CHANGED);
+  expect(ws.listenerCount('error')).toBe(1);
+  expect(socket.write).not.toHaveBeenCalled();
+  expect(h.releaseAuth.mock.invocationCallOrder[0]).toBeLessThan(
+    h.upgrade.mock.invocationCallOrder[0]!,
+  );
   expect(h.attach).not.toHaveBeenCalled();
   expect(h.start).not.toHaveBeenCalled();
   expect(h.releaseAuth).toHaveBeenCalledOnce();

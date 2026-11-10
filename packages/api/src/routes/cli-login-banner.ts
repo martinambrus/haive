@@ -15,6 +15,7 @@ import {
   AMP_PASTE_LOGIN_URL_PREFIX,
   AUTH_URL_PREFIXES,
   CLI_EXEC_JOB_NAMES,
+  CLI_LOGIN_CLOSE_CODES,
   INCOMPLETE_ANSI_ESCAPE,
   TOKEN_PASTE_PROVIDERS,
   detectAuthResult,
@@ -315,9 +316,20 @@ export function installCliLoginBannerWebSocket(
           return;
         }
 
+        // Browsers cannot read an HTTP refusal of an upgrade. These authenticated,
+        // owned-provider refusals carry only a close code and never start a banner session.
+        const closeRefused = (code: number) => {
+          if (auth.session.revoked || socket.destroyed || socket.writableEnded) return;
+          wss.handleUpgrade(req, socket, head, (ws) => {
+            // Registers transport errors and session revocation policy, not a banner session.
+            if (auth.session.accept(ws)) ws.close(code);
+            else ws.terminate();
+          });
+        };
+
         const releaseAuth = await tryCliAuthLock(db, cliAuthScope(provider));
         if (!releaseAuth) {
-          rejectUpgrade(socket, 409, 'Login or sign-out in progress');
+          closeRefused(CLI_LOGIN_CLOSE_CODES.AUTH_BUSY);
           return;
         }
         if (auth.session.revoked || socket.destroyed) {
@@ -341,7 +353,7 @@ export function installCliLoginBannerWebSocket(
           if (!lockedProvider || cliAuthScope(lockedProvider) !== cliAuthScope(provider)) {
             socket.removeListener('close', releaseUnclaimed);
             await releaseAuth();
-            rejectUpgrade(socket, 409, 'Login settings changed. Try again.');
+            closeRefused(CLI_LOGIN_CLOSE_CODES.SETTINGS_CHANGED);
             return;
           }
           wss.handleUpgrade(req, socket, head, (ws) => {

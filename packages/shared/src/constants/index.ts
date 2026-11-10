@@ -454,6 +454,12 @@ export const CLI_EXEC_JOB_NAMES = {
 /** Stable scheduler key; BullMQ derives each refresh tick's job id from it. */
 export const VERSION_REFRESH_JOB_ID = 'cli-refresh-versions-repeatable';
 
+/** Login banner refusals sent only after origin, authentication and ownership checks. */
+export const CLI_LOGIN_CLOSE_CODES = {
+  AUTH_BUSY: 4409,
+  SETTINGS_CHANGED: 4410,
+} as const;
+
 /** Maximum time a sign-out job waits for an account's auth scope to become available. */
 export const CLI_SIGN_OUT_AUTH_WAIT_MS = 30 * 60_000;
 

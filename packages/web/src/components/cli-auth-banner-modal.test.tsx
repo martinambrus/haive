@@ -1,3 +1,4 @@
+import { CLI_LOGIN_CLOSE_CODES } from '@haive/shared/constants';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CliAuthBannerModal } from './cli-auth-banner-modal';
 import { buttons, createRenderer, fire, textOf, type Renderer } from '../../test/render-tree';
@@ -49,7 +50,7 @@ class FakeWebSocket {
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   onerror: (() => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event?: { code: number; reason?: string }) => void) | null = null;
   constructor(_url: string) {
     FakeWebSocket.instances.push(this);
   }
@@ -319,4 +320,23 @@ describe('CLI auth banner socket close', () => {
     expect(textOf(view.tree())).toContain('Connection timed out');
     expect(textOf(view.tree())).not.toContain('Connection closed');
   });
+});
+
+it.each([
+  [
+    CLI_LOGIN_CLOSE_CODES.AUTH_BUSY,
+    'Another sign-in or sign-out for this account is in progress. Try again when it finishes.',
+  ],
+  [CLI_LOGIN_CLOSE_CODES.SETTINGS_CHANGED, 'Login settings changed. Reload and try again.'],
+])('shows application close code %s even around generic error callbacks', (code, message) => {
+  socket.onerror?.();
+  socket.onclose?.({ code: code as number, reason: 'unrelated reason text' });
+  view.draw();
+  expect(textOf(view.tree())).toContain(message);
+  socket.onerror?.();
+  socket.onclose?.({ code: 1006 });
+  view.draw();
+  expect(textOf(view.tree())).toContain(message);
+  expect(textOf(view.tree())).not.toContain('WebSocket error');
+  expect(buttons(view.tree(), 'retry')).toHaveLength(1);
 });
