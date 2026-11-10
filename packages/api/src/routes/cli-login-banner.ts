@@ -330,6 +330,20 @@ export function installCliLoginBannerWebSocket(
         };
         socket.once('close', releaseUnclaimed);
         try {
+          // Capture the settings under the lock: a PATCH may have committed after
+          // the first read but before we acquired its old scope.
+          const lockedProvider = await db.query.cliProviders.findFirst({
+            where: and(
+              eq(schema.cliProviders.id, providerId),
+              eq(schema.cliProviders.userId, auth.userId),
+            ),
+          });
+          if (!lockedProvider || cliAuthScope(lockedProvider) !== cliAuthScope(provider)) {
+            socket.removeListener('close', releaseUnclaimed);
+            await releaseAuth();
+            rejectUpgrade(socket, 409, 'Login settings changed. Try again.');
+            return;
+          }
           wss.handleUpgrade(req, socket, head, (ws) => {
             socket.removeListener('close', releaseUnclaimed);
             if (!auth.session.accept(ws)) {
@@ -340,8 +354,8 @@ export function installCliLoginBannerWebSocket(
               ws,
               userId: auth.userId,
               providerId: provider.id,
-              providerName: provider.name,
-              provider,
+              providerName: lockedProvider.name,
+              provider: lockedProvider,
               releaseAuth,
               docker,
             }).catch(async (err) => {

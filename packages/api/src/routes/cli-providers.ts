@@ -56,7 +56,7 @@ import {
 import { getCliExecQueue, getUsagePollQueue } from '../queues.js';
 import { enqueueCliVersionRefresh } from '../lib/cli-version-refresh.js';
 import { loadPollableJob } from '../lib/cli-job-poll.js';
-import { isSignOutSecret, withCliAuthWrite } from '../lib/cli-auth-write.js';
+import { isSignOutSecret, withCliAuthLocks, withCliAuthWrite } from '../lib/cli-auth-write.js';
 
 function secretAuditMetadata(names: Iterable<string>): {
   secretCount: number;
@@ -583,7 +583,21 @@ cliProviderRoutes.patch('/:id', async (c) => {
       }
     : undefined;
   const authSecretNames = Object.keys(split?.secrets ?? {}).filter(isSignOutSecret);
-  const updated = await withCliAuthWrite(db, existing, authSecretNames, () =>
+  // Even an apparent no-op can become a change before the row lock is taken.
+  const authSettingsRequested = body.authMode !== undefined || body.isolateAuth !== undefined;
+  const authProviders = authSettingsRequested
+    ? [
+        existing,
+        {
+          ...existing,
+          authMode: body.authMode ?? existing.authMode,
+          isolateAuth: body.isolateAuth ?? existing.isolateAuth,
+        },
+      ]
+    : authSecretNames.length
+      ? [existing]
+      : [];
+  const updated = await withCliAuthLocks(db, authProviders, () =>
     db.transaction(async (tx) => {
       if (startsJob) await admitNewWork(tx);
       const [current] = await tx
@@ -592,6 +606,18 @@ cliProviderRoutes.patch('/:id', async (c) => {
         .where(and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)))
         .for('no key update');
       if (!current) throw new HttpError(404, 'CLI provider not found');
+      // A concurrent PATCH may have committed between our read and lock acquisition.
+      // Refuse rather than write under a lock for settings the row no longer has.
+      if (
+        authProviders.length &&
+        (current.authMode !== existing.authMode || current.isolateAuth !== existing.isolateAuth)
+      ) {
+        throw new HttpError(
+          409,
+          'CLI authentication settings changed. Reload and try again.',
+          'cli_auth_busy',
+        );
+      }
       const fields: string[] = PROVIDER_SECURITY_FIELDS.filter(
         (field) =>
           updates[field] !== undefined &&

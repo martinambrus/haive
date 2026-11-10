@@ -155,6 +155,48 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
       expect(await secrets()).toHaveLength(1);
     },
   );
+  for (const change of [{ isolateAuth: true }, { authMode: 'api_key' }] as const) {
+    it.each(['old', 'new'] as const)(
+      `scope change ${JSON.stringify(change)} refuses a held %s scope, then releases both on success`,
+      async (held) => {
+        const before = (await db.query.cliProviders.findFirst({
+          where: eq(schema.cliProviders.id, provider),
+        }))!;
+        const scopes = [cliAuthScope(before), cliAuthScope({ ...before, ...change })];
+        const patch = () =>
+          app.request(`/cli-providers/${provider}`, {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(change),
+          });
+        const release = await tryCliAuthLock(db, scopes[held === 'old' ? 0 : 1]!);
+        expect(release).not.toBeNull();
+        try {
+          const res = await patch();
+          expect(res.status).toBe(409);
+          expect(await res.json()).toMatchObject({ code: 'cli_auth_busy' });
+          expect(
+            await db.query.cliProviders.findFirst({ where: eq(schema.cliProviders.id, provider) }),
+          ).toEqual(before);
+          expect(await audits(db)).toHaveLength(0);
+        } finally {
+          await release?.();
+        }
+        expect((await patch()).status).toBe(200);
+        expect(
+          await db.query.cliProviders.findFirst({ where: eq(schema.cliProviders.id, provider) }),
+        ).toMatchObject({ ...change, authGeneration: before.authGeneration });
+        for (const scope of scopes) {
+          const releaseAgain = await tryCliAuthLock(db, scope);
+          try {
+            expect(releaseAgain).not.toBeNull();
+          } finally {
+            await releaseAgain?.();
+          }
+        }
+      },
+    );
+  }
   it('audit refusal is scoped to this test actor', async () => {
     await refuseAudit(db, h.actor);
     let id: string | undefined;

@@ -15,17 +15,30 @@ export async function withCliAuthWrite<T>(
   write: () => Promise<T>,
 ): Promise<T> {
   if (!names.some(isSignOutSecret)) return write();
-  const release = await tryCliAuthLock(db, cliAuthScope(provider));
-  if (!release) {
-    throw new HttpError(
-      409,
-      'CLI authentication is busy. Finish the current sign-in or credential update and try again.',
-      'cli_auth_busy',
-    );
-  }
+  return withCliAuthLocks(db, [provider], write);
+}
+
+/** Lock both sides of a settings change before opening its transaction. */
+export async function withCliAuthLocks<T>(
+  db: Database,
+  providers: CliAuthProvider[],
+  write: () => Promise<T>,
+): Promise<T> {
+  const releases: (() => Promise<void>)[] = [];
   try {
+    for (const scope of [...new Set(providers.map(cliAuthScope))].sort()) {
+      const release = await tryCliAuthLock(db, scope);
+      if (!release) {
+        throw new HttpError(
+          409,
+          'CLI authentication is busy. Finish the current sign-in or credential update and try again.',
+          'cli_auth_busy',
+        );
+      }
+      releases.push(release);
+    }
     return await write();
   } finally {
-    await release();
+    await Promise.all(releases.map((release) => release()));
   }
 }

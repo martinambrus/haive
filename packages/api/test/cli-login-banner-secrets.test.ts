@@ -1,6 +1,9 @@
 vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
-  tryCliAuthLock: async () => (h.authBusy ? null : h.releaseAuth),
+  tryCliAuthLock: async () => {
+    await h.onAuthLock?.();
+    return h.authBusy ? null : h.releaseAuth;
+  },
 }));
 import { EventEmitter } from 'node:events';
 import type { Server } from 'node:http';
@@ -12,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   authBusy: false,
+  onAuthLock: undefined as (() => Promise<void>) | undefined,
   releaseAuth: vi.fn(async () => {}),
   updates: [] as Record<string, unknown>[],
   stampGate: undefined as Promise<void> | undefined,
@@ -102,6 +106,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   h.loginEnqueueGate = undefined;
   h.authBusy = false;
+  h.onAuthLock = undefined;
   h.updates = [];
   h.stampGate = undefined;
   h.stampError = false;
@@ -138,7 +143,14 @@ beforeEach(() => {
     query: {
       users: { findFirst: async () => ({ id: 'user', status: 'active', tokenVersion: 0 }) },
       cliProviders: {
-        findFirst: async () => ({ id: PROVIDER, userId: 'user', name: providerName, envVars: {} }),
+        findFirst: vi.fn(async () => ({
+          id: PROVIDER,
+          userId: 'user',
+          name: providerName,
+          authMode: 'subscription',
+          isolateAuth: false,
+          envVars: {},
+        })),
       },
     },
     update: () => ({
@@ -200,6 +212,7 @@ async function start(query = '', attached = true, providerId = PROVIDER) {
   );
   await settle();
   if (attached) expect(stream.listenerCount('data')).toBe(1);
+  return socket;
 }
 function assertNoCredentialText(...values: string[]) {
   const strings: string[] = [];
@@ -1977,5 +1990,24 @@ it('keeps the lock across a close while the volume-login audit is pending', asyn
   await settle();
   expect(h.audits).toHaveLength(1);
   expect(h.updates.some((v) => typeof v.authGeneration === 'string')).toBe(true);
+  expect(h.releaseAuth).toHaveBeenCalledOnce();
+});
+
+it('refuses a login when its settings change between the provider read and auth lock', async () => {
+  const db = h.db as any;
+  h.onAuthLock = async () => {
+    db.query.cliProviders.findFirst.mockResolvedValue({
+      id: PROVIDER,
+      userId: 'user',
+      name: providerName,
+      authMode: 'subscription',
+      isolateAuth: true,
+      envVars: {},
+    });
+  };
+  const socket = await start('', false);
+  expect(socket.write).toHaveBeenCalledWith(expect.stringContaining('409'));
+  expect(h.attach).not.toHaveBeenCalled();
+  expect(h.start).not.toHaveBeenCalled();
   expect(h.releaseAuth).toHaveBeenCalledOnce();
 });
