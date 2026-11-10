@@ -261,7 +261,7 @@ The owner scheduled one capped validation attempt; this block is an evidence dep
 
 ### T199 · /favicon.ico answers 404 on every page
 
-status: open · kind: feature · user decision: resolved 2026-11-01 · priority: P3
+status: in progress (bundle H1, overnight run 2026-11-10, branch fix/H1-a11y-favicon) · kind: feature · user decision: resolved 2026-11-01 · priority: P3
 Add an icon via the Next app-router convention (src/app/icon.svg or favicon.ico).
 
 User decision 2026-11-01: Use a simple Haive H favicon.
@@ -677,7 +677,7 @@ status: parked · kind: design · was modular #146 · reason: diminishing return
 
 ### T343 · FNF[a11y-sweep] · links wrap buttons at 17 sites; sidebar rename input sits inside a button; plan panel close and tabs lack names (+12)
 
-status: open · was modular #151 · priority: P2
+status: in progress (bundle H1, overnight run 2026-11-10, branch fix/H1-a11y-favicon) · was modular #151 · priority: P2
 All PRE-EXISTING unless marked.
 
 1. Base items:
