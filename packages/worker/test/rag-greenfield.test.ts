@@ -81,6 +81,7 @@ let repo: Record<string, unknown>;
 let onboarding: { id: string } | null;
 let writes: Record<string, unknown>[];
 let marks: unknown[];
+let auditRows: (typeof schema.auditEvents.$inferInsert)[];
 let warnings: Array<string | null>;
 let inserts: unknown[][];
 let order: string[];
@@ -134,6 +135,7 @@ beforeEach(async () => {
   executionPath = 'full_workflow';
   writes = [];
   marks = [];
+  auditRows = [];
   warnings = [];
   inserts = [];
   order = [];
@@ -249,20 +251,31 @@ beforeEach(async () => {
     },
     transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(db),
     insert: (table: unknown) => ({
-      values: (values: unknown) => ({
-        onConflictDoUpdate: async () => {
-          if (table === schema.projectStateOutbox) marks.push(values);
-          return [];
-        },
-      }),
+      values: (values: unknown) => {
+        if (table === schema.auditEvents) {
+          auditRows.push(values as typeof schema.auditEvents.$inferInsert);
+          return Promise.resolve([]);
+        }
+        return {
+          onConflictDoUpdate: async () => {
+            if (table === schema.projectStateOutbox) marks.push(values);
+            return [];
+          },
+        };
+      },
     }),
-    // Scope and plan-link queries have no rows for this new repository.
+    // Serve the locked repository scope and the queries used by RAG ingestion.
     select: () => ({
       from: (table: unknown) => ({
         innerJoin: () => ({
           where: () => ({ limit: async () => [{ globs: repo.scopeExcludeGlobs }] }),
         }),
         where: (condition: never) => ({
+          for: async (mode: string) => {
+            expect(table).toBe(schema.repositories);
+            expect(mode).toBe('update');
+            return [{ scopeExcludeGlobs: repo.scopeExcludeGlobs }];
+          },
           limit: async () => (table === schema.tasks ? [{ repositoryId: 'repo-1' }] : []),
           orderBy: () => ({
             limit: async () => {
@@ -316,6 +329,7 @@ beforeEach(async () => {
     db,
     taskId: 'task-1',
     taskStepId: 'step-1',
+    userId: 'user-1',
     repoPath: root,
     workspacePath: root,
     emitProgress: async () => {},
@@ -1135,6 +1149,21 @@ describe('workflow RAG source scope before each ingestion', () => {
     expect(defaults).not.toContain('scratch');
     await saveScope(detected, [...defaults, 'scratch']);
     expect(repo.scopeExcludeGlobs).toEqual(['vendor']);
+    expect(auditRows).toEqual([
+      expect.objectContaining({
+        actorUserId: 'user-1',
+        action: 'repository.scope.update',
+        targetType: 'repository',
+        targetId: 'repo-1',
+        metadata: {
+          source: 'rag_source_selection',
+          actorKind: 'task_user',
+          fields: ['scopeExcludeGlobs'],
+          addedCount: 0,
+          removedCount: 1,
+        },
+      }),
+    ]);
   });
 
   it('pre-sync does not expose or count this task or other active worktrees', async () => {

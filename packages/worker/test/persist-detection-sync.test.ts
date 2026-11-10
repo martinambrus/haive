@@ -47,6 +47,7 @@ describe('persistDetection and the project state sync', () => {
         '{"schemaVersion":1,"scopeExcludeGlobs":["vendor/**"]}',
       );
       const fake = createFakeDb({
+        auditEvents: schema.auditEvents,
         repositories: schema.repositories,
         projectStateOutbox: schema.projectStateOutbox,
         planNodes: schema.planNodes,
@@ -92,6 +93,7 @@ describe('persistDetection and a plan snapshot it leaves alone', () => {
     const root = await mkdtemp(join(tmpdir(), 'persist-detection-'));
     dirs.push(root);
     const fake = createFakeDb({
+      auditEvents: schema.auditEvents,
       repositories: schema.repositories,
       projectStateOutbox: schema.projectStateOutbox,
       planNodes: schema.planNodes,
@@ -168,6 +170,7 @@ describe('persistDetection and a legacy mirror next to a record unit', () => {
     }
     for (const unit of units) await writeFile(join(root, '.haive-data/state', unit), '{}');
     const fake = createFakeDb({
+      auditEvents: schema.auditEvents,
       repositories: schema.repositories,
       projectStateOutbox: schema.projectStateOutbox,
     });
@@ -260,6 +263,7 @@ describe('persistDetection and a legacy tooling.json next to the tooling unit', 
       );
     }
     const fake = createFakeDb({
+      auditEvents: schema.auditEvents,
       repositories: schema.repositories,
       projectStateOutbox: schema.projectStateOutbox,
     });
@@ -328,6 +332,7 @@ describe('persistDetection and a legacy tooling.json next to the tooling unit', 
       }),
     );
     const fake = createFakeDb({
+      auditEvents: schema.auditEvents,
       repositories: schema.repositories,
       projectStateOutbox: schema.projectStateOutbox,
     });

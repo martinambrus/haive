@@ -65,6 +65,7 @@ async function setup(seed: Seed) {
   const { repositories, projectStateSync: sync, tasks } = schema;
   const conflicts = schema.projectStateConflicts;
   const fake = createFakeDb({
+    auditEvents: schema.auditEvents,
     repositories,
     projectStateSync: sync,
     projectStateOutbox: schema.projectStateOutbox,

@@ -1,4 +1,10 @@
 import {
+  auditRepositorySettings,
+  logAuditEvent,
+  type AuditActor,
+  type AuditEvent,
+} from '../audit.js';
+import {
   REVIEW_WATERMARK_KEYS,
   REVIEW_WATERMARK_UNIT,
   reviewWatermarks,
@@ -672,7 +678,9 @@ export async function syncProjectStateFromCheckout(
     repoPath,
     refuseDuringGitOperation,
     expectedCheckout,
+    actor,
   }: {
+    actor?: AuditActor;
     repositoryId: string;
     repoPath: string;
     /** An open merge, rebase, cherry-pick or revert holds the read. A checkout that changed since its first read always holds it. */
@@ -702,11 +710,14 @@ export async function syncProjectStateFromCheckout(
   const checkout = await readCheckout(repoPath);
   if (checkout.kind === 'absent') return { outcome: 'absent' };
 
+  const auditEvents: AuditEvent[] = [];
   return db
     .transaction(async (tx) => {
       if (expectedCheckout) await lockRepositoryTasksKey(tx, repositoryId);
       await lockProjectState(tx, repositoryId);
       return syncProjectStateLocked(tx, {
+        auditEvents,
+        actor,
         repositoryId,
         repoPath,
         refuseDuringGitOperation,
@@ -715,6 +726,10 @@ export async function syncProjectStateFromCheckout(
         seen,
         seenRepo,
       });
+    })
+    .then((result) => {
+      auditEvents.forEach(logAuditEvent);
+      return result;
     })
     .catch((err: unknown) => {
       if (err instanceof CheckoutMoved) return { outcome: 'superseded' as const };
@@ -726,6 +741,8 @@ export async function syncProjectStateFromCheckout(
 export async function syncProjectStateLocked(
   tx: Tx,
   {
+    auditEvents,
+    actor,
     repositoryId,
     repoPath,
     refuseDuringGitOperation,
@@ -735,6 +752,8 @@ export async function syncProjectStateLocked(
     seen,
     seenRepo,
   }: {
+    auditEvents: AuditEvent[];
+    actor?: AuditActor;
     repositoryId: string;
     repoPath: string;
     refuseDuringGitOperation?: boolean;
@@ -982,6 +1001,25 @@ export async function syncProjectStateLocked(
   };
   const settingsMoved = Object.keys(updates).length > 0;
   if (settingsMoved) {
+    let auditActor = actor ?? { userId: repo.userId, kind: 'repository_owner' as const };
+    if (!actor && holdingTaskId) {
+      const [task] = await tx
+        .select({ userId: schema.tasks.userId })
+        .from(schema.tasks)
+        .where(eq(schema.tasks.id, holdingTaskId))
+        .limit(1);
+      if (!task) throw new Error('Project-state import task no longer exists');
+      auditActor = { userId: task.userId, kind: 'task_user' };
+    }
+    auditEvents.push(
+      ...(await auditRepositorySettings(tx, {
+        repositoryId,
+        actor: auditActor,
+        source: 'project_state_sync',
+        before: repo,
+        updates,
+      })),
+    );
     await tx
       .update(schema.repositories)
       .set({ ...updates, updatedAt: new Date() })

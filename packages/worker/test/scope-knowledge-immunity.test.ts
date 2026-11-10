@@ -96,6 +96,7 @@ describe('09_7-rag-source-selection apply and the project state record', () => {
 
   it('stores the deny list and marks the record of that repository dirty', async () => {
     const fake = createFakeDb({
+      auditEvents: schema.auditEvents,
       tasks: schema.tasks,
       repositories: schema.repositories,
       projectStateOutbox: schema.projectStateOutbox,
@@ -105,18 +106,21 @@ describe('09_7-rag-source-selection apply and the project state record', () => {
     }
     fake.insert(schema.tasks, { id: TASK, userId: USER, repositoryId: REPO });
 
-    await ragSourceSelectionStep.apply({ ...fakeCtx(), db: fake.db, taskId: TASK } as never, {
-      iteration: 0,
-      previousIterations: [],
-      detected: {
-        framework: null,
-        tree: TREE,
-        defaultExcludeGlobs: [],
-        extensionSet: ['.ts'],
-        totalCodeFiles: 912,
+    await ragSourceSelectionStep.apply(
+      { ...fakeCtx(), db: fake.db, taskId: TASK, userId: USER } as never,
+      {
+        iteration: 0,
+        previousIterations: [],
+        detected: {
+          framework: null,
+          tree: TREE,
+          defaultExcludeGlobs: [],
+          extensionSet: ['.ts'],
+          totalCodeFiles: 912,
+        },
+        formValues: { selectedDirs: SELECTED },
       },
-      formValues: { selectedDirs: SELECTED },
-    });
+    );
 
     expect(fake.rows(schema.repositories).find((r) => r.id === REPO)?.scopeExcludeGlobs).toEqual([
       'vendor',

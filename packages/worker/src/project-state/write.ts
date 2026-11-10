@@ -1,3 +1,4 @@
+import { logAuditEvent, type AuditEvent } from '../audit.js';
 import {
   watermarkKeyOfUnit,
   REVIEW_WATERMARK_SETTING,
@@ -806,6 +807,7 @@ export async function writeProjectStateColumn(
     };
     // Commit the retry signal before any filesystem mutation. Recheck admission and the checkout
     // after reacquiring the locks: a holder admitted between transactions leaves only this intent.
+    const auditEvents: AuditEvent[] = [];
     const prepared = await db.transaction(async (tx) => {
       await gate(tx);
       await recoverWriteLocked(tx, repositoryId, repoPath, expectedCheckout);
@@ -833,6 +835,7 @@ export async function writeProjectStateColumn(
         : previousBase.files.filter((f) => f !== RTK_SETTING_FILE);
       if (checkout.kind === 'record' && sync?.syncedHash !== checkout.hash) {
         const imported = await syncProjectStateLocked(tx, {
+          auditEvents,
           repositoryId,
           repoPath,
           checkout,
@@ -927,6 +930,7 @@ export async function writeProjectStateColumn(
         unownedMalformedRtk,
       };
     });
+    auditEvents.forEach(logAuditEvent);
     if (!prepared) throw new ProjectStateMovedError();
     await db.transaction(async (tx) => {
       await gate(tx);

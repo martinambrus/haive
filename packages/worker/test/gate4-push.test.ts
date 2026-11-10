@@ -5,6 +5,8 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { validateFormValues, type FormSchema } from '@haive/shared';
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 
 // Avoid the master-KEK / secretsService dependency: the credentialed push path
@@ -70,38 +72,45 @@ function makeCtx(
     boundCredentialId?: string | null;
     credentials?: Array<{ id: string; label: string; host: string }>;
   } = {},
-): { ctx: StepContext; sets: Record<string, unknown>[] } {
+): { ctx: StepContext; sets: Record<string, unknown>[]; repo: () => Record<string, unknown> } {
   const sets: Record<string, unknown>[] = [];
-  const credentials = opts.credentials ?? [{ id: 'cred-1', label: 'GH', host: 'github.com' }];
-  const db = {
-    query: {
-      users: { findFirst: async () => ({ role: 'admin' }) },
-      tasks: { findFirst: async () => ({ repositoryId: 'repo-1' }) },
-      repositories: {
-        findFirst: async () => ({
-          credentialsSecretId: opts.boundCredentialId ?? null,
-          remoteUrl: sets.at(-1)?.remoteUrl ?? httpOrigin(fixtureBase),
-        }),
-      },
-      repoCredentials: { findMany: async () => credentials },
-    },
-    // loadPreviousStepOutput(01-worktree-setup) -> no row, so detect falls back
-    // to ctx.workspacePath.
-    select: () => ({
-      from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => [] }) }) }),
-    }),
-    update: () => ({
-      set: (v: Record<string, unknown>) => {
-        sets.push(v);
-        return { where: async () => undefined };
-      },
-    }),
+  const credentials = opts.credentials ?? [
+    { id: '00000000-0000-4000-8000-000000000004', label: 'GH', host: 'github.com' },
+  ];
+  const fake = createFakeDb({
+    users: schema.users,
+    tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+    repositories: schema.repositories,
+    repoCredentials: schema.repoCredentials,
+    auditEvents: schema.auditEvents,
+  });
+  fake.insert(schema.users, { id: '00000000-0000-4000-8000-000000000001', role: 'admin' });
+  fake.insert(schema.tasks, {
+    userId: '00000000-0000-4000-8000-000000000001',
+    id: '00000000-0000-4000-8000-000000000002',
+    repositoryId: '00000000-0000-4000-8000-000000000003',
+  });
+  fake.insert(schema.repositories, {
+    id: '00000000-0000-4000-8000-000000000003',
+    userId: '00000000-0000-4000-8000-000000000001',
+    credentialsSecretId: opts.boundCredentialId ?? null,
+    remoteUrl: opts.boundCredentialId ? httpOrigin(fixtureBase) : null,
+  });
+  for (const credential of credentials)
+    fake.insert(schema.repoCredentials, {
+      ...credential,
+      userId: '00000000-0000-4000-8000-000000000001',
+    });
+  fake.hooks.beforeUpdate = (table) => {
+    if (table === schema.repositories) sets.push({});
   };
+  const db = fake.db;
   const noop = (): void => undefined;
   const ctx = {
-    taskId: 'task-1',
+    taskId: '00000000-0000-4000-8000-000000000002',
     taskStepId: 'ts-1',
-    userId: 'user-1',
+    userId: '00000000-0000-4000-8000-000000000001',
     repoPath: workspacePath,
     workspacePath,
     sandboxWorkdir: '/workspace',
@@ -112,7 +121,7 @@ function makeCtx(
     emitProgress: async () => undefined,
     throwIfCancelled: noop,
   } as unknown as StepContext;
-  return { ctx, sets };
+  return { ctx, sets, repo: () => fake.rows(schema.repositories)[0]! };
 }
 
 function leafFields(schema: FormSchema): Map<string, Record<string, unknown>> {
@@ -172,8 +181,8 @@ describe('gate-4 push: form', () => {
     workspacePath: '/tmp/x',
     branch: BRANCH,
     recentCommits: 'abc init commit',
-    repositoryId: 'repo-1',
-    credentials: [{ id: 'cred-1', label: 'GH', host: 'github.com' }],
+    repositoryId: '00000000-0000-4000-8000-000000000003',
+    credentials: [{ id: '00000000-0000-4000-8000-000000000004', label: 'GH', host: 'github.com' }],
   };
 
   it('gates the push (checkbox default false) and offers a manual credential option', () => {
@@ -187,7 +196,7 @@ describe('gate-4 push: form', () => {
     const fields = leafFields(schema);
     expect((fields.get('push') as { default: boolean }).default).toBe(false);
     const cred = fields.get('credentialId') as { options: { value: string }[]; default: string };
-    expect(cred.options.map((o) => o.value)).toContain('cred-1');
+    expect(cred.options.map((o) => o.value)).toContain('00000000-0000-4000-8000-000000000004');
     expect(cred.options.map((o) => o.value)).toContain(''); // manual
     expect(cred.default).toBe(''); // no bound credential -> manual
     expect(fields.has('setUpstream')).toBe(true);
@@ -200,9 +209,11 @@ describe('gate-4 push: form', () => {
       ...baseDetected,
       hasOrigin: true,
       originUrl: 'https://github.com/o/r.git',
-      boundCredentialId: 'cred-1',
+      boundCredentialId: '00000000-0000-4000-8000-000000000004',
     }) as FormSchema;
-    expect((leafFields(schema).get('credentialId') as { default: string }).default).toBe('cred-1');
+    expect((leafFields(schema).get('credentialId') as { default: string }).default).toBe(
+      '00000000-0000-4000-8000-000000000004',
+    );
   });
 
   it('asks for a remote URL when there is no origin', () => {
@@ -236,7 +247,7 @@ describe('gate-4 push: smoke canned value satisfies the form', () => {
     workspacePath: '/tmp/x',
     branch: BRANCH,
     recentCommits: 'abc init',
-    repositoryId: 'repo-1',
+    repositoryId: '00000000-0000-4000-8000-000000000003',
     boundCredentialId: null,
     credentials: [],
   };
@@ -277,7 +288,7 @@ describe('gate-4 push: apply', () => {
     const { dir } = await makeRepo(false);
     const bare = await mkTmp('gate4-bare-');
     await git(bare, ['init', '--bare']);
-    const { ctx, sets } = makeCtx(dir);
+    const { ctx, sets, repo } = makeCtx(dir);
     const detected = await gate4PushStep.detect!(ctx);
     const out = await gate4PushStep.apply(
       ctx,
@@ -287,22 +298,28 @@ describe('gate-4 push: apply', () => {
     expect(out.branch).toBe(BRANCH);
     expect(await bareHasBranch(bare)).toBe(true);
     expect(sets).toHaveLength(1);
-    expect(sets[0]!.remoteUrl).toBe(httpOrigin(bare));
+    expect(repo().remoteUrl).toBe(httpOrigin(bare));
   });
 
   it('pushes to an existing origin using the chosen credential', async () => {
     const { dir, bare } = await makeRepo(true);
-    const { ctx, sets } = makeCtx(dir, { boundCredentialId: 'cred-1' });
+    const { ctx, sets } = makeCtx(dir, {
+      boundCredentialId: '00000000-0000-4000-8000-000000000004',
+    });
     const detected = await gate4PushStep.detect!(ctx);
     const out = await gate4PushStep.apply(
       ctx,
-      applyArgs(detected, { push: true, credentialId: 'cred-1', setUpstream: true }),
+      applyArgs(detected, {
+        push: true,
+        credentialId: '00000000-0000-4000-8000-000000000004',
+        setUpstream: true,
+      }),
     );
     expect(out.pushed).toBe(true);
     expect(vi.mocked(getDecryptedCredentials)).toHaveBeenCalledWith(
       expect.anything(),
-      'cred-1',
-      'user-1',
+      '00000000-0000-4000-8000-000000000004',
+      '00000000-0000-4000-8000-000000000001',
     );
     expect(await bareHasBranch(bare!)).toBe(true);
     expect(sets).toHaveLength(0); // existing origin -> no repo-row write

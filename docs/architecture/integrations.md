@@ -839,6 +839,34 @@ redacted structurally, including git's own password placeholder; the raw snapsho
 restoration. A placeholder containing whitespace is a known redaction limit; neither measured git
 version emits that form.
 
+Worker writes of the same repository settings use `worker/src/audit.ts`: project-state sync
+and take-theirs resolutions audit scope and agent rules; the legacy clone mirror import and
+RAG source selection audit scope. Each inserts its row in the settings transaction, only for
+changed columns, and logs after commit (including an import nested in the project-state writer's
+preparation transaction). Metadata contains `source`, `actorKind` and `fields` (column names
+only) plus the API's own keys for the action (`addedCount`/`removedCount` for scope, the
+presence summary for agent rules; `host`, `credentialsChanged`, `branchChanged` for the remote),
+never rule text, globs or other setting values. Task writes name the task user, conflict
+answers name the resolving user, and unattended imports name the repository owner. Other portable
+settings have no API audit action and do not gain one here.
+
+Gate 4 writes the repository row when the checkout has no origin (the typed URL and the selected
+credential replace what the row held, as before) or when the row has no remote. A row that already
+has a remote, with an origin in the checkout, makes the push a one-off: no row lock, no write, and
+the selected credential is used for that push only. Otherwise it takes a bounded `FOR NO KEY UPDATE` lock,
+re-checks the row under it, and follows the relink's order: `repository.remote.update` row
+(source `gate4_push`), an add-only `ensureOrigin` when the checkout has no origin, then the column
+write, which also binds the selected credential when one was chosen. It removes only an origin it
+added, on a callback or commit failure, after an in-flight callback settles; a failed restore is
+the reported failure. Each git call is aborted after 10 s; the worker's abort sends SIGTERM to the
+git process group and SIGKILL 1 s later (the relink waits 2 s), so a killed git can still leave a
+`config.lock`. A Retry after a failed row write repairs the row from the checkout's origin, under
+the lock and without touching git, but only when that origin still matches the one the form showed;
+a changed origin is refused before any credential or row write, matching `taskRemoteUrl`'s rule that
+a push approval binds to the address the user saw. Retries and matching values add no duplicate
+audit row. A lock wait that times out fails the step with the database's message (the worker has no
+409 mapping).
+
 Disconnect (`integration.connection.disconnect`) is the one exception, on purpose: its row follows
 the vendor revoke, which cannot be undone and whose outcome (`revoked`) the row records, so it stays
 `recordAuditEvent` and a refused row is logged, not raised.

@@ -1,3 +1,4 @@
+import { auditRepositorySettings, logAuditEvent, type AuditEvent } from '../audit.js';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
@@ -216,7 +217,41 @@ async function importHaiveDataMirror(
   }
 
   if (Object.keys(updates).length === 0) return deferred;
+  const auditEvents: AuditEvent[] = [];
   await db.transaction(async (tx) => {
+    // The mirrors were read outside the transaction. Recheck non-clobbering fills under the row lock.
+    const [stored] = await tx
+      .select()
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, repositoryId))
+      .for('update');
+    if (!stored) throw new Error('Repository no longer exists');
+    for (const field of [
+      'scopeExcludeGlobs',
+      'onboardingEnvironment',
+      'onboardingTooling',
+    ] as const) {
+      if (stored[field] != null) delete updates[field];
+    }
+    const current = readRenderContextColumn(stored.renderContext);
+    if (
+      isRtkChoiceRecorded(
+        current.kind === 'column' && current.column.rtkChoiceRecorded,
+        stored.rtkChoiceMadeAt,
+      )
+    ) {
+      delete updates.rtkEnabled;
+    }
+    if (Object.keys(updates).length === 0) return;
+    auditEvents.push(
+      ...(await auditRepositorySettings(tx, {
+        repositoryId,
+        actor: { userId: stored.userId, kind: 'repository_owner' },
+        source: 'clone_import',
+        before: stored,
+        updates,
+      })),
+    );
     await tx
       .update(schema.repositories)
       .set({ ...updates, updatedAt: new Date() })
@@ -231,11 +266,12 @@ async function importHaiveDataMirror(
       await markProjectStateDirty(tx, repositoryId);
     }
   });
-  logger.info(
-    { repositoryId, imported: Object.keys(updates) },
-    'restored onboarding state from .haive-data mirror',
-  );
-  if (heldMcpServers) {
+  auditEvents.forEach(logAuditEvent);
+  const imported = Object.keys(updates);
+  if (imported.length) {
+    logger.info({ repositoryId, imported }, 'restored onboarding state from .haive-data mirror');
+  }
+  if (heldMcpServers && Object.hasOwn(updates, 'onboardingTooling')) {
     logger.warn(
       { repositoryId, servers: heldMcpServers },
       'imported MCP servers held until accepted on this install',

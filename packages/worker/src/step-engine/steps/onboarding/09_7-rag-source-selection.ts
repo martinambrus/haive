@@ -1,3 +1,4 @@
+import { auditRepositorySettings, logAuditEvent, type AuditEvent } from '../../../audit.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
@@ -216,13 +217,30 @@ export const ragSourceSelectionStep: StepDefinition<
 
     const repositoryId = await resolveRepositoryId(ctx.db, ctx.taskId);
     if (repositoryId) {
+      const auditEvents: AuditEvent[] = [];
       await ctx.db.transaction(async (tx) => {
+        const [stored] = await tx
+          .select({ scopeExcludeGlobs: schema.repositories.scopeExcludeGlobs })
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, repositoryId))
+          .for('update');
+        if (!stored) throw new Error('Repository no longer exists');
+        auditEvents.push(
+          ...(await auditRepositorySettings(tx, {
+            repositoryId,
+            actor: { userId: ctx.userId, kind: 'task_user' },
+            source: 'rag_source_selection',
+            before: stored,
+            updates: { scopeExcludeGlobs: excludeGlobs },
+          })),
+        );
         await tx
           .update(schema.repositories)
           .set({ scopeExcludeGlobs: excludeGlobs, updatedAt: new Date() })
           .where(eq(schema.repositories.id, repositoryId));
         await markProjectStateDirty(tx, repositoryId);
       });
+      auditEvents.forEach(logAuditEvent);
     } else {
       ctx.logger.warn(
         'rag-source-selection: no repositoryId for task, RAG deny list not persisted',
