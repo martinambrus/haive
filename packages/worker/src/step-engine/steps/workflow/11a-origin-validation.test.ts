@@ -53,7 +53,7 @@ describe('11a apply reads the current origin and validates a typed URL', () => {
   it('uses an origin added since detect without demanding another URL', async () => {
     h.getOriginUrl.mockResolvedValue('https://example.test/r');
     await apply(detected, { push: true });
-    expect(h.getOriginUrl).toHaveBeenCalledWith('/workspace');
+    expect(h.getOriginUrl).toHaveBeenCalledWith('/workspace', { signal: expect.any(AbortSignal) });
     expect(h.ensureOrigin).not.toHaveBeenCalled();
     expect(h.pushBranch).toHaveBeenCalled();
   });
