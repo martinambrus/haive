@@ -837,7 +837,7 @@ Sites:
   On a timeout they return different things: partial stdout, [], null, or "timed out".
   Fix: one shared runDockerCommand(args, {timeoutMs}) returning {stdout, stderr, exit, timedOut}, plus a test that kills a hung child.
 
-### T373 · FNF[audit-strict-admin-actions] · password-change throttle, tooling reset order, module log lines; strict-audit leftovers (+11)
+### T373 · FNF[audit-strict-admin-actions] · password-change throttle, tooling reset order, module log lines; strict-audit leftovers (+12)
 
 status: in progress, items 5-7 (codex-sonnet); sites + items 1-4 shipped in PR #1058 (1f1064268), 2026-11-10 · was modular #246 · priority: P2
 
@@ -852,6 +852,7 @@ status: in progress, items 5-7 (codex-sonnet); sites + items 1-4 shipped in PR #
 13. The launch-compensation block (row committed first, effect, delete by id on failure) is copied three times (maintenance.ts upgrade, loader.ts teardown, cli-providers.ts sign-out) and logs through the root logger; one helper would do. New in #1058, minor.
 14. Stale test names in the #1058 tests still describe the old bounded-enqueue behaviour; no gated PG test covers the upgrade's compensating delete. Minor, coverage.
 15. A launch row is visible on /admin/audit while its effect runs and vanishes if the effect fails (routes/admin.ts ~:192-275); release.md ~:157 and modules.md ~:28 document the lost-reply case (lost Redis reply, docker 300 s kill), where the effect can run with its row deleted. By design, minor.
+16. The strict module rows written by shared `modularity-server/module-drain.ts` (`audit()` ~:171-176: `module.drain` ~:192, graceful `module.deactivate` ~:218, `module.drain_cancel` ~:253; callers loader.ts DELETE `/:id/drain` ~:303, graceful PATCH ~:314-335, the `finalizeModuleDrains` sweep) log no pino line after commit, while the same actions from activation.ts now do. PRE-EXISTING, minor. From the item 5-7 review.
 
 ### T379 · FNF[git-tree-readers] · gitlink readers and literal-pathspec helpers duplicated with different failure contracts (+5)
 
@@ -1458,7 +1459,8 @@ Queued connected findings from T376 review10, verified with synthetic pure-node 
 
 ### T523 · FNF[git-config-environment] · API readers and worker writers do not share one explicit ambient Git configuration policy
 
-status: open · kind: security · user decision: resolved 2026-11-01 · priority: P2
+status: parked · kind: security · user decision: resolved 2026-11-01; parked by owner 2026-11-10 · priority: P2
+Reproduction gate 2026-11-10 found no current trigger: api readers (haive-data-status.ts ~:54-58, routes/plan.ts ~:166) pass only PATH, HOME and GIT_CEILING_DIRECTORIES; the worker's `gitEnv` (worker repo/git-exec.ts ~:83-99) passes its full environment, but neither container sets any XDG_* or GIT_* variable and the only system config is /etc/gitconfig (`safe.directory=*`). A scratch repro shows the two diverge only once such a setting exists (e.g. `status.showUntrackedFiles=no` via XDG or GIT_CONFIG_COUNT). Resume when a container, deploy or user setup adds an XDG__/GIT_CONFIG__ setting or a reader/writer mismatch is observed. Evidence: .claude/tmp/codex-run/T523-S/gate.md (local).
 Queued design split from T521 item4; no additional implementation authorized. PRE-EXISTING, narrow compatibility issue. HOME handling was aligned in T120 PR1b, but XDG_CONFIG_HOME and GIT_CONFIG_* can still make API status readers and worker writers resolve different configuration. Decide whether the supported contract preserves selected ambient configuration for both or supplies an isolated explicit configuration. Establish a current caller/reproduction before changing global Git policy. Executable repository filters remain T387, not a member of this decision.
 
 User decision 2026-11-01: Use one explicit isolated Haive Git configuration for API readers and worker writers, allowing only deliberately supported settings.
