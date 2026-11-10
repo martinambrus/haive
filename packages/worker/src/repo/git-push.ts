@@ -99,10 +99,26 @@ export async function originGitRun(
   const urls = await originUrls(cwd);
   if (urls === null) throw new Error('origin remote is not configured');
   let guard: Awaited<ReturnType<typeof gitRemoteGuardArgs>>;
+  let configError: Error | undefined;
   try {
-    guard = await gitRemoteGuardArgs(owner, urls);
+    guard = await gitRemoteGuardArgs(owner, urls, async () => {
+      // URL-scoped HTTP settings and remote proxies outrank the generic transport pins.
+      const config = await gitRun(
+        cwd,
+        ['config', '--get-regexp', '^(http\\..*\\..*|remote\\..*\\.(proxy|proxyauthmethod))$'],
+        env,
+        { guardedRemote: {} },
+      );
+      if (config.code === 1) return;
+      configError = new Error(
+        config.code === 0
+          ? "Git transport config is not allowed: remove URL-specific http.* and remote.*.proxy / remote.*.proxyauthmethod settings from the repository's git config."
+          : 'Could not read the repository git transport config. Repair the git config and retry.',
+      );
+      throw configError;
+    });
   } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code !== 'ENOTFOUND') throw err;
+    if (err !== configError && (err as NodeJS.ErrnoException)?.code !== 'ENOTFOUND') throw err;
     return { code: 128, stdout: '', stderr: `${(err as Error).message}\n` };
   }
   return gitRun(cwd, [...guard.argv, ...args], env, {

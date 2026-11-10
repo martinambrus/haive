@@ -205,8 +205,7 @@ it('pins every checked public address for HTTP failover and keeps the first for 
   );
   const pin = 'public.test:443:93.184.216.34,[2606:4700:4700::1111]';
   expect(args).toContain(`http.curloptResolve=${pin}`);
-  expect(env.GIT_CONFIG_KEY_1).toBe('http.https://public.test/r.curloptResolve');
-  expect(env.GIT_CONFIG_VALUE_1).toBe(pin);
+  expect(env).toEqual({});
   expect(args).toContain(
     'core.sshCommand=ssh -o HostName=93.184.216.34 -o HostKeyAlias=public.test',
   );
@@ -236,7 +235,7 @@ it('does not follow a public HTTP redirect to loopback', async () => {
   expect(after.requests).toBe(before.requests + 1);
 });
 
-it('repository URL-specific HTTP config cannot override the checked pin or redirect policy', async () => {
+it('refuses repository URL-specific pin and redirect settings before transport', async () => {
   seams.resolve.mockResolvedValue([{ address: '127.0.0.1', family: 4 }]);
   seams.isBlocked.mockReturnValue(false);
   const target = new URL(url);
@@ -267,8 +266,8 @@ it('repository URL-specific HTTP config cannot override the checked pin or redir
   });
   expect(result.code).not.toBe(0);
   const after = await stats();
-  expect(after.redirected).toBe(before.redirected + 1);
-  expect(after.requests).toBe(before.requests + 1);
+  expect(after.redirected).toBe(before.redirected);
+  expect(after.requests).toBe(before.requests);
 });
 it.each([
   ['process', 'config'],
@@ -276,7 +275,7 @@ it.each([
   ['process', 'fetch'],
   ['caller', 'fetch'],
 ])(
-  'keeps equals-path pins over repository and %s environment config during %s',
+  'keeps equals-path pins over generic repository and %s environment config during %s',
   async (source, check) => {
     const work = `${root}/equals-config-${source}-${check}`;
     await exec('/usr/bin/git', ['init', work]);
@@ -288,7 +287,7 @@ it.each([
       curloptResolve: `public.test:${new URL(target).port}:127.0.0.2`,
     };
     for (const [key, value] of Object.entries(planted)) {
-      await exec('/usr/bin/git', ['-C', work, 'config', `http.${target}.${key}`, value]);
+      await exec('/usr/bin/git', ['-C', work, 'config', `http.${key}`, value]);
     }
     const ambient = {
       GIT_CONFIG_COUNT: '1',
@@ -330,6 +329,162 @@ it.each([
     expect((await stats()).requests).toBeGreaterThan(before.requests);
   },
 );
+it.each([
+  'userinfo',
+  'query',
+  'fragment',
+  'remote-proxy',
+  'remote-auth',
+  'include',
+  'worktree',
+  'other-http',
+  'other-remote',
+])('structural config refusal precedes any network or DNS for %s', async (kind) => {
+  seams.resolve.mockResolvedValue([{ address: '127.0.0.1', family: 4 }]);
+  seams.isBlocked.mockReturnValue(false);
+  const work = `${root}/structural-${kind}`;
+  await exec('/usr/bin/git', ['init', work]);
+  const target = new URL(url.replace('127.0.0.1', 'public.test'));
+  if (kind === 'userinfo') target.username = 'alice';
+  if (kind === 'query') target.search = '?x=1';
+  if (kind === 'fragment') target.hash = '#f';
+  await exec('/usr/bin/git', ['-C', work, 'remote', 'add', 'origin', target.href]);
+  const proxy = await startGitHttpServer(root);
+  try {
+    const key =
+      kind === 'remote-proxy'
+        ? 'remote.origin.proxy'
+        : kind === 'remote-auth'
+          ? 'remote.origin.proxyauthmethod'
+          : kind === 'other-remote'
+            ? 'remote.other.name.proxy'
+            : kind === 'other-http'
+              ? 'http.https://unrelated.test/r.sslverify'
+              : `http.${target.href}.proxy`;
+    const value =
+      kind === 'remote-auth'
+        ? 'basic'
+        : kind === 'other-http'
+          ? 'false'
+          : proxy.httpOrigin(`${root}/repo.git`);
+    let configArgs = ['-C', work, 'config'];
+    if (kind === 'include') {
+      const include = `${root}/included-config`;
+      await exec('/usr/bin/git', ['-C', work, 'config', 'include.path', include]);
+      configArgs = ['config', '--file', include];
+    }
+    if (kind === 'worktree') {
+      await exec('/usr/bin/git', ['-C', work, 'config', 'extensions.worktreeConfig', 'true']);
+      configArgs.push('--worktree');
+    }
+    await exec('/usr/bin/git', [...configArgs, key, value]);
+    const before = await stats();
+    const run = vi.spyOn(gitExec, 'gitRun');
+    const result = await originGitRun(
+      work,
+      ['fetch', 'origin'],
+      {
+        db: dbFor('user'),
+        userId: 'owner',
+      },
+      undefined,
+      { timeout: 2000 },
+    );
+    const proxyStats = (await (
+      await fetch(new URL('/__fixture_stats', proxy.httpOrigin(`${root}/repo.git`)))
+    ).json()) as { requests: number };
+    expect.soft(result.code).toBe(128);
+    expect.soft(run.mock.calls.some(([, args]) => args.includes('fetch'))).toBe(false);
+    expect.soft(egress.resolveGuardedAddress).not.toHaveBeenCalled();
+    expect.soft((await stats()).requests).toBe(before.requests);
+    expect.soft(proxyStats.requests).toBe(0);
+    const reads = run.mock.calls.flatMap(([, args], index) =>
+      args.includes('--get-regexp') ? [index] : [],
+    );
+    expect(reads).toHaveLength(1);
+    const index = reads[0]!;
+    const config = await run.mock.results[index]!.value;
+    expect(config.stdout).toContain(key);
+    if (process.env.HAIVE_GIT_GUARD_TRACE)
+      process.stdout.write(
+        `CONFIG TRACE ${kind}: ${JSON.stringify({ argv: run.mock.calls[index]![1], config, result, proxyStats, fixture: await stats() })}\n`,
+      );
+  } finally {
+    await proxy.close();
+  }
+});
+it('generic pins fetch the fixture despite a repository generic proxy', async () => {
+  const work = `${root}/generic-pins`;
+  await exec('/usr/bin/git', ['init', work]);
+  const target = url.replace('127.0.0.1', 'public.test');
+  await exec('/usr/bin/git', ['-C', work, 'remote', 'add', 'origin', target]);
+  await exec('/usr/bin/git', ['-C', work, 'config', 'http.proxy', 'http://127.0.0.1:1']);
+  seams.resolve.mockResolvedValue([{ address: '127.0.0.1', family: 4 }]);
+  seams.isBlocked.mockReturnValue(false);
+  const run = vi.spyOn(gitExec, 'gitRun');
+  const before = await stats();
+  const result = await originGitRun(
+    work,
+    ['fetch', 'origin'],
+    { db: dbFor('user'), userId: 'owner' },
+    { GIT_CURL_VERBOSE: '1' },
+    { timeout: 2000 },
+  );
+  if (process.env.HAIVE_GIT_GUARD_TRACE)
+    process.stdout.write(
+      `GENERIC PIN TRACE (no guard config env): ${JSON.stringify({ calls: run.mock.calls, result, before, after: await stats() })}\n`,
+    );
+  expect(result.code, result.stderr).toBe(0);
+  expect((await stats()).requests).toBeGreaterThan(before.requests);
+});
+it.each(['http', 'remote'])(
+  'admin runs skip the effective config inspection with planted %s keys',
+  async (kind) => {
+    const work = `${root}/admin-config-${kind}`;
+    await exec('/usr/bin/git', ['init', work]);
+    await exec('/usr/bin/git', ['-C', work, 'remote', 'add', 'origin', url]);
+    const key = kind === 'http' ? `http.${url}.proxy` : 'remote.origin.proxy';
+    await exec('/usr/bin/git', ['-C', work, 'config', key, url]);
+    const run = vi.spyOn(gitExec, 'gitRun');
+    const result = await originGitRun(
+      work,
+      ['fetch', 'origin'],
+      {
+        db: dbFor('admin'),
+        userId: 'owner',
+      },
+      undefined,
+      { timeout: 2000 },
+    );
+    expect(result.code, result.stderr).toBe(0);
+    expect(run.mock.calls.some(([, args]) => args.includes('--get-regexp'))).toBe(false);
+    expect(egress.resolveGuardedAddress).not.toHaveBeenCalled();
+    expect(run.mock.calls.find(([, args]) => args.includes('fetch'))?.[1]).toEqual([
+      'fetch',
+      'origin',
+    ]);
+  },
+);
+it.each([128, -1, 124])('refuses when effective config cannot be read (exit %s)', async (code) => {
+  const work = `${root}/config-read-${code}`;
+  await exec('/usr/bin/git', ['init', work]);
+  await exec('/usr/bin/git', ['-C', work, 'remote', 'add', 'origin', url]);
+  const actualRun = gitExec.gitRun;
+  const run = vi
+    .spyOn(gitExec, 'gitRun')
+    .mockImplementation((cwd, args, ...rest) =>
+      args.includes('--get-regexp')
+        ? Promise.resolve({ code, stdout: '', stderr: 'read failed' })
+        : actualRun(cwd, args, ...rest),
+    );
+  const result = await originGitRun(work, ['fetch', 'origin'], {
+    db: dbFor('user'),
+    userId: 'owner',
+  });
+  expect(result.code).toBe(128);
+  expect(run.mock.calls.some(([, args]) => args.includes('fetch'))).toBe(false);
+  expect(egress.resolveGuardedAddress).not.toHaveBeenCalled();
+});
 it('pushBranch refuses a private second push URL before network I/O', async () => {
   const work = `${root}/push`;
   await exec('/usr/bin/git', ['init', work]);

@@ -28,6 +28,7 @@ function shellWord(value: string): string {
 export async function gitRemoteGuardArgs(
   owner: GitRemoteOwner,
   urls: readonly string[],
+  beforeResolve?: () => Promise<void>,
 ): Promise<{ argv: string[]; env: Record<string, string> }> {
   if ('trustedAdminModuleSource' in owner) return { argv: [], env: {} };
   const user = await owner.db.query.users.findFirst({
@@ -35,9 +36,9 @@ export async function gitRemoteGuardArgs(
     columns: { role: true },
   });
   if (user?.role === 'admin') return { argv: [], env: {} };
+  await beforeResolve?.();
   const addresses = new Map<string, string[]>();
   const http = new Map<string, string>();
-  const httpUrls = new Map<string, string>();
   const ssh = new Map<string, string>();
   for (const remote of urls) {
     const { host, port, ssh: isSsh } = targetFor(remote);
@@ -58,36 +59,14 @@ export async function gitRemoteGuardArgs(
     else {
       const authority = `${host.includes(':') ? `[${host}]` : host}:${port}`;
       const pinned = address.map((entry) => (entry.includes(':') ? `[${entry}]` : entry)).join(',');
-      const pin = `${authority}:${pinned}`;
       http.set(authority, pinned);
-      const url = new URL(redactGitUrl(remote, true));
-      url.password = '';
-      url.search = '';
-      url.hash = '';
-      httpUrls.set(url.href, pin);
     }
   }
   const argv: string[] = [];
   for (const [authority, address] of http) {
     argv.push('-c', `http.curloptResolve=${authority}:${address}`);
   }
-  if (http.size) argv.push('-c', 'http.followRedirects=false');
-  const env: Record<string, string> = { GIT_CONFIG_COUNT: String(httpUrls.size * 4) };
-  let index = 0;
-  for (const [url, pin] of httpUrls) {
-    // Git splits -c at the first equals sign; percent-encoding it does not match the raw path.
-    // URL-specific repository config outranks generic -c; a proxy would resolve the host again.
-    for (const [key, value] of [
-      ['curloptResolve', ''],
-      ['curloptResolve', pin],
-      ['followRedirects', 'false'],
-      ['proxy', ''],
-    ] as const) {
-      env[`GIT_CONFIG_KEY_${index}`] = `http.${url}.${key}`;
-      env[`GIT_CONFIG_VALUE_${index}`] = value;
-      index++;
-    }
-  }
+  if (http.size) argv.push('-c', 'http.followRedirects=false', '-c', 'http.proxy=');
   const sshCommands = [...ssh].map(([host, address]) => ({
     host,
     command: `ssh -o ${shellWord(`HostName=${address}`)} -o ${shellWord(`HostKeyAlias=${host}`)}`,
@@ -103,5 +82,5 @@ export async function gitRemoteGuardArgs(
       `core.sshCommand=sh -c ${shellWord(`for arg do case "$arg" in ${cases} esac; done; exit 128`)} --`,
     );
   }
-  return { argv, env };
+  return { argv, env: {} };
 }

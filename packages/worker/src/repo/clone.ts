@@ -80,6 +80,7 @@ export async function gitClone(
     if ((err as NodeJS.ErrnoException)?.code !== 'ENOTFOUND') throw err;
     throw new Error(`git clone failed (exit 128): ${(err as Error).message}`, { cause: err });
   }
+  // Clones run in the worker cwd without checkout config, so no repository config read is needed.
   const args = [...guard.argv, ...(auth?.argv ?? []), 'clone', '--depth', '1'];
   if (branch) args.push('--branch', branch);
   args.push('--', redactGitUrl(url, true), dest);
