@@ -8,6 +8,8 @@ import {
   identifierTsvSql,
   isPgvectorUnavailable,
   fenceRagStore,
+  ensureRagLexicalConfig,
+  RAG_TEXT_CONFIG_SQL,
   openExistingRagDatabase,
   ragDatabaseName,
   tryAcquireRagSyncLock,
@@ -131,6 +133,7 @@ export async function ensureRagSchema(
   );
 
   await dedupeAndEnforceRepoUniqueness(conn);
+  await ensureRagLexicalConfig(step, log);
 
   // tsvector auto-update trigger. Three parts, and the last two are why code
   // identifiers are findable at all: Postgres' text-search PARSER splits
@@ -141,12 +144,11 @@ export async function ensureRagSchema(
   // backfillIdentifierTsv can find the rows that still need it.
   //
   // CREATE OR REPLACE, and ensureRagSchema runs at the start of every workflow
-  // task (02-pre-rag-sync), so a change here upgrades every reachable store on
-  // its own — no version marker, no migration.
+  // task (02-pre-rag-sync). The store-local configuration records its normalization mode.
   await exec(`
     CREATE OR REPLACE FUNCTION update_content_tsv() RETURNS trigger AS $$
     BEGIN
-      NEW.content_tsv := to_tsvector('english', COALESCE(NEW.content, ''))
+      NEW.content_tsv := to_tsvector(${RAG_TEXT_CONFIG_SQL}, COALESCE(NEW.content, ''))
         || ${identifierTsvSql("COALESCE(NEW.content, '')")}
         || array_to_tsvector(ARRAY['${IDENTIFIER_TSV_SENTINEL}']);
       RETURN NEW;

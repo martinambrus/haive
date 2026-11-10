@@ -7,6 +7,7 @@ import {
   identifierTsvSql,
 } from '../rag/identifiers.js';
 import type { GlobalKbConnection } from './connection.js';
+import { ensureRagLexicalConfig, RAG_TEXT_CONFIG_SQL } from '../rag/lexical-config.js';
 import { canonicalFacetValueSql, orphanFacetMajorSql, trimFacetValueSql } from './schema.js';
 
 const log = logger.child({ module: 'global-kb-schema' });
@@ -275,10 +276,11 @@ export async function ensureGlobalKbSchema(
 
   // Mirrors ensureRagSchema's trigger: identifier lexemes make snake_case names match whole, the
   // sentinel marks a row built by this body (docs/architecture/identifier-search.md).
+  await ensureRagLexicalConfig(step, log);
   await exec(`
     CREATE OR REPLACE FUNCTION update_content_tsv() RETURNS trigger AS $$
     BEGIN
-      NEW.content_tsv := to_tsvector('english', COALESCE(NEW.content, ''))
+      NEW.content_tsv := to_tsvector(${RAG_TEXT_CONFIG_SQL}, COALESCE(NEW.content, ''))
         || ${identifierTsvSql("COALESCE(NEW.content, '')")}
         || array_to_tsvector(ARRAY['${IDENTIFIER_TSV_SENTINEL}']);
       RETURN NEW;

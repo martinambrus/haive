@@ -30,6 +30,17 @@ function capturingConn(withVector: boolean): { conn: RagConnection; statements: 
 const EXCLUSION = `source_type <> '${TASK_SOURCE_TYPE}'`;
 
 describe('ragHybridSearch excludes the effort estimator task rows', () => {
+  it.each([true, false])(
+    'uses the index configuration for prose queries (vector: %s)',
+    async (vector) => {
+      const { conn, statements } = capturingConn(vector);
+      await ragHybridSearch(conn, [0.1, 0.2, 0.3, 0.4], 'čerpadlo', {});
+      const search = statements.find((s) => s.includes('ts_rank_cd'))!;
+      expect(search).toContain("'haive_english_unaccent_v1'");
+      expect(search).toContain("'pg_catalog.english'::regconfig");
+    },
+  );
+
   it('filters them out of the dense + lexical branch', async () => {
     const { conn, statements } = capturingConn(true);
 

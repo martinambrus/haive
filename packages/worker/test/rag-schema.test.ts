@@ -1,5 +1,11 @@
 import postgres from 'postgres';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+
+const logged = vi.hoisted(() => ({ warn: vi.fn() }));
+vi.mock('@haive/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@haive/shared')>()),
+  logger: { child: () => ({ warn: logged.warn, info: () => {} }) },
+}));
 import { ensureRagSchema } from '../src/step-engine/steps/onboarding/_rag-connection.js';
 import { IDENTIFIER_TSV_SENTINEL, identifierTsvSentinelQuery } from '@haive/shared/rag';
 import type { RagConnection } from '@haive/shared/rag';
@@ -20,6 +26,7 @@ function fakeConn(
     wrapped?: boolean;
     trigger?: 'stale' | 'current';
     fullBatches?: boolean;
+    unaccentThrows?: string;
   } = {},
 ): {
   conn: RagConnection;
@@ -29,6 +36,7 @@ function fakeConn(
 } {
   const backfillParams: unknown[][] = [];
   const captured: string[] = [];
+  const configs = new Set<string>();
   const pg = ((strings: TemplateStringsArray | string) => {
     // Called as a tag (conn.pg`...`) and as a function (conn.pg(RAG_TABLE)) for
     // identifier interpolation; only the tag form carries SQL worth capturing.
@@ -44,6 +52,18 @@ function fakeConn(
   }) as unknown as { unsafe: (q: string, params?: unknown[]) => Promise<unknown[]> };
   pg.unsafe = (q: string, params?: unknown[]) => {
     captured.push(q);
+    if (q.includes('CREATE EXTENSION IF NOT EXISTS unaccent') && opts.unaccentThrows) {
+      return Promise.reject(pgError(opts.unaccentThrows));
+    }
+    if (q.includes('SELECT oid AS config')) {
+      const name = /cfgname = '([^']+)'/.exec(q)![1]!;
+      return Promise.resolve([{ config: configs.has('public.' + name) ? name : null }]);
+    }
+    if (q.includes('CREATE TEXT SEARCH CONFIGURATION')) {
+      configs.add(/CONFIGURATION ([^\s]+)/.exec(q)![1]!);
+      return Promise.resolve(Object.assign([], { command: 'CREATE' }));
+    }
+    if (q.includes('AS dictionary')) return Promise.resolve([{ dictionary: 'public.unaccent' }]);
     if (q.includes('SET content = content')) {
       backfillParams.push(params ?? []);
       return Promise.resolve(Object.assign([], { count: opts.fullBatches ? 2_000 : 0 }));
@@ -74,6 +94,35 @@ function fakeConn(
 }
 
 describe('ensureRagSchema', () => {
+  it.each(['42501', '0A000', '58P01'])(
+    'fails open once when unaccent is unavailable (%s)',
+    async (code) => {
+      logged.warn.mockClear();
+      const { conn, queries } = fakeConn({ unaccentThrows: code });
+      await expect(ensureRagSchema(conn)).resolves.toMatchObject({ usedPgvector: true });
+      await expect(ensureRagSchema(conn)).resolves.toMatchObject({ usedPgvector: true });
+      expect(queries()).toContain(
+        'CREATE TEXT SEARCH CONFIGURATION public.haive_english_verbatim_v1',
+      );
+      expect(queries()).not.toContain(
+        'CREATE TEXT SEARCH CONFIGURATION public.haive_english_unaccent_v1',
+      );
+      expect(logged.warn).toHaveBeenCalledTimes(1);
+      expect(logged.warn.mock.calls[0]![0]).toMatchObject({ err: { code } });
+    },
+  );
+
+  it('ensures unaccent in the RAG store and uses a recorded text-search configuration', async () => {
+    const { conn, queries } = fakeConn();
+    await ensureRagSchema(conn);
+    expect(queries()).toContain('CREATE EXTENSION IF NOT EXISTS unaccent');
+    expect(queries()).toContain(
+      'CREATE TEXT SEARCH CONFIGURATION public.haive_english_unaccent_v1',
+    );
+    expect(queries()).toContain('pg_catalog.english_stem');
+    expect(queries()).toContain("'haive_english_unaccent_v1'");
+  });
+
   it('runs every CREATE in its own transaction behind the schema lock, so two first ensures do not race', async () => {
     const { conn, statements } = fakeConn();
     await ensureRagSchema(conn);

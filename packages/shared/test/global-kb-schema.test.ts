@@ -14,6 +14,7 @@ import {
   identifierTsvSql,
 } from '../src/rag/identifiers.js';
 import { orphanFacetMajorSql, trimFacetValueSql } from '../src/global-kb/schema.js';
+import { RAG_TEXT_CONFIG_SQL } from '../src/rag/lexical-config.js';
 
 type EnsureConn = Parameters<typeof ensureGlobalKbSchema>[0];
 
@@ -44,6 +45,7 @@ function fakeConn(
   let unstamped = opts.unstampedRows ?? 0;
   const backfillParams: unknown[][] = [];
   const captured: string[] = [];
+  const configs = new Set<string>();
   let lockFailure = opts.lockThrowsOnce;
   const tag = (strings: TemplateStringsArray) => {
     const q = strings.join('');
@@ -61,6 +63,14 @@ function fakeConn(
   const tx = Object.assign(tag, {
     unsafe: (q: string, params?: unknown[]) => {
       captured.push(q);
+      if (q.includes('SELECT oid AS config')) {
+        const name = /cfgname = '([^']+)'/.exec(q)![1]!;
+        return Promise.resolve([{ config: configs.has('public.' + name) ? name : null }]);
+      }
+      if (q.includes('CREATE TEXT SEARCH CONFIGURATION')) {
+        configs.add(/CONFIGURATION ([^\s]+)/.exec(q)![1]!);
+      }
+      if (q.includes('AS dictionary')) return Promise.resolve([{ dictionary: 'public.unaccent' }]);
       if (q.includes('SET content = content')) {
         backfillParams.push(params ?? []);
         if (opts.backfillThrows) return Promise.reject(new Error('statement timeout'));
@@ -317,6 +327,12 @@ describe('ensureGlobalKbSchema', () => {
       ['ALTER TABLE global_kb_entries DROP', 'ALTER TABLE global_kb_entries ADD'],
       ['SELECT 1 FROM pg_trigger', 'CREATE TRIGGER trg_global_kb_clear_enforced_hash BEFORE'],
       [
+        'SELECT oid AS config',
+        "SELECT format('%I.unaccent', n.nspname) AS",
+        'CREATE TEXT SEARCH CONFIGURATION',
+        'ALTER TEXT SEARCH CONFIGURATION',
+      ],
+      [
         "SELECT tgattr::text = ''",
         'DROP TRIGGER IF EXISTS',
         'CREATE TRIGGER trg_global_content_tsv BEFORE',
@@ -510,7 +526,7 @@ describe('ensureGlobalKbSchema', () => {
       /CREATE OR REPLACE FUNCTION update_content_tsv\(\)[\s\S]*?LANGUAGE plpgsql/,
     )![0];
 
-    expect(fn).toContain("to_tsvector('english', COALESCE(NEW.content, ''))");
+    expect(fn).toContain(`to_tsvector(${RAG_TEXT_CONFIG_SQL}, COALESCE(NEW.content, ''))`);
     expect(fn).toContain(identifierTsvSql("COALESCE(NEW.content, '')"));
     expect(fn).toContain(`array_to_tsvector(ARRAY['${IDENTIFIER_TSV_SENTINEL}'])`);
   });
