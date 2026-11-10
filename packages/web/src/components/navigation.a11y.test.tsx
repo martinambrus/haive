@@ -39,6 +39,7 @@ it.each([false, true])(
     );
     if (menu) fireEvent.click(screen.getByRole('button', { name: 'Actions' }));
     const action = screen.getByRole(menu ? 'menuitem' : 'link', { name: 'View task' });
+    expect(action.hasAttribute('href')).toBe(false);
     expect(action.getAttribute('aria-disabled')).toBe('true');
     fireEvent.click(action);
     expect(onClick).not.toHaveBeenCalled();

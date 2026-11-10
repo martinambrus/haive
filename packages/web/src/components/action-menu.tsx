@@ -231,7 +231,19 @@ export function ActionMenu({
             return (
               <div key={item.key}>
                 {separated && <div className="my-1 border-t border-neutral-800" />}
-                {item.href ? (
+                {item.href && item.disabled ? (
+                  <a
+                    ref={capture}
+                    role="menuitem"
+                    aria-disabled="true"
+                    tabIndex={-1}
+                    title={item.title}
+                    className={rowClass}
+                    onClick={(event) => event.preventDefault()}
+                  >
+                    {body}
+                  </a>
+                ) : item.href ? (
                   <Link
                     ref={capture}
                     role="menuitem"

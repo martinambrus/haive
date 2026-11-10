@@ -64,24 +64,39 @@ export function LinkButton({
   size?: ButtonSize;
   disabled?: boolean;
 }) {
-  return (
-    <Link
-      {...props}
-      className={cn(
-        buttonClasses(variant, size, className),
-        disabled && 'cursor-not-allowed opacity-50',
-      )}
-      aria-disabled={disabled || undefined}
-      tabIndex={disabled ? -1 : tabIndex}
-      onClick={(event) => {
-        if (disabled) {
-          event.preventDefault();
-          return;
-        }
-        onClick?.(event);
-      }}
-    />
+  const appearance = cn(
+    buttonClasses(variant, size, className),
+    disabled && 'cursor-not-allowed opacity-50',
   );
+  if (disabled) {
+    // Next Link requires a destination. Use a plain anchor with none, stripping
+    // navigation-only props while preserving anchor, ARIA and data attributes.
+    const {
+      href: _href,
+      as: _as,
+      replace: _replace,
+      scroll: _scroll,
+      shallow: _shallow,
+      passHref: _passHref,
+      prefetch: _prefetch,
+      locale: _locale,
+      legacyBehavior: _legacyBehavior,
+      onNavigate: _onNavigate,
+      transitionTypes: _transitionTypes,
+      ...anchorProps
+    } = props;
+    return (
+      <a
+        {...anchorProps}
+        role={props.role ?? 'link'}
+        className={appearance}
+        aria-disabled="true"
+        tabIndex={-1}
+        onClick={(event) => event.preventDefault()}
+      />
+    );
+  }
+  return <Link {...props} className={appearance} tabIndex={tabIndex} onClick={onClick} />;
 }
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(

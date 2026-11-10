@@ -55,6 +55,7 @@ it('keeps a disabled LinkButton out of the tab order and refuses its action', ()
     createElement(LinkButton, { href: '/tasks', disabled: true, onClick: click }, 'All tasks'),
   );
   const link = screen.getByRole('link', { name: 'All tasks' });
+  expect(link.hasAttribute('href')).toBe(false);
   expect(link.getAttribute('aria-disabled')).toBe('true');
   expect(link.tabIndex).toBe(-1);
   fireEvent.click(link);
