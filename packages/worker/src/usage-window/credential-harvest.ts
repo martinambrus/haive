@@ -170,6 +170,6 @@ export async function harvestInTaskCredentials(
   }
 
   for (const target of targets) {
-    await syncProviderAuthBack(target.taskId, target.provider, runner, db);
+    await syncProviderAuthBack(target.taskId, target.provider, db, runner, 0);
   }
 }

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import { syncProviderAuthBack } from '../src/sandbox/task-auth-volume.js';
@@ -20,6 +20,7 @@ beforeEach(() => {
   h.acquire.mockReset().mockResolvedValue(h.release);
   h.release.mockClear();
 });
+afterEach(() => vi.useRealTimers());
 describe('task auth sync shares the sign-out critical section', () => {
   it('yields to login/sign-out without even reading a credential', async () => {
     h.acquire.mockResolvedValue(null);
@@ -28,13 +29,30 @@ describe('task auth sync shares the sign-out critical section', () => {
       await syncProviderAuthBack(
         'task',
         provider,
-        runner as unknown as DockerRunner,
         {} as Database,
+        runner as unknown as DockerRunner,
+        0,
       ),
     ).toBe(false);
     expect(runner.volumeExists).not.toHaveBeenCalled();
     expect(runner.run).not.toHaveBeenCalled();
     expect(h.acquire).toHaveBeenCalledWith(expect.anything(), cliAuthScope(provider));
+  });
+  it('waits for a short-lived teardown contender before reading the surviving user volume', async () => {
+    vi.useFakeTimers();
+    h.acquire.mockResolvedValueOnce(null);
+    const runner = { volumeExists: vi.fn(async () => false), run: vi.fn() };
+    const pending = syncProviderAuthBack(
+      'task',
+      provider,
+      {} as Database,
+      runner as unknown as DockerRunner,
+    );
+    await vi.advanceTimersByTimeAsync(500);
+    await pending;
+    expect(h.acquire).toHaveBeenCalledTimes(2);
+    expect(runner.volumeExists).toHaveBeenCalledOnce();
+    expect(h.release).toHaveBeenCalledOnce();
   });
   it('does not recreate a volume that sign-out removed', async () => {
     const runner = { volumeExists: vi.fn(async () => false), run: vi.fn() };
@@ -42,8 +60,8 @@ describe('task auth sync shares the sign-out critical section', () => {
       await syncProviderAuthBack(
         'task',
         provider,
-        runner as unknown as DockerRunner,
         {} as Database,
+        runner as unknown as DockerRunner,
       ),
     ).toBe(false);
     expect(runner.run).not.toHaveBeenCalled();
@@ -71,12 +89,29 @@ describe('task auth sync shares the sign-out critical section', () => {
       await syncProviderAuthBack(
         'task',
         provider,
-        runner as unknown as DockerRunner,
         { update } as unknown as Database,
+        runner as unknown as DockerRunner,
       ),
     ).toBe(true);
     expect(runner.run.mock.calls.at(-1)?.[0].mounts).toHaveLength(2);
     expect(h.release).toHaveBeenCalledOnce();
     expect(update).not.toHaveBeenCalled();
   });
+});
+
+it('bounds teardown contention at thirty seconds without reading an unowned credential', async () => {
+  vi.useFakeTimers();
+  h.acquire.mockResolvedValue(null);
+  const runner = { volumeExists: vi.fn(), run: vi.fn() };
+  const pending = syncProviderAuthBack(
+    'task',
+    provider,
+    {} as Database,
+    runner as unknown as DockerRunner,
+  );
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(await pending).toBe(false);
+  expect(h.acquire).toHaveBeenCalledTimes(61);
+  expect(runner.volumeExists).not.toHaveBeenCalled();
+  expect(h.release).not.toHaveBeenCalled();
 });
