@@ -1,3 +1,4 @@
+import { adminGitOwner } from './support/git-owner.js';
 // Host and CI only: requires git http-backend, absent from the worker image.
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -53,7 +54,7 @@ const helper = () => buildCredentialHelper({} as never, 'cred', 'user', bound);
 
 it('authenticates on the bound host', async () => {
   const auth = await helper();
-  const res = await originGitRun(work, [...auth.argv, 'ls-remote', 'origin'], {
+  const res = await originGitRun(work, [...auth.argv, 'ls-remote', 'origin'], adminGitOwner, {
     ...auth.env,
     GIT_TERMINAL_PROMPT: '0',
   });
@@ -86,6 +87,7 @@ it.each(['insteadOf', 'pushInsteadOf'])(
         ...auth.argv,
         ...(kind === 'pushInsteadOf' ? ['push', 'origin', 'main'] : ['ls-remote', 'origin']),
       ],
+      adminGitOwner,
       { ...auth.env, GIT_TERMINAL_PROMPT: '0' },
     );
     expect(res.code !== 0).toBe(true);
@@ -172,10 +174,10 @@ it('prevents an uploaded remote helper from inheriting the credential environmen
   };
   // Control: -c hardening alone does not stop an allowed repository-selected executable.
   const { GIT_ALLOW_PROTOCOL: _allow, ...unrestricted } = env;
-  await originGitRun(work, [...auth.argv, 'ls-remote', 'origin'], unrestricted);
+  await originGitRun(work, [...auth.argv, 'ls-remote', 'origin'], adminGitOwner, unrestricted);
   expect(await lstatNoFollow(root, 'marker')).not.toBeNull();
   env.HAIVE_MARKER = `${root}/hardened-marker`;
-  const res = await originGitRun(work, [...auth.argv, 'ls-remote', 'origin'], env);
+  const res = await originGitRun(work, [...auth.argv, 'ls-remote', 'origin'], adminGitOwner, env);
   expect(res.code !== 0).toBe(true);
   expect(await lstatNoFollow(root, 'hardened-marker')).toBeNull();
 });
@@ -186,7 +188,7 @@ it('authenticates both the failed first fetch and the empty-branch probe on the 
     await fetchOrigin({
       repoPath: work,
       branch: 'main',
-      db: {} as never,
+      db: adminGitOwner.db,
       userId: 'user',
       credentialId: 'cred',
       remoteUrl: bound,
@@ -200,7 +202,7 @@ it('does not treat an authentication failure as an empty origin', async () => {
     fetchOrigin({
       repoPath: work,
       branch: 'main',
-      db: {} as never,
+      db: adminGitOwner.db,
       userId: 'user',
       remoteUrl: bound,
     }),

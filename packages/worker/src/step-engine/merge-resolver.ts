@@ -719,7 +719,7 @@ async function fetchForSync(
   );
   let res;
   try {
-    res = await originGitRun(cwd, argv, env);
+    res = await originGitRun(cwd, argv, { db, userId: ctx.userId }, env);
   } catch (err) {
     return {
       ok: false,

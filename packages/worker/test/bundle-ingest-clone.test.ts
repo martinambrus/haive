@@ -1,3 +1,4 @@
+import { adminGitOwner } from './support/git-owner.js';
 // Host and CI only: the clone goes over the smart-HTTP fixture, which needs `git http-backend`,
 // and the alpine worker image (whose in-image job runs bundle-ingest.test.ts) does not ship it.
 import { spawn } from 'node:child_process';
@@ -64,7 +65,7 @@ describe('bundle-ingest: git clone + rev-parse', () => {
     await run('git', ['commit', '-m', 'init'], work);
     await run('git', ['push', 'origin', 'main'], work);
 
-    await gitClone(httpOrigin(sourceRepo), dest, 'main');
+    await gitClone(httpOrigin(sourceRepo), dest, 'main', undefined, adminGitOwner);
     const head = await gitRevParseHead(dest);
     expect(head).toMatch(/^[0-9a-f]{40}$/);
     expect((await readdir(dest)).sort()).toContain('agents');

@@ -89,7 +89,7 @@ async function fetchOrigin(
     }
   }
   argv.push('fetch', '--end-of-options', 'origin', `refs/heads/${base}`);
-  const res = await originGitRun(ctx.repoPath, argv, env);
+  const res = await originGitRun(ctx.repoPath, argv, { db: ctx.db, userId: ctx.userId }, env);
   if (res.code !== 0) {
     return {
       ok: false,

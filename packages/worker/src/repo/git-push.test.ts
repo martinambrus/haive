@@ -1,10 +1,10 @@
+import { adminGitOwner } from '../../test/support/git-owner.js';
 import { fixtureBase, networkGitArgs, httpOrigin } from '../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, it, expect } from 'vitest';
-import type { Database } from '@haive/database';
 import { gitTimeoutLimits } from './git-exec.js';
 import { failGit, noGit, type FakeGit } from '../../test/support/fake-git.js';
 import { detectOrigin, ensureOrigin, getOriginUrl, pushBranch, scrubSecret } from './git-push.js';
@@ -35,9 +35,8 @@ async function setupRepoWithBareOrigin(): Promise<{ work: string; bare: string }
   return { work, bare };
 }
 
-// db/userId are only touched on the credential path; the HTTP tests use no
-// credential, so a bare stub is never dereferenced.
-const stubDb = {} as unknown as Database;
+// Loopback fixture remotes belong to an administrator.
+const stubDb = adminGitOwner.db;
 
 describe('detectOrigin / getOriginUrl read a failed git as an error', () => {
   const FAILED = /^git remote get-url origin failed in /;

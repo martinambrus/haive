@@ -49,7 +49,10 @@ async function main() {
   const target = targetArg ?? `origin/${bundle.gitBranch ?? 'main'}`;
 
   log.info({ target }, 'fetch + reset to target');
-  const fetched = await originGitRun(bundle.storageRoot, ['fetch', 'origin']);
+  const fetched = await originGitRun(bundle.storageRoot, ['fetch', 'origin'], {
+    db,
+    userId: bundle.userId,
+  });
   if (fetched.code !== 0) {
     throw new Error(`git fetch origin failed (exit ${fetched.code}): ${fetched.stderr.trim()}`);
   }

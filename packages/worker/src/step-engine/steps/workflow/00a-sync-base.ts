@@ -103,7 +103,7 @@ async function fetchOrigin(
   argv.push('fetch', '--end-of-options', 'origin', `refs/heads/${base}`);
   let res;
   try {
-    res = await originGitRun(ctx.repoPath, argv, env);
+    res = await originGitRun(ctx.repoPath, argv, { db: ctx.db, userId: ctx.userId }, env);
   } catch (err) {
     if (!(err instanceof OriginUrlError)) throw err;
     ctx.logger.warn({ err: err.message }, 'base sync skipped: origin refused');
@@ -466,12 +466,11 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     const ff = (): Promise<{ code: number; stderr: string; stdout: string }> =>
       onCurrent
         ? gitRun(ctx.repoPath, ['merge', '--ff-only', `origin/${base}`])
-        : originGitRun(ctx.repoPath, [
-            'fetch',
-            '--end-of-options',
-            'origin',
-            `refs/heads/${base}:refs/heads/${base}`,
-          ]);
+        : originGitRun(
+            ctx.repoPath,
+            ['fetch', '--end-of-options', 'origin', `refs/heads/${base}:refs/heads/${base}`],
+            { db: ctx.db, userId: ctx.userId },
+          );
 
     const repositoryId = onCurrent ? await taskRepositoryId(ctx) : null;
     // Another task working in the checkout itself (no worktree of its own) holds the base where it is.
@@ -615,13 +614,11 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
             kept.clear();
             asided = false;
           }
-          await originGitRun(ctx.repoPath, [
-            'fetch',
-            '--deepen=50',
-            '--end-of-options',
-            'origin',
-            `refs/heads/${base}`,
-          ]);
+          await originGitRun(
+            ctx.repoPath,
+            ['fetch', '--deepen=50', '--end-of-options', 'origin', `refs/heads/${base}`],
+            { db: ctx.db, userId: ctx.userId },
+          );
           res = await ffLocked();
         }
       } catch (err) {

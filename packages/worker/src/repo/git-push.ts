@@ -10,6 +10,7 @@ import { schema, type Database } from '@haive/database';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { getDecryptedCredentials } from './credentials.js';
 import { GIT_MAX_BUFFER, type GitRunResult, gitRun } from './git-exec.js';
+import { gitRemoteGuardArgs, type GitRemoteOwner } from './git-remote-guard.js';
 
 // Re-exported because the step modules and the merge core import them from here.
 export { GIT_MAX_BUFFER, gitRun };
@@ -56,8 +57,8 @@ export class OriginUrlError extends Error {
 
 /** Read every effective fetch and push URL (including git's insteadOf rewrites). Exit 2 alone
  *  means no origin; a failed read is unknown, and an unsafe address fails the caller. */
-export async function getOriginUrl(cwd: string): Promise<string | null> {
-  let first: string | undefined;
+async function originUrls(cwd: string): Promise<string[] | null> {
+  const all: string[] = [];
   for (const push of [false, true]) {
     const res = await gitRun(cwd, [
       'remote',
@@ -76,16 +77,35 @@ export async function getOriginUrl(cwd: string): Promise<string | null> {
     const urls = res.stdout.trim().split('\n');
     for (const url of urls) {
       if (!isAllowedGitRemoteUrl(url)) throw new OriginUrlError(url, push ? 'push' : 'fetch');
+      all.push(url);
     }
-    first ??= urls[0];
   }
-  return gitRemoteIdentity(first!);
+  return all;
+}
+
+export async function getOriginUrl(cwd: string): Promise<string | null> {
+  const urls = await originUrls(cwd);
+  return urls === null ? null : gitRemoteIdentity(urls[0]!);
 }
 
 /** Origin transports always re-read the checkout immediately before git talks to the remote. */
-export async function originGitRun(...args: Parameters<typeof gitRun>): Promise<GitRunResult> {
-  if ((await getOriginUrl(args[0])) === null) throw new Error('origin remote is not configured');
-  return gitRun(...args);
+export async function originGitRun(
+  cwd: string,
+  args: string[],
+  owner: GitRemoteOwner,
+  env?: Parameters<typeof gitRun>[2],
+  io?: Parameters<typeof gitRun>[3],
+): Promise<GitRunResult> {
+  const urls = await originUrls(cwd);
+  if (urls === null) throw new Error('origin remote is not configured');
+  let guard: string[];
+  try {
+    guard = await gitRemoteGuardArgs(owner, urls);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOTFOUND') throw err;
+    return { code: 128, stdout: '', stderr: `${(err as Error).message}\n` };
+  }
+  return gitRun(cwd, [...guard, ...args], env, { ...io, guardedRemote: guard.length > 0 });
 }
 
 /** Add `origin` pointing at url, or replace all its URLs when it already exists. Idempotent.
@@ -245,7 +265,7 @@ export async function pushBranch(args: {
   if (setUpstream && !sha) pushArgs.push('-u');
   pushArgs.push('origin', sha ? `${sha}:refs/heads/${branch}` : branch);
 
-  const res = await originGitRun(cwd, pushArgs, env);
+  const res = await originGitRun(cwd, pushArgs, { db, userId }, env);
   if (res.code !== 0) {
     throw new Error(`git push failed: ${scrubSecret(res.stderr || res.stdout, secret)}`);
   }

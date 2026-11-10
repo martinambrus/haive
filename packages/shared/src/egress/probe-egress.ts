@@ -147,6 +147,25 @@ function stripBrackets(hostname: string): string {
   return hostname.replace(/^\[|\]$/g, '');
 }
 
+/** Resolve once for a transport that can pin an address itself, using the probe's dial policy. */
+export async function resolveGuardedAddress(host: string, seams: ProbeSeams = {}): Promise<string> {
+  host = stripBrackets(host);
+  const lazy = lazyAllowlist(seams);
+  if (net.isIP(host)) {
+    if (await literalRefused(host, seams, lazy)) {
+      warnRefused(host);
+      throw notFound(host);
+    }
+    return host;
+  }
+  return new Promise<string>((resolve, reject) => {
+    probeLookup(host, seams, lazy)(host, {}, (err, address) => {
+      if (err) reject(err);
+      else resolve(address as string);
+    });
+  });
+}
+
 function decoderFor(
   header: string | undefined,
 ): zlib.Gunzip | zlib.Inflate | zlib.BrotliDecompress | undefined {

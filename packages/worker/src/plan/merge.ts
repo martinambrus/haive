@@ -107,6 +107,7 @@ export async function fetchOrigin(args: {
   const res = await originGitRun(
     args.repoPath,
     [...argv, 'fetch', '--end-of-options', 'origin', `refs/heads/${args.branch}`],
+    { db: args.db, userId: args.userId },
     env,
   );
   if (res.code === 0) return 'present';
@@ -116,6 +117,7 @@ export async function fetchOrigin(args: {
   const probe = await originGitRun(
     args.repoPath,
     [...argv, 'ls-remote', '--exit-code', '--refs', '--', 'origin', `refs/heads/${args.branch}`],
+    { db: args.db, userId: args.userId },
     env,
   );
   if (probe.code === 2 && probe.stdout === '') return 'absent';

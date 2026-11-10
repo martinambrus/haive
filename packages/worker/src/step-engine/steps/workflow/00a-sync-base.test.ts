@@ -151,6 +151,7 @@ function mkCtx(
         findFirst: async () => ({ repositoryId }),
         findMany: async () => otherCheckoutTasks,
       },
+      users: { findFirst: async () => ({ role: 'admin' }) },
       repositories: { findFirst: async () => null },
     },
   };
@@ -167,6 +168,35 @@ function mkCtx(
 function applyArgs(detected: unknown, formValues: Record<string, unknown>): never {
   return { detected, formValues, iteration: 0, previousIterations: [] } as never;
 }
+
+it('owner-role control: the step fetch passes its owner and refuses loopback before dialing', async () => {
+  const { bare, seed } = await seedOrigin();
+  const local = await cloneLocal(bare);
+  const run = vi.spyOn(gitExec, 'gitRun');
+  const origin = vi.spyOn(gitPush, 'originGitRun');
+  try {
+    const ctx = mkCtx(local);
+    const owner = vi
+      .spyOn(ctx.db.query.users, 'findFirst')
+      .mockResolvedValue({ role: 'user' } as never);
+    const statsUrl = new URL('/__fixture_stats', httpOrigin(bare));
+    const before = (await (await fetch(statsUrl)).json()) as { requests: number };
+    const detected = await syncBaseStep.detect!(ctx);
+    expect(detected).toMatchObject({ fetchOk: false });
+    expect(owner).toHaveBeenCalledWith(expect.objectContaining({ columns: { role: true } }));
+    expect(origin.mock.calls[0]![2]).toEqual({ db: ctx.db, userId: ctx.userId });
+    expect(run.mock.calls.some(([, argv]) => argv.includes('fetch'))).toBe(false);
+    expect(((await (await fetch(statsUrl)).json()) as { requests: number }).requests).toBe(
+      before.requests,
+    );
+    owner.mockRestore();
+  } finally {
+    run.mockRestore();
+    origin.mockRestore();
+    for (const dir of [bare, seed, local])
+      await rm(dir, { recursive: true, force: true, maxRetries: 5 });
+  }
+});
 
 /** A bare origin on `main` with one commit, plus a seed working clone to advance it. */
 async function seedOrigin(): Promise<{ bare: string; seed: string }> {
@@ -778,7 +808,10 @@ function makeMergeDb(
         },
       },
       repositories: { findFirst: async () => undefined },
-      users: { findFirst: async () => undefined },
+      users: {
+        findFirst: async (opts: { columns?: { role?: boolean } }) =>
+          opts?.columns?.role ? { role: 'admin' } : undefined,
+      },
       taskSteps: { findFirst: async () => ({ mergeResolveState: mergeState }) },
     },
     update: () => ({

@@ -59,7 +59,12 @@ async function gitFetchAndCheckout(
   const args = ['pull', '--ff-only', 'origin'];
   if (bundle.gitBranch) args.push(bundle.gitBranch);
   const auth = await bundleGitAuth(db, bundle);
-  const res = await originGitRun(bundle.storageRoot, [...auth.argv, ...args], auth.env);
+  const res = await originGitRun(
+    bundle.storageRoot,
+    [...auth.argv, ...args],
+    { db, userId: bundle.userId },
+    auth.env,
+  );
   if (res.code !== 0) {
     const msg = scrubSecret(res.stderr, auth.secret).trim();
     throw new Error(`git pull failed (exit ${res.noExit ?? res.code}): ${msg}`);
@@ -200,7 +205,10 @@ export async function handleIngestGit(
     await ensureDirNoFollow(bundleStorageRoot, dirRel, { mode: 0o755 });
     await removeNoFollow(bundleStorageRoot, `${dirRel}/extracted`, { recursive: true });
 
-    await gitClone(cloneUrl, dest, bundle.gitBranch ?? undefined, auth);
+    await gitClone(cloneUrl, dest, bundle.gitBranch ?? undefined, auth, {
+      db,
+      userId: bundle.userId,
+    });
     const head = await gitRevParseHead(dest);
     await db
       .update(schema.customBundles)
