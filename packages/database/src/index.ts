@@ -67,3 +67,5 @@ export {
   type ReviveTask,
 } from './repository-task-lock.js';
 export { lockStepRows } from './step-row-lock.js';
+
+export { tryCliAuthLock } from './cli-auth-lock.js';

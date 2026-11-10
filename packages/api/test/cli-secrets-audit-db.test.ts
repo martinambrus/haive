@@ -1,3 +1,4 @@
+import { advanceVolumeLoginGeneration } from '@haive/shared/cli-auth-state';
 import { randomUUID } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq, sql } from 'drizzle-orm';
@@ -326,6 +327,7 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
         const refreshed = await db.query.cliProviders.findFirst({
           where: eq(schema.cliProviders.id, provider),
         });
+        expect(refreshed?.authGeneration).not.toBe(before?.authGeneration);
         expect(refreshed?.authStatus).toBe('ok');
         expect(refreshed?.authMessage).toBe('authenticated');
         expect(refreshed?.authLastCheckedAt).toBeInstanceOf(Date);
@@ -384,6 +386,7 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
     // Pause at the audit insert, immediately after the legacy environment was read.
     const captureDb = new Proxy(db, {
       get(target, key) {
+        if (key === '$client') return target.$client;
         if (key === 'transaction')
           return (fn: (tx: any) => Promise<unknown>) =>
             target.transaction((tx) =>
@@ -459,7 +462,11 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
     async (outcome) => {
       let visible = 0;
       let openTransactions = -1;
-      h.add.mockImplementation(async () => {
+      h.add.mockImplementation(async (_name, payload) => {
+        expect(payload.authGeneration).toBe(
+          (await db.query.cliProviders.findFirst({ where: eq(schema.cliProviders.id, provider) }))!
+            .authGeneration,
+        );
         visible = (await audits(db)).length;
         const [row] = await db.execute(sql`
         SELECT count(*)::int AS count FROM pg_stat_activity
@@ -477,6 +484,33 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
       expect(h.auditLog).toHaveBeenCalledTimes(outcome === 'success' ? 1 : 0);
     },
   );
+
+  it('a completed volume login advances shared siblings, leaving isolated and API-key generations alone', async () => {
+    const before = (await db.query.cliProviders.findFirst({
+      where: eq(schema.cliProviders.id, provider),
+    }))!;
+    const siblings = await db
+      .insert(schema.cliProviders)
+      .values([
+        { userId: h.actor, name: 'claude-code', label: 'shared sibling' },
+        { userId: h.actor, name: 'claude-code', label: 'isolated sibling', isolateAuth: true },
+        { userId: h.actor, name: 'claude-code', label: 'key sibling', authMode: 'api_key' },
+      ])
+      .returning();
+    await advanceVolumeLoginGeneration(db, before);
+    const after = (await db.query.cliProviders.findFirst({
+      where: eq(schema.cliProviders.id, provider),
+    }))!;
+    expect(after.authGeneration).not.toBe(before.authGeneration);
+    for (const sibling of siblings) {
+      const current = (await db.query.cliProviders.findFirst({
+        where: eq(schema.cliProviders.id, sibling.id),
+      }))!;
+      expect(current.authGeneration).toBe(
+        sibling.label === 'shared sibling' ? after.authGeneration : sibling.authGeneration,
+      );
+    }
+  });
 
   it('a refused sign-out audit queues nothing on Postgres', async () => {
     await refuseAudit(db, h.actor);

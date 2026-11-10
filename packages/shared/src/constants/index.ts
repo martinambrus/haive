@@ -471,10 +471,14 @@ export const CLI_POLLABLE_JOB_OPTS = {
 export interface CliSignOutJobPayload {
   providerId: string;
   userId: string;
+  /** Absent on jobs queued before generation fencing was deployed. */
+  authGeneration?: string;
 }
 
 export interface CliSignOutJobResult {
   ok: boolean;
+  /** A later completed login superseded this request; nothing was removed. */
+  superseded?: boolean;
   removed: string[];
   failed: { name: string; stderr: string }[];
 }

@@ -129,6 +129,8 @@ export const cliProviders = pgTable(
     rulesContent: text('rules_content').notNull().default(''),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
+    // Changes only after a login credential is durable, never when an attempt starts.
+    authGeneration: uuid('auth_generation').notNull().defaultRandom(),
   },
   (table) => [index('cli_providers_user_id_idx').on(table.userId)],
 );

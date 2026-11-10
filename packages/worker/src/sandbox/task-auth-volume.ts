@@ -1,7 +1,8 @@
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { createHash } from 'node:crypto';
 import { eq } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { schema, tryCliAuthLock, type Database } from '@haive/database';
+import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import {
   CLI_PROVIDER_LIST,
   cliAuthTaskVolumeName,
@@ -1260,7 +1261,7 @@ export async function syncRefreshedAuthToUserVolumes(
     });
     if (!provider) continue;
 
-    await syncProviderAuthBack(taskId, provider, runner);
+    await syncProviderAuthBack(taskId, provider, runner, db);
   }
 }
 
@@ -1288,6 +1289,7 @@ export async function syncProviderAuthBack(
   taskId: string,
   provider: AuthSyncProvider,
   runner: DockerRunner = defaultDockerRunner,
+  db: Database,
 ): Promise<boolean> {
   const source = CLI_CREDENTIAL_FILES[provider.name];
   if (!source) return false;
@@ -1302,7 +1304,12 @@ export async function syncProviderAuthBack(
   const taskVol = cliAuthTaskVolumeName(taskId, provider.name, source.authPathIdx);
   const userVol = userVolumeForCtx(ctx, source.authPathIdx);
 
+  let release: (() => Promise<void>) | null = null;
   try {
+    release = await tryCliAuthLock(db, cliAuthScope(provider));
+    if (!release) return false;
+    // A sign-out that won the lock must not be undone by a helper mount recreating it.
+    if (!(await runner.volumeExists(userVol))) return false;
     const taskRaw = await readVolumeFile(taskVol, source.relPath, runner);
     if (!taskRaw) return false;
     const taskToken = extractToken(source.extract, taskRaw);
@@ -1328,6 +1335,8 @@ export async function syncProviderAuthBack(
       'auth sync-back failed; user volume left as-is',
     );
     return false;
+  } finally {
+    await release?.();
   }
 }
 

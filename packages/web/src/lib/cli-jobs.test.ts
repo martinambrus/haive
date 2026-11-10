@@ -5,6 +5,8 @@ import {
   POLL_TIMEOUT_MS,
   runCatalogVersionRefresh,
   runPricingRefresh,
+  runCliSignOut,
+  signOutSummary,
 } from './cli-jobs';
 import type { CliPackageVersionsEntry } from './api-client';
 
@@ -169,4 +171,17 @@ describe('refresh results', () => {
       expect(h.get).toHaveBeenCalledWith('/cli-providers/catalog/claude-code/refresh-versions/42');
     },
   );
+});
+
+describe('superseded sign-out', () => {
+  it('keeps the flag through polling and tells the user their newer login was kept', async () => {
+    const result = { ok: true, superseded: true, removed: [], failed: [] };
+    h.get.mockResolvedValue({ status: 'done', result });
+    expect(await runCliSignOut('provider')).toEqual(result);
+    expect(signOutSummary(result)).toBe(
+      'Sign-out skipped because you signed in again. Your current login was kept.',
+    );
+    expect(signOutSummary({ ok: true, removed: [], failed: [] })).toBe('Already signed out.');
+    expect(signOutSummary({ ok: true, removed: ['volume'], failed: [] })).toBe('Signed out.');
+  });
 });

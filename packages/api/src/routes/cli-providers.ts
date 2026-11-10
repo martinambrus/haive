@@ -784,11 +784,15 @@ cliProviderRoutes.post('/:id/sign-out', async (c) => {
   const db = getDb();
   const provider = await db.query.cliProviders.findFirst({
     where: and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)),
-    columns: { id: true },
+    columns: { id: true, authGeneration: true },
   });
   if (!provider) throw new HttpError(404, 'CLI provider not found');
 
-  const payload: CliSignOutJobPayload = { providerId: provider.id, userId };
+  const payload: CliSignOutJobPayload = {
+    providerId: provider.id,
+    userId,
+    authGeneration: provider.authGeneration,
+  };
   const queue = getCliExecQueue();
   const event: AuditEvent = {
     actorUserId: userId,

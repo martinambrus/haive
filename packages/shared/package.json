@@ -7,6 +7,10 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./cli-auth-state": {
+      "types": "./dist/cli-auth-state.d.ts",
+      "import": "./dist/cli-auth-state.js"
+    },
     "./haive-data": {
       "types": "./dist/haive-data.d.ts",
       "import": "./dist/haive-data.js"

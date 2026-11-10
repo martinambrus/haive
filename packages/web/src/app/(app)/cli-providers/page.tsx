@@ -36,7 +36,7 @@ import {
 import { ActionMenu } from '@/components/action-menu';
 import { CliUpgradeAll } from '@/components/cli-upgrade-all';
 import { cliUpgradeLatest, groupUpgradable } from '@/components/cli-upgrade-selection';
-import { runCliProbe, runCliSignOut, type QueuedJobPhase } from '@/lib/cli-jobs';
+import { runCliProbe, runCliSignOut, signOutSummary, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { usePageTitle } from '@/lib/use-page-title';
 import { CLI_LOGIN_PROVIDERS, usageReconnectFix, usageReconnectHint } from '@/lib/usage-reconnect';
@@ -290,12 +290,9 @@ export default function CliProvidersPage() {
       return next;
     });
     try {
-      const { ok, removed, failed } = await runCliSignOut(p.id, setPhase);
-      const summary = ok
-        ? removed.length === 0
-          ? 'Already signed out.'
-          : `Removed: ${removed.join(', ')}`
-        : `Failed: ${failed.map((f) => `${f.name} (${f.stderr})`).join('; ')}`;
+      const result = await runCliSignOut(p.id, setPhase);
+      const { ok } = result;
+      const summary = signOutSummary(result);
       setSignOutStates((s) => ({
         ...s,
         [p.id]: { busy: false, message: ok ? summary : null, error: ok ? null : summary },

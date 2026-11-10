@@ -5,7 +5,7 @@ import {
   resolveCliAuthUserVolumeName,
   type CliProviderName,
 } from '@haive/shared';
-import { schema, type Database } from '@haive/database';
+import { schema, tryCliAuthLock, type Database } from '@haive/database';
 import {
   applyGrokRefresh,
   GrokOauthError,
@@ -113,10 +113,15 @@ export async function refreshExpiringCliCredentials(
   }
 
   for (const [vol, sharing] of byVolume) {
+    let release: (() => Promise<void>) | null = null;
     try {
+      release = await tryCliAuthLock(db, vol);
+      if (!release) continue;
       await refreshGrokVolume(db, vol, sharing, runner);
     } catch (err) {
       log.warn({ err, vol }, 'grok credential refresh failed; leaving the stored login as-is');
+    } finally {
+      await release?.();
     }
   }
 }

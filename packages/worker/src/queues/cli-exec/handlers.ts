@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DelayedError, Worker, type Job, type Queue } from 'bullmq';
 import { and, eq, inArray, isNotNull, isNull, notInArray, sql } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { schema, tryCliAuthLock, type Database } from '@haive/database';
+import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
 import { safeErrorMessage, safeErrorForTransport } from '@haive/shared/logger';
 import {
@@ -1133,8 +1134,9 @@ export async function handleSignOutJob(
   db: Database,
   payload: CliSignOutJobPayload,
   runner: DockerRunner = defaultDockerRunner,
+  job?: Job,
 ): Promise<CliSignOutJobResult> {
-  const provider = await db.query.cliProviders.findFirst({
+  let provider = await db.query.cliProviders.findFirst({
     where: eq(schema.cliProviders.id, payload.providerId),
   });
   if (!provider) return { ok: false, removed: [], failed: [] };
@@ -1142,73 +1144,97 @@ export async function handleSignOutJob(
     return { ok: false, removed: [], failed: [] };
   }
 
-  const meta = getCliProviderMetadata(provider.name);
-  const removed: string[] = [];
-  const failed: { name: string; stderr: string }[] = [];
-  for (let idx = 0; idx < meta.authConfigPaths.length; idx += 1) {
-    const name = authVolumeFor(provider, idx);
-    if (!(await runner.volumeExists(name))) continue;
-    // Exactly the hazard `cleanupTaskAuthVolumes` guards, on the volume class that
-    // outlives every task: a worker killed between `docker create` and `docker start`
-    // leaves a Created auth helper mounting this volume, and `docker volume rm --force`
-    // then fails forever. A task volume gets swept because it is removed at task end;
-    // a per-user one is only ever removed HERE, so without this the strays accumulate
-    // and sign-out is the one operation that can never succeed. MEASURED on the dev
-    // install: two helpers stranded on `haive_cli_auth_<user>_codex_0`. Stopped users
-    // only — a running login or probe container is deliberately spared.
-    const containerCleanup = await runner.removeStoppedContainersUsingVolume?.(name);
-    if (containerCleanup && !containerCleanup.ok) {
-      log.warn(
-        { volume: name, stderr: containerCleanup.stderr },
-        'stopped auth helper container cleanup failed',
-      );
-    } else if (containerCleanup && containerCleanup.removed.length > 0) {
-      log.info(
-        { volume: name, containers: containerCleanup.removed.length },
-        'removed stopped auth helper containers',
-      );
+  const release = await tryCliAuthLock(db, cliAuthScope(provider));
+  if (!release) {
+    if (!job) throw new Error('CLI authentication is busy');
+    await job.moveToDelayed(Date.now() + 1_000, job.token);
+    throw new DelayedError();
+  }
+  try {
+    // The read before the lock is only for its namespace. A login may have completed
+    // while it was being acquired, so judge the generation only from this fresh row.
+    provider = await db.query.cliProviders.findFirst({
+      where: eq(schema.cliProviders.id, payload.providerId),
+    });
+    if (!provider || provider.userId !== payload.userId)
+      return { ok: false, removed: [], failed: [] };
+    if (
+      payload.authGeneration !== undefined &&
+      payload.authGeneration !== provider.authGeneration
+    ) {
+      log.info({ providerId: provider.id }, 'cli sign-out superseded by a newer login');
+      return { ok: true, superseded: true, removed: [], failed: [] };
     }
-    const result = await runner.volumeRemove(name);
-    if (result.ok) removed.push(name);
-    else failed.push({ name, stderr: result.stderr });
-  }
+    const meta = getCliProviderMetadata(provider.name);
+    const removed: string[] = [];
+    const failed: { name: string; stderr: string }[] = [];
+    for (let idx = 0; idx < meta.authConfigPaths.length; idx += 1) {
+      const name = authVolumeFor(provider, idx);
+      if (!(await runner.volumeExists(name))) continue;
+      // Exactly the hazard `cleanupTaskAuthVolumes` guards, on the volume class that
+      // outlives every task: a worker killed between `docker create` and `docker start`
+      // leaves a Created auth helper mounting this volume, and `docker volume rm --force`
+      // then fails forever. A task volume gets swept because it is removed at task end;
+      // a per-user one is only ever removed HERE, so without this the strays accumulate
+      // and sign-out is the one operation that can never succeed. MEASURED on the dev
+      // install: two helpers stranded on `haive_cli_auth_<user>_codex_0`. Stopped users
+      // only — a running login or probe container is deliberately spared.
+      const containerCleanup = await runner.removeStoppedContainersUsingVolume?.(name);
+      if (containerCleanup && !containerCleanup.ok) {
+        log.warn(
+          { volume: name, stderr: containerCleanup.stderr },
+          'stopped auth helper container cleanup failed',
+        );
+      } else if (containerCleanup && containerCleanup.removed.length > 0) {
+        log.info(
+          { volume: name, containers: containerCleanup.removed.length },
+          'removed stopped auth helper containers',
+        );
+      }
+      const result = await runner.volumeRemove(name);
+      if (result.ok) removed.push(name);
+      else failed.push({ name, stderr: result.stderr });
+    }
 
-  // Claude's subscription login lives in the env-injected CLAUDE_CODE_OAUTH_TOKEN secret
-  // (the login flow even strips it out of envVars), NOT in a volume file — so removing
-  // volumes alone leaves the provider authenticated and the next login skips browser auth.
-  // Delete the login + usage-tracking token secrets to log out for real. A user-entered
-  // BYOK key (apiKeyEnvName, e.g. ANTHROPIC_AUTH_TOKEN) is not a login artifact -> kept.
-  if (provider.name === 'claude-code') {
-    await db
-      .delete(schema.cliProviderSecrets)
-      .where(
-        and(
-          eq(schema.cliProviderSecrets.providerId, provider.id),
-          inArray(schema.cliProviderSecrets.secretName, [
-            'CLAUDE_CODE_OAUTH_TOKEN',
-            CLAUDE_USAGE_OAUTH_SECRET,
-          ]),
-        ),
-      );
-  }
+    // Claude's subscription login lives in the env-injected CLAUDE_CODE_OAUTH_TOKEN secret
+    // (the login flow even strips it out of envVars), NOT in a volume file — so removing
+    // volumes alone leaves the provider authenticated and the next login skips browser auth.
+    // Delete the login + usage-tracking token secrets to log out for real. A user-entered
+    // BYOK key (apiKeyEnvName, e.g. ANTHROPIC_AUTH_TOKEN) is not a login artifact -> kept.
+    if (provider.name === 'claude-code') {
+      await db
+        .delete(schema.cliProviderSecrets)
+        .where(
+          and(
+            eq(schema.cliProviderSecrets.providerId, provider.id),
+            inArray(schema.cliProviderSecrets.secretName, [
+              'CLAUDE_CODE_OAUTH_TOKEN',
+              CLAUDE_USAGE_OAUTH_SECRET,
+            ]),
+          ),
+        );
+    }
 
-  if (failed.length === 0) {
-    await db
-      .update(schema.cliProviders)
-      .set({
-        authStatus: 'unknown',
-        authMessage: null,
-        authLastCheckedAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.cliProviders.id, provider.id));
-  }
+    if (failed.length === 0) {
+      await db
+        .update(schema.cliProviders)
+        .set({
+          authStatus: 'unknown',
+          authMessage: null,
+          authLastCheckedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.cliProviders.id, provider.id));
+    }
 
-  log.info(
-    { providerId: provider.id, removedCount: removed.length, failedCount: failed.length },
-    'cli sign-out completed',
-  );
-  return { ok: failed.length === 0, removed, failed };
+    log.info(
+      { providerId: provider.id, removedCount: removed.length, failedCount: failed.length },
+      'cli sign-out completed',
+    );
+    return { ok: failed.length === 0, removed, failed };
+  } finally {
+    await release();
+  }
 }
 
 const VERSION_REFRESH_INTERVAL_MS = 12 * 60 * 60 * 1000;
@@ -1599,7 +1625,7 @@ export async function startCliExecWorker(
         });
       }
       if (job.name === CLI_EXEC_JOB_NAMES.SIGN_OUT) {
-        return handleSignOutJob(db, job.data as CliSignOutJobPayload);
+        return handleSignOutJob(db, job.data as CliSignOutJobPayload, defaultDockerRunner, job);
       }
       if (job.name === CLI_EXEC_JOB_NAMES.PROVISION_OLLAMA_MODEL) {
         return handleProvisionOllamaModelJob(db, job.data as OllamaProvisionJobPayload);

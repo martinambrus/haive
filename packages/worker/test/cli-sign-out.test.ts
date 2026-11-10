@@ -1,4 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const lock = vi.hoisted(() => ({ release: vi.fn(async () => {}), acquire: vi.fn() }));
+vi.mock('@haive/database', async (original) => ({
+  ...(await original<typeof import('@haive/database')>()),
+  tryCliAuthLock: lock.acquire,
+}));
 import { handleSignOutJob } from '../src/queues/cli-exec-queue.js';
 import type { Database } from '@haive/database';
 import type {
@@ -6,6 +12,11 @@ import type {
   DockerRunOpts,
   DockerVolumeOpResult,
 } from '../src/sandbox/docker-runner.js';
+
+beforeEach(() => {
+  lock.acquire.mockReset().mockResolvedValue(lock.release);
+  lock.release.mockClear();
+});
 
 interface ProviderRowOverrides {
   id?: string;
@@ -48,6 +59,7 @@ function makeProviderRow(overrides: ProviderRowOverrides = {}) {
 
 interface DbCalls {
   updateSet: Record<string, unknown> | null;
+  deleted?: boolean;
 }
 
 function makeDb(row: ReturnType<typeof makeProviderRow> | null, calls: DbCalls): Database {
@@ -58,6 +70,13 @@ function makeDb(row: ReturnType<typeof makeProviderRow> | null, calls: DbCalls):
           return row;
         },
       },
+    },
+    delete() {
+      return {
+        where: async () => {
+          calls.deleted = true;
+        },
+      };
     },
     update() {
       return {
@@ -254,4 +273,109 @@ describe('handleSignOutJob', () => {
     expect(result.failed).toEqual([{ name: failVol, stderr: 'in use' }]);
     expect(calls.updateSet).toBeNull();
   });
+});
+
+// A job snapshots the completed login, never the start of an attempt.
+describe('queued sign-out credential generation', () => {
+  it.each(['gemini', 'claude-code'])(
+    'preserves a newer %s login, volume, secrets and health',
+    async (name) => {
+      const calls: DbCalls = { updateSet: null };
+      const row = { ...makeProviderRow({ name }), authGeneration: 'new-login' };
+      const runner = makeRunner({
+        existing: [
+          name === 'gemini'
+            ? 'haive_cli_auth_user1_gemini_0'
+            : 'haive_cli_auth_user1_claude-code_0',
+        ],
+      });
+      const before = [...runner.existing];
+      const payload = { providerId: row.id, userId: row.userId, authGeneration: 'old-login' };
+      const result = await handleSignOutJob(makeDb(row, calls), payload, runner);
+      expect([...runner.existing]).toEqual(before);
+      expect(calls.deleted).not.toBe(true);
+      expect(calls.updateSet).toBeNull();
+      expect(result).toMatchObject({ ok: true, superseded: true, removed: [], failed: [] });
+    },
+  );
+
+  it('still deletes Claude credentials when no newer login completed (including an abandoned attempt)', async () => {
+    const calls: DbCalls = { updateSet: null };
+    const row = { ...makeProviderRow({ name: 'claude-code' }), authGeneration: 'same-login' };
+    const volume = 'haive_cli_auth_user1_claude-code_0';
+    const runner = makeRunner({ existing: [volume] });
+    const payload = { providerId: row.id, userId: row.userId, authGeneration: 'same-login' };
+    const result = await handleSignOutJob(makeDb(row, calls), payload, runner);
+    expect(result.ok).toBe(true);
+    expect(runner.existing.size).toBe(0);
+    expect(calls.deleted).toBe(true);
+    expect(calls.updateSet?.authStatus).toBe('unknown');
+  });
+});
+
+it('delays without touching credentials while a login may have written but not yet stamped success', async () => {
+  lock.acquire.mockResolvedValueOnce(null);
+  const calls: DbCalls = { updateSet: null };
+  const row = { ...makeProviderRow(), authGeneration: 'prior' };
+  const runner = makeRunner({ existing: ['haive_cli_auth_user1_gemini_0'] });
+  const job = { token: 'token', moveToDelayed: vi.fn(async () => {}) };
+  await expect(
+    handleSignOutJob(
+      makeDb(row, calls),
+      { providerId: row.id, userId: row.userId, authGeneration: 'prior' },
+      runner,
+      job as any,
+    ),
+  ).rejects.toMatchObject({ name: 'DelayedError' });
+  expect(job.moveToDelayed).toHaveBeenCalledWith(expect.any(Number), 'token');
+  expect(runner.removed).toEqual([]);
+  expect(calls.updateSet).toBeNull();
+  row.authGeneration = 'new-login';
+  expect(
+    await handleSignOutJob(
+      makeDb(row, calls),
+      { providerId: row.id, userId: row.userId, authGeneration: 'prior' },
+      runner,
+    ),
+  ).toMatchObject({ superseded: true });
+  expect(lock.release).toHaveBeenCalledOnce();
+});
+it('re-reads generation after taking the lock and releases it on a thrown delete', async () => {
+  const calls: DbCalls = { updateSet: null };
+  const row = { ...makeProviderRow(), authGeneration: 'prior' };
+  lock.acquire.mockImplementationOnce(async () => {
+    row.authGeneration = 'new-login';
+    return lock.release;
+  });
+  expect(
+    await handleSignOutJob(
+      makeDb(row, calls),
+      { providerId: row.id, userId: row.userId, authGeneration: 'prior' },
+      makeRunner(),
+    ),
+  ).toMatchObject({ superseded: true });
+  expect(lock.release).toHaveBeenCalledOnce();
+  lock.release.mockClear();
+  const claude = makeProviderRow({ name: 'claude-code' });
+  const db = makeDb(claude, calls);
+  vi.spyOn(db, 'delete').mockImplementation(() => {
+    throw new Error('delete refused');
+  });
+  await expect(
+    handleSignOutJob(db, { providerId: claude.id, userId: claude.userId }, makeRunner()),
+  ).rejects.toThrow('delete refused');
+  expect(lock.release).toHaveBeenCalledOnce();
+});
+
+it('keeps deletion behavior for legacy jobs without a generation even after a newer login', async () => {
+  const row = { ...makeProviderRow({ name: 'claude-code' }), authGeneration: 'new-login' };
+  const calls: DbCalls = { updateSet: null };
+  const runner = makeRunner({ existing: ['haive_cli_auth_user1_claude-code_0'] });
+  expect(
+    (await handleSignOutJob(makeDb(row, calls), { providerId: row.id, userId: row.userId }, runner))
+      .ok,
+  ).toBe(true);
+  expect(runner.existing.size).toBe(0);
+  expect(calls.deleted).toBe(true);
+  expect(calls.updateSet?.authStatus).toBe('unknown');
 });

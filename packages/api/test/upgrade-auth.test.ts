@@ -1,3 +1,7 @@
+vi.mock('@haive/database', async (original) => ({
+  ...(await original<typeof import('@haive/database')>()),
+  tryCliAuthLock: async () => async () => {},
+}));
 import { readFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import net, { type AddressInfo, type Socket } from 'node:net';

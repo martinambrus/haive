@@ -1,3 +1,7 @@
+vi.mock('@haive/database', async (original) => ({
+  ...(await original<typeof import('@haive/database')>()),
+  tryCliAuthLock: async () => (h.authBusy ? null : h.releaseAuth),
+}));
 import { EventEmitter } from 'node:events';
 import type { Server } from 'node:http';
 import { Duplex } from 'node:stream';
@@ -7,6 +11,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
+  authBusy: false,
+  releaseAuth: vi.fn(async () => {}),
+  updates: [] as Record<string, unknown>[],
+  stampGate: undefined as Promise<void> | undefined,
+  loginEnqueueGate: undefined as Promise<void> | undefined,
   audits: [] as Record<string, unknown>[],
   auditError: false,
   ws: undefined as unknown,
@@ -48,6 +57,7 @@ vi.mock('../src/queues.js', () => ({
   getUsagePollQueue: () => ({ add: async () => ({}) }),
   getCliExecQueue: () => ({
     add: async (name: string, payload: unknown) => {
+      if (name === 'cli-login-create' && h.loginEnqueueGate) await h.loginEnqueueGate;
       if (h.queueError) throw h.queueError;
       let delivered = false;
       if (name !== 'cli-login-create') h.probe(payload);
@@ -88,6 +98,10 @@ const settle = async () => {
 beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
+  h.loginEnqueueGate = undefined;
+  h.authBusy = false;
+  h.updates = [];
+  h.stampGate = undefined;
   h.save.mockReset();
   h.attach.mockReset();
   h.start.mockReset().mockResolvedValue(undefined);
@@ -118,9 +132,18 @@ beforeEach(() => {
     select: () => ({ from: () => ({ where: () => ({ for: async () => [{ envVars: {} }] }) }) }),
     query: {
       users: { findFirst: async () => ({ id: 'user', status: 'active', tokenVersion: 0 }) },
-      cliProviders: { findFirst: async () => ({ id: PROVIDER, name: providerName, envVars: {} }) },
+      cliProviders: {
+        findFirst: async () => ({ id: PROVIDER, userId: 'user', name: providerName, envVars: {} }),
+      },
     },
-    update: () => ({ set: () => ({ where: async () => {} }) }),
+    update: () => ({
+      set: (values: Record<string, unknown>) => ({
+        where: async () => {
+          if (values.authGeneration && h.stampGate) await h.stampGate;
+          h.updates.push(values);
+        },
+      }),
+    }),
   };
   ws = Object.assign(new EventEmitter(), {
     readyState: 1,
@@ -1862,4 +1885,56 @@ it('amp credential-file success writes a volume login row', async () => {
   stream.emit('data', Buffer.from('https://auth.ampcode.com/device?user_code=ABCD-1234\n\n'));
   await vi.advanceTimersByTimeAsync(2500);
   expect(h.audits).toMatchObject([{ action: 'cli_provider.login', targetId: PROVIDER }]);
+});
+
+describe('login generation and lock lifecycle', () => {
+  it('rejects a conflicting login before creating any container', async () => {
+    h.authBusy = true;
+    await start('', false);
+    expect(h.attach).not.toHaveBeenCalled();
+    expect(h.start).not.toHaveBeenCalled();
+  });
+  it('an abandoned login releases its lock without advancing generation', async () => {
+    providerName = 'grok';
+    await start();
+    ws.close();
+    await settle();
+    expect(h.releaseAuth).toHaveBeenCalledOnce();
+    expect(h.updates.some((v) => v.authGeneration)).toBe(false);
+  });
+  it('keeps the lock across a close between volume credential write and completion stamp', async () => {
+    providerName = 'grok';
+    await start();
+    let resume!: () => void;
+    h.stampGate = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    stream.emit(
+      'data',
+      Buffer.from('https://accounts.x.ai/oauth2/device?user_code=ABCD-1234\n\nSigned in\n'),
+    );
+    await settle();
+    ws.close();
+    await settle();
+    expect(h.releaseAuth).not.toHaveBeenCalled();
+    resume();
+    await settle();
+    expect(h.updates.some((v) => typeof v.authGeneration === 'string')).toBe(true);
+    expect(h.releaseAuth).toHaveBeenCalledOnce();
+  });
+});
+
+it('releases an abandoned login while its Redis enqueue is still pending, without starting a late container', async () => {
+  let resume!: () => void;
+  h.loginEnqueueGate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  await start('', false);
+  ws.close();
+  await settle();
+  expect(h.releaseAuth).toHaveBeenCalledOnce();
+  expect(h.updates.some((v) => v.authGeneration)).toBe(false);
+  resume();
+  await settle();
+  expect(h.start).not.toHaveBeenCalled();
 });
