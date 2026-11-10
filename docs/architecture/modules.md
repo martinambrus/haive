@@ -109,7 +109,8 @@ the module loads again.
   **Failed** with the reason and a **Retry**, and one that is `pending` as **Starting** with no Retry;
   it keys on the state, never on the reason, and the page reloads every 5 s while a row that is not
   deactivated is not ready. Retry is `POST /modules/:id/retry` (admin; foreign origin refused): under
-  the module row's lock (5 s `lock_timeout`, 503 `module-busy`) it writes a `module.retry` audit row
+  the module row's lock (5 s `lock_timeout`, 503 `module-busy`) it writes a `module.retry` audit row (logged after the commit, as are the `module.drain_cancel` and
+  graceful `module.deactivate` rows the loader PATCH writes through `setModuleActive`)
   and moves only `updated_at` in one transaction (404 unknown, 409 `module_inactive` when
   deactivated, a drain left as it is), then publishes on `MODULE_ACTIVATED_CHANNEL`; the changed stamp
   makes the worker's next pass start the module afresh with its attempts reset. The api's loader

@@ -70,7 +70,13 @@ role check in api source outside its allowlist, so an admin route gated some oth
 **Sign-in and registration are rate limited.** `lib/auth-throttle.ts` admits an attempt on
 `POST /auth/login` and `POST /auth/register` only while an account bucket (the email's blind index) holds
 fewer than `AUTH_ACCOUNT_LIMIT` (10) and an address bucket fewer than `AUTH_IP_LIMIT` (30) attempts in the
-last `AUTH_THROTTLE_WINDOW_MS` (60 s); login and registration have separate budgets. The buckets are
+last `AUTH_THROTTLE_WINDOW_MS` (60 s); login and registration have separate budgets. `PUT /user-settings/password`
+checks the current password against the sign-in budget (scope `login`, keyed by the account's stored blind
+index, same address rules), so the two password checks share one budget. It reads the user row to find that
+index, then reserves before bcrypt, and refunds as soon as the current password verifies, even when the change
+is then refused (`password_unchanged`, a conflict). A wrong current password answers 400
+`current_password_incorrect`, not 401: the web client retries any other 401 once after a silent refresh, and a
+retried wrong password would spend two attempts and write two rows. The buckets are
 sorted sets, `haive:auth-throttle:<login|register>:acct|ip:<key>`, and one Lua script checks every
 bucket and reserves a member in all of them or in none, so parallel attempts cannot all pass before any
 is recorded. A refused attempt adds nothing, so the only lockout is the window sliding past; it answers
@@ -78,7 +84,8 @@ is recorded. A refused attempt adds nothing, so the only lockout is the window s
 verbatim, and a browser cannot read `Retry-After` cross-origin, so the wait is in the sentence), and has
 run no bcrypt; its only database work is the audit row below, written after the answer. A success removes its own member: only failures cost budget, because the e2e suite
 registers about 22 users a minute from one address and a count-all budget would have flaked it. The
-throttle runs after the body is validated and before any bcrypt or database work. If Redis is not ready,
+throttle runs after the body is validated and before any bcrypt or database work (the password change reads the
+user row first, for the key). If Redis is not ready,
 rejects, or does not answer within 400 ms the attempt is admitted and one warning is logged: a login that
 waits on a stalled Redis is worse than an unthrottled one. A reservation that still lands after the bound is
 released when it does, and so is one the shared client rejected at its own 2 s command deadline, since that
@@ -105,7 +112,10 @@ the address is then a real client. A public peer keeps the bucket.
 the 401, so a row the database refuses answers 500, never a session or a 401 without its row. Registration
 (`user.register`: `role`, `invited`, `firstRun`) and a password change (`user.password.change`, `forced` for
 the must-change flow) write theirs in the change's own transaction, so a refused row undoes the account or the
-new hash. A throttled sign-in writes `auth.login.throttled` with `limiter: 'account' | 'address'`, the limiter
+new hash. A wrong current password writes `user.password.change.failure` (`reason: 'invalid_credentials'`)
+before its 400, so a refused row answers 500, and a throttled password change writes
+`user.password.change.throttled` under the same rules as a throttled sign-in below; the two share the
+`<bucket>:audit` key, so one row per refused bucket per window covers both. A throttled sign-in writes `auth.login.throttled` with `limiter: 'account' | 'address'`, the limiter
 whose bucket refused it, and names the account only when the account limiter refused. It is written at most
 once per refused bucket per window (a `SET NX` key `<bucket>:audit` that expires with the window) and never
 makes the 429 wait: the lookup and the insert run after the answer, and a failure is logged (`failed to audit
@@ -114,7 +124,9 @@ writes no row.
 
 Accepted limits. Someone who knows an email can keep its bucket full for as long as they keep sending, and the
 owner then gets 429 even with the right password; behind the default bridge there is no address to tell the
-senders apart, so the account bucket is the only brake there. The window is measured by the api's clock, one api
+senders apart, so the account bucket is the only brake there. Anyone holding a valid access cookie can also spend the
+account's sign-in budget through the password change, and its 429 says "sign-in attempts" because the budget
+is the sign-in one. The window is measured by the api's clock, one api
 instance per install. The limits are the constants above; the unused `RATE_LIMIT_*` config keys were removed.
 
 **A caller who is not an administrator cannot aim the probe routes at a blocked address.**
