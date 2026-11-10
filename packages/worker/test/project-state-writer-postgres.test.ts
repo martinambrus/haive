@@ -44,7 +44,11 @@ import {
   writeProjectStateRecord,
   writeProjectStateColumn,
 } from '../src/project-state/write.js';
-import { refreshProjectState, sweepDirtyProjectStates } from '../src/project-state/refresh.js';
+import {
+  markProjectStatesDirtyAtBoot,
+  refreshProjectState,
+  sweepDirtyProjectStates,
+} from '../src/project-state/refresh.js';
 import { handleRefresh } from '../src/repo/refresh.js';
 import {
   putBackProjections,
@@ -185,6 +189,23 @@ async function diskRecord(root: string, name: string) {
 }
 
 describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
+  it.each(['sweep', 'boot'] as const)('%s refresh leaves legacy mirrors alone', async (mode) => {
+    const s = await fixture();
+    await db!
+      .update(schema.repositories)
+      .set({ onboardingEnvironment: { schemaVersion: 1, envDetectData: {}, confirmedValues: {} } })
+      .where(eq(schema.repositories.id, s.repo.id));
+    await s.write();
+    const path = join(s.root, '.haive-data/environment.json');
+    const legacy = JSON.stringify({ schemaVersion: 1, envDetectData: {}, confirmedValues: {} });
+    await writeFile(path, legacy);
+    if (mode === 'boot') await markProjectStatesDirtyAtBoot(db!);
+    else await markProjectStateDirty(db!, s.repo.id);
+    expect(await sweepDirtyProjectStates(db!)).toBe(1);
+    expect(await readFile(path, 'utf8')).toBe(legacy);
+    expect((await s.outbox())!.writtenRevision).toBe((await s.outbox())!.revision);
+  });
+
   it('defers rules imported by 02 and its retry, then reconciles through the task-end hook', async () => {
     const s = await fixture();
     const local = 'LOCAL RULES\n';
@@ -235,31 +256,33 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
       logger: { info() {}, warn() {}, error() {}, debug() {} },
       throwIfCancelled() {},
     } as unknown as StepContext;
-    const apply = () =>
-      upgradeApplyStep.apply(ctx, {
+    const apply = (next?: { taskId: string; column: unknown }) =>
+      upgradeApplyStep.apply(next ? { ...ctx, taskId: next.taskId } : ctx, {
         detected: {
           repositoryId: s.repo.id,
           ranBackfill: false,
-          entries: [
-            {
-              entryId: 'config',
-              bucket: 'new_artifact',
-              templateId: 'workflow-config',
-              templateKind: 'workflow-config',
-              diskPath,
-              liveArtifactId: null,
-              currentContent: null,
-              newContent: content,
-              baselineContent: null,
-              currentHash: null,
-              baselineWrittenHash: null,
-              newContentHash: hash,
-              baselineTemplateContentHash: null,
-              currentTemplateContentHash: hash,
-              templateSchemaVersion: 2,
-              delta: null,
-            },
-          ],
+          entries: next
+            ? []
+            : [
+                {
+                  entryId: 'config',
+                  bucket: 'new_artifact',
+                  templateId: 'workflow-config',
+                  templateKind: 'workflow-config',
+                  diskPath,
+                  liveArtifactId: null,
+                  currentContent: null,
+                  newContent: content,
+                  baselineContent: null,
+                  currentHash: null,
+                  baselineWrittenHash: null,
+                  newContentHash: hash,
+                  baselineTemplateContentHash: null,
+                  currentTemplateContentHash: hash,
+                  templateSchemaVersion: 2,
+                  delta: null,
+                },
+              ],
           counts: {},
           installedTemplateSetHash: null,
           currentTemplateSetHash: 'set',
@@ -271,8 +294,8 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
             enabledCliProviders: [],
             rtkEnabled: false,
           },
-          renderContextColumn: planned!.renderContext,
-          agentRulesOverride: local,
+          renderContextColumn: next?.column ?? planned!.renderContext,
+          agentRulesOverride: next ? incoming : local,
           rtkFollowsLive: false,
           backfilledRows: 0,
         },
@@ -320,6 +343,20 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
     expect(await readFile(path, 'utf8')).toBe(incoming);
     expect(await base()).toEqual(beforeBase);
     expect((await s.outbox())!.writeIntent).toBeNull();
+    const retirementOwed = await db!
+      .select()
+      .from(schema.taskEvents)
+      .where(
+        and(
+          eq(schema.taskEvents.taskId, task!.id),
+          eq(schema.taskEvents.eventType, 'upgrade.haive_file_retirement_deferred'),
+        ),
+      );
+    expect(retirementOwed).toHaveLength(1);
+    expect(retirementOwed[0]!.payload).toMatchObject({
+      repositoryId: s.repo.id,
+      retirement: 'next_02_or_12',
+    });
 
     await db!
       .update(schema.tasks)
@@ -334,12 +371,12 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
     );
     expect(claim).toMatchObject({ path: diskPath, writtenHash: hash });
     expect((await s.outbox())!.writtenRevision).toBe((await s.outbox())!.revision);
-    await expect(readFile(join(s.root, '.haive/install.json'))).rejects.toMatchObject({
-      code: 'ENOENT',
-    });
-    await expect(readFile(join(s.root, '.haive-data/exclusions.json'))).rejects.toMatchObject({
-      code: 'ENOENT',
-    });
+    expect(await readFile(join(s.root, '.haive/install.json'), 'utf8')).toContain(
+      'templateSetHash',
+    );
+    expect(await readFile(join(s.root, '.haive-data/exclusions.json'), 'utf8')).toContain(
+      'vendor/**',
+    );
     expect(await readFile(path, 'utf8')).toBe(incoming);
     expect(((await base()) as { settings: Record<string, unknown> }).settings['agent-rules']).toBe(
       incoming,
@@ -347,6 +384,54 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
     expect(
       await db!.select().from(schema.auditEvents).where(eq(schema.auditEvents.targetId, s.repo.id)),
     ).toHaveLength(1);
+
+    // A new 02 owns the checkout again and can retire with its normal event/staging rules.
+    const [nextTask] = await db!
+      .insert(schema.tasks)
+      .values({
+        userId: s.userId,
+        repositoryId: s.repo.id,
+        type: 'onboarding_upgrade',
+        title: 'retire owed mirrors',
+        status: 'running',
+      })
+      .returning();
+    const [current] = await db!
+      .select()
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, s.repo.id));
+    const next = { taskId: nextTask!.id, column: current!.renderContext };
+    expect((await apply(next)).recordWrite).toBe('written');
+    expect((await s.outbox())!.writtenRevision).toBe((await s.outbox())!.revision);
+    expect((await apply(next)).recordWrite).toBe('written');
+    const retired = await db!
+      .select()
+      .from(schema.taskEvents)
+      .where(
+        and(
+          eq(schema.taskEvents.taskId, nextTask!.id),
+          eq(schema.taskEvents.eventType, 'upgrade.haive_file_retired'),
+        ),
+      );
+    expect(retired.map((event) => event.payload)).toEqual(
+      expect.arrayContaining([
+        { path: '.haive/install.json' },
+        { path: '.haive-data/exclusions.json' },
+      ]),
+    );
+    expect(retired).toHaveLength(2);
+    await db!
+      .update(schema.tasks)
+      .set({ status: 'completed' })
+      .where(eq(schema.tasks.id, nextTask!.id));
+    const clean = await s.outbox();
+    let rewrites = 0;
+    seam.afterWrite = async () => {
+      rewrites++;
+    };
+    await resyncAfterTaskEnd(db!, nextTask!.id);
+    expect(rewrites).toBe(0);
+    expect(await s.outbox()).toEqual(clean);
   });
 
   it.each(['prepared', 'partial'] as const)(

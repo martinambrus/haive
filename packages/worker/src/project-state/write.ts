@@ -952,6 +952,28 @@ export async function writeProjectStateColumn(
             .set({ renderContext: column })
             .where(eq(schema.repositories.id, repositoryId));
           await markProjectStateDirty(tx, repositoryId);
+          if (holdingTaskId) {
+            // Task-end refresh cannot satisfy this task's checkout-holder fence or stage a
+            // deletion in its completed commit. Keep a durable, historical handoff; the next
+            // 02 or 12 retires the mirrors through its usual shape checks and removal events.
+            const eventType = 'upgrade.haive_file_retirement_deferred';
+            const [owed] = await tx
+              .select({ id: schema.taskEvents.id })
+              .from(schema.taskEvents)
+              .where(
+                and(
+                  eq(schema.taskEvents.taskId, holdingTaskId),
+                  eq(schema.taskEvents.eventType, eventType),
+                ),
+              )
+              .limit(1);
+            if (!owed)
+              await tx.insert(schema.taskEvents).values({
+                taskId: holdingTaskId,
+                eventType,
+                payload: { repositoryId, retirement: 'next_02_or_12' },
+              });
+          }
         });
       }
       throw err;

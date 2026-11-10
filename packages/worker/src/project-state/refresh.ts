@@ -1,7 +1,7 @@
 import { checkoutMissing, type NamedCheckout } from '../repo/checkout-head.js';
 import { and, asc, eq, isNotNull, lt, or, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { HAIVE_DATA_FILES, logger } from '@haive/shared';
+import { logger } from '@haive/shared';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { readRenderContextColumn } from '@haive/shared/project-state';
 import { gitOperationInProgress } from '../repo/git-operation.js';
@@ -13,12 +13,6 @@ import {
   recoverProjectStateWrite,
   writeProjectStateColumn,
 } from './write.js';
-
-import {
-  retireInstallManifest,
-  retireLegacyMirrors,
-  toolingOutsideRecord,
-} from '../step-engine/_retire-install-manifest.js';
 
 const SWEEP_BATCH = 25;
 
@@ -186,13 +180,8 @@ export async function refreshProjectStateOutcome(
     if (err instanceof ProjectStateMovedError) return { outcome: 'superseded' };
     throw err;
   }
-  // A deferred foreground write reaches here through task-end re-sync or a later sweep. Finish
-  // the same retirement only after the replacement record exists; each mirror checks its unit.
-  const retirement = { repoPath, logger: logger.child<string>({ repositoryId }) };
-  const warnings: string[] = [];
-  await retireInstallManifest(retirement, warnings);
-  const keep = (await toolingOutsideRecord(db, repositoryId)) ? [HAIVE_DATA_FILES.tooling] : [];
-  await retireLegacyMirrors(retirement, warnings, keep);
+  // Refresh owns only the record. A deferred upgrade has already released its checkout by the
+  // time this runs, so retirement waits for the next 02 or 12 and its normal guards and staging.
   return { outcome: 'written' };
 }
 
