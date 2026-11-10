@@ -486,7 +486,7 @@ status: open · kind: fix · found: T347 run · priority: P3
 
 ### T557 · FNF[unguarded-dial-audit] · dials that still bypass the egress guard (design) (+8)
 
-status: open · kind: design · found: T347 run · priority: P2
+status: in progress, items 9 8 (codex-sonnet) · kind: design · found: T347 run · priority: P2
 Each needs a per-dial decision (guard, admin-trust, or remove).
 
 1. Shipped in PR #1049 (provider Test connection guarded by the owner role). Correction: api routes/cli-providers.ts:664 only enqueues and cli-adapters/zai.ts only sets env for the sandboxed CLI; neither is a dial.
