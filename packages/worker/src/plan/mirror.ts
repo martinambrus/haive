@@ -1,7 +1,7 @@
 import { planMirrorErrorsSuppressed } from './error-scope.js';
 import { lockRepositoryTasksKey } from '@haive/database';
 import { checkoutMatches, checkoutMissing, type NamedCheckout } from '../repo/checkout-head.js';
-import { admitWatchedCheckout } from '../project-state/watch-admission.js';
+import { admitWatchedRepository } from '../project-state/watch-admission.js';
 import { scrubErrorPaths } from '@haive/shared/logger';
 import { createHash } from 'node:crypto';
 import {
@@ -12,7 +12,7 @@ import {
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 import { and, eq, gte, inArray, isNull, like, notInArray, sql } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { hasPgCode, schema, type Database } from '@haive/database';
 import {
   HAIVE_DATA_FILES,
   PLAN_MIRROR_SCHEMA_VERSION,
@@ -262,34 +262,71 @@ export async function writePlanMirror(
   changes?: PlanMirrorChanges,
 ): Promise<string[]> {
   try {
-    const result = await db.transaction(async (tx) => {
-      // Every writer (queue, plan steps, onboarding) enters here. Serialize per
-      // repository across worker processes so an older render can never rename
-      // over a newer one after the newer writer already marked itself current.
-      await lockPlanMirror(tx, repositoryId);
-      return writePlanMirrorLocked(tx, repositoryId, repoPath, changes);
-    });
+    const flush = () =>
+      db.transaction(
+        async (tx) => {
+          // Every writer (queue, plan steps, onboarding) enters here. Serialize per
+          // repository across worker processes so an older render can never rename
+          // over a newer one after the newer writer already marked itself current.
+          await lockPlanMirror(tx, repositoryId);
+          return writePlanMirrorLocked(tx, repositoryId, repoPath, changes);
+        },
+        { isolationLevel: 'repeatable read' },
+      );
+    let result;
+    try {
+      result = await flush();
+    } catch (err) {
+      if (!(err instanceof PlanMirrorNeedsReconcile)) throw err;
+      // Never retain P into the subsequent render/file write. The first flush
+      // rolled back without writing; reconcile commits independently, then a
+      // fresh snapshot must still judge the file it is about to replace.
+      const outcome = await reconcilePlanFromCheckout(db, repositoryId, repoPath, {
+        expectedHash: hashBytes(err.bytes),
+      }).catch((failure) => {
+        if (failure instanceof PlanSnapshotError)
+          throw new PlanMirrorHeldError(heldUnreadable(failure.message));
+        throw failure;
+      });
+      if (outcome.skipped) throw new PlanMirrorHeldError(heldUnreadable(outcome.skipped));
+      result = await flush().catch((failure) => {
+        if (failure instanceof PlanMirrorNeedsReconcile) throw new PlanMirrorHeldError(HELD_MOVED);
+        throw failure;
+      });
+    }
     // Thrown only once the stamp of the plan.json that landed is committed.
     if (result.failed !== undefined) throw result.failed;
     return result.written;
   } catch (err) {
+    if (hasPgCode(err, '40001')) err = new PlanMirrorHeldError(HELD_RACED);
     await recordPlanMirrorError(db, repositoryId, err).catch(() => undefined);
     throw err;
   }
 }
 
-const loadMirrorState = async (db: PlanMirrorTx, repositoryId: string) => {
+/** Internal handoff: a flush is read-only with respect to ancestry. */
+class PlanMirrorNeedsReconcile extends Error {
+  constructor(readonly bytes: Buffer) {
+    super('plan.json needs reconciliation');
+  }
+}
+
+const loadMirrorState = async (db: PlanMirrorTx, repositoryId: string, forFlush = false) => {
   const columns = {
     revision: schema.planMirrorState.revision,
     writtenRevision: schema.planMirrorState.writtenRevision,
     syncedHash: schema.planMirrorState.syncedHash,
     hasBase: sql<boolean>`${schema.planMirrorState.syncedSnapshot} is not null`,
   };
-  const [state] = await db
+  const query = db
     .select(columns)
     .from(schema.planMirrorState)
     .where(eq(schema.planMirrorState.repositoryId, repositoryId))
     .limit(1);
+  // A repeatable-read flush must detect a moved revision BEFORE writing files.
+  // Keep the outbox row stable until its stamp commits; patches can write nodes
+  // meanwhile and dirty this row after us. No node row or P is requested here.
+  const [state] = await (forFlush ? query.for('update') : query);
   return state ?? null;
 };
 
@@ -368,21 +405,18 @@ async function writePlanMirrorLocked(
   repoPath: string,
   changes?: PlanMirrorChanges,
 ): Promise<{ written: string[]; failed?: unknown }> {
-  // A flush can reconcile plan.json; take the patch lock before even inserting a
-  // missing mirror-state row, so it cannot hold that row while waiting for a patch.
-  await lockPlanPatch(db, repositoryId);
-  let state = await loadMirrorState(db, repositoryId);
+  let state = await loadMirrorState(db, repositoryId, true);
   if (!state) {
     await db
       .insert(schema.planMirrorState)
       .values({ repositoryId, revision: 1, writtenRevision: 0 })
       .onConflictDoNothing();
-    state = await loadMirrorState(db, repositoryId);
+    state = await loadMirrorState(db, repositoryId, true);
   }
 
   if (await gitOperationInProgress(repoPath))
     throw new PlanMirrorHeldError(HELD_GIT_OPERATION, 'git_operation');
-  let rendered = await renderPlanMirrorFiles(db, repositoryId);
+  const rendered = await renderPlanMirrorFiles(db, repositoryId);
   const onDiskRead = await readPlanJson(repoPath);
   if (onDiskRead === 'too-large') throw new PlanMirrorHeldError(heldUnreadable(PLAN_TOO_LARGE));
   const onDiskBytes = onDiskRead;
@@ -407,16 +441,7 @@ async function writePlanMirrorLocked(
       } else if (!state.hasBase && state.revision > state.writtenRevision) {
         throw new PlanMirrorHeldError(HELD_NO_BASE);
       } else {
-        const outcome = await reconcilePlanLocked(db, repositoryId, onDiskBytes, {}).catch(
-          (err) => {
-            if (err instanceof PlanSnapshotError)
-              throw new PlanMirrorHeldError(heldUnreadable(err.message));
-            throw err;
-          },
-        );
-        if (outcome.skipped) throw new PlanMirrorHeldError(heldUnreadable(outcome.skipped));
-        state = await loadMirrorState(db, repositoryId);
-        rendered = await renderPlanMirrorFiles(db, repositoryId);
+        throw new PlanMirrorNeedsReconcile(onDiskBytes);
       }
     }
   }
@@ -652,9 +677,10 @@ export async function importPlanMirror(
       await lockRepositoryTasksKey(tx, repositoryId);
       await lockPlanMirror(tx, repositoryId);
     }
+    await assertCheckoutStillHolds(storagePath, rawBytes, expectedCheckout);
     await lockPlanPatch(tx, repositoryId);
     if (expectedCheckout) {
-      if (!(await admitWatchedCheckout(tx, repositoryId, storagePath, expectedCheckout)))
+      if (!(await admitWatchedRepository(tx, repositoryId)))
         throw new PlanMirrorHeldError(HELD_MOVED, 'checkout_changed');
     }
     await tx.insert(schema.planNodes).values(
@@ -730,7 +756,6 @@ export async function importPlanMirror(
           syncedSnapshot: mirror,
         },
       });
-    await assertCheckoutStillHolds(storagePath, rawBytes, expectedCheckout);
   });
 
   logger.info(
@@ -774,19 +799,13 @@ export async function reconcilePlanFromCheckout(
   db: Database,
   repositoryId: string,
   repoPath: string,
-  opts: { requireStamp?: boolean; expectedCheckout?: NamedCheckout } = {},
+  opts: { requireStamp?: boolean; expectedCheckout?: NamedCheckout; expectedHash?: string } = {},
 ): Promise<PlanPullOutcome> {
   if (await gitOperationInProgress(repoPath))
     throw new PlanMirrorHeldError(HELD_GIT_OPERATION, 'git_operation');
   return db.transaction(async (tx) => {
     if (opts.expectedCheckout) await lockRepositoryTasksKey(tx, repositoryId);
     await lockPlanMirror(tx, repositoryId);
-    await lockPlanPatch(tx, repositoryId);
-    if (
-      opts.expectedCheckout &&
-      !(await admitWatchedCheckout(tx, repositoryId, repoPath, opts.expectedCheckout))
-    )
-      throw new PlanMirrorHeldError(HELD_MOVED, 'checkout_changed');
     let bytes: Buffer | null;
     try {
       const read = await readPlanJson(repoPath);
@@ -796,9 +815,11 @@ export async function reconcilePlanFromCheckout(
       bytes = null;
     }
     if (bytes === null) return noOutcome(NO_SNAPSHOT);
-    const outcome = await reconcilePlanLocked(tx, repositoryId, bytes, opts);
-    await assertCheckoutStillHolds(repoPath, bytes, opts.expectedCheckout);
-    return outcome;
+    if (opts.expectedHash && hashBytes(bytes) !== opts.expectedHash)
+      throw new PlanMirrorHeldError(HELD_MOVED, 'checkout_changed');
+    return reconcilePlanLocked(tx, repositoryId, bytes, opts, async () => {
+      await assertCheckoutStillHolds(repoPath, bytes, opts.expectedCheckout);
+    });
   });
 }
 
@@ -1043,19 +1064,23 @@ async function reconcilePlanLocked(
   tx: PlanMirrorTx,
   repositoryId: string,
   bytes: Buffer,
-  opts: { requireStamp?: boolean },
+  opts: { requireStamp?: boolean; expectedCheckout?: NamedCheckout },
+  beforeApply: () => Promise<void>,
 ): Promise<PlanPullOutcome> {
-  await lockPlanPatch(tx, repositoryId);
   const [state] = await tx
     .select({
       syncedHash: schema.planMirrorState.syncedHash,
       syncedSnapshot: schema.planMirrorState.syncedSnapshot,
+      revision: schema.planMirrorState.revision,
     })
     .from(schema.planMirrorState)
     .where(eq(schema.planMirrorState.repositoryId, repositoryId))
     .limit(1);
   const hash = hashBytes(bytes);
   if (bytes.length > 0 && state?.syncedHash === hash) {
+    await beforeApply();
+    if (opts.expectedCheckout && !(await admitWatchedRepository(tx, repositoryId)))
+      throw new PlanMirrorHeldError(HELD_MOVED, 'checkout_changed');
     // A row stamped before 0196 has the bytes it last read but no base; they are the base.
     if (state.syncedSnapshot == null) await seedBaseFrom(tx, repositoryId, bytes);
     await convergePlanQuestions(tx, repositoryId);
@@ -1210,6 +1235,24 @@ async function reconcilePlanLocked(
       taskable: n.taskable,
       createdBy: 'import' as const,
     }));
+  // All file/git reads and the merge/render precede P. Do not wait here with a
+  // judged checkout: contention defers the reconcile, just like a held flush.
+  await beforeApply();
+  const busy = await tx.execute(
+    sql`select 1 where not pg_try_advisory_xact_lock(hashtextextended(${`plan-patch:${repositoryId}`}, 0))`,
+  );
+  if (busy.length > 0) throw new PlanMirrorHeldError(HELD_RACED);
+  // A path writer could have committed during preparation. Hash/base writers
+  // are serialized by the mirror lock; patches advance revision. Re-read both
+  // before any mutation, retaining the existing per-node version fences too.
+  const current = await loadMirrorState(tx, repositoryId);
+  if (
+    (current?.revision ?? null) !== (state?.revision ?? null) ||
+    (current?.syncedHash ?? null) !== (state?.syncedHash ?? null)
+  )
+    throw new PlanMirrorHeldError(HELD_RACED);
+  if (opts.expectedCheckout && !(await admitWatchedRepository(tx, repositoryId)))
+    throw new PlanMirrorHeldError(HELD_MOVED, 'checkout_changed');
   if (insertRows.length > 0) await tx.insert(schema.planNodes).values(insertRows);
 
   let nodesUpdated = 0;
