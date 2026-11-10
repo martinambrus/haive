@@ -1,4 +1,22 @@
-const authLock = vi.hoisted(() => ({ acquire: vi.fn(), release: vi.fn(async () => {}) }));
+const authLock = vi.hoisted(() => ({
+  acquire: vi.fn(),
+  release: vi.fn(async () => {}),
+  debug: vi.fn(),
+}));
+vi.mock('@haive/shared', async (original) => {
+  const actual = await original<typeof import('@haive/shared')>();
+  return {
+    ...actual,
+    logger: {
+      ...actual.logger,
+      child(bindings: Record<string, unknown>) {
+        const child = actual.logger.child(bindings);
+        if (bindings.module === 'credential-refresh') child.debug = authLock.debug;
+        return child;
+      },
+    },
+  };
+});
 vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
   tryCliAuthLock: authLock.acquire,
@@ -225,6 +243,7 @@ it('yields credential refresh to sign-out/login without reading or spending a to
   expect(writeVolumeFile).not.toHaveBeenCalled();
   expect(fetchMock).not.toHaveBeenCalled();
   expect(update).not.toHaveBeenCalled();
+  expect(authLock.debug).toHaveBeenCalledWith({ providerId: rows[0]!.id }, expect.any(String));
 });
 it('releases its auth lock when a credential read throws', async () => {
   const { db } = refreshFixture();

@@ -117,7 +117,13 @@ export async function refreshExpiringCliCredentials(
     let release: (() => Promise<void>) | null = null;
     try {
       release = await tryCliAuthLock(db, cliAuthScope(sharing[0]!));
-      if (!release) continue;
+      if (!release) {
+        log.debug(
+          { providerId: sharing[0]!.id },
+          'credential refresh skipped: authentication is busy',
+        );
+        continue;
+      }
       await refreshGrokVolume(db, vol, sharing, runner);
     } catch (err) {
       log.warn({ err, vol }, 'grok credential refresh failed; leaving the stored login as-is');

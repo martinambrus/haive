@@ -9,7 +9,23 @@ const h = vi.hoisted(() => ({
   release: vi.fn(async () => {}),
   read: vi.fn(),
   refresh: vi.fn(),
+  fetch: vi.fn(),
+  debug: vi.fn(),
 }));
+vi.mock('@haive/shared', async (original) => {
+  const actual = await original<typeof import('@haive/shared')>();
+  return {
+    ...actual,
+    logger: {
+      ...actual.logger,
+      child(bindings: Record<string, unknown>) {
+        const child = actual.logger.child(bindings);
+        if (bindings.module === 'usage-poll') child.debug = h.debug;
+        return child;
+      },
+    },
+  };
+});
 vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
   tryCliAuthLock: h.acquire,
@@ -30,7 +46,7 @@ import { writeProviderSecret } from '../src/usage-window/token-source.js';
 import { handleSignOutJob } from '../src/queues/cli-exec-queue.js';
 import type { DockerRunner } from '../src/sandbox/docker-runner.js';
 
-function setup() {
+function setup(isolateAuth = true) {
   const fake = createFakeDb({
     cliProviders: schema.cliProviders,
     cliProviderSecrets: schema.cliProviderSecrets,
@@ -42,7 +58,7 @@ function setup() {
     name: 'claude-code',
     label: 'test',
     authMode: 'subscription',
-    isolateAuth: true,
+    isolateAuth,
     enabled: true,
     authGeneration: '00000000-0000-4000-8000-000000000001',
   });
@@ -51,6 +67,11 @@ function setup() {
 beforeEach(() => {
   h.acquire.mockReset().mockResolvedValue(h.release);
   h.release.mockClear();
+  h.debug.mockClear();
+  h.fetch
+    .mockReset()
+    .mockImplementation(async () => Response.json({ five_hour: { utilization: 12 } }));
+  vi.stubGlobal('fetch', h.fetch);
   h.read
     .mockReset()
     .mockResolvedValue(
@@ -65,7 +86,10 @@ beforeEach(() => {
   vi.spyOn(configService, 'get').mockResolvedValue('off');
   vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue('ab'.repeat(32));
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 it('holds the shared scope across the usage credential read, grant and write without advancing the login generation', async () => {
   const fake = setup();
   h.refresh.mockImplementation(async () => {
@@ -120,13 +144,18 @@ it('a usage refresh after a sign-out request still removes the volumes and both 
   expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
   expect(fake.rows(schema.cliProviders)[0]!.authStatus).toBe('unknown');
 });
-it('does not read or refresh while sign-out or a credential writer owns the scope', async () => {
+it('logs and skips refresh while sign-out or a credential writer owns the scope', async () => {
   const fake = setup();
   h.acquire.mockResolvedValueOnce(null);
   await runUsagePollTick(fake.db as unknown as Database);
-  expect(h.read).not.toHaveBeenCalled();
+  expect(h.read).toHaveBeenCalledOnce();
   expect(h.refresh).not.toHaveBeenCalled();
+  expect(h.fetch).not.toHaveBeenCalled();
   expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+  expect(h.debug).toHaveBeenCalledWith(
+    { providerId: fake.rows(schema.cliProviders)[0]!.id },
+    expect.any(String),
+  );
 });
 it('leaves the usage secret and login generation unchanged when the upsert fails', async () => {
   const fake = setup();
@@ -145,4 +174,82 @@ it('leaves the usage secret and login generation unchanged when the upsert fails
   expect(fake.rows(schema.cliProviders)[0]!.authGeneration).toBe(
     '00000000-0000-4000-8000-000000000001',
   );
+});
+
+it('polls two same-scope providers in one tick without locking when no refresh is due', async () => {
+  const fake = setup(false);
+  const first = fake.rows(schema.cliProviders)[0]!;
+  fake.insert(schema.cliProviders, { ...first, id: randomUUID() });
+  const scopes = new Set<string>();
+  h.acquire.mockImplementation(async (_db, scope: string) => {
+    if (scopes.has(scope)) return null;
+    scopes.add(scope);
+    return async () => {
+      scopes.delete(scope);
+    };
+  });
+  h.read.mockResolvedValue(
+    JSON.stringify({
+      accessToken: 'fresh',
+      refreshToken: 'refresh',
+      expiresAt: Date.now() + 3600000,
+    }),
+  );
+  await runUsagePollTick(fake.db as unknown as Database);
+  expect(h.fetch).toHaveBeenCalledTimes(2);
+  expect(
+    fake
+      .rows(schema.usageWindowSnapshots)
+      .map((row) => row.providerId)
+      .sort(),
+  ).toEqual(
+    fake
+      .rows(schema.cliProviders)
+      .map((row) => row.id)
+      .sort(),
+  );
+  expect(h.acquire).not.toHaveBeenCalled();
+  expect(h.refresh).not.toHaveBeenCalled();
+});
+
+it.each([
+  [null, null],
+  ['invalid JSON', null],
+  [JSON.stringify({ refreshToken: 'no-access' }), null],
+  [
+    JSON.stringify({ accessToken: 'already-refreshed', refreshToken: 'rotated', expiresAt: 1e15 }),
+    'already-refreshed',
+  ],
+])('re-reads credentials under the refresh lock before using %s', async (raw, token) => {
+  const fake = setup();
+  h.acquire.mockImplementationOnce(async () => {
+    h.read.mockResolvedValue(raw);
+    return h.release;
+  });
+  await runUsagePollTick(fake.db as unknown as Database);
+  expect(h.read).toHaveBeenCalledTimes(2);
+  expect(h.refresh).not.toHaveBeenCalled();
+  expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+  if (token) {
+    expect(h.fetch).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: `Bearer ${token}` }),
+      }),
+    );
+  } else {
+    expect(h.fetch).not.toHaveBeenCalled();
+  }
+  expect(h.release).toHaveBeenCalledOnce();
+});
+
+it('refreshes using the token re-read under the lock', async () => {
+  const fake = setup();
+  h.read.mockResolvedValueOnce(
+    JSON.stringify({ accessToken: 'obsolete', refreshToken: 'spent', expiresAt: 0 }),
+  );
+  await runUsagePollTick(fake.db as unknown as Database);
+  expect(h.read).toHaveBeenCalledTimes(2);
+  expect(h.refresh).toHaveBeenCalledWith('refresh');
+  expect(h.release).toHaveBeenCalledOnce();
 });

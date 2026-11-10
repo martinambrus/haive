@@ -165,16 +165,14 @@ interface ProviderRow {
 
 /** Read a stored ClaudeOauthTokens secret, refreshing (and re-storing the rotated
  *  token) when the access token is near expiry. Returns null when not connected.
- *  Only the singleton poll worker calls this, so the single-use refresh token is never
- *  consumed by two refreshes at once. */
+ *  Ordinary reads need no lock. A refresh re-reads under the shared auth lock so it
+ *  cannot spend a refresh token replaced or removed since the initial read. */
 async function resolveOauthRefreshToken(
   db: Database,
   provider: ProviderRow,
   secretName: string,
 ): Promise<{ token: string } | null> {
-  const release = await tryCliAuthLock(db, cliAuthScope(provider));
-  if (!release) return null;
-  try {
+  const readStored = async (): Promise<ClaudeOauthTokens | null> => {
     const raw = await readProviderSecretToken(db, provider.id, secretName);
     if (!raw) return null; // usage tracking not connected for this provider
     let stored: ClaudeOauthTokens;
@@ -192,6 +190,23 @@ async function resolveOauthRefreshToken(
     if (stored.refreshToken && deadUsageRefreshToken.get(provider.id) === stored.refreshToken) {
       return null;
     }
+    return stored;
+  };
+
+  const current = await readStored();
+  if (!current) return null;
+  if (!current.refreshToken || !claudeTokenNeedsRefresh(current.expiresAt)) {
+    return { token: current.accessToken };
+  }
+
+  const release = await tryCliAuthLock(db, cliAuthScope(provider));
+  if (!release) {
+    log.debug({ providerId: provider.id }, 'usage OAuth refresh skipped: authentication is busy');
+    return null;
+  }
+  try {
+    const stored = await readStored();
+    if (!stored) return null;
 
     if (stored.refreshToken && claudeTokenNeedsRefresh(stored.expiresAt)) {
       try {
