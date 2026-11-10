@@ -15,6 +15,8 @@ const h = vi.hoisted(() => ({
   settle: (async () => ({})) as () => Promise<unknown>,
   state: 'active' as string,
   audits: [] as unknown[],
+  auditError: false,
+  enqueueError: false,
 }));
 
 vi.mock('../src/middleware/auth.js', async (importOriginal) => {
@@ -32,12 +34,25 @@ vi.mock('../src/middleware/auth.js', async (importOriginal) => {
   };
 });
 vi.mock('../src/db.js', () => ({
-  getDb: () => ({ select: () => ({ from: async () => h.rows }) }),
+  getDb: () => ({
+    select: () => ({ from: async () => h.rows }),
+    transaction: async (run: (tx: unknown) => unknown) => {
+      try {
+        return await run({});
+      } catch (err) {
+        h.audits = [];
+        throw err;
+      }
+    },
+  }),
 }));
 vi.mock('../src/redis.js', () => ({ getRedis: () => ({ get: async () => h.report }) }));
 vi.mock('../src/lib/audit.js', () => ({
   recordAuditEvent: async (_db: unknown, event: unknown) => void h.audits.push(event),
-  insertAuditEvent: async (_db: unknown, event: unknown) => void h.audits.push(event),
+  insertAuditEvent: async (_db: unknown, event: unknown) => {
+    if (h.auditError) throw new Error('audit refused');
+    h.audits.push(event);
+  },
   logAuditEvent: () => {},
 }));
 vi.mock('../src/modules/activation.js', () => ({
@@ -48,6 +63,7 @@ vi.mock('../src/modules/activation.js', () => ({
 vi.mock('../src/queues.js', () => ({
   getModuleControlQueue: () => ({
     add: async (...args: unknown[]) => {
+      if (h.enqueueError) throw new Error('queue refused');
       h.added.push(args);
       return {
         id: 'job-1',
@@ -132,6 +148,8 @@ beforeEach(() => {
   h.settle = async () => ({ moduleId: 'alpha', tornDownAt: DOWN });
   h.state = 'active';
   h.audits = [];
+  h.auditError = false;
+  h.enqueueError = false;
 });
 
 describe('POST /modules/:id/teardown, before anything is queued', () => {
@@ -252,4 +270,15 @@ describe('GET /modules/loaded', () => {
       ['beta', null],
     ]);
   });
+});
+
+it('refuses teardown before enqueue when the audit is refused', async () => {
+  h.auditError = true;
+  expect((await teardown('alpha')).status).toBe(500);
+  expect(h.added).toEqual([]);
+});
+it('rolls back teardown audit when enqueue fails', async () => {
+  h.enqueueError = true;
+  expect((await teardown('alpha')).status).toBe(500);
+  expect(h.audits).toEqual([]);
 });

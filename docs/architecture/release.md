@@ -146,6 +146,12 @@ The updater creates the journal table itself, at every start: `ensureJournal` ru
 `UPGRADE_JOURNAL_DDL`, which `@haive/database` exports once and the api's tests build the table
 from, so nothing keeps a copy of it.
 
+The API's upgrade launch inserts maintenance.start_upgrade before starting the updater
+container, in one transaction. A refused row starts no container; a failed Docker launch
+rolls the row back. Metadata contains request field names only. The log follows commit.
+As with the Redis maintenance state, a commit failure after the external effect succeeded
+cannot atomically undo that effect.
+
 A start that ends before any run exists also leaves a row, so an administrator sees why an upgrade
 did not happen, from the admin page or from `./haive upgrade`, after the api that launched it is
 gone. When the updater held the database and the lock, then neither created nor resumed a run, and

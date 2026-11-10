@@ -19,6 +19,13 @@ The integration settings and admin cards identify a provider's contributing modu
 provider state separately from its configured switch; see [Integrations](integrations.md). A
 provider enabled by configuration can still be unavailable because its module is deactivated.
 
+Admin activation and ordinary deactivation write their audit row in the same transaction as
+the module change, and log after commit. Urgent deactivation records module.deactivate
+with mode urgent in the transaction that stamps the module, before stopping dependents;
+the subsequent Stop rows remain best-effort. Teardown records its request before enqueue
+inside a transaction: an audit refusal queues nothing and an enqueue failure rolls the row
+back. The partial-purge row after an irreversible database drop remains best-effort.
+
 ## The four states
 
 Two things move independently: whether the code is **installed** (a rebuild moves it) and whether the

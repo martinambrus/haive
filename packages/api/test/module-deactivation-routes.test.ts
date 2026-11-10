@@ -90,6 +90,14 @@ vi.mock('../src/modules/activation.js', () => ({
   },
   deactivateUrgently: async (_db: unknown, id: string, actor: string) => {
     h.urgents.push([id, actor]);
+    if ((h.urgent as { kind: string }).kind === 'ok')
+      h.audits.push({
+        actorUserId: actor,
+        action: 'module.deactivate',
+        targetType: 'module',
+        targetId: null,
+        metadata: { moduleId: id, mode: 'urgent' },
+      });
     return h.urgent;
   },
 }));
@@ -380,7 +388,7 @@ describe('PATCH /modules/:id', () => {
         action: 'module.deactivate',
         targetType: 'module',
         targetId: null,
-        metadata: { moduleId: 'alpha', mode: 'urgent', stopped: 1 },
+        metadata: { moduleId: 'alpha', mode: 'urgent' },
       },
     ]);
   });

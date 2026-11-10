@@ -9,7 +9,7 @@ import {
   pickTaskTypeDraft,
 } from '@haive/shared/modularity';
 import { getDb } from '../db.js';
-import { recordAuditEvent } from '../lib/audit.js';
+import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { loadUsableProvider } from '../lib/step-cli-choice.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 import { definitionForCreate } from '../lib/task-type-definition.js';
@@ -84,7 +84,7 @@ taskTypeDraftRoutes.post('/', async (c) => {
   const { draft } = pickTaskTypeDraft(body.current ?? {});
 
   // The opening message is written before the start is queued: the step reads it on its first detect.
-  const { taskId, queued } = await db.transaction(async (tx) => {
+  const { taskId, queued, event } = await db.transaction(async (tx) => {
     await admitNewWork(tx);
     const { runListSnapshot, customSteps } = await definitionForCreate(tx, 'type_draft', {
       generic: false,
@@ -116,20 +116,22 @@ taskTypeDraftRoutes.post('/', async (c) => {
       body: body.message,
       ...(Object.keys(draft).length > 0 ? { draft } : {}),
     });
-    return { taskId: task.id, queued: await markQueuedForStart(tx, task.id) };
+    const event: AuditEvent = {
+      actorUserId: userId,
+      action: 'task_type_draft.start',
+      targetType: 'task',
+      targetId: task.id,
+      metadata: {
+        cliProviderId: body.cliProviderId ?? null,
+        withEditorState: Object.keys(draft).length > 0,
+      },
+    };
+    await insertAuditEvent(tx, event);
+    return { taskId: task.id, queued: await markQueuedForStart(tx, task.id), event };
   });
 
+  logAuditEvent(event);
   if (queued) await enqueueStart(taskId, userId);
-  await recordAuditEvent(db, {
-    actorUserId: userId,
-    action: 'task_type_draft.start',
-    targetType: 'task',
-    targetId: taskId,
-    metadata: {
-      cliProviderId: body.cliProviderId ?? null,
-      withEditorState: Object.keys(draft).length > 0,
-    },
-  });
   return c.json({ taskId }, 201);
 });
 

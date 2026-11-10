@@ -19,7 +19,7 @@ import {
 } from '@haive/shared/modularity';
 import { readStepCatalog, type StepCatalogRead } from '@haive/shared/modularity-server';
 import { getDb } from '../db.js';
-import { recordAuditEvent } from '../lib/audit.js';
+import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { buildUpcomingCliSteps } from './tasks/_helpers.js';
 import { loadStepFlags, withTaskCustomSteps } from '../lib/step-flags.js';
 import {
@@ -255,34 +255,39 @@ adminTaskTypeRoutes.post('/', async (c) => {
   if (defaultIssues.length > 0) {
     return c.json({ error: 'Invalid defaults', issues: defaultIssues }, 400);
   }
-  const [created] = await db
-    .insert(schema.taskTypeDefinitions)
-    .values({
-      slug: body.slug,
-      displayName: body.displayName,
-      description: body.description ?? null,
-      runListStrategy: 'static',
-      stepIds: body.stepIds,
-      preAnswerDefaults: body.preAnswerDefaults ?? {},
-      stepLoopLimitDefaults: body.stepLoopLimitDefaults ?? {},
-      promptSteps,
-      fixLoop: null,
-      enabled: body.enabled ?? true,
-      selectable: body.selectable ?? true,
-      source: 'admin',
-      requiresRepository: body.requiresRepository,
-      sortOrder: body.sortOrder ?? 0,
-      contentHash: null,
-    })
-    .onConflictDoNothing()
-    .returning();
-  if (!created) throw new HttpError(409, 'That slug is already taken');
-  await recordAuditEvent(db, {
+  const event: AuditEvent = {
     actorUserId: c.get('userId'),
     action: 'task_type.create',
     targetType: 'task_type',
     metadata: { slug: body.slug, stepCount: body.stepIds.length },
+  };
+  const created = await db.transaction(async (tx) => {
+    const [created] = await tx
+      .insert(schema.taskTypeDefinitions)
+      .values({
+        slug: body.slug,
+        displayName: body.displayName,
+        description: body.description ?? null,
+        runListStrategy: 'static',
+        stepIds: body.stepIds,
+        preAnswerDefaults: body.preAnswerDefaults ?? {},
+        stepLoopLimitDefaults: body.stepLoopLimitDefaults ?? {},
+        promptSteps,
+        fixLoop: null,
+        enabled: body.enabled ?? true,
+        selectable: body.selectable ?? true,
+        source: 'admin',
+        requiresRepository: body.requiresRepository,
+        sortOrder: body.sortOrder ?? 0,
+        contentHash: null,
+      })
+      .onConflictDoNothing({ target: schema.taskTypeDefinitions.slug })
+      .returning();
+    if (!created) throw new HttpError(409, 'That slug is already taken');
+    await insertAuditEvent(tx, event);
+    return created;
   });
+  logAuditEvent(event);
   return c.json({ taskType: { ...created, editableFields: editableFieldsOf(created) } }, 201);
 });
 
@@ -385,7 +390,15 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
       .set({ ...body, ...dropped, updatedAt: new Date() })
       .where(eq(schema.taskTypeDefinitions.slug, slug))
       .returning();
-    return { updated, droppedFields: Object.keys(dropped) } as const;
+    if (!updated) throw new HttpError(404, 'Task type not found');
+    const event: AuditEvent = {
+      actorUserId: c.get('userId'),
+      action: 'task_type.update',
+      targetType: 'task_type',
+      metadata: { slug, fields: [...fields, ...Object.keys(dropped)] },
+    };
+    await insertAuditEvent(tx, event);
+    return { updated, event } as const;
   });
   const changed = outcome.changed;
   if (changed) {
@@ -401,18 +414,19 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
   if ('invalid' in outcome) return c.json(outcome.invalid, 400);
   const updated = outcome.updated;
   if (!updated) throw new HttpError(404, 'Task type not found');
-  await recordAuditEvent(db, {
-    actorUserId: c.get('userId'),
-    action: 'task_type.update',
-    targetType: 'task_type',
-    metadata: { slug, fields: [...fields, ...outcome.droppedFields] },
-  });
+  logAuditEvent(outcome.event);
   return c.json({ taskType: { ...updated, editableFields: editableFieldsOf(updated) } });
 });
 
 adminTaskTypeRoutes.delete('/:slug', async (c) => {
   const slug = c.req.param('slug');
   const db = getDb();
+  const event: AuditEvent = {
+    actorUserId: c.get('userId'),
+    action: 'task_type.delete',
+    targetType: 'task_type',
+    metadata: { slug },
+  };
   // The row lock pairs with the create path's FOR SHARE read, so a task cannot be inserted between the check and the delete.
   await db.transaction(async (tx) => {
     const [row] = await tx
@@ -431,13 +445,9 @@ adminTaskTypeRoutes.delete('/:slug', async (c) => {
       .limit(1);
     if (used) throw new HttpError(409, 'Tasks of this type exist; disable it instead');
     await tx.delete(schema.taskTypeDefinitions).where(eq(schema.taskTypeDefinitions.slug, slug));
+    await insertAuditEvent(tx, event);
   });
-  await recordAuditEvent(db, {
-    actorUserId: c.get('userId'),
-    action: 'task_type.delete',
-    targetType: 'task_type',
-    metadata: { slug },
-  });
+  logAuditEvent(event);
   return c.body(null, 204);
 });
 

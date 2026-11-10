@@ -218,7 +218,10 @@ with availability and public traits); `GET /task-types/:slug/saved-step-clis` (a
 steps of that type's run list, prompt steps included, on which the caller saved a per-step CLI, and
 `defaultProviderId`, the provider every other CLI step falls to; see
 [Step summaries](step-summaries.md)). Every write is audited (`task_type.create`, `update` with the
-field list, `delete`).
+field list, `delete`). The row is inserted in the change's own transaction and logged after
+commit, so an audit refusal undoes the create, update or delete. Draft start records
+task_type_draft.start with the task, opening message and queued state in their transaction,
+before enqueueing START; it never records message or prompt content.
 
 - **Create** runs, each stage a 400 with `issues`: built-in slug (409) → strict schema → slug taken
   (409) → catalog synced (409) → prompt steps → composition → defaults.

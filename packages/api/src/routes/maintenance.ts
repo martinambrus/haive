@@ -582,19 +582,26 @@ maintenanceRoutes.post('/upgrade', async (c) => {
   if (body.force) args.push('--force');
 
   const startedAt = new Date().toISOString();
-  const started = await runDockerClient(args);
-  if (!started.ok) {
-    // Never echo `args`: the message would be the one place the redaction above was pointless.
-    log.error({ image, stderr: started.stderr }, 'could not start the updater');
-    throw new HttpError(502, `could not start the updater: ${started.stderr || 'docker failed'}`);
-  }
-
-  await recordAuditEvent(db, {
+  const event: AuditEvent = {
     actorUserId: c.get('userId'),
     action: 'maintenance.start_upgrade',
     targetType: 'system',
-    metadata: { from: current, to: version, container: started.containerId, force: !!body.force },
+    metadata: { fields: Object.keys(body) },
+  };
+  const started = await db.transaction(async (tx) => {
+    await insertAuditEvent(tx, event);
+    const result = await runDockerClient(args);
+    if (!result.ok) {
+      // Never echo args: environment values do not belong in a failure.
+      log.error({ image, stderr: result.stderr }, 'could not start the updater');
+      throw new HttpError(
+        502,
+        'could not start the updater: ' + (result.stderr || 'docker failed'),
+      );
+    }
+    return result;
   });
+  logAuditEvent(event);
   log.info({ from: current, to: version, container: started.containerId }, 'upgrade started');
   // 202: the work outlives this request, and this process is one of the things it replaces.
   return c.json(

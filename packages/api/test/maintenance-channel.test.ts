@@ -3,22 +3,29 @@ import { readFile } from 'node:fs/promises';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
 
-const h = vi.hoisted(() => ({ spawn: vi.fn() }));
+const h = vi.hoisted(() => ({ spawn: vi.fn(), insert: vi.fn(), rows: [] as unknown[] }));
 vi.mock('node:child_process', async (original) => ({
   ...(await original<typeof import('node:child_process')>()),
   spawn: h.spawn,
 }));
-vi.mock('../src/db.js', () => ({ getDb: () => ({}) }));
+vi.mock('../src/db.js', () => ({
+  getDb: () => ({
+    transaction: async (fn: (tx: unknown) => unknown) => {
+      try {
+        return await fn({ insert: () => ({ values: h.insert }) });
+      } catch (err) {
+        h.rows = [];
+        throw err;
+      }
+    },
+  }),
+}));
 vi.mock('../src/lib/upgrade-run.js', () => ({
   findLiveUpgradeRun: async () => null,
   listUpgradeRuns: async () => [],
   lastUpgradeAttempt: async () => null,
 }));
-vi.mock('../src/lib/audit.js', () => ({
-  recordAuditEvent: vi.fn(),
-  insertAuditEvent: vi.fn(),
-  logAuditEvent: vi.fn(),
-}));
+
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (_c: unknown, next: () => unknown) => next(),
   requireAdmin: async (_c: unknown, next: () => unknown) => next(),
@@ -57,6 +64,10 @@ beforeEach(() => {
   vi.stubEnv('HAIVE_INSTALL_DIR_HOST', '/host/install');
   vi.stubEnv('HAIVE_REGISTRY_TOKEN', 'hidden-token-sentinel');
   vi.spyOn(Date, 'now').mockReturnValue(1234);
+  h.rows = [];
+  h.insert.mockReset().mockImplementation(async (ev: unknown) => {
+    h.rows.push(ev);
+  });
   h.spawn.mockReset().mockImplementation(() => {
     const child = Object.assign(new EventEmitter(), {
       stdout: new EventEmitter(),
@@ -176,4 +187,32 @@ it('run overlay forwards channel, channel registry and Docker config keys to api
   const api = text.slice(text.indexOf('\n  api:'), text.indexOf('\n  worker:'));
   for (const key of ['HAIVE_CHANNEL', 'HAIVE_CHANNEL_REGISTRY', 'DOCKER_CONFIG'])
     expect(api).toContain(key + ': ${' + key + ':-}');
+});
+
+it('refuses the audit before starting an upgrade container', async () => {
+  h.insert.mockRejectedValue(new Error('audit refused'));
+  expect((await post()).status).toBe(500);
+  expect(h.spawn).not.toHaveBeenCalled();
+});
+it('rolls the upgrade row back when docker fails', async () => {
+  h.spawn.mockImplementation(() => {
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      kill: vi.fn(),
+    });
+    queueMicrotask(() => child.emit('close', 1));
+    return child;
+  });
+  expect((await post()).status).toBe(502);
+  expect(h.rows).toEqual([]);
+});
+it('writes the upgrade row before docker starts', async () => {
+  const spawn = h.spawn.getMockImplementation()!;
+  h.spawn.mockImplementation((...args: unknown[]) => {
+    expect(h.rows).toMatchObject([{ action: 'maintenance.start_upgrade' }]);
+    return spawn(...args);
+  });
+  expect((await post()).status).toBe(202);
+  expect(h.rows).toHaveLength(1);
 });

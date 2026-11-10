@@ -331,13 +331,6 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
     if (mode === 'urgent') {
       const urgent = await deactivateUrgently(db, id, c.get('userId')).catch(moduleBusyError);
       if (urgent.kind === 'missing') throw new HttpError(404, 'Module not found');
-      await recordAuditEvent(db, {
-        actorUserId: c.get('userId'),
-        action: 'module.deactivate',
-        targetType: 'module',
-        targetId: null,
-        metadata: { moduleId: id, mode, stopped: urgent.stopped.length },
-      });
       return c.json({
         moduleId: id,
         active: false,
@@ -348,7 +341,20 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
         capped: urgent.capped,
       });
     }
-    const result = await setModuleActive(db, id, active, c.get('userId')).catch(moduleBusyError);
+    const event: AuditEvent = {
+      actorUserId: c.get('userId'),
+      action: active ? 'module.activate' : 'module.deactivate',
+      targetType: 'module',
+      targetId: null,
+      metadata: { moduleId: id },
+    };
+    const result = await db
+      .transaction(async (tx) => {
+        const result = await setModuleActive(tx, id, active, c.get('userId'));
+        if (result.kind === 'ok') await insertAuditEvent(tx, event);
+        return result;
+      })
+      .catch(moduleBusyError);
     if (result.kind === 'missing') throw new HttpError(404, 'Module not found');
     if (result.kind === 'open') {
       return c.json(
@@ -362,13 +368,7 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
       );
     }
     if (active) publishModuleActivated(id);
-    await recordAuditEvent(db, {
-      actorUserId: c.get('userId'),
-      action: active ? 'module.activate' : 'module.deactivate',
-      targetType: 'module',
-      targetId: null,
-      metadata: { moduleId: id },
-    });
+    logAuditEvent(event);
     return c.json({
       moduleId: id,
       active,
@@ -400,18 +400,28 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
         'module_missing',
       );
     }
-    const job = await getModuleControlQueue().add(
-      MODULE_CONTROL_JOB_NAMES.TEARDOWN,
-      { moduleId: id } satisfies ModuleTeardownPayload,
-      { deduplication: { id: `module-teardown-${id}` }, removeOnComplete: 100, removeOnFail: 100 },
-    );
-    await recordAuditEvent(getDb(), {
+    const event: AuditEvent = {
       actorUserId: c.get('userId'),
       action: 'module.teardown',
       targetType: 'module',
       targetId: null,
       metadata: { moduleId: id },
+    };
+    const job = await getDb().transaction(async (tx) => {
+      await insertAuditEvent(tx, event);
+      const job = await getModuleControlQueue().add(
+        MODULE_CONTROL_JOB_NAMES.TEARDOWN,
+        { moduleId: id } satisfies ModuleTeardownPayload,
+        {
+          deduplication: { id: `module-teardown-${id}` },
+          removeOnComplete: 100,
+          removeOnFail: 100,
+        },
+      );
+      if (!job.id) throw new HttpError(500, 'Module teardown was not queued');
+      return job;
     });
+    logAuditEvent(event);
     let result: ModuleTeardownResult;
     try {
       result = (await job.waitUntilFinished(
