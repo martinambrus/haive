@@ -284,3 +284,14 @@ cli_provider.sign_out before adding the sign-out job, inside a transaction;
 an audit refusal queues nothing and a refused enqueue rolls the row back.
 It logs after commit. The worker retains ownership of credential-volume and
 Claude login-secret removal and adds no audit writer.
+
+**CLI provider security edits require their own row.** PATCH records
+cli_provider.update whenever networkPolicy, egressDomains, wrapperContent,
+wrapperPath, executablePath, cliArgs, sandboxDockerfileExtra, authMode,
+isolateAuth or cliVersion changes, or a non-secret environment entry changes.
+The current provider is read under its row lock, and the update and required
+audit commit together. Metadata lists changed fields and environment names
+(including removals), never their values or wrapper/Dockerfile content.
+Secret environment writes keep their existing strict cli_provider.secret.set
+row in that same transaction. Both logs follow commit; unchanged settings
+add no update row.

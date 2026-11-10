@@ -177,6 +177,70 @@ describe('POST /:providerId/secrets', () => {
   });
 });
 
+describe('strict provider security updates', () => {
+  const changes = [
+    { networkPolicy: { mode: 'none', domains: [], ips: [] } },
+    { egressDomains: ['api.example'] },
+    { wrapperContent: 'echo hidden-wrapper' },
+    { wrapperPath: '/hidden/wrapper' },
+    { executablePath: '/hidden/cli' },
+    { cliArgs: ['hidden-argument'] },
+    { sandboxDockerfileExtra: 'RUN echo hidden-dockerfile' },
+    { envVars: { ANTHROPIC_BASE_URL: 'https://hidden.example' } },
+  ];
+  it.each(changes)('audit refusal rolls back %j without enqueuing', async (change) => {
+    const fake = setup(true);
+    const before = fake.rows(schema.cliProviders);
+    fake.hooks.beforeInsert = async (table) => {
+      if (table === schema.auditEvents) throw new Error('audit refused');
+    };
+    expect((await send('PATCH', '/' + PROVIDER, change)).status).toBe(500);
+    expect(fake.rows(schema.cliProviders)).toEqual(before);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+  it('records changed field and environment names, never their values', async () => {
+    const fake = setup(true);
+    expect(
+      (
+        await send('PATCH', '/' + PROVIDER, {
+          wrapperContent: 'hidden-wrapper',
+          cliArgs: ['hidden-argument'],
+          envVars: { ANTHROPIC_BASE_URL: 'https://hidden.example' },
+        })
+      ).status,
+    ).toBe(200);
+    expect(fake.rows(schema.auditEvents)).toMatchObject([
+      {
+        action: 'cli_provider.update',
+        actorUserId: USER,
+        targetId: PROVIDER,
+        metadata: {
+          fields: ['wrapperContent', 'cliArgs', 'envVars'],
+          envNames: ['ANTHROPIC_BASE_URL'],
+        },
+      },
+    ]);
+    expect(JSON.stringify(fake.rows(schema.auditEvents))).not.toContain('hidden');
+  });
+  it('lists a removed environment name too', async () => {
+    const fake = setup(true);
+    expect((await send('PATCH', '/' + PROVIDER, { envVars: {} })).status).toBe(200);
+    expect(fake.rows(schema.auditEvents)).toMatchObject([
+      { metadata: { fields: ['envVars'], envNames: ['ANTHROPIC_BASE_URL'] } },
+    ]);
+  });
+  it('writes no update row for unchanged security fields', async () => {
+    const fake = setup(true);
+    expect(
+      (
+        await send('PATCH', '/' + PROVIDER, {
+          envVars: { ANTHROPIC_BASE_URL: 'https://old.example' },
+        })
+      ).status,
+    ).toBe(200);
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+  });
+});
 describe('strict provider sign-out enqueue', () => {
   it('refuses enqueue when its audit insert fails', async () => {
     const fake = setup(true);
@@ -205,4 +269,16 @@ describe('strict provider sign-out enqueue', () => {
     expect((await send('POST', '/' + PROVIDER + '/sign-out', {})).status).toBe(202);
     expect(fake.rows(schema.auditEvents)).toHaveLength(1);
   });
+});
+
+it('does not audit a network policy whose object key order differs', async () => {
+  const fake = setup(true);
+  fake.patch(schema.cliProviders, PROVIDER, {
+    networkPolicy: { ips: [], domains: [], mode: 'full' },
+  });
+  expect(
+    (await send('PATCH', '/' + PROVIDER, { networkPolicy: { mode: 'full', domains: [], ips: [] } }))
+      .status,
+  ).toBe(200);
+  expect(fake.rows(schema.auditEvents)).toEqual([]);
 });

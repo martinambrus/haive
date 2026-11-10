@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { and, asc, desc, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { schema, type Database } from '@haive/database';
@@ -547,6 +548,43 @@ cliProviderRoutes.patch('/:id', async (c) => {
     : undefined;
   const updated = await db.transaction(async (tx) => {
     if (startsJob) await admitNewWork(tx);
+    const [current] = await tx
+      .select()
+      .from(schema.cliProviders)
+      .where(and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)))
+      .for('update');
+    if (!current) throw new HttpError(404, 'CLI provider not found');
+    const securityFields = [
+      'networkPolicy',
+      'egressDomains',
+      'wrapperContent',
+      'wrapperPath',
+      'executablePath',
+      'cliArgs',
+      'sandboxDockerfileExtra',
+      'authMode',
+      'isolateAuth',
+      'cliVersion',
+    ] as const;
+    const fields: string[] = securityFields.filter(
+      (field) => updates[field] !== undefined && !isDeepStrictEqual(updates[field], current[field]),
+    );
+    const envNames = split
+      ? [...new Set([...Object.keys(current.envVars ?? {}), ...Object.keys(split.envVars)])]
+          .filter((name) => (current.envVars ?? {})[name] !== split.envVars[name])
+          .sort()
+      : [];
+    if (envNames.length > 0) fields.push('envVars');
+    const event: AuditEvent | undefined = fields.length
+      ? {
+          actorUserId: userId,
+          action: 'cli_provider.update',
+          targetType: 'cli_provider',
+          targetId: id,
+          metadata: { fields, ...(envNames.length ? { envNames } : {}) },
+        }
+      : undefined;
+    if (event) await insertAuditEvent(tx, event);
     const rows = await tx
       .update(schema.cliProviders)
       .set(updates)
@@ -562,9 +600,10 @@ cliProviderRoutes.patch('/:id', async (c) => {
       });
     }
     if (secretEvent) await insertAuditEvent(tx, secretEvent);
-    return rows;
+    return { rows, event };
   });
-  const updatedRow = updated[0]!;
+  const updatedRow = updated.rows[0]!;
+  if (updated.event) logAuditEvent(updated.event);
   if (secretEvent) logAuditEvent(secretEvent);
 
   if (provisioningModel) await enqueueOllamaProvisionForProvider(id, userId);
