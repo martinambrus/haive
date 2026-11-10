@@ -15,6 +15,8 @@ const h = vi.hoisted(() => ({
   releaseAuth: vi.fn(async () => {}),
   updates: [] as Record<string, unknown>[],
   stampGate: undefined as Promise<void> | undefined,
+  stampError: false,
+  auditGate: undefined as Promise<void> | undefined,
   loginEnqueueGate: undefined as Promise<void> | undefined,
   audits: [] as Record<string, unknown>[],
   auditError: false,
@@ -102,6 +104,8 @@ beforeEach(() => {
   h.authBusy = false;
   h.updates = [];
   h.stampGate = undefined;
+  h.stampError = false;
+  h.auditGate = undefined;
   h.save.mockReset();
   h.attach.mockReset();
   h.start.mockReset().mockResolvedValue(undefined);
@@ -125,6 +129,7 @@ beforeEach(() => {
     transaction: async (fn: (tx: unknown) => unknown) => fn(h.db),
     insert: () => ({
       values: async (ev: Record<string, unknown>) => {
+        if (h.auditGate) await h.auditGate;
         if (h.auditError) throw new Error('audit refused');
         h.audits.push(ev);
       },
@@ -139,6 +144,7 @@ beforeEach(() => {
     update: () => ({
       set: (values: Record<string, unknown>) => ({
         where: async () => {
+          if (values.authGeneration && h.stampError) throw new Error('stamp refused');
           if (values.authGeneration && h.stampGate) await h.stampGate;
           h.updates.push(values);
         },
@@ -1937,4 +1943,39 @@ it('releases an abandoned login while its Redis enqueue is still pending, withou
   resume();
   await settle();
   expect(h.start).not.toHaveBeenCalled();
+});
+
+it('retains the volume-login audit if the completion stamp fails', async () => {
+  providerName = 'grok';
+  await start();
+  h.stampError = true;
+  stream.emit(
+    'data',
+    Buffer.from('https://accounts.x.ai/oauth2/device?user_code=ABCD-1234\n\nSigned in\n'),
+  );
+  await settle();
+  expect(h.audits).toMatchObject([{ action: 'cli_provider.login', targetId: PROVIDER }]);
+  expect(h.probe).not.toHaveBeenCalled();
+  expect(h.releaseAuth).toHaveBeenCalledOnce();
+});
+it('keeps the lock across a close while the volume-login audit is pending', async () => {
+  providerName = 'grok';
+  await start();
+  let resume!: () => void;
+  h.auditGate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  stream.emit(
+    'data',
+    Buffer.from('https://accounts.x.ai/oauth2/device?user_code=ABCD-1234\n\nSigned in\n'),
+  );
+  await settle();
+  ws.close();
+  await settle();
+  expect(h.releaseAuth).not.toHaveBeenCalled();
+  resume();
+  await settle();
+  expect(h.audits).toHaveLength(1);
+  expect(h.updates.some((v) => typeof v.authGeneration === 'string')).toBe(true);
+  expect(h.releaseAuth).toHaveBeenCalledOnce();
 });

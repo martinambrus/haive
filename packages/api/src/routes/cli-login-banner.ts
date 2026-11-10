@@ -1216,18 +1216,20 @@ async function saveOauthTokenAndProbe(session: BannerSession, oauthToken: string
 
 async function runProbeAndSave(session: BannerSession): Promise<void> {
   try {
-    // Keep the lock across the CLI write and this durable completion stamp.
-    session.credentialSave = advanceVolumeLoginGeneration(getDb(), session.provider);
+    // Keep audit and completion stamping inside the promise cleanup awaits, so a
+    // close during either write cannot release the credential lock early.
+    session.credentialSave = (async () => {
+      // The CLI already wrote its credential. Audit it before attempting the stamp.
+      await recordAuditEvent(getDb(), {
+        actorUserId: session.userId,
+        action: 'cli_provider.login',
+        targetType: 'cli_provider',
+        targetId: session.providerId,
+        metadata: { source: 'volume' },
+      });
+      await advanceVolumeLoginGeneration(getDb(), session.provider);
+    })();
     await session.credentialSave;
-    // Called only after the CLI's success signal: its volume credential already exists.
-    // Neither a probe failure nor a closed dialog can undo that external write.
-    await recordAuditEvent(getDb(), {
-      actorUserId: session.userId,
-      action: 'cli_provider.login',
-      targetType: 'cli_provider',
-      targetId: session.providerId,
-      metadata: { source: 'volume' },
-    });
     const result = await enqueueProbe(
       session.providerId,
       session.userId,
