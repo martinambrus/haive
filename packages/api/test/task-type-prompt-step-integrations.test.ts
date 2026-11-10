@@ -53,6 +53,7 @@ function insert() {
 
 function db() {
   const tx = {
+    insert,
     select: () => ({ from: (table: unknown) => rows(table) }),
     update: () => ({
       set: (values: Record<string, unknown>) => ({

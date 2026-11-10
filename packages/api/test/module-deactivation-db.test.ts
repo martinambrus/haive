@@ -1403,7 +1403,7 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       });
     });
 
-    it('audits the deactivation with its mode and how many tasks it stopped', async () => {
+    it('audits the deactivation with its mode before stopping tasks', async () => {
       await patchUrgent('alpha');
       expect(
         (await audits()).map((r) => [
@@ -1414,13 +1414,7 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
           r.metadata,
         ]),
       ).toEqual([
-        [
-          'module.deactivate',
-          'module',
-          null,
-          ACTOR,
-          { moduleId: 'alpha', mode: 'urgent', stopped: 1 },
-        ],
+        ['module.deactivate', 'module', null, ACTOR, { moduleId: 'alpha', mode: 'urgent' }],
       ]);
     });
 
@@ -1448,8 +1442,8 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       expect(await stoppedEvents()).toHaveLength(1);
       expect(await taskAudits()).toHaveLength(1);
       expect((await audits()).map((r) => r.metadata)).toEqual([
-        { moduleId: 'alpha', mode: 'urgent', stopped: 1 },
-        { moduleId: 'alpha', mode: 'urgent', stopped: 0 },
+        { moduleId: 'alpha', mode: 'urgent' },
+        { moduleId: 'alpha', mode: 'urgent' },
       ]);
     });
 
@@ -1578,7 +1572,7 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
         ],
       ]);
       expect((await audits()).map((r) => r.metadata)).toEqual([
-        { moduleId: 'alpha', mode: 'urgent', stopped: 1 },
+        { moduleId: 'alpha', mode: 'urgent' },
       ]);
       expect((await taskAudits()).map((r) => [r.action, r.targetId])).toEqual([
         ['task.admin_stop', a.id],
@@ -1609,7 +1603,7 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       });
       expect(after!.events).toEqual([]);
       expect((await audits()).map((r) => r.metadata)).toEqual([
-        { moduleId: 'alpha', mode: 'urgent', stopped: 1 },
+        { moduleId: 'alpha', mode: 'urgent' },
       ]);
       expect((await taskAudits()).map((r) => [r.action, r.targetId])).toEqual([
         ['task.admin_stop', a.id],
@@ -1631,7 +1625,7 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       expect(await stampOf('gamma')).toBeInstanceOf(Date);
       expect(h.kills).toEqual([]);
       expect((await audits()).map((r) => r.metadata)).toEqual([
-        { moduleId: 'gamma', mode: 'urgent', stopped: 0 },
+        { moduleId: 'gamma', mode: 'urgent' },
       ]);
     });
 

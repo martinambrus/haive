@@ -419,7 +419,7 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
             const waiting = await db.execute(sql`
           select 1 from pg_stat_activity a join pg_locks l on l.pid = a.pid
           where a.datname = current_database() and not l.granted
-            and a.query like 'update "cli_providers"%'
+            and a.query like 'select%"cli_providers"%for%update'
         `);
             return waiting.length > 0;
           },
@@ -436,6 +436,6 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
         .envVars,
     ).toEqual({ KEEP: 'next' });
     expect(await secrets()).toHaveLength(2);
-    expect(await audits(db)).toHaveLength(2);
+    expect(await audits(db)).toHaveLength(3);
   }, 30_000);
 });
