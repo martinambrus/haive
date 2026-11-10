@@ -1,5 +1,5 @@
 import { UPGRADE_JOURNAL_DDL } from '@haive/database';
-import { parseMaintenanceState, type MaintenanceState } from '@haive/shared';
+import type { MaintenanceState } from '@haive/shared';
 import type { Sql } from 'postgres';
 import { attemptVersion } from './attempt-fields.js';
 import type { RunStatus, UpgradePhase } from './phases.js';
@@ -68,10 +68,11 @@ export async function startRun(
   sql: Sql,
   entry: { fromVersion: string; toVersion: string; channel: string; metadata?: RunMetadata },
 ): Promise<string> {
+  // Written in the INSERT itself: a kill before recordFoundState must still be distinguishable.
   const rows = await sql<{ id: string }[]>`
     INSERT INTO upgrade_runs (from_version, to_version, channel, phase, status, metadata)
     VALUES (${entry.fromVersion}, ${entry.toVersion}, ${entry.channel}, 'preflight', 'running',
-            ${sql.json(entry.metadata ?? {})})
+            ${sql.json({ ...entry.metadata, foundStateRequired: true })})
     RETURNING id`;
   return rows[0]!.id;
 }
@@ -133,10 +134,18 @@ export async function recordFoundState(
      WHERE id = ${id}`;
 }
 
-export async function readFoundState(sql: Sql, id: string): Promise<MaintenanceState> {
-  const rows = await sql<{ found: string | null }[]>`
-    SELECT metadata ->> 'foundState' AS found FROM upgrade_runs WHERE id = ${id}`;
-  return parseMaintenanceState(rows[0]?.found);
+/** New runs require a recorded state. Older releases had no marker and retain their normal
+ *  fallback; a missing row or an invalid recorded state is unknown, never permission to lift a hold. */
+export async function readFoundState(sql: Sql, id: string): Promise<MaintenanceState | null> {
+  const [row] = await sql<{ found: string | null; required: string | null }[]>`
+    SELECT metadata ->> 'foundState' AS found,
+           metadata ->> 'foundStateRequired' AS required
+      FROM upgrade_runs WHERE id = ${id}`;
+  if (!row) return null;
+  if (row.found === 'normal' || row.found === 'draining' || row.found === 'maintenance') {
+    return row.found;
+  }
+  return row.found == null && row.required == null ? 'normal' : null;
 }
 
 export async function finishRun(

@@ -44,6 +44,8 @@ vi.mock('../src/run.js', async (importOriginal) => {
   };
 });
 
+import { ensureJournal, startRun } from '../src/journal.js';
+
 const url = process.env.UPDATER_ROLLBACK_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/updater_rollback_test'))
   throw new Error('Use a dedicated updater_rollback_test database for the rollback tests');
@@ -136,6 +138,43 @@ describe.skipIf(!url)(
         throw new Error('compose down');
       };
     };
+
+    it.each(['normal', 'draining', 'maintenance'])(
+      'preserves %s and reports unknown prior state when a new run died before recording it',
+      async (state) => {
+        control.stored = state;
+        await ensureJournal(sql);
+        await startRun(sql, {
+          fromVersion: '1.0.0',
+          toVersion: '1.1.0',
+          channel: 'public',
+          metadata: { migrationHead: '0208_repositories_rtk_choice_made_at' },
+        });
+
+        expect(await runUpdater()).toBe(0);
+
+        expect(control.stored).toBe(state);
+        expect((await run()).status).toBe('rolled_back');
+        expect(logs).toContainEqual(
+          expect.objectContaining({
+            event: 'maintenance-restore-skipped',
+            reason: 'prior maintenance state is unknown; keeping the current state',
+          }),
+        );
+      },
+    );
+
+    it('uses the legacy normal fallback for an older run without a found-state marker', async () => {
+      control.stored = 'maintenance';
+      await ensureJournal(sql);
+      await sql`INSERT INTO upgrade_runs (from_version, to_version, channel, phase, status, metadata)
+        VALUES ('1.0.0', '1.1.0', 'public', 'preflight', 'running',
+          '{"migrationHead":"0208_repositories_rtk_choice_made_at"}'::jsonb)`;
+
+      expect(await runUpdater()).toBe(0);
+
+      expect(control.stored).toBe('normal');
+    });
 
     it('keeps the run running with the error recorded, exits 6, and leaves the hold in place', async () => {
       failRollback();
