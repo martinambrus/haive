@@ -1,5 +1,3 @@
-import { randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
 import { SANDBOX_CORE_IMAGE } from '../sandbox/image-composer.js';
 import type { AuthMode, CliProviderName } from '@haive/shared';
 import {
@@ -28,8 +26,8 @@ export async function readProviderSecretToken(
 }
 
 /** Upsert a cli_provider_secret (envelope-encrypted). The usage poller calls this to
- *  persist a refreshed/rotated OAuth token. Mirrors the api login-banner writer; safe
- *  only while the caller holds cliAuthScope across its credential read, refresh and write. */
+ *  persist a refreshed/rotated OAuth token without advancing the login generation.
+ *  Safe only while the caller holds cliAuthScope across its credential read, refresh and write. */
 export async function writeProviderSecret(
   db: Database,
   providerId: string,
@@ -39,30 +37,24 @@ export async function writeProviderSecret(
   const masterKek = await secretsService.getMasterKek();
   const env = envelopeEncrypt(value, masterKek);
   const fingerprint = computeKeyFingerprint(value);
-  await db.transaction(async (tx) => {
-    await tx
-      .insert(schema.cliProviderSecrets)
-      .values({
-        providerId,
-        secretName,
+  await db
+    .insert(schema.cliProviderSecrets)
+    .values({
+      providerId,
+      secretName,
+      encryptedValue: env.encryptedValue,
+      encryptedDek: env.encryptedDek,
+      fingerprint,
+    })
+    .onConflictDoUpdate({
+      target: [schema.cliProviderSecrets.providerId, schema.cliProviderSecrets.secretName],
+      set: {
         encryptedValue: env.encryptedValue,
         encryptedDek: env.encryptedDek,
         fingerprint,
-      })
-      .onConflictDoUpdate({
-        target: [schema.cliProviderSecrets.providerId, schema.cliProviderSecrets.secretName],
-        set: {
-          encryptedValue: env.encryptedValue,
-          encryptedDek: env.encryptedDek,
-          fingerprint,
-          updatedAt: new Date(),
-        },
-      });
-    await tx
-      .update(schema.cliProviders)
-      .set({ authGeneration: randomUUID() })
-      .where(eq(schema.cliProviders.id, providerId));
-  });
+        updatedAt: new Date(),
+      },
+    });
 }
 
 export interface AuthVolumeCtx {

@@ -27,6 +27,8 @@ vi.mock('../src/cli-adapters/probe-fetch.js', () => ({
 }));
 import { runUsagePollTick } from '../src/queues/usage-poll-queue.js';
 import { writeProviderSecret } from '../src/usage-window/token-source.js';
+import { handleSignOutJob } from '../src/queues/cli-exec-queue.js';
+import type { DockerRunner } from '../src/sandbox/docker-runner.js';
 
 function setup() {
   const fake = createFakeDb({
@@ -64,7 +66,7 @@ beforeEach(() => {
   vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue('ab'.repeat(32));
 });
 afterEach(() => vi.restoreAllMocks());
-it('holds the shared scope across the usage credential read, grant and atomic write', async () => {
+it('holds the shared scope across the usage credential read, grant and write without advancing the login generation', async () => {
   const fake = setup();
   h.refresh.mockImplementation(async () => {
     expect(h.acquire).toHaveBeenCalledOnce();
@@ -78,10 +80,45 @@ it('holds the shared scope across the usage credential read, grant and atomic wr
   );
   expect(h.refresh).toHaveBeenCalledOnce();
   expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(1);
-  expect(fake.rows(schema.cliProviders)[0]!.authGeneration).not.toBe(
+  expect(fake.rows(schema.cliProviders)[0]!.authGeneration).toBe(
     '00000000-0000-4000-8000-000000000001',
   );
   expect(h.release).toHaveBeenCalledOnce();
+});
+it('a usage refresh after a sign-out request still removes the volumes and both Claude secrets', async () => {
+  const fake = setup();
+  const provider = fake.rows(schema.cliProviders)[0]!;
+  const payload = {
+    providerId: provider.id as string,
+    userId: provider.userId as string,
+    authGeneration: provider.authGeneration as string,
+  };
+  fake.insert(schema.cliProviderSecrets, {
+    providerId: provider.id,
+    secretName: 'CLAUDE_CODE_OAUTH_TOKEN',
+    encryptedValue: 'login',
+    encryptedDek: 'login',
+  });
+  const volume = cliAuthScope(provider as any);
+  const volumes = new Set([volume]);
+  const runner = {
+    volumeExists: async (name: string) => volumes.has(name),
+    volumeRemove: async (name: string) => {
+      volumes.delete(name);
+      return { ok: true, stderr: '' };
+    },
+  } as DockerRunner;
+  await runUsagePollTick(fake.db as unknown as Database);
+  expect(h.refresh).toHaveBeenCalledOnce();
+  expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(2);
+  expect(await handleSignOutJob(fake.db as unknown as Database, payload, runner)).toEqual({
+    ok: true,
+    removed: [volume],
+    failed: [],
+  });
+  expect(volumes.size).toBe(0);
+  expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+  expect(fake.rows(schema.cliProviders)[0]!.authStatus).toBe('unknown');
 });
 it('does not read or refresh while sign-out or a credential writer owns the scope', async () => {
   const fake = setup();
@@ -91,10 +128,10 @@ it('does not read or refresh while sign-out or a credential writer owns the scop
   expect(h.refresh).not.toHaveBeenCalled();
   expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
 });
-it('rolls back the usage secret and generation together on commit failure', async () => {
+it('leaves the usage secret and login generation unchanged when the upsert fails', async () => {
   const fake = setup();
-  fake.hooks.beforeCommit = async () => {
-    throw new Error('commit refused');
+  fake.hooks.beforeInsert = async () => {
+    throw new Error('upsert refused');
   };
   await expect(
     writeProviderSecret(
@@ -103,7 +140,7 @@ it('rolls back the usage secret and generation together on commit failure', asyn
       'CLAUDE_USAGE_OAUTH',
       'new',
     ),
-  ).rejects.toThrow('commit refused');
+  ).rejects.toThrow('upsert refused');
   expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
   expect(fake.rows(schema.cliProviders)[0]!.authGeneration).toBe(
     '00000000-0000-4000-8000-000000000001',
