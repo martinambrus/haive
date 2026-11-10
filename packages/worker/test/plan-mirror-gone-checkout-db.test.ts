@@ -8,10 +8,12 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDatabase, hasPgCode, schema, type Database } from '@haive/database';
 import { HAIVE_DATA_FILES, logger } from '@haive/shared';
-import { applyPlanPatch, markPlanMirrorDirty } from '@haive/shared/plan';
+import * as fsSafe from '@haive/shared/fs-safe';
+import { applyPlanPatch, lockPlanPatch, markPlanMirrorDirty } from '@haive/shared/plan';
 import {
   writePlanMirror,
   reconcilePlanFromCheckout,
+  importPlanMirror,
   PlanMirrorHeldError,
 } from '../src/plan/mirror.js';
 import * as gitExec from '../src/repo/git-exec.js';
@@ -395,6 +397,102 @@ describe.skipIf(!url)('the plan sweep when a checkout directory is gone', () => 
     return repo;
   }
 
+  async function emptyIncomingRepo() {
+    const repo = await dirtyRepository({ plan: false, updatedAt: new Date() });
+    await createCheckout(repo.path);
+    await db
+      .update(schema.repositories)
+      .set({ status: 'ready' })
+      .where(eq(schema.repositories.id, repo.id));
+    await mkdir(join(repo.path, '.haive-data'), { recursive: true });
+    await writeFile(
+      join(repo.path, HAIVE_DATA_FILES.plan),
+      JSON.stringify({
+        schemaVersion: 2,
+        nodes: [
+          {
+            id: randomUUID(),
+            parentId: null,
+            ordinal: 0,
+            title: 'Imported',
+            kind: 'component',
+            body: null,
+            status: 'todo',
+            taskable: false,
+          },
+        ],
+        edges: [],
+        codeLinks: [],
+      }),
+    );
+    return repo;
+  }
+
+  it.each(['reconcile', 'import'] as const)(
+    'rolls back %s writes when plan.json changes during the database apply',
+    async (mode) => {
+      const repo = mode === 'reconcile' ? await incomingRepo() : await emptyIncomingRepo();
+      const expectedCheckout = (await readNamedCheckout(repo.path))!;
+      const beforeNodes = await db
+        .select()
+        .from(schema.planNodes)
+        .where(eq(schema.planNodes.repositoryId, repo.id));
+      const beforeState = await mirror(repo.id);
+      let moved = false;
+      const observed = observeStatements(db, async (text) => {
+        // Both paths have written their nodes before they stamp the mirror.
+        if (!moved && /^insert into "plan_mirror_state"/.test(text)) {
+          moved = true;
+          const file = join(repo.path, HAIVE_DATA_FILES.plan);
+          const incoming = JSON.parse(await readFile(file, 'utf8'));
+          incoming.nodes[0].title = 'Checkout moved during apply';
+          await writeFile(file, JSON.stringify(incoming));
+        }
+      });
+      const applied =
+        mode === 'reconcile'
+          ? reconcilePlanFromCheckout(observed.db, repo.id, repo.path, { expectedCheckout })
+          : importPlanMirror(observed.db, repo.id, repo.path, expectedCheckout);
+      await expect(applied).rejects.toMatchObject({
+        name: 'PlanMirrorHeldError',
+        code: 'checkout_changed',
+      });
+      expect(moved).toBe(true);
+      expect(
+        await db.select().from(schema.planNodes).where(eq(schema.planNodes.repositoryId, repo.id)),
+      ).toEqual(beforeNodes);
+      expect(await mirror(repo.id)).toEqual(beforeState);
+    },
+  );
+
+  it('defers an import as held when another connection owns P', async () => {
+    const repo = await emptyIncomingRepo();
+    const peer = createDatabase(url!);
+    const holding = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const holder = peer.transaction(async (tx) => {
+      await lockPlanPatch(tx, repo.id);
+      holding.resolve();
+      await release.promise;
+    });
+    try {
+      await holding.promise;
+      await expect(importPlanMirror(db, repo.id, repo.path)).rejects.toBeInstanceOf(
+        PlanMirrorHeldError,
+      );
+      expect(
+        await db.query.planNodes.findFirst({
+          where: eq(schema.planNodes.repositoryId, repo.id),
+        }),
+      ).toBeUndefined();
+      expect((await mirror(repo.id))!.lastError).toBeNull();
+    } finally {
+      release.resolve();
+      await holder;
+      await peer.$client.end({ timeout: 5 });
+    }
+  });
+
   function observePatchLock(beforeLock?: () => Promise<void>) {
     let held = false;
     let locks = 0;
@@ -434,19 +532,28 @@ describe.skipIf(!url)('the plan sweep when a checkout directory is gone', () => 
     return { db: wrapped, held: () => held, locks: () => locks };
   }
 
-  it('does every reconcile git read before taking P, including watched-checkout admission', async () => {
+  it('does reconcile preparation before P and only rechecks the checkout after its writes', async () => {
     const repo = await incomingRepo();
     const expectedCheckout = await readNamedCheckout(repo.path);
     const observed = observePatchLock();
+    let applied = false;
+    let rechecks = 0;
+    const writes = observeStatements(observed.db, async (text) => {
+      if (/^insert into "plan_mirror_state"/.test(text)) applied = true;
+    });
     const run = gitExec.gitRun;
     const git = vi.spyOn(gitExec, 'gitRun').mockImplementation(async (...args) => {
-      expect(observed.held(), 'git was called while P was held').toBe(false);
+      if (observed.held()) {
+        expect(applied, 'git inside P must be the final checkout guard').toBe(true);
+        rechecks++;
+      }
       return run(...args);
     });
-    await reconcilePlanFromCheckout(observed.db, repo.id, repo.path, {
+    await reconcilePlanFromCheckout(writes.db, repo.id, repo.path, {
       expectedCheckout: expectedCheckout!,
     });
     expect(git).toHaveBeenCalled();
+    expect(rechecks).toBeGreaterThan(0);
     expect(observed.locks()).toBe(1);
     const nodes = await db
       .select()
@@ -477,13 +584,18 @@ describe.skipIf(!url)('the plan sweep when a checkout directory is gone', () => 
     );
   });
 
-  it('commits an automatic reconcile before the flush does any further git/file work', async () => {
+  it('commits an automatic reconcile before the flush writes files', async () => {
     const repo = await incomingRepo();
     const observed = observePatchLock();
-    const run = gitExec.gitRun;
-    vi.spyOn(gitExec, 'gitRun').mockImplementation(async (...args) => {
-      expect(observed.held(), 'flush git was called while reconcile held P').toBe(false);
-      return run(...args);
+    const write = fsSafe.writeFileNoFollow;
+    const rewrite = fsSafe.rewriteFileIfNoFollow;
+    vi.spyOn(fsSafe, 'writeFileNoFollow').mockImplementation((...args) => {
+      expect(observed.held(), 'flush wrote a file while reconcile held P').toBe(false);
+      return write(...args);
+    });
+    vi.spyOn(fsSafe, 'rewriteFileIfNoFollow').mockImplementation((...args) => {
+      expect(observed.held(), 'flush rewrote a file while reconcile held P').toBe(false);
+      return rewrite(...args);
     });
     await writePlanMirror(observed.db, repo.id, repo.path);
     expect(observed.locks()).toBe(1);

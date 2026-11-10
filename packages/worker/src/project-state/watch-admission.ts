@@ -21,8 +21,8 @@ export async function admitWatchedCheckout(
   );
 }
 
-/** Database half of admission, for a caller that has just checked its checkout before taking
- * an ancestry lock. No git or file work may extend that lock's lifetime. */
+/** Database half of admission, for a caller that checks its checkout before taking
+ * an ancestry lock and re-asserts it after applying, inside the same transaction. */
 export async function admitWatchedRepository(tx: Tx, repositoryId: string): Promise<boolean> {
   const [repo] = await tx
     .select({

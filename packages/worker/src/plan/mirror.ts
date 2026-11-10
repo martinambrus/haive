@@ -24,6 +24,7 @@ import {
 import { planMirrorPayloadSchema, planMirrorV2Schema } from '@haive/shared/schemas';
 import {
   lockPlanPatch,
+  PlanPatchError,
   loadPlanEdges,
   loadPlanNodes,
   markPlanMirrorDirty,
@@ -675,7 +676,11 @@ export async function importPlanMirror(
       await lockPlanMirror(tx, repositoryId);
     }
     await assertCheckoutStillHolds(storagePath, rawBytes, expectedCheckout);
-    await lockPlanPatch(tx, repositoryId);
+    await lockPlanPatch(tx, repositoryId).catch((err: unknown) => {
+      if (err instanceof PlanPatchError && err.kind === 'busy')
+        throw new PlanMirrorHeldError(HELD_RACED);
+      throw err;
+    });
     if (expectedCheckout) {
       if (!(await admitWatchedRepository(tx, repositoryId)))
         throw new PlanMirrorHeldError(HELD_MOVED, 'checkout_changed');
@@ -753,6 +758,7 @@ export async function importPlanMirror(
           syncedSnapshot: mirror,
         },
       });
+    await assertCheckoutStillHolds(storagePath, rawBytes, expectedCheckout);
   });
 
   logger.info(
@@ -814,9 +820,11 @@ export async function reconcilePlanFromCheckout(
     if (bytes === null) return noOutcome(NO_SNAPSHOT);
     if (opts.expectedHash && hashBytes(bytes) !== opts.expectedHash)
       throw new PlanMirrorHeldError(HELD_MOVED, 'checkout_changed');
-    return reconcilePlanLocked(tx, repositoryId, bytes, opts, async () => {
+    const outcome = await reconcilePlanLocked(tx, repositoryId, bytes, opts, async () => {
       await assertCheckoutStillHolds(repoPath, bytes, opts.expectedCheckout);
     });
+    await assertCheckoutStillHolds(repoPath, bytes, opts.expectedCheckout);
+    return outcome;
   });
 }
 
@@ -1232,7 +1240,8 @@ async function reconcilePlanLocked(
       taskable: n.taskable,
       createdBy: 'import' as const,
     }));
-  // All file/git reads and the merge/render precede P. Do not wait here with a
+  // Preparation file/git reads and the merge/render precede P; the caller rechecks
+  // the checkout after the writes, inside this transaction. Do not wait here with a
   // judged checkout: contention defers the reconcile, just like a held flush.
   await beforeApply();
   const busy = await tx.execute(
