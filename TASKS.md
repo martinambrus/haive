@@ -837,7 +837,7 @@ Sites:
   On a timeout they return different things: partial stdout, [], null, or "timed out".
   Fix: one shared runDockerCommand(args, {timeoutMs}) returning {stdout, stderr, exit, timedOut}, plus a test that kills a hung child.
 
-### T373 · FNF[audit-strict-admin-actions] · password-change throttle, tooling reset order, module log lines; strict-audit leftovers (+11)
+### T373 · FNF[audit-strict-admin-actions] · password-change throttle, tooling reset order, module log lines; strict-audit leftovers (+12)
 
 status: in progress, items 5-7 (codex-sonnet); sites + items 1-4 shipped in PR #1058 (1f1064268), 2026-11-10 · was modular #246 · priority: P2
 
@@ -852,6 +852,7 @@ status: in progress, items 5-7 (codex-sonnet); sites + items 1-4 shipped in PR #
 13. The launch-compensation block (row committed first, effect, delete by id on failure) is copied three times (maintenance.ts upgrade, loader.ts teardown, cli-providers.ts sign-out) and logs through the root logger; one helper would do. New in #1058, minor.
 14. Stale test names in the #1058 tests still describe the old bounded-enqueue behaviour; no gated PG test covers the upgrade's compensating delete. Minor, coverage.
 15. A launch row is visible on /admin/audit while its effect runs and vanishes if the effect fails (routes/admin.ts ~:192-275); release.md ~:157 and modules.md ~:28 document the lost-reply case (lost Redis reply, docker 300 s kill), where the effect can run with its row deleted. By design, minor.
+16. The strict module rows written by shared `modularity-server/module-drain.ts` (`audit()` ~:171-176: `module.drain` ~:192, graceful `module.deactivate` ~:218, `module.drain_cancel` ~:253; callers loader.ts DELETE `/:id/drain` ~:303, graceful PATCH ~:314-335, the `finalizeModuleDrains` sweep) log no pino line after commit, while the same actions from activation.ts now do. PRE-EXISTING, minor. From the item 5-7 review.
 
 ### T379 · FNF[git-tree-readers] · gitlink readers and literal-pathspec helpers duplicated with different failure contracts (+5)
 
