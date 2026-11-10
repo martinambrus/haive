@@ -261,14 +261,14 @@ The owner scheduled one capped validation attempt; this block is an evidence dep
 
 ### T199 · /favicon.ico answers 404 on every page
 
-status: open · kind: feature · user decision: resolved 2026-11-01 · priority: P3
+status: in progress (bundle H1, overnight run 2026-11-10, branch fix/H1-a11y-favicon) · kind: feature · user decision: resolved 2026-11-01 · priority: P3
 Add an icon via the Next app-router convention (src/app/icon.svg or favicon.ico).
 
 User decision 2026-11-01: Use a simple Haive H favicon.
 
 ### T270 · FNF[plan] · a child insert can take a parent's path from before a concurrent move
 
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (bundle G, overnight run 2026-11-10, branch fix/G-plan-lock-merge-visibility) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 applyPlanPatch's loadNode reads the parent path unlocked (shared/src/plan/apply-patch.ts:415). FOR SHARE on the parent is not enough (a move rewrites descendants in one UPDATE). Direction: a per-repository plan-patch advisory lock first in applyOps; lock-order analysis owed.
 
 User decision 2026-11-01: Serialize conflicting edits; bound waits and return explicit retryable busy responses. Lock-order analysis remains required.
@@ -331,7 +331,7 @@ User decision 2026-11-01: keep live Google connection parked; prepare setup inst
 
 ### T334 · FNF[builtin-order-hazards] · built-in workflow runs 07b before 07c, and 08b fixer edits after both
 
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (bundle F4, overnight run 2026-11-10, branch fix/F4-workflow-order) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 All PRE-EXISTING.
 
 1. 07b-phase-4-validate boots and uses the runtime (07b:787) against a DDEV container that has not yet applied the implementation's .ddev change; 07c-ddev-reconcile runs after it in registry order (steps/workflow/index.ts).
@@ -677,7 +677,7 @@ status: parked · kind: design · was modular #146 · reason: diminishing return
 
 ### T343 · FNF[a11y-sweep] · links wrap buttons at 17 sites; sidebar rename input sits inside a button; plan panel close and tabs lack names (+12)
 
-status: open · was modular #151 · priority: P2
+status: in progress (bundle H1, overnight run 2026-11-10, branch fix/H1-a11y-favicon) · was modular #151 · priority: P2
 All PRE-EXISTING unless marked.
 
 1. Base items:
@@ -988,7 +988,7 @@ In api routes/cli-login-banner.ts `onStreamData` (~:876-882), a success or error
 
 ### T460 · FNF[retry-repo-deleted] · a Retry revives a failed task whose repository was deleted (+1)
 
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (bundle F2, overnight run 2026-11-10, branch fix/F2-retry-repo-state) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 From the T349 review (2026-10-31). PRE-EXISTING. A failed task whose repository was deleted still passes `checkRevive` (database repository-task-lock.ts ~:109), while the repository delete's `cancelOpenTasksForRepo` (api lib/cancel-task.ts ~:130) skips failed tasks; a Retry then sets it `running` with no repository and the worker's next advance throws. Decide: refuse that Retry (say why on the page), or have the delete cancel failed tasks too. Cross-reference T393, T394, T409.
 
 Also (T349 fix-round review, 2026-10-31, reasoned from the code, not reproduced): since T349 the delete takes the task-creation key a Retry takes, but a Retry already waiting on the key when the delete commits goes on: `checkRevive` returns null after the wait without reading the repository again (database repository-task-lock.ts ~:109-113), so the task is revived to `running` with a NULL repository. Whichever way this is decided, the Retry must read the repository again after its wait.
@@ -1197,7 +1197,7 @@ Execution fence 2026-11-01: Deduplicate the resolved T397 paths and T379 overlap
 
 ### T497 · FNF[plan-merge-failed-visibility] · after a reload a failed plan merge leaves no trace on the plan page
 
-status: open · kind: feature · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (bundle G, overnight run 2026-11-10, branch fix/G-plan-lock-merge-visibility) · kind: feature · user decision: resolved 2026-11-01 · priority: P2
 From the T491 review (2026-10-31). `GET /plan/merge` lists open merges only (api plan.ts ~:447-459) and `plan_merge` tasks are hidden from the task list (tasks/index.ts ~:289-292), so once the page that saw the failure is gone, a FAILED merge (which keeps its worktree for a Retry) cannot be found from the plan page. Options: the route also returns the newest failed merge not followed by a successful one, shown with its Retry link; or a plan-page notice from the task events. Recommended: the first.
 
 User decision 2026-11-01: Show the latest unresolved failed plan merge with its Retry/task link after reload.
@@ -1321,7 +1321,7 @@ Executable verification scope: Prioritize user-supplied endpoint bodies and a sa
 
 ### T512 · FNF[retry-cannot-help] · the repositories page offers Retry on an errored repository whose message says Retry cannot help
 
-status: open · kind: feature · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (bundle F2, overnight run 2026-11-10, branch fix/F2-retry-repo-state) · kind: feature · user decision: resolved 2026-11-01 · priority: P2
 From the T397 fix round 4 (2026-10-31). Minor (UX); arrives with T397.
 
 After T397 a refresh that finds a `.git` git refuses (exit 128) but that no structural read proves dead ends `error` with a message saying Retry cannot help until the checkout is repaired and that removing and re-adding the repository rebuilds it. The repositories page still offers Retry for every `error` row, and it must not key on the message text (AGENTS.md: a message is display copy). Decision needed: a structural signal (for example an error code column on `repositories`, written with the status) that the page reads to hide Retry and offer remove-and-re-add, or keep Retry (it is harmless, three attempts) and only reword. Single.
