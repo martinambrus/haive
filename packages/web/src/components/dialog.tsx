@@ -53,9 +53,27 @@ function leavesPanel(panel: HTMLElement, stops: HTMLElement[], backwards: boolea
 export function Dialog({ open, onOpenChange, children, className }: DialogProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
+  const lastFocusedRef = useRef<HTMLElement | null>(null);
+  // A keyed move can blur the opener during the opening commit. Remember real
+  // focus events while closed, without choosing an opener during render.
+  useEffect(() => {
+    const remember = () => {
+      const active = document.activeElement;
+      if (active && active !== document.body) lastFocusedRef.current = active as HTMLElement;
+    };
+    remember();
+    document.addEventListener('focusin', remember);
+    return () => document.removeEventListener('focusin', remember);
+  }, []);
   // Insertion effects run before the layout phase, where a child's autoFocus takes focus.
   useInsertionEffect(() => {
-    if (open) openerRef.current = document.activeElement as HTMLElement | null;
+    if (open) {
+      const active = document.activeElement as HTMLElement | null;
+      openerRef.current =
+        active === document.body && lastFocusedRef.current?.isConnected
+          ? lastFocusedRef.current
+          : active;
+    }
   }, [open]);
 
   useEffect(() => {

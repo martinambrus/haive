@@ -57,6 +57,7 @@ export function ActionMenu({
 }) {
   const [open, setOpen] = useState(false);
   const [flip, setFlip] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const rowRefs = useRef<(HTMLElement | null)[]>([]);
 
@@ -178,6 +179,7 @@ export function ActionMenu({
       <Button
         variant="primary"
         size="sm"
+        ref={triggerRef}
         onClick={toggle}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -225,6 +227,7 @@ export function ActionMenu({
                     title={item.title}
                     className={rowClass}
                     onClick={() => {
+                      triggerRef.current?.focus();
                       item.onClick?.();
                       setOpen(false);
                     }}
@@ -240,6 +243,7 @@ export function ActionMenu({
                     disabled={item.disabled}
                     className={rowClass}
                     onClick={() => {
+                      triggerRef.current?.focus();
                       setOpen(false);
                       item.onClick?.();
                     }}
