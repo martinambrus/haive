@@ -475,6 +475,7 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
     .update(schema.repositories)
     .set({
       status: 'error',
+      errorCode: null,
       statusMessage:
         'Preparing this repository did not finish — the worker stopped while it was running. Retry if available; otherwise delete the repository and add it again.',
       updatedAt: new Date(),

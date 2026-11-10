@@ -167,6 +167,7 @@ describe('the repository row a refresh reads', () => {
     expect(Object.keys(fetched[0]!).sort()).toEqual([
       'branch',
       'credentialsSecretId',
+      'errorCode',
       'id',
       'localPath',
       'remoteUrl',
@@ -320,5 +321,77 @@ describe('retrying an upload', () => {
     setup({ source: 'upload', status: 'error', remoteUrl: 'https://example.com/r.git' });
     expect((await refresh()).status).toBe(200);
     expect(h.add.mock.calls[0]![0]).toBe(REPO_JOB_NAMES.REFRESH);
+  });
+});
+
+describe('explicit checkout recovery', () => {
+  const recover = () => app.request(`/${REPO}/recover-checkout`, { method: 'POST' });
+  it('retains the repository and queues a single recovery with its source', async () => {
+    const fake = setup({
+      source: 'git_https',
+      remoteUrl: 'https://example.com/r.git',
+      status: 'error',
+      errorCode: 'checkout_repair_needed',
+      agentRulesOverride: 'keep settings',
+    });
+    const response = await recover();
+    expect(response.status).toBe(200);
+    expect(fake.rows(schema.repositories)).toHaveLength(1);
+    expect(fake.rows(schema.repositories)[0]).toMatchObject({
+      status: 'cloning',
+      errorCode: null,
+      agentRulesOverride: 'keep settings',
+    });
+    expect(h.add).toHaveBeenCalledWith(
+      REPO_JOB_NAMES.REFRESH,
+      expect.objectContaining({ repositoryId: REPO, recoverCheckout: true }),
+      expect.objectContaining({ attempts: 1 }),
+    );
+    expect((await recover()).status).toBe(409);
+    expect(h.add).toHaveBeenCalledTimes(1);
+  });
+  it('refuses recovery for an ordinary error', async () => {
+    setup({ source: 'git_https', remoteUrl: 'https://example.com/r.git', status: 'error' });
+    expect((await recover()).status).toBe(409);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+  it('refuses recovery while a task holds the checkout', async () => {
+    setup(
+      {
+        source: 'git_https',
+        remoteUrl: 'https://example.com/r.git',
+        status: 'error',
+        errorCode: 'checkout_repair_needed',
+      },
+      'running',
+    );
+    expect((await recover()).status).toBe(409);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+  it('uses guidance instead of rebuilding a read-only source folder', async () => {
+    setup({
+      source: 'local_path',
+      localPath: '/host-fs/r',
+      writable: false,
+      status: 'error',
+      errorCode: 'checkout_repair_needed',
+    });
+    expect((await recover()).status).toBe(409);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+});
+
+it('keeps the recovery action available when its enqueue fails', async () => {
+  const fake = setup({
+    source: 'git_https',
+    remoteUrl: 'https://example.com/r.git',
+    status: 'error',
+    errorCode: 'checkout_repair_needed',
+  });
+  h.add.mockRejectedValueOnce(new Error('queue unavailable'));
+  expect((await app.request(`/${REPO}/recover-checkout`, { method: 'POST' })).status).toBe(500);
+  expect(fake.rows(schema.repositories)[0]).toMatchObject({
+    status: 'error',
+    errorCode: 'checkout_repair_needed',
   });
 });

@@ -320,6 +320,8 @@ export interface RepoJobPayload {
   credentialsId?: string;
   archivePath?: string;
   archiveFormat?: ArchiveFormat;
+  /** Explicit recovery: keep the old tree aside and preserve existing project records. */
+  recoverCheckout?: boolean;
 }
 
 /* ------------------------------------------------------------------ */

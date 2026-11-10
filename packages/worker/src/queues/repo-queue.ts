@@ -1,3 +1,4 @@
+import { CheckoutRepairNeededError } from '../repo/repair-needed.js';
 import { scrubErrorPaths } from '@haive/shared/logger';
 import { safeProcessor } from './safe-processor.js';
 import { Worker, type Job } from 'bullmq';
@@ -47,6 +48,12 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
           .update(schema.repositories)
           .set({
             status: 'error',
+            errorCode:
+              err instanceof CheckoutRepairNeededError
+                ? err.code
+                : payload.recoverCheckout
+                  ? 'checkout_repair_needed'
+                  : null,
             statusMessage: message,
             updatedAt: new Date(),
           })

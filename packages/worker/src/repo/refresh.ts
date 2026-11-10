@@ -1,3 +1,4 @@
+import { CheckoutRepairNeededError } from './repair-needed.js';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { UnrecoverableError } from 'bullmq';
@@ -475,10 +476,12 @@ async function rebuild(
       );
     }
     if (source !== 'usable') {
-      throw new Error(
+      const message =
         `Not refreshed: the folder this repository was imported from (${fromFolder}) could not be examined (${source.unknown}). Nothing was moved.` +
-          (source.repairNeeded ? ' Retry cannot help until that folder is repaired.' : ''),
-      );
+        (source.repairNeeded ? ' Retry cannot help until that folder is repaired.' : '');
+      throw source.repairNeeded
+        ? new CheckoutRepairNeededError(message, 'source_repair_needed')
+        : new Error(message);
     }
   }
   const auth =
@@ -522,20 +525,24 @@ async function rebuild(
   }
   const built = await usableCheckout(dest);
   if (built !== 'usable') {
-    throw failedAfterMove(
+    const failure = failedAfterMove(
       built === 'unusable'
         ? 'the rebuilt checkout is not usable'
         : `the rebuilt checkout could not be examined (${built.unknown})`,
       aside,
     );
+    throw typeof built === 'object' && built.repairNeeded
+      ? new CheckoutRepairNeededError(failure.message)
+      : failure;
   }
   await persistDetection(
     db,
     payload.repositoryId,
     dest,
     aside
-      ? `The previous folder was not a usable checkout; it was kept next to the checkout as ${path.basename(aside)}.`
+      ? `The previous folder was kept next to the checkout as ${path.basename(aside)}. Its files and unpushed commits are retained there.`
       : null,
+    ...(payload.recoverCheckout ? [{ preserveProjectData: true } as const] : []),
   );
 }
 
@@ -552,10 +559,10 @@ export async function handleRefresh(
     payload.repositoryId,
     async () => {
       const state = await usableCheckout(dest);
-      if (typeof state === 'object') {
-        // The queue starts at cloning. Throw so its catch records error and offers Retry;
-        // detection would import a mirror from a checkout we could not examine.
-        throw new Error(
+      if (typeof state === 'object' && !payload.recoverCheckout) {
+        // Do not import mirrors from a checkout Git cannot examine.
+        const Failure = state.repairNeeded ? CheckoutRepairNeededError : Error;
+        throw new Failure(
           `Not refreshed: the checkout could not be examined (${state.unknown}). Nothing was moved.` +
             (state.repairNeeded ? ` ${REPAIR_ADVICE}` : ''),
         );
@@ -564,8 +571,14 @@ export async function handleRefresh(
       const holding = await checkoutHoldingTasks(db, payload.repositoryId);
       if (holding > 0) {
         const refusal = holdingRefusal(holding);
-        if (!usable) throw new Error(refusal);
+        if (!usable || payload.recoverCheckout) throw new Error(refusal);
         await persistDetection(db, payload.repositoryId, dest, refusal);
+        return;
+      }
+      if (payload.recoverCheckout) {
+        // Explicit recovery alone may rebuild unknown metadata. The old folder is retained,
+        // and no mirror from either checkout may overwrite existing project data.
+        await rebuild(db, payload, repoStorageRoot, rel, dest);
         return;
       }
       // A row stamped before 0196 takes its base from the checkout before a fast-forward moves it,

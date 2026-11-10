@@ -287,6 +287,7 @@ export async function persistDetection(
   /** Carried into `status_message` beside `status: 'ready'`. The repository IS ready — this is the
    *  "ready, with caveats" case, and the column exists for exactly that. */
   statusMessage?: string | null,
+  options?: { preserveProjectData: true },
 ): Promise<void> {
   const detection = await detectFromDirectory(storagePath);
   await db
@@ -298,12 +299,16 @@ export async function persistDetection(
       sizeBytes: detection.sizeBytes,
       storagePath,
       status: 'ready',
+      errorCode: null,
       // `null` when this import dropped nothing, so a clean re-import CLEARS a previous run's note
       // rather than leaving the repository labelled with a caveat that no longer applies.
       statusMessage: statusMessage ?? null,
       updatedAt: new Date(),
     })
     .where(eq(schema.repositories.id, repositoryId));
+
+  // A recovery keeps this install's settings, KB and plan; incoming mirrors are not authoritative.
+  if (options?.preserveProjectData) return;
 
   // Best-effort: a fresh clone of an already-onboarded repo restores its
   // onboarding-derived columns from the committed .haive-data/ mirror. Never

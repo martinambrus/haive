@@ -340,6 +340,7 @@ export interface Repository {
   branch: string | null;
   status: 'cloning' | 'ready' | 'error';
   statusMessage: string | null;
+  errorCode?: string | null;
   /** List-only retry capability. Absent means unknown; the API still checks admission. */
   canRetry?: boolean;
   /** List-only: recorded reason an errored repository cannot be retried. Absent means unknown. */
