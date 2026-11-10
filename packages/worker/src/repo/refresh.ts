@@ -588,7 +588,7 @@ export async function handleRefresh(
       const holding = await checkoutHoldingTasks(db, payload.repositoryId);
       if (holding > 0) {
         const refusal = holdingRefusal(holding);
-        if (!usable || payload.recoverCheckout) throw new Error(refusal);
+        if (!usable) throw new Error(refusal);
         await persistDetection(db, payload.repositoryId, dest, refusal);
         return;
       }

@@ -717,6 +717,29 @@ it('rechecks a repaired checkout on a recovery job, keeping its files and cleari
   expect(h.persist).toHaveBeenCalledWith(db, 'r1', dest, null);
 });
 
+it.each([false, true])(
+  'a usable checkout with holding tasks finishes ready without moving it (recovery: %s)',
+  async (recoverCheckout) => {
+    const { dest, payload } = await fixture();
+    const before = await git(dest, ['rev-parse', 'HEAD']);
+    await writeFile(path.join(dest, 'notes.txt'), 'uncommitted work');
+    h.holding = 1;
+    await handleRefresh({ ...payload, recoverCheckout }, db, root);
+    expect(h.persist).toHaveBeenCalledWith(
+      db,
+      'r1',
+      dest,
+      'Not refreshed: 1 task is using this repository. Refresh once it finishes.',
+    );
+    expect(row.status).toBe('ready');
+    expect(await readdir(path.dirname(dest))).toEqual(['r1']);
+    expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(before);
+    expect(await readFile(path.join(dest, 'notes.txt'), 'utf8')).toBe('uncommitted work');
+    expect(h.seed).not.toHaveBeenCalled();
+    expect(h.clone).not.toHaveBeenCalled();
+  },
+);
+
 it('seeds the legacy plan base before a recovery moves the old tree, best effort', async () => {
   const { dest, payload } = await fixture();
   await writeFile(path.join(dest, '.git/config'), '[core\n');

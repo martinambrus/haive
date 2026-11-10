@@ -88,6 +88,7 @@ beforeEach(async () => {
   h.seed.mockResolvedValue(undefined);
   h.persist.mockImplementation(async (_db, _id, _dest, note) => {
     row.status = 'ready';
+    row.errorCode = null;
     row.statusMessage = note;
   });
   root = await mkdtemp(path.join(tmpdir(), 'refresh-retries-'));
@@ -274,15 +275,20 @@ describe.skipIf(!redisUrl)('failed explicit recovery', () => {
 });
 
 describe.skipIf(!redisUrl)('recovery pickup task fence', () => {
-  it('refuses a task that started before pickup even if the checkout was repaired meanwhile', async () => {
+  it('finishes ready when tasks hold a checkout that was repaired before recovery pickup', async () => {
     const { dest, payload } = await fixture();
     await writeFile(path.join(dest, '.git/HEAD'), 'ref: refs/heads/main\n');
     h.holding = true;
     const job = await refreshJob({ ...payload, recoverCheckout: true });
-    expect(await job.getState()).toBe('failed');
-    expect(row).toMatchObject({ status: 'error', errorCode: 'checkout_repair_needed' });
+    expect(await job.getState()).toBe('completed');
+    expect(row).toMatchObject({ status: 'ready', errorCode: null });
     expect(await asides(dest)).toEqual([]);
-    expect(h.persist).not.toHaveBeenCalled();
+    expect(h.persist).toHaveBeenCalledWith(
+      db,
+      'r1',
+      dest,
+      'Not refreshed: 1 task is using this repository. Refresh once it finishes.',
+    );
   });
 });
 
