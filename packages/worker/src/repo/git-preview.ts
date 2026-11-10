@@ -96,7 +96,12 @@ export async function commitGitPreview(
 ): Promise<boolean> {
   if (!preview.paths.length) return false;
   const merge = await gitRun(cwd, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
-  if (merge.code !== 1)
+  if (merge.code !== 0 && merge.code !== 1) {
+    throw new Error(
+      `git merge read failed: ${merge.stderr || merge.stdout || `exit ${merge.code}`}`,
+    );
+  }
+  if (merge.code === 0)
     throw new Error('Finish or abort the open merge before committing session edits.');
   const made = await gitRun(
     cwd,

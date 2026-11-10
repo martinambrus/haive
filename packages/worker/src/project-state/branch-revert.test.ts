@@ -365,7 +365,7 @@ describe('the pushes Haive makes of a task branch put its Haive files back first
     expect(h.warning()).toContain(GLOBS);
   });
 
-  it('a put-back that fails fails the run-app ready gate, and its Retry puts back and pushes with nothing left to commit', async () => {
+  it('a put-back that fails fails the run-app ready gate; its Retry reopens the form, whose Finish puts back and pushes with nothing left to commit', async () => {
     const { parent, wt, bare, forked } = await fixture();
     await commit(wt, { ...stateFiles(BY_AGENT), 'feature.txt': 'feature\n' }, 'feature work');
     await write(wt, { 'session.txt': 'session\n' });

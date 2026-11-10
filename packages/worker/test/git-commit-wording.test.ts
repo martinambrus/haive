@@ -456,9 +456,7 @@ describe.each(sites)('%s commit decisions', (site) => {
       }
       return undefined;
     });
-    await expect(apply()).rejects.toThrow(
-      site === 'run-app' ? /Finish or abort the open merge/ : /^git merge read failed:/,
-    );
+    await expect(apply()).rejects.toThrow(/^git merge read failed:/);
     expect(await command(repo, ['rev-parse', 'HEAD'])).toBe(head);
     expect(writes).toEqual([]);
     expect(vi.mocked(gitRun).mock.calls.some(([, args]) => args[0] === 'commit')).toBe(false);
