@@ -454,8 +454,13 @@ export const CLI_EXEC_JOB_NAMES = {
 /** Stable scheduler key; BullMQ derives each refresh tick's job id from it. */
 export const VERSION_REFRESH_JOB_ID = 'cli-refresh-versions-repeatable';
 
-/** Finished CLI jobs stay readable beyond the browser's 10-minute poll window
+/** Maximum time a sign-out job waits for an account's auth scope to become available. */
+export const CLI_SIGN_OUT_AUTH_WAIT_MS = 30 * 60_000;
+
+/** Finished CLI jobs stay readable for 15 minutes AFTER completion or failure
  *  (packages/web/src/lib/cli-jobs.ts), including refreshes started by the worker.
+ *  Pending/active jobs do not age out: this bounds the time to retrieve a finished
+ *  result, not the total time a browser may poll a delayed sign-out.
  *  BullMQ age/count pruning applies only to the finishing job's own state set. Every
  *  cli-exec producer that retains results must use at least this age, without a
  *  count cap; `true` is safe for jobs that remove only their own result.

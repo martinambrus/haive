@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
-import { CLI_POLLABLE_JOB_OPTS, type RefreshCliVersionsJobResult } from '@haive/shared/constants';
+import {
+  CLI_SIGN_OUT_AUTH_WAIT_MS,
+  type RefreshCliVersionsJobResult,
+} from '@haive/shared/constants';
 import {
   jobPhaseForState,
   POLL_TIMEOUT_MS,
+  SIGN_OUT_POLL_TIMEOUT_MS,
   runCatalogVersionRefresh,
   runPricingRefresh,
   runCliSignOut,
+  runCliProbe,
   signOutSummary,
 } from './cli-jobs';
 import type { CliPackageVersionsEntry } from './api-client';
@@ -32,15 +37,10 @@ describe('jobPhaseForState', () => {
   });
 });
 
-describe('POLL_TIMEOUT_MS', () => {
-  it('stays under the server-side job retention', () => {
-    // Polling past retention would report "expired" for work that succeeded.
-    for (const retention of [
-      CLI_POLLABLE_JOB_OPTS.removeOnComplete,
-      CLI_POLLABLE_JOB_OPTS.removeOnFail,
-    ]) {
-      expect(POLL_TIMEOUT_MS).toBeLessThan(retention.age * 1000);
-    }
+describe('poll budgets', () => {
+  it('keeps the default at ten minutes and allows the worker auth wait plus margin for sign-out', () => {
+    expect(POLL_TIMEOUT_MS).toBe(10 * 60_000);
+    expect(SIGN_OUT_POLL_TIMEOUT_MS).toBeGreaterThan(CLI_SIGN_OUT_AUTH_WAIT_MS + 15_000);
   });
 });
 
@@ -190,4 +190,41 @@ it('shows the worker auth-contention failure text for sign-out', async () => {
   const error = 'A CLI sign-in or credential update kept this account busy. Nothing was removed.';
   h.get.mockResolvedValue({ status: 'failed', error });
   await expect(runCliSignOut('provider')).rejects.toThrow(error);
+});
+
+it('continues sign-out polling at eleven minutes and surfaces a later worker failure', async () => {
+  h.get.mockResolvedValue({ status: 'pending', state: 'delayed' });
+  let settled = false;
+  const result = runCliSignOut('provider')
+    .catch((error: Error) => error)
+    .finally(() => {
+      settled = true;
+    });
+  await vi.advanceTimersByTimeAsync(11 * 60_000);
+  expect(settled).toBe(false);
+  expect(h.get).toHaveBeenCalledTimes(331);
+  const error = 'A CLI sign-in or credential update kept this account busy. Nothing was removed.';
+  await vi.advanceTimersByTimeAsync(19 * 60_000);
+  expect(settled).toBe(false);
+  h.get.mockResolvedValue({ status: 'failed', error });
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(await result).toMatchObject({ message: error });
+});
+
+it('a probe still times out at ten minutes', async () => {
+  const result = runCliProbe('provider').catch((error: Error) => error);
+  await vi.advanceTimersByTimeAsync(10 * 60_000);
+  expect(await result).toMatchObject({
+    message: expect.stringContaining('Still queued behind running CLI jobs.'),
+  });
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('a sign-out poll timeout names the account wait', async () => {
+  const result = runCliSignOut('provider').catch((error: Error) => error);
+  await vi.advanceTimersByTimeAsync(SIGN_OUT_POLL_TIMEOUT_MS);
+  expect(await result).toMatchObject({
+    message: expect.stringContaining('Still waiting for this account to become available.'),
+  });
+  expect(vi.getTimerCount()).toBe(0);
 });
