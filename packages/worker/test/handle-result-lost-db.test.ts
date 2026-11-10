@@ -608,6 +608,38 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
     expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '07b-phase-4-validate', round: 1 });
   });
 
+  it('falls back to 07b for a pinned old-order run list instead of looping at 07c', async () => {
+    const w = await lateFixer();
+    const runListSnapshot = [
+      '07b-phase-4-validate',
+      '07c-ddev-reconcile',
+      '08b-test-management',
+      '08-phase-5-verify',
+      '10-gate-3-commit',
+    ];
+    await db.update(schema.tasks).set({ runListSnapshot }).where(eq(schema.tasks.id, w.taskId));
+    await writeFile(path.join(w.dir, 'a.ts'), 'export const a = 3;');
+    await handleResult(db, { ...w.ctx, runListSnapshot }, w.row.stepId, {
+      status: 'done',
+      row: w.row,
+      output: {},
+    });
+    expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '07b-phase-4-validate', round: 1 });
+    const row = await makeRow(w.taskId, {
+      stepId: '07b-phase-4-validate',
+      status: 'done',
+      round: 1,
+      output: { validationSnapshot: await readValidationSnapshot({ db, taskId: w.taskId }) },
+    });
+    await handleResult(
+      db,
+      { ...w.ctx, runListSnapshot, currentRound: 1, currentStepId: row.stepId },
+      row.stepId,
+      { status: 'done', row, output: row.output },
+    );
+    expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '08-phase-5-verify', round: 1 });
+  });
+
   it('refuses an unreadable final change rather than assuming 08b made no edits', async () => {
     const w = await lateFixer();
     await db

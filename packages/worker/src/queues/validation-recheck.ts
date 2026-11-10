@@ -81,7 +81,10 @@ export async function validationSuccessor(
   const affectedFiles = affectedValidationFiles(before, after);
   if (before && affectedFiles.length === 0) return ordinary;
   return {
-    next: steps.find((s) => s.metadata.id === RECONCILE) ?? steps[validateIndex],
+    next:
+      ids.indexOf(RECONCILE) >= 0 && ids.indexOf(RECONCILE) < validateIndex
+        ? steps[ids.indexOf(RECONCILE)]
+        : steps[validateIndex],
     round: round + 1,
     recheck: { resumeStepId: ordinary.next?.metadata.id ?? null, affectedFiles },
   };
