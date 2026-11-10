@@ -1455,6 +1455,36 @@ describe('phase4ValidateStep.apply: the change the validator checked', () => {
     expect(out.source).toBe('validator');
     expect(out.changeFingerprint).toMatch(DIGEST);
     expect(out.changeFingerprint).toBe(await changeFingerprint(dir, 'main'));
+    expect(out.validationSnapshot).toEqual({ 'a.php': expect.any(String) });
+  });
+
+  it('leaves the local loop when its own fixer changes DDEV inputs', async () => {
+    const dir = await checkout();
+    const w = worldOf(dir);
+    const text = reply({
+      issues: [
+        {
+          severity: 'high',
+          file: '.ddev/config.yaml:1',
+          description: 'wrong PHP version',
+          fix: 'update config',
+        },
+      ],
+    });
+    const initial = await runApply(w.ctx, text, { invocationId: VALIDATOR_1 });
+    await mkdir(path.join(dir, '.ddev'));
+    await writeFile(path.join(dir, '.ddev/config.yaml'), 'php_version: "8.4"');
+    const fixed = await runApply(w.ctx, FIXER_REPLY, {
+      iteration: 1,
+      previous: [passRecord(0, text, initial)],
+      invocationId: FIXER_1,
+    });
+    expect(fixed.runtimeChanged).toBe(true);
+    expect(
+      await phase4ValidateStep.loop!.shouldContinue({ applyOutput: fixed, iteration: 1 } as never),
+    ).toBe(false);
+    // The existing bounded fix loop passes through 07c before another validator can use DDEV.
+    expect(phase4ValidateStep.fixLoop!.evaluate(fixed)?.blocking).toBe(true);
   });
 
   it('stores another one once the change has moved, and the same one while it has not', async () => {

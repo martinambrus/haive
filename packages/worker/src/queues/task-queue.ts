@@ -1,3 +1,4 @@
+import { validationSuccessor, VALIDATION_RECHECK_EVENT } from './validation-recheck.js';
 import {
   resolveDispatchIntegrations,
   stepIntegrationRequirements,
@@ -2147,18 +2148,41 @@ export async function handleResult(
         await markTaskDeadOnStep(db, ctx, result.row.id, result.row.round, stepId, [stepId]);
         return;
       }
-      const next = steps[idx + 1];
+      const successor = await validationSuccessor(db, ctx, stepId, result.row.round, steps);
+      const { next, round: nextRound } = successor;
       if (next) {
-        // Forward walk stays in the same round as the step that just finished.
-        const nextRound = result.row.round;
-        const pointed = await markTaskRunningWithStep(
-          db,
-          ctx.taskId,
-          next.metadata.id,
-          computeGlobalStepIndex(next.metadata.workflowType, next.metadata.index),
-          nextRound,
-          { epoch: ctx.orchestrationEpoch },
-        );
+        if (successor.recheck) {
+          const reset = await resetStepAndDownstream(
+            db,
+            ctx.taskId,
+            next.metadata.id,
+            nextRound,
+            ctx.orchestrationEpoch,
+          );
+          if (reset === 'superseded') return;
+          if (reset) ctx.orchestrationEpoch = reset.newEpoch;
+        }
+        const point = (handle: Database | DbTx) =>
+          markTaskRunningWithStep(
+            handle,
+            ctx.taskId,
+            next.metadata.id,
+            computeGlobalStepIndex(next.metadata.workflowType, next.metadata.index),
+            nextRound,
+            { epoch: ctx.orchestrationEpoch },
+          );
+        // No Git/FS read runs while the source row or task is locked.
+        const pointed = successor.recheck
+          ? await db.transaction(async (tx) => {
+              if (!(await lockOwnedStep(tx, result.row.id))) return false;
+              if (!(await point(tx))) return false;
+              await appendEvent(tx, ctx.taskId, result.row.id, VALIDATION_RECHECK_EVENT, {
+                round: nextRound,
+                ...successor.recheck,
+              });
+              return true;
+            })
+          : await point(db);
         if (!pointed) {
           logger.info(
             { taskId: ctx.taskId, stepId, nextStepId: next.metadata.id },
