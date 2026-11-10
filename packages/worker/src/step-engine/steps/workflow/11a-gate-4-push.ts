@@ -2,7 +2,7 @@ import { and, desc, eq, sql } from 'drizzle-orm';
 import { REPOSITORY_TASKS_LOCK_TIMEOUT_MS, schema } from '@haive/database';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../../../audit.js';
 import type { FormSchema } from '@haive/shared';
-import { gitRemoteUrlSchema, redactGitUrl } from '@haive/shared/schemas';
+import { gitRemoteUrlSchema, parseScpLikeGitUrl, redactGitUrl } from '@haive/shared/schemas';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import {
@@ -111,7 +111,16 @@ async function persistPushOrigin(
             action: 'repository.remote.update',
             targetType: 'repository',
             targetId: repositoryId,
-            metadata: { source: 'gate4_push', actorKind: 'task_user', fields },
+            metadata: {
+              source: 'gate4_push',
+              actorKind: 'task_user',
+              fields,
+              host: parseScpLikeGitUrl(approvedUrl)?.host ?? new URL(approvedUrl).hostname,
+              credentialsChanged:
+                patch.credentialsSecretId !== undefined &&
+                patch.credentialsSecretId !== stored.credentialsSecretId,
+              branchChanged: false,
+            },
           };
           await insertAuditEvent(tx, event);
         }

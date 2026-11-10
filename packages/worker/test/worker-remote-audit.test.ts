@@ -160,6 +160,9 @@ describe('T505.1 transactional gate-4 remote', () => {
           source: 'gate4_push',
           actorKind: 'task_user',
           fields: ['remoteUrl', 'credentialsSecretId'],
+          host: 'example.com',
+          credentialsChanged: true,
+          branchChanged: false,
         },
       }),
     ]);
@@ -326,7 +329,14 @@ describe('T505.2 Retry with a checkout origin and empty repository remote', () =
     expect(s.repo()).toMatchObject({ remoteUrl: URL, credentialsSecretId: null });
     expect(s.audits()).toEqual([
       expect.objectContaining({
-        metadata: { source: 'gate4_push', actorKind: 'task_user', fields: ['remoteUrl'] },
+        metadata: {
+          source: 'gate4_push',
+          actorKind: 'task_user',
+          fields: ['remoteUrl'],
+          host: 'example.com',
+          credentialsChanged: false,
+          branchChanged: false,
+        },
       }),
     ]);
     expect(h.ensure).not.toHaveBeenCalled();
@@ -359,5 +369,17 @@ describe('Fix-1 approval and lock controls', () => {
     expect(h.trace).not.toContain('lock no key update');
     expect(s.audits()).toEqual([]);
     expect(h.push).toHaveBeenCalledOnce();
+  });
+  it('remote metadata has the API host and change flags without remote or credential values', async () => {
+    const s = setup();
+    await s.apply(false, 'git@example.com:owner/repo.git');
+    expect(s.audits()[0]?.metadata).toEqual({
+      source: 'gate4_push',
+      actorKind: 'task_user',
+      fields: ['remoteUrl', 'credentialsSecretId'],
+      host: 'example.com',
+      credentialsChanged: true,
+      branchChanged: false,
+    });
   });
 });

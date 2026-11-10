@@ -116,7 +116,7 @@ function event(
     action,
     targetType: 'repository',
     targetId: REPO,
-    metadata: { source, fields, actorKind },
+    metadata: expect.objectContaining({ source, fields, actorKind }),
   };
 }
 
@@ -350,5 +350,36 @@ describe('Fix-1 scope-save and metadata controls', () => {
     expect(s.repo().updatedAt).not.toEqual(new Date(0));
     expect(s.fake.rows(schema.projectStateOutbox)).toHaveLength(1);
     expect(s.audits()).toEqual([]);
+  });
+  it('scope and security metadata match the API summary keys without storing setting values', async () => {
+    const s = await setup();
+    await s.db.transaction(async (tx) => {
+      await audit.auditRepositorySettings(tx, {
+        repositoryId: REPO,
+        actor: { userId: OWNER, kind: 'repository_owner' },
+        source: 'project_state_sync',
+        before: { scopeExcludeGlobs: ['kept/**', 'removed/**'], agentRulesOverride: null },
+        updates: {
+          scopeExcludeGlobs: ['kept/**', 'added/**', 'added/**'],
+          agentRulesOverride: 'secret rule text',
+        },
+      });
+    });
+    expect(s.audits().map((row) => row.metadata)).toEqual([
+      {
+        source: 'project_state_sync',
+        actorKind: 'repository_owner',
+        fields: ['scopeExcludeGlobs'],
+        addedCount: 1,
+        removedCount: 1,
+      },
+      {
+        source: 'project_state_sync',
+        actorKind: 'repository_owner',
+        fields: ['agentRulesOverride'],
+        values: { agentRulesOverride: true },
+      },
+    ]);
+    expect(JSON.stringify(s.audits())).not.toMatch(/kept|removed\/\*|added\/\*|secret rule text/);
   });
 });

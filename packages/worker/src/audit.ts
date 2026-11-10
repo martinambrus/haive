@@ -75,12 +75,26 @@ export async function auditRepositorySettings(
       sameValue((before as Record<string, unknown>)[field] ?? null, updates[field] ?? null)
     )
       continue;
+    let summary: Record<string, unknown>;
+    if (field === 'scopeExcludeGlobs') {
+      const previous = new Set(
+        (before as { scopeExcludeGlobs?: string[] | null }).scopeExcludeGlobs ?? [],
+      );
+      const wanted = new Set((updates[field] as string[] | null) ?? []);
+      summary = {
+        addedCount: [...wanted].filter((glob) => !previous.has(glob)).length,
+        removedCount: [...previous].filter((glob) => !wanted.has(glob)).length,
+      };
+    } else {
+      // Match the API's presence summary; never include the rule text.
+      summary = { values: { agentRulesOverride: updates[field] != null } };
+    }
     const event: AuditEvent = {
       actorUserId: actor.userId,
       action,
       targetType: 'repository',
       targetId: repositoryId,
-      metadata: { source, actorKind: actor.kind, fields: [field] },
+      metadata: { source, actorKind: actor.kind, fields: [field], ...summary },
     };
     await insertAuditEvent(tx, event);
     events.push(event);
