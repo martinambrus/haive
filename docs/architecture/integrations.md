@@ -851,6 +851,10 @@ uses the same transaction order, a bounded `FOR NO KEY UPDATE` take, `repository
 with source `gate4_push`, and an add-only `ensureOrigin`. It removes its own added origin
 on a callback or commit failure and waits for an in-flight callback before the fallback restore;
 a failed restore remains the reported failure. Git calls have a 10 s abort deadline.
+An existing checkout origin with an empty repository remote is repaired under the same row lock:
+the worker rereads and validates the current origin and persists its credential-free address with
+the audit row, without modifying Git. A populated repository remote keeps its binding; the push's
+selected credential is then only for that push. Retries and matching values add no duplicate audit.
 
 Disconnect (`integration.connection.disconnect`) is the one exception, on purpose: its row follows
 the vendor revoke, which cannot be undone and whose outcome (`revoked`) the row records, so it stays

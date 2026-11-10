@@ -269,3 +269,68 @@ describe('T505.1 transactional gate-4 remote', () => {
     expect(JSON.stringify(s.audits())).not.toContain('secret');
   });
 });
+describe('T505.2 Retry with a checkout origin and empty repository remote', () => {
+  it('repairs a row after a failed update followed by Retry, without replacing the surviving origin', async () => {
+    const s = setup();
+    s.fake.hooks.beforeUpdate = () => {
+      throw new Error('row refused');
+    };
+    await expect(s.apply()).rejects.toThrow('row refused');
+    // The old implementation left this origin after its failed row update.
+    h.origin = URL;
+    s.fake.hooks.beforeUpdate = null;
+    await s.apply(true);
+    expect(s.repo()).toMatchObject({ remoteUrl: URL, credentialsSecretId: CREDENTIAL });
+    expect(s.audits()).toHaveLength(1);
+  });
+  it('does not rebind a stored remote or credential for a one-off push', async () => {
+    const s = setup(URL);
+    h.origin = URL;
+    await s.apply(true);
+    expect(s.repo()).toMatchObject({ remoteUrl: URL, credentialsSecretId: null });
+    expect(s.audits()).toEqual([]);
+    expect(h.ensure).not.toHaveBeenCalled();
+  });
+  it.each(['audit', 'commit'])(
+    'Retry repair keeps the existing origin when %s fails',
+    async (failure) => {
+      const s = setup();
+      h.origin = URL;
+      if (failure === 'audit')
+        s.fake.hooks.beforeInsert = (table) => {
+          if (table === schema.auditEvents) throw new Error('audit refused');
+        };
+      else
+        s.fake.hooks.beforeCommit = () => {
+          throw new Error('commit refused');
+        };
+      await expect(s.apply(true)).rejects.toThrow('refused');
+      expect(s.repo().remoteUrl).toBeNull();
+      expect(s.audits()).toEqual([]);
+      expect(h.origin).toBe(URL);
+      expect(h.ensure).not.toHaveBeenCalled();
+      expect(h.git).not.toHaveBeenCalled();
+      expect(h.push).not.toHaveBeenCalled();
+    },
+  );
+  it('uses the checkout origin rather than a stale form value, and audits only changed fields once', async () => {
+    const s = setup();
+    h.origin = URL;
+    await s.apply(true, 'https://stale.example/repo.git', '');
+    await s.apply(true, 'https://stale.example/repo.git', '');
+    expect(s.repo()).toMatchObject({ remoteUrl: URL, credentialsSecretId: null });
+    expect(s.audits()).toEqual([
+      expect.objectContaining({
+        metadata: { source: 'gate4_push', actorKind: 'task_user', fields: ['remoteUrl'] },
+      }),
+    ]);
+    expect(h.ensure).not.toHaveBeenCalled();
+  });
+  it('never persists credentials from an existing origin', async () => {
+    const s = setup();
+    h.origin = 'https://user:secret@example.com/repo.git';
+    await s.apply(true);
+    expect(s.repo().remoteUrl).toBe(URL);
+    expect(JSON.stringify(s.audits())).not.toContain('secret');
+  });
+});

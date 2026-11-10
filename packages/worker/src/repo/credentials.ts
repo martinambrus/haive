@@ -26,7 +26,7 @@ export async function decryptCredentialRow(
 }
 
 export async function getDecryptedCredentials(
-  db: Database,
+  db: Pick<Database, 'query'>,
   credentialsId: string,
   userId: string,
 ): Promise<DecryptedCredentials> {

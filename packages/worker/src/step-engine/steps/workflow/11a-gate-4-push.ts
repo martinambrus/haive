@@ -27,6 +27,7 @@ async function persistPushOrigin(
   workspace: string,
   remoteUrl: string,
   credentialId: string | undefined,
+  addOrigin: boolean,
 ): Promise<void> {
   let addedOrigin = false;
   let restoreFailure: Error | undefined;
@@ -78,8 +79,20 @@ async function persistPushOrigin(
           .for('no key update');
         await tx.execute(sql.raw('SET LOCAL lock_timeout = DEFAULT'));
         if (!stored) throw new Error('Repository no longer exists');
+        // An existing binding makes this a one-off push. Only an empty row needs Retry repair.
+        if (!addOrigin && stored.remoteUrl !== null) return;
+        let approvedUrl = remoteUrl;
+        if (!addOrigin) {
+          const current = await boundedRemoteGit((signal) => getOriginUrl(workspace, { signal }));
+          if (current === null)
+            throw new Error('Origin disappeared while this push was waiting; retry');
+          const parsed = gitRemoteUrlSchema.safeParse(current);
+          if (!parsed.success) throw new Error('Origin is not a valid Git remote');
+          approvedUrl = parsed.data;
+        }
+        if (credentialId) await buildCredentialHelper(tx, credentialId, ctx.userId, approvedUrl);
         const patch = {
-          remoteUrl,
+          remoteUrl: approvedUrl,
           ...(credentialId ? { credentialsSecretId: credentialId } : {}),
         };
         const fields = (Object.keys(patch) as (keyof typeof patch)[]).filter(
@@ -96,15 +109,16 @@ async function persistPushOrigin(
           await insertAuditEvent(tx, event);
         }
         try {
-          await boundedRemoteGit((signal) =>
-            ensureOrigin(workspace, remoteUrl, {
-              addOnly: true,
-              signal,
-              onAdded: () => {
-                addedOrigin = true;
-              },
-            }),
-          );
+          if (addOrigin)
+            await boundedRemoteGit((signal) =>
+              ensureOrigin(workspace, approvedUrl, {
+                addOnly: true,
+                signal,
+                onAdded: () => {
+                  addedOrigin = true;
+                },
+              }),
+            );
           if (fields.length)
             await tx
               .update(schema.repositories)
@@ -431,13 +445,15 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
 
     // Establish origin. For the no-origin path the user supplies a clean URL
     // (no embedded token); we persist that, never the credentialed URL.
-    let hasOrigin: boolean;
+    let originUrl: string | null;
     try {
-      hasOrigin = (await getOriginUrl(workspace)) !== null;
+      originUrl = await boundedRemoteGit((signal) => getOriginUrl(workspace, { signal }));
     } catch (err) {
       if (!(err instanceof OriginUrlError)) throw err;
       return { pushed: false, remote: null, branch, message: err.message };
     }
+    const hasOrigin = originUrl !== null;
+    let remoteUrl = originUrl;
     if (!hasOrigin) {
       const suppliedUrl = (values.remoteUrl ?? '').trim();
       if (!suppliedUrl) {
@@ -445,20 +461,21 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
       }
       const parsed = gitRemoteUrlSchema.safeParse(suppliedUrl);
       if (!parsed.success) throw new Error(parsed.error.issues[0]!.message);
-      const remoteUrl = parsed.data;
+      remoteUrl = parsed.data;
+    }
+    if (detected.repositoryId) {
+      await persistPushOrigin(
+        ctx,
+        detected.repositoryId,
+        workspace,
+        remoteUrl!,
+        values.credentialId,
+        !hasOrigin,
+      );
+    } else if (!hasOrigin) {
       if (values.credentialId)
         await buildCredentialHelper(ctx.db, values.credentialId, ctx.userId, remoteUrl);
-      if (detected.repositoryId) {
-        await persistPushOrigin(
-          ctx,
-          detected.repositoryId,
-          workspace,
-          remoteUrl,
-          values.credentialId,
-        );
-      } else {
-        await ensureOrigin(workspace, remoteUrl);
-      }
+      await ensureOrigin(workspace, remoteUrl!);
     }
 
     if (detected.baseBranch) {

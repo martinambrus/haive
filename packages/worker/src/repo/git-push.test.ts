@@ -221,6 +221,49 @@ describe('git-push helpers', () => {
     }
   });
 
+  it('ensureOrigin reports a partial add even when git exits with an error after writing config', async () => {
+    const work = await mkdtemp(path.join(fixtureBase, 'gp-add-partial-'));
+    let shim: FakeGit | undefined;
+    try {
+      await git(work, ['init', '-b', 'main']);
+      shim = await failGit(['remote', 'add'], { afterRun: true, exit: 128 });
+      let uncertain = false;
+      await expect(
+        ensureOrigin(work, 'https://a.test/x.git', {
+          addOnly: true,
+          onAdded: () => {
+            uncertain = true;
+          },
+        }),
+      ).rejects.toThrow('Git remote add failed');
+      expect(await getOriginUrl(work)).toBe('https://a.test/x.git');
+      expect(uncertain).toBe(true);
+    } finally {
+      await shim?.restore();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('getOriginUrl aborts a stalled read without accepting its output', async () => {
+    const work = await mkdtemp(path.join(fixtureBase, 'gp-read-abort-'));
+    let shim: FakeGit | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await git(work, ['init', '-b', 'main']);
+      await ensureOrigin(work, 'https://a.test/x.git');
+      shim = await failGit(['remote', 'get-url'], { afterRun: true, hang: true });
+      const controller = new AbortController();
+      timer = setTimeout(() => controller.abort(), 300);
+      await expect(getOriginUrl(work, { signal: controller.signal })).rejects.toThrow(
+        'read timed out',
+      );
+    } finally {
+      clearTimeout(timer);
+      await shim?.restore();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
   it('scrubSecret masks every occurrence; passthrough on null', () => {
     expect(scrubSecret('tok=abc and abc again', 'abc')).toBe('tok=*** and *** again');
     expect(scrubSecret('nothing', null)).toBe('nothing');

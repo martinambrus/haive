@@ -9,7 +9,7 @@ import {
 import { schema, type Database } from '@haive/database';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { getDecryptedCredentials } from './credentials.js';
-import { GIT_MAX_BUFFER, gitGaveNoAnswer, type GitRunResult, gitRun } from './git-exec.js';
+import { GIT_MAX_BUFFER, type GitRunResult, gitRun } from './git-exec.js';
 import { gitRemoteGuardArgs, type GitRemoteOwner } from './git-remote-guard.js';
 
 // Re-exported because the step modules and the merge core import them from here.
@@ -57,16 +57,12 @@ export class OriginUrlError extends Error {
 
 /** Read every effective fetch and push URL (including git's insteadOf rewrites). Exit 2 alone
  *  means no origin; a failed read is unknown, and an unsafe address fails the caller. */
-async function originUrls(cwd: string): Promise<string[] | null> {
+async function originUrls(cwd: string, signal?: AbortSignal): Promise<string[] | null> {
   const all: string[] = [];
   for (const push of [false, true]) {
-    const res = await gitRun(cwd, [
-      'remote',
-      'get-url',
-      ...(push ? ['--push'] : []),
-      '--all',
-      'origin',
-    ]);
+    const args = ['remote', 'get-url', ...(push ? ['--push'] : []), '--all', 'origin'];
+    const res = signal ? await gitRun(cwd, args, undefined, { signal }) : await gitRun(cwd, args);
+    if (signal?.aborted) throw new Error('Git remote read timed out');
     if (!push && res.code === 2) return null;
     if (res.code !== 0) {
       const output = redactGitText(res.stderr || res.stdout)
@@ -83,8 +79,11 @@ async function originUrls(cwd: string): Promise<string[] | null> {
   return all;
 }
 
-export async function getOriginUrl(cwd: string): Promise<string | null> {
-  const urls = await originUrls(cwd);
+export async function getOriginUrl(
+  cwd: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<string | null> {
+  const urls = await originUrls(cwd, options.signal);
   return urls === null ? null : gitRemoteIdentity(urls[0]!);
 }
 
@@ -170,22 +169,17 @@ export async function ensureOrigin(
     /** Refuse an origin added meanwhile rather than replacing its URLs. */
     addOnly?: boolean;
     signal?: AbortSignal;
-    /** Also called for an uncertain add, so its owner can undo it after a timeout. */
+    /** Also called for a potentially partial add, so its owner can undo a failed attempt. */
     onAdded?: () => void;
   } = {},
 ): Promise<{ added: boolean; updated: boolean }> {
   url = redactGitUrl(url, true);
-  const add = await gitRun(
-    cwd,
-    ['remote', 'add', 'origin', url],
-    undefined,
-    options.signal ? { signal: options.signal } : undefined,
-  );
-  if (
-    add.code === 0 ||
-    (options.addOnly && add.code !== 3 && (gitGaveNoAnswer(add) || options.signal?.aborted))
-  )
-    options.onAdded?.();
+  const addArgs = ['remote', 'add', 'origin', url];
+  const add = options.signal
+    ? await gitRun(cwd, addArgs, undefined, { signal: options.signal })
+    : await gitRun(cwd, addArgs);
+  // Exit 3 proves an existing remote was left alone. Any other failed add can be partial.
+  if (add.code === 0 || (options.addOnly && add.code !== 3)) options.onAdded?.();
   if (options.signal?.aborted) throw new Error('Git remote add timed out');
   if (options.addOnly && add.code !== 0) {
     throw new Error(
@@ -228,7 +222,7 @@ export async function ensureOrigin(
  *  persists and isn't visible via `ps`. The leading empty `credential.helper=`
  *  clears any inherited global helper. */
 export async function buildCredentialHelper(
-  db: Database,
+  db: Pick<Database, 'query'>,
   credentialId: string,
   userId: string,
   remoteUrl: string | null | undefined,

@@ -138,7 +138,20 @@ async function fixture(
 function stubDb() {
   const events: { eventType: string; payload: unknown }[] = [];
   let warning: string | null = null;
+  const transaction = {
+    execute: async () => {},
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          for: async () => [
+            { remoteUrl: 'https://example.test/bound.git', credentialsSecretId: null },
+          ],
+        }),
+      }),
+    }),
+  };
   const db = {
+    transaction: async <T>(fn: (tx: typeof transaction) => Promise<T>) => fn(transaction),
     query: {
       users: {
         findFirst: async (): Promise<
