@@ -104,7 +104,12 @@ function setup(remoteUrl: string | null = null, dropDuringGit = false, failRowLo
   fake.hooks.beforeCommit = () => {
     h.trace.push('commit');
   };
-  const apply = (hasOrigin = false, remote = URL, credentialId = CREDENTIAL) =>
+  const apply = (
+    hasOrigin = false,
+    remote = URL,
+    credentialId = CREDENTIAL,
+    detectedOrigin = h.origin,
+  ) =>
     gate4PushStep.apply(
       {
         db,
@@ -119,7 +124,7 @@ function setup(remoteUrl: string | null = null, dropDuringGit = false, failRowLo
           workspacePath: '/unused',
           branch: 'main',
           hasOrigin,
-          originUrl: h.origin,
+          originUrl: detectedOrigin,
           recentCommits: '',
           repositoryId: REPO,
           boundCredentialId: null,
@@ -332,5 +337,27 @@ describe('T505.2 Retry with a checkout origin and empty repository remote', () =
     await s.apply(true);
     expect(s.repo().remoteUrl).toBe(URL);
     expect(JSON.stringify(s.audits())).not.toContain('secret');
+  });
+});
+
+describe('Fix-1 approval and lock controls', () => {
+  it('refuses an origin changed after the form without persisting or using credentials', async () => {
+    const s = setup();
+    h.origin = 'https://changed.example/repo.git';
+    await expect(s.apply(true, URL, CREDENTIAL, URL)).rejects.toThrow(
+      /origin changed since the form.*retry/i,
+    );
+    expect(s.repo()).toMatchObject({ remoteUrl: null, credentialsSecretId: null });
+    expect(s.audits()).toEqual([]);
+    expect(h.credential).not.toHaveBeenCalled();
+    expect(h.push).not.toHaveBeenCalled();
+  });
+  it('a bound row with an origin pushes without a row lock', async () => {
+    const s = setup(URL, false, true);
+    h.origin = URL;
+    await s.apply(true);
+    expect(h.trace).not.toContain('lock no key update');
+    expect(s.audits()).toEqual([]);
+    expect(h.push).toHaveBeenCalledOnce();
   });
 });

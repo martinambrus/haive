@@ -28,7 +28,23 @@ async function persistPushOrigin(
   remoteUrl: string,
   credentialId: string | undefined,
   addOrigin: boolean,
+  detectedOriginUrl: string | null,
 ): Promise<void> {
+  // The common, already-bound push needs no repository write or row lock.
+  const readStored = (db: Pick<StepContext['db'], 'select'>) =>
+    db
+      .select({
+        remoteUrl: schema.repositories.remoteUrl,
+        credentialsSecretId: schema.repositories.credentialsSecretId,
+      })
+      .from(schema.repositories)
+      .where(
+        and(eq(schema.repositories.id, repositoryId), eq(schema.repositories.userId, ctx.userId)),
+      );
+  const [initial] = await readStored(ctx.db);
+  if (!initial) throw new Error('Repository no longer exists');
+  if (!addOrigin && initial.remoteUrl !== null) return;
+
   let addedOrigin = false;
   let restoreFailure: Error | undefined;
   let event: AuditEvent | undefined;
@@ -64,19 +80,7 @@ async function persistPushOrigin(
         await tx.execute(
           sql.raw(`SET LOCAL lock_timeout = '${REPOSITORY_TASKS_LOCK_TIMEOUT_MS}ms'`),
         );
-        const [stored] = await tx
-          .select({
-            remoteUrl: schema.repositories.remoteUrl,
-            credentialsSecretId: schema.repositories.credentialsSecretId,
-          })
-          .from(schema.repositories)
-          .where(
-            and(
-              eq(schema.repositories.id, repositoryId),
-              eq(schema.repositories.userId, ctx.userId),
-            ),
-          )
-          .for('no key update');
+        const [stored] = await readStored(tx).for('no key update');
         await tx.execute(sql.raw('SET LOCAL lock_timeout = DEFAULT'));
         if (!stored) throw new Error('Repository no longer exists');
         // An existing binding makes this a one-off push. Only an empty row needs Retry repair.
@@ -88,7 +92,10 @@ async function persistPushOrigin(
             throw new Error('Origin disappeared while this push was waiting; retry');
           const parsed = gitRemoteUrlSchema.safeParse(current);
           if (!parsed.success) throw new Error('Origin is not a valid Git remote');
-          approvedUrl = parsed.data;
+          const detected = gitRemoteUrlSchema.safeParse(detectedOriginUrl);
+          if (!detected.success || parsed.data !== detected.data)
+            throw new Error('Origin changed since the form was shown; retry this step');
+          approvedUrl = detected.data;
         }
         if (credentialId) await buildCredentialHelper(tx, credentialId, ctx.userId, approvedUrl);
         const patch = {
@@ -471,6 +478,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
         remoteUrl!,
         values.credentialId,
         !hasOrigin,
+        detected.originUrl,
       );
     } else if (!hasOrigin) {
       if (values.credentialId)
