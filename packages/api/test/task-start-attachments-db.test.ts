@@ -108,71 +108,90 @@ describe.skipIf(!url)('deferred attachments through real Postgres routes', () =>
     return attachment!.id;
   };
 
-  it.each(['same-branch', 'cross-branch', 'done', 'left-open', 'settled'] as const)(
-    'fences root START for %s merge state with a retryable 409',
-    async (kind) => {
-      const id = await create(false, undefined);
-      const [merger] = await db
-        .insert(schema.tasks)
-        .values({
-          userId: USER,
-          repositoryId: REPO,
-          type: 'workflow',
-          title: 'merger',
-          status: kind === 'left-open' || kind === 'settled' ? 'cancelled' : 'waiting_user',
-        })
-        .returning();
-      const dir =
-        kind === 'cross-branch' ? '/unused/t363/.haive/worktrees/main--base' : '/unused/t363';
-      const [step] = await db
-        .insert(schema.taskSteps)
-        .values({
-          taskId: merger!.id,
-          stepId: '12-worktree-cleanup',
-          stepIndex: 12,
-          title: 'merge',
-          round: 0,
-          status: 'waiting_cli',
-          mergeResolveState: {
-            mode: kind === 'cross-branch' ? 'cross-branch' : 'same-branch',
-            phase: kind === 'done' ? 'done' : 'resolving',
-            baseBranch: 'main',
-            featureBranch: 'feature',
-            mergeDir: dir,
-          } as never,
-        })
-        .returning();
-      if (kind === 'left-open' || kind === 'settled') {
+  it.each([
+    'same-branch',
+    'cross-branch',
+    'done',
+    'left-open',
+    'settled',
+    'skipped',
+    'completed',
+    'cancelled-pending',
+    'cancelled-finished',
+  ] as const)('fences root START for %s merge state with a retryable 409', async (kind) => {
+    const id = await create(false, undefined);
+    const [merger] = await db
+      .insert(schema.tasks)
+      .values({
+        userId: USER,
+        repositoryId: REPO,
+        type: 'workflow',
+        title: 'merger',
+        status:
+          kind === 'completed'
+            ? 'completed'
+            : kind === 'left-open' || kind === 'settled' || kind.startsWith('cancelled-')
+              ? 'cancelled'
+              : 'waiting_user',
+      })
+      .returning();
+    const dir =
+      kind === 'cross-branch' ? '/unused/t363/.haive/worktrees/main--base' : '/unused/t363';
+    const [step] = await db
+      .insert(schema.taskSteps)
+      .values({
+        taskId: merger!.id,
+        stepId: '12-worktree-cleanup',
+        stepIndex: 12,
+        title: 'merge',
+        round: 0,
+        status: kind === 'skipped' ? 'skipped' : 'waiting_cli',
+        mergeResolveState: {
+          mode: kind === 'cross-branch' ? 'cross-branch' : 'same-branch',
+          phase: kind === 'done' ? 'done' : 'resolving',
+          baseBranch: 'main',
+          featureBranch: 'feature',
+          mergeDir: dir,
+        } as never,
+      })
+      .returning();
+    if (kind === 'left-open' || kind === 'settled') {
+      await db.insert(schema.taskEvents).values({
+        taskId: merger!.id,
+        taskStepId: step!.id,
+        eventType: 'merge.left_open',
+        payload: { dir, ref: 'feature', head: 'old', mergeHead: 'incoming' },
+      });
+      if (kind === 'settled')
         await db.insert(schema.taskEvents).values({
           taskId: merger!.id,
-          taskStepId: step!.id,
-          eventType: 'merge.left_open',
-          payload: { dir, ref: 'feature', head: 'old', mergeHead: 'incoming' },
+          eventType: 'merge.left_open_settled',
+          payload: { dir, mergeHead: 'incoming', outcome: 'aborted', reason: 'done' },
         });
-        if (kind === 'settled')
-          await db.insert(schema.taskEvents).values({
-            taskId: merger!.id,
-            eventType: 'merge.left_open_settled',
-            payload: { dir, mergeHead: 'incoming', outcome: 'aborted', reason: 'done' },
-          });
-      } else {
-        await db
-          .insert(schema.mergeDirClaims)
-          .values({ mergeDir: dir, taskId: merger!.id, taskStepId: step!.id });
-      }
-      const busy = kind === 'same-branch' || kind === 'left-open';
-      const res = await post(`/tasks/${id}/action`, { action: 'start' });
-      expect(res.status).toBe(busy ? 409 : 200);
-      if (busy) {
-        expect(await res.json()).toMatchObject({ error: expect.stringMatching(/merge|busy/i) });
-        expect(await row(id)).toMatchObject({ status: 'created' });
-        expect(h.add).not.toHaveBeenCalled();
-      } else {
-        expect(await row(id)).toMatchObject({ status: 'queued' });
-        expect(h.add).toHaveBeenCalledTimes(1);
-      }
-    },
-  );
+    } else {
+      await db
+        .insert(schema.mergeDirClaims)
+        .values({ mergeDir: dir, taskId: merger!.id, taskStepId: step!.id });
+    }
+    if (kind === 'cancelled-finished') {
+      await db.insert(schema.taskEvents).values({
+        taskId: merger!.id,
+        eventType: 'task.cancel_finished',
+        payload: {},
+      });
+    }
+    const busy = kind === 'same-branch' || kind === 'left-open' || kind === 'cancelled-pending';
+    const res = await post(`/tasks/${id}/action`, { action: 'start' });
+    expect(res.status).toBe(busy ? 409 : 200);
+    if (busy) {
+      expect(await res.json()).toMatchObject({ error: expect.stringMatching(/merge|busy/i) });
+      expect(await row(id)).toMatchObject({ status: 'created' });
+      expect(h.add).not.toHaveBeenCalled();
+    } else {
+      expect(await row(id)).toMatchObject({ status: 'queued' });
+      expect(h.add).toHaveBeenCalledTimes(1);
+    }
+  });
 
   it('rolls an immediate create back while a cancelled task has a root merge left open', async () => {
     const [merger] = await db
