@@ -846,7 +846,11 @@ changed columns, and logs after commit (including an import nested in the projec
 preparation transaction). Metadata contains `source`, `actorKind` and `fields` (column names
 only), never rule text, globs or other setting values. Task writes name the task user, conflict
 answers name the resolving user, and unattended imports name the repository owner. Other portable
-settings have no API audit action and do not gain one here.
+settings have no API audit action and do not gain one here. Gate 4's first remote binding
+uses the same transaction order, a bounded `FOR NO KEY UPDATE` take, `repository.remote.update`
+with source `gate4_push`, and an add-only `ensureOrigin`. It removes its own added origin
+on a callback or commit failure and waits for an in-flight callback before the fallback restore;
+a failed restore remains the reported failure. Git calls have a 10 s abort deadline.
 
 Disconnect (`integration.connection.disconnect`) is the one exception, on purpose: its row follows
 the vendor revoke, which cannot be undone and whose outcome (`revoked`) the row records, so it stays

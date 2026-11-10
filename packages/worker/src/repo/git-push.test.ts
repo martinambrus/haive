@@ -163,6 +163,64 @@ describe('git-push helpers', () => {
     }
   });
 
+  it('ensureOrigin add-only refuses a concurrently added origin without changing any URLs', async () => {
+    const work = await mkdtemp(path.join(fixtureBase, 'gp-add-only-'));
+    try {
+      await git(work, ['init', '-b', 'main']);
+      let added = 0;
+      const options = {
+        addOnly: true,
+        onAdded: () => {
+          added++;
+        },
+      };
+      await ensureOrigin(work, 'https://a.test/x.git', options);
+      await git(work, ['config', '--add', 'remote.origin.pushurl', 'https://push.test/x.git']);
+      await expect(ensureOrigin(work, 'https://b.test/y.git', options)).rejects.toThrow(
+        'Origin was added',
+      );
+      expect(await getOriginUrl(work)).toBe('https://a.test/x.git');
+      expect((await git(work, ['config', '--get-all', 'remote.origin.pushurl'])).trim()).toBe(
+        'https://push.test/x.git',
+      );
+      expect(added).toBe(1);
+    } finally {
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('ensureOrigin reports an uncertain add on abort, so the transaction owner can restore it', async () => {
+    const work = await mkdtemp(path.join(fixtureBase, 'gp-add-abort-'));
+    let shim: FakeGit | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await git(work, ['init', '-b', 'main']);
+      shim = await failGit(['remote', 'add'], { afterRun: true, hang: true });
+      const controller = new AbortController();
+      let uncertain = false;
+      timer = setTimeout(() => controller.abort(), 300);
+      await expect(
+        ensureOrigin(work, 'https://a.test/x.git', {
+          addOnly: true,
+          signal: controller.signal,
+          onAdded: () => {
+            uncertain = true;
+          },
+        }),
+      ).rejects.toThrow('timed out');
+      expect(uncertain).toBe(true);
+      await shim.restore();
+      shim = undefined;
+      expect(await getOriginUrl(work)).toBe('https://a.test/x.git');
+      await git(work, ['remote', 'remove', 'origin']);
+      expect(await getOriginUrl(work)).toBeNull();
+    } finally {
+      clearTimeout(timer);
+      await shim?.restore();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
   it('scrubSecret masks every occurrence; passthrough on null', () => {
     expect(scrubSecret('tok=abc and abc again', 'abc')).toBe('tok=*** and *** again');
     expect(scrubSecret('nothing', null)).toBe('nothing');

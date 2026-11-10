@@ -1,5 +1,6 @@
-import { desc, eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { and, desc, eq, sql } from 'drizzle-orm';
+import { REPOSITORY_TASKS_LOCK_TIMEOUT_MS, schema } from '@haive/database';
+import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../../../audit.js';
 import type { FormSchema } from '@haive/shared';
 import { gitRemoteUrlSchema, redactGitUrl } from '@haive/shared/schemas';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -18,6 +19,125 @@ import { requireUsableGit } from '../../../repo/git-workspace.js';
 import { putBackProjections, warnStep } from '../../../project-state/branch-revert.js';
 
 const MANUAL_CREDENTIAL_VALUE = '';
+
+/** Establish the approved remote while the repository row and its audit move together. */
+async function persistPushOrigin(
+  ctx: StepContext,
+  repositoryId: string,
+  workspace: string,
+  remoteUrl: string,
+  credentialId: string | undefined,
+): Promise<void> {
+  let addedOrigin = false;
+  let restoreFailure: Error | undefined;
+  let event: AuditEvent | undefined;
+  let callbackSettled: Promise<void> | undefined;
+  const restore = async (err: unknown): Promise<never> => {
+    if (restoreFailure) throw restoreFailure;
+    if (addedOrigin) {
+      addedOrigin = false;
+      try {
+        const removed = await boundedRemoteGit((signal) =>
+          gitRun(workspace, ['remote', 'remove', 'origin'], undefined, { signal }),
+        );
+        // Exit 2: an interrupted add left no origin to remove.
+        if (removed.code !== 0 && removed.code !== 2) throw new Error('Origin removal failed');
+      } catch (restoreError) {
+        restoreFailure = new AggregateError(
+          [restoreError],
+          'Remote update failed and the added origin could not be removed',
+          { cause: err },
+        );
+        throw restoreFailure;
+      }
+    }
+    throw err;
+  };
+  try {
+    await ctx.db.transaction(async (tx) => {
+      let settle!: () => void;
+      callbackSettled = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      try {
+        await tx.execute(
+          sql.raw(`SET LOCAL lock_timeout = '${REPOSITORY_TASKS_LOCK_TIMEOUT_MS}ms'`),
+        );
+        const [stored] = await tx
+          .select({
+            remoteUrl: schema.repositories.remoteUrl,
+            credentialsSecretId: schema.repositories.credentialsSecretId,
+          })
+          .from(schema.repositories)
+          .where(
+            and(
+              eq(schema.repositories.id, repositoryId),
+              eq(schema.repositories.userId, ctx.userId),
+            ),
+          )
+          .for('no key update');
+        await tx.execute(sql.raw('SET LOCAL lock_timeout = DEFAULT'));
+        if (!stored) throw new Error('Repository no longer exists');
+        const patch = {
+          remoteUrl,
+          ...(credentialId ? { credentialsSecretId: credentialId } : {}),
+        };
+        const fields = (Object.keys(patch) as (keyof typeof patch)[]).filter(
+          (field) => patch[field] !== stored[field],
+        );
+        if (fields.length) {
+          event = {
+            actorUserId: ctx.userId,
+            action: 'repository.remote.update',
+            targetType: 'repository',
+            targetId: repositoryId,
+            metadata: { source: 'gate4_push', actorKind: 'task_user', fields },
+          };
+          await insertAuditEvent(tx, event);
+        }
+        try {
+          await boundedRemoteGit((signal) =>
+            ensureOrigin(workspace, remoteUrl, {
+              addOnly: true,
+              signal,
+              onAdded: () => {
+                addedOrigin = true;
+              },
+            }),
+          );
+          if (fields.length)
+            await tx
+              .update(schema.repositories)
+              .set({ ...patch, updatedAt: new Date() })
+              .where(eq(schema.repositories.id, repositoryId));
+        } catch (err) {
+          // Restore before a queued relink can acquire the repository row.
+          await restore(err);
+        }
+      } finally {
+        settle();
+      }
+    });
+  } catch (err) {
+    // A connection can reject the transaction while its callback is still doing git work.
+    await callbackSettled;
+    await restore(err);
+  }
+  if (event) logAuditEvent(event);
+}
+
+/** A remote edit must release the row promptly, including a child that ignores SIGTERM. */
+async function boundedRemoteGit<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const result = await run(controller.signal);
+    if (controller.signal.aborted) throw new Error('Git remote operation timed out');
+    return result;
+  } finally {
+    clearTimeout(deadline);
+  }
+}
 
 interface CredentialOption {
   id: string;
@@ -328,19 +448,16 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
       const remoteUrl = parsed.data;
       if (values.credentialId)
         await buildCredentialHelper(ctx.db, values.credentialId, ctx.userId, remoteUrl);
-      await ensureOrigin(workspace, remoteUrl);
-      // Persist the remote (and the chosen credential) onto the repo row so
-      // future pushes/clones are pre-wired. Plain runtime write; idempotent.
       if (detected.repositoryId) {
-        const patch: { remoteUrl: string; credentialsSecretId?: string; updatedAt: Date } = {
+        await persistPushOrigin(
+          ctx,
+          detected.repositoryId,
+          workspace,
           remoteUrl,
-          updatedAt: new Date(),
-        };
-        if (values.credentialId) patch.credentialsSecretId = values.credentialId;
-        await ctx.db
-          .update(schema.repositories)
-          .set(patch)
-          .where(eq(schema.repositories.id, detected.repositoryId));
+          values.credentialId,
+        );
+      } else {
+        await ensureOrigin(workspace, remoteUrl);
       }
     }
 

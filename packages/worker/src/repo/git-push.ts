@@ -9,7 +9,7 @@ import {
 import { schema, type Database } from '@haive/database';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { getDecryptedCredentials } from './credentials.js';
-import { GIT_MAX_BUFFER, type GitRunResult, gitRun } from './git-exec.js';
+import { GIT_MAX_BUFFER, gitGaveNoAnswer, type GitRunResult, gitRun } from './git-exec.js';
 import { gitRemoteGuardArgs, type GitRemoteOwner } from './git-remote-guard.js';
 
 // Re-exported because the step modules and the merge core import them from here.
@@ -166,9 +166,34 @@ export async function originGitRun(
 export async function ensureOrigin(
   cwd: string,
   url: string,
+  options: {
+    /** Refuse an origin added meanwhile rather than replacing its URLs. */
+    addOnly?: boolean;
+    signal?: AbortSignal;
+    /** Also called for an uncertain add, so its owner can undo it after a timeout. */
+    onAdded?: () => void;
+  } = {},
 ): Promise<{ added: boolean; updated: boolean }> {
   url = redactGitUrl(url, true);
-  const add = await gitRun(cwd, ['remote', 'add', 'origin', url]);
+  const add = await gitRun(
+    cwd,
+    ['remote', 'add', 'origin', url],
+    undefined,
+    options.signal ? { signal: options.signal } : undefined,
+  );
+  if (
+    add.code === 0 ||
+    (options.addOnly && add.code !== 3 && (gitGaveNoAnswer(add) || options.signal?.aborted))
+  )
+    options.onAdded?.();
+  if (options.signal?.aborted) throw new Error('Git remote add timed out');
+  if (options.addOnly && add.code !== 0) {
+    throw new Error(
+      add.code === 3
+        ? 'Origin was added while this push was waiting; retry'
+        : 'Git remote add failed',
+    );
+  }
   if (add.code === 0) return { added: true, updated: false };
   if (add.code === 3) {
     const cleared = await gitRun(cwd, [
