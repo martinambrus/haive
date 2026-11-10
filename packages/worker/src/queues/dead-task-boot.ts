@@ -156,7 +156,14 @@ export async function reviveDeadTask(
   const revived = await db.transaction(async (tx) => {
     if (await newWorkHeldUnderFence(tx)) return 'held' as const;
     try {
-      if (await reviveRefusal(tx, c.id)) return null;
+      const refusal = await reviveRefusal(tx, c.id);
+      if (refusal) {
+        const reason = 'refusal' in refusal ? refusal.refusal.reason : refusal.admission.reason;
+        log.info({ taskId: c.id, reason }, 'dead task revival refused');
+        return reason === 'root-claim' || reason === 'live-upgrade' || reason === 'live-onboarding'
+          ? ('held' as const)
+          : null;
+      }
     } catch (err) {
       if (err instanceof ModuleAdmissionError) return 'held' as const;
       throw err;
@@ -326,7 +333,7 @@ export async function reviveDeadTasks(
     }
   }
   if (held > 0) {
-    log.info({ held }, 'dead tasks not revived: new work is held or its state cannot be read');
+    log.info({ held }, 'dead tasks not revived: admission is held or its state cannot be read');
   }
   return { revived, held, failed };
 }

@@ -72,6 +72,7 @@ function withoutDistinctFrom(node: unknown): unknown {
 function setup(initialState: string | Error = 'normal') {
   const fake = createFakeDb({
     modules: schema.modules,
+    repositories: schema.repositories,
     tasks: schema.tasks,
     taskEvents: schema.taskEvents,
     taskTypeDefinitions: schema.taskTypeDefinitions,
@@ -491,5 +492,70 @@ describe('retryHeldRevivals', () => {
 
     expect(t.fences()).toBe(0);
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('dead-task revival admission refusals', () => {
+  it.each(['root-claim', 'live-upgrade', 'live-onboarding'] as const)(
+    'logs and retries the transient %s refusal once it clears',
+    async (reason) => {
+      const t = setup();
+      const repoId = uuid(8);
+      t.fake.insert(schema.repositories, {
+        id: repoId,
+        userId: USER,
+        name: 'repo',
+        source: 'blank',
+        ...(reason === 'root-claim' ? { rootClaimedAt: new Date(), rootClaimKind: 'refresh' } : {}),
+      });
+      t.fake.insert(schema.taskTypeDefinitions, {
+        slug: 'onboarding',
+        displayName: 'Onboarding',
+        runListStrategy: 'static',
+        source: 'test',
+      });
+      t.dead(1, { type: 'onboarding', status: 'failed', repositoryId: repoId });
+      if (reason !== 'root-claim')
+        t.dead(2, {
+          type: reason === 'live-upgrade' ? 'onboarding_upgrade' : 'onboarding',
+          status: 'running',
+          repositoryId: repoId,
+          deadAt: null,
+        });
+      const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+      expect(await reviveDeadTasks(t.db, t.deps)).toEqual({ revived: 0, held: 1, failed: 0 });
+      expect(info).toHaveBeenCalledWith(
+        expect.objectContaining({ taskId: uuid(1), reason }),
+        expect.any(String),
+      );
+      expect(t.task(1).deadAt).toEqual(DEAD_AT);
+      vi.useFakeTimers();
+      const stop = retryHeldRevivals(t.db, t.deps);
+      if (reason === 'root-claim')
+        await t.fake.db
+          .update(schema.repositories)
+          .set({ rootClaimedAt: null })
+          .where(eq(schema.repositories.id, repoId));
+      else
+        await t.fake.db
+          .update(schema.tasks)
+          .set({ status: 'cancelled' })
+          .where(eq(schema.tasks.id, uuid(2)));
+      await vi.advanceTimersByTimeAsync(DEAD_TASK_REVIVE_RETRY_MS);
+      expect(t.task(1).deadAt).toBeNull();
+      expect(t.fake.rows(schema.taskEvents)).toHaveLength(1);
+      stop();
+    },
+  );
+  it('logs a deleted repository as permanent without retrying it', async () => {
+    const t = setup();
+    t.dead(1, { repositoryId: null, metadata: {} });
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+    expect(await reviveDeadTasks(t.db, t.deps)).toEqual({ revived: 0, held: 0, failed: 0 });
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: uuid(1), reason: 'no-repository' }),
+      expect.any(String),
+    );
+    t.untouched();
   });
 });
