@@ -837,7 +837,7 @@ Sites:
 
 ### T373 · FNF[audit-strict-admin-actions] · module/task-type/upgrade-start actions still audit best-effort (+7)
 
-status: open · was modular #246 · priority: P2
+status: in progress, sites + items 1-4 (codex-sonnet) · was modular #246 · priority: P2
 Sites:
 
 - api modules/loader.ts:261, :291, :324, :411;
