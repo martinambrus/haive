@@ -18,6 +18,7 @@ const h = vi.hoisted(() => ({
   db: undefined as any,
   actor: '',
   throttle: vi.fn(),
+  refund: vi.fn(),
   close: vi.fn(),
   auditInsert: vi.fn(),
   auditLog: vi.fn(),
@@ -91,7 +92,8 @@ describe.skipIf(!url)('Account security audit on Postgres', () => {
       })
       .where(eq(schema.users.id, h.actor));
     cookie = `${ACCESS_COOKIE}=${await signAccessToken({ sub: h.actor, role: 'admin', tv: 0 })}`;
-    h.throttle.mockReset().mockResolvedValue({ refund: async () => {} });
+    h.refund.mockReset().mockResolvedValue(undefined);
+    h.throttle.mockReset().mockResolvedValue({ refund: h.refund });
     h.close.mockClear();
   });
   afterEach(async () => {
@@ -117,6 +119,7 @@ describe.skipIf(!url)('Account security audit on Postgres', () => {
         newPassword: 'synthetic-next-password',
       });
       expect(res.status).toBe(refused ? 500 : 400);
+      expect(h.refund).not.toHaveBeenCalled();
       if (!refused)
         expect(await res.json()).toEqual({
           error: 'Current password is incorrect',
@@ -150,6 +153,7 @@ describe.skipIf(!url)('Account security audit on Postgres', () => {
         newPassword: 'synthetic-next-password',
       });
       expect(res.status).toBe(refused ? 500 : 200);
+      expect(h.refund).toHaveBeenCalledTimes(1);
       expect(await audits(db)).toHaveLength(refused ? 0 : 1);
       expect(await sessions()).toHaveLength(refused ? 0 : 1);
       if (refused) {

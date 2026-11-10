@@ -146,6 +146,8 @@ userSettingsRoutes.put('/password', requireAuthAllowingPasswordChange, async (c)
     logAuditEvent(event);
     throw new HttpError(400, 'Current password is incorrect', 'current_password_incorrect');
   }
+  // Only a failed credential check costs budget, even if a later change is refused.
+  await attempt.refund();
 
   if (user.mustChangePassword && body.newPassword === body.currentPassword) {
     throw new HttpError(
@@ -201,7 +203,6 @@ userSettingsRoutes.put('/password', requireAuthAllowingPasswordChange, async (c)
   logAuditEvent(event);
   closeUserSockets(userId);
   setAuthCookies(c, accessToken, refreshToken);
-  await attempt.refund();
 
   return c.json({ ok: true });
 });

@@ -275,7 +275,12 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
   });
 
   describe('password-change oracle', () => {
-    async function change(email: string, currentPassword = WRONG, address?: string) {
+    async function change(
+      email: string,
+      currentPassword = WRONG,
+      address?: string,
+      newPassword = 'a different synthetic password',
+    ) {
       const user = fake
         .rows(schema.users)
         .find((row) => row.emailBlindIndex === computeEmailBlindIndex(email, PEPPER))!;
@@ -285,7 +290,7 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
         {
           method: 'PUT',
           headers: { 'content-type': 'application/json', cookie },
-          body: JSON.stringify({ currentPassword, newPassword: 'a different synthetic password' }),
+          body: JSON.stringify({ currentPassword, newPassword }),
         },
         address ? { incoming: { socket: { remoteAddress: address } } } : undefined,
       );
@@ -357,6 +362,27 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
       expect((await change(email, PASSWORD)).status).toBe(200);
       expect(fake.rows(schema.users)[0]!.mustChangePassword).toBe(false);
       expect(await client.zcard(acctKey('login', email))).toBe(0);
+    });
+
+    it('refunds a verified current password when the forced change refuses password_unchanged', async () => {
+      const email = mail('forced-unchanged-refund');
+      addUser(email);
+      const user = fake.rows(schema.users)[0]!;
+      await fake.db
+        .update(schema.users)
+        .set({ mustChangePassword: true })
+        .where(eq(schema.users.id, String(user.id)));
+
+      const res = await change(email, PASSWORD, peer(1), PASSWORD);
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ code: 'password_unchanged' });
+      expect(fake.rows(schema.users)[0]).toMatchObject({
+        mustChangePassword: true,
+        tokenVersion: 0,
+      });
+      expect(await client.zcard(acctKey('login', email))).toBe(0);
+      expect(await client.zcard(ipKey('login', peer(1)))).toBe(0);
     });
 
     it('fails open on a stalled Redis before checking the current password', async () => {
