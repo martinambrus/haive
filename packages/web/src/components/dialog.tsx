@@ -18,6 +18,10 @@ interface DialogProps {
   /** Override the centered wrapper's sizing (default `max-w-lg`). Merged with
    *  tailwind-merge, so e.g. `w-[95vw] max-w-6xl` widens it for a large modal. */
   className?: string;
+  'aria-label'?: string;
+  backdropClassName?: string;
+  /** A replacement opener, e.g. the history bell exchanged by a sticky header. */
+  fallbackFocus?: () => HTMLElement | null;
 }
 
 const TABBABLE =
@@ -58,9 +62,19 @@ function leavesPanel(panel: HTMLElement, stops: HTMLElement[], backwards: boolea
   return (edge.compareDocumentPosition(active) & beyond) !== 0;
 }
 
-export function Dialog({ open, onOpenChange, children, className }: DialogProps) {
+export function Dialog({
+  open,
+  onOpenChange,
+  children,
+  className,
+  'aria-label': label,
+  backdropClassName,
+  fallbackFocus,
+}: DialogProps) {
   const depth = useContext(DialogDepth);
   const panelRef = useRef<HTMLDivElement>(null);
+  const fallbackFocusRef = useRef(fallbackFocus);
+  fallbackFocusRef.current = fallbackFocus;
   const openerRef = useRef<HTMLElement | null>(null);
   const lastFocusedRef = useRef<HTMLElement | null>(null);
   // A keyed move can blur the opener during the opening commit. Remember real
@@ -151,10 +165,11 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
       }
       // A dialog still open above this one keeps the focus.
       if (!wasTop) return;
-      if (entry.opener?.isConnected) entry.opener.focus();
+      const returnTo = entry.opener?.isConnected ? entry.opener : fallbackFocusRef.current?.();
+      returnTo?.focus();
       const below = openPanels.at(-1);
       const focused = document.activeElement;
-      const onOpener = focused === entry.opener && focused !== document.body;
+      const onOpener = focused === returnTo && focused !== document.body;
       // Focus that is on neither the opener nor the dialog below goes to that dialog.
       if (below && !onOpener && !below.panel.contains(focused)) below.panel.focus();
     };
@@ -172,11 +187,14 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
         className="fixed inset-0 flex items-center justify-center"
       >
         <div
-          className="fixed inset-0 bg-black/60 backdrop-blur-sm"
+          className={cn('fixed inset-0 bg-black/60 backdrop-blur-sm', backdropClassName)}
           onClick={() => onOpenChange(false)}
         />
         <div
           ref={panelRef}
+          role={label ? 'dialog' : undefined}
+          aria-modal={label ? true : undefined}
+          aria-label={label}
           tabIndex={-1}
           className={cn('relative z-10 w-full max-w-lg outline-none', className)}
         >

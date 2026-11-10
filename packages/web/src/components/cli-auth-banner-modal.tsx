@@ -1,4 +1,5 @@
 'use client';
+import { Dialog } from '@/components/dialog';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
@@ -431,22 +432,6 @@ export function CliAuthBannerModal({
     onClose();
   }, [onClose]);
 
-  // Escape closes, like every other modal. Same path as the header's Close button,
-  // and stopPropagation for the same reason the shared Dialog gives: this closes
-  // synchronously on a discrete event, so a page-level handler behind the modal
-  // would otherwise act on the same keypress.
-  useEffect(() => {
-    // The provider mounts this closed on every page, so an unguarded listener swallows Escape app-wide.
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      e.stopPropagation();
-      handleClose();
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [open, handleClose]);
-
   /** Re-run ONLY the connection test, for a sign-in that saved its credentials and then lost
    *  its verification. Same probe the provider page's "Test connection" runs, so the result the
    *  user sees here is the one stored against the provider. */
@@ -481,10 +466,14 @@ export function CliAuthBannerModal({
   const pasteInputPlaceholder = pastesCode ? 'Paste code here' : 'Paste token here';
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
-      role="dialog"
-      aria-modal="true"
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) handleClose();
+      }}
+      aria-label={`Sign in — ${providerLabel}`}
+      className="w-[calc(100vw-2rem)] max-w-2xl"
+      backdropClassName="bg-black/70 backdrop-blur-none"
     >
       <div className="flex max-h-[90vh] w-full max-w-2xl flex-col gap-4 overflow-y-auto rounded-lg border border-neutral-800 bg-neutral-950 p-5 shadow-xl">
         <div className="flex items-start justify-between gap-4">
@@ -763,7 +752,7 @@ export function CliAuthBannerModal({
           </div>
         )}
       </div>
-    </div>
+    </Dialog>
   );
 }
 

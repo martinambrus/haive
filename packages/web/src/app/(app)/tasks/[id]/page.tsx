@@ -1,4 +1,5 @@
 'use client';
+import { PostLoginRetryDialog } from '@/components/post-login-retry-dialog';
 import { LinkButton } from '@/components/ui';
 
 import Link from 'next/link';
@@ -2414,26 +2415,11 @@ export default function TaskDetailPage() {
         </div>
       )}
 
-      {pendingLoginRetry && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-          <Card className="flex max-w-md flex-col gap-4 p-5">
-            <h2 className="text-base font-semibold text-neutral-100">Login successful</h2>
-            <p className="text-sm text-neutral-300">
-              You&apos;re now signed in. Retry step{' '}
-              <span className="font-mono text-xs text-neutral-400">{pendingLoginRetry.stepId}</span>{' '}
-              now?
-            </p>
-            <div className="flex justify-end gap-2">
-              <Button variant="secondary" size="sm" onClick={() => setPendingLoginRetry(null)}>
-                Not now
-              </Button>
-              <Button size="sm" onClick={confirmPostLoginRetry}>
-                Retry step
-              </Button>
-            </div>
-          </Card>
-        </div>
-      )}
+      <PostLoginRetryDialog
+        stepId={pendingLoginRetry?.stepId ?? null}
+        onClose={() => setPendingLoginRetry(null)}
+        onRetry={confirmPostLoginRetry}
+      />
     </div>
   );
 }
