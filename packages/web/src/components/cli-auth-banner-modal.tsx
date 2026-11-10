@@ -10,6 +10,7 @@ import { Button, FormError } from '@/components/ui';
 import { apiWebSocketUrl, type CliProbeResult, type CliProviderName } from '@/lib/api-client';
 import { usePendingCliCopy } from '@/lib/use-pending-cli-copy';
 import { describeSlotHolders } from '@/components/cli-slot-wait';
+import { CLI_LOGIN_CLOSE_CODES } from '@haive/shared/constants';
 import { runCliProbe } from '@/lib/cli-jobs';
 
 interface CliAuthBannerModalProps {
@@ -124,6 +125,7 @@ export function CliAuthBannerModal({
   useEffect(() => {
     if (!open) return;
     let disposed = false;
+    let refusalCode: number | undefined;
     changePhase('connecting');
     setAuthUrl(null);
     setDeviceCode(null);
@@ -232,14 +234,27 @@ export function CliAuthBannerModal({
     };
 
     ws.onerror = () => {
-      if (disposed) return;
+      if (disposed || refusalCode !== undefined) return;
       changePhase('error');
       setError('WebSocket error');
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       clearTimeout(connectTimeout);
-      if (disposed) return;
+      if (disposed || refusalCode !== undefined) return;
+      const refusal =
+        event?.code === CLI_LOGIN_CLOSE_CODES.AUTH_BUSY
+          ? 'Another sign-in or sign-out for this account is in progress. Try again when it finishes.'
+          : event?.code === CLI_LOGIN_CLOSE_CODES.SETTINGS_CHANGED
+            ? 'Login settings changed. Reload and try again.'
+            : null;
+      if (refusal) {
+        refusalCode = event.code;
+        setQueueWait(null);
+        setError(refusal);
+        changePhase('error');
+        return;
+      }
       if (phaseRef.current === 'success') {
         // A closed socket cannot clear the queued probe; let the safety timer resume.
         setQueueWait(null);

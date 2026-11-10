@@ -584,6 +584,7 @@ jobs:
           shared test/global-kb-ensure-bound.test.ts HAIVE_GKB_TEST_DB_URL gkb_ensure_bound_test pgvector
           worker test/rag-schema.test.ts HAIVE_GKB_TEST_DB_URL rag_schema_test pgvector
           api test/cli-secrets-audit-db.test.ts CLI_SECRETS_AUDIT_TEST_URL cli_secrets_audit_test pg
+          api test/cli-login-banner-auth-db.test.ts CLI_SECRETS_AUDIT_TEST_URL cli_secrets_audit_test_banner pg
           database test/cli-auth-lock.test.ts CLI_AUTH_LOCK_TEST_URL cli_secrets_audit_test_auth_lock pg
           worker test/cli-sign-out-db.test.ts CLI_SIGN_OUT_TEST_URL cli_secrets_audit_test_signout pg
           api test/account-security-audit-db.test.ts ACCOUNT_SECURITY_AUDIT_TEST_URL account_security_audit_test pg

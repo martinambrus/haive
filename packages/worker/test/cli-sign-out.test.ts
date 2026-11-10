@@ -5,6 +5,7 @@ vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
   tryCliAuthLock: lock.acquire,
 }));
+import { CLI_SIGN_OUT_AUTH_WAIT_MS } from '@haive/shared/constants';
 import { handleSignOutJob } from '../src/queues/cli-exec-queue.js';
 import type { Database } from '@haive/database';
 import type {
@@ -449,7 +450,7 @@ it('fails after thirty minutes of auth contention without removing anything', as
   const now = Date.now();
   const job = {
     token: 'token',
-    data: { authContentionStartedAt: now - 30 * 60_000, authContentionAttempts: 123 },
+    data: { authContentionStartedAt: now - CLI_SIGN_OUT_AUTH_WAIT_MS, authContentionAttempts: 123 },
     updateData: vi.fn(),
     moveToDelayed: vi.fn(),
   };

@@ -1,11 +1,17 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
-import { CLI_POLLABLE_JOB_OPTS, type RefreshCliVersionsJobResult } from '@haive/shared/constants';
+import {
+  CLI_POLLABLE_JOB_OPTS,
+  CLI_SIGN_OUT_AUTH_WAIT_MS,
+  type RefreshCliVersionsJobResult,
+} from '@haive/shared/constants';
 import {
   jobPhaseForState,
   POLL_TIMEOUT_MS,
+  SIGN_OUT_POLL_TIMEOUT_MS,
   runCatalogVersionRefresh,
   runPricingRefresh,
   runCliSignOut,
+  runCliProbe,
   signOutSummary,
 } from './cli-jobs';
 import type { CliPackageVersionsEntry } from './api-client';
@@ -32,15 +38,20 @@ describe('jobPhaseForState', () => {
   });
 });
 
-describe('POLL_TIMEOUT_MS', () => {
-  it('stays under the server-side job retention', () => {
-    // Polling past retention would report "expired" for work that succeeded.
+describe('poll budgets', () => {
+  it('keeps the default poll timeout under completed and failed job retention', () => {
+    // Sign-out is exempt: it polls continuously, and retention counts from completion.
     for (const retention of [
       CLI_POLLABLE_JOB_OPTS.removeOnComplete,
       CLI_POLLABLE_JOB_OPTS.removeOnFail,
     ]) {
       expect(POLL_TIMEOUT_MS).toBeLessThan(retention.age * 1000);
     }
+  });
+
+  it('keeps the default at ten minutes and allows the worker auth wait plus margin for sign-out', () => {
+    expect(POLL_TIMEOUT_MS).toBe(10 * 60_000);
+    expect(SIGN_OUT_POLL_TIMEOUT_MS).toBeGreaterThan(CLI_SIGN_OUT_AUTH_WAIT_MS + 15_000);
   });
 });
 
@@ -191,3 +202,55 @@ it('shows the worker auth-contention failure text for sign-out', async () => {
   h.get.mockResolvedValue({ status: 'failed', error });
   await expect(runCliSignOut('provider')).rejects.toThrow(error);
 });
+
+it('continues sign-out polling at eleven minutes and surfaces a later worker failure', async () => {
+  h.get.mockResolvedValue({ status: 'pending', state: 'delayed' });
+  let settled = false;
+  const result = runCliSignOut('provider')
+    .catch((error: Error) => error)
+    .finally(() => {
+      settled = true;
+    });
+  await vi.advanceTimersByTimeAsync(11 * 60_000);
+  expect(settled).toBe(false);
+  expect(h.get).toHaveBeenCalledTimes(331);
+  const error = 'A CLI sign-in or credential update kept this account busy. Nothing was removed.';
+  await vi.advanceTimersByTimeAsync(19 * 60_000);
+  expect(settled).toBe(false);
+  h.get.mockResolvedValue({ status: 'failed', error });
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(await result).toMatchObject({ message: error });
+});
+
+it('a probe still times out at ten minutes', async () => {
+  const result = runCliProbe('provider').catch((error: Error) => error);
+  await vi.advanceTimersByTimeAsync(10 * 60_000);
+  expect(await result).toMatchObject({
+    message: expect.stringContaining('Still queued behind running CLI jobs.'),
+  });
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it.each([
+  ['delayed', 'Still waiting for this account to become available.'],
+  ['waiting', 'Still queued behind running CLI jobs.'],
+  ['prioritized', 'Still queued behind running CLI jobs.'],
+  ['active', 'Still running.'],
+  [undefined, 'Still queued behind running CLI jobs.'],
+] as const)(
+  'a sign-out poll timeout names the last observed state (%s)',
+  async (state, message) => {
+    h.get
+      .mockResolvedValueOnce({
+        status: 'pending',
+        state: state === 'delayed' ? 'active' : 'delayed',
+      })
+      .mockResolvedValue({ status: 'pending', state });
+    const onPhase = vi.fn();
+    const result = runCliSignOut('provider', onPhase).catch((error: Error) => error);
+    await vi.advanceTimersByTimeAsync(SIGN_OUT_POLL_TIMEOUT_MS);
+    expect(await result).toMatchObject({ message: expect.stringContaining(message) });
+    expect(onPhase).toHaveBeenLastCalledWith(state === 'active' ? 'running' : 'queued');
+    expect(vi.getTimerCount()).toBe(0);
+  },
+);

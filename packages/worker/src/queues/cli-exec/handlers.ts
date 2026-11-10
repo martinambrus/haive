@@ -13,6 +13,7 @@ import {
   CLI_EXEC_JOB_NAMES,
   VERSION_REFRESH_JOB_ID,
   CLI_POLLABLE_JOB_OPTS,
+  CLI_SIGN_OUT_AUTH_WAIT_MS,
   CONFIG_CONCURRENCY_CHANNEL,
   CONFIG_KEYS,
   ConfigUnavailableError,
@@ -1150,7 +1151,7 @@ export async function handleSignOutJob(
     if (!job) throw new Error('CLI authentication is busy');
     const startedAt = job.data?.authContentionStartedAt ?? Date.now();
     const waitedMs = Date.now() - startedAt;
-    if (waitedMs >= 30 * 60_000) {
+    if (waitedMs >= CLI_SIGN_OUT_AUTH_WAIT_MS) {
       throw new UnrecoverableError(
         'A CLI sign-in or credential update kept this account busy. Nothing was removed.',
       );
