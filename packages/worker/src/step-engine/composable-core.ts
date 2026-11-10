@@ -34,7 +34,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     requires: [needRepository('Reads the dependencies declared by the repository.')],
     provides: ['env-deps'],
     entails: ['env-image'],
-    precedes: ['base-synced', 'worktree', 'discovery', 'spec', 'cleaned'],
+    precedes: ['worktree', 'discovery', 'spec', 'cleaned'],
   },
   {
     stepId: '02-generate-dockerfile',
@@ -46,7 +46,6 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
       { needs: 'env-deps', reason: 'Builds the Dockerfile from the declared dependencies.' },
     ],
     provides: ['env-dockerfile'],
-    precedes: ['base-synced'],
   },
   {
     stepId: '03-build-image',
@@ -55,7 +54,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     dispatchesCli: false,
     requires: [{ needs: 'env-dockerfile', reason: 'Fails without a generated Dockerfile.' }],
     provides: ['env-image'],
-    precedes: ['base-synced', 'worktree', 'discovery', 'spec', 'browser-choice', 'cleaned'],
+    precedes: ['worktree', 'discovery', 'spec', 'browser-choice', 'cleaned'],
   },
   {
     stepId: '04-verify-environment',
@@ -64,9 +63,8 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     group: 'env',
     dispatchesCli: false,
     requires: [{ needs: 'env-image', reason: 'Checks the built, ready image.' }],
-    provides: ['env-verified'],
+    provides: [],
     precedes: [
-      'base-synced',
       'app-runtime',
       'implementation',
       'discovery',
@@ -82,16 +80,9 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     label: 'Sync base with origin',
     group: 'setup',
     dispatchesCli: true,
-    requires: [
-      needRepository('Syncs the repository base branch with origin.'),
-      { needs: 'env-image', reason: 'A divergent-base merge fixer needs the built environment.' },
-      {
-        needs: 'env-verified',
-        reason: 'Check runtimes and language servers before a merge fixer.',
-      },
-    ],
-    provides: ['base-synced'],
-    precedes: ['worktree', 'discovery', 'spec'],
+    requires: [needRepository('Syncs the repository base branch with origin.')],
+    provides: [],
+    precedes: ['worktree', 'discovery', 'spec', 'env-deps', 'env-dockerfile', 'env-image'],
   },
   {
     stepId: '01-worktree-setup',

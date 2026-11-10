@@ -22,10 +22,9 @@ export const MODEL_HEALTH_STEP_ID = '00-model-health-workflow';
  *  the base-sync step). */
 export const TRIAGE_STEP_ID = '00-triage';
 
-/** The pre-branch base-sync step id. Runs after the model-health canary and environment
- *  prelude, before triage: a divergent-base merge fixer needs the image and LSP checks.
- *  It freshens the local base branch from origin so the feature worktree starts from
- *  the latest code and the
+/** The pre-branch base-sync step id. Runs after the model-health canary and before
+ *  triage (orderWorkflowRunList pulls it between them): it freshens the local base
+ *  branch from origin so the feature worktree is cut from the latest code and the
  *  12-worktree-cleanup base push is a fast-forward. Single source of truth. */
 export const SYNC_BASE_STEP_ID = '00a-sync-base';
 
@@ -141,12 +140,14 @@ export interface OrderableStep {
   readonly metadata: { readonly id: string; readonly workflowType: string };
 }
 
-/** Build the workflow run list: model-health, the complete environment prelude, base
- * sync, triage, then the remaining workflow steps in registry order. The prelude reads
- * the existing repository checkout and task env template, never base-sync output; its
- * image and LSP checks must be ready before sync can dispatch a divergent-base fixer.
- * Sync still freshens the branch before triage or worktree creation. A chosen path trims
- * only workflow steps; the canary, sync and triage belong to every path's spine. */
+/** Build the ordered run list for a workflow task: the model-health canary first (a
+ *  dead model fails loudly before anything else runs), then 00a-sync-base (freshen the
+ *  base branch from origin before any decision or branch is made), then 00-triage (so
+ *  the path is chosen up front), then the env-replicate prelude, then the remaining
+ *  workflow steps in their existing order. When a path is set, workflow steps are
+ *  trimmed to that path; the env-replicate prelude is never filtered. The canary,
+ *  base-sync, and triage are all in every path set (SPINE), so none is ever filtered
+ *  out. Pure (no registry / DB) so it is unit-testable. */
 export function orderWorkflowRunList<T extends OrderableStep>(
   main: readonly T[],
   prelude: readonly T[],
@@ -161,7 +162,7 @@ export function orderWorkflowRunList<T extends OrderableStep>(
       s.metadata.id !== SYNC_BASE_STEP_ID &&
       s.metadata.id !== TRIAGE_STEP_ID,
   );
-  const ordered = [...health, ...prelude, ...sync, ...triage, ...rest];
+  const ordered = [...health, ...sync, ...triage, ...prelude, ...rest];
   if (!path) return ordered;
   return ordered.filter(
     (s) => s.metadata.workflowType === 'env_replicate' || keepForPath(s.metadata.id, path),

@@ -76,53 +76,57 @@ describe('orderWorkflowRunList', () => {
     step('07-phase-2-implement'),
     step('08d-adversarial-qa'),
     step('10-gate-3-commit'),
-    // Deliberately out of position: sync belongs after the complete environment prelude.
+    // Deliberately out of position to prove orderWorkflowRunList pulls it to slot 1.
     step(SYNC_BASE_STEP_ID),
   ];
   const prelude: OrderableStep[] = [
     step('01-declare-deps', 'env_replicate'),
-    step('02-generate-dockerfile', 'env_replicate'),
     step('03-build-image', 'env_replicate'),
-    step('04-verify-environment', 'env_replicate'),
   ];
+  it.each([null, 'full_workflow', 'quick_bugfix', 'plan_tasklist'] as const)(
+    'syncs the base before env detection and retains the prelude after triage on %s',
+    (path) => {
+      const ids = orderWorkflowRunList(main, prelude, path).map((s) => s.metadata.id);
+      expect(ids.slice(0, 5)).toEqual([
+        '00-model-health-workflow',
+        SYNC_BASE_STEP_ID,
+        TRIAGE_STEP_ID,
+        '01-declare-deps',
+        '03-build-image',
+      ]);
+      expect(ids[ids.indexOf(TRIAGE_STEP_ID) + 1]).toBe('01-declare-deps');
+    },
+  );
+
   const ids = (path: Parameters<typeof orderWorkflowRunList>[2]) =>
     orderWorkflowRunList(main, prelude, path).map((s) => s.metadata.id);
 
-  it('null path: model-health, prelude, base-sync, triage, then the rest', () => {
+  it('null path: model-health, base-sync, triage, then prelude, then the rest', () => {
     const r = ids(null);
     expect(r[0]).toBe('00-model-health-workflow');
-    expect(r[5]).toBe(SYNC_BASE_STEP_ID);
-    expect(r[6]).toBe(TRIAGE_STEP_ID);
-    expect(r.slice(1, 5)).toEqual(prelude.map((s) => s.metadata.id));
+    expect(r[1]).toBe(SYNC_BASE_STEP_ID);
+    expect(r[2]).toBe(TRIAGE_STEP_ID);
+    expect(r.slice(3, 5)).toEqual(['01-declare-deps', '03-build-image']);
     expect(r).toContain('08d-adversarial-qa');
   });
 
-  it('quick_bugfix: model-health + prelude + base-sync + triage, prelude kept, heavy steps dropped', () => {
+  it('quick_bugfix: model-health + base-sync + triage first, prelude kept, heavy steps dropped', () => {
     const r = ids('quick_bugfix');
     expect(r[0]).toBe('00-model-health-workflow');
-    expect(r[5]).toBe(SYNC_BASE_STEP_ID);
-    expect(r[6]).toBe(TRIAGE_STEP_ID);
+    expect(r[1]).toBe(SYNC_BASE_STEP_ID);
+    expect(r[2]).toBe(TRIAGE_STEP_ID);
     expect(r).toContain('01-declare-deps'); // prelude is never filtered
     expect(r).toContain('07-phase-2-implement');
     expect(r).not.toContain('08d-adversarial-qa');
     expect(r).not.toContain('04-phase-0b-pre-planning');
   });
 
-  it('plan_tasklist: model-health + prelude + base-sync first, spec + DAG kept, adversarial dropped', () => {
+  it('plan_tasklist: model-health + base-sync first, spec + DAG kept, adversarial dropped', () => {
     const r = ids('plan_tasklist');
     expect(r[0]).toBe('00-model-health-workflow');
-    expect(r[5]).toBe(SYNC_BASE_STEP_ID);
+    expect(r[1]).toBe(SYNC_BASE_STEP_ID);
     expect(r).toContain('04-phase-0b-pre-planning');
     expect(r).toContain('06b-sprint-planning');
     expect(r).not.toContain('08d-adversarial-qa');
   });
-  it.each([null, 'full_workflow', 'quick_bugfix', 'plan_tasklist'] as const)(
-    'has image and LSP checks ready before a divergent-base merge fixer on path %s',
-    (path) => {
-      const r = ids(path);
-      expect(r.indexOf('04-verify-environment')).toBeLessThan(r.indexOf(SYNC_BASE_STEP_ID));
-      expect(r.indexOf(SYNC_BASE_STEP_ID)).toBeLessThan(r.indexOf(TRIAGE_STEP_ID));
-      expect(r.indexOf(SYNC_BASE_STEP_ID)).toBeLessThan(r.indexOf('01-worktree-setup'));
-    },
-  );
 });
