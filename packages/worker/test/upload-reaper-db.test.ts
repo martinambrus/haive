@@ -123,6 +123,145 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
   const statusOf = async (id: string) =>
     (await db.query.dbUploads.findFirst({ where: eq(schema.dbUploads.id, id) }))!.status;
 
+  describe('90-day finished metadata retention', () => {
+    const tables = {
+      repo: schema.repoUploads,
+      bundle: schema.customBundleUploads,
+      dump: schema.dbUploads,
+    };
+    type Kind = keyof typeof tables;
+    const DAY = 24 * HOUR;
+    async function metadata(
+      kind: Kind,
+      days: number,
+      status = kind === 'dump' ? 'consumed' : 'complete',
+      id: string = randomUUID(),
+      bundleId?: string,
+    ) {
+      const common = {
+        id,
+        userId,
+        filename: 'archive',
+        totalSize: 10,
+        bytesReceived: 10,
+        chunkSize: 10,
+        status,
+        createdAt: new Date(Date.now() - 120 * DAY),
+        updatedAt: new Date(Date.now() - days * DAY),
+      };
+      if (kind === 'dump') {
+        await db.insert(schema.dbUploads).values({
+          ...common,
+          dumpFormat: 'sql',
+          dumpPath: path.join(root, 'repos', '_uploads', userId, `db-${id}.sql`),
+        });
+      } else if (kind === 'repo') {
+        await db.insert(schema.repoUploads).values({
+          ...common,
+          archiveFormat: 'zip',
+          archivePath: path.join(root, 'repos', '_uploads', userId, `${id}.zip`),
+        });
+      } else {
+        await db.insert(schema.customBundleUploads).values({
+          ...common,
+          name: 'bundle',
+          repositoryId: repoId,
+          bundleId,
+          archiveFormat: 'zip',
+          archivePath: path.join(root, 'bundles', userId, bundleId ?? id, 'source.zip'),
+        });
+      }
+      return id;
+    }
+    const row = async (kind: Kind, id: string) => {
+      const table = tables[kind];
+      return (
+        await db.select({ id: table.id, status: table.status }).from(table).where(eq(table.id, id))
+      )[0];
+    };
+
+    it.each(['repo', 'bundle', 'dump'] as const)(
+      '%s deletes a 91-day finished row, keeps 89-day and failed or active rows',
+      async (kind) => {
+        const old = await metadata(kind, 91);
+        const young = await metadata(kind, 89);
+        const failed = await metadata(kind, 91, 'failed');
+        const active = await metadata(kind, 0, 'uploading');
+        const completing = await metadata(kind, 0, 'completing');
+        const reapFailed = await metadata(kind, 91, 'reap_failed');
+        await reapAbandonedUploads(db);
+        expect(await row(kind, old)).toBeUndefined();
+        for (const id of [young, failed, active, completing, reapFailed])
+          expect(await row(kind, id)).toBeDefined();
+      },
+    );
+
+    it.each(['cloning', 'error'] as const)(
+      'keeps completed repository metadata needed by a %s repository',
+      async (status) => {
+        await db
+          .update(schema.repositories)
+          .set({ source: 'upload', status })
+          .where(eq(schema.repositories.id, repoId));
+        await metadata('repo', 91, 'complete', repoId);
+        await reapAbandonedUploads(db);
+        expect(await row('repo', repoId)).toBeDefined();
+      },
+    );
+
+    it.each(['syncing', 'failed', 'active'] as const)(
+      'preserves the %s bundle and its archive; only active bundle metadata expires',
+      async (status) => {
+        const bundleId = randomUUID();
+        const archivePath = path.join(root, 'bundles', userId, bundleId, 'source.zip');
+        await mkdir(path.dirname(archivePath), { recursive: true });
+        await writeFile(archivePath, 'retained source');
+        await db.insert(schema.customBundles).values({
+          id: bundleId,
+          userId,
+          repositoryId: repoId,
+          name: 'bundle',
+          sourceType: 'zip',
+          storageRoot: path.dirname(archivePath),
+          archivePath,
+          status,
+        });
+        const id = await metadata('bundle', 91, 'complete', randomUUID(), bundleId);
+        await reapAbandonedUploads(db);
+        expect(Boolean(await row('bundle', id))).toBe(status !== 'active');
+        expect(
+          await db.query.customBundles.findFirst({ where: eq(schema.customBundles.id, bundleId) }),
+        ).toBeDefined();
+        expect(await exists(archivePath)).toBe(true);
+      },
+    );
+
+    it.each(['running', 'failed', 'completed'] as const)(
+      'keeps consumed metadata referenced by a %s task without nulling its source',
+      async (status) => {
+        const id = await metadata('dump', 91);
+        await link(id, status, 91 * DAY);
+        await reapAbandonedUploads(db);
+        expect(await row('dump', id)).toBeDefined();
+        expect(
+          (await db.query.tasks.findFirst({ where: eq(schema.tasks.dbUploadId, id) }))?.dbUploadId,
+        ).toBe(id);
+      },
+    );
+
+    it.each(['repo', 'bundle', 'dump'] as const)(
+      '%s deletes at most 100 finished rows per pass and drains the next batch',
+      async (kind) => {
+        for (let i = 0; i < 103; i++) await metadata(kind, 91);
+        const table = tables[kind];
+        await reapAbandonedUploads(db);
+        expect(await db.select().from(table).where(eq(table.userId, userId))).toHaveLength(3);
+        await reapAbandonedUploads(db);
+        expect(await db.select().from(table).where(eq(table.userId, userId))).toHaveLength(0);
+      },
+    );
+  });
+
   // Runs `inject` once the pass has read the tasks and before it claims: a task linked in that gap.
   function afterTasksRead(real: Database, inject: () => Promise<unknown>): Database {
     let first = true;

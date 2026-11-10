@@ -119,10 +119,9 @@ Verification fence: one short pass, at most three supported cases per candidate,
 
 ### T323 · FNF[uploads-3] · finished upload rows are never deleted; the reaper's removal is not identity-checked (+1)
 
-status: in progress (item 4 in bundle D1, overnight run 2026-11-10) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
+status: open (item 5 parked; item 4 done #1063) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 All PRE-EXISTING.
 
-4. PARKED (user): `complete` rows in repo_uploads/custom_bundle_uploads and `consumed` db_uploads rows are never deleted — needs a retention rule.
 5. Latent, minor: the reaper removes a path without checking it is still the file it lstat'ed (upload-reaper.ts removeFile); fs-safe's lstatNoFollow returns numeric Stats, so dev/ino cannot be compared losslessly. Cannot bite today (upload names are fresh UUIDs). Fix: a bigint lstat identity export in fs-safe, compared before the unlink.
 
 User decision 2026-11-01: Retain complete/consumed upload metadata 90 days; protect active or retry-needed rows. Item5 identity-hardening remains parked until reachable impact.
@@ -141,15 +140,6 @@ All PRE-EXISTING; notes .claude/tmp/track-b/b3/b31c/analysis/guard.md.
 
 status: in progress (bundle E1, overnight run 2026-11-10, branch fix/E1-dag-merge-root-fences) · priority: P2
 dag-executor.ts (~681, ~951) aborts level merges without resolveHaiveProjectionConflicts, so a conflict only in Haive files goes to a fixer. Fix: run B3.1c's revert helper on each DAG issue branch before its level merge. (#274 merged, so unblocked.)
-
-### T291 · FNF[fs-park] · a process death mid-park leaves the file under its park name (+2)
-
-status: in progress (bundle D1, overnight run 2026-11-10, branch fix/D1-park-sweep-upload-retention) · priority: P2
-All PRE-EXISTING.
-
-1. fs-safe.ts ~1115-1262 parks as `.<leaf>.haive-park-<pid>-<uuid>`; a kill between rename and settle leaves it there; nothing sweeps it. Fix: boot/temp sweep puts it back when the name is free, else reports.
-2. _rules-files.ts stripRtkBlocks (~180) / appendRtkBlock (~336) await 02's DB insert while AGENTS.md/CLAUDE.md is parked; record before the park.
-3. plan/mirror.ts ~287/~316 await git while plan.json is parked — deliberate; item 1 covers it.
 
 ### T308 · FNF[worktree-aliases] · hard links planted into .haive/worktrees before #800 survive
 
@@ -202,7 +192,7 @@ shared/src/rag/search.ts:449/:560 plainto_tsquery ANDs every term; 67.6% of logg
 
 ### T145 · RAG F13 · Slovak text matches only verbatim
 
-status: open · kind: feature · user decision: resolved 2026-11-01 · priority: P3
+status: in progress (bundle K, overnight run 2026-11-10, branch fix/K-slovak-rag) · kind: feature · user decision: resolved 2026-11-01 · priority: P3
 _rag-connection.ts:130 update_content_tsv uses to_tsvector('english') without unaccent ("kotolna" misses "kotolňa"). Needs a backfill (like backfillIdentifierTsv) and a fail-open path without the extension. Plan P2(e).
 
 User decision 2026-11-01: Approve bounded Slovak accent-insensitive retrieval with a backfill and extension-unavailable fallback; retain retrieval-evaluation gates for T144/T147.
@@ -1569,8 +1559,17 @@ status: open (items 1, 3, 5 done in #1062; the rest unapproved, awaiting owner p
 status: open · kind: fix · found: T590 (#1062) Codex and review 2026-11-10 · priority: P4
 PRE-EXISTING, minor to moderate. A browser cannot read a refused upgrade's status, so these show a generic error: api routes/terminal.ts ~:66 ("Container not running"), ~:70 ("Container not bound to docker"); routes/terminal-shell.ts ~:137 (task status disables the terminal), ~:552, ~:559 (repository eligibility). Clients: web Terminal.tsx ~:247-253, InteractiveShell.tsx ~:241-247. Fix: the #1062 pattern (accept after the origin, auth and ownership checks, then close with a 4000-4999 code from a shared constant; the client keys its sentence on the code).
 
+### T592 · FNF[fs-park-recovery] · park recovery runs only where fs-safe writes; legacy truncated parks (+1)
+
+status: open · kind: fix · found: D1 (#1063) Codex and review 2026-11-10 · priority: P4
+PRE-EXISTING, minor.
+
+1. Park recovery (worker `fs-recovery.ts`, driven by the write-path temp sweep) visits only directories fs-safe writes into; a park left in a directory nothing writes again stays under its park name. Fix: also visit the dirs that parked a file (record them) or accept and document.
+2. A park written before #1063 with a leaf long enough to be truncated in its park name has no `.name` record, so recovery cannot know the original name and only warns. Fix: none needed unless a user reports one; manual restore.
+
 ## Done
 
+- T291 + T323 item 4 — a file parked by a process death is put back after 24 h (ctime age, worker write-path sweep, bounded warnings, `.name` records for long leaves); RTK strip/append record before parking; complete/consumed upload rows deleted 90 days after `updated_at` (protected states kept) — PR #1063 (a49293f6e), 2026-11-10. T323 item 5 stays parked; follow-ups T592.
 - T590 items 1, 3, 5 — CLI login-secret deletes take the auth-scope lock (409 `cli_auth_busy`, no generation advance); sign-out poll window past the shared 30 min cap (`CLI_SIGN_OUT_AUTH_WAIT_MS`); busy or settings-moved login upgrade closes with 4409/4410 and the modal says why — PR #1062 (0f52f236c), 2026-11-10. T590 stays open with items 2, 4, 6-18; follow-ups T591, T502 item 4.
 - T586 — a late CLI sign-out no longer deletes a newer login's credential: `cli_providers.auth_generation` (migration 0224) stamped at login and secret writes, the sign-out job skips a superseded login; one advisory lock per auth scope held by login, sign-out, sync-back, refresh and PATCH, with scope recheck after the lock — PR #1061 (f715e40a7), 2026-11-10. Follow-ups T590.
 - T570 + T554 items 1-3 — encryption key SET NX winner (checked on every production read); private endpoint seed retries unresolved names (cap 10, admin save ends seed ownership); one shared allowlist lock name; item 4 invalid (egress guard already warns), item 5 no change — PR #1060 (5f90d186a), 2026-11-10. Leftovers T589.
