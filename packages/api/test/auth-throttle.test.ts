@@ -308,24 +308,30 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
         });
       }
       vi.mocked(verifyPassword).mockClear();
-      const res = await change(email);
-      expect(res.status).toBe(429);
-      const body = (await res.json()) as RefusedBody;
-      expect(
-        fake.rows(schema.auditEvents).filter((r) => r.action === 'user.password.change.failure'),
-      ).toHaveLength(10);
-      expect(body.code).toBe('rate_limited');
-      expect(body.retryAfterSeconds).toBe(Number(res.headers.get('Retry-After')));
-      expect(body.error).toContain(String(body.retryAfterSeconds));
-      expect(verifyPassword).not.toHaveBeenCalled();
-      await change(email);
-      await vi.waitFor(() =>
+      const audit = vi.spyOn(await import('../src/lib/audit.js'), 'recordAuditEvent');
+      try {
+        const res = await change(email);
+        expect(res.status).toBe(429);
+        const body = (await res.json()) as RefusedBody;
+        expect(
+          fake.rows(schema.auditEvents).filter((r) => r.action === 'user.password.change.failure'),
+        ).toHaveLength(10);
+        expect(body.code).toBe('rate_limited');
+        expect(body.retryAfterSeconds).toBe(Number(res.headers.get('Retry-After')));
+        expect(body.error).toContain(String(body.retryAfterSeconds));
+        expect(verifyPassword).not.toHaveBeenCalled();
+        expect((await change(email)).status).toBe(429);
+        // Both handlers have scheduled their best-effort audits; settle every write before counting.
+        await Promise.all(audit.mock.results.map((result) => result.value));
         expect(
           fake
             .rows(schema.auditEvents)
             .filter((r) => r.action === 'user.password.change.throttled'),
-        ).toHaveLength(1),
-      );
+        ).toHaveLength(1);
+      } finally {
+        await Promise.all(audit.mock.results.map((result) => result.value));
+        audit.mockRestore();
+      }
     });
 
     it.each(['login', 'password'] as const)(
