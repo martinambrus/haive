@@ -301,3 +301,20 @@ it('bounds sign-out enqueue to ten seconds and rolls its audit back', async () =
     vi.useRealTimers();
   }
 });
+
+describe('empty provider security values are audit no-ops', () => {
+  it.each([
+    ['cliArgs', null, []],
+    ['wrapperContent', '', ''],
+    ['wrapperPath', '', ''],
+    ['executablePath', '', ''],
+    ['sandboxDockerfileExtra', '', ''],
+    ['cliVersion', '', ''],
+    ['envVars', null, {}],
+  ])('does not audit an empty %s save', async (field, before, after) => {
+    const fake = setup(true);
+    fake.patch(schema.cliProviders, PROVIDER, { [field as string]: before });
+    expect((await send('PATCH', '/' + PROVIDER, { [field as string]: after })).status).toBe(200);
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+  });
+});

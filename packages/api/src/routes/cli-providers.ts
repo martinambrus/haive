@@ -348,6 +348,13 @@ cliProviderRoutes.get('/:id', async (c) => {
   return c.json({ provider: withRulesState(row) });
 });
 
+/** Empty optional settings have the same meaning whether stored as NULL or sent by a form. */
+function emptyAuditValueAsNull(value: unknown): unknown {
+  if (value == null || value === '') return null;
+  if (typeof value === 'object' && Object.keys(value).length === 0) return null;
+  return value;
+}
+
 cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
   const body = createCliProviderRequestSchema.parse(await c.req.json());
@@ -568,7 +575,12 @@ cliProviderRoutes.patch('/:id', async (c) => {
       'cliVersion',
     ] as const;
     const fields: string[] = securityFields.filter(
-      (field) => updates[field] !== undefined && !isDeepStrictEqual(updates[field], current[field]),
+      (field) =>
+        updates[field] !== undefined &&
+        !isDeepStrictEqual(
+          emptyAuditValueAsNull(updates[field]),
+          emptyAuditValueAsNull(current[field]),
+        ),
     );
     const envNames = split
       ? [...new Set([...Object.keys(current.envVars ?? {}), ...Object.keys(split.envVars)])]
