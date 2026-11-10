@@ -33,6 +33,9 @@ export const DEFAULT_CLI_STREAM_LOG_RETENTION_DAYS = 0;
  *  Admin-tunable via CONFIG_KEYS.CLI_PROMPT_RETENTION_DAYS. */
 export const DEFAULT_CLI_PROMPT_RETENTION_DAYS = 0;
 
+/** Shared with the administrator route so seed and save serialize on the same lock. */
+export const PRIVATE_ENDPOINT_ALLOWLIST_LOCK_NAME = 'admin-config:private-endpoint-allowlist';
+
 /** Seed ownership is cleared by every administrator write, including a same-value save. */
 export const PRIVATE_ENDPOINT_SEED_STATE_KEY = 'bootstrap:privateEndpointSeed';
 

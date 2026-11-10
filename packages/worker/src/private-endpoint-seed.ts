@@ -6,6 +6,7 @@ import {
   BUILT_IN_PRIVATE_ORIGINS,
   CONFIG_KEYS,
   PRIVATE_ENDPOINT_SEED_STATE_KEY,
+  PRIVATE_ENDPOINT_ALLOWLIST_LOCK_NAME,
   IN_STACK_OLLAMA_HOSTS,
   ONBOARDING_TOOLING_SCHEMA_VERSION,
   configService,
@@ -26,9 +27,6 @@ import { loadPreviousStepOutput } from './step-engine/steps/onboarding/_helpers.
 
 const log = logger.child({ module: 'private-endpoint-seed' });
 
-/** The admin save of this list takes the same advisory lock (`saveConfig` in api/src/routes/admin.ts
- *  hashes `admin-config:<route>`), so a seed and a save never interleave. */
-const ALLOWLIST_LOCK_NAME = 'admin-config:private-endpoint-allowlist';
 const AUDIT_ACTION = 'config.private_endpoint_allowlist';
 /** No authenticated actor: the same sentinel as the api's ANONYMOUS_AUDIT_ACTOR. */
 const SEED_AUDIT_ACTOR = '00000000-0000-0000-0000-000000000000';
@@ -413,7 +411,7 @@ export async function seedPrivateEndpointAllowlist(
     await db.transaction(async (tx) => {
       await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_MS}ms'`));
       await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${ALLOWLIST_LOCK_NAME}, 0))`,
+        sql`select pg_advisory_xact_lock(hashtextextended(${PRIVATE_ENDPOINT_ALLOWLIST_LOCK_NAME}, 0))`,
       );
       if (
         (await config.getFresh(key)) !== previous ||
