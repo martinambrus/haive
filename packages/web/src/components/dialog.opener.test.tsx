@@ -72,3 +72,54 @@ it('10 restores the actual opener when the opening commit moves its keyed node',
   fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
   expect(document.activeElement).toBe(opener);
 });
+
+it('registers a document focusin guard only while open, even with multiple closed dialogs', () => {
+  const add = vi.spyOn(document, 'addEventListener');
+  const remove = vi.spyOn(document, 'removeEventListener');
+  const scene = (open: boolean) => (
+    <>
+      <Dialog open={open} onOpenChange={() => {}}>
+        <button>Done</button>
+      </Dialog>
+      <Dialog open={false} onOpenChange={() => {}}>
+        Closed
+      </Dialog>
+    </>
+  );
+  const liveGuards = () => {
+    const listeners = new Set(
+      add.mock.calls.filter(([type]) => type === 'focusin').map(([, fn]) => fn),
+    );
+    for (const [type, fn] of remove.mock.calls) {
+      if (type === 'focusin') listeners.delete(fn);
+    }
+    return listeners.size;
+  };
+  const view = render(scene(false));
+  expect(liveGuards()).toBe(0);
+  view.rerender(scene(true));
+  expect(liveGuards()).toBe(1);
+  view.rerender(scene(false));
+  expect(liveGuards()).toBe(0);
+});
+
+it('does not restore an unrelated focus from an earlier interaction on a programmatic open', async () => {
+  const scene = (open: boolean) => (
+    <>
+      <button>Unrelated</button>
+      <Dialog open={open} onOpenChange={() => {}} aria-label="Programmatic">
+        <button>Done</button>
+      </Dialog>
+    </>
+  );
+  const view = render(scene(false));
+  const unrelated = screen.getByRole('button', { name: 'Unrelated' });
+  unrelated.focus();
+  fireEvent.click(unrelated);
+  unrelated.blur();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(document.activeElement).toBe(document.body);
+  view.rerender(scene(true));
+  view.rerender(scene(false));
+  expect(document.activeElement).toBe(document.body);
+});

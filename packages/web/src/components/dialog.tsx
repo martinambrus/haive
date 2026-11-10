@@ -30,6 +30,36 @@ interface DialogProps {
 const TABBABLE =
   'a[href], button, input, select, textarea, [tabindex], summary, iframe, [contenteditable], audio[controls], video[controls], area[href]';
 const DialogAncestors = createContext<RefObject<HTMLDivElement | null>[]>([]);
+
+// A keyed move can blur the opener before insertion effects run. Capture focus
+// before the opening interaction reaches React, and forget it at the next task.
+// Closed dialogs share these listeners instead of each tracking document focus.
+let closedDialogs = 0;
+let interactionOpener: HTMLElement | null = null;
+let forgetInteraction: ReturnType<typeof setTimeout> | undefined;
+function rememberOpeningInteraction() {
+  const active = document.activeElement as HTMLElement | null;
+  interactionOpener = active && active !== document.body ? active : null;
+  clearTimeout(forgetInteraction);
+  forgetInteraction = setTimeout(() => {
+    interactionOpener = null;
+    forgetInteraction = undefined;
+  }, 0);
+}
+function watchOpeningInteractions() {
+  if (closedDialogs++ === 0) {
+    document.addEventListener('click', rememberOpeningInteraction, true);
+    document.addEventListener('keydown', rememberOpeningInteraction, true);
+  }
+  return () => {
+    if (--closedDialogs !== 0) return;
+    document.removeEventListener('click', rememberOpeningInteraction, true);
+    document.removeEventListener('keydown', rememberOpeningInteraction, true);
+    clearTimeout(forgetInteraction);
+    forgetInteraction = undefined;
+    interactionOpener = null;
+  };
+}
 const openPanels: {
   panel: HTMLElement;
   wrapper: HTMLElement;
@@ -92,27 +122,16 @@ export function Dialog({
   const fallbackFocusRef = useRef(fallbackFocus);
   fallbackFocusRef.current = fallbackFocus;
   const openerRef = useRef<HTMLElement | null>(null);
-  const lastFocusedRef = useRef<HTMLElement | null>(null);
-  // A keyed move can blur the opener during the opening commit. Remember real
-  // focus events while closed, without choosing an opener during render.
   useEffect(() => {
-    if (typeof document === 'undefined') return;
-    const remember = () => {
-      const active = document.activeElement;
-      if (active && active !== document.body) lastFocusedRef.current = active as HTMLElement;
-    };
-    remember();
-    document.addEventListener('focusin', remember);
-    return () => document.removeEventListener('focusin', remember);
-  }, []);
+    if (open || typeof document === 'undefined') return;
+    return watchOpeningInteractions();
+  }, [open]);
   // Insertion effects run before the layout phase, where a child's autoFocus takes focus.
   useInsertionEffect(() => {
     if (open) {
       const active = document.activeElement as HTMLElement | null;
       openerRef.current =
-        active === document.body && lastFocusedRef.current?.isConnected
-          ? lastFocusedRef.current
-          : active;
+        active === document.body && interactionOpener?.isConnected ? interactionOpener : active;
     }
   }, [open]);
 
