@@ -45,6 +45,7 @@ import {
   sumToolUsageSteps,
   type ToolUsageStepRow,
 } from '@haive/shared/stats';
+import { logAuditEvent } from '../../lib/audit.js';
 import { getDb } from '../../db.js';
 import { rollupToolUsage } from '@haive/shared/stats-server';
 import { parseInvocationHistoryQuery } from './_invocation-history.js';
@@ -377,7 +378,10 @@ async function moveTaskToStep(
   >,
   leftActive: (typeof schema.taskSteps.$inferSelect)[],
   now: Date,
-  opts: { fromFailed?: boolean; liftPause?: { read: Date; role: string | undefined } } = {},
+  opts: {
+    fromFailed?: boolean;
+    liftPause?: { read: Date; role: string | undefined; actorUserId: string };
+  } = {},
 ) {
   // The task leaves `failed` here for every caller, so the revival checks sit here too.
   await refuseReviveBesideLive(tx, taskId);
@@ -406,12 +410,18 @@ async function moveTaskToStep(
     throw new HttpError(409, opts.fromFailed ? RETRY_RACED_MESSAGE : ENDED_TASK_MESSAGE);
   }
   // A task Retry means "run it", so the hold it read goes with it, unless it is an administrator's.
-  if (opts.liftPause) {
-    await liftReadPause(tx, taskId, opts.liftPause.read, opts.liftPause.role);
-  }
+  const resumeAudit = opts.liftPause
+    ? await liftReadPause(
+        tx,
+        taskId,
+        opts.liftPause.read,
+        opts.liftPause.role,
+        opts.liftPause.actorUserId,
+      )
+    : null;
   const late = await rowsActivatedMeanwhile(tx, taskId, [step.id]);
   await resetRowsForRerun(tx, taskId, late, now, { rowsHeld: true });
-  return { epoch: bumped.epoch, leftActive: [...leftActive, ...late] };
+  return { epoch: bumped.epoch, leftActive: [...leftActive, ...late], resumeAudit };
 }
 
 /** A cancelled or completed task is not moved back to a step, as the task page offers no step
@@ -430,7 +440,7 @@ export async function retryTaskAtStep(
   taskId: string,
   userId: string,
   target: typeof schema.taskSteps.$inferSelect,
-  opts: { liftPause?: { read: Date; role: string | undefined } } = {},
+  opts: { liftPause?: { read: Date; role: string | undefined; actorUserId: string } } = {},
 ): Promise<{ epoch: number }> {
   const rows = await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, taskId));
   const downstream = rows.filter(
@@ -490,8 +500,13 @@ export async function retryTaskAtStep(
         reset: touched.map((r) => ({ stepId: r.stepId, round: r.round })),
       },
     });
-    return { epoch: result.epoch, live: cancelled.length > 0 || touched.some(isLive) };
+    return {
+      epoch: result.epoch,
+      live: cancelled.length > 0 || touched.some(isLive),
+      resumeAudit: result.resumeAudit,
+    };
   });
+  if (moved.resumeAudit) logAuditEvent(moved.resumeAudit);
   if (moved.live) {
     const killed = await killTaskSandboxes(taskId);
     logger.info({ taskId, killed }, 'killed task sandboxes for task retry');

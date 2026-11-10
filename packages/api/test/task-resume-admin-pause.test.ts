@@ -415,3 +415,38 @@ describe('Retry of a failed paused task', () => {
     });
   });
 });
+
+describe.each([
+  ['START replay', () => setup({ status: 'failed', errorMessage: 'boom' }, ADMIN)],
+  ['step target', () => failedOnStep(ADMIN)],
+])('Retry admin-pause audit: %s', (_shape, make) => {
+  it('records an administrator resume and its strict row', async () => {
+    const fake = make();
+    await adminPause();
+    expect((await retryBy(ADMIN)).status).toBe(200);
+    expect(
+      fake
+        .rows(schema.taskEvents)
+        .filter((e) => e.eventType === 'task.resumed')
+        .map((e) => e.payload),
+    ).toEqual([{ by: ADMIN.id, byAdmin: true }]);
+    expect(
+      fake.rows(schema.auditEvents).filter((e) => e.action === 'task.admin_resume'),
+    ).toMatchObject([
+      { actorUserId: ADMIN.id, targetId: TASK, metadata: { ownerUserId: ADMIN.id } },
+    ]);
+  });
+  it('a refused row undoes Retry, keeps the hold and queues nothing', async () => {
+    const fake = make();
+    await adminPause();
+    const before = fake.rows(schema.tasks)[0];
+    const steps = fake.rows(schema.taskSteps);
+    fake.hooks.beforeInsert = async (table) => {
+      if (table === schema.auditEvents) throw new Error('audit refused');
+    };
+    expect((await retryBy(ADMIN)).status).toBe(500);
+    expect(fake.rows(schema.tasks)[0]).toEqual(before);
+    expect(fake.rows(schema.taskSteps)).toEqual(steps);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+});

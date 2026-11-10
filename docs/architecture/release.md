@@ -121,7 +121,8 @@ Cancel, the step abort and the plan merge discard still clear any pause, and an 
 and lifts an administrator's pause through the owner route gets the same `byAdmin` `task.resumed` event
 and `task.admin_resume` row as from the page (`recordAdminResume`, in the resume's transaction, so a row
 that cannot be written undoes it); lifting their own owner pause stays an owner action with neither, and
-a Retry that clears an administrator's pause for an administrator records only `task.retried`.
+a Retry that clears an administrator's pause for an administrator also records that same
+resume event and audit row inside its Retry transaction, for both START replay and a step retry.
 `GET /tasks/:id` carries `pauseLocked` (the pause is an administrator's and the viewer is not one), which
 hides the task page's Resume and changes its banner.
 In the worker, the allowance auto-resume and an answer to a parked form do not reopen a failed task while

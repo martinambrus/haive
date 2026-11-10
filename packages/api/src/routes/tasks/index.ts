@@ -1389,7 +1389,7 @@ taskRoutes.post('/:id/action', async (c) => {
       // Retry lifts only the hold it read, and never an administrator's; it still revives the task,
       // since a refusal would leave its owner nothing to do until an administrator acts.
       const liftPause = task.pausedAt
-        ? { read: task.pausedAt, role: c.get('userRole') }
+        ? { read: task.pausedAt, role: c.get('userRole'), actorUserId: userId }
         : undefined;
       // A task that stopped on a step re-runs that step. START replays the task from its first
       // step, which only a task that never reached one still needs.
@@ -1459,7 +1459,7 @@ taskRoutes.post('/:id/action', async (c) => {
           .returning({ id: schema.tasks.id });
       // Bump the orchestration epoch so advance-step jobs enqueued before this retry are
       // dropped by the worker's epoch guard instead of running against the restarted task.
-      await db.transaction(async (tx) => {
+      const resumeAudit = await db.transaction(async (tx) => {
         await admitNewWork(tx);
         await refuseReviveBesideLive(tx, id);
         await supersedeLiveRuns(tx, id, { failTask: false });
@@ -1469,8 +1469,9 @@ taskRoutes.post('/:id/action', async (c) => {
         if (!moved) throw new HttpError(409, 'The task is no longer failed; reload it');
         // Retrying a paused task means "run it". Leaving the hold set would restart the task
         // straight into the pause park, with Retry apparently doing nothing; an administrator's stays.
-        if (liftPause) await liftReadPause(tx, id, liftPause.read, liftPause.role);
+        return liftPause ? liftReadPause(tx, id, liftPause.read, liftPause.role, userId) : null;
       });
+      if (resumeAudit) logAuditEvent(resumeAudit);
       // Answering a parked form revives the task, so its pass can open a row between the settle
       // above and the bump. None can at the old epoch after it, so settle once more.
       await stopActiveCliInvocations(db, id, { failTask: false });
