@@ -105,6 +105,7 @@ describe('repair-needed repository errors', () => {
     );
     const view = await mounted();
     expect(buttons(view.tree(), /^retry$/i)).toHaveLength(0);
+    expect(buttons(view.tree(), /^check repair$/i)).toHaveLength(1);
     const recovery = buttons(view.tree(), /^rebuild checkout$/i);
     expect(recovery).toHaveLength(1);
     fire.click(recovery[0]!);
@@ -127,17 +128,31 @@ describe('repair-needed repository errors', () => {
   });
 });
 
-it('offers repair guidance and a repair check for an unusable source', async () => {
-  repo.source = 'local_path';
-  repo.localPath = '/source/repo';
-  repo.writable = true;
-  repo.errorCode = 'source_repair_needed';
+it.each(['git_https', 'local_path'])(
+  'offers rebuild after source repair for %s',
+  async (source) => {
+    repo.source = source;
+    repo.localPath = '/source/repo';
+    repo.remoteUrl = 'https://example.com/r.git';
+    repo.writable = true;
+    repo.errorCode = 'source_repair_needed';
+    vi.stubGlobal(
+      'confirm',
+      vi.fn(() => true),
+    );
+    const view = await mounted();
+    expect(buttons(view.tree(), /^retry$/i)).toHaveLength(0);
+    fire.click(buttons(view.tree(), /^rebuild checkout$/i)[0]!);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.post).toHaveBeenCalledWith('/repos/repo-1/recover-checkout', {});
+    vi.unstubAllGlobals();
+  },
+);
+it('checks an in-place checkout repair without rebuilding', async () => {
+  repo.source = 'git_https';
+  repo.remoteUrl = 'https://example.com/r.git';
+  repo.errorCode = 'checkout_repair_needed';
   const view = await mounted();
-  expect(buttons(view.tree(), /^retry$/i)).toHaveLength(0);
-  expect(buttons(view.tree(), /^rebuild checkout$/i)).toHaveLength(0);
-  fire.click(buttons(view.tree(), /^repair checkout$/i)[0]!);
-  view.draw();
-  expect(textOf(view.tree())).toContain('Keep the repository registered');
   fire.click(buttons(view.tree(), /^check repair$/i)[0]!);
   await vi.advanceTimersByTimeAsync(0);
   expect(h.post).toHaveBeenCalledWith('/repos/repo-1/refresh-tree', {});

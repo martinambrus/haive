@@ -1,3 +1,4 @@
+import { checkoutWorktreeRefusal } from '@haive/shared/repo-rebuild';
 import { CheckoutRepairNeededError } from './repair-needed.js';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -86,7 +87,7 @@ const REPAIR_ADVICE =
  *  reads cannot prove dead (a corrupt config, unreadable, linked or external metadata), or a HEAD
  *  read other than exit 0 or 1. `repairNeeded` marks the ones where git answered with an exit
  *  status of its own.
- *  Unknown must never trigger a rebuild: it moves the folder. */
+ *  An ordinary refresh never rebuilds unknown metadata; explicit recovery may retain it aside. */
 export async function usableCheckout(
   dest: string,
 ): Promise<'usable' | 'unusable' | { unknown: string; repairNeeded?: true }> {
@@ -453,6 +454,8 @@ async function rebuild(
   rel: string,
   dest: string,
 ): Promise<void> {
+  const worktreeRefusal = await checkoutWorktreeRefusal(db, payload.repositoryId, dest);
+  if (worktreeRefusal) throw new Error(worktreeRefusal);
   const fromFolder = payload.source === 'local_path' ? payload.localPath : undefined;
   const fromRemote = payload.source === 'local_path' ? undefined : payload.remoteUrl;
   if (!fromFolder && !fromRemote) {
@@ -573,12 +576,6 @@ export async function handleRefresh(
         const refusal = holdingRefusal(holding);
         if (!usable || payload.recoverCheckout) throw new Error(refusal);
         await persistDetection(db, payload.repositoryId, dest, refusal);
-        return;
-      }
-      if (payload.recoverCheckout) {
-        // Explicit recovery alone may rebuild unknown metadata. The old folder is retained,
-        // and no mirror from either checkout may overwrite existing project data.
-        await rebuild(db, payload, repoStorageRoot, rel, dest);
         return;
       }
       // A row stamped before 0196 takes its base from the checkout before a fast-forward moves it,

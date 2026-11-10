@@ -181,7 +181,7 @@ export default function ReposPage() {
     if (
       recovery &&
       !confirm(
-        'Rebuild this checkout from its source? The old folder, including unpushed commits and local files, will be kept beside the new checkout. Tasks, settings and knowledge base records will be preserved.',
+        'Rebuild this checkout from its source? The old folder, including unpushed commits and local files, will be kept beside the new checkout. Task records, settings and knowledge base records will be preserved. Completed or cancelled tasks’ worktrees stay in the kept folder. Finish or cancel unfinished tasks with worktrees in this checkout before rebuilding.',
       )
     )
       return;
@@ -337,7 +337,7 @@ function RepoCard(props: RepoCardProps) {
     repo.status === 'error' &&
     (repo.errorCode === 'checkout_repair_needed' || repo.errorCode === 'source_repair_needed');
   const canRebuild =
-    repo.errorCode === 'checkout_repair_needed' &&
+    repairNeeded &&
     (repo.source === 'local_path' ? !!repo.writable && !!repo.localPath : !!repo.remoteUrl);
   const canCheckRepair = repo.source === 'local_path' ? !!repo.localPath : !!repo.remoteUrl;
   const retryUnavailableReason =
@@ -567,6 +567,15 @@ function RepoCard(props: RepoCardProps) {
                 label: retrying ? 'Retrying...' : 'Retry',
                 icon: RefreshCw,
                 spin: retrying,
+                onClick: handleRetryClick,
+                disabled: retrying,
+              },
+            repairNeeded &&
+              canRebuild &&
+              repo.errorCode === 'checkout_repair_needed' && {
+                key: 'check-repair',
+                label: retrying ? 'Checking...' : 'Check repair',
+                icon: RefreshCw,
                 onClick: handleRetryClick,
                 disabled: retrying,
               },

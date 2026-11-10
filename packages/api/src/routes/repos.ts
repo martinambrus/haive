@@ -1,3 +1,4 @@
+import { checkoutWorktreeRefusal } from '@haive/shared/repo-rebuild';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -3523,7 +3524,11 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
     },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
-  if (recovery && (repo.status !== 'error' || repo.errorCode !== 'checkout_repair_needed')) {
+  if (
+    recovery &&
+    (repo.status !== 'error' ||
+      (repo.errorCode !== 'checkout_repair_needed' && repo.errorCode !== 'source_repair_needed'))
+  ) {
     throw new HttpError(409, 'This repository does not need checkout recovery.');
   }
   if (recovery && repo.source === 'local_path' && (!repo.writable || !repo.localPath)) {
@@ -3556,6 +3561,15 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
   if (!retryUpload && repo.source !== 'local_path' && !repo.remoteUrl) {
     throw new HttpError(409, NO_REFRESH_SOURCE);
   }
+  if (recovery) {
+    const refusal = await checkoutWorktreeRefusal(
+      db,
+      id,
+      path.join(uploadsStorageRoot(), userId, id),
+    );
+    if (refusal) throw new HttpError(409, refusal);
+  }
+
   const holding = await db.query.tasks.findMany({
     where: and(
       eq(schema.tasks.repositoryId, id),
@@ -3593,7 +3607,12 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
         and(
           eq(schema.repositories.id, id),
           retryUpload || recovery ? eq(schema.repositories.status, 'error') : undefined,
-          recovery ? eq(schema.repositories.errorCode, 'checkout_repair_needed') : undefined,
+          recovery
+            ? inArray(schema.repositories.errorCode, [
+                'checkout_repair_needed',
+                'source_repair_needed',
+              ])
+            : undefined,
         ),
       )
       .returning({ id: schema.repositories.id });

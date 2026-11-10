@@ -131,6 +131,10 @@
       "types": "./dist/attachments-fs.d.ts",
       "import": "./dist/attachments-fs.js"
     },
+    "./repo-rebuild": {
+      "types": "./dist/repo-rebuild.d.ts",
+      "import": "./dist/repo-rebuild.js"
+    },
     "./onboarding-admission": {
       "types": "./dist/onboarding-admission.d.ts",
       "import": "./dist/onboarding-admission.js"

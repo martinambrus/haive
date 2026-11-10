@@ -55,6 +55,7 @@ const h = vi.hoisted(() => ({
   /** Stands in for the copy that follows the move; null runs the real one. */
   copyFault: null as null | ((src: string, dest: string) => Promise<void>),
   holding: 0,
+  taskWorktrees: [] as Record<string, unknown>[],
   processor: null as Processor | null,
 }));
 vi.mock('../src/repo/clone.js', async (original) => {
@@ -111,7 +112,12 @@ const db = {
   execute: async () => {},
   query: {
     users: { findFirst: async () => ({ role: 'admin' }) },
-    tasks: { findMany: async () => Array.from({ length: h.holding }, () => ({ id: 'holder' })) },
+    tasks: {
+      findMany: async (opts: { columns?: { worktreePath?: boolean } }) =>
+        opts.columns?.worktreePath
+          ? h.taskWorktrees
+          : Array.from({ length: h.holding }, () => ({ id: 'holder' })),
+    },
   },
   transaction: async (fn: (tx: unknown) => unknown) => fn(db),
   select: () => ({
@@ -126,6 +132,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   row.status = 'cloning';
   h.holding = 0;
+  h.taskWorktrees = [];
   h.copyFault = null;
   fsFaults.remove = false;
   fsFaults.stat = null;
@@ -695,3 +702,41 @@ it.each(['copy', 'clone'] as const)(
     expect(row.status).toBe('error');
   },
 );
+
+it('rechecks a repaired checkout on a recovery job, keeping its files and clearing the code', async () => {
+  const { dest, payload } = await fixture();
+  await writeFile(path.join(dest, 'notes.txt'), 'uncommitted work');
+  await handleRefresh({ ...payload, recoverCheckout: true }, db, root);
+  expect((await readdir(path.dirname(dest))).filter((n) => n.includes('.aside-'))).toEqual([]);
+  expect(await readFile(path.join(dest, 'notes.txt'), 'utf8')).toBe('uncommitted work');
+  expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(
+    await git(payload.localPath!, ['rev-parse', 'HEAD']),
+  );
+  expect(h.persist).toHaveBeenCalledWith(db, 'r1', dest, null);
+});
+
+it('seeds the legacy plan base before a recovery moves the old tree, best effort', async () => {
+  const { dest, payload } = await fixture();
+  await writeFile(path.join(dest, '.git/config'), '[core\n');
+  h.seed.mockImplementationOnce(async () => {
+    expect((await readdir(path.dirname(dest))).filter((n) => n.includes('.aside-'))).toEqual([]);
+    expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
+    throw new Error('legacy plan base unreadable');
+  });
+  await handleRefresh({ ...payload, recoverCheckout: true }, db, root);
+  expect(h.seed).toHaveBeenCalledTimes(1);
+  expect(row.status).toBe('ready');
+});
+
+it('refuses a rebuild at pickup when an unfinished task has a worktree under the checkout', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  h.taskWorktrees = [
+    { id: 'failed-task', worktreePath: path.join(dest, '.haive/worktrees/feature') },
+  ];
+  await expect(handleRefresh({ ...payload, recoverCheckout: true }, db, root)).rejects.toThrow(
+    '1 task has a worktree inside this checkout',
+  );
+  expect((await readdir(path.dirname(dest))).filter((n) => n.includes('.aside-'))).toEqual([]);
+  expect(h.persist).not.toHaveBeenCalled();
+});

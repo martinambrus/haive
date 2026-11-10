@@ -20,6 +20,7 @@ vi.mock('../src/queues.js', async (importOriginal) => ({
 }));
 
 import { Hono } from 'hono';
+import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { configService, REPO_JOB_NAMES } from '@haive/shared';
@@ -394,4 +395,79 @@ it('keeps the recovery action available when its enqueue fails', async () => {
     status: 'error',
     errorCode: 'checkout_repair_needed',
   });
+});
+
+describe('rebuild admission for task worktrees and repaired sources', () => {
+  const recover = () => app.request(`/${REPO}/recover-checkout`, { method: 'POST' });
+  const checkout = `/var/lib/haive/repos/${USER}/${REPO}`;
+  it.each(['failed', 'created'])(
+    'refuses a %s task worktree until the task is cancelled',
+    async (taskStatus) => {
+      const fake = setup(
+        {
+          source: 'git_https',
+          remoteUrl: 'https://example.com/r.git',
+          status: 'error',
+          errorCode: 'checkout_repair_needed',
+        },
+        taskStatus,
+        { worktreePath: `${checkout}/.haive/worktrees/feature` },
+      );
+      const response = await recover();
+      expect(response.status).toBe(409);
+      expect(await response.text()).toContain('1 task has a worktree inside this checkout');
+      expect(status(fake)).toBe('error');
+      expect(h.add).not.toHaveBeenCalled();
+      await fake.db
+        .update(schema.tasks)
+        .set({ status: 'cancelled' })
+        .where(eq(schema.tasks.repositoryId, REPO));
+      expect((await recover()).status).toBe(200);
+    },
+  );
+  it.each(['completed', 'cancelled'])('allows a %s task worktree', async (taskStatus) => {
+    setup(
+      {
+        source: 'git_https',
+        remoteUrl: 'https://example.com/r.git',
+        status: 'error',
+        errorCode: 'checkout_repair_needed',
+      },
+      taskStatus,
+      { worktreePath: `${checkout}/.haive/worktrees/feature` },
+    );
+    expect((await recover()).status).toBe(200);
+  });
+  it('allows an unfinished task whose worktree is outside the checkout', async () => {
+    setup(
+      {
+        source: 'git_https',
+        remoteUrl: 'https://example.com/r.git',
+        status: 'error',
+        errorCode: 'checkout_repair_needed',
+      },
+      'failed',
+      { worktreePath: `${checkout}-other/.haive/worktrees/feature` },
+    );
+    expect((await recover()).status).toBe(200);
+  });
+  it.each(['git_https', 'local_path'])(
+    'admits recovery after source repair for %s',
+    async (source) => {
+      setup({
+        source,
+        remoteUrl: 'https://example.com/r.git',
+        localPath: '/source/repo',
+        writable: true,
+        status: 'error',
+        errorCode: 'source_repair_needed',
+      });
+      expect((await recover()).status).toBe(200);
+      expect(h.add).toHaveBeenCalledWith(
+        REPO_JOB_NAMES.REFRESH,
+        expect.objectContaining({ recoverCheckout: true }),
+        expect.any(Object),
+      );
+    },
+  );
 });

@@ -242,7 +242,7 @@ describe.skipIf(!redisUrl)('repair-needed refresh and explicit checkout recovery
     expect(h.persist).toHaveBeenCalledWith(db, 'r1', dest, expect.any(String), {
       preserveProjectData: true,
     });
-    expect(h.seed).not.toHaveBeenCalled();
+    expect(h.seed).toHaveBeenCalledTimes(1);
   });
 });
 
