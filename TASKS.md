@@ -1542,7 +1542,7 @@ status: open · kind: design · found: #1060 reviews 2026-11-10 · priority: P3
 
 ### T590 · FNF[cli-auth-lock-followups] · CLI auth lock and sign-out follow-ups (+13)
 
-status: open, owner-approved 2026-11-10 for items 1, 3, 5 (next session; handoff 2026-11-10g) · kind: fix · found: #1061 reviews 2026-11-10 · priority: P3
+status: in progress (items 1, 3, 5; session 2026-11-10g, branch fix/T590-auth-lock-followups) · kind: fix · found: #1061 reviews 2026-11-10 · priority: P3
 
 1. `DELETE /:providerId/usage-auth` and `DELETE /:providerId/secrets/:secretName` (api cli-providers.ts ~:1165-1230) take no auth lock, so a usage refresh that read the secret before the delete can write it back. PRE-EXISTING, moderate. Fix: take the lock (`withCliAuthLock`) like the writers.
 2. A task's sync-back waits 30 s for the lock, then the task copy is removed (worker sandbox/task-auth-volume.ts ~:1312-1323); an open login dialog on the same CLI (up to 10 min) loses the token the task rotated. Accepted and documented (sandbox.md); waits are sequential per provider inside a step-summary slot. REGRESSION, minor.
