@@ -1,6 +1,13 @@
 'use client';
 
-import { useEffect, useInsertionEffect, useRef, type HTMLAttributes } from 'react';
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useInsertionEffect,
+  useRef,
+  type HTMLAttributes,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { cn } from '@/lib/cn';
 
@@ -15,7 +22,8 @@ interface DialogProps {
 
 const TABBABLE =
   'a[href], button, input, select, textarea, [tabindex], summary, iframe, [contenteditable], audio[controls], video[controls], area[href]';
-const openPanels: { panel: HTMLElement; opener: HTMLElement | null }[] = [];
+const DialogDepth = createContext(0);
+const openPanels: { panel: HTMLElement; opener: HTMLElement | null; depth: number }[] = [];
 
 const isRadio = (el: Element): el is HTMLInputElement => (el as HTMLInputElement).type === 'radio';
 const inGroup = (a: HTMLInputElement, b: HTMLInputElement) =>
@@ -51,6 +59,7 @@ function leavesPanel(panel: HTMLElement, stops: HTMLElement[], backwards: boolea
 }
 
 export function Dialog({ open, onOpenChange, children, className }: DialogProps) {
+  const depth = useContext(DialogDepth);
   const panelRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
   const lastFocusedRef = useRef<HTMLElement | null>(null);
@@ -99,9 +108,10 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
   useEffect(() => {
     const panel = panelRef.current;
     if (!open || !panel) return;
-    const entry = { panel, opener: openerRef.current };
-    if (!panel.contains(document.activeElement)) panel.focus();
+    const entry = { panel, opener: openerRef.current, depth };
     openPanels.push(entry);
+    openPanels.sort((a, b) => a.depth - b.depth);
+    if (openPanels.at(-1) === entry && !panel.contains(document.activeElement)) panel.focus();
     const onTab = (e: KeyboardEvent) => {
       if (e.key !== 'Tab' || e.defaultPrevented || openPanels.at(-1) !== entry) return;
       const ahead = tabbables(panel, document.activeElement);
@@ -132,26 +142,32 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
       // Focus that is on neither the opener nor the dialog below goes to that dialog.
       if (below && !onOpener && !below.panel.contains(focused)) below.panel.focus();
     };
-  }, [open]);
+  }, [open, depth]);
 
   if (!open) return null;
   return createPortal(
     // Marked so page-level Escape handlers can tell a dialog is on top and
     // leave the key to it: without that, one Escape closes the dialog AND
     // whatever was behind it.
-    <div data-haive-dialog="" className="fixed inset-0 z-50 flex items-center justify-center">
+    <DialogDepth value={depth + 1}>
       <div
-        className="fixed inset-0 bg-black/60 backdrop-blur-sm"
-        onClick={() => onOpenChange(false)}
-      />
-      <div
-        ref={panelRef}
-        tabIndex={-1}
-        className={cn('relative z-10 w-full max-w-lg outline-none', className)}
+        data-haive-dialog=""
+        style={{ zIndex: 50 + depth }}
+        className="fixed inset-0 flex items-center justify-center"
       >
-        {children}
+        <div
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm"
+          onClick={() => onOpenChange(false)}
+        />
+        <div
+          ref={panelRef}
+          tabIndex={-1}
+          className={cn('relative z-10 w-full max-w-lg outline-none', className)}
+        >
+          {children}
+        </div>
       </div>
-    </div>,
+    </DialogDepth>,
     document.body,
   );
 }
