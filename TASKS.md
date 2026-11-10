@@ -331,7 +331,7 @@ User decision 2026-11-01: keep live Google connection parked; prepare setup inst
 
 ### T334 · FNF[builtin-order-hazards] · built-in workflow runs 07b before 07c, and 08b fixer edits after both
 
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (bundle F4, overnight run 2026-11-10, branch fix/F4-workflow-order) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 All PRE-EXISTING.
 
 1. 07b-phase-4-validate boots and uses the runtime (07b:787) against a DDEV container that has not yet applied the implementation's .ddev change; 07c-ddev-reconcile runs after it in registry order (steps/workflow/index.ts).
