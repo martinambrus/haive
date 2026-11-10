@@ -217,6 +217,15 @@ it('brackets a pinned IPv6 address', async () => {
     'http.curloptResolve=public.test:443:[2606:4700:4700::1111]',
   );
 });
+it('does not pin an IP literal host but keeps redirect and proxy pins', async () => {
+  const argv = await guardArgs(
+    ['https://[2606:4700:4700::1111]/r', 'http://93.184.216.34/r'],
+    'user',
+  );
+  expect(argv.some((arg) => arg.startsWith('http.curloptResolve='))).toBe(false);
+  expect(argv).toContain('http.followRedirects=false');
+  expect(argv).toContain('http.proxy=');
+});
 it('does not follow a public HTTP redirect to loopback', async () => {
   seams.resolve.mockResolvedValue([{ address: '127.0.0.1', family: 4 }]);
   seams.isBlocked.mockReturnValue(false);

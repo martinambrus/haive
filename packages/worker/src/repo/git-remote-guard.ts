@@ -1,3 +1,4 @@
+import net from 'node:net';
 import { schema, type Database } from '@haive/database';
 import { eq } from 'drizzle-orm';
 import { resolveGuardedAddress } from '@haive/shared/egress';
@@ -40,6 +41,7 @@ export async function gitRemoteGuardArgs(
   const addresses = new Map<string, string[]>();
   const http = new Map<string, string>();
   const ssh = new Map<string, string>();
+  let anyHttp = false;
   for (const remote of urls) {
     const { host, port, ssh: isSsh } = targetFor(remote);
     let address = addresses.get(host);
@@ -57,16 +59,22 @@ export async function gitRemoteGuardArgs(
     }
     if (isSsh) ssh.set(host, address[0]!);
     else {
-      const authority = `${host.includes(':') ? `[${host}]` : host}:${port}`;
-      const pinned = address.map((entry) => (entry.includes(':') ? `[${entry}]` : entry)).join(',');
-      http.set(authority, pinned);
+      anyHttp = true;
+      // An IP literal is the checked address already; older libcurl rejects a bracketed IPv6 host entry.
+      if (net.isIP(host) === 0) {
+        const authority = `${host}:${port}`;
+        const pinned = address
+          .map((entry) => (entry.includes(':') ? `[${entry}]` : entry))
+          .join(',');
+        http.set(authority, pinned);
+      }
     }
   }
   const argv: string[] = [];
   for (const [authority, address] of http) {
     argv.push('-c', `http.curloptResolve=${authority}:${address}`);
   }
-  if (http.size) argv.push('-c', 'http.followRedirects=false', '-c', 'http.proxy=');
+  if (anyHttp) argv.push('-c', 'http.followRedirects=false', '-c', 'http.proxy=');
   const sshCommands = [...ssh].map(([host, address]) => ({
     host,
     command: `ssh -o ${shellWord(`HostName=${address}`)} -o ${shellWord(`HostKeyAlias=${host}`)}`,
