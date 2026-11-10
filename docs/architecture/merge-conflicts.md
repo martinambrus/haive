@@ -38,6 +38,15 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   A count above zero halts the step with "N other task(s) working in this checkout; nothing was
   merged. Retry this step once it/they finish(es)." and nothing is merged or aborted. A cross-branch
   merge runs in the shared `<base>--base` worktree and is not fenced.
+  The opposite direction is fenced at START: a task that would work in the checkout itself
+  (`decideTaskWorktree` says root) is refused with 409 "A merge is still open in the repository
+  checkout. Finish or abort it, then try again." while a same-branch merge is open there
+  (`assertRootMergeIdle`, `api/src/lib/root-merge-busy.ts`, run under the same task-creation lock).
+  Open means a live merge-dir claim on the root whose step's `merge_resolve_state` is same-branch and
+  not done or pushing, judged by the worker's own `liveClaimHolder` (shared): a completed task's, a
+  skipped step's or a torn-down cancelled task's claim is stale and refuses nothing. It also means a
+  merge a cancelled task left open and recorded (`merge.left_open`) that is not yet settled. An
+  immediate create-and-start is rolled back. Worktree and cross-branch tasks start as before.
 - **A merge dir holds one task's merge at a time, by a claim and fenced sections.** A cross-branch
   merge runs in a worktree named from the base branch alone (`main--base`), shared by every task
   merging into that base, since git allows the branch in one worktree. A step takes the dir in
@@ -303,6 +312,13 @@ files are put back to where it forked (`putBackBeforeMerge`, see
 [Onboarding template versioning](onboarding-upgrades.md)), so a task branch never carries an agent's
 edit of the record or the plan into the base. A base-sync round and a pass that finds the feature's
 merge open skip it.
+
+The DAG level merge does the same for each issue branch (`putBackIssueProjections`,
+`dag-executor.ts`): before the first merge of an issue into the integration branch, and again
+before a retry (after aborting the stale merge it left open), the issue branch's own changes to the
+record and the plan are put back to where it forked, so the integration branch keeps its own plan and
+record. A note it could not settle goes to the step's warning; an ordinary code conflict keeps its
+fixer path.
 
 A DAG level merge records which files conflicted. The merge pass reads `unmergedPaths` while the
 merge it opened is still open, since the abort that follows clears them and nothing else keeps the

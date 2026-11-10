@@ -120,6 +120,19 @@ Whether there is anything to commit is decided by structure, never by git's word
 
 After its commit lands, gate 3 reads the new HEAD sha and the changed files. A read git gave no answer for (`gitGaveNoAnswer`) is retried once; if it still has none, `tasks.commit_sha` keeps whatever an earlier round stored (NULL on a first round) and a step warning names the read; a plain non-zero exit still writes NULL. A NULL sha means `haiveOwnShas` cannot recognise that commit as Haive's own later.
 
+Run app's Finish commits only what the form showed. The form pins the reviewed paths, their parent
+commit and the tree built from them (`commitPreview`; Haive's projections and atomic-write temp files
+are left out), and Finish commits that pinned tree with a compare-and-swap on the parent
+(`commitGitPreview`, `repo/git-preview.ts`): an edit made in the terminal after the preview, or
+other staged work, is neither swept into the commit nor lost. If the reviewed bytes or the branch
+changed before Finish, the form comes back refreshed with a warning note asking to review the new
+preview (older parked forms too, since the note is added outside their frozen schema); only the
+parent mismatch reads as "branch changed", any other ref-update failure is an error. When the
+preview cannot be built in full (a diff read failed, or more than 500 changed files) Commit is
+hidden and the form says why: an oversized session is committed from the terminal, and Finish still
+works without committing. Its commit refuses while a merge is open in the checkout ("Finish or abort
+the open merge before committing session edits.").
+
 Run app's Finish form treats Commit and Push as independent choices. A push with Commit unticked
 publishes the branch's existing commits without staging or committing session edits; the ordinary
 projection put-back still precedes the push and leaves unrelated staged and unstaged work alone.
