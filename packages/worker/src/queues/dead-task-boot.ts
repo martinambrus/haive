@@ -160,7 +160,10 @@ export async function reviveDeadTask(
       if (refusal) {
         const reason = 'refusal' in refusal ? refusal.refusal.reason : refusal.admission.reason;
         log.info({ taskId: c.id, reason }, 'dead task revival refused');
-        return reason === 'root-claim' || reason === 'live-upgrade' || reason === 'live-onboarding'
+        return reason === 'root-claim' ||
+          reason === 'live-upgrade' ||
+          reason === 'live-onboarding' ||
+          reason === 'contested'
           ? ('held' as const)
           : null;
       }

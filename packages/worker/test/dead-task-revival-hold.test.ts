@@ -76,6 +76,7 @@ function setup(initialState: string | Error = 'normal') {
     tasks: schema.tasks,
     taskEvents: schema.taskEvents,
     taskTypeDefinitions: schema.taskTypeDefinitions,
+    projectStateConflicts: schema.projectStateConflicts,
   });
   fake.insert(schema.taskTypeDefinitions, {
     slug: TYPE,
@@ -496,6 +497,66 @@ describe('retryHeldRevivals', () => {
 });
 
 describe('dead-task revival admission refusals', () => {
+  it('keeps retrying a contested upgrade until its project-state conflict is answered', async () => {
+    const t = setup();
+    const repoId = uuid(8);
+    t.fake.insert(schema.repositories, {
+      id: repoId,
+      userId: USER,
+      name: 'repo',
+      source: 'blank',
+    });
+    t.fake.insert(schema.taskTypeDefinitions, {
+      slug: 'onboarding_upgrade',
+      displayName: 'Upgrade',
+      runListStrategy: 'static',
+      source: 'test',
+    });
+    t.dead(1, { type: 'onboarding_upgrade', status: 'failed', repositoryId: repoId });
+    t.dead(2, {
+      type: 'onboarding',
+      status: 'completed',
+      repositoryId: repoId,
+      completedAt: new Date(),
+      deadAt: null,
+    });
+    t.fake.insert(schema.projectStateConflicts, {
+      id: uuid(9),
+      repositoryId: repoId,
+      unit: 'project/render.json#projectName',
+      resolvedAt: null,
+    });
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+    expect(await reviveDeadTasks(t.db, t.deps)).toEqual({ revived: 0, held: 1, failed: 0 });
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: uuid(1), reason: 'contested' }),
+      expect.any(String),
+    );
+    expect(t.task(1).deadAt).toEqual(DEAD_AT);
+    expect(t.fake.rows(schema.taskEvents)).toEqual([]);
+    vi.useFakeTimers();
+    const stop = retryHeldRevivals(t.db, t.deps);
+    try {
+      await vi.advanceTimersByTimeAsync(DEAD_TASK_REVIVE_RETRY_MS);
+      expect(t.task(1).deadAt).toEqual(DEAD_AT);
+      expect(t.fake.rows(schema.taskEvents)).toEqual([]);
+      expect(vi.getTimerCount()).toBe(1);
+      await t.fake.db
+        .update(schema.projectStateConflicts)
+        .set({ resolvedAt: new Date(), resolution: 'keep_mine' })
+        .where(eq(schema.projectStateConflicts.id, uuid(9)));
+      await vi.advanceTimersByTimeAsync(DEAD_TASK_REVIVE_RETRY_MS);
+      expect(t.task(1)).toMatchObject({ deadAt: null, orchestrationEpoch: 4 });
+      expect(t.fake.rows(schema.taskEvents)).toMatchObject([
+        { taskId: uuid(1), eventType: 'task.revived' },
+      ]);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(t.sent).toEqual([]);
+    } finally {
+      stop();
+    }
+  });
+
   it.each(['root-claim', 'live-upgrade', 'live-onboarding'] as const)(
     'logs and retries the transient %s refusal once it clears',
     async (reason) => {
