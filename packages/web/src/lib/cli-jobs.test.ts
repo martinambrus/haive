@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import {
+  CLI_POLLABLE_JOB_OPTS,
   CLI_SIGN_OUT_AUTH_WAIT_MS,
   type RefreshCliVersionsJobResult,
 } from '@haive/shared/constants';
@@ -38,6 +39,16 @@ describe('jobPhaseForState', () => {
 });
 
 describe('poll budgets', () => {
+  it('keeps the default poll timeout under completed and failed job retention', () => {
+    // Sign-out is exempt: it polls continuously, and retention counts from completion.
+    for (const retention of [
+      CLI_POLLABLE_JOB_OPTS.removeOnComplete,
+      CLI_POLLABLE_JOB_OPTS.removeOnFail,
+    ]) {
+      expect(POLL_TIMEOUT_MS).toBeLessThan(retention.age * 1000);
+    }
+  });
+
   it('keeps the default at ten minutes and allows the worker auth wait plus margin for sign-out', () => {
     expect(POLL_TIMEOUT_MS).toBe(10 * 60_000);
     expect(SIGN_OUT_POLL_TIMEOUT_MS).toBeGreaterThan(CLI_SIGN_OUT_AUTH_WAIT_MS + 15_000);
@@ -220,11 +231,26 @@ it('a probe still times out at ten minutes', async () => {
   expect(vi.getTimerCount()).toBe(0);
 });
 
-it('a sign-out poll timeout names the account wait', async () => {
-  const result = runCliSignOut('provider').catch((error: Error) => error);
-  await vi.advanceTimersByTimeAsync(SIGN_OUT_POLL_TIMEOUT_MS);
-  expect(await result).toMatchObject({
-    message: expect.stringContaining('Still waiting for this account to become available.'),
-  });
-  expect(vi.getTimerCount()).toBe(0);
-});
+it.each([
+  ['delayed', 'Still waiting for this account to become available.'],
+  ['waiting', 'Still queued behind running CLI jobs.'],
+  ['prioritized', 'Still queued behind running CLI jobs.'],
+  ['active', 'Still running.'],
+  [undefined, 'Still queued behind running CLI jobs.'],
+] as const)(
+  'a sign-out poll timeout names the last observed state (%s)',
+  async (state, message) => {
+    h.get
+      .mockResolvedValueOnce({
+        status: 'pending',
+        state: state === 'delayed' ? 'active' : 'delayed',
+      })
+      .mockResolvedValue({ status: 'pending', state });
+    const onPhase = vi.fn();
+    const result = runCliSignOut('provider', onPhase).catch((error: Error) => error);
+    await vi.advanceTimersByTimeAsync(SIGN_OUT_POLL_TIMEOUT_MS);
+    expect(await result).toMatchObject({ message: expect.stringContaining(message) });
+    expect(onPhase).toHaveBeenLastCalledWith(state === 'active' ? 'running' : 'queued');
+    expect(vi.getTimerCount()).toBe(0);
+  },
+);
