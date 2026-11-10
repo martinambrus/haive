@@ -142,7 +142,7 @@ stays open to them because the settings page and the status panel run it on load
 
 **A provider's Test connection follows the same rule in the worker.** `POST /cli-providers/:id/test` only queues
 a PROBE job, and for an OpenRouter or Ollama provider the worker then sends one request to the provider's base
-URL and shows the answer's text. The job carries no role, so `resolveProbeFetch` (`queues/cli-exec/images.ts`)
+URL and shows the answer's text. The job carries no role, so `resolveProbeFetch` (`worker/src/cli-adapters/probe-fetch.ts`)
 reads the owner's `users.role` at probe time: `admin` gets the plain `fetch`, and any other value, a missing row
 included, gets `guardedProbeFetch` (`egress/probe-fetch.ts`, the allow set `rag/embed.ts` uses). Only a hand-set
 `ANTHROPIC_BASE_URL` is guarded, read from the same merged env the run resolves it from: a URL Haive picked itself
@@ -153,6 +153,11 @@ than a failure, because a run dials from inside the sandbox under its own networ
 this probe may not. The warning is keyed on the transport `cause.code` `ENOTFOUND` and also covers a name that
 does not resolve: telling the two apart would say which names resolve privately. An OpenRouter probe stays
 silent on any transport failure, as it does for every inconclusive outcome.
+The Z.AI usage poll dials the origin of the same hand-set URL with the provider's token, so it takes its
+transport from the same `resolveProbeFetch` (`UsageFetchContext.fetchImpl`); a refusal is a plain `error` row,
+never an auth strike or a backoff. The Ollama and OpenRouter probes and the Z.AI poll read at most 64 KiB of a
+reply (`readBounded`, `readForgeJson` from `@haive/shared/forge`, which cancel the stream past the cap) and
+treat a longer one as no answer: the bare HTTP status, an inconclusive compatibility check, a failed poll.
 
 **The private-endpoint allowlist.** An administrator lists the private, loopback or link-local endpoints the
 install may dial: `config:security:privateEndpointAllowlist`, `GET`/`PUT /admin/config/private-endpoint-allowlist`
