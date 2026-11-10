@@ -380,14 +380,60 @@ function serializeConfigSave<T>(run: () => Promise<T>): Promise<T> {
 
 globalKbRoutes.put('/config', (c) => serializeConfigSave(() => putConfig(c)));
 
-// Write the main-DB row first. Main-DB changes join its transaction; log only after commit.
-async function auditedChange<T>(event: AuditEvent, change: (tx: DbTx) => Promise<T>): Promise<T> {
+// Write each main-DB row before its change; log only after commit. A null initial event
+// lets entry writers decide under the store locks, then record before their first write.
+// The store commits inside this transaction: a failed main commit can still leave a lapse
+// without its row (the same cross-database window as Enforce/Un-enforce).
+async function auditedChange<T>(
+  event: AuditEvent | null,
+  change: (tx: DbTx, record: (event: AuditEvent) => Promise<void>) => Promise<T>,
+): Promise<T> {
+  const events: AuditEvent[] = [];
   const result = await getDb().transaction(async (tx) => {
-    await insertAuditEvent(tx, event);
-    return change(tx);
+    const record = async (next: AuditEvent): Promise<void> => {
+      await insertAuditEvent(tx, next);
+      events.push(next);
+    };
+    if (event) await record(event);
+    return change(tx, record);
   });
-  logAuditEvent(event);
+  for (const committed of events) logAuditEvent(committed);
   return result;
+}
+
+async function entryChange<T>(
+  actor: Context<AppEnv>,
+  change: (record: (event: AuditEvent) => Promise<void>) => Promise<T>,
+): Promise<T> {
+  // Only an admin can lapse an approval: canManageEntry checks both the locked entry
+  // and an activation's predecessor. Owner edits must not reserve a main connection
+  // while waiting for the store's namespace lock.
+  if (actor.get('userRole') === 'admin') {
+    return auditedChange(null, (_tx, record) => change(record));
+  }
+  return change(async () => {
+    throw new Error('Non-admin entry change unexpectedly attempted to lapse an approval');
+  });
+}
+
+function lapseAuditEvent(
+  actorUserId: string,
+  entry: GlobalKbEntry,
+  cause: 'edit' | 'status' | 'delete',
+  status?: GlobalKbStatus,
+): AuditEvent {
+  return {
+    actorUserId,
+    action: 'global_kb.house_rule.lapse',
+    targetType: 'global_kb_entry',
+    targetId: entry.id,
+    metadata: {
+      namespace: entry.namespace,
+      mode: entry.enforce?.mode ?? null,
+      cause,
+      ...(cause === 'status' ? { status } : {}),
+    },
+  };
 }
 
 async function putConfig(c: Context<AppEnv>) {
@@ -1129,179 +1175,196 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
   // had just detached. The UI's button guard cannot prevent that — it only serialises one tab,
   // while a second tab or an API client goes straight at the route.
   const result = await withGlobalKb(getDb(), async ({ db: conn, settings }) =>
-    conn.transaction(async (db) => {
-      // LOCKED, so a retry's detect — a plain UPDATE to `enriching` — waits for this transaction
-      // instead of flipping the status between the check and the write.
-      const current = await lockEntry(db, id);
-      if (!current) {
-        return {
-          row: undefined,
-          supersededId: null,
-          reembed: false,
-          namespace: settings.namespace,
-        };
-      }
-      if (!canManageEntry(current, c)) {
-        throw new HttpError(
-          403,
-          'Only an owner or admin may change an unapproved entry; approved and ownerless entries require an admin',
-          'admin_required',
-        );
-      }
-      const blocked = enrichmentBlocksEdit(current.status);
-      if (blocked) throw new HttpError(409, blocked, 'entry_enrichment_pending');
-      const set: Partial<typeof globalKbEntries.$inferInsert> = { updatedAt: new Date() };
-      if (data.title !== undefined) set.title = data.title;
-      if (data.body !== undefined) set.body = data.body;
-      if (data.category !== undefined) set.category = data.category;
-      if (data.facets !== undefined) set.facets = normalizeFacets(data.facets as GlobalKbFacets);
-      if (data.status !== undefined) set.status = data.status;
-      if (description !== undefined) set.description = description;
-      // Activating CLEARS the supersession stamp, or reactivating is a no-op that looks like a
-      // success. `supersededAt` means "archived because something replaced it", and the digest
-      // filters on `status = 'active' AND superseded_at IS NULL` — so a row flipped to active
-      // with the stamp still set stays invisible to every project. The scope editor's own warning
-      // tells a reviewer to reactivate the predecessor when they move a replacement's scope, and
-      // this is what makes that instruction true rather than merely printed.
-      //
-      // `supersedesEntryId` is deliberately KEPT here: it records what this entry replaced. Only a
-      // real re-scope clears it (below), because a rule whose scope moved no longer replaces that.
-      if (data.status === 'active') set.supersededAt = null;
-      // Only a changed title or body, or an entry becoming active, has anything to embed; pending
-      // is what lets the worker re-queue a sync whose enqueue below is lost.
-      const becomesActive = data.status === 'active' && current.status !== 'active';
-      const reembed =
-        becomesActive ||
-        (data.title !== undefined && data.title !== current.title) ||
-        (data.body !== undefined && data.body !== current.body);
-      if (reembed) set.embedStatus = 'pending';
-      // Done here and not by the trigger: a reverted edit must not revive the approval, and the
-      // token is blind to the facet order a backfill rewrites.
-      if (
-        current.enforcedHash != null &&
-        houseRuleContentToken({ ...current, ...set }) !== houseRuleContentToken(current)
-      ) {
-        set.enforcedHash = null;
-      }
-      // A SCOPE edit invalidates a proposed supersession. The link was decided by comparing this
-      // draft's article against the entry it would replace; re-scoping it to another technology
-      // makes it a different rule, and activating it would then archive an entry it no longer has
-      // anything to do with. Cleared rather than revalidated — revalidating needs an embedding
-      // pass, and a stale duplicate the reviewer can archive by hand is a far cheaper mistake than
-      // silently retiring the wrong article. Keyed on the FILTER dimensions, so a tags-only edit
-      // (tags do not scope retrieval) leaves a valid link alone.
-      if (data.facets !== undefined) {
-        // Cleared on ANY real re-scope, whatever the status. The link is not only history: every
-        // activation reads it — reactivation included — and archives the entry it names. So an
-        // exemption for ACTIVE entries became wrong once an active entry could be archived and
-        // reactivated from the page: re-scope an active replacement (the scope editor then tells
-        // the reviewer to reactivate the old entry), archive it, reactivate it, and its activation
-        // archived that old entry again although the two rules no longer share a scope. This
-        // condition already had to widen once, from drafts to archived entries, for the same
-        // reason: the set of states an entry can be activated from kept growing.
-        //
-        // Clearing costs the record of what a re-scoped entry once replaced, which stopped being
-        // true when its scope moved. The predecessor's "an active entry still replaces this one"
-        // warning follows this link too, so it stops claiming a replacement that is gone.
-        if (current.supersedesEntryId && scopeChanged(current.facets, set.facets)) {
-          set.supersedesEntryId = null;
+    entryChange(c, (record) =>
+      conn.transaction(async (db) => {
+        // LOCKED, so a retry's detect — a plain UPDATE to `enriching` — waits for this transaction
+        // instead of flipping the status between the check and the write.
+        const current = await lockEntry(db, id);
+        if (!current) {
+          return {
+            row: undefined,
+            supersededId: null,
+            reembed: false,
+            namespace: settings.namespace,
+          };
         }
-      }
-      // Authorize the link after a same-request re-scope has had a chance to clear it.
-      // The corpus advisory lock is already held; lock the predecessor in this transaction too.
-      const supersedesEntryId = { ...current, ...set }.supersedesEntryId;
-      if (becomesActive && supersedesEntryId) {
-        const [target] = await db
-          .select()
-          .from(globalKbEntries)
-          .where(eq(globalKbEntries.id, supersedesEntryId))
-          .for('update');
-        if (target && target.status !== 'archived' && !canManageEntry(target, c)) {
+        if (!canManageEntry(current, c)) {
           throw new HttpError(
             403,
-            'Activating this entry would archive an entry you may not change; an admin is required',
+            'Only an owner or admin may change an unapproved entry; approved and ownerless entries require an admin',
             'admin_required',
           );
         }
-      }
-      if (data.facets !== undefined) {
-        // A link POINTING AT this entry was decided against the old scope
-        // too. Left in place, activating that replacement — a reactivation included — archives
-        // this entry although the two rules no longer share a scope, and the successor lookup
-        // keeps warning that it has been replaced. Their `updatedAt` is left alone, for the
-        // list-order reason the activation's predecessor archive gives.
-        if (scopeChanged(current.facets, set.facets)) {
-          await db
-            .update(globalKbEntries)
-            .set({ supersedesEntryId: null })
-            .where(eq(globalKbEntries.supersedesEntryId, id));
+        const blocked = enrichmentBlocksEdit(current.status);
+        if (blocked) throw new HttpError(409, blocked, 'entry_enrichment_pending');
+        const set: Partial<typeof globalKbEntries.$inferInsert> = { updatedAt: new Date() };
+        if (data.title !== undefined) set.title = data.title;
+        if (data.body !== undefined) set.body = data.body;
+        if (data.category !== undefined) set.category = data.category;
+        if (data.facets !== undefined) set.facets = normalizeFacets(data.facets as GlobalKbFacets);
+        if (data.status !== undefined) set.status = data.status;
+        if (description !== undefined) set.description = description;
+        // Activating CLEARS the supersession stamp, or reactivating is a no-op that looks like a
+        // success. `supersededAt` means "archived because something replaced it", and the digest
+        // filters on `status = 'active' AND superseded_at IS NULL` — so a row flipped to active
+        // with the stamp still set stays invisible to every project. The scope editor's own warning
+        // tells a reviewer to reactivate the predecessor when they move a replacement's scope, and
+        // this is what makes that instruction true rather than merely printed.
+        //
+        // `supersedesEntryId` is deliberately KEPT here: it records what this entry replaced. Only a
+        // real re-scope clears it (below), because a rule whose scope moved no longer replaces that.
+        if (data.status === 'active') set.supersededAt = null;
+        // Only a changed title or body, or an entry becoming active, has anything to embed; pending
+        // is what lets the worker re-queue a sync whose enqueue below is lost.
+        const becomesActive = data.status === 'active' && current.status !== 'active';
+        const reembed =
+          becomesActive ||
+          (data.title !== undefined && data.title !== current.title) ||
+          (data.body !== undefined && data.body !== current.body);
+        if (reembed) set.embedStatus = 'pending';
+        const lapses: AuditEvent[] = [];
+        // Done here and not by the trigger: a reverted edit must not revive the approval, and the
+        // token is blind to the facet order a backfill rewrites.
+        if (
+          current.enforcedHash != null &&
+          houseRuleContentToken({ ...current, ...set }) !== houseRuleContentToken(current)
+        ) {
+          set.enforcedHash = null;
+          lapses.push(lapseAuditEvent(c.get('userId'), current, 'edit'));
+        } else if (
+          current.enforcedHash != null &&
+          current.status === 'active' &&
+          data.status !== undefined &&
+          data.status !== 'active'
+        ) {
+          lapses.push(lapseAuditEvent(c.get('userId'), current, 'status', data.status));
         }
-      }
-      const rekeyed = rescopedTopicKey(current, { category: set.category, facets: set.facets });
-      if (rekeyed !== undefined) set.topicKey = rekeyed;
-      const [row] = await db
-        .update(globalKbEntries)
-        .set(set)
-        .where(eq(globalKbEntries.id, id))
-        .returning();
-      // Carry the new scope onto this entry's CHUNKS, in the same transaction.
-      //
-      // A chunk holds its OWN copy of the facets and `buildFacetClause` filters on THAT, not on
-      // the entry's — so committing the entry alone leaves every chunk advertising the old
-      // scope, while the body expansion serves the entry's current text. Until the sync ran, a
-      // re-scoped rule was therefore still delivered to its FORMER projects and missing from its
-      // new ones, and indefinitely so if the enqueue or the embed failed.
-      //
-      // An UPDATE rather than a delete: a scope edit changes metadata, not prose, so the vectors
-      // stay valid and the entry keeps working for the whole operation instead of going dark
-      // until a re-embed lands. The enqueue below still runs — it is what re-embeds a BODY change
-      // — but retrieval is correct the moment this commits rather than whenever that job does.
-      if (set.facets !== undefined) {
-        await db.execute(
-          sql`UPDATE ai_rag_embeddings SET facets = ${JSON.stringify(set.facets)}::jsonb
-               WHERE namespace = ${row?.namespace ?? ''} AND entry_id = ${id}`,
-        );
-      }
-      // A non-active entry holds no vectors, enforced HERE, in the transaction that sets the status,
-      // rather than by the sync job enqueued after commit. Global retrieval has no status predicate:
-      // `rag.ts` ranks chunks on namespace and facets and joins the entry only to expand its body,
-      // so a chunk that outlives its entry's `active` status is served. An enqueue that failed after
-      // commit (Redis unavailable) used to leave an archived rule retrievable indefinitely, while
-      // the page reported the archive as failed. A no-op for an entry that holds none.
-      if (row && row.status !== 'active') {
-        await db.execute(
-          sql`DELETE FROM ai_rag_embeddings WHERE namespace = ${row.namespace} AND entry_id = ${id}`,
-        );
-      }
-      // Activation supersession: when a draft that proposes replacing another entry (a
-      // merge produced by onboarding) is activated, archive the entry it supersedes so
-      // the topic keeps a single live article. Its vectors go in this transaction too, for the
-      // reason above.
-      let supersededId: string | null = null;
-      if (row && becomesActive && row.supersedesEntryId) {
-        const [archived] = await db
+        // A SCOPE edit invalidates a proposed supersession. The link was decided by comparing this
+        // draft's article against the entry it would replace; re-scoping it to another technology
+        // makes it a different rule, and activating it would then archive an entry it no longer has
+        // anything to do with. Cleared rather than revalidated — revalidating needs an embedding
+        // pass, and a stale duplicate the reviewer can archive by hand is a far cheaper mistake than
+        // silently retiring the wrong article. Keyed on the FILTER dimensions, so a tags-only edit
+        // (tags do not scope retrieval) leaves a valid link alone.
+        if (data.facets !== undefined) {
+          // Cleared on ANY real re-scope, whatever the status. The link is not only history: every
+          // activation reads it — reactivation included — and archives the entry it names. So an
+          // exemption for ACTIVE entries became wrong once an active entry could be archived and
+          // reactivated from the page: re-scope an active replacement (the scope editor then tells
+          // the reviewer to reactivate the old entry), archive it, reactivate it, and its activation
+          // archived that old entry again although the two rules no longer share a scope. This
+          // condition already had to widen once, from drafts to archived entries, for the same
+          // reason: the set of states an entry can be activated from kept growing.
+          //
+          // Clearing costs the record of what a re-scoped entry once replaced, which stopped being
+          // true when its scope moved. The predecessor's "an active entry still replaces this one"
+          // warning follows this link too, so it stops claiming a replacement that is gone.
+          if (current.supersedesEntryId && scopeChanged(current.facets, set.facets)) {
+            set.supersedesEntryId = null;
+          }
+        }
+        // Authorize the link after a same-request re-scope has had a chance to clear it.
+        // The corpus advisory lock is already held; lock the predecessor in this transaction too.
+        const supersedesEntryId = { ...current, ...set }.supersedesEntryId;
+        if (becomesActive && supersedesEntryId) {
+          const [target] = await db
+            .select()
+            .from(globalKbEntries)
+            .where(eq(globalKbEntries.id, supersedesEntryId))
+            .for('update');
+          if (target && target.status !== 'archived' && !canManageEntry(target, c)) {
+            throw new HttpError(
+              403,
+              'Activating this entry would archive an entry you may not change; an admin is required',
+              'admin_required',
+            );
+          }
+          if (target?.status === 'active' && target.enforcedHash != null) {
+            lapses.push(lapseAuditEvent(c.get('userId'), target, 'status', 'archived'));
+          }
+        }
+        // All decisions came from locked rows. A refused audit must precede every store write,
+        // including scope/link maintenance and activation of the replacement.
+        for (const lapse of lapses) await record(lapse);
+        if (data.facets !== undefined) {
+          // A link POINTING AT this entry was decided against the old scope
+          // too. Left in place, activating that replacement — a reactivation included — archives
+          // this entry although the two rules no longer share a scope, and the successor lookup
+          // keeps warning that it has been replaced. Their `updatedAt` is left alone, for the
+          // list-order reason the activation's predecessor archive gives.
+          if (scopeChanged(current.facets, set.facets)) {
+            await db
+              .update(globalKbEntries)
+              .set({ supersedesEntryId: null })
+              .where(eq(globalKbEntries.supersedesEntryId, id));
+          }
+        }
+        const rekeyed = rescopedTopicKey(current, { category: set.category, facets: set.facets });
+        if (rekeyed !== undefined) set.topicKey = rekeyed;
+        const [row] = await db
           .update(globalKbEntries)
-          // Record the archive time via supersededAt, but DON'T bump updatedAt: the
-          // list sorts by updatedAt desc, so bumping it would float the just-archived
-          // old article above its replacement. Leaving updatedAt keeps it in place.
-          .set({ status: 'archived', supersededAt: new Date() })
-          .where(
-            and(
-              eq(globalKbEntries.id, row.supersedesEntryId),
-              ne(globalKbEntries.status, 'archived'),
-            ),
-          )
-          .returning({ id: globalKbEntries.id, namespace: globalKbEntries.namespace });
-        if (archived) {
+          .set(set)
+          .where(eq(globalKbEntries.id, id))
+          .returning();
+        // Carry the new scope onto this entry's CHUNKS, in the same transaction.
+        //
+        // A chunk holds its OWN copy of the facets and `buildFacetClause` filters on THAT, not on
+        // the entry's — so committing the entry alone leaves every chunk advertising the old
+        // scope, while the body expansion serves the entry's current text. Until the sync ran, a
+        // re-scoped rule was therefore still delivered to its FORMER projects and missing from its
+        // new ones, and indefinitely so if the enqueue or the embed failed.
+        //
+        // An UPDATE rather than a delete: a scope edit changes metadata, not prose, so the vectors
+        // stay valid and the entry keeps working for the whole operation instead of going dark
+        // until a re-embed lands. The enqueue below still runs — it is what re-embeds a BODY change
+        // — but retrieval is correct the moment this commits rather than whenever that job does.
+        if (set.facets !== undefined) {
           await db.execute(
-            sql`DELETE FROM ai_rag_embeddings
-                 WHERE namespace = ${archived.namespace} AND entry_id = ${archived.id}`,
+            sql`UPDATE ai_rag_embeddings SET facets = ${JSON.stringify(set.facets)}::jsonb
+               WHERE namespace = ${row?.namespace ?? ''} AND entry_id = ${id}`,
           );
         }
-        supersededId = archived?.id ?? null;
-      }
-      return { row, supersededId, reembed, namespace: settings.namespace };
-    }),
+        // A non-active entry holds no vectors, enforced HERE, in the transaction that sets the status,
+        // rather than by the sync job enqueued after commit. Global retrieval has no status predicate:
+        // `rag.ts` ranks chunks on namespace and facets and joins the entry only to expand its body,
+        // so a chunk that outlives its entry's `active` status is served. An enqueue that failed after
+        // commit (Redis unavailable) used to leave an archived rule retrievable indefinitely, while
+        // the page reported the archive as failed. A no-op for an entry that holds none.
+        if (row && row.status !== 'active') {
+          await db.execute(
+            sql`DELETE FROM ai_rag_embeddings WHERE namespace = ${row.namespace} AND entry_id = ${id}`,
+          );
+        }
+        // Activation supersession: when a draft that proposes replacing another entry (a
+        // merge produced by onboarding) is activated, archive the entry it supersedes so
+        // the topic keeps a single live article. Its vectors go in this transaction too, for the
+        // reason above.
+        let supersededId: string | null = null;
+        if (row && becomesActive && row.supersedesEntryId) {
+          const [archived] = await db
+            .update(globalKbEntries)
+            // Record the archive time via supersededAt, but DON'T bump updatedAt: the
+            // list sorts by updatedAt desc, so bumping it would float the just-archived
+            // old article above its replacement. Leaving updatedAt keeps it in place.
+            .set({ status: 'archived', supersededAt: new Date() })
+            .where(
+              and(
+                eq(globalKbEntries.id, row.supersedesEntryId),
+                ne(globalKbEntries.status, 'archived'),
+              ),
+            )
+            .returning({ id: globalKbEntries.id, namespace: globalKbEntries.namespace });
+          if (archived) {
+            await db.execute(
+              sql`DELETE FROM ai_rag_embeddings
+                 WHERE namespace = ${archived.namespace} AND entry_id = ${archived.id}`,
+            );
+          }
+          supersededId = archived?.id ?? null;
+        }
+        return { row, supersededId, reembed, namespace: settings.namespace };
+      }),
+    ),
   ).catch(lockBusyError);
 
   const entry = result.row;
@@ -1319,34 +1382,42 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
 globalKbRoutes.delete('/entries/:id', async (c) => {
   const id = entryIdParam(c.req.param('id'));
   const entry = await withGlobalKb(getDb(), async ({ db: conn }) =>
-    conn.transaction(async (db) => {
-      const current = await lockEntry(db, id);
-      if (!current) return undefined;
-      if (!canManageEntry(current, c)) {
-        throw new HttpError(
-          403,
-          'Only an owner or admin may delete an unapproved entry; approved and ownerless entries require an admin',
-          'admin_required',
-        );
-      }
-      const [row] = await db.delete(globalKbEntries).where(eq(globalKbEntries.id, id)).returning();
-      if (row) {
-        await db.execute(
-          sql`DELETE FROM ai_rag_embeddings WHERE namespace = ${row.namespace} AND entry_id = ${id}`,
-        );
-        // Entries that replaced this one now replace what IT replaced. Left pointing at the gap, a
-        // chain A -> B -> C loses B, and archived A stops warning that C is live, so Reactivate is
-        // offered on a rule that already has an active successor. `updated_at` is left alone, for
-        // the list-order reason the activation's predecessor archive gives.
-        await db.execute(
-          sql`UPDATE global_kb_entries
+    entryChange(c, (record) =>
+      conn.transaction(async (db) => {
+        const current = await lockEntry(db, id);
+        if (!current) return undefined;
+        if (!canManageEntry(current, c)) {
+          throw new HttpError(
+            403,
+            'Only an owner or admin may delete an unapproved entry; approved and ownerless entries require an admin',
+            'admin_required',
+          );
+        }
+        if (current.enforcedHash != null) {
+          await record(lapseAuditEvent(c.get('userId'), current, 'delete'));
+        }
+        const [row] = await db
+          .delete(globalKbEntries)
+          .where(eq(globalKbEntries.id, id))
+          .returning();
+        if (row) {
+          await db.execute(
+            sql`DELETE FROM ai_rag_embeddings WHERE namespace = ${row.namespace} AND entry_id = ${id}`,
+          );
+          // Entries that replaced this one now replace what IT replaced. Left pointing at the gap, a
+          // chain A -> B -> C loses B, and archived A stops warning that C is live, so Reactivate is
+          // offered on a rule that already has an active successor. `updated_at` is left alone, for
+          // the list-order reason the activation's predecessor archive gives.
+          await db.execute(
+            sql`UPDATE global_kb_entries
                  SET supersedes_entry_id = CASE WHEN id = ${row.supersedesEntryId}::uuid
                                                 THEN NULL ELSE ${row.supersedesEntryId}::uuid END
                WHERE supersedes_entry_id = ${id}::uuid`,
-        );
-      }
-      return row;
-    }),
+          );
+        }
+        return row;
+      }),
+    ),
   ).catch(lockBusyError);
   if (!entry) throw new HttpError(404, 'global KB entry not found');
   await enqueueSync(entry.id, entry.namespace, 'delete');

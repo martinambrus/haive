@@ -113,7 +113,17 @@ of an approval that has already lapsed answers 200 and writes its row too. Un-en
 that was never enforced answers 404 before any row, and one whose approval changed between its read
 and the lock answers 409 `enforcement_changed`, so a row never names settings it did not remove.
 Each request holds one main-database connection while it waits for the namespace lock (up to 30 s).
-A lapse (an edit, a status change or a deletion of the entry) writes no row.
+
+An API lapse writes `global_kb.house_rule.lapse` (target the entry; metadata the namespace, the
+mode, `cause` `edit`, `status` or `delete`, and for `status` the new status; never the rule's text,
+title or globs): a content PATCH that clears the approval, a PATCH that moves an approved entry out
+of `active` (the store trigger clears `enforced_hash`), the activation of a draft that archives an
+approved predecessor (the row targets the predecessor), and a DELETE of an approved entry. The row
+is written only when the lock-held read shows an approval the change clears, in the same
+main-then-store transaction as Enforce, so the same commit window applies. Only an admin can lapse
+an approval (`canManageEntry`), so only an admin's PATCH or DELETE opens the main transaction; an
+owner's holds no main connection while it waits for the lock. A lapse by any other writer (the
+worker, another install sharing the store, direct SQL) writes no row.
 
 An enforced entry needs a description and may not carry invisible or control characters or Haive
 prompt delimiters. `always` rules share an 8,000-byte cap per namespace, counted in UTF-8 bytes of

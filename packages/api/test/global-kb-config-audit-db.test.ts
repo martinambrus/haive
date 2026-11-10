@@ -15,7 +15,10 @@ const h = vi.hoisted(() => {
 });
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
-vi.mock('../src/queues.js', () => ({ getGlobalKbSyncQueue: vi.fn(), getTaskQueue: vi.fn() }));
+vi.mock('../src/queues.js', () => ({
+  getGlobalKbSyncQueue: () => ({ add: async () => {} }),
+  getTaskQueue: vi.fn(),
+}));
 vi.mock('../src/lib/task-start.js', () => ({
   enqueueStart: vi.fn(async () => {}),
   markQueuedForStart: async () => true,
@@ -127,6 +130,7 @@ describe.skipIf(!url)('global KB config and enforcement write audit rows first o
   const storeName = `global_kb_config_audit_test_store_${randomUUID().replaceAll('-', '')}`;
   let storeCreated = false;
   let entryId: string;
+  let replacementEntryId: string | undefined;
 
   const enforcement = async (method: 'PUT' | 'DELETE') => {
     const [row] = await storeDb
@@ -207,6 +211,7 @@ describe.skipIf(!url)('global KB config and enforcement write audit rows first o
   beforeEach(async () => {
     h.userId = randomUUID();
     entryId = randomUUID();
+    replacementEntryId = undefined;
     await storeDb.insert(globalKbEntries).values({
       id: entryId,
       namespace: 'default',
@@ -230,6 +235,9 @@ describe.skipIf(!url)('global KB config and enforcement write audit rows first o
   afterEach(async () => {
     await store.unsafe('DROP TRIGGER IF EXISTS refuse_store_write ON global_kb_entries');
     await store.unsafe('DROP FUNCTION IF EXISTS refuse_store_write()');
+    if (replacementEntryId) {
+      await storeDb.delete(globalKbEntries).where(eq(globalKbEntries.id, replacementEntryId));
+    }
     await storeDb.delete(globalKbEntries).where(eq(globalKbEntries.id, entryId));
     await dropTriggers(db);
     await db.delete(schema.auditEvents).where(eq(schema.auditEvents.actorUserId, h.userId));
@@ -288,6 +296,113 @@ describe.skipIf(!url)('global KB config and enforcement write audit rows first o
     expect(row!.enforcedHash).not.toBeNull();
     expect(await rows()).toEqual([]);
   });
+
+  const lapseCases = [
+    ['edit', { body: 'Edited private body' }, 'edit', {}],
+    ['archive', { status: 'archived' }, 'status', { status: 'archived' }],
+    ['draft', { status: 'draft' }, 'status', { status: 'draft' }],
+    ['supersede', { status: 'active' }, 'status', { status: 'archived' }],
+    ['delete', undefined, 'delete', {}],
+  ] as const;
+  const lapse = async (name: string, body: unknown) => {
+    let target = entryId;
+    if (name === 'supersede') {
+      const [draft] = await storeDb
+        .insert(globalKbEntries)
+        .values({
+          namespace: 'default',
+          title: 'Replacement',
+          body: 'Replacement body',
+          category: 'best_practice',
+          status: 'draft',
+          source: 'user',
+          supersedesEntryId: entryId,
+        })
+        .returning();
+      target = draft!.id;
+      replacementEntryId = target;
+    }
+    return app.request(`/global-kb/entries/${target}`, {
+      method: name === 'delete' ? 'DELETE' : 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  };
+  const storedEntry = async () => {
+    const [row] = await storeDb
+      .select()
+      .from(globalKbEntries)
+      .where(eq(globalKbEntries.id, entryId));
+    return row;
+  };
+
+  it.each(lapseCases)(
+    'L1: %s records exactly one lapse when the approval is removed',
+    async (name, body, cause, extra) => {
+      expect((await enforcement('PUT')).status).toBe(200);
+      expect((await lapse(name, body)).status).toBe(200);
+      expect((await storedEntry())?.enforcedHash ?? null).toBeNull();
+      const events = await rowsOf('global_kb.house_rule.lapse');
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ targetType: 'global_kb_entry', targetId: entryId });
+      expect(events[0]!.metadata).toEqual({ namespace: 'default', mode: 'files', cause, ...extra });
+      if (name !== 'supersede') {
+        expect((await lapse(name, body)).status).toBe(name === 'delete' ? 404 : 200);
+        expect(await rowsOf('global_kb.house_rule.lapse')).toHaveLength(1);
+      }
+    },
+  );
+
+  it.each(lapseCases)(
+    'L2: a refused %s audit insert preserves the approved entry',
+    async (name, body) => {
+      expect((await enforcement('PUT')).status).toBe(200);
+      const before = await storedEntry();
+      await refuseAudit(db, ['global_kb.house_rule.lapse']);
+      expect((await lapse(name, body)).status).toBe(500);
+      expect(await storedEntry()).toEqual(before);
+      expect(await rowsOf('global_kb.house_rule.lapse')).toEqual([]);
+      if (name === 'supersede') {
+        const [replacement] = await storeDb
+          .select()
+          .from(globalKbEntries)
+          .where(eq(globalKbEntries.id, replacementEntryId!));
+        expect(replacement).toMatchObject({
+          status: 'draft',
+          supersedesEntryId: entryId,
+          enforcedHash: null,
+        });
+      }
+    },
+  );
+
+  it.each(lapseCases)(
+    'L3: a failed %s store write rolls its lapse row back',
+    async (name, body) => {
+      expect((await enforcement('PUT')).status).toBe(200);
+      const before = await storedEntry();
+      await store.unsafe(
+        "CREATE FUNCTION refuse_store_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'store refused'; END $$",
+      );
+      await store.unsafe(
+        'CREATE TRIGGER refuse_store_write BEFORE UPDATE OR DELETE ON global_kb_entries FOR EACH ROW EXECUTE FUNCTION refuse_store_write()',
+      );
+      expect((await lapse(name, body)).status).toBe(500);
+      expect(await storedEntry()).toEqual(before);
+      expect(await rowsOf('global_kb.house_rule.lapse')).toEqual([]);
+    },
+  );
+
+  it.each(lapseCases)(
+    'L4: %s preserves the documented cross-database commit window',
+    async (name, body) => {
+      expect((await enforcement('PUT')).status).toBe(200);
+      await refuseAuditAtCommit(db);
+      expect((await lapse(name, body)).status).toBe(500);
+      expect((await storedEntry())?.enforcedHash ?? null).toBeNull();
+      expect(await rowsOf('global_kb.house_rule.lapse')).toEqual([]);
+    },
+  );
 
   it('S1: a refused audit row fails a new connection string and leaves the old one', async () => {
     await armExternalWithOld();
