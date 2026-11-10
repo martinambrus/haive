@@ -153,6 +153,7 @@ export function Dialog({
     if (openPanels.at(-1) === entry && !panel.contains(document.activeElement)) panel.focus();
     const onTab = (e: KeyboardEvent) => {
       if (e.key !== 'Tab' || e.defaultPrevented || openPanels.at(-1) !== entry) return;
+      if (document.activeElement?.closest('[data-haive-toast-region]')) return;
       const ahead = tabbables(panel, document.activeElement);
       if (!leavesPanel(panel, ahead, e.shiftKey)) return;
       const stops = tabbables(panel, null);
@@ -167,6 +168,8 @@ export function Dialog({
     };
     const onFocus = () => {
       if (openPanels.at(-1) !== entry || panel.contains(document.activeElement)) return;
+      // Portaled notification controls stay usable while the modal is open.
+      if (document.activeElement?.closest('[data-haive-toast-region]')) return;
       const stops = tabbables(panel, null);
       ((backwards ? stops.at(-1) : stops[0]) ?? panel).focus();
     };
