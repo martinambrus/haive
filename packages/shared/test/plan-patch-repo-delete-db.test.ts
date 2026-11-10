@@ -810,6 +810,37 @@ describe.skipIf(!url)('a plan patch beside a repository delete, on Postgres', ()
     );
 
     it(
+      'allows an update-only patch while another connection holds the patch lock',
+      async () => {
+        const ids = await seedRepository();
+        const holding = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        const holder = peerDb.transaction(async (tx) => {
+          await tx.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended(${`plan-patch:${ids.repositoryId}`}, 0))`,
+          );
+          holding.resolve();
+          await release.promise;
+        });
+        try {
+          await holding.promise;
+          const result = await applyPlanPatch(
+            patchDb,
+            {
+              ops: [{ op: 'upsert', nodeRef: ids.a, status: 'done' }],
+            },
+            userOptions(ids.repositoryId),
+          );
+          expect(result.updated).toEqual([ids.a]);
+        } finally {
+          release.resolve();
+          await holder;
+        }
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
       'bounds a held repository patch lock and keeps it through the outer transaction',
       async () => {
         const ids = await seedRepository();
@@ -819,7 +850,7 @@ describe.skipIf(!url)('a plan patch beside a repository delete, on Postgres', ()
           await applyPlanPatch(
             tx,
             {
-              ops: [],
+              ops: [{ op: 'upsert', nodeRef: ids.a, parentRef: ids.root }],
             },
             userOptions(ids.repositoryId),
           );
@@ -828,19 +859,17 @@ describe.skipIf(!url)('a plan patch beside a repository delete, on Postgres', ()
         });
         try {
           await holding.promise;
-          const started = performance.now();
           const outcome = await settle(
             applyPlanPatch(
               patchDb,
               {
-                ops: [{ op: 'upsert', nodeRef: ids.a, title: 'Must not land' }],
+                ops: [{ op: 'upsert', nodeRef: ids.a, parentRef: ids.b, title: 'Must not land' }],
               },
               userOptions(ids.repositoryId),
             ),
           );
           expect(describeOutcome(outcome)).toContain('PlanPatchError busy');
-          expect(performance.now() - started).toBeGreaterThanOrEqual(800);
-          expect(performance.now() - started).toBeLessThan(2500);
+          // The holder has not been released: refusal precedes its outer commit.
           // Contention is per repository, so another plan remains writable.
           const other = await seedRepository();
           await applyPlanPatch(

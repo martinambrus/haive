@@ -20,7 +20,8 @@ import {
   wouldDetachSubtree,
 } from './paths.js';
 
-export type DbOrTx = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
+export type PlanPatchTx = Parameters<Parameters<Database['transaction']>[0]>[0];
+export type DbOrTx = Database | PlanPatchTx;
 type UpsertOp = Extract<PlanPatchOp, { op: 'upsert' }>;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -436,12 +437,26 @@ export async function dropUnresolvableOps(
 class UnresolvableRefError extends PlanPatchError {}
 
 async function applyOps(
-  tx: DbOrTx,
+  tx: PlanPatchTx,
   patch: PlanPatch,
   opts: ApplyPlanPatchOptions,
 ): Promise<ApplyPlanPatchResult> {
   const { repositoryId, origin, sourceTaskId = null, derivedAtCommit = null } = opts;
-  await lockPlanPatch(tx, repositoryId);
+  const patchOps = normalizeOpRefs(patch.ops);
+  // Decide before any read or row lock. Every valid create names a parent (null
+  // for a root), as does a move. Deletes read subtree paths, and depends_on
+  // links read ancestry and the dependency graph. Field/ordinal-only updates,
+  // other links and unlinks neither read nor change ancestry.
+  if (
+    patchOps.some(
+      (op) =>
+        (op.op === 'upsert' && op.parentRef !== undefined) ||
+        op.op === 'delete' ||
+        (op.op === 'link' && op.kind === 'depends_on'),
+    )
+  ) {
+    await lockPlanPatch(tx, repositoryId);
+  }
   const result: ApplyPlanPatchResult = {
     created: [],
     updated: [],
@@ -872,7 +887,6 @@ async function applyOps(
   // Refs are normalised FIRST, once, feeding both the drop pre-flight and the op
   // loop below. Normalising in only one of them would make an op's survival
   // depend on which of the two looked at it.
-  const patchOps = normalizeOpRefs(patch.ops);
   // Before the drop pre-flight and the first write, from the whole patch: an agent patch whose
   // every create is dropped for a repository that is gone is `repository_gone`, not an empty
   // success.
