@@ -4,6 +4,7 @@ vi.mock('@haive/database', async (original) => ({
   tryCliAuthLock: authLock.acquire,
 }));
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import type { Database } from '@haive/database';
 import { refreshExpiringCliCredentials } from './credential-refresh.js';
 import { readVolumeFile, writeVolumeFile } from './token-source.js';
@@ -218,6 +219,8 @@ it('yields credential refresh to sign-out/login without reading or spending a to
   const fetchMock = vi.fn();
   vi.stubGlobal('fetch', fetchMock);
   await refreshExpiringCliCredentials(db);
+  const rows = await db.query.cliProviders.findMany();
+  expect(authLock.acquire).toHaveBeenCalledWith(db, cliAuthScope(rows[0]!));
   expect(readVolumeFile).not.toHaveBeenCalled();
   expect(writeVolumeFile).not.toHaveBeenCalled();
   expect(fetchMock).not.toHaveBeenCalled();

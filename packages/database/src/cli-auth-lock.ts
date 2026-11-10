@@ -17,11 +17,15 @@ export async function tryCliAuthLock(
     // postgres accepts its parsed options again (including host/port arrays), although
     // the public input type describes only the pre-parsed scalar form.
     ...(options as unknown as postgres.Options<{}>),
+    // parseOptions returns objects with shared verbatim. Never alias the pool's retry
+    // counter/type cache, and do not launch its unawaited startup type query.
+    shared: { retries: 0, typeArrayMap: {} },
+    fetch_types: false,
     max: 1,
     idle_timeout: 0,
     max_lifetime: null,
     connect_timeout: 5,
-  });
+  } as unknown as postgres.Options<{}>);
   try {
     const [row] =
       await client`select pg_try_advisory_lock(hashtextextended(${`cli-auth:${scope}`}, 0)) as held`;

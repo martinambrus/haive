@@ -1,3 +1,4 @@
+import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import { and, eq, inArray } from 'drizzle-orm';
 import {
   cliAuthTaskVolumePrefix,
@@ -115,7 +116,7 @@ export async function refreshExpiringCliCredentials(
   for (const [vol, sharing] of byVolume) {
     let release: (() => Promise<void>) | null = null;
     try {
-      release = await tryCliAuthLock(db, vol);
+      release = await tryCliAuthLock(db, cliAuthScope(sharing[0]!));
       if (!release) continue;
       await refreshGrokVolume(db, vol, sharing, runner);
     } catch (err) {
