@@ -77,7 +77,7 @@ describe('gitRemoteUrlSchema', () => {
     // place on the other side, where `file:///path` genuinely parses with no
     // host at all.
     expect(new URL('https:///repo.git').hostname).toBe('repo.git');
-    expect(accepts('https:///repo.git')).toBe(true);
+    expect(accepts('https:///repo.git')).toBe(false);
     expect(new URL('file:///etc/passwd').hostname).toBe('');
   });
 

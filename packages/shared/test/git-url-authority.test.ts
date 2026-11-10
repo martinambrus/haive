@@ -36,3 +36,15 @@ it.each([
   expect(isAllowedGitRemoteUrl(remote)).toBe(true);
   expect(gitRemoteUrlSchema.safeParse(remote).success).toBe(true);
 });
+
+it.each([
+  '\x01http://h/r',
+  ' http://h/r',
+  'http://h/r with-space',
+  'http://h/r\tpath',
+  'http://h/r\x7f',
+  'git@h.test:r with-space',
+  'https://h/r\u00a0path',
+])('refuses controls or whitespace anywhere in a remote: case %#', (remote) => {
+  expect(isAllowedGitRemoteUrl(remote)).toBe(false);
+});

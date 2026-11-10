@@ -97,7 +97,7 @@ function looksLikeUrl(value: string): boolean {
 }
 
 export function isAllowedGitRemoteUrl(value: string): boolean {
-  if (REMOTE_HELPER_SYNTAX.test(value)) return false;
+  if (/[\s\x00-\x1f\x7f]/.test(value) || REMOTE_HELPER_SYNTAX.test(value)) return false;
   if (looksLikeUrl(value)) {
     let parsed: URL;
     try {
@@ -301,7 +301,8 @@ export const gitRemoteUrlSchema = z
     message:
       'must be an https, http or ssh URL, or an scp-style address with a user or a ' +
       'dotted host (git@github.com:owner/repo.git). A local file:// path is not a ' +
-      'remote; for a single-word host write ssh://host/path.',
+      'remote; for a single-word host write ssh://host/path. ' +
+      'Write the host as a URL parser prints it (e.g. punycode for a non-ASCII name).',
   })
   .transform((value) => redactGitUrl(value, true));
 
