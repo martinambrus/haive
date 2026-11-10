@@ -1448,6 +1448,33 @@ describe('PATCH supersession authorization controls', () => {
 });
 
 describe('house-rule lapse audit', () => {
+  it.each(['PATCH', 'DELETE'] as const)(
+    'a non-admin %s holds no main transaction while waiting for the store lock',
+    async (method) => {
+      h.role = 'user';
+      const transaction = vi.fn(auditFake.db.transaction.bind(auditFake.db));
+      h.db = { ...auditFake.db, transaction };
+      auditFake.hooks.beforeCommit = () => {
+        throw new Error('an unrelated main commit must not fail an owner edit');
+      };
+      fake.hooks.beforeLock = () => {
+        expect(transaction).not.toHaveBeenCalled();
+      };
+
+      const res = await send(
+        method,
+        `/entries/${ENTRY}`,
+        method === 'PATCH' ? { body: 'Changed' } : undefined,
+      );
+
+      expect(res.status).toBe(200);
+      expect(transaction).not.toHaveBeenCalled();
+      if (method === 'PATCH') expect(stored().body).toBe('Changed');
+      else expect(stored()).toBeUndefined();
+      expect(auditFake.rows(schema.auditEvents)).toEqual([]);
+    },
+  );
+
   const lapseRows = () =>
     auditFake.rows(schema.auditEvents).filter((row) => row.action === 'global_kb.house_rule.lapse');
   const operations = [

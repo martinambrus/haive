@@ -130,6 +130,7 @@ describe.skipIf(!url)('global KB config and enforcement write audit rows first o
   const storeName = `global_kb_config_audit_test_store_${randomUUID().replaceAll('-', '')}`;
   let storeCreated = false;
   let entryId: string;
+  let replacementEntryId: string | undefined;
 
   const enforcement = async (method: 'PUT' | 'DELETE') => {
     const [row] = await storeDb
@@ -210,6 +211,7 @@ describe.skipIf(!url)('global KB config and enforcement write audit rows first o
   beforeEach(async () => {
     h.userId = randomUUID();
     entryId = randomUUID();
+    replacementEntryId = undefined;
     await storeDb.insert(globalKbEntries).values({
       id: entryId,
       namespace: 'default',
@@ -233,6 +235,9 @@ describe.skipIf(!url)('global KB config and enforcement write audit rows first o
   afterEach(async () => {
     await store.unsafe('DROP TRIGGER IF EXISTS refuse_store_write ON global_kb_entries');
     await store.unsafe('DROP FUNCTION IF EXISTS refuse_store_write()');
+    if (replacementEntryId) {
+      await storeDb.delete(globalKbEntries).where(eq(globalKbEntries.id, replacementEntryId));
+    }
     await storeDb.delete(globalKbEntries).where(eq(globalKbEntries.id, entryId));
     await dropTriggers(db);
     await db.delete(schema.auditEvents).where(eq(schema.auditEvents.actorUserId, h.userId));
@@ -315,6 +320,7 @@ describe.skipIf(!url)('global KB config and enforcement write audit rows first o
         })
         .returning();
       target = draft!.id;
+      replacementEntryId = target;
     }
     return app.request(`/global-kb/entries/${target}`, {
       method: name === 'delete' ? 'DELETE' : 'PATCH',
@@ -356,6 +362,17 @@ describe.skipIf(!url)('global KB config and enforcement write audit rows first o
       expect((await lapse(name, body)).status).toBe(500);
       expect(await storedEntry()).toEqual(before);
       expect(await rowsOf('global_kb.house_rule.lapse')).toEqual([]);
+      if (name === 'supersede') {
+        const [replacement] = await storeDb
+          .select()
+          .from(globalKbEntries)
+          .where(eq(globalKbEntries.id, replacementEntryId!));
+        expect(replacement).toMatchObject({
+          status: 'draft',
+          supersedesEntryId: entryId,
+          enforcedHash: null,
+        });
+      }
     },
   );
 

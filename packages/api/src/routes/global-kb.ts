@@ -401,6 +401,21 @@ async function auditedChange<T>(
   return result;
 }
 
+async function entryChange<T>(
+  actor: Context<AppEnv>,
+  change: (record: (event: AuditEvent) => Promise<void>) => Promise<T>,
+): Promise<T> {
+  // Only an admin can lapse an approval: canManageEntry checks both the locked entry
+  // and an activation's predecessor. Owner edits must not reserve a main connection
+  // while waiting for the store's namespace lock.
+  if (actor.get('userRole') === 'admin') {
+    return auditedChange(null, (_tx, record) => change(record));
+  }
+  return change(async () => {
+    throw new Error('Non-admin entry change unexpectedly attempted to lapse an approval');
+  });
+}
+
 function lapseAuditEvent(
   actorUserId: string,
   entry: GlobalKbEntry,
@@ -1160,7 +1175,7 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
   // had just detached. The UI's button guard cannot prevent that — it only serialises one tab,
   // while a second tab or an API client goes straight at the route.
   const result = await withGlobalKb(getDb(), async ({ db: conn, settings }) =>
-    auditedChange(null, (_tx, record) =>
+    entryChange(c, (record) =>
       conn.transaction(async (db) => {
         // LOCKED, so a retry's detect — a plain UPDATE to `enriching` — waits for this transaction
         // instead of flipping the status between the check and the write.
@@ -1367,7 +1382,7 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
 globalKbRoutes.delete('/entries/:id', async (c) => {
   const id = entryIdParam(c.req.param('id'));
   const entry = await withGlobalKb(getDb(), async ({ db: conn }) =>
-    auditedChange(null, (_tx, record) =>
+    entryChange(c, (record) =>
       conn.transaction(async (db) => {
         const current = await lockEntry(db, id);
         if (!current) return undefined;
