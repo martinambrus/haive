@@ -1349,13 +1349,37 @@ planRoutes.post('/:id/plan/merge', requireNewWorkAllowed, async (c) => {
   return c.json({ taskId }, 201);
 });
 
-/** The open merge conversation, if there is one — the banner and the panel both
- *  read this. Returns `{ merge: null }` rather than 404 so the plan page can poll it
- *  as a plain state read. */
+/** The live conversation and the latest unresolved failure. Completion time orders
+ *  outcomes: an older conversation retried later can fail after a newer one succeeded.
+ *  A cancellation does not resolve a failure, and message copy never determines state. */
 planRoutes.get('/:id/plan/merge', async (c) => {
   const { repositoryId } = await requireOwnedRepo(c);
-  const task = await findOpenPlanMerge(repositoryId);
-  if (!task) return c.json({ merge: null });
+  const [task, latestOutcome] = await Promise.all([
+    findOpenPlanMerge(repositoryId),
+    getDb().query.tasks.findFirst({
+      where: and(
+        eq(schema.tasks.repositoryId, repositoryId),
+        eq(schema.tasks.type, 'plan_merge'),
+        inArray(schema.tasks.status, ['failed', 'completed']),
+      ),
+      orderBy: [
+        desc(sql`coalesce(${schema.tasks.completedAt}, ${schema.tasks.createdAt})`),
+        desc(schema.tasks.createdAt),
+        desc(schema.tasks.id),
+      ],
+      columns: { id: true, status: true, createdAt: true, completedAt: true },
+    }),
+  ]);
+  const failedMerge =
+    latestOutcome?.status === 'failed'
+      ? {
+          taskId: latestOutcome.id,
+          status: latestOutcome.status,
+          createdAt: latestOutcome.createdAt,
+          completedAt: latestOutcome.completedAt,
+        }
+      : null;
+  if (!task) return c.json({ merge: null, failedMerge });
   const rows = await getDb()
     .select({ payload: schema.taskEvents.payload, createdAt: schema.taskEvents.createdAt })
     .from(schema.taskEvents)
@@ -1382,6 +1406,7 @@ planRoutes.get('/:id/plan/merge', async (c) => {
         };
       }),
     },
+    failedMerge,
   });
 });
 
