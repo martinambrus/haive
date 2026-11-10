@@ -201,13 +201,18 @@ function stubDb() {
       }),
     }),
     select: () => ({
-      from: () => ({
-        where: () => ({
-          orderBy: async () =>
-            events
-              .filter((e) => e.eventType === PUT_BACK_EVENT)
-              .map((e) => ({ payload: e.payload })),
-        }),
+      from: (table: unknown) => ({
+        where: () =>
+          table === schema.repositories
+            ? Promise.resolve([
+                { remoteUrl: 'https://example.test/bound.git', credentialsSecretId: null },
+              ])
+            : {
+                orderBy: async () =>
+                  events
+                    .filter((e) => e.eventType === PUT_BACK_EVENT)
+                    .map((e) => ({ payload: e.payload })),
+              },
       }),
     }),
   };
