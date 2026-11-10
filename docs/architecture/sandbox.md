@@ -365,3 +365,38 @@ phase, shows queue progress, and offers a fresh login if the socket closes. The 
 guard still suppresses duplicate captures and `probePending` keeps stream EOF from ending the
 session. Volume-based logins retain their existing earlier success event because their credential
 is already stored.
+
+## CLI sign-out and newer logins
+
+A sign-out (POST `/cli-providers/:id/sign-out`) queues a job on the shared cli-exec queue that can
+wait minutes, so a login completed in between must survive it. Two pieces do that:
+
+- **Generation.** `cli_providers.auth_generation` (uuid) changes only when a user-driven credential
+  write is durable: a volume login after the CLI's success signal (`runProbeAndSave`, after the
+  `cli_provider.login` audit), the Claude OAuth save (`saveCliLoginSecret`, same transaction as the
+  secret), a manual secret POST or a PATCH that moves a login secret, the usage reconnect, and the
+  boot copy of secret-like env. A shared-volume login advances every row sharing that volume
+  (`advanceVolumeLoginGeneration`, `@haive/shared/cli-auth-state`). An abandoned attempt, a usage
+  refresh, a grok refresh and a task's sync-back never advance it. The sign-out job carries the
+  value read at request time and, when the row's value differs, removes nothing and returns
+  `{ ok: true, superseded: true }`; the poll route reports it as `done` and the page says the user
+  signed in again. A job queued without the field (older release) deletes as before.
+- **Lock.** Every credential writer and the sign-out job serialise on a session advisory lock keyed
+  by the auth volume's name (`cliAuthScope`, path index 0, so shared and isolated rows resolve as a
+  task mounts them). `tryCliAuthLock` (`@haive/database`) takes it with `pg_try_advisory_lock` on a
+  dedicated one-connection postgres.js client (`fetch_types: false`, its own `shared` state), never
+  a pooled connection or an open transaction; closing that client releases it, and the server
+  releases it when the process dies. Nothing waits on it while holding a row lock. Each holder re-reads
+  the row under the lock and refuses when its scope moved meanwhile (the job retries under the new scope,
+  an api writer answers 409). A PATCH that changes `authMode` or `isolateAuth` holds the old and the new
+  scope, sorted; a save that sends them unchanged takes no lock. A login dialog
+  holds it from the WebSocket upgrade until its session is torn down (at most the 10-minute session
+  timeout once the container exists). Api writers answer 409 `cli_auth_busy` when it is held. The
+  sign-out job defers itself (`deferJob`, 2 s doubling to 15 s) and fails after 30 minutes with a
+  sentence saying nothing was removed. The usage poll reads without the lock and takes it only to
+  refresh, re-reading the token under it. A task's sync-back waits up to 30 s for it; still held,
+  it warns and the task copy is removed with its volume, so a token the task rotated is lost while
+  a login dialog on the same CLI stays open that long (that login replaces it when it succeeds).
+
+Undo: revert the change; the column is ignored by the older release
+(`ALTER TABLE cli_providers DROP COLUMN IF EXISTS auth_generation` removes it).

@@ -56,6 +56,7 @@ import {
 import { getCliExecQueue, getUsagePollQueue } from '../queues.js';
 import { enqueueCliVersionRefresh } from '../lib/cli-version-refresh.js';
 import { loadPollableJob } from '../lib/cli-job-poll.js';
+import { isSignOutSecret, withCliAuthLocks, withCliAuthWrite } from '../lib/cli-auth-write.js';
 
 function secretAuditMetadata(names: Iterable<string>): {
   secretCount: number;
@@ -68,7 +69,7 @@ function secretAuditMetadata(names: Iterable<string>): {
 async function loadOwnedProvider(db: Database, userId: string, providerId: string) {
   const provider = await db.query.cliProviders.findFirst({
     where: and(eq(schema.cliProviders.id, providerId), eq(schema.cliProviders.userId, userId)),
-    columns: { id: true },
+    columns: { id: true, userId: true, name: true, authMode: true, isolateAuth: true },
   });
   if (!provider) throw new HttpError(404, 'CLI provider not found');
   return provider;
@@ -581,55 +582,88 @@ cliProviderRoutes.patch('/:id', async (c) => {
         },
       }
     : undefined;
-  const updated = await db.transaction(async (tx) => {
-    if (startsJob) await admitNewWork(tx);
-    const [current] = await tx
-      .select()
-      .from(schema.cliProviders)
-      .where(and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)))
-      .for('no key update');
-    if (!current) throw new HttpError(404, 'CLI provider not found');
-    const fields: string[] = PROVIDER_SECURITY_FIELDS.filter(
-      (field) =>
-        updates[field] !== undefined &&
-        !isDeepStrictEqual(
-          emptyAuditValueAsNull(updates[field]),
-          emptyAuditValueAsNull(current[field]),
-        ),
-    );
-    const envNames = split
-      ? [...new Set([...Object.keys(current.envVars ?? {}), ...Object.keys(split.envVars)])]
-          .filter((name) => (current.envVars ?? {})[name] !== split.envVars[name])
-          .sort()
+  const authSecretNames = Object.keys(split?.secrets ?? {}).filter(isSignOutSecret);
+  // The edit form sends both fields on every save: lock only for a real change, so an unrelated
+  // edit never waits on a login. A stale read of either field is refused below either way.
+  const authSettingsRequested = body.authMode !== undefined || body.isolateAuth !== undefined;
+  const authSettingsChanged =
+    (body.authMode !== undefined && body.authMode !== existing.authMode) ||
+    (body.isolateAuth !== undefined && body.isolateAuth !== existing.isolateAuth);
+  const authProviders = authSettingsChanged
+    ? [
+        existing,
+        {
+          ...existing,
+          authMode: body.authMode ?? existing.authMode,
+          isolateAuth: body.isolateAuth ?? existing.isolateAuth,
+        },
+      ]
+    : authSecretNames.length
+      ? [existing]
       : [];
-    if (envNames.length > 0) fields.push('envVars');
-    const event: AuditEvent | undefined = fields.length
-      ? {
-          actorUserId: userId,
-          action: 'cli_provider.update',
-          targetType: 'cli_provider',
-          targetId: id,
-          metadata: { fields, ...(envNames.length ? { envNames } : {}) },
-        }
-      : undefined;
-    if (event) await insertAuditEvent(tx, event);
-    const rows = await tx
-      .update(schema.cliProviders)
-      .set(updates)
-      .where(eq(schema.cliProviders.id, id))
-      .returning();
-    for (const [name, value] of Object.entries(split?.secrets ?? {})) {
-      await upsertProviderSecret(tx, {
-        providerId: id,
-        name,
-        value,
-        masterKek: await secretsService.getMasterKek(),
-        onExisting: 'overwrite',
-      });
-    }
-    if (secretEvent) await insertAuditEvent(tx, secretEvent);
-    return { rows, event };
-  });
+  const updated = await withCliAuthLocks(db, authProviders, () =>
+    db.transaction(async (tx) => {
+      if (startsJob) await admitNewWork(tx);
+      const [current] = await tx
+        .select()
+        .from(schema.cliProviders)
+        .where(and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)))
+        .for('no key update');
+      if (!current) throw new HttpError(404, 'CLI provider not found');
+      // A concurrent PATCH may have committed between our read and lock acquisition.
+      // Refuse rather than write under a lock for settings the row no longer has.
+      if (
+        (authProviders.length || authSettingsRequested) &&
+        (current.authMode !== existing.authMode || current.isolateAuth !== existing.isolateAuth)
+      ) {
+        throw new HttpError(
+          409,
+          'CLI authentication settings changed. Reload and try again.',
+          'cli_auth_busy',
+        );
+      }
+      const fields: string[] = PROVIDER_SECURITY_FIELDS.filter(
+        (field) =>
+          updates[field] !== undefined &&
+          !isDeepStrictEqual(
+            emptyAuditValueAsNull(updates[field]),
+            emptyAuditValueAsNull(current[field]),
+          ),
+      );
+      const envNames = split
+        ? [...new Set([...Object.keys(current.envVars ?? {}), ...Object.keys(split.envVars)])]
+            .filter((name) => (current.envVars ?? {})[name] !== split.envVars[name])
+            .sort()
+        : [];
+      if (envNames.length > 0) fields.push('envVars');
+      const event: AuditEvent | undefined = fields.length
+        ? {
+            actorUserId: userId,
+            action: 'cli_provider.update',
+            targetType: 'cli_provider',
+            targetId: id,
+            metadata: { fields, ...(envNames.length ? { envNames } : {}) },
+          }
+        : undefined;
+      if (event) await insertAuditEvent(tx, event);
+      const rows = await tx
+        .update(schema.cliProviders)
+        .set({ ...updates, ...(authSecretNames.length ? { authGeneration: randomUUID() } : {}) })
+        .where(eq(schema.cliProviders.id, id))
+        .returning();
+      for (const [name, value] of Object.entries(split?.secrets ?? {})) {
+        await upsertProviderSecret(tx, {
+          providerId: id,
+          name,
+          value,
+          masterKek: await secretsService.getMasterKek(),
+          onExisting: 'overwrite',
+        });
+      }
+      if (secretEvent) await insertAuditEvent(tx, secretEvent);
+      return { rows, event };
+    }),
+  );
   const updatedRow = updated.rows[0]!;
   if (updated.event) logAuditEvent(updated.event);
   if (secretEvent) logAuditEvent(secretEvent);
@@ -784,11 +818,15 @@ cliProviderRoutes.post('/:id/sign-out', async (c) => {
   const db = getDb();
   const provider = await db.query.cliProviders.findFirst({
     where: and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)),
-    columns: { id: true },
+    columns: { id: true, authGeneration: true },
   });
   if (!provider) throw new HttpError(404, 'CLI provider not found');
 
-  const payload: CliSignOutJobPayload = { providerId: provider.id, userId };
+  const payload: CliSignOutJobPayload = {
+    providerId: provider.id,
+    userId,
+    authGeneration: provider.authGeneration,
+  };
   const queue = getCliExecQueue();
   const event: AuditEvent = {
     actorUserId: userId,
@@ -976,7 +1014,7 @@ cliProviderRoutes.post('/:providerId/secrets', async (c) => {
   const providerId = c.req.param('providerId');
   const body = setCliProviderSecretRequestSchema.parse(await c.req.json());
   const db = getDb();
-  await loadOwnedProvider(db, userId, providerId);
+  const provider = await loadOwnedProvider(db, userId, providerId);
 
   const existing = await db.query.cliProviderSecrets.findFirst({
     where: and(
@@ -993,17 +1031,25 @@ cliProviderRoutes.post('/:providerId/secrets', async (c) => {
     metadata: { source: 'manual', secretName: body.secretName },
   };
   const masterKek = await secretsService.getMasterKek();
-  const secret = await db.transaction(async (tx) => {
-    await insertAuditEvent(tx, event);
-    const secret = await upsertProviderSecret(tx, {
-      providerId,
-      name: body.secretName,
-      value: body.value,
-      masterKek,
-      onExisting: 'overwrite',
-    });
-    return secret;
-  });
+  const secret = await withCliAuthWrite(db, provider, [body.secretName], () =>
+    db.transaction(async (tx) => {
+      await insertAuditEvent(tx, event);
+      const secret = await upsertProviderSecret(tx, {
+        providerId,
+        name: body.secretName,
+        value: body.value,
+        masterKek,
+        onExisting: 'overwrite',
+      });
+      if (isSignOutSecret(body.secretName)) {
+        await tx
+          .update(schema.cliProviders)
+          .set({ authGeneration: randomUUID() })
+          .where(eq(schema.cliProviders.id, providerId));
+      }
+      return secret;
+    }),
+  );
   logAuditEvent(event);
   return existing ? c.json({ secret }) : c.json({ secret }, 201);
 });
@@ -1056,7 +1102,7 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
   const providerId = c.req.param('providerId');
   const body = usageAuthCompleteSchema.parse(await c.req.json());
   const db = getDb();
-  await loadOwnedProvider(db, userId, providerId);
+  const provider = await loadOwnedProvider(db, userId, providerId);
 
   const { code, state } = parseClaudeAuthCode(body.code);
   if (!state) {
@@ -1065,54 +1111,61 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
       'The pasted code is missing its state part; copy the whole code, including the part after #.',
     );
   }
-  const taken = (await getRedis().eval(
-    TAKE_USAGE_AUTH_STASH_SCRIPT,
-    1,
-    usageAuthStateKey(userId, providerId),
-    state,
-  )) as string | 0 | null;
-  if (taken === null) {
-    throw new HttpError(400, 'Authorization expired or not started; please restart.');
-  }
-  if (taken === 0) {
-    throw new HttpError(
-      400,
-      'The pasted code belongs to a different authorization; paste the code from this one, or restart it.',
-    );
-  }
-  const { verifier } = JSON.parse(taken) as { verifier: string };
-  const event: AuditEvent = {
-    actorUserId: userId,
-    action: 'cli_provider.secret.set',
-    targetType: 'cli_provider',
-    targetId: providerId,
-    metadata: { source: 'usage_oauth', secretName: CLAUDE_USAGE_OAUTH_SECRET },
-  };
-  const masterKek = await secretsService.getMasterKek();
-  const tokens = await db.transaction(async (tx) => {
-    await insertAuditEvent(tx, event);
-    let tokens;
-    try {
-      tokens = await exchangeClaudeAuthCode(code, verifier, state);
-    } catch (err) {
-      throw new HttpError(400, err instanceof Error ? err.message : 'Token exchange failed');
+  const tokens = await withCliAuthWrite(db, provider, [CLAUDE_USAGE_OAUTH_SECRET], async () => {
+    const taken = (await getRedis().eval(
+      TAKE_USAGE_AUTH_STASH_SCRIPT,
+      1,
+      usageAuthStateKey(userId, providerId),
+      state,
+    )) as string | 0 | null;
+    if (taken === null) {
+      throw new HttpError(400, 'Authorization expired or not started; please restart.');
     }
-    if (!claudeTokensHaveUsageScope(tokens)) {
+    if (taken === 0) {
       throw new HttpError(
         400,
-        'The granted token is missing the user:profile scope required for usage tracking.',
+        'The pasted code belongs to a different authorization; paste the code from this one, or restart it.',
       );
     }
-    await upsertProviderSecret(tx, {
-      providerId,
-      name: CLAUDE_USAGE_OAUTH_SECRET,
-      value: JSON.stringify(tokens),
-      masterKek,
-      onExisting: 'overwrite',
+    const { verifier } = JSON.parse(taken) as { verifier: string };
+    const event: AuditEvent = {
+      actorUserId: userId,
+      action: 'cli_provider.secret.set',
+      targetType: 'cli_provider',
+      targetId: providerId,
+      metadata: { source: 'usage_oauth', secretName: CLAUDE_USAGE_OAUTH_SECRET },
+    };
+    const masterKek = await secretsService.getMasterKek();
+    const tokens = await db.transaction(async (tx) => {
+      await insertAuditEvent(tx, event);
+      let tokens;
+      try {
+        tokens = await exchangeClaudeAuthCode(code, verifier, state);
+      } catch (err) {
+        throw new HttpError(400, err instanceof Error ? err.message : 'Token exchange failed');
+      }
+      if (!claudeTokensHaveUsageScope(tokens)) {
+        throw new HttpError(
+          400,
+          'The granted token is missing the user:profile scope required for usage tracking.',
+        );
+      }
+      await upsertProviderSecret(tx, {
+        providerId,
+        name: CLAUDE_USAGE_OAUTH_SECRET,
+        value: JSON.stringify(tokens),
+        masterKek,
+        onExisting: 'overwrite',
+      });
+      await tx
+        .update(schema.cliProviders)
+        .set({ authGeneration: randomUUID() })
+        .where(eq(schema.cliProviders.id, providerId));
+      return tokens;
     });
+    logAuditEvent(event);
     return tokens;
   });
-  logAuditEvent(event);
   // Kick an immediate usage poll so the header meter refreshes within seconds instead of
   // waiting for the ~5-min repeatable tick: the freshly rotated token clears the worker's
   // dead-token gate and this poll overwrites the needs_reconnect snapshot with a live one.

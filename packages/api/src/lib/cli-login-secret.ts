@@ -1,5 +1,7 @@
+import { cliAuthScope } from '@haive/shared/cli-auth-state';
+import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { schema, tryCliAuthLock, type Database } from '@haive/database';
 import { secretsService, upsertProviderSecret } from '@haive/shared';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from './audit.js';
 
@@ -10,7 +12,21 @@ export async function saveCliLoginSecret(
   providerId: string,
   token: string,
   assertActive: () => void = () => {},
+  authLockHeld = false,
 ): Promise<void> {
+  if (!authLockHeld) {
+    const provider = await db.query.cliProviders.findFirst({
+      where: and(eq(schema.cliProviders.id, providerId), eq(schema.cliProviders.userId, userId)),
+    });
+    if (!provider) throw new Error('Provider not found');
+    const release = await tryCliAuthLock(db, cliAuthScope(provider));
+    if (!release) throw new Error('CLI authentication is busy');
+    try {
+      return await saveCliLoginSecret(db, userId, providerId, token, assertActive, true);
+    } finally {
+      await release();
+    }
+  }
   const masterKek = await secretsService.getMasterKek();
   const event: AuditEvent = {
     actorUserId: userId,
@@ -47,6 +63,7 @@ export async function saveCliLoginSecret(
         ...(existing.envVars && 'CLAUDE_CODE_OAUTH_TOKEN' in existing.envVars
           ? { envVars: rest }
           : {}),
+        authGeneration: randomUUID(),
         authStatus: 'ok',
         authMessage: 'authenticated',
         authLastCheckedAt: new Date(),

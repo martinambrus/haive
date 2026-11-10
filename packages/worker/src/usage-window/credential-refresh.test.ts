@@ -1,4 +1,28 @@
+const authLock = vi.hoisted(() => ({
+  acquire: vi.fn(),
+  release: vi.fn(async () => {}),
+  debug: vi.fn(),
+}));
+vi.mock('@haive/shared', async (original) => {
+  const actual = await original<typeof import('@haive/shared')>();
+  return {
+    ...actual,
+    logger: {
+      ...actual.logger,
+      child(bindings: Record<string, unknown>) {
+        const child = actual.logger.child(bindings);
+        if (bindings.module === 'credential-refresh') child.debug = authLock.debug;
+        return child;
+      },
+    },
+  };
+});
+vi.mock('@haive/database', async (original) => ({
+  ...(await original<typeof import('@haive/database')>()),
+  tryCliAuthLock: authLock.acquire,
+}));
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import type { Database } from '@haive/database';
 import { refreshExpiringCliCredentials } from './credential-refresh.js';
 import { readVolumeFile, writeVolumeFile } from './token-source.js';
@@ -80,6 +104,7 @@ function refreshFixture() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  authLock.acquire.mockReset().mockResolvedValue(authLock.release);
   vi.mocked(listTaskAuthVolumes).mockResolvedValue([]);
   vi.mocked(writeVolumeFile).mockResolvedValue(true);
 });
@@ -204,4 +229,25 @@ describe('Grok refresh suppression and retry', () => {
     await refreshExpiringCliCredentials(db);
     expect(readVolumeFile).not.toHaveBeenCalled();
   });
+});
+
+it('yields credential refresh to sign-out/login without reading or spending a token', async () => {
+  const { db, update } = refreshFixture();
+  authLock.acquire.mockResolvedValueOnce(null);
+  const fetchMock = vi.fn();
+  vi.stubGlobal('fetch', fetchMock);
+  await refreshExpiringCliCredentials(db);
+  const rows = await db.query.cliProviders.findMany();
+  expect(authLock.acquire).toHaveBeenCalledWith(db, cliAuthScope(rows[0]!));
+  expect(readVolumeFile).not.toHaveBeenCalled();
+  expect(writeVolumeFile).not.toHaveBeenCalled();
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(update).not.toHaveBeenCalled();
+  expect(authLock.debug).toHaveBeenCalledWith({ providerId: rows[0]!.id }, expect.any(String));
+});
+it('releases its auth lock when a credential read throws', async () => {
+  const { db } = refreshFixture();
+  vi.mocked(readVolumeFile).mockRejectedValueOnce(new Error('read failed'));
+  await refreshExpiringCliCredentials(db);
+  expect(authLock.release).toHaveBeenCalledOnce();
 });

@@ -1,3 +1,8 @@
+import {
+  cliAuthScope,
+  advanceVolumeLoginGeneration,
+  type CliAuthProvider,
+} from '@haive/shared/cli-auth-state';
 import type { Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
@@ -5,7 +10,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { Job } from 'bullmq';
 import Docker from 'dockerode';
 import { and, eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { schema, tryCliAuthLock } from '@haive/database';
 import {
   AMP_PASTE_LOGIN_URL_PREFIX,
   AUTH_URL_PREFIXES,
@@ -161,6 +166,9 @@ const DEVICE_CODE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderN
 ]);
 
 interface BannerSession {
+  provider: CliAuthProvider;
+  releaseAuth: () => Promise<void>;
+  credentialSave?: Promise<void>;
   ws: WebSocket;
   userId: string;
   providerId: string;
@@ -307,32 +315,71 @@ export function installCliLoginBannerWebSocket(
           return;
         }
 
-        if (auth.session.revoked) return;
+        const releaseAuth = await tryCliAuthLock(db, cliAuthScope(provider));
+        if (!releaseAuth) {
+          rejectUpgrade(socket, 409, 'Login or sign-out in progress');
+          return;
+        }
+        if (auth.session.revoked || socket.destroyed) {
+          await releaseAuth();
+          return;
+        }
 
-        wss.handleUpgrade(req, socket, head, (ws) => {
-          if (!auth.session.accept(ws)) return;
-          runBannerSession({
-            ws,
-            userId: auth.userId,
-            providerId: provider.id,
-            providerName: provider.name,
-            docker,
-          }).catch((err) => {
-            // The user closing the dialog unwinds the session through the same throw path as a
-            // real failure. It is not one, and the socket it would report to is already gone.
-            if (err instanceof LoginCancelled) {
-              log.info({ providerId }, 'login dialog closed by the user');
+        const releaseUnclaimed = () => {
+          void releaseAuth();
+        };
+        socket.once('close', releaseUnclaimed);
+        try {
+          // Capture the settings under the lock: a PATCH may have committed after
+          // the first read but before we acquired its old scope.
+          const lockedProvider = await db.query.cliProviders.findFirst({
+            where: and(
+              eq(schema.cliProviders.id, providerId),
+              eq(schema.cliProviders.userId, auth.userId),
+            ),
+          });
+          if (!lockedProvider || cliAuthScope(lockedProvider) !== cliAuthScope(provider)) {
+            socket.removeListener('close', releaseUnclaimed);
+            await releaseAuth();
+            rejectUpgrade(socket, 409, 'Login settings changed. Try again.');
+            return;
+          }
+          wss.handleUpgrade(req, socket, head, (ws) => {
+            socket.removeListener('close', releaseUnclaimed);
+            if (!auth.session.accept(ws)) {
+              void releaseAuth();
               return;
             }
-            log.error({ error: safeErrorDetails(err), providerId }, 'banner session crashed');
-            wsSend(ws, { type: 'error', message: safeErrorMessage(err) });
-            try {
-              ws.close(1011, 'internal_error');
-            } catch {
-              // ignore
-            }
+            runBannerSession({
+              ws,
+              userId: auth.userId,
+              providerId: provider.id,
+              providerName: lockedProvider.name,
+              provider: lockedProvider,
+              releaseAuth,
+              docker,
+            }).catch(async (err) => {
+              // The user closing the dialog unwinds the session through the same throw path as a
+              // real failure. It is not one, and the socket it would report to is already gone.
+              await releaseAuth();
+              if (err instanceof LoginCancelled) {
+                log.info({ providerId }, 'login dialog closed by the user');
+                return;
+              }
+              log.error({ error: safeErrorDetails(err), providerId }, 'banner session crashed');
+              wsSend(ws, { type: 'error', message: safeErrorMessage(err) });
+              try {
+                ws.close(1011, 'internal_error');
+              } catch {
+                // ignore
+              }
+            });
           });
-        });
+        } catch (err) {
+          socket.removeListener('close', releaseUnclaimed);
+          await releaseAuth();
+          throw err;
+        }
       } catch (err) {
         log.error({ error: safeErrorDetails(err) }, 'upgrade failed');
         rejectUpgrade(socket, 500, 'Internal Server Error');
@@ -344,6 +391,8 @@ export function installCliLoginBannerWebSocket(
 }
 
 interface RunBannerOpts {
+  provider: CliAuthProvider;
+  releaseAuth: () => Promise<void>;
   ws: WebSocket;
   userId: string;
   providerId: string;
@@ -359,12 +408,20 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   // mid-queue was simply unobserved. The 30s ttl used to bound the damage; without it a job the
   // user gave up on would go on to build a container nobody is attached to.
   const abort = createAbortHandle();
+  let containerMayWrite = false;
   const pending: { job: Job | null } = { job: null };
   ws.on('close', () => {
     abort.fire();
+    // Redis enqueue can outlive the socket. Until start begins, abort guarantees that
+    // no credential writer can run, so an abandoned queue wait need not keep the lock.
+    if (!containerMayWrite) void opts.releaseAuth();
     void discardPendingLogin(pending, docker);
   });
 
+  if (ws.readyState !== WebSocket.OPEN) {
+    await opts.releaseAuth();
+    return;
+  }
   wsSend(ws, { type: 'phase', phase: 'starting' });
 
   const createResult = await enqueueLoginCreate(providerId, userId, abort, ws, pending);
@@ -378,6 +435,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     } catch {
       // ignore
     }
+    await opts.releaseAuth();
     return;
   }
 
@@ -388,6 +446,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   } catch (err) {
     log.error({ error: safeErrorDetails(err), providerId }, 'attach failed');
     await teardownContainer(createResult.containerRowId, docker, createResult.dockerContainerId);
+    await opts.releaseAuth();
     wsSend(ws, { type: 'error', message: 'Failed to attach to login container' });
     try {
       ws.close(1011, 'attach_failed');
@@ -416,6 +475,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
         docker,
         createResult.dockerContainerId!,
       );
+      await opts.releaseAuth();
     })());
   };
 
@@ -441,6 +501,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     if (abort.aborted) throw new LoginCancelled();
 
     try {
+      containerMayWrite = true;
       await dockerContainer.start();
     } catch (err) {
       log.error({ error: safeErrorDetails(err), providerId }, 'start failed');
@@ -463,6 +524,8 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     }
 
     const session: BannerSession = {
+      provider: opts.provider,
+      releaseAuth: opts.releaseAuth,
       ws,
       userId,
       providerId,
@@ -1132,7 +1195,15 @@ async function saveOauthTokenAndProbe(session: BannerSession, oauthToken: string
       });
       return;
     }
-    await saveCliLoginSecret(getDb(), session.userId, session.providerId, oauthToken, assertActive);
+    session.credentialSave = saveCliLoginSecret(
+      getDb(),
+      session.userId,
+      session.providerId,
+      oauthToken,
+      assertActive,
+      true,
+    );
+    await session.credentialSave;
     requestUsagePoll();
     log.info({ providerId: session.providerId }, 'verified oauth token saved to encrypted secret');
     // The browser's lost-result recovery treats auth-success as proof of durable storage.
@@ -1159,15 +1230,20 @@ async function saveOauthTokenAndProbe(session: BannerSession, oauthToken: string
 
 async function runProbeAndSave(session: BannerSession): Promise<void> {
   try {
-    // Called only after the CLI's success signal: its volume credential already exists.
-    // Neither a probe failure nor a closed dialog can undo that external write.
-    await recordAuditEvent(getDb(), {
-      actorUserId: session.userId,
-      action: 'cli_provider.login',
-      targetType: 'cli_provider',
-      targetId: session.providerId,
-      metadata: { source: 'volume' },
-    });
+    // Keep audit and completion stamping inside the promise cleanup awaits, so a
+    // close during either write cannot release the credential lock early.
+    session.credentialSave = (async () => {
+      // The CLI already wrote its credential. Audit it before attempting the stamp.
+      await recordAuditEvent(getDb(), {
+        actorUserId: session.userId,
+        action: 'cli_provider.login',
+        targetType: 'cli_provider',
+        targetId: session.providerId,
+        metadata: { source: 'volume' },
+      });
+      await advanceVolumeLoginGeneration(getDb(), session.provider);
+    })();
+    await session.credentialSave;
     const result = await enqueueProbe(
       session.providerId,
       session.userId,
@@ -1384,6 +1460,9 @@ async function cleanupSession(session: BannerSession): Promise<void> {
     // ignore
   }
   await teardownContainer(session.containerRowId, session.docker, session.dockerContainerId);
+  // A close can race the awaited completion stamp/promotion. Never let sign-out enter that gap.
+  await session.credentialSave?.catch(() => {});
+  await session.releaseAuth();
   try {
     if (session.ws.readyState === WebSocket.OPEN) {
       session.ws.close(1000, 'session_ended');

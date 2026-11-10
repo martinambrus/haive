@@ -1,3 +1,8 @@
+const authLock = vi.hoisted(() => ({ acquire: vi.fn(), release: vi.fn(async () => {}) }));
+vi.mock('@haive/database', async (original) => ({
+  ...(await original<typeof import('@haive/database')>()),
+  tryCliAuthLock: authLock.acquire,
+}));
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
@@ -34,6 +39,7 @@ import {
   logger,
   secretsService,
 } from '@haive/shared';
+import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import { cliProviderRoutes } from '../src/routes/cli-providers.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -59,6 +65,8 @@ function setup(existing = false) {
       userId: USER,
       name: 'claude-code',
       label: 'p',
+      authMode: 'subscription',
+      isolateAuth: false,
       rulesContent: DEFAULT_AGENT_RULES,
       envVars: { ANTHROPIC_BASE_URL: 'https://old.example' },
     });
@@ -87,6 +95,8 @@ function send(method: string, path: string, body: Record<string, unknown>) {
 const ENV = { ANTHROPIC_BASE_URL: 'https://api.example', ANTHROPIC_API_KEY: SECRET_VALUE };
 
 beforeEach(() => {
+  authLock.acquire.mockReset().mockResolvedValue(authLock.release);
+  authLock.release.mockClear();
   h.transactionOpen = false;
   h.auditLog.mockReset();
   h.add.mockReset();
@@ -492,4 +502,188 @@ it('a sign-out audit commit failure queues nothing', async () => {
   expect(h.add).not.toHaveBeenCalled();
   expect(fake.rows(schema.auditEvents)).toEqual([]);
   expect(h.auditLog).not.toHaveBeenCalled();
+});
+
+describe('sign-out secret writers advance the generation under the auth lock', () => {
+  it.each(['CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_USAGE_OAUTH'])(
+    'fences manual and environment writes of %s',
+    async (secretName) => {
+      const fake = setup(true);
+      for (const method of secretName === 'CLAUDE_CODE_OAUTH_TOKEN'
+        ? ['POST', 'PATCH']
+        : ['POST']) {
+        const before = fake.rows(schema.cliProviders)[0]!.authGeneration;
+        const res = await send(
+          method,
+          `/${PROVIDER}${method === 'POST' ? '/secrets' : ''}`,
+          method === 'POST'
+            ? { secretName, value: 'new-token' }
+            : { envVars: { [secretName]: 'new-token' } },
+        );
+        expect([200, 201]).toContain(res.status);
+        expect(fake.rows(schema.cliProviders)[0]!.authGeneration).not.toBe(before);
+      }
+      const writes = secretName === 'CLAUDE_CODE_OAUTH_TOKEN' ? 2 : 1;
+      expect(authLock.acquire).toHaveBeenCalledTimes(writes);
+      expect(authLock.release).toHaveBeenCalledTimes(writes);
+    },
+  );
+  it('refuses a login-secret write whose auth scope changed while the lock was taken', async () => {
+    const fake = setup(true);
+    const before = fake.rows(schema.cliProviders)[0]!;
+    authLock.acquire.mockImplementationOnce(async () => {
+      fake.patch(schema.cliProviders, PROVIDER, { isolateAuth: true });
+      return authLock.release;
+    });
+    const res = await send('POST', `/${PROVIDER}/secrets`, {
+      secretName: 'CLAUDE_CODE_OAUTH_TOKEN',
+      value: 'new-token',
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'cli_auth_busy' });
+    expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+    expect(fake.rows(schema.cliProviders)[0]!.authGeneration).toBe(before.authGeneration);
+    expect(authLock.release).toHaveBeenCalledOnce();
+  });
+  it.each(['POST', 'PATCH'])(
+    'refuses a busy %s write with 409 and keeps the credential',
+    async (method) => {
+      const fake = setup(true);
+      authLock.acquire.mockResolvedValue(null);
+      const res = await send(
+        method,
+        `/${PROVIDER}${method === 'POST' ? '/secrets' : ''}`,
+        method === 'POST'
+          ? { secretName: 'CLAUDE_CODE_OAUTH_TOKEN', value: 'new-token' }
+          : { envVars: { CLAUDE_CODE_OAUTH_TOKEN: 'new-token' } },
+      );
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({
+        code: 'cli_auth_busy',
+        error:
+          'CLI authentication is busy. Finish the current sign-in or credential update and try again.',
+      });
+      expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+      expect(fake.rows(schema.auditEvents)).toHaveLength(0);
+    },
+  );
+});
+
+describe('provider auth scope changes', () => {
+  const changes = [{ isolateAuth: true }, { authMode: 'api_key' }] as const;
+  for (const change of changes) {
+    it.each(['old', 'new'] as const)(
+      `refuses ${JSON.stringify(change)} while the %s scope is held`,
+      async (held) => {
+        const fake = setup(true);
+        const before = fake.rows(schema.cliProviders)[0]!;
+        const oldScope = cliAuthScope(before as any);
+        const newScope = cliAuthScope({ ...before, ...change } as any);
+        authLock.acquire.mockImplementation(async (_db, scope) => {
+          expect(h.transactionOpen).toBe(false);
+          return scope === (held === 'old' ? oldScope : newScope) ? null : authLock.release;
+        });
+        const res = await send('PATCH', `/${PROVIDER}`, change);
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ code: 'cli_auth_busy' });
+        expect(fake.rows(schema.cliProviders)[0]).toEqual(before);
+        expect(fake.rows(schema.auditEvents)).toHaveLength(0);
+        expect(authLock.release).toHaveBeenCalledTimes(authLock.acquire.mock.calls.length - 1);
+      },
+    );
+    it(`changes ${JSON.stringify(change)} without advancing the generation and releases both scopes`, async () => {
+      const fake = setup(true);
+      const before = fake.rows(schema.cliProviders)[0]!;
+      const scopes = [
+        cliAuthScope(before as any),
+        cliAuthScope({ ...before, ...change } as any),
+      ].sort();
+      const res = await send('PATCH', `/${PROVIDER}`, change);
+      expect(res.status).toBe(200);
+      expect(fake.rows(schema.cliProviders)[0]).toMatchObject({
+        ...change,
+        authGeneration: before.authGeneration,
+      });
+      expect(authLock.acquire.mock.calls.map((call) => call[1])).toEqual(scopes);
+      expect(authLock.release).toHaveBeenCalledTimes(2);
+    });
+  }
+  it.each([false, true])(
+    'reuses held scopes when a secret moves with isolateAuth=%s',
+    async (isolated) => {
+      const fake = setup(true);
+      fake.patch(schema.cliProviders, PROVIDER, { isolateAuth: isolated });
+      const before = fake.rows(schema.cliProviders)[0]!;
+      const res = await send('PATCH', `/${PROVIDER}`, {
+        isolateAuth: !isolated,
+        envVars: { CLAUDE_CODE_OAUTH_TOKEN: 'new-token' },
+      });
+      expect(res.status).toBe(200);
+      expect(authLock.acquire.mock.calls.map((call) => call[1])).toEqual(
+        [
+          cliAuthScope(before as any),
+          cliAuthScope({ ...before, isolateAuth: !isolated } as any),
+        ].sort(),
+      );
+      expect(authLock.release).toHaveBeenCalledTimes(2);
+      expect(fake.rows(schema.cliProviders)[0]!.authGeneration).not.toBe(before.authGeneration);
+      expect(secretValues(fake)).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: 'new-token' });
+    },
+  );
+  it('acquires a scope once when isolated authMode changes also move a secret', async () => {
+    const fake = setup(true);
+    fake.patch(schema.cliProviders, PROVIDER, { isolateAuth: true });
+    expect(
+      (
+        await send('PATCH', `/${PROVIDER}`, {
+          authMode: 'api_key',
+          envVars: { CLAUDE_CODE_OAUTH_TOKEN: 'new-token' },
+        })
+      ).status,
+    ).toBe(200);
+    expect(authLock.acquire).toHaveBeenCalledOnce();
+    expect(authLock.release).toHaveBeenCalledOnce();
+  });
+  it('releases both scopes after an audit refusal', async () => {
+    const fake = setup(true);
+    const before = fake.rows(schema.cliProviders)[0]!;
+    fake.hooks.beforeInsert = async () => {
+      throw new Error('audit refused');
+    };
+    expect((await send('PATCH', `/${PROVIDER}`, { isolateAuth: true })).status).toBe(500);
+    expect(fake.rows(schema.cliProviders)[0]).toEqual(before);
+    expect(authLock.acquire).toHaveBeenCalledTimes(2);
+    expect(authLock.release).toHaveBeenCalledTimes(2);
+  });
+  it('takes no lock for unchanged auth settings and saves while the scope is held', async () => {
+    const fake = setup(true);
+    const before = fake.rows(schema.cliProviders)[0]!;
+    authLock.acquire.mockResolvedValue(null);
+    const res = await send('PATCH', `/${PROVIDER}`, {
+      authMode: before.authMode,
+      isolateAuth: before.isolateAuth,
+      label: 'Renamed while signing in',
+    });
+    expect(res.status).toBe(200);
+    expect(authLock.acquire).not.toHaveBeenCalled();
+    expect(fake.rows(schema.cliProviders)[0]!.label).toBe('Renamed while signing in');
+    expect(fake.rows(schema.cliProviders)[0]!.authGeneration).toBe(before.authGeneration);
+  });
+  it.each([
+    { isolateAuth: true, envVars: { CLAUDE_CODE_OAUTH_TOKEN: 'new-token' } },
+    { authMode: 'api_key' },
+  ])('refuses a stale scope read before writing %j', async (change) => {
+    const fake = setup(true);
+    authLock.acquire.mockImplementation(async () => {
+      fake.patch(schema.cliProviders, PROVIDER, { authMode: 'api_key' });
+      return authLock.release;
+    });
+    const res = await send('PATCH', `/${PROVIDER}`, change);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'cli_auth_busy' });
+    expect(fake.rows(schema.cliProviders)[0]!.isolateAuth).toBe(false);
+    expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+    expect(fake.rows(schema.auditEvents)).toHaveLength(0);
+    expect(authLock.release).toHaveBeenCalledTimes(2);
+  });
 });

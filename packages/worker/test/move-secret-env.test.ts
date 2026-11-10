@@ -1,3 +1,8 @@
+const authLock = vi.hoisted(() => ({ acquire: vi.fn(), release: vi.fn(async () => {}) }));
+vi.mock('@haive/database', async (original) => ({
+  ...(await original<typeof import('@haive/database')>()),
+  tryCliAuthLock: authLock.acquire,
+}));
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { schema } from '@haive/database';
@@ -48,6 +53,8 @@ function secrets(fake: ReturnType<typeof setup>['fake'], providerId: string) {
 }
 
 beforeEach(() => {
+  authLock.acquire.mockReset().mockResolvedValue(authLock.release);
+  authLock.release.mockClear();
   vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue(KEK);
 });
 
@@ -136,4 +143,46 @@ describe('dropCopiedSecretLikeProviderEnv (committed upgrade)', () => {
     expect(envs).toContainEqual(LEGACY);
     expect(envs).toContainEqual({ ANTHROPIC_BASE_URL: 'u' });
   });
+});
+
+it.each(['copy', 'drop'])(
+  'fences the legacy %s writer and stamps only a newly created credential',
+  async (phase) => {
+    const { fake, db } = setup();
+    addProvider(fake, P1, LEGACY);
+    const run = phase === 'copy' ? copySecretLikeProviderEnv : dropCopiedSecretLikeProviderEnv;
+    const before = fake.rows(schema.cliProviders)[0]!.authGeneration;
+    await run(db);
+    expect(fake.rows(schema.cliProviders)[0]!.authGeneration).not.toBe(before);
+    expect(authLock.acquire).toHaveBeenCalledOnce();
+    expect(authLock.release).toHaveBeenCalledOnce();
+    const after = fake.rows(schema.cliProviders)[0]!.authGeneration;
+    await run(db);
+    expect(fake.rows(schema.cliProviders)[0]!.authGeneration).toBe(after);
+  },
+);
+it.each(['copy', 'drop'])(
+  'does not migrate a legacy credential while authentication is busy (%s)',
+  async (phase) => {
+    const { fake, db } = setup();
+    addProvider(fake, P1, LEGACY);
+    authLock.acquire.mockResolvedValueOnce(null);
+    if (phase === 'copy') await copySecretLikeProviderEnv(db);
+    else await expect(dropCopiedSecretLikeProviderEnv(db)).rejects.toThrow('1 provider(s)');
+    expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+    expect(fake.rows(schema.cliProviders)[0]!.envVars).toEqual(LEGACY);
+  },
+);
+
+it('rolls back a copied legacy credential and its generation together', async () => {
+  const { fake, db } = setup();
+  addProvider(fake, P1, LEGACY);
+  const before = fake.rows(schema.cliProviders);
+  fake.hooks.beforeCommit = async () => {
+    throw new Error('commit refused');
+  };
+  await copySecretLikeProviderEnv(db);
+  expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+  expect(fake.rows(schema.cliProviders)).toEqual(before);
+  expect(authLock.release).toHaveBeenCalledOnce();
 });

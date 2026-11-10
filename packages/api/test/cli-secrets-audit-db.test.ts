@@ -1,3 +1,5 @@
+import { tryCliAuthLock } from '@haive/database';
+import { cliAuthScope, advanceVolumeLoginGeneration } from '@haive/shared/cli-auth-state';
 import { randomUUID } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq, sql } from 'drizzle-orm';
@@ -109,6 +111,92 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
     await cleanActor(db, h.actor);
     vi.restoreAllMocks();
   });
+  it.each(['manual', 'environment', 'usage'] as const)(
+    '%s credential writes fence and commit their generation atomically',
+    async (source) => {
+      const before = (await db.query.cliProviders.findFirst({
+        where: eq(schema.cliProviders.id, provider),
+      }))!;
+      const write = () =>
+        source === 'environment'
+          ? app.request(`/cli-providers/${provider}`, {
+              method: 'PATCH',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ envVars: { CLAUDE_CODE_OAUTH_TOKEN: 'synthetic-new' } }),
+            })
+          : send(
+              'POST',
+              source === 'manual' ? 'secrets' : 'usage-auth/complete',
+              source === 'manual'
+                ? { secretName: 'CLAUDE_CODE_OAUTH_TOKEN', value: 'synthetic-new' }
+                : { code: 'code#state' },
+            );
+      const release = await tryCliAuthLock(db, cliAuthScope(before));
+      expect(release).not.toBeNull();
+      try {
+        expect((await write()).status).toBe(409);
+      } finally {
+        await release?.();
+      }
+      expect(await secrets()).toHaveLength(0);
+      await refuseAudit(db, h.actor);
+      expect((await write()).status).toBe(500);
+      expect(
+        (await db.query.cliProviders.findFirst({ where: eq(schema.cliProviders.id, provider) }))!
+          .authGeneration,
+      ).toBe(before.authGeneration);
+      expect(await secrets()).toHaveLength(0);
+      await allowAudit(db);
+      expect([200, 201]).toContain((await write()).status);
+      expect(
+        (await db.query.cliProviders.findFirst({ where: eq(schema.cliProviders.id, provider) }))!
+          .authGeneration,
+      ).not.toBe(before.authGeneration);
+      expect(await secrets()).toHaveLength(1);
+    },
+  );
+  for (const change of [{ isolateAuth: true }, { authMode: 'api_key' }] as const) {
+    it.each(['old', 'new'] as const)(
+      `scope change ${JSON.stringify(change)} refuses a held %s scope, then releases both on success`,
+      async (held) => {
+        const before = (await db.query.cliProviders.findFirst({
+          where: eq(schema.cliProviders.id, provider),
+        }))!;
+        const scopes = [cliAuthScope(before), cliAuthScope({ ...before, ...change })];
+        const patch = () =>
+          app.request(`/cli-providers/${provider}`, {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(change),
+          });
+        const release = await tryCliAuthLock(db, scopes[held === 'old' ? 0 : 1]!);
+        expect(release).not.toBeNull();
+        try {
+          const res = await patch();
+          expect(res.status).toBe(409);
+          expect(await res.json()).toMatchObject({ code: 'cli_auth_busy' });
+          expect(
+            await db.query.cliProviders.findFirst({ where: eq(schema.cliProviders.id, provider) }),
+          ).toEqual(before);
+          expect(await audits(db)).toHaveLength(0);
+        } finally {
+          await release?.();
+        }
+        expect((await patch()).status).toBe(200);
+        expect(
+          await db.query.cliProviders.findFirst({ where: eq(schema.cliProviders.id, provider) }),
+        ).toMatchObject({ ...change, authGeneration: before.authGeneration });
+        for (const scope of scopes) {
+          const releaseAgain = await tryCliAuthLock(db, scope);
+          try {
+            expect(releaseAgain).not.toBeNull();
+          } finally {
+            await releaseAgain?.();
+          }
+        }
+      },
+    );
+  }
   it('audit refusal is scoped to this test actor', async () => {
     await refuseAudit(db, h.actor);
     let id: string | undefined;
@@ -326,6 +414,7 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
         const refreshed = await db.query.cliProviders.findFirst({
           where: eq(schema.cliProviders.id, provider),
         });
+        expect(refreshed?.authGeneration).not.toBe(before?.authGeneration);
         expect(refreshed?.authStatus).toBe('ok');
         expect(refreshed?.authMessage).toBe('authenticated');
         expect(refreshed?.authLastCheckedAt).toBeInstanceOf(Date);
@@ -384,6 +473,7 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
     // Pause at the audit insert, immediately after the legacy environment was read.
     const captureDb = new Proxy(db, {
       get(target, key) {
+        if (key === '$client') return target.$client;
         if (key === 'transaction')
           return (fn: (tx: any) => Promise<unknown>) =>
             target.transaction((tx) =>
@@ -459,7 +549,11 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
     async (outcome) => {
       let visible = 0;
       let openTransactions = -1;
-      h.add.mockImplementation(async () => {
+      h.add.mockImplementation(async (_name, payload) => {
+        expect(payload.authGeneration).toBe(
+          (await db.query.cliProviders.findFirst({ where: eq(schema.cliProviders.id, provider) }))!
+            .authGeneration,
+        );
         visible = (await audits(db)).length;
         const [row] = await db.execute(sql`
         SELECT count(*)::int AS count FROM pg_stat_activity
@@ -477,6 +571,33 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
       expect(h.auditLog).toHaveBeenCalledTimes(outcome === 'success' ? 1 : 0);
     },
   );
+
+  it('a completed volume login advances shared siblings, leaving isolated and API-key generations alone', async () => {
+    const before = (await db.query.cliProviders.findFirst({
+      where: eq(schema.cliProviders.id, provider),
+    }))!;
+    const siblings = await db
+      .insert(schema.cliProviders)
+      .values([
+        { userId: h.actor, name: 'claude-code', label: 'shared sibling' },
+        { userId: h.actor, name: 'claude-code', label: 'isolated sibling', isolateAuth: true },
+        { userId: h.actor, name: 'claude-code', label: 'key sibling', authMode: 'api_key' },
+      ])
+      .returning();
+    await advanceVolumeLoginGeneration(db, before);
+    const after = (await db.query.cliProviders.findFirst({
+      where: eq(schema.cliProviders.id, provider),
+    }))!;
+    expect(after.authGeneration).not.toBe(before.authGeneration);
+    for (const sibling of siblings) {
+      const current = (await db.query.cliProviders.findFirst({
+        where: eq(schema.cliProviders.id, sibling.id),
+      }))!;
+      expect(current.authGeneration).toBe(
+        sibling.label === 'shared sibling' ? after.authGeneration : sibling.authGeneration,
+      );
+    }
+  });
 
   it('a refused sign-out audit queues nothing on Postgres', async () => {
     await refuseAudit(db, h.actor);

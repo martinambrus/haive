@@ -4,6 +4,7 @@ const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   role: 'user' as 'admin' | 'user',
+  add: vi.fn(async () => ({ id: '42' })),
   getJob: vi.fn(async (_id: string): Promise<unknown> => undefined),
 }));
 
@@ -16,7 +17,7 @@ vi.mock('../src/middleware/auth.js', () => ({
   },
 }));
 vi.mock('../src/queues.js', () => ({
-  getCliExecQueue: () => ({ getJob: h.getJob }),
+  getCliExecQueue: () => ({ getJob: h.getJob, add: h.add }),
 }));
 
 import { Hono } from 'hono';
@@ -44,6 +45,7 @@ app.onError(errorHandler);
 
 beforeEach(() => {
   const fake = createFakeDb({
+    auditEvents: schema.auditEvents,
     cliProviders: schema.cliProviders,
     cliPackageVersions: schema.cliPackageVersions,
   });
@@ -56,8 +58,14 @@ beforeEach(() => {
     fetchError: null,
   });
   h.db = fake.db;
+  const find = fake.db.query.cliProviders.findFirst.bind(fake.db.query.cliProviders);
+  vi.spyOn(fake.db.query.cliProviders, 'findFirst').mockImplementation(async (options: any) => {
+    const row = await find(options);
+    return row ? { ...row, authGeneration: 'completed-login' } : row;
+  });
   h.role = 'user';
   h.getJob.mockReset();
+  h.add.mockClear();
 });
 
 function job(name: string, data = { providerId: PROVIDER, userId: USER }) {
@@ -186,4 +194,25 @@ describe('catalog refresh result', () => {
       expect(body).not.toHaveProperty('result');
     },
   );
+});
+
+it('stamps sign-out with the completed credential generation', async () => {
+  const res = await app.request(`/${PROVIDER}/sign-out`, { method: 'POST' });
+  expect(res.status).toBe(202);
+  expect(h.add).toHaveBeenCalledWith(
+    CLI_EXEC_JOB_NAMES.SIGN_OUT,
+    { providerId: PROVIDER, userId: USER, authGeneration: 'completed-login' },
+    expect.any(Object),
+  );
+});
+
+it('reports a superseded sign-out result truthfully', async () => {
+  const result = { ok: true, superseded: true, removed: [], failed: [] };
+  h.getJob.mockResolvedValue({
+    ...job(CLI_EXEC_JOB_NAMES.SIGN_OUT),
+    getState: async () => 'completed',
+    returnvalue: result,
+  });
+  const res = await app.request(`/${PROVIDER}/sign-out/123`);
+  expect(await res.json()).toEqual({ status: 'done', result });
 });

@@ -1,3 +1,10 @@
+vi.mock('@haive/database', async (original) => ({
+  ...(await original<typeof import('@haive/database')>()),
+  tryCliAuthLock: async () => {
+    await h.onAuthLock?.();
+    return h.authBusy ? null : h.releaseAuth;
+  },
+}));
 import { EventEmitter } from 'node:events';
 import type { Server } from 'node:http';
 import { Duplex } from 'node:stream';
@@ -7,6 +14,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
+  authBusy: false,
+  onAuthLock: undefined as (() => Promise<void>) | undefined,
+  releaseAuth: vi.fn(async () => {}),
+  updates: [] as Record<string, unknown>[],
+  stampGate: undefined as Promise<void> | undefined,
+  stampError: false,
+  auditGate: undefined as Promise<void> | undefined,
+  loginEnqueueGate: undefined as Promise<void> | undefined,
   audits: [] as Record<string, unknown>[],
   auditError: false,
   ws: undefined as unknown,
@@ -48,6 +63,7 @@ vi.mock('../src/queues.js', () => ({
   getUsagePollQueue: () => ({ add: async () => ({}) }),
   getCliExecQueue: () => ({
     add: async (name: string, payload: unknown) => {
+      if (name === 'cli-login-create' && h.loginEnqueueGate) await h.loginEnqueueGate;
       if (h.queueError) throw h.queueError;
       let delivered = false;
       if (name !== 'cli-login-create') h.probe(payload);
@@ -88,6 +104,13 @@ const settle = async () => {
 beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
+  h.loginEnqueueGate = undefined;
+  h.authBusy = false;
+  h.onAuthLock = undefined;
+  h.updates = [];
+  h.stampGate = undefined;
+  h.stampError = false;
+  h.auditGate = undefined;
   h.save.mockReset();
   h.attach.mockReset();
   h.start.mockReset().mockResolvedValue(undefined);
@@ -111,6 +134,7 @@ beforeEach(() => {
     transaction: async (fn: (tx: unknown) => unknown) => fn(h.db),
     insert: () => ({
       values: async (ev: Record<string, unknown>) => {
+        if (h.auditGate) await h.auditGate;
         if (h.auditError) throw new Error('audit refused');
         h.audits.push(ev);
       },
@@ -118,9 +142,26 @@ beforeEach(() => {
     select: () => ({ from: () => ({ where: () => ({ for: async () => [{ envVars: {} }] }) }) }),
     query: {
       users: { findFirst: async () => ({ id: 'user', status: 'active', tokenVersion: 0 }) },
-      cliProviders: { findFirst: async () => ({ id: PROVIDER, name: providerName, envVars: {} }) },
+      cliProviders: {
+        findFirst: vi.fn(async () => ({
+          id: PROVIDER,
+          userId: 'user',
+          name: providerName,
+          authMode: 'subscription',
+          isolateAuth: false,
+          envVars: {},
+        })),
+      },
     },
-    update: () => ({ set: () => ({ where: async () => {} }) }),
+    update: () => ({
+      set: (values: Record<string, unknown>) => ({
+        where: async () => {
+          if (values.authGeneration && h.stampError) throw new Error('stamp refused');
+          if (values.authGeneration && h.stampGate) await h.stampGate;
+          h.updates.push(values);
+        },
+      }),
+    }),
   };
   ws = Object.assign(new EventEmitter(), {
     readyState: 1,
@@ -171,6 +212,7 @@ async function start(query = '', attached = true, providerId = PROVIDER) {
   );
   await settle();
   if (attached) expect(stream.listenerCount('data')).toBe(1);
+  return socket;
 }
 function assertNoCredentialText(...values: string[]) {
   const strings: string[] = [];
@@ -1862,4 +1904,110 @@ it('amp credential-file success writes a volume login row', async () => {
   stream.emit('data', Buffer.from('https://auth.ampcode.com/device?user_code=ABCD-1234\n\n'));
   await vi.advanceTimersByTimeAsync(2500);
   expect(h.audits).toMatchObject([{ action: 'cli_provider.login', targetId: PROVIDER }]);
+});
+
+describe('login generation and lock lifecycle', () => {
+  it('rejects a conflicting login before creating any container', async () => {
+    h.authBusy = true;
+    await start('', false);
+    expect(h.attach).not.toHaveBeenCalled();
+    expect(h.start).not.toHaveBeenCalled();
+  });
+  it('an abandoned login releases its lock without advancing generation', async () => {
+    providerName = 'grok';
+    await start();
+    ws.close();
+    await settle();
+    expect(h.releaseAuth).toHaveBeenCalledOnce();
+    expect(h.updates.some((v) => v.authGeneration)).toBe(false);
+  });
+  it('keeps the lock across a close between volume credential write and completion stamp', async () => {
+    providerName = 'grok';
+    await start();
+    let resume!: () => void;
+    h.stampGate = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    stream.emit(
+      'data',
+      Buffer.from('https://accounts.x.ai/oauth2/device?user_code=ABCD-1234\n\nSigned in\n'),
+    );
+    await settle();
+    ws.close();
+    await settle();
+    expect(h.releaseAuth).not.toHaveBeenCalled();
+    resume();
+    await settle();
+    expect(h.updates.some((v) => typeof v.authGeneration === 'string')).toBe(true);
+    expect(h.releaseAuth).toHaveBeenCalledOnce();
+  });
+});
+
+it('releases an abandoned login while its Redis enqueue is still pending, without starting a late container', async () => {
+  let resume!: () => void;
+  h.loginEnqueueGate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  await start('', false);
+  ws.close();
+  await settle();
+  expect(h.releaseAuth).toHaveBeenCalledOnce();
+  expect(h.updates.some((v) => v.authGeneration)).toBe(false);
+  resume();
+  await settle();
+  expect(h.start).not.toHaveBeenCalled();
+});
+
+it('retains the volume-login audit if the completion stamp fails', async () => {
+  providerName = 'grok';
+  await start();
+  h.stampError = true;
+  stream.emit(
+    'data',
+    Buffer.from('https://accounts.x.ai/oauth2/device?user_code=ABCD-1234\n\nSigned in\n'),
+  );
+  await settle();
+  expect(h.audits).toMatchObject([{ action: 'cli_provider.login', targetId: PROVIDER }]);
+  expect(h.probe).not.toHaveBeenCalled();
+  expect(h.releaseAuth).toHaveBeenCalledOnce();
+});
+it('keeps the lock across a close while the volume-login audit is pending', async () => {
+  providerName = 'grok';
+  await start();
+  let resume!: () => void;
+  h.auditGate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  stream.emit(
+    'data',
+    Buffer.from('https://accounts.x.ai/oauth2/device?user_code=ABCD-1234\n\nSigned in\n'),
+  );
+  await settle();
+  ws.close();
+  await settle();
+  expect(h.releaseAuth).not.toHaveBeenCalled();
+  resume();
+  await settle();
+  expect(h.audits).toHaveLength(1);
+  expect(h.updates.some((v) => typeof v.authGeneration === 'string')).toBe(true);
+  expect(h.releaseAuth).toHaveBeenCalledOnce();
+});
+
+it('refuses a login when its settings change between the provider read and auth lock', async () => {
+  const db = h.db as any;
+  h.onAuthLock = async () => {
+    db.query.cliProviders.findFirst.mockResolvedValue({
+      id: PROVIDER,
+      userId: 'user',
+      name: providerName,
+      authMode: 'subscription',
+      isolateAuth: true,
+      envVars: {},
+    });
+  };
+  const socket = await start('', false);
+  expect(socket.write).toHaveBeenCalledWith(expect.stringContaining('409'));
+  expect(h.attach).not.toHaveBeenCalled();
+  expect(h.start).not.toHaveBeenCalled();
+  expect(h.releaseAuth).toHaveBeenCalledOnce();
 });

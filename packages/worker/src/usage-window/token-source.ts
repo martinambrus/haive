@@ -26,8 +26,8 @@ export async function readProviderSecretToken(
 }
 
 /** Upsert a cli_provider_secret (envelope-encrypted). The usage poller calls this to
- *  persist a refreshed/rotated OAuth token. Mirrors the api login-banner writer; safe
- *  to call concurrently only from the singleton poller (no cross-process refresh race). */
+ *  persist a refreshed/rotated OAuth token without advancing the login generation.
+ *  Safe only while the caller holds cliAuthScope across its credential read, refresh and write. */
 export async function writeProviderSecret(
   db: Database,
   providerId: string,

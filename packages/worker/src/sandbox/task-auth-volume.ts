@@ -1,7 +1,8 @@
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { createHash } from 'node:crypto';
 import { eq } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { schema, tryCliAuthLock, type Database } from '@haive/database';
+import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import {
   CLI_PROVIDER_LIST,
   cliAuthTaskVolumeName,
@@ -1236,7 +1237,8 @@ export function shouldSyncAuthBack(
  *  outright. Add a CLI to CLI_CREDENTIAL_FILES, not to USAGE_PROVIDERS, to cover it here.
  *
  *  Best-effort by contract. Every failure is logged and swallowed so a teardown never
- *  fails on it; the cost of skipping is one more stale poll, not a broken task. */
+ *  fails on it. Teardown waits up to 30 seconds for authentication; a longer conflict
+ *  is warned before the task copy is removed, which can lose a rotated credential. */
 export async function syncRefreshedAuthToUserVolumes(
   db: Database,
   taskId: string,
@@ -1260,7 +1262,7 @@ export async function syncRefreshedAuthToUserVolumes(
     });
     if (!provider) continue;
 
-    await syncProviderAuthBack(taskId, provider, runner);
+    await syncProviderAuthBack(taskId, provider, db, runner);
   }
 }
 
@@ -1283,11 +1285,14 @@ export interface AuthSyncProvider {
  *  copyAuthFileBack re-checks that ordering with `-nt` inside the container doing the copy —
  *  and a second copy of it elsewhere would drift from this one.
  *
+ *  Teardown waits briefly for contenders. Harvest passes lockWaitMs=0 and retries next tick.
  *  Best-effort by contract: every failure is logged and swallowed. */
 export async function syncProviderAuthBack(
   taskId: string,
   provider: AuthSyncProvider,
+  db: Database,
   runner: DockerRunner = defaultDockerRunner,
+  lockWaitMs = 30_000,
 ): Promise<boolean> {
   const source = CLI_CREDENTIAL_FILES[provider.name];
   if (!source) return false;
@@ -1302,7 +1307,25 @@ export async function syncProviderAuthBack(
   const taskVol = cliAuthTaskVolumeName(taskId, provider.name, source.authPathIdx);
   const userVol = userVolumeForCtx(ctx, source.authPathIdx);
 
+  let release: (() => Promise<void>) | null = null;
   try {
+    const deadline = Date.now() + lockWaitMs;
+    do {
+      release = await tryCliAuthLock(db, cliAuthScope(provider));
+      if (release || Date.now() >= deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(500, deadline - Date.now())));
+    } while (!release);
+    if (!release) {
+      if (lockWaitMs > 0) {
+        log.warn(
+          { taskId, providerId: provider.id, provider: provider.name, taskVol, lockWaitMs },
+          'auth sync-back skipped: authentication stayed busy; teardown will remove the task credential copy',
+        );
+      }
+      return false;
+    }
+    // A sign-out that won the lock must not be undone by a helper mount recreating it.
+    if (!(await runner.volumeExists(userVol))) return false;
     const taskRaw = await readVolumeFile(taskVol, source.relPath, runner);
     if (!taskRaw) return false;
     const taskToken = extractToken(source.extract, taskRaw);
@@ -1328,6 +1351,8 @@ export async function syncProviderAuthBack(
       'auth sync-back failed; user volume left as-is',
     );
     return false;
+  } finally {
+    await release?.();
   }
 }
 

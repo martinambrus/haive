@@ -1,3 +1,4 @@
+import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import { and, eq, inArray } from 'drizzle-orm';
 import {
   cliAuthTaskVolumePrefix,
@@ -5,7 +6,7 @@ import {
   resolveCliAuthUserVolumeName,
   type CliProviderName,
 } from '@haive/shared';
-import { schema, type Database } from '@haive/database';
+import { schema, tryCliAuthLock, type Database } from '@haive/database';
 import {
   applyGrokRefresh,
   GrokOauthError,
@@ -113,10 +114,21 @@ export async function refreshExpiringCliCredentials(
   }
 
   for (const [vol, sharing] of byVolume) {
+    let release: (() => Promise<void>) | null = null;
     try {
+      release = await tryCliAuthLock(db, cliAuthScope(sharing[0]!));
+      if (!release) {
+        log.debug(
+          { providerId: sharing[0]!.id },
+          'credential refresh skipped: authentication is busy',
+        );
+        continue;
+      }
       await refreshGrokVolume(db, vol, sharing, runner);
     } catch (err) {
       log.warn({ err, vol }, 'grok credential refresh failed; leaving the stored login as-is');
+    } finally {
+      await release?.();
     }
   }
 }

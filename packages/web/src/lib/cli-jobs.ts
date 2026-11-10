@@ -1,4 +1,4 @@
-import type { RefreshCliVersionsJobResult } from '@haive/shared/constants';
+import type { CliSignOutJobResult, RefreshCliVersionsJobResult } from '@haive/shared/constants';
 import { api, type CliPackageVersionsEntry, type CliProbeResult } from './api-client';
 
 /** What a running cli-exec job the UI started is doing right now, for the button label.
@@ -17,10 +17,16 @@ export function jobPhaseForState(state: string | undefined): QueuedJobPhase {
   return state === 'active' ? 'running' : 'queued';
 }
 
-export interface SignOutResult {
-  ok: boolean;
-  removed: string[];
-  failed: { name: string; stderr: string }[];
+export type SignOutResult = CliSignOutJobResult;
+
+export function signOutSummary(result: SignOutResult): string {
+  if (result.superseded)
+    return 'Sign-out skipped because you signed in again. Your current login was kept.';
+  if (!result.ok)
+    return `Failed: ${result.failed.map((f) => `${f.name} (${f.stderr})`).join('; ')}`;
+  return result.removed.length === 0
+    ? 'Already signed out.'
+    : `Removed: ${result.removed.join(', ')}`;
 }
 
 const POLL_INTERVAL_MS = 2_000;
