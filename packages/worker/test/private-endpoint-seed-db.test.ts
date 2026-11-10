@@ -432,7 +432,7 @@ describe.skipIf(!url)('one-time seed of the private endpoint allowlist', () => {
     const config = fakeConfig('');
     await seedPrivateEndpointAllowlist(db, deps(config));
     expect(config.store.get(KEY)).toBe('');
-    expect(config.setIfAbsent).not.toHaveBeenCalled();
+    expect(config.comparePrivateEndpointSeed).not.toHaveBeenCalled();
     expect(lookups).toEqual([]);
     expect(await audits()).toHaveLength(0);
   });
@@ -440,7 +440,7 @@ describe.skipIf(!url)('one-time seed of the private endpoint allowlist', () => {
   it('does not even look at the install when the key exists and nothing would be seeded', async () => {
     const config = fakeConfig('');
     await seedPrivateEndpointAllowlist(db, deps(config));
-    expect(config.setIfAbsent).not.toHaveBeenCalled();
+    expect(config.comparePrivateEndpointSeed).not.toHaveBeenCalled();
   });
 
   it('leaves an existing non-empty list alone', async () => {
@@ -448,7 +448,7 @@ describe.skipIf(!url)('one-time seed of the private endpoint allowlist', () => {
     const config = fakeConfig('10.1.1.1');
     await seedPrivateEndpointAllowlist(db, deps(config));
     expect(config.store.get(KEY)).toBe('10.1.1.1');
-    expect(config.setIfAbsent).not.toHaveBeenCalled();
+    expect(config.comparePrivateEndpointSeed).not.toHaveBeenCalled();
     expect(lookups).toEqual([]);
     expect(await audits()).toHaveLength(0);
   });
