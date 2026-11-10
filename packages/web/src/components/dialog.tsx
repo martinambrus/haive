@@ -21,6 +21,8 @@ interface DialogProps {
   className?: string;
   'aria-label'?: string;
   backdropClassName?: string;
+  /** Keep terminal sign-in sessions open until Close or Escape. */
+  dismissOnBackdrop?: boolean;
   /** A replacement opener, e.g. the history bell exchanged by a sticky header. */
   fallbackFocus?: () => HTMLElement | null;
 }
@@ -80,6 +82,7 @@ export function Dialog({
   className,
   'aria-label': label,
   backdropClassName,
+  dismissOnBackdrop = true,
   fallbackFocus,
 }: DialogProps) {
   const ancestors = useContext(DialogAncestors);
@@ -211,7 +214,9 @@ export function Dialog({
       >
         <div
           className={cn('fixed inset-0 bg-black/60 backdrop-blur-sm', backdropClassName)}
-          onClick={() => onOpenChange(false)}
+          onClick={() => {
+            if (dismissOnBackdrop) onOpenChange(false);
+          }}
         />
         <div
           ref={panelRef}

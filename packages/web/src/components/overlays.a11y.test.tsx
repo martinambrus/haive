@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { useState } from 'react';
 import { CliAuthBannerModal } from './cli-auth-banner-modal';
+import { Dialog } from './dialog';
 import { TaskHistoryPanel, type useTaskHistory } from './task-history';
 vi.mock('@xterm/xterm', () => ({ Terminal: class {} }));
 vi.mock('@xterm/addon-fit', () => ({ FitAddon: class {} }));
@@ -80,4 +81,46 @@ it('3 implementation history shares the dialog focus guard and returns to its be
   expect(dialog.contains(document.activeElement)).toBe(true);
   fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
   expect(document.activeElement).toBe(bell);
+});
+
+it.each(['Close', 'Escape'])('keeps sign-in active after a backdrop click until %s', (dismiss) => {
+  const close = vi.fn();
+  vi.stubGlobal(
+    'WebSocket',
+    class {
+      close = close;
+    },
+  );
+  function Scene() {
+    const [open, setOpen] = useState(true);
+    return (
+      <CliAuthBannerModal
+        open={open}
+        providerId="p"
+        providerLabel="Claude"
+        providerName="claude-code"
+        onClose={() => setOpen(false)}
+      />
+    );
+  }
+  render(<Scene />);
+  const dialog = screen.getByRole('dialog', { name: 'Sign in — Claude' });
+  fireEvent.click(dialog.previousElementSibling!);
+  expect(screen.getByRole('dialog', { name: 'Sign in — Claude' })).toBe(dialog);
+  expect(close).not.toHaveBeenCalled();
+  if (dismiss === 'Close') fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+  else fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(close).toHaveBeenCalled();
+});
+
+it('keeps backdrop dismissal enabled for ordinary dialogs', () => {
+  const change = vi.fn();
+  render(
+    <Dialog open onOpenChange={change} aria-label="Ordinary">
+      Content
+    </Dialog>,
+  );
+  fireEvent.click(screen.getByRole('dialog', { name: 'Ordinary' }).previousElementSibling!);
+  expect(change).toHaveBeenCalledWith(false);
 });

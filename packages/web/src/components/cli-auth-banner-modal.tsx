@@ -468,6 +468,7 @@ export function CliAuthBannerModal({
   return (
     <Dialog
       open={open}
+      dismissOnBackdrop={false}
       onOpenChange={(next) => {
         if (!next) handleClose();
       }}
