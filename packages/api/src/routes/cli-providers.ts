@@ -1196,7 +1196,7 @@ cliProviderRoutes.delete('/:providerId/usage-auth', async (c) => {
   const userId = c.get('userId');
   const providerId = c.req.param('providerId');
   const db = getDb();
-  await loadOwnedProvider(db, userId, providerId);
+  const provider = await loadOwnedProvider(db, userId, providerId);
   const event: AuditEvent = {
     actorUserId: userId,
     action: 'cli_provider.secret.delete',
@@ -1204,24 +1204,26 @@ cliProviderRoutes.delete('/:providerId/usage-auth', async (c) => {
     targetId: providerId,
     metadata: { source: 'usage_oauth', secretName: CLAUDE_USAGE_OAUTH_SECRET },
   };
-  const deleted = await db.transaction(async (tx) => {
-    const rows = await tx
-      .delete(schema.cliProviderSecrets)
-      .where(
-        and(
-          eq(schema.cliProviderSecrets.providerId, providerId),
-          eq(schema.cliProviderSecrets.secretName, CLAUDE_USAGE_OAUTH_SECRET),
-        ),
-      )
-      .returning({ id: schema.cliProviderSecrets.id });
-    if (rows.length > 0) await insertAuditEvent(tx, event);
-    // Drop the last usage snapshot too: with no token the poller will never touch this row
-    // again, so a stale meter / needs_reconnect chip would otherwise linger indefinitely.
-    await tx
-      .delete(schema.usageWindowSnapshots)
-      .where(eq(schema.usageWindowSnapshots.providerId, providerId));
-    return rows.length > 0;
-  });
+  const deleted = await withCliAuthWrite(db, provider, [CLAUDE_USAGE_OAUTH_SECRET], () =>
+    db.transaction(async (tx) => {
+      const rows = await tx
+        .delete(schema.cliProviderSecrets)
+        .where(
+          and(
+            eq(schema.cliProviderSecrets.providerId, providerId),
+            eq(schema.cliProviderSecrets.secretName, CLAUDE_USAGE_OAUTH_SECRET),
+          ),
+        )
+        .returning({ id: schema.cliProviderSecrets.id });
+      if (rows.length > 0) await insertAuditEvent(tx, event);
+      // Drop the last usage snapshot too: with no token the poller will never touch this row
+      // again, so a stale meter / needs_reconnect chip would otherwise linger indefinitely.
+      await tx
+        .delete(schema.usageWindowSnapshots)
+        .where(eq(schema.usageWindowSnapshots.providerId, providerId));
+      return rows.length > 0;
+    }),
+  );
   if (deleted) logAuditEvent(event);
   return c.json({ connected: false });
 });
@@ -1231,7 +1233,7 @@ cliProviderRoutes.delete('/:providerId/secrets/:secretName', async (c) => {
   const providerId = c.req.param('providerId');
   const secretName = c.req.param('secretName');
   const db = getDb();
-  await loadOwnedProvider(db, userId, providerId);
+  const provider = await loadOwnedProvider(db, userId, providerId);
 
   const event: AuditEvent = {
     actorUserId: userId,
@@ -1240,19 +1242,21 @@ cliProviderRoutes.delete('/:providerId/secrets/:secretName', async (c) => {
     targetId: providerId,
     metadata: { source: 'manual', secretName },
   };
-  await db.transaction(async (tx) => {
-    const result = await tx
-      .delete(schema.cliProviderSecrets)
-      .where(
-        and(
-          eq(schema.cliProviderSecrets.providerId, providerId),
-          eq(schema.cliProviderSecrets.secretName, secretName),
-        ),
-      )
-      .returning({ id: schema.cliProviderSecrets.id });
-    if (result.length === 0) throw new HttpError(404, 'Secret not found');
-    await insertAuditEvent(tx, event);
-  });
+  await withCliAuthWrite(db, provider, [secretName], () =>
+    db.transaction(async (tx) => {
+      const result = await tx
+        .delete(schema.cliProviderSecrets)
+        .where(
+          and(
+            eq(schema.cliProviderSecrets.providerId, providerId),
+            eq(schema.cliProviderSecrets.secretName, secretName),
+          ),
+        )
+        .returning({ id: schema.cliProviderSecrets.id });
+      if (result.length === 0) throw new HttpError(404, 'Secret not found');
+      await insertAuditEvent(tx, event);
+    }),
+  );
   logAuditEvent(event);
   return c.json({ ok: true });
 });

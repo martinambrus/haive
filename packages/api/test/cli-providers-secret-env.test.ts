@@ -58,6 +58,7 @@ function setup(existing = false) {
     cliProviders: schema.cliProviders,
     cliPackageVersions: schema.cliPackageVersions,
     cliProviderSecrets: schema.cliProviderSecrets,
+    usageWindowSnapshots: schema.usageWindowSnapshots,
   });
   if (existing) {
     fake.insert(schema.cliProviders, {
@@ -686,4 +687,47 @@ describe('provider auth scope changes', () => {
     expect(fake.rows(schema.auditEvents)).toHaveLength(0);
     expect(authLock.release).toHaveBeenCalledTimes(2);
   });
+});
+
+it.each([
+  ['usage-auth', 'CLAUDE_USAGE_OAUTH'],
+  ['secrets/CLAUDE_USAGE_OAUTH', 'CLAUDE_USAGE_OAUTH'],
+  ['secrets/CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'],
+])('busy auth delete %s returns a stable 409 without opening a transaction', async (path, name) => {
+  const fake = setup(true);
+  fake.insert(schema.cliProviderSecrets, {
+    providerId: PROVIDER,
+    secretName: name,
+    encryptedValue: 'before',
+    encryptedDek: 'before',
+  });
+  const before = fake.rows(schema.cliProviderSecrets);
+  authLock.acquire.mockImplementation(async () => {
+    expect(h.transactionOpen).toBe(false);
+    return null;
+  });
+  const res = await app.request('/' + PROVIDER + '/' + path, { method: 'DELETE' });
+  expect(res.status).toBe(409);
+  expect(await res.json()).toEqual({
+    code: 'cli_auth_busy',
+    error:
+      'CLI authentication is busy. Finish the current sign-in or credential update and try again.',
+  });
+  expect(fake.rows(schema.cliProviderSecrets)).toEqual(before);
+  expect(fake.rows(schema.auditEvents)).toHaveLength(0);
+});
+
+it('a non-auth secret delete stays unlocked even when authentication is busy', async () => {
+  const fake = setup(true);
+  fake.insert(schema.cliProviderSecrets, {
+    providerId: PROVIDER,
+    secretName: 'API_KEY',
+    encryptedValue: 'before',
+    encryptedDek: 'before',
+  });
+  authLock.acquire.mockResolvedValue(null);
+  const res = await app.request('/' + PROVIDER + '/secrets/API_KEY', { method: 'DELETE' });
+  expect(res.status).toBe(200);
+  expect(authLock.acquire).not.toHaveBeenCalled();
+  expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
 });

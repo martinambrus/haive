@@ -111,6 +111,58 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
     await cleanActor(db, h.actor);
     vi.restoreAllMocks();
   });
+  it.each([
+    ['usage-auth', 'CLAUDE_USAGE_OAUTH'],
+    ['secrets/CLAUDE_USAGE_OAUTH', 'CLAUDE_USAGE_OAUTH'],
+    ['secrets/CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'],
+  ])(
+    'auth delete %s refuses a held scope, then commits without advancing generation',
+    async (path, name) => {
+      const before = (await db.query.cliProviders.findFirst({
+        where: eq(schema.cliProviders.id, provider),
+      }))!;
+      await db.insert(schema.cliProviderSecrets).values({
+        providerId: provider,
+        secretName: name,
+        encryptedValue: 'before',
+        encryptedDek: 'before',
+      });
+      const priorSecrets = await secrets();
+      const release = await tryCliAuthLock(db, cliAuthScope(before));
+      expect(release).not.toBeNull();
+      try {
+        const res = await send('DELETE', path);
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({
+          code: 'cli_auth_busy',
+          error: expect.any(String),
+        });
+        expect(await secrets()).toEqual(priorSecrets);
+        expect(await audits(db)).toHaveLength(0);
+      } finally {
+        await release?.();
+      }
+      await refuseAudit(db, h.actor);
+      expect((await send('DELETE', path)).status).toBe(500);
+      expect(await secrets()).toEqual(priorSecrets);
+      await allowAudit(db);
+      expect((await send('DELETE', path)).status).toBe(200);
+      expect(await secrets()).toHaveLength(0);
+      expect(await audits(db)).toHaveLength(1);
+      expect(
+        (await db.query.cliProviders.findFirst({
+          where: eq(schema.cliProviders.id, provider),
+        }))!.authGeneration,
+      ).toBe(before.authGeneration);
+      const releaseAgain = await tryCliAuthLock(db, cliAuthScope(before));
+      try {
+        expect(releaseAgain).not.toBeNull();
+      } finally {
+        await releaseAgain?.();
+      }
+    },
+  );
+
   it.each(['manual', 'environment', 'usage'] as const)(
     '%s credential writes fence and commit their generation atomically',
     async (source) => {
