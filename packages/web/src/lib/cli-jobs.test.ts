@@ -182,7 +182,7 @@ describe('superseded sign-out', () => {
       'Sign-out skipped because you signed in again. Your current login was kept.',
     );
     expect(signOutSummary({ ok: true, removed: [], failed: [] })).toBe('Already signed out.');
-    expect(signOutSummary({ ok: true, removed: ['volume'], failed: [] })).toBe('Signed out.');
+    expect(signOutSummary({ ok: true, removed: ['volume'], failed: [] })).toBe('Removed: volume');
   });
 });
 
