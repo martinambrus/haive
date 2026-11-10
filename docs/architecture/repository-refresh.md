@@ -48,6 +48,25 @@ Retry can clear the only notice; T486 tracks retention and durable reporting. A 
 import is re-scanned as before, and a repository with no remote and no folder answers 409 without
 touching its row.
 
+**A checkout git cannot read gets a repair code and an explicit rebuild.** When the refresh
+cannot prove the checkout usable or unusable (the unknown path above) the row is `error` with
+`repositories.error_code = 'checkout_repair_needed'` (migration 0225; `'source_repair_needed'` when
+the folder source could not be examined and needs repair; the codes are `REPOSITORY_ERROR_CODES`, `@haive/shared`), and the
+page keys its actions on the code, never on the message: "Check repair" re-runs the ordinary refresh,
+and "Rebuild checkout" (when the source can rebuild) posts the recovery, the user's explicit consent
+to move the checkout aside although it could not be proved unusable. The code clears when
+preparation starts or detection succeeds. A recovery job first re-checks the checkout: one that is
+usable again (held by a task or not) finishes as an ordinary refresh, moves nothing and clears the
+code. Otherwise it takes the ordinary rebuild path (seed, source proof, move aside, build, verify),
+keeps every repository record and skips the incoming mirror imports, so settings, KB and plan data
+stay. Any rebuild, recovery or not, is refused with a sentence naming the count while a task of the
+repository that is neither completed nor cancelled has a worktree under the checkout (a `failed`
+or `created` one included, since its unpushed commits would move with the tree): the api refuses at
+admission (409), and the worker counts again, together with the holding tasks, under the
+task-creation lock (`lockRepositoryTasksKey`) in the transaction that renames the checkout aside;
+the lock spans only the recount and the rename, never the clone. Cancel the task, or finish it, and
+rebuild. A start after the rename can still overlap the clone (the window above).
+
 The list's `canRetry` / `retryUnavailableReason` describe the durable source the retry
 route can use: a local folder, a remote URL, or a completed upload record belonging to the
 repository's owner whose archive has not been recorded as unavailable. A blank project or a
