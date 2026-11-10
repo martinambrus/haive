@@ -455,7 +455,7 @@ From the T406/T408 build (2026-11-07).
 
 ### T554 · FNF[allowlist-seed-hardening] · the private-endpoint upgrade seed can lose entries for good (+1)
 
-status: in progress 2026-11-10 (sec-T586, /codex-sonnet), owner-approved (next: T570+T554 as bundle C) · kind: fix · found: T347 run · priority: P2
+status: open, owner-approved 2026-11-10 (bundle C with T570/T554, after T586) · kind: fix · found: T347 run · priority: P2
 
 1. A DNS outage at the one seeding boot leaves a permanent empty list: unresolved names are skipped (worker private-endpoint-seed.ts:196,227) and an empty plan writes `''` (:354), which counts as written. NEW-LIMIT. Fix: do not write the empty marker while a candidate is unresolved; retry on later boots with a cap.
 2. A transient DNS failure for one name is not retried (private-endpoint-seed.ts:146-216), so that name is skipped for good. NEW-LIMIT.
@@ -640,7 +640,7 @@ PRE-EXISTING. shared config.service.ts `CONFIG_REDIS_OPTIONS` (~:785) and `redis
 
 ### T570 · FNF[encryption-key-set-race] · two processes on a first boot can each generate the encryption key
 
-status: in progress 2026-11-10 (sec-T586, /codex-sonnet), owner-approved (next: T570+T554 as bundle C) · kind: fix · found: T544 run 2026-11-08 · priority: P3
+status: open, owner-approved 2026-11-10 (bundle C with T570/T554, after T586) · kind: fix · found: T544 run 2026-11-08 · priority: P3
 PRE-EXISTING. shared config.service.ts `ensureEncryptionKey` (~:938-951, EXISTS then plain SET; also ~:1039): with no key in Redis and no `CONFIG_ENCRYPTION_KEY`, api and worker initializing together each generate a key, the last SET wins, and the other may already encrypt with the overwritten one. Direction: SET NX, then re-read the winner.
 
 ### T571 · FNF[global-kb-boot-store-stall] · worker boot waits forever on a stalled global KB store
