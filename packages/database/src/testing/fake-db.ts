@@ -152,8 +152,9 @@ interface SelectQuery extends PromiseLike<FakeRow[]> {
 interface Insert extends Lazy<FakeRow[]> {
   onConflictDoUpdate(conflict: { target: Column | Column[]; set: FakeRow }): Lazy<FakeRow[]>;
   /** `ON CONFLICT (target) [WHERE where] DO NOTHING`: a value matching a row on the target
-   *  columns, among the rows `where` selects, goes in as nothing and returns no row. */
-  onConflictDoNothing(conflict: { target: Column | Column[]; where?: unknown }): Lazy<FakeRow[]>;
+   *  columns, among the rows `where` selects, goes in as nothing and returns no row.
+   *  An omitted target is supported for tables whose only constraint is their primary key. */
+  onConflictDoNothing(conflict?: { target: Column | Column[]; where?: unknown }): Lazy<FakeRow[]>;
 }
 
 /** The handle a test casts to `Database`, and the transaction a section receives. */
@@ -721,8 +722,23 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
           return Object.assign(run(), {
             onConflictDoUpdate: (c: { target: Column | Column[]; set: FakeRow }) =>
               run({ target: [c.target].flat(), set: c.set }),
-            onConflictDoNothing: (c: { target: Column | Column[]; where?: unknown }) =>
-              run({ target: [c.target].flat(), where: c.where, doNothing: true }),
+            onConflictDoNothing: (c?: { target: Column | Column[]; where?: unknown }) => {
+              if (c) return run({ target: [c.target].flat(), where: c.where, doNothing: true });
+              const config = getTableConfig(table);
+              if (
+                config.uniqueConstraints.length ||
+                config.columns.some((column) => column.isUnique) ||
+                config.indexes.some((index) => index.config.unique)
+              )
+                throw new Error(
+                  'fake db: targetless conflict with unique constraints is unsupported',
+                );
+              const target = [
+                ...config.columns.filter((column) => column.primary),
+                ...config.primaryKeys.flatMap((key) => key.columns),
+              ];
+              return target.length ? run({ target, doNothing: true }) : run();
+            },
           });
         },
       }),

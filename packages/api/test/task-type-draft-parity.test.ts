@@ -3,7 +3,10 @@ import { describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({ catalog: [] as unknown[] }));
 
 vi.mock('../src/db.js', () => ({
-  getDb: () => ({ select: () => ({ from: (table: unknown) => rows(table) }), insert }),
+  getDb: () => {
+    const tx = { select: () => ({ from: (table: unknown) => rows(table) }), insert };
+    return { ...tx, transaction: async (fn: (handle: typeof tx) => unknown) => fn(tx) };
+  },
 }));
 vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/middleware/auth.js')>()),

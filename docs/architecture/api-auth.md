@@ -270,3 +270,31 @@ address from the request body should take `egressFor(c.get('userRole'))` and add
 `probe-targets.test.ts`.
 
 The IDE proxy's credential rule is in [Sandbox](sandbox.md).
+
+**CLI volume logins leave a row after the success signal.** Codex, Grok, Amp and
+Antigravity record `cli_provider.login` with source `volume` before their post-login
+probe. The CLI has already written the credential into its volume: a failed probe,
+closed dialog or refused audit cannot undo it, so the row is deliberately best-effort.
+Metadata never includes credentials, output, codes or environment values.
+Claude-family captured tokens already record `cli_provider.secret.set` atomically
+with encrypted-secret promotion; those keep their strict write.
+
+**CLI sign-out requires its request row before enqueue.** The API commits
+`cli_provider.sign_out` before adding the sign-out job, with no transaction open
+during the enqueue; an audit refusal queues nothing, and a rejected or id-less
+enqueue deletes that one row by id (a failed delete is logged). The pino line
+follows a successful enqueue. The worker retains ownership of credential-volume and
+Claude login-secret removal and adds no audit writer.
+
+**CLI provider security edits require their own row.** Create records
+`cli_provider.create` in its insert transaction, listing the security fields the
+request sent. PATCH records `cli_provider.update` whenever `networkPolicy`,
+`egressDomains`, `wrapperContent`, `wrapperPath`, `executablePath`, `cliArgs`,
+`sandboxDockerfileExtra`, `rulesContent`, `modelfile`, `authMode`, `isolateAuth`
+or `cliVersion` changes, or a non-secret environment entry changes; NULL and an
+empty value count as equal. The current provider is read under its
+`FOR NO KEY UPDATE` row lock, and the update and required audit commit together. Metadata lists changed fields and environment names
+(including removals), never their values or wrapper/Dockerfile content.
+Secret environment writes keep their existing strict `cli_provider.secret.set`
+row in that same transaction. Both logs follow commit; unchanged settings
+add no update row.

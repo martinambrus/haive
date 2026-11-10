@@ -121,7 +121,8 @@ Cancel, the step abort and the plan merge discard still clear any pause, and an 
 and lifts an administrator's pause through the owner route gets the same `byAdmin` `task.resumed` event
 and `task.admin_resume` row as from the page (`recordAdminResume`, in the resume's transaction, so a row
 that cannot be written undoes it); lifting their own owner pause stays an owner action with neither, and
-a Retry that clears an administrator's pause for an administrator records only `task.retried`.
+a Retry that clears an administrator's pause for an administrator also records that same
+resume event and audit row inside its Retry transaction, for both START replay and a step retry.
 `GET /tasks/:id` carries `pauseLocked` (the pause is an administrator's and the viewer is not one), which
 hides the task page's Resume and changes its banner.
 In the worker, the allowance auto-resume and an answer to a parked form do not reopen a failed task while
@@ -145,6 +146,15 @@ read answers 500, so a read that failed never enables the start buttons and neve
 The updater creates the journal table itself, at every start: `ensureJournal` runs
 `UPGRADE_JOURNAL_DDL`, which `@haive/database` exports once and the api's tests build the table
 from, so nothing keeps a copy of it.
+
+The API's upgrade launch commits its `maintenance.start_upgrade` row (metadata `from`, `to`,
+`force`) in its own short transaction before it starts the updater container, so no main-database
+connection is held while Docker pulls and starts it (up to 300 s). A refused row starts no container.
+A failed launch deletes that one row by id and answers the launch error (a failed delete is logged);
+the pino line follows a successful launch only. The admin audit log can therefore show the row while
+the launch is in flight and lose it if the launch fails. A launch whose outcome is ambiguous (the
+300 s deadline kills the Docker client after the daemon may already have started the container)
+deletes the row as a failure, so such an upgrade can run without one.
 
 A start that ends before any run exists also leaves a row, so an administrator sees why an upgrade
 did not happen, from the admin page or from `./haive upgrade`, after the api that launched it is

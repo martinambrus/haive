@@ -680,6 +680,17 @@ describe('ON CONFLICT DO NOTHING on the fake', () => {
   const c = schema.projectStateConflicts;
   const REPO = '00000000-0000-4000-8000-0000000000b1';
 
+  it('accepts an omitted target for a table with only a primary-key constraint', async () => {
+    const t = schema.taskTypeDefinitions;
+    const fake = createFakeDb({ taskTypeDefinitions: t });
+    const add = (slug: string) =>
+      fake.db.insert(t).values({ slug }).onConflictDoNothing().returning();
+    expect(await add('one')).toHaveLength(1);
+    expect(await add('one')).toEqual([]);
+    expect(await add('two')).toHaveLength(1);
+    expect(fake.rows(t).map((r) => r.slug)).toEqual(['one', 'two']);
+  });
+
   it('skips a value matching a row of the target among the rows its WHERE selects, and returns none', async () => {
     const fake = createFakeDb({ repositories: schema.repositories, projectStateConflicts: c });
     fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme' });

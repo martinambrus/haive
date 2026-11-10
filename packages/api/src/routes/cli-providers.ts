@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { and, asc, desc, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { schema, type Database } from '@haive/database';
@@ -346,6 +348,28 @@ cliProviderRoutes.get('/:id', async (c) => {
   return c.json({ provider: withRulesState(row) });
 });
 
+/** Empty optional settings have the same meaning whether stored as NULL or sent by a form. */
+function emptyAuditValueAsNull(value: unknown): unknown {
+  if (value == null || value === '') return null;
+  if (typeof value === 'object' && Object.keys(value).length === 0) return null;
+  return value;
+}
+
+const PROVIDER_SECURITY_FIELDS = [
+  'networkPolicy',
+  'egressDomains',
+  'wrapperContent',
+  'wrapperPath',
+  'executablePath',
+  'cliArgs',
+  'sandboxDockerfileExtra',
+  'authMode',
+  'isolateAuth',
+  'cliVersion',
+  'rulesContent',
+  'modelfile',
+] as const;
+
 cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
   const body = createCliProviderRequestSchema.parse(await c.req.json());
@@ -395,6 +419,17 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
         ...(provisioningModel ? { modelProvisionStatus: 'provisioning' } : {}),
       })
       .returning();
+    const fields: string[] = PROVIDER_SECURITY_FIELDS.filter((field) => body[field] !== undefined);
+    const envNames = Object.keys(split?.envVars ?? {}).sort();
+    if (envNames.length) fields.push('envVars');
+    const event: AuditEvent = {
+      actorUserId: userId,
+      action: 'cli_provider.create',
+      targetType: 'cli_provider',
+      targetId: rows[0]!.id,
+      metadata: { fields, ...(envNames.length ? { envNames } : {}) },
+    };
+    await insertAuditEvent(tx, event);
     for (const [name, value] of Object.entries(split?.secrets ?? {})) {
       await upsertProviderSecret(tx, {
         providerId: rows[0]!.id,
@@ -417,10 +452,11 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
       };
       await insertAuditEvent(tx, secretEvent);
     }
-    return rows;
+    return { rows, event };
   });
 
-  const created = inserted[0]!;
+  const created = inserted.rows[0]!;
+  logAuditEvent(inserted.event);
   if (secretEvent) logAuditEvent(secretEvent);
   await enqueueBuildForProvider(created.id, userId);
   if (provisioningModel) await enqueueOllamaProvisionForProvider(created.id, userId);
@@ -547,6 +583,36 @@ cliProviderRoutes.patch('/:id', async (c) => {
     : undefined;
   const updated = await db.transaction(async (tx) => {
     if (startsJob) await admitNewWork(tx);
+    const [current] = await tx
+      .select()
+      .from(schema.cliProviders)
+      .where(and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)))
+      .for('no key update');
+    if (!current) throw new HttpError(404, 'CLI provider not found');
+    const fields: string[] = PROVIDER_SECURITY_FIELDS.filter(
+      (field) =>
+        updates[field] !== undefined &&
+        !isDeepStrictEqual(
+          emptyAuditValueAsNull(updates[field]),
+          emptyAuditValueAsNull(current[field]),
+        ),
+    );
+    const envNames = split
+      ? [...new Set([...Object.keys(current.envVars ?? {}), ...Object.keys(split.envVars)])]
+          .filter((name) => (current.envVars ?? {})[name] !== split.envVars[name])
+          .sort()
+      : [];
+    if (envNames.length > 0) fields.push('envVars');
+    const event: AuditEvent | undefined = fields.length
+      ? {
+          actorUserId: userId,
+          action: 'cli_provider.update',
+          targetType: 'cli_provider',
+          targetId: id,
+          metadata: { fields, ...(envNames.length ? { envNames } : {}) },
+        }
+      : undefined;
+    if (event) await insertAuditEvent(tx, event);
     const rows = await tx
       .update(schema.cliProviders)
       .set(updates)
@@ -562,9 +628,10 @@ cliProviderRoutes.patch('/:id', async (c) => {
       });
     }
     if (secretEvent) await insertAuditEvent(tx, secretEvent);
-    return rows;
+    return { rows, event };
   });
-  const updatedRow = updated[0]!;
+  const updatedRow = updated.rows[0]!;
+  if (updated.event) logAuditEvent(updated.event);
   if (secretEvent) logAuditEvent(secretEvent);
 
   if (provisioningModel) await enqueueOllamaProvisionForProvider(id, userId);
@@ -723,8 +790,31 @@ cliProviderRoutes.post('/:id/sign-out', async (c) => {
 
   const payload: CliSignOutJobPayload = { providerId: provider.id, userId };
   const queue = getCliExecQueue();
-  const job = await queue.add(CLI_EXEC_JOB_NAMES.SIGN_OUT, payload, CLI_POLLABLE_JOB_OPTS);
-  if (!job.id) throw new HttpError(500, 'sign-out was not queued', 'sign_out_enqueue_failed');
+  const event: AuditEvent = {
+    actorUserId: userId,
+    action: 'cli_provider.sign_out',
+    targetType: 'cli_provider',
+    targetId: provider.id,
+  };
+  const auditId = randomUUID();
+  await db.transaction((tx) => insertAuditEvent(tx, event, { id: auditId }));
+  // Redis can wait indefinitely: keep the required row committed without holding a connection.
+  let job: Awaited<ReturnType<typeof queue.add>>;
+  try {
+    job = await queue.add(CLI_EXEC_JOB_NAMES.SIGN_OUT, payload, CLI_POLLABLE_JOB_OPTS);
+    if (!job.id) throw new HttpError(500, 'sign-out was not queued', 'sign_out_enqueue_failed');
+  } catch (err) {
+    try {
+      await db.delete(schema.auditEvents).where(eq(schema.auditEvents.id, auditId));
+    } catch (cleanupError) {
+      logger.error(
+        { err: cleanupError, auditId },
+        'failed to remove the failed sign-out launch audit',
+      );
+    }
+    throw err;
+  }
+  logAuditEvent(event);
 
   return c.json({ jobId: job.id }, 202);
 });

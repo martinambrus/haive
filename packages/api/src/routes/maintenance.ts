@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, desc, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
@@ -582,19 +583,35 @@ maintenanceRoutes.post('/upgrade', async (c) => {
   if (body.force) args.push('--force');
 
   const startedAt = new Date().toISOString();
-  const started = await runDockerClient(args);
-  if (!started.ok) {
-    // Never echo `args`: the message would be the one place the redaction above was pointless.
-    log.error({ image, stderr: started.stderr }, 'could not start the updater');
-    throw new HttpError(502, `could not start the updater: ${started.stderr || 'docker failed'}`);
-  }
-
-  await recordAuditEvent(db, {
+  const event: AuditEvent = {
     actorUserId: c.get('userId'),
     action: 'maintenance.start_upgrade',
     targetType: 'system',
-    metadata: { from: current, to: version, container: started.containerId, force: !!body.force },
-  });
+    metadata: { from: current, to: version, force: !!body.force },
+  };
+  const auditId = randomUUID();
+  await db.transaction((tx) => insertAuditEvent(tx, event, { id: auditId }));
+  // An image pull can take minutes. Commit the required row and release the connection first.
+  let started: Awaited<ReturnType<typeof runDockerClient>>;
+  try {
+    started = await runDockerClient(args);
+    if (!started.ok) {
+      // Never echo args: environment values do not belong in a failure.
+      log.error({ image, stderr: started.stderr }, 'could not start the updater');
+      throw new HttpError(
+        502,
+        'could not start the updater: ' + (started.stderr || 'docker failed'),
+      );
+    }
+  } catch (err) {
+    try {
+      await db.delete(schema.auditEvents).where(eq(schema.auditEvents.id, auditId));
+    } catch (cleanupError) {
+      log.error({ err: cleanupError, auditId }, 'failed to remove the failed upgrade launch audit');
+    }
+    throw err;
+  }
+  logAuditEvent(event);
   log.info({ from: current, to: version, container: started.containerId }, 'upgrade started');
   // 202: the work outlives this request, and this process is one of the things it replaces.
   return c.json(

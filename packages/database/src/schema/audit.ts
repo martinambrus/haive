@@ -5,7 +5,9 @@ import { pgTable, uuid, varchar, jsonb, timestamp, index } from 'drizzle-orm/pg-
  *  audit log line, which goes to stdout and rotates. Deliberately NO foreign
  *  keys: audit rows must outlive the user/credential they reference, so
  *  actorUserId/targetId are plain uuids. Never updated or deleted by
- *  application code. Secret/username plaintext is never stored — only
+ *  application code except a launch-compensation delete of the row the same
+ *  request wrote when its external effect failed.
+ *  Secret/username plaintext is never stored — only
  *  non-sensitive metadata (host, label, changed-field booleans, role). */
 export const auditEvents = pgTable(
   'audit_events',

@@ -20,6 +20,7 @@ const h = vi.hoisted(() => ({
   actor: '',
   exchange: vi.fn(),
   poll: vi.fn(),
+  add: vi.fn(),
   stash: '',
   auditInsert: vi.fn(),
   auditLog: vi.fn(),
@@ -29,9 +30,9 @@ vi.mock('../src/lib/audit.js', async (original) => {
   const real = await original<any>();
   return {
     ...real,
-    insertAuditEvent: async (db: any, event: any) => {
+    insertAuditEvent: async (db: any, event: any, options?: { id?: string }) => {
       h.auditInsert(event);
-      return real.insertAuditEvent(db, event);
+      return real.insertAuditEvent(db, event, options);
     },
     logAuditEvent: (event: any) => {
       h.auditLog(event);
@@ -47,7 +48,7 @@ vi.mock('../src/middleware/auth.js', () => ({
 }));
 vi.mock('../src/queues.js', () => ({
   getUsagePollQueue: () => ({ add: h.poll }),
-  getCliExecQueue: () => ({ add: vi.fn(async () => ({})) }),
+  getCliExecQueue: () => ({ add: h.add }),
 }));
 vi.mock('../src/redis.js', () => ({ getRedis: () => ({ eval: async () => h.stash }) }));
 vi.mock('@haive/shared/claude-oauth', async (original) => ({
@@ -101,6 +102,7 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
     });
     h.stash = JSON.stringify({ verifier: 'synthetic-verifier', state: 'state' });
     h.poll.mockReset().mockResolvedValue(undefined);
+    h.add.mockReset().mockResolvedValue({});
   });
   afterEach(async () => {
     await allowAudit(db);
@@ -224,8 +226,13 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
       );
       expect(response.status).toBe(operation === 'patch' ? 200 : 201);
       const rows = await audits(db);
-      expect(rows).toHaveLength(1);
-      expect(rows[0]!.metadata).toMatchObject({ secretCount: 60, secretNames: names.slice(0, 50) });
+      expect(rows).toHaveLength(operation === 'create' ? 2 : 1);
+      const secretRows = rows.filter((row) => row.action !== 'cli_provider.create');
+      expect(secretRows).toHaveLength(1);
+      expect(secretRows[0]!.metadata).toMatchObject({
+        secretCount: 60,
+        secretNames: names.slice(0, 50),
+      });
       expect(h.auditLog.mock.calls[0]![0]).toBe(h.auditInsert.mock.calls[0]![0]);
       expect(JSON.stringify(rows)).not.toContain('synthetic');
     },
@@ -264,12 +271,21 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
         expect(res.status).toBe(
           refused ? 500 : operation === 'clone' || operation === 'create' ? 201 : 200,
         );
-        expect(await audits(db)).toHaveLength(refused ? 0 : 1);
+        const rows = await audits(db);
+        expect(rows).toHaveLength(refused ? 0 : operation === 'create' ? 2 : 1);
         if (!refused) {
           expect(h.auditLog.mock.calls[0]![0]).toBe(h.auditInsert.mock.calls[0]![0]);
           if (operation !== 'provider-delete')
-            expect((await audits(db))[0]!.metadata).toMatchObject({
+            expect(
+              rows.find((row) => row.action !== 'cli_provider.create')!.metadata,
+            ).toMatchObject({
               secretNames: [operation === 'clone' ? 'API_KEY' : 'ANTHROPIC_API_KEY'],
+            });
+          if (operation === 'create')
+            expect(rows.find((row) => row.action === 'cli_provider.create')).toMatchObject({
+              actorUserId: h.actor,
+              targetType: 'cli_provider',
+              metadata: { fields: ['authMode'] },
             });
         }
         if (refused) {
@@ -419,7 +435,7 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
             const waiting = await db.execute(sql`
           select 1 from pg_stat_activity a join pg_locks l on l.pid = a.pid
           where a.datname = current_database() and not l.granted
-            and a.query like 'update "cli_providers"%'
+            and a.query like 'select%"cli_providers"%for%update'
         `);
             return waiting.length > 0;
           },
@@ -436,6 +452,37 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
         .envVars,
     ).toEqual({ KEEP: 'next' });
     expect(await secrets()).toHaveLength(2);
-    expect(await audits(db)).toHaveLength(2);
+    expect(await audits(db)).toHaveLength(3);
   }, 30_000);
+  it.each(['success', 'reject', 'missing-id'])(
+    'sign-out %s sees its committed audit outside a transaction',
+    async (outcome) => {
+      let visible = 0;
+      let openTransactions = -1;
+      h.add.mockImplementation(async () => {
+        visible = (await audits(db)).length;
+        const [row] = await db.execute(sql`
+        SELECT count(*)::int AS count FROM pg_stat_activity
+        WHERE datname = current_database() AND state = 'idle in transaction'
+      `);
+        openTransactions = Number(row!.count);
+        if (outcome === 'reject') throw new Error('queue refused');
+        return outcome === 'missing-id' ? {} : { id: 'sign-out-job' };
+      });
+      const result = await send('POST', 'sign-out');
+      expect(result.status).toBe(outcome === 'success' ? 202 : 500);
+      expect(visible).toBe(1);
+      expect(openTransactions).toBe(0);
+      expect(await audits(db)).toHaveLength(outcome === 'success' ? 1 : 0);
+      expect(h.auditLog).toHaveBeenCalledTimes(outcome === 'success' ? 1 : 0);
+    },
+  );
+
+  it('a refused sign-out audit queues nothing on Postgres', async () => {
+    await refuseAudit(db, h.actor);
+    expect((await send('POST', 'sign-out')).status).toBe(500);
+    expect(h.add).not.toHaveBeenCalled();
+    expect(await audits(db)).toEqual([]);
+    expect(h.auditLog).not.toHaveBeenCalled();
+  });
 });

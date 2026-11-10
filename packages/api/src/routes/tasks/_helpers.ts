@@ -1193,9 +1193,13 @@ export async function liftReadPause(
   taskId: string,
   read: Date,
   role: string | undefined,
-): Promise<boolean> {
-  if (adminPauseLocks((await findAdminPausedTaskIds(tx, [taskId])).has(taskId), role)) return false;
-  return clearTaskPause(tx, taskId, read);
+  actorUserId: string,
+): Promise<AuditEvent | null> {
+  const byAdmin = (await findAdminPausedTaskIds(tx, [taskId])).has(taskId);
+  if (adminPauseLocks(byAdmin, role)) return null;
+  if (!(await clearTaskPause(tx, taskId, read))) return null;
+  // Retry is an owner action; an administrator owner can also lift an admin hold.
+  return byAdmin ? recordAdminResume(tx, taskId, actorUserId, actorUserId) : null;
 }
 
 /** The model-health canary validates THE task's model, so swapping the CLI on a

@@ -169,6 +169,7 @@ const ROUTES: { name: string; path: string; body: unknown }[] = [
 
 function setup() {
   const fake = createFakeDb({
+    auditEvents: schema.auditEvents,
     modules: schema.modules,
     tasks: schema.tasks,
     taskEvents: schema.taskEvents,

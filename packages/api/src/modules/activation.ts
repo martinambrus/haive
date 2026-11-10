@@ -1,10 +1,15 @@
 import { moduleDependentRows, moduleDependents } from '@haive/shared/modularity-server';
 import { eq, isNotNull, sql } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { schema, type Database, type DbTx } from '@haive/database';
 import { logger } from '@haive/shared';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { isStepOfModule } from '@haive/shared/modularity';
-import { insertAuditEvent, recordAuditEvent } from '../lib/audit.js';
+import {
+  insertAuditEvent,
+  logAuditEvent,
+  recordAuditEvent,
+  type AuditEvent,
+} from '../lib/audit.js';
 import { enqueueStopSettle } from '../lib/cancel-task.js';
 import { killTaskSandboxesOrThrow } from '../lib/sandbox-kill.js';
 import { supersedeLiveRuns } from '../lib/task-control.js';
@@ -67,7 +72,7 @@ const dependentRows = moduleDependentRows;
 export const liveDependents = moduleDependents;
 
 export function setModuleActive(
-  db: Database,
+  db: Database | DbTx,
   moduleId: string,
   active: boolean,
   actorUserId?: string,
@@ -199,6 +204,13 @@ export async function deactivateUrgently(
   moduleId: string,
   actorUserId: string,
 ): Promise<UrgentDeactivation> {
+  const event: AuditEvent = {
+    actorUserId,
+    action: 'module.deactivate',
+    targetType: 'module',
+    targetId: null,
+    metadata: { moduleId, mode: 'urgent' },
+  };
   const stamped = await db.transaction(async (tx) => {
     await tx.execute(sql`SET LOCAL lock_timeout = '5s'`);
     const [row] = await tx
@@ -210,6 +222,8 @@ export async function deactivateUrgently(
       .where(eq(schema.modules.moduleId, moduleId))
       .for('update');
     if (!row) return null;
+    // Fail before the module changes or any dependent is stopped.
+    await insertAuditEvent(tx, event);
     await tx.delete(schema.moduleDrainTasks).where(eq(schema.moduleDrainTasks.moduleId, moduleId));
     if (row.drainingAt)
       await insertAuditEvent(tx, {
@@ -236,6 +250,7 @@ export async function deactivateUrgently(
     return { deactivatedAt, capped, dependents: [...tasks, ...unlisted] };
   });
   if (!stamped) return { kind: 'missing' };
+  logAuditEvent(event);
 
   const report: UrgentReport = { stopped: [], left: [], failed: [], capped: stamped.capped };
   for (const { id, title, status, ownerId, currentStepId } of stamped.dependents) {
