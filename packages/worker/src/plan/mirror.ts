@@ -263,16 +263,13 @@ export async function writePlanMirror(
 ): Promise<string[]> {
   try {
     const flush = () =>
-      db.transaction(
-        async (tx) => {
-          // Every writer (queue, plan steps, onboarding) enters here. Serialize per
-          // repository across worker processes so an older render can never rename
-          // over a newer one after the newer writer already marked itself current.
-          await lockPlanMirror(tx, repositoryId);
-          return writePlanMirrorLocked(tx, repositoryId, repoPath, changes);
-        },
-        { isolationLevel: 'repeatable read' },
-      );
+      db.transaction(async (tx) => {
+        // Every writer (queue, plan steps, onboarding) enters here. Serialize per
+        // repository across worker processes so an older render can never rename
+        // over a newer one after the newer writer already marked itself current.
+        await lockPlanMirror(tx, repositoryId);
+        return writePlanMirrorLocked(tx, repositoryId, repoPath, changes);
+      });
     let result;
     try {
       result = await flush();
@@ -311,22 +308,18 @@ class PlanMirrorNeedsReconcile extends Error {
   }
 }
 
-const loadMirrorState = async (db: PlanMirrorTx, repositoryId: string, forFlush = false) => {
+const loadMirrorState = async (db: PlanMirrorTx, repositoryId: string) => {
   const columns = {
     revision: schema.planMirrorState.revision,
     writtenRevision: schema.planMirrorState.writtenRevision,
     syncedHash: schema.planMirrorState.syncedHash,
     hasBase: sql<boolean>`${schema.planMirrorState.syncedSnapshot} is not null`,
   };
-  const query = db
+  const [state] = await db
     .select(columns)
     .from(schema.planMirrorState)
     .where(eq(schema.planMirrorState.repositoryId, repositoryId))
     .limit(1);
-  // A repeatable-read flush must detect a moved revision BEFORE writing files.
-  // Keep the outbox row stable until its stamp commits; patches can write nodes
-  // meanwhile and dirty this row after us. No node row or P is requested here.
-  const [state] = await (forFlush ? query.for('update') : query);
   return state ?? null;
 };
 
@@ -405,13 +398,13 @@ async function writePlanMirrorLocked(
   repoPath: string,
   changes?: PlanMirrorChanges,
 ): Promise<{ written: string[]; failed?: unknown }> {
-  let state = await loadMirrorState(db, repositoryId, true);
+  let state = await loadMirrorState(db, repositoryId);
   if (!state) {
     await db
       .insert(schema.planMirrorState)
       .values({ repositoryId, revision: 1, writtenRevision: 0 })
       .onConflictDoNothing();
-    state = await loadMirrorState(db, repositoryId, true);
+    state = await loadMirrorState(db, repositoryId);
   }
 
   if (await gitOperationInProgress(repoPath))
@@ -420,17 +413,19 @@ async function writePlanMirrorLocked(
   const onDiskRead = await readPlanJson(repoPath);
   if (onDiskRead === 'too-large') throw new PlanMirrorHeldError(heldUnreadable(PLAN_TOO_LARGE));
   const onDiskBytes = onDiskRead;
+  let seedBase = false;
+  let agreedBase: PlanMirrorPayload | undefined;
   if (onDiskBytes !== null) {
     const diskHash = hashBytes(onDiskBytes);
     // Haive never writes an empty plan.json; older rows stamped absence as the hash of zero bytes.
     const synced = onDiskBytes.length > 0 && diskHash === (state?.syncedHash ?? null);
     // A row stamped before 0196 has no base; the bytes it last read or wrote are it, so they are
     // stored before this flush writes its own edits over them.
-    if (synced && state && !state.hasBase) await seedBaseFrom(db, repositoryId, onDiskBytes);
+    if (synced && state && !state.hasBase) seedBase = true;
     if (!synced && rendered !== null && diskHash === hashBytes(rendered.json)) {
       // The checkout reached this plan on its own: what both hold is agreed, so it is the base.
       const agreed = planMirrorPayloadSchema.safeParse(JSON.parse(rendered.json) as unknown);
-      if (agreed.success) await storeAgreedBase(db, repositoryId, agreed.data);
+      if (agreed.success) agreedBase = agreed.data;
     }
     if (!synced && !(rendered !== null && diskHash === hashBytes(rendered.json))) {
       if (state?.syncedHash == null) {
@@ -492,6 +487,8 @@ async function writePlanMirrorLocked(
   await writePlanJsonIfUnchanged(repoPath, rendered.json, onDiskBytes);
   written.push(HAIVE_DATA_FILES.plan);
   changes?.written.push(HAIVE_DATA_FILES.plan);
+  if (seedBase) await seedBaseFrom(db, repositoryId, onDiskBytes!);
+  if (agreedBase) await storeAgreedBase(db, repositoryId, agreedBase);
   await stampSyncedHash(db, repositoryId, hashBytes(rendered.json));
   // A failed plan.md leaves the row dirty but keeps the stamp of the plan.json that landed.
   try {
@@ -1082,8 +1079,8 @@ async function reconcilePlanLocked(
     if (opts.expectedCheckout && !(await admitWatchedRepository(tx, repositoryId)))
       throw new PlanMirrorHeldError(HELD_MOVED, 'checkout_changed');
     // A row stamped before 0196 has the bytes it last read but no base; they are the base.
-    if (state.syncedSnapshot == null) await seedBaseFrom(tx, repositoryId, bytes);
     await convergePlanQuestions(tx, repositoryId);
+    if (state.syncedSnapshot == null) await seedBaseFrom(tx, repositoryId, bytes);
     return noOutcome(null);
   }
   const raw = bytes.toString('utf8');
