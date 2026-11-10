@@ -17,6 +17,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { REPO_JOB_NAMES } from '@haive/shared';
 import { UnrecoverableError, type Job, type Processor } from 'bullmq';
 import { schema } from '@haive/database';
+import * as repositoryLocks from '@haive/database';
+import * as fsSafe from '@haive/shared/fs-safe';
 import { restoreFaults } from '../src/project-state/set-aside.js';
 import * as projections from '../src/project-state/set-aside.js';
 import type { Database } from '@haive/database';
@@ -739,4 +741,88 @@ it('refuses a rebuild at pickup when an unfinished task has a worktree under the
   );
   expect((await readdir(path.dirname(dest))).filter((n) => n.includes('.aside-'))).toEqual([]);
   expect(h.persist).not.toHaveBeenCalled();
+});
+
+it.each([false, true])(
+  'recounts worktrees under the task lock after credentials are prepared (recovery: %s)',
+  async (recoverCheckout) => {
+    const { dest } = await fixture();
+    await rm(path.join(dest, '.git/HEAD'));
+    h.helper.mockImplementationOnce(async () => {
+      h.taskWorktrees = [{ worktreePath: path.join(dest, '.haive/worktrees/late-task') }];
+    });
+    const lock = vi.spyOn(repositoryLocks, 'lockRepositoryTasksKey');
+    const tx = { ...db };
+    tx.query = {
+      ...db.query,
+      tasks: {
+        ...db.query.tasks,
+        findMany: vi.fn(async (opts: Parameters<typeof db.query.tasks.findMany>[0]) => {
+          expect(lock).toHaveBeenCalledWith(tx, 'r1');
+          return db.query.tasks.findMany(opts);
+        }) as unknown as typeof db.query.tasks.findMany,
+      } as unknown as typeof db.query.tasks,
+    };
+    const fenced = {
+      ...db,
+      transaction: async (fn: (conn: typeof tx) => unknown) => fn(tx),
+    } as unknown as Database;
+    await expect(
+      handleRefresh({ ...remotePayload, recoverCheckout }, fenced, root),
+    ).rejects.toThrow('1 task has a worktree inside this checkout');
+    expect(tx.query.tasks.findMany).toHaveBeenCalled();
+    expect(h.helper).toHaveBeenCalledOnce();
+    expect(h.clone).not.toHaveBeenCalled();
+    await untouched(dest);
+  },
+);
+
+it('recounts checkout holders under the task lock after credentials are prepared', async () => {
+  const { dest } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  h.helper.mockImplementationOnce(async () => {
+    h.holding = 1;
+  });
+  await expect(handleRefresh(remotePayload, db, root)).rejects.toThrow(
+    'Not refreshed: 1 task is using this repository. Refresh once it finishes.',
+  );
+  expect(h.clone).not.toHaveBeenCalled();
+  await untouched(dest);
+});
+
+it('holds the task lock for the rename and releases the transaction before cloning', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  let inTransaction = false;
+  const lock = vi.spyOn(repositoryLocks, 'lockRepositoryTasksKey');
+  const tx = { ...db };
+  const fenced = {
+    ...db,
+    transaction: async (fn: (conn: typeof tx) => Promise<unknown>) => {
+      inTransaction = true;
+      try {
+        return await fn(tx);
+      } finally {
+        inTransaction = false;
+      }
+    },
+  } as unknown as Database;
+  const rename = fsSafe.renameNoFollow;
+  vi.spyOn(fsSafe, 'renameNoFollow').mockImplementation(async (...args) => {
+    expect(inTransaction).toBe(true);
+    expect(lock).toHaveBeenCalledWith(tx, 'r1');
+    return rename(...args);
+  });
+  h.helper.mockImplementationOnce(async () => {
+    expect(inTransaction).toBe(false);
+  });
+  h.clone.mockImplementationOnce(async (_url, to) => {
+    expect(inTransaction).toBe(false);
+    await git(root, ['clone', payload.localPath!, to]);
+  });
+  await handleRefresh(remotePayload, fenced, root);
+  expect(lock).toHaveBeenCalledOnce();
+  expect(h.clone).toHaveBeenCalledOnce();
+  expect(await asidesOf(dest)).toHaveLength(1);
+  expect(row.status).toBe('ready');
 });

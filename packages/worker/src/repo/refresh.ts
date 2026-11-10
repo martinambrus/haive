@@ -496,7 +496,16 @@ async function rebuild(
     fromRemote && payload.credentialsId
       ? await buildCredentialHelper(db, payload.credentialsId, payload.userId, payload.remoteUrl)
       : undefined;
-  const aside = await moveAside(repoStorageRoot, rel);
+  const aside = await db.transaction(async (tx) => {
+    // Starts and revivals take this key before writing task state. Recount after the slow
+    // preparation, then hold the key only through the rename, never through the clone or copy.
+    await lockRepositoryTasksKey(tx, payload.repositoryId);
+    const worktreeRefusal = await checkoutWorktreeRefusal(tx, payload.repositoryId, dest);
+    if (worktreeRefusal) throw new Error(worktreeRefusal);
+    const holding = await checkoutHoldingTasks(tx, payload.repositoryId);
+    if (holding > 0) throw new Error(holdingRefusal(holding));
+    return moveAside(repoStorageRoot, rel);
+  });
   // Publish a folder copy only after it finishes. A failed or interrupted copy must never
   // leave a partial checkout that the next refresh could mistake for ready.
   const stagingRel = fromFolder ? `${rel}.rebuild-${randomUUID()}` : null;

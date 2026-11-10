@@ -65,6 +65,8 @@ const row: { status: string; statusMessage?: string; errorCode?: string | null }
   status: 'cloning',
 };
 const db = {
+  execute: async () => {},
+  transaction: async (fn: (tx: unknown) => unknown) => fn(db),
   query: { tasks: { findMany: async () => (h.holding ? [{ id: 'live' }] : []) } },
   update: () => ({ set: (values: object) => ({ where: async () => Object.assign(row, values) }) }),
 } as unknown as Database;
