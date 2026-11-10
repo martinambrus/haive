@@ -27,6 +27,7 @@ class FakeRedis {
   /** Upper-case command names the server swallows without replying. */
   silentOn = new Set<string>();
   connections = 0;
+  beforeEncryptionSet: (() => void) | null = null;
   private server: Server | null = null;
   private sockets = new Set<Socket>();
 
@@ -116,6 +117,7 @@ class FakeRedis {
         return void socket.write(v === undefined ? '$-1\r\n' : bulk(v));
       }
       case 'SET': {
+        if (args[1] === CONFIG_KEYS.ENCRYPTION_KEY) this.beforeEncryptionSet?.();
         const nx = args.slice(3).some((a) => a.toUpperCase() === 'NX');
         if (nx && this.store.has(args[1]!)) return void socket.write('$-1\r\n');
         this.store.set(args[1]!, args[2]!);
@@ -204,6 +206,67 @@ describe('ConfigService while Redis is unavailable', () => {
       // already closed by the test
     }
     await fake?.refuse();
+  });
+
+  it('concurrent initializers use the key that wins the write race', async () => {
+    delete process.env.CONFIG_ENCRYPTION_KEY;
+    fake = new FakeRedis();
+    await fake.start();
+    // Another process installs and starts using its key after our missing-key read.
+    fake.beforeEncryptionSet = () => {
+      fake.beforeEncryptionSet = null;
+      fake.store.set(CONFIG_KEYS.ENCRYPTION_KEY, ENC_KEY);
+    };
+    svc = new ConfigService();
+    const peer = new ConfigService();
+    try {
+      await Promise.all([svc.initialize(fake.url()), peer.initialize(fake.url())]);
+      expect(await svc.getEncryptionKey()).toBe(ENC_KEY);
+      expect(await peer.getEncryptionKey()).toBe(ENC_KEY);
+      expect(fake.store.get(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(ENC_KEY);
+    } finally {
+      await peer.close();
+      process.env.CONFIG_ENCRYPTION_KEY = ENC_KEY;
+    }
+  });
+
+  it('checks a losing environment key against the stored winner in production', async () => {
+    fake = new FakeRedis();
+    await fake.start();
+    fake.beforeEncryptionSet = () => fake.store.set(CONFIG_KEYS.ENCRYPTION_KEY, 'cd'.repeat(32));
+    svc = new ConfigService();
+    const oldEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      await expect(svc.initialize(fake.url())).rejects.toThrow('does not match');
+      expect(fake.store.get(CONFIG_KEYS.ENCRYPTION_KEY)).toBe('cd'.repeat(32));
+    } finally {
+      process.env.NODE_ENV = oldEnv;
+    }
+  });
+
+  it('a losing fallback environment key keeps rejecting in production', async () => {
+    await boot();
+    fake.store.delete(CONFIG_KEYS.ENCRYPTION_KEY);
+    svc.clearCache();
+    fake.beforeEncryptionSet = () => fake.store.set(CONFIG_KEYS.ENCRYPTION_KEY, 'cd'.repeat(32));
+    const oldEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      await expect(svc.getEncryptionKey()).rejects.toThrow('does not match');
+      await expect(svc.getEncryptionKey()).rejects.toThrow('does not match');
+    } finally {
+      process.env.NODE_ENV = oldEnv;
+    }
+  });
+
+  it('fallback key recovery returns and caches the stored winner', async () => {
+    await boot();
+    fake.store.delete(CONFIG_KEYS.ENCRYPTION_KEY);
+    svc.clearCache();
+    fake.beforeEncryptionSet = () => fake.store.set(CONFIG_KEYS.ENCRYPTION_KEY, 'cd'.repeat(32));
+    expect(await svc.getEncryptionKey()).toBe('cd'.repeat(32));
+    expect(await svc.getEncryptionKey()).toBe('cd'.repeat(32));
   });
 
   it('works while healthy and serves a second get from cache', async () => {

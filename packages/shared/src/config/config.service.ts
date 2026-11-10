@@ -937,33 +937,37 @@ export class ConfigService {
     const envKey = this.getEnvEncryptionKey();
 
     if (!exists) {
-      if (envKey) {
-        await this.redisCall('ensureEncryptionKey', (redis) =>
-          redis.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey),
-        );
-        logger.info('Seeded encryption key from CONFIG_ENCRYPTION_KEY');
-        return;
-      }
-      const generated = randomBytes(32).toString('hex');
-      await this.redisCall('ensureEncryptionKey', (redis) =>
-        redis.set(CONFIG_KEYS.ENCRYPTION_KEY, generated),
+      const seeded = await this.redisCall('ensureEncryptionKey', (redis) =>
+        redis.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey ?? randomBytes(32).toString('hex'), 'NX'),
       );
-      logger.warn('Generated new encryption key (CONFIG_ENCRYPTION_KEY not set)');
-      return;
+      if (seeded === 'OK') {
+        if (envKey) logger.info('Seeded encryption key from CONFIG_ENCRYPTION_KEY');
+        else logger.warn('Generated new encryption key (CONFIG_ENCRYPTION_KEY not set)');
+      } else {
+        logger.info('Found encryption key seeded by another process');
+      }
+    } else {
+      logger.info('Found existing encryption key');
     }
+    const stored = await this.redisCall('ensureEncryptionKey', (redis) =>
+      redis.get(CONFIG_KEYS.ENCRYPTION_KEY),
+    );
+    if (!stored) throw new Error('Encryption key not found');
+    this.checkEncryptionKey(stored, envKey);
+    this.localCache.set(CONFIG_KEYS.ENCRYPTION_KEY, {
+      value: stored,
+      expiresAt: Date.now() + ConfigService.LOCAL_CACHE_TTL_MS,
+    });
+  }
 
-    if (envKey) {
-      const stored = await this.redisCall('ensureEncryptionKey', (redis) =>
-        redis.get(CONFIG_KEYS.ENCRYPTION_KEY),
-      );
-      if (stored && stored !== envKey) {
-        if (process.env.NODE_ENV === 'production') {
-          throw new Error(
-            'CONFIG_ENCRYPTION_KEY does not match the key stored in Redis. Aborting to prevent data corruption.',
-          );
-        }
-        logger.warn('CONFIG_ENCRYPTION_KEY does not match Redis encryption key');
+  private checkEncryptionKey(stored: string, envKey: string | null): void {
+    if (envKey && stored !== envKey) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error(
+          'CONFIG_ENCRYPTION_KEY does not match the key stored in Redis. Aborting to prevent data corruption.',
+        );
       }
+      logger.warn('CONFIG_ENCRYPTION_KEY does not match Redis encryption key');
     }
   }
 
@@ -1036,9 +1040,18 @@ export class ConfigService {
       const envKey = this.getEnvEncryptionKey();
       if (envKey) {
         await this.redisCall('getEncryptionKey', (redis) =>
-          redis.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey),
+          redis.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey, 'NX'),
         );
-        return envKey;
+        const stored = await this.redisCall('getEncryptionKey', (redis) =>
+          redis.get(CONFIG_KEYS.ENCRYPTION_KEY),
+        );
+        if (!stored) throw new Error('Encryption key not found');
+        this.checkEncryptionKey(stored, envKey);
+        this.localCache.set(CONFIG_KEYS.ENCRYPTION_KEY, {
+          value: stored,
+          expiresAt: Date.now() + ConfigService.LOCAL_CACHE_TTL_MS,
+        });
+        return stored;
       }
       throw new Error('Encryption key not found');
     }
