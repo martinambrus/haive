@@ -460,8 +460,9 @@ base and the record as they were, and 02's or 04's own record write reports `rec
 override and writes the record, so a 02 retry no longer refuses its plan. The rules region in
 AGENTS.md still holds the old override until the next upgrade offers it as a `clean_update`. A
 deferred write retires no legacy mirror and no `.haive/install.json`, and neither does the
-task-end resync or any other refresh (the sweep, the boot mark, the observer, a Save): those files
-wait for the next successful 12 or 02 record write, which retires them as below. The RTK block is no manifest item, so 02 takes it
+task-end resync or any other refresh (the sweep, the boot mark, the observer, a Save): the legacy
+mirrors wait for the next successful 12 or 02 record write, and `.haive/install.json` for the next
+successful 12, 02 or 04 one (04 retires only that file, `retireInstallManifest`), as below. The RTK block is no manifest item, so 02 takes it
 out of AGENTS.md, CLAUDE.md and GEMINI.md by its markers, as a reset does, with the newline 07 wrote
 after it (`stripRtkBlocks`). A link is refused and reported, as is a file past the 1 MiB cap the
 plan reads with or one that is not valid UTF-8, and a `CLAUDE.md -> AGENTS.md` link is left to
