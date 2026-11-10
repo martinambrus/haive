@@ -1458,7 +1458,8 @@ Queued connected findings from T376 review10, verified with synthetic pure-node 
 
 ### T523 · FNF[git-config-environment] · API readers and worker writers do not share one explicit ambient Git configuration policy
 
-status: open · kind: security · user decision: resolved 2026-11-01 · priority: P2
+status: parked · kind: security · user decision: resolved 2026-11-01; parked by owner 2026-11-10 · priority: P2
+Reproduction gate 2026-11-10 found no current trigger: api readers (haive-data-status.ts ~:54-58, routes/plan.ts ~:166) pass only PATH, HOME and GIT_CEILING_DIRECTORIES; the worker's `gitEnv` (worker repo/git-exec.ts ~:83-99) passes its full environment, but neither container sets any XDG_* or GIT_* variable and the only system config is /etc/gitconfig (`safe.directory=*`). A scratch repro shows the two diverge only once such a setting exists (e.g. `status.showUntrackedFiles=no` via XDG or GIT_CONFIG_COUNT). Resume when a container, deploy or user setup adds an XDG_*/GIT_CONFIG_* setting or a reader/writer mismatch is observed. Evidence: .claude/tmp/codex-run/T523-S/gate.md (local).
 Queued design split from T521 item4; no additional implementation authorized. PRE-EXISTING, narrow compatibility issue. HOME handling was aligned in T120 PR1b, but XDG_CONFIG_HOME and GIT_CONFIG_* can still make API status readers and worker writers resolve different configuration. Decide whether the supported contract preserves selected ambient configuration for both or supplies an isolated explicit configuration. Establish a current caller/reproduction before changing global Git policy. Executable repository filters remain T387, not a member of this decision.
 
 User decision 2026-11-01: Use one explicit isolated Haive Git configuration for API readers and worker writers, allowing only deliberately supported settings.
