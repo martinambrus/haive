@@ -1,5 +1,5 @@
 import { validateFormValues } from '@haive/shared';
-import { tmpdir } from 'node:os';
+import { fixtureBase, networkGitArgs } from '../../../../test/support/git-http.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -19,14 +19,8 @@ vi.mock('../workflow/_app-runtime.js', async (importOriginal) => ({
   ensureAppServing: m.ensureAppServing,
 }));
 
-vi.mock('../../../repo/git-push.js', async (original) => ({
-  ...(await original<typeof import('../../../repo/git-push.js')>()),
-  pushBranch: vi.fn(async () => undefined),
-}));
-
 import { failGit, type FakeGit } from '../../../../test/support/fake-git.js';
 import { killGit, type KilledGit } from '../../../../test/support/kill-git.js';
-import { pushBranch } from '../../../repo/git-push.js';
 import { gitPreview } from '../../../repo/git-preview.js';
 import { runAppReadyStep } from './99-run-app-ready.js';
 
@@ -40,14 +34,15 @@ const ctx = {
   logger: { info: vi.fn(), warn },
 } as never;
 
-const git = (cwd: string, args: string[]) => execFileSync('git', args, { cwd, stdio: 'pipe' });
+const git = (cwd: string, args: string[]) =>
+  execFileSync('git', networkGitArgs(args), { cwd, stdio: 'pipe' });
 
 describe('run-app ready gate when the branch read gives no answer', () => {
   let dirs: string[] = [];
   let shim: KilledGit | FakeGit | null = null;
 
   async function makeRepo(withOrigin: boolean): Promise<string> {
-    const repo = await mkdtemp(path.join(tmpdir(), 'run-app-ready-'));
+    const repo = await mkdtemp(path.join(fixtureBase, 'run-app-ready-'));
     dirs.push(repo);
     git(repo, ['init', '-b', 'main']);
     git(repo, ['config', 'gc.auto', '0']);
@@ -57,7 +52,10 @@ describe('run-app ready gate when the branch read gives no answer', () => {
     git(repo, ['add', '-A']);
     git(repo, ['commit', '-m', 'one']);
     if (withOrigin) {
-      git(repo, ['remote', 'add', 'origin', 'https://example.com/run-app.git']);
+      const bare = await mkdtemp(path.join(fixtureBase, 'run-app-ready-origin-'));
+      dirs.push(bare);
+      git(bare, ['init', '--bare', '-b', 'main']);
+      git(repo, ['remote', 'add', 'origin', `file://${bare}`]);
     }
     m.loadPreviousStepOutput.mockImplementation(async (_db: unknown, _id: string, step: string) =>
       step === '01-worktree-setup' ? { output: { worktreePath: repo } } : null,
@@ -154,7 +152,7 @@ describe('run-app ready gate apply when a push is asked for', () => {
   let dirs: string[] = [];
 
   async function makeRepo(withOrigin: boolean, dirty: boolean): Promise<string> {
-    const repo = await mkdtemp(path.join(tmpdir(), 'run-app-apply-'));
+    const repo = await mkdtemp(path.join(fixtureBase, 'run-app-apply-'));
     dirs.push(repo);
     git(repo, ['init', '-b', 'main']);
     git(repo, ['config', 'gc.auto', '0']);
@@ -164,10 +162,10 @@ describe('run-app ready gate apply when a push is asked for', () => {
     git(repo, ['add', '-A']);
     git(repo, ['commit', '-m', 'one']);
     if (withOrigin) {
-      const bare = await mkdtemp(path.join(tmpdir(), 'run-app-apply-origin-'));
+      const bare = await mkdtemp(path.join(fixtureBase, 'run-app-apply-origin-'));
       dirs.push(bare);
       git(bare, ['init', '--bare', '-b', 'main']);
-      git(repo, ['remote', 'add', 'origin', 'https://example.com/run-app.git']);
+      git(repo, ['remote', 'add', 'origin', `file://${bare}`]);
     }
     if (dirty) await writeFile(path.join(repo, 'b.txt'), 'b\n');
     return repo;
@@ -320,7 +318,7 @@ describe('run-app ready gate apply when a push is asked for', () => {
     expect(git(repo, ['rev-parse', 'HEAD']).toString()).toBe(head);
     expect(git(repo, ['diff', '--cached', '--binary']).toString()).toBe(index);
     expect(git(repo, ['status', '--porcelain=v1', '-z']).toString()).toBe(status);
-    expect(pushBranch).toHaveBeenCalledWith(expect.objectContaining({ cwd: repo, branch: 'main' }));
+    expect(git(repo, ['ls-remote', 'origin', 'refs/heads/main']).toString()).toContain(head.trim());
   });
 
   it('finishes without Git mutations when both choices are unticked', async () => {
