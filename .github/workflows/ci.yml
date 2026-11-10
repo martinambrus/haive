@@ -593,6 +593,7 @@ jobs:
           api test/forced-throttled-audit-db.test.ts FORCED_THROTTLED_AUDIT_TEST_URL forced_throttled_audit_test pg
           api test/stop-settle-db.test.ts STOP_SETTLE_TEST_URL stop_settle_test pg
           worker test/settle-stopped-task-db.test.ts WORKER_SETTLE_STOPPED_TEST_URL worker_settle_stopped_test pg
+          database test/repository-task-lock.test.ts REPOSITORY_TASK_LOCK_TEST_URL repository_task_lock_test pg
           GATED
           exit "$failed"
 

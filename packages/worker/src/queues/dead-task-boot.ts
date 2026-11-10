@@ -1,4 +1,5 @@
-import { guardTaskModuleAdmission, ModuleAdmissionError } from '@haive/shared/modularity-server';
+import { reviveRefusal } from '@haive/shared/onboarding-admission';
+import { ModuleAdmissionError } from '@haive/shared/modularity-server';
 import { and, desc, eq, inArray, isNotNull, isNull, notInArray, sql, type SQL } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
 import { logger, TASK_DEAD_EVENT, type WorkflowType } from '@haive/shared';
@@ -155,7 +156,7 @@ export async function reviveDeadTask(
   const revived = await db.transaction(async (tx) => {
     if (await newWorkHeldUnderFence(tx)) return 'held' as const;
     try {
-      await guardTaskModuleAdmission(tx, c.id);
+      if (await reviveRefusal(tx, c.id)) return null;
     } catch (err) {
       if (err instanceof ModuleAdmissionError) return 'held' as const;
       throw err;

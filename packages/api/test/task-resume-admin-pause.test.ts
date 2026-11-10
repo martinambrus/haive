@@ -47,6 +47,7 @@ let clock = 0;
 const setup = (over: Record<string, unknown> = {}, taskOwner = OWNER) => {
   const fake = createFakeDb({
     modules: schema.modules,
+    repositories: schema.repositories,
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     taskEvents: schema.taskEvents,
@@ -55,9 +56,17 @@ const setup = (over: Record<string, unknown> = {}, taskOwner = OWNER) => {
     taskStepAgentMinings: schema.taskStepAgentMinings,
     taskDagPlans: schema.taskDagPlans,
   });
+  fake.insert(schema.repositories, {
+    id: TASK,
+    userId: taskOwner.id,
+    name: 'repo',
+    source: 'git_https',
+    status: 'ready',
+  });
   fake.insert(schema.tasks, {
     id: TASK,
     userId: taskOwner.id,
+    repositoryId: TASK,
     type: 'workflow',
     title: 'a task',
     status: 'running',

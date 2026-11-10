@@ -151,6 +151,7 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
         userId,
         type: TYPE,
         title: 'dead task boot',
+        metadata: { anchorRepositoryId: null },
         status: 'running',
         orchestrationEpoch: 3,
         currentStepId: A,
@@ -628,6 +629,28 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
   });
 
   describe('the revive fence', () => {
+    it('keeps a dead task dead after its repository was deleted', async () => {
+      const [repo] = await db
+        .insert(schema.repositories)
+        .values({
+          userId,
+          name: 'deleted anchor',
+          source: 'git_https',
+        })
+        .returning();
+      const id = await makeDead({
+        repositoryId: repo!.id,
+        metadata: { anchorRepositoryId: repo!.id },
+      });
+      const read = await view(id);
+      await db.delete(schema.repositories).where(eq(schema.repositories.id, repo!.id));
+      const { sent, deps } = recorder();
+      await expect(reviveDeadTask(db, read, deps)).resolves.toBeNull();
+      expect(await task(id)).toMatchObject({ deadAt: DEAD_AT, orchestrationEpoch: 3 });
+      expect(await events(id)).toHaveLength(0);
+      expect(sent).toEqual([]);
+    });
+
     it('refuses a task that moved to another epoch since it was read', async () => {
       const id = await makeDead();
       const read = await view(id);

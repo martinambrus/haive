@@ -69,9 +69,17 @@ describe.each(actions)('%s on a step whose merge retries ran out', (_name, reque
       repositories: schema.repositories,
       onboardingArtifacts: schema.onboardingArtifacts,
     });
+    fake.insert(schema.repositories, {
+      id: USER,
+      userId: USER,
+      name: 'repo',
+      source: 'git_https',
+      status: 'ready',
+    });
     fake.insert(schema.tasks, {
       id: TASK,
       userId: USER,
+      repositoryId: USER,
       type: 'onboarding',
       title: 't',
       status: 'failed',

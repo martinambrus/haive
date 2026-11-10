@@ -46,6 +46,7 @@ beforeEach(() => {
 function setup(target: Record<string, unknown>) {
   const fake = createFakeDb({
     modules: schema.modules,
+    repositories: schema.repositories,
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     taskEvents: schema.taskEvents,
@@ -53,9 +54,17 @@ function setup(target: Record<string, unknown>) {
     taskStepAgentMinings: schema.taskStepAgentMinings,
     taskDagPlans: schema.taskDagPlans,
   });
+  fake.insert(schema.repositories, {
+    id: USER,
+    userId: USER,
+    name: 'repo',
+    source: 'git_https',
+    status: 'ready',
+  });
   fake.insert(schema.tasks, {
     id: TASK,
     userId: USER,
+    repositoryId: USER,
     status: 'failed',
     errorMessage: 'boom',
     orchestrationEpoch: 3,

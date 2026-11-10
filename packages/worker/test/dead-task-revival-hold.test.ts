@@ -165,6 +165,7 @@ function setup(initialState: string | Error = 'normal') {
       userId: USER,
       type: TYPE,
       title: `dead ${n}`,
+      metadata: { anchorRepositoryId: null },
       status: 'queued',
       orchestrationEpoch: 3,
       currentStepId: null,
