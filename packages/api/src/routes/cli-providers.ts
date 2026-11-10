@@ -723,8 +723,19 @@ cliProviderRoutes.post('/:id/sign-out', async (c) => {
 
   const payload: CliSignOutJobPayload = { providerId: provider.id, userId };
   const queue = getCliExecQueue();
-  const job = await queue.add(CLI_EXEC_JOB_NAMES.SIGN_OUT, payload, CLI_POLLABLE_JOB_OPTS);
-  if (!job.id) throw new HttpError(500, 'sign-out was not queued', 'sign_out_enqueue_failed');
+  const event: AuditEvent = {
+    actorUserId: userId,
+    action: 'cli_provider.sign_out',
+    targetType: 'cli_provider',
+    targetId: provider.id,
+  };
+  const job = await db.transaction(async (tx) => {
+    await insertAuditEvent(tx, event);
+    const queued = await queue.add(CLI_EXEC_JOB_NAMES.SIGN_OUT, payload, CLI_POLLABLE_JOB_OPTS);
+    if (!queued.id) throw new HttpError(500, 'sign-out was not queued', 'sign_out_enqueue_failed');
+    return queued;
+  });
+  logAuditEvent(event);
 
   return c.json({ jobId: job.id }, 202);
 });

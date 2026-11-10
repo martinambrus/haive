@@ -278,3 +278,9 @@ closed dialog or refused audit cannot undo it, so the row is deliberately best-e
 Metadata never includes credentials, output, codes or environment values.
 Claude-family captured tokens already record cli_provider.secret.set atomically
 with encrypted-secret promotion; those keep their strict write.
+
+**CLI sign-out requires its request row before enqueue.** The API inserts
+cli_provider.sign_out before adding the sign-out job, inside a transaction;
+an audit refusal queues nothing and a refused enqueue rolls the row back.
+It logs after commit. The worker retains ownership of credential-volume and
+Claude login-secret removal and adds no audit writer.

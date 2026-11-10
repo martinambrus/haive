@@ -176,3 +176,33 @@ describe('POST /:providerId/secrets', () => {
     expect(secretValues(fake)).toEqual({ API_KEY: SECRET_VALUE });
   });
 });
+
+describe('strict provider sign-out enqueue', () => {
+  it('refuses enqueue when its audit insert fails', async () => {
+    const fake = setup(true);
+    fake.hooks.beforeInsert = async (table) => {
+      if (table === schema.auditEvents) throw new Error('audit refused');
+    };
+    h.add.mockResolvedValue({ id: 'job-1' } as never);
+    expect((await send('POST', '/' + PROVIDER + '/sign-out', {})).status).toBe(500);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+  it.each(['reject', 'missing-id'])('rolls the row back on enqueue %s', async (failure) => {
+    const fake = setup(true);
+    if (failure === 'reject') h.add.mockRejectedValue(new Error('queue refused'));
+    else h.add.mockResolvedValue({} as never);
+    expect((await send('POST', '/' + PROVIDER + '/sign-out', {})).status).toBe(500);
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+  });
+  it('inserts the row before enqueue and retains it on success', async () => {
+    const fake = setup(true);
+    h.add.mockImplementation(async () => {
+      expect(fake.rows(schema.auditEvents)).toMatchObject([
+        { action: 'cli_provider.sign_out', actorUserId: USER, targetId: PROVIDER },
+      ]);
+      return { id: 'job-1' } as never;
+    });
+    expect((await send('POST', '/' + PROVIDER + '/sign-out', {})).status).toBe(202);
+    expect(fake.rows(schema.auditEvents)).toHaveLength(1);
+  });
+});
