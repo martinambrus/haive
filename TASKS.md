@@ -837,25 +837,21 @@ Sites:
   On a timeout they return different things: partial stdout, [], null, or "timed out".
   Fix: one shared runDockerCommand(args, {timeoutMs}) returning {stdout, stderr, exit, timedOut}, plus a test that kills a hung child.
 
-### T373 · FNF[audit-strict-admin-actions] · module/task-type/upgrade-start actions still audit best-effort (+7)
+### T373 · FNF[audit-strict-admin-actions] · password-change throttle, tooling reset order, module log lines; strict-audit leftovers (+11)
 
-status: in progress, sites + items 1-4 (codex-sonnet) · was modular #246 · priority: P2
-Sites:
+status: in progress, items 5-7 (codex-sonnet); sites + items 1-4 shipped in PR #1058 (1f1064268), 2026-11-10 · was modular #246 · priority: P2
 
-- api modules/loader.ts:261, :291, :324, :411;
-- routes/task-types.ts:275, :399, :430;
-- task-type-drafts.ts:123;
-- maintenance.ts:533.
-  The Stop rows are best-effort on purpose.
-  Fix: the #212/#224 shape (audit row in the change's transaction; for external side effects, row first, rolled back on failure).
-
-1. A role-admin owner's Retry under an administrator's pause lifts it with no byAdmin event or audit row (api tasks/_helpers.ts ~:1181).
-2. Container-volume CLI logins write no audit row: the codex, grok, amp and antigravity successes all reach `runProbeAndSave` (api cli-login-banner.ts ~:1142-1179), which probes and sends `saved`; the CLI writes the credential into the auth volume, so the shape is a best-effort row after the success signal, as for an integration disconnect (integrations.md ~:554-566). PRE-EXISTING, consequential. From the T376 review (2026-10-31).
-3. A CLI provider sign-out removes the credential volumes with no row (api cli-providers.ts ~:709-724 queues the job; worker handlers.ts ~:1094 runs it). PRE-EXISTING, minor to moderate.
-4. `PATCH /cli-providers/:id` changes security-relevant non-secret fields with no row: `networkPolicy` and `egressDomains` (the sandbox egress allow-list), `wrapperContent`, `wrapperPath`, `executablePath`, `cliArgs`, `sandboxDockerfileExtra` and env names such as `ANTHROPIC_BASE_URL` (cli-providers.ts ~:455-511); the strict row fires only when env secrets are present. Record the changed field names, never code or values. PRE-EXISTING, moderate.
 5. `PUT /user-settings/password` checks the current password with no throttle and no failure row (user-settings.ts ~:108-109): the one password oracle outside the throttled `/auth/login`, open to any valid access cookie. PRE-EXISTING, moderate.
 6. A hand-made tooling PATCH that combines `ragEmbedAction` with a security field runs the RAG reset before the audited transaction, so a refused row leaves the reset done (tooling-upgrades.ts ~:946-958 vs ~:991); the page sends the action alone. PRE-EXISTING, minor.
 7. The strict in-transaction module audit rows (`module.drain_cancel`, graceful `module.deactivate`, `module.retry`; api modules/activation.ts) log no pino line after the commit, unlike the documented pattern (api lib/audit.ts docblock ~:36, integrations.md ~:813). PRE-EXISTING, minor. From the T350 run.
+8. `PATCH /cli-providers/:id` leaves `enabled` and `model` unaudited (api cli-providers.ts ~:548). PRE-EXISTING, minor. From the #1058 review.
+9. A PATCH on a draining module writes two `module.deactivate` rows for one request: `setModuleActive` (activation.ts ~:120-126) and the loader (loader.ts ~:354). PRE-EXISTING, minor.
+10. `POST /cli-providers/:id/sandbox-image/build` (cli-providers.ts ~:666-700) queues a rebuild with no row. PRE-EXISTING, minor (no security state changes).
+11. `module.settings` save holds a pooled connection and an advisory lock across Redis reads and writes (loader.ts ~:597-655). PRE-EXISTING, minor to moderate; its row must still roll back with the savepoint.
+12. `cli_provider.create` metadata lists fields the request sent, not fields it set to a non-empty value. New in #1058, minor.
+13. The launch-compensation block (row committed first, effect, delete by id on failure) is copied three times (maintenance.ts upgrade, loader.ts teardown, cli-providers.ts sign-out) and logs through the root logger; one helper would do. New in #1058, minor.
+14. Stale test names in the #1058 tests still describe the old bounded-enqueue behaviour; no gated PG test covers the upgrade's compensating delete. Minor, coverage.
+15. A launch row is visible on /admin/audit while its effect runs and vanishes if the effect fails (routes/admin.ts ~:192-275); release.md ~:157 and modules.md ~:28 document the lost-reply case (lost Redis reply, docker 300 s kill), where the effect can run with its row deleted. By design, minor.
 
 ### T379 · FNF[git-tree-readers] · gitlink readers and literal-pathspec helpers duplicated with different failure contracts (+5)
 
@@ -1272,23 +1268,6 @@ From the T489 review (2026-10-31). PRE-EXISTING, minor to moderate.
 status: parked · reason: diminishing returns (2026-11-01 scan): Explicitly minor chat race requires switching nodes during the start request; resume when resume when users repeatedly create duplicate conversations through this race · priority: P4
 From the T491 follow-up review (2026-10-31). PRE-EXISTING, minor (needs a node switch and back inside the POST). The old instance's post-send reload updates only its own unmounted state (web plan-chat.tsx ~:347 against the guard ~:160-167) and `onPatched` refreshes the page, not the chat; the start route has no guard against a second live conversation for the node (api plan.ts ~:1406-1450, lib/spawn-plan-task.ts), so a second Send can start another. Fix: re-read the node's conversations when the remounted chat sees a send in flight, and refuse a second live start for the node.
 
-### T504 · FNF[audit-imported-settings] · audited repository settings that arrive with the checkout or an import leave no audit row
-
-status: in progress (codex-sonnet) · kind: audit · user decision: resolved 2026-11-01 · priority: P2
-From the T376 third review (2026-10-31). PRE-EXISTING; moderate for the agent rules, minor for the scope list. T376 audits `agentRulesOverride` (`repository.security.update`) and `scopeExcludeGlobs` (`repository.scope.update`) at their api routes only. The worker's project-state sync writes both from the checkout's portable settings (worker project-state/sync.ts ~:909-920, `mergePortable` ~:522; shared project-state/settings.ts ~:20-29, ~:135-145), a "take theirs" answer to a project-state question writes them (api project-state-conflicts.ts ~:140-151, worker project-state/resolve.ts ~:564, ~:583-588), 09_7-rag-source-selection.ts ~:218-224 persists the scope choice and the clone import (repo/clone.ts ~:188-199) fills the scope list; the worker has no audit writer at all. So a change of the agent rules (prepended to every prompt) that arrives with a pull leaves no row. Decide: record a row in the same transaction as the column write (sync and resolve already hold one) with `source: 'project_state'` and an actor for imports, or document that imports are unaudited.
-
-User decision 2026-11-01: Audit project-state/import and worker remote-setting mutations with source and actor; never record secret values.
-
-### T505 · FNF[gate4-remote-writer] · Gate 4's push writes the repository's remote and credential binding with no audit row, lock or restore (+1)
-
-status: in progress (codex-sonnet) · kind: audit · user decision: resolved 2026-11-01 · priority: P2
-From the T376 third review (2026-10-31). PRE-EXISTING, minor to moderate.
-
-1. With no origin in the worktree, 11a-gate-4-push.ts ~:308-331 runs `ensureOrigin` (the worktree shares the repository's config) and then a plain `ctx.db.update(schema.repositories)` of `remoteUrl` and `credentialsSecretId`: the change T376 audits in `POST /:id/remote`, with no row lock and no restore. Ownership and fit are checked first (git-push.ts ~:132-142), so no leak. The audit part waits on T504's decision (the worker has no audit writer).
-2. A failed row update leaves the checkout ahead of the column, and a Retry does not repair it: the persist sits behind `if (!hasOrigin)` (~:308) and the origin now exists, so the row keeps `remoteUrl` null while pushes go to the origin. Key the persist on the row, not on `hasOrigin`, and take the `/remote` shape (row lock, restore on failure).
-
-User decision 2026-11-01: Audit project-state/import and worker remote-setting mutations with source and actor; never record secret values.
-
 ### T506 · FNF[plan-panel-codes] · the plan chat's End and the detail panel's stale edit still read error messages; small T491 control gaps (+5)
 
 status: parked · reason: diminishing returns (2026-11-01 scan): Entire bundle is minor error presentation, coverage gaps, or currently unreachable callback behavior; resume when resume when recovery failures materially prevent plan interaction · priority: P4
@@ -1553,8 +1532,29 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
+### T586 · worker sign-out job can delete a newer login's credential
+
+status: open · kind: fix · found: #1058 Codex run 2026-11-10 · priority: P2
+PRE-EXISTING, consequential. A CLI provider sign-out queues a job (api cli-providers.ts) that the worker runs later (worker queues/cli-exec/handlers.ts ~:1182) by removing the credential volumes; when the user signs in again before the job runs, the late job removes the newer login's credential. Not re-verified by the reviewer. Fix direction: stamp the job with the sign-out generation or time and skip when a newer login exists.
+
+### T587 · Cancel, step abort and plan discard clear an administrator's pause with no audit row (owner confirm)
+
+status: open · kind: decision · found: #1058 review 2026-11-10 · priority: P4
+PRE-EXISTING. Cancel (api tasks/index.ts ~:1379), step abort (tasks/steps.ts ~:1756) and plan merge discard (routes/plan.ts ~:1406) clear any pause, an administrator's included, with no `byAdmin` event or audit row. release.md ~:120 documents that they clear any pause; decide whether the audit trail should record it (a best-effort row like the Retry resume) or stay as documented.
+
+### T588 · FNF[worker-audit-writer] · worker audit writer follow-ups (+5)
+
+status: open · kind: fix · found: #1057 reviews 2026-11-10 · priority: P4
+
+1. No worker mapping for a lock timeout: gate 4's bounded lock take and 02-upgrade-apply.ts ~:834-840 end the step with the raw PostgreSQL message; `isLockNotAvailable` exists in @haive/database (used by attachments/expand-archives.ts ~:687). PRE-EXISTING pattern, minor.
+2. `packages/worker/src/audit.ts` duplicates the api's `insertAuditEvent`, `logAuditEvent` and `AuditEvent`, and metadata summaries are computed in both (worker audit.ts ~:78-91, api repos.ts ~:996-998); @haive/shared could host one copy. Minor, drift risk.
+3. Worker rows carry `source`, `actorKind`, `fields`, keys no api row for the same action has; a consumer filtering on `source` sees only worker rows. The admin list reads metadata generically. Minor.
+4. Gate 4's no-origin path replaces a saved remote and credential with the typed values (11a-gate-4-push.ts `persistPushOrigin` with `addOrigin`); audited and stated in the form since #1057, unchanged behaviour. PRE-EXISTING, minor; decide whether it should refuse instead.
+5. `repository.scope.update` from the worker reports `addedCount` 0 when a null list becomes `[]`. Nit.
+
 ## Done
 
+- T504 + T505 — worker writes of repository settings (project-state sync and resolve, clone import, 09_7 RAG scope) leave strict audit rows with source and actor; gate 4 binds the remote with a bounded row lock, an in-transaction row, add-only origin and restore, repairs on Retry and refuses an origin changed since the form — PR #1057 (b7309577c), 2026-11-10. Follow-ups T588.
 - T492 — a house rule's approval lapse writes an audit row — PR #1056 (c58365e78), 2026-11-10
 - T326 — an unreadable house-rules fingerprint reads as unread (could-not-verify) — commit 941e23608; closed at owner triage 2026-11-10
 - T578 — nested repositories at the remaining commit sites — PRs #1042, #1045 (63aad40c2), #1046 (df288e668), 2026-11-09
