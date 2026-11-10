@@ -1,4 +1,5 @@
 'use client';
+import { LinkButton } from '@/components/ui';
 
 import Link from 'next/link';
 import { startTaskWithAttachmentConfirmation } from '@/lib/start-task';
@@ -2279,26 +2280,22 @@ export default function TaskDetailPage() {
           )}
           {task.status === 'completed' && promotedDraftCount > 0 && (
             <div className="flex justify-center pt-2">
-              <Link href={`/settings/global-kb?status=draft&sourceTaskId=${task.id}`}>
-                <Button>
-                  Review {promotedDraftCount} global KB draft{promotedDraftCount === 1 ? '' : 's'}{' '}
-                  you promoted →
-                </Button>
-              </Link>
+              <LinkButton href={`/settings/global-kb?status=draft&sourceTaskId=${task.id}`}>
+                Review {promotedDraftCount} global KB draft{promotedDraftCount === 1 ? '' : 's'} you
+                promoted →
+              </LinkButton>
             </div>
           )}
           {isPlanTask && task.status === 'completed' && task.repositoryId && planNodeCount > 0 && (
             <div className="flex justify-center pt-2">
-              <Link href={`/repos/${task.repositoryId}/plan`}>
-                <Button>Continue to the plan →</Button>
-              </Link>
+              <LinkButton href={`/repos/${task.repositoryId}/plan`}>
+                Continue to the plan →
+              </LinkButton>
             </div>
           )}
           {isUpgradeTask && task.status === 'completed' && (
             <div className="flex justify-center pt-2">
-              <Link href="/repos">
-                <Button>Back to repositories</Button>
-              </Link>
+              <LinkButton href="/repos">Back to repositories</LinkButton>
             </div>
           )}
           {deadNote && <DeadTaskBanner text={deadNote.text} />}

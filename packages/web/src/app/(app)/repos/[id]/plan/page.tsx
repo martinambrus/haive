@@ -1,8 +1,8 @@
 'use client';
+import { LinkButton } from '@/components/ui';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import Link from 'next/link';
 import {
   CloudDownload,
   CloudUpload,
@@ -964,11 +964,9 @@ export default function PlanPage() {
               )}
             </>
           )}
-          <Link href={`/repos`}>
-            <Button size="sm" variant="ghost">
-              Back to repositories
-            </Button>
-          </Link>
+          <LinkButton href={`/repos`} size="sm" variant="ghost">
+            Back to repositories
+          </LinkButton>
         </div>
       </div>
 
@@ -1410,23 +1408,17 @@ export default function PlanPage() {
                       {picked.size} node{picked.size === 1 ? '' : 's'} picked for one task.
                       {picked.size > 1 && ' They are recorded as affected; none is marked done.'}
                     </span>
-                    <Link
-                      // Ids only. The form loads each node anyway (for the
-                      // titles and the blockers) and writes the description from
-                      // them, so nothing about the task has to survive the hop.
-                      // The role is the one thing it cannot derive: `touched` for
-                      // a set is the safe direction, since greening five nodes
-                      // for a change that touched part of each is a claim the
-                      // plan then repeats to everyone who reads it.
+                    <LinkButton
                       href={`/tasks/new?${new URLSearchParams({
                         repositoryId,
                         planNodeIds: [...picked].join(','),
                         planNodeRole: picked.size === 1 ? 'implements' : 'touched',
                       }).toString()}`}
                       onClick={() => rememberTaskOrigin('/tasks/new', planOrigin(repositoryId))}
+                      size="sm"
                     >
-                      <Button size="sm">Start one task for these</Button>
-                    </Link>
+                      Start one task for these
+                    </LinkButton>
                     <button
                       type="button"
                       onClick={() => setPicked(new Set())}

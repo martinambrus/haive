@@ -1,9 +1,11 @@
+import Link from 'next/link';
 import {
   forwardRef,
   type ButtonHTMLAttributes,
   type InputHTMLAttributes,
   type LabelHTMLAttributes,
   type HTMLAttributes,
+  type ComponentProps,
 } from 'react';
 import { cn } from './cn.js';
 
@@ -39,18 +41,28 @@ const buttonSizes: Record<ButtonSize, string> = {
 // `whitespace-nowrap` is not cosmetic: every size sets a FIXED height, so a label
 // that wraps overflows its own box instead of growing it. A squeezed flex row is
 // what triggers it, and it renders as text spilling over the button's border.
+function buttonClasses(variant: ButtonVariant, size: ButtonSize, className?: string) {
+  return cn(
+    'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md font-medium transition-colors disabled:cursor-not-allowed',
+    buttonVariants[variant],
+    buttonSizes[size],
+    className,
+  );
+}
+
+/** A navigation action styled like Button, with one interactive element. */
+export function LinkButton({
+  variant = 'primary',
+  size = 'md',
+  className,
+  ...props
+}: ComponentProps<typeof Link> & { variant?: ButtonVariant; size?: ButtonSize }) {
+  return <Link className={buttonClasses(variant, size, className)} {...props} />;
+}
+
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
   ({ className, variant = 'primary', size = 'md', ...props }, ref) => (
-    <button
-      ref={ref}
-      className={cn(
-        'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md font-medium transition-colors disabled:cursor-not-allowed',
-        buttonVariants[variant],
-        buttonSizes[size],
-        className,
-      )}
-      {...props}
-    />
+    <button ref={ref} className={buttonClasses(variant, size, className)} {...props} />
   ),
 );
 Button.displayName = 'Button';

@@ -1,4 +1,5 @@
 'use client';
+import { LinkButton } from '@/components/ui';
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
@@ -242,9 +243,7 @@ export default function ReposPage() {
             Local checkouts and remote clones. Status updates live every few seconds.
           </p>
         </div>
-        <Link href="/repos/new">
-          <Button>Add repository</Button>
-        </Link>
+        <LinkButton href="/repos/new">Add repository</LinkButton>
       </div>
 
       {error && (
@@ -263,9 +262,9 @@ export default function ReposPage() {
               Add one to start running orchestration tasks against it.
             </CardDescription>
           </CardHeader>
-          <Link href="/repos/new">
-            <Button size="sm">Add repository</Button>
-          </Link>
+          <LinkButton href="/repos/new" size="sm">
+            Add repository
+          </LinkButton>
         </Card>
       )}
 

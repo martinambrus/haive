@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { ChevronDown, LoaderCircle, type LucideIcon } from 'lucide-react';
-import { Button } from '@/components/ui';
+import { Button, LinkButton } from '@/components/ui';
 import { cn } from '@/lib/cn';
 
 export interface ActionMenuItem {
@@ -121,9 +121,16 @@ export function ActionMenu({
     return (
       <div className={className}>
         {only.href ? (
-          <Link href={only.href} onClick={only.onClick}>
-            {button}
-          </Link>
+          <LinkButton
+            href={only.href}
+            onClick={only.onClick}
+            variant={only.danger ? 'destructive' : 'primary'}
+            size="sm"
+            title={only.title}
+          >
+            <ItemIcon item={only} />
+            {only.label}
+          </LinkButton>
         ) : (
           button
         )}

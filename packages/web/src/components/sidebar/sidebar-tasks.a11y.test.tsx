@@ -41,3 +41,11 @@ it('11 labels a created task not started', async () => {
   expect(link.title).toContain('not started');
   expect(link.title).not.toContain('queued');
 });
+it('1 keeps the folder rename textbox outside the collapse button', async () => {
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Rename Ideas' }));
+  const input = screen.getByRole('textbox', { name: 'Folder name' });
+  expect(input.closest('button')).toBeNull();
+  fireEvent.change(input, { target: { value: 'Plans' } });
+  expect((input as HTMLInputElement).value).toBe('Plans');
+});
