@@ -179,6 +179,8 @@ export async function listResidentOllamaModels(
   url: string,
   timeoutMs = 5000,
   fetchFn: typeof fetch = ollamaFetch,
+  /** The guard deliberately presents a refusal as ENOTFOUND, like an unresolvable name. */
+  onRefused?: () => void,
 ): Promise<string[] | null> {
   try {
     const resp = await fetchFn(`${url}/api/ps`, { signal: AbortSignal.timeout(timeoutMs) });
@@ -190,7 +192,13 @@ export async function listResidentOllamaModels(
       if (m.model) names.add(m.model);
     }
     return Array.from(names);
-  } catch {
+  } catch (err) {
+    if (
+      err instanceof TypeError &&
+      (err.cause as NodeJS.ErrnoException | undefined)?.code === 'ENOTFOUND'
+    ) {
+      onRefused?.();
+    }
     return null;
   }
 }

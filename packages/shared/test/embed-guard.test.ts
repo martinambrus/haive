@@ -61,6 +61,14 @@ describe('Ollama helpers dial through the egress guard by default', () => {
     expect(hits).toBe(0);
   });
 
+  it('reports refused residency dials without changing the null result', async () => {
+    allowlist('');
+    const refused = vi.fn();
+    expect(await listResidentOllamaModels(loop(), 2000, undefined, refused)).toBeNull();
+    expect(refused).toHaveBeenCalledExactlyOnceWith();
+    expect(hits).toBe(0);
+  });
+
   it('reaches a loopback target the allowlist covers', async () => {
     allowlist('127.0.0.1');
     expect(await probeOllama(loop())).toBe(true);

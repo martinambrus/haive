@@ -1,3 +1,4 @@
+import { listResidentModelsOnBoot } from './embed-residency-boot.js';
 import {
   resolveDispatchIntegrations,
   stepIntegrationRequirements,
@@ -61,11 +62,7 @@ import {
   type TaskStatus,
   type WorkflowType,
 } from '@haive/shared';
-import {
-  listResidentOllamaModels,
-  releaseEmbedModelIfUnused,
-  resolveTaskEmbedTarget,
-} from '@haive/shared/rag';
+import { releaseEmbedModelIfUnused, resolveTaskEmbedTarget } from '@haive/shared/rag';
 import { resolveGlobalKbSettings } from '@haive/shared/global-kb';
 import { fairPriority } from '@haive/shared/fair-priority';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
@@ -1120,7 +1117,7 @@ export async function reconcileEmbedModelResidency(db: Database): Promise<void> 
 
     let unloaded = 0;
     for (const [url, models] of byUrl) {
-      const resident = await listResidentOllamaModels(url);
+      const resident = await listResidentModelsOnBoot(url);
       if (!resident) continue; // unreachable, or nothing loaded
       for (const model of models) {
         if (!resident.includes(model)) continue;
