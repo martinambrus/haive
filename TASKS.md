@@ -192,7 +192,7 @@ shared/src/rag/search.ts:449/:560 plainto_tsquery ANDs every term; 67.6% of logg
 
 ### T145 · RAG F13 · Slovak text matches only verbatim
 
-status: open · kind: feature · user decision: resolved 2026-11-01 · priority: P3
+status: in progress (bundle K, overnight run 2026-11-10, branch fix/K-slovak-rag) · kind: feature · user decision: resolved 2026-11-01 · priority: P3
 _rag-connection.ts:130 update_content_tsv uses to_tsvector('english') without unaccent ("kotolna" misses "kotolňa"). Needs a backfill (like backfillIdentifierTsv) and a fail-open path without the extension. Plan P2(e).
 
 User decision 2026-11-01: Approve bounded Slovak accent-insensitive retrieval with a backfill and extension-unavailable fallback; retain retrieval-evaluation gates for T144/T147.
