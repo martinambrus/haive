@@ -369,6 +369,7 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
       );
     }
     if (active) publishModuleActivated(id);
+    for (const written of result.auditEvents ?? []) logAuditEvent(written);
     logAuditEvent(event);
     return c.json({
       moduleId: id,

@@ -30,7 +30,7 @@ export interface ModuleDependent {
 export type ModuleToggle =
   | { kind: 'missing' }
   | { kind: 'open'; tasks: ModuleDependent[]; capped: boolean }
-  | { kind: 'ok'; deactivatedAt: Date | null };
+  | { kind: 'ok'; deactivatedAt: Date | null; auditEvents?: AuditEvent[] };
 
 interface UrgentReport {
   stopped: {
@@ -77,6 +77,8 @@ export function setModuleActive(
   active: boolean,
   actorUserId?: string,
 ): Promise<ModuleToggle> {
+  // The caller may hold an outer transaction; return its rows for logging after that commit.
+  const auditEvents: AuditEvent[] = [];
   return db.transaction(async (tx): Promise<ModuleToggle> => {
     await tx.execute(sql`SET LOCAL lock_timeout = '5s'`);
     const [row] = await tx
@@ -89,13 +91,16 @@ export function setModuleActive(
       .for('update');
     if (!row) return { kind: 'missing' };
     if (active) {
-      if (row.drainingAt && actorUserId)
-        await insertAuditEvent(tx, {
+      if (row.drainingAt && actorUserId) {
+        const event: AuditEvent = {
           actorUserId,
           action: 'module.drain_cancel',
           targetType: 'module',
           metadata: { moduleId },
-        });
+        };
+        await insertAuditEvent(tx, event);
+        auditEvents.push(event);
+      }
       await tx
         .delete(schema.moduleDrainTasks)
         .where(eq(schema.moduleDrainTasks.moduleId, moduleId));
@@ -109,20 +114,23 @@ export function setModuleActive(
           updatedAt: new Date(),
         })
         .where(eq(schema.modules.moduleId, moduleId));
-      return { kind: 'ok', deactivatedAt: null };
+      return { kind: 'ok', deactivatedAt: null, auditEvents };
     }
     if (row.deactivatedAt) return { kind: 'ok', deactivatedAt: row.deactivatedAt };
     const { tasks, capped } = await liveDependents(tx, moduleId);
     if (tasks.length > 0) return { kind: 'open', tasks, capped };
     const deactivatedAt = new Date();
     if (row.drainingAt) {
-      if (actorUserId)
-        await insertAuditEvent(tx, {
+      if (actorUserId) {
+        const event: AuditEvent = {
           actorUserId,
           action: 'module.deactivate',
           targetType: 'module',
           metadata: { moduleId, mode: 'graceful' },
-        });
+        };
+        await insertAuditEvent(tx, event);
+        auditEvents.push(event);
+      }
       await tx
         .delete(schema.moduleDrainTasks)
         .where(eq(schema.moduleDrainTasks.moduleId, moduleId));
@@ -131,19 +139,25 @@ export function setModuleActive(
       .update(schema.modules)
       .set({ deactivatedAt, drainingAt: null, drainingBy: null, updatedAt: deactivatedAt })
       .where(eq(schema.modules.moduleId, moduleId));
-    return { kind: 'ok', deactivatedAt };
+    return { kind: 'ok', deactivatedAt, auditEvents };
   });
 }
 
 export type ModuleRetry = { kind: 'missing' } | { kind: 'inactive' } | { kind: 'ok' };
 
 /** Moves only the activation stamp, which the worker reads as a request to start the module again. */
-export function requestModuleRetry(
+export async function requestModuleRetry(
   db: Database,
   moduleId: string,
   actorUserId: string,
 ): Promise<ModuleRetry> {
-  return db.transaction(async (tx): Promise<ModuleRetry> => {
+  const event: AuditEvent = {
+    actorUserId,
+    action: 'module.retry',
+    targetType: 'module',
+    metadata: { moduleId },
+  };
+  const result = await db.transaction(async (tx): Promise<ModuleRetry> => {
     await tx.execute(sql`SET LOCAL lock_timeout = '5s'`);
     const [row] = await tx
       .select({ deactivatedAt: schema.modules.deactivatedAt })
@@ -152,18 +166,15 @@ export function requestModuleRetry(
       .for('update');
     if (!row) return { kind: 'missing' };
     if (row.deactivatedAt) return { kind: 'inactive' };
-    await insertAuditEvent(tx, {
-      actorUserId,
-      action: 'module.retry',
-      targetType: 'module',
-      metadata: { moduleId },
-    });
+    await insertAuditEvent(tx, event);
     await tx
       .update(schema.modules)
       .set({ updatedAt: new Date() })
       .where(eq(schema.modules.moduleId, moduleId));
     return { kind: 'ok' };
   });
+  if (result.kind === 'ok') logAuditEvent(event);
+  return result;
 }
 
 // starts_with only narrows the rows in SQL; isStepOfModule is the exact test.
@@ -211,6 +222,12 @@ export async function deactivateUrgently(
     targetId: null,
     metadata: { moduleId, mode: 'urgent' },
   };
+  const drainCancelEvent: AuditEvent = {
+    actorUserId,
+    action: 'module.drain_cancel',
+    targetType: 'module',
+    metadata: { moduleId, mode: 'urgent' },
+  };
   const stamped = await db.transaction(async (tx) => {
     await tx.execute(sql`SET LOCAL lock_timeout = '5s'`);
     const [row] = await tx
@@ -225,13 +242,7 @@ export async function deactivateUrgently(
     // Fail before the module changes or any dependent is stopped.
     await insertAuditEvent(tx, event);
     await tx.delete(schema.moduleDrainTasks).where(eq(schema.moduleDrainTasks.moduleId, moduleId));
-    if (row.drainingAt)
-      await insertAuditEvent(tx, {
-        actorUserId,
-        action: 'module.drain_cancel',
-        targetType: 'module',
-        metadata: { moduleId, mode: 'urgent' },
-      });
+    if (row.drainingAt) await insertAuditEvent(tx, drainCancelEvent);
     if (row.drainingAt)
       await tx
         .update(schema.modules)
@@ -247,10 +258,16 @@ export async function deactivateUrgently(
     const { tasks, capped } = await liveDependents(tx, moduleId);
     const listed = new Set(tasks.map((task) => task.id));
     const unlisted = (await dependentsInModuleStep(tx, moduleId)).filter((t) => !listed.has(t.id));
-    return { deactivatedAt, capped, dependents: [...tasks, ...unlisted] };
+    return {
+      deactivatedAt,
+      capped,
+      dependents: [...tasks, ...unlisted],
+      drainCancelled: !!row.drainingAt,
+    };
   });
   if (!stamped) return { kind: 'missing' };
   logAuditEvent(event);
+  if (stamped.drainCancelled) logAuditEvent(drainCancelEvent);
 
   const report: UrgentReport = { stopped: [], left: [], failed: [], capped: stamped.capped };
   for (const { id, title, status, ownerId, currentStepId } of stamped.dependents) {

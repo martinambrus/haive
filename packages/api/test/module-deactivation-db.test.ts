@@ -85,7 +85,7 @@ vi.mock('@haive/shared', async (importOriginal) => ({
 }));
 
 import { Hono } from 'hono';
-import { CONFIG_KEYS } from '@haive/shared';
+import { CONFIG_KEYS, logger } from '@haive/shared';
 import {
   MODULE_DEPENDENTS_CAP,
   moduleManifestSchema,
@@ -1939,6 +1939,71 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       ]);
       expect(await typeTasks()).toHaveLength(0);
     });
+  });
+
+  describe('strict module audit logs', () => {
+    for (const operation of ['activate', 'deactivate', 'urgent', 'retry'] as const) {
+      for (const failCommit of [false, true]) {
+        it(`logs ${operation} only after the outer commit (commit refused: ${failCommit})`, async () => {
+          await db
+            .update(schema.modules)
+            .set({
+              drainingAt: new Date(),
+              drainingBy: ACTOR,
+            })
+            .where(eq(schema.modules.moduleId, 'alpha'));
+          let committed = false;
+          const lines: { action: string; committed: boolean }[] = [];
+          const info = vi
+            .spyOn(logger, 'info')
+            .mockImplementation((fields: any, message?: string) => {
+              if (message?.startsWith('audit: module.'))
+                lines.push({ action: fields.action, committed });
+            });
+          h.db = new Proxy(db, {
+            get(target, key) {
+              if (key === 'transaction')
+                return async (run: (tx: any) => Promise<unknown>) => {
+                  const result = await target.transaction(async (tx) => {
+                    const result = await run(tx);
+                    if (failCommit) throw new Error('fixture commit refusal');
+                    return result;
+                  });
+                  committed = true;
+                  return result;
+                };
+              const value = Reflect.get(target, key, target);
+              return typeof value === 'function' ? value.bind(target) : value;
+            },
+          });
+          try {
+            const response =
+              operation === 'retry'
+                ? await send('POST', '/modules/alpha/retry')
+                : await send('PATCH', '/modules/alpha', {
+                    active: operation === 'activate',
+                    ...(operation === 'urgent' ? { mode: 'urgent' } : {}),
+                  });
+            expect(response.status).toBe(failCommit ? 500 : 200);
+            const actions =
+              operation === 'retry'
+                ? ['module.retry']
+                : operation === 'activate'
+                  ? ['module.drain_cancel', 'module.activate']
+                  : operation === 'urgent'
+                    ? ['module.deactivate', 'module.drain_cancel']
+                    : ['module.deactivate', 'module.deactivate'];
+            expect(lines).toEqual(
+              failCommit ? [] : actions.map((action) => ({ action, committed: true })),
+            );
+            expect(await audits()).toHaveLength(failCommit ? 0 : actions.length);
+          } finally {
+            h.db = db;
+            info.mockRestore();
+          }
+        });
+      }
+    }
   });
 
   describe('POST /modules/:id/retry', () => {
