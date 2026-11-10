@@ -695,6 +695,16 @@ const PORTABLE_SETTING_UPDATE_KEYS = [
   'agentRulesOverride',
 ] as const;
 
+const TOOLING_SECURITY_FIELDS = [
+  'secretMaskEnabled',
+  'secretMaskAllow',
+  'secretMaskDenyExtend',
+  'agentRulesOverride',
+  'appAuth',
+  'verifyCommands',
+  'prWorkflowEnabled',
+] as const;
+
 /** The PATCH body. A field of the wrong type is a 400 `Validation failed` naming it, before any
  *  lock or write. Loose on purpose: an unknown key survives the parse, because the MCP
  *  decision below must travel with no other key and counts them. */
@@ -745,6 +755,19 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
   // Not caught: a body that is not JSON is answered 400 by `jsonBodyErrors`, where `{}` would be a
   // save of nothing that reports success.
   const body = toolingPatchBodySchema.parse(requireJsonObject(await c.req.json()));
+
+  if (
+    body.ragEmbedAction &&
+    [...TOOLING_SECURITY_FIELDS, 'appAuthUsername', 'appAuthPassword'].some((field) =>
+      Object.hasOwn(body, field),
+    )
+  ) {
+    throw new HttpError(
+      400,
+      'Send a RAG embed action separately from security settings',
+      'rag_action_security_conflict',
+    );
+  }
 
   if (body.repoMcpServersAction === 'accept' || body.repoMcpServersAction === 'discard') {
     if (Object.keys(body).length > 1) {
@@ -980,15 +1003,6 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
         appAuthWrites.map(({ suffix, value }) => [suffix, value ? 'set' : 'cleared']),
       ),
     };
-    const securityFields = [
-      'secretMaskEnabled',
-      'secretMaskAllow',
-      'secretMaskDenyExtend',
-      'agentRulesOverride',
-      'appAuth',
-      'verifyCommands',
-      'prWorkflowEnabled',
-    ] as const;
     let changedFields: string[] = [];
     const securityEvent: AuditEvent = {
       actorUserId: userId,
@@ -1010,7 +1024,7 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
       if (!stored) throw new HttpError(404, 'Repository not found');
       if (typeof body.rtkEnabled === 'boolean' && stored.rtkEnabled !== body.rtkEnabled)
         updates.rtkChoiceMadeAt = new Date();
-      changedFields = securityFields.filter(
+      changedFields = TOOLING_SECURITY_FIELDS.filter(
         (field) => field in updates && !isDeepStrictEqual(stored[field], updates[field]),
       );
       securityEvent.metadata = {

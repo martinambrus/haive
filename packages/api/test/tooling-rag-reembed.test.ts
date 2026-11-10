@@ -209,6 +209,37 @@ async function mutePostgres() {
   return { url: `postgres://rag:rag@127.0.0.1:${port}/rag`, seen };
 }
 
+describe('mixed RAG reset and security changes', () => {
+  it.each([
+    { secretMaskEnabled: false },
+    { secretMaskAllow: ['.env'] },
+    { secretMaskDenyExtend: ['secret'] },
+    { agentRulesOverride: 'rules' },
+    { appAuth: null },
+    { appAuthUsername: 'synthetic-user' },
+    { appAuthPassword: 'synthetic-secret' },
+    { verifyCommands: {} },
+    { prWorkflowEnabled: false },
+  ])('refuses a combined action before any lock, reset or audited write: %j', async (security) => {
+    const fake = setup('postgres://rag:rag@127.0.0.1:1/rag');
+    const before = structuredClone(fake.rows(schema.repositories));
+    const secrets = vi.spyOn(userSecretsService, 'set').mockResolvedValue(undefined as never);
+    const res = await app.request(`/${REPO}/tooling`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ragEmbedAction: 'rebuild_index', ...security }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'rag_action_security_conflict' });
+    expect(fakeLock.state.tried).toEqual([]);
+    expect(h.openOptions).toEqual([]);
+    expect(h.statements).toEqual([]);
+    expect(secrets).not.toHaveBeenCalled();
+    expect(fake.rows(schema.repositories)).toEqual(before);
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+  });
+});
+
 describe('forcing a re-embed of a repository', () => {
   it('resets the chunk hashes of that repository in batches, on a store opened with a connect timeout', async () => {
     setup('postgres://rag:rag@127.0.0.1:1/rag');
@@ -493,7 +524,7 @@ describe('a RAG embed action while a sync of the repository runs', () => {
       const secrets = vi.spyOn(userSecretsService, 'set').mockResolvedValue(undefined as never);
       fakeLock.state.held.add(REPO);
 
-      const res = await patch({ ragEmbedAction, appAuthPassword: 'pw', rtkEnabled: false });
+      const res = await patch({ ragEmbedAction, rtkEnabled: false });
 
       expect(res.status).toBe(409);
       expect((await res.json()) as { error: string }).toMatchObject({
@@ -721,17 +752,10 @@ describe('saving or clearing the app-login credentials of a repository', () => {
     expect(auditLines()).toEqual([]);
   });
 
-  const refusals: Array<[string, number, () => void]> = [
-    ['the sync lock is held', 409, () => fakeLock.state.held.add(REPO)],
-    ['Redis cannot be reached', 503, () => (fakeLock.state.redisDown = true)],
-    ['Redis does not answer the lock command', 503, () => (fakeLock.state.stalled = true)],
-  ];
-
-  it.each(refusals)('writes no secret and no event when %s', async (_why, status, arrange) => {
+  it('refuses a RAG action mixed with app credentials before any lock or secret write', async () => {
     const fake = setup(STORE, true, true);
     const before = structuredClone(fake.rows(schema.repositories));
     const { set, remove } = spySecrets();
-    arrange();
 
     const res = await patch({
       ragEmbedAction: 'retry',
@@ -739,7 +763,10 @@ describe('saving or clearing the app-login credentials of a repository', () => {
       appAuthPassword: '',
     });
 
-    expect(res.status).toBe(status);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'rag_action_security_conflict' });
+    expect(fakeLock.state.tried).toEqual([]);
+    expect(h.statements).toEqual([]);
     expect(fake.rows(schema.repositories)).toEqual(before);
     expect(set).not.toHaveBeenCalled();
     expect(remove).not.toHaveBeenCalled();

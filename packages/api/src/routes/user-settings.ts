@@ -13,6 +13,7 @@ import {
   encrypt,
   decrypt,
   decryptEmail,
+  logger,
 } from '@haive/shared';
 import { hashPassword, verifyPassword } from '../auth/password.js';
 import { signAccessToken, signRefreshToken, hashRefreshToken } from '../auth/jwt.js';
@@ -25,7 +26,13 @@ import {
 } from '@haive/shared/fs-safe';
 import { requireAuth, requireAuthAllowingPasswordChange } from '../middleware/auth.js';
 import { getDb } from '../db.js';
-import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
+import {
+  insertAuditEvent,
+  logAuditEvent,
+  recordAuditEvent,
+  type AuditEvent,
+} from '../lib/audit.js';
+import { AuthThrottleError, reserveAuthAttempt } from '../lib/auth-throttle.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { containmentHttpError } from '../lib/fs-http.js';
 import { isJsonObject, requireJsonObject } from '../lib/json-object.js';
@@ -100,14 +107,47 @@ userSettingsRoutes.put('/password', requireAuthAllowingPasswordChange, async (c)
       id: true,
       role: true,
       passwordHash: true,
+      emailBlindIndex: true,
       tokenVersion: true,
       mustChangePassword: true,
     },
   });
   if (!user) throw new HttpError(404, 'User not found');
 
+  let attempt;
+  try {
+    // The sign-in blind index and scope share both oracle budgets, including the address rules.
+    attempt = await reserveAuthAttempt(c, 'login', user.emailBlindIndex);
+  } catch (err) {
+    if (err instanceof AuthThrottleError && err.auditAllowed) {
+      void recordAuditEvent(db, {
+        actorUserId: userId,
+        action: 'user.password.change.throttled',
+        targetType: 'user',
+        targetId: userId,
+        metadata: { reason: 'throttled', limiter: err.limiter },
+      }).catch((auditError: unknown) => {
+        logger.error({ err: auditError }, 'failed to audit throttled password change');
+      });
+    }
+    throw err;
+  }
+
   const ok = await verifyPassword(body.currentPassword, user.passwordHash);
-  if (!ok) throw new HttpError(401, 'Current password is incorrect');
+  if (!ok) {
+    const event: AuditEvent = {
+      actorUserId: userId,
+      action: 'user.password.change.failure',
+      targetType: 'user',
+      targetId: userId,
+      metadata: { reason: 'invalid_credentials' },
+    };
+    await insertAuditEvent(db, event);
+    logAuditEvent(event);
+    throw new HttpError(400, 'Current password is incorrect', 'current_password_incorrect');
+  }
+  // Only a failed credential check costs budget, even if a later change is refused.
+  await attempt.refund();
 
   if (user.mustChangePassword && body.newPassword === body.currentPassword) {
     throw new HttpError(

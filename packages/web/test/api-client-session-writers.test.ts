@@ -87,3 +87,32 @@ describe('a password write whose access token expired', () => {
     expect(lock).toHaveBeenCalledTimes(3);
   });
 });
+
+describe('a password write with an incorrect current password', () => {
+  it('shows the field refusal after exactly one request, without refreshing', async () => {
+    vi.resetModules();
+    const fetcher = vi.fn(async () =>
+      Response.json(
+        { error: 'Current password is incorrect', code: 'current_password_incorrect' },
+        { status: 400 },
+      ),
+    );
+    vi.stubGlobal('fetch', fetcher);
+    const { api } = await import('../src/lib/api-client');
+    await expect(
+      api.put('/user-settings/password', {
+        currentPassword: 'synthetic-wrong',
+        newPassword: 'replacement',
+      }),
+    ).rejects.toMatchObject({
+      message: 'Current password is incorrect',
+      status: 400,
+      code: 'current_password_incorrect',
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledWith(
+      expect.stringContaining('/user-settings/password'),
+      expect.objectContaining({ method: 'PUT' }),
+    );
+  });
+});

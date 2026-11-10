@@ -1115,7 +1115,10 @@ it. The PATCH validates the text before any write (`normalizeAgentRulesOverride`
 reason otherwise; a body that is not a JSON object is refused 400 `invalid_body`, and one that is
 not JSON `invalid_json`, before any field is read; a field of the wrong type, an unknown
 `ragEmbedAction` or an unknown `repoMcpServersAction` is refused 400 `Validation failed` with the field
-in `issues[].path`, before any lock or write), stores the normalised text, marks the outbox in the same transaction and answers
+in `issues[].path`, before any lock or write; a `ragEmbedAction` sent together with a security field
+(the secret mask, agent rules, app auth, verify commands or the PR workflow switch) is refused 400
+`rag_action_security_conflict` before any effect, because the RAG reset runs ahead of the audited save
+and a refused audit row could not undo it; the page sends the action alone), stores the normalised text, marks the outbox in the same transaction and answers
 with what it stored. "Save tooling" never sends the key, so an unrelated save can neither pin the
 default text as an override nor erase one. Choosing Override starts from the default text rather
 than an empty editor, since an empty override is a choice that writes no block (the card says so),
