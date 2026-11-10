@@ -1279,14 +1279,14 @@ From the T491 follow-up review (2026-10-31). PRE-EXISTING, minor (needs a node s
 
 ### T504 · FNF[audit-imported-settings] · audited repository settings that arrive with the checkout or an import leave no audit row
 
-status: open · kind: audit · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (codex-sonnet) · kind: audit · user decision: resolved 2026-11-01 · priority: P2
 From the T376 third review (2026-10-31). PRE-EXISTING; moderate for the agent rules, minor for the scope list. T376 audits `agentRulesOverride` (`repository.security.update`) and `scopeExcludeGlobs` (`repository.scope.update`) at their api routes only. The worker's project-state sync writes both from the checkout's portable settings (worker project-state/sync.ts ~:909-920, `mergePortable` ~:522; shared project-state/settings.ts ~:20-29, ~:135-145), a "take theirs" answer to a project-state question writes them (api project-state-conflicts.ts ~:140-151, worker project-state/resolve.ts ~:564, ~:583-588), 09_7-rag-source-selection.ts ~:218-224 persists the scope choice and the clone import (repo/clone.ts ~:188-199) fills the scope list; the worker has no audit writer at all. So a change of the agent rules (prepended to every prompt) that arrives with a pull leaves no row. Decide: record a row in the same transaction as the column write (sync and resolve already hold one) with `source: 'project_state'` and an actor for imports, or document that imports are unaudited.
 
 User decision 2026-11-01: Audit project-state/import and worker remote-setting mutations with source and actor; never record secret values.
 
 ### T505 · FNF[gate4-remote-writer] · Gate 4's push writes the repository's remote and credential binding with no audit row, lock or restore (+1)
 
-status: open · kind: audit · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (codex-sonnet) · kind: audit · user decision: resolved 2026-11-01 · priority: P2
 From the T376 third review (2026-10-31). PRE-EXISTING, minor to moderate.
 
 1. With no origin in the worktree, 11a-gate-4-push.ts ~:308-331 runs `ensureOrigin` (the worktree shares the repository's config) and then a plain `ctx.db.update(schema.repositories)` of `remoteUrl` and `credentialsSecretId`: the change T376 audits in `POST /:id/remote`, with no row lock and no restore. Ownership and fit are checked first (git-push.ts ~:132-142), so no leak. The audit part waits on T504's decision (the worker has no audit writer).
