@@ -267,11 +267,11 @@ async function importHaiveDataMirror(
     }
   });
   auditEvents.forEach(logAuditEvent);
-  logger.info(
-    { repositoryId, imported: Object.keys(updates) },
-    'restored onboarding state from .haive-data mirror',
-  );
-  if (heldMcpServers) {
+  const imported = Object.keys(updates);
+  if (imported.length) {
+    logger.info({ repositoryId, imported }, 'restored onboarding state from .haive-data mirror');
+  }
+  if (heldMcpServers && Object.hasOwn(updates, 'onboardingTooling')) {
     logger.warn(
       { repositoryId, servers: heldMcpServers },
       'imported MCP servers held until accepted on this install',
