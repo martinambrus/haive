@@ -6,6 +6,9 @@ const h = vi.hoisted(() => ({
   add: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined),
 }));
 
+// Merge admission is exercised on Postgres in task-start-attachments-db; this fake covers create/start bookkeeping.
+vi.mock('../src/lib/root-merge-busy.js', () => ({ assertRootMergeIdle: async () => undefined }));
+
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: h.add }) }));
 vi.mock('../src/middleware/auth.js', () => ({

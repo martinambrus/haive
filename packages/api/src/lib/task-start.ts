@@ -2,6 +2,7 @@ import { and, eq, isNull } from 'drizzle-orm';
 import { lockRepositoryTasksKey, schema, type DbTx } from '@haive/database';
 import { TASK_JOB_NAMES, type TaskJobPayload } from '@haive/shared';
 import { assertCustomToolsUsable } from './custom-tools-start-check.js';
+import { assertRootMergeIdle } from './root-merge-busy.js';
 import { boundedLockWait } from './repository-busy.js';
 import type { getDb } from '../db.js';
 import { getTaskQueue } from '../queues.js';
@@ -30,6 +31,8 @@ export async function markQueuedForStart(
     const [task] = await tx
       .select({
         repositoryId: schema.tasks.repositoryId,
+        worktreePath: schema.tasks.worktreePath,
+        worktreeBranch: schema.tasks.worktreeBranch,
         expectedAttachmentCount: schema.tasks.expectedAttachmentCount,
         status: schema.tasks.status,
         deadAt: schema.tasks.deadAt,
@@ -44,7 +47,12 @@ export async function markQueuedForStart(
     }
     // A queued task holds the checkout, so its start waits out a move that holds this lock.
     const repositoryId = task?.repositoryId;
-    if (repositoryId) await boundedLockWait(tx, () => lockRepositoryTasksKey(tx, repositoryId));
+    if (repositoryId) {
+      await boundedLockWait(tx, () => lockRepositoryTasksKey(tx, repositoryId));
+      if (task?.status === 'created' && task.deadAt == null) {
+        await assertRootMergeIdle(tx, taskId, { ...task, repositoryId });
+      }
+    }
     // Unrecorded counts keep the ordinary create/start path. For a recorded count, serialize
     // starts before checking it so an already-started task never conflicts over missing files.
     if (task?.expectedAttachmentCount != null) {

@@ -14,7 +14,7 @@ const TASK = '00000000-0000-4000-8000-000000000001';
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function world(repositoryId: string | null) {
-  const fake = createFakeDb({ tasks: schema.tasks });
+  const fake = createFakeDb({ tasks: schema.tasks, repositories: schema.repositories });
   fake.insert(schema.tasks, {
     id: TASK,
     userId: USER,
