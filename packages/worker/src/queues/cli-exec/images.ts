@@ -20,6 +20,7 @@ import {
 import { probeOpenRouterModelCompat } from '../../cli-adapters/openrouter-compat.js';
 import { resolveOpenRouterBaseUrl } from '../../cli-adapters/openrouter-proxy.js';
 import { probeOllamaEndpoint } from '../../cli-adapters/ollama-probe.js';
+import { resolveProbeFetch } from '../../cli-adapters/probe-fetch.js';
 import { resolveOllamaBaseUrl } from '../../cli-adapters/ollama-thinking-proxy.js';
 import { log } from './_shared.js';
 import { createSandboxSpawner } from './exec-core.js';
@@ -379,20 +380,6 @@ function resolveMissingApiKeyError(
   );
 }
 
-async function resolveProbeFetch(
-  db: Database,
-  provider: CliProviderRecord,
-  env: Record<string, string>,
-): Promise<typeof fetch> {
-  // Platform-picked URLs include private sidecars outside the probe allow set.
-  if (env.ANTHROPIC_BASE_URL == null) return fetch;
-  const owner = await db.query.users.findFirst({
-    where: eq(schema.users.id, provider.userId),
-    columns: { role: true },
-  });
-  return owner?.role === 'admin' ? fetch : guardedProbeFetch;
-}
-
 /** The Test-connection advisory for an OpenRouter provider whose selected model
  *  rejects the claude binary's request shape, or null when there is nothing to say.
  *
@@ -419,7 +406,7 @@ async function resolveOpenRouterCompatWarning(
   const token = env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY;
   if (!token) return null;
   const baseUrl = resolveOpenRouterBaseUrl(env);
-  const fetchImpl = await resolveProbeFetch(db, provider, env);
+  const fetchImpl = await resolveProbeFetch(db, provider.userId, env.ANTHROPIC_BASE_URL ?? null);
   const compat = await probeOpenRouterModelCompat({ baseUrl, token, model, fetchImpl });
   if (compat.compatible) return null;
   const because = compat.detail ? ` Upstream said: "${compat.detail}".` : '';
@@ -473,7 +460,7 @@ async function resolveOllamaProbeOutcome(
     model,
     disableThinking: provider.disableThinking,
   });
-  const fetchImpl = await resolveProbeFetch(db, provider, env);
+  const fetchImpl = await resolveProbeFetch(db, provider.userId, env.ANTHROPIC_BASE_URL ?? null);
   const result = await probeOllamaEndpoint({ baseUrl, token, model, fetchImpl });
   if (result.ok) return null;
   // The guard masks a refusal as ENOTFOUND, so this also covers a name that does not resolve.

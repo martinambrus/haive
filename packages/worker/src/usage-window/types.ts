@@ -76,6 +76,8 @@ export function authDenialSeverity(opts: {
 }
 
 export interface UsageFetchContext {
+  /** Owner-scoped transport for fetchers that dial a hand-set origin. */
+  fetchImpl?: typeof fetch;
   providerName: CliProviderName;
   /** provider.cliVersion — feeds the claude `User-Agent: claude-code/<ver>`,
    *  which the endpoint REQUIRES (a blank UA is permanently 429'd). Null falls
