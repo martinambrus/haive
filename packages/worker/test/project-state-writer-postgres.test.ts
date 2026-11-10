@@ -29,6 +29,7 @@ import {
   projectStateHash,
   renderProjectState,
 } from '@haive/shared/project-state';
+import { sha256Hex } from '@haive/shared';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
@@ -188,6 +189,9 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
     const s = await fixture();
     const local = 'LOCAL RULES\n';
     const incoming = 'TEAM RULES\n';
+    const diskPath = '.claude/workflow-config.json';
+    const content = 'upgraded config\n';
+    const hash = sha256Hex(content);
     const git = (...args: string[]) =>
       execFileSync('git', args, {
         cwd: s.root,
@@ -203,7 +207,7 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
     git('commit', '--allow-empty', '-qm', 'initial');
     await db!
       .update(schema.repositories)
-      .set({ agentRulesOverride: local })
+      .set({ agentRulesOverride: local, scopeExcludeGlobs: ['vendor/**'] })
       .where(eq(schema.repositories.id, s.repo.id));
     await s.write();
     const [planned] = await db!
@@ -236,13 +240,32 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
         detected: {
           repositoryId: s.repo.id,
           ranBackfill: false,
-          entries: [],
+          entries: [
+            {
+              entryId: 'config',
+              bucket: 'new_artifact',
+              templateId: 'workflow-config',
+              templateKind: 'workflow-config',
+              diskPath,
+              liveArtifactId: null,
+              currentContent: null,
+              newContent: content,
+              baselineContent: null,
+              currentHash: null,
+              baselineWrittenHash: null,
+              newContentHash: hash,
+              baselineTemplateContentHash: null,
+              currentTemplateContentHash: hash,
+              templateSchemaVersion: 2,
+              delta: null,
+            },
+          ],
           counts: {},
           installedTemplateSetHash: null,
           currentTemplateSetHash: 'set',
           renderCtxSnapshot: {
             ...REFERENCE_CONTEXT,
-            ...context(),
+            ...context('upgraded'),
             cliTargets: [],
             agentTargets: [],
             enabledCliProviders: [],
@@ -253,7 +276,7 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
           rtkFollowsLive: false,
           backfilledRows: 0,
         },
-        formValues: {},
+        formValues: { selectedNew: ['config'] },
         iteration: 0,
         previousIterations: [],
       } as never);
@@ -270,9 +293,29 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
       )[0]!.baseSnapshot;
     const beforeBase = await base();
 
-    expect((await apply()).recordWrite).toBe('skipped');
+    await mkdir(join(s.root, '.haive'), { recursive: true });
+    await writeFile(
+      join(s.root, '.haive/install.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        templateSetHash: 'old',
+        templates: [],
+      }),
+    );
+    await writeFile(
+      join(s.root, '.haive-data/exclusions.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        scopeExcludeGlobs: ['vendor/**'],
+      }),
+    );
+    const applied = await apply();
+    expect(applied.appliedCount).toBe(1);
+    const dirty = (await s.outbox())!;
+    expect(dirty.writtenRevision).toBeLessThan(dirty.revision);
+    expect(applied.recordWrite).toBe('deferred');
     expect(await rules()).toBe(local);
-    expect((await apply()).recordWrite).toBe('skipped');
+    expect((await apply()).recordWrite).toBe('deferred');
     expect(await rules()).toBe(local);
     expect(await readFile(path, 'utf8')).toBe(incoming);
     expect(await base()).toEqual(beforeBase);
@@ -285,6 +328,18 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
     await resyncAfterTaskEnd(db!, task!.id);
 
     expect(await rules()).toBe(incoming);
+    expect(await s.render()).toMatchObject({ projectInfo: { name: 'upgraded' } });
+    const claim = JSON.parse(
+      await readFile(join(s.root, '.haive-data/state', claimFileName(diskPath)), 'utf8'),
+    );
+    expect(claim).toMatchObject({ path: diskPath, writtenHash: hash });
+    expect((await s.outbox())!.writtenRevision).toBe((await s.outbox())!.revision);
+    await expect(readFile(join(s.root, '.haive/install.json'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    await expect(readFile(join(s.root, '.haive-data/exclusions.json'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
     expect(await readFile(path, 'utf8')).toBe(incoming);
     expect(((await base()) as { settings: Record<string, unknown> }).settings['agent-rules']).toBe(
       incoming,

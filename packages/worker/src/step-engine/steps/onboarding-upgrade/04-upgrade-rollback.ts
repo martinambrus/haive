@@ -164,7 +164,7 @@ interface RollbackOutput extends RollbackDetect {
   revertedCount: number;
   /** What the project state record write did; 'failed' when it threw. Optional because it is read
    *  back from a persisted output that may predate it. */
-  recordWrite?: 'written' | 'failed' | 'skipped';
+  recordWrite?: 'written' | 'failed' | 'skipped' | 'deferred';
 }
 
 interface RollbackRendering {
@@ -1130,7 +1130,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       }
     } catch (err) {
       failIfColumnStale(err);
-      recordWrite = err instanceof ProjectStateImportDeferredError ? 'skipped' : 'failed';
+      recordWrite = err instanceof ProjectStateImportDeferredError ? 'deferred' : 'failed';
       const message = safeErrorMessage(err);
       if (err instanceof ProjectStateImportDeferredError) {
         warnings.push(`Project state record deferred: ${message}`);

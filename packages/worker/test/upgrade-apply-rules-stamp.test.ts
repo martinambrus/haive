@@ -139,13 +139,13 @@ describe('02 and the rules override its plan was made from', () => {
       const output = await s.apply();
 
       expect(s.fake.rows(schema.repositories)[0]!.agentRulesOverride).toBe(local);
-      expect(output.recordWrite).toBe('skipped');
+      expect(output.recordWrite).toBe('deferred');
       expect(output.warnings).toContain(
         'Project state record deferred: imported repository rules are waiting for this upgrade to finish',
       );
       if (incoming === null) await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
       else expect(await readFile(path, 'utf8')).toBe(incoming);
-      expect((await s.apply()).recordWrite).toBe('skipped');
+      expect((await s.apply()).recordWrite).toBe('deferred');
       expect(await s.agentsMd()).toContain('PLANNED RULES');
 
       s.fake.patch(schema.tasks, TASK, { status: 'completed' });

@@ -817,7 +817,7 @@ export async function writeProjectStateColumn(
     // Commit the retry signal before any filesystem mutation. Recheck admission and the checkout
     // after reacquiring the locks: a holder admitted between transactions leaves only this intent.
     const auditEvents: AuditEvent[] = [];
-    const prepared = await db.transaction(async (tx) => {
+    const preparation = db.transaction(async (tx) => {
       await gate(tx);
       await recoverWriteLocked(tx, repositoryId, repoPath, expectedCheckout);
       const checkout = await readCheckout(repoPath);
@@ -939,6 +939,22 @@ export async function writeProjectStateColumn(
         previousBaseFiles,
         unownedMalformedRtk,
       };
+    });
+    const prepared = await preparation.catch(async (err: unknown) => {
+      if (err instanceof ProjectStateImportDeferredError) {
+        // The import transaction rolled back, but this foreground write still owes its approved
+        // context and ledger claims. Persist the local context and retry signal together, under
+        // the same task/column/reset fences; leave the incoming files and sync base untouched.
+        await db.transaction(async (tx) => {
+          await gate(tx);
+          await tx
+            .update(schema.repositories)
+            .set({ renderContext: column })
+            .where(eq(schema.repositories.id, repositoryId));
+          await markProjectStateDirty(tx, repositoryId);
+        });
+      }
+      throw err;
     });
     auditEvents.forEach(logAuditEvent);
     if (!prepared) throw new ProjectStateMovedError();
