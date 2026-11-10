@@ -14,6 +14,7 @@ import {
 } from '@haive/shared';
 import { schema, type Database } from '@haive/database';
 import { getDb } from '../db.js';
+import { resolveProbeFetch } from '../cli-adapters/probe-fetch.js';
 import { getBullRedis } from '../redis.js';
 import {
   claudeTokenNeedsRefresh,
@@ -336,10 +337,12 @@ async function pollProvider(db: Database, provider: ProviderRow): Promise<void> 
 
   lastPollAt.set(provider.id, Date.now()); // record the actual vendor-call time
 
+  const baseUrl = provider.envVars?.ANTHROPIC_BASE_URL ?? null;
   const ctx: UsageFetchContext = {
+    fetchImpl: await resolveProbeFetch(db, provider.userId, baseUrl),
     providerName: provider.name,
     cliVersion: provider.cliVersion,
-    baseUrl: provider.envVars?.ANTHROPIC_BASE_URL ?? null,
+    baseUrl,
     accountId: creds.accountId ?? null,
   };
   const outcome = await cfg.fetch(creds.token, ctx);

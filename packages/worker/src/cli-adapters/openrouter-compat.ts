@@ -1,3 +1,5 @@
+import { readBounded } from '@haive/shared/forge';
+
 /**
  * Pre-flight check for "this OpenRouter model cannot run a Haive step", run from
  * the provider's Test-connection probe so an incompatible model is caught at save
@@ -26,6 +28,9 @@
  * upstream detail lives in OpenRouter's `metadata.raw`, which the binary discards.
  * Calling the endpoint directly is what lets us show the user the actual sentence.
  */
+
+// Nested upstream errors are small JSON; 64 KiB leaves room for provider history.
+const PROBE_BODY_MAX_BYTES = 64 * 1024;
 
 const PROBE_TIMEOUT_MS = 20_000;
 
@@ -160,9 +165,17 @@ export async function probeOpenRouterModelCompat(opts: {
   // 401/403/429 say something about the KEY or the quota, not the model shape.
   if (resp.status !== 400) return { compatible: true };
 
+  let answer: { text: string; truncated: boolean };
+  try {
+    answer = await readBounded(resp, PROBE_BODY_MAX_BYTES);
+  } catch {
+    return { compatible: false };
+  }
+  if (answer.truncated) return { compatible: true };
+
   let parsed: unknown = null;
   try {
-    parsed = await resp.json();
+    parsed = JSON.parse(answer.text);
   } catch {
     return { compatible: false };
   }

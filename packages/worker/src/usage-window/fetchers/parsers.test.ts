@@ -195,7 +195,15 @@ describe.each(Object.entries(USAGE_PROVIDERS))('%s usage HTTP deadline', (name, 
             signal.addEventListener('abort', () => reject(signal.reason), { once: true });
           });
         if (phase === 'request') return stalled();
-        return { ok: true, json: stalled };
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              signal.addEventListener('abort', () => controller.error(signal.reason), {
+                once: true,
+              });
+            },
+          }),
+        );
       });
       vi.stubGlobal('fetch', fetchMock);
       const ctx = { providerName: name as CliProviderName };
@@ -205,15 +213,17 @@ describe.each(Object.entries(USAGE_PROVIDERS))('%s usage HTTP deadline', (name, 
       expect(deadline).toHaveBeenCalledWith(15_000);
       vi.stubGlobal(
         'fetch',
-        vi.fn(async () => ({
-          ok: true,
-          json: async () => ({
-            five_hour: { utilization: 12 },
-            primary: { used_percent: 12 },
-            data: [{ type: 'TOKENS_LIMIT', percentage: 12 }],
-            buckets: [{ tokenType: 'REQUESTS', remainingFraction: 0.88 }],
-          }),
-        })),
+        vi.fn(
+          async () =>
+            new Response(
+              JSON.stringify({
+                five_hour: { utilization: 12 },
+                primary: { used_percent: 12 },
+                data: [{ type: 'TOKENS_LIMIT', percentage: 12 }],
+                buckets: [{ tokenType: 'REQUESTS', remainingFraction: 0.88 }],
+              }),
+            ),
+        ),
       );
       expect((await cfg.fetch('fixture-token', ctx)).ok).toBe(true);
     },
