@@ -268,7 +268,7 @@ User decision 2026-11-01: Use a simple Haive H favicon.
 
 ### T270 · FNF[plan] · a child insert can take a parent's path from before a concurrent move
 
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (bundle G, overnight run 2026-11-10, branch fix/G-plan-lock-merge-visibility) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 applyPlanPatch's loadNode reads the parent path unlocked (shared/src/plan/apply-patch.ts:415). FOR SHARE on the parent is not enough (a move rewrites descendants in one UPDATE). Direction: a per-repository plan-patch advisory lock first in applyOps; lock-order analysis owed.
 
 User decision 2026-11-01: Serialize conflicting edits; bound waits and return explicit retryable busy responses. Lock-order analysis remains required.
@@ -1197,7 +1197,7 @@ Execution fence 2026-11-01: Deduplicate the resolved T397 paths and T379 overlap
 
 ### T497 · FNF[plan-merge-failed-visibility] · after a reload a failed plan merge leaves no trace on the plan page
 
-status: open · kind: feature · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (bundle G, overnight run 2026-11-10, branch fix/G-plan-lock-merge-visibility) · kind: feature · user decision: resolved 2026-11-01 · priority: P2
 From the T491 review (2026-10-31). `GET /plan/merge` lists open merges only (api plan.ts ~:447-459) and `plan_merge` tasks are hidden from the task list (tasks/index.ts ~:289-292), so once the page that saw the failure is gone, a FAILED merge (which keeps its worktree for a Retry) cannot be found from the plan page. Options: the route also returns the newest failed merge not followed by a successful one, shown with its Retry link; or a plan-page notice from the task events. Recommended: the first.
 
 User decision 2026-11-01: Show the latest unresolved failed plan merge with its Retry/task link after reload.
