@@ -8,18 +8,18 @@ it('public-only answers do not read the allowlist, and resolve once', async () =
   const privateAllowlist = vi.fn(() => {
     throw new Error('must not read');
   });
-  expect(await resolveGuardedAddress('public.test', { resolve, privateAllowlist })).toBe(
+  expect(await resolveGuardedAddress('public.test', { resolve, privateAllowlist })).toEqual([
     '93.184.216.34',
-  );
+  ]);
   expect(resolve).toHaveBeenCalledExactlyOnceWith('public.test');
   expect(privateAllowlist).not.toHaveBeenCalled();
 });
 it('classifies literals without DNS and accepts bracketed IPv6', async () => {
   const resolve = vi.fn();
   const privateAllowlist = () => EMPTY;
-  expect(await resolveGuardedAddress('[2606:4700:4700::1111]', { resolve })).toBe(
+  expect(await resolveGuardedAddress('[2606:4700:4700::1111]', { resolve })).toEqual([
     '2606:4700:4700::1111',
-  );
+  ]);
   await expect(
     resolveGuardedAddress('127.0.0.1', { resolve, privateAllowlist }),
   ).rejects.toMatchObject({ code: 'ENOTFOUND', syscall: 'getaddrinfo', hostname: '127.0.0.1' });
@@ -44,7 +44,7 @@ it.each(['internal.test', '10.0.0.0/8'])('lifts private answers through %s', asy
       resolve: async () => [{ address: '10.1.2.3', family: 4 }],
       privateAllowlist: () => parseAllowlist(entry),
     }),
-  ).toBe('10.1.2.3');
+  ).toEqual(['10.1.2.3']);
 });
 it('returns the same error for a refused and a missing name', async () => {
   const privateAllowlist = () => EMPTY;
@@ -69,4 +69,15 @@ it('propagates a configuration outage without dialing', async () => {
       },
     }),
   ).rejects.toBe(outage);
+});
+
+it('returns every checked public address for transport failover', async () => {
+  expect(
+    await resolveGuardedAddress('public.test', {
+      resolve: async () => [
+        { address: '93.184.216.34', family: 4 },
+        { address: '2606:4700:4700::1111', family: 6 },
+      ],
+    }),
+  ).toEqual(['93.184.216.34', '2606:4700:4700::1111']);
 });

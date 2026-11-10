@@ -175,6 +175,20 @@ it('matches URL-specific overrides against the HTTP transport without userinfo',
   ]);
   expect(pin.stdout.trim()).toBe('public.test:443:93.184.216.34');
 });
+it('pins every checked public address for HTTP failover and keeps the first for SSH', async () => {
+  seams.resolve.mockResolvedValue([
+    { address: '93.184.216.34', family: 4 },
+    { address: '2606:4700:4700::1111', family: 6 },
+  ]);
+  const args = await guardArgs(['https://public.test/r', 'git@public.test:r'], 'user');
+  const pin = 'public.test:443:93.184.216.34,[2606:4700:4700::1111]';
+  expect(args).toContain(`http.curloptResolve=${pin}`);
+  expect(args).toContain(`http.https://public.test/r.curloptResolve=${pin}`);
+  expect(args).toContain(
+    'core.sshCommand=ssh -o HostName=93.184.216.34 -o HostKeyAlias=public.test',
+  );
+  expect(seams.resolve).toHaveBeenCalledTimes(1);
+});
 it('brackets a pinned IPv6 address', async () => {
   seams.resolve.mockResolvedValue([{ address: '2606:4700:4700::1111', family: 6 }]);
   expect(await guardArgs(['https://public.test/r'], 'user')).toContain(

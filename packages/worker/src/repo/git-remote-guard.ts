@@ -35,7 +35,7 @@ export async function gitRemoteGuardArgs(
     columns: { role: true },
   });
   if (user?.role === 'admin') return [];
-  const addresses = new Map<string, string>();
+  const addresses = new Map<string, string[]>();
   const http = new Map<string, string>();
   const httpUrls = new Map<string, string>();
   const ssh = new Map<string, string>();
@@ -54,11 +54,12 @@ export async function gitRemoteGuardArgs(
       }
       addresses.set(host, address);
     }
-    if (isSsh) ssh.set(host, address);
+    if (isSsh) ssh.set(host, address[0]!);
     else {
       const authority = `${host.includes(':') ? `[${host}]` : host}:${port}`;
-      const pin = `${authority}:${address.includes(':') ? `[${address}]` : address}`;
-      http.set(authority, address);
+      const pinned = address.map((entry) => (entry.includes(':') ? `[${entry}]` : entry)).join(',');
+      const pin = `${authority}:${pinned}`;
+      http.set(authority, pinned);
       const url = new URL(redactGitUrl(remote, true));
       url.password = '';
       url.search = '';
@@ -68,10 +69,7 @@ export async function gitRemoteGuardArgs(
   }
   const argv: string[] = [];
   for (const [authority, address] of http) {
-    argv.push(
-      '-c',
-      `http.curloptResolve=${authority}:${address.includes(':') ? `[${address}]` : address}`,
-    );
+    argv.push('-c', `http.curloptResolve=${authority}:${address}`);
   }
   if (http.size) argv.push('-c', 'http.followRedirects=false');
   for (const [url, pin] of httpUrls) {
