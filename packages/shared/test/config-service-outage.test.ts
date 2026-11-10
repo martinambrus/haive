@@ -255,6 +255,9 @@ describe('ConfigService while Redis is unavailable', () => {
     try {
       await expect(svc.getEncryptionKey()).rejects.toThrow('does not match');
       await expect(svc.getEncryptionKey()).rejects.toThrow('does not match');
+      // After the cached null expires the ordinary read sees the winner and must still refuse it.
+      svc.clearCache();
+      await expect(svc.getEncryptionKey()).rejects.toThrow('does not match');
     } finally {
       process.env.NODE_ENV = oldEnv;
     }

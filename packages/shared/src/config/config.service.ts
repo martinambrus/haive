@@ -1116,6 +1116,10 @@ export class ConfigService {
       }
       throw new Error('Encryption key not found');
     }
+    // Production refuses a mismatch on every read, not only while a cached null lasts; elsewhere
+    // the boot check already warned once.
+    if (process.env.NODE_ENV === 'production')
+      this.checkEncryptionKey(key, this.getEnvEncryptionKey());
     return key;
   }
 
