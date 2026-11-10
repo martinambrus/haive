@@ -6,6 +6,7 @@ import {
 import { eq, inArray, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
+import { allowAudit, refuseAudit } from './security-audit-db.js';
 
 const url = process.env.MODULE_DEACTIVATION_API_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/module_deactivation_api_test'))
@@ -22,6 +23,8 @@ const h = vi.hoisted(() => ({
   killable: '',
   onKill: undefined as ((taskId: string) => Promise<void>) | undefined,
   eventFails: false,
+  workerReport: null as string | null,
+  teardownAdd: vi.fn(),
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -46,8 +49,12 @@ vi.mock('../src/lib/sandbox-kill.js', () => ({
     return taskId === h.killable ? 1 : 0;
   },
 }));
-vi.mock('../src/redis.js', () => ({ getRedis: () => ({ get: async () => null }) }));
-vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: async () => undefined }) }));
+vi.mock('../src/redis.js', () => ({ getRedis: () => ({ get: async () => h.workerReport }) }));
+vi.mock('../src/queues.js', () => ({
+  getTaskQueue: () => ({ add: async () => undefined }),
+  getModuleControlQueue: () => ({ add: h.teardownAdd }),
+  getModuleControlQueueEvents: () => ({}),
+}));
 vi.mock('../src/middleware/auth.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('../src/middleware/auth.js')>();
   return {
@@ -270,6 +277,8 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
     h.killable = '';
     h.onKill = undefined;
     h.eventFails = false;
+    h.workerReport = null;
+    h.teardownAdd.mockReset();
     selects = 0;
     await clean();
     for (const id of ['alpha', 'alpha-two', 'beta', 'gamma']) await setModule(id);
@@ -2065,5 +2074,57 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
         expect(await audits()).toEqual([]);
       },
     );
+  });
+  describe('teardown launch audit on Postgres', () => {
+    beforeEach(async () => {
+      await db
+        .update(schema.modules)
+        .set({ deactivatedAt: new Date() })
+        .where(eq(schema.modules.moduleId, 'alpha'));
+      h.workerReport = JSON.stringify({
+        at: new Date().toISOString(),
+        modules: [{ id: 'alpha', version: '1.0.0' }],
+      });
+    });
+
+    it.each(['success', 'reject', 'missing-id'])(
+      '%s sees its committed row without holding a transaction',
+      async (outcome) => {
+        let visible = 0;
+        let openTransactions = -1;
+        h.teardownAdd.mockImplementation(async () => {
+          visible = (await audits()).length;
+          const [row] = await db.execute(sql`
+          SELECT count(*)::int AS count FROM pg_stat_activity
+          WHERE datname = current_database() AND state = 'idle in transaction'
+        `);
+          openTransactions = Number(row!.count);
+          if (outcome === 'reject') throw new Error('queue refused');
+          return {
+            id: outcome === 'missing-id' ? undefined : 'teardown-job',
+            waitUntilFinished: async () => ({
+              moduleId: 'alpha',
+              tornDownAt: new Date().toISOString(),
+            }),
+          };
+        });
+        const result = await send('POST', '/modules/alpha/teardown');
+        expect(result.status).toBe(outcome === 'success' ? 200 : 500);
+        expect(visible).toBe(1);
+        expect(openTransactions).toBe(0);
+        expect(await audits()).toHaveLength(outcome === 'success' ? 1 : 0);
+      },
+    );
+
+    it('an audit refusal queues nothing', async () => {
+      await refuseAudit(db, ACTOR);
+      try {
+        expect((await send('POST', '/modules/alpha/teardown')).status).toBe(500);
+        expect(h.teardownAdd).not.toHaveBeenCalled();
+        expect(await audits()).toEqual([]);
+      } finally {
+        await allowAudit(db);
+      }
+    });
   });
 });

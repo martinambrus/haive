@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   beginModuleDrain,
   cancelModuleDrain,
@@ -5,7 +6,7 @@ import {
 } from '@haive/shared/modularity-server';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { Hono } from 'hono';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { isLockNotAvailable, schema } from '@haive/database';
 import {
@@ -37,7 +38,6 @@ import {
 } from '@haive/shared/module-host';
 import { HttpError, type AppEnv } from '../context.js';
 import { getDb } from '../db.js';
-import { AUDITED_QUEUE_ADD_WAIT_MS, boundedAdd } from '../lib/queue-bounded.js';
 import {
   insertAuditEvent,
   logAuditEvent,
@@ -408,24 +408,33 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
       targetId: null,
       metadata: { moduleId: id },
     };
-    const job = await getDb().transaction(async (tx) => {
-      await insertAuditEvent(tx, event);
-      const job = await boundedAdd(
-        () =>
-          getModuleControlQueue().add(
-            MODULE_CONTROL_JOB_NAMES.TEARDOWN,
-            { moduleId: id } satisfies ModuleTeardownPayload,
-            {
-              deduplication: { id: `module-teardown-${id}` },
-              removeOnComplete: 100,
-              removeOnFail: 100,
-            },
-          ),
-        AUDITED_QUEUE_ADD_WAIT_MS,
+    const db = getDb();
+    const auditId = randomUUID();
+    await db.transaction((tx) => insertAuditEvent(tx, event, { id: auditId }));
+    // Redis can wait indefinitely: keep the required row committed without holding a connection.
+    let job: Awaited<ReturnType<ReturnType<typeof getModuleControlQueue>['add']>>;
+    try {
+      job = await getModuleControlQueue().add(
+        MODULE_CONTROL_JOB_NAMES.TEARDOWN,
+        { moduleId: id } satisfies ModuleTeardownPayload,
+        {
+          deduplication: { id: `module-teardown-${id}` },
+          removeOnComplete: 100,
+          removeOnFail: 100,
+        },
       );
       if (!job.id) throw new HttpError(500, 'Module teardown was not queued');
-      return job;
-    });
+    } catch (err) {
+      try {
+        await db.delete(schema.auditEvents).where(eq(schema.auditEvents.id, auditId));
+      } catch (cleanupError) {
+        logger.error(
+          { err: cleanupError, auditId },
+          'failed to remove the failed teardown launch audit',
+        );
+      }
+      throw err;
+    }
     logAuditEvent(event);
     let result: ModuleTeardownResult;
     try {

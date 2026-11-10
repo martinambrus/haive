@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { and, asc, desc, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
@@ -44,7 +45,6 @@ import {
   parseClaudeAuthCode,
 } from '@haive/shared/claude-oauth';
 import { getDb } from '../db.js';
-import { AUDITED_QUEUE_ADD_WAIT_MS, boundedAdd } from '../lib/queue-bounded.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { getRedis } from '../redis.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -796,15 +796,24 @@ cliProviderRoutes.post('/:id/sign-out', async (c) => {
     targetType: 'cli_provider',
     targetId: provider.id,
   };
-  const job = await db.transaction(async (tx) => {
-    await insertAuditEvent(tx, event);
-    const queued = await boundedAdd(
-      () => queue.add(CLI_EXEC_JOB_NAMES.SIGN_OUT, payload, CLI_POLLABLE_JOB_OPTS),
-      AUDITED_QUEUE_ADD_WAIT_MS,
-    );
-    if (!queued.id) throw new HttpError(500, 'sign-out was not queued', 'sign_out_enqueue_failed');
-    return queued;
-  });
+  const auditId = randomUUID();
+  await db.transaction((tx) => insertAuditEvent(tx, event, { id: auditId }));
+  // Redis can wait indefinitely: keep the required row committed without holding a connection.
+  let job: Awaited<ReturnType<typeof queue.add>>;
+  try {
+    job = await queue.add(CLI_EXEC_JOB_NAMES.SIGN_OUT, payload, CLI_POLLABLE_JOB_OPTS);
+    if (!job.id) throw new HttpError(500, 'sign-out was not queued', 'sign_out_enqueue_failed');
+  } catch (err) {
+    try {
+      await db.delete(schema.auditEvents).where(eq(schema.auditEvents.id, auditId));
+    } catch (cleanupError) {
+      logger.error(
+        { err: cleanupError, auditId },
+        'failed to remove the failed sign-out launch audit',
+      );
+    }
+    throw err;
+  }
   logAuditEvent(event);
 
   return c.json({ jobId: job.id }, 202);

@@ -1,5 +1,8 @@
 import { randomBytes } from 'node:crypto';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import { logger } from '@haive/shared';
 import { DrizzleQueryError } from 'drizzle-orm/errors';
 
 const ACTOR = '00000000-0000-4000-8000-0000000000a1';
@@ -14,10 +17,15 @@ const h = vi.hoisted(() => ({
   waits: [] as unknown[][],
   settle: (async () => ({})) as () => Promise<unknown>,
   state: 'active' as string,
-  audits: [] as unknown[],
+  audits: [] as { id?: string; [key: string]: unknown }[],
+  auditLog: vi.fn(),
+  remove: vi.fn(),
+  transactionOpen: false,
+  commitError: false,
+  jobId: 'job-1' as string | undefined,
+  onAdd: undefined as (() => Promise<void>) | undefined,
   auditError: false,
   enqueueError: false,
-  enqueueHang: false,
 }));
 
 vi.mock('../src/middleware/auth.js', async (importOriginal) => {
@@ -38,23 +46,35 @@ vi.mock('../src/db.js', () => ({
   getDb: () => ({
     select: () => ({ from: async () => h.rows }),
     transaction: async (run: (tx: unknown) => unknown) => {
+      const before = [...h.audits];
+      h.transactionOpen = true;
       try {
-        return await run({});
+        const result = await run({});
+        if (h.commitError) throw new Error('commit refused');
+        return result;
       } catch (err) {
-        h.audits = [];
+        h.audits = before;
         throw err;
+      } finally {
+        h.transactionOpen = false;
       }
     },
+    delete: () => ({ where: h.remove }),
   }),
 }));
 vi.mock('../src/redis.js', () => ({ getRedis: () => ({ get: async () => h.report }) }));
 vi.mock('../src/lib/audit.js', () => ({
-  recordAuditEvent: async (_db: unknown, event: unknown) => void h.audits.push(event),
-  insertAuditEvent: async (_db: unknown, event: unknown) => {
+  recordAuditEvent: async (_db: unknown, event: Record<string, unknown>) =>
+    void h.audits.push(event),
+  insertAuditEvent: async (
+    _db: unknown,
+    event: Record<string, unknown>,
+    options?: { id?: string },
+  ) => {
     if (h.auditError) throw new Error('audit refused');
-    h.audits.push(event);
+    h.audits.push({ ...event, ...(options?.id ? { id: options.id } : {}) });
   },
-  logAuditEvent: () => {},
+  logAuditEvent: h.auditLog,
 }));
 vi.mock('../src/modules/activation.js', () => ({
   deactivatedModuleIds: async () => new Set<string>(),
@@ -64,11 +84,11 @@ vi.mock('../src/modules/activation.js', () => ({
 vi.mock('../src/queues.js', () => ({
   getModuleControlQueue: () => ({
     add: async (...args: unknown[]) => {
-      if (h.enqueueHang) return new Promise<never>(() => {});
+      await h.onAdd?.();
       if (h.enqueueError) throw new Error('queue refused');
       h.added.push(args);
       return {
-        id: 'job-1',
+        id: h.jobId,
         waitUntilFinished: (...wait: unknown[]) => {
           h.waits.push(wait);
           return h.settle();
@@ -152,8 +172,18 @@ beforeEach(() => {
   h.audits = [];
   h.auditError = false;
   h.enqueueError = false;
-  h.enqueueHang = false;
+  h.transactionOpen = false;
+  h.commitError = false;
+  h.jobId = 'job-1';
+  h.onAdd = undefined;
+  h.auditLog.mockReset();
+  h.remove.mockReset().mockImplementation(async (where: SQL) => {
+    const id = new PgDialect().sqlToQuery(where).params[0];
+    h.audits = h.audits.filter((row) => row.id !== id);
+  });
 });
+
+afterEach(() => vi.restoreAllMocks());
 
 describe('POST /modules/:id/teardown, before anything is queued', () => {
   it('refuses a user', async () => {
@@ -209,7 +239,7 @@ describe('POST /modules/:id/teardown, once the module is eligible', () => {
 
   it('audits the request once, with the module id, as soon as the job is queued', async () => {
     await teardown('alpha');
-    expect(h.audits).toEqual([
+    expect(h.audits).toMatchObject([
       {
         actorUserId: ACTOR,
         action: 'module.teardown',
@@ -286,20 +316,83 @@ it('rolls back teardown audit when enqueue fails', async () => {
   expect(h.audits).toEqual([]);
 });
 
-it('bounds teardown enqueue to ten seconds and rolls its audit back', async () => {
+it('keeps a committed teardown row while enqueue waits without a transaction', async () => {
   vi.useFakeTimers();
-  try {
-    h.enqueueHang = true;
-    let response: Response | undefined;
-    void Promise.resolve(teardown('alpha')).then((r) => {
-      response = r;
+  let release!: () => void;
+  let reached!: () => void;
+  const adding = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  h.onAdd = () => {
+    reached();
+    return new Promise<void>((resolve) => {
+      release = resolve;
     });
-    await vi.advanceTimersByTimeAsync(9_999);
-    expect(response).toBeUndefined();
-    await vi.advanceTimersByTimeAsync(1);
-    expect(response?.status).toBe(500);
-    expect(h.audits).toEqual([]);
+  };
+  const request = Promise.resolve(teardown('alpha'));
+  try {
+    await adding;
+    expect(h.transactionOpen).toBe(false);
+    expect(h.audits).toHaveLength(1);
+    expect(h.auditLog).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(h.audits).toHaveLength(1);
+    expect(h.transactionOpen).toBe(false);
+    expect(h.auditLog).not.toHaveBeenCalled();
   } finally {
+    release();
+    await request;
     vi.useRealTimers();
   }
+  expect((await request).status).toBe(200);
+  expect(h.audits).toHaveLength(1);
+  expect(h.auditLog).toHaveBeenCalledOnce();
+});
+
+it.each(['reject', 'missing-id'])(
+  'compensates only this teardown row on %s and does not log success',
+  async (failure) => {
+    const prior = { id: 'prior', action: 'module.teardown', metadata: { moduleId: 'alpha' } };
+    h.audits.push(prior);
+    let transactionAtAdd: boolean | undefined;
+    let rowsAtAdd = 0;
+    let loggedAtAdd = false;
+    h.onAdd = async () => {
+      transactionAtAdd = h.transactionOpen;
+      rowsAtAdd = h.audits.length;
+      loggedAtAdd = h.auditLog.mock.calls.length > 0;
+    };
+    h.enqueueError = failure === 'reject';
+    if (failure === 'missing-id') h.jobId = undefined;
+    expect((await teardown('alpha')).status).toBe(500);
+    expect(transactionAtAdd).toBe(false);
+    expect(rowsAtAdd).toBe(2);
+    expect(loggedAtAdd).toBe(false);
+    expect(h.audits).toEqual([prior]);
+    expect(h.remove).toHaveBeenCalledOnce();
+    expect(h.auditLog).not.toHaveBeenCalled();
+  },
+);
+
+it('preserves and logs a failed teardown compensation without replacing the enqueue error', async () => {
+  const error = vi.spyOn(logger, 'error').mockImplementation(() => {});
+  h.remove.mockRejectedValue(new Error('delete refused'));
+  h.jobId = undefined;
+  const result = await teardown('alpha');
+  expect(result.status).toBe(500);
+  expect(await result.json()).toMatchObject({ error: 'Module teardown was not queued' });
+  expect(h.audits).toHaveLength(1);
+  expect(error).toHaveBeenCalledWith(
+    expect.objectContaining({ err: expect.any(Error), auditId: expect.any(String) }),
+    expect.stringContaining('audit'),
+  );
+  expect(h.auditLog).not.toHaveBeenCalled();
+});
+
+it('a teardown audit commit failure queues nothing', async () => {
+  h.commitError = true;
+  expect((await teardown('alpha')).status).toBe(500);
+  expect(h.added).toEqual([]);
+  expect(h.audits).toEqual([]);
+  expect(h.auditLog).not.toHaveBeenCalled();
 });

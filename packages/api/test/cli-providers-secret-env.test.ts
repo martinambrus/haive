@@ -1,12 +1,18 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
+  transactionOpen: false,
+  auditLog: vi.fn(),
   add: vi.fn(async (..._args: unknown[]) => undefined),
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/lib/audit.js', async (original) => ({
+  ...(await original<typeof import('../src/lib/audit.js')>()),
+  logAuditEvent: h.auditLog,
+}));
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
     c.set('userId', USER);
@@ -21,7 +27,13 @@ vi.mock('../src/queues.js', () => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { configService, DEFAULT_AGENT_RULES, envelopeDecrypt, secretsService } from '@haive/shared';
+import {
+  configService,
+  DEFAULT_AGENT_RULES,
+  envelopeDecrypt,
+  logger,
+  secretsService,
+} from '@haive/shared';
 import { cliProviderRoutes } from '../src/routes/cli-providers.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -51,6 +63,15 @@ function setup(existing = false) {
       envVars: { ANTHROPIC_BASE_URL: 'https://old.example' },
     });
   }
+  const transaction = fake.db.transaction.bind(fake.db);
+  fake.db.transaction = async (fn) => {
+    h.transactionOpen = true;
+    try {
+      return await transaction(fn);
+    } finally {
+      h.transactionOpen = false;
+    }
+  };
   h.db = fake.db;
   return fake;
 }
@@ -66,11 +87,15 @@ function send(method: string, path: string, body: Record<string, unknown>) {
 const ENV = { ANTHROPIC_BASE_URL: 'https://api.example', ANTHROPIC_API_KEY: SECRET_VALUE };
 
 beforeEach(() => {
+  h.transactionOpen = false;
+  h.auditLog.mockReset();
   h.add.mockReset();
   h.add.mockResolvedValue(undefined);
   vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue(KEK);
   vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 });
+
+afterEach(() => vi.restoreAllMocks());
 
 function secretValues(fake: ReturnType<typeof setup>): Record<string, string> {
   return Object.fromEntries(
@@ -285,23 +310,38 @@ it('does not audit a network policy whose object key order differs', async () =>
   expect(fake.rows(schema.auditEvents)).toEqual([]);
 });
 
-it('bounds sign-out enqueue to ten seconds and rolls its audit back', async () => {
+it('keeps a committed sign-out row while enqueue waits without a transaction', async () => {
   const fake = setup(true);
   vi.useFakeTimers();
-  try {
-    h.add.mockImplementation(() => new Promise<never>(() => {}));
-    let response: Response | undefined;
-    void Promise.resolve(send('POST', '/' + PROVIDER + '/sign-out', {})).then((r) => {
-      response = r;
+  let release!: (value: never) => void;
+  let reached!: () => void;
+  const adding = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  h.add.mockImplementation(() => {
+    reached();
+    return new Promise((resolve) => {
+      release = resolve;
     });
-    await vi.advanceTimersByTimeAsync(9_999);
-    expect(response).toBeUndefined();
-    await vi.advanceTimersByTimeAsync(1);
-    expect(response?.status).toBe(500);
-    expect(fake.rows(schema.auditEvents)).toEqual([]);
+  });
+  const request = Promise.resolve(send('POST', '/' + PROVIDER + '/sign-out', {}));
+  try {
+    await adding;
+    expect(h.transactionOpen).toBe(false);
+    expect(fake.rows(schema.auditEvents)).toHaveLength(1);
+    expect(h.auditLog).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fake.rows(schema.auditEvents)).toHaveLength(1);
+    expect(h.transactionOpen).toBe(false);
+    expect(h.auditLog).not.toHaveBeenCalled();
   } finally {
+    release({ id: 'late-job' } as never);
+    await request;
     vi.useRealTimers();
   }
+  expect((await request).status).toBe(202);
+  expect(fake.rows(schema.auditEvents)).toHaveLength(1);
+  expect(h.auditLog).toHaveBeenCalledOnce();
 });
 
 describe('empty provider security values are audit no-ops', () => {
@@ -391,4 +431,65 @@ it('records rules and Modelfile updates by name without their content', async ()
     { action: 'cli_provider.update', metadata: { fields: ['rulesContent', 'modelfile'] } },
   ]);
   expect(JSON.stringify(fake.rows(schema.auditEvents))).not.toContain('hidden');
+});
+
+it.each(['reject', 'missing-id'])(
+  'compensates only this sign-out row on %s and does not log success',
+  async (failure) => {
+    const fake = setup(true);
+    fake.insert(schema.auditEvents, {
+      actorUserId: USER,
+      action: 'cli_provider.sign_out',
+      targetType: 'cli_provider',
+      targetId: PROVIDER,
+    });
+    const before = fake.rows(schema.auditEvents);
+    let transactionAtAdd: boolean | undefined;
+    let rowsAtAdd = 0;
+    let loggedAtAdd = false;
+    h.add.mockImplementation(async () => {
+      transactionAtAdd = h.transactionOpen;
+      rowsAtAdd = fake.rows(schema.auditEvents).length;
+      loggedAtAdd = h.auditLog.mock.calls.length > 0;
+      if (failure === 'reject') throw new Error('queue refused');
+      return {} as never;
+    });
+    const result = await send('POST', '/' + PROVIDER + '/sign-out', {});
+    expect(result.status).toBe(500);
+    expect(transactionAtAdd).toBe(false);
+    expect(rowsAtAdd).toBe(2);
+    expect(loggedAtAdd).toBe(false);
+    expect(fake.rows(schema.auditEvents)).toEqual(before);
+    expect(h.auditLog).not.toHaveBeenCalled();
+  },
+);
+
+it('preserves and logs a failed sign-out compensation without replacing the enqueue error', async () => {
+  const fake = setup(true);
+  const error = vi.spyOn(logger, 'error').mockImplementation(() => {});
+  fake.hooks.beforeDelete = async () => {
+    throw new Error('delete refused');
+  };
+  h.add.mockResolvedValue({} as never);
+  const result = await send('POST', '/' + PROVIDER + '/sign-out', {});
+  expect(result.status).toBe(500);
+  expect(await result.json()).toMatchObject({ code: 'sign_out_enqueue_failed' });
+  expect(fake.rows(schema.auditEvents)).toHaveLength(1);
+  expect(error).toHaveBeenCalledWith(
+    expect.objectContaining({ err: expect.any(Error), auditId: expect.any(String) }),
+    expect.stringContaining('audit'),
+  );
+  expect(h.auditLog).not.toHaveBeenCalled();
+});
+
+it('a sign-out audit commit failure queues nothing', async () => {
+  const fake = setup(true);
+  h.add.mockResolvedValue({ id: 'job-1' } as never);
+  fake.hooks.beforeCommit = async () => {
+    throw new Error('commit refused');
+  };
+  expect((await send('POST', '/' + PROVIDER + '/sign-out', {})).status).toBe(500);
+  expect(h.add).not.toHaveBeenCalled();
+  expect(fake.rows(schema.auditEvents)).toEqual([]);
+  expect(h.auditLog).not.toHaveBeenCalled();
 });

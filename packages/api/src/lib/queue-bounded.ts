@@ -6,9 +6,6 @@ import { HttpError } from '../context.js';
  *  request awaiting it would hang. */
 export const QUEUE_ADD_WAIT_MS = 2_000;
 
-/** Maximum Redis wait while an audit transaction holds a main-database connection. */
-export const AUDITED_QUEUE_ADD_WAIT_MS = 10_000;
-
 /** Awaits `add()` for at most `waitMs`; rejects on the add's own rejection or on the timeout.
  *  The add is not cancelled: after a timeout it can still land, so only queue work that is
  *  idempotent or guarded by the worker. A late rejection is swallowed. */

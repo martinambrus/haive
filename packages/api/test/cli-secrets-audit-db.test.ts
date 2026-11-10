@@ -20,6 +20,7 @@ const h = vi.hoisted(() => ({
   actor: '',
   exchange: vi.fn(),
   poll: vi.fn(),
+  add: vi.fn(),
   stash: '',
   auditInsert: vi.fn(),
   auditLog: vi.fn(),
@@ -29,9 +30,9 @@ vi.mock('../src/lib/audit.js', async (original) => {
   const real = await original<any>();
   return {
     ...real,
-    insertAuditEvent: async (db: any, event: any) => {
+    insertAuditEvent: async (db: any, event: any, options?: { id?: string }) => {
       h.auditInsert(event);
-      return real.insertAuditEvent(db, event);
+      return real.insertAuditEvent(db, event, options);
     },
     logAuditEvent: (event: any) => {
       h.auditLog(event);
@@ -47,7 +48,7 @@ vi.mock('../src/middleware/auth.js', () => ({
 }));
 vi.mock('../src/queues.js', () => ({
   getUsagePollQueue: () => ({ add: h.poll }),
-  getCliExecQueue: () => ({ add: vi.fn(async () => ({})) }),
+  getCliExecQueue: () => ({ add: h.add }),
 }));
 vi.mock('../src/redis.js', () => ({ getRedis: () => ({ eval: async () => h.stash }) }));
 vi.mock('@haive/shared/claude-oauth', async (original) => ({
@@ -101,6 +102,7 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
     });
     h.stash = JSON.stringify({ verifier: 'synthetic-verifier', state: 'state' });
     h.poll.mockReset().mockResolvedValue(undefined);
+    h.add.mockReset().mockResolvedValue({});
   });
   afterEach(async () => {
     await allowAudit(db);
@@ -452,4 +454,35 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
     expect(await secrets()).toHaveLength(2);
     expect(await audits(db)).toHaveLength(3);
   }, 30_000);
+  it.each(['success', 'reject', 'missing-id'])(
+    'sign-out %s sees its committed audit outside a transaction',
+    async (outcome) => {
+      let visible = 0;
+      let openTransactions = -1;
+      h.add.mockImplementation(async () => {
+        visible = (await audits(db)).length;
+        const [row] = await db.execute(sql`
+        SELECT count(*)::int AS count FROM pg_stat_activity
+        WHERE datname = current_database() AND state = 'idle in transaction'
+      `);
+        openTransactions = Number(row!.count);
+        if (outcome === 'reject') throw new Error('queue refused');
+        return outcome === 'missing-id' ? {} : { id: 'sign-out-job' };
+      });
+      const result = await send('POST', 'sign-out');
+      expect(result.status).toBe(outcome === 'success' ? 202 : 500);
+      expect(visible).toBe(1);
+      expect(openTransactions).toBe(0);
+      expect(await audits(db)).toHaveLength(outcome === 'success' ? 1 : 0);
+      expect(h.auditLog).toHaveBeenCalledTimes(outcome === 'success' ? 1 : 0);
+    },
+  );
+
+  it('a refused sign-out audit queues nothing on Postgres', async () => {
+    await refuseAudit(db, h.actor);
+    expect((await send('POST', 'sign-out')).status).toBe(500);
+    expect(h.add).not.toHaveBeenCalled();
+    expect(await audits(db)).toEqual([]);
+    expect(h.auditLog).not.toHaveBeenCalled();
+  });
 });
