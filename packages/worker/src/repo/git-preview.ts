@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
+import { HAIVE_DATA_FILES } from '@haive/shared';
+import { PROJECT_STATE_DIR } from '@haive/shared/project-state';
 import { removeNoFollow } from '@haive/shared/fs-safe';
 import { parsePorcelainZ } from '../step-engine/steps/workflow/_commit-diff.js';
 import { PROJECTION_TEMP_EXCLUDE } from './git-stage.js';
@@ -10,9 +12,9 @@ import { GIT_MAX_BUFFER, gitRun } from './git-exec.js';
 export const RUN_APP_PATHSPECS = [
   '.',
   ':(top,exclude,glob).haive/**',
-  ':(top,exclude).haive-data/state',
-  ':(top,exclude).haive-data/plan.json',
-  ':(top,exclude).haive-data/plan.md',
+  ...[PROJECT_STATE_DIR, HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown].map(
+    (rel) => `:(top,exclude)${rel}`,
+  ),
   PROJECTION_TEMP_EXCLUDE,
 ];
 
@@ -79,8 +81,8 @@ export async function gitPreview(cwd: string, paths?: readonly string[]): Promis
       throw new Error(`git preview paths failed: ${listed.stderr || listed.stdout}`);
     return { head, ref, tree, paths: listed.stdout.split('\0').filter(Boolean) };
   } finally {
-    await removeNoFollow(os.tmpdir(), name);
-    await removeNoFollow(os.tmpdir(), `${name}.lock`);
+    await removeNoFollow(os.tmpdir(), name).catch(() => false);
+    await removeNoFollow(os.tmpdir(), `${name}.lock`).catch(() => false);
   }
 }
 
@@ -103,14 +105,27 @@ export async function commitGitPreview(
   );
   if (made.code !== 0) throw new Error(`git preview commit failed: ${made.stderr || made.stdout}`);
   const moved = await gitRun(cwd, ['update-ref', preview.ref, made.stdout.trim(), preview.head]);
-  if (moved.code !== 0)
+  if (moved.code !== 0) {
+    // Verify a lost compare-and-swap through the ref, not git's translated error text.
+    // A killed run or a lock/permission failure alone says nothing about the branch.
+    if (moved.code > 0) {
+      const actual = await gitRun(cwd, ['rev-parse', '--verify', preview.ref]);
+      if (actual.code === 0 && actual.stdout.trim() !== preview.head) {
+        throw new Error(
+          'The branch changed since the commit preview. Reopen it and review the current edits before committing.',
+        );
+      }
+    }
     throw new Error(
-      'The branch changed since the commit preview. Reopen it and review the current edits before committing.',
+      `git update-ref failed: ${moved.stderr || moved.stdout || `exit ${moved.code}`}`,
     );
+  }
+  // Path reset also accepts a deleted source absent from both the tree and the index
+  // (a staged rename). Restore rejects that source after the commit already landed.
   const restore = await gitRun(cwd, [
-    'restore',
-    '--staged',
-    `--source=${preview.tree}`,
+    'reset',
+    '--quiet',
+    preview.tree,
     '--',
     ...preview.paths.map((p) => `:(top,literal)${p}`),
   ]);
