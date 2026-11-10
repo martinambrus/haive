@@ -44,6 +44,7 @@ import {
   parseClaudeAuthCode,
 } from '@haive/shared/claude-oauth';
 import { getDb } from '../db.js';
+import { AUDITED_QUEUE_ADD_WAIT_MS, boundedAdd } from '../lib/queue-bounded.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { getRedis } from '../redis.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -770,7 +771,10 @@ cliProviderRoutes.post('/:id/sign-out', async (c) => {
   };
   const job = await db.transaction(async (tx) => {
     await insertAuditEvent(tx, event);
-    const queued = await queue.add(CLI_EXEC_JOB_NAMES.SIGN_OUT, payload, CLI_POLLABLE_JOB_OPTS);
+    const queued = await boundedAdd(
+      () => queue.add(CLI_EXEC_JOB_NAMES.SIGN_OUT, payload, CLI_POLLABLE_JOB_OPTS),
+      AUDITED_QUEUE_ADD_WAIT_MS,
+    );
     if (!queued.id) throw new HttpError(500, 'sign-out was not queued', 'sign_out_enqueue_failed');
     return queued;
   });

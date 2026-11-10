@@ -17,6 +17,7 @@ const h = vi.hoisted(() => ({
   audits: [] as unknown[],
   auditError: false,
   enqueueError: false,
+  enqueueHang: false,
 }));
 
 vi.mock('../src/middleware/auth.js', async (importOriginal) => {
@@ -63,6 +64,7 @@ vi.mock('../src/modules/activation.js', () => ({
 vi.mock('../src/queues.js', () => ({
   getModuleControlQueue: () => ({
     add: async (...args: unknown[]) => {
+      if (h.enqueueHang) return new Promise<never>(() => {});
       if (h.enqueueError) throw new Error('queue refused');
       h.added.push(args);
       return {
@@ -150,6 +152,7 @@ beforeEach(() => {
   h.audits = [];
   h.auditError = false;
   h.enqueueError = false;
+  h.enqueueHang = false;
 });
 
 describe('POST /modules/:id/teardown, before anything is queued', () => {
@@ -281,4 +284,22 @@ it('rolls back teardown audit when enqueue fails', async () => {
   h.enqueueError = true;
   expect((await teardown('alpha')).status).toBe(500);
   expect(h.audits).toEqual([]);
+});
+
+it('bounds teardown enqueue to ten seconds and rolls its audit back', async () => {
+  vi.useFakeTimers();
+  try {
+    h.enqueueHang = true;
+    let response: Response | undefined;
+    void Promise.resolve(teardown('alpha')).then((r) => {
+      response = r;
+    });
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(response).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(response?.status).toBe(500);
+    expect(h.audits).toEqual([]);
+  } finally {
+    vi.useRealTimers();
+  }
 });

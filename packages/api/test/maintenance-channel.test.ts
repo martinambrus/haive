@@ -2,8 +2,17 @@ import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 
-const h = vi.hoisted(() => ({ spawn: vi.fn(), insert: vi.fn(), rows: [] as unknown[] }));
+const h = vi.hoisted(() => ({
+  spawn: vi.fn(),
+  insert: vi.fn(),
+  remove: vi.fn(),
+  auditLog: vi.fn(),
+  rows: [] as unknown[],
+  transactionOpen: false,
+}));
 vi.mock('node:child_process', async (original) => ({
   ...(await original<typeof import('node:child_process')>()),
   spawn: h.spawn,
@@ -11,14 +20,22 @@ vi.mock('node:child_process', async (original) => ({
 vi.mock('../src/db.js', () => ({
   getDb: () => ({
     transaction: async (fn: (tx: unknown) => unknown) => {
+      h.transactionOpen = true;
       try {
         return await fn({ insert: () => ({ values: h.insert }) });
       } catch (err) {
         h.rows = [];
         throw err;
+      } finally {
+        h.transactionOpen = false;
       }
     },
+    delete: () => ({ where: h.remove }),
   }),
+}));
+vi.mock('../src/lib/audit.js', async (original) => ({
+  ...(await original<typeof import('../src/lib/audit.js')>()),
+  logAuditEvent: h.auditLog,
 }));
 vi.mock('../src/lib/upgrade-run.js', () => ({
   findLiveUpgradeRun: async () => null,
@@ -65,6 +82,12 @@ beforeEach(() => {
   vi.stubEnv('HAIVE_REGISTRY_TOKEN', 'hidden-token-sentinel');
   vi.spyOn(Date, 'now').mockReturnValue(1234);
   h.rows = [];
+  h.transactionOpen = false;
+  h.auditLog.mockClear();
+  h.remove.mockReset().mockImplementation(async (where: SQL) => {
+    const id = new PgDialect().sqlToQuery(where).params[0];
+    h.rows = h.rows.filter((row) => (row as { id?: string }).id !== id);
+  });
   h.insert.mockReset().mockImplementation(async (ev: unknown) => {
     h.rows.push(ev);
   });
@@ -234,4 +257,54 @@ it('records the source and target versions and force flag before starting Docker
 it('records force false for an ordinary upgrade', async () => {
   expect((await post()).status).toBe(202);
   expect(h.rows).toMatchObject([{ metadata: { from: '1.0.0', to: '9.9.9', force: false } }]);
+});
+
+it('commits the upgrade row and releases its transaction before Docker starts', async () => {
+  const spawn = h.spawn.getMockImplementation()!;
+  h.spawn.mockImplementation((...args: unknown[]) => {
+    expect(h.transactionOpen).toBe(false);
+    expect(h.rows).toHaveLength(1);
+    return spawn(...args);
+  });
+  expect((await post()).status).toBe(202);
+});
+
+it('compensates only the failed launch row and leaves unrelated audit rows', async () => {
+  const unrelated = { id: 'unrelated', action: 'other.action' };
+  h.rows.push(unrelated);
+  h.spawn.mockImplementation(() => {
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      kill: vi.fn(),
+    });
+    queueMicrotask(() => child.emit('close', 1));
+    return child;
+  });
+  expect((await post()).status).toBe(502);
+  expect(h.remove).toHaveBeenCalledOnce();
+  expect(h.rows).toEqual([unrelated]);
+  expect(h.auditLog).not.toHaveBeenCalled();
+});
+
+it('preserves the Docker error when compensating deletion fails', async () => {
+  h.remove.mockRejectedValue(new Error('delete refused'));
+  h.spawn.mockImplementation(() => {
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      kill: vi.fn(),
+    });
+    queueMicrotask(() => {
+      child.stderr.emit('data', Buffer.from('effect failed'));
+      child.emit('close', 1);
+    });
+    return child;
+  });
+  const result = await post();
+  expect(result.status).toBe(502);
+  expect(await result.json()).toEqual({ error: 'could not start the updater: effect failed' });
+  expect(h.remove).toHaveBeenCalledOnce();
+  expect(h.rows).toHaveLength(1);
+  expect(h.auditLog).not.toHaveBeenCalled();
 });

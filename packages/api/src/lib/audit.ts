@@ -37,8 +37,11 @@ export function logAuditEvent(event: AuditEvent): void {
 export async function insertAuditEvent(
   db: Pick<Database, 'insert'>,
   event: AuditEvent,
+  options: { id?: string } = {},
 ): Promise<void> {
   await db.insert(schema.auditEvents).values({
+    // A caller compensating a failed external effect needs its exact committed row.
+    ...(options.id ? { id: options.id } : {}),
     actorUserId: event.actorUserId,
     action: event.action,
     targetType: event.targetType,

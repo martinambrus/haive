@@ -37,6 +37,7 @@ import {
 } from '@haive/shared/module-host';
 import { HttpError, type AppEnv } from '../context.js';
 import { getDb } from '../db.js';
+import { AUDITED_QUEUE_ADD_WAIT_MS, boundedAdd } from '../lib/queue-bounded.js';
 import {
   insertAuditEvent,
   logAuditEvent,
@@ -409,14 +410,18 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
     };
     const job = await getDb().transaction(async (tx) => {
       await insertAuditEvent(tx, event);
-      const job = await getModuleControlQueue().add(
-        MODULE_CONTROL_JOB_NAMES.TEARDOWN,
-        { moduleId: id } satisfies ModuleTeardownPayload,
-        {
-          deduplication: { id: `module-teardown-${id}` },
-          removeOnComplete: 100,
-          removeOnFail: 100,
-        },
+      const job = await boundedAdd(
+        () =>
+          getModuleControlQueue().add(
+            MODULE_CONTROL_JOB_NAMES.TEARDOWN,
+            { moduleId: id } satisfies ModuleTeardownPayload,
+            {
+              deduplication: { id: `module-teardown-${id}` },
+              removeOnComplete: 100,
+              removeOnFail: 100,
+            },
+          ),
+        AUDITED_QUEUE_ADD_WAIT_MS,
       );
       if (!job.id) throw new HttpError(500, 'Module teardown was not queued');
       return job;

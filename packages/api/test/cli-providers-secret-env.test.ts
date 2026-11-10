@@ -282,3 +282,22 @@ it('does not audit a network policy whose object key order differs', async () =>
   ).toBe(200);
   expect(fake.rows(schema.auditEvents)).toEqual([]);
 });
+
+it('bounds sign-out enqueue to ten seconds and rolls its audit back', async () => {
+  const fake = setup(true);
+  vi.useFakeTimers();
+  try {
+    h.add.mockImplementation(() => new Promise<never>(() => {}));
+    let response: Response | undefined;
+    void Promise.resolve(send('POST', '/' + PROVIDER + '/sign-out', {})).then((r) => {
+      response = r;
+    });
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(response).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(response?.status).toBe(500);
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+  } finally {
+    vi.useRealTimers();
+  }
+});

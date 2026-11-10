@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, desc, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
@@ -588,19 +589,28 @@ maintenanceRoutes.post('/upgrade', async (c) => {
     targetType: 'system',
     metadata: { from: current, to: version, force: !!body.force },
   };
-  const started = await db.transaction(async (tx) => {
-    await insertAuditEvent(tx, event);
-    const result = await runDockerClient(args);
-    if (!result.ok) {
+  const auditId = randomUUID();
+  await db.transaction((tx) => insertAuditEvent(tx, event, { id: auditId }));
+  // An image pull can take minutes. Commit the required row and release the connection first.
+  let started: Awaited<ReturnType<typeof runDockerClient>>;
+  try {
+    started = await runDockerClient(args);
+    if (!started.ok) {
       // Never echo args: environment values do not belong in a failure.
-      log.error({ image, stderr: result.stderr }, 'could not start the updater');
+      log.error({ image, stderr: started.stderr }, 'could not start the updater');
       throw new HttpError(
         502,
-        'could not start the updater: ' + (result.stderr || 'docker failed'),
+        'could not start the updater: ' + (started.stderr || 'docker failed'),
       );
     }
-    return result;
-  });
+  } catch (err) {
+    try {
+      await db.delete(schema.auditEvents).where(eq(schema.auditEvents.id, auditId));
+    } catch (cleanupError) {
+      log.error({ err: cleanupError, auditId }, 'failed to remove the failed upgrade launch audit');
+    }
+    throw err;
+  }
   logAuditEvent(event);
   log.info({ from: current, to: version, container: started.containerId }, 'upgrade started');
   // 202: the work outlives this request, and this process is one of the things it replaces.

@@ -77,6 +77,14 @@ const HISTORY = [
 ];
 
 const fakeDb = {
+  transaction: async (fn: (tx: unknown) => unknown) =>
+    fn({
+      insert: () => ({
+        values: async () => {
+          h.inserts += 1;
+        },
+      }),
+    }),
   insert: () => {
     h.inserts += 1;
     throw new Error('no insert expected');
