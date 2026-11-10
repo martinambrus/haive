@@ -355,6 +355,21 @@ function emptyAuditValueAsNull(value: unknown): unknown {
   return value;
 }
 
+const PROVIDER_SECURITY_FIELDS = [
+  'networkPolicy',
+  'egressDomains',
+  'wrapperContent',
+  'wrapperPath',
+  'executablePath',
+  'cliArgs',
+  'sandboxDockerfileExtra',
+  'authMode',
+  'isolateAuth',
+  'cliVersion',
+  'rulesContent',
+  'modelfile',
+] as const;
+
 cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
   const body = createCliProviderRequestSchema.parse(await c.req.json());
@@ -404,6 +419,17 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
         ...(provisioningModel ? { modelProvisionStatus: 'provisioning' } : {}),
       })
       .returning();
+    const fields: string[] = PROVIDER_SECURITY_FIELDS.filter((field) => body[field] !== undefined);
+    const envNames = Object.keys(split?.envVars ?? {}).sort();
+    if (envNames.length) fields.push('envVars');
+    const event: AuditEvent = {
+      actorUserId: userId,
+      action: 'cli_provider.create',
+      targetType: 'cli_provider',
+      targetId: rows[0]!.id,
+      metadata: { fields, ...(envNames.length ? { envNames } : {}) },
+    };
+    await insertAuditEvent(tx, event);
     for (const [name, value] of Object.entries(split?.secrets ?? {})) {
       await upsertProviderSecret(tx, {
         providerId: rows[0]!.id,
@@ -426,10 +452,11 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
       };
       await insertAuditEvent(tx, secretEvent);
     }
-    return rows;
+    return { rows, event };
   });
 
-  const created = inserted[0]!;
+  const created = inserted.rows[0]!;
+  logAuditEvent(inserted.event);
   if (secretEvent) logAuditEvent(secretEvent);
   await enqueueBuildForProvider(created.id, userId);
   if (provisioningModel) await enqueueOllamaProvisionForProvider(created.id, userId);
@@ -562,19 +589,7 @@ cliProviderRoutes.patch('/:id', async (c) => {
       .where(and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)))
       .for('no key update');
     if (!current) throw new HttpError(404, 'CLI provider not found');
-    const securityFields = [
-      'networkPolicy',
-      'egressDomains',
-      'wrapperContent',
-      'wrapperPath',
-      'executablePath',
-      'cliArgs',
-      'sandboxDockerfileExtra',
-      'authMode',
-      'isolateAuth',
-      'cliVersion',
-    ] as const;
-    const fields: string[] = securityFields.filter(
+    const fields: string[] = PROVIDER_SECURITY_FIELDS.filter(
       (field) =>
         updates[field] !== undefined &&
         !isDeepStrictEqual(

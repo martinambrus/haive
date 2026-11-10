@@ -186,6 +186,8 @@ describe('strict provider security updates', () => {
     { executablePath: '/hidden/cli' },
     { cliArgs: ['hidden-argument'] },
     { sandboxDockerfileExtra: 'RUN echo hidden-dockerfile' },
+    { rulesContent: 'hidden-rules' },
+    { modelfile: 'FROM hidden-model' },
     { envVars: { ANTHROPIC_BASE_URL: 'https://hidden.example' } },
   ];
   it.each(changes)('audit refusal rolls back %j without enqueuing', async (change) => {
@@ -317,4 +319,76 @@ describe('empty provider security values are audit no-ops', () => {
     expect((await send('PATCH', '/' + PROVIDER, { [field as string]: after })).status).toBe(200);
     expect(fake.rows(schema.auditEvents)).toEqual([]);
   });
+});
+
+describe('strict provider creation', () => {
+  it('refuses creation without an audit and queues nothing', async () => {
+    const fake = setup();
+    fake.hooks.beforeInsert = async (table) => {
+      if (table === schema.auditEvents) throw new Error('audit refused');
+    };
+    expect(
+      (await send('POST', '/', { name: 'claude-code', label: 'p', authMode: 'api_key' })).status,
+    ).toBe(500);
+    expect(fake.rows(schema.cliProviders)).toEqual([]);
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
+  it('records only the configured security field and environment names', async () => {
+    const fake = setup();
+    expect(
+      (
+        await send('POST', '/', {
+          name: 'claude-code',
+          label: 'hidden-label',
+          authMode: 'api_key',
+          networkPolicy: { mode: 'none', domains: [], ips: [] },
+          wrapperContent: 'hidden-wrapper',
+          cliArgs: ['hidden-argument'],
+          envVars: ENV,
+          rulesContent: 'hidden-rules',
+          modelfile: 'FROM hidden-model',
+        })
+      ).status,
+    ).toBe(201);
+    const rows = fake.rows(schema.auditEvents);
+    const event = rows.find((row) => row.action === 'cli_provider.create');
+    expect(event).toMatchObject({
+      actorUserId: USER,
+      targetType: 'cli_provider',
+      targetId: fake.rows(schema.cliProviders)[0]!.id,
+      metadata: {
+        fields: [
+          'networkPolicy',
+          'wrapperContent',
+          'cliArgs',
+          'authMode',
+          'rulesContent',
+          'modelfile',
+          'envVars',
+        ],
+        envNames: ['ANTHROPIC_BASE_URL'],
+      },
+    });
+    expect(rows).toHaveLength(2);
+    expect(JSON.stringify(rows)).not.toContain('hidden');
+    expect(JSON.stringify(rows)).not.toContain(SECRET_VALUE);
+  });
+});
+
+it('records rules and Modelfile updates by name without their content', async () => {
+  const fake = setup(true);
+  expect(
+    (
+      await send('PATCH', '/' + PROVIDER, {
+        rulesContent: 'hidden-rules',
+        modelfile: 'FROM hidden-model',
+      })
+    ).status,
+  ).toBe(200);
+  expect(fake.rows(schema.auditEvents)).toMatchObject([
+    { action: 'cli_provider.update', metadata: { fields: ['rulesContent', 'modelfile'] } },
+  ]);
+  expect(JSON.stringify(fake.rows(schema.auditEvents))).not.toContain('hidden');
 });

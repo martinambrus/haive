@@ -224,8 +224,13 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
       );
       expect(response.status).toBe(operation === 'patch' ? 200 : 201);
       const rows = await audits(db);
-      expect(rows).toHaveLength(1);
-      expect(rows[0]!.metadata).toMatchObject({ secretCount: 60, secretNames: names.slice(0, 50) });
+      expect(rows).toHaveLength(operation === 'create' ? 2 : 1);
+      const secretRows = rows.filter((row) => row.action !== 'cli_provider.create');
+      expect(secretRows).toHaveLength(1);
+      expect(secretRows[0]!.metadata).toMatchObject({
+        secretCount: 60,
+        secretNames: names.slice(0, 50),
+      });
       expect(h.auditLog.mock.calls[0]![0]).toBe(h.auditInsert.mock.calls[0]![0]);
       expect(JSON.stringify(rows)).not.toContain('synthetic');
     },
@@ -264,12 +269,21 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
         expect(res.status).toBe(
           refused ? 500 : operation === 'clone' || operation === 'create' ? 201 : 200,
         );
-        expect(await audits(db)).toHaveLength(refused ? 0 : 1);
+        const rows = await audits(db);
+        expect(rows).toHaveLength(refused ? 0 : operation === 'create' ? 2 : 1);
         if (!refused) {
           expect(h.auditLog.mock.calls[0]![0]).toBe(h.auditInsert.mock.calls[0]![0]);
           if (operation !== 'provider-delete')
-            expect((await audits(db))[0]!.metadata).toMatchObject({
+            expect(
+              rows.find((row) => row.action !== 'cli_provider.create')!.metadata,
+            ).toMatchObject({
               secretNames: [operation === 'clone' ? 'API_KEY' : 'ANTHROPIC_API_KEY'],
+            });
+          if (operation === 'create')
+            expect(rows.find((row) => row.action === 'cli_provider.create')).toMatchObject({
+              actorUserId: h.actor,
+              targetType: 'cli_provider',
+              metadata: { fields: ['authMode'] },
             });
         }
         if (refused) {
