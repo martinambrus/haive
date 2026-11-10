@@ -90,6 +90,17 @@ it.each(['user', 'Admin', 'owner', undefined])(
     expect((await stats()).requests).toBe(before.requests);
   },
 );
+it('refuses a backslash authority before a non-admin clone reaches the fixture', async () => {
+  const before = await stats();
+  const target = url.replace('http://', 'http://public.test\\@');
+  const result = await gitClone(target, `${root}/ambiguous`, undefined, undefined, {
+    db: dbFor('user'),
+    userId: 'owner',
+  }).catch((error: unknown) => error);
+  expect((await stats()).requests).toBe(before.requests);
+  expect(result).toBeInstanceOf(Error);
+  expect(egress.resolveGuardedAddress).not.toHaveBeenCalled();
+});
 it('admin clones unchanged with no resolution or additional config', async () => {
   const run = vi.spyOn(gitExec, 'gitRun');
   await gitClone(url, `${root}/admin`, undefined, undefined, {

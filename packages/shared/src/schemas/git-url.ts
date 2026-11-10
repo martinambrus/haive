@@ -105,6 +105,15 @@ export function isAllowedGitRemoteUrl(value: string): boolean {
     } catch {
       return false;
     }
+    const authority = value.slice(value.indexOf('://') + 3).split(/[/?#]/)[0]!;
+    // WHATWG strips controls and treats backslashes as delimiters; Git's transports do not.
+    if (/[\\\x00-\x20\x7f]/.test(authority)) return false;
+    const host = authority
+      .slice(authority.lastIndexOf('@') + 1)
+      .replace(/:\d*$/, '')
+      .replace(/^\[|\]$/g, '')
+      .toLowerCase();
+    if (host !== parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase()) return false;
     // A host is required for the same reason `file:` is excluded: a scheme that
     // parses but names no server is not pointing at a remote.
     return ALLOWED_GIT_URL_SCHEMES.has(parsed.protocol) && parsed.hostname.length > 0;
