@@ -391,9 +391,15 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   an api writer answers 409). A PATCH that changes `authMode` or `isolateAuth` holds the old and the new
   scope, sorted; a save that sends them unchanged takes no lock. A login dialog
   holds it from the WebSocket upgrade until its session is torn down (at most the 10-minute session
-  timeout once the container exists). Api writers answer 409 `cli_auth_busy` when it is held. The
-  sign-out job defers itself (`deferJob`, 2 s doubling to 15 s) and fails after 30 minutes with a
-  sentence saying nothing was removed. The usage poll reads without the lock and takes it only to
+  timeout once the container exists). A login upgrade that finds it held, or finds the scope moved
+  under it, is accepted and closed at once with `CLI_LOGIN_CLOSE_CODES` (4409 busy, 4410 settings
+  changed; `@haive/shared/constants`), since a browser cannot read a refused upgrade's status; the
+  origin, auth and ownership checks still refuse before any accept, and the modal keys its sentence
+  on the code. Api writers, and the deletes of a login secret (DELETE `usage-auth` and
+  `secrets/:name`), answer 409 `cli_auth_busy` when it is held; a delete never advances the
+  generation, so it cannot supersede a pending sign-out. The sign-out job defers itself (`deferJob`,
+  2 s doubling to 15 s) and fails after `CLI_SIGN_OUT_AUTH_WAIT_MS` (30 minutes) with a sentence
+  saying nothing was removed; the page polls a sign-out for that cap plus 2 minutes (other jobs 10). The usage poll reads without the lock and takes it only to
   refresh, re-reading the token under it. A task's sync-back waits up to 30 s for it; still held,
   it warns and the task copy is removed with its volume, so a token the task rotated is lost while
   a login dialog on the same CLI stays open that long (that login replaces it when it succeeds).
