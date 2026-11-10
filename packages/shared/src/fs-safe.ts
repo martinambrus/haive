@@ -1841,6 +1841,9 @@ const PARK_NAME =
 const STALE_PARK_MS = 24 * 60 * 60 * 1000;
 const SWEEP_MAX_PARKS = 32;
 let parkRecoveryOnWrites = false;
+// Bounded like sweepCursors: a sandboxed agent can plant any number of park names, so the
+// oldest entry is dropped and may warn again rather than the set growing for the process lifetime.
+const WARNED_PARKS_MAX = 1024;
 const warnedParks = new Set<string>();
 
 /** Worker startup opts into recovery on atomic writes. Other processes (especially
@@ -1901,6 +1904,9 @@ async function recoverStalePark(
     const key = JSON.stringify([directoryKey, parked]);
     if (warnedParks.has(key)) return;
     warnedParks.add(key);
+    if (warnedParks.size > WARNED_PARKS_MAX) {
+      warnedParks.delete(warnedParks.values().next().value as string);
+    }
     logger.warn({ err, anchor, rel, parked }, message);
   };
   let held: FileHandle | null = null;
