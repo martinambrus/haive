@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
   <title>Haive</title>
-  <rect width="32" height="32" rx="7" fill="#262626"/>
-  <path d="M8 7h5v7h6V7h5v18h-5v-7h-6v7H8Z" fill="#fafafa"/>
+  <rect width="32" height="32" rx="7" fill="#262626" />
+  <path d="M8 7h5v7h6V7h5v18h-5v-7h-6v7H8Z" fill="#fafafa" />
 </svg>
