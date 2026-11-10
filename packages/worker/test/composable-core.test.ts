@@ -258,8 +258,10 @@ describe('core composable catalog', () => {
     ['01c-ddev-env', '11b1-rag-source-selection', 'rag-scope'],
     ['01b-install-plugins', '11d-skill-sync', 'skills-synced'],
     ['11b-kb-commit', '11c-rag-reindex', 'reindexed'],
-    ['00a-sync-base', '01-declare-deps', 'env-deps'],
-    ['00a-sync-base', '03-build-image', 'env-image'],
+    ['01-declare-deps', '00a-sync-base', 'base-synced'],
+    ['02-generate-dockerfile', '00a-sync-base', 'base-synced'],
+    ['03-build-image', '00a-sync-base', 'base-synced'],
+    ['04-verify-environment', '00a-sync-base', 'base-synced'],
     ['01b-install-plugins', '01a-app-boot', 'app-runtime'],
     ['01c1-restore-database', '04-phase-0b-pre-planning', 'spec'],
     ['01c1-restore-database', '03-phase-0a-discovery', 'discovery'],
@@ -496,8 +498,16 @@ describe('core composable catalog', () => {
     ).toEqual([]);
   });
 
+  const envPrelude = [
+    '01-declare-deps',
+    '02-generate-dockerfile',
+    '03-build-image',
+    '04-verify-environment',
+  ];
+
   it('remembers a capability cleanup removed when checking precedence', () => {
     const order = [
+      ...envPrelude,
       '01-worktree-setup',
       '07-phase-2-implement',
       '10-gate-3-commit',
@@ -505,15 +515,26 @@ describe('core composable catalog', () => {
       '00a-sync-base',
     ];
     expect(validateComposition(order, catalog)).toEqual([
-      { kind: 'too-late', index: 4, stepId: '00a-sync-base', token: 'worktree' },
+      { kind: 'too-late', index: 8, stepId: '00a-sync-base', token: 'worktree' },
     ]);
   });
 
+  it('refuses a merge-capable base sync with no built and verified environment', () => {
+    const issues = validateComposition(['00a-sync-base', '01-worktree-setup'], catalog);
+    for (const needs of ['env-image', 'env-verified']) {
+      expect(issues).toContainEqual(
+        expect.objectContaining({ kind: 'unmet-need', stepId: '00a-sync-base', needs }),
+      );
+    }
+  });
+
   it('rejects syncing the base after the worktree is cut', () => {
-    expect(validateComposition(['00a-sync-base', '01-worktree-setup'], catalog)).toEqual([]);
-    expect(validateComposition(['01-worktree-setup', '00a-sync-base'], catalog)).toEqual([
-      { kind: 'too-late', index: 1, stepId: '00a-sync-base', token: 'worktree' },
-    ]);
+    expect(
+      validateComposition([...envPrelude, '00a-sync-base', '01-worktree-setup'], catalog),
+    ).toEqual([]);
+    expect(
+      validateComposition([...envPrelude, '01-worktree-setup', '00a-sync-base'], catalog),
+    ).toEqual([{ kind: 'too-late', index: 5, stepId: '00a-sync-base', token: 'worktree' }]);
   });
 
   it('rejects a worktree step after cleanup removed the worktree', () => {
@@ -581,7 +602,9 @@ describe('core composable catalog repository token', () => {
     'refuses %s for a repo-less type',
     (stepId) => {
       const needs = (opts?: { requiresRepository: boolean }) =>
-        validateComposition([stepId], catalog, opts).filter((i) => i.kind === 'unmet-need');
+        validateComposition([stepId], catalog, opts).filter(
+          (i) => i.kind === 'unmet-need' && i.needs === 'repository',
+        );
       expect(needs(repoLess)).toEqual([unmet(0, stepId, 'repository')]);
       expect(needs()).toEqual([]);
     },
