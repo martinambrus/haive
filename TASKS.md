@@ -484,9 +484,9 @@ status: open · kind: fix · found: T347 run · priority: P3
 3. `armIdle` re-arms only on upstream reads (tooling.ts:279-335), so a client that stops reading for 10 minutes can trip a misleading idle stop. NEW-LIMIT (edge).
 4. A late `fetchFn` resolve after an idle stop leaves its body unconsumed for a custom `fetchFn` that ignores `signal`. NEW-LIMIT (edge).
 
-### T557 · FNF[unguarded-dial-audit] · dials that still bypass the egress guard (design) (+8)
+### T557 · FNF[unguarded-dial-audit] · dials that still bypass the egress guard (design) (+9)
 
-status: in progress, items 9 8 (codex-sonnet) · kind: design · found: T347 run · priority: P2
+status: open · kind: design · found: T347 run · priority: P2
 Each needs a per-dial decision (guard, admin-trust, or remove).
 
 1. Shipped in PR #1049 (provider Test connection guarded by the owner role). Correction: api routes/cli-providers.ts:664 only enqueues and cli-adapters/zai.ts only sets env for the sandboxed CLI; neither is a dial.
@@ -496,12 +496,13 @@ Each needs a per-dial decision (guard, admin-trust, or remove).
 5. A user-typed git remote is dialed by the child `git` process outside the Node guard (worker repo clone.ts:74, bundle-sync.ts:18). A fix (protocol allowlist, network policy) changes product behaviour. PRE-EXISTING.
 6. Shipped in PR #1050 (a non-admin's call tests the stored settings and ignores the body; an admin keeps the typed URL).
 7. Shipped in PR #1049 (the OpenRouter compat probe, same guard).
-8. (PR #1049 review) A Test connection buffers a whole response body from a user-set URL with no size cap, bounded only by the 20 s abort: worker cli-adapters/ollama-probe.ts ~:118 (`resp.text()`), openrouter-compat.ts ~:165 (`resp.json()`). A non-admin can hold that much worker memory per probe. PRE-EXISTING, consequential for availability.
-9. (PR #1049 run and review) Z.AI usage polling sends the provider's token over plain fetch to the origin of a hand-set `ANTHROPIC_BASE_URL` (worker usage-window/fetchers/zai.ts ~:71, usage-poll-queue.ts:342); no reply text is returned, but status and error text land on the usage row (240 characters), so a non-admin gets a blind reachability and status probe of private hosts on every poll. PRE-EXISTING, consequential. Fix direction: same owner-role rule.
+8. Shipped in PR #1054 (13db14a66): the Ollama and OpenRouter probes and the Z.AI poll read at most 64 KiB (`readBounded`, `readForgeJson`).
+9. Shipped in PR #1054 (13db14a66): the Z.AI usage poll takes its transport from the shared owner-role `resolveProbeFetch` (worker cli-adapters/probe-fetch.ts).
 10. (PR #1049 review) For the exempt in-stack names a non-admin sees the transport text with the container address and open port (`describeTransportError`, ollama-probe.ts ~:62-72). PRE-EXISTING, minor, narrower than before.
 11. (PR #1049 review) The refused warning says "refused by the egress guard" also when a built-in host's DNS is down, and no test drives `ConfigUnavailableError` into the Ollama result. NEW, minor.
 12. (PR #1050 review) `POST /tooling/pull-ollama-model` with the exempt in-stack host lets any signed-in user make the shared Ollama pull an arbitrary model (api routes/tooling.ts pull stream). Whether onboarding needs this for non-admins is unverified. PRE-EXISTING, possibly consequential (disk, bandwidth); needs a decision.
 13. (PR #1050 review) Minors: a stored Ollama URL with userinfo is returned to every role and echoed in the test message (global-kb.ts `configResponse`); the Test's `ollamaEmbed` passes no timeout, so a hung Ollama holds a non-admin page load up to 240 s (global-kb.ts, tooling.ts ~:117); the non-admin test path decrypts the external connection string only to read three fields (`resolveGlobalKbSettings`); that path's not-configured branch is unreachable with the real resolver and its spelling matrix left the shared table in probe-targets.test.ts. PRE-EXISTING or NEW, minor.
+14. (PR #1054 review) Usage poll minors, all PRE-EXISTING or by decision: the poll resolves the transport (one `users` read) for every usage provider with a hand-set URL though only zai consumes it, and `Promise.allSettled` (usage-poll-queue.ts ~:443) drops a rejection with no log; the poll reads only `ANTHROPIC_BASE_URL` while the Z.AI run adapter prefers `Z_AI_API_URL` (cli-adapters/zai.ts ~:63,106), so such a provider is polled at the default origin; a `ConfigUnavailableError` from the guard's allowlist read lands as `Configuration store unavailable` row text, not the quiet retry error-diagnostics.md describes for ticks; a non-admin's public `http://` origin that redirects to https now stores `http 301` (the guard never follows redirects, by decision). Minor.
 
 ### T584 · FNF[nested-repo-commit-leftovers] · nested repository edge cases left after the commit-site work (+5)
 
@@ -1234,7 +1235,7 @@ From the T385/T348 driver (2026-10-31). PRE-EXISTING, minor.
 
 Reconciled 2026-11-01: only member4 remains a candidate for execution. Reproduce it through a supported producer before changing recovery; a synthetic impossible row is not enough. Members1/7 are resolved,2/3/5/6 are parked in T525.
 
-### T500 · FNF[handoff-silent-writes] · three handleResult neighbours write silently or re-fail a stopped task (+4)
+### T500 · FNF[handoff-silent-writes] · three handleResult neighbours write silently or re-fail a stopped task (+5)
 
 status: open · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
 From the T385/T348 driver (2026-10-31). PRE-EXISTING, minor. Same family as T385 item 6 (the lost hand-off log).
@@ -1348,6 +1349,7 @@ From the T365 fix round 1 (2026-10-31), verified against cx-365. PRE-EXISTING, m
 3. Two private chunked bounded-read copies (shared forge/base-forge.ts ~:106, api lib/module-vendor-client.ts ~:102) beside the exported `readForgeJson` and `readForgeErrorExcerpt` that T365 adds.
 4. Fix direction: reuse T365's `readForgeJson` / `readForgeErrorExcerpt` everywhere (bounded read, stream cancelled past the bound, fixed message without the body), after T365 lands.
 5. (T365 review 3) api github-oauth.ts ~:119: a bare `catch` words a timeout or network failure as "answered something other than a repository list". Key the message on the error class (timeout, abort, parse) instead. Minor.
+6. (PR #1054 review) Worker user-set sites shipped (ollama-probe.ts, openrouter-compat.ts, zai usage fetcher; `readBounded` now exported from `@haive/shared/forge`). Left: fixed-vendor usage bodies claude-code.ts ~:55, codex.ts ~:79, gemini.ts ~:48, grok-oauth.ts ~:175,180 (member 2); api module-vendor-client.ts ~:102 now duplicates the exported `readBounded` (member 3); the probes return on 2xx (OpenRouter on any non-400) without cancelling the body, holding the socket to the 20 s abort; an OpenRouter 400 body whose read fails mid-way still returns `compatible: false`. Minor.
 
 Executable verification scope: Prioritize user-supplied endpoint bodies and a safe bounded over-limit reproduction. Trusted-vendor generalization, helper deduplication and error wording remain deferred. No automatic full-bundle repair: prove a supported current consequence, then scope the fix; park the remainder.
 
