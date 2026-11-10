@@ -129,11 +129,12 @@ export async function originGitRun(
     return { code: 128, stdout: '', stderr: `${(err as Error).message}\n` };
   }
   if (guard.argv.length > 0) {
-    // Recheck after DNS; writable .git in the repo Terminal leaves a millisecond window to git's own config read.
+    // Recheck after DNS, the URLs last since they pick the host; writable .git in the repo Terminal
+    // still leaves the time until git's own config read (a few process starts).
     let unchanged = false;
     try {
-      const currentUrls = await originUrls(cwd);
       const currentConfigError = await gitTransportConfigError(cwd, env);
+      const currentUrls = await originUrls(cwd);
       unchanged =
         !currentConfigError &&
         currentUrls !== null &&

@@ -174,7 +174,13 @@ answer is pinned so git cannot resolve again: http(s) gets `http.curloptResolve`
 the stored URL (userinfo, query, fragment), so pinning per URL was tried and kept missing one: `originGitRun`
 instead reads the checkout's effective config once (includes and worktree config) and refuses a guarded run that
 has any such key, with a message that names the setting to remove. An imported repository never has one (the
-import strips `http.*`); an external checkout may. Any ambient `GIT_CONFIG_*` is dropped for that run; ssh gets `core.sshCommand` with
+import strips `http.*`); an external checkout may. Git reads `.git/config` itself after the check, and the
+owner can rewrite it meanwhile (`POST /repos/:id/remote`, or the repo-scope Terminal, which keeps a writable
+`.git`), so after resolving `originGitRun` runs the scan and then reads the URLs again as its last steps before
+spawning, and refuses any difference. That shrinks a window the remote's own DNS could stretch to seconds down to
+the few process starts before git's own read; closing it needs git to run where a private address is unreachable,
+which this does not do. `-c remote.origin.url=` is no lever: git 2.54 resets the list with it, 2.43 appends an empty
+URL (MEASURED). Any ambient `GIT_CONFIG_*` is dropped for that run; ssh gets `core.sshCommand` with
 `-o HostName=<address> -o HostKeyAlias=<host>`, and `GIT_SSH`/`GIT_SSH_COMMAND` are dropped for that run. The
 worker image has no ssh client, so that pin is tested on its argv only. A redirecting remote therefore fails for
 a non-administrator, and a private Git server needs an allowlist entry. Module sources are admin-only routes and
