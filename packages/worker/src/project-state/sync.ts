@@ -576,7 +576,6 @@ async function mergePortable(
   // this install's stands.
   if (
     repo.rtkChoiceMadeAt != null &&
-    row !== null &&
     previousSettings['rtk-enabled'] === undefined &&
     localSettings['rtk-enabled'] !== undefined
   ) {
