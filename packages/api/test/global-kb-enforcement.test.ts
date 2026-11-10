@@ -201,8 +201,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  expect(auditFake.rows(schema.auditEvents)).toHaveLength(enforcementSuccesses);
-  expect(h.logAudit).toHaveBeenCalledTimes(enforcementSuccesses);
+  const rows = auditFake.rows(schema.auditEvents);
+  expect(rows.filter((row) => row.action !== 'global_kb.house_rule.lapse')).toHaveLength(
+    enforcementSuccesses,
+  );
+  expect(h.logAudit).toHaveBeenCalledTimes(rows.length);
 });
 
 describe('the enforcement routes are for admins', () => {
@@ -1441,5 +1444,155 @@ describe('PATCH supersession authorization controls', () => {
     expect(fake.rows(globalKbEntries)).toEqual(before);
     expect(vectorStatements).toEqual([]);
     expect(h.add).not.toHaveBeenCalled();
+  });
+});
+
+describe('house-rule lapse audit', () => {
+  const lapseRows = () =>
+    auditFake.rows(schema.auditEvents).filter((row) => row.action === 'global_kb.house_rule.lapse');
+  const operations = [
+    ['edit', () => patch({ body: 'Changed rule text' }), {}],
+    ['archive', () => patch({ status: 'archived' }), { status: 'archived' }],
+    ['draft', () => patch({ status: 'draft' }), { status: 'draft' }],
+    ['delete', () => send('DELETE', `/entries/${ENTRY}`), {}],
+  ] as const;
+
+  it.each(operations)(
+    'records %s with locked context and logs after both commits',
+    async (name, run, extra) => {
+      approve(ENTRY, FILES);
+      fake.patch(globalKbEntries, ENTRY, { namespace: 'elsewhere' });
+      const checkBeforeWrite = () => {
+        expect(lapseRows()).toHaveLength(1);
+        expect(h.logAudit).not.toHaveBeenCalled();
+      };
+      fake.hooks.beforeUpdate = checkBeforeWrite;
+      fake.hooks.beforeDelete = checkBeforeWrite;
+      auditFake.hooks.beforeCommit = () => {
+        expect(h.logAudit).not.toHaveBeenCalled();
+        expect(
+          name === 'delete'
+            ? stored() === undefined
+            : stored().body !== BODY || stored().status !== 'active',
+        ).toBe(true);
+      };
+      expect((await run()).status).toBe(200);
+      expect(lapseRows()).toMatchObject([
+        {
+          actorUserId: ADMIN,
+          action: 'global_kb.house_rule.lapse',
+          targetType: 'global_kb_entry',
+          targetId: ENTRY,
+        },
+      ]);
+      expect(lapseRows()[0]!.metadata).toEqual({
+        namespace: 'elsewhere',
+        mode: 'files',
+        cause: name === 'archive' || name === 'draft' ? 'status' : name,
+        ...extra,
+      });
+      expect(h.logAudit).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('audits the enforced predecessor, not the activating draft', async () => {
+    approve(ENTRY, ALWAYS);
+    addEntry(SECOND, { status: 'draft', supersedesEntryId: ENTRY });
+    expect((await patch({ status: 'active' }, SECOND)).status).toBe(200);
+    expect(lapseRows()).toMatchObject([
+      {
+        targetId: ENTRY,
+        metadata: { namespace: 'default', mode: 'always', cause: 'status', status: 'archived' },
+      },
+    ]);
+    expect(lapseRows()).toHaveLength(1);
+  });
+
+  it('does not invent a lapse for no-op content, same status, or an unapproved entry', async () => {
+    approve(ENTRY, ALWAYS);
+    expect((await patch({ title: TITLE, status: 'active' })).status).toBe(200);
+    expect(lapseRows()).toEqual([]);
+    fake.patch(globalKbEntries, ENTRY, { enforcedHash: null });
+    expect((await patch({ body: 'Changed' })).status).toBe(200);
+    expect((await patch({ status: 'archived' })).status).toBe(200);
+    expect((await send('DELETE', `/entries/${ENTRY}`)).status).toBe(200);
+    expect(lapseRows()).toEqual([]);
+  });
+
+  it('counts a combined edit and status change as one edit lapse', async () => {
+    approve(ENTRY, ALWAYS);
+    expect((await patch({ body: 'Changed', status: 'archived' })).status).toBe(200);
+    expect(lapseRows()).toHaveLength(1);
+    expect(lapseRows()[0]!.metadata).toEqual({
+      namespace: 'default',
+      mode: 'always',
+      cause: 'edit',
+    });
+  });
+
+  it.each(operations)(
+    'refuses %s without changing the store when its audit insert fails',
+    async (_name, run) => {
+      approve(ENTRY, ALWAYS);
+      const before = structuredClone(fake.rows(globalKbEntries));
+      auditFake.hooks.beforeInsert = () => {
+        throw new Error('audit refused');
+      };
+      expect((await run()).status).toBe(500);
+      expect(fake.rows(globalKbEntries)).toEqual(before);
+      expect(lapseRows()).toEqual([]);
+      expect(h.logAudit).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(operations)('rolls back the audit when the %s store write fails', async (_name, run) => {
+    approve(ENTRY, ALWAYS);
+    const before = structuredClone(fake.rows(globalKbEntries));
+    const refuse = () => {
+      expect(lapseRows()).toHaveLength(1);
+      throw new Error('store refused');
+    };
+    fake.hooks.beforeUpdate = refuse;
+    fake.hooks.beforeDelete = refuse;
+    expect((await run()).status).toBe(500);
+    expect(fake.rows(globalKbEntries)).toEqual(before);
+    expect(lapseRows()).toEqual([]);
+    expect(h.logAudit).not.toHaveBeenCalled();
+  });
+
+  it('sees approval landing while an edit waits for the namespace lock', async () => {
+    fake.hooks.beforeLock = () => {
+      fake.hooks.beforeLock = null;
+      approve(ENTRY, FILES);
+    };
+    expect((await patch({ title: 'Changed' })).status).toBe(200);
+    expect(lapseRows()).toHaveLength(1);
+    expect(lapseRows()[0]!.metadata).toEqual({
+      namespace: 'default',
+      mode: 'files',
+      cause: 'edit',
+    });
+  });
+
+  it('does not record an approval removed while waiting for the lock', async () => {
+    approve(ENTRY, ALWAYS);
+    fake.hooks.beforeLock = () => {
+      fake.hooks.beforeLock = null;
+      fake.patch(globalKbEntries, ENTRY, { enforcedHash: null });
+    };
+    expect((await patch({ title: 'Changed' })).status).toBe(200);
+    expect(lapseRows()).toEqual([]);
+  });
+
+  it('does not log a main commit failure after an edit committed in the store', async () => {
+    approve(ENTRY, ALWAYS);
+    auditFake.hooks.beforeCommit = () => {
+      throw new Error('commit refused');
+    };
+    expect((await patch({ title: 'Changed' })).status).toBe(500);
+    expect(stored().title).toBe('Changed');
+    expect(stored().enforcedHash).toBeNull();
+    expect(lapseRows()).toEqual([]);
+    expect(h.logAudit).not.toHaveBeenCalled();
   });
 });
