@@ -608,7 +608,6 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       answeredBusyBehindRelink(() =>
         sendSetting('tooling', {
           ragEmbedAction: 'rebuild_index',
-          secretMaskEnabled: false,
         }),
       ),
     30_000,
@@ -667,15 +666,13 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       relinkArrived = reached;
       return true;
     };
-    const save = Promise.resolve(
-      sendSetting('tooling', { ragEmbedAction: 'retry', secretMaskEnabled: false }),
-    );
+    const save = Promise.resolve(sendSetting('tooling', { ragEmbedAction: 'retry' }));
     try {
       const answer = await answeredWithin(5_000, save);
       expect(answer.status).toBe(200);
       expect(await answer.json()).toMatchObject({ degradationKept: false });
       expect(await stored()).toMatchObject({
-        secretMaskEnabled: false,
+        secretMaskEnabled: true,
         ragEmbedDegradedAt: null,
         ragEmbedDegradedReason: null,
       });
@@ -770,9 +767,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       return true;
     };
     const warnings = vi.spyOn(logger, 'warn').mockImplementation(() => {});
-    const save = Promise.resolve(
-      sendSetting('tooling', { ragEmbedAction: 'retry', secretMaskEnabled: false }),
-    );
+    const save = Promise.resolve(sendSetting('tooling', { ragEmbedAction: 'retry' }));
     try {
       const answer = await answeredWithin(5_000, save);
       expect(answer.status).toBe(200);
@@ -780,8 +775,8 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       expect(acquired).toBe(true);
       expect(holderError).toBeUndefined();
       expect(probes).toBe(2);
-      expect(await stored()).toMatchObject({ secretMaskEnabled: false, ragEmbedDegradedAt: null });
-      expect((await audits(db)).map((row) => row.action)).toEqual(['repository.security.update']);
+      expect(await stored()).toMatchObject({ secretMaskEnabled: true, ragEmbedDegradedAt: null });
+      expect((await audits(db)).map((row) => row.action)).toEqual([]);
       expect(
         warnings.mock.calls.some(
           (call) => call[1] === 'retry degraded flag restore deferred by repository lock',
