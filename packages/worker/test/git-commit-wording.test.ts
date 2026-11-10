@@ -6,6 +6,7 @@ import { writeFileNoFollow } from '@haive/shared/fs-safe';
 import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { gitRun, type GitRunResult } from '../src/repo/git-exec.js';
+import { gitPreview, type GitPreview } from '../src/repo/git-preview.js';
 import { commitKnowledgeTrees } from '../src/step-engine/steps/workflow/_kb-commit.js';
 import { gate3CommitStep } from '../src/step-engine/steps/workflow/10-gate-3-commit.js';
 import { skillSyncStep } from '../src/step-engine/steps/workflow/11d-skill-sync.js';
@@ -76,7 +77,7 @@ describe.each(sites)('%s commit decisions', (site) => {
   let writes: unknown[];
   let skillTargetDirs: string[];
 
-  const apply = async () => {
+  const apply = async (preview?: GitPreview) => {
     const common = {
       formValues: { commit: true, commitMessage: 'test commit' },
       iteration: 0,
@@ -119,6 +120,7 @@ describe.each(sites)('%s commit decisions', (site) => {
             hasGit: true,
             workspacePath: repo,
             hasOrigin: false,
+            commitPreview: preview ?? (await gitPreview(repo)),
             branch: 'main',
             mode: 'none',
             appUrl: null,
@@ -311,15 +313,39 @@ describe.each(sites)('%s commit decisions', (site) => {
       expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe('README.md');
     });
   } else {
-    it('retains the intentional whole-index commit for session edits', async () => {
-      await writeFileNoFollow(repo, 'README.md', 'session edits\n');
-      await command(repo, ['add', '--', 'README.md']);
+    it(
+      site === 'run-app'
+        ? 'commits all reviewed session edits and leaves later staged work alone'
+        : 'retains the intentional whole-index commit for session edits',
+      async () => {
+        await writeFileNoFollow(repo, 'README.md', 'session edits\n');
+        await command(repo, ['add', '--', 'README.md']);
 
-      expect(await apply()).toMatchObject({ committed: true, commitSha: expect.any(String) });
+        let preview: GitPreview | undefined;
+        if (site === 'run-app') {
+          await writeFileNoFollow(repo, 'reviewed.txt', 'reviewed session edit\n');
+          preview = await gitPreview(repo);
+          await writeFileNoFollow(repo, 'late.txt', 'later staged work\n');
+          await command(repo, ['add', '--', 'late.txt']);
+        }
+        expect(await apply(preview)).toMatchObject({
+          committed: true,
+          commitSha: expect.any(String),
+        });
 
-      expect(await command(repo, ['show', 'HEAD:README.md'])).toBe('session edits');
-      expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe('');
-    });
+        expect(await command(repo, ['show', 'HEAD:README.md'])).toBe('session edits');
+        expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe(
+          site === 'run-app' ? 'late.txt' : '',
+        );
+        if (site === 'run-app') {
+          expect(await command(repo, ['show', 'HEAD:reviewed.txt'])).toBe('reviewed session edit');
+          expect(await command(repo, ['ls-tree', '--name-only', 'HEAD', '--', 'late.txt'])).toBe(
+            '',
+          );
+          expect(await command(repo, ['show', ':late.txt'])).toBe('later staged work');
+        }
+      },
+    );
   }
 
   if (site === 'knowledge trees') {
@@ -356,10 +382,12 @@ describe.each(sites)('%s commit decisions', (site) => {
   }
 
   it.each(['stdout', 'stderr'] as const)(
-    'reports an empty index with reworded commit %s (stubbed exit 1)',
+    site === 'run-app'
+      ? 'reports an empty preview without invoking commit plumbing (reworded %s, exit 1)'
+      : 'reports an empty index with reworded commit %s (stubbed exit 1)',
     async (stream) => {
       control.result.mockImplementation((_cwd: string, args: string[]) =>
-        args[0] === 'commit'
+        ['commit', 'commit-tree'].includes(args[0]!)
           ? { code: 1, stdout: '', stderr: '', [stream]: 'Aucun changement à enregistrer' }
           : undefined,
       );
@@ -367,36 +395,74 @@ describe.each(sites)('%s commit decisions', (site) => {
       const out = await apply();
       expect(out).toMatchObject({ committed: false, commitSha: null });
       if (site !== 'skill sync') expect(out).toHaveProperty('message', 'nothing to commit');
-      if (site === 'run-app') expect(out).toMatchObject({ finished: true, pushed: false });
+      if (site === 'run-app') {
+        expect(out).toMatchObject({ finished: true, pushed: false });
+        expect(
+          vi
+            .mocked(gitRun)
+            .mock.calls.some(([, args]) =>
+              ['commit', 'commit-tree', 'update-ref'].includes(args[0]!),
+            ),
+        ).toBe(false);
+      }
       if (site === 'skill sync') expect(out).toMatchObject({ removed: ['already-removed'] });
       expect(writes).toEqual([]);
       expect(await command(repo, ['rev-parse', 'HEAD'])).toBe(head);
     },
   );
 
-  it.each([128, 2, -1, 124])('rejects a failed staged read with code %i', async (code) => {
-    control.result.mockImplementation((_cwd: string, args: string[]): GitRunResult | undefined => {
-      if (args[0] === 'diff' && args.includes('--cached') && args.includes('--quiet')) {
-        return { code, stdout: '', stderr: 'staged read failed' };
+  // Run-app's pinned-tree write fence replaces gitCommitStaged's index read.
+  it.each([128, 2, -1, 124])(
+    site === 'run-app'
+      ? 'rejects a failed preview ref update with code %i'
+      : 'rejects a failed staged read with code %i',
+    async (code) => {
+      if (site === 'run-app') await writeFileNoFollow(repo, 'README.md', 'session edits\n');
+      const head = await command(repo, ['rev-parse', 'HEAD']);
+      control.result.mockImplementation(
+        (_cwd: string, args: string[]): GitRunResult | undefined => {
+          if (
+            site === 'run-app'
+              ? args[0] === 'update-ref'
+              : args[0] === 'diff' && args.includes('--cached') && args.includes('--quiet')
+          ) {
+            return { code, stdout: '', stderr: 'staged read failed' };
+          }
+          if (args[0] === 'commit') return { code: 1, stdout: 'nothing to commit', stderr: '' };
+          return undefined;
+        },
+      );
+      await expect(apply()).rejects.toThrow(
+        site === 'run-app' ? /^git update-ref failed:/ : /^git staged read failed:/,
+      );
+      expect(await command(repo, ['rev-parse', 'HEAD'])).toBe(head);
+      expect(writes).toEqual([]);
+      expect(vi.mocked(gitRun).mock.calls.some(([, args]) => args[0] === 'commit')).toBe(false);
+      if (site === 'run-app') {
+        expect(vi.mocked(gitRun).mock.calls.some(([, args]) => args[0] === 'commit-tree')).toBe(
+          true,
+        );
+        expect(vi.mocked(gitRun).mock.calls.some(([, args]) => args[0] === 'reset')).toBe(false);
       }
-      if (args[0] === 'commit') return { code: 1, stdout: 'nothing to commit', stderr: '' };
-      return undefined;
-    });
-    await expect(apply()).rejects.toThrow(/^git staged read failed:/);
-    expect(writes).toEqual([]);
-    expect(vi.mocked(gitRun).mock.calls.some(([, args]) => args[0] === 'commit')).toBe(false);
-  });
+    },
+  );
 
   it.each([128, 2, -1, 124])('rejects a failed merge read with code %i', async (code) => {
+    if (site === 'run-app') await writeFileNoFollow(repo, 'README.md', 'session edits\n');
+    const head = await command(repo, ['rev-parse', 'HEAD']);
     control.result.mockImplementation((_cwd: string, args: string[]): GitRunResult | undefined => {
       if (args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) {
         return { code, stdout: '', stderr: 'opaque diagnostic' };
       }
       return undefined;
     });
-    await expect(apply()).rejects.toThrow(/^git merge read failed:/);
+    await expect(apply()).rejects.toThrow(
+      site === 'run-app' ? /Finish or abort the open merge/ : /^git merge read failed:/,
+    );
+    expect(await command(repo, ['rev-parse', 'HEAD'])).toBe(head);
     expect(writes).toEqual([]);
     expect(vi.mocked(gitRun).mock.calls.some(([, args]) => args[0] === 'commit')).toBe(false);
+    expect(vi.mocked(gitRun).mock.calls.some(([, args]) => args[0] === 'commit-tree')).toBe(false);
   });
 
   it('rejects a real commit failure even when its output mentions nothing to commit', async () => {
@@ -408,11 +474,13 @@ describe.each(sites)('%s commit decisions', (site) => {
           : 'README.md';
     await writeFileNoFollow(repo, file, 'changed\n');
     control.result.mockImplementation((_cwd: string, args: string[]) =>
-      args[0] === 'commit'
+      args[0] === (site === 'run-app' ? 'commit-tree' : 'commit')
         ? { code: 128, stdout: '', stderr: 'fatal: nothing to commit is not the failure here' }
         : undefined,
     );
-    await expect(apply()).rejects.toThrow(/git commit failed/);
+    await expect(apply()).rejects.toThrow(
+      site === 'run-app' ? /git preview commit failed/ : /git commit failed/,
+    );
     expect(writes).toEqual([]);
   });
 });

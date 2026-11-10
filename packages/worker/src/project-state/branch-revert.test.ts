@@ -11,6 +11,8 @@ import { schema } from '@haive/database';
 import { emptyProjectState, renderProjectState } from '@haive/shared/project-state';
 import { gate4PushStep } from '../step-engine/steps/workflow/11a-gate-4-push.js';
 import { runAppReadyStep } from '../step-engine/steps/run-app/99-run-app-ready.js';
+import { gitPreview } from '../repo/git-preview.js';
+import { ReopenStepFormError } from '../step-engine/step-definition.js';
 import type { StepContext } from '../step-engine/step-definition.js';
 import { killGit } from '../../test/support/kill-git.js';
 
@@ -333,7 +335,8 @@ describe('the pushes Haive makes of a task branch put its Haive files back first
 
   it('the run-app ready gate pushes the session commit with them put back', async () => {
     const { parent, wt, bare, forked } = await fixture();
-    await write(wt, { ...stateFiles(BY_AGENT), 'session.txt': 'session\n' });
+    await commit(wt, { ...stateFiles(BY_AGENT), 'feature.txt': 'feature\n' }, 'feature work');
+    await write(wt, { 'session.txt': 'session\n' });
     const h = stubDb();
     const out = await runAppReadyStep.apply(stepCtx(parent, h.db), {
       detected: {
@@ -350,6 +353,7 @@ describe('the pushes Haive makes of a task branch put its Haive files back first
         diffArtifactPath: null,
         changedFileCount: 2,
         baseBranch: 'main',
+        commitPreview: await gitPreview(wt),
       },
       formValues: { commit: true, commitMessage: 'session edits', push: true },
       iteration: 0,
@@ -363,7 +367,8 @@ describe('the pushes Haive makes of a task branch put its Haive files back first
 
   it('a put-back that fails fails the run-app ready gate, and its Retry puts back and pushes with nothing left to commit', async () => {
     const { parent, wt, bare, forked } = await fixture();
-    await write(wt, { ...stateFiles(BY_AGENT), 'session.txt': 'session\n' });
+    await commit(wt, { ...stateFiles(BY_AGENT), 'feature.txt': 'feature\n' }, 'feature work');
+    await write(wt, { 'session.txt': 'session\n' });
     const h = stubDb();
     const args = {
       detected: {
@@ -380,18 +385,24 @@ describe('the pushes Haive makes of a task branch put its Haive files back first
         diffArtifactPath: null,
         changedFileCount: 2,
         baseBranch: 'main',
+        commitPreview: await gitPreview(wt),
       },
       formValues: { commit: true, commitMessage: 'session edits', push: true },
       iteration: 0,
       previousIterations: [],
-    } as never;
+    };
     handBack.failOnce = true;
-    await expect(runAppReadyStep.apply(stepCtx(parent, h.db), args)).rejects.toThrow(
+    await expect(runAppReadyStep.apply(stepCtx(parent, h.db), args as never)).rejects.toThrow(
       /injected hand-back failure/,
     );
     expect(await git(bare, ['branch', '--list', 'feature/x'])).toBe('');
 
-    const out = await runAppReadyStep.apply(stepCtx(parent, h.db), args);
+    await expect(runAppReadyStep.apply(stepCtx(parent, h.db), args as never)).rejects.toThrow(
+      ReopenStepFormError,
+    );
+    args.detected.commitPreview = await gitPreview(wt);
+    expect(args.detected.commitPreview.paths).toEqual([]);
+    const out = await runAppReadyStep.apply(stepCtx(parent, h.db), args as never);
     expect(out).toMatchObject({ committed: false, pushed: true });
     expect(handBack.calls).toHaveLength(2);
     expect(await at(bare, 'feature/x', 'session.txt')).toBe('session\n');
@@ -401,7 +412,8 @@ describe('the pushes Haive makes of a task branch put its Haive files back first
   it('the run-app ready gate on the repository root itself has nothing to put back', async () => {
     const { parent, bare } = await fixture();
     await ensureGitExcludeEntry(parent);
-    await write(parent, stateFiles(BY_AGENT));
+    const originalState = await at(parent, 'HEAD', GLOBS);
+    await write(parent, { ...stateFiles(BY_AGENT), 'session.txt': 'session\n' });
     const h = stubDb();
     const out = await runAppReadyStep.apply(stepCtx(parent, h.db), {
       detected: {
@@ -418,6 +430,7 @@ describe('the pushes Haive makes of a task branch put its Haive files back first
         diffArtifactPath: null,
         changedFileCount: 1,
         baseBranch: null,
+        commitPreview: await gitPreview(parent),
       },
       formValues: { commit: true, commitMessage: 'session edits', push: true },
       iteration: 0,
@@ -425,7 +438,9 @@ describe('the pushes Haive makes of a task branch put its Haive files back first
     } as never);
     expect(out).toMatchObject({ committed: true, pushed: true });
     expect(h.events).toEqual([]);
-    expect(await at(bare, 'main', GLOBS)).toBe(await readFile(path.join(parent, GLOBS), 'utf8'));
+    expect(await at(bare, 'main', 'session.txt')).toBe('session\n');
+    expect(await at(bare, 'main', GLOBS)).toBe(originalState);
+    expect(await readFile(path.join(parent, GLOBS), 'utf8')).toBe(stateFiles(BY_AGENT)[GLOBS]);
   });
 });
 
