@@ -1,7 +1,8 @@
+import { MAINTENANCE_STATES } from '@haive/shared';
 import { UPGRADE_JOURNAL_DDL } from '@haive/database';
 import type { Sql } from 'postgres';
 import { describe, expect, it, vi } from 'vitest';
-import { ensureJournal, lastDoneChannel, recordAttempt } from './journal.js';
+import { ensureJournal, lastDoneChannel, readFoundState, recordAttempt } from './journal.js';
 
 function mockAttemptSql() {
   const sql = Object.assign(
@@ -106,4 +107,23 @@ it('stores a validated fallback for an invalid target in the non-nullable column
     metadata: {},
   });
   expect(sql.mock.calls[0]![2]).toBe('unknown');
+});
+
+describe('readFoundState', () => {
+  it.each(MAINTENANCE_STATES)('reads the shared state %s', async (found) => {
+    const sql = vi.fn(async () => [{ found, required: 'true' }]);
+    expect(await readFoundState(sql as unknown as Sql, 'run')).toBe(found);
+  });
+  it.each([null, 'future-state'])('keeps the legacy normal fallback for %j', async (found) => {
+    const sql = vi.fn(async () => [{ found, required: null }]);
+    expect(await readFoundState(sql as unknown as Sql, 'run')).toBe('normal');
+  });
+  it.each([null, 'future-state'])('refuses to guess a required state %j', async (found) => {
+    const sql = vi.fn(async () => [{ found, required: 'true' }]);
+    expect(await readFoundState(sql as unknown as Sql, 'run')).toBeNull();
+  });
+  it('treats a missing run as unknown', async () => {
+    const sql = vi.fn(async () => []);
+    expect(await readFoundState(sql as unknown as Sql, 'missing')).toBeNull();
+  });
 });

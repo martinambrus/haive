@@ -814,6 +814,9 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
 
           expect(stored).toBe(state);
           expect(written).toEqual([]);
+          const [row] = await probe<{ metadata: Record<string, unknown> }[]>`
+            SELECT metadata FROM upgrade_runs WHERE id = ${runId}`;
+          expect(row!.metadata.restoreSkipped).toBe('found_state_unknown');
           expect(logged).toContainEqual({
             event: 'maintenance-restore-skipped',
             fields: { reason: 'prior maintenance state is unknown; keeping the current state' },

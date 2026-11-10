@@ -236,6 +236,7 @@ async function restoreMaintenanceState(ctx: UpgradeContext): Promise<void> {
   }
   const found = await readFoundState(ctx.sql, ctx.runId);
   if (found === null) {
+    await mergeMetadata(ctx.sql, ctx.runId, { restoreSkipped: 'found_state_unknown' });
     ctx.log('maintenance-restore-skipped', {
       reason: 'prior maintenance state is unknown; keeping the current state',
     });

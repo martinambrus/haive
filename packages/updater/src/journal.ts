@@ -1,5 +1,5 @@
 import { UPGRADE_JOURNAL_DDL } from '@haive/database';
-import type { MaintenanceState } from '@haive/shared';
+import { maintenanceStateSchema, type MaintenanceState } from '@haive/shared';
 import type { Sql } from 'postgres';
 import { attemptVersion } from './attempt-fields.js';
 import type { RunStatus, UpgradePhase } from './phases.js';
@@ -135,17 +135,16 @@ export async function recordFoundState(
 }
 
 /** New runs require a recorded state. Older releases had no marker and retain their normal
- *  fallback; a missing row or an invalid recorded state is unknown, never permission to lift a hold. */
+ *  fallback; a missing row or an invalid required state is unknown, never permission to lift a hold. */
 export async function readFoundState(sql: Sql, id: string): Promise<MaintenanceState | null> {
   const [row] = await sql<{ found: string | null; required: string | null }[]>`
     SELECT metadata ->> 'foundState' AS found,
            metadata ->> 'foundStateRequired' AS required
       FROM upgrade_runs WHERE id = ${id}`;
   if (!row) return null;
-  if (row.found === 'normal' || row.found === 'draining' || row.found === 'maintenance') {
-    return row.found;
-  }
-  return row.found == null && row.required == null ? 'normal' : null;
+  const parsed = maintenanceStateSchema.safeParse(row.found);
+  if (parsed.success) return parsed.data;
+  return row.required == null ? 'normal' : null;
 }
 
 export async function finishRun(

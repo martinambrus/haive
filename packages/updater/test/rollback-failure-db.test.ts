@@ -83,8 +83,15 @@ describe.skipIf(!url)(
     };
 
     const run = async () => {
-      const [row] = await sql<{ status: string; error: string | null; ended_at: Date | null }[]>`
-      SELECT status, error, ended_at FROM upgrade_runs ORDER BY started_at DESC LIMIT 1`;
+      const [row] = await sql<
+        {
+          status: string;
+          error: string | null;
+          ended_at: Date | null;
+          metadata: Record<string, unknown>;
+        }[]
+      >`
+      SELECT status, error, ended_at, metadata FROM upgrade_runs ORDER BY started_at DESC LIMIT 1`;
       return row!;
     };
 
@@ -155,6 +162,7 @@ describe.skipIf(!url)(
 
         expect(control.stored).toBe(state);
         expect((await run()).status).toBe('rolled_back');
+        expect((await run()).metadata.restoreSkipped).toBe('found_state_unknown');
         expect(logs).toContainEqual(
           expect.objectContaining({
             event: 'maintenance-restore-skipped',
