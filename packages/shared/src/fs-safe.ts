@@ -286,7 +286,6 @@ async function walkDir(
   }
   try {
     await assertHeldAt(fh, real, anchor, rel, segs.join('/'));
-    await recoverDeadParks({ fh, real }, anchor, segs.join('/'));
   } catch (err) {
     await closeQuietly(fh);
     throw err;
@@ -1836,16 +1835,18 @@ const PARK_LEAF_MAX_BYTES = 100;
 const PARK_NAME =
   /^\.(.+)\.haive-park-([1-9][0-9]*)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 
-/** A conservative liveness test: even an unrelated live PID or an inaccessible PID keeps the park.
- *  In particular another api/worker sharing this tree must finish its own operation. */
-function deadParkOwner(pid: number): boolean {
-  if (!Number.isSafeInteger(pid) || pid > 2147483647) return false;
-  try {
-    process.kill(pid, 0);
-    return false;
-  } catch (err) {
-    return errno(err) === 'ESRCH';
-  }
+// The longest park callback is plan/mirror's gitOperationInProgress: six sequential
+// rev-parse calls, each bounded at 10 minutes (worker/repo/git-exec.ts). A day is
+// 24 times that full window. Rename refreshes ctime, even for years-old file bytes.
+const STALE_PARK_MS = 24 * 60 * 60 * 1000;
+const SWEEP_MAX_PARKS = 32;
+let parkRecoveryOnWrites = false;
+const warnedParks = new Set<string>();
+
+/** Worker startup opts into recovery on atomic writes. Other processes (especially
+ *  the api) leave this disabled; reads never run recovery, even in the worker. */
+export function setParkRecoveryOnWrites(enabled: boolean): void {
+  parkRecoveryOnWrites = enabled;
 }
 
 /** Read a bounded, link-refused original name for a truncated park. The companion is data from
@@ -1884,72 +1885,70 @@ async function originalParkLeaf(
   }
 }
 
-/** Sweep only this verified directory, without following any child. Running before the next
- *  operation also covers repository roots, worktrees, uploads and bundle storage without an
- *  unbounded boot walk. Old long names were truncated and cannot be reconstructed: keep and warn.
- *  A failed recovery never hides the park or prevents the caller doing its own operation. */
-async function recoverDeadParks(dir: HeldDir, anchor: string, rel: string): Promise<void> {
-  let names: string[];
+/** One candidate from the bounded write-path stream. Old long names without a
+ *  recovery record cannot be reconstructed: keep and warn once per process. */
+async function recoverStalePark(
+  dir: HeldDir,
+  anchor: string,
+  rel: string,
+  parked: string,
+  directoryKey: string,
+): Promise<void> {
+  const nameOnly = parked.endsWith('.name');
+  const match = PARK_NAME.exec(nameOnly ? parked.slice(0, -5) : parked);
+  if (!match) return;
+  const warn = (message: string, err?: unknown) => {
+    const key = JSON.stringify([directoryKey, parked]);
+    if (warnedParks.has(key)) return;
+    warnedParks.add(key);
+    logger.warn({ err, anchor, rel, parked }, message);
+  };
+  let held: FileHandle | null = null;
   try {
-    names = await readdir(fdPath(dir.fh.fd));
-  } catch (err) {
-    logger.warn({ err, anchor, rel }, 'park recovery could not list directory');
-    return;
-  }
-  for (const parked of names) {
-    const nameOnly = parked.endsWith('.name');
-    const match = PARK_NAME.exec(nameOnly ? parked.slice(0, -5) : parked);
-    if (!match || !deadParkOwner(Number(match[2]))) continue;
-    let leaf = match[1]!;
-    try {
-      if (nameOnly) {
-        // A death before rename leaves only the name record; no file bytes are stored in it.
-        const source = await lstat(at(dir.fh.fd, parked.slice(0, -5))).catch((err: unknown) => {
-          if (errno(err) === 'ENOENT') return null;
-          throw err;
-        });
-        if (source === null && (await lstat(at(dir.fh.fd, parked))).isFile()) {
-          await assertHeldAt(dir.fh, dir.real, anchor, rel, rel);
-          await unlink(at(dir.fh.fd, parked));
-        }
-        continue;
-      }
-      // A UTF-8 cut can shorten the 100-byte prefix by up to three bytes. Neither such a prefix
-      // nor a path spelling '.' or '..' is sufficient evidence of the original public name.
-      if (leaf === '.' || leaf === '..') {
-        logger.warn({ anchor, rel, parked }, 'park recovery cannot reconstruct original name');
-        continue;
-      }
-      if (Buffer.byteLength(leaf) >= PARK_LEAF_MAX_BYTES - 3) {
-        try {
-          leaf = await originalParkLeaf(dir, parked, leaf, anchor, rel);
-        } catch (err) {
-          logger.warn(
-            { err, anchor, rel, parked },
-            'park recovery cannot reconstruct original name',
-          );
-          continue;
-        }
-      }
-      const held = await open(at(dir.fh.fd, parked), O_PATH | O_NOFOLLOW);
-      try {
-        if (!(await held.stat()).isFile()) {
-          logger.warn({ anchor, rel, parked }, 'park recovery refused a non-file');
-          continue;
-        }
-        await assertHeldAt(dir.fh, dir.real, anchor, rel, rel);
-        await assertHeldAt(held, below(dir.real, parked), anchor, rel, parked);
-        await restoreNoReplace(dir, parked, leaf);
-        await unlink(at(dir.fh.fd, `${parked}.name`)).catch((err: unknown) => {
-          if (errno(err) !== 'ENOENT') throw err;
-        });
-      } finally {
-        await closeQuietly(held);
-      }
-    } catch (err) {
-      if (errno(err) === 'ENOENT') continue; // Another sweep already restored it.
-      logger.warn({ err, anchor, rel, parked }, 'park recovery kept the parked file');
+    held = await open(at(dir.fh.fd, parked), O_PATH | O_NOFOLLOW);
+    const st = await held.stat();
+    if (Date.now() - st.ctimeMs <= STALE_PARK_MS) return;
+    if (!st.isFile()) {
+      warn('park recovery refused a non-file');
+      return;
     }
+    await assertHeldAt(dir.fh, dir.real, anchor, rel, rel);
+    await assertHeldAt(held, below(dir.real, parked), anchor, rel, parked);
+    if (nameOnly) {
+      // A death before rename leaves only the name record; never remove one while
+      // its park exists, whatever the age of the record itself.
+      const source = await lstat(at(dir.fh.fd, parked.slice(0, -5))).catch((err: unknown) => {
+        if (errno(err) === 'ENOENT') return null;
+        throw err;
+      });
+      if (source === null) await unlink(at(dir.fh.fd, parked));
+      return;
+    }
+    let leaf = match[1]!;
+    if (leaf === '.' || leaf === '..') {
+      warn('park recovery cannot reconstruct original name');
+      return;
+    }
+    // A UTF-8 cut can shorten the 100-byte prefix by up to three bytes.
+    if (Buffer.byteLength(leaf) >= PARK_LEAF_MAX_BYTES - 3) {
+      try {
+        leaf = await originalParkLeaf(dir, parked, leaf, anchor, rel);
+      } catch (err) {
+        warn('park recovery cannot reconstruct original name', err);
+        return;
+      }
+    }
+    await assertHeldAt(dir.fh, dir.real, anchor, rel, rel);
+    await assertHeldAt(held, below(dir.real, parked), anchor, rel, parked);
+    if (Date.now() - (await held.stat()).ctimeMs <= STALE_PARK_MS) return;
+    await restoreNoReplace(dir, parked, leaf);
+    await unlink(at(dir.fh.fd, `${parked}.name`)).catch((err: unknown) => {
+      if (errno(err) !== 'ENOENT') throw err;
+    });
+  } catch (err) {
+    if (errno(err) !== 'ENOENT') warn('park recovery kept the parked file', err);
+  } finally {
+    if (held !== null) await closeQuietly(held);
   }
 }
 
@@ -2501,8 +2500,15 @@ async function sweepStaleTemps(anchor: string, dirSegs: string[], leaf: string):
       const dirStat = await dir.fh.stat({ bigint: true });
       const key = `${dirStat.dev}:${dirStat.ino}`;
       const start = sweepCursors.get(key) ?? 0;
-      const budget = { entries: SWEEP_MAX_ENTRIES, temps: SWEEP_MAX_TEMPS };
+      const budget = { entries: SWEEP_MAX_ENTRIES, temps: SWEEP_MAX_TEMPS, parks: SWEEP_MAX_PARKS };
       const sweepOne = async (name: string): Promise<void> => {
+        if (
+          parkRecoveryOnWrites &&
+          PARK_NAME.test(name.endsWith('.name') ? name.slice(0, -5) : name)
+        ) {
+          budget.parks -= 1;
+          await recoverStalePark(dir, anchor, dirSegs.join('/'), name, key);
+        }
         if (!name.startsWith(prefix)) return;
         const suffix = name.slice(prefix.length);
         if (!TEMP_SUFFIX.test(suffix) || Number(suffix.slice(0, suffix.indexOf('-'))) >= PID_MAX) {
@@ -2535,7 +2541,7 @@ async function sweepStaleTemps(anchor: string, dirSegs: string[], leaf: string):
           index += 1;
           if (index <= skip) continue;
           if (index > stopAt) return 0;
-          if (budget.entries <= 0 || budget.temps <= 0) return index - 1;
+          if (budget.entries <= 0 || budget.temps <= 0 || budget.parks <= 0) return index - 1;
           budget.entries -= 1;
           await sweepOne(entry.name);
         }

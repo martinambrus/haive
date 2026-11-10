@@ -1,3 +1,4 @@
+import './fs-recovery.js';
 import { finalizeModuleDrains } from '@haive/shared/modularity-server';
 import { logger, configService, CONFIG_KEYS, retryWhileConfigUnavailable } from '@haive/shared';
 import { bootstrap } from './bootstrap.js';
