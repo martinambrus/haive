@@ -250,7 +250,7 @@ describe('core composable catalog', () => {
     ['10-gate-3-commit', '11-phase-8-learning', 'learnings'],
     ['08-phase-5-verify', '11-phase-8-learning', 'learnings'],
     ['01b-install-plugins', '07-phase-2-implement', 'implementation'],
-    ['07b-phase-4-validate', '07c-ddev-reconcile', 'reconciled'],
+    ['07c-ddev-reconcile', '07b-phase-4-validate', 'validation'],
     ['07-phase-2-implement', '11b1-rag-source-selection', 'rag-scope'],
     ['04-verify-environment', '07-phase-2-implement', 'implementation'],
     ['04-verify-environment', '03-phase-0a-discovery', 'discovery'],
@@ -281,6 +281,29 @@ describe('core composable catalog', () => {
       expect.objectContaining({ kind: 'too-late', stepId: early, token }),
     );
   });
+
+  it.each([null, 'full_workflow', 'quick_bugfix', 'plan_tasklist'] as const)(
+    'reconciles after implementation and before validation on path %s (including DAG)',
+    (path) => {
+      const main = stepRegistry.listByWorkflow('workflow');
+      const lists = [
+        main,
+        orderWorkflowRunList(main, stepRegistry.listByWorkflow('env_replicate'), path),
+      ];
+      for (const list of lists) {
+        const ids = list.map((s) => s.metadata.id);
+        const reconcile = ids.indexOf('07c-ddev-reconcile');
+        expect(reconcile).toBeGreaterThan(ids.indexOf('07-phase-2-implement'));
+        if (ids.includes('06c-dag-execute')) {
+          expect(reconcile).toBeGreaterThan(ids.indexOf('06c-dag-execute'));
+        }
+        if (ids.includes('07a-code-simplify')) {
+          expect(reconcile).toBeGreaterThan(ids.indexOf('07a-code-simplify'));
+        }
+        expect(reconcile).toBeLessThan(ids.indexOf('07b-phase-4-validate'));
+      }
+    },
+  );
 
   it('keeps the built-in workflow tree committed before push and cleanup', () => {
     const order = stepRegistry

@@ -294,7 +294,6 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
       'commit',
       'reindexed',
       'db-saved',
-      'reconciled',
       'learnings',
       'rag-scope',
     ],
@@ -311,7 +310,7 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
       { needs: 'implementation', reason: 'Checks the implemented changes.' },
     ],
     provides: ['reconciled'],
-    precedes: ['tests', 'verification', 'db-saved', 'learnings'],
+    precedes: ['validation', 'tests', 'verification', 'db-saved', 'learnings'],
     loopTargetStepId: IMPLEMENT,
   },
   {

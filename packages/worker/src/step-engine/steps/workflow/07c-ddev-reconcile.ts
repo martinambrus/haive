@@ -273,10 +273,10 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
   metadata: {
     id: '07c-ddev-reconcile',
     workflowType: 'workflow',
-    index: 7.8,
+    index: 7.7,
     title: 'DDEV reconcile',
     description:
-      'Applies post-implementation .ddev/config.yaml changes (php restart; MySQL/MariaDB version migration) to the running DDEV env before verify and browser testing.',
+      'Applies post-implementation .ddev/config.yaml changes (php restart; MySQL/MariaDB version migration) to the running DDEV env before validation, verify and browser testing.',
     requiresCli: false,
     allowSkip: true,
   },

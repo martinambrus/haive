@@ -643,7 +643,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
   metadata: {
     id: '07b-phase-4-validate',
     workflowType: 'workflow',
-    index: 7.7,
+    index: 7.8,
     title: 'Phase 4: Implementation validation',
     description:
       'An implementation-validator agent checks the code against the approved spec (logic, edge cases, refactoring impact, dead code, UI language, review dimensions) and loops a fixer agent until valid.',
