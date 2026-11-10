@@ -97,7 +97,7 @@ export function ActionMenu({
   // The rows replace buttons that were all tab-reachable, so the menu has to hand focus
   // over rather than leave it on a trigger whose list nothing can reach by keyboard.
   useEffect(() => {
-    if (open) rowRefs.current[0]?.focus();
+    if (open) rowRefs.current.find((row) => row !== null)?.focus();
   }, [open]);
 
   if (ordered.length === 0) return null;
@@ -123,6 +123,7 @@ export function ActionMenu({
         {only.href ? (
           <LinkButton
             href={only.href}
+            disabled={only.disabled}
             onClick={only.onClick}
             variant={only.danger ? 'destructive' : 'primary'}
             size="sm"
@@ -219,9 +220,13 @@ export function ActionMenu({
                 {item.label}
               </>
             );
-            const rowClass = cn(ROW_CLASS, item.danger && DANGER_ROW_CLASS);
+            const rowClass = cn(
+              ROW_CLASS,
+              item.danger && DANGER_ROW_CLASS,
+              item.disabled && 'cursor-not-allowed opacity-50',
+            );
             const capture = (el: HTMLElement | null) => {
-              rowRefs.current[index] = el;
+              rowRefs.current[index] = item.disabled ? null : el;
             };
             return (
               <div key={item.key}>
@@ -230,10 +235,16 @@ export function ActionMenu({
                   <Link
                     ref={capture}
                     role="menuitem"
+                    aria-disabled={item.disabled || undefined}
+                    tabIndex={item.disabled ? -1 : 0}
                     href={item.href}
                     title={item.title}
                     className={rowClass}
-                    onClick={() => {
+                    onClick={(event) => {
+                      if (item.disabled) {
+                        event.preventDefault();
+                        return;
+                      }
                       triggerRef.current?.focus();
                       item.onClick?.();
                       setOpen(false);

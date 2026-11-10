@@ -17,3 +17,30 @@ it('1 a single menu navigation action is one named link without a nested button'
   fireEvent.click(link);
   expect(onClick).toHaveBeenCalledOnce();
 });
+
+it.each([false, true])(
+  'keeps disabled navigation actions inert in a single action or menu: %s',
+  (menu) => {
+    const onClick = vi.fn();
+    render(
+      <ActionMenu
+        items={[
+          {
+            key: 'view',
+            label: 'View task',
+            icon: Pencil,
+            href: '/tasks/one',
+            disabled: true,
+            onClick,
+          },
+          ...(menu ? [{ key: 'other', label: 'Other action', icon: Pencil }] : []),
+        ]}
+      />,
+    );
+    if (menu) fireEvent.click(screen.getByRole('button', { name: 'Actions' }));
+    const action = screen.getByRole(menu ? 'menuitem' : 'link', { name: 'View task' });
+    expect(action.getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(action);
+    expect(onClick).not.toHaveBeenCalled();
+  },
+);

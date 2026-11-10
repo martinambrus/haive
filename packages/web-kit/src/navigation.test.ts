@@ -49,3 +49,14 @@ it('renders a navigation action as one named link with the same Button appearanc
   expect(link.getAttribute('href')).toBe('/tasks');
   expect(link.className).toBe(screen.getByRole('button', { name: 'Run' }).className);
 });
+it('keeps a disabled LinkButton out of the tab order and refuses its action', () => {
+  const click = vi.fn();
+  render(
+    createElement(LinkButton, { href: '/tasks', disabled: true, onClick: click }, 'All tasks'),
+  );
+  const link = screen.getByRole('link', { name: 'All tasks' });
+  expect(link.getAttribute('aria-disabled')).toBe('true');
+  expect(link.tabIndex).toBe(-1);
+  fireEvent.click(link);
+  expect(click).not.toHaveBeenCalled();
+});

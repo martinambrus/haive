@@ -55,9 +55,33 @@ export function LinkButton({
   variant = 'primary',
   size = 'md',
   className,
+  disabled = false,
+  onClick,
+  tabIndex,
   ...props
-}: ComponentProps<typeof Link> & { variant?: ButtonVariant; size?: ButtonSize }) {
-  return <Link className={buttonClasses(variant, size, className)} {...props} />;
+}: ComponentProps<typeof Link> & {
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+  disabled?: boolean;
+}) {
+  return (
+    <Link
+      {...props}
+      className={cn(
+        buttonClasses(variant, size, className),
+        disabled && 'cursor-not-allowed opacity-50',
+      )}
+      aria-disabled={disabled || undefined}
+      tabIndex={disabled ? -1 : tabIndex}
+      onClick={(event) => {
+        if (disabled) {
+          event.preventDefault();
+          return;
+        }
+        onClick?.(event);
+      }}
+    />
+  );
 }
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
