@@ -134,6 +134,47 @@ it('pins each public HTTP host and port and disables redirects', async () => {
   );
   expect(seams.resolve).toHaveBeenCalledTimes(2);
 });
+it('keeps equals paths parseable by git for guarded HTTPS runs', async () => {
+  const args = await guardArgs(['https://public.test/a=b/r.git'], 'user');
+  const result = await exec('/usr/bin/git', [...args, 'config', '--list']);
+  expect(result.stdout.split('\n')).toContain('http.curloptresolve=public.test:443:93.184.216.34');
+  expect(args).toContain('http.followRedirects=false');
+});
+it('clones a guarded HTTP equals path through the fixture', async () => {
+  await mkdir(`${root}/a=b`);
+  await exec('/usr/bin/git', ['init', '--bare', `${root}/a=b/r.git`]);
+  seams.resolve.mockResolvedValue([{ address: '127.0.0.1', family: 4 }]);
+  seams.isBlocked.mockReturnValue(false);
+  const target = fixture
+    .httpOrigin(`${root}/a=b/r.git`)
+    .replace('%3D', '=')
+    .replace('127.0.0.1', 'public.test');
+  const before = await stats();
+  await gitClone(target, `${root}/equals-clone`, undefined, undefined, {
+    db: dbFor('user'),
+    userId: 'owner',
+  });
+  expect((await stats()).requests).toBeGreaterThan(before.requests);
+});
+it('matches URL-specific overrides against the HTTP transport without userinfo', async () => {
+  const args = await guardArgs(['https://alice@public.test/r'], 'user');
+  const proxy = await exec('/usr/bin/git', [
+    ...args,
+    'config',
+    '--get-urlmatch',
+    'http.proxy',
+    'https://public.test/r',
+  ]);
+  expect(proxy.stdout).toBe('\n');
+  const pin = await exec('/usr/bin/git', [
+    ...args,
+    'config',
+    '--get-urlmatch',
+    'http.curloptResolve',
+    'https://public.test/r',
+  ]);
+  expect(pin.stdout.trim()).toBe('public.test:443:93.184.216.34');
+});
 it('brackets a pinned IPv6 address', async () => {
   seams.resolve.mockResolvedValue([{ address: '2606:4700:4700::1111', family: 6 }]);
   expect(await guardArgs(['https://public.test/r'], 'user')).toContain(

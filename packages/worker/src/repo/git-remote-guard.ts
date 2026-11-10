@@ -59,7 +59,7 @@ export async function gitRemoteGuardArgs(
       const authority = `${host.includes(':') ? `[${host}]` : host}:${port}`;
       const pin = `${authority}:${address.includes(':') ? `[${address}]` : address}`;
       http.set(authority, address);
-      const url = new URL(remote);
+      const url = new URL(redactGitUrl(remote, true));
       url.password = '';
       url.search = '';
       url.hash = '';
@@ -75,6 +75,8 @@ export async function gitRemoteGuardArgs(
   }
   if (http.size) argv.push('-c', 'http.followRedirects=false');
   for (const [url, pin] of httpUrls) {
+    // Git splits -c at the first equals sign; percent-encoding it does not match the raw path.
+    if (url.includes('=')) continue;
     // URL-specific repository config outranks generic -c; a proxy would resolve the host again.
     argv.push(
       '-c',
