@@ -1,3 +1,4 @@
+import { stageAllArgs } from '../../../repo/git-stage.js';
 import { initialGitlinkWarnings } from '../workflow/_gitlink-registration.js';
 import {
   sameValue,
@@ -977,7 +978,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
         await initGitWorkspace(ctx.repoPath, initBranch);
         didInit = true;
         warnings.push(...(await initialGitlinkWarnings(ctx)));
-        await gitExec(['add', '-A'], { cwd: ctx.repoPath, maxBuffer: GIT_MAX_BUFFER });
+        await gitExec(stageAllArgs(), { cwd: ctx.repoPath, maxBuffer: GIT_MAX_BUFFER });
         ctx.logger.info({ initBranch }, 'post-onboarding: initialized git repository');
       }
       // After any init, so a repository that had no git yet is checked against its .gitignore too.

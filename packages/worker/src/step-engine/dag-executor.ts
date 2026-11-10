@@ -1,3 +1,4 @@
+import { stageAllArgs } from '../repo/git-stage.js';
 import { assertDependencyCommitSafe } from './steps/workflow/_dependency-policy.js';
 import { parsePorcelainZ } from './steps/workflow/_commit-diff.js';
 import { putBackProjections, warnStep } from '../project-state/branch-revert.js';
@@ -519,7 +520,7 @@ async function commitIssueWork(
       }),
     );
   }
-  const add = await gitRun(worktreePath, ['add', '-A']);
+  const add = await gitRun(worktreePath, stageAllArgs());
   if (add.code !== 0) {
     throw new Error(
       `git add failed for DAG issue ${issue.issueKey}: ${(add.stderr || add.stdout).trim()}`,

@@ -21,16 +21,8 @@ const LISTING = { maxBuffer: GIT_MAX_BUFFER, encoding: 'latin1' } as const;
 // A split index writes `.git/sharedindex.*` into the repository, so every scratch-index write turns it off.
 const NO_SPLIT_INDEX = ['-c', 'core.splitIndex=false'] as const;
 
-/** The argv of the gate's `git add -A`, shared by the real add and the check of what it would stage. */
-export function stageAllArgs(excluded: string[]): string[] {
-  return [
-    'add',
-    '-A',
-    ...(excluded.length
-      ? ['--', '.', ...excluded.map((p) => `:(top,exclude,literal)${p.slice(0, -1)}`)]
-      : []),
-  ];
-}
+import { stageAllArgs } from '../../../repo/git-stage.js';
+export { stageAllArgs } from '../../../repo/git-stage.js';
 
 function failure(what: string, res: GitRunResult): Error {
   const line = res.stderr.trim().split('\n', 1)[0] ?? '';
