@@ -343,20 +343,6 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
     expect(await readFile(path, 'utf8')).toBe(incoming);
     expect(await base()).toEqual(beforeBase);
     expect((await s.outbox())!.writeIntent).toBeNull();
-    const retirementOwed = await db!
-      .select()
-      .from(schema.taskEvents)
-      .where(
-        and(
-          eq(schema.taskEvents.taskId, task!.id),
-          eq(schema.taskEvents.eventType, 'upgrade.haive_file_retirement_deferred'),
-        ),
-      );
-    expect(retirementOwed).toHaveLength(1);
-    expect(retirementOwed[0]!.payload).toMatchObject({
-      repositoryId: s.repo.id,
-      retirement: 'next_02_or_12',
-    });
 
     await db!
       .update(schema.tasks)

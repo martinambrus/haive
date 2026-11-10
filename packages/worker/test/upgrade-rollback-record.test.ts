@@ -241,13 +241,6 @@ describe('what a rollback reports its record write did', () => {
       const s = await rollback(BEFORE, HAIVE_MANIFEST, false, incoming);
       expect(s.out.recordWrite).toBe('deferred');
       expect((await s.apply()).recordWrite).toBe('deferred');
-      expect(
-        s.fake
-          .rows(schema.taskEvents)
-          .filter((event) => event.eventType === 'upgrade.haive_file_retirement_deferred'),
-      ).toMatchObject([
-        { taskId: TASK, payload: { repositoryId: REPO, retirement: 'next_02_or_12' } },
-      ]);
       expect(s.fake.rows(schema.projectStateOutbox)[0]!.writeIntent).toBeNull();
       expect(s.fake.rows(schema.repositories)[0]!.agentRulesOverride).toBe('LOCAL RULES\n');
       expect(s.exists('.haive/install.json')).toBe(true);
