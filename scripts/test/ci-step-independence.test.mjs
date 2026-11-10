@@ -1122,6 +1122,7 @@ function checkSmokeSplit(workflow) {
       'Recovery re-drive advance ids on a real Redis',
       'Repo refresh retries on a real Redis',
       'RAG sync lock on a real Redis',
+      'Private endpoint seed store on a real Redis',
       'Usage-auth stash script on a real Redis',
       'Module activation watch on a real Redis',
       'Auth throttle script on a real Redis',

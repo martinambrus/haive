@@ -145,6 +145,7 @@ vi.mock('@haive/shared', async (importOriginal) => {
 
 import { Hono } from 'hono';
 import {
+  PRIVATE_ENDPOINT_ALLOWLIST_LOCK_NAME,
   ConfigUnavailableError,
   configService,
   DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS,
@@ -612,6 +613,12 @@ describe.each(ROUTES.filter(({ a }) => Object.keys(a).length > 1))(
 );
 
 describe('PUT /admin/config/private-endpoint-allowlist', () => {
+  it('uses the shared private-endpoint lock name for the derived admin route', async () => {
+    expect((await put('private-endpoint-allowlist', { allowlist: '10.0.0.1' })).status).toBe(200);
+    expect(h.locks).toEqual([PRIVATE_ENDPOINT_ALLOWLIST_LOCK_NAME]);
+    expect(PRIVATE_ENDPOINT_ALLOWLIST_LOCK_NAME).toBe('admin-config:private-endpoint-allowlist');
+  });
+
   it('refuses an invalid entry by name, and writes and audits nothing', async () => {
     const res = await put('private-endpoint-allowlist', {
       allowlist: 'gitlab.corp.example\nbad host!',

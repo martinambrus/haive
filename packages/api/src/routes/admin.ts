@@ -7,6 +7,7 @@ import {
   ALLOWANCE_WATCH_MODES,
   CONFIG_CONCURRENCY_CHANNEL,
   CONFIG_KEYS,
+  PRIVATE_ENDPOINT_ALLOWLIST_LOCK_NAME,
   CONFIG_RUNTIME_LIMITS_CHANNEL,
   DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS,
   DEFAULT_CLI_PROMPT_RETENTION_DAYS,
@@ -487,13 +488,15 @@ async function saveConfig(
   fields: Record<string, ConfigField>,
 ): Promise<void> {
   const entries = Object.entries(fields);
+  const lockName =
+    route === 'private-endpoint-allowlist'
+      ? PRIVATE_ENDPOINT_ALLOWLIST_LOCK_NAME
+      : `admin-config:${route}`;
   // One save of a switch at a time, so each row's `from` is what the save before it left.
   const outcome = await getDb()
     .transaction(async (tx) => {
       await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${CONFIG_LOCK_TIMEOUT_MS}ms'`));
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`admin-config:${route}`}, 0))`,
-      );
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${lockName}, 0))`);
       const stored = await Promise.all(entries.map(([, [key]]) => configService.getFresh(key)));
       const changes = entries.map(([name, [, value, fallback]], i) => {
         const from = parseStored(stored[i] ?? null, fallback);

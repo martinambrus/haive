@@ -234,8 +234,10 @@ counts as an empty list with a warn. The card says a hostname entry cannot lift 
 cloud metadata or IPv6 tunnel addresses, that a refusal reads as host-not-found, and that a hosts-file-only name needs a hostname entry.
 
 **Upgrade seed.** `seedPrivateEndpointAllowlist` (`packages/worker/src/private-endpoint-seed.ts`) is a
-convergent `DATA_MIGRATIONS` entry that runs while the key was never written; an empty value counts as
-written, so a cleared list is never re-seeded and a fresh install stays empty. It lists the private targets
+convergent `DATA_MIGRATIONS` entry that runs while the key was never written, or while its own retry state
+(`bootstrap:privateEndpointSeed`: attempts, the list it wrote, the names still pending) says the list is still
+the one it wrote; an empty value counts as written, so a cleared list is never re-seeded and a fresh install stays
+empty. It lists the private targets
 the install already stores: the Global KB Ollama URL; per repository the external or ddev RAG connection
 string and the Ollama URL (the committed tooling mirror, else the newest onboarding task's
 `04-tooling-infrastructure` output); the host and API base of each forge credential. A name is listed only if
@@ -244,12 +246,18 @@ it resolves (DNS first, the system resolver for a name that exists only in `/etc
 100.100.100.200 / 192.0.0.192 / fd00:ec2::254 are never listed, so a stored loopback target stays refused until an
 administrator lists it. An address literal becomes an address entry, a name a hostname entry. Lookups take
 5 s each, 8 at once, 20 s overall; the entry and byte caps apply. The write is one transaction under the admin
-save's advisory lock (`admin-config:private-endpoint-allowlist`): an audit row
-`config.private_endpoint_allowlist` by the nil-UUID system actor with metadata `{from, to, seeded: true}`, then
-`SET NX`; a lost race rolls the row back. An empty plan writes an empty value and no audit row. A throw writes
-nothing and the next boot retries. A name that did not resolve at the one boot that seeds is skipped, not
-retried. The api's 30 s cache delays the effect there. Undo: clear the list in the card (never re-seeded), or
-`DEL` the key to have the next worker boot seed once more.
+save's advisory lock (`PRIVATE_ENDPOINT_ALLOWLIST_LOCK_NAME` in `@haive/shared`, which the admin save uses for
+this route): an audit row `config.private_endpoint_allowlist` by the nil-UUID system actor with metadata
+`{from, to, seeded: true}`, then one Lua compare-and-set of the list and the retry state together; a lost race
+rolls the row back and is logged as a skip. A throw writes nothing and the next boot retries.
+A name that did not resolve stays pending: the names that did resolve are written at once, and each later seed
+run looks up only the pending names and appends the ones that now resolve (an audit row per change). While
+nothing resolved and a name is pending, the list key stays absent rather than empty. After 10 runs (a seed run,
+not a distinct boot: a bootstrap retry or a crash loop counts too) the seed writes what it knows, `''` included,
+warns, and stops. An administrator save of the list (any value, the same one included) deletes the retry state
+in the same Lua call, so the seed never adds to a list an administrator decided. A malformed retry state fails the
+seed run (the list stays as it is) until the state key is deleted. The api's 30 s cache delays the effect there.
+Undo: clear the list in the card (never re-seeded), or `DEL` the key to have the next worker boot seed once more.
 
 What a non-admin keeps: the built-in hosts, the only targets a request-typed probe may reach while they
 resolve private. They are the in-stack Ollama names (`IN_STACK_OLLAMA_HOSTS`: `ollama` and its container

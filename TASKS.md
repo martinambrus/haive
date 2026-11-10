@@ -453,16 +453,6 @@ From the T406/T408 build (2026-11-07).
 6. The module-schema-wins precedence of the hold is untested.
 7. Nits: `step-context-usage.ts` ~:51 throws "invs is not iterable" under mock-DB unit runs (harmless); stale "web package has no vitest config" header in web lib/step-cli-providers.ts ~:20; `providerLabel` in provider-hold.ts shares a name with sandbox/mcp-surface.ts ~:389.
 
-### T554 · FNF[allowlist-seed-hardening] · the private-endpoint upgrade seed can lose entries for good (+1)
-
-status: in progress 2026-11-10 (sec-T586, /codex-sonnet), owner-approved (next: T570+T554 as bundle C) · kind: fix · found: T347 run · priority: P2
-
-1. A DNS outage at the one seeding boot leaves a permanent empty list: unresolved names are skipped (worker private-endpoint-seed.ts:196,227) and an empty plan writes `''` (:354), which counts as written. NEW-LIMIT. Fix: do not write the empty marker while a candidate is unresolved; retry on later boots with a cap.
-2. A transient DNS failure for one name is not retried (private-endpoint-seed.ts:146-216), so that name is skipped for good. NEW-LIMIT.
-3. The seed hard-codes the lock name `admin-config:private-endpoint-allowlist` (:30) while the admin save derives it from its route name (api routes/admin.ts:483); a rename silently breaks their serialisation. NEW-LIMIT. Fix: one shared constant.
-4. `reconcileEmbedModelResidency` (worker queues/task-queue.ts:1084-1098) dials a historical task's Ollama URL; a private one the seed did not list is refused and skipped silently. REGRESSION (minor, best-effort cleanup).
-5. (T555 run, 2026-11-09) Seed `METADATA` (worker private-endpoint-seed.ts:70-73) is a second hand-kept list holding two of the guard's three metadata addresses. It can drift from the guard's set; no change needed today. PRE-EXISTING, minor.
-
 ### T555 · FNF[egress-guard-hardening] · remaining egress guard gaps: local NAT64 and Teredo, probe details (+2)
 
 status: parked · reason: diminishing returns (owner triage 2026-11-10); resume on a user report, a measured failure, or a change in the same code · kind: fix · found: T347 run · priority: P2
@@ -637,11 +627,6 @@ PRE-EXISTING. terminal-shell.ts `openSession` (api routes ~:439-476) publishes t
 
 status: open · kind: fix · found: T544 run 2026-11-08 · priority: P4
 PRE-EXISTING. shared config.service.ts `CONFIG_REDIS_OPTIONS` (~:785) and `redisCall` (~:1068): after repeated 2 s command timeouts on a socket that stays open but loses bytes, ioredis keeps the timed-out commands queued and reply pairing can desync until the socket is destroyed. A drop, a restart-like drop and `docker pause` recover on the same client; only the lossy black-hole does not, and T544's boot retry then waits as long as it lasts. Related T548.
-
-### T570 · FNF[encryption-key-set-race] · two processes on a first boot can each generate the encryption key
-
-status: in progress 2026-11-10 (sec-T586, /codex-sonnet), owner-approved (next: T570+T554 as bundle C) · kind: fix · found: T544 run 2026-11-08 · priority: P3
-PRE-EXISTING. shared config.service.ts `ensureEncryptionKey` (~:938-951, EXISTS then plain SET; also ~:1039): with no key in Redis and no `CONFIG_ENCRYPTION_KEY`, api and worker initializing together each generate a key, the last SET wins, and the other may already encrypt with the overwritten one. Direction: SET NX, then re-read the winner.
 
 ### T571 · FNF[global-kb-boot-store-stall] · worker boot waits forever on a stalled global KB store
 
@@ -1551,8 +1536,18 @@ status: open · kind: fix · found: #1057 reviews 2026-11-10 · priority: P4
 4. Gate 4's no-origin path replaces a saved remote and credential with the typed values (11a-gate-4-push.ts `persistPushOrigin` with `addOrigin`); audited and stated in the form since #1057, unchanged behaviour. PRE-EXISTING, minor; decide whether it should refuse instead.
 5. `repository.scope.update` from the worker reports `addedCount` 0 when a null list becomes `[]`. Nit.
 
+### T589 · FNF[encryption-key-and-seed-store] · boot key and seed store leftovers (+3)
+
+status: open · kind: design · found: #1060 reviews 2026-11-10 · priority: P3
+
+1. With no `CONFIG_ENCRYPTION_KEY` and an empty Redis (flush, new volume) `ensureEncryptionKey` (shared config.service.ts ~:939-967) generates a fresh key with only a warn, which orphans every secret encrypted under the lost key; it cannot tell a first install from a lost store. PRE-EXISTING, consequential, by design today; decide whether a non-empty secrets table should refuse to generate.
+2. `getEncryptionKey` caches `null` for 30 s via `get()` before throwing (config.service.ts ~:1098-1117), so a recovered key stays unseen for up to the cache TTL when no env key is set. PRE-EXISTING, minor.
+3. The seed's Redis compare-and-set runs inside the Postgres transaction but outside its rollback: a timed-out or ambiguous Redis write, or a COMMIT failing after it, leaves the grant applied with its audit row rolled back (worker private-endpoint-seed.ts ~:410-435). Same shape as the earlier `setIfAbsent`. PRE-EXISTING, minor.
+4. Seed attempts count seed runs, not distinct boots (bootstrap retries and crash loops count), and a malformed `bootstrap:privateEndpointSeed` blocks the seed until deleted; both documented in api-auth.md. Accepted, minor.
+
 ## Done
 
+- T570 + T554 items 1-3 — encryption key SET NX winner (checked on every production read); private endpoint seed retries unresolved names (cap 10, admin save ends seed ownership); one shared allowlist lock name; item 4 invalid (egress guard already warns), item 5 no change — PR #1060 (5f90d186a), 2026-11-10. Leftovers T589.
 - T373 sites + items 1-7 — strict admin audit rows (module, task-type, upgrade, CLI provider create/update/sign-out/login, admin pause lift), password-change throttle and failure row (400 `current_password_incorrect`), mixed RAG tooling save refused, module rows logged after commit — PRs #1058 (1f1064268), #1059 (8a56956d9), 2026-11-10. Leftovers 8-16 stay open under T373.
 - T504 + T505 — worker writes of repository settings (project-state sync and resolve, clone import, 09_7 RAG scope) leave strict audit rows with source and actor; gate 4 binds the remote with a bounded row lock, an in-transaction row, add-only origin and restore, repairs on Retry and refuses an origin changed since the form — PR #1057 (b7309577c), 2026-11-10. Follow-ups T588.
 - T492 — a house rule's approval lapse writes an audit row — PR #1056 (c58365e78), 2026-11-10
