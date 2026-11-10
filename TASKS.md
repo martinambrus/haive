@@ -43,18 +43,7 @@ over silently: ask the user, then set `owner:` to yourself with a note naming th
 and write where the work stands (branch, PR, evidence path) in its body.
 
 **Finish**: when the PR is merged and main CI is green, delete the task's block and add one line to
-`### T589 · FNF[encryption-key-and-seed-store] · boot key and seed store leftovers (+3)
-
-status: open · kind: design · found: #1060 reviews 2026-11-10 · priority: P3
-
-1. With no `CONFIG_ENCRYPTION_KEY` and an empty Redis (flush, new volume) `ensureEncryptionKey` (shared config.service.ts ~:939-967) generates a fresh key with only a warn, which orphans every secret encrypted under the lost key; it cannot tell a first install from a lost store. PRE-EXISTING, consequential, by design today; decide whether a non-empty secrets table should refuse to generate.
-2. `getEncryptionKey` caches `null` for 30 s via `get()` before throwing (config.service.ts ~:1098-1117), so a recovered key stays unseen for up to the cache TTL when no env key is set. PRE-EXISTING, minor.
-3. The seed's Redis compare-and-set runs inside the Postgres transaction but outside its rollback: a timed-out or ambiguous Redis write, or a COMMIT failing after it, leaves the grant applied with its audit row rolled back (worker private-endpoint-seed.ts ~:410-435). Same shape as the earlier `setIfAbsent`. PRE-EXISTING, minor.
-4. Seed attempts count seed runs, not distinct boots (bootstrap retries and crash loops count), and a malformed `bootstrap:privateEndpointSeed` blocks the seed until deleted; both documented in api-auth.md. Accepted, minor.
-
-## Done` - T570 + T554 items 1-3 — encryption key SET NX winner (checked on every production read); private endpoint seed retries unresolved names (cap 10, admin save ends seed ownership); one shared allowlist lock name; item 4 invalid (egress guard already warns), item 5 no change — PR #1060 (5f90d186a), 2026-11-10. Leftovers T589.
-
-(`T323 — <title> — PR #N (<merge sha>), <date>`).
+`## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
 **Found something outside your task?** Search the board first (`grep -n "<file>\|<symbol>\|<slug>"`).
 
@@ -1547,8 +1536,18 @@ status: open · kind: fix · found: #1057 reviews 2026-11-10 · priority: P4
 4. Gate 4's no-origin path replaces a saved remote and credential with the typed values (11a-gate-4-push.ts `persistPushOrigin` with `addOrigin`); audited and stated in the form since #1057, unchanged behaviour. PRE-EXISTING, minor; decide whether it should refuse instead.
 5. `repository.scope.update` from the worker reports `addedCount` 0 when a null list becomes `[]`. Nit.
 
+### T589 · FNF[encryption-key-and-seed-store] · boot key and seed store leftovers (+3)
+
+status: open · kind: design · found: #1060 reviews 2026-11-10 · priority: P3
+
+1. With no `CONFIG_ENCRYPTION_KEY` and an empty Redis (flush, new volume) `ensureEncryptionKey` (shared config.service.ts ~:939-967) generates a fresh key with only a warn, which orphans every secret encrypted under the lost key; it cannot tell a first install from a lost store. PRE-EXISTING, consequential, by design today; decide whether a non-empty secrets table should refuse to generate.
+2. `getEncryptionKey` caches `null` for 30 s via `get()` before throwing (config.service.ts ~:1098-1117), so a recovered key stays unseen for up to the cache TTL when no env key is set. PRE-EXISTING, minor.
+3. The seed's Redis compare-and-set runs inside the Postgres transaction but outside its rollback: a timed-out or ambiguous Redis write, or a COMMIT failing after it, leaves the grant applied with its audit row rolled back (worker private-endpoint-seed.ts ~:410-435). Same shape as the earlier `setIfAbsent`. PRE-EXISTING, minor.
+4. Seed attempts count seed runs, not distinct boots (bootstrap retries and crash loops count), and a malformed `bootstrap:privateEndpointSeed` blocks the seed until deleted; both documented in api-auth.md. Accepted, minor.
+
 ## Done
 
+- T570 + T554 items 1-3 — encryption key SET NX winner (checked on every production read); private endpoint seed retries unresolved names (cap 10, admin save ends seed ownership); one shared allowlist lock name; item 4 invalid (egress guard already warns), item 5 no change — PR #1060 (5f90d186a), 2026-11-10. Leftovers T589.
 - T373 sites + items 1-7 — strict admin audit rows (module, task-type, upgrade, CLI provider create/update/sign-out/login, admin pause lift), password-change throttle and failure row (400 `current_password_incorrect`), mixed RAG tooling save refused, module rows logged after commit — PRs #1058 (1f1064268), #1059 (8a56956d9), 2026-11-10. Leftovers 8-16 stay open under T373.
 - T504 + T505 — worker writes of repository settings (project-state sync and resolve, clone import, 09_7 RAG scope) leave strict audit rows with source and actor; gate 4 binds the remote with a bounded row lock, an in-transaction row, add-only origin and restore, repairs on Retry and refuses an origin changed since the form — PR #1057 (b7309577c), 2026-11-10. Follow-ups T588.
 - T492 — a house rule's approval lapse writes an audit row — PR #1056 (c58365e78), 2026-11-10
