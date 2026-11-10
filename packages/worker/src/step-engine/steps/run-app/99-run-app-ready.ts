@@ -4,6 +4,7 @@ import type { FormSchema } from '@haive/shared';
 import { CONFIG_KEYS, configService } from '@haive/shared';
 import {
   TaskCancelledError,
+  ReopenStepFormError,
   type StepContext,
   type StepDefinition,
 } from '../../step-definition.js';
@@ -22,7 +23,12 @@ import {
   unregisteredGitlinks,
   unregisteredGitlinksMessage,
 } from '../workflow/_gitlink-registration.js';
-import { gitCommitStaged } from '../../../repo/git-commit.js';
+import {
+  gitPreview,
+  commitGitPreview,
+  RUN_APP_PATHSPECS,
+  type GitPreview,
+} from '../../../repo/git-preview.js';
 import { gitWorkspaceStatus } from '../../../repo/git-workspace.js';
 import { putBackProjections, warnStep } from '../../../project-state/branch-revert.js';
 
@@ -60,6 +66,8 @@ interface RunAppReadyDetect {
   branchError?: string | null;
   dirtyFiles: number;
   diffArtifactPath: string | null;
+  /** Absent on older parked forms or when the preview could not be read safely. */
+  commitPreview?: GitPreview | null;
   changedFileCount: number;
   /** The branch 01 forked the worktree from; absent where 01 did not run or the output predates it. */
   baseBranch?: string | null;
@@ -177,6 +185,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
     let dirtyFiles = 0;
     let diffArtifactPath: string | null = null;
     let changedFileCount = 0;
+    let commitPreview: GitPreview | null = null;
     if (hasGit) {
       const branchRes = await gitRun(workspacePath, ['rev-parse', '--abbrev-ref', 'HEAD']);
       branch = branchRes.code === 0 ? branchRes.stdout.trim() : null;
@@ -210,9 +219,26 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
         }
         dirtyFiles = status.stdout.split('\n').filter((l) => l.trim().length > 0).length;
         if (dirtyFiles > 0) {
-          const res = await buildCommitDiffArtifact(workspacePath, gitRun);
+          const before = await gitPreview(workspacePath);
+          const res = await buildCommitDiffArtifact(workspacePath, (cwd, argv) =>
+            gitRun(cwd, argv.includes('status') ? [...argv, '--', ...RUN_APP_PATHSPECS] : argv),
+          );
+          const after = await gitPreview(workspacePath);
+          if (
+            before.head !== after.head ||
+            before.ref !== after.ref ||
+            before.tree !== after.tree ||
+            res.truncated
+          ) {
+            throw new Error(
+              'The commit preview changed while it was being read; reopen it to review the current edits.',
+            );
+          }
           diffArtifactPath = res.artifactPath;
           changedFileCount = res.changedFileCount;
+          commitPreview = before;
+        } else {
+          commitPreview = await gitPreview(workspacePath, []);
         }
       } catch (err) {
         ctx.logger.warn({ err }, 'run-app-ready: failed to build commit diff artifact');
@@ -234,6 +260,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       branchError,
       dirtyFiles,
       diffArtifactPath,
+      commitPreview,
       changedFileCount,
       baseBranch: worktreeOutput?.baseBranch ?? null,
     };
@@ -260,6 +287,10 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
             'When you are done, finish to tear down the environment. Optionally commit your',
             'session edits back to this task’s branch first.',
           ];
+    lines.push(
+      '',
+      'Only the edits shown below are committed. If they change, review the refreshed preview and finish again.',
+    );
     const fields: FormSchema['fields'] = [
       {
         type: 'checkbox',
@@ -341,16 +372,40 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       ]);
       if (status.code !== 0)
         throw new Error(`git status failed: ${status.stderr || status.stdout}`);
-      const orphans = await unregisteredGitlinks(workspace, status.stdout, []);
+      const orphans = await unregisteredGitlinks(
+        workspace,
+        status.stdout,
+        [],
+        detected.commitPreview?.paths,
+      );
       if (orphans.length) throw new Error(unregisteredGitlinksMessage(orphans));
-      const add = await gitRun(workspace, ['add', '-A']);
-      if (add.code !== 0) {
-        throw new Error(`git add failed: ${add.stderr || add.stdout}`);
+      const preview = detected.commitPreview;
+      if (!preview?.ref) {
+        throw new ReopenStepFormError(
+          'Reopen the commit preview and review the current edits before committing.',
+        );
+      }
+      let current: GitPreview;
+      try {
+        current = await gitPreview(workspace, preview.paths);
+      } catch {
+        throw new ReopenStepFormError(
+          'The commit preview changed or could not be read. Reopen it and review the current edits before committing.',
+        );
+      }
+      if (
+        current.head !== preview.head ||
+        current.ref !== preview.ref ||
+        current.tree !== preview.tree
+      ) {
+        throw new ReopenStepFormError(
+          'The commit preview has changed. Reopen it and review the current edits before committing.',
+        );
       }
       const message = (values.commitMessage ?? '').trim() || 'chore: run-app session edits';
       const userEnv = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
       const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
-      nothing = !(await gitCommitStaged(workspace, message, commitEnv));
+      nothing = !(await commitGitPreview(workspace, preview, message, commitEnv));
     }
     const commitNote = values.commit
       ? nothing
