@@ -147,11 +147,14 @@ The updater creates the journal table itself, at every start: `ensureJournal` ru
 `UPGRADE_JOURNAL_DDL`, which `@haive/database` exports once and the api's tests build the table
 from, so nothing keeps a copy of it.
 
-The API's upgrade launch inserts maintenance.start_upgrade before starting the updater
-container, in one transaction. A refused row starts no container; a failed Docker launch
-rolls the row back. Metadata contains request field names only. The log follows commit.
-As with the Redis maintenance state, a commit failure after the external effect succeeded
-cannot atomically undo that effect.
+The API's upgrade launch commits its `maintenance.start_upgrade` row (metadata `from`, `to`,
+`force`) in its own short transaction before it starts the updater container, so no main-database
+connection is held while Docker pulls and starts it (up to 300 s). A refused row starts no container.
+A failed launch deletes that one row by id and answers the launch error (a failed delete is logged);
+the pino line follows a successful launch only. The admin audit log can therefore show the row while
+the launch is in flight and lose it if the launch fails. A launch whose outcome is ambiguous (the
+300 s deadline kills the Docker client after the daemon may already have started the container)
+deletes the row as a failure, so such an upgrade can run without one.
 
 A start that ends before any run exists also leaves a row, so an administrator sees why an upgrade
 did not happen, from the admin page or from `./haive upgrade`, after the api that launched it is

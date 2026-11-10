@@ -20,11 +20,13 @@ provider state separately from its configured switch; see [Integrations](integra
 provider enabled by configuration can still be unavailable because its module is deactivated.
 
 Admin activation and ordinary deactivation write their audit row in the same transaction as
-the module change, and log after commit. Urgent deactivation records module.deactivate
-with mode urgent in the transaction that stamps the module, before stopping dependents;
-the subsequent Stop rows remain best-effort. Teardown records its request before enqueue
-inside a transaction: an audit refusal queues nothing and an enqueue failure rolls the row
-back. The partial-purge row after an irreversible database drop remains best-effort.
+the module change, and log after commit. Urgent deactivation records `module.deactivate`
+with mode `urgent` in the transaction that stamps the module, before stopping dependents;
+the subsequent Stop rows remain best-effort. Teardown commits its `module.teardown` row before
+it enqueues the job, with no transaction open during the enqueue: an audit refusal queues nothing,
+and a rejected or id-less enqueue deletes that one row by id (a failed delete is logged). A Redis
+reply lost after the job was added also deletes the row, so that rare teardown runs without one. The
+partial-purge row after an irreversible database drop remains best-effort.
 
 ## The four states
 
