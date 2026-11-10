@@ -1376,3 +1376,12 @@ export function computeEffectiveSecretGlobs(opts: {
 }
 
 export { TASK_SCOPE_RULES } from './task-scope-rules.js';
+
+/** Structural repository preparation failures; display copy is never a recovery gate. */
+export const REPOSITORY_ERROR_CODES = {
+  CHECKOUT_REPAIR_NEEDED: 'checkout_repair_needed',
+  SOURCE_REPAIR_NEEDED: 'source_repair_needed',
+} as const;
+
+export type RepositoryErrorCode =
+  (typeof REPOSITORY_ERROR_CODES)[keyof typeof REPOSITORY_ERROR_CODES];

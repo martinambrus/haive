@@ -19,7 +19,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import type { TreeNode } from '@haive/shared';
+import { REPOSITORY_ERROR_CODES, type TreeNode } from '@haive/shared';
 import { api, API_BASE_URL, type Repository } from '@/lib/api-client';
 import { Button, Badge, Card, CardHeader, CardTitle, CardDescription } from '@/components/ui';
 import { DirectoryTreeSelect } from '@/components/directory-tree-select';
@@ -335,7 +335,8 @@ function RepoCard(props: RepoCardProps) {
   const canEditScope = repo.status === 'ready' && repo.scopeExcludeGlobs !== null;
   const repairNeeded =
     repo.status === 'error' &&
-    (repo.errorCode === 'checkout_repair_needed' || repo.errorCode === 'source_repair_needed');
+    (repo.errorCode === REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED ||
+      repo.errorCode === REPOSITORY_ERROR_CODES.SOURCE_REPAIR_NEEDED);
   const canRebuild =
     repairNeeded &&
     (repo.source === 'local_path' ? !!repo.writable && !!repo.localPath : !!repo.remoteUrl);
@@ -572,7 +573,7 @@ function RepoCard(props: RepoCardProps) {
               },
             repairNeeded &&
               canRebuild &&
-              repo.errorCode === 'checkout_repair_needed' && {
+              repo.errorCode === REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED && {
                 key: 'check-repair',
                 label: retrying ? 'Checking...' : 'Check repair',
                 icon: RefreshCw,

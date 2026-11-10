@@ -72,6 +72,8 @@ import {
   initRepoUploadRequestSchema,
   linkRepoRemoteRequestSchema,
   REPO_JOB_NAMES,
+  REPOSITORY_ERROR_CODES,
+  type RepositoryErrorCode,
   updateRepoExclusionsRequestSchema,
   CLI_PROVIDER_LIST,
   HAIVE_DATA_DIR,
@@ -230,7 +232,7 @@ export async function addRepoJobOrMarkError(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
   add: () => Promise<unknown>,
-  errorCode: string | null = null,
+  errorCode: RepositoryErrorCode | null = null,
 ): Promise<void> {
   try {
     await add();
@@ -3527,7 +3529,8 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
   if (
     recovery &&
     (repo.status !== 'error' ||
-      (repo.errorCode !== 'checkout_repair_needed' && repo.errorCode !== 'source_repair_needed'))
+      (repo.errorCode !== REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED &&
+        repo.errorCode !== REPOSITORY_ERROR_CODES.SOURCE_REPAIR_NEEDED))
   ) {
     throw new HttpError(409, 'This repository does not need checkout recovery.');
   }
@@ -3609,8 +3612,8 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
           retryUpload || recovery ? eq(schema.repositories.status, 'error') : undefined,
           recovery
             ? inArray(schema.repositories.errorCode, [
-                'checkout_repair_needed',
-                'source_repair_needed',
+                REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED,
+                REPOSITORY_ERROR_CODES.SOURCE_REPAIR_NEEDED,
               ])
             : undefined,
         ),
@@ -3659,7 +3662,7 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
               backoff: { type: 'exponential', delay: 5000 },
             },
       ),
-    recovery ? 'checkout_repair_needed' : null,
+    recovery ? REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED : null,
   );
 
   return c.json({ ok: true });

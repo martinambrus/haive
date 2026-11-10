@@ -13,7 +13,12 @@ import {
   renameNoFollow,
 } from '@haive/shared/fs-safe';
 import { lockRepositoryTasksKey, schema, type Database } from '@haive/database';
-import { CHECKOUT_HOLDING_TASK_STATUSES, logger, type RepoJobPayload } from '@haive/shared';
+import {
+  CHECKOUT_HOLDING_TASK_STATUSES,
+  REPOSITORY_ERROR_CODES,
+  logger,
+  type RepoJobPayload,
+} from '@haive/shared';
 import { assertCloneUrl, copyTree, gitClone, persistDetection, withRootClaim } from './clone.js';
 import {
   MOVE_ATTEMPTS,
@@ -483,7 +488,7 @@ async function rebuild(
         `Not refreshed: the folder this repository was imported from (${fromFolder}) could not be examined (${source.unknown}). Nothing was moved.` +
         (source.repairNeeded ? ' Retry cannot help until that folder is repaired.' : '');
       throw source.repairNeeded
-        ? new CheckoutRepairNeededError(message, 'source_repair_needed')
+        ? new CheckoutRepairNeededError(message, REPOSITORY_ERROR_CODES.SOURCE_REPAIR_NEEDED)
         : new Error(message);
     }
   }
