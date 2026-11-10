@@ -12,6 +12,7 @@ import { getTableConfig, PgJsonb, PgUUID, type PgTable } from 'drizzle-orm/pg-co
  * wrong folder. It supports exactly the conditions callers build — `and` and `or` of `eq` / `ne` /
  * `gt` / `gte` / `lt` / `inArray` / `notInArray` / `isNull` / `isNotNull`, a NULL matching only `isNull`,
  * a jsonb column's key that holds a string (`jsonb_typeof(column -> 'key') = 'string'`),
+ * a string-valued jsonb member equal to a string (`column ->> 'key' = value`),
  * and `not(EXISTS (SELECT 1 FROM table WHERE inner_uuid = outer_uuid AND a IS NULL AND b IS NULL))`
  * or the same with `AND (a >= value OR b >= value)` in place of the two IS NULL tests —
  * and throws on anything else, so a drizzle upgrade or a new query shape fails loudly instead of
@@ -339,6 +340,23 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       }
       const [col, op, val] = ch;
       const key = is(col, Column) ? keyOf.get(col) : undefined;
+      const textMember = /^ ->> '([^']+)' = $/.exec(text(op) ?? '');
+      if (
+        ch.length === 3 &&
+        key !== undefined &&
+        is(col, PgJsonb) &&
+        textMember &&
+        typeof val === 'string'
+      ) {
+        return (row) => {
+          const doc = row[key];
+          return (
+            typeof doc === 'object' &&
+            doc !== null &&
+            (doc as Record<string, unknown>)[textMember[1]!] === val
+          );
+        };
+      }
       if (key !== undefined && is(col, Column)) {
         if (ch.length === 2 && text(op) === ' is null') return (row) => row[key] == null;
         if (ch.length === 2 && text(op) === ' is not null') return (row) => row[key] != null;

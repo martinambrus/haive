@@ -14,7 +14,19 @@ const TASK = '00000000-0000-4000-8000-000000000001';
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function world(repositoryId: string | null) {
-  const fake = createFakeDb({ tasks: schema.tasks, repositories: schema.repositories });
+  const fake = createFakeDb({
+    tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+    mergeDirClaims: schema.mergeDirClaims,
+    taskEvents: schema.taskEvents,
+    repositories: schema.repositories,
+  });
+  fake.insert(schema.repositories, {
+    id: REPO,
+    userId: USER,
+    name: 'repo',
+    storagePath: '/unused/task-start-lock',
+  });
   fake.insert(schema.tasks, {
     id: TASK,
     userId: USER,

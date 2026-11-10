@@ -127,6 +127,8 @@ interface World {
 async function world(w: World = {}) {
   const fake = createFakeDb({
     tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+    mergeDirClaims: schema.mergeDirClaims,
     taskEvents: schema.taskEvents,
     repositories: schema.repositories,
     onboardingArtifacts: schema.onboardingArtifacts,
