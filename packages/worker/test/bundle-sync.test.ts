@@ -1,3 +1,4 @@
+import { adminGitOwner } from './support/git-owner.js';
 import { fixtureBase, httpOrigin, networkGitArgs } from './support/git-http.js';
 import { hardenGitArgs } from '@haive/shared/git-args';
 import { spawn } from 'node:child_process';
@@ -68,7 +69,7 @@ async function setupBareWithAdvance(): Promise<{
 
   // Independent bundle clone (this is what bundle-sync.ts operates on).
   const cloneDir = path.join(tmpRoot, 'clone');
-  await gitClone(httpOrigin(bare), cloneDir, 'main');
+  await gitClone(httpOrigin(bare), cloneDir, 'main', undefined, adminGitOwner);
 
   // Author advances upstream — bundle clone is now stale.
   await writeFile(path.join(author, 'README.md'), 'second\n');

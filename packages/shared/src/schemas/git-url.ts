@@ -35,6 +35,13 @@ import { z } from 'zod';
  * anonymous `git://` protocol is deliberately absent: it is unauthenticated and
  * unencrypted, nothing in the product references it, and no stored repository
  * uses it.
+ *
+ * The host must also read the same to WHATWG and to git's transports. curl dials
+ * the raw authority text, so `http://public.example\@10.0.0.5/` (WHATWG host
+ * `public.example`, curl host 10.0.0.5 — MEASURED) would let a remote pass the
+ * worker's owner guard with one host and connect to another. A value holding
+ * whitespace or a control character, or whose raw host differs from the parsed
+ * one (IDN, percent-encoded or short IPv4 forms included), is refused.
  */
 const ALLOWED_GIT_URL_SCHEMES = new Set(['https:', 'http:', 'ssh:']);
 
@@ -97,7 +104,7 @@ function looksLikeUrl(value: string): boolean {
 }
 
 export function isAllowedGitRemoteUrl(value: string): boolean {
-  if (REMOTE_HELPER_SYNTAX.test(value)) return false;
+  if (/[\s\x00-\x1f\x7f]/.test(value) || REMOTE_HELPER_SYNTAX.test(value)) return false;
   if (looksLikeUrl(value)) {
     let parsed: URL;
     try {
@@ -105,6 +112,15 @@ export function isAllowedGitRemoteUrl(value: string): boolean {
     } catch {
       return false;
     }
+    const authority = value.slice(value.indexOf('://') + 3).split(/[/?#]/)[0]!;
+    // WHATWG strips controls and treats backslashes as delimiters; Git's transports do not.
+    if (/[\\\x00-\x20\x7f]/.test(authority)) return false;
+    const host = authority
+      .slice(authority.lastIndexOf('@') + 1)
+      .replace(/:\d*$/, '')
+      .replace(/^\[|\]$/g, '')
+      .toLowerCase();
+    if (host !== parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase()) return false;
     // A host is required for the same reason `file:` is excluded: a scheme that
     // parses but names no server is not pointing at a remote.
     return ALLOWED_GIT_URL_SCHEMES.has(parsed.protocol) && parsed.hostname.length > 0;
@@ -292,7 +308,8 @@ export const gitRemoteUrlSchema = z
     message:
       'must be an https, http or ssh URL, or an scp-style address with a user or a ' +
       'dotted host (git@github.com:owner/repo.git). A local file:// path is not a ' +
-      'remote; for a single-word host write ssh://host/path.',
+      'remote; for a single-word host write ssh://host/path. ' +
+      'Write the host as a URL parser prints it (e.g. punycode for a non-ASCII name).',
   })
   .transform((value) => redactGitUrl(value, true));
 

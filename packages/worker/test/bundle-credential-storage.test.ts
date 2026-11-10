@@ -56,11 +56,16 @@ it('keeps clone and every resync authenticated without URL credentials, cleaning
   });
   const clean = fixture.httpOrigin(bare);
   h.host = new URL(clean).host;
-  const fake = createFakeDb({ customBundles: schema.customBundles, tasks: schema.tasks });
+  const fake = createFakeDb({
+    customBundles: schema.customBundles,
+    tasks: schema.tasks,
+    users: schema.users,
+  });
   const bundleId = '00000000-0000-4000-8000-000000000001';
   const userId = '00000000-0000-4000-8000-000000000002';
   const repositoryId = '00000000-0000-4000-8000-000000000003';
   const taskId = '00000000-0000-4000-8000-000000000004';
+  fake.insert(schema.users, { id: userId, role: 'admin' });
   fake.insert(schema.customBundles, {
     id: bundleId,
     userId,

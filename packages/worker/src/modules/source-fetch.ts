@@ -18,6 +18,9 @@ import { originGitRun, scrubSecret } from '../repo/git-push.js';
 import { shellQuote } from '../sandbox/shell-quote.js';
 import { pinModuleTree, resolveWorkerImage } from './source-pin.js';
 
+// Module source writes and fetches are requireAdmin routes; boot uses only those saved sources.
+const ADMIN_MODULE_SOURCE = { trustedAdminModuleSource: true } as const;
+
 export type FetchSource = {
   id: string;
   moduleId: string;
@@ -250,6 +253,7 @@ export async function fetchModuleSource(
         await originGitRun(
           tree,
           [...auth, 'ls-remote', '--end-of-options', url.href, heads, tags, `${tags}^{}`],
+          ADMIN_MODULE_SOURCE,
           env,
           io,
         ),
@@ -290,6 +294,7 @@ export async function fetchModuleSource(
         originGitRun(
           tree,
           [...auth, 'fetch', '--no-tags', '--depth=1', '--end-of-options', url.href, target],
+          ADMIN_MODULE_SOURCE,
           env,
           { ...io, signal },
         ),

@@ -18,7 +18,12 @@ async function gitFetch(
   const args = ['fetch', '--quiet', 'origin'];
   if (branch) args.push(branch);
   const auth = await bundleGitAuth(db, bundle);
-  const res = await originGitRun(bundle.storageRoot, [...auth.argv, ...args], auth.env);
+  const res = await originGitRun(
+    bundle.storageRoot,
+    [...auth.argv, ...args],
+    { db, userId: bundle.userId },
+    auth.env,
+  );
   if (res.code !== 0) {
     const msg = scrubSecret(res.stderr, auth.secret).trim();
     throw new Error(`git fetch failed (exit ${res.noExit ?? res.code}): ${msg}`);

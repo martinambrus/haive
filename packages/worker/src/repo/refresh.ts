@@ -225,6 +225,7 @@ async function sourceFor(
         const res = await originGitRun(
           dest,
           [...argv, 'fetch', ...extra, '--end-of-options', 'origin', `refs/heads/${branch}`],
+          { db, userId: payload.userId },
           env,
         );
         return res.code === 0 ? null : scrubSecret(firstLine(res.stderr || res.stdout), secret);
@@ -495,7 +496,7 @@ async function rebuild(
       await renameNoFollow(repoStorageRoot, stagingRel!, rel, { noReplace: true });
     } else {
       await ensureDirNoFollow(repoStorageRoot, payload.userId);
-      await gitClone(fromRemote!, dest, payload.branch, auth);
+      await gitClone(fromRemote!, dest, payload.branch, auth, { db, userId: payload.userId });
     }
   } catch (err) {
     if (stagingRel) {

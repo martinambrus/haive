@@ -126,7 +126,9 @@ function fakeDb() {
       repositories: {
         findFirst: async () => ({ credentialsSecretId: null, storagePath: flags.repoPath }),
       },
-      users: { findFirst: async () => ({ gitName: 'T', gitEmail: 't@haive.local' }) },
+      users: {
+        findFirst: async () => ({ role: 'admin', gitName: 'T', gitEmail: 't@haive.local' }),
+      },
     },
     insert: (table: unknown) => ({
       values: async (v: Event) => {

@@ -103,7 +103,7 @@ vi.mock('../../../repo/git-push.js', async (importOriginal) => {
       if (fetching) await fetchProbe.afterFetch?.();
       return result;
     },
-    originGitRun: async (...args: Parameters<typeof real.gitRun>) => {
+    originGitRun: async (...args: Parameters<typeof real.originGitRun>) => {
       const intercepted = fetchProbe.intercept?.(args[1], args[0]);
       if (intercepted) return intercepted;
       const fetching = args[1].includes('fetch');
@@ -339,7 +339,10 @@ function makeDb(
   const db = {
     transaction: async (fn: (tx: unknown) => unknown) => fn(db),
     query: {
-      users: { findFirst: async () => undefined },
+      users: {
+        findFirst: async (opts: { columns?: { role?: boolean } }) =>
+          opts?.columns?.role ? { role: 'admin' } : undefined,
+      },
       tasks: { findFirst: async () => opts.worktreeSharer ?? undefined },
       taskSteps: {
         findFirst: async () => ({ id: 'step1', mergeResolveState: mergeState, warningMessage }),
@@ -2914,7 +2917,10 @@ describe('12 worktree cleanup apply (non-merge actions)', () => {
       taskStepId: 'step1',
       db: {
         query: {
-          users: { findFirst: async () => undefined },
+          users: {
+            findFirst: async (opts: { columns?: { role?: boolean } }) =>
+              opts?.columns?.role ? { role: 'admin' } : undefined,
+          },
           // findWorktreePathClaimant: no sharer unless the test supplies one.
           tasks: { findFirst: async () => sharer },
         },

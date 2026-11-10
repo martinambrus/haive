@@ -42,7 +42,12 @@ async function fetchRemoteHead(
   const fetchArgs = ['fetch', '--quiet', 'origin'];
   if (branch) fetchArgs.push(branch);
   const auth = await bundleGitAuth(db, bundle);
-  const fetched = await originGitRun(cwd, [...auth.argv, ...fetchArgs], auth.env);
+  const fetched = await originGitRun(
+    cwd,
+    [...auth.argv, ...fetchArgs],
+    { db, userId: bundle.userId },
+    auth.env,
+  );
   if (fetched.code !== 0) {
     const msg = scrubSecret(fetched.stderr, auth.secret).trim();
     throw new Error(`git fetch failed (exit ${fetched.noExit ?? fetched.code}): ${msg}`);

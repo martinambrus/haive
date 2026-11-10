@@ -130,7 +130,7 @@ async function main(): Promise<void> {
       emailEncrypted: 'repo-refresh-smoke',
       emailBlindIndex: `repo-refresh-smoke-${randomBytes(6).toString('hex')}`,
       passwordHash: 'smoke-not-real',
-      role: 'user',
+      role: 'admin',
       status: 'active',
       tokenVersion: 0,
     });

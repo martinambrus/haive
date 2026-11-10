@@ -80,7 +80,10 @@ async function main() {
   const repoStoragePath: string = repo.storagePath;
 
   log.info('step 1: git reset --hard');
-  const fetched = await originGitRun(bundle.storageRoot, ['fetch', 'origin']);
+  const fetched = await originGitRun(bundle.storageRoot, ['fetch', 'origin'], {
+    db,
+    userId: bundle.userId,
+  });
   if (fetched.code !== 0) {
     throw new Error(`git fetch origin failed (exit ${fetched.code}): ${fetched.stderr.trim()}`);
   }

@@ -80,8 +80,23 @@ function killedByTimeout(err: { killed?: boolean; signal?: string; code?: unknow
 
 /** Every host-side git process starts here, so the hardening in `hardenGitArgs` cannot be skipped
  *  by a new call site. `git-exec-guard.test.ts` is what keeps that true. */
-function gitEnv(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return { ...process.env, ...GIT_BASE_ENV, ...(env ?? {}) };
+function gitEnv(
+  env?: NodeJS.ProcessEnv,
+  guardedRemote?: Record<string, string>,
+): NodeJS.ProcessEnv {
+  const merged = { ...process.env, ...GIT_BASE_ENV, ...(env ?? {}) };
+  if (guardedRemote) {
+    // GIT_SSH_COMMAND outranks core.sshCommand; the checked pin must win over ambient commands.
+    delete merged.GIT_SSH;
+    delete merged.GIT_SSH_COMMAND;
+    merged.GIT_SSH_VARIANT = 'ssh';
+    // Ambient command-scope config can replace the pins or outrank them through PARAMETERS.
+    for (const key of Object.keys(merged)) {
+      if (/^GIT_CONFIG_(?:COUNT|PARAMETERS|KEY_\d+|VALUE_\d+)$/.test(key)) delete merged[key];
+    }
+    Object.assign(merged, guardedRemote);
+  }
+  return merged;
 }
 
 /** An abort callback precedes exit. Stop the whole git group (including index-pack), then
@@ -157,16 +172,17 @@ export async function gitRun(
     timeout?: number;
     allowFileTransport?: boolean;
     signal?: AbortSignal;
+    guardedRemote?: Record<string, string>;
   },
 ): Promise<GitRunResult> {
-  const { input, allowFileTransport, ...output } = io ?? {};
+  const { input, allowFileTransport, guardedRemote, ...output } = io ?? {};
   const argv = hardenGitArgs(args, { allowFileTransport });
   const timeout = output.timeout ?? gitDefaultTimeoutMs(argv);
   let child: ChildProcess;
   try {
     child = spawn('git', argv, {
       cwd,
-      env: gitEnv(env),
+      env: gitEnv(env, guardedRemote),
       detached: !!output.signal,
       signal: output.signal,
     });

@@ -1,3 +1,4 @@
+import { adminGitOwner } from '../../test/support/git-owner.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -17,7 +18,9 @@ it.each(['path', 'file URL'])(
     dirs.push(root);
     expect((await gitRun(root, ['init', '--bare', 'source'])).code).toBe(0);
     const url = shape === 'path' ? `${root}/source` : `file://${root}/source`;
-    await expect(gitClone(url, `${root}/dest`)).rejects.toMatchObject({ name: 'OriginUrlError' });
+    await expect(
+      gitClone(url, `${root}/dest`, undefined, undefined, adminGitOwner),
+    ).rejects.toMatchObject({ name: 'OriginUrlError' });
     expect(await lstatNoFollow(root, 'dest')).toBeNull();
   },
 );
@@ -26,11 +29,17 @@ it('blocks an allowed URL rewritten to file by inherited git config', async () =
   dirs.push(root);
   expect((await gitRun(root, ['init', '--bare', 'source'])).code).toBe(0);
   await expect(
-    gitClone('https://example.test/source', `${root}/dest`, undefined, {
-      argv: ['-c', `url.file://${root}/.insteadOf=https://example.test/`],
-      env: {},
-      secret: '',
-    }),
+    gitClone(
+      'https://example.test/source',
+      `${root}/dest`,
+      undefined,
+      {
+        argv: ['-c', `url.file://${root}/.insteadOf=https://example.test/`],
+        env: {},
+        secret: '',
+      },
+      adminGitOwner,
+    ),
   ).rejects.toThrow();
   expect(await lstatNoFollow(root, 'dest')).toBeNull();
 });

@@ -1,3 +1,4 @@
+import { adminGitOwner } from './support/git-owner.js';
 import { fixtureBase, networkGitArgs, httpOrigin } from './support/git-http.js';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -62,13 +63,14 @@ async function makeOriginAndClone(): Promise<{ origin: string; extracted: string
   git(work, 'commit', '-m', 'one');
   git(work, 'push', 'origin', 'main');
   const extracted = path.join(tmpRoot, USER, BUNDLE, 'extracted');
-  await gitClone(httpOrigin(origin), extracted, 'main');
+  await gitClone(httpOrigin(origin), extracted, 'main', undefined, adminGitOwner);
   git(extracted, 'config', 'gc.auto', '0');
   return { origin, extracted };
 }
 
 function bundleDb(origin: string, storageRoot: string) {
-  const fake = createFakeDb({ customBundles: schema.customBundles });
+  const fake = createFakeDb({ customBundles: schema.customBundles, users: schema.users });
+  fake.insert(schema.users, { id: USER, role: 'admin' });
   fake.insert(schema.customBundles, {
     id: BUNDLE,
     userId: USER,

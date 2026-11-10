@@ -110,6 +110,7 @@ const row: { status: string; statusMessage?: string } = { status: 'ready' };
 const db = {
   execute: async () => {},
   query: {
+    users: { findFirst: async () => ({ role: 'admin' }) },
     tasks: { findMany: async () => Array.from({ length: h.holding }, () => ({ id: 'holder' })) },
   },
   transaction: async (fn: (tx: unknown) => unknown) => fn(db),
@@ -575,7 +576,10 @@ it('the credential built before the move reaches the clone that follows it', asy
   });
   await handleRefresh(remotePayload, db, root);
   expect(h.helper).toHaveBeenCalledWith(db, 'cred-1', 'u1', 'https://git.example.test/r1.git');
-  expect(h.clone).toHaveBeenCalledWith('https://git.example.test/r1.git', dest, 'main', auth);
+  expect(h.clone).toHaveBeenCalledWith('https://git.example.test/r1.git', dest, 'main', auth, {
+    db,
+    userId: 'u1',
+  });
   expect(row.status).toBe('ready');
 });
 

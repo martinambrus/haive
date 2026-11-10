@@ -92,7 +92,9 @@ function fakeDb() {
     query: {
       tasks: { findFirst: async () => ({ userId: 'u1', repositoryId: 'r1' }) },
       repositories: { findFirst: async () => ({ credentialsSecretId: null }) },
-      users: { findFirst: async () => ({ gitName: 'T', gitEmail: 't@haive.local' }) },
+      users: {
+        findFirst: async () => ({ role: 'admin', gitName: 'T', gitEmail: 't@haive.local' }),
+      },
     },
     insert: (table: unknown) => ({
       values: async (v: Event) => {
@@ -272,6 +274,7 @@ describe('plan snapshot save and pull: a merge a conversation left open', () => 
 it('names an unknown untracked state file through the real set-aside with origin ahead', async () => {
   const repoPath = await unrelatedPair();
   const fake = createFakeDb({
+    users: schema.users,
     repositories: schema.repositories,
     tasks: schema.tasks,
     projectStateOutbox: schema.projectStateOutbox,
@@ -281,6 +284,7 @@ it('names an unknown untracked state file through the real set-aside with origin
   });
   const repositoryId = '00000000-0000-4000-8000-000000000001';
   const userId = '00000000-0000-4000-8000-000000000002';
+  fake.insert(schema.users, { id: userId, role: 'admin' });
   fake.insert(schema.repositories, {
     id: repositoryId,
     userId,

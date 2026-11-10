@@ -1,3 +1,4 @@
+import { adminGitOwner } from './support/git-owner.js';
 import { fixtureBase, httpOrigin } from './support/git-http.js';
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -65,7 +66,13 @@ describe('handleResyncGit', () => {
     await run('git', ['add', '.'], work);
     await run('git', ['commit', '-m', 'init'], work);
     await run('git', ['push', 'origin', 'main'], work);
-    await gitClone(httpOrigin(origin), path.join(tmpRoot, h.user, BUNDLE, 'extracted'), 'main');
+    await gitClone(
+      httpOrigin(origin),
+      path.join(tmpRoot, h.user, BUNDLE, 'extracted'),
+      'main',
+      undefined,
+      adminGitOwner,
+    );
 
     await mkdir(path.join(work, 'docs', DEEP), { recursive: true });
     for (let i = 0; i < 60; i++) {
@@ -75,7 +82,8 @@ describe('handleResyncGit', () => {
     await run('git', ['commit', '-q', '-m', 'wide'], work);
     await run('git', ['push', 'origin', 'main'], work);
 
-    const fake = createFakeDb({ customBundles: schema.customBundles });
+    const fake = createFakeDb({ customBundles: schema.customBundles, users: schema.users });
+    fake.insert(schema.users, { id: h.user, role: 'admin' });
     fake.insert(schema.customBundles, {
       id: BUNDLE,
       userId: h.user,

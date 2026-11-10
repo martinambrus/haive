@@ -1,3 +1,4 @@
+import { adminGitOwner } from './support/git-owner.js';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -68,7 +69,14 @@ else { process.stdout.write('ordinary output\\n'); process.stderr.write(process.
   it.each([
     [
       'clone before destination exists',
-      () => gitClone('https://example.test/repo', path.join(dir, 'absent')),
+      () =>
+        gitClone(
+          'https://example.test/repo',
+          path.join(dir, 'absent'),
+          undefined,
+          undefined,
+          adminGitOwner,
+        ),
     ],
     [
       'blank init',
@@ -100,11 +108,17 @@ else { process.stdout.write('ordinary output\\n'); process.stderr.write(process.
 
   it('clone preserves credential argv, trusted env, host destination and normal success', async () => {
     process.env.T412_MODE = 'done';
-    await gitClone('https://bad:embedded@example.test/repo', path.join(dir, 'absent'), 'main', {
-      argv: ['-c', 'credential.helper=!trusted-helper'],
-      env: { T412_TOKEN: 'synthetic-secret' },
-      secret: 'synthetic-secret',
-    });
+    await gitClone(
+      'https://bad:embedded@example.test/repo',
+      path.join(dir, 'absent'),
+      'main',
+      {
+        argv: ['-c', 'credential.helper=!trusted-helper'],
+        env: { T412_TOKEN: 'synthetic-secret' },
+        secret: 'synthetic-secret',
+      },
+      adminGitOwner,
+    );
     const call = await record();
     expect(call).toMatchObject({ token: 'synthetic-secret', prompt: '0', askpass: 'echo' });
     expect(call.args).toContain('core.hooksPath=/dev/null');
@@ -127,11 +141,17 @@ else { process.stdout.write('ordinary output\\n'); process.stderr.write(process.
     process.env.T412_EXIT = '7';
     const secret = `pass' suffix`;
     process.env.T412_STDERR = `failed https://u:${secret}@example.test/repo and ${secret}`;
-    const error = await gitClone('https://example.test/repo', path.join(dir, 'absent'), undefined, {
-      argv: [],
-      env: {},
-      secret,
-    }).catch((e: Error) => e);
+    const error = await gitClone(
+      'https://example.test/repo',
+      path.join(dir, 'absent'),
+      undefined,
+      {
+        argv: [],
+        env: {},
+        secret,
+      },
+      adminGitOwner,
+    ).catch((e: Error) => e);
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toContain('exit 7');
     expect((error as Error).message).not.toContain(secret);
@@ -149,7 +169,17 @@ else { process.stdout.write('ordinary output\\n'); process.stderr.write(process.
     },
   );
   it.each([
-    ['clone', () => gitClone('https://example.test/repo', path.join(dir, 'absent'))],
+    [
+      'clone',
+      () =>
+        gitClone(
+          'https://example.test/repo',
+          path.join(dir, 'absent'),
+          undefined,
+          undefined,
+          adminGitOwner,
+        ),
+    ],
     ['advance operator', () => advanceGit(dir, ['rev-parse', 'HEAD'])],
     ['reset operator', () => resetGit(dir, ['rev-parse', 'HEAD'])],
   ] as const)(

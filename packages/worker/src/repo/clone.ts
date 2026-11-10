@@ -60,6 +60,7 @@ import { EXTRACT_UID, FIRST_SLOT, childFd, runTool, toolReadable } from './tool-
 import { splitUploadPath } from './worktree-paths.js';
 import { gitRun as boundedGitRun } from './git-exec.js';
 import { sanitizeImportedGitConfig } from './import-git-config.js';
+import { gitRemoteGuardArgs, type GitRemoteOwner } from './git-remote-guard.js';
 
 /** Clone `url` into `dest`. When `auth` is supplied (an inline git credential
  *  helper from buildCredentialHelper), the token rides in env and git resolves
@@ -67,19 +68,33 @@ import { sanitizeImportedGitConfig } from './import-git-config.js';
 export async function gitClone(
   url: string,
   dest: string,
-  branch?: string,
-  auth?: { argv: string[]; env: Record<string, string>; secret: string },
+  branch: string | undefined,
+  auth: { argv: string[]; env: Record<string, string>; secret: string } | undefined,
+  owner: GitRemoteOwner,
 ): Promise<void> {
   assertCloneUrl(url);
-  const args = [...(auth?.argv ?? []), 'clone', '--depth', '1'];
+  let guard: Awaited<ReturnType<typeof gitRemoteGuardArgs>>;
+  try {
+    guard = await gitRemoteGuardArgs(owner, [url]);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOTFOUND') throw err;
+    throw new Error(`git clone failed (exit 128): ${(err as Error).message}`, { cause: err });
+  }
+  // Clones run in the worker cwd without checkout config, so no repository config read is needed.
+  const args = [...guard.argv, ...(auth?.argv ?? []), 'clone', '--depth', '1'];
   if (branch) args.push('--branch', branch);
   args.push('--', redactGitUrl(url, true), dest);
   // The destination does not exist yet: run in the worker's cwd, as spawn did,
   // while keeping the shared deadline, hardening and no-exit result contract.
-  const result = await boundedGitRun(process.cwd(), args, {
-    GIT_ASKPASS: 'echo',
-    ...(auth?.env ?? {}),
-  });
+  const result = await boundedGitRun(
+    process.cwd(),
+    args,
+    {
+      GIT_ASKPASS: 'echo',
+      ...(auth?.env ?? {}),
+    },
+    { guardedRemote: guard.argv.length > 0 ? guard.env : undefined },
+  );
   if (result.code !== 0) {
     const msg = scrubSecret(result.stderr, auth?.secret ?? null).trim();
     throw new Error(`git clone failed (exit ${result.code}): ${msg}`);
@@ -839,7 +854,7 @@ export async function handleClone(
       ? await buildCredentialHelper(db, payload.credentialsId, payload.userId, remoteUrl)
       : undefined;
 
-    await gitClone(remoteUrl, dest, payload.branch, auth);
+    await gitClone(remoteUrl, dest, payload.branch, auth, { db, userId: payload.userId });
     await persistDetection(db, payload.repositoryId, dest);
     logger.info({ repositoryId: payload.repositoryId, dest }, 'Repo clone complete');
   });

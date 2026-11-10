@@ -91,6 +91,7 @@ function ctxFor(fixtures: Fixture[]): StepContext {
   }));
   let call = 0;
   const db = {
+    query: { users: { findFirst: async () => ({ role: 'admin' }) } },
     select: () => ({
       from: () => ({
         where: () => {

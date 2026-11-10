@@ -65,7 +65,8 @@ const gitStderr = (cwd: string, args: string[]) =>
     (err: { stderr?: string }) => err.stderr ?? '',
   );
 
-const newFakeDb = () => createFakeDb({ repositories: schema.repositories, tasks: schema.tasks });
+const newFakeDb = () =>
+  createFakeDb({ repositories: schema.repositories, tasks: schema.tasks, users: schema.users });
 let base: string;
 let fake: ReturnType<typeof newFakeDb>;
 const stored = () => fake.rows(schema.repositories).find((r) => r.id === REPO)!;
@@ -75,6 +76,7 @@ beforeEach(async () => {
   vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
   base = await mkdtemp(path.join(tmpdir(), 'repo-status-message-'));
   fake = newFakeDb();
+  fake.insert(schema.users, { id: USER, role: 'admin' });
   fake.insert(schema.repositories, {
     id: REPO,
     userId: USER,

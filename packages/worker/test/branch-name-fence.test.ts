@@ -15,6 +15,7 @@ const git = async (dir: string, ...args: string[]): Promise<string> =>
 const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
 const db = {
   query: {
+    users: { findFirst: async () => ({ role: 'admin' }) },
     tasks: { findFirst: async () => ({ repositoryId: null }) },
     repositories: { findFirst: async () => null },
   },

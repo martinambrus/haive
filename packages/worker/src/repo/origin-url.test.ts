@@ -1,3 +1,4 @@
+import { adminGitOwner } from '../../test/support/git-owner.js';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -48,7 +49,7 @@ describe('origin URL boundary', () => {
     expect((await gitRun(work, ['ls-remote', '--get-url', 'origin'])).stdout.trim()).toBe(
       'http://127.0.0.1:1/repo',
     );
-    await expect(originGitRun(work, ['fetch', 'origin'])).rejects.toThrow(
+    await expect(originGitRun(work, ['fetch', 'origin'], adminGitOwner)).rejects.toThrow(
       'origin remote is not configured',
     );
   });

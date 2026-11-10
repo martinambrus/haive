@@ -175,7 +175,7 @@ describe('run-app ready gate apply when a push is asked for', () => {
     const db = {
       query: {
         tasks: { findFirst: async () => ({ repositoryId: null }) },
-        users: { findFirst: async () => undefined },
+        users: { findFirst: async () => ({ role: 'admin' }) },
         taskSteps: { findFirst: async () => ({ id: 'step1', warningMessage }) },
       },
       update: () => ({
