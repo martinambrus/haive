@@ -455,7 +455,7 @@ From the T406/T408 build (2026-11-07).
 
 ### T554 · FNF[allowlist-seed-hardening] · the private-endpoint upgrade seed can lose entries for good (+1)
 
-status: open, owner-approved 2026-11-10 (next: T586, then T570+T554 as bundle C) · kind: fix · found: T347 run · priority: P2
+status: in progress 2026-11-10 (sec-T586, /codex-sonnet), owner-approved (next: T570+T554 as bundle C) · kind: fix · found: T347 run · priority: P2
 
 1. A DNS outage at the one seeding boot leaves a permanent empty list: unresolved names are skipped (worker private-endpoint-seed.ts:196,227) and an empty plan writes `''` (:354), which counts as written. NEW-LIMIT. Fix: do not write the empty marker while a candidate is unresolved; retry on later boots with a cap.
 2. A transient DNS failure for one name is not retried (private-endpoint-seed.ts:146-216), so that name is skipped for good. NEW-LIMIT.
@@ -640,7 +640,7 @@ PRE-EXISTING. shared config.service.ts `CONFIG_REDIS_OPTIONS` (~:785) and `redis
 
 ### T570 · FNF[encryption-key-set-race] · two processes on a first boot can each generate the encryption key
 
-status: open, owner-approved 2026-11-10 (next: T586, then T570+T554 as bundle C) · kind: fix · found: T544 run 2026-11-08 · priority: P3
+status: in progress 2026-11-10 (sec-T586, /codex-sonnet), owner-approved (next: T570+T554 as bundle C) · kind: fix · found: T544 run 2026-11-08 · priority: P3
 PRE-EXISTING. shared config.service.ts `ensureEncryptionKey` (~:938-951, EXISTS then plain SET; also ~:1039): with no key in Redis and no `CONFIG_ENCRYPTION_KEY`, api and worker initializing together each generate a key, the last SET wins, and the other may already encrypt with the overwritten one. Direction: SET NX, then re-read the winner.
 
 ### T571 · FNF[global-kb-boot-store-stall] · worker boot waits forever on a stalled global KB store
@@ -1533,7 +1533,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ### T586 · worker sign-out job can delete a newer login's credential
 
-status: open, owner-approved 2026-11-10 (next: T586, then T570+T554 as bundle C) · kind: fix · found: #1058 Codex run 2026-11-10 · priority: P2
+status: in progress 2026-11-10 (sec-T586, /codex-sonnet), owner-approved (next: T570+T554 as bundle C) · kind: fix · found: #1058 Codex run 2026-11-10 · priority: P2
 PRE-EXISTING, consequential. A CLI provider sign-out queues a job (api cli-providers.ts) that the worker runs later (worker queues/cli-exec/handlers.ts ~:1182) by removing the credential volumes; when the user signs in again before the job runs, the late job removes the newer login's credential. Not re-verified by the reviewer. Fix direction: stamp the job with the sign-out generation or time and skip when a newer login exists.
 
 ### T587 · Cancel, step abort and plan discard clear an administrator's pause with no audit row (owner confirm)
