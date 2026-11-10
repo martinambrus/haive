@@ -447,11 +447,16 @@ its record write. The rules override is stamped the same way: 01 records the one
 under that lock before any write and refuses the plan (`PLAN_NO_LONGER_HOLDS`) once it moved, since
 it writes the region from the plan's text and renders nothing again. NULL and `''` are different
 overrides, and a plan from before the stamp is not compared. 07 has no plan to go stale and 12
-compares nothing (above). One residual: the record write at the end of 02 first imports a checkout
-it has not read (`writeProjectStateColumn`), and only an imported render context sends that writer
-back to plan, so an import that moves the override can land after the region was written. The next
-upgrade then offers the region as a `clean_update`, and a retry of 02 refuses its plan and needs a
-re-plan. The RTK block is no manifest item, so 02 takes it
+compares nothing (above). While an `onboarding_upgrade` task of the repository holds the checkout, an import that would move
+the override (a text, an empty override or a deletion) is deferred: the sync leaves the column, the
+base and the record as they were, and 02's or 04's own record write reports `recordWrite:
+'deferred'` and keeps its owed write dirty with the context it was approved with. The task-end resync
+(`resyncAfterTaskEnd`, on completion, failure, cancel, stop and the dead-task paths) then imports the
+override and writes the record, so a 02 retry no longer refuses its plan. The rules region in
+AGENTS.md still holds the old override until the next upgrade offers it as a `clean_update`. A
+deferred write retires no legacy mirror and no `.haive/install.json`, and neither does the
+task-end resync or any other refresh (the sweep, the boot mark, the observer, a Save): those files
+wait for the next successful 12 or 02 record write, which retires them as below. The RTK block is no manifest item, so 02 takes it
 out of AGENTS.md, CLAUDE.md and GEMINI.md by its markers, as a reset does, with the newline 07 wrote
 after it (`stripRtkBlocks`). A link is refused and reported, as is a file past the 1 MiB cap the
 plan reads with or one that is not valid UTF-8, and a `CLAUDE.md -> AGENTS.md` link is left to
@@ -480,7 +485,8 @@ Both resolve that context in one order (`renderContextOrigin`, `@haive/shared/pr
 A writer (12, 02, 04) whose record write fails clears the column, so that order falls back to the
 snapshot its own rows carry rather than to a column it could not move (`writeProjectStateRecord`).
 The step does not fail: it keeps a warning and reports `recordWrite: 'failed'` in its output
-(`'written'`, or `'skipped'` when it had nothing to record), which tests read instead of the wording.
+(`'written'`, `'skipped'` when it had nothing to record, or `'deferred'` when an import that
+would move the rules override waits for the task's end, below), which tests read instead of the wording.
 A fenced write (02's) clears it only while it still holds a context 02 planned against: a sync
 that took the lock after the failed write and before the clear is newer than both, and stays.
 First comes the repository's render context column, whose RTK choice is its stored
@@ -1096,8 +1102,9 @@ unrecorded install drops it on read, and the writer owns no file while the flag 
 recorded by the flag alone, so a rollback whose plan predates it can write the flag back to false, and
 the next sync adopts again while the file stands. The first sync after a switch, on a sync row whose
 base never held the setting, keeps this install's value with no question and records the checkout's
-in the base, so later changes merge three-way as any setting does; with no sync row at all, the
-checkout's value still wins, even over a stamped choice (running-list item `FNF[rtk-first-import]`). A column holding nothing has no file (a NULL `scope_exclude_globs` is "never chosen",
+in the base, so later changes merge three-way as any setting does; with no sync row at all, a
+stamped choice (`rtk_choice_made_at`) still wins over the checkout's value, and only an unstamped
+column takes the checkout's. A column holding nothing has no file (a NULL `scope_exclude_globs` is "never chosen",
 not an empty list; a NULL `agent_rules_override` follows the default rules, while `''` is an
 override that renders no block and travels as a 0-byte file, never as NULL), and
 `environmentUnitOf` gives `project/environment.json` from
@@ -1158,7 +1165,7 @@ here, so deleting `settings/agent-rules.md` resets the override to the default r
 holds no setting and no environment (no sync row, or one written before the record
 carried them) merges them as no base at all**: the checkout's value wins over a column nobody chose
 (`rtk_enabled` is NOT NULL default true, and would otherwise push B's default back over A's choice on
-B's first sync), except a switched `rtk-enabled` on an existing sync row, as above, and a set joins
+B's first sync), except a stamped `rtk-enabled`, with or without a sync row, as above, and a set joins
 both lists. What such a merge replaces is logged, not silent: a sync with no base logs one warn once
 its sync row is written, with `count` and at most ten `units` (unit names, settings and environment
 first, never a value); a sync that rolls back before that logs nothing. An RTK-off import closes the
