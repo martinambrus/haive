@@ -168,7 +168,8 @@ value, a missing row included, has every fetch and push URL of the origin (inste
 `resolveGuardedAddress` (`egress/probe-egress.ts`: the probe's resolver, blocked ranges, private-endpoint
 allowlist and unliftable addresses) before git starts. A blocked answer is refused with git's own "Could not
 resolve host" text, which a name that does not exist also gets on this path, so the two read alike. The checked
-answer is pinned so git cannot resolve again: http(s) gets `http.curloptResolve` with every checked address,
+answer is pinned so git cannot resolve again: http(s) gets `http.curloptResolve` with every checked address
+(none for an IP literal, which is the checked address, and whose bracketed IPv6 form libcurl 8.5 refuses),
 `http.followRedirects=false` and `http.proxy=`. A URL-scoped entry in the repository's own config
 (`http.<url>.*`, or `remote.<name>.proxy`) outranks a generic `-c`, and git matches it against every spelling of
 the stored URL (userinfo, query, fragment), so pinning per URL was tried and kept missing one: `originGitRun`
