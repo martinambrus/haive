@@ -1971,6 +1971,8 @@ const LOST_HANDOFF_READS_ROW = {
   round_cap_row: true,
   round_cap_task: false,
   fix_target: true,
+  revalidation_target: true,
+  successor_task: false,
 } as const;
 
 type LostHandoffSite = keyof typeof LOST_HANDOFF_READS_ROW;
@@ -2174,7 +2176,8 @@ export async function handleResult(
         // No Git/FS read runs while the source row or task is locked.
         const pointed = successor.recheck
           ? await db.transaction(async (tx) => {
-              if (!(await lockOwnedStep(tx, result.row.id))) return false;
+              if (result.status === 'done' && !(await lockOwnedStep(tx, result.row.id)))
+                return false;
               if (!(await point(tx))) return false;
               await appendEvent(tx, ctx.taskId, result.row.id, VALIDATION_RECHECK_EVENT, {
                 round: nextRound,
@@ -2184,10 +2187,7 @@ export async function handleResult(
             })
           : await point(db);
         if (!pointed) {
-          logger.info(
-            { taskId: ctx.taskId, stepId, nextStepId: next.metadata.id },
-            'successor not handed off: the task moved to a newer epoch',
-          );
+          await logLost(successor.recheck ? 'revalidation_target' : 'successor_task');
           return;
         }
         await enqueueAdvance(

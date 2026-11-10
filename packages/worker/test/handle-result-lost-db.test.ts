@@ -568,6 +568,39 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
     },
   );
 
+  it('hands off revalidation when a skipped 08b already changed files', async () => {
+    const w = await lateFixer();
+    await writeFile(path.join(w.dir, 'a.test.ts'), 'test("new", () => {});');
+    const [row] = await db
+      .update(schema.taskSteps)
+      .set({ status: 'skipped' })
+      .where(eq(schema.taskSteps.id, w.row.id))
+      .returning();
+    await handleResult(db, w.ctx, row!.stepId, { status: 'skipped', row: row! });
+    expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '07c-ddev-reconcile', round: 1 });
+    expect(await eventTypes(w.taskId)).toContain('validation.recheck_requested');
+    expect(await eventTypes(w.taskId)).not.toContain('fix_loop.started');
+  });
+
+  it('names the revalidation hand-off site when a Retry took only the source row', async () => {
+    const w = await lateFixer();
+    await writeFile(path.join(w.dir, 'a.test.ts'), 'test("new", () => {});');
+    afterEpochCheck(async () => {
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'pending' })
+        .where(eq(schema.taskSteps.id, w.row.id));
+    });
+    await w.hand();
+    expect(h.adds).toEqual([]);
+    expect(handoffLines()).toEqual([
+      expect.objectContaining({
+        level: 'info',
+        fields: expect.objectContaining({ site: 'revalidation_target', reason: 'row_reset' }),
+      }),
+    ]);
+  });
+
   it('revalidates a non-DDEV custom type through 07b without adding an off-list step', async () => {
     const w = await lateFixer('08b-test-management', { ddev: false });
     await writeFile(path.join(w.dir, 'a.ts'), 'export const a = 3;');
