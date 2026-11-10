@@ -61,6 +61,7 @@ import {
 import { loadLiveArtifacts, unionExpandedFor } from '../../_upgrade-render.js';
 import {
   failIfColumnStale,
+  ProjectStateImportDeferredError,
   lockProjectState,
   ProjectStateMovedError,
   refuseMovedColumn,
@@ -2013,9 +2014,14 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       const failed = recordWritten
         ? 'the record was written, but retiring the files it replaces failed'
         : 'project state record write failed';
-      recordWrite = 'failed';
-      warnings.push(`${failed}: ${message}`);
-      ctx.logger.warn({ err }, failed);
+      recordWrite = err instanceof ProjectStateImportDeferredError ? 'skipped' : 'failed';
+      if (err instanceof ProjectStateImportDeferredError) {
+        warnings.push(`Project state record deferred: ${message}`);
+        ctx.logger.info({ repositoryId: plan.repositoryId }, message);
+      } else {
+        warnings.push(`${failed}: ${message}`);
+        ctx.logger.warn({ err }, failed);
+      }
       // What this task removed, now or in an earlier attempt, is still listed.
       try {
         for (const [path, ids] of await retiredByThisTask(ctx.db, ctx.taskId)) {

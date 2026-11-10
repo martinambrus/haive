@@ -46,6 +46,7 @@ import { retireInstallManifest } from '../../_retire-install-manifest.js';
 import { resolveRenderContext, unionExpandedFor } from '../../_upgrade-render.js';
 import {
   failIfColumnStale,
+  ProjectStateImportDeferredError,
   lockProjectState,
   refuseMovedColumn,
   refuseReleasedCheckout,
@@ -1129,10 +1130,15 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       }
     } catch (err) {
       failIfColumnStale(err);
-      recordWrite = 'failed';
+      recordWrite = err instanceof ProjectStateImportDeferredError ? 'skipped' : 'failed';
       const message = safeErrorMessage(err);
-      warnings.push(`project state record write failed: ${message}`);
-      ctx.logger.warn({ err }, 'project state record write failed');
+      if (err instanceof ProjectStateImportDeferredError) {
+        warnings.push(`Project state record deferred: ${message}`);
+        ctx.logger.info({ repositoryId: detected.repositoryId }, message);
+      } else {
+        warnings.push(`project state record write failed: ${message}`);
+        ctx.logger.warn({ err }, 'project state record write failed');
+      }
     }
 
     ctx.logger.info(

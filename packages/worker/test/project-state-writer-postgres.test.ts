@@ -47,6 +47,7 @@ import { refreshProjectState, sweepDirtyProjectStates } from '../src/project-sta
 import { handleRefresh } from '../src/repo/refresh.js';
 import {
   putBackProjections,
+  resyncAfterTaskEnd,
   restoreFaults,
   setAsideHaiveProjections,
 } from '../src/project-state/set-aside.js';
@@ -183,6 +184,116 @@ async function diskRecord(root: string, name: string) {
 }
 
 describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
+  it('defers rules imported by 02 and its retry, then reconciles through the task-end hook', async () => {
+    const s = await fixture();
+    const local = 'LOCAL RULES\n';
+    const incoming = 'TEAM RULES\n';
+    const git = (...args: string[]) =>
+      execFileSync('git', args, {
+        cwd: s.root,
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: 'fixture',
+          GIT_AUTHOR_EMAIL: 'fixture@local',
+          GIT_COMMITTER_NAME: 'fixture',
+          GIT_COMMITTER_EMAIL: 'fixture@local',
+        },
+      });
+    git('init', '-q', '-b', 'main');
+    git('commit', '--allow-empty', '-qm', 'initial');
+    await db!
+      .update(schema.repositories)
+      .set({ agentRulesOverride: local })
+      .where(eq(schema.repositories.id, s.repo.id));
+    await s.write();
+    const [planned] = await db!
+      .select()
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, s.repo.id));
+    const path = join(s.root, '.haive-data/state/settings/agent-rules.md');
+    await writeFile(path, incoming);
+    const [task] = await db!
+      .insert(schema.tasks)
+      .values({
+        userId: s.userId,
+        repositoryId: s.repo.id,
+        type: 'onboarding_upgrade',
+        title: 'rules import',
+        status: 'running',
+      })
+      .returning();
+    const ctx = {
+      db: db!,
+      repoPath: s.root,
+      workspacePath: s.root,
+      taskId: task!.id,
+      userId: s.userId,
+      logger: { info() {}, warn() {}, error() {}, debug() {} },
+      throwIfCancelled() {},
+    } as unknown as StepContext;
+    const apply = () =>
+      upgradeApplyStep.apply(ctx, {
+        detected: {
+          repositoryId: s.repo.id,
+          ranBackfill: false,
+          entries: [],
+          counts: {},
+          installedTemplateSetHash: null,
+          currentTemplateSetHash: 'set',
+          renderCtxSnapshot: {
+            ...REFERENCE_CONTEXT,
+            ...context(),
+            cliTargets: [],
+            agentTargets: [],
+            enabledCliProviders: [],
+            rtkEnabled: false,
+          },
+          renderContextColumn: planned!.renderContext,
+          agentRulesOverride: local,
+          rtkFollowsLive: false,
+          backfilledRows: 0,
+        },
+        formValues: {},
+        iteration: 0,
+        previousIterations: [],
+      } as never);
+    const rules = async () =>
+      (
+        await db!.select().from(schema.repositories).where(eq(schema.repositories.id, s.repo.id))
+      )[0]!.agentRulesOverride;
+    const base = async () =>
+      (
+        await db!
+          .select()
+          .from(schema.projectStateSync)
+          .where(eq(schema.projectStateSync.repositoryId, s.repo.id))
+      )[0]!.baseSnapshot;
+    const beforeBase = await base();
+
+    expect((await apply()).recordWrite).toBe('skipped');
+    expect(await rules()).toBe(local);
+    expect((await apply()).recordWrite).toBe('skipped');
+    expect(await rules()).toBe(local);
+    expect(await readFile(path, 'utf8')).toBe(incoming);
+    expect(await base()).toEqual(beforeBase);
+    expect((await s.outbox())!.writeIntent).toBeNull();
+
+    await db!
+      .update(schema.tasks)
+      .set({ status: 'completed' })
+      .where(eq(schema.tasks.id, task!.id));
+    await resyncAfterTaskEnd(db!, task!.id);
+
+    expect(await rules()).toBe(incoming);
+    expect(await readFile(path, 'utf8')).toBe(incoming);
+    expect(((await base()) as { settings: Record<string, unknown> }).settings['agent-rules']).toBe(
+      incoming,
+    );
+    expect(
+      await db!.select().from(schema.auditEvents).where(eq(schema.auditEvents.targetId, s.repo.id)),
+    ).toHaveLength(1);
+  });
+
   it.each(['prepared', 'partial'] as const)(
     'defers conflict answers while a %s record journal owns another render key',
     async (phase) => {

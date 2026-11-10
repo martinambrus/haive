@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { schema } from '@haive/database';
+import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
   CLI_RULES_END,
@@ -18,6 +18,7 @@ import type {
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
 import { RECORD_WRITE_TABLES, recordWritten } from './support/upgrade-apply-record.js';
 
 // 02 writes the region from the plan's `newContent` and never renders it again, so a form that parked
@@ -61,6 +62,8 @@ async function setup(stamp: string | null | undefined, live: string | null) {
   const root = await mkdtemp(join(tmpdir(), 'upgrade-apply-rules-stamp-'));
   dirs.push(root);
   const fake = createFakeDb({
+    auditEvents: schema.auditEvents,
+    taskSteps: schema.taskSteps,
     onboardingArtifacts: schema.onboardingArtifacts,
     repositories: schema.repositories,
     customBundles: schema.customBundles,
@@ -119,10 +122,42 @@ async function setup(stamp: string | null | undefined, live: string | null) {
       previousIterations: [],
     });
   const agentsMd = () => readFile(join(root, 'AGENTS.md'), 'utf8');
-  return { fake, apply, agentsMd };
+  return { fake, apply, agentsMd, root };
 }
 
 describe('02 and the rules override its plan was made from', () => {
+  it.each(['IMPORTED RULES\n', '', null])(
+    'defers an imported override %j through the record write and a retry, then imports after completion',
+    async (incoming) => {
+      const local = 'PLANNED RULES\n';
+      const s = await setup(local, local);
+      await recordWritten(s.apply());
+      const path = join(s.root, '.haive-data/state/settings/agent-rules.md');
+      if (incoming === null) await unlink(path);
+      else await writeFile(path, incoming);
+
+      const output = await s.apply();
+
+      expect(s.fake.rows(schema.repositories)[0]!.agentRulesOverride).toBe(local);
+      expect(output.recordWrite).toBe('skipped');
+      expect(output.warnings).toContain(
+        'Project state record deferred: imported repository rules are waiting for this upgrade to finish',
+      );
+      if (incoming === null) await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+      else expect(await readFile(path, 'utf8')).toBe(incoming);
+      expect((await s.apply()).recordWrite).toBe('skipped');
+      expect(await s.agentsMd()).toContain('PLANNED RULES');
+
+      s.fake.patch(schema.tasks, TASK, { status: 'completed' });
+      await syncProjectStateFromCheckout(s.fake.db as unknown as Database, {
+        repositoryId: REPO,
+        repoPath: s.root,
+      });
+
+      expect(s.fake.rows(schema.repositories)[0]!.agentRulesOverride).toBe(incoming);
+    },
+  );
+
   it.each([
     ['one text for another', 'A', 'B'],
     ['NULL for the empty string', null, ''],

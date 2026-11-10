@@ -103,12 +103,18 @@ type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 export type ProjectStateSyncOutcome =
   'absent' | 'refused' | 'deferred' | 'superseded' | 'held' | 'unchanged' | 'applied' | 'conflict';
 
-export interface ProjectStateSyncResult {
-  code?: 'write_pending' | 'git_operation';
-  outcome: ProjectStateSyncOutcome;
-  /** Why the record was refused, or what conflicted, worded as `last_error` holds it. */
-  reason?: string;
-}
+export type ProjectStateSyncResult =
+  | {
+      outcome: 'deferred';
+      code: 'upgrade_rules';
+      reason: string;
+    }
+  | {
+      code?: 'write_pending' | 'git_operation';
+      outcome: ProjectStateSyncOutcome;
+      /** Why the record was refused, or what conflicted, worded as `last_error` holds it. */
+      reason?: string;
+    };
 
 const MIB = 1024 * 1024;
 // A first sync can replace a claim per file: the list is cut, settings first; `count` is the total.
@@ -919,6 +925,32 @@ export async function syncProjectStateLocked(
   } catch (err) {
     if (err instanceof ReviewWatermarkUnavailableError) return refuse(err.message);
     throw err;
+  }
+  // Background imports already defer above. The writer may import for its own holding task,
+  // but changing that upgrade's rules after 02 rendered its region would invalidate its retry.
+  // Hold the whole unseen record before any import writes: the unchanged checkout and old base
+  // retain the incoming value (including deletion) for resyncAfterTaskEnd / the checkout sweep.
+  if (holdingTaskId && Object.hasOwn(portable.updates, 'agentRulesOverride')) {
+    const [upgrade] = await tx
+      .select({ id: schema.tasks.id })
+      .from(schema.tasks)
+      .where(
+        and(
+          eq(schema.tasks.id, holdingTaskId),
+          eq(schema.tasks.repositoryId, repositoryId),
+          eq(schema.tasks.type, 'onboarding_upgrade'),
+          inArray(schema.tasks.status, [...CHECKOUT_HOLDING_TASK_STATUSES]),
+          isNull(schema.tasks.deadAt),
+        ),
+      )
+      .limit(1);
+    if (upgrade) {
+      return {
+        outcome: 'deferred',
+        code: 'upgrade_rules',
+        reason: 'imported repository rules are waiting for this upgrade to finish',
+      };
+    }
   }
   const merged = merge.merged.render;
   let wrote = false;

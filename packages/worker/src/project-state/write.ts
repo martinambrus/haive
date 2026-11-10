@@ -147,6 +147,15 @@ export class ProjectStateMovedError extends Error {
  *  an open git operation. It retains ProjectStateMovedError's public name and refusal semantics. */
 export class ProjectStateCheckoutHeldError extends ProjectStateMovedError {}
 
+/** The incoming record stays on disk for the task-end reconciliation. No column, base, audit
+ *  row or record file was changed, so this deferral must neither clear the column nor re-plan 02. */
+export class ProjectStateImportDeferredError extends Error {
+  constructor() {
+    super('imported repository rules are waiting for this upgrade to finish');
+    this.name = 'ProjectStateImportDeferredError';
+  }
+}
+
 /** An interrupted attempt is preserved until a person repairs a path the undo journal cannot own. */
 export class ProjectStateRecoveryHeldError extends ProjectStateMovedError {
   constructor(path: string) {
@@ -845,6 +854,7 @@ export async function writeProjectStateColumn(
           holdingTaskId,
           expectedCheckout,
         });
+        if (imported.code === 'upgrade_rules') throw new ProjectStateImportDeferredError();
         if (['refused', 'held', 'deferred', 'superseded'].includes(imported.outcome)) {
           throw new ProjectStateMovedError(imported.reason);
         }
@@ -1010,6 +1020,7 @@ export async function writeProjectStateColumn(
     // Admission and a CAS refused before our first mutation changed no semantic state. Once a
     // file did change, a moved checkout is a partial-write failure just like a SQL rollback: retain
     // its path report and foreground pending-local-side cleanup (background writers keep column).
+    if (err instanceof ProjectStateImportDeferredError) throw err;
     if (err instanceof ProjectStateMovedError && !mutatedFiles) throw err;
     const cleared =
       keepColumnOnFailure === true ||
