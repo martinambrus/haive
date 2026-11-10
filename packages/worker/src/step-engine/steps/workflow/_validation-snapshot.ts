@@ -18,6 +18,17 @@ export type ValidationSnapshot = Record<string, string>;
 export async function readValidationSnapshot(
   ctx: Pick<StepContext, 'db' | 'taskId'>,
 ): Promise<ValidationSnapshot | null> {
+  // Retry the complete bounded read once: a transient Git/FS failure proves no equality.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const snapshot = await readValidationSnapshotOnce(ctx);
+    if (snapshot !== null) return snapshot;
+  }
+  return null;
+}
+
+async function readValidationSnapshotOnce(
+  ctx: Pick<StepContext, 'db' | 'taskId'>,
+): Promise<ValidationSnapshot | null> {
   try {
     const setup = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
     const made = setup?.output as { worktreePath?: string; baseBranch?: string } | null;
@@ -36,8 +47,9 @@ export async function readValidationSnapshot(
           maxBytes: FINGERPRINT_READ_BYTES,
           strict: true,
         });
-        // A bounded prefix is never evidence that the whole file stayed unchanged.
-        if (read === null || read.size !== read.data.length) return null;
+        if (read === null) return null;
+        // Same bound as changeFingerprint: size plus prefix permits large deliverables.
+        hash.update(JSON.stringify(read.size));
         hash.update(read.data);
       } else if (entry?.kind === 'symlink') {
         const target = await readLinkNoFollow(anchor, rel, { strict: true });

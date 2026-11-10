@@ -12,6 +12,15 @@ const VALIDATE = '07b-phase-4-validate';
 const RECONCILE = '07c-ddev-reconcile';
 export const VALIDATION_RECHECK_EVENT = 'validation.recheck_requested';
 
+export class ValidationSnapshotError extends Error {
+  constructor() {
+    super(
+      'Cannot snapshot final changes after two read attempts. Retry this step; if it repeats, check Git access and workspace readability.',
+    );
+    this.name = 'ValidationSnapshotError';
+  }
+}
+
 export interface ValidationSuccessor {
   next: StepDefinition | undefined;
   round: number;
@@ -68,10 +77,7 @@ export async function validationSuccessor(
   const before = (validated.output as { validationSnapshot?: ValidationSnapshot | null } | null)
     ?.validationSnapshot;
   const after = await readValidationSnapshot({ db, taskId: ctx.taskId });
-  if (after === null)
-    throw new Error(
-      'Cannot read final changes for revalidation; retry after repairing the workspace.',
-    );
+  if (after === null) throw new ValidationSnapshotError();
   const affectedFiles = affectedValidationFiles(before, after);
   if (before && affectedFiles.length === 0) return ordinary;
   return {

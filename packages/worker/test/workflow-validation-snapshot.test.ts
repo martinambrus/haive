@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { chmod, mkdtemp, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
@@ -10,8 +10,11 @@ import {
   readValidationSnapshot,
 } from '../src/step-engine/steps/workflow/_validation-snapshot.js';
 
+import * as changeReads from '../src/orchestrator/house-rules-dispatch.js';
+
 const dirs: string[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
@@ -82,6 +85,28 @@ describe('the final changes affected since validation', () => {
     await unlink(path.join(w.dir, 'link'));
     await symlink('/outside/two', path.join(w.dir, 'link'));
     expect(affectedValidationFiles(before, (await w.read())!)).toEqual(['app.ts', 'link']);
+  });
+
+  it('fingerprints a 9 MiB changed file using its size and bounded prefix', async () => {
+    const w = await checkout();
+    const file = path.join(w.dir, 'large.bin');
+    await writeFile(file, Buffer.alloc(9 * 1024 * 1024, 1));
+    const before = await w.read();
+    expect(before).not.toBeNull();
+    expect(before).toHaveProperty('large.bin');
+    await writeFile(file, Buffer.alloc(10 * 1024 * 1024, 1));
+    expect(affectedValidationFiles(before, (await w.read())!)).toEqual(['large.bin']);
+  });
+
+  it('retries one transient git failure before giving up', async () => {
+    const w = await checkout();
+    const original = changeReads.readChangedFiles;
+    const read = vi
+      .spyOn(changeReads, 'readChangedFiles')
+      .mockResolvedValueOnce(null)
+      .mockImplementation(original);
+    expect(await w.read()).not.toBeNull();
+    expect(read).toHaveBeenCalledTimes(2);
   });
 
   it('returns unknown for a failed Git read instead of an empty snapshot', async () => {

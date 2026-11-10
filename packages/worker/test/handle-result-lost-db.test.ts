@@ -614,7 +614,15 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
       .update(schema.taskSteps)
       .set({ output: { worktreePath: path.join(w.dir, 'gone'), baseBranch: 'main' } })
       .where(eq(schema.taskSteps.id, w.setup.id));
-    await expect(w.hand()).rejects.toThrow('Cannot read final changes for revalidation');
+    await w.hand();
+    const row = await db.query.taskSteps.findFirst({ where: eq(schema.taskSteps.id, w.row.id) });
+    expect(row).toMatchObject({
+      status: 'failed',
+      errorMessage: expect.stringContaining('Cannot snapshot final changes'),
+    });
+    const task = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, w.taskId) });
+    // finishFailedStep is the existing hand-off convention: a failed step also fails its task.
+    expect(task?.status).toBe('failed');
     expect(h.adds).toEqual([]);
     expect(await eventTypes(w.taskId)).not.toContain('validation.recheck_requested');
   });

@@ -1,4 +1,8 @@
-import { validationSuccessor, VALIDATION_RECHECK_EVENT } from './validation-recheck.js';
+import {
+  validationSuccessor,
+  ValidationSnapshotError,
+  VALIDATION_RECHECK_EVENT,
+} from './validation-recheck.js';
 import {
   resolveDispatchIntegrations,
   stepIntegrationRequirements,
@@ -1973,6 +1977,7 @@ const LOST_HANDOFF_READS_ROW = {
   fix_target: true,
   revalidation_target: true,
   successor_task: false,
+  validation_snapshot: true,
 } as const;
 
 type LostHandoffSite = keyof typeof LOST_HANDOFF_READS_ROW;
@@ -2150,7 +2155,47 @@ export async function handleResult(
         await markTaskDeadOnStep(db, ctx, result.row.id, result.row.round, stepId, [stepId]);
         return;
       }
-      const successor = await validationSuccessor(db, ctx, stepId, result.row.round, steps);
+      let successor;
+      try {
+        successor = await validationSuccessor(db, ctx, stepId, result.row.round, steps);
+      } catch (err) {
+        if (!(err instanceof ValidationSnapshotError)) throw err;
+        // Snapshot failure belongs to this step's hand-off, so Retry can rerun it.
+        // As with every failed step, finishFailedStep also fails and settles its task.
+        try {
+          await db.transaction(async (tx) => {
+            const [failed] = await tx
+              .update(schema.taskSteps)
+              .set({
+                status: 'failed',
+                errorMessage: err.message,
+                endedAt: new Date(),
+                updatedAt: new Date(),
+                ...CLEAR_STEP_USAGE_STAMP,
+              })
+              .where(
+                and(
+                  eq(schema.taskSteps.id, result.row.id),
+                  eq(schema.taskSteps.status, result.status),
+                ),
+              )
+              .returning({ id: schema.taskSteps.id });
+            if (!failed) throw new ParkOvertaken();
+            const held = await tx
+              .select({ id: schema.tasks.id })
+              .from(schema.tasks)
+              .where(taskWriteTarget(ctx.taskId, { epoch: ctx.orchestrationEpoch }))
+              .for('share');
+            if (held.length === 0) throw new ParkOvertaken();
+          });
+        } catch (writeErr) {
+          if (!(writeErr instanceof ParkOvertaken)) throw writeErr;
+          await logLost('validation_snapshot');
+          return;
+        }
+        await finishFailedStep(db, ctx, stepId, result.row, err.message, OPEN_TASK_STATUSES);
+        return;
+      }
       const { next, round: nextRound } = successor;
       if (next) {
         if (successor.recheck) {
