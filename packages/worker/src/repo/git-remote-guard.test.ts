@@ -153,7 +153,7 @@ it('clones a guarded HTTP equals path through the fixture', async () => {
   seams.isBlocked.mockReturnValue(false);
   const target = fixture
     .httpOrigin(`${root}/a=b/r.git`)
-    .replace('%3D', '=')
+    .replaceAll('%3D', '=')
     .replace('127.0.0.1', 'public.test');
   const before = await stats();
   vi.stubEnv('GIT_CONFIG_COUNT', '99');
