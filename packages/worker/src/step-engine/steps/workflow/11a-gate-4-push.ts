@@ -420,7 +420,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
           id: 'credentialId',
           label: 'Credential to push with',
           description:
-            'Used for this push. If the repository has no remote saved yet, this push also saves its address and this credential on the repository. The token is never written to git config. Choose "manually" for SSH or public remotes.',
+            'Used for this push. This push also saves the address above and this credential as the repository\'s remote and credential, replacing any saved ones, so later tasks use them too. The token is never written to git config. Choose "manually" for SSH or public remotes.',
           options: credentialOptions,
           default: defaultCredential,
           visibleWhen: { field: 'push', equals: true },
