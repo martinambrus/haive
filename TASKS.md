@@ -1516,11 +1516,6 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
-### T586 · worker sign-out job can delete a newer login's credential
-
-status: in progress 2026-11-10 (sec-T586, /codex-sonnet), owner-approved (next: T570+T554 as bundle C) · kind: fix · found: #1058 Codex run 2026-11-10 · priority: P2
-PRE-EXISTING, consequential. A CLI provider sign-out queues a job (api cli-providers.ts) that the worker runs later (worker queues/cli-exec/handlers.ts ~:1182) by removing the credential volumes; when the user signs in again before the job runs, the late job removes the newer login's credential. Not re-verified by the reviewer. Fix direction: stamp the job with the sign-out generation or time and skip when a newer login exists.
-
 ### T587 · Cancel, step abort and plan discard clear an administrator's pause with no audit row (owner confirm)
 
 status: open · kind: decision · found: #1058 review 2026-11-10 · priority: P4
@@ -1545,8 +1540,28 @@ status: open · kind: design · found: #1060 reviews 2026-11-10 · priority: P3
 3. The seed's Redis compare-and-set runs inside the Postgres transaction but outside its rollback: a timed-out or ambiguous Redis write, or a COMMIT failing after it, leaves the grant applied with its audit row rolled back (worker private-endpoint-seed.ts ~:410-435). Same shape as the earlier `setIfAbsent`. PRE-EXISTING, minor.
 4. Seed attempts count seed runs, not distinct boots (bootstrap retries and crash loops count), and a malformed `bootstrap:privateEndpointSeed` blocks the seed until deleted; both documented in api-auth.md. Accepted, minor.
 
+### T590 · FNF[cli-auth-lock-followups] · CLI auth lock and sign-out follow-ups (+13)
+
+status: open · kind: fix · found: #1061 reviews 2026-11-10 · priority: P3
+
+1. `DELETE /:providerId/usage-auth` and `DELETE /:providerId/secrets/:secretName` (api cli-providers.ts ~:1165-1230) take no auth lock, so a usage refresh that read the secret before the delete can write it back. PRE-EXISTING, moderate. Fix: take the lock (`withCliAuthLock`) like the writers.
+2. A task's sync-back waits 30 s for the lock, then the task copy is removed (worker sandbox/task-auth-volume.ts ~:1312-1323); an open login dialog on the same CLI (up to 10 min) loses the token the task rotated. Accepted and documented (sandbox.md); waits are sequential per provider inside a step-summary slot. REGRESSION, minor.
+3. The web stops polling a sign-out after 10 min (web lib/cli-jobs.ts ~:37) while the job's contention cap is 30 min, so the failure text never reaches the page and "Still queued behind running CLI jobs" is not the reason. PRE-EXISTING window, minor.
+4. No lock-loss detection on the dedicated lock connection (database cli-auth-lock.ts): after a PG restart or `pg_terminate_backend` during a long login the holder still believes it holds the scope; migrate/lock.ts re-asserts the backend pid. REGRESSION, minor.
+5. A busy scope answers the login WebSocket upgrade with 409, which the modal shows as "WebSocket error" (web components/cli-auth-banner-modal.tsx ~:234). New triggers: a second tab, a quick retry during teardown, a sign-out executing. REGRESSION, minor.
+6. Dedicated lock connections are not capped; before a login container exists no session timer bounds the hold (api cli-login-banner.ts ~:318, ~:546). REGRESSION, minor.
+7. `teardownContainer` (api cli-login-banner.ts ~:1459-1477) has no timeout around `docker remove` and now holds the auth lock while it hangs. PRE-EXISTING hang, minor.
+8. `handleProbeJob` writes an `authStatus` computed before a sign-out that ran meanwhile (worker cli-exec/handlers.ts ~:705). PRE-EXISTING, minor.
+9. LOGIN_CREATE's `chown -R` helper mounts the auth volume outside the lock (handlers.ts ~:1097); a sign-out can then fail with "volume in use". PRE-EXISTING, minor.
+10. `job.updateData` in the sign-out contention path (handlers.ts ~:1158) is outside `deferJob`'s refusal retry; a Redis LOADING/OOM fails the sign-out with the raw error. Minor.
+11. `dropCopiedSecretLikeProviderEnv` fails the destructive migration on a busy lock with no bounded wait (worker secrets/move-secret-env.ts ~:37-39, ~:105). Minor.
+12. `GET /cli-providers` and `/:id` return `authGeneration` (api cli-providers.ts ~:224, ~:335). REGRESSION, minor (opaque, own-user).
+13. Tests: the PATCH stale-read refusal for an unchanged present value (`|| authSettingsRequested`, api cli-providers.ts ~:616) has no test; api writer and move-secret-env unit tests mock `tryCliAuthLock` without asserting its scope (gated PG tests cover it); harvest's `lockWaitMs = 0` is not pinned; usage-auth complete and `writeProviderSecret` lock rows secret-then-provider while others go provider-then-secret (safe under the advisory scope; add a comment). Minor.
+14. The sign-out scope-change retry (worker cli-exec/handlers.ts, after the lock) has no own attempt cap; only repeated settings changes inside the read-to-lock window keep it looping. Minor.
+
 ## Done
 
+- T586 — a late CLI sign-out no longer deletes a newer login's credential: `cli_providers.auth_generation` (migration 0224) stamped at login and secret writes, the sign-out job skips a superseded login; one advisory lock per auth scope held by login, sign-out, sync-back, refresh and PATCH, with scope recheck after the lock — PR #1061 (f715e40a7), 2026-11-10. Follow-ups T590.
 - T570 + T554 items 1-3 — encryption key SET NX winner (checked on every production read); private endpoint seed retries unresolved names (cap 10, admin save ends seed ownership); one shared allowlist lock name; item 4 invalid (egress guard already warns), item 5 no change — PR #1060 (5f90d186a), 2026-11-10. Leftovers T589.
 - T373 sites + items 1-7 — strict admin audit rows (module, task-type, upgrade, CLI provider create/update/sign-out/login, admin pause lift), password-change throttle and failure row (400 `current_password_incorrect`), mixed RAG tooling save refused, module rows logged after commit — PRs #1058 (1f1064268), #1059 (8a56956d9), 2026-11-10. Leftovers 8-16 stay open under T373.
 - T504 + T505 — worker writes of repository settings (project-state sync and resolve, clone import, 09_7 RAG scope) leave strict audit rows with source and actor; gate 4 binds the remote with a bounded row lock, an in-transaction row, add-only origin and restore, repairs on Retry and refuses an origin changed since the form — PR #1057 (b7309577c), 2026-11-10. Follow-ups T588.
