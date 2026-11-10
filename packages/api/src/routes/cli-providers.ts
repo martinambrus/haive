@@ -553,7 +553,7 @@ cliProviderRoutes.patch('/:id', async (c) => {
       .select()
       .from(schema.cliProviders)
       .where(and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)))
-      .for('update');
+      .for('no key update');
     if (!current) throw new HttpError(404, 'CLI provider not found');
     const securityFields = [
       'networkPolicy',
