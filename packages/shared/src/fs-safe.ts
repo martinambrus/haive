@@ -17,6 +17,7 @@ import {
   type FileHandle,
 } from 'node:fs/promises';
 import path from 'node:path';
+import { logger } from './logger/index.js';
 
 /**
  * Link-refusing filesystem primitives for repository paths.
@@ -1831,6 +1832,132 @@ type ParkedVerdict = 'remove' | 'keep' | Buffer;
  *  under NAME_MAX (255) beside the pid and uuid; a shorter leaf parks under its whole name. */
 const PARK_LEAF_MAX_BYTES = 100;
 
+const PARK_NAME =
+  /^\.(.+)\.haive-park-([1-9][0-9]*)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+
+// The longest park callback is plan/mirror's gitOperationInProgress: six sequential
+// rev-parse calls, each bounded at 10 minutes (worker/repo/git-exec.ts). A day is
+// 24 times that full window. Rename refreshes ctime, even for years-old file bytes.
+const STALE_PARK_MS = 24 * 60 * 60 * 1000;
+const SWEEP_MAX_PARKS = 32;
+let parkRecoveryOnWrites = false;
+// Bounded like sweepCursors: a sandboxed agent can plant any number of park names, so the
+// oldest entry is dropped and may warn again rather than the set growing for the process lifetime.
+const WARNED_PARKS_MAX = 1024;
+const warnedParks = new Set<string>();
+
+/** Worker startup opts into recovery on atomic writes. Other processes (especially
+ *  the api) leave this disabled; reads never run recovery, even in the worker. */
+export function setParkRecoveryOnWrites(enabled: boolean): void {
+  parkRecoveryOnWrites = enabled;
+}
+
+/** Read a bounded, link-refused original name for a truncated park. The companion is data from
+ *  the writable tree: it may name exactly one leaf whose prefix matches this park, never a path. */
+async function originalParkLeaf(
+  dir: HeldDir,
+  parked: string,
+  prefix: string,
+  anchor: string,
+  rel: string,
+): Promise<string> {
+  const name = `${parked}.name`;
+  const fh = await open(at(dir.fh.fd, name), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
+  try {
+    const st = await fh.stat();
+    if (!st.isFile() || st.size > 255) throw new Error('invalid park recovery name');
+    await assertHeldAt(fh, below(dir.real, name), anchor, rel, name);
+    const buf = Buffer.alloc(256);
+    const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+    const bytes = buf.subarray(0, bytesRead);
+    const leaf = decodeUtf8Strict(bytes);
+    if (
+      !leaf ||
+      bytesRead > 255 ||
+      leaf.includes('/') ||
+      leaf === '.' ||
+      leaf === '..' ||
+      leaf.includes('\0') ||
+      parkLeaf(leaf) !== prefix
+    ) {
+      throw new Error('invalid park recovery name');
+    }
+    return leaf;
+  } finally {
+    await closeQuietly(fh);
+  }
+}
+
+/** One candidate from the bounded write-path stream. Old long names without a
+ *  recovery record cannot be reconstructed: keep and warn once per process. */
+async function recoverStalePark(
+  dir: HeldDir,
+  anchor: string,
+  rel: string,
+  parked: string,
+  directoryKey: string,
+): Promise<void> {
+  const nameOnly = parked.endsWith('.name');
+  const match = PARK_NAME.exec(nameOnly ? parked.slice(0, -5) : parked);
+  if (!match) return;
+  const warn = (message: string, err?: unknown) => {
+    const key = JSON.stringify([directoryKey, parked]);
+    if (warnedParks.has(key)) return;
+    warnedParks.add(key);
+    if (warnedParks.size > WARNED_PARKS_MAX) {
+      warnedParks.delete(warnedParks.values().next().value as string);
+    }
+    logger.warn({ err, anchor, rel, parked }, message);
+  };
+  let held: FileHandle | null = null;
+  try {
+    held = await open(at(dir.fh.fd, parked), O_PATH | O_NOFOLLOW);
+    const st = await held.stat();
+    if (Date.now() - st.ctimeMs <= STALE_PARK_MS) return;
+    if (!st.isFile()) {
+      warn('park recovery refused a non-file');
+      return;
+    }
+    await assertHeldAt(dir.fh, dir.real, anchor, rel, rel);
+    await assertHeldAt(held, below(dir.real, parked), anchor, rel, parked);
+    if (nameOnly) {
+      // A death before rename leaves only the name record; never remove one while
+      // its park exists, whatever the age of the record itself.
+      const source = await lstat(at(dir.fh.fd, parked.slice(0, -5))).catch((err: unknown) => {
+        if (errno(err) === 'ENOENT') return null;
+        throw err;
+      });
+      if (source === null) await unlink(at(dir.fh.fd, parked));
+      return;
+    }
+    let leaf = match[1]!;
+    if (leaf === '.' || leaf === '..') {
+      warn('park recovery cannot reconstruct original name');
+      return;
+    }
+    // A UTF-8 cut can shorten the 100-byte prefix by up to three bytes.
+    if (Buffer.byteLength(leaf) >= PARK_LEAF_MAX_BYTES - 3) {
+      try {
+        leaf = await originalParkLeaf(dir, parked, leaf, anchor, rel);
+      } catch (err) {
+        warn('park recovery cannot reconstruct original name', err);
+        return;
+      }
+    }
+    await assertHeldAt(dir.fh, dir.real, anchor, rel, rel);
+    await assertHeldAt(held, below(dir.real, parked), anchor, rel, parked);
+    if (Date.now() - (await held.stat()).ctimeMs <= STALE_PARK_MS) return;
+    await restoreNoReplace(dir, parked, leaf);
+    await unlink(at(dir.fh.fd, `${parked}.name`)).catch((err: unknown) => {
+      if (errno(err) !== 'ENOENT') throw err;
+    });
+  } catch (err) {
+    if (errno(err) !== 'ENOENT') warn('park recovery kept the parked file', err);
+  } finally {
+    if (held !== null) await closeQuietly(held);
+  }
+}
+
 function parkLeaf(leaf: string): string {
   const bytes = Buffer.from(leaf, 'utf8');
   if (bytes.length <= PARK_LEAF_MAX_BYTES) return leaf;
@@ -1858,6 +1985,8 @@ async function settleParked(
     if (!isPathContainmentError(err) && ABSENT.has(errno(err) ?? '')) return 'absent';
     throw err;
   }
+  let nameRecord: string | null = null;
+  let parkedRemains = false;
   try {
     const st = await lstat(at(dir.fh.fd, leaf)).catch((err: unknown) => {
       if (ABSENT.has(errno(err) ?? '')) return null;
@@ -1867,10 +1996,23 @@ async function settleParked(
     if (!st.isFile()) return 'kept';
 
     const parked = `.${parkLeaf(leaf)}.haive-park-${process.pid}-${randomUUID()}`;
+    if (Buffer.byteLength(leaf) >= PARK_LEAF_MAX_BYTES - 3) {
+      const fh = await withRepair(dir.fh, { repairPermissions: opts.repairPermissions }, () =>
+        open(at(dir.fh.fd, `${parked}.name`), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600),
+      );
+      nameRecord = `${parked}.name`;
+      try {
+        await fh.writeFile(leaf, 'utf8');
+        await fh.sync();
+      } finally {
+        await closeQuietly(fh);
+      }
+    }
     try {
       await withRepair(dir.fh, { repairPermissions: opts.repairPermissions }, () =>
         rename(at(dir.fh.fd, leaf), at(dir.fh.fd, parked)),
       );
+      parkedRemains = true;
     } catch (err) {
       if (ABSENT.has(errno(err) ?? '')) return 'absent';
       throw err;
@@ -1880,6 +2022,7 @@ async function settleParked(
     const putBack = async (earlier?: { error: unknown }): Promise<void> => {
       try {
         await restoreNoReplace(dir, parked, leaf);
+        parkedRemains = false;
       } catch (err) {
         throw new ParkedFileError(safe, [...segs, parked].join('/'), errno(err), {
           cause:
@@ -1909,12 +2052,19 @@ async function settleParked(
     }
     try {
       await unlink(at(dir.fh.fd, parked));
+      parkedRemains = false;
     } catch (err) {
       await putBack({ error: err });
       throw err;
     }
     return 'removed';
   } finally {
+    if (nameRecord !== null && !parkedRemains) {
+      await unlink(at(dir.fh.fd, nameRecord)).catch((err: unknown) => {
+        if (errno(err) !== 'ENOENT')
+          logger.warn({ err, anchor, rel, nameRecord }, 'park recovery name cleanup failed');
+      });
+    }
     await closeQuietly(dir.fh);
   }
 }
@@ -2356,8 +2506,15 @@ async function sweepStaleTemps(anchor: string, dirSegs: string[], leaf: string):
       const dirStat = await dir.fh.stat({ bigint: true });
       const key = `${dirStat.dev}:${dirStat.ino}`;
       const start = sweepCursors.get(key) ?? 0;
-      const budget = { entries: SWEEP_MAX_ENTRIES, temps: SWEEP_MAX_TEMPS };
+      const budget = { entries: SWEEP_MAX_ENTRIES, temps: SWEEP_MAX_TEMPS, parks: SWEEP_MAX_PARKS };
       const sweepOne = async (name: string): Promise<void> => {
+        if (
+          parkRecoveryOnWrites &&
+          PARK_NAME.test(name.endsWith('.name') ? name.slice(0, -5) : name)
+        ) {
+          budget.parks -= 1;
+          await recoverStalePark(dir, anchor, dirSegs.join('/'), name, key);
+        }
         if (!name.startsWith(prefix)) return;
         const suffix = name.slice(prefix.length);
         if (!TEMP_SUFFIX.test(suffix) || Number(suffix.slice(0, suffix.indexOf('-'))) >= PID_MAX) {
@@ -2390,7 +2547,7 @@ async function sweepStaleTemps(anchor: string, dirSegs: string[], leaf: string):
           index += 1;
           if (index <= skip) continue;
           if (index > stopAt) return 0;
-          if (budget.entries <= 0 || budget.temps <= 0) return index - 1;
+          if (budget.entries <= 0 || budget.temps <= 0 || budget.parks <= 0) return index - 1;
           budget.entries -= 1;
           await sweepOne(entry.name);
         }

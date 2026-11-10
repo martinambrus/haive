@@ -1007,7 +1007,8 @@ describe('U5: a completed dump whose task ended without importing it', () => {
     await reapAbandonedUploads(db());
 
     expect(rowOf(dumps, upload.id).status).toBe('cancelled');
-    expect(guard.claims).toBe(1);
+    // The dump claim and one finished-metadata reference guard for each upload table.
+    expect(guard.claims).toBe(4);
   });
 
   it('leaves a dump the import consumed after the check', async () => {
