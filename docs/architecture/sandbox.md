@@ -386,7 +386,10 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   task mounts them). `tryCliAuthLock` (`@haive/database`) takes it with `pg_try_advisory_lock` on a
   dedicated one-connection postgres.js client (`fetch_types: false`, its own `shared` state), never
   a pooled connection or an open transaction; closing that client releases it, and the server
-  releases it when the process dies. Nothing waits on it while holding a row lock. A login dialog
+  releases it when the process dies. Nothing waits on it while holding a row lock. Each holder re-reads
+  the row under the lock and refuses when its scope moved meanwhile (the job retries under the new scope,
+  an api writer answers 409). A PATCH that changes `authMode` or `isolateAuth` holds the old and the new
+  scope, sorted; a save that sends them unchanged takes no lock. A login dialog
   holds it from the WebSocket upgrade until its session is torn down (at most the 10-minute session
   timeout once the container exists). Api writers answer 409 `cli_auth_busy` when it is held. The
   sign-out job defers itself (`deferJob`, 2 s doubling to 15 s) and fails after 30 minutes with a
