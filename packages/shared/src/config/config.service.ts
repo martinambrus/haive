@@ -1119,7 +1119,7 @@ export class ConfigService {
     // Production refuses a mismatch on every read, not only while a cached null lasts; elsewhere
     // the boot check already warned once.
     if (process.env.NODE_ENV === 'production')
-      this.checkEncryptionKey(key, this.getEnvEncryptionKey());
+      this.checkEncryptionKey(key, this.getEnvEncryptionKey(false));
     return key;
   }
 
@@ -1152,7 +1152,8 @@ export class ConfigService {
     }
   }
 
-  private getEnvEncryptionKey(): string | null {
+  /** `warn` false on a per-read path: an invalid value is reported at boot, not on every request. */
+  private getEnvEncryptionKey(warn = true): string | null {
     const raw = process.env.CONFIG_ENCRYPTION_KEY?.trim();
     if (!raw) return null;
     if (/^[0-9a-fA-F]{64}$/.test(raw)) {
@@ -1166,7 +1167,7 @@ export class ConfigService {
     } catch {
       // Ignore invalid base64
     }
-    logger.warn('CONFIG_ENCRYPTION_KEY must be 64 hex chars or base64-encoded 32 bytes');
+    if (warn) logger.warn('CONFIG_ENCRYPTION_KEY must be 64 hex chars or base64-encoded 32 bytes');
     return null;
   }
 
