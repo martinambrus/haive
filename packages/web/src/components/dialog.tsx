@@ -66,6 +66,7 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
   // A keyed move can blur the opener during the opening commit. Remember real
   // focus events while closed, without choosing an opener during render.
   useEffect(() => {
+    if (typeof document === 'undefined') return;
     const remember = () => {
       const active = document.activeElement;
       if (active && active !== document.body) lastFocusedRef.current = active as HTMLElement;
