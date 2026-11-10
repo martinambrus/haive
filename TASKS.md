@@ -129,7 +129,7 @@ User decision 2026-11-01: Retain complete/consumed upload metadata 90 days; prot
 
 ### T286 · FNF[root-work] · a task at the root after 01 was skipped escapes the fences (+3)
 
-status: open · area: touches finishMerge — heads-up to modular-haive-plan first · #278 (fnf/278-merge-dir-reads) LANDED as PR #884 (c48df1953) 2026-10-24: git-operation.ts, set-aside.ts, git-merge.ts, merge-projections.ts, merge-baseline.ts and left-open-merge.ts are free · priority: P2
+status: in progress (bundle E1, overnight run 2026-11-10, branch fix/E1-dag-merge-root-fences) · area: touches finishMerge — heads-up to modular-haive-plan first · #278 (fnf/278-merge-dir-reads) LANDED as PR #884 (c48df1953) 2026-10-24: git-operation.ts, set-aside.ts, git-merge.ts, merge-projections.ts, merge-baseline.ts and left-open-merge.ts are free · priority: P2
 All PRE-EXISTING; notes .claude/tmp/track-b/b3/b31c/analysis/guard.md.
 
 1. checkoutHoldingTasks({rootOnly}) (repo/refresh.ts:32-46) misses a task whose latest 01 round was skipped; count it in SQL like decideTaskWorktree.
@@ -139,7 +139,7 @@ All PRE-EXISTING; notes .claude/tmp/track-b/b3/b31c/analysis/guard.md.
 
 ### T271 · FNF[dag] · the DAG level merge never settles Haive's own files
 
-status: open · priority: P2
+status: in progress (bundle E1, overnight run 2026-11-10, branch fix/E1-dag-merge-root-fences) · priority: P2
 dag-executor.ts (~681, ~951) aborts level merges without resolveHaiveProjectionConflicts, so a conflict only in Haive files goes to a fixer. Fix: run B3.1c's revert helper on each DAG issue branch before its level merge. (#274 merged, so unblocked.)
 
 ### T291 · FNF[fs-park] · a process death mid-park leaves the file under its park name (+2)
