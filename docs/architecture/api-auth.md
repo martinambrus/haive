@@ -82,7 +82,8 @@ bucket and reserves a member in all of them or in none, so parallel attempts can
 is recorded. A refused attempt adds nothing, so the only lockout is the window sliding past; it answers
 429 with `Retry-After` and `{error, code: 'rate_limited', retryAfterSeconds}` (the web form shows `error`
 verbatim, and a browser cannot read `Retry-After` cross-origin, so the wait is in the sentence), and has
-run no bcrypt; its only database work is the audit row below, written after the answer. A success removes its own member: only failures cost budget, because the e2e suite
+run no bcrypt; its only database work is the audit row below, written after the answer (a refused password
+change has also read its user row, for the key). A success removes its own member: only failures cost budget, because the e2e suite
 registers about 22 users a minute from one address and a count-all budget would have flaked it. The
 throttle runs after the body is validated and before any bcrypt or database work (the password change reads the
 user row first, for the key). If Redis is not ready,
@@ -114,8 +115,9 @@ the 401, so a row the database refuses answers 500, never a session or a 401 wit
 the must-change flow) write theirs in the change's own transaction, so a refused row undoes the account or the
 new hash. A wrong current password writes `user.password.change.failure` (`reason: 'invalid_credentials'`)
 before its 400, so a refused row answers 500, and a throttled password change writes
-`user.password.change.throttled` under the same rules as a throttled sign-in below; the two share the
-`<bucket>:audit` key, so one row per refused bucket per window covers both. A throttled sign-in writes `auth.login.throttled` with `limiter: 'account' | 'address'`, the limiter
+`user.password.change.throttled` (actor and target the signed-in user, no lookup) after its 429,
+best-effort, at most once per refused bucket per window; it shares the sign-in's `<bucket>:audit` key, so one row
+per refused bucket per window covers both. A throttled sign-in writes `auth.login.throttled` with `limiter: 'account' | 'address'`, the limiter
 whose bucket refused it, and names the account only when the account limiter refused. It is written at most
 once per refused bucket per window (a `SET NX` key `<bucket>:audit` that expires with the window) and never
 makes the 429 wait: the lookup and the insert run after the answer, and a failure is logged (`failed to audit
