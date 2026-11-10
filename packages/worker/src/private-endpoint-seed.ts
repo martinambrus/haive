@@ -5,6 +5,7 @@ import { schema, type Database } from '@haive/database';
 import {
   BUILT_IN_PRIVATE_ORIGINS,
   CONFIG_KEYS,
+  PRIVATE_ENDPOINT_SEED_STATE_KEY,
   IN_STACK_OLLAMA_HOSTS,
   ONBOARDING_TOOLING_SCHEMA_VERSION,
   configService,
@@ -50,7 +51,7 @@ export interface SeedPlan {
 }
 
 export interface SeedDeps {
-  config?: Pick<ConfigService, 'getFresh' | 'setIfAbsent'>;
+  config?: Pick<ConfigService, 'getFresh' | 'comparePrivateEndpointSeed'>;
   plan?: PlanOptions;
 }
 
@@ -329,18 +330,76 @@ async function candidateHosts(
 
 class SeedLostRace extends Error {}
 
-/** Writes the private endpoint allowlist once, from the targets this install already stores, so an
- *  upgrade does not stop a working install. The key being absent is the "never written" marker: any
- *  value, an empty one included, means an administrator (or an earlier seed) decided. Convergent. */
+const MAX_SEED_ATTEMPTS = 10;
+interface SeedState {
+  attempts: number;
+  written: string | null;
+  pending: string[];
+}
+
+function readSeedState(raw: string | null): SeedState | null {
+  if (raw === null) return null;
+  const state = JSON.parse(raw) as SeedState;
+  if (
+    !Number.isInteger(state.attempts) ||
+    state.attempts < 1 ||
+    state.attempts > MAX_SEED_ATTEMPTS ||
+    (state.written !== null && typeof state.written !== 'string') ||
+    !Array.isArray(state.pending) ||
+    !state.pending.every((host) => typeof host === 'string')
+  ) {
+    throw new Error('Invalid private endpoint seed state');
+  }
+  return state;
+}
+
+/** Resume only our unfinished seed. Any existing value without matching seed ownership is a
+ * decision; administrator writes atomically clear ownership, even when saving the same value. */
 export async function seedPrivateEndpointAllowlist(
   db: Database,
   deps: SeedDeps = {},
 ): Promise<void> {
   const config = deps.config ?? configService;
   const key = CONFIG_KEYS.PRIVATE_ENDPOINT_ALLOWLIST;
-  if ((await config.getFresh(key)) !== null) return;
+  const previous = await config.getFresh(key);
+  const rawState = await config.getFresh(PRIVATE_ENDPOINT_SEED_STATE_KEY);
+  const savedState = readSeedState(rawState);
+  // DEL of a previously written list explicitly asks for a new seed (the documented undo).
+  const state = previous === null && savedState?.written !== null ? null : savedState;
+  if (state) {
+    if (
+      state.attempts >= MAX_SEED_ATTEMPTS ||
+      state.pending.length === 0 ||
+      state.written !== previous
+    )
+      return;
+  } else if (previous !== null) return;
 
-  const plan = await planPrivateEndpointSeed(await candidateHosts(db, config), deps.plan);
+  const plan = await planPrivateEndpointSeed(
+    state ? state.pending : await candidateHosts(db, config),
+    deps.plan,
+  );
+  // Preserve entries we already made available, even if DNS now fails for those names.
+  const entries = previous ? previous.split('\n') : [];
+  for (const entry of plan.entries) {
+    if (entries.includes(entry)) continue;
+    if (
+      entries.length >= MAX_ALLOWLIST_ENTRIES ||
+      Buffer.byteLength([...entries, entry].join('\n')) > MAX_ALLOWLIST_BYTES
+    ) {
+      plan.dropped++;
+    } else entries.push(entry);
+  }
+  entries.sort();
+  const attempts = (state?.attempts ?? 0) + 1;
+  const unresolved = plan.skipped
+    .filter((skip) => skip.reason === 'unresolved')
+    .map((skip) => skip.host);
+  const capped = attempts >= MAX_SEED_ATTEMPTS && unresolved.length > 0;
+  const pending = capped ? [] : unresolved;
+  // No empty decision marker until DNS settles or the durable retry budget is exhausted.
+  const text = entries.length > 0 || pending.length === 0 ? entries.join('\n') : null;
+  const nextState = JSON.stringify({ attempts, written: text ?? previous, pending });
   const skips: Record<SeedSkipReason, number> = {
     invalid: 0,
     public: 0,
@@ -348,32 +407,33 @@ export async function seedPrivateEndpointAllowlist(
     'not-seedable': 0,
   };
   for (const skip of plan.skipped) skips[skip.reason] += 1;
-  const summary = { entries: plan.entries, skipped: skips, dropped: plan.dropped };
+  const summary = { entries, skipped: skips, dropped: plan.dropped, attempts };
 
-  if (plan.entries.length === 0) {
-    await config.setIfAbsent(key, '');
-    log.info(summary, 'no private endpoint to seed; allowlist left empty');
-    return;
-  }
-
-  const text = plan.entries.join('\n');
   try {
     await db.transaction(async (tx) => {
       await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_MS}ms'`));
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${ALLOWLIST_LOCK_NAME}, 0))`,
       );
-      if ((await config.getFresh(key)) !== null) throw new SeedLostRace();
-      // The row goes first: the config value lives in Redis, which no rollback reaches.
-      await tx.insert(schema.auditEvents).values({
-        actorUserId: SEED_AUDIT_ACTOR,
-        action: AUDIT_ACTION,
-        targetType: 'system',
-        targetId: null,
-        metadata: { from: '', to: text, seeded: true },
-        createdAt: sql`clock_timestamp()`,
-      });
-      if (!(await config.setIfAbsent(key, text))) throw new SeedLostRace();
+      if (
+        (await config.getFresh(key)) !== previous ||
+        (await config.getFresh(PRIVATE_ENDPOINT_SEED_STATE_KEY)) !== rawState
+      )
+        throw new SeedLostRace();
+      // Redis is external to the transaction: the granting audit must succeed first.
+      if (text !== null && text !== '' && text !== previous) {
+        await tx.insert(schema.auditEvents).values({
+          actorUserId: SEED_AUDIT_ACTOR,
+          action: AUDIT_ACTION,
+          targetType: 'system',
+          targetId: null,
+          metadata: { from: previous ?? '', to: text, seeded: true },
+          createdAt: sql`clock_timestamp()`,
+        });
+      }
+      if (!(await config.comparePrivateEndpointSeed(previous, rawState, text, nextState))) {
+        throw new SeedLostRace();
+      }
     });
   } catch (error) {
     if (error instanceof SeedLostRace) {
@@ -382,5 +442,8 @@ export async function seedPrivateEndpointAllowlist(
     }
     throw error;
   }
-  log.info(summary, 'private endpoint allowlist seeded from stored targets');
+  if (capped) log.warn(summary, 'private endpoint seed retry cap reached; keeping known entries');
+  else if (pending.length > 0)
+    log.info(summary, 'private endpoint seed pending; retry on next boot');
+  else log.info(summary, 'private endpoint allowlist seeded from stored targets');
 }

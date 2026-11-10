@@ -42,19 +42,49 @@ const resolve = async (host: string): Promise<dns.LookupAddress[]> => {
 
 function fakeConfig(initial?: string, opts: { raceWith?: string; failSet?: boolean } = {}) {
   const store = new Map<string, string>(initial === undefined ? [] : [[KEY, initial]]);
+  const setIfAbsent = vi.fn(async (key: string, value: string) => {
+    if (opts.failSet) throw new Error('redis down');
+    if (opts.raceWith !== undefined) {
+      store.set(key, opts.raceWith);
+      return false;
+    }
+    if (store.has(key)) return false;
+    store.set(key, value);
+    return true;
+  });
   return {
     store,
     getFresh: async (key: string) => store.get(key) ?? null,
-    setIfAbsent: vi.fn(async (key: string, value: string) => {
-      if (opts.failSet) throw new Error('redis down');
-      if (opts.raceWith !== undefined) {
-        store.set(key, opts.raceWith);
-        return false;
-      }
-      if (store.has(key)) return false;
-      store.set(key, value);
-      return true;
-    }),
+    setIfAbsent,
+    comparePrivateEndpointSeed: vi.fn(
+      async (
+        expected: string | null,
+        expectedState: string | null,
+        value: string | null,
+        state: string,
+      ) => {
+        const stateKey = 'bootstrap:privateEndpointSeed';
+        if (
+          (store.get(KEY) ?? null) !== expected ||
+          (store.get(stateKey) ?? null) !== expectedState
+        )
+          return false;
+        if (value !== null) {
+          if (expected === null) {
+            if (!(await setIfAbsent(KEY, value))) return false;
+          } else {
+            if (opts.failSet) throw new Error('redis down');
+            if (opts.raceWith !== undefined) {
+              store.set(KEY, opts.raceWith);
+              return false;
+            }
+            store.set(KEY, value);
+          }
+        }
+        store.set(stateKey, state);
+        return true;
+      },
+    ),
   };
 }
 
@@ -149,6 +179,135 @@ describe.skipIf(!url)('one-time seed of the private endpoint allowlist', () => {
     await db.delete(schema.auditEvents);
     await db.delete(schema.users);
     await db.$client.end({ timeout: 5 });
+  });
+
+  it('retries an all-unresolved seed on a later boot without writing an empty marker', async () => {
+    const config = fakeConfig();
+    config.store.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, 'http://ollama-box.lan:11434');
+    await seedPrivateEndpointAllowlist(db, {
+      config,
+      plan: { resolvers: { dns: async () => [], system: async () => [] } },
+    });
+    expect(config.store.has(KEY)).toBe(false);
+    await seedPrivateEndpointAllowlist(db, deps(config));
+    expect(config.store.get(KEY)).toBe('ollama-box.lan');
+  });
+
+  it('keeps resolved entries available and adds an unresolved name on a later boot', async () => {
+    const config = fakeConfig();
+    config.store.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, 'http://ollama-box.lan:11434');
+    await credential('forge.lan', 'gitea');
+    const partial = async (host: string) => (host === 'forge.lan' ? [] : resolve(host));
+    await seedPrivateEndpointAllowlist(db, {
+      config,
+      plan: { resolvers: { dns: partial, system: partial } },
+    });
+    expect(config.store.get(KEY)).toBe('ollama-box.lan');
+    await seedPrivateEndpointAllowlist(db, deps(config));
+    expect(config.store.get(KEY)).toBe('forge.lan\nollama-box.lan');
+    expect((await audits()).map((row) => row.metadata)).toEqual([
+      { from: '', to: 'ollama-box.lan', seeded: true },
+      { from: 'ollama-box.lan', to: 'forge.lan\nollama-box.lan', seeded: true },
+    ]);
+  });
+
+  it('caps unresolved retries at ten durable attempts', async () => {
+    const config = fakeConfig();
+    config.store.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, 'http://ollama-box.lan:11434');
+    const dns = vi.fn(async () => []);
+    const options = { config, plan: { resolvers: { dns, system: dns } } };
+    for (let i = 0; i < 9; i++) {
+      await seedPrivateEndpointAllowlist(db, options);
+      expect(config.store.has(KEY)).toBe(false);
+    }
+    await seedPrivateEndpointAllowlist(db, options);
+    expect(config.store.get(KEY)).toBe('');
+    const calls = dns.mock.calls.length;
+    await seedPrivateEndpointAllowlist(db, deps(config));
+    expect(config.store.get(KEY)).toBe('');
+    expect(dns.mock.calls).toHaveLength(calls);
+    expect(lines.join('')).toContain('retry cap');
+  });
+
+  it.each(['', '10.9.8.7', 'ollama-box.lan'])(
+    'never resumes after an administrator saves %j',
+    async (saved) => {
+      const config = fakeConfig();
+      config.store.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, 'http://ollama-box.lan:11434');
+      await credential('forge.lan', 'gitea');
+      const partial = async (host: string) => (host === 'forge.lan' ? [] : resolve(host));
+      await seedPrivateEndpointAllowlist(db, {
+        config,
+        plan: { resolvers: { dns: partial, system: partial } },
+      });
+      // ConfigService.set atomically invalidates seed ownership even for a same-value save.
+      config.store.set(KEY, saved);
+      config.store.delete('bootstrap:privateEndpointSeed');
+      lookups.length = 0;
+      await seedPrivateEndpointAllowlist(db, deps(config));
+      expect(config.store.get(KEY)).toBe(saved);
+      expect(lookups).toEqual([]);
+      expect(await audits()).toHaveLength(1);
+    },
+  );
+
+  it('rolls a retry audit back if an administrator changes the value just before CAS', async () => {
+    const config = fakeConfig();
+    config.store.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, 'http://ollama-box.lan:11434');
+    await credential('forge.lan', 'gitea');
+    const partial = async (host: string) => (host === 'forge.lan' ? [] : resolve(host));
+    await seedPrivateEndpointAllowlist(db, {
+      config,
+      plan: { resolvers: { dns: partial, system: partial } },
+    });
+    config.comparePrivateEndpointSeed.mockImplementationOnce(async () => {
+      config.store.set(KEY, '');
+      config.store.delete('bootstrap:privateEndpointSeed');
+      return false;
+    });
+    await seedPrivateEndpointAllowlist(db, deps(config));
+    expect(config.store.get(KEY)).toBe('');
+    expect(await audits()).toHaveLength(1);
+    expect(lines.join('')).toContain('seed skipped');
+  });
+
+  it('does not publish a seed if its audit insert fails', async () => {
+    const config = fakeConfig();
+    config.store.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, 'http://ollama-box.lan:11434');
+    const transaction = db.transaction.bind(db);
+    vi.spyOn(db, 'transaction').mockImplementation((run) =>
+      transaction(async (tx) => {
+        vi.spyOn(tx, 'insert').mockImplementation(() => {
+          throw new Error('audit refused');
+        });
+        return run(tx);
+      }),
+    );
+    await expect(seedPrivateEndpointAllowlist(db, deps(config))).rejects.toThrow('audit refused');
+    expect(config.comparePrivateEndpointSeed).not.toHaveBeenCalled();
+    expect(config.store.has(KEY)).toBe(false);
+    expect(await audits()).toHaveLength(0);
+  });
+
+  it('serializes concurrent seeds and commits only the winning audit', async () => {
+    const config = fakeConfig();
+    config.store.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, 'http://ollama-box.lan:11434');
+    await Promise.all([
+      seedPrivateEndpointAllowlist(db, deps(config)),
+      seedPrivateEndpointAllowlist(db, deps(config)),
+    ]);
+    expect(config.store.get(KEY)).toBe('ollama-box.lan');
+    expect(await audits()).toHaveLength(1);
+  });
+
+  it('allows an explicit key deletion to request a fresh seed', async () => {
+    const config = fakeConfig();
+    config.store.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, 'http://ollama-box.lan:11434');
+    await seedPrivateEndpointAllowlist(db, deps(config));
+    config.store.delete(KEY);
+    await seedPrivateEndpointAllowlist(db, deps(config));
+    expect(config.store.get(KEY)).toBe('ollama-box.lan');
+    expect(await audits()).toHaveLength(2);
   });
 
   it('seeds from the global KB url, repository tooling and forge credentials, with one audit row', async () => {

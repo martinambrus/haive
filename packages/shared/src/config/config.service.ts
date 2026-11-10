@@ -33,6 +33,9 @@ export const DEFAULT_CLI_STREAM_LOG_RETENTION_DAYS = 0;
  *  Admin-tunable via CONFIG_KEYS.CLI_PROMPT_RETENTION_DAYS. */
 export const DEFAULT_CLI_PROMPT_RETENTION_DAYS = 0;
 
+/** Seed ownership is cleared by every administrator write, including a same-value save. */
+export const PRIVATE_ENDPOINT_SEED_STATE_KEY = 'bootstrap:privateEndpointSeed';
+
 export const CONFIG_KEYS = {
   DATABASE_URL: 'config:database:url',
   API_PORT: 'config:server:apiPort',
@@ -1009,7 +1012,17 @@ export class ConfigService {
   async set(key: string, value: string): Promise<void> {
     this.ensureInitialized();
     try {
-      await this.redisCall('set', (redis) => redis.set(key, value));
+      await this.redisCall('set', (redis) =>
+        key === CONFIG_KEYS.PRIVATE_ENDPOINT_ALLOWLIST
+          ? redis.eval(
+              "redis.call('SET', KEYS[1], ARGV[1]); redis.call('DEL', KEYS[2]); return 1",
+              2,
+              key,
+              PRIVATE_ENDPOINT_SEED_STATE_KEY,
+              value,
+            )
+          : redis.set(key, value),
+      );
     } finally {
       // A rejected write may still have been applied, so never keep a cached copy of the old value.
       this.localCache.delete(key);
@@ -1022,6 +1035,51 @@ export class ConfigService {
       return (await this.redisCall('setIfAbsent', (redis) => redis.set(key, value, 'NX'))) === 'OK';
     } finally {
       this.localCache.delete(key);
+    }
+  }
+
+  /** Atomically compare seed ownership and publish its next value and durable attempt state.
+   * Caller holds the admin advisory lock and writes any required audit row first. */
+  async comparePrivateEndpointSeed(
+    expected: string | null,
+    expectedState: string | null,
+    value: string | null,
+    state: string,
+  ): Promise<boolean> {
+    this.ensureInitialized();
+    try {
+      return (
+        (await this.redisCall('comparePrivateEndpointSeed', (redis) =>
+          redis.eval(
+            `local current = redis.call('GET', KEYS[1])
+         local state = redis.call('GET', KEYS[2])
+         local expected = false
+         if ARGV[1] == '1' then expected = ARGV[2] end
+         local expectedState = false
+         if ARGV[3] == '1' then expectedState = ARGV[4] end
+         if current ~= expected or state ~= expectedState then return 0 end
+         if ARGV[5] == '1' then
+           if not current then redis.call('SET', KEYS[1], ARGV[6], 'NX')
+           else redis.call('SET', KEYS[1], ARGV[6]) end
+         end
+         redis.call('SET', KEYS[2], ARGV[7])
+         return 1`,
+            2,
+            CONFIG_KEYS.PRIVATE_ENDPOINT_ALLOWLIST,
+            PRIVATE_ENDPOINT_SEED_STATE_KEY,
+            expected === null ? '0' : '1',
+            expected ?? '',
+            expectedState === null ? '0' : '1',
+            expectedState ?? '',
+            value === null ? '0' : '1',
+            value ?? '',
+            state,
+          ),
+        )) === 1
+      );
+    } finally {
+      this.localCache.delete(CONFIG_KEYS.PRIVATE_ENDPOINT_ALLOWLIST);
+      this.localCache.delete(PRIVATE_ENDPOINT_SEED_STATE_KEY);
     }
   }
 
