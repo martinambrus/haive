@@ -120,8 +120,23 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
       e.preventDefault();
       ((e.shiftKey ? stops.at(-1) : stops[0]) ?? panel).focus();
     };
+    // Native radio navigation and positive tabindex can choose a stop outside
+    // the panel. Guard the resulting focus as well as the key's predicted order.
+    let backwards = false;
+    const rememberDirection = (event: KeyboardEvent) => {
+      if (event.key === 'Tab') backwards = event.shiftKey;
+    };
+    const onFocus = () => {
+      if (openPanels.at(-1) !== entry || panel.contains(document.activeElement)) return;
+      const stops = tabbables(panel, null);
+      ((backwards ? stops.at(-1) : stops[0]) ?? panel).focus();
+    };
+    document.addEventListener('keydown', rememberDirection);
+    document.addEventListener('focusin', onFocus);
     document.addEventListener('keydown', onTab);
     return () => {
+      document.removeEventListener('keydown', rememberDirection);
+      document.removeEventListener('focusin', onFocus);
       document.removeEventListener('keydown', onTab);
       const at = openPanels.indexOf(entry);
       const wasTop = at === openPanels.length - 1;
