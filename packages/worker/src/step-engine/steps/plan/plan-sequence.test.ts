@@ -392,12 +392,21 @@ describe('foldSequenceResults', () => {
     vi.mocked(applyAgentPatch).mockReset();
   });
 
-  it('fails a busy ordering fold without discarding the saved reply', async () => {
-    const busy = new PlanPatchError('busy', 'The plan is busy. Try again.');
-    vi.mocked(applyAgentPatch).mockRejectedValueOnce(busy);
-    const { db, stamps } = fakeDb();
-    await expect(foldSequenceResults(ctx(db), 'r', [agentReply(ORDER)])).rejects.toBe(busy);
-    expect(stamps).toEqual([]);
+  it('retries a busy ordering fold without discarding its reply', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(applyAgentPatch)
+        .mockRejectedValueOnce(new PlanPatchError('busy', 'busy'))
+        .mockResolvedValueOnce(outcome({ updated: [A, B] }));
+      const { db, stamps } = fakeDb();
+      const result = foldSequenceResults(ctx(db), 'r', [agentReply(ORDER)]);
+      await vi.runAllTimersAsync();
+      expect(await result).toBe(2);
+      expect(applyAgentPatch).toHaveBeenCalledTimes(2);
+      expect(stamps).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('records a reply that lost ops under the partial prefix, not as a failure', async () => {

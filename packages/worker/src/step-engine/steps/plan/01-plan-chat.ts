@@ -1,3 +1,4 @@
+import { retryPlanPatch } from '../../../plan/patch-retry.js';
 import { asc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, type FormSchema } from '@haive/shared';
@@ -284,10 +285,13 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
         result.summary = patch.summary ?? '';
         try {
           if (patch.ops.length > 0) {
-            const res = await applyAgentPatch(ctx.db, patch, {
-              repositoryId: d.repositoryId,
-              sourceTaskId: ctx.taskId,
-            });
+            const repositoryId = d.repositoryId;
+            const res = await retryPlanPatch(() =>
+              applyAgentPatch(ctx.db, patch, {
+                repositoryId,
+                sourceTaskId: ctx.taskId,
+              }),
+            );
             result.applied = true;
             dropped = res.dropped;
             strippedCodeLinks = res.strippedCodeLinks;

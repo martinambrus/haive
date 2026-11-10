@@ -180,7 +180,7 @@ async function foldPatch(
   } catch (err) {
     if (!(err instanceof PlanPatchError)) throw err;
     if (err.kind === 'busy') {
-      throw new Error('The plan is busy. Retry this step to apply the saved planner reply.');
+      throw new Error('The plan stayed busy. Retry this step to ask the planner again.');
     }
     if (err.kind === 'conflict') {
       throw new Error(

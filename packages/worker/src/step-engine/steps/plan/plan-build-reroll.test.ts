@@ -165,10 +165,23 @@ describe('plan build wave re-roll', () => {
     expect(payload.sample).toHaveLength(5);
   });
 
-  it('fails a busy fold without re-prompting or stamping the reply as unusable', async () => {
-    const busy = new PlanPatchError('busy', 'The plan is busy. Try again.');
-    vi.mocked(applyAgentPatch).mockRejectedValueOnce(busy);
-    expect(await foldOneAgentWave()).toBe(busy);
+  it('retries a busy fold without re-prompting or stamping the reply as unusable', async () => {
+    vi.mocked(applyAgentPatch)
+      .mockRejectedValueOnce(new PlanPatchError('busy', 'busy'))
+      .mockResolvedValueOnce({
+        created: ['c'],
+        updated: [],
+        deleted: [],
+        linked: 0,
+        unlinked: 0,
+        codeLinked: 0,
+        refs: { kid: 'c' },
+        dropped: [],
+        strippedCodeLinks: [],
+      });
+    const result = await foldOneAgentWave();
+    expect((result as Error).message).toContain('did not produce a root node');
+    expect(applyAgentPatch).toHaveBeenCalledTimes(2);
     expect(writes.stamps).toBe(0);
   });
 

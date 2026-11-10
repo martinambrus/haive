@@ -89,6 +89,47 @@ const thinner = {
 const noNote = () => null;
 
 describe('applyAgentPatchOnce', () => {
+  it('retries a transient busy outside the claim transaction and folds the same reply', async () => {
+    vi.useFakeTimers();
+    try {
+      const { db, claims, stamps } = fakeDb();
+      const write = vi
+        .fn()
+        .mockRejectedValueOnce(new PlanPatchError('busy', 'busy'))
+        .mockResolvedValue(applied);
+      const result = applyAgentPatchOnce(ctx(db), 'agent-a', write, () => 'Applied').then(
+        (value) => ({ value, error: null }),
+        (error) => ({ value: null, error }),
+      );
+      await vi.runAllTimersAsync();
+      expect((await result).value).toBe(applied);
+      expect(write).toHaveBeenCalledTimes(2);
+      expect(claims).toHaveLength(2);
+      expect(stamps).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds persistent busy and gives a truthful retry instruction', async () => {
+    vi.useFakeTimers();
+    try {
+      const { db, claims, stamps } = fakeDb();
+      const write = vi.fn().mockRejectedValue(new PlanPatchError('busy', 'busy'));
+      const result = applyAgentPatchOnce(ctx(db), 'agent-a', write, noNote).catch((error) => error);
+      await vi.runAllTimersAsync();
+      expect(await result).toMatchObject({
+        kind: 'busy',
+        message: 'The plan stayed busy. Try again.',
+      });
+      expect(write).toHaveBeenCalledTimes(5);
+      expect(claims).toHaveLength(5);
+      expect(stamps).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('writes the reply inside the transaction that claims its row', async () => {
     const { db, claims } = fakeDb();
     const write = vi.fn(async (_tx: unknown) => applied);
@@ -157,12 +198,19 @@ describe('foldCoverageResults', () => {
     vi.mocked(applyAgentPatch).mockResolvedValue(applied);
   });
 
-  it('fails a busy coverage fold without stamping the saved reply as unusable', async () => {
-    const busy = new PlanPatchError('busy', 'The plan is busy. Try again.');
-    vi.mocked(applyAgentPatch).mockRejectedValueOnce(busy);
-    const { db, stamps } = fakeDb();
-    await expect(foldCoverageResults(ctx(db), detected, [reply])).rejects.toBe(busy);
-    expect(stamps).toEqual([]);
+  it('retries a busy coverage fold without discarding its reply', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(applyAgentPatch).mockRejectedValueOnce(new PlanPatchError('busy', 'busy'));
+      const { db, stamps } = fakeDb();
+      const result = foldCoverageResults(ctx(db), detected, [reply]);
+      await vi.runAllTimersAsync();
+      expect((await result).hadFailure).toBe(false);
+      expect(applyAgentPatch).toHaveBeenCalledTimes(2);
+      expect(stamps).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('folds a reply once it has claimed it', async () => {

@@ -1,4 +1,5 @@
 import { PLAN_PATCH_MAX_OPS, planTaskProposalSchema, type PlanTaskProposal } from '@haive/shared';
+import { retryPlanPatch } from '../../../plan/patch-retry.js';
 import {
   applyPlanPatch,
   stripNodeRefPrefix,
@@ -333,27 +334,29 @@ export async function applyAgentPatchOnce<T = ApplyPlanPatchResult>(
   write: (tx: DbOrTx) => Promise<T>,
   note: (applied: T) => string | null,
 ): Promise<T | null> {
-  return ctx.db.transaction(async (tx) => {
-    const [claimed] = await tx
-      .update(schema.taskStepAgentMinings)
-      .set({ consumedAt: new Date(), updatedAt: new Date() })
-      .where(
-        and(
-          eq(schema.taskStepAgentMinings.taskStepId, ctx.taskStepId),
-          eq(schema.taskStepAgentMinings.agentId, agentId),
-          isNull(schema.taskStepAgentMinings.consumedAt),
-        ),
-      )
-      .returning({ id: schema.taskStepAgentMinings.id });
-    if (!claimed) return null;
-    const applied = await write(tx);
-    const message = note(applied);
-    if (message) {
-      await tx
+  return retryPlanPatch(() =>
+    ctx.db.transaction(async (tx) => {
+      const [claimed] = await tx
         .update(schema.taskStepAgentMinings)
-        .set({ errorMessage: message.slice(0, 2000) })
-        .where(eq(schema.taskStepAgentMinings.id, claimed.id));
-    }
-    return applied;
-  });
+        .set({ consumedAt: new Date(), updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.taskStepAgentMinings.taskStepId, ctx.taskStepId),
+            eq(schema.taskStepAgentMinings.agentId, agentId),
+            isNull(schema.taskStepAgentMinings.consumedAt),
+          ),
+        )
+        .returning({ id: schema.taskStepAgentMinings.id });
+      if (!claimed) return null;
+      const applied = await write(tx);
+      const message = note(applied);
+      if (message) {
+        await tx
+          .update(schema.taskStepAgentMinings)
+          .set({ errorMessage: message.slice(0, 2000) })
+          .where(eq(schema.taskStepAgentMinings.id, claimed.id));
+      }
+      return applied;
+    }),
+  );
 }

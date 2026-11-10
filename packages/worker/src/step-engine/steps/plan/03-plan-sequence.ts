@@ -1,3 +1,4 @@
+import { applyPlanPatchWithRetry as applyPlanPatch } from '../../../plan/patch-retry.js';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { PLAN_PATCH_MAX_OPS, type FormSchema, type FormValues } from '@haive/shared';
@@ -6,7 +7,6 @@ import {
   PLAN_NODE_REF_PREFIX,
   SEQUENCE_AGENTS_PER_PASS,
   SEQUENCE_MAX_RUN_CHILDREN,
-  applyPlanPatch,
   askedParents,
   sequenceAgentId,
   sequenceAgentParent,
