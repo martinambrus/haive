@@ -84,7 +84,8 @@ describe('taskToneLabel', () => {
     expect(taskToneLabel({ status: 'running' })).toBe('running');
     expect(taskToneLabel({ status: 'waiting_user' })).toBe('waiting');
     expect(taskToneLabel({ status: 'failed' })).toBe('failed');
-    expect(taskToneLabel({ status: 'created' })).toBe('queued');
+    expect(taskToneLabel({ status: 'created' })).toBe('not started');
+    expect(taskToneLabel({ status: 'queued' })).toBe('queued');
   });
 
   it('does not call a cancelled or completed task dead for a dead_at it still carries', () => {
