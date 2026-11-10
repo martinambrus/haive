@@ -752,33 +752,25 @@ describe('saving or clearing the app-login credentials of a repository', () => {
     expect(auditLines()).toEqual([]);
   });
 
-  const refusals: Array<[string, number, () => void]> = [
-    ['the sync lock is held', 409, () => fakeLock.state.held.add(REPO)],
-    ['Redis cannot be reached', 503, () => (fakeLock.state.redisDown = true)],
-    ['Redis does not answer the lock command', 503, () => (fakeLock.state.stalled = true)],
-  ];
+  it('refuses a RAG action mixed with app credentials before any lock or secret write', async () => {
+    const fake = setup(STORE, true, true);
+    const before = structuredClone(fake.rows(schema.repositories));
+    const { set, remove } = spySecrets();
 
-  it.each(refusals)(
-    'refuses mixed secrets before checking whether %s',
-    async (_why, _status, arrange) => {
-      const fake = setup(STORE, true, true);
-      const before = structuredClone(fake.rows(schema.repositories));
-      const { set, remove } = spySecrets();
-      arrange();
+    const res = await patch({
+      ragEmbedAction: 'retry',
+      appAuthUsername: USERNAME,
+      appAuthPassword: '',
+    });
 
-      const res = await patch({
-        ragEmbedAction: 'retry',
-        appAuthUsername: USERNAME,
-        appAuthPassword: '',
-      });
-
-      expect(res.status).toBe(400);
-      expect(await res.json()).toMatchObject({ code: 'rag_action_security_conflict' });
-      expect(fake.rows(schema.repositories)).toEqual(before);
-      expect(set).not.toHaveBeenCalled();
-      expect(remove).not.toHaveBeenCalled();
-      expect(fake.rows(schema.auditEvents)).toEqual([]);
-      expect(auditLines()).toEqual([]);
-    },
-  );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'rag_action_security_conflict' });
+    expect(fakeLock.state.tried).toEqual([]);
+    expect(h.statements).toEqual([]);
+    expect(fake.rows(schema.repositories)).toEqual(before);
+    expect(set).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+    expect(auditLines()).toEqual([]);
+  });
 });
