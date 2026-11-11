@@ -20,7 +20,7 @@ export const ROLLBACK_RECORD_WRITE_TABLES = {
 
 /** Awaits a 02, 04 or 12 apply, whose record write must have run, or with `recordWriteFails` failed. */
 export async function recordWritten<
-  T extends { warnings: string[]; recordWrite?: 'written' | 'failed' | 'skipped' },
+  T extends { warnings: string[]; recordWrite?: 'written' | 'failed' | 'skipped' | 'deferred' },
 >(
   applied: Promise<T>,
   { recordWriteFails = false }: { recordWriteFails?: boolean } = {},
