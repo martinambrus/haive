@@ -228,7 +228,7 @@ Read so far: `refreshProjectState` (`worker/src/project-state/refresh.ts` ~:100-
 
 ### T611 · FNF[replace-zip-followups] · Replace ZIP mode and replacement-record follow-ups (+10)
 
-status: open · kind: fix · found: J (#487) reviews 2026-11-11 · priority: P3
+status: in progress (bundle K2, run 2026-11-11, branch fix/K2-replace-zip-followups) · kind: fix · found: J (#487) reviews 2026-11-11 · priority: P3
 Low unless marked. Code in api `routes/bundles.ts`, worker `bundle-ingest.ts`, `data-migrations.ts` (stranded-replacement sweep), web `bundle-composer.tsx`.
 
 1. (PRE-EXISTING, consequential) Replacement admission holds a DB transaction open during its Redis job check (`bundles.ts` ~:899). Do the Redis check outside the transaction or bound it.
@@ -268,7 +268,7 @@ Code in `worker/src/step-engine/left-committed-merge.ts`.
 
 ### T615 · design · reset provenance credits a merge into another branch
 
-status: open · kind: design · found: E2 (#1080) Greptile P1 2026-11-11 · priority: P2
+status: in progress (bundle K1, run 2026-11-11, branch fix/K1-reset-provenance-branch) · kind: design · found: E2 (#1080) Greptile P1 2026-11-11 · priority: P2
 DECIDED by the owner 2026-11-11: the worker records the checkout branch when the reset starts; provenance counts only landings whose `landedOn` equals it; old merges without a branch stay counted as today. Overnight run authorized.
 `resolveMergedTasks` (api `routes/repos.ts` ~:1195-1245) counts a task's 11d skill-sync output as reaching the checkout when its step 12 merged, whatever branch the merge landed on: the legacy `merge_resolve_state.merged === true` path (PRE-EXISTING; `merge-resolver.ts` sets it with no branch check) and, since #1080, a `merge.landed` event. A cross-branch merge leaves the checkout unchanged, so a later onboarding reset can delete a user's untouched skill at the same path. A fix must compare the landing's `landedOn` with the branch the reset is reading, which the api cannot read (no git there): record the checkout branch at reset start in the worker, or have the worker resolve provenance. Decide where.
 
