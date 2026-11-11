@@ -63,6 +63,8 @@ import { handleRefresh } from '../src/repo/refresh.js';
 import {
   putBackProjections,
   resyncAfterTaskEnd,
+  resyncWithKeptMetadata,
+  resyncHaiveProjections,
   restoreFaults,
   setAsideHaiveProjections,
 } from '../src/project-state/set-aside.js';
@@ -146,6 +148,8 @@ afterEach(async () => {
   seam.afterDirRemove = null;
   seam.afterSetAside = null;
   delete restoreFaults.afterBase;
+  delete restoreFaults.beforeResync;
+  delete restoreFaults.beforeRestore;
   for (const id of users.splice(0)) await db!.delete(schema.users).where(eq(schema.users.id, id));
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
@@ -203,6 +207,46 @@ async function diskRecord(root: string, name: string) {
 }
 
 describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
+  it('commits captured metadata before removal and keeps it after failed re-sync', async () => {
+    const s = await fixture();
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: s.root });
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.name=T',
+        '-c',
+        'user.email=t@local',
+        'commit',
+        '--allow-empty',
+        '-qm',
+        'initial',
+      ],
+      { cwd: s.root },
+    );
+    await s.write();
+    const rel = '.haive-data/state/project/render.json';
+    await chmod(join(s.root, rel), 0o600);
+    await chmod(join(s.root, '.haive-data/state/project'), 0o700);
+    restoreFaults.beforeRestore = async () => {
+      const pending = (await s.outbox())!.keptMetadata?.[s.root];
+      expect(pending?.[rel]?.mode).toBe(0o600);
+      expect(pending?.[rel]?.owner?.uid).toBe(process.getuid!());
+      expect(pending?.[rel]?.parents).toContainEqual(
+        expect.objectContaining({ path: '.haive-data/state/project', mode: 0o700 }),
+      );
+    };
+    const aside = await setAsideHaiveProjections(db!, s.repo.id, s.root);
+    expect(aside.outcome).toBe('set-aside');
+    if (aside.outcome !== 'set-aside') throw new Error('expected kept metadata');
+    restoreFaults.beforeResync = () => {
+      throw new Error('transient re-sync failure');
+    };
+    expect(await resyncWithKeptMetadata(db!, s.repo.id, s.root, aside.kept)).toBe(false);
+    expect((await s.outbox())!.keptMetadata?.[s.root]?.[rel]?.mode).toBe(0o600);
+    expect(aside.kept.get(rel)?.mode).toBe(0o600);
+  });
+
   it.each(['sweep', 'boot'] as const)('%s refresh leaves legacy mirrors alone', async (mode) => {
     const s = await fixture();
     await db!
@@ -1162,6 +1206,8 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
     let before: Awaited<ReturnType<typeof m.snapshot>> | undefined;
     restoreFaults.afterBase = async () => {
       delete restoreFaults.afterBase;
+      delete restoreFaults.beforeResync;
+      delete restoreFaults.beforeRestore;
       await m.leaveIntent();
       before = await m.snapshot();
     };

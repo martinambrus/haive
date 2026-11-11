@@ -30,8 +30,8 @@ import {
   putBackAfterFailure,
   putBackProjections,
   recoverAfterMoveFailure,
-  restoreKeptMetadata,
   restoreProjectionsInTx,
+  resyncWithKeptMetadata,
   resyncHaiveProjections,
   setAsideHaiveProjections,
   type KeptFiles,
@@ -654,12 +654,10 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         } finally {
           if (repositoryId) {
             try {
-              await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
+              await resyncWithKeptMetadata(ctx.db, repositoryId, ctx.repoPath, kept);
             } catch (err) {
               if (!handBackFailed) throw err;
               ctx.logger.warn({ err }, 'projection resync failed after hand-back failure');
-            } finally {
-              await restoreKeptMetadata(ctx.repoPath, kept);
             }
           }
         }

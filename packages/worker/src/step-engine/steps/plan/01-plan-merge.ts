@@ -29,9 +29,8 @@ import {
   MOVE_ATTEMPTS,
   putBackProjections,
   recoverAfterMoveFailure,
-  restoreKeptMetadata,
   restoreProjectionsInTx,
-  resyncHaiveProjections,
+  resyncWithKeptMetadata,
   setAsideHaiveProjections,
   type KeptFiles,
 } from '../../../project-state/set-aside.js';
@@ -694,8 +693,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
           message: 'docs: save project plan',
           identity,
         });
-        await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
-        await restoreKeptMetadata(ctx.repoPath, kept);
+        await resyncWithKeptMetadata(ctx.db, repositoryId, ctx.repoPath, kept);
       }
     } catch (err) {
       return recoverAfterMoveFailure(ctx.db, repositoryId, ctx.repoPath, kept, before, err);

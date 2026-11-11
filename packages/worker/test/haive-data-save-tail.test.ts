@@ -283,6 +283,8 @@ describe('data Save failure and race controls', () => {
       refusal: { code: 'resync_failed' },
     });
     expect(push.pushBranch).not.toHaveBeenCalled();
+    expect(h.resettle).toHaveBeenCalled();
+    expect(h.metadata).not.toHaveBeenCalled();
   });
   it('reports plan_merge opened inside integrateOrigin after prechecks', async () => {
     h.fetch.mockImplementation(async () => {

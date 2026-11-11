@@ -35,9 +35,8 @@ import {
   MOVE_ATTEMPTS,
   putBackProjections,
   recoverAfterMoveFailure,
-  restoreKeptMetadata,
   restoreProjectionsInTx,
-  resyncHaiveProjections,
+  resyncWithKeptMetadata,
   setAsideHaiveProjections,
   type CheckoutFence,
   type KeptFiles,
@@ -434,9 +433,8 @@ const planSaveSeams: SaveSeams = {
     await reconcilePlanFromCheckout(getDb(), repo.id, repoPath);
     await flushPlanMirrorForRepository(getDb(), repo.id);
     await commitPlanSnapshotFiles({ repoPath, message, identity });
-    if (!(await resyncHaiveProjections(getDb(), repo.id, repoPath)))
+    if (!(await resyncWithKeptMetadata(getDb(), repo.id, repoPath, kept)))
       throw new Error('project state re-sync failed before pushing');
-    await restoreKeptMetadata(repoPath, kept);
   },
 };
 
@@ -717,8 +715,7 @@ export async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
       // checkout's plan.json no longer says everything the plan does.
       const files = outcome.skipped ? [] : (await flushPlanMirrorForRepository(db, repo.id)).files;
       if (integrated.landed) {
-        await resyncHaiveProjections(db, repo.id, repoPath);
-        await restoreKeptMetadata(repoPath, kept);
+        await resyncWithKeptMetadata(db, repo.id, repoPath, kept);
       }
 
       return resultFor(repo.id, files, {

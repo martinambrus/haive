@@ -33,7 +33,7 @@ import {
   type HaiveProjectionCommit,
 } from './commit.js';
 import { refreshProjectStateOutcome } from './refresh.js';
-import { restoreKeptMetadata, resyncHaiveProjections } from './set-aside.js';
+import { resyncWithKeptMetadata } from './set-aside.js';
 import { lockProjectState } from './write.js';
 
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
@@ -350,14 +350,10 @@ async function saveHaiveDataInScope(payload: HaiveDataSavePayload): Promise<Haiv
       },
       commit,
       async afterLanding(scope) {
-        try {
-          if (!(await resyncHaiveProjections(db, repo.id, scope.repoPath)))
-            fail({ code: 'resync_failed' });
-          // Re-check questions under all four locks before any new record is committed.
-          await commit(scope);
-        } finally {
-          await restoreKeptMetadata(scope.repoPath, scope.kept);
-        }
+        if (!(await resyncWithKeptMetadata(db, repo.id, scope.repoPath, scope.kept)))
+          fail({ code: 'resync_failed' });
+        // Re-check questions under all four locks before any new record is committed.
+        await commit(scope);
       },
     });
     return {

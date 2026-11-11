@@ -17,6 +17,7 @@ import { failGit } from '../../../../test/support/fake-git.js';
 const projections = vi.hoisted(() => ({
   setAside: vi.fn(),
   resync: vi.fn(),
+  resettle: vi.fn(),
   putBack: vi.fn(),
   restore: vi.fn(),
   seed: vi.fn(),
@@ -37,6 +38,7 @@ vi.mock('../../../plan/mirror.js', async (importOriginal) => ({
 vi.mock('../../../project-state/set-aside.js', () => ({
   setAsideHaiveProjections: projections.setAside,
   resyncHaiveProjections: projections.resync,
+  resyncWithKeptMetadata: projections.resettle,
   putBackProjections: projections.putBack,
   putBackAfterFailure: async (...args: unknown[]) => {
     await projections.putBack(...args.slice(0, 4));
@@ -100,6 +102,12 @@ beforeEach(() => {
   projections.setAside.mockReset();
   projections.resync.mockReset();
   projections.resync.mockResolvedValue(true);
+  projections.resettle.mockReset().mockImplementation(async (...args: unknown[]) => {
+    const synced = await projections.resync(...args.slice(0, 3));
+    if (synced) await projections.metadata(args[2], args[3]);
+    return synced;
+  });
+  projections.metadata.mockReset();
   projections.putBack.mockReset();
   projections.restore.mockReset();
   projections.seed.mockReset();
@@ -1862,11 +1870,45 @@ it('sync preserves hand-back failure when resync also throws', async () => {
       expect.objectContaining({ err: secondary }),
       expect.stringMatching(/resync/),
     );
-    expect(projections.metadata).toHaveBeenCalledWith(local, expect.any(Map));
+    expect(projections.metadata).not.toHaveBeenCalled();
   } finally {
     await shim?.restore();
     asRoot.mockRestore();
     for (const dir of [bare, seed, local])
       await rm(dir, { recursive: true, force: true, maxRetries: 5 });
   }
+});
+
+describe('fast-forward metadata recovery', () => {
+  it('retains the kept map when the re-sync fails', async () => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    try {
+      await advanceOrigin(seed, 'incoming.txt');
+      const ctx = mkCtx(local, 'repo-1');
+      const d = await syncBaseStep.detect!(ctx);
+      const kept = new Map([
+        [
+          KEPT_FILE,
+          {
+            bytes: Buffer.from('{}'),
+            index: null,
+            untracked: true,
+            owner: { uid: 1000, gid: 1000 },
+            mode: 0o600,
+          },
+        ],
+      ]);
+      projections.setAside.mockResolvedValue({ outcome: 'set-aside', kept });
+      projections.resync.mockResolvedValue(false);
+      await syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }));
+      expect(projections.resettle).toHaveBeenCalledWith(ctx.db, 'repo-1', local, kept);
+      expect(projections.metadata).not.toHaveBeenCalled();
+      expect(kept.size).toBe(1);
+    } finally {
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
+      await rm(seed, { recursive: true, force: true });
+      await rm(local, { recursive: true, force: true });
+    }
+  });
 });

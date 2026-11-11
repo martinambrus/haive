@@ -55,6 +55,13 @@ import {
   overlaySettings,
 } from './write.js';
 
+import {
+  captureProjectionMetadata,
+  keptMetadataOf,
+  rememberKeptMetadata,
+  restorePendingKeptMetadata,
+} from './kept-metadata.js';
+
 type DbOrTx = Parameters<typeof markPlanMirrorDirty>[0];
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 
@@ -454,6 +461,7 @@ export const restoreFaults: {
 } = {};
 
 interface RestoreGuard {
+  repositoryId: string;
   owns: (path: string) => boolean;
   lock: (tx: Tx) => Promise<unknown>;
   judgeLock: (tx: Tx) => Promise<unknown>;
@@ -489,6 +497,16 @@ async function judgeAndMark(
   await restoreFaults.afterJudgeFence?.();
   if (holding > 0) return { stopped: { outcome: 'held', holding } };
   await guard.mark(tx);
+  await rememberKeptMetadata(
+    tx,
+    guard.repositoryId,
+    repoPath,
+    await captureProjectionMetadata(
+      repoPath,
+      paths,
+      async (path) => (await headEntry(repoPath, path)) === null,
+    ),
+  );
   await guard.base?.(tx);
   return { prints, generation: await guard.generation(tx) };
 }
@@ -596,6 +614,7 @@ const stateGuard = (
   head: HeadRecord,
   fence?: CheckoutFence,
 ): RestoreGuard => ({
+  repositoryId,
   owns: (path) => path.startsWith(STATE_PREFIX),
   lock: guardLock(repositoryId, fence, (tx) => lockProjectState(tx, repositoryId)),
   judgeLock: (tx) => lockProjectState(tx, repositoryId),
@@ -613,6 +632,7 @@ const planGuard = (
   plan: readonly string[],
   fence?: CheckoutFence,
 ): RestoreGuard => ({
+  repositoryId,
   owns: (path) => !path.startsWith(STATE_PREFIX),
   lock: guardLock(repositoryId, fence, (tx) => lockPlanMirror(tx, repositoryId)),
   judgeLock: (tx) => lockPlanMirror(tx, repositoryId),
@@ -956,6 +976,19 @@ export async function resyncHaiveProjections(
   return synced;
 }
 
+/** A move caller keeps its map in memory and in the outbox until the complete re-sync succeeds. */
+export async function resyncWithKeptMetadata(
+  db: Database,
+  repositoryId: string,
+  repoPath: string,
+  kept: KeptFiles,
+): Promise<boolean> {
+  await rememberKeptMetadata(db, repositoryId, repoPath, keptMetadataOf(kept));
+  if (!(await resyncHaiveProjections(db, repositoryId, repoPath))) return false;
+  await restorePendingKeptMetadata(db, repositoryId, repoPath, restoreKeptMetadata);
+  return true;
+}
+
 /** The re-sync an onboarding or upgrade owes when it ends, since the sync deferred while it held the
  *  checkout. Call it with no transaction open and the status write committed. Never throws. */
 export async function resyncAfterTaskEnd(db: Database, taskId: string): Promise<void> {
@@ -986,24 +1019,27 @@ const WRITER_FILE_MODE = 0o644;
 
 /** After the re-sync: an untracked projection the set-aside removed, and the directories it pruned, are new now and
  *  get back their owner and mode while the writer still owns them; a group or file mode changed meanwhile stays. */
-export async function restoreKeptMetadata(repoPath: string, kept: KeptFiles): Promise<void> {
+export async function restoreKeptMetadata(repoPath: string, kept: KeptFiles): Promise<boolean> {
+  let restored = true;
   await restoreFaults.beforeKeptMetadata?.();
   const writer = process.getuid?.();
   for (const [path, { bytes, owner, mode, untracked, parents }] of kept) {
-    await restoreKeptParents(repoPath, parents);
+    if (!(await restoreKeptParents(repoPath, parents))) restored = false;
     if (!untracked || !Buffer.isBuffer(bytes) || !owner || mode === undefined) continue;
     const warn = metadataWarn(repoPath, path);
     try {
       const now = await lstatNoFollow(repoPath, path);
       if (now?.kind !== 'file' || now.stats.uid !== writer) continue;
-      await chownNoFollow(repoPath, path, keptOwner(owner, now.stats.gid)).catch(warn);
       await chmodNoFollow(repoPath, path, (current) =>
         (current & ~0o111) === WRITER_FILE_MODE ? (mode & ~0o111) | (current & 0o111) : current,
       );
+      await chownNoFollow(repoPath, path, keptOwner(owner, now.stats.gid));
     } catch (err) {
+      restored = false;
       warn(err);
     }
   }
+  return restored;
 }
 
 /** The captured owner, keeping a group someone set since: the writer's own gid is the only one it gives a new node. */
@@ -1015,19 +1051,25 @@ function keptOwner(
 }
 
 /** The directory half of `restoreKeptMetadata`, deepest first, which the put-back shares. Never throws. */
-async function restoreKeptParents(repoPath: string, parents: KeptFile['parents']): Promise<void> {
+async function restoreKeptParents(
+  repoPath: string,
+  parents: KeptFile['parents'],
+): Promise<boolean> {
+  let restored = true;
   const writer = process.getuid?.();
   for (const { path, owner, mode } of parents ?? []) {
     const warn = metadataWarn(repoPath, path);
     try {
       const now = await lstatNoFollow(repoPath, path);
       if (now?.kind !== 'directory' || now.stats.uid !== writer) continue;
-      await chownNoFollow(repoPath, path, keptOwner(owner, now.stats.gid)).catch(warn);
       await chmodNoFollow(repoPath, path, mode);
+      await chownNoFollow(repoPath, path, keptOwner(owner, now.stats.gid));
     } catch (err) {
+      restored = false;
       warn(err);
     }
   }
+  return restored;
 }
 
 /** After a set-aside that ends with no move: writes each kept file back as the set-aside found it, unless
@@ -1140,13 +1182,12 @@ export async function recoverAfterMoveFailure(
         'HEAD not readable after a failed move; re-syncing instead of putting files back',
       );
     }
-    await resyncHaiveProjections(db, repositoryId, repoPath).catch((resyncErr: unknown) =>
+    await resyncWithKeptMetadata(db, repositoryId, repoPath, kept).catch((resyncErr: unknown) =>
       logger.error(
         { err: resyncErr, repositoryId },
         'projections not re-synced after a failed move',
       ),
     );
-    await restoreKeptMetadata(repoPath, kept);
     throw err;
   }
   return putBackAfterFailure(db, repositoryId, repoPath, kept, err, section);

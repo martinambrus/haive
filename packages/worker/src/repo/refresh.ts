@@ -33,9 +33,8 @@ import {
   putBackAfterFailure,
   putBackProjections,
   recoverAfterMoveFailure,
-  restoreKeptMetadata,
   restoreProjectionsInTx,
-  resyncHaiveProjections,
+  resyncWithKeptMetadata,
   setAsideHaiveProjections,
   type KeptFiles,
 } from '../project-state/set-aside.js';
@@ -418,15 +417,13 @@ export async function fastForward(
         throw err;
       } finally {
         try {
-          await resyncHaiveProjections(db, payload.repositoryId, dest);
+          await resyncWithKeptMetadata(db, payload.repositoryId, dest, kept);
         } catch (err) {
           if (!handBackFailed) throw err;
           logger.warn(
             { err, repositoryId: payload.repositoryId },
             'projection resync failed after hand-back failure',
           );
-        } finally {
-          await restoreKeptMetadata(dest, kept);
         }
       }
     } else if (asided) await putBackProjections(db, payload.repositoryId, dest, kept);
