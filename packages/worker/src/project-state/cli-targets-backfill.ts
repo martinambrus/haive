@@ -32,7 +32,7 @@ export async function seedRepositoryCliTargets(db: Database): Promise<void> {
         })
         .from(schema.repositories)
         .where(eq(schema.repositories.id, repo.id))
-        .for('update');
+        .for('no key update');
       if (!stored || isRootClaimLive(stored.rootClaimedAt)) return;
       const [holder] = await tx
         .select({ id: schema.tasks.id })

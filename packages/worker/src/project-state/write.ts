@@ -748,6 +748,8 @@ export async function writeProjectStateColumn(
       await lockProjectState(tx, repositoryId);
       // Root claims do not take the advisory key. Hold their repository row through the files,
       // so a reset cannot claim just after the last refusal check and walk this same record.
+      // NO KEY UPDATE still excludes claims, deletes and writers, while child FK checks can pass.
+      // Task starts/rebuilds are fenced separately by the task-creation key above.
       const [repo] = await tx
         .select({
           renderContext: schema.repositories.renderContext,
@@ -757,7 +759,7 @@ export async function writeProjectStateColumn(
         })
         .from(schema.repositories)
         .where(eq(schema.repositories.id, repositoryId))
-        .for('update');
+        .for('no key update');
       if (!repo) throw new ProjectStateMovedError();
       if (
         expectedCheckout &&
@@ -1493,7 +1495,7 @@ export async function refuseHeldCheckout(
     .from(schema.repositories)
     .where(eq(schema.repositories.id, repositoryId))
     .limit(1)
-    .for('update');
+    .for('no key update');
   if (!repo) throw new ProjectStateMovedError();
   const live = await tx
     .select({ id: schema.tasks.id })

@@ -17,9 +17,17 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
-import { claimRepositoryRoot, createDatabase, schema, type Database } from '@haive/database';
+import {
+  claimRepositoryRoot,
+  createDatabase,
+  hasPgCode,
+  lockRepositoryRow,
+  lockRepositoryTasksKey,
+  schema,
+  type Database,
+} from '@haive/database';
 import {
   claimFileName,
   PROJECT_STATE_LIMITS,
@@ -203,6 +211,117 @@ async function diskRecord(root: string, name: string) {
 }
 
 describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
+  it.each(['plan node', 'mirror row', 'plain FK task row'] as const)(
+    'repository row hold permits a %s insert during the final filesystem write',
+    async (child) => {
+      const s = await fixture();
+      await s.write();
+      // Force the next writer through sync-before-write too: its nested repository/RTK locks
+      // must not silently promote the writer's lock back to FOR UPDATE.
+      const path = join(s.root, '.haive-data/state/project/render.json');
+      await writeFile(path, `${await readFile(path, 'utf8')}\n`);
+      let checked = false;
+      seam.beforeRewrite = async () => {
+        seam.beforeRewrite = null;
+        checked = true;
+        const started = performance.now();
+        await db!.transaction(async (tx) => {
+          await tx.execute(sql`set local lock_timeout = '300ms'`);
+          if (child === 'plan node') {
+            const id = randomUUID();
+            await tx.insert(schema.planNodes).values({
+              id,
+              repositoryId: s.repo.id,
+              path: `/${id}/`,
+              title: 'Concurrent plan node',
+            });
+          } else if (child === 'mirror row') {
+            await tx.insert(schema.planMirrorState).values({ repositoryId: s.repo.id });
+          } else {
+            // A raw FK insert only: a real task start also takes the task-creation key, which the
+            // writer still holds across the same work, so it still waits (see the next test).
+            await tx.insert(schema.tasks).values({
+              userId: s.userId,
+              repositoryId: s.repo.id,
+              type: 'workflow',
+              title: 'Concurrent child',
+              status: 'created',
+            });
+          }
+        });
+        process.stdout.write(
+          `repository row hold: ${child} inserted in ${Math.round(performance.now() - started)} ms while writer paused\n`,
+        );
+      };
+      await s.write('next');
+      expect(checked).toBe(true);
+      expect((await s.render()).projectInfo.name).toBe('next');
+      expect((await s.outbox())!.writeIntent).toBeNull();
+    },
+  );
+
+  it('repository row hold still excludes writers, delete, root claims, task starts and upgrades', async () => {
+    const s = await fixture();
+    await s.write();
+    type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
+    let checked = false;
+    seam.beforeRewrite = async () => {
+      seam.beforeRewrite = null;
+      checked = true;
+      const peers: [string, (tx: Tx) => PromiseLike<unknown>][] = [
+        ['writer', (tx) => lockProjectState(tx, s.repo.id)],
+        ['task start/rebuild', (tx) => lockRepositoryTasksKey(tx, s.repo.id)],
+        ['upgrade admission', (tx) => lockRepositoryRow(tx, s.repo.id)],
+        [
+          'repository delete',
+          (tx) => tx.delete(schema.repositories).where(eq(schema.repositories.id, s.repo.id)),
+        ],
+        [
+          'root claim',
+          (tx) =>
+            tx
+              .update(schema.repositories)
+              .set({ rootClaimedAt: new Date(), rootClaimKind: 'reset' })
+              .where(eq(schema.repositories.id, s.repo.id)),
+        ],
+        [
+          'row writer',
+          (tx) =>
+            tx
+              .select()
+              .from(schema.repositories)
+              .where(eq(schema.repositories.id, s.repo.id))
+              .for('no key update'),
+        ],
+      ];
+      for (const [name, take] of peers) {
+        const started = performance.now();
+        const error = await db!
+          .transaction(async (tx) => {
+            await tx.execute(sql`set local lock_timeout = '100ms'`);
+            await take(tx);
+          })
+          .then(
+            () => null,
+            (err: unknown) => err,
+          );
+        expect(hasPgCode(error, '55P03'), name).toBe(true);
+        process.stdout.write(
+          `repository row hold: ${name} excluded (${Math.round(performance.now() - started)} ms, 55P03)\n`,
+        );
+      }
+    };
+    await s.write('serialized');
+    expect(checked).toBe(true);
+    expect((await s.render()).projectInfo.name).toBe('serialized');
+    expect((await s.outbox())!.writeIntent).toBeNull();
+    await applyPlanPatch(
+      db!,
+      { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'After writer' }] },
+      { repositoryId: s.repo.id, origin: 'user' },
+    );
+  });
+
   it.each(['sweep', 'boot'] as const)('%s refresh leaves legacy mirrors alone', async (mode) => {
     const s = await fixture();
     await db!

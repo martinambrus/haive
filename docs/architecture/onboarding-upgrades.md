@@ -795,7 +795,10 @@ recovery and dirty-projection flushing enabled, preserving their overwrite and c
 **A filesystem attempt has a committed undo journal before changing the public record.** The writer takes
 `lockRepositoryTasksKey` then `lockProjectState`, checks the column and its own task (or, for a
 background refresh, opposing live onboarding/upgrade tasks and a reset claim), and commits a dirty
-outbox revision with `write_intent` (0213). Both phases hold the repository row too: root claims
+outbox revision with `write_intent` (0213). Both phases hold the repository row too, FOR NO KEY
+UPDATE: it excludes a delete, a row update and another writer but not a child row's foreign-key
+KEY SHARE, so a plan node or mirror row insert does not wait for the write. A task start still
+waits, on the task-creation key the writer holds across the same work. Root claims
 update that row without taking either advisory lock, so a reset claiming just after the last check
 must wait until the writer's files and transaction finish. This bounded journal contains only changed record paths,
 their before/planned bytes and original mode and owner; both sides obey the record reader's entry
