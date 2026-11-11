@@ -383,7 +383,12 @@ it('retries under the new scope when auth settings changed while the lock was ta
   const runner = makeRunner({
     existing: ['haive_cli_auth_user1_gemini_0', 'haive_cli_auth_prov-default_gemini_0'],
   });
-  const job = { data: {}, token: 'token', moveToDelayed: vi.fn(async () => {}) };
+  const job = {
+    data: {},
+    token: 'token',
+    updateData: vi.fn(async () => {}),
+    moveToDelayed: vi.fn(async () => {}),
+  };
   await expect(
     handleSignOutJob(
       makeDb(row, calls),
@@ -504,3 +509,46 @@ it.each(['LOADING Redis is loading', 'OOM command not allowed'])(
     }
   },
 );
+
+it('bounds repeated scope changes independently of auth-lock contention', async () => {
+  const row = makeProviderRow();
+  const calls: DbCalls = { updateSet: null };
+  const runner = makeRunner({ existing: ['haive_cli_auth_user1_gemini_0'] });
+  lock.acquire.mockImplementation(async () => {
+    row.isolateAuth = !row.isolateAuth;
+    return lock.release;
+  });
+  const job = {
+    timestamp: Date.now(),
+    data: {},
+    token: 'token',
+    updateData: vi.fn(async (data: any) => {
+      job.data = data;
+    }),
+    moveToDelayed: vi.fn(async () => {}),
+  };
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await expect(
+      handleSignOutJob(
+        makeDb(row, calls),
+        { providerId: row.id, userId: row.userId },
+        runner,
+        job as any,
+      ),
+    ).rejects.toMatchObject({ name: 'DelayedError' });
+  }
+  await expect(
+    handleSignOutJob(
+      makeDb(row, calls),
+      { providerId: row.id, userId: row.userId },
+      runner,
+      job as any,
+    ),
+  ).rejects.toThrow(
+    'CLI authentication settings kept changing. Nothing was removed. Try signing out again.',
+  );
+  expect(job.moveToDelayed).toHaveBeenCalledTimes(5);
+  expect(lock.release).toHaveBeenCalledTimes(6);
+  expect(runner.removed).toEqual([]);
+  expect(calls.updateSet).toBeNull();
+});

@@ -1278,7 +1278,15 @@ export async function handleSignOutJob(
     if (cliAuthScope(provider) !== lockedScope) {
       if (!job) throw new Error('CLI authentication settings changed');
       log.debug({ providerId: provider.id }, 'cli sign-out retried: auth settings changed');
-      await deferJob(job, 1_000, job.token!);
+      const attempts = job.data?.authScopeChangeAttempts ?? 0;
+      if (attempts >= 5) {
+        throw new UnrecoverableError(
+          'CLI authentication settings kept changing. Nothing was removed. Try signing out again.',
+        );
+      }
+      await deferJob(job, 1_000, job.token!, () =>
+        job.updateData({ ...job.data, authScopeChangeAttempts: attempts + 1 }),
+      );
       throw new DelayedError();
     }
     if (
