@@ -239,6 +239,32 @@ describe('handleIngestZip', () => {
     },
   );
 
+  it('replays a committed replacement without extracting or changing its catalog', async () => {
+    const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');
+    const fake = createFakeDb({
+      customBundles: schema.customBundles,
+      customBundleItems: schema.customBundleItems,
+    });
+    const fixture = await seedCrashedReplacement(tmpRoot, fake, 'after swap');
+    // The catalog transaction's active row is the commit marker. The archive is corrupt,
+    // and the record still names the old tree: extracting or rolling back would destroy this tree.
+    fake.patch(schema.customBundles, BUNDLE, { status: 'active', lastSyncNote: 'committed note' });
+    fake.patch(schema.customBundleItems, String(fake.rows(schema.customBundleItems)[0]!.id), {
+      sourcePath: 'new.md',
+    });
+    const rows = structuredClone(fake.rows(schema.customBundles));
+    const items = structuredClone(fake.rows(schema.customBundleItems));
+    const tx = vi.spyOn(fake.db, 'transaction');
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await handleIngestZip(fixture.payload, fake.db as unknown as Database, tmpRoot);
+      expect(await readFile(path.join(fixture.dest, 'new.md'), 'utf8')).toBe('new tree');
+      expect(fake.rows(schema.customBundles)).toEqual(rows);
+      expect(fake.rows(schema.customBundleItems)).toEqual(items);
+      await expect(readFile(`${fixture.archivePath}.replacement.json`)).rejects.toThrow();
+    }
+    expect(tx).not.toHaveBeenCalled();
+  });
+
   it('fails a bundle whose replacement record does not parse, keeping the old tree and items', async () => {
     const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');
     const fake = createFakeDb({
