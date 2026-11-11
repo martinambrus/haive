@@ -1,6 +1,9 @@
 const authLock = vi.hoisted(() => ({
   acquire: vi.fn(),
-  release: vi.fn(async () => {}),
+  release: Object.assign(
+    vi.fn(async () => {}),
+    { assertHeld: vi.fn(async () => {}) },
+  ),
   debug: vi.fn(),
 }));
 vi.mock('@haive/shared', async (original) => {

@@ -1,7 +1,7 @@
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { createHash } from 'node:crypto';
 import { eq } from 'drizzle-orm';
-import { schema, tryCliAuthLock, type Database } from '@haive/database';
+import { schema, tryCliAuthLock, type CliAuthLock, type Database } from '@haive/database';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import {
   CLI_PROVIDER_LIST,
@@ -1307,7 +1307,7 @@ export async function syncProviderAuthBack(
   const taskVol = cliAuthTaskVolumeName(taskId, provider.name, source.authPathIdx);
   const userVol = userVolumeForCtx(ctx, source.authPathIdx);
 
-  let release: (() => Promise<void>) | null = null;
+  let release: CliAuthLock | null = null;
   try {
     const deadline = Date.now() + lockWaitMs;
     do {
@@ -1337,6 +1337,7 @@ export async function syncProviderAuthBack(
     ]);
     if (!shouldSyncAuthBack(taskToken, userToken, taskMtime, userMtime)) return false;
 
+    await release.assertHeld();
     const copied = await copyAuthFileBack(taskVol, userVol, source.relPath, runner);
     if (copied) {
       log.info(

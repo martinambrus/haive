@@ -6,7 +6,7 @@ import {
   resolveCliAuthUserVolumeName,
   type CliProviderName,
 } from '@haive/shared';
-import { schema, tryCliAuthLock, type Database } from '@haive/database';
+import { schema, tryCliAuthLock, type CliAuthLock, type Database } from '@haive/database';
 import {
   applyGrokRefresh,
   GrokOauthError,
@@ -114,7 +114,7 @@ export async function refreshExpiringCliCredentials(
   }
 
   for (const [vol, sharing] of byVolume) {
-    let release: (() => Promise<void>) | null = null;
+    let release: CliAuthLock | null = null;
     try {
       release = await tryCliAuthLock(db, cliAuthScope(sharing[0]!));
       if (!release) {
@@ -124,7 +124,7 @@ export async function refreshExpiringCliCredentials(
         );
         continue;
       }
-      await refreshGrokVolume(db, vol, sharing, runner);
+      await refreshGrokVolume(db, vol, sharing, runner, release.assertHeld);
     } catch (err) {
       log.warn({ err, vol }, 'grok credential refresh failed; leaving the stored login as-is');
     } finally {
@@ -138,6 +138,7 @@ async function refreshGrokVolume(
   vol: string,
   sharing: GrokProviderRow[],
   runner: DockerRunner,
+  assertHeld: () => Promise<void>,
 ): Promise<void> {
   const raw = await readVolumeFile(vol, GROK_CREDENTIAL_FILE.relPath, runner);
   if (!raw) return; // not signed in, or grok already deleted the file
@@ -164,6 +165,7 @@ async function refreshGrokVolume(
       { vol, providerIds: sharing.map((r) => r.id) },
       'grok refresh token rejected (invalid_grant); marking the provider as needing a re-login',
     );
+    await assertHeld();
     await db
       .update(schema.cliProviders)
       .set({
@@ -181,6 +183,7 @@ async function refreshGrokVolume(
     return;
   }
 
+  await assertHeld();
   const wrote = await writeVolumeFile(
     vol,
     GROK_CREDENTIAL_FILE.relPath,

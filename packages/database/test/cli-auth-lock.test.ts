@@ -36,6 +36,30 @@ describe.skipIf(!url)('CLI auth session lock on PostgreSQL', () => {
     await next?.();
     await next?.();
   });
+  it('detects a terminated backend and refuses a protected write even after reconnect', async () => {
+    const scope = randomUUID();
+    const release = await tryCliAuthLock(db, scope);
+    expect(release).not.toBeNull();
+    let written = false;
+    try {
+      await release!.assertHeld();
+      const [holder] = await other.$client`
+        select pid from pg_locks where locktype = 'advisory'
+        and classid = ((hashtextextended(${`cli-auth:${scope}`}, 0) >> 32) & 4294967295)::oid
+        and objid = (hashtextextended(${`cli-auth:${scope}`}, 0) & 4294967295)::oid`;
+      expect(holder?.pid).toBeTruthy();
+      await other.$client`select pg_terminate_backend(${holder!.pid})`;
+      const write = async () => {
+        await release!.assertHeld();
+        written = true;
+      };
+      await expect(write()).rejects.toThrow();
+      await expect(write()).rejects.toThrow();
+      expect(written).toBe(false);
+    } finally {
+      await release?.();
+    }
+  }, 15_000);
   it('does not wait on the main pool even when all ten connections are reserved', async () => {
     const held = await Promise.all(Array.from({ length: 10 }, () => db.$client.reserve()));
     try {

@@ -10,7 +10,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { Job } from 'bullmq';
 import Docker from 'dockerode';
 import { and, eq } from 'drizzle-orm';
-import { schema, tryCliAuthLock } from '@haive/database';
+import { schema, tryCliAuthLock, type CliAuthLock } from '@haive/database';
 import {
   AMP_PASTE_LOGIN_URL_PREFIX,
   AUTH_URL_PREFIXES,
@@ -168,7 +168,7 @@ const DEVICE_CODE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderN
 
 interface BannerSession {
   provider: CliAuthProvider;
-  releaseAuth: () => Promise<void>;
+  releaseAuth: CliAuthLock;
   credentialSave?: Promise<void>;
   ws: WebSocket;
   userId: string;
@@ -404,7 +404,7 @@ export function installCliLoginBannerWebSocket(
 
 interface RunBannerOpts {
   provider: CliAuthProvider;
-  releaseAuth: () => Promise<void>;
+  releaseAuth: CliAuthLock;
   ws: WebSocket;
   userId: string;
   providerId: string;
@@ -420,6 +420,30 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   // mid-queue was simply unobserved. The 30s ttl used to bound the damage; without it a job the
   // user gave up on would go on to build a container nobody is attached to.
   const abort = createAbortHandle();
+  const heldAuth = opts.releaseAuth;
+  let checkingLock = false;
+  const lockWatch = setInterval(() => {
+    if (checkingLock || abort.aborted) return;
+    checkingLock = true;
+    void heldAuth
+      .assertHeld()
+      .catch(() => {
+        log.warn({ providerId }, 'login authentication lock lost; stopping session');
+        abort.fire();
+        wsSend(ws, { type: 'error', message: 'Authentication changed. Retry the login.' });
+        ws.close(1011, 'auth_lock_lost');
+      })
+      .finally(() => {
+        checkingLock = false;
+      });
+  }, 1_000);
+  opts.releaseAuth = Object.assign(
+    async () => {
+      clearInterval(lockWatch);
+      await heldAuth();
+    },
+    { assertHeld: heldAuth.assertHeld },
+  );
   let containerMayWrite = false;
   const pending: { job: Job | null } = { job: null };
   ws.on('close', () => {
@@ -436,7 +460,12 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   }
   wsSend(ws, { type: 'phase', phase: 'starting' });
 
-  const createResult = await enqueueLoginCreate(providerId, userId, abort, ws, pending);
+  const createResult = await enqueueLoginCreate(providerId, userId, abort, ws, pending).catch(
+    async (err) => {
+      await opts.releaseAuth();
+      throw err;
+    },
+  );
   if (!createResult.ok || !createResult.containerRowId || !createResult.dockerContainerId) {
     wsSend(ws, {
       type: 'error',
@@ -513,6 +542,8 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     if (abort.aborted) throw new LoginCancelled();
 
     try {
+      await opts.releaseAuth.assertHeld();
+      if (abort.aborted) throw new LoginCancelled();
       containerMayWrite = true;
       await dockerContainer.start();
     } catch (err) {
@@ -650,6 +681,15 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
         rows?: number;
         cols?: number;
       };
+      if (msg.type === 'input' || msg.type === 'token-input') {
+        try {
+          await session.releaseAuth.assertHeld();
+          if (session.cleanedUp || session.abort.aborted) return;
+        } catch {
+          void cleanupSession(session);
+          return;
+        }
+      }
       if (msg.type === 'input' && typeof msg.data === 'string') {
         // Terminal-login keystrokes (incl. the pasted auth code + Enter) -> stdin.
         try {
@@ -697,11 +737,14 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
           const wrote = session.stream.write(token);
           session.oneShotTimers.push(
             setTimeout(() => {
-              try {
-                session.stream.write('\r');
-              } catch {
-                // ignore
-              }
+              void session.releaseAuth
+                .assertHeld()
+                .then(() => {
+                  if (!session.cleanedUp && !session.abort.aborted) session.stream.write('\r');
+                })
+                .catch(() => {
+                  void cleanupSession(session);
+                });
             }, 150),
           );
           log.info({ providerId: session.providerId, wrote }, 'token written');
@@ -898,12 +941,22 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
             if (session.cleanedUp || session.authUrlSent || session.rawBuffer.includes('oauth2')) {
               return;
             }
-            session.menuAdvanceCount += 1;
-            try {
-              session.stream.write('\r');
-            } catch {
-              // stream may have closed mid-tick; ignore
-            }
+            void session.releaseAuth
+              .assertHeld()
+              .then(() => {
+                if (
+                  session.cleanedUp ||
+                  session.abort.aborted ||
+                  session.authUrlSent ||
+                  session.rawBuffer.includes('oauth2')
+                )
+                  return;
+                session.menuAdvanceCount += 1;
+                session.stream.write('\r');
+              })
+              .catch(() => {
+                void cleanupSession(session);
+              });
           }, 1500);
         }
       }
@@ -1176,20 +1229,21 @@ function stopCaptureWatchdog(session: BannerSession): void {
 
 /** Verify this capture in isolation before replacing the active encrypted credential. */
 async function saveOauthTokenAndProbe(session: BannerSession, oauthToken: string): Promise<void> {
-  const assertActive = (): void => {
+  const assertActive = async (): Promise<void> => {
+    await session.releaseAuth.assertHeld();
     if (session.abort.aborted || session.cleanedUp || session.ws.readyState !== WebSocket.OPEN) {
       throw new LoginCancelled();
     }
   };
   try {
-    assertActive();
+    await assertActive();
     const candidate = encryptCliLoginCandidate(
       session.userId,
       session.providerId,
       oauthToken,
       await secretsService.getMasterKek(),
     );
-    assertActive();
+    await assertActive();
     const result = await enqueueProbe(
       session.providerId,
       session.userId,
@@ -1198,7 +1252,7 @@ async function saveOauthTokenAndProbe(session: BannerSession, oauthToken: string
       session.pending,
       candidate,
     );
-    assertActive();
+    await assertActive();
     if (result?.ok !== true || result.cli?.ok !== true || result.cli.authStatus !== 'ok') {
       wsSend(session.ws, {
         type: 'error',
@@ -1245,6 +1299,7 @@ async function runProbeAndSave(session: BannerSession): Promise<void> {
     // Keep audit and completion stamping inside the promise cleanup awaits, so a
     // close during either write cannot release the credential lock early.
     session.credentialSave = (async () => {
+      await session.releaseAuth.assertHeld();
       // The CLI already wrote its credential. Audit it before attempting the stamp.
       await recordAuditEvent(getDb(), {
         actorUserId: session.userId,
@@ -1253,6 +1308,7 @@ async function runProbeAndSave(session: BannerSession): Promise<void> {
         targetId: session.providerId,
         metadata: { source: 'volume' },
       });
+      await session.releaseAuth.assertHeld();
       await advanceVolumeLoginGeneration(getDb(), session.provider);
     })();
     await session.credentialSave;

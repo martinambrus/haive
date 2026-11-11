@@ -6,7 +6,10 @@ import { configService, secretsService } from '@haive/shared';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
 const h = vi.hoisted(() => ({
   acquire: vi.fn(),
-  release: vi.fn(async () => {}),
+  release: Object.assign(
+    vi.fn(async () => {}),
+    { assertHeld: vi.fn(async () => {}) },
+  ),
   read: vi.fn(),
   refresh: vi.fn(),
   fetch: vi.fn(),

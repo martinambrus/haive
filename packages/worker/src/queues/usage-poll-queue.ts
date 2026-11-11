@@ -211,6 +211,7 @@ async function resolveOauthRefreshToken(
     if (stored.refreshToken && claudeTokenNeedsRefresh(stored.expiresAt)) {
       try {
         const fresh = await refreshClaudeToken(stored.refreshToken);
+        await release.assertHeld();
         await writeProviderSecret(db, provider.id, secretName, JSON.stringify(fresh));
         deadUsageRefreshToken.delete(provider.id); // recovered (or was never dead)
         return { token: fresh.accessToken };
@@ -225,6 +226,7 @@ async function resolveOauthRefreshToken(
             'usage OAuth refresh rejected (invalid_grant); marking needs_reconnect, polling paused until re-auth',
           );
           deadUsageRefreshToken.set(provider.id, stored.refreshToken);
+          await release.assertHeld();
           await upsertSnapshot(db, provider, {
             ok: false,
             error: 'Usage tracking token expired — reconnect this provider to restore its meters.',
