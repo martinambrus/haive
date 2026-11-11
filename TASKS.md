@@ -272,6 +272,11 @@ status: open · kind: design · found: E2 (#1080) Greptile P1 2026-11-11 · prio
 DECIDED by the owner 2026-11-11: the worker records the checkout branch when the reset starts; provenance counts only landings whose `landedOn` equals it; old merges without a branch stay counted as today. Overnight run authorized.
 `resolveMergedTasks` (api `routes/repos.ts` ~:1195-1245) counts a task's 11d skill-sync output as reaching the checkout when its step 12 merged, whatever branch the merge landed on: the legacy `merge_resolve_state.merged === true` path (PRE-EXISTING; `merge-resolver.ts` sets it with no branch check) and, since #1080, a `merge.landed` event. A cross-branch merge leaves the checkout unchanged, so a later onboarding reset can delete a user's untouched skill at the same path. A fix must compare the landing's `landedOn` with the branch the reset is reading, which the api cannot read (no git there): record the checkout branch at reset start in the worker, or have the worker resolve provenance. Decide where.
 
+### T616 · fix · boot warning for the cross-host sign-in throttle
+
+status: open · kind: fix · found: H2 (#435) · priority: P3
+DECIDED by the owner 2026-11-11: when web and api hostnames differ (web-origin proxy mode) and web's address is not covered by `HAIVE_TRUSTED_PROXIES`, log one warning at api boot naming the operator rule in `docs/architecture/api-auth.md` (cross-host web-proxy mode). The docs rule stays; the warning only reports it. Overnight run authorized.
+
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
 **Found something outside your task?** Search the board first (`grep -n "<file>\|<symbol>\|<slug>"`).
