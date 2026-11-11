@@ -947,6 +947,7 @@ describe('CLI login banner startup cleanup', () => {
       await start('', false);
       expect(stream.writableEnded).toBe(true);
       expect(h.remove).toHaveBeenCalledWith({ force: true });
+      expect(h.updates).toContainEqual({ status: 'destroyed', destroyedAt: expect.any(Date) });
       expect(ws.readyState).toBe(3);
       expect(ws.send).toHaveBeenCalledWith(
         JSON.stringify({ type: 'error', message: 'Failed to start login container' }),

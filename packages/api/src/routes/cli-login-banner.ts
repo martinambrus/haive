@@ -1587,7 +1587,6 @@ async function teardownContainer(
       await docker.getContainer(dockerContainerId).remove({ force: true });
     } catch (err) {
       log.warn({ error: safeErrorDetails(err), dockerContainerId }, 'docker remove failed');
-      return;
     }
     const db = getDb();
     await db
