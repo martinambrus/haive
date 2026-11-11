@@ -25,7 +25,7 @@ import type { HostApi, HostApiError as ApiError } from '@haive/web-kit/host';
 
 // A real runtime import, unlike the type-only ones above. `api-origin` has no imports of its own,
 // so it introduces no cycle.
-import { resolveApiOrigin, type RuntimeApiConfig } from './api-origin';
+import { resolveApiTransport, type RuntimeApiConfig } from './api-origin';
 // Runtime too, and for the same reason: `route-access` has no imports of its own.
 import { decideSessionEnd } from './route-access';
 import { recoverBrowserSession, withBrowserSessionLock } from './browser-session';
@@ -39,18 +39,27 @@ declare global {
 
 // Resolved ONCE at module load, which is why the layout injects its script into <head>: an inline
 // classic script executes during parse, ahead of the deferred module scripts that evaluate this.
-const API_BASE = resolveApiOrigin({
+const API_TRANSPORT = resolveApiTransport({
   config: typeof window === 'undefined' ? undefined : window.__HAIVE_RUNTIME__,
   location: typeof window === 'undefined' ? undefined : window.location,
   buildTime: process.env.NEXT_PUBLIC_API_URL,
 });
 
+const API_BASE = API_TRANSPORT.base;
 export const API_BASE_URL = API_BASE;
+export const API_USES_WEB_PROXY = API_TRANSPORT.viaWebProxy;
 
 export function apiWebSocketUrl(path: string): string {
-  const url = new URL(path, API_BASE);
+  const base = new URL(API_BASE);
+  const url = API_USES_WEB_PROXY ? new URL(`${API_BASE}${path}`) : new URL(path, base);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   return url.toString();
+}
+
+/** Keep the editor's established path: its root-absolute redirects use /ide/... too. */
+export function apiEditorUrl(path: string): string {
+  const base = new URL(API_BASE);
+  return `${API_USES_WEB_PROXY ? base.origin : API_BASE}${path}`;
 }
 
 export type { ApiError };

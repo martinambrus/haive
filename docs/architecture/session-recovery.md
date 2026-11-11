@@ -78,16 +78,33 @@ native submit before attach, because its submit button is `disabled` in the serv
 
 ## Cookie transport boundary
 
-The current session transport requires the browser-facing web and API URLs to use **the same
-hostname**. Different ports on that hostname work: host-only cookies are shared across ports,
-and credentialed CORS plus the existing request-origin gate allow the web to call its API. The
-loopback harness tests exactly this contract (`127.0.0.1:46100` and `127.0.0.1:46101`).
+Same hostname, different ports (the default): the browser calls the API directly. Host-only
+cookies are shared across ports, and credentialed CORS plus the request-origin gate allow the
+web to call its API. The loopback harness tests this contract (`127.0.0.1:46100` and
+`127.0.0.1:46101`).
 
-An explicit API URL on a different hostname remains configurable, but host-only API cookies do
-not reach the web hostname's proxy or server layout. A successful API login alone therefore
-cannot establish that server-rendered web session; CORS cannot transfer those cookies. Different
-sites add the existing SameSite=Lax restriction as well. This is a pre-existing deployment limit,
-not fixed by browser recovery. No cookie Domain, SSO or proxy transport redesign is included here.
+Different hostnames (`resolveApiTransport` `viaWebProxy`): browser API traffic goes through the
+web origin's `/api/haive` proxy (`app/api/haive/[...path]/route.ts`, `lib/api-proxy.server.ts`)
+and editor traffic through `/ide` there. HTTP route handlers stream bodies; Next's existing
+upgrade handler forwards WebSockets. Cookies stay host-only, HttpOnly and SameSite=Lax on the web
+hostname, and single-use refresh rotation is unchanged. `WEB_ORIGIN` must exactly match the
+browser-facing web origin. No cookie Domain or SSO is involved.
+
+Server-side proxying, auth probes, authenticated layout reads and registration status resolve one
+base (`resolveServerApiBase`, `lib/api-base.server.ts`): `API_URL_INTERNAL`, else
+`HAIVE_PUBLIC_API_URL`, else `NEXT_PUBLIC_API_URL`, else `http://localhost:3001`. An invalid
+absolute HTTP(S) base is logged once per unchanged configuration per server process; proxy
+requests then answer 502 while public pages stay up.
+
+Every raw repository-file response, including one relayed by the proxy, carries
+`X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox` (no `allow-scripts`, no
+`allow-same-origin`): SVG still renders in `<img>`, but a top-level repository document cannot
+run script with the app's origin. In proxy mode the editor shares the web origin; code-server
+runs repository code, so moving it to its own origin or a constrained iframe is an open design
+decision.
+
+Behind the proxy the API's sign-in throttle sees web as the peer; see the cross-host rule in
+[API auth](api-auth.md).
 
 ## Isolated regression harness
 
@@ -136,3 +153,7 @@ committed refresh response headers without prematurely updating the browser cook
 ordering controls require a fresh scratch database so the setup case really has zero users;
 run them before the optional existing auth checks, whose bootstrap owner intentionally remains.
 They must never be mounted in the production application.
+
+The cross-host spec (`web-origin.spec.ts`) also runs against `next build` plus `next start`: a
+terminal WebSocket upgrade with frames both ways, direct and proxied raw SVG headers, top-level
+script containment and `<img>` rendering.

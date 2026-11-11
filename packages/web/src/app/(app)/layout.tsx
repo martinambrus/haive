@@ -1,3 +1,4 @@
+import { resolveServerApiBase } from '@/lib/api-base.server';
 import { cookies } from 'next/headers';
 import type { ReactNode } from 'react';
 import { KeyRound } from 'lucide-react';
@@ -42,10 +43,6 @@ interface MeResponse {
   };
 }
 
-function apiBaseUrl(): string {
-  return process.env.API_URL_INTERNAL ?? process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
-}
-
 /** Server rendering only reads the session. Rotating here consumes the browser's refresh
  * token without any way for a Server Component to return the replacement cookies. */
 async function fetchMe(): Promise<{ data: MeResponse; cookie: string } | null> {
@@ -55,7 +52,7 @@ async function fetchMe(): Promise<{ data: MeResponse; cookie: string } | null> {
     .map((c) => `${c.name}=${c.value}`)
     .join('; ');
   try {
-    const response = await fetch(`${apiBaseUrl()}/auth/me`, {
+    const response = await fetch(`${resolveServerApiBase()}/auth/me`, {
       headers: { Cookie: cookie },
       cache: 'no-store',
       signal: AbortSignal.timeout(5_000),
@@ -72,7 +69,7 @@ async function fetchMe(): Promise<{ data: MeResponse; cookie: string } | null> {
  *  and never blocks the page — the sidebar is a chrome, not a gate. */
 async function fetchSidebarPrefs(cookie: string): Promise<UiPrefsBlob> {
   try {
-    const res = await fetch(`${apiBaseUrl()}/user-settings/ui-prefs`, {
+    const res = await fetch(`${resolveServerApiBase()}/user-settings/ui-prefs`, {
       headers: { Cookie: cookie },
       cache: 'no-store',
     });
@@ -90,7 +87,7 @@ async function fetchSidebarPrefs(cookie: string): Promise<UiPrefsBlob> {
 /** Installed modules' sidebar items. Any failure means no module items and never blocks the page. */
 async function fetchModules(cookie: string): Promise<ModuleSummary[]> {
   try {
-    const res = await fetch(`${apiBaseUrl()}/modules`, {
+    const res = await fetch(`${resolveServerApiBase()}/modules`, {
       headers: { Cookie: cookie },
       cache: 'no-store',
     });

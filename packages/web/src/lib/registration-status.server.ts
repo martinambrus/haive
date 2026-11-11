@@ -1,3 +1,4 @@
+import { resolveServerApiBase } from './api-base.server';
 import type { RegistrationStatus } from '@/lib/api-client';
 
 /**
@@ -15,9 +16,8 @@ import type { RegistrationStatus } from '@/lib/api-client';
  * it did before this existed.
  */
 export async function fetchRegistrationStatus(): Promise<RegistrationStatus | null> {
-  const apiBase =
-    process.env.API_URL_INTERNAL ?? process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
   try {
+    const apiBase = resolveServerApiBase();
     const res = await fetch(`${apiBase}/auth/registration-status`, { cache: 'no-store' });
     if (!res.ok) return null;
     return (await res.json()) as RegistrationStatus;
