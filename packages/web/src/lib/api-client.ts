@@ -1005,6 +1005,8 @@ export interface StatsThroughput {
 }
 
 export interface TaskStep {
+  /** Returned by the step API; used for structural merge failure advice. */
+  mergeResolveState?: { phase: string; baseBranch: string; pushed?: boolean } | null;
   id: string;
   taskId: string;
   stepId: string;

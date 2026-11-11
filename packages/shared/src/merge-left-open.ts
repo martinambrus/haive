@@ -62,3 +62,31 @@ export function leftOpenMerges(events: readonly LeftOpenEventRow[]): LeftOpenMer
   }
   return [...merges.values()];
 }
+
+/** Durable step-12 facts live in task events: resetting a step never deletes them. */
+export const MERGE_LANDED_EVENT = 'merge.landed';
+export const MERGE_LEFT_COMMITTED_EVENT = 'merge.left_committed';
+export interface LandedMerge {
+  baseShaBefore: string;
+  baseShaAfter: string;
+  landedOn: string;
+  landedAt: string;
+  repoPath: string;
+  dir: string;
+}
+export function readLandedMerge(value: unknown): LandedMerge | null {
+  if (!value || typeof value !== 'object') return null;
+  const v = value as Record<string, unknown>;
+  if (
+    ![v.baseShaBefore, v.baseShaAfter].every(
+      (s) => typeof s === 'string' && /^[0-9a-f]{40}$/.test(s),
+    )
+  )
+    return null;
+  if (
+    ![v.landedOn, v.landedAt, v.repoPath, v.dir].every((s) => typeof s === 'string' && s.length > 0)
+  )
+    return null;
+  if (!Number.isFinite(Date.parse(v.landedAt as string))) return null;
+  return v as unknown as LandedMerge;
+}

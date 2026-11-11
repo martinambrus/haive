@@ -1,3 +1,7 @@
+import { execFile } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { promisify } from 'node:util';
+import { recordLandedMerge } from '../src/step-engine/landed-merge.js';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
@@ -34,6 +38,7 @@ const h = vi.hoisted(() => {
   const calls: string[] = [];
   return {
     db: undefined as unknown,
+    realMergeReport: false,
     /** In call order: every teardown seam the job reached (`<seam>:<task id>`), child process it started and job it queued. */
     calls,
     seen: (seam: string, taskId: string): void => {
@@ -58,10 +63,16 @@ vi.mock('bullmq', async (importOriginal) => ({
 }));
 vi.mock('node:child_process', async (importOriginal) => {
   const { EventEmitter } = await import('node:events');
+  const actual = await importOriginal<typeof import('node:child_process')>();
   return {
-    ...(await importOriginal<typeof import('node:child_process')>()),
-    spawn: (command: string, args: string[] = []) => {
+    ...actual,
+    spawn: (
+      command: string,
+      args: string[] = [],
+      options?: import('node:child_process').SpawnOptions,
+    ) => {
       h.calls.push(`spawn ${[command, ...args].join(' ')}`);
+      if (command === 'git' && h.realMergeReport) return actual.spawn(command, args, options ?? {});
       const child = Object.assign(new EventEmitter(), {
         stdout: new EventEmitter(),
         stderr: new EventEmitter(),
@@ -148,16 +159,26 @@ vi.mock('../src/project-state/set-aside.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   resyncAfterTaskEnd: async (_db: unknown, taskId: string) => h.seen('resyncAfterTaskEnd', taskId),
 }));
-vi.mock('../src/step-engine/left-open-merge.js', async (importOriginal) => ({
-  ...(await importOriginal<object>()),
-  recordLeftOpenMerges: async (_db: unknown, taskId: string) =>
-    h.seen('recordLeftOpenMerges', taskId),
-}));
-vi.mock('../src/step-engine/merge-dir-claim.js', async (importOriginal) => ({
-  ...(await importOriginal<object>()),
-  releaseTaskMergeClaims: async (_db: unknown, taskId: string) =>
-    h.seen('releaseTaskMergeClaims', taskId),
-}));
+vi.mock('../src/step-engine/left-open-merge.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/step-engine/left-open-merge.js')>();
+  return {
+    ...actual,
+    recordLeftOpenMerges: async (db: Database, taskId: string) => {
+      h.seen('recordLeftOpenMerges', taskId);
+      if (h.realMergeReport) await actual.recordLeftOpenMerges(db, taskId);
+    },
+  };
+});
+vi.mock('../src/step-engine/merge-dir-claim.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/step-engine/merge-dir-claim.js')>();
+  return {
+    ...actual,
+    releaseTaskMergeClaims: async (db: Database, taskId: string) => {
+      h.seen('releaseTaskMergeClaims', taskId);
+      if (h.realMergeReport) await actual.releaseTaskMergeClaims(db, taskId);
+    },
+  };
+});
 vi.mock('../src/step-engine/steps/plan/01-plan-merge.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   discardPlanMerge: async (_db: unknown, taskId: string) => h.seen('discardPlanMerge', taskId),
@@ -320,6 +341,7 @@ describe.skipIf(!url)(
 
     beforeEach(async () => {
       h.calls.length = 0;
+      h.realMergeReport = false;
       await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
     });
 
@@ -327,7 +349,10 @@ describe.skipIf(!url)(
       // The one process the job starts itself is the docker label sweep, answered by the stub. Anything
       // else (git, another tool) means a teardown path escaped its recorder.
       const stray = h.calls.filter(
-        (call) => call.startsWith('spawn ') && !call.startsWith('spawn docker '),
+        (call) =>
+          call.startsWith('spawn ') &&
+          !call.startsWith('spawn docker ') &&
+          !(h.realMergeReport && call.startsWith('spawn git ')),
       );
       expect(stray, 'child processes the job asked for besides docker').toEqual([]);
     });
@@ -683,6 +708,172 @@ describe.skipIf(!url)(
       },
       TEST_TIMEOUT,
     );
+
+    const mergeDirs: string[] = [];
+    afterEach(async () => {
+      for (const dir of mergeDirs.splice(0)) await rm(dir, { recursive: true, force: true });
+    });
+
+    const landedFixture = async () => {
+      const dir = await mkdtemp(path.join(os.tmpdir(), 'e2-cancel-landed-'));
+      mergeDirs.push(dir);
+      const exec = promisify(execFile);
+      const git = async (...args: string[]) =>
+        (
+          await exec('git', args, {
+            cwd: dir,
+            env: {
+              ...process.env,
+              GIT_AUTHOR_NAME: 'T',
+              GIT_AUTHOR_EMAIL: 't@test.local',
+              GIT_COMMITTER_NAME: 'T',
+              GIT_COMMITTER_EMAIL: 't@test.local',
+            },
+          })
+        ).stdout.trim();
+      await git('init', '-b', 'main');
+      await writeFile(path.join(dir, 'base'), 'base');
+      await git('add', '.');
+      await git('commit', '-m', 'base');
+      const before = await git('rev-parse', 'HEAD');
+      await git('switch', '-c', 'feature');
+      await writeFile(path.join(dir, 'feature'), 'feature');
+      await git('add', '.');
+      await git('commit', '-m', 'feature');
+      await git('switch', 'main');
+      await git('merge', '--no-ff', 'feature', '-m', 'merge');
+      const after = await git('rev-parse', 'HEAD');
+      const taskId = await seedTask('running', { repositoryId: null });
+      await seedStep(taskId, '12-worktree-cleanup', 12, 'running');
+      const step = await db.query.taskSteps.findFirst({
+        where: eq(schema.taskSteps.taskId, taskId),
+      });
+      const state = {
+        phase: 'squashing',
+        mode: 'same-branch',
+        mergeDir: dir,
+        baseBranch: 'main',
+        featureBranch: 'feature',
+        baseShaBefore: before,
+        merged: false,
+      } as import('@haive/database').MergeResolveState;
+
+      await db.insert(schema.mergeDirClaims).values({
+        mergeDir: dir,
+        taskId,
+        taskStepId: step!.id,
+      });
+      h.realMergeReport = true;
+      const land = (tx: Tx) =>
+        recordLandedMerge(tx, {
+          taskId,
+          stepId: step!.id,
+          stepKey: '12-worktree-cleanup',
+          repoPath: dir,
+          state,
+        });
+      return { dir, git, taskId, before, after, land, state, stepId: step!.id };
+    };
+
+    const expectCancelFinished = async (taskId: string) => {
+      expect((await taskView(taskId)).status).toBe('cancelled');
+      expect(await eventsOfType(taskId, 'task.cancel_finished')).toHaveLength(1);
+      expect(
+        await db
+          .select()
+          .from(schema.mergeDirClaims)
+          .where(eq(schema.mergeDirClaims.taskId, taskId)),
+      ).toEqual([]);
+      expectTeardownRan(taskId);
+    };
+
+    it('a cancel after the local merge and before reachDone reports it once without undoing it', async () => {
+      const f = await landedFixture();
+      await db.transaction(f.land);
+      await runCancel(f.taskId);
+      await runCancel(f.taskId);
+      const reports = await eventsOfType(f.taskId, 'merge.left_committed');
+      expect(reports).toHaveLength(1);
+      expect(await f.git('rev-parse', 'main')).toBe(f.after);
+      expect(reports[0]?.payload).toMatchObject({
+        baseShaBefore: f.before,
+        baseShaAfter: f.after,
+        landedOn: 'main',
+      });
+    });
+
+    it('a cancel finishes and releases claims when the landed-on branch was deleted', async () => {
+      const f = await landedFixture();
+      await db.transaction(f.land);
+      await f.git('switch', 'feature');
+      await f.git('branch', '-D', 'main');
+      await runCancel(f.taskId);
+      expect(await eventsOfType(f.taskId, 'merge.left_committed')).toEqual([]);
+      await expectCancelFinished(f.taskId);
+    });
+
+    it('a cancel with no landing event writes no merge report and finishes', async () => {
+      const f = await landedFixture();
+      await runCancel(f.taskId);
+      expect(await eventsOfType(f.taskId, 'merge.landed')).toEqual([]);
+      expect(await eventsOfType(f.taskId, 'merge.left_committed')).toEqual([]);
+      expect(await eventsOfType(f.taskId, 'merge.left_open')).toEqual([]);
+      await expectCancelFinished(f.taskId);
+    });
+
+    it('reports once when a merge-dir section commits its landing while cancels wait for the lock', async () => {
+      const f = await landedFixture();
+      // Pushing no longer has an open merge to report, but its recorded directory must
+      // still fence the committed report. The section already passed its liveness check.
+      f.state.phase = 'pushing';
+      await db
+        .update(schema.taskSteps)
+        .set({ mergeResolveState: f.state })
+        .where(eq(schema.taskSteps.id, f.stepId));
+      let held!: () => void;
+      const holding = new Promise<void>((resolve) => (held = resolve));
+      let publish!: () => void;
+      const publishing = new Promise<void>((resolve) => (publish = resolve));
+      const writer = settle(
+        peer.transaction(async (tx) => {
+          await tx.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended(${'merge-dir:' + f.dir}, 0))`,
+          );
+          held();
+          await publishing;
+          await f.land(tx);
+        }),
+      );
+      await Promise.race([
+        holding,
+        writer.then((outcome) => {
+          if (!outcome.ok) throw outcome.error;
+        }),
+      ]);
+      const cancels = [settle(runCancel(f.taskId)), settle(runCancel(f.taskId))];
+      try {
+        const deadline = Date.now() + BLOCKED_WITHIN_MS;
+        while (seamsOf(f.taskId).filter((seam) => seam === 'recordLeftOpenMerges').length < 2) {
+          if (Date.now() > deadline) throw new Error('cancels never reached the merge report');
+          await sleep(20);
+        }
+        expect(await eventsOfType(f.taskId, 'merge.landed')).toEqual([]);
+        expect(await eventsOfType(f.taskId, 'task.cancel_finished')).toEqual([]);
+      } finally {
+        publish();
+        const outcomes = await Promise.all([writer, ...cancels]);
+        expect(outcomes.map(describeOutcome)).toEqual(['resolved', 'resolved', 'resolved']);
+      }
+      expect(await eventsOfType(f.taskId, 'merge.left_committed')).toHaveLength(1);
+      expect(await f.git('rev-parse', 'main')).toBe(f.after);
+      expect(
+        await db
+          .select()
+          .from(schema.mergeDirClaims)
+          .where(eq(schema.mergeDirClaims.taskId, f.taskId)),
+      ).toEqual([]);
+      expect(await eventsOfType(f.taskId, 'task.cancel_finished')).not.toHaveLength(0);
+    });
 
     it(
       'W7: a CANCEL that waits for a step row does not hold the task row, so a claim beside it cannot deadlock',

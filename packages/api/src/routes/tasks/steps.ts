@@ -1752,8 +1752,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     await stopActiveCliInvocations(db, id, { failTask: false });
     const result = await db.transaction((tx) => cancelTaskIfOpen(tx, id, { by: userId }));
     if (!result.cancelled) return c.json({ ok: true, status: result.status });
-    // The pause goes with the cancel, as in the Cancel action: a cancelled task is still
-    // resumable, and a stale paused_at would park it again once it was revived.
+    // Cancel ends the pause as well; step actions refuse this terminal task.
     await clearTaskPause(db, id);
     await enqueueCancelJob(id, userId);
     await appendTaskEvent(db, id, step.id, 'step.abort', { stepId, note: body.note ?? null });

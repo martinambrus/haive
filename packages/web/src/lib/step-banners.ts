@@ -1,4 +1,9 @@
-import { leftOpenMerges, type MergeLeftOpenOutcome } from '@haive/shared/merge-left-open';
+import {
+  MERGE_LEFT_COMMITTED_EVENT,
+  readLandedMerge,
+  leftOpenMerges,
+  type MergeLeftOpenOutcome,
+} from '@haive/shared/merge-left-open';
 import { parseUpgradeInstant } from './upgrade-time';
 import { parseStepId } from '@haive/shared/modularity';
 
@@ -55,6 +60,8 @@ export const QUEUED_WAIT_TEXT =
 /** The step fields the banner rules read. Dates accept a `Date` or an ISO string. */
 export interface StepBannerRow {
   status: string;
+  stepId?: string;
+  mergeResolveState?: { phase: string; baseBranch: string; pushed?: boolean } | null;
   statusMessage: string | null;
   errorMessage: string | null;
   /** Runtime-slot park marker. Non-null iff the step is queued for capacity right now. */
@@ -121,9 +128,25 @@ export function parkBanner(
  *  WITH errorMessage to route a thrown failure back to implementation, so the column is the
  *  payload of a routing decision there. That is also why this rule cannot be a DB constraint or a
  *  nulling trigger: enforcing "done implies no error" would destroy the diagnosis. */
-export function failureBanner(step: StepBannerRow): { text: string } | null {
+export function failureBanner(
+  step: StepBannerRow,
+  opts: { taskStatus?: string } = {},
+): { text: string } | null {
   if (!step.errorMessage) return null;
   if (step.status === 'done' || step.status === 'skipped') return null;
+  // A stored push failure can predate cancel. Its recovery advice belongs to the current
+  // task state; identify it by the merge phase, never by matching its error wording.
+  if (
+    opts.taskStatus === 'cancelled' &&
+    step.status === 'failed' &&
+    step.stepId === '12-worktree-cleanup' &&
+    step.mergeResolveState?.phase === 'pushing' &&
+    step.mergeResolveState.pushed !== true
+  ) {
+    return {
+      text: `The merge was saved locally, but its push may not have finished. This task was cancelled. Push ${codeSpan(step.mergeResolveState.baseBranch)} manually from the repository terminal if you want to publish it.`,
+    };
+  }
   return { text: step.errorMessage };
 }
 
@@ -397,4 +420,21 @@ export function upgradeAttemptBanner(
     kind: attempt.status,
     text: `${title} (${codeSpan(attempt.toVersion)}). ${attempt.error ?? 'The updater stopped before starting the upgrade.'}`,
   };
+}
+
+/** A cancelled task's landed-merge report is structural evidence, independent of step copy. */
+export function leftCommittedMergeBanner(
+  events: readonly LeftMergeEventRow[],
+  opts: { taskStatus: string },
+): { text: string } | null {
+  if (opts.taskStatus !== 'cancelled') return null;
+  const merge = events
+    .filter((e) => e.eventType === MERGE_LEFT_COMMITTED_EVENT)
+    .map((e) => readLandedMerge(e.payload))
+    .find((m) => m !== null);
+  return merge
+    ? {
+        text: `This task's merge stays committed on ${codeSpan(merge.landedOn)} and was not undone when the task was cancelled.`,
+      }
+    : null;
 }

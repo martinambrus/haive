@@ -1,3 +1,4 @@
+import { recordLeftCommittedMerge } from './left-committed-merge.js';
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray, isNotNull, ne, sql } from 'drizzle-orm';
 import { schema, type Database, type MergeResolveState } from '@haive/database';
@@ -66,14 +67,18 @@ export async function peekOpenMerge(dir: string): Promise<OpenMerge | null> {
 
 /** The merges the task's rows say were in progress: a resolver step's merge dir, and the task's
  *  integration worktree while a DAG level merge has a conflict in flight. */
-async function recordedMerges(db: Database, taskId: string): Promise<RecordedMerge[]> {
+async function recordedMerges(
+  db: Database,
+  taskId: string,
+  includeLanded = false,
+): Promise<RecordedMerge[]> {
   const merges: RecordedMerge[] = [];
   const steps = await db
     .select({ id: schema.taskSteps.id, state: schema.taskSteps.mergeResolveState })
     .from(schema.taskSteps)
     .where(and(eq(schema.taskSteps.taskId, taskId), isNotNull(schema.taskSteps.mergeResolveState)));
   for (const { id, state } of steps) {
-    if (!state || !MID_MERGE_PHASES.has(state.phase)) continue;
+    if (!state || (!includeLanded && !MID_MERGE_PHASES.has(state.phase))) continue;
     merges.push({
       dir: state.mergeDir,
       ref: state.featureBranch,
@@ -229,7 +234,11 @@ async function settleGoneMerge(
  *  failure throws, so the cancel is re-driven before `task.cancel_finished` is written. */
 export async function recordLeftOpenMerges(db: Database, taskId: string): Promise<void> {
   const known = await taskLeftOpen(db, taskId);
-  for (const recorded of await recordedMerges(db, taskId)) {
+  // Keep all recorded directories for the committed report, including pushing/done and host
+  // checkouts. An in-flight section can still commit its landing after cancel took the step.
+  const merges = await recordedMerges(db, taskId, true);
+  for (const recorded of merges) {
+    if (recorded.state && !MID_MERGE_PHASES.has(recorded.state.phase)) continue;
     if (isHostCheckout(recorded.dir)) continue;
     // Under the dir's lock, so nobody clears or replaces the merge between the read and the report.
     const found = await inMergeDirLock(db, recorded.dir, async (tx) => {
@@ -264,6 +273,11 @@ export async function recordLeftOpenMerges(db: Database, taskId: string): Promis
     if (found === 'gone') await settleGoneMerge(db, taskId, recorded);
     else if (found) known.push({ ...found, settled: null, refused: null });
   }
+  await recordLeftCommittedMerge(
+    db,
+    taskId,
+    merges.map((merge) => merge.dir),
+  );
 }
 
 async function maskSourceOnce(db: Database, taskId: string): Promise<SecretMaskSource> {

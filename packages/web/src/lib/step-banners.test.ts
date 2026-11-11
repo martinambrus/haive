@@ -7,6 +7,7 @@ import {
   invocationBanner,
   isTaskDead,
   leftMergeBanners,
+  leftCommittedMergeBanner,
   modelIdentityBanner,
   moduleStopBanner,
   parkBanner,
@@ -635,5 +636,93 @@ describe('upgradeAttemptBanner', () => {
     expect(upgradeAttemptBanner({ ...attempt, status: 'failed', error: null })?.kind).toBe(
       'failed',
     );
+  });
+});
+
+describe('leftCommittedMergeBanner', () => {
+  const payload = {
+    baseShaBefore: 'a'.repeat(40),
+    baseShaAfter: 'b'.repeat(40),
+    landedOn: 'release/test',
+    landedAt: '2026-10-12T00:00:00Z',
+    repoPath: '/host-fs/repo',
+    dir: '/host-fs/repo',
+  };
+  it('shows the committed report for cancelled tasks, including pushed and host-fs merges', () => {
+    expect(
+      leftCommittedMergeBanner([{ eventType: 'merge.left_committed', payload }], {
+        taskStatus: 'cancelled',
+      }),
+    ).toEqual({
+      text: expect.stringContaining('stays committed on `release/test` and was not undone'),
+    });
+  });
+  it('does not show copy or a landed fact as a cancellation report', () => {
+    expect(
+      leftCommittedMergeBanner([{ eventType: 'merge.landed', payload }], {
+        taskStatus: 'cancelled',
+      }),
+    ).toBeNull();
+    expect(
+      leftCommittedMergeBanner(
+        [{ eventType: 'merge.left_committed', payload: { message: 'merge stays committed' } }],
+        { taskStatus: 'cancelled' },
+      ),
+    ).toBeNull();
+    expect(
+      leftCommittedMergeBanner([{ eventType: 'merge.left_committed', payload }], {
+        taskStatus: 'running',
+      }),
+    ).toBeNull();
+    expect(leftCommittedMergeBanner([], { taskStatus: 'cancelled' })).toBeNull();
+  });
+});
+
+describe('cancelled step-12 push failure copy', () => {
+  const failedPush = {
+    ...step({
+      status: 'failed',
+      errorMessage:
+        'Merge committed, but push failed. The merge is saved locally — retry the push.',
+    }),
+    stepId: '12-worktree-cleanup',
+    mergeResolveState: { phase: 'pushing', baseBranch: 'main', pushed: false },
+  };
+  it('offers a manual push on a cancelled task rather than an impossible retry', () => {
+    const banner = failureBanner(failedPush, { taskStatus: 'cancelled' });
+    expect(banner?.text).not.toContain('retry');
+    expect(banner?.text).toContain('Push `main` manually');
+    expect(banner?.text).toContain('its push may not have finished');
+  });
+  it('does not claim an in-flight push failed when cancel took the step', () => {
+    const interrupted = {
+      ...failedPush,
+      errorMessage: 'Task cancelled',
+      mergeResolveState: { phase: 'pushing', baseBranch: 'main' },
+    };
+    expect(failureBanner(interrupted, { taskStatus: 'cancelled' })?.text).toContain(
+      'its push may not have finished',
+    );
+    expect(
+      failureBanner(
+        { ...interrupted, mergeResolveState: { ...interrupted.mergeResolveState, pushed: true } },
+        { taskStatus: 'cancelled' },
+      )?.text,
+    ).toBe('Task cancelled');
+  });
+  it('uses structural state even if the error wording changes, and keeps live-task diagnosis', () => {
+    expect(
+      failureBanner(
+        { ...failedPush, errorMessage: 'origin unavailable' },
+        { taskStatus: 'cancelled' },
+      )?.text,
+    ).toContain('Push `main` manually');
+    expect(failureBanner(failedPush, { taskStatus: 'failed' })?.text).toBe(failedPush.errorMessage);
+    expect(
+      failureBanner({ ...failedPush, status: 'done' }, { taskStatus: 'cancelled' }),
+    ).toBeNull();
+    expect(
+      failureBanner({ ...failedPush, stepId: 'other' }, { taskStatus: 'cancelled' })?.text,
+    ).toBe(failedPush.errorMessage);
   });
 });

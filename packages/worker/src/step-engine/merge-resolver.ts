@@ -1,3 +1,4 @@
+import { recordLandedMerge } from './landed-merge.js';
 import { withProjectionMove } from '../project-state/projection-move.js';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -280,6 +281,22 @@ export async function saveMergeState(
   state: MergeResolveState,
 ): Promise<void> {
   await updateOwnedStep(db, stepRowId, { mergeResolveState: state });
+}
+
+function saveLandedState(
+  tx: DbHandle,
+  current: TaskStepRow,
+  ctx: StepContext,
+  params: AdvanceStepParams,
+  state: MergeResolveState,
+) {
+  return recordLandedMerge(tx, {
+    taskId: params.taskId,
+    stepId: current.id,
+    stepKey: params.stepDef.metadata.id,
+    repoPath: ctx.repoPath,
+    state,
+  });
 }
 
 /** A host-side write to the merge dir, fenced on this step's claim and the pass's epoch. */
@@ -568,7 +585,7 @@ async function finishMerge(
   if ((squashed.mergeStage ?? 'feature') === 'feature' && squashed.phase !== 'squashing') {
     squashed = { ...squashed, phase: 'squashing', merged: false, mergedAt: undefined };
     await inMergeDir(db, current, params, squashed.mergeDir, (tx) =>
-      saveMergeState(tx, current.id, squashed),
+      saveLandedState(tx, current, ctx, params, squashed),
     );
   }
   current = squash.current;
@@ -665,7 +682,7 @@ async function squashFeatureMerge(
       squashCommitSha,
       ...(skipped ? { squashAfterMerge: false, squashSkipReason: skipped } : {}),
     };
-    await saveMergeState(tx, current.id, squashed);
+    await saveLandedState(tx, current, ctx, params, squashed);
     return squashed;
   });
   const squashCommitSha = next.squashCommitSha;
@@ -1435,7 +1452,9 @@ async function resolveMergePhaseInMove(
       const result: MergeOpen = settled.merged ? { kind: 'merged' } : opened;
       // Recorded in the same transaction, so a landed merge the squash has yet to reset is held too.
       if (result.kind !== 'refused') {
-        await saveMergeState(tx, current.id, { ...armed, phase: 'resolving' });
+        const openedState: MergeResolveState = { ...armed, phase: 'resolving' };
+        if (result.kind === 'merged') await saveLandedState(tx, current, ctx, params, openedState);
+        else await saveMergeState(tx, current.id, openedState);
       }
       return {
         kind: 'opened' as const,
@@ -1650,9 +1669,15 @@ async function resolveMergePhaseInMove(
         const completing = state;
         const committed =
           usable &&
-          (await section(completing.mergeDir, () =>
-            completeMergeHostSide(completing.mergeDir, commitEnv, completing.featureBranch),
-          ));
+          (await section(completing.mergeDir, async (tx) => {
+            const committed = await completeMergeHostSide(
+              completing.mergeDir,
+              commitEnv,
+              completing.featureBranch,
+            );
+            if (committed) await saveLandedState(tx, current, ctx, params, completing);
+            return committed;
+          }));
         const idle: MergeResolveState = { ...state, fixInvocationId: null };
         state = idle;
         if (committed) {
@@ -1674,6 +1699,10 @@ async function resolveMergePhaseInMove(
     // leaves the parent repo stuck mid-merge (a later "Retry with AI" re-creates the conflict on
     // demand).
     if (await mergeCommitted(state.mergeDir, state.featureBranch)) {
+      const committed = state;
+      await section(committed.mergeDir, (tx) =>
+        saveLandedState(tx, current, ctx, params, committed),
+      );
       return finishMerge(db, stepDef, current, ctx, params, state);
     }
     const dir = state.mergeDir;
@@ -1715,6 +1744,7 @@ async function resolveMergePhaseInMove(
         return haltFailed(db, current, params, state, asideHalt(stopped), 'haive files changed');
       }
     }
+    const reopeningState = state;
     const reopen = async (tx: Tx) => {
       if (repositoryId) await lockRepositoryTasksKey(tx, repositoryId);
       const wasOpen = await peekOpenMerge(dir);
@@ -1740,6 +1770,7 @@ async function resolveMergePhaseInMove(
         if (again) return { kind: 'aside' as const, again, staleOpen, adopted };
         const opened = await openMerge(dir, feature, ['-m', `Merge ${feature}`], commitEnv);
         if (opened.kind === 'merged') {
+          await saveLandedState(tx, current, ctx, params, reopeningState);
           return { kind: 'merged' as const, staleOpen, warnings: [], adopted };
         }
         if (opened.kind === 'refused') {
@@ -1748,6 +1779,7 @@ async function resolveMergePhaseInMove(
       }
       const settled = await settleOwnFiles(dir, feature, commitEnv);
       if (settled.merged) {
+        await saveLandedState(tx, current, ctx, params, reopeningState);
         return { kind: 'merged' as const, staleOpen, warnings: settled.warnings, adopted };
       }
       return {
