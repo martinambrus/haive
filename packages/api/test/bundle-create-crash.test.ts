@@ -204,6 +204,37 @@ describe('T487: explicit replacement mode', () => {
     },
   );
 
+  it.each(['lost claim', 'rolled back transaction'])(
+    'leaves no replacement record after a %s',
+    async (failure) => {
+      const dir = await seedZipBundle();
+      await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+      if (failure === 'lost claim') {
+        h.beforeRename = () => {
+          fake.patch(schema.customBundleUploads, REPLACE, {
+            updatedAt: new Date(Date.now() + 60_000),
+          });
+        };
+      } else {
+        fake.hooks.beforeCommit = () => {
+          throw new Error('injected commit rollback');
+        };
+      }
+      const response = await post(`/${BUNDLE}/replace/${REPLACE}/complete`, {
+        mode: 'keep_until_success',
+      });
+      expect(response.status).toBe(failure === 'lost claim' ? 409 : 500);
+      expect(fake.rows(schema.customBundles)[0]).toMatchObject({
+        status: 'active',
+        archivePath: path.join(dir, 'source.zip'),
+      });
+      await expect(
+        stat(path.join(dir, `source.${REPLACE}.zip.replacement.json`)),
+      ).rejects.toThrow();
+      expect(ingestJobs()).toHaveLength(0);
+    },
+  );
+
   it('keeps the old extracted tree until a keep-mode replacement succeeds', async () => {
     const dir = await seedZipBundle();
     await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });

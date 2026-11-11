@@ -20,6 +20,9 @@ import {
   type CustomBundleSourceType,
 } from '@haive/shared';
 import {
+  fileIdentity,
+  removeFileIfIdentityNoFollow,
+  type FileIdentity,
   isWalkDepthError,
   openFileNoFollow,
   walkFilesNoFollow,
@@ -885,80 +888,99 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
       return;
     }
     let replacement: BundleReplacement;
-    await db.transaction(async (tx) => {
-      await admitNewWork(tx);
-      const [current] = await tx
-        .select()
-        .from(schema.customBundles)
-        .where(eq(schema.customBundles.id, bundleId))
-        .for('update');
-      if (!current) throw new HttpError(404, 'bundle not found');
-      if (current.status === 'syncing' && current.archivePath !== finalArchive) {
-        throw new HttpError(409, 'another import of this bundle is already running');
-      }
-      await refuseLiveBundleJob(queue, bundleId);
-      const intentRel = `${finalRel}.replacement.json`;
-      const saved = await readFileNoFollow(anchor, intentRel, { maxBytes: 8192, strict: true });
-      if (saved) {
-        replacement = bundleReplacementSchema.parse(JSON.parse(saved.data.toString('utf8')));
-        if (replacement.mode !== mode)
-          throw new HttpError(
-            409,
-            'This upload already has a different replacement mode. Start a new replacement to change it.',
-          );
-        if (
-          current.archivePath !== finalArchive &&
-          (replacement.previousArchive
-            ? current.archivePath !== replacement.previousArchive.archivePath
-            : current.status === 'active')
-        ) {
-          throw new HttpError(
-            409,
-            'The bundle changed since this replacement started. Start a new replacement.',
-          );
+    const intentRel = `${finalRel}.replacement.json`;
+    let createdIntent: FileIdentity | null = null;
+    try {
+      await db.transaction(async (tx) => {
+        await admitNewWork(tx);
+        const [current] = await tx
+          .select()
+          .from(schema.customBundles)
+          .where(eq(schema.customBundles.id, bundleId))
+          .for('update');
+        if (!current) throw new HttpError(404, 'bundle not found');
+        if (current.status === 'syncing' && current.archivePath !== finalArchive) {
+          throw new HttpError(409, 'another import of this bundle is already running');
         }
-      } else {
-        if (current.archivePath === finalArchive)
-          throw new HttpError(409, 'The replacement record is missing. Start a new replacement.');
-        replacement = {
-          mode,
-          previousArchive:
-            current.status === 'active'
-              ? {
-                  archivePath: current.archivePath,
-                  archiveFilename: current.archiveFilename,
-                  archiveFormat: current.archiveFormat,
-                }
-              : null,
-        };
-        await writeFileNoFollow(anchor, intentRel, JSON.stringify(replacement), { durable: true });
-      }
-      // A different replace may have won since the pre-read. Only this source can resume syncing.
-      const [promoted] = await tx
-        .update(schema.customBundles)
-        .set({
-          archiveFilename: row.filename,
-          archiveFormat: row.archiveFormat,
-          archivePath: finalArchive,
-          storageRoot: newExtracted,
-          status: 'syncing',
-          lastSyncError: null,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(schema.customBundles.id, bundleId),
-            or(
-              ne(schema.customBundles.status, 'syncing'),
-              eq(schema.customBundles.archivePath, finalArchive),
+        await refuseLiveBundleJob(queue, bundleId);
+        const saved = await readFileNoFollow(anchor, intentRel, { maxBytes: 8192, strict: true });
+        if (saved) {
+          replacement = bundleReplacementSchema.parse(JSON.parse(saved.data.toString('utf8')));
+          if (replacement.mode !== mode)
+            throw new HttpError(
+              409,
+              'This upload already has a different replacement mode. Start a new replacement to change it.',
+            );
+          if (
+            current.archivePath !== finalArchive &&
+            (replacement.previousArchive
+              ? current.archivePath !== replacement.previousArchive.archivePath
+              : current.status === 'active')
+          ) {
+            throw new HttpError(
+              409,
+              'The bundle changed since this replacement started. Start a new replacement.',
+            );
+          }
+        } else {
+          if (current.archivePath === finalArchive)
+            throw new HttpError(409, 'The replacement record is missing. Start a new replacement.');
+          replacement = {
+            mode,
+            previousArchive:
+              current.status === 'active'
+                ? {
+                    archivePath: current.archivePath,
+                    archiveFilename: current.archiveFilename,
+                    archiveFormat: current.archiveFormat,
+                  }
+                : null,
+          };
+        }
+        // A different replace may have won since the pre-read. Only this source can resume syncing.
+        const [promoted] = await tx
+          .update(schema.customBundles)
+          .set({
+            archiveFilename: row.filename,
+            archiveFormat: row.archiveFormat,
+            archivePath: finalArchive,
+            storageRoot: newExtracted,
+            status: 'syncing',
+            lastSyncError: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.customBundles.id, bundleId),
+              or(
+                ne(schema.customBundles.status, 'syncing'),
+                eq(schema.customBundles.archivePath, finalArchive),
+              ),
             ),
-          ),
-        )
-        .returning({ id: schema.customBundles.id });
-      if (!promoted) throw new HttpError(409, 'another import of this bundle is already running');
-      // Fence promotion to the held upload; a takeover rolls the transaction back.
-      await claim.write(tx, { bundleId });
-    });
+          )
+          .returning({ id: schema.customBundles.id });
+        if (!promoted) throw new HttpError(409, 'another import of this bundle is already running');
+        // Fence promotion to the held upload; a takeover rolls the transaction back.
+        await claim.write(tx, { bundleId });
+        // The durable write follows promotion and the held-upload fence. A refused claim never
+        // creates a record; a commit failure removes only this request's inode.
+        if (!saved) {
+          await writeFileNoFollow(anchor, intentRel, JSON.stringify(replacement), {
+            durable: true,
+          });
+          const held = await openFileNoFollow(anchor, intentRel, 'read', { strict: true });
+          if (!held) throw new Error('replacement record disappeared before commit');
+          try {
+            createdIntent = await fileIdentity(held);
+          } finally {
+            await held.close();
+          }
+        }
+      });
+    } catch (err) {
+      if (createdIntent) await removeFileIfIdentityNoFollow(anchor, intentRel, createdIntent);
+      throw err;
+    }
     await db.transaction(async (tx) => {
       // Keep bundle-then-upload ownership fencing in BOTH modes. A stale complete must neither
       // remove a takeover's tree nor enqueue against its source when keep mode skips removal.
