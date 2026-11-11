@@ -1,11 +1,12 @@
 import { fixtureBase, networkGitArgs } from '../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
 import { failGit, type FakeGit } from '../../test/support/fake-git.js';
+import { recordFixerLeftovers, type FixerLeftovers } from '../step-engine/git-merge.js';
 import { moveAsideRecordedLeftovers } from './merge-baseline.js';
 import { divergence, ensurePlanMergeWorktree, mergeOriginInto } from './merge.js';
 
@@ -86,5 +87,70 @@ describe('moveAsideRecordedLeftovers on a failed MERGE_HEAD read', () => {
       },
     ) as Database;
     await expect(moveAsideRecordedLeftovers(db, 'r1', wt, 'origin/main')).resolves.toBeUndefined();
+  });
+});
+
+describe('transactional leftovers reports', () => {
+  it('marks a report only after its event commits, and leaves a rolled back report unmarked', async () => {
+    const root = await mkdtemp(path.join(fixtureBase, 'leftovers-report-'));
+    dirs.push(root);
+    await mkdir(path.join(root, 'kept'));
+    const leftovers: FixerLeftovers = {
+      root,
+      folder: 'kept',
+      moved: ['mine'],
+      left: [],
+      unstaged: [],
+      restored: [],
+      interrupted: [],
+    };
+    const callbacks: (() => Promise<void>)[] = [];
+    const events: unknown[] = [];
+    const tx = {
+      insert: () => ({
+        values: async (event: unknown) => {
+          events.push(event);
+        },
+      }),
+    } as unknown as Database;
+    await recordFixerLeftovers(tx, 'task', null, 'main', leftovers, (mark) => callbacks.push(mark));
+    expect(events).toHaveLength(1);
+    expect(callbacks).toHaveLength(1);
+    await expect(access(path.join(root, 'kept/reported'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    // A rollback discards the callback. A committed event runs it.
+    await callbacks[0]!();
+    await expect(access(path.join(root, 'kept/reported'))).resolves.toBeUndefined();
+  });
+
+  it('never marks a report whose event insert failed', async () => {
+    const root = await mkdtemp(path.join(fixtureBase, 'leftovers-report-'));
+    dirs.push(root);
+    await mkdir(path.join(root, 'kept'));
+    const leftovers: FixerLeftovers = {
+      root,
+      folder: 'kept',
+      moved: [],
+      left: [],
+      unstaged: [],
+      restored: [],
+      interrupted: [],
+    };
+    const callbacks: (() => Promise<void>)[] = [];
+    const tx = {
+      insert: () => ({
+        values: async () => {
+          throw new Error('audit failed');
+        },
+      }),
+    } as unknown as Database;
+    await expect(
+      recordFixerLeftovers(tx, 'task', null, 'main', leftovers, (mark) => callbacks.push(mark)),
+    ).rejects.toThrow('audit failed');
+    expect(callbacks).toEqual([]);
+    await expect(access(path.join(root, 'kept/reported'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
   });
 });

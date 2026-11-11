@@ -298,6 +298,7 @@ export async function integrateOrigin(args: {
     }
 
     // A file found rewritten ends the transaction unmoved and goes back to the set-aside.
+    const reports: (() => Promise<void>)[] = [];
     const moved = await db.transaction(async (tx) => {
       await lockPlanMerge(tx, args.repositoryId);
       // The api refuses a save while a conversation is open, but one can open after that check.
@@ -317,8 +318,9 @@ export async function integrateOrigin(args: {
           code: 'plan_merge',
           taskId: open.id,
         });
-      return mergeInScratch(tx, args, gap, previousCommit, fence);
+      return mergeInScratch(tx, args, gap, previousCommit, fence, (mark) => reports.push(mark));
     });
+    for (const markReported of reports) await markReported();
     if (moved.retry && attempt < MOVE_ATTEMPTS) continue;
     const { retry, movedFrom, ...outcome } = moved;
     if (movedFrom !== undefined) await handBackAfterMove(args.repoPath, movedFrom);
@@ -339,13 +341,19 @@ async function mergeInScratch(
   gap: Awaited<ReturnType<typeof divergence>>,
   previousCommit: string | null,
   fence: CheckoutFence,
+  afterCommit: (markReported: () => Promise<void>) => void,
 ): Promise<IntegrateOutcome & { retry?: true; movedFrom?: string }> {
-  const db = getDb();
   const worktree = await ensurePlanMergeWorktree(args.repoPath);
   let removed = false;
   // An abandoned conversation's merge is discarded below, but not what its fixers left: a failure
   // to move that aside fails the save before anything removes the worktree.
-  await moveAsideRecordedLeftovers(db, args.repositoryId, worktree, `origin/${args.branch}`);
+  await moveAsideRecordedLeftovers(
+    tx,
+    args.repositoryId,
+    worktree,
+    `origin/${args.branch}`,
+    afterCommit,
+  );
   try {
     const attempt = await mergeOriginInto(worktree, args.branch, gap.unrelated, args.identity);
     if (!attempt.clean) {
