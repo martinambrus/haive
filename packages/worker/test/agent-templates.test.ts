@@ -236,3 +236,35 @@ describe('shouldEmitAgentsReadme', () => {
     expect(shouldEmitAgentsReadme({ dir: '.codex/agents' })).toBe(true);
   });
 });
+
+describe('the learning-recorder persona and the learning step agree', () => {
+  // 11-phase-8-learning asks for insert/update/delete ops returned as JSON and writes the files
+  // itself after a person reviews them, and a pasted persona outranks that step's protocol, so
+  // the persona must allow the same ops and defer to the calling step's output.
+  const spec = BASELINE_AGENT_SPECS.find((s) => s.id === 'learning-recorder')!;
+  const body = buildAgentFileMarkdown(spec);
+
+  it('lets the agent update and delete existing learnings', () => {
+    expect(body).not.toMatch(
+      /never overwrite|never rewrite|byte-for-byte|no prior entry modified/i,
+    );
+    expect(body).not.toMatch(/fold a new lesson into an existing entry/i);
+    expect(body).toMatch(/\bupdate\b[^\n]*existing|existing[^\n]*\bupdate\b/i);
+    expect(body).toMatch(/\bdelete\b/i);
+  });
+
+  it('defers to the output a calling step defines and writes no file then', () => {
+    expect(body).toContain('When the calling step defines an output');
+    expect(body).toContain('write no learning file');
+  });
+
+  it('says what a learning is for and asks for its file:line evidence', () => {
+    expect(spec.coreMission).toMatch(/later run/i);
+    expect(body).toContain('`path/to/file.ext:LINE`');
+  });
+
+  it('names no command onboarding does not ship', () => {
+    expect(body).toContain('.haive-data/learnings/');
+    expect(body).not.toMatch(/\/learn\b/);
+  });
+});
