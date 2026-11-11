@@ -45,7 +45,8 @@ export async function rootMergeBusy(
     where: eq(schema.mergeDirClaims.mergeDir, root),
     columns: { taskStepId: true, taskId: true },
   });
-  if (claim && (await liveClaimHolder(tx, claim))) {
+  // The claim's own task is left out: its Retry or Resume is what continues the merge.
+  if (claim && claim.taskId !== taskId && (await liveClaimHolder(tx, claim))) {
     const step = await tx.query.taskSteps.findFirst({
       where: eq(schema.taskSteps.id, claim.taskStepId),
       columns: { mergeResolveState: true },

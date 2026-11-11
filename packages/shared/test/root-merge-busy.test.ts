@@ -92,6 +92,18 @@ describe('root merge re-drive predicate', () => {
       expect(await busy()).toBe(false);
     },
   );
+  it("does not hold the claim owner's own re-drive, whose Retry resumes the merge", async () => {
+    const { fake } = world();
+    fake.patch(schema.tasks, '00000000-0000-4000-8000-000000000003', {
+      repositoryId: '00000000-0000-4000-8000-000000000001',
+      status: 'failed',
+    });
+    const own = () =>
+      fake.db.transaction((tx) =>
+        taskRootMergeBusy(tx as never, '00000000-0000-4000-8000-000000000003'),
+      );
+    expect(await own()).toBe(false);
+  });
   it('uses a skipped latest setup over stale worktree columns', async () => {
     const { fake, busy } = world();
     fake.patch(schema.tasks, '00000000-0000-4000-8000-000000000002', { worktreePath: '/repo/wt' });
