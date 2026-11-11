@@ -546,10 +546,15 @@ PRE-EXISTING link, new consequence of #1044. Auto-link picks the entry a draft r
 status: open · kind: fix · found: T558 run 2026-11-09 · priority: P4
 PRE-EXISTING, minor. `configSchema` (api routes/global-kb.ts ~:292-293) accepts `ollamaUrl`/`embedModel` with surrounding whitespace and `putConfig` writes them as sent; the non-admin compare trims, so only the stored value and its dials see the whitespace. Fix: trim in the schema.
 
-### T580 · plan[sleep-paper-lessons] · calibrate effort estimates on the LLM's recorded estimate; keep learnings reachable past 60
+### T580 · plan[sleep-paper-lessons] · calibrate effort estimates on the LLM's recorded estimate; keep learnings reachable past 60 (+2)
 
 status: parked · reason: diminishing returns (owner triage 2026-11-10); PR 1 shipped #1047 884f5c074; resume when step 11 changes or a repository nears 60 learnings · kind: fix · found: SLEEP paper assessment 2026-11-09 · priority: P3
 Plan: `docs/plans/sleep-paper-lessons.md`. PR 1: `hydrateAnchors` and `GET /tasks/estimation-accuracy` read the latest `estimate.recorded.aiHours` instead of the column `06b-sprint-planning` overwrites. PR 2 (low urgency, when step 11 is next touched or a repository nears 60 learnings): list every learning id and title, not an unsorted first 60. Both PRE-EXISTING. P3 of the plan, the backtest, waits for its trigger query.
+
+Appended 2026-11-11 from the Anthropic dreaming assessment; both bear on step 11 seeing and reconciling learnings:
+
+1. Learnings written before the `.haive-data/` move are unreachable. PRE-EXISTING. `readExistingLearnings` (worker 11-phase-8-learning.ts ~:591) and `collectKbFiles` (worker \_rag-index.ts ~:94, `KNOWLEDGE_SOURCE_PREFIXES`) read only `.haive-data/learnings/`, and `migrateLegacyKnowledge` (onboarding \_kb-legacy.ts) runs only from 08-knowledge-acquisition, so a repository keeps them dark until it is re-onboarded. MEASURED on the dev install: 192 of 198 learnings at HEAD sit under `.claude/learnings/` in 59 repositories; 0 of 70 step-11 runs were shown an existing learning. Fix direction: run the learnings half of the migration on the workflow path before 02-pre-rag-sync indexes, or read both dirs.
+2. The `learning-recorder` persona forbids what step 11 asks for. PRE-EXISTING. The template (onboarding \_agent-templates.ts ~:805-864) says "Add, never overwrite" and lists folding a lesson into an existing entry as an anti-pattern; step 11 asks for `update`/`delete` ops (~:1146-1150) and tells the agent to follow that persona when the repository has it (~:1119-1125), which most onboarded repositories do. MEASURED: 247 entries over 70 runs, all inserts (confounded by item 1). Fix direction: make the template match the reconcile protocol, with the template-manifest bump `docs/architecture/onboarding-upgrades.md` asks for.
 
 ### T559 · FNF[gated-test-hygiene] · gated test addresses and the gated-list check in driver gates (+1)
 
