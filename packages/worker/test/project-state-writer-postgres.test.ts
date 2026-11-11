@@ -57,6 +57,7 @@ import {
   sweepDirtyProjectStates,
 } from '../src/project-state/refresh.js';
 import { applyPlanPatch } from '@haive/shared/plan';
+import { sweepKeptProjectionMetadata } from '../src/project-state/kept-metadata-recovery.js';
 import { writePlanMirror, reconcilePlanFromCheckout } from '../src/plan/mirror.js';
 import { persistDetection } from '../src/repo/clone.js';
 import { handleRefresh } from '../src/repo/refresh.js';
@@ -64,7 +65,6 @@ import {
   putBackProjections,
   resyncAfterTaskEnd,
   resyncWithKeptMetadata,
-  resyncHaiveProjections,
   restoreFaults,
   setAsideHaiveProjections,
 } from '../src/project-state/set-aside.js';
@@ -207,6 +207,85 @@ async function diskRecord(root: string, name: string) {
 }
 
 describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
+  it.each(['outbox', 'legacy-done'] as const)(
+    'recovers %s metadata from PostgreSQL even when projection revisions are clean',
+    async (store) => {
+      const s = await fixture();
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: s.root });
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.name=T',
+          '-c',
+          'user.email=t@local',
+          'commit',
+          '--allow-empty',
+          '-qm',
+          'initial',
+        ],
+        { cwd: s.root },
+      );
+      await s.write();
+      const rel = '.haive-data/state/project/render.json';
+      const metadata = {
+        [rel]: { owner: { uid: process.getuid!(), gid: process.getgid!() }, mode: 0o600 },
+      };
+      let stepId: string | undefined;
+      if (store === 'outbox') {
+        await db!
+          .update(schema.projectStateOutbox)
+          .set({ keptMetadata: { [s.root]: metadata } })
+          .where(eq(schema.projectStateOutbox.repositoryId, s.repo.id));
+      } else {
+        const [task] = await db!
+          .insert(schema.tasks)
+          .values({
+            userId: s.userId,
+            repositoryId: s.repo.id,
+            type: 'workflow',
+            title: 'completed merge',
+            status: 'completed',
+          })
+          .returning();
+        const [step] = await db!
+          .insert(schema.taskSteps)
+          .values({
+            taskId: task!.id,
+            stepId: '00a-sync-base',
+            stepIndex: 0,
+            title: 'merge',
+            status: 'done',
+            mergeResolveState: {
+              phase: 'done',
+              mode: 'same-branch',
+              mergeDir: s.root,
+              keptMetadata: metadata,
+            } as never,
+          })
+          .returning();
+        stepId = step!.id;
+      }
+      const mark = (await s.outbox())!;
+      expect(mark.revision).toBe(mark.writtenRevision);
+      restoreFaults.beforeResync = () => {
+        throw new Error('still unavailable');
+      };
+      expect(await sweepKeptProjectionMetadata(db!)).toBe(0);
+      delete restoreFaults.beforeResync;
+      expect(await sweepKeptProjectionMetadata(db!)).toBe(1);
+      expect((await stat(join(s.root, rel))).mode & 0o7777).toBe(0o600);
+      if (stepId) {
+        const [step] = await db!
+          .select()
+          .from(schema.taskSteps)
+          .where(eq(schema.taskSteps.id, stepId));
+        expect(step!.mergeResolveState!.keptMetadata).toBeUndefined();
+      } else expect((await s.outbox())!.keptMetadata).toBeNull();
+      expect(await sweepKeptProjectionMetadata(db!)).toBe(0);
+    },
+  );
+
   it('commits captured metadata before removal and keeps it after failed re-sync', async () => {
     const s = await fixture();
     execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: s.root });

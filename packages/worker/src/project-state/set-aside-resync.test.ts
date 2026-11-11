@@ -86,11 +86,11 @@ describe('resyncHaiveProjections settles only a state sync that finished', () =>
     expect(await resyncHaiveProjections(marksDb(), 'repo-1', '/repo')).toBe(false);
   });
 
-  it('answers true for a deferred sync whose pending write deferred with it', async () => {
+  it('answers false for a deferred sync whose pending write deferred with it', async () => {
     calls.outcome = 'deferred';
     calls.dirty.state = true;
     calls.refreshed = false;
-    expect(await resyncHaiveProjections(marksDb(), 'repo-1', '/repo')).toBe(true);
+    expect(await resyncHaiveProjections(marksDb(), 'repo-1', '/repo')).toBe(false);
   });
 
   it('answers true when the pending state was written', async () => {

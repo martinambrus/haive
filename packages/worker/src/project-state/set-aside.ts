@@ -924,8 +924,8 @@ async function isDirty(
 /** After a move of the checkout: reads the new head's record and plan in, then writes what this install
  *  still has pending over them. A step that fails here leaves its mark raised, so the sweep retries it.
  *  Whether both halves re-synced: false while a merge, rebase, cherry-pick or revert is open, when either threw, or when the
- *  state sync was held, superseded or refused or its pending write did not run. A sync deferred to a
- *  live onboarding or upgrade counts as done: that task re-syncs when it ends. */
+ *  state sync was held, superseded or refused or its pending write did not run. A deferred write
+ *  retains its metadata until the task-end re-sync or a later sweep finishes it. */
 export async function resyncHaiveProjections(
   db: Database,
   repositoryId: string,
@@ -952,8 +952,7 @@ export async function resyncHaiveProjections(
     if (outcome === 'held' || outcome === 'superseded' || outcome === 'refused') synced = false;
     if (
       (await isDirty(db, schema.projectStateOutbox, repositoryId)) &&
-      !(await refreshProjectState(db, repositoryId)) &&
-      outcome !== 'deferred'
+      !(await refreshProjectState(db, repositoryId))
     ) {
       synced = false;
     }
@@ -973,6 +972,14 @@ export async function resyncHaiveProjections(
     logger.warn({ err, repositoryId }, 'plan not re-synced after a checkout move');
     await raiseMarkAfterFailure(db, schema.planMirrorState, repositoryId, markPlanMirrorDirty);
   }
+  if (synced) {
+    try {
+      synced = await restorePendingKeptMetadata(db, repositoryId, repoPath, restoreKeptMetadata);
+    } catch (err) {
+      synced = false;
+      logger.warn({ err, repositoryId }, 'captured projection metadata not settled');
+    }
+  }
   return synced;
 }
 
@@ -984,9 +991,7 @@ export async function resyncWithKeptMetadata(
   kept: KeptFiles,
 ): Promise<boolean> {
   await rememberKeptMetadata(db, repositoryId, repoPath, keptMetadataOf(kept));
-  if (!(await resyncHaiveProjections(db, repositoryId, repoPath))) return false;
-  await restorePendingKeptMetadata(db, repositoryId, repoPath, restoreKeptMetadata);
-  return true;
+  return resyncHaiveProjections(db, repositoryId, repoPath);
 }
 
 /** The re-sync an onboarding or upgrade owes when it ends, since the sync deferred while it held the

@@ -26,6 +26,7 @@ import type {
 } from '@haive/shared/project-state';
 import { resolveProjectStateConflict } from '../project-state/resolve.js';
 import { markProjectStatesDirtyAtBoot, sweepDirtyProjectStates } from '../project-state/refresh.js';
+import { sweepKeptProjectionMetadata } from '../project-state/kept-metadata-recovery.js';
 import {
   sweepCheckoutRepositories,
   watchCheckout,
@@ -780,6 +781,11 @@ async function sweepAll(): Promise<number> {
     swept += await sweepDirtyProjectStates(getDb());
   } catch (err) {
     logger.warn({ err }, 'project state sweep failed');
+  }
+  try {
+    swept += await sweepKeptProjectionMetadata(getDb());
+  } catch (err) {
+    logger.warn({ err }, 'projection metadata sweep failed');
   }
   return swept;
 }

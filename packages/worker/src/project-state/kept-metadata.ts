@@ -94,17 +94,19 @@ export async function restorePendingKeptMetadata(
   repositoryId: string,
   repoPath: string,
   restore: (repoPath: string, kept: KeptFiles) => Promise<boolean>,
-): Promise<void> {
+): Promise<boolean> {
   const [row] = await db
     .select({ kept: schema.projectStateOutbox.keptMetadata })
     .from(schema.projectStateOutbox)
     .where(eq(schema.projectStateOutbox.repositoryId, repositoryId))
     .limit(1);
   const metadata = row?.kept?.[repoPath];
-  if (!metadata || !(await restore(repoPath, keptFilesOf(metadata)))) return;
+  if (!metadata) return true;
+  if (!(await restore(repoPath, keptFilesOf(metadata)))) return false;
   await db.execute(sql`
     UPDATE project_state_outbox SET
       kept_metadata = nullif(kept_metadata - ${repoPath}::text, '{}'::jsonb), updated_at = now()
     WHERE repository_id = ${repositoryId} AND kept_metadata -> ${repoPath}::text = ${JSON.stringify(metadata)}::jsonb
   `);
+  return true;
 }
