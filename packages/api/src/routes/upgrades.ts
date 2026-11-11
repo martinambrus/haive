@@ -1057,18 +1057,14 @@ async function lockRepositoryTasks(tx: DbTx, repositoryId: string) {
  *  revival runs too): an onboarding beside a live upgrade or rollback, an upgrade or rollback
  *  beside a live onboarding, a live root claim. An upgrade or rollback is also admitted again, as
  *  at creation, so one a reset has since cut off cannot continue. */
-export async function refuseReviveBesideLive(
-  tx: DbTx,
-  taskId: string,
-  options: { continuation?: boolean } = {},
-): Promise<void> {
+export async function refuseReviveBesideLive(tx: DbTx, taskId: string): Promise<void> {
   const verdict = await boundedLockWait(
     tx,
     () => reviveRefusal(tx, taskId),
     TASK_START_LOCK_TIMEOUT_MS,
   );
   if (!verdict) {
-    if (!options.continuation) await assertTaskRootMergeIdle(tx, taskId);
+    await assertTaskRootMergeIdle(tx, taskId);
     return;
   }
   const rollback = (verdict.task.metadata as { mode?: unknown } | null)?.mode === 'rollback';
