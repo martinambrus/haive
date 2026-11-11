@@ -22,6 +22,7 @@ import { detectOrigin, gitRun, originGitRun, buildCredentialHelper } from '../re
 import { worktreeDirPaths, worktreeDirName } from '../repo/worktree-paths.js';
 import { checkoutHoldingTasks } from '../repo/refresh.js';
 import { findWorktreePathClaimant } from '../repo/worktree-claims.js';
+import { worktreesHoldingBranch } from '../repo/git-workspace.js';
 import {
   resyncHaiveProjections,
   setAsideHaiveProjections,
@@ -439,16 +440,10 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
           // Preserve the moved-away commit as a git root too: a JSON sha alone cannot stop gc.
           // This create-only ref also identifies an admitted attempt if SQL fails after git moved.
           const undoRef = `refs/haive/undo-left-merge/${taskId}/${baseShaAfter}`;
-          // Porcelain -z keeps paths literal, including spaces, quotes and newlines. Git's
-          // update-ref does not protect a branch checked out in another worktree.
-          const listed = await gitRun(cwd, ['worktree', 'list', '--porcelain', '-z']);
-          if (listed.code !== 0) throw new UndoGitError('Cannot read the repository worktrees');
-          const holders: string[] = [];
-          let worktree = '';
-          for (const field of listed.stdout.split('\0')) {
-            if (field.startsWith('worktree ')) worktree = field.slice(9);
-            if (field === `branch ${branch}`) holders.push(worktree);
-          }
+          // Git's update-ref does not protect a branch checked out in another worktree.
+          const holders = await worktreesHoldingBranch(cwd, branch).catch(() => {
+            throw new UndoGitError('Cannot read the repository worktrees');
+          });
           const transient = worktreeDirPaths(
             cwd,
             '',
