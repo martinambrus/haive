@@ -70,6 +70,7 @@ export type ProjectStateRefreshOutcome =
       outcome: 'held';
       reason: 'git_operation' | 'recovery' | 'checkout' | 'sync';
       code?: 'write_pending' | 'git_operation';
+      detail?: string;
     }
   | { outcome: 'blocked'; code: 'unowned_malformed_rtk'; file: string }
   | { outcome: 'refused'; reason: 'record' | 'context' };
@@ -130,7 +131,12 @@ export async function refreshProjectStateOutcome(
     expectedCheckout,
   });
   if (synced.outcome === 'held')
-    return { outcome: 'held', reason: 'sync', ...(synced.code ? { code: synced.code } : {}) };
+    return {
+      outcome: 'held',
+      reason: 'sync',
+      ...(synced.code ? { code: synced.code } : {}),
+      ...(synced.reason ? { detail: synced.reason.slice(0, 500) } : {}),
+    };
   if (synced.outcome === 'refused') {
     await setOutboxError(db, repositoryId, synced.reason ?? 'the checkout record was refused');
     return { outcome: 'refused', reason: 'record' };
@@ -188,10 +194,17 @@ export async function refreshProjectStateOutcome(
   return { outcome: 'written' };
 }
 
+export type ProjectStateSweepOutcome =
+  ProjectStateRefreshOutcome | { outcome: 'error'; detail: string };
+
 /** Rewrites the record of each repository whose outbox row is dirty. Writes only; the commit is
  *  whoever commits the repository. A refused, deferred or superseded sync writes nothing and keeps
  *  the row dirty with its reason, and a record that moved under the write waits for the next tick. */
-export async function sweepDirtyProjectStates(db: Database): Promise<number> {
+export async function sweepDirtyProjectStates(
+  db: Database,
+  /** Optional diagnostics sink: captures this attempt without retrying a writer to inspect it. */
+  outcomes?: Map<string, ProjectStateSweepOutcome>,
+): Promise<number> {
   const dirty = await db
     .select({ repositoryId: schema.projectStateOutbox.repositoryId })
     .from(schema.projectStateOutbox)
@@ -217,9 +230,15 @@ export async function sweepDirtyProjectStates(db: Database): Promise<number> {
   let written = 0;
   for (const { repositoryId } of dirty) {
     try {
-      if (await refreshProjectState(db, repositoryId)) written++;
+      const result = await refreshProjectStateOutcome(db, repositoryId);
+      outcomes?.set(repositoryId, result);
+      if (result.outcome === 'written' || result.outcome === 'blocked') written++;
       else await touchOutbox(db, repositoryId);
     } catch (err) {
+      outcomes?.set(repositoryId, {
+        outcome: 'error',
+        detail: safeErrorMessage(err).slice(0, 500),
+      });
       logger.warn({ err, repositoryId }, 'dirty project state refresh failed');
       await setOutboxError(db, repositoryId, safeErrorMessage(err)).catch(() => undefined);
       await touchOutbox(db, repositoryId).catch(() => undefined);

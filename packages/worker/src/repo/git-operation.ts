@@ -17,10 +17,15 @@ export class GitOperationUnreadableError extends Error {
  *  directory but no REBASE_HEAD. A checkout with no `.git` has none; a read that fails in one that has
  *  a `.git` is unknown and throws. */
 export async function gitOperationInProgress(repoPath: string): Promise<boolean> {
+  return (await gitOperationMarker(repoPath)) !== null;
+}
+
+/** The first state entry that holds this checkout, using the same read as the operation guard. */
+export async function gitOperationMarker(repoPath: string): Promise<string | null> {
   for (const ref of GIT_OPERATION_STATE_ENTRIES) {
     const located = await gitRun(repoPath, ['rev-parse', '--git-path', ref]);
     if (located.code !== 0) {
-      if ((await gitWorkspaceStatus(repoPath)) === 'absent') return false;
+      if ((await gitWorkspaceStatus(repoPath)) === 'absent') return null;
       throw new GitOperationUnreadableError(
         `git rev-parse --git-path ${ref} failed in ${repoPath}: ${(located.stderr || located.stdout).trim().slice(0, 500)}`,
       );
@@ -33,12 +38,12 @@ export async function gitOperationInProgress(repoPath: string): Promise<boolean>
       throw new GitOperationUnreadableError(`${ref} is outside the checkout anchor in ${repoPath}`);
     }
     try {
-      if ((await lstatNoFollow(repoPath, rel, { strict: true })) !== null) return true;
+      if ((await lstatNoFollow(repoPath, rel, { strict: true })) !== null) return ref;
     } catch (err) {
       throw new GitOperationUnreadableError(
         `${ref} could not be read in ${repoPath}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
-  return false;
+  return null;
 }

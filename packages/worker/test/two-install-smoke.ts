@@ -61,7 +61,8 @@ import { pull, save } from '../src/queues/plan-mirror-queue.js';
 import { handleRefresh } from '../src/repo/refresh.js';
 import {
   markProjectStatesDirtyAtBoot,
-  sweepDirtyProjectStates,
+  sweepDirtyProjectStates as runProjectStateSweep,
+  type ProjectStateSweepOutcome,
 } from '../src/project-state/refresh.js';
 import { resolveProjectStateConflict } from '../src/project-state/resolve.js';
 import { restoreFaults } from '../src/project-state/set-aside.js';
@@ -95,6 +96,7 @@ import {
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { planMergeStep } from '../src/step-engine/steps/plan/01-plan-merge.js';
+import { projectStateSweepDiagnostic } from './support/project-state-sweep-diagnostics.js';
 
 const log = logger.child({ module: 'two-install-smoke' });
 
@@ -108,6 +110,25 @@ const urlA = process.env.DATABASE_URL;
  *  passes fails the run, so the PR that closes one removes it here. */
 const KNOWN_GAPS: Record<string, string> = {};
 const gapsChecked = new Set<string>();
+
+// Snapshot immediately after each sweep, before a later check/mutation can remove its hold.
+// Keep only the latest tick per install; expected holds stay quiet unless a check fails.
+const sweepDiagnostics = new Map<Database, unknown[]>();
+async function sweepDirtyProjectStates(db: Database): Promise<number> {
+  const outcomes = new Map<string, ProjectStateSweepOutcome>();
+  const written = await runProjectStateSweep(db, outcomes);
+  const diagnostics: unknown[] = [];
+  for (const [repositoryId, refresh] of outcomes) {
+    try {
+      const diagnostic = await projectStateSweepDiagnostic(db, repositoryId, refresh);
+      if (diagnostic) diagnostics.push(diagnostic);
+    } catch (err) {
+      diagnostics.push({ repositoryId, refresh, diagnosticError: String(err).slice(0, 500) });
+    }
+  }
+  sweepDiagnostics.set(db, diagnostics);
+  return written;
+}
 
 let failures = 0;
 let checks = 0;
@@ -130,6 +151,9 @@ function check(name: string, ok: boolean, detail?: unknown): void {
   }
   failures += 1;
   log.error({ check: name, detail }, 'FAILED');
+  for (const diagnostics of sweepDiagnostics.values())
+    for (const diagnostic of diagnostics)
+      log.error({ check: name, diagnostic }, 'project-state sweep diagnostic (last tick)');
 }
 
 const gitEnv = {
