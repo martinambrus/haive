@@ -78,7 +78,7 @@ test.describe('step retry/skip UI', () => {
 
     // The button's disappearance is NOT asserted, and this is the same race as the status poll
     // above wearing a different hat: Retry hides while the step is pending and comes back the
-    // moment the worker re-fails it, which on a repo-less fixture is immediate. CI caught this
+    // moment the worker re-fails it, which on a fixture with no checkout path is immediate. CI caught this
     // one on the run after the poll was removed. What the test is actually for — that the
     // button is wired to the action endpoint — is proven by the event.
   });
@@ -104,7 +104,7 @@ test.describe('step retry/skip UI', () => {
     // Advancement is NOT asserted, for the reason the api's own skip handler gives: it cannot
     // see unmaterialized future steps, so it enqueues ADVANCE_STEP and the worker walks the run
     // list. On a fixture task that worker loses — it fails with "has no resolvable repo path",
-    // because the fixture has no repository. Measured: the task stays failed on the skipped
+    // because the fixture has no checkout path. Measured: the task stays failed on the skipped
     // step. What skip guarantees synchronously is the step row and the event, both below.
 
     const events = await sql<{ event_type: string }[]>`

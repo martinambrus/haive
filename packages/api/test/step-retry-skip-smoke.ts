@@ -45,7 +45,7 @@ async function main(): Promise<void> {
     await userSecretsService.initialize(db, masterKek);
 
     // Every action below enqueues a real advance-step job. Against a live stack a running
-    // worker picks it up within milliseconds, fails the throwaway task (no repo, no real
+    // worker picks it up within milliseconds, fails the throwaway task (no checkout path, no real
     // step) and the assertions below race it. Pause the queue for the duration; the jobs
     // are dropped and the queue resumed in the finally block.
     await getTaskQueue().pause();
@@ -72,10 +72,17 @@ async function main(): Promise<void> {
     const token = await signAccessToken({ sub: userId, role: 'user', tv: 0 });
     const cookie = `${ACCESS_COOKIE}=${token}`;
 
+    const [repository] = await db
+      .insert(schema.repositories)
+      .values({ userId, name: 'step-retry-skip', source: 'local_path', status: 'ready' })
+      .returning({ id: schema.repositories.id });
+    if (!repository) throw new Error('repository insert failed');
+
     const [task] = await db
       .insert(schema.tasks)
       .values({
         userId,
+        repositoryId: repository.id,
         type: 'workflow',
         title: 'retry skip smoke',
         status: 'failed',

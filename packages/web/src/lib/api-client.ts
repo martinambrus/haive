@@ -1,4 +1,8 @@
-import type { TaskIntegrationChoice, TaskIntegrationPreview } from '@haive/shared';
+import type {
+  RepositoryErrorCode,
+  TaskIntegrationChoice,
+  TaskIntegrationPreview,
+} from '@haive/shared';
 import type { IntegrationConnection, IntegrationProvider } from './integrations';
 import type { SidebarTree } from './sidebar-tree';
 import type { TaskToneFilter } from './task-tone';
@@ -340,6 +344,7 @@ export interface Repository {
   branch: string | null;
   status: 'cloning' | 'ready' | 'error';
   statusMessage: string | null;
+  errorCode?: RepositoryErrorCode | null;
   /** List-only retry capability. Absent means unknown; the API still checks admission. */
   canRetry?: boolean;
   /** List-only: recorded reason an errored repository cannot be retried. Absent means unknown. */

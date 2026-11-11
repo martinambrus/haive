@@ -55,6 +55,7 @@ const net = vi.hoisted(() => ({
   attachmentFetches: [] as string[],
   unstubbed: [] as string[],
   patchError: null as string | null,
+  actionError: null as string | null,
   stopResult: { killed: 0, cancelled: 0, stopped: 0 },
 }));
 
@@ -94,6 +95,12 @@ async function fakeFetch(input: unknown, init?: { body?: string; method?: string
   if (path === '/tasks/t1/action') {
     const body = JSON.parse(init?.body ?? '{}') as Record<string, unknown>;
     net.actions.push(body);
+    if (net.actionError)
+      return {
+        ok: false,
+        status: 409,
+        json: async () => ({ error: net.actionError, code: 'task_repository_deleted' }),
+      };
     if (net.missing && !body.confirmMissingAttachments)
       return {
         ok: false,
@@ -167,6 +174,7 @@ beforeAll(() => {
 beforeEach(() => {
   vi.clearAllTimers();
   net.patchError = null;
+  net.actionError = null;
   net.routeId = 't1';
   net.heldDetail = null;
   net.integrationSnapshot = { categories: [], choices: [], grants: [] };
@@ -566,6 +574,20 @@ it('accepts a slow task poll while a newer poll is still pending', async () => {
   expect(textOf(view.tree())).toContain('Accepted slow response');
   second({ ok: true, status: 200, json: async () => updated });
   await view.flush();
+});
+
+it('shows the API explanation when Retry refuses a deleted repository', async () => {
+  const sentence = 'The repository of this task was deleted; it cannot be retried.';
+  net.actionError = sentence;
+  const view = await mount({ status: 'failed', pausedAt: null });
+  await menuLabels(view);
+  const retry =
+    findAll(view.tree(), (h) => h.props.role === 'menuitem' && textOf(h).trim() === 'Retry')[0] ??
+    buttons(view.tree(), /^retry$/i)[0];
+  expect(retry).toBeDefined();
+  fire.click(retry!);
+  await view.flush();
+  expect(textOf(view.tree())).toContain(sentence);
 });
 
 describe('task page: round labels', () => {

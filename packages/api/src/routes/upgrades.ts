@@ -1068,7 +1068,11 @@ export async function refuseReviveBesideLive(
     const refusal = verdict.refusal;
     switch (refusal.reason) {
       case 'no-repository':
-        throw new HttpError(404, 'Repository not found');
+        throw new HttpError(
+          409,
+          'The repository of this task was deleted; it cannot be retried.',
+          'task_repository_deleted',
+        );
       case 'root-claim':
         throw new HttpError(409, rootClaimRefusal(refusal.claimKind));
       case 'live-upgrade':

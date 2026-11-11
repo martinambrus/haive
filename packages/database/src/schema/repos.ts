@@ -283,6 +283,8 @@ export const repositories = pgTable(
      *  Haive's live default rules; any text, the empty string included, is an explicit override.
      *  Declared LAST so `ALTER TABLE ADD COLUMN` and `drizzle-kit push` agree on column order. */
     agentRulesOverride: text('agent_rules_override'),
+    /** Structural recovery state; written with status and cleared outside error. */
+    errorCode: text('error_code'),
   },
   (table) => [
     index('repositories_user_id_idx').on(table.userId),

@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, ne, sql } from 'drizzle-orm';
 import * as schema from './schema/index.js';
 import { isRootClaimLive, type RootClaimKind } from './repo-root-claim.js';
 import type { DbTx } from './task-attachments-lock.js';
@@ -58,6 +58,7 @@ export async function liveTaskIdOfType(
   repositoryId: string,
   type: 'onboarding' | 'onboarding_upgrade',
   userId?: string,
+  excludeTaskId?: string,
 ): Promise<string | null> {
   const [live] = await db
     .select({ id: schema.tasks.id })
@@ -68,6 +69,7 @@ export async function liveTaskIdOfType(
         eq(schema.tasks.type, type),
         inArray(schema.tasks.status, [...LIVE_TASK_STATUSES]),
         ...(userId ? [eq(schema.tasks.userId, userId)] : []),
+        ...(excludeTaskId ? [ne(schema.tasks.id, excludeTaskId)] : []),
       ),
     )
     .limit(1);
@@ -81,9 +83,9 @@ export type ReviveRefusal =
   | { reason: 'live-onboarding'; taskId: string };
 
 export interface ReviveTask {
-  type: 'onboarding' | 'onboarding_upgrade';
+  type: string;
   userId: string;
-  repositoryId: string;
+  repositoryId: string | null;
   metadata: unknown;
 }
 
@@ -95,9 +97,14 @@ export type ReviveCheck =
  * The checks that decide whether a failed onboarding or upgrade may be revived, under the lock
  * creation takes: a live root claim, then an onboarding beside a live upgrade, rollback or other
  * onboarding, or an upgrade or rollback beside a live onboarding. Call it in the transaction that
- * revives the task. Null when the task is of another type, has no repository, or is already live.
+ * revives the task. Every type proves its repository still exists after taking the creation key.
+ * A task created repo-less may explicitly opt out of the missing-repository refusal.
  */
-export async function checkRevive(tx: DbTx, taskId: string): Promise<ReviveCheck | null> {
+export async function checkRevive(
+  tx: DbTx,
+  taskId: string,
+  allowNoRepository = false,
+): Promise<ReviveCheck | null> {
   const [row] = await tx
     .select({
       type: schema.tasks.type,
@@ -107,13 +114,20 @@ export async function checkRevive(tx: DbTx, taskId: string): Promise<ReviveCheck
     })
     .from(schema.tasks)
     .where(eq(schema.tasks.id, taskId));
-  if (!row?.repositoryId) return null;
-  // A revived task holds the checkout again, so it waits out a move that holds this lock, as creation does.
+  if (!row) return null;
+  if (!row.repositoryId) {
+    return allowNoRepository ? null : { task: row, refusal: { reason: 'no-repository' } };
+  }
+  // Deletion takes this key too. A read before the wait cannot prove the repository survived it.
   if (row.type !== 'onboarding' && row.type !== 'onboarding_upgrade') {
     await lockRepositoryTasksKey(tx, row.repositoryId);
-    return null;
+    const [repo] = await tx
+      .select({ id: schema.repositories.id })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, row.repositoryId));
+    return repo ? null : { task: row, refusal: { reason: 'no-repository' } };
   }
-  const task: ReviveTask = {
+  const task: ReviveTask & { repositoryId: string } = {
     type: row.type,
     userId: row.userId,
     repositoryId: row.repositoryId,
@@ -122,10 +136,16 @@ export async function checkRevive(tx: DbTx, taskId: string): Promise<ReviveCheck
   const repo = await lockRepositoryRow(tx, task.repositoryId);
   if (!repo) return { task, refusal: { reason: 'no-repository' } };
   const [current] = await tx
-    .select({ status: schema.tasks.status })
+    .select({ status: schema.tasks.status, deadAt: schema.tasks.deadAt })
     .from(schema.tasks)
     .where(eq(schema.tasks.id, taskId));
-  if (!current || (LIVE_TASK_STATUSES as readonly string[]).includes(current.status)) return null;
+  // Dead tasks keep their live status but gave up the checkout; revival must re-admit them.
+  // An active task's Retry/Resume retains the existing admission behaviour.
+  if (
+    !current ||
+    (!current.deadAt && (LIVE_TASK_STATUSES as readonly string[]).includes(current.status))
+  )
+    return null;
   if (isRootClaimLive(repo.rootClaimedAt)) {
     return {
       task,
@@ -134,11 +154,23 @@ export async function checkRevive(tx: DbTx, taskId: string): Promise<ReviveCheck
   }
   let refusal: ReviveRefusal | null = null;
   if (task.type === 'onboarding') {
-    const upgradeId = await liveTaskIdOfType(tx, task.repositoryId, 'onboarding_upgrade');
+    const upgradeId = await liveTaskIdOfType(
+      tx,
+      task.repositoryId,
+      'onboarding_upgrade',
+      undefined,
+      taskId,
+    );
     if (upgradeId) refusal = { reason: 'live-upgrade', taskId: upgradeId };
   }
   if (!refusal) {
-    const onboardingId = await liveTaskIdOfType(tx, task.repositoryId, 'onboarding', task.userId);
+    const onboardingId = await liveTaskIdOfType(
+      tx,
+      task.repositoryId,
+      'onboarding',
+      task.userId,
+      taskId,
+    );
     if (onboardingId) refusal = { reason: 'live-onboarding', taskId: onboardingId };
   }
   return refusal ? { task, refusal } : { task, repo, refusal: null };

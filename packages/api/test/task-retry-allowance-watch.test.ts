@@ -37,14 +37,23 @@ describe('retrying a task that failed on a provider outage', () => {
   it('clears the allowance watch the failure armed', async () => {
     const fake = createFakeDb({
       modules: schema.modules,
+      repositories: schema.repositories,
       tasks: schema.tasks,
       taskSteps: schema.taskSteps,
       cliInvocations: schema.cliInvocations,
       taskEvents: schema.taskEvents,
     });
+    fake.insert(schema.repositories, {
+      id: USER,
+      userId: USER,
+      name: 'repo',
+      source: 'git_https',
+      status: 'ready',
+    });
     fake.insert(schema.tasks, {
       id: TASK,
       userId: USER,
+      repositoryId: USER,
       status: 'failed',
       errorMessage: 'rate limited',
       awaitingAllowanceProviderId: PROVIDER,

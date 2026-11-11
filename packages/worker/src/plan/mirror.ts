@@ -262,6 +262,7 @@ export async function writePlanMirror(
   repositoryId: string,
   repoPath: string,
   changes?: PlanMirrorChanges,
+  options?: { recoveredCheckout: true },
 ): Promise<string[]> {
   try {
     const flush = () =>
@@ -269,6 +270,9 @@ export async function writePlanMirror(
         // Every writer (queue, plan steps, onboarding) enters here. Serialize per
         // repository across worker processes so an older render can never rename
         // over a newer one after the newer writer already marked itself current.
+        // Recovery runs on a private replacement inside the rebuild's root claim. Keep its stamp
+        // update in the same lock order as task admission and the record writer.
+        if (options?.recoveredCheckout) await lockRepositoryTasksKey(tx, repositoryId);
         await lockPlanMirror(tx, repositoryId);
         return writePlanMirrorLocked(tx, repositoryId, repoPath, changes);
       });

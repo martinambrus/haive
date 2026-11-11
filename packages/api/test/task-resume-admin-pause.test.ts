@@ -47,6 +47,7 @@ let clock = 0;
 const setup = (over: Record<string, unknown> = {}, taskOwner = OWNER) => {
   const fake = createFakeDb({
     modules: schema.modules,
+    repositories: schema.repositories,
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     taskEvents: schema.taskEvents,
@@ -55,9 +56,17 @@ const setup = (over: Record<string, unknown> = {}, taskOwner = OWNER) => {
     taskStepAgentMinings: schema.taskStepAgentMinings,
     taskDagPlans: schema.taskDagPlans,
   });
+  fake.insert(schema.repositories, {
+    id: TASK,
+    userId: taskOwner.id,
+    name: 'repo',
+    source: 'git_https',
+    status: 'ready',
+  });
   fake.insert(schema.tasks, {
     id: TASK,
     userId: taskOwner.id,
+    repositoryId: TASK,
     type: 'workflow',
     title: 'a task',
     status: 'running',
@@ -399,11 +408,14 @@ describe('Retry of a failed paused task', () => {
       const fake = make();
       await pauseBy(OWNER);
       const read = fake.rows(schema.tasks)[0]?.pausedAt;
-      fake.hooks.beforeUpdate = async (table) => {
-        if (table !== schema.tasks) return;
-        fake.hooks.beforeUpdate = null;
-        await adminResume();
-        await adminPause();
+      // Retry has read the owner's hold, but must not hold the creation key yet:
+      // the administrator's Resume takes that key too, so awaiting it from an
+      // update hook inside Retry's locked transaction would wait on Retry itself.
+      fake.hooks.beforeLock = async (key) => {
+        if (key !== `onboarding-upgrade:${TASK}`) return;
+        fake.hooks.beforeLock = null;
+        expect((await adminResume()).status).toBe(200);
+        expect((await adminPause()).status).toBe(200);
       };
 
       const res = await retryBy(OWNER);

@@ -105,11 +105,19 @@ const act = (taskId: string, action: 'pause' | 'resume' | 'stop') =>
 
 describe.skipIf(!url)('maintenance routes on Postgres', () => {
   let db: Database;
+  let repositoryId: string;
 
   const task = async (over: Partial<typeof schema.tasks.$inferInsert> = {}) => {
     const [row] = await db
       .insert(schema.tasks)
-      .values({ userId: OWNER, type: TYPE, title: 'Task', status: 'running', ...over })
+      .values({
+        userId: OWNER,
+        repositoryId,
+        type: TYPE,
+        title: 'Task',
+        status: 'running',
+        ...over,
+      })
       .returning();
     return row!;
   };
@@ -240,6 +248,7 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
     h.state = 'normal';
     h.stateKeys = [];
     await clean();
+    repositoryId = (await repository('ready', 'task-fixture')).id;
   });
 
   afterEach(async () => {

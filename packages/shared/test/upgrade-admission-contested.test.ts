@@ -142,6 +142,34 @@ describe('upgradeAdmission: a pending project state conflict', () => {
     });
   });
 
+  it.each(
+    ['running', 'queued'].flatMap((status) =>
+      ['onboarding', 'onboarding_upgrade'].map((type) => ({ status, type })),
+    ),
+  )(
+    'keeps the existing admission of an active $status $type despite checkout holds',
+    async ({ status, type }) => {
+      const s = setup();
+      s.fake.patch(schema.repositories, REPO, {
+        rootClaimedAt: new Date(),
+        rootClaimKind: 'reset',
+      });
+      s.pend(FRAMEWORK);
+      s.fake.insert(schema.tasks, {
+        id: UPGRADE,
+        userId: USER,
+        repositoryId: REPO,
+        type,
+        title: 'active upgrade',
+        status,
+        deadAt: null,
+      });
+      expect(
+        await s.fake.db.transaction((tx) => reviveRefusal(tx as unknown as DbTx, UPGRADE)),
+      ).toBeNull();
+    },
+  );
+
   it('refuses the revival of a failed upgrade, naming the reason', async () => {
     const s = setup();
     s.fake.insert(schema.repositories, { id: OTHER, userId: USER, name: 'other' });

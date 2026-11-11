@@ -37,6 +37,7 @@ import { checkProviderRecovery, runUsagePollTick } from '../src/queues/usage-pol
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const TASK = '00000000-0000-4000-8000-000000000001';
+const REPO = '00000000-0000-4000-8000-0000000000e1';
 const PROVIDER = '00000000-0000-4000-8000-0000000000b1';
 const ROW = '00000000-0000-4000-8000-0000000000c1';
 const NEXT_TASK = '00000000-0000-4000-8000-000000000002';
@@ -73,6 +74,7 @@ function setup() {
   const fake = createFakeDb({
     modules: schema.modules,
     tasks: schema.tasks,
+    repositories: schema.repositories,
     taskSteps: schema.taskSteps,
     cliInvocations: schema.cliInvocations,
     taskStepAgentMinings: schema.taskStepAgentMinings,
@@ -80,9 +82,11 @@ function setup() {
     usageWindowSnapshots: schema.usageWindowSnapshots,
   });
   const since = new Date('2026-10-15T08:00:00.000Z');
+  fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', status: 'ready' });
   fake.insert(schema.tasks, {
     id: TASK,
     userId: USER,
+    repositoryId: REPO,
     status: 'failed',
     currentStepId: 'fan-out',
     currentRound: 0,

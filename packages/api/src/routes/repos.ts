@@ -1,3 +1,4 @@
+import { checkoutWorktreeRefusal } from '@haive/shared/repo-rebuild';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -71,6 +72,8 @@ import {
   initRepoUploadRequestSchema,
   linkRepoRemoteRequestSchema,
   REPO_JOB_NAMES,
+  REPOSITORY_ERROR_CODES,
+  type RepositoryErrorCode,
   updateRepoExclusionsRequestSchema,
   CLI_PROVIDER_LIST,
   HAIVE_DATA_DIR,
@@ -229,6 +232,7 @@ export async function addRepoJobOrMarkError(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
   add: () => Promise<unknown>,
+  errorCode: RepositoryErrorCode | null = null,
 ): Promise<void> {
   try {
     await add();
@@ -237,6 +241,7 @@ export async function addRepoJobOrMarkError(
       .update(schema.repositories)
       .set({
         status: 'error',
+        errorCode,
         statusMessage:
           'Could not queue the job that prepares this repository. Retry if available; otherwise delete the repository and add it again.',
         updatedAt: new Date(),
@@ -3499,9 +3504,10 @@ repoRoutes.delete('/:id', async (c) => {
   });
 });
 
-repoRoutes.post('/:id/refresh-tree', requireNewWorkAllowed, async (c) => {
+async function refreshRepository(c: Context<AppEnv>, recovery = false) {
   const userId = c.get('userId');
   const id = c.req.param('id');
+  if (!id) throw new HttpError(404, 'Repository not found');
   const db = getDb();
   const repo = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
@@ -3510,6 +3516,7 @@ repoRoutes.post('/:id/refresh-tree', requireNewWorkAllowed, async (c) => {
     columns: {
       id: true,
       status: true,
+      errorCode: true,
       source: true,
       remoteUrl: true,
       localPath: true,
@@ -3519,6 +3526,33 @@ repoRoutes.post('/:id/refresh-tree', requireNewWorkAllowed, async (c) => {
     },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
+  if (
+    recovery &&
+    (repo.status !== 'error' ||
+      (repo.errorCode !== REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED &&
+        repo.errorCode !== REPOSITORY_ERROR_CODES.SOURCE_REPAIR_NEEDED))
+  ) {
+    throw new HttpError(409, 'This repository does not need checkout recovery.');
+  }
+  const repairErrorCode =
+    repo.errorCode === REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED
+      ? REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED
+      : repo.errorCode === REPOSITORY_ERROR_CODES.SOURCE_REPAIR_NEEDED
+        ? REPOSITORY_ERROR_CODES.SOURCE_REPAIR_NEEDED
+        : null;
+  const checkCheckoutOnly = !recovery && repairErrorCode !== null;
+  if (recovery && repo.source === 'local_path' && (!repo.writable || !repo.localPath)) {
+    throw new HttpError(
+      409,
+      'Repair the original folder in place, then refresh it. Haive cannot rebuild without a writable source folder.',
+    );
+  }
+  if (recovery && repo.source !== 'local_path' && !repo.remoteUrl) {
+    throw new HttpError(
+      409,
+      'Repair this checkout in place, then refresh it. There is no remote or writable source folder to rebuild from.',
+    );
+  }
   // The cheap half of each refusal: the job claims the root and checks the tasks again, since
   // either can change between this read and its pickup.
   const held = await readLiveRootClaim(db, id);
@@ -3537,6 +3571,15 @@ repoRoutes.post('/:id/refresh-tree', requireNewWorkAllowed, async (c) => {
   if (!retryUpload && repo.source !== 'local_path' && !repo.remoteUrl) {
     throw new HttpError(409, NO_REFRESH_SOURCE);
   }
+  if (recovery) {
+    const refusal = await checkoutWorktreeRefusal(
+      db,
+      id,
+      path.join(uploadsStorageRoot(), userId, id),
+    );
+    if (refusal) throw new HttpError(409, refusal);
+  }
+
   const holding = await db.query.tasks.findMany({
     where: and(
       eq(schema.tasks.repositoryId, id),
@@ -3553,7 +3596,7 @@ repoRoutes.post('/:id/refresh-tree', requireNewWorkAllowed, async (c) => {
   }
 
   const queue = getRepoQueue();
-  if (retryUpload) {
+  if (retryUpload || recovery) {
     const live = await queue.getJobs([
       'waiting',
       'delayed',
@@ -3569,17 +3612,30 @@ repoRoutes.post('/:id/refresh-tree', requireNewWorkAllowed, async (c) => {
     await admitNewWork(tx);
     const changed = await tx
       .update(schema.repositories)
-      .set({ status: 'cloning', statusMessage: null, updatedAt: new Date() })
+      .set({
+        status: 'cloning',
+        statusMessage: null,
+        // Keep the repair signal until recovery settles: even before enqueue, another refresh
+        // must remain check-only rather than rebuild without restoring this install's data.
+        errorCode: checkCheckoutOnly || recovery ? repairErrorCode : null,
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(schema.repositories.id, id),
-          retryUpload ? eq(schema.repositories.status, 'error') : undefined,
+          retryUpload || recovery ? eq(schema.repositories.status, 'error') : undefined,
+          recovery
+            ? inArray(schema.repositories.errorCode, [
+                REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED,
+                REPOSITORY_ERROR_CODES.SOURCE_REPAIR_NEEDED,
+              ])
+            : undefined,
         ),
       )
       .returning({ id: schema.repositories.id });
     // The live-job read alone cannot fence two simultaneous requests. Only one can move error
     // to cloning, and a second click before pickup cannot queue a second destructive extraction.
-    if (retryUpload && changed.length === 0) {
+    if ((retryUpload || recovery) && changed.length === 0) {
       throw new HttpError(409, 'Repository preparation is already queued or running.');
     }
   });
@@ -3588,6 +3644,8 @@ repoRoutes.post('/:id/refresh-tree', requireNewWorkAllowed, async (c) => {
     repositoryId: repo.id,
     userId,
     source: repo.source,
+    ...(recovery ? { recoverCheckout: true } : {}),
+    ...(checkCheckoutOnly ? { checkCheckoutOnly: true } : {}),
     ...(upload
       ? { archivePath: upload.archivePath, archiveFormat: upload.archiveFormat as ArchiveFormat }
       : {}),
@@ -3601,22 +3659,33 @@ repoRoutes.post('/:id/refresh-tree', requireNewWorkAllowed, async (c) => {
     : repo.source === 'local_path' && !repo.writable
       ? REPO_JOB_NAMES.SCAN
       : REPO_JOB_NAMES.REFRESH;
-  await addRepoJobOrMarkError(db, repo.id, () =>
-    queue.add(
-      jobName,
-      payload,
-      retryUpload
-        ? {
-            attempts: 1,
-            removeOnComplete: 100,
-            removeOnFail: 100,
-          }
-        : {
-            attempts: 3,
-            backoff: { type: 'exponential', delay: 5000 },
-          },
-    ),
+  await addRepoJobOrMarkError(
+    db,
+    repo.id,
+    () =>
+      queue.add(
+        jobName,
+        payload,
+        retryUpload || recovery
+          ? {
+              attempts: 1,
+              removeOnComplete: 100,
+              removeOnFail: 100,
+            }
+          : {
+              attempts: 3,
+              backoff: { type: 'exponential', delay: 5000 },
+            },
+      ),
+    recovery
+      ? REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED
+      : checkCheckoutOnly
+        ? repairErrorCode
+        : null,
   );
 
   return c.json({ ok: true });
-});
+}
+
+repoRoutes.post('/:id/refresh-tree', requireNewWorkAllowed, (c) => refreshRepository(c));
+repoRoutes.post('/:id/recover-checkout', requireNewWorkAllowed, (c) => refreshRepository(c, true));
