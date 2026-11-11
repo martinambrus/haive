@@ -53,6 +53,19 @@ Owner decision: a consumed `db_uploads` row is deleted once 90 days have passed 
 2. A Retry or reopen of such a task that reaches `01c1-restore-database` with no dump must fail with a plain sentence saying the dump expired and how to upload a new one, never a generic error. Add that control.
 3. Docs: `database-persistence.md` retention paragraph.
 
+### T594 · FNF[repo-recovery-followups] · checkout recovery and revival follow-ups (+7)
+
+status: open · kind: fix · found: F2 (#1065) reviews 2026-11-10/11 · priority: P3
+All PRE-EXISTING.
+
+1. C1: a recovery that fails after `moveAside` leaves `dest` missing or partial with the code set; each further recovery moves it aside again, accumulating `.aside-*` siblings (`worker/src/repo/refresh.ts` ~:427-442). Fix: reuse or clean the failed destination before moving aside again.
+2. C2: a task that starts after the rename can overlap the minutes-long clone while `dest` is absent (`refresh.ts` ~:509-520); a start does not read the root claim (`repository-refresh.md` :18-19). Fix: task start refuses while a root claim of a rebuild is held.
+3. C3: `reconcileStrandedCloningRepos` writes `error_code = null` (`worker/src/data-migrations.ts` ~:478), so a recovery stranded by a worker death becomes an ordinary Retry. Fix: keep the code.
+4. C4: the task page offers Retry on a failed task whose repository was deleted until the click returns the 409 (`web/src/app/(app)/tasks/[id]/page.tsx` ~:1948). Fix: hide it on the structural NULL repository.
+5. C5: a Rebuild clicked right after Cancel can race the asynchronous teardown touching the worktree under the checkout. Fix: count tasks with a pending teardown as holders.
+6. R1: `refreshRepository` flips an ordinary refresh of a `ready` repo to `cloning` unconditionally (`api/src/routes/repos.ts` ~:3606-3620).
+7. D4a: dead-task revival polling for transient holds is unbounded (`worker/src/queues/dead-task-boot.ts` `retryHeldRevivals`). Fix: cap or back off, log once.
+
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
 **Found something outside your task?** Search the board first (`grep -n "<file>\|<symbol>\|<slug>"`).
