@@ -423,7 +423,12 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       try {
         // Rebuild against the reviewed parent, including deletions already committed.
         // This also ignores the projection-only tree changes put-back may have made.
-        current = await gitPreview(workspace, preview.paths, preview.head);
+        // An initially clean session needs an unscoped read to offer later edits for review.
+        current = await gitPreview(
+          workspace,
+          preview.paths.length ? preview.paths : undefined,
+          preview.head,
+        );
         if (current.head !== preview.head && current.ref === preview.ref) {
           alreadyCommitted = await gitPreviewWasCommitted(workspace, preview, current.head);
           if (alreadyCommitted) committedPreviewSha = current.head;

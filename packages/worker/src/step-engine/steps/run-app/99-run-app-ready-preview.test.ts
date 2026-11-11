@@ -16,6 +16,7 @@ import * as gitExec from '../../../repo/git-exec.js';
 import * as branchRevert from '../../../project-state/branch-revert.js';
 import * as gitPush from '../../../repo/git-push.js';
 import { runAppReadyStep } from './99-run-app-ready.js';
+import { ReopenStepFormError } from '../../step-definition.js';
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
@@ -39,6 +40,44 @@ const finish = (
     iteration: 0,
     previousIterations: [],
   });
+
+it('reopens an initially empty preview to review edits made during the session', async () => {
+  const { repo, ctx } = await setup();
+  const detected = await runAppReadyStep.detect!(ctx);
+  expect(detected.commitPreview?.paths).toEqual([]);
+  const head = await git(repo, ['rev-parse', 'HEAD']);
+  await writeFileNoFollow(repo, 'a.txt', 'later session edit\n');
+  const index = await git(repo, ['ls-files', '-s']);
+  await expect(finish(ctx, detected)).rejects.toMatchObject({
+    constructor: ReopenStepFormError,
+    notice: true,
+    message:
+      'The edits changed since the commit preview. Review the refreshed preview before finishing.',
+  });
+  expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
+  expect(await git(repo, ['ls-files', '-s'])).toBe(index);
+  const refreshed = await runAppReadyStep.detect!(ctx);
+  expect(refreshed.commitPreview?.paths).toEqual(['a.txt']);
+  expect(refreshed.changedFileCount).toBe(1);
+  const artifact = JSON.parse(
+    (await readFileNoFollow(repo, '.haive/gate3-diff.json'))!.data.toString('utf8'),
+  );
+  expect(artifact.files.map((file: { path: string }) => file.path)).toEqual(['a.txt']);
+  expect(await finish(ctx, refreshed)).toMatchObject({ committed: true });
+});
+
+it('finishes an initially empty preview without edits as nothing to commit', async () => {
+  const { repo, ctx } = await setup();
+  const detected = await runAppReadyStep.detect!(ctx);
+  expect(detected.commitPreview?.paths).toEqual([]);
+  const head = await git(repo, ['rev-parse', 'HEAD']);
+  expect(await finish(ctx, detected)).toMatchObject({
+    finished: true,
+    committed: false,
+    message: 'nothing to commit',
+  });
+  expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
+});
 
 it('commits only previewed paths and leaves a later staged file in the index', async () => {
   const { repo, ctx } = await setup();
