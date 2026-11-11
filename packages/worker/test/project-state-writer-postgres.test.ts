@@ -581,6 +581,61 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
     ).toEqual(['Shared root', 'Unpushed child']);
   });
 
+  it.each([false, true])(
+    'recovery imports the source plan with no local rows (empty context: %s)',
+    async (emptyContext) => {
+      const m = await moveFixture();
+      await applyPlanPatch(
+        db!,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Team plan' }] },
+        { repositoryId: m.s.repo.id, origin: 'llm' },
+      );
+      await writePlanMirror(db!, m.s.repo.id, m.source);
+      const plan = await readFile(join(m.source, '.haive-data/plan.json'), 'utf8');
+      const markdown = await readFile(join(m.source, '.haive-data/plan.md'), 'utf8');
+      m.git(m.source, 'add', '.haive-data/plan.json', '.haive-data/plan.md');
+      m.git(m.source, 'commit', '-qm', 'team plan');
+      await db!.delete(schema.planNodes).where(eq(schema.planNodes.repositoryId, m.s.repo.id));
+      if (emptyContext) {
+        await db!
+          .update(schema.repositories)
+          .set({ renderContext: null })
+          .where(eq(schema.repositories.id, m.s.repo.id));
+        await db!
+          .delete(schema.projectStateSync)
+          .where(eq(schema.projectStateSync.repositoryId, m.s.repo.id));
+      }
+      await writeFile(join(m.dest, '.git/config'), '[core\n');
+      await handleRefresh({ ...m.payload, recoverCheckout: true }, db!, m.storage);
+      expect(await readFile(join(m.dest, '.haive-data/plan.json'), 'utf8')).toBe(plan);
+      expect(await readFile(join(m.dest, '.haive-data/plan.md'), 'utf8')).toBe(markdown);
+      expect(
+        (
+          await db!
+            .select()
+            .from(schema.planNodes)
+            .where(eq(schema.planNodes.repositoryId, m.s.repo.id))
+        ).map((n) => n.title),
+      ).toEqual(['Team plan']);
+      if (emptyContext) {
+        const [repo] = await db!
+          .select()
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, m.s.repo.id));
+        expect((repo!.renderContext as ReturnType<typeof context>).projectInfo.name).toBe(
+          'incoming',
+        );
+        expect(
+          JSON.parse(await readFile(join(m.dest, '.haive-data/state/project/render.json'), 'utf8'))
+            .projectInfo.name,
+        ).toBe('incoming');
+      }
+      expect(m.git(m.dest, 'diff', '--name-only', '--diff-filter=D')).not.toContain(
+        '.haive-data/plan',
+      );
+    },
+  );
+
   it.each(['active', 'persisted', 'late'] as const)(
     'defers a clean public refresh with a %s journal and retries after explicit recovery',
     async (timing) => {

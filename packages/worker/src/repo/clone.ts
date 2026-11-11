@@ -282,19 +282,40 @@ async function importHaiveDataMirror(
   return deferred;
 }
 
-/** Restore only this install's projections in the private replacement, after rebuild discarded
- *  the source mirrors and before its final publication fence. Both writers record their own bases
- *  and write without committing. A failure must fail recovery, never become a best-effort import. */
+/** Restore this install's projections before publication, importing the incoming record or plan
+ *  only where this install has none. A failure must fail recovery, never be best-effort. */
 export async function restoreProjectData(
   db: Database,
   repositoryId: string,
   replacementPath: string,
 ): Promise<void> {
+  const [repo] = await db
+    .select({ renderContext: schema.repositories.renderContext })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .limit(1);
+  if (repo?.renderContext != null)
+    await removeNoFollow(replacementPath, PROJECT_STATE_DIR, { recursive: true });
   const state = await refreshProjectStateOutcome(db, repositoryId, undefined, replacementPath);
   if (state.outcome !== 'written' && state.outcome !== 'absent') {
     throw new Error(`Recovered checkout project data could not be written (${state.outcome})`);
   }
-  await writePlanMirror(db, repositoryId, replacementPath, undefined, { recoveredCheckout: true });
+  const [plan] = await db
+    .select({ id: schema.planNodes.id })
+    .from(schema.planNodes)
+    .where(eq(schema.planNodes.repositoryId, repositoryId))
+    .limit(1);
+  if (!plan) {
+    // The ordinary first import owns this decision; an empty database must not turn the team's
+    // committed plan into a tracked deletion at the next Save.
+    await syncPlanFromCheckout(db, repositoryId, replacementPath);
+  } else {
+    await removeNoFollow(replacementPath, HAIVE_DATA_FILES.plan);
+    await removeNoFollow(replacementPath, HAIVE_DATA_FILES.planMarkdown);
+    await writePlanMirror(db, repositoryId, replacementPath, undefined, {
+      recoveredCheckout: true,
+    });
+  }
 }
 
 export async function persistDetection(

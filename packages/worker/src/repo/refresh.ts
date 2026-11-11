@@ -39,7 +39,6 @@ import {
   setAsideHaiveProjections,
   type KeptFiles,
 } from '../project-state/set-aside.js';
-import { PROJECT_STATE_DIR } from '@haive/shared/project-state';
 import { headCommit } from '../plan/merge.js';
 import { seedPlanBaseFromCheckout } from '../plan/mirror.js';
 import { handBackAfterMove } from '../step-engine/git-merge.js';
@@ -541,9 +540,6 @@ async function rebuild(
         // source's stale projections before the ordinary writers recreate this install's data.
         const replacement = path.join(repoStorageRoot, stagingRel);
         for (const projection of [
-          PROJECT_STATE_DIR,
-          HAIVE_DATA_FILES.plan,
-          HAIVE_DATA_FILES.planMarkdown,
           HAIVE_DATA_FILES.environment,
           HAIVE_DATA_FILES.exclusions,
           HAIVE_DATA_FILES.tooling,

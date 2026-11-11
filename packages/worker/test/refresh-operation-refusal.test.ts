@@ -881,7 +881,12 @@ it.each(['copy', 'clone'] as const)(
       await expect(readFile(path.join(dest, '.git/HEAD'))).rejects.toMatchObject({
         code: 'ENOENT',
       });
-      expect(await readdir(path.join(replacement, '.haive-data'))).toEqual(['knowledge_base']);
+      expect((await readdir(path.join(replacement, '.haive-data'))).sort()).toEqual([
+        'knowledge_base',
+        'plan.json',
+        'plan.md',
+        'state',
+      ]);
       await writeFile(path.join(replacement, '.haive-data/plan.json'), 'restored');
     });
     await handleRefresh(
