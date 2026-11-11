@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { logger } from '@haive/shared';
 import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { bundleReplacementSchema, type BundleReplacement } from '@haive/shared/schemas';
@@ -116,4 +117,11 @@ export async function restoreReplacementBundle(
       ),
     );
   return true;
+}
+
+/** Cleanup follows the catalog commit. Failure must not roll a committed tree back. */
+export async function clearReplacementRecord(root: string, archiveRel: string): Promise<void> {
+  await removeNoFollow(root, `${archiveRel}.replacement.json`).catch((err: unknown) => {
+    logger.warn({ err, archiveRel }, 'completed bundle replacement record was not removed');
+  });
 }

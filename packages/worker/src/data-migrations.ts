@@ -1,5 +1,9 @@
 import { bundleArchiveRel } from './repo/bundle-ingest.js';
-import { readReplacement, restoreReplacementBundle } from './repo/bundle-recovery.js';
+import {
+  clearReplacementRecord,
+  readReplacement,
+  restoreReplacementBundle,
+} from './repo/bundle-recovery.js';
 import { seedRepositoryCliTargets } from './project-state/cli-targets-backfill.js';
 import { isDeepStrictEqual } from 'node:util';
 import {
@@ -522,6 +526,7 @@ export async function reconcileStrandedSyncingBundles(db: Database): Promise<voi
   if (stranded.length === 0) return;
 
   for (const id of stranded) {
+    let restoredArchive: string | null = null;
     await db.transaction(async (tx) => {
       const [bundle] = await tx
         .select()
@@ -551,8 +556,14 @@ export async function reconcileStrandedSyncingBundles(db: Database): Promise<voi
           replacement,
           'The worker stopped before import finished.',
         ))
-      )
+      ) {
+        const [restored] = await tx
+          .select()
+          .from(schema.customBundles)
+          .where(eq(schema.customBundles.id, id));
+        if (restored?.status === 'active') restoredArchive = archiveRel;
         return;
+      }
       await tx
         .update(schema.customBundles)
         .set({
@@ -563,6 +574,11 @@ export async function reconcileStrandedSyncingBundles(db: Database): Promise<voi
         })
         .where(eq(schema.customBundles.id, id));
     });
+    if (restoredArchive)
+      await clearReplacementRecord(
+        process.env.BUNDLE_STORAGE_ROOT ?? '/var/lib/haive/bundles',
+        restoredArchive,
+      );
   }
   log.warn({ count: stranded.length }, 'failed bundles stranded at syncing');
 }

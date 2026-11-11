@@ -185,6 +185,17 @@ describe('handleIngestZip', () => {
         contentHash: 'old',
       });
       const oldItems = structuredClone(fake.rows(schema.customBundleItems));
+      await writeFile(
+        `${archivePath}.replacement.json`,
+        JSON.stringify({
+          mode: 'keep_until_success',
+          previousArchive: {
+            archivePath: path.join(dir, 'source.zip'),
+            archiveFilename: 'old.zip',
+            archiveFormat: 'zip',
+          },
+        }),
+      );
       h.failCatalog = outcome === 'catalog failure';
       const result = handleIngestZip(
         {
@@ -221,6 +232,7 @@ describe('handleIngestZip', () => {
           lastSyncNote: null,
         });
       }
+      await expect(readFile(`${archivePath}.replacement.json`)).rejects.toThrow();
     },
   );
 
@@ -290,6 +302,7 @@ describe('handleIngestZip', () => {
       } else {
         expect(await readFile(path.join(fixture.dest, 'old.md'), 'utf8')).toBe('old tree');
         expect(row).toMatchObject({ status: 'active', ...fixture.previousArchive });
+        await expect(readFile(`${fixture.archivePath}.replacement.json`)).rejects.toThrow();
       }
     },
   );

@@ -73,6 +73,7 @@ describe('reconcileStrandedSyncingBundles', () => {
           });
         } else {
           expect(current).toMatchObject({ status: 'active', ...fixture.previousArchive });
+          await expect(readFile(`${fixture.archivePath}.replacement.json`)).rejects.toThrow();
           expect(await readFile(join(fixture.dest, 'old.md'), 'utf8')).toBe('old tree');
         }
         await run();

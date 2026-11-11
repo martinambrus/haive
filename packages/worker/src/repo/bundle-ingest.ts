@@ -4,6 +4,7 @@ import { redactGitUrl } from '@haive/shared/schemas';
 import path from 'node:path';
 import { ensureDirNoFollow, lstatNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import {
+  clearReplacementRecord,
   readReplacement,
   recordReplacementSwap,
   restoreReplacementBundle,
@@ -133,10 +134,13 @@ export async function handleIngestZip(
   // A redelivered job for a superseded upload must not touch the current source or catalog.
   if (payload.archivePath && payload.archivePath !== bundle.archivePath) return;
   const dest = bundleExtractedDir(bundleStorageRoot, payload.userId, bundle.id);
-  if (payload.archivePath && bundle.status === 'active') return;
   const archiveRel = bundle.archivePath
     ? bundleArchiveRel(bundleStorageRoot, bundle.archivePath, payload.userId, bundle.id)
     : null;
+  if (payload.archivePath && bundle.status === 'active') {
+    if (archiveRel) await clearReplacementRecord(bundleStorageRoot, archiveRel);
+    return;
+  }
   const destRel = `${bundleDirRel(payload.userId, bundle.id)}/extracted`;
   let replacement = payload.replacement;
   let replacementRead = false;
@@ -220,6 +224,7 @@ export async function handleIngestZip(
         },
       },
     );
+    if (replacement) await clearReplacementRecord(bundleStorageRoot, archiveRel);
     if (report.note) {
       logger.warn({ bundleId: bundle.id, dropped: report.dropped }, report.note);
     }
@@ -261,6 +266,14 @@ export async function handleIngestZip(
             );
           })
         : false;
+    if (restored && archiveRel && replacement) {
+      const current = await loadBundle(db, bundle.id);
+      if (
+        current.status === 'active' &&
+        current.archivePath === replacement.previousArchive?.archivePath
+      )
+        await clearReplacementRecord(bundleStorageRoot, archiveRel);
+    }
     if (!restored) {
       await db
         .update(schema.customBundles)
