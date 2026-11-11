@@ -1,5 +1,16 @@
 # Workflow commits
 
+`ensureGitExcludeEntry` (`repo/git-init.ts`) writes `.haive/` and `**/.claude/settings.local.json`
+to `.git/info/exclude` at every `01-worktree-setup` and every `initGitWorkspace`. Linked worktrees
+read the main repository's exclude file, so every Haive `git add -A` (gate 3, the DAG issue commit,
+run-app, the initial commits) skips both. The second entry exists because Claude Code's "Yes, and
+don't ask again" writes the approved command verbatim, secrets included, into that file, and a
+person can run `claude` in the task terminal. Claude Code puts the same pattern in the host's global
+ignore file, which the worker container does not have, so on the developer host the exposure does
+not reproduce without `-c core.excludesFile=`. A copy the repository already tracks still commits.
+Do not add the file to the secret-mask globs instead: that glob set is also what `carry-untracked.ts`
+copies into every new worktree.
+
 Before `git add -A`, both gate 3 and the DAG issue committer run `assertDependencyCommitSafe`.
 It checks uncapped untracked paths and tracked changes against the task's fork point, including
 earlier issue commits, deletions and both sides of renames. Modified infrastructure and
