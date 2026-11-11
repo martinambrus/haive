@@ -56,7 +56,6 @@ import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
 import { refuseBesideLiveUpgrade, refuseReviveBesideLive } from '../upgrades.js';
 import {
   cancelLiveRuns,
-  clearTaskPause,
   reofferParkedSteps,
   startIfNeverStarted,
   stopActiveCliInvocations,
@@ -73,6 +72,7 @@ import { writeStepCliChoice } from '../../lib/step-cli-choice.js';
 import { refuseDeadTask } from '../../lib/task-dead.js';
 import { loadStepFlags, loadTaskStepFlags } from '../../lib/step-flags.js';
 import {
+  clearCancelledTaskPause,
   appendTaskEvent,
   enrichStepsWithActiveRole,
   enrichStepsWithAgentCounts,
@@ -1753,7 +1753,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     const result = await db.transaction((tx) => cancelTaskIfOpen(tx, id, { by: userId }));
     if (!result.cancelled) return c.json({ ok: true, status: result.status });
     // Cancel ends the pause as well; step actions refuse this terminal task.
-    await clearTaskPause(db, id);
+    await clearCancelledTaskPause(db, id, userId, task.userId);
     await enqueueCancelJob(id, userId);
     await appendTaskEvent(db, id, step.id, 'step.abort', { stepId, note: body.note ?? null });
     return c.json({ ok: true, status: 'cancelled' });
