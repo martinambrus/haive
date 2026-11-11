@@ -106,6 +106,7 @@ let syncError: string | null = null;
 
 let replacementBodies: unknown[] = [];
 let replacementInits = 0;
+let replacementFailure: { site: string; response: StubResponse } | null = null;
 let syncNote: string | null = null;
 const keyListeners = new Set<(event: unknown) => void>();
 async function fakeFetch(input: unknown, init?: RequestInit) {
@@ -145,14 +146,17 @@ async function fakeFetch(input: unknown, init?: RequestInit) {
   }
   if (url.pathname.endsWith('/bundles/b1/replace/init')) {
     replacementInits += 1;
+    if (replacementFailure?.site === 'init') return replacementFailure.response;
     return reply({ session: { id: 'u1' } });
   }
   if (url.pathname.endsWith('/bundles/b1/replace/u1/complete')) {
     replacementBodies.push(JSON.parse(String(init?.body)));
+    if (replacementFailure?.site === 'complete') return replacementFailure.response;
     bundleState = 'syncing';
     return reply({});
   }
-  if (url.pathname.endsWith('/bundles/uploads/u1/chunk')) return reply({});
+  if (url.pathname.endsWith('/bundles/uploads/u1/chunk'))
+    return replacementFailure?.site === 'chunk' ? replacementFailure.response : reply({});
   return { ok: false, status: 404, json: async () => ({}) };
 }
 
@@ -179,6 +183,7 @@ afterAll(() => vi.unstubAllGlobals());
 beforeEach(() => {
   replacementBodies = [];
   replacementInits = 0;
+  replacementFailure = null;
   syncNote = null;
   keyListeners.clear();
   updaterReplay.enabled = false;
@@ -576,6 +581,46 @@ it.each(['keep_until_success', 'remove_first'])(
     expect(confirm().props.disabled).toBe(true);
   },
 );
+
+it.each([
+  ['init', { error: ' Another import is already running. ' }, 'Another import is already running.'],
+  ['chunk', { error: 'This upload has expired.' }, 'This upload has expired.'],
+  [
+    'complete',
+    { error: 'The bundle changed. Start a new replacement.' },
+    'The bundle changed. Start a new replacement.',
+  ],
+  ['complete', { error: '  ' }, 'replace complete failed (409)'],
+  ['complete', { error: 42 }, 'replace complete failed (409)'],
+  ['complete', null, 'replace complete failed (409)'],
+] as const)('shows the API refusal for replacement %s: %j', async (site, body, message) => {
+  replacementFailure = {
+    site,
+    response: {
+      ok: false,
+      status: 409,
+      json: async () => {
+        if (body === null) throw new Error('not JSON');
+        return body;
+      },
+    },
+  };
+  const live = await mountLive();
+  const input = findAll(live.view.tree(), (h) => h.tag === 'input' && h.props.type === 'file')[0]!;
+  (input.props.onChange as (e: unknown) => void)({
+    target: { files: [new File(['zip'], 'replacement.zip')], value: '' },
+  });
+  await settle(live.view);
+  const radio = findAll(
+    live.view.tree(),
+    (h) => h.tag === 'input' && h.props.value === 'keep_until_success',
+  )[0]!;
+  (radio.props.onChange as () => void)();
+  await settle(live.view);
+  await live.click('Confirm replacement');
+  expect(live.text()).toContain(message);
+  expect(bundleState).toBe('active');
+});
 
 it('renders replacement option bodies with inline markdown outside their labels', async () => {
   const live = await mountLive();
