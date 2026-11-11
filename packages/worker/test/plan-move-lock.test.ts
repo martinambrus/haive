@@ -16,6 +16,7 @@ const h = vi.hoisted(() => ({
   holding: 0,
   leftoverHandles: [] as unknown[],
   transactionHandle: null as unknown,
+  transactions: [] as unknown[],
   transactionActive: false,
   reports: [] as boolean[],
 }));
@@ -182,6 +183,7 @@ beforeEach(() => {
   h.restore = 'clean';
   h.holding = 0;
   h.leftoverHandles = [];
+  h.transactions = [];
   h.reports = [];
   h.transactionActive = false;
   const db = {
@@ -189,6 +191,7 @@ beforeEach(() => {
       try {
         const tx = { select: db.select };
         h.transactionHandle = tx;
+        h.transactions.push(tx);
         h.transactionActive = true;
         return await fn(tx);
       } finally {
@@ -211,7 +214,9 @@ describe('a Save/Pull landing', () => {
     const before = git(h.repo, 'rev-parse', 'HEAD');
     const out = await run();
     expect(out.landed).toBe(true);
-    expect(h.leftoverHandles).toEqual([h.transactionHandle]);
+    // Moved aside and reported in a transaction of its own, before the merge's.
+    expect(h.transactions).toHaveLength(2);
+    expect(h.leftoverHandles).toEqual([h.transactions[0]]);
     expect(h.reports).toEqual([false]);
     expect(h.removes).toBe(1);
     expect(h.lockRequests).toHaveLength(1);
@@ -236,7 +241,8 @@ describe('a Save/Pull landing', () => {
       const out = await run().catch((err: unknown) => err);
       if (kind === 'throw') {
         expect(out).toBeInstanceOf(Error);
-        expect(h.reports).toEqual([]);
+        // The merge's failure cannot take back the report of what was already moved aside.
+        expect(h.reports).toEqual([false]);
       } else expect((out as { landed: boolean }).landed).toBe(false);
       expect(h.removes).toBe(removes);
       expect(h.lockRequests).toHaveLength(locks);
