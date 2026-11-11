@@ -361,7 +361,7 @@ User decision 2026-11-01: Preserve captured owner/mode until recovery completes;
 
 ### T318 · FNF[task-lock-wait-2] · remaining unbounded waits on start paths (+9)
 
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (bundle F1, run 2026-11-11, branch fix/F1-start-waits) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 
 1. /clarify takes the creation lock for a live task (api tasks/steps.ts:821). 2. Worker revival wait unbounded (_revive-check.ts:86); needs a soft-fail path first. 3. reviveDeadTask takes no creation lock. 4. mergeInScratch uses the pool inside the plan-merge transaction. 5. New-work fence and the advisory start's plan_nodes lock wait unbounded. 6. Ten waiting starts can starve the api pool for 30 s.
 
