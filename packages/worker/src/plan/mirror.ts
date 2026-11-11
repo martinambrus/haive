@@ -421,8 +421,8 @@ async function writePlanMirrorLocked(
     const diskHash = hashBytes(onDiskBytes);
     // Haive never writes an empty plan.json; older rows stamped absence as the hash of zero bytes.
     const synced = onDiskBytes.length > 0 && diskHash === (state?.syncedHash ?? null);
-    // A row stamped before 0196 has no base; the bytes it last read or wrote are it, so they are
-    // stored before this flush writes its own edits over them.
+    // A row stamped before 0196 has no base; the bytes it last read or wrote are it. They are
+    // stored as the base, from the bytes judged here, once this flush's plan.json has landed.
     if (synced && state && !state.hasBase) seedBase = true;
     if (!synced && rendered !== null && diskHash === hashBytes(rendered.json)) {
       // The checkout reached this plan on its own: what both hold is agreed, so it is the base.
