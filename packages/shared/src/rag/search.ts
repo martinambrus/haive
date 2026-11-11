@@ -8,6 +8,7 @@ import {
 import { logger } from '../logger/index.js';
 import { vectorLiteral } from './embed.js';
 import { extractIdentifiers, identifierTsQuery } from './identifiers.js';
+import { RAG_TEXT_CONFIG_SQL } from './lexical-config.js';
 
 const log = logger.child({ module: 'rag-search' });
 
@@ -590,7 +591,7 @@ export async function ragHybridSearch(
     const sqlText = `
       WITH q AS (
         SELECT $1::vector AS qv, ($1::vector)::halfvec(${dims}) AS qvh,
-               plainto_tsquery('english', $2) AS qq
+               plainto_tsquery(${RAG_TEXT_CONFIG_SQL}, $2) AS qq
       ),
       dense_c AS (
         SELECT id, vector,
@@ -710,7 +711,7 @@ export async function ragHybridSearch(
       const poolParam = identQueryParam + 1;
       rows = (await conn.pg.unsafe(
         `
-      WITH q AS (SELECT plainto_tsquery('english', $1) AS qq),
+      WITH q AS (SELECT plainto_tsquery(${RAG_TEXT_CONFIG_SQL}, $1) AS qq),
       lex AS (
         SELECT id,
                row_number() OVER (
@@ -760,7 +761,7 @@ export async function ragHybridSearch(
     } else {
       rows = (await conn.pg.unsafe(
         `
-      WITH q AS (SELECT plainto_tsquery('english', $1) AS qq)
+      WITH q AS (SELECT plainto_tsquery(${RAG_TEXT_CONFIG_SQL}, $1) AS qq)
       SELECT
         source_path, section_id, chunk_index, source_type, content, id,
         0 AS dense_sim,

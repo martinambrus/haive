@@ -36,7 +36,11 @@ load-bearing and each cost a measured failure to find:
 Lexemes go in via `array_to_tsvector`, which BYPASSES the parser, and are matched with the
 literal-lexeme cast `'pdf_generator'::tsquery` — never `to_tsquery`, which re-runs the parser
 and re-splits them (`to_tsquery('simple','pdf_generator')` is `'pdf' <-> 'generator'`). The
-`english` prose half is untouched, so no configuration mismatch is introduced. Cost measured
+prose half uses a store-local English configuration: `unaccent` then English stemming when the
+extension is available (`kotolna` matches `kotolňa`), otherwise verbatim English. Triggers, the three
+prose readers and the backfill predicates all resolve the same configuration through the current
+schema's `pg_namespace` row (`RAG_TEXT_CONFIG_SQL`, `shared/src/rag/lexical-config.ts`), never a
+`::regnamespace` cast, which would misread a mixed-case schema name. Cost measured
 on a 9,197-row store: tsvector total 8.9 MB to 10 MB, 9.3 lexemes added per chunk.
 
 **Ranked by IDF, and that is forced, not preferred.** `array_to_tsvector` stores POSITIONLESS
@@ -78,6 +82,13 @@ was safe from `extractIdentifiers` but not from the english parser, so a row who
 word read as upgraded when it was not; moving to v3 rewrites every per-repo store once. It is
 capped per invocation so a large store finishes over the next few syncs rather than making one
 task wait for the whole rewrite.
+
+The accent change rides the same backfill with an independent stamp (`haive accent tsv v1`), so a row
+already carrying the v3 identifier stamp is still rewritten once; batches skip locked rows. Until a
+row is rewritten an accented query can miss it (an unaccented query is unaffected), so a store above
+40,000 rows takes `ceil(N / 40,000)` task starts to fully match. Only a structural unavailability
+(SQLSTATE 42501, 58P01, 0A000) records the verbatim configuration and warns once; any other failure
+warns without recording it, and the next ensure retries.
 
 **The global KB store carries the same lexemes.** `ensureGlobalKbSchema` installs the same
 function body and runs the same backfill through its bounded step, but with no row cap: the
