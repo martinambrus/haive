@@ -29,6 +29,7 @@ import { resolveProjectStateConflict } from '../project-state/resolve.js';
 import { markProjectStatesDirtyAtBoot, sweepDirtyProjectStates } from '../project-state/refresh.js';
 import { sweepKeptProjectionMetadata } from '../project-state/kept-metadata-recovery.js';
 import {
+  observeCheckoutBranch,
   sweepCheckoutRepositories,
   watchCheckout,
   type CheckoutWatchResult,
@@ -866,6 +867,7 @@ export function startPlanMirrorWorker(): Worker<
   | ProjectStateResolveResult
   | HaiveDataSaveResult
   | CheckoutWatchResult
+  | boolean
   | number
 > {
   const worker = new Worker<
@@ -874,6 +876,7 @@ export function startPlanMirrorWorker(): Worker<
     | ProjectStateResolveResult
     | HaiveDataSaveResult
     | CheckoutWatchResult
+    | boolean
     | number
   >(
     QUEUE_NAMES.PLAN_MIRROR,
@@ -910,6 +913,9 @@ export function startPlanMirrorWorker(): Worker<
           case PLAN_MIRROR_JOB_NAMES.SYNC_CHECKOUT:
             if (!data.repositoryId) throw new Error('repositoryId required');
             return watchCheckout(getDb(), data.repositoryId);
+          case PLAN_MIRROR_JOB_NAMES.OBSERVE_CHECKOUT_BRANCH:
+            if (!data.repositoryId) throw new Error('repositoryId required');
+            return (await observeCheckoutBranch(getDb(), data.repositoryId)) !== null;
           default:
             throw new Error(`unknown plan-mirror job: ${job.name}`);
         }

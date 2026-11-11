@@ -12,22 +12,9 @@ import { admitWatchedCheckout } from './watch-admission.js';
 export type CheckoutWatchResult =
   'disabled' | 'held' | 'refused' | 'absent' | 'unchanged' | 'synced';
 
-/** Observe only this checkout: never fetch, pull, change branch or visit a folder import's source. */
-export async function watchCheckout(
-  db: Database,
-  repositoryId: string,
-): Promise<CheckoutWatchResult> {
-  try {
-    if (!(await configService.getBoolean(CONFIG_KEYS.PROJECT_STATE_SYNC_ENABLED, true)))
-      return 'disabled';
-  } catch (err) {
-    if (!(err instanceof ConfigUnavailableError)) throw err;
-    logger.warn(
-      { err, repositoryId },
-      'checkout observation skipped: the config store is unavailable',
-    );
-    return 'held';
-  }
+/** Read/persist HEAD without record import, config reads or advisory locks. Reset waits only for
+ * this path, since the full watcher can wait behind recovery and record/plan import locks. */
+export async function observeCheckoutBranch(db: Database, repositoryId: string) {
   const [repo] = await db
     .select({
       storagePath: schema.repositories.storagePath,
@@ -37,10 +24,10 @@ export async function watchCheckout(
     .from(schema.repositories)
     .where(eq(schema.repositories.id, repositoryId));
   const repoPath = repo?.storagePath ?? repo?.localPath;
-  if (!repoPath || repo?.status !== 'ready') return 'held';
+  if (!repoPath || repo?.status !== 'ready') return null;
   // This observation is independent of record-import admission: even a detached/unreadable
   // checkout or an active reset must replace the previous branch with the current answer.
-  // No pooled connection is held across Git. Reset reads the last completed observation.
+  // No pooled connection is held across Git.
   let head: Awaited<ReturnType<typeof readNamedCheckout>> = null;
   try {
     head = await readNamedCheckout(repoPath);
@@ -57,6 +44,29 @@ export async function watchCheckout(
           sql`${schema.repositories.checkoutBranch} IS DISTINCT FROM ${checkoutBranch}`,
         ),
       );
+  }
+  return { repoPath, head };
+}
+
+/** Observe only this checkout: never fetch, pull, change branch or visit a folder import's source. */
+export async function watchCheckout(
+  db: Database,
+  repositoryId: string,
+): Promise<CheckoutWatchResult> {
+  // Persist the answer even when record sync is disabled or its config store is unavailable.
+  const observation = await observeCheckoutBranch(db, repositoryId);
+  if (!observation) return 'held';
+  const { repoPath, head } = observation;
+  try {
+    if (!(await configService.getBoolean(CONFIG_KEYS.PROJECT_STATE_SYNC_ENABLED, true)))
+      return 'disabled';
+  } catch (err) {
+    if (!(err instanceof ConfigUnavailableError)) throw err;
+    logger.warn(
+      { err, repositoryId },
+      'checkout record import skipped: the config store is unavailable',
+    );
+    return 'held';
   }
   if (!head) return 'held';
   try {

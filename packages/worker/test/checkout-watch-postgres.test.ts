@@ -141,6 +141,16 @@ describe.skipIf(!url)('checkout watch on real Git and PostgreSQL', () => {
     expect((await stateOf(s.id))?.syncedHead).toBe(git(s.root, 'rev-parse', 'HEAD'));
     expect(await watchCheckout(db!, s.id)).toBe('unchanged');
   });
+  it('records the checkout branch even when record sync is disabled', async () => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    const s = await fixture();
+    expect(await watchCheckout(db!, s.id)).toBe('disabled');
+    expect(await repoOf(s.id)).toMatchObject({ checkoutBranch: 'main' });
+    git(s.root, 'checkout', '-qb', 'feature-x');
+    expect(await watchCheckout(db!, s.id)).toBe('disabled');
+    expect(await repoOf(s.id)).toMatchObject({ checkoutBranch: 'feature-x' });
+    expect(await stateOf(s.id)).toBeUndefined();
+  });
   it('records the actual checkout branch through switches, detachment and unreadable Git', async () => {
     enabled();
     const s = await fixture();

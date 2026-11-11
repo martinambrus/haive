@@ -123,6 +123,8 @@ export const PLAN_MIRROR_JOB_NAMES = {
   SAVE_HAIVE_DATA: 'save-haive-data',
   SWEEP: 'sweep-plan-mirrors',
   SYNC_CHECKOUT: 'sync-checkout',
+  /** Reset-time HEAD observation only; no project-state recovery or record/plan import. */
+  OBSERVE_CHECKOUT_BRANCH: 'observe-checkout-branch',
   SWEEP_CHECKOUTS: 'sweep-checkouts',
   /** Explicitly fast-forwards the checkout from origin, then reconciles the committed plan
    *  mirror onto the local plan. Checkout observation never contacts origin. */

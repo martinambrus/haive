@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   PLAN_MIRROR_JOB_NAMES,
   CONFIG_KEYS,
@@ -8,6 +9,47 @@ import {
 } from '@haive/shared';
 import type { HaiveDataSavePayload, HaiveDataSaveResult } from '@haive/shared/haive-data';
 import { getPlanMirrorQueue, getPlanMirrorQueueEvents } from '../queues.js';
+
+/** Five seconds for the entire Redis/worker round trip, including enqueue and event readiness.
+ * Never reuse a page hint's job: a reset needs an observation that started after this request.
+ * The caller reads checkout_branch only on success; any failure makes this reset UNKNOWN. */
+export async function observeCheckoutBranchForReset(
+  repositoryId: string,
+  userId: string,
+): Promise<boolean> {
+  const timeoutMs = 5_000;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const observe = async () => {
+      const job = await getPlanMirrorQueue().add(
+        PLAN_MIRROR_JOB_NAMES.OBSERVE_CHECKOUT_BRANCH,
+        { repositoryId, userId } satisfies PlanMirrorJobPayload,
+        {
+          jobId: `reset-checkout-${repositoryId}-${randomUUID()}`,
+          removeOnComplete: true,
+          removeOnFail: true,
+        },
+      );
+      const result: unknown = await job.waitUntilFinished(getPlanMirrorQueueEvents(), timeoutMs);
+      if (result !== true) throw new Error('checkout branch observation did not complete');
+      return true;
+    };
+    return await Promise.race([
+      observe(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('checkout branch observation timed out')),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } catch (err) {
+    logger.warn({ err, repositoryId }, 'reset checkout branch is unknown: observation failed');
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** Best-effort page hint; the complete periodic scan is the durable backstop. */
 export async function enqueueCheckoutSync(repositoryId: string, userId: string): Promise<void> {

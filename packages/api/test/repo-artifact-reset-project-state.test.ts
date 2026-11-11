@@ -4,9 +4,20 @@ import os from 'node:os';
 import path from 'node:path';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
-const h = vi.hoisted(() => ({ db: undefined as unknown }));
+const h = vi.hoisted(() => ({
+  db: undefined as unknown,
+  add: vi.fn(),
+  wait: vi.fn(),
+  events: {},
+  provenance: [] as unknown[],
+}));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/queues.js', async (load) => ({
+  ...(await load<typeof import('../src/queues.js')>()),
+  getPlanMirrorQueue: () => ({ add: h.add }),
+  getPlanMirrorQueueEvents: () => h.events,
+}));
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
     c.set('userId', USER);
@@ -20,6 +31,7 @@ vi.mock('@haive/database', async (importOriginal) => ({
 }));
 
 import { Hono } from 'hono';
+import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
@@ -328,6 +340,9 @@ describe('the reset takes back the settings and the environment of the record', 
  *  `task_steps` to `tasks`, which the fake has no builder for; a repository with no onboarding run
  *  has no rows to read there. */
 async function setup(root: string, snapshot: Record<string, unknown> = {}) {
+  h.provenance = [];
+  h.add.mockReset().mockResolvedValue({ waitUntilFinished: h.wait });
+  h.wait.mockReset().mockResolvedValue(true);
   const fake = createFakeDb({
     repositories: schema.repositories,
     tasks: schema.tasks,
@@ -384,7 +399,7 @@ async function setup(root: string, snapshot: Record<string, unknown> = {}) {
     const query: Record<string, unknown> = {};
     for (const method of ['innerJoin', 'where', 'orderBy']) query[method] = () => query;
     query.then = (ok: (rows: unknown[]) => unknown, bad: (err: unknown) => unknown) =>
-      Promise.resolve([]).then(ok, bad);
+      Promise.resolve(h.provenance).then(ok, bad);
     return query;
   };
   h.db = {
@@ -404,6 +419,79 @@ app.onError(errorHandler);
 const reset = () => app.request(`/${REPO}/onboarding-artifacts`, { method: 'DELETE' });
 
 describe('resetting a repository through the route', () => {
+  const skill = '.claude/skills/personal/SKILL.md';
+  async function mergedSkill(storedBranch: string, kind: 'event' | 'legacy') {
+    const root = await repoRoot({ [skill]: 'my untouched skill' });
+    const fake = await setup(root);
+    await fake.db
+      .update(schema.repositories)
+      .set({ checkoutBranch: storedBranch })
+      .where(eq(schema.repositories.id, REPO));
+    const endedAt = new Date('2026-02-01T00:00:00Z');
+    h.provenance = [
+      {
+        taskId: 't1',
+        stepId: '11d-skill-sync',
+        detectOutput: { skillTargetDirs: ['.claude/skills'] },
+        output: { generated: ['personal'], removed: [], indexRemovedDirs: [], skipped: [] },
+        mergeResolveState: null,
+        endedAt,
+        ...(kind === 'event'
+          ? {
+              landedMerge: {
+                baseShaBefore: 'a'.repeat(40),
+                baseShaAfter: 'b'.repeat(40),
+                landedOn: 'main',
+                landedAt: endedAt.toISOString(),
+                repoPath: root,
+                dir: root,
+              },
+            }
+          : {}),
+      },
+      {
+        taskId: 't1',
+        stepId: '12-worktree-cleanup',
+        mergeResolveState: { merged: true, baseBranch: 'main', mergedAt: endedAt.toISOString() },
+        endedAt,
+      },
+    ];
+    return { root, fake };
+  }
+
+  it.each(['event', 'legacy'] as const)(
+    'awaits a fresh branch before crediting a %s landing after a checkout switch',
+    async (kind) => {
+      const { root, fake } = await mergedSkill('main', kind);
+      h.wait.mockImplementation(async () => {
+        // The worker now observes feature-x; the sweep's persisted main was stale.
+        await fake.db
+          .update(schema.repositories)
+          .set({ checkoutBranch: 'feature-x' })
+          .where(eq(schema.repositories.id, REPO));
+        return true;
+      });
+
+      expect((await reset()).status).toBe(200);
+
+      expect(h.wait).toHaveBeenCalledWith(h.events, 5_000);
+      expect(await readFile(path.join(root, skill), 'utf8')).toBe('my untouched skill');
+    },
+  );
+
+  it.each(['queue', 'job', 'timeout'] as const)(
+    'counts an unknown branch when observation fails at %s, ignoring the stored branch',
+    async (failure) => {
+      const { root } = await mergedSkill('feature-x', 'legacy');
+      if (failure === 'queue') h.add.mockRejectedValue(new Error('Redis unavailable'));
+      else h.wait.mockRejectedValue(new Error(failure === 'job' ? 'job failed' : 'job timed out'));
+
+      expect((await reset()).status).toBe(200);
+
+      expect(await exists(root, skill)).toBe(false);
+    },
+  );
+
   it('takes the record files and their directories off its checkout', async () => {
     const root = await repoRoot();
     await setup(root);

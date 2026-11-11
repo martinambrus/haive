@@ -122,7 +122,7 @@ import { getDb } from '../db.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
-import { enqueueCheckoutSync } from '../lib/plan-mirror.js';
+import { enqueueCheckoutSync, observeCheckoutBranchForReset } from '../lib/plan-mirror.js';
 import {
   admitNewWork,
   assertNewWorkAllowed,
@@ -3186,6 +3186,8 @@ async function runOnboardingArtifactReset(
   // carry a `created_at` older than an end-of-request stamp, and `loadProvenanceSteps` would
   // exclude that run for good. Its writes land after the reset, so it belongs on the new side.
   const resetStartedAt = new Date();
+  // The root claim is a lease, not a pooled connection. No transaction spans this worker wait.
+  const branchObserved = await observeCheckoutBranchForReset(id, userId);
   const repoRow = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
     columns: { onboardingResetAt: true, renderContext: true, checkoutBranch: true },
@@ -3233,7 +3235,11 @@ async function runOnboardingArtifactReset(
   const written = collectWrittenCliContent(
     onboardingSteps,
     live,
-    resolveMergedTasks(onboardingSteps, epoch, repoRow?.checkoutBranch ?? null),
+    resolveMergedTasks(
+      onboardingSteps,
+      epoch,
+      branchObserved ? (repoRow?.checkoutBranch ?? null) : null,
+    ),
   );
 
   // Read before the transaction below deletes the sync row.
