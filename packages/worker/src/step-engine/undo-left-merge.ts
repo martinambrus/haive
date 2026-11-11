@@ -535,6 +535,18 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
               await settle('moved', 'The checkout moved since this merge; nothing was changed.');
               return;
             }
+            // --keep preserves working bytes but resets every index entry. Set-aside
+            // already restores projection entries to HEAD, so no paths need excluding.
+            const staged = await gitRun(movedCheckout, ['diff', '--cached', '--quiet', 'HEAD']);
+            if (staged.code === 1) {
+              await settle(
+                'refused',
+                'This checkout has staged changes. Commit or unstage them before trying Undo again.',
+              );
+              return;
+            }
+            if (staged.code !== 0)
+              throw new UndoGitError('Git could not read the checkout index before Undo.');
           }
           const move = await gitRun(
             movedCheckout ?? cwd,

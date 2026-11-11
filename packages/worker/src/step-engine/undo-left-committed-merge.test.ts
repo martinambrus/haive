@@ -285,6 +285,70 @@ describe('explicit undo of a cancel-left committed merge', () => {
     expect(await readFile(path.join(f.dir, 'feature'), 'utf8')).toBe('feature');
     expect(f.settled()[0]?.payload.outcome).toBe('undone');
   });
+  it.each(['repository', 'transient base'])(
+    'refuses partially staged unrelated work in the %s checkout and allows retry after unstaging',
+    async (kind) => {
+      const f = await fixture();
+      let checkout = f.dir;
+      if (kind === 'transient base') {
+        await git(f.dir, 'switch', 'feature');
+        checkout = worktreeDirPaths(f.dir, '', `${worktreeDirName('main')}--base`).worktreePath;
+        await git(f.dir, 'worktree', 'add', checkout, 'main');
+        f.payload.dir = checkout;
+        f.job.dir = checkout;
+      }
+      await writeFile(path.join(checkout, 'base'), 'staged version\n');
+      await git(checkout, 'add', 'base');
+      const staged = await git(checkout, 'ls-files', '--stage', '--', 'base');
+      await writeFile(path.join(checkout, 'base'), 'working version\n');
+      const working = await readFile(path.join(checkout, 'base'));
+
+      await f.run();
+
+      expect.soft(await git(checkout, 'ls-files', '--stage', '--', 'base')).toBe(staged);
+      expect.soft(await readFile(path.join(checkout, 'base'))).toEqual(working);
+      expect.soft(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+      expect.soft(f.settled()[0]?.payload).toMatchObject({
+        outcome: 'refused',
+        reason: expect.stringMatching(/commit or unstage/i),
+      });
+      expect.soft(leftCommittedMerges(f.events)[0]).toMatchObject({
+        settled: null,
+        refused: { count: 1 },
+      });
+      expect.soft(h.sync).not.toHaveBeenCalled();
+
+      await git(checkout, 'reset', '--', 'base');
+      await f.run();
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+      expect(await readFile(path.join(checkout, 'base'))).toEqual(working);
+      expect(leftCommittedMerges(f.events)[0]?.settled?.outcome).toBe('undone');
+    },
+  );
+  it.each([128, 124, -1])(
+    'records an index diff failure with exit %s as retryable without resetting',
+    async (code) => {
+      const f = await fixture();
+      const actual = gitPush.gitRun;
+      vi.spyOn(gitPush, 'gitRun').mockImplementation(async (dir, args, ...rest) =>
+        args[0] === 'diff' && args.includes('--cached')
+          ? { code, stdout: '', stderr: 'cannot read index' }
+          : actual(dir, args, ...rest),
+      );
+
+      await expect(f.run()).resolves.toBeUndefined();
+
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+      expect(leftCommittedMerges(f.events)[0]).toMatchObject({
+        settled: null,
+        refused: { count: 1, reason: expect.stringMatching(/could not read.*index/i) },
+      });
+      expect(h.sync).not.toHaveBeenCalled();
+      vi.restoreAllMocks();
+      await f.run();
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+    },
+  );
   it('does not drop another commit appended since landing', async () => {
     const f = await fixture();
     await git(f.dir, 'commit', '--allow-empty', '-m', 'other');
