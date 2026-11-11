@@ -4,7 +4,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DelayedError, UnrecoverableError, Worker, type Job, type Queue } from 'bullmq';
-import { and, eq, inArray, isNotNull, isNull, notInArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, lte, notInArray, sql } from 'drizzle-orm';
 import { schema, tryCliAuthLock, type Database } from '@haive/database';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
@@ -1024,10 +1024,15 @@ export async function handleRefreshCliVersionsJob(
   // Record before remote work, best-effort: a result-store outage must not prevent
   // sources from refreshing. A later throw or process death leaves an unfinished run.
   try {
-    await db.insert(schema.refreshRuns).values(started).onConflictDoUpdate({
-      target: schema.refreshRuns.kind,
-      set: started,
-    });
+    // An older run whose start write lands after a newer one's leaves the newer row in place.
+    await db
+      .insert(schema.refreshRuns)
+      .values(started)
+      .onConflictDoUpdate({
+        target: schema.refreshRuns.kind,
+        set: started,
+        setWhere: lte(schema.refreshRuns.startedAt, started.startedAt),
+      });
   } catch (err) {
     log.warn({ err, runId }, 'failed to record refresh start');
   }

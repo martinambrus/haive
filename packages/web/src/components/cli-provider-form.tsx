@@ -29,6 +29,7 @@ import {
 } from '@/lib/api-client';
 import { Button, FormError, Input, Label } from '@/components/ui';
 import { LatestRefresh } from '@/components/latest-refresh';
+import { RefreshFailures } from '@/components/refresh-failures';
 import { runCatalogVersionRefresh, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { OllamaModelDownload } from '@/components/ollama-model-download';
 import { OpenRouterModelPicker } from '@/components/openrouter-model-picker';
@@ -828,12 +829,15 @@ export function CliProviderForm({
                 Last refresh failed: {versionCache.fetchError}
               </p>
             )}
-            {canReadRefresh && (
+            {canReadRefresh ? (
               <LatestRefresh
                 endpoint={`/cli-providers/catalog/${metadata.name}/refresh-result`}
                 active={refreshingVersions}
                 result={refreshResult}
               />
+            ) : (
+              // The role read can fail; this manual run's own result reaches only an admin anyway.
+              <RefreshFailures result={refreshResult} />
             )}
           </>
         )}

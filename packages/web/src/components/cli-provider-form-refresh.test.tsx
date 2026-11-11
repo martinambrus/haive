@@ -198,3 +198,17 @@ it('polls durable refresh results for admins', async () => {
   expect(h.get.mock.calls.filter(([path]) => path.endsWith('/refresh-result'))).toHaveLength(4);
   expect(h.get.mock.calls.filter(([path]) => path === '/auth/me')).toHaveLength(1);
 });
+it('still names the failed sources of a manual refresh when the role read failed', async () => {
+  const original = h.get.getMockImplementation()!;
+  h.get.mockImplementation((path: string) =>
+    path === '/auth/me' ? Promise.reject(new Error('network down')) : original(path),
+  );
+  answer = { status: 'done', entry, result: OPENROUTER_FAILED };
+  const view = mount();
+  await settle(view);
+  await clickRefresh(view);
+  const shown = alertsIn(view);
+  expect(shown).toHaveLength(1);
+  expect(textOf(shown[0]!)).toContain('models endpoint HTTP 503');
+  expect(h.get.mock.calls.filter(([path]) => path.endsWith('/refresh-result'))).toHaveLength(0);
+});
