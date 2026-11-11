@@ -1153,7 +1153,7 @@ Reconciled 2026-11-01: item2 is RESOLVED by T397: failedAfterMove names the kept
 
 ### T487 · FNF[bundle-replace-zip-tree] · ask whether to preserve the old bundle or remove it first to free disk
 
-status: open · kind: feature · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (bundle J, run 2026-11-11, branch fix/J-replace-zip-mode) · kind: feature · user decision: resolved 2026-11-01 · priority: P2
 From the T479 follow-up review (2026-10-31). PRE-EXISTING, minor.
 
 The Replace ZIP route (api routes/bundles.ts ~:895-907; the removal at ~:906, inside the bundle-then-upload transaction) deletes the bundle's `extracted/` tree before it enqueues the ingest job (`attempts: 1`, ~:921), so the worker's `extractArchive` finds no destination and a corrupt replacement zip leaves a failed bundle (bundle-ingest.ts ~:173-176) whose item rows stay (worker-restarts.md ~:130-131) with no tree behind them. Since T479 the swap restores the previous tree on failure, so the route's removal no longer buys atomicity; but the comment at bundles.ts ~:896-897 ties it to the stale-complete guard and the docs record it as intended. Decide whether the route keeps the tree and lets the swap replace it.
