@@ -270,6 +270,27 @@ describe('reconcileStrandedSyncingBundles', () => {
     expect(row(STRANDED).status).toBe('active');
   });
 
+  it('labels candidate counts as attempts when a candidate changes before recovery', async () => {
+    bundle(STRANDED);
+    bundle(OTHER);
+    getJobs.mockImplementation(async () => {
+      fake.patch(schema.customBundles, STRANDED, { updatedAt: new Date() });
+      return [];
+    });
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      await run();
+      expect(row(STRANDED).status).toBe('syncing');
+      expect(row(OTHER).status).toBe('failed');
+      expect(warn).toHaveBeenCalledWith(
+        { attempted: 2 },
+        'attempted recovery of bundles stranded at syncing',
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('writes nothing when the queue cannot be read', async () => {
     bundle(STRANDED);
     getJobs.mockRejectedValue(new Error('redis is down'));
