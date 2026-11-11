@@ -143,15 +143,20 @@ export async function handleIngestZip(
   }
   const destRel = `${bundleDirRel(payload.userId, bundle.id)}/extracted`;
   let replacement = payload.replacement;
-  let replacementRead = false;
+  if (archiveRel) {
+    try {
+      replacement = (await readReplacement(bundleStorageRoot, archiveRel)) ?? replacement;
+    } catch (err) {
+      logger.warn({ err, bundleId: bundle.id }, 'bundle replacement record could not be read');
+      throw err;
+    }
+  }
   let published = false;
   try {
     if (!bundle.archivePath || !bundle.archiveFormat) {
       throw new Error('zip-source bundle missing archivePath or archiveFormat');
     }
     if (!archiveRel) throw new Error('bundle archive is not the file this bundle uploaded');
-    replacement = (await readReplacement(bundleStorageRoot, archiveRel)) ?? replacement;
-    replacementRead = true;
     if (
       replacement?.mode === 'keep_until_success' &&
       replacement.previousArchive &&
@@ -243,37 +248,46 @@ export async function handleIngestZip(
     );
   } catch (err) {
     const msg = safeErrorMessage(err);
-    const restored =
-      !published && replacementRead && archiveRel && replacement
-        ? await db.transaction(async (tx) => {
-            const [current] = await tx
-              .select()
-              .from(schema.customBundles)
-              .where(
-                and(
-                  eq(schema.customBundles.id, bundle.id),
-                  eq(schema.customBundles.archivePath, bundle.archivePath!),
-                  eq(schema.customBundles.status, 'syncing'),
-                ),
-              )
-              .for('update');
-            if (!current) return true; // A newer admission or completed catalog owns the tree.
-            return restoreReplacementBundle(
-              tx as unknown as Database,
-              bundleStorageRoot,
-              current,
-              replacement!,
-              scrubErrorPaths(msg),
-            );
-          })
-        : false;
-    if (restored && archiveRel && replacement) {
-      const current = await loadBundle(db, bundle.id);
-      if (
-        current.status === 'active' &&
-        current.archivePath === replacement.previousArchive?.archivePath
-      )
-        await clearReplacementRecord(bundleStorageRoot, archiveRel);
+    let restored = false;
+    try {
+      restored =
+        !published && archiveRel && replacement
+          ? await db.transaction(async (tx) => {
+              const [current] = await tx
+                .select()
+                .from(schema.customBundles)
+                .where(
+                  and(
+                    eq(schema.customBundles.id, bundle.id),
+                    eq(schema.customBundles.archivePath, bundle.archivePath!),
+                    eq(schema.customBundles.status, 'syncing'),
+                  ),
+                )
+                .for('update');
+              if (!current) return true; // A newer admission or completed catalog owns the tree.
+              return restoreReplacementBundle(
+                tx as unknown as Database,
+                bundleStorageRoot,
+                current,
+                replacement!,
+                scrubErrorPaths(msg),
+              );
+            })
+          : false;
+      if (restored && archiveRel && replacement) {
+        const current = await loadBundle(db, bundle.id);
+        if (
+          current.status === 'active' &&
+          current.archivePath === replacement.previousArchive?.archivePath
+        )
+          await clearReplacementRecord(bundleStorageRoot, archiveRel);
+      }
+    } catch (restoreErr) {
+      logger.warn(
+        { err: restoreErr, bundleId: bundle.id },
+        'bundle replacement recovery failed; leaving bundle unchanged',
+      );
+      throw err;
     }
     if (!restored) {
       await db

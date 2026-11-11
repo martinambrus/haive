@@ -32,6 +32,8 @@ vi.mock('../src/bundle-parser/index.js', () => ({
 }));
 
 import { schema } from '@haive/database';
+import { logger } from '@haive/shared';
+import * as recovery from '../src/repo/bundle-recovery.js';
 import { createFakeDb } from '@haive/database/testing';
 import type { Database } from '@haive/database';
 import type { ClassifiedBundle } from '../src/bundle-parser/classifier.js';
@@ -70,6 +72,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await rm(tmpRoot, { recursive: true, force: true });
 });
 
@@ -233,6 +236,48 @@ describe('handleIngestZip', () => {
         });
       }
       await expect(readFile(`${archivePath}.replacement.json`)).rejects.toThrow();
+    },
+  );
+
+  it.each(['corrupt record', 'restore I/O'])(
+    'leaves the bundle unchanged and logs a recovery fault: %s',
+    async (fault) => {
+      const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');
+      const fake = createFakeDb({
+        customBundles: schema.customBundles,
+        customBundleItems: schema.customBundleItems,
+      });
+      const fixture = await seedCrashedReplacement(tmpRoot, fake, 'before extract');
+      const before = structuredClone(fake.rows(schema.customBundles));
+      const items = structuredClone(fake.rows(schema.customBundleItems));
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const restoreError = Object.assign(new Error('restore denied'), { code: 'EACCES' });
+      if (fault === 'corrupt record') {
+        await writeFile(`${fixture.archivePath}.replacement.json`, '{invalid json');
+      } else {
+        vi.spyOn(recovery, 'restoreReplacementBundle').mockRejectedValueOnce(restoreError);
+      }
+      const record = await readFile(`${fixture.archivePath}.replacement.json`, 'utf8');
+
+      const error = await handleIngestZip(
+        fixture.payload,
+        fake.db as unknown as Database,
+        tmpRoot,
+      ).catch((err: unknown) => err);
+
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBe(restoreError);
+      expect(fake.rows(schema.customBundles)).toEqual(before);
+      expect(fake.rows(schema.customBundleItems)).toEqual(items);
+      expect(await readFile(`${fixture.archivePath}.replacement.json`, 'utf8')).toBe(record);
+      expect(await readFile(path.join(fixture.dest, 'old.md'), 'utf8')).toBe('old tree');
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          bundleId: fixture.payload.bundleId,
+          err: fault === 'restore I/O' ? restoreError : expect.any(Error),
+        }),
+        expect.any(String),
+      );
     },
   );
 

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
+import { logger } from '@haive/shared';
 import { createFakeDb } from '@haive/database/testing';
 
 const getJobs = vi.fn<(types: string[]) => Promise<Array<{ data: unknown }>>>();
@@ -85,6 +86,48 @@ describe('reconcileStrandedSyncingBundles', () => {
       }
     },
   );
+
+  it('leaves a corrupt stranded bundle unchanged and recovers the next bundle', async () => {
+    const { mkdir, mkdtemp, readFile, rm, writeFile } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');
+    const root = await mkdtemp(join(tmpdir(), 'bundle-sweep-fault-'));
+    const saved = process.env.BUNDLE_STORAGE_ROOT;
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    process.env.BUNDLE_STORAGE_ROOT = root;
+    try {
+      const dir = join(root, USER, STRANDED);
+      const archivePath = join(dir, 'source.new.zip');
+      await mkdir(dir, { recursive: true });
+      const corruptRecord = '{invalid json';
+      await writeFile(`${archivePath}.replacement.json`, corruptRecord);
+      bundle(STRANDED, { sourceType: 'zip', archivePath });
+      const before = structuredClone(row(STRANDED));
+      const fixture = await seedCrashedReplacement(root, fake, 'after swap');
+      const items = structuredClone(fake.rows(schema.customBundleItems));
+
+      await expect(run()).resolves.toBeUndefined();
+
+      expect(row(STRANDED)).toEqual(before);
+      expect(await readFile(`${archivePath}.replacement.json`, 'utf8')).toBe(corruptRecord);
+      expect(row(fixture.payload.bundleId)).toMatchObject({
+        status: 'active',
+        ...fixture.previousArchive,
+      });
+      expect(await readFile(join(fixture.dest, 'old.md'), 'utf8')).toBe('old tree');
+      expect(fake.rows(schema.customBundleItems)).toEqual(items);
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ bundleId: STRANDED, err: expect.any(Error) }),
+        expect.any(String),
+      );
+    } finally {
+      warn.mockRestore();
+      if (saved === undefined) delete process.env.BUNDLE_STORAGE_ROOT;
+      else process.env.BUNDLE_STORAGE_ROOT = saved;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 
   it('fails a bundle that has been syncing for minutes with no job in the queue', async () => {
     bundle(STRANDED);

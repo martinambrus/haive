@@ -526,59 +526,63 @@ export async function reconcileStrandedSyncingBundles(db: Database): Promise<voi
   if (stranded.length === 0) return;
 
   for (const id of stranded) {
-    let restoredArchive: string | null = null;
-    await db.transaction(async (tx) => {
-      const [bundle] = await tx
-        .select()
-        .from(schema.customBundles)
-        .where(
-          and(
-            eq(schema.customBundles.id, id),
-            eq(schema.customBundles.status, 'syncing'),
-            lt(schema.customBundles.updatedAt, cutoff),
-          ),
-        )
-        .for('update');
-      if (!bundle) return;
-      const root = process.env.BUNDLE_STORAGE_ROOT ?? '/var/lib/haive/bundles';
-      const archiveRel =
-        bundle.sourceType === 'zip' && bundle.archivePath
-          ? bundleArchiveRel(root, bundle.archivePath, bundle.userId, bundle.id)
-          : null;
-      const replacement = archiveRel ? await readReplacement(root, archiveRel) : null;
-      if (
-        archiveRel &&
-        replacement &&
-        (await restoreReplacementBundle(
-          tx as unknown as Database,
-          root,
-          bundle,
-          replacement,
-          'The worker stopped before import finished.',
-        ))
-      ) {
-        const [restored] = await tx
+    try {
+      let restoredArchive: string | null = null;
+      await db.transaction(async (tx) => {
+        const [bundle] = await tx
           .select()
           .from(schema.customBundles)
+          .where(
+            and(
+              eq(schema.customBundles.id, id),
+              eq(schema.customBundles.status, 'syncing'),
+              lt(schema.customBundles.updatedAt, cutoff),
+            ),
+          )
+          .for('update');
+        if (!bundle) return;
+        const root = process.env.BUNDLE_STORAGE_ROOT ?? '/var/lib/haive/bundles';
+        const archiveRel =
+          bundle.sourceType === 'zip' && bundle.archivePath
+            ? bundleArchiveRel(root, bundle.archivePath, bundle.userId, bundle.id)
+            : null;
+        const replacement = archiveRel ? await readReplacement(root, archiveRel) : null;
+        if (
+          archiveRel &&
+          replacement &&
+          (await restoreReplacementBundle(
+            tx as unknown as Database,
+            root,
+            bundle,
+            replacement,
+            'The worker stopped before import finished.',
+          ))
+        ) {
+          const [restored] = await tx
+            .select()
+            .from(schema.customBundles)
+            .where(eq(schema.customBundles.id, id));
+          if (restored?.status === 'active') restoredArchive = archiveRel;
+          return;
+        }
+        await tx
+          .update(schema.customBundles)
+          .set({
+            status: 'failed',
+            lastSyncError:
+              'Importing this bundle did not finish: nothing is queued or running for it. Use Resync (git) or Replace ZIP to try again, or remove the bundle.',
+            updatedAt: new Date(),
+          })
           .where(eq(schema.customBundles.id, id));
-        if (restored?.status === 'active') restoredArchive = archiveRel;
-        return;
-      }
-      await tx
-        .update(schema.customBundles)
-        .set({
-          status: 'failed',
-          lastSyncError:
-            'Importing this bundle did not finish: nothing is queued or running for it. Use Resync (git) or Replace ZIP to try again, or remove the bundle.',
-          updatedAt: new Date(),
-        })
-        .where(eq(schema.customBundles.id, id));
-    });
-    if (restoredArchive)
-      await clearReplacementRecord(
-        process.env.BUNDLE_STORAGE_ROOT ?? '/var/lib/haive/bundles',
-        restoredArchive,
-      );
+      });
+      if (restoredArchive)
+        await clearReplacementRecord(
+          process.env.BUNDLE_STORAGE_ROOT ?? '/var/lib/haive/bundles',
+          restoredArchive,
+        );
+    } catch (err) {
+      log.warn({ err, bundleId: id }, 'stranded bundle recovery failed; leaving bundle unchanged');
+    }
   }
   log.warn({ count: stranded.length }, 'failed bundles stranded at syncing');
 }
