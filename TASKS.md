@@ -43,7 +43,17 @@ over silently: ask the user, then set `owner:` to yourself with a note naming th
 and write where the work stands (branch, PR, evidence path) in its body.
 
 **Finish**: when the PR is merged and main CI is green, delete the task's block and add one line to
-`## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
+`### T593 · consumed DB-dump upload rows expire 90 days after their task ended
+
+status: open · kind: fix · found: D1 (#1063) owner decision 2026-11-11 · priority: P3
+
+Owner decision: a consumed `db_uploads` row is deleted once 90 days have passed and every task that names it is completed or cancelled. Today the consumed-row expiry in `worker/src/repo/upload-reaper.ts` (`pin` ~:326-334) keeps the row while ANY task row names it, ended tasks included, so in practice it goes only with its repository.
+
+1. Narrow the `db_uploads` pin to the rule `claimDump` already uses for complete dumps (`keptByTask` ~:363-374): a task not in `ENDED_TASK_STATUSES`, or one updated within the cutoff, keeps the row. `tasks.db_upload_id` is `ON DELETE SET NULL`, so the named tasks lose the link.
+2. A Retry or reopen of such a task that reaches `01c1-restore-database` with no dump must fail with a plain sentence saying the dump expired and how to upload a new one, never a generic error. Add that control.
+3. Docs: `database-persistence.md` retention paragraph.
+
+## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
 **Found something outside your task?** Search the board first (`grep -n "<file>\|<symbol>\|<slug>"`).
 
