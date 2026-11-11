@@ -27,6 +27,7 @@ vi.mock('@haive/database', async (original) => ({
 let tail = Promise.resolve();
 vi.mock('./merge-dir-claim.js', () => ({
   liveClaimHolder: async () => (h.holder ? { id: 'other', title: 'Other' } : null),
+  otherLiveClaim: async () => (h.holder ? { id: 'other', title: 'Other' } : null),
   inMergeDirLock: async (db: unknown, _dir: string, fn: (tx: unknown) => Promise<unknown>) => {
     const prev = tail;
     let release!: () => void;
@@ -44,6 +45,9 @@ vi.mock('./merge-dir-claim.js', () => ({
 vi.mock('../repo/refresh.js', () => ({ checkoutHoldingTasks: async () => h.holding }));
 vi.mock('../repo/worktree-claims.js', () => ({ findWorktreePathClaimant: async () => null }));
 vi.mock('../project-state/set-aside.js', () => ({
+  setAsideHaiveProjections: async () => ({ outcome: 'clean' }),
+  restoreProjectionsInTx: async () => ({ outcome: 'clean' }),
+  putBackProjections: async () => undefined,
   resyncHaiveProjections: async (...args: unknown[]) => {
     h.sync(...args);
     return h.synced;

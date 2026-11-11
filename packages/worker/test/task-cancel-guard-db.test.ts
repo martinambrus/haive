@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, mkdir, readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { recordLandedMerge } from '../src/step-engine/landed-merge.js';
 import { randomUUID } from 'node:crypto';
@@ -719,7 +719,7 @@ describe.skipIf(!url)(
       for (const dir of mergeDirs.splice(0)) await rm(dir, { recursive: true, force: true });
     });
 
-    const landedFixture = async () => {
+    const landedFixture = async (projection = false) => {
       const dir = await mkdtemp(path.join(os.tmpdir(), 'e2-cancel-landed-'));
       mergeDirs.push(dir);
       const exec = promisify(execFile);
@@ -743,6 +743,10 @@ describe.skipIf(!url)(
       const before = await git('rev-parse', 'HEAD');
       await git('switch', '-c', 'feature');
       await writeFile(path.join(dir, 'feature'), 'feature');
+      if (projection) {
+        await mkdir(path.join(dir, '.haive-data'));
+        await writeFile(path.join(dir, '.haive-data/plan.md'), 'landed plan');
+      }
       await git('add', '.');
       await git('commit', '-m', 'feature');
       await git('switch', 'main');
@@ -792,8 +796,8 @@ describe.skipIf(!url)(
       expectTeardownRan(taskId);
     };
 
-    const undoFixture = async () => {
-      const f = await landedFixture();
+    const undoFixture = async (projection = false) => {
+      const f = await landedFixture(projection);
       await db.transaction(f.land);
       await runCancel(f.taskId);
       await db.update(schema.tasks).set({ repositoryId }).where(eq(schema.tasks.id, f.taskId));
@@ -808,6 +812,31 @@ describe.skipIf(!url)(
       };
       return { ...f, undo: () => processTaskJob(job as Parameters<typeof processTaskJob>[0]), job };
     };
+
+    it('Undo sets aside a dirty Haive projection before reset --keep', async () => {
+      const f = await undoFixture(true);
+      await db.delete(schema.planNodes).where(eq(schema.planNodes.repositoryId, repositoryId));
+      await db.insert(schema.planNodes).values({ repositoryId, path: '1', title: 'Plan' });
+      await writeFile(path.join(f.dir, '.haive-data/plan.md'), 'pending plan');
+      await f.undo();
+      expect(await eventsOfType(f.taskId, 'merge.left_committed_settled')).toMatchObject([
+        { payload: { outcome: 'undone' } },
+      ]);
+      expect(await f.git('rev-parse', 'main')).toBe(f.before);
+      expect(h.calls).toContain(`resyncHaiveProjections:${f.taskId}`);
+    });
+
+    it('Undo puts projections back if local edits refuse the reset', async () => {
+      const f = await undoFixture(true);
+      await db.delete(schema.planNodes).where(eq(schema.planNodes.repositoryId, repositoryId));
+      await db.insert(schema.planNodes).values({ repositoryId, path: '1', title: 'Plan' });
+      await writeFile(path.join(f.dir, '.haive-data/plan.md'), 'pending plan');
+      await writeFile(path.join(f.dir, 'feature'), 'local edit');
+      await f.undo();
+      expect(await f.git('rev-parse', 'main')).toBe(f.after);
+      expect(await readFile(path.join(f.dir, '.haive-data/plan.md'), 'utf8')).toBe('pending plan');
+      expect(await readFile(path.join(f.dir, 'feature'), 'utf8')).toBe('local edit');
+    });
 
     it('Undo serializes concurrent jobs on the real directory lock and settles once', async () => {
       const f = await undoFixture();
