@@ -157,6 +157,51 @@ Low unless marked. Code in `worker/src/project-state/refresh.ts`, `worker/src/qu
 17. Doubled "but" in a refusal message.
 18. CI budget: the gated Postgres step is at 134 of 138 rows its 26-minute limit holds; measure before the next raise (`docs/architecture/ci-smokes.md`).
 
+### T603 · FNF[task-start-wait-followups] · bounded start waits and plan-merge leftovers follow-ups (+5)
+
+status: open · kind: fix · found: F1 (#318) reviews 2026-11-11 · priority: P4
+Low unless marked. Code in `worker/src/queues/plan-mirror-queue.ts` (`integrateOrigin`), `worker/src/queues/usage-poll-queue.ts`, `01-plan-merge.ts`.
+
+1. `RevivalBusy` is logged at error level (`usage-poll-queue.ts` ~:654); a busy revival is expected and retried, so warn.
+2. `integrateOrigin`'s first transaction rethrows after the leftover marks by `reports.length`, not by error class (a failure before any report rethrows at once; one after is held until the marks commit). Key it on where the failure happened.
+3. No real-order test for the index-held path (worktree kept, removes 0); the unit test drives a fake.
+4. No real-PostgreSQL test that the leftovers report survives a failure in the merge transaction, nor one for a conversation opening between the two transactions.
+5. `discardPlanMerge` uses the pool inside a transaction (`01-plan-merge.ts` ~:794), the shape item 4 of the old T318 fixed in `mergeInScratch`. PRE-EXISTING.
+
+### T604 · design · the 5 s start-admission bound against a large claim ledger
+
+status: open · kind: design · found: F1 (#318) review 2026-11-11 · priority: P3
+A task start waits at most 5 s for the repository task lock and row admission, then answers 409 busy (`repository-task-lock.ts`). MEASURED: the foreground project-state writer holds that lock 844-2,072 ms at 512 claim files; extrapolated, 5 s covers about 1,300-1,800 claim files, while the record allows 4,096 entries (`shared/src/project-state/limits.ts`). A repository near the cap can therefore answer busy to routine starts while a write runs. Decide: raise the bound with the ledger size, shorten the writer's hold (batch outside the lock), or accept and document.
+
+### T605 · design · git work under the task-creation key
+
+status: open · kind: design · found: F1 (#318) and D2 (#484) reviews 2026-11-11 · priority: P3
+Task creation holds the creation key across git and file work (worktree and branch checks, attachment staging), so a slow git or disk holds every other creation and start for that repository behind it. PRE-EXISTING, consequential. Decide whether the key covers only the row admission, with the file work fenced by the task's own epoch instead.
+
+### T606 · FNF[refresh-run-followups] · latest refresh-run record follow-ups (+12)
+
+status: open · kind: fix · found: F3 (#440) reviews 2026-11-11 · priority: P4
+Low unless marked. Code in `worker/src/queues/cli-exec/handlers.ts` (refresh_runs writes), `web/src/components/latest-refresh.tsx` and its pages, `@haive/database/testing` fake db.
+
+1. The start upsert's `setWhere` (an older overlapping start never overwrites a newer run) has no failing test: the fake db ignores `setWhere` and `<=`. Verified by hand on postgres:18 only.
+2. The fake db drops conflict options it does not support instead of failing, so a test can pass against a write the real database would treat differently.
+3. Run ordering compares `started_at` from the worker's clock; a clock step can reorder runs.
+4. A finished result with no `startedAt` beats the stored run.
+5. `skipped` sources are recorded only for prices; the copy shows raw source tokens.
+6. The inline `LatestRefresh` variants have no test.
+7. The trigger label (manual / scheduled / boot) is hard-coded in the component.
+8. The 10 s admin poll keeps running in a hidden tab.
+9. The result shape is declared twice (shared constants and the api response).
+10. A manual refresh that joins an in-flight job keeps that job's trigger.
+11. A failed `/auth/me` read never retries, so the stored-run panel stays hidden until reload.
+12. Probe and sign-out results are still not durable.
+
+### T607 · FNF[a11y-sweep-2] · hand-faked React hooks in web tests (+1)
+
+status: open · kind: fix · found: H1 (#343) 2026-11-11 · priority: P4
+
+1. 15 web test harnesses still fake React hooks by hand (item 7 of the old T343, partly done in #1073, which moved the touched ones to Testing Library + JSDOM). Move the rest to real React rendering or one shared helper.
+
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
 **Found something outside your task?** Search the board first (`grep -n "<file>\|<symbol>\|<slug>"`).
@@ -345,31 +390,12 @@ Validation scheduling decision 2026-11-01: attach to the dedicated capped T300 r
 
 The owner scheduled one capped validation attempt; this block is an evidence dependency, not an unanswered policy question.
 
-### T199 · /favicon.ico answers 404 on every page
-
-status: in progress (bundle H1, overnight run 2026-11-10, branch fix/H1-a11y-favicon) · kind: feature · user decision: resolved 2026-11-01 · priority: P3
-Add an icon via the Next app-router convention (src/app/icon.svg or favicon.ico).
-
-User decision 2026-11-01: Use a simple Haive H favicon.
-
 ### T310 · FNF[kept-metadata-moves] · captured owner/mode lost when a re-sync does not finish
 
 status: in progress (bundle D3, run 2026-11-11, branch fix/D3-kept-metadata) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 A: six non-merge move paths drop the kept map after a re-sync that may have returned false. B: projection writers create files as root (verify on dev). C: persisted keptMetadata never settled again. D: reachDone / settleGoneMerge after a failed re-sync. Options: inherit owner from parent dir; persist the kept map per repo; retry the re-sync before restoring.
 
 User decision 2026-11-01: Preserve captured owner/mode until recovery completes; never silently discard metadata.
-
-### T318 · FNF[task-lock-wait-2] · remaining unbounded waits on start paths (+9)
-
-status: in progress (bundle F1, run 2026-11-11, branch fix/F1-start-waits) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-
-1. /clarify takes the creation lock for a live task (api tasks/steps.ts:821). 2. Worker revival wait unbounded (_revive-check.ts:86); needs a soft-fail path first. 3. reviveDeadTask takes no creation lock. 4. mergeInScratch uses the pool inside the plan-merge transaction. 5. New-work fence and the advisory start's plan_nodes lock wait unbounded. 6. Ten waiting starts can starve the api pool for 30 s.
-
-From the T355 build (2026-11-07), PRE-EXISTING: 7. api middleware/maintenance.ts ~:45-54 fence read sits inside the start path with no bound of its own beyond the config store's 2 s. 8. worker `_revive-check.ts` ~:60 revival read: decide hold vs fail now that the read can reject.
-
-User decision 2026-11-01: Bound conflicting task-start waits and report a clear retryable busy response; do not proceed from stale state.
-
-From the T346 build (2026-11-08), PRE-EXISTING: 9. `claimTaskStart` accepts `created` (worker task-queue.ts:351, 355, 390); dormant, no producer sends START for a created task. 10. A losing concurrent Start reports a stale `status: "created"` (api tasks/index.ts:1343-1344).
 
 ### T319 · FNF[set-aside-batch] · set-aside spends 20-24 git spawns per dirty path (+1)
 
@@ -726,28 +752,6 @@ status: parked · kind: design · was modular #146 · reason: diminishing return
 4. The rag and ddev routes parse the bearer header by hand; use the shared parse in lib/task-call-auth.ts.
 5. Per-run `<uuid>` dirs in the wrappers volume are removed only by runInSandbox's finally. Add a boot or periodic sweep.
 
-### T343 · FNF[a11y-sweep] · links wrap buttons at 17 sites; sidebar rename input sits inside a button; plan panel close and tabs lack names (+12)
-
-status: in progress (bundle H1, overnight run 2026-11-10, branch fix/H1-a11y-favicon) · was modular #151 · priority: P2
-All PRE-EXISTING unless marked.
-
-1. Base items:
-   - links wrap buttons at 17 sites;
-   - the sidebar rename input sits inside a button;
-   - the plan panel's close button and tabs lack names and state.
-2. web-kit tabs.tsx TabNav sets no aria-current on the active tab.
-3. Three overlays bypass the shared Dialog: cli-auth-banner-modal.tsx:445, tasks/[id]/page.tsx:2308 ("Login successful"), and task-history.tsx:289.
-4. A dialog opened from an ActionMenu row loses its opener, so focus goes to BODY.
-5. A nested Dialog mounted in the same commit as its parent paints under it. Fix: z-index by depth.
-6. In a none-checked radio group, Tab can leave the trap. Fix: a focusin guard.
-7. 13 web tests fake React hooks by hand. Fix: use real React or one shared helper.
-8. An overflowing scroll region (code-preview-dialog.tsx ~:156) is not keyboard-scrollable. Fix: tabIndex={0} plus a name.
-9. A positive tabindex escapes the trap.
-10. REGRESSION from #774 (rare): an opener that a keyed reorder moves reads as body.
-11. The sidebar labels a `created` task "queued" (lib/task-tone.ts:69). Fix: "not started".
-12. plan-starter.tsx inputs (~:316, :399, :509) rely on placeholders as names, and the state and progress text sits outside a live region.
-13. (T454 review, 2026-10-31) PRE-EXISTING, minor, by code reading: the GitHub repo picker on /repos/new is not keyboard-operable and lacks combobox semantics (web components/new-repo-form.tsx ~:317, ~:325-327, ~:339); its blur timer closes the list 150 ms after Tab.
-
 ### T344 · FNF[task-type-e2e] · task-type e2e specs need no instance-wide switch flip and cover the unsaved-changes guard (+2)
 
 status: parked · reason: diminishing returns · user confirmed routine coverage stays parked, 2026-11-01 · priority: P4
@@ -947,7 +951,7 @@ status: parked · area: modular-haive-plan owns merge-resolver.ts landing sectio
 
 ### T435 · FNF[web-api-cookie-transport] · different web/API hostnames cannot establish the server-rendered session
 
-status: open · kind: feature · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (bundle H2, run 2026-11-11, branch fix/H2-web-origin-session) · kind: feature · user decision: resolved 2026-11-01 · priority: P2
 
 PRE-EXISTING, verified during T382/T432 recovery review. API cookies are host-only (`packages/api/src/auth/cookies.ts`), while the web proxy/layout require cookies at the web hostname; `packages/web/src/lib/api-origin.ts` accepts a different explicit API hostname. Login against that API cannot establish the SSR web session. CORS does not transfer cookies between hostnames; different sites also face SameSite=Lax. Same hostname/different ports is supported and tested. Decide on web-origin API proxying or an explicit cookie/SSO deployment contract before changing transport. Evidence: `.claude/tmp/board-run/T382/codex-review-session-recovery-fix-2.md` F2 and branch session-recovery.md. Keep single-use refresh rotation; this is separate from the current T382 correction.
 
@@ -966,13 +970,6 @@ From the T433 review (2026-10-30). Residual of T433's fallback: api routes/cli-l
 
 Cross-reference (T438, 2026-10-30): the device code now waits within the same deadline, so a code cut at the deadline goes out as it stands (cli-login-banner.ts ~:716) and is never corrected either; success text in output that arrives while the frame is held is evaluated only at the next chunk (`canDetectAuth` needs `authUrlSent`, ~:838-840; a human cannot approve before the link shows); and the login modal shows nothing about the code when the frame carries none (web cli-auth-banner-modal.tsx ~:634, now rarer). A re-send mechanism would cover the first and the last.
 
-### T440 · FNF[refresh-result-unrecorded] · a refresh's failed sources are never recorded, so a scheduled refresh's or a timed-out manual refresh's failures show nowhere
-
-status: in progress (bundle F3, run 2026-11-11, branch fix/F3-refresh-result) · kind: feature · user decision: resolved 2026-11-01 · priority: P2
-From the T428 review (2026-10-30). PRE-EXISTING, moderate. T428 shows the `ok: false` sources only on the page that started a refresh and only while its poll is open. A scheduled tick or boot refresh, and a manual refresh whose 10-minute poll window ends, surface nowhere; the poll-timeout copy even promises "reopen this page later to see the result" (web lib/cli-jobs.ts ~:33-38), which no page can show. FX has no durable trace at all: `fx_rates` has no error column (database schema/pricing.ts ~:126-135), a failure is only `log.warn` plus `ok: false` (worker cli-versions/model-prices.ts ~:329-332), and dispatch just returns the result (worker queues/cli-exec/handlers.ts ~:1529-1531). Decide between a last-result row per source, an FX fetch-state table, or one last refresh-run record the pages read; fix the timeout copy with it.
-
-User decision 2026-11-01: Persist the latest refresh result and per-source failures so the UI can reopen them later.
-
 ### T442 · FNF[runner-launch-spec] [design] · a running app runner is reused whatever image, caps, ports or debug env it was created with
 
 status: parked · reason: diminishing returns (2026-11-01 scan): Runner launch-spec mismatch is explicitly minor with unmeasured consequences; resume when resume when changed launch settings cause a demonstrated runtime problem · priority: P4
@@ -982,15 +979,6 @@ From the T431 review (2026-10-30). PRE-EXISTING, minor, consequence unmeasured. 
 
 status: parked · reason: diminishing returns (2026-11-01 scan): Explicitly minor oversized-override edge requires unusually large rules; resume when resume when actual repository rules exceed Codex's readable limit · priority: P4
 From the T119 review (2026-10-30). Minor. shared project-state limits.ts ~:12 `MAX_AGENT_RULES_BYTES` is 64 KiB, while codex reads only the first 32 KiB of AGENTS.md (the reason AGENTS.md itself is kept under 32 KiB), so a large override silently truncates what codex sees, and the rest of the file after the block with it. Decide: a 24-32 KiB cap, or a size hint on the Tooling editor.
-
-### T446 · FNF[bundle-descriptor-removal] · document the chosen claim-based descriptor-removal rule in upgrade commits
-
-status: in progress (bundle B, overnight run 2026-11-10, branch fix/B-upgrade-rtk) · kind: documentation · user decision: resolved 2026-11-01 · priority: P3
-From the T119 review (2026-10-30). Verified 2026-10-31 by the T446 driver (evidence in .claude/tmp/sonnet-run/T446/): INTENDED by the documented rule in docs/architecture/onboarding-upgrades.md ~:662-671. A descriptor that the previous base names but no local bundle holds is kept while a claim names its source, and is removed and reported in `removed` once none does; it "can flap across pushes". Measured on real git with a two-install smoke harness (packages/worker/test/two-install-smoke.ts): B's record writer (worker project-state/write.ts ~:684-711, run by 12, 02, 04, the 10 s dirty sweep and the checkout watcher) removes A's claim-less descriptor; Haive's own 02+03 with the commit box ticked commits that removal; A writes the file again at its next record write. Nothing reads an unclaimed descriptor, and A's bundle row, storage, items and ledger are untouched, so nothing is lost.
-
-Question for the owner: keep the rule (recommended, adding to the docs that 12 and 03 stage the removal when their commit box is ticked), or make a claim-less descriptor team-wide. Option 2: a descriptor exists only while a claim names its source. Option 3: the sync adds a checkout descriptor to the base only if a local bundle, a claim or the previous base names it. The flip lists are in the driver report. If flipped, also make the two-install smoke assert the rule across installs: it commits B's deletion (~:2477) and `treesDiffer` skips `bundles/` (~:2879).
-
-User decision 2026-11-01: Keep current claim-based descriptor rule; document that12/03 can commit automatic descriptor removal. No team-wide descriptor policy change.
 
 ### T450 · FNF[install-ownership-of-runners] · the runtime-runner reaper removes runners this install's database does not know, volumes included
 
@@ -1109,15 +1097,6 @@ Since T459 a plan patch that may insert takes the repository row FOR KEY SHARE f
 Note (T459 fix round): 01-plan-build (~:882, and 10_8 with it), 02-plan-coverage (~:793), 03-plan-sequence (~:630) and 01-plan-chat (~:318) catch every fold error alike, so a repository deleted under them is stamped as a failed apply rather than failing at once; minor, since the repository delete cancels the task's open steps first.
 
 Engineering scope derived from the accepted policy (2026-11-01), not a new owner decision: Use the selected serialization/bounded-wait policy for reachable plan/delete conflicts; prove lock order with current callers before a locking change. Existing data consistency stays intact.
-
-### T484 · FNF[project-state-row-hold] · the project-state writers hold the repository row FOR UPDATE across file and git work
-
-status: in progress (bundle D2, run 2026-11-11, branch fix/D2-project-state-row-hold) · kind: fix · policy: covered by accepted bounded-wait/consistency rules · priority: P2
-From the T459 review (2026-10-31). PRE-EXISTING, consequential (latency).
-
-The project-state writers take the repositories row FOR UPDATE (`watch-admission.ts` ~:24, `sync.ts` ~:733, through the write gate in write.ts ~:727-731) and keep it across file and git work: MEASURED by T459, 26-52 ms per foreground write with no claim files, 1.0-1.3 s with 150, and about 2 s per sweep write. Every child INSERT of the repository (a task start, a plan node, a mirror row) needs KEY SHARE on that row and waits as long. Decide whether the writers need FOR UPDATE (it also excludes the FK checks of every insert) or FOR NO KEY UPDATE (still excludes a delete and another writer), or a shorter hold.
-
-Engineering scope derived from the accepted policy (2026-11-01), not a new owner decision: Reduce or bound row holds under the accepted short-wait policy, preserving writer/delete exclusion and atomic project-state semantics. SQL lock strength is an implementation choice requiring a measured control.
 
 ### T485 · FNF[credential-connection-leftovers] · credential and connection edges T341 left: a drifted row still reads connected, the delete dialog names only the connection (+6)
 
@@ -1607,6 +1586,11 @@ Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/rou
 
 ## Done
 
+- T484 — all nine project-state row takes use `FOR NO KEY UPDATE`, so a child row's FK check (plan node, mirror row, task row) no longer waits for a project-state write (measured: lock timeout at 300 ms before, 3-15 ms after; delete, root claim and row writer still excluded) — PR #1074 (436bd881f), 2026-11-11. The task-creation key held across the same work is T605 (design).
+- T343 + T199 — accessibility sweep: navigation actions are `LinkButton`s (no link wraps a button, the statistics module's Advanced statistics included), the sidebar rename input is out of its button, a `created` task reads "not started", plan panel close and tabs are named, `TabNav` sets `aria-current`, three overlays use the shared `Dialog`, dialog focus restore, depth stacking and a focusin trap guard, a keyboard-scrollable code preview, named plan-starter inputs with live progress, a keyboard combobox for the GitHub repo picker; a Haive "H" favicon (`src/app/icon.svg`) — PR #1073 (c8bc4e09d), 2026-11-11. T343 item 7 continues as T607.
+- T446 — the claim-based descriptor-removal rule is kept and documented (`onboarding-upgrades.md` ~:739: 12 and 03 stage the removal when their commit box is ticked) — PR #950, verified on main 2026-11-11.
+- T440 — the latest version and price refresh run is durable (`refresh_runs`, migration 0228, one row per kind: run id, trigger, start/finish, sanitized per-source errors and kill-switch skips; an older overlapping completion never overwrites a newer run; both writes best-effort); admin-only `GET /cli-pricing/refresh/latest` and `GET /cli-providers/catalog/:name/refresh-result`; `LatestRefresh` on `/admin/pricing` and the provider form (admins poll every 10 s; a page prefers its own job's result; the manual result still shows when the role read failed); docs model-pricing.md, error-diagnostics.md — PR #1076 (5f74b1a71), 2026-11-11. Follow-ups T606 (+12).
+- T318 — task start admission (POST /tasks, Start next, spawn-plan, enrich, kb-author, upgrades, plan advisory, root-merge check) waits at most 5 s per repository/plan key or row lock and 1 s for the new-work fence, then answers 409 busy with nothing created (other `boundedLockWait` callers keep 30 s); worker revivals delay 30 s on lock expiry or an unreadable maintenance read, which now counts as held; `claimTaskStart` claims only `queued`; `mergeInScratch` runs on its caller's transaction; Plan Save/Pull report moved-aside merge leftovers in their own committed transaction before the merge; docs worker-restarts.md, merge-conflicts.md, plan-canvas.md — PR #1075 (e7f56b678), 2026-11-11. Follow-ups T603 (+5), T604 (design), T605 (design).
 - T460 + T512 — Retry, Resume and dead-task revival refuse a task whose repository was deleted (409 `task_repository_deleted`), and revival applies the Retry/Resume holds whatever the stored status; `repositories.error_code` (migration 0225) classifies a repair-needed checkout, "Check repair" is check only and never rebuilds, and "Rebuild checkout" moves the old checkout aside and restores this install's settings, KB and plan data; recovery keeps the repair code until detection succeeds, stranded preparations keep it, and rebuilds are refused while an unfinished task (legacy setup-output pointer included) has a worktree under the checkout — PR #1065 (2c16ca95e), 2026-11-11; dev 0225 applied, 0 of 79 repositories flagged. Follow-ups T602. Owner check: when this install has no plan rows, recovery keeps the incoming plan files.
 - T598 — Claude Code's `.claude/settings.local.json` ("don't ask again" saves the approved command verbatim, secrets included) is kept out of every Haive `git add -A` by a `**/.claude/settings.local.json` entry `ensureGitExcludeEntry` writes to `.git/info/exclude` next to `.haive/`; tracked copies still commit; not via the secret-mask globs, which `carry-untracked.ts` copies into worktrees — PR #1072 (b9482ff32), 2026-11-11.
 - T580 — effort estimates calibrate on the LLM's recorded estimate (`hydrateAnchors` and `GET /tasks/estimation-accuracy` read the latest `estimate.recorded.aiHours`, not the column `06b-sprint-planning` overwrites); step 11 lists every learning and skill (sorted by id, up to 500, excerpts on the first 60, ids filtered and titles collapsed at build time, an omission line past the cap, an open-before-update line for title-only entries); the `learning-recorder` persona allows update and delete and defers to the calling step's output — PR #1047 (884f5c074, 2026-11-09) and PR #1070 (7578584bb), 2026-11-11. Item 1 closed, not a defect: the `.haive-data/` move recorded no dual-read, and re-onboarding migrates `.claude/learnings/`. Plan `sleep-paper-lessons` shipped apart from P3; further work continues in `docs/plans/agent-memory-lessons.md`.

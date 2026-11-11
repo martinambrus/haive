@@ -771,7 +771,7 @@ async function answerInTransaction(
       })
       .from(schema.repositories)
       .where(eq(schema.repositories.id, repositoryId))
-      .for('update');
+      .for('no key update');
     if (!repo || repo.userId !== userId) return { kind: 'not_found' };
     const [row] = await tx
       .select()

@@ -31,7 +31,8 @@ The processor catch cannot protect a value already converted to text. Writers of
 columns and helpers returning a failure inside a successful job result sanitize at that sink,
 before persistence or return. This includes the project-state outbox, bundle ingestion, CLI
 image probes, Ollama provisioning and the version and price refresh's per-source `errors`, which
-the pricing page and the provider form show as returned (`RefreshFailures`): a new refresh source
+the pricing page and the provider form show as returned (`RefreshFailures`) and `refresh_runs`
+stores as they are: a new refresh source
 sanitizes at its own sink. A later safe rethrow does not repair an earlier raw write.
 
 The Git bundle ingest handler first calls `safeErrorMessage` on the original error. Bound errors keep their

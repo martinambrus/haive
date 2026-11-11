@@ -3,11 +3,20 @@ import { randomUUID } from 'node:crypto';
 import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createDatabase, schema, type Database, type MergeResolveState } from '@haive/database';
+import {
+  TASK_START_LOCK_TIMEOUT_MS,
+  NEW_WORK_FENCE_LOCK_TIMEOUT_MS,
+  createDatabase,
+  lockRepositoryTasksKey,
+  schema,
+  type Database,
+  type MergeResolveState,
+} from '@haive/database';
 import {
   configService,
+  lockNewWorkFenceExclusive,
   MERGE_LEFT_OPEN_EVENT,
   TASK_JOB_NAMES,
   type WorkflowType,
@@ -660,6 +669,136 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
   });
 
   describe('the revive fence', () => {
+    it.each(['creation', 'new-work', 'task-row'] as const)(
+      'holds a revival behind a busy %s fence with no state change',
+      async (kind) => {
+        const [repo] = await db
+          .insert(schema.repositories)
+          .values({ userId, name: 'busy repo', source: 'blank', status: 'ready' })
+          .returning();
+        const id = await makeDead({ repositoryId: repo!.id });
+        const read = await view(id);
+        const { sent, deps } = recorder();
+        const peer = createDatabase(url!);
+        let ready!: () => void;
+        let release!: () => void;
+        const gate = new Promise<void>((r) => {
+          release = r;
+        });
+        const taken = new Promise<void>((r) => {
+          ready = r;
+        });
+        const holder = peer.transaction(async (tx) => {
+          if (kind === 'creation') await lockRepositoryTasksKey(tx, repo!.id);
+          else if (kind === 'new-work') await lockNewWorkFenceExclusive(tx);
+          else await tx.execute(sql`select id from tasks where id = ${id} for update`);
+          ready();
+          await gate;
+        });
+        await taken;
+        const timer = setTimeout(
+          release,
+          (kind === 'new-work' ? NEW_WORK_FENCE_LOCK_TIMEOUT_MS : TASK_START_LOCK_TIMEOUT_MS) + 800,
+        );
+        try {
+          await expect(reviveDeadTask(db, read, deps)).resolves.toBe('held');
+        } finally {
+          clearTimeout(timer);
+          release();
+          await holder;
+          await peer.$client.end({ timeout: 5 });
+        }
+        expect(await task(id)).toMatchObject({ deadAt: DEAD_AT, orchestrationEpoch: 3 });
+        expect(await events(id, 'task.revived')).toHaveLength(0);
+        expect(sent).toEqual([]);
+        await expect(reviveDeadTask(db, read, deps)).resolves.toBe('advance');
+      },
+    );
+
+    it.each(['early', 'fenced'] as const)(
+      'defers a saved answer when the %s config read fails',
+      async (stage) => {
+        const id = await make({ status: 'failed', repositoryId });
+        await row(id, A, 'waiting_form', {
+          formValues: { answer: 'go' },
+          waitingStartedAt: new Date('2026-01-01'),
+        });
+        const before = await task(id);
+        const read = vi.spyOn(configService, 'getFresh');
+        if (stage === 'early') read.mockRejectedValue(new Error('store failed early'));
+        else
+          read
+            .mockResolvedValueOnce('normal')
+            .mockRejectedValueOnce(new Error('store failed under fence'));
+        const pending = job(TASK_JOB_NAMES.ADVANCE_STEP, {
+          taskId: id,
+          userId,
+          stepId: A,
+          formValues: { answer: 'go' },
+        });
+        const defer = vi.spyOn(pending, 'moveToDelayed');
+        await expect(processTaskJob(pending, 'test-token')).rejects.toMatchObject({
+          name: 'DelayedError',
+        });
+        expect(defer).toHaveBeenCalledTimes(1);
+        expect(await task(id)).toEqual(before);
+        expect(await events(id, 'task.failed')).toHaveLength(0);
+      },
+    );
+
+    it('defers an answered failed task behind the creation key without consuming an attempt', async () => {
+      const id = await make({ status: 'failed', repositoryId });
+      await row(id, A, 'waiting_form', {
+        formValues: { answer: 'go' },
+        waitingStartedAt: new Date('2026-01-01'),
+      });
+      const before = await task(id);
+      const peer = createDatabase(url!);
+      let ready!: () => void;
+      let release!: () => void;
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      const taken = new Promise<void>((r) => {
+        ready = r;
+      });
+      const holder = peer.transaction(async (tx) => {
+        await lockRepositoryTasksKey(tx, repositoryId);
+        ready();
+        await gate;
+      });
+      await taken;
+      const timer = setTimeout(release, TASK_START_LOCK_TIMEOUT_MS + 800);
+      const pending = job(TASK_JOB_NAMES.ADVANCE_STEP, {
+        taskId: id,
+        userId,
+        stepId: A,
+        formValues: { answer: 'go' },
+      });
+      const defer = vi.spyOn(pending, 'moveToDelayed');
+      try {
+        await expect(processTaskJob(pending, 'test-token')).rejects.toMatchObject({
+          name: 'DelayedError',
+        });
+      } finally {
+        clearTimeout(timer);
+        release();
+        await holder;
+        await peer.$client.end({ timeout: 5 });
+      }
+      expect(defer).toHaveBeenCalledTimes(1);
+      expect(await task(id)).toEqual(before);
+      expect(await events(id, 'task.failed')).toHaveLength(0);
+    });
+
+    it('a stray START leaves a deferred created draft untouched', async () => {
+      const id = await make({ status: 'created', currentStepId: null, repositoryId });
+      const before = await task(id);
+      await processTaskJob(job(TASK_JOB_NAMES.START, { taskId: id, userId }));
+      expect(await task(id)).toEqual(before);
+      expect(await events(id)).toHaveLength(0);
+    });
+
     it('keeps a dead task dead after its repository was deleted', async () => {
       const [repo] = await db
         .insert(schema.repositories)

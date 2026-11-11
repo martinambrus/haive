@@ -19,6 +19,31 @@ export const LIVE_TASK_STATUSES = [
  *  key, a plan or project-state key, or its row) before giving up. */
 export const REPOSITORY_TASKS_LOCK_TIMEOUT_MS = 30_000;
 
+/** Admission waits for repository/plan keys and rows. Measured with 512 claim files: the
+ *  longest foreground hold was 2.072 s, the sweep 1.735 s; 1,000-file git sections took
+ *  118-131 ms. Five seconds leaves routine writers headroom while bounding pool occupancy.
+ *  The hold grows with the record: extrapolated linearly from 150 and 512 files, about
+ *  1,300-1,800 claim files fill 5 s and a record at its 4,096-entry ceiling holds about 10-14 s,
+ *  so a start behind such a write answers 409 busy. */
+export const TASK_START_LOCK_TIMEOUT_MS = 5_000;
+
+/** The exclusive maintenance holder only toggles state; it needs no filesystem/git budget. */
+export const NEW_WORK_FENCE_LOCK_TIMEOUT_MS = 1_000;
+
+/** The shared lock-wait mechanism. A timeout aborts the transaction; callers translate it only
+ * after giving up the transaction, and never continue using state read before the wait. */
+export async function boundedLockWait<T>(
+  tx: DbTx,
+  take: () => Promise<T>,
+  timeoutMs = REPOSITORY_TASKS_LOCK_TIMEOUT_MS,
+): Promise<T> {
+  await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${timeoutMs}ms'`));
+  const result = await take();
+  // Later writes retain their ordinary wait policy.
+  await tx.execute(sql.raw('SET LOCAL lock_timeout = DEFAULT'));
+  return result;
+}
+
 /** The repository's task-creation lock alone, without the row: a checkout move holds it so no task is
  *  created between its last check and the move, while plain inserts still go through. */
 export async function lockRepositoryTasksKey(tx: DbTx, repositoryId: string): Promise<void> {

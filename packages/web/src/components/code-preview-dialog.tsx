@@ -140,6 +140,7 @@ export function CodePreviewDialog({
           </div>
           <button
             type="button"
+            aria-label="Close code preview"
             onClick={() => onOpenChange(false)}
             className="text-sm text-neutral-500 hover:text-neutral-200"
           >
@@ -153,7 +154,13 @@ export function CodePreviewDialog({
         {file?.binary && <p className="text-sm text-neutral-500">This file is not text.</p>}
 
         {file?.content && (
-          <div ref={scrollRef} className="haive-md min-h-0 flex-1 overflow-auto">
+          <div
+            ref={scrollRef}
+            role="region"
+            aria-label={`Source code: ${repoPath}`}
+            tabIndex={0}
+            className="haive-md min-h-0 flex-1 overflow-auto"
+          >
             <div ref={codeRef} className="relative">
               {lineBox && (
                 <div

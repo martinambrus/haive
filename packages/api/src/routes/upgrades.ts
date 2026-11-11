@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import {
+  TASK_START_LOCK_TIMEOUT_MS,
   isRootClaimLive,
   liveTaskIdOfType,
   lockRepositoryRow,
@@ -1038,7 +1039,11 @@ export async function withRepositoryTaskLock<T>(
 }
 
 async function lockRepositoryTasks(tx: DbTx, repositoryId: string) {
-  const repo = await boundedLockWait(tx, () => lockRepositoryRow(tx, repositoryId));
+  const repo = await boundedLockWait(
+    tx,
+    () => lockRepositoryRow(tx, repositoryId),
+    TASK_START_LOCK_TIMEOUT_MS,
+  );
   if (!repo) throw new HttpError(404, 'Repository not found');
   if (isRootClaimLive(repo.rootClaimedAt)) {
     throw new HttpError(409, rootClaimRefusal(repo.rootClaimKind as RootClaimKind | null));
@@ -1052,14 +1057,14 @@ async function lockRepositoryTasks(tx: DbTx, repositoryId: string) {
  *  revival runs too): an onboarding beside a live upgrade or rollback, an upgrade or rollback
  *  beside a live onboarding, a live root claim. An upgrade or rollback is also admitted again, as
  *  at creation, so one a reset has since cut off cannot continue. */
-export async function refuseReviveBesideLive(
-  tx: DbTx,
-  taskId: string,
-  options: { continuation?: boolean } = {},
-): Promise<void> {
-  const verdict = await boundedLockWait(tx, () => reviveRefusal(tx, taskId));
+export async function refuseReviveBesideLive(tx: DbTx, taskId: string): Promise<void> {
+  const verdict = await boundedLockWait(
+    tx,
+    () => reviveRefusal(tx, taskId),
+    TASK_START_LOCK_TIMEOUT_MS,
+  );
   if (!verdict) {
-    if (!options.continuation) await assertTaskRootMergeIdle(tx, taskId);
+    await assertTaskRootMergeIdle(tx, taskId);
     return;
   }
   const rollback = (verdict.task.metadata as { mode?: unknown } | null)?.mode === 'rollback';

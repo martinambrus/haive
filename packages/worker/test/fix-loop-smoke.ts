@@ -296,7 +296,7 @@ async function main(): Promise<void> {
         type: 'workflow',
         title: 'Fix-loop smoke',
         description: 'Drive the fix loop to the cap and exercise the escalation gate.',
-        status: 'created',
+        status: 'queued',
       })
       .returning();
     if (!task) throw new Error('task insert failed');

@@ -61,11 +61,22 @@ export function TabNav({
           id === active ? activeClass[variant] : inactiveClass[variant],
         );
         return item.href ? (
-          <Link key={id} href={item.href} className={classes}>
+          <Link
+            key={id}
+            href={item.href}
+            className={classes}
+            aria-current={id === active ? 'page' : undefined}
+          >
             {item.label}
           </Link>
         ) : (
-          <button key={id} type="button" onClick={() => onSelect?.(id)} className={classes}>
+          <button
+            key={id}
+            type="button"
+            onClick={() => onSelect?.(id)}
+            className={classes}
+            aria-pressed={id === active}
+          >
             {item.label}
           </button>
         );

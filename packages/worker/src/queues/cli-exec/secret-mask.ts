@@ -2,7 +2,7 @@ import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { posix } from 'node:path';
 import { glob } from 'tinyglobby';
 import { eq } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { schema, type Database, type DbTx } from '@haive/database';
 import {
   CONFIG_KEYS,
   configService,
@@ -95,7 +95,7 @@ export async function resolveSecretMasks(
 }
 
 /** The task's repository row as masking reads it, or null for a task with no repository. */
-async function maskedRepository(db: Database, taskId: string) {
+async function maskedRepository(db: Database | DbTx, taskId: string) {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
     columns: { userId: true, repositoryId: true },
@@ -131,7 +131,7 @@ async function maskedRepository(db: Database, taskId: string) {
  *  writer that must keep those files out of what an agent could read later: with masking off the
  *  agent reads them anyway, so leaving them out costs nothing. Null for a task with no repository. */
 export async function taskSecretMaskPolicy(
-  db: Database,
+  db: Database | DbTx,
   taskId: string,
 ): Promise<SecretMaskPolicy | null> {
   const target = await maskedRepository(db, taskId);

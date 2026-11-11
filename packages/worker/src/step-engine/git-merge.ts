@@ -7,7 +7,7 @@ import { isUtf8 } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { schema, type Database } from '@haive/database';
+import { schema, type Database, type DbTx } from '@haive/database';
 import { HAIVE_DATA_FILES } from '@haive/shared';
 import { logger } from '@haive/shared/logger';
 import {
@@ -1198,11 +1198,12 @@ export async function relocateFixerChanges(
 
 /** One event per relocation, so every attempt's leftovers stay findable from the Activity tab. */
 export async function recordFixerLeftovers(
-  db: Database,
+  db: Database | DbTx,
   taskId: string,
   taskStepId: string | null,
   branch: string,
   leftovers: FixerLeftovers,
+  afterCommit?: (markReported: () => Promise<void>) => void,
 ): Promise<void> {
   await db.insert(schema.taskEvents).values({
     taskId,
@@ -1224,11 +1225,15 @@ export async function recordFixerLeftovers(
       ...(leftovers.unchecked ? { unchecked: leftovers.unchecked } : {}),
     },
   });
-  for (const folder of [leftovers.folder, ...leftovers.interrupted]) {
-    await writeFileNoFollow(leftovers.root, `${folder}/${REPORTED_MARK}`, '', {
-      mode: 'create-exclusive',
-    }).catch(() => undefined);
-  }
+  const markReported = async () => {
+    for (const folder of [leftovers.folder, ...leftovers.interrupted]) {
+      await writeFileNoFollow(leftovers.root, `${folder}/${REPORTED_MARK}`, '', {
+        mode: 'create-exclusive',
+      }).catch(() => undefined);
+    }
+  };
+  if (afterCommit) afterCommit(markReported);
+  else await markReported();
 }
 
 /** The step's warning. It names the task's folder rather than one attempt's, since every attempt

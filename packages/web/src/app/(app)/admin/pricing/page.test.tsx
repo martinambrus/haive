@@ -38,6 +38,7 @@ beforeEach(() => {
   status = { status: 'pending', state: 'waiting', message: 'completed' };
   h.post.mockReset().mockResolvedValue({ jobId: JOB });
   h.get.mockReset().mockImplementation(async (path: string) => {
+    if (path === '/cli-pricing/refresh/latest') return { run: null };
     if (path === '/cli-pricing') {
       loads++;
       return { currencies: [], feeds: [], providers: [], prices: [] };
@@ -151,6 +152,65 @@ const PARTIAL: RefreshCliVersionsJobResult = {
     { name: 'price:gemini', error: 'litellm HTTP 503' },
   ],
 };
+
+describe('stored refresh result', () => {
+  it('shows a scheduled failure on page load without starting a job', async () => {
+    h.get.mockImplementation(async (path: string) =>
+      path === '/cli-pricing/refresh/latest'
+        ? {
+            run: {
+              startedAt: '2026-11-01T00:00:00Z',
+              finishedAt: '2026-11-01T00:01:00Z',
+              trigger: 'scheduled',
+              result: PARTIAL,
+            },
+          }
+        : { currencies: [], feeds: [], providers: [], prices: [] },
+    );
+    const view = createRenderer(() => createElement(PricingPage));
+    await settle(view);
+    expect(textOf(view.tree())).toContain('fx feed unreachable');
+    expect(textOf(view.tree())).toContain('scheduled');
+    expect(h.post).not.toHaveBeenCalled();
+  });
+  it('shows an unfinished run using its timestamps even if a stale success result exists', async () => {
+    h.get.mockImplementation(async (path: string) =>
+      path === '/cli-pricing/refresh/latest'
+        ? {
+            run: {
+              startedAt: '2026-11-01T00:00:00Z',
+              finishedAt: null,
+              trigger: 'boot',
+              result: { ok: true, refreshed: [], errors: [] },
+            },
+          }
+        : { currencies: [], feeds: [], providers: [], prices: [] },
+    );
+    const view = createRenderer(() => createElement(PricingPage));
+    await settle(view);
+    expect(textOf(view.tree())).toContain('has not finished');
+  });
+  it('shows a later stored failure after the manual poll window ends', async () => {
+    const original = h.get.getMockImplementation()!;
+    let run: unknown = null;
+    h.get.mockImplementation((path: string) =>
+      path === '/cli-pricing/refresh/latest' ? Promise.resolve({ run }) : original(path),
+    );
+    const view = await start();
+    await vi.advanceTimersByTimeAsync(POLL_TIMEOUT_MS);
+    view.draw();
+    expect(textOf(view.tree())).toContain('The latest refresh result is saved');
+    run = {
+      startedAt: '2026-11-01T00:00:00Z',
+      finishedAt: '2026-11-01T00:01:00Z',
+      trigger: 'manual',
+      result: PARTIAL,
+    };
+    await vi.advanceTimersByTimeAsync(10_000);
+    view.draw();
+    expect(textOf(view.tree())).toContain('fx feed unreachable');
+  });
+});
 
 describe('pricing refresh result', () => {
   it('names each failed source with its reason once, and still reloads the table', async () => {

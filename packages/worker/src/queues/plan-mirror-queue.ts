@@ -301,26 +301,37 @@ async function integrateOriginInMove(args: {
       for (const [file, was] of aside.kept) if (!args.kept.has(file)) args.kept.set(file, was);
     }
 
+    // What an abandoned conversation's fixers left is moved aside and reported in a transaction of
+    // its own, committed before the merge below can remove the worktree: a later failure of that
+    // merge rolls back nothing the report wrote. A failure to move it aside fails the save with the
+    // worktree kept.
+    const reports: (() => Promise<void>)[] = [];
+    // A failure after the report was written (an index git would not give up) still commits it.
+    let failedAfterReport: unknown = null;
+    await db.transaction(async (tx) => {
+      await lockPlanMerge(tx, args.repositoryId);
+      await refuseOpenPlanMerge(tx, args.repositoryId);
+      const worktree = await ensurePlanMergeWorktree(args.repoPath);
+      try {
+        await moveAsideRecordedLeftovers(
+          tx,
+          args.repositoryId,
+          worktree,
+          `origin/${args.branch}`,
+          (mark) => reports.push(mark),
+        );
+      } catch (err) {
+        if (reports.length === 0) throw err;
+        failedAfterReport = err;
+      }
+    });
+    for (const markReported of reports) await markReported();
+    if (failedAfterReport) throw failedAfterReport;
     // A file found rewritten ends the transaction unmoved and goes back to the set-aside.
     const moved = await db.transaction(async (tx) => {
       await lockPlanMerge(tx, args.repositoryId);
       // The api refuses a save while a conversation is open, but one can open after that check.
-      const [open] = await tx
-        .select({ id: schema.tasks.id })
-        .from(schema.tasks)
-        .where(
-          and(
-            eq(schema.tasks.repositoryId, args.repositoryId),
-            eq(schema.tasks.type, 'plan_merge'),
-            inArray(schema.tasks.status, [...PLAN_MERGE_LIVE_STATUSES]),
-          ),
-        )
-        .limit(1);
-      if (open)
-        throw new PlanMirrorRefusal('A merge conversation is open for this repository', {
-          code: 'plan_merge',
-          taskId: open.id,
-        });
+      await refuseOpenPlanMerge(tx, args.repositoryId);
       return mergeInScratch(tx, args, gap, previousCommit, fence);
     });
     if (moved.retry && attempt < MOVE_ATTEMPTS) continue;
@@ -337,6 +348,29 @@ async function integrateOriginInMove(args: {
   }
 }
 
+/** Refuses while a merge conversation is open: the api checks before queuing, but one can open after. */
+async function refuseOpenPlanMerge(
+  tx: Parameters<typeof restoreProjectionsInTx>[0],
+  repositoryId: string,
+): Promise<void> {
+  const [open] = await tx
+    .select({ id: schema.tasks.id })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.repositoryId, repositoryId),
+        eq(schema.tasks.type, 'plan_merge'),
+        inArray(schema.tasks.status, [...PLAN_MERGE_LIVE_STATUSES]),
+      ),
+    )
+    .limit(1);
+  if (open)
+    throw new PlanMirrorRefusal('A merge conversation is open for this repository', {
+      code: 'plan_merge',
+      taskId: open.id,
+    });
+}
+
 async function mergeInScratch(
   tx: Parameters<typeof restoreProjectionsInTx>[0],
   args: Parameters<typeof integrateOrigin>[0],
@@ -344,12 +378,9 @@ async function mergeInScratch(
   previousCommit: string | null,
   fence: CheckoutFence,
 ): Promise<IntegrateOutcome & { retry?: true; movedFrom?: string }> {
-  const db = getDb();
+  // What an abandoned conversation's fixers left was moved aside and reported before this.
   const worktree = await ensurePlanMergeWorktree(args.repoPath);
   let removed = false;
-  // An abandoned conversation's merge is discarded below, but not what its fixers left: a failure
-  // to move that aside fails the save before anything removes the worktree.
-  await moveAsideRecordedLeftovers(db, args.repositoryId, worktree, `origin/${args.branch}`);
   try {
     const attempt = await mergeOriginInto(worktree, args.branch, gap.unrelated, args.identity);
     if (!attempt.clean) {

@@ -124,7 +124,7 @@ function setup(initialState: string | Error = 'normal') {
           }),
           execute: async (query: Parameters<typeof tx.execute>[0]) => {
             const text = dialect.sqlToQuery(query as never).sql;
-            log.push(text);
+            if (!text.startsWith('SET LOCAL ')) log.push(text);
             if (failFence && text === FENCE) throw new Error('connection lost');
             return tx.execute(query);
           },

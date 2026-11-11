@@ -134,7 +134,8 @@ export function NewRepoForm() {
   const [repoListOpen, setRepoListOpen] = useState(false);
   const [manualUrl, setManualUrl] = useState(false);
   const [branchTouched, setBranchTouched] = useState(false);
-  const repoListBlurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [activeRepo, setActiveRepo] = useState(-1);
+  const repoListRef = useRef<HTMLDivElement>(null);
   const branchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -181,6 +182,26 @@ export function NewRepoForm() {
       cancelled = true;
     };
   }, [source, credentialsId, manualUrl]);
+
+  const filteredRepos = (repos ?? []).filter((repo) =>
+    repo.fullName.toLowerCase().includes(repoFilter.trim().toLowerCase()),
+  );
+  const visibleRepos = filteredRepos.slice(0, REPO_LIST_LIMIT);
+  function selectRepo(repo: GithubRepo) {
+    setRemoteUrl(repo.cloneUrl);
+    setRepoFilter(repo.fullName);
+    setRepoListOpen(false);
+    setActiveRepo(-1);
+    const field = branchRef.current;
+    if (field && !branchTouched && !field.value) field.value = repo.defaultBranch;
+  }
+
+  useEffect(() => {
+    if (!repoListOpen || activeRepo < 0) return;
+    repoListRef.current
+      ?.querySelector<HTMLElement>(`#repo-picker-option-${activeRepo}`)
+      ?.scrollIntoView?.({ block: 'nearest' });
+  }, [activeRepo, repoListOpen]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -318,16 +339,53 @@ export function NewRepoForm() {
                 <div className="relative">
                   <Input
                     id="repo-picker"
+                    role="combobox"
+                    aria-autocomplete="list"
+                    aria-expanded={repoListOpen && repos !== null}
+                    aria-controls="repo-picker-listbox"
+                    aria-activedescendant={
+                      repoListOpen && visibleRepos[activeRepo]
+                        ? `repo-picker-option-${activeRepo}`
+                        : undefined
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                        event.preventDefault();
+                        setRepoListOpen(true);
+                        setActiveRepo((at) =>
+                          event.key === 'ArrowDown'
+                            ? Math.min(at + 1, visibleRepos.length - 1)
+                            : at < 0
+                              ? visibleRepos.length - 1
+                              : Math.max(0, at - 1),
+                        );
+                      } else if (
+                        event.key === 'Enter' &&
+                        repoListOpen &&
+                        visibleRepos[activeRepo]
+                      ) {
+                        event.preventDefault();
+                        selectRepo(visibleRepos[activeRepo]);
+                      } else if (event.key === 'Escape' && repoListOpen) {
+                        event.stopPropagation();
+                        setRepoListOpen(false);
+                        setActiveRepo(-1);
+                      } else if (event.key === 'Tab') {
+                        setRepoListOpen(false);
+                        setActiveRepo(-1);
+                      }
+                    }}
                     value={repoFilter}
                     onChange={(e) => {
                       setRepoFilter(e.target.value);
+                      setActiveRepo(-1);
                       setRepoListOpen(true);
                       if (remoteUrl) setRemoteUrl('');
                     }}
                     onFocus={() => setRepoListOpen(true)}
                     onBlur={() => {
-                      if (repoListBlurTimer.current) clearTimeout(repoListBlurTimer.current);
-                      repoListBlurTimer.current = setTimeout(() => setRepoListOpen(false), 150);
+                      setRepoListOpen(false);
+                      setActiveRepo(-1);
                     }}
                     placeholder={
                       reposLoading
@@ -340,13 +398,15 @@ export function NewRepoForm() {
                     disabled={reposLoading || repos === null}
                   />
                   {repoListOpen && repos && (
-                    <div className="absolute z-10 mt-1 max-h-64 w-full overflow-y-auto rounded-md border border-neutral-800 bg-neutral-950 shadow-lg">
+                    <div
+                      ref={repoListRef}
+                      id="repo-picker-listbox"
+                      role="listbox"
+                      aria-label="Repositories"
+                      className="absolute z-10 mt-1 max-h-64 w-full overflow-y-auto rounded-md border border-neutral-800 bg-neutral-950 shadow-lg"
+                    >
                       {(() => {
-                        const filtered = repoFilter.trim()
-                          ? repos.filter((r) =>
-                              r.fullName.toLowerCase().includes(repoFilter.trim().toLowerCase()),
-                            )
-                          : repos;
+                        const filtered = filteredRepos;
                         if (filtered.length === 0) {
                           return (
                             <div className="px-3 py-2 text-xs text-neutral-500">No matches.</div>
@@ -359,20 +419,19 @@ export function NewRepoForm() {
                                 {`Showing ${Math.min(filtered.length, REPO_LIST_LIMIT)} of ${filtered.length} matches. Type to narrow the list.`}
                               </span>
                             )}
-                            {filtered.slice(0, REPO_LIST_LIMIT).map((r) => (
+                            {visibleRepos.map((r, index) => (
                               <button
                                 key={r.fullName}
+                                id={`repo-picker-option-${index}`}
+                                role="option"
+                                aria-label={r.fullName}
+                                aria-selected={remoteUrl === r.cloneUrl}
+                                tabIndex={-1}
                                 type="button"
                                 onMouseDown={(e) => e.preventDefault()}
-                                onClick={() => {
-                                  setRemoteUrl(r.cloneUrl);
-                                  setRepoFilter(r.fullName);
-                                  setRepoListOpen(false);
-                                  const field = branchRef.current;
-                                  if (field && !branchTouched && !field.value)
-                                    field.value = r.defaultBranch;
-                                }}
-                                className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs text-neutral-200 hover:bg-neutral-800"
+                                onClick={() => selectRepo(r)}
+                                onMouseMove={() => setActiveRepo(index)}
+                                className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs text-neutral-200 hover:bg-neutral-800 ${activeRepo === index ? 'bg-neutral-800' : ''}`}
                               >
                                 <span className="font-mono">{r.fullName}</span>
                                 {r.private && (

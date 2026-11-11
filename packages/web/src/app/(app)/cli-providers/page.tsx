@@ -1,6 +1,6 @@
 'use client';
+import { LinkButton } from '@/components/ui';
 
-import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
@@ -743,9 +743,9 @@ export default function CliProvidersPage() {
                       {m.supportsCliAuth && <Badge>CLI</Badge>}
                     </div>
                     <div className="mt-4">
-                      <Link href={`/cli-providers/new?name=${m.name}`}>
-                        <Button size="sm">Add</Button>
-                      </Link>
+                      <LinkButton href={`/cli-providers/new?name=${m.name}`} size="sm">
+                        Add
+                      </LinkButton>
                     </div>
                   </Card>
                 ))}

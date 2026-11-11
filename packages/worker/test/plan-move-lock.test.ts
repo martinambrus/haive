@@ -14,6 +14,11 @@ const h = vi.hoisted(() => ({
   removes: 0,
   restore: 'clean' as 'clean' | 'retry' | 'refused' | 'throw',
   holding: 0,
+  leftoverHandles: [] as unknown[],
+  transactions: [] as unknown[],
+  transactionActive: false,
+  reports: [] as boolean[],
+  indexHeld: false,
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -42,7 +47,19 @@ vi.mock('../src/secrets/user-git-identity.js', () => ({
 vi.mock('../src/repo/refresh.js', () => ({ checkoutHoldingTasks: async () => h.holding }));
 vi.mock('../src/plan/merge-baseline.js', async (original) => ({
   ...(await original<typeof import('../src/plan/merge-baseline.js')>()),
-  moveAsideRecordedLeftovers: async () => {},
+  moveAsideRecordedLeftovers: async (
+    db: unknown,
+    _repo: string,
+    _tree: string,
+    _branch: string,
+    afterCommit?: (mark: () => Promise<void>) => void,
+  ) => {
+    h.leftoverHandles.push(db);
+    afterCommit?.(async () => {
+      h.reports.push(h.transactionActive);
+    });
+    if (h.indexHeld) throw new Error('index held');
+  },
 }));
 vi.mock('../src/plan/mirror.js', () => ({
   PlanMirrorHeldError: class extends Error {},
@@ -166,12 +183,21 @@ beforeEach(() => {
   h.removes = 0;
   h.restore = 'clean';
   h.holding = 0;
+  h.leftoverHandles = [];
+  h.transactions = [];
+  h.reports = [];
+  h.indexHeld = false;
+  h.transactionActive = false;
   const db = {
     transaction: async (fn: (conn: unknown) => Promise<unknown>) => {
       try {
-        return await fn(db);
+        const tx = { select: db.select };
+        h.transactions.push(tx);
+        h.transactionActive = true;
+        return await fn(tx);
       } finally {
         h.locked = false;
+        h.transactionActive = false;
       }
     },
     select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),
@@ -189,6 +215,10 @@ describe('a Save/Pull landing', () => {
     const before = git(h.repo, 'rev-parse', 'HEAD');
     const out = await run();
     expect(out.landed).toBe(true);
+    // Moved aside and reported in a transaction of its own, before the merge's.
+    expect(h.transactions).toHaveLength(2);
+    expect(h.leftoverHandles).toEqual([h.transactions[0]]);
+    expect(h.reports).toEqual([false]);
     expect(h.removes).toBe(1);
     expect(h.lockRequests).toHaveLength(1);
     expect(hasScratch(h.lockRequests[0]!)).toBe(false);
@@ -210,8 +240,11 @@ describe('a Save/Pull landing', () => {
       h.restore = restore;
       h.holding = holding;
       const out = await run().catch((err: unknown) => err);
-      if (kind === 'throw') expect(out).toBeInstanceOf(Error);
-      else expect((out as { landed: boolean }).landed).toBe(false);
+      if (kind === 'throw') {
+        expect(out).toBeInstanceOf(Error);
+        // The merge's failure cannot take back the report of what was already moved aside.
+        expect(h.reports).toEqual([false]);
+      } else expect((out as { landed: boolean }).landed).toBe(false);
       expect(h.removes).toBe(removes);
       expect(h.lockRequests).toHaveLength(locks);
       for (const listing of h.lockRequests) expect(hasScratch(listing)).toBe(false);
@@ -219,6 +252,18 @@ describe('a Save/Pull landing', () => {
       expect(h.handBacks).toEqual([]);
     },
   );
+});
+
+describe('a Save/Pull whose leftovers left the index held', () => {
+  it('commits and marks the report, then fails with the worktree kept', async () => {
+    fixture(false);
+    h.indexHeld = true;
+    await expect(run()).rejects.toThrow('index held');
+    expect(h.transactions).toHaveLength(1);
+    expect(h.reports).toEqual([false]);
+    expect(h.removes).toBe(0);
+    expect(hasScratch(worktrees())).toBe(true);
+  });
 });
 
 describe('a confirm landing', () => {

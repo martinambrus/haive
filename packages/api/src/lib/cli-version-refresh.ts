@@ -26,7 +26,7 @@ export async function enqueueCliVersionRefresh() {
   }
   return queue.add(
     CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
-    {} satisfies RefreshCliVersionsJobPayload,
+    { trigger: 'manual' } satisfies RefreshCliVersionsJobPayload,
     CLI_POLLABLE_JOB_OPTS,
   );
 }

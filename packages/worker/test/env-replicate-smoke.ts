@@ -169,7 +169,7 @@ async function main(): Promise<void> {
         title: 'Stand up sandboxed dev environment',
         description:
           'Build a minimal Node-based sandbox image for the fixture (env-replicate runs as mandatory prelude).',
-        status: 'created',
+        status: 'queued',
       })
       .returning();
     if (!task) throw new Error('task insert failed');

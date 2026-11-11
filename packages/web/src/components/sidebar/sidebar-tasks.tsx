@@ -330,51 +330,49 @@ export function SidebarTasks({
             dropMarker(node.folder.id),
           )}
         >
-          <button
-            type="button"
-            onClick={() => onTreeChange(toggleClosed(tree, node.key))}
-            {...dragProps(node.folder.id)}
-            className="flex min-w-0 flex-1 cursor-grab items-center gap-1 text-left active:cursor-grabbing"
-            title={node.folder.name}
-          >
-            {closed ? (
-              <ChevronRight className="h-3 w-3 shrink-0" />
-            ) : (
-              <ChevronDown className="h-3 w-3 shrink-0" />
-            )}
-            {closed ? (
-              <Folder className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
-            ) : (
-              <FolderOpen className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
-            )}
-            {renameValue !== null ? (
-              <input
-                autoFocus
-                value={renameValue}
-                onClick={(e) => e.preventDefault()}
-                onChange={(e) => setRenaming({ id: node.folder.id, value: e.target.value })}
-                onBlur={() => {
-                  commit(renameFolder(tree, node.folder.id, renameValue));
+          {renameValue !== null ? (
+            <input
+              autoFocus
+              aria-label="Folder name"
+              value={renameValue}
+              onChange={(e) => setRenaming({ id: node.folder.id, value: e.target.value })}
+              onBlur={() => {
+                commit(renameFolder(tree, node.folder.id, renameValue));
+                setRenaming(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur();
+                if (e.key === 'Escape') {
+                  e.stopPropagation();
                   setRenaming(null);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') e.currentTarget.blur();
-                  if (e.key === 'Escape') {
-                    e.stopPropagation();
-                    setRenaming(null);
-                  }
-                }}
-                className="min-w-0 flex-1 rounded border border-neutral-700 bg-neutral-950 px-1 text-xs text-neutral-100 outline-none focus:border-indigo-500"
-              />
-            ) : (
+                }
+              }}
+              className="min-w-0 flex-1 rounded border border-neutral-700 bg-neutral-950 px-1 text-xs text-neutral-100 outline-none focus:border-indigo-500"
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={() => onTreeChange(toggleClosed(tree, node.key))}
+              {...dragProps(node.folder.id)}
+              className="flex min-w-0 flex-1 cursor-grab items-center gap-1 text-left active:cursor-grabbing"
+              title={node.folder.name}
+            >
+              {closed ? (
+                <ChevronRight className="h-3 w-3 shrink-0" />
+              ) : (
+                <ChevronDown className="h-3 w-3 shrink-0" />
+              )}
+              {closed ? (
+                <Folder className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
+              ) : (
+                <FolderOpen className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
+              )}
               <span className="truncate">{node.folder.name}</span>
-            )}
-            {renameValue === null && (
-              <span className="ml-auto shrink-0 text-[10px] text-neutral-600">
+              <span className="ml-auto shrink-0 text-[10px] text-neutral-400">
                 {node.taskCount}
               </span>
-            )}
-          </button>
+            </button>
+          )}
           {renameValue === null && (
             <span className="hidden shrink-0 items-center gap-0.5 group-hover/folder:flex">
               <button

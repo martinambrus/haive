@@ -3075,7 +3075,7 @@ describe('syncProjectStateFromCheckout: files a reset leaves behind', () => {
 });
 
 describe('syncProjectStateFromCheckout: the lock and the transaction', () => {
-  it('takes the lock first in the one transaction that writes, and reads the repository FOR UPDATE before it writes', async () => {
+  it('takes the lock first in the one transaction that writes, and reads the repository FOR NO KEY UPDATE before it writes', async () => {
     const s = await setup();
     await s.putRecord(record(BASE));
 
@@ -3088,9 +3088,9 @@ describe('syncProjectStateFromCheckout: the lock and the transaction', () => {
     expect(txn[0]).toBe(LOCK);
     expect(outside.filter(isWrite)).toEqual([]);
     expect(txn.filter((e) => e === LOCK)).toHaveLength(1);
-    const forUpdate = txn.indexOf('select repositories for update');
-    expect(forUpdate).toBeGreaterThan(0);
-    expect(forUpdate).toBeLessThan(txn.findIndex(isWrite));
+    const rowLock = txn.indexOf('select repositories for no key update');
+    expect(rowLock).toBeGreaterThan(0);
+    expect(rowLock).toBeLessThan(txn.findIndex(isWrite));
     expect(s.lockKeys).toEqual([LOCK_KEY]);
   });
 
@@ -3101,10 +3101,10 @@ describe('syncProjectStateFromCheckout: the lock and the transaction', () => {
     const { trace } = await s.run();
 
     const txn = transactions(trace).inside[0]!;
-    const forUpdate = txn.indexOf('select repositories for update');
+    const rowLock = txn.indexOf('select repositories for no key update');
     const liveRead = txn.findIndex((e) => e.startsWith('select tasks'));
-    expect(forUpdate).toBeGreaterThan(0);
-    expect(liveRead).toBeGreaterThan(forUpdate);
+    expect(rowLock).toBeGreaterThan(0);
+    expect(liveRead).toBeGreaterThan(rowLock);
   });
 
   it('takes the same lock key as the writer, and its own repository key for another repository', async () => {

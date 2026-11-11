@@ -54,7 +54,7 @@ async function branchAt(repoPath: string): Promise<string | null> {
   return branch.stdout.trim() || null;
 }
 
-/** The caller supplies the repository row it has already read (FOR UPDATE in the final check).
+/** The caller supplies the repository row it has already read (FOR NO KEY UPDATE in the final check).
  * Every query inside that final check stays on its transaction's connection.
  * Keep the read-only mirror in api/src/lib/haive-data-status.ts in sync with these facts. */
 async function factsAt(
@@ -290,7 +290,7 @@ async function saveHaiveDataInScope(payload: HaiveDataSavePayload): Promise<Haiv
           .select()
           .from(schema.repositories)
           .where(eq(schema.repositories.id, repo.id))
-          .for('update');
+          .for('no key update');
         if (
           !locked ||
           locked.userId !== payload.userId ||

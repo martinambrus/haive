@@ -1,4 +1,4 @@
-import { type DbTx } from '@haive/database';
+import { TASK_START_LOCK_TIMEOUT_MS, type DbTx } from '@haive/database';
 import {
   ROOT_MERGE_BUSY_MESSAGE,
   rootMergeBusy,
@@ -18,6 +18,6 @@ export async function assertRootMergeIdle(
 
 /** Recovery actions take the same lock before checking and keep it through their writes. */
 export async function assertTaskRootMergeIdle(tx: DbTx, taskId: string): Promise<void> {
-  if (await boundedLockWait(tx, () => taskRootMergeBusy(tx, taskId)))
+  if (await boundedLockWait(tx, () => taskRootMergeBusy(tx, taskId), TASK_START_LOCK_TIMEOUT_MS))
     throw new HttpError(409, ROOT_MERGE_BUSY_MESSAGE);
 }

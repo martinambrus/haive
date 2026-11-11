@@ -41,7 +41,7 @@ async function refresh(path = '/pricing/refresh', role: 'admin' | 'user' | null 
 }
 
 beforeEach(() => {
-  const fake = createFakeDb({ users: schema.users });
+  const fake = createFakeDb({ users: schema.users, refreshRuns: schema.refreshRuns });
   fake.insert(schema.users, { id: ADMIN, role: 'admin', status: 'active', tokenVersion: 0 });
   fake.insert(schema.users, { id: USER, role: 'user', status: 'active', tokenVersion: 0 });
   h.db = fake.db;
@@ -60,7 +60,7 @@ describe('pricing refresh', () => {
     expect(await res.json()).toMatchObject({ code: 'refresh_enqueue_failed' });
   });
 
-  it('queues a catalog refresh with an empty payload', async () => {
+  it('queues a catalog refresh with its manual trigger', async () => {
     const res = await refresh();
 
     expect(res.status).toBe(200);
@@ -68,7 +68,7 @@ describe('pricing refresh', () => {
     expect(h.add).toHaveBeenCalledTimes(1);
     expect(h.add).toHaveBeenCalledWith(
       CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
-      {},
+      { trigger: 'manual' },
       CLI_POLLABLE_JOB_OPTS,
     );
     expect(h.add.mock.calls[0]?.[2]).not.toHaveProperty('jobId');
@@ -130,6 +130,56 @@ async function poll(id = '123', role: 'admin' | 'user' | null = 'admin') {
     headers: token ? { cookie: `${ACCESS_COOKIE}=${token}` } : {},
   });
 }
+
+describe('durable refresh result', () => {
+  it('returns a stored scheduled failure to an admin after the job is gone', async () => {
+    const result = { ok: false, refreshed: [], errors: [{ name: 'fx', error: 'ECB unavailable' }] };
+    await (h.db as ReturnType<typeof createFakeDb>['db']).insert(schema.refreshRuns).values({
+      kind: 'versions',
+      runId: ADMIN,
+      trigger: 'scheduled',
+      startedAt: new Date('2026-11-01T00:00:00Z'),
+      finishedAt: new Date('2026-11-01T00:01:00Z'),
+      result,
+    });
+    const res = await poll('latest');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ run: { trigger: 'scheduled', result } });
+    expect(h.getJob).not.toHaveBeenCalled();
+  });
+  it('returns null before the first run', async () => {
+    expect(await (await poll('latest')).json()).toEqual({ run: null });
+  });
+  it('refuses non-admins and anonymous callers', async () => {
+    expect((await poll('latest', 'user')).status).toBe(403);
+    expect((await poll('latest', null)).status).toBe(401);
+  });
+  it.each(['admin', 'user', null] as const)(
+    'keeps the provider form result admin-only (%s)',
+    async (role) => {
+      await (h.db as ReturnType<typeof createFakeDb>['db']).insert(schema.refreshRuns).values({
+        kind: 'versions',
+        runId: ADMIN,
+        trigger: 'boot',
+        startedAt: new Date(),
+        finishedAt: null,
+        result: null,
+      });
+      const token = role
+        ? await signAccessToken({ sub: role === 'user' ? USER : ADMIN, role, tv: 0 })
+        : null;
+      const res = await app.request('/providers/catalog/codex/refresh-result', {
+        headers: token ? { cookie: `${ACCESS_COOKIE}=${token}` } : {},
+      });
+      expect(res.status).toBe(role ? 200 : 401);
+      if (role === 'admin')
+        expect(await res.json()).toMatchObject({
+          run: { trigger: 'boot', finishedAt: null, result: null },
+        });
+      if (role === 'user') expect(await res.json()).toEqual({ run: null });
+    },
+  );
+});
 
 describe('pricing refresh polling', () => {
   it.each(['waiting', 'prioritized', 'delayed', 'active'])(
