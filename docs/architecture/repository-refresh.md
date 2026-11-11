@@ -61,8 +61,13 @@ preparation starts or detection succeeds. A recovery job first re-checks the che
 usable again (held by a task or not) finishes as an ordinary refresh, moves nothing and clears the
 code. Otherwise it takes the ordinary rebuild path (seed, source proof, move aside, build, verify),
 keeps every repository record and this install's settings, KB and plan data. Before the move it
-settles a pending project-state write intent against the current checkout, or refuses with the
-cause and moves nothing; the move transaction re-checks that no intent appeared. The private
+handles a pending project-state write intent under the task key and then the project-state lock.
+An intent naming an abandoned private replacement (a stopped earlier restore), or one left with no
+checkout at all, is cleared; no tree or journal image is deleted. An older unmarked intent with a
+recorded journal stage is classified by whether that stage is present under the current checkout.
+A current-checkout intent, and an unmarked one with no stage, still settles against the current
+checkout or refuses with the cause and moves nothing. The move transaction re-checks that no
+intent appeared. The private
 replacement drops the legacy mirrors and is restored through the ordinary writers without a commit:
 the state record is written from the database with its base and watermark, and the plan is
 rendered from the database with `synced_hash` stamped and the agreed `synced_snapshot` left as it
