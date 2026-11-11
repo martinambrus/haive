@@ -107,6 +107,13 @@ bucket is neither counted nor enforced and only the account bucket applies. An a
 through `X-Forwarded-For` is counted even when it is private, because the operator configured that proxy and
 the address is then a real client. A public peer keeps the bucket.
 
+**Cross-host web-proxy mode.** When web and API hostnames differ, browsers reach the api through
+web's `/api/haive` proxy, so web is the peer. Next route handlers forward supplied
+`X-Forwarded-For` and expose no socket peer. Expose web only behind a front proxy that appends the
+real client to `X-Forwarded-For`, block direct access to web, and list the web container and every
+trusted intermediary hop in `HAIVE_TRUSTED_PROXIES`. Trusting web alone lets a direct caller pick
+its address bucket; leaving web's private peer untrusted turns the address bucket off.
+
 **Sign-ins, registrations and password changes leave audit rows.** A successful sign-in writes
 `auth.login.success` in the transaction that stores its refresh token, and a failed one
 `auth.login.failure` (`reason: 'invalid_credentials'`, the account as target when the email matched) before
