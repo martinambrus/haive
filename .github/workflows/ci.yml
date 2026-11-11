@@ -320,7 +320,7 @@ jobs:
   postgres-gated:
     name: Postgres-gated tests
     runs-on: ubuntu-latest
-    # 120 s setup allowance plus 7.5 s per GATED row; retain the 25-minute check limit.
+    # 120 s setup allowance plus 7.5 s per GATED row; retain the 26-minute check limit.
     # 30 minutes covers that whole limit plus setup and keeps >=600 s over modelled green.
     timeout-minutes: 30
     services:

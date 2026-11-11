@@ -41,11 +41,11 @@ now models each split job with those historical numbers and explicit setup allow
   the largest check's entire 900 s limit plus modelled green (1869 s), so later checks still have room after a hang.
   The extra 62 s conservatively allows moving module preparation from the old gated step into this job's setup.
 - `postgres-gated`: 120 s setup/module allowance + 7.5 s per row = 982.5 s at 115 rows. Its 30-minute limit (1800 s)
-  leaves 817.5 s over modelled green and covers the unchanged 25-minute gated step limit plus setup (1620 s).
+  leaves 817.5 s over modelled green and covers the 26-minute gated step limit plus setup (1680 s).
   The 120 s allowance rounds up the historical 62 s setup maximum to include module preparation.
 - Both jobs retain at least 600 s over modelled green, stay within twice that model and leave room for a check's
   whole time limit plus the rest of a green run. The gated step also retains at least 1.5 times its modelled row time:
-  its 25 minutes holds 133 rows and fails the pin at 134; the new job's 600 s margin lasts through 144 rows.
+  its 26 minutes holds 138 rows and fails the pin at 139 (raised from 25 at 134 rows); the new job's 600 s margin lasts through 144 rows.
   Measure again before raising a limit when those pins fail.
 
 The old model at 115 rows was 907 + 862.5 = 1769.5 s in one job. The split's expected critical path is the larger
@@ -58,7 +58,7 @@ the auth throttle script), and the pin cannot see future growth outside the list
 a green run comes within 600 s of its limit, including whether the new setup allowances remain adequate.
 
 A check that is not a `smoke:ci` chain has its own `timeout-minutes`, set well above its slowest green run (MEASURED over
-the same runs): the Postgres-gated tests 378-704 s (25 minutes), the auth throttle script 90-149 s (10 minutes), the
+the same runs): the Postgres-gated tests 378-704 s (26 minutes), the auth throttle script 90-149 s (10 minutes), the
 other five Redis scripts at most 10 s (5 minutes). The recovery re-drive script came later and has no CI runs yet: 6 s
 locally (5 minutes, as its siblings). Repo refresh retries has a separate five-minute Redis check,
 using database 5 so its queue cleanup cannot reach another check's jobs. A new such check gets a limit
