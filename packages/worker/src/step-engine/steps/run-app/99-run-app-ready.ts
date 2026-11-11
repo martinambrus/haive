@@ -27,6 +27,7 @@ import {
   gitPreview,
   gitPreviewWasCommitted,
   commitGitPreview,
+  assertGitPreviewBranch,
   RUN_APP_PATHSPECS,
   type GitPreview,
 } from '../../../repo/git-preview.js';
@@ -407,6 +408,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
         status.stdout,
         [],
         detected.commitPreview?.paths,
+        detected.commitPreview ?? undefined,
       );
       if (orphans.length) throw new Error(unregisteredGitlinksMessage(orphans));
       const preview = detected.commitPreview;
@@ -494,6 +496,8 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       // Not best effort: a put-back that fails fails the step, and its Retry finishes it.
       if (detected.baseBranch) {
         const target = detected.baseBranch;
+        if (values.commit && detected.commitPreview)
+          await assertGitPreviewBranch(workspace, detected.commitPreview, !nothing);
         await warnStep(
           ctx,
           await putBackProjections({ ctx, worktree: workspace, branch: pushTo, target }),
@@ -510,6 +514,8 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
               columns: { credentialsSecretId: true, remoteUrl: true },
             })
           : null;
+        if (values.commit && detected.commitPreview)
+          await assertGitPreviewBranch(workspace, detected.commitPreview, !nothing);
         await pushBranch({
           cwd: workspace,
           branch: pushTo,

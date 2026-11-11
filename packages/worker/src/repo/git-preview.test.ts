@@ -92,3 +92,29 @@ it.each([false, true])(
     }
   },
 );
+
+it('skips index refresh and names the landed branch when HEAD switches after update-ref', async () => {
+  const repo = await setup();
+  await safeFs.writeFileNoFollow(repo, 'a.txt', 'reviewed');
+  const preview = await gitPreview(repo);
+  await git(repo, ['branch', 'other']);
+  const real = gitExec.gitRun;
+  let index = '';
+  vi.spyOn(gitExec, 'gitRun').mockImplementation(async (...args) => {
+    const result = await real(...args);
+    if (args[1][0] === 'update-ref' && result.code === 0) {
+      await git(repo, ['switch', 'other']);
+      await safeFs.writeFileNoFollow(repo, 'a.txt', 'other staged bytes');
+      await git(repo, ['add', '--', 'a.txt']);
+      index = await git(repo, ['ls-files', '-s']);
+    }
+    return result;
+  });
+  await expect(commitGitPreview(repo, preview, 'reviewed edit', identity)).rejects.toThrow(
+    /landed on refs\/heads\/main.*branch/s,
+  );
+  expect(index).not.toBe('');
+  expect((await git(repo, ['rev-parse', 'main^{tree}'])).trim()).toBe(preview.tree);
+  expect((await git(repo, ['rev-parse', 'other'])).trim()).toBe(preview.head);
+  expect(await git(repo, ['ls-files', '-s'])).toBe(index);
+});

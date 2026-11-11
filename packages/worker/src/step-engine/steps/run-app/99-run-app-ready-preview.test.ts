@@ -1,5 +1,11 @@
+import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import { writeFileNoFollow, readFileNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
+import {
+  writeFileNoFollow,
+  readFileNoFollow,
+  removeNoFollow,
+  ensureDirNoFollow,
+} from '@haive/shared/fs-safe';
 import { gateContext, git, repoFixture } from '../../../../test/support/nested-repo.js';
 
 vi.mock('../workflow/_app-runtime.js', () => ({
@@ -7,6 +13,8 @@ vi.mock('../workflow/_app-runtime.js', () => ({
 }));
 import * as commitDiff from '../workflow/_commit-diff.js';
 import * as gitExec from '../../../repo/git-exec.js';
+import * as branchRevert from '../../../project-state/branch-revert.js';
+import * as gitPush from '../../../repo/git-push.js';
 import { runAppReadyStep } from './99-run-app-ready.js';
 
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -206,5 +214,123 @@ it.each(['unreadable', 'truncated'] as const)(
       }),
     ).toMatchObject({ finished: true, committed: false, message: 'finished without committing' });
     expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
+  },
+);
+
+it.each([false, true])(
+  'judges gitlink registration on the pinned tree (registration previewed=%s)',
+  async (registeredInPreview) => {
+    const { repo, ctx } = await setup();
+    await ensureDirNoFollow(repo, 'nested');
+    await git(path.join(repo, 'nested'), ['init', '-q', '-b', 'main']);
+    await writeFileNoFollow(repo, 'nested/inner.txt', 'nested\n');
+    await git(path.join(repo, 'nested'), ['add', '-A']);
+    await git(path.join(repo, 'nested'), ['commit', '-qm', 'nested']);
+    const register = () =>
+      writeFileNoFollow(
+        repo,
+        '.gitmodules',
+        '[submodule "lib"]\n\tpath = nested\n\turl = https://example.invalid/nested.git\n',
+      );
+    if (registeredInPreview) await register();
+    const detected = await runAppReadyStep.detect!(ctx);
+    expect(detected.commitPreview?.paths).toContain('nested');
+    if (!registeredInPreview) await register();
+    await git(repo, ['add', '--', '.gitmodules']);
+    const index = await git(repo, ['ls-files', '-s']);
+    const head = await git(repo, ['rev-parse', 'HEAD']);
+    if (registeredInPreview) {
+      expect(await finish(ctx, detected)).toMatchObject({ committed: true });
+      expect(await git(repo, ['show', 'HEAD:.gitmodules'])).toContain('path = nested');
+    } else {
+      await expect(finish(ctx, detected)).rejects.toThrow(
+        'Nothing was committed. These paths are nested git repositories that are not registered as a submodule:',
+      );
+      expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
+      expect(await git(repo, ['ls-files', '-s'])).toBe(index);
+    }
+  },
+);
+
+it('refuses a branch switch after the preview recheck without moving either branch or index', async () => {
+  const { repo, ctx } = await setup();
+  await writeFileNoFollow(repo, 'a.txt', 'reviewed');
+  const detected = await runAppReadyStep.detect!(ctx);
+  const head = await git(repo, ['rev-parse', 'HEAD']);
+  const real = gitExec.gitRun;
+  let index = '';
+  vi.spyOn(gitExec, 'gitRun').mockImplementation(async (...args) => {
+    if (args[1][0] === 'commit-tree') {
+      await git(repo, ['switch', '-c', 'other']);
+      await writeFileNoFollow(repo, 'a.txt', 'new branch staged bytes');
+      await git(repo, ['add', '--', 'a.txt']);
+      index = await git(repo, ['ls-files', '-s']);
+    }
+    return real(...args);
+  });
+  await expect(finish(ctx, detected)).rejects.toThrow(
+    'The branch changed since the commit preview.',
+  );
+  expect(index).not.toBe('');
+  expect(await git(repo, ['rev-parse', 'main'])).toBe(head);
+  expect(await git(repo, ['rev-parse', 'other'])).toBe(head);
+  expect(await git(repo, ['ls-files', '-s'])).toBe(index);
+});
+
+it.each(['put-back', 'push'] as const)(
+  'Retry checks its branch again before %s after recognizing a landed preview',
+  async (seam) => {
+    const { repo, ctx } = await setup();
+    await writeFileNoFollow(repo, 'a.txt', 'reviewed');
+    const detected = await runAppReadyStep.detect!(ctx);
+    await finish(ctx, detected);
+    const head = await git(repo, ['rev-parse', 'HEAD']);
+    Object.assign(detected, { hasOrigin: true, branch: 'main', baseBranch: 'base' });
+    const putBack = vi.spyOn(branchRevert, 'putBackProjections').mockResolvedValue([]);
+    const push = vi.spyOn(gitPush, 'pushBranch').mockResolvedValue({
+      pushed: true,
+      remote: 'origin',
+      branch: 'main',
+    });
+    let index = '';
+    const switchBranch = async () => {
+      await git(repo, ['switch', '-c', 'other']);
+      await writeFileNoFollow(repo, 'a.txt', 'other staged bytes');
+      await git(repo, ['add', '--', 'a.txt']);
+      index = await git(repo, ['ls-files', '-s']);
+    };
+    if (seam === 'put-back') {
+      const real = gitExec.gitRun;
+      vi.spyOn(gitExec, 'gitRun').mockImplementation(async (...args) => {
+        const result = await real(...args);
+        if (args[1].includes('--format=%P%n%T')) await switchBranch();
+        return result;
+      });
+    } else {
+      putBack.mockImplementationOnce(async () => {
+        await switchBranch();
+        return [];
+      });
+    }
+    let note = '';
+    try {
+      note = (
+        await runAppReadyStep.apply(ctx, {
+          detected,
+          formValues: { commit: true, push: true },
+          iteration: 0,
+          previousIterations: [],
+        })
+      ).message;
+    } catch (error) {
+      note = (error as Error).message;
+    }
+    expect(index).not.toBe('');
+    expect(push).not.toHaveBeenCalled();
+    expect(putBack).toHaveBeenCalledTimes(seam === 'put-back' ? 0 : 1);
+    expect(note).toMatch(/landed on refs\/heads\/main.*branch/s);
+    expect(await git(repo, ['rev-parse', 'main'])).toBe(head);
+    expect(await git(repo, ['rev-parse', 'other'])).toBe(head);
+    expect(await git(repo, ['ls-files', '-s'])).toBe(index);
   },
 );

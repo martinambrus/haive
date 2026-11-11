@@ -106,6 +106,27 @@ export async function gitPreviewWasCommitted(
   return parents === preview.head && tree === preview.tree;
 }
 
+const BRANCH_CHANGED =
+  'The branch changed since the commit preview. Reopen it and review the current edits before committing.';
+
+/** Every checkout write must still belong to the preview's named branch, including on Retry. */
+export async function assertGitPreviewBranch(
+  cwd: string,
+  preview: GitPreview,
+  committed = false,
+): Promise<void> {
+  const symbolic = await gitRun(cwd, ['symbolic-ref', '-q', 'HEAD']);
+  const landed = committed ? `The reviewed commit landed on ${preview.ref}, but ` : '';
+  if (symbolic.code !== 0 && symbolic.code !== 1)
+    throw new Error(`${landed}the checkout branch could not be read for the commit preview.`);
+  if (symbolic.code === 0 && symbolic.stdout.trim() === preview.ref) return;
+  throw new Error(
+    committed
+      ? `${landed}the checked-out branch changed. Further index updates, projection put-back and push are stopped; return to that branch before retrying.`
+      : BRANCH_CHANGED,
+  );
+}
+
 // Commit the pinned tree and compare-and-swap its reviewed parent, so a terminal write stays
 // uncommitted and a concurrent commit cannot be overwritten. Only the reviewed index paths move.
 export async function commitGitPreview(
@@ -129,6 +150,9 @@ export async function commitGitPreview(
     identity,
   );
   if (made.code !== 0) throw new Error(`git preview commit failed: ${made.stderr || made.stdout}`);
+  // Git has no atomic HEAD + named-ref CAS. The parent CAS protects the previewed branch;
+  // the second HEAD check below stops an intervening switch from resetting the new index.
+  await assertGitPreviewBranch(cwd, preview);
   const moved = await gitRun(cwd, ['update-ref', preview.ref, made.stdout.trim(), preview.head]);
   if (moved.code !== 0) {
     // Verify a lost compare-and-swap through the ref, not git's translated error text.
@@ -136,9 +160,7 @@ export async function commitGitPreview(
     if (moved.code > 0) {
       const actual = await gitRun(cwd, ['rev-parse', '--verify', preview.ref]);
       if (actual.code === 0 && actual.stdout.trim() !== preview.head) {
-        throw new Error(
-          'The branch changed since the commit preview. Reopen it and review the current edits before committing.',
-        );
+        throw new Error(BRANCH_CHANGED);
       }
     }
     throw new Error(
@@ -147,6 +169,7 @@ export async function commitGitPreview(
   }
   // Path reset also accepts a deleted source absent from both the tree and the index
   // (a staged rename). Restore rejects that source after the commit already landed.
+  await assertGitPreviewBranch(cwd, preview, true);
   const restore = await gitRun(cwd, [
     'reset',
     '--quiet',
