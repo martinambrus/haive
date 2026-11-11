@@ -345,6 +345,22 @@ async function putBackPayloads(db: Database, taskId: string): Promise<unknown[]>
   return rows.map((row) => row.payload);
 }
 
+/** A failed put-back may already have moved HEAD. Only its exact recorded commit
+ *  can stand between a run-app preview commit and Retry; foreign descendants cannot. */
+export async function commitBeforeProjectionPutBack(
+  ctx: RevertCtx,
+  branch: string,
+  tip: string,
+): Promise<string | null> {
+  for (const payload of await putBackPayloads(ctx.db, ctx.taskId)) {
+    const recorded = recordedOf(payload);
+    if (recorded?.branch !== branch || recorded.commit !== tip) continue;
+    if ((await revParse(ctx.repoPath, `${tip}^`)) === recorded.preRevertSha)
+      return recorded.preRevertSha;
+  }
+  return null;
+}
+
 async function record(ctx: RevertCtx, branch: string, revert: ProjectionRevert): Promise<void> {
   await ctx.db.insert(schema.taskEvents).values({
     taskId: ctx.taskId,

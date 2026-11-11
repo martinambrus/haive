@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { writeFileNoFollow, readFileNoFollow } from '@haive/shared/fs-safe';
+import { writeFileNoFollow, readFileNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import { gateContext, git, repoFixture } from '../../../../test/support/nested-repo.js';
 
 vi.mock('../workflow/_app-runtime.js', () => ({
@@ -67,6 +67,39 @@ it('refuses a changed previewed file before staging or committing', async () => 
   await expect(finish(ctx, detected)).rejects.toThrow(/preview.*changed|changed.*preview/i);
   expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
   expect(await git(repo, ['ls-files', '-s'])).toBe(index);
+});
+
+it.each(['addition', 'deletion'] as const)(
+  'recognizes its already committed %s after a restart without making another commit',
+  async (kind) => {
+    const { repo, ctx } = await setup();
+    if (kind === 'addition') await writeFileNoFollow(repo, 'added.txt', 'previewed\n');
+    else await removeNoFollow(repo, 'a.txt');
+    const detected = await runAppReadyStep.detect!(ctx);
+    expect(detected.commitPreview?.paths).toContain(kind === 'addition' ? 'added.txt' : 'a.txt');
+    expect(await finish(ctx, detected)).toMatchObject({ committed: true });
+    const sha = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+    await writeFileNoFollow(repo, 'later.txt', 'unreviewed\n');
+    await git(repo, ['add', '--', 'later.txt']);
+    expect(await finish(gateContext(repo), structuredClone(detected))).toMatchObject({
+      committed: true,
+      commitSha: sha,
+    });
+    expect((await git(repo, ['rev-parse', 'HEAD'])).trim()).toBe(sha);
+    expect(await git(repo, ['diff', '--cached', '--name-only'])).toBe('later.txt\n');
+  },
+);
+
+it('reopens for a foreign empty commit on top of the preview even when its tree is identical', async () => {
+  const { repo, ctx } = await setup();
+  await writeFileNoFollow(repo, 'a.txt', 'previewed\n');
+  const detected = await runAppReadyStep.detect!(ctx);
+  await finish(ctx, detected);
+  await git(repo, ['commit', '--allow-empty', '-m', 'chore: run-app session edits']);
+  const head = await git(repo, ['rev-parse', 'HEAD']);
+  expect((await git(repo, ['rev-parse', 'HEAD^{tree}'])).trim()).toBe(detected.commitPreview!.tree);
+  await expect(finish(gateContext(repo), detected)).rejects.toThrow(/preview/i);
+  expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
 });
 
 it('excludes Haive projections from the preview and commit, even when staged', async () => {

@@ -28,8 +28,13 @@ export interface GitPreview {
 
 /** Snapshot exactly what an add would commit, without changing the user's index.
  *  A supplied path set ignores later unrelated files. The tree pins bytes and modes,
- *  including binary and oversized files whose preview contains metadata only. */
-export async function gitPreview(cwd: string, paths?: readonly string[]): Promise<GitPreview> {
+ *  including binary and oversized files whose preview contains metadata only.
+ *  A supplied base rechecks that same scope after its commit or a projection put-back. */
+export async function gitPreview(
+  cwd: string,
+  paths?: readonly string[],
+  baseHead?: string,
+): Promise<GitPreview> {
   const name = `run-app-preview-${randomUUID()}`;
   const env = { GIT_INDEX_FILE: path.join(os.tmpdir(), name) };
   const run = async (args: string[], scratch = false) => {
@@ -48,7 +53,8 @@ export async function gitPreview(cwd: string, paths?: readonly string[]): Promis
     if (symbolic.code !== 0 && symbolic.code !== 1)
       throw new Error('The checkout branch could not be read for the commit preview.');
     const ref = symbolic.code === 0 ? symbolic.stdout.trim() : 'HEAD';
-    await run(['read-tree', head], true);
+    const base = baseHead ?? head;
+    await run(['read-tree', base], true);
     let selected = paths;
     if (!selected) {
       const status = await gitRun(
@@ -73,7 +79,7 @@ export async function gitPreview(cwd: string, paths?: readonly string[]): Promis
     // No rename pairing: both the added destination and deleted source belong to the scope.
     const listed = await gitRun(
       cwd,
-      ['diff-tree', '--no-commit-id', '--name-only', '--no-renames', '-r', '-z', head, tree],
+      ['diff-tree', '--no-commit-id', '--name-only', '--no-renames', '-r', '-z', base, tree],
       undefined,
       { maxBuffer: GIT_MAX_BUFFER },
     );
@@ -84,6 +90,20 @@ export async function gitPreview(cwd: string, paths?: readonly string[]): Promis
     await removeNoFollow(os.tmpdir(), name).catch(() => false);
     await removeNoFollow(os.tmpdir(), `${name}.lock`).catch(() => false);
   }
+}
+
+/** A landed preview has exactly its reviewed parent and tree, independent of its message. */
+export async function gitPreviewWasCommitted(
+  cwd: string,
+  preview: GitPreview,
+  commit: string,
+): Promise<boolean> {
+  if (!preview.paths.length) return false;
+  const read = await gitRun(cwd, ['show', '-s', '--format=%P%n%T', commit]);
+  if (read.code !== 0)
+    throw new Error(`git preview commit read failed: ${read.stderr || read.stdout}`);
+  const [parents, tree] = read.stdout.trim().split('\n');
+  return parents === preview.head && tree === preview.tree;
 }
 
 // Commit the pinned tree and compare-and-swap its reviewed parent, so a terminal write stays

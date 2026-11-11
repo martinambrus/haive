@@ -25,12 +25,17 @@ import {
 } from '../workflow/_gitlink-registration.js';
 import {
   gitPreview,
+  gitPreviewWasCommitted,
   commitGitPreview,
   RUN_APP_PATHSPECS,
   type GitPreview,
 } from '../../../repo/git-preview.js';
 import { gitWorkspaceStatus } from '../../../repo/git-workspace.js';
-import { putBackProjections, warnStep } from '../../../project-state/branch-revert.js';
+import {
+  commitBeforeProjectionPutBack,
+  putBackProjections,
+  warnStep,
+} from '../../../project-state/branch-revert.js';
 
 // Git identity fallback when the user has no name/email on file — mirrors
 // 10-gate-3-commit so a commit-back never fails for a missing identity.
@@ -384,6 +389,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
 
     const workspace = detected.workspacePath;
     let nothing = true;
+    let committedPreviewSha: string | null = null;
     // A push can publish commits already on the branch. Leaving commit unticked
     // must keep the user's index and uncommitted session edits untouched.
     if (values.commit) {
@@ -411,8 +417,26 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
         );
       }
       let current: GitPreview;
+      let alreadyCommitted = false;
       try {
-        current = await gitPreview(workspace, preview.paths);
+        // Rebuild against the reviewed parent, including deletions already committed.
+        // This also ignores the projection-only tree changes put-back may have made.
+        current = await gitPreview(workspace, preview.paths, preview.head);
+        if (current.head !== preview.head && current.ref === preview.ref) {
+          alreadyCommitted = await gitPreviewWasCommitted(workspace, preview, current.head);
+          if (alreadyCommitted) committedPreviewSha = current.head;
+          if (!alreadyCommitted && detected.branch) {
+            const beforePutBack = await commitBeforeProjectionPutBack(
+              ctx,
+              detected.branch,
+              current.head,
+            );
+            alreadyCommitted =
+              beforePutBack !== null &&
+              (await gitPreviewWasCommitted(workspace, preview, beforePutBack));
+            if (alreadyCommitted) committedPreviewSha = beforePutBack;
+          }
+        }
       } catch {
         throw new ReopenStepFormError(
           'The edits changed or could not be read. Review the refreshed preview before finishing.',
@@ -420,7 +444,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
         );
       }
       if (
-        current.head !== preview.head ||
+        (current.head !== preview.head && !alreadyCommitted) ||
         current.ref !== preview.ref ||
         current.tree !== preview.tree
       ) {
@@ -429,10 +453,14 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
           { notice: true },
         );
       }
-      const message = (values.commitMessage ?? '').trim() || 'chore: run-app session edits';
-      const userEnv = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
-      const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
-      nothing = !(await commitGitPreview(workspace, preview, message, commitEnv));
+      if (alreadyCommitted) {
+        nothing = false;
+      } else {
+        const message = (values.commitMessage ?? '').trim() || 'chore: run-app session edits';
+        const userEnv = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
+        const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
+        nothing = !(await commitGitPreview(workspace, preview, message, commitEnv));
+      }
     }
     const commitNote = values.commit
       ? nothing
@@ -456,7 +484,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       };
     }
     const shaRes = nothing ? null : await gitRun(workspace, ['rev-parse', 'HEAD']);
-    const commitSha = shaRes?.code === 0 ? shaRes.stdout.trim() : null;
+    const commitSha = committedPreviewSha ?? (shaRes?.code === 0 ? shaRes.stdout.trim() : null);
 
     // Optional best-effort push: existing commits are safe on the branch, so a
     // push failure must never block teardown. Uses the repo's bound credential.
