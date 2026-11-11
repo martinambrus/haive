@@ -117,10 +117,18 @@ async function remoteRefusal(
     if (!(await detectOrigin(m.repoPath))) return null;
     const fetchUrl = await gitRun(m.repoPath, ['remote', 'get-url', '--all', 'origin']);
     const pushUrl = await gitRun(m.repoPath, ['remote', 'get-url', '--push', '--all', 'origin']);
-    if (fetchUrl.code !== 0 || pushUrl.code !== 0 || fetchUrl.stdout !== pushUrl.stdout)
+    // Fetch reads only the first URL, whereas push writes to every effective push URL.
+    // A person can reduce origin to one matching destination and retry this report.
+    if (
+      fetchUrl.code !== 0 ||
+      pushUrl.code !== 0 ||
+      !pushUrl.stdout.trim() ||
+      pushUrl.stdout.trim().split('\n').length !== 1 ||
+      fetchUrl.stdout !== pushUrl.stdout
+    )
       return {
         reason:
-          'The remote push destination cannot be checked safely; the merge was left committed.',
+          'The remote push destination cannot be checked safely. Configure one origin push destination matching its fetch URL, then retry Undo; the merge was left committed.',
       };
     const helper = credentialId
       ? await buildCredentialHelper(db, credentialId, userId, fetchUrl.stdout.trim())

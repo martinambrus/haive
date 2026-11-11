@@ -345,6 +345,38 @@ describe('explicit undo of a cancel-left committed merge', () => {
     await f.run();
     expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
   });
+  it.each(['url', 'pushurl'])(
+    'refuses multiple origin %s destinations when only the second contains the merge',
+    async (key) => {
+      const f = await fixture();
+      const remotes = [path.join(f.root, 'first.git'), path.join(f.root, 'second.git')];
+      for (const remote of remotes) {
+        await mkdir(remote);
+        await git(remote, 'init', '--bare');
+      }
+      await git(f.dir, 'remote', 'add', 'origin', remotes[0]!);
+      if (key === 'pushurl')
+        await git(f.dir, 'config', '--add', 'remote.origin.pushurl', remotes[0]!);
+      await git(f.dir, 'config', '--add', `remote.origin.${key}`, remotes[1]!);
+      await git(f.dir, 'push', remotes[1]!, 'main');
+      expect(await git(remotes[0]!, 'for-each-ref', 'refs/heads/main')).toBe('');
+      expect(await git(remotes[1]!, 'rev-parse', 'main')).toBe(f.after);
+
+      await f.run();
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+      expect(f.settled()[0]?.payload).toMatchObject({ outcome: 'refused' });
+      expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+      expect(h.sync).not.toHaveBeenCalled();
+
+      // A person can clear the configuration refusal; the remaining destination is checked.
+      await git(f.dir, 'config', '--unset-all', `remote.origin.${key}`);
+      await git(f.dir, 'config', '--replace-all', 'remote.origin.url', remotes[1]!);
+      await f.run();
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+      expect(leftCommittedMerges(f.events)[0]?.settled?.outcome).toBe('refused');
+      expect(f.settled()[1]?.payload.permanent).toBe(true);
+    },
+  );
   it('refuses a pushed merge even if the tracking ref is stale', async () => {
     const f = await fixture();
     const remote = path.join(f.root, 'remote.git');
