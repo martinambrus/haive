@@ -231,7 +231,9 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
       { cwd: s.root },
     );
     await s.write();
-    const rel = '.haive-data/state/project/render.json';
+    // The pre-capture-carrier base leaves this file pending because its rebuilt
+    // entry omits the captured parent. Chmod this exact entry, not render.json.
+    const rel = '.haive-data/state/format.json';
     await chmod(join(s.root, rel), 0o600);
     await withProjectionMove(async () => {
       const aside = await setAsideHaiveProjections(db!, s.repo.id, s.root);
@@ -241,7 +243,9 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
       const accumulated = new Map(aside.kept);
       await putBackProjections(db!, s.repo.id, s.root, accumulated);
     });
-    expect((await s.outbox())!.keptMetadata).toBeNull();
+    // Keep running on a stale capture too, so the later chmod assertion can fail
+    // independently when a sweep replays it.
+    expect.soft((await s.outbox())!.keptMetadata).toBeNull();
     await chmod(join(s.root, rel), 0o644);
     await sweepKeptProjectionMetadata(db!);
     expect((await stat(join(s.root, rel))).mode & 0o7777).toBe(0o644);
