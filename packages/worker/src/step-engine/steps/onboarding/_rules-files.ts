@@ -173,27 +173,36 @@ export async function stripRtkBlocks(
         outcomes.push({ file, result: 'skipped-link' });
         continue;
       }
-      let read = false;
-      let notUtf8 = false;
+      const snapshot = await readUpgradeFile(repoPath, file);
+      if (snapshot.kind === 'unread') {
+        outcomes.push({
+          file,
+          result: 'refused',
+          error: rtkRefusal(snapshot.reason === 'undecodable'),
+        });
+        continue;
+      }
+      const stripped = snapshot.kind === 'text' ? withoutRtkBlocks(snapshot.text) : null;
+      if (snapshot.kind === 'absent' || stripped === null) {
+        outcomes.push({ file, result: 'none' });
+        continue;
+      }
+      const before = Buffer.from(snapshot.text, 'utf8');
+      // Persist rollback evidence while the public file is present. 02 drops this record if the
+      // subsequent CAS refuses; a retry after a successful edit can recover it as before.
+      await record(file, snapshot.text, stripped.text);
       const result = await rewriteFileIfNoFollow(
         repoPath,
         file,
-        async (data) => {
-          read = true;
-          const before = data.toString('utf8');
-          if (!Buffer.from(before, 'utf8').equals(data)) {
-            notUtf8 = true;
-            return null;
-          }
-          const stripped = withoutRtkBlocks(before);
-          if (stripped === null) return null;
-          await record(file, before, stripped.text);
-          return Buffer.from(stripped.text, 'utf8');
-        },
+        (data) => (data.equals(before) ? Buffer.from(stripped.text, 'utf8') : null),
         { maxBytes: RULES_FILE_READ_CAP },
       );
-      if (result === 'kept' && (!read || notUtf8)) {
-        outcomes.push({ file, result: 'refused', error: rtkRefusal(notUtf8) });
+      if (result === 'kept') {
+        outcomes.push({
+          file,
+          result: 'refused',
+          error: 'it changed while its record was being written',
+        });
       } else {
         outcomes.push({ file, result: result === 'rewritten' ? 'stripped' : 'none' });
       }
@@ -328,33 +337,26 @@ export async function appendRtkBlock(
   block: string,
   record: (before: string, after: string) => Promise<void>,
 ): Promise<RtkBlockPutBackOutcome> {
-  let notUtf8 = false;
-  let standing = false;
   try {
+    const snapshot = await readUpgradeFile(repoPath, file);
+    if (snapshot.kind === 'absent') return { result: 'absent' };
+    if (snapshot.kind === 'unread') {
+      return { result: 'refused', error: rtkRefusal(snapshot.reason === 'undecodable') };
+    }
+    if (snapshot.text.includes(RTK_REF_MARKER_START)) return { result: 'standing' };
+    const before = Buffer.from(snapshot.text, 'utf8');
+    const sep = snapshot.text.length === 0 || snapshot.text.endsWith('\n') ? '' : '\n';
+    const after = `${snapshot.text}${sep}${block}`;
+    await record(snapshot.text, after);
     const result = await rewriteFileIfNoFollow(
       repoPath,
       file,
-      async (data) => {
-        const before = data.toString('utf8');
-        if (!Buffer.from(before, 'utf8').equals(data)) {
-          notUtf8 = true;
-          return null;
-        }
-        if (before.includes(RTK_REF_MARKER_START)) {
-          standing = true;
-          return null;
-        }
-        const sep = before.length === 0 || before.endsWith('\n') ? '' : '\n';
-        const after = `${before}${sep}${block}`;
-        await record(before, after);
-        return Buffer.from(after, 'utf8');
-      },
+      (data) => (data.equals(before) ? Buffer.from(after, 'utf8') : null),
       { maxBytes: RULES_FILE_READ_CAP },
     );
     if (result === 'rewritten') return { result: 'appended' };
     if (result === 'absent') return { result: 'absent' };
-    if (standing) return { result: 'standing' };
-    return { result: 'refused', error: rtkRefusal(notUtf8) };
+    return { result: 'refused', error: 'it changed while its record was being written' };
   } catch (err) {
     return { result: 'refused', error: err instanceof Error ? err.message : String(err) };
   }

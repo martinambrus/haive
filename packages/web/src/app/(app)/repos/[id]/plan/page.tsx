@@ -41,6 +41,7 @@ import {
   type PlanPullOutcome,
   type PlanMergeConflict,
   type PlanMergeState,
+  type PlanMergeFailure,
   type CliProvider,
   type CliProvidersResponse,
   getPlanBuildClis,
@@ -152,6 +153,7 @@ export default function PlanPage() {
   const [busy, setBusy] = useState(false);
   const [snapshotBusy, setSnapshotBusy] = useState(false);
   const [merge, setMerge] = useState<PlanMergeState | null>(null);
+  const [failedMerge, setFailedMerge] = useState<PlanMergeFailure | null>(null);
   const [conflict, setConflict] = useState<PlanMergeConflict | null>(null);
   const [startingMerge, setStartingMerge] = useState(false);
   const [mergeProviders, setMergeProviders] = useState<CliProvider[]>([]);
@@ -331,6 +333,7 @@ export default function PlanPage() {
     try {
       const res = await getPlanMerge(repositoryId);
       setMerge(res.merge);
+      setFailedMerge(res.failedMerge ?? null);
     } catch {
       /* a merge state that will not load must not break the page */
     }
@@ -978,6 +981,7 @@ export default function PlanPage() {
       <PlanMergePanel
         repositoryId={repositoryId}
         merge={merge}
+        failedMerge={failedMerge}
         onChanged={() => void refreshMerge()}
         onSettled={() => {
           setConflict(null);
