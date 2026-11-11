@@ -354,6 +354,108 @@ async function main(): Promise<void> {
     );
     await db.delete(schema.tasks).where(eq(schema.tasks.id, cancelledMergeId));
 
+    // The branch comes from the worker's durable observation, never repositories.branch.
+    for (const scenario of [
+      { kind: 'event', checkout: 'main', landing: 'feature-x', count: false },
+      { kind: 'event', checkout: 'main', landing: 'main', count: true },
+      { kind: 'event', checkout: null, landing: 'feature-x', count: true },
+      { kind: 'legacy', checkout: 'main', landing: 'feature-x', count: false },
+      { kind: 'legacy', checkout: 'main', landing: 'main', count: true },
+      { kind: 'legacy', checkout: null, landing: 'feature-x', count: true },
+      { kind: 'legacy', checkout: 'main', landing: null, count: true },
+    ]) {
+      const branchRepoId = randomUUID();
+      const branchTaskId = randomUUID();
+      const branchRoot = await mkdtemp(join(tmpdir(), 'reset-provenance-branch-'));
+      const label = `${scenario.kind}: ${scenario.landing} -> ${scenario.checkout}`;
+      try {
+        await db.insert(schema.repositories).values({
+          id: branchRepoId,
+          userId,
+          source: 'blank',
+          name: label,
+          branch: 'configured-is-not-checked-out',
+          checkoutBranch: scenario.checkout,
+        });
+        await db.insert(schema.tasks).values({
+          id: branchTaskId,
+          userId,
+          repositoryId: branchRepoId,
+          type: 'workflow',
+          title: label,
+          status: 'completed',
+        });
+        await db.insert(schema.taskSteps).values([
+          {
+            taskId: branchTaskId,
+            stepId: '11d-skill-sync',
+            stepIndex: 11,
+            title: 'sync',
+            status: 'done',
+            endedAt: BEFORE_RESET,
+            detectOutput: { skillTargetDirs: ['.claude/skills'] },
+            output: { generated: ['personal'], removed: [], skipped: [], indexRemovedDirs: [] },
+          },
+          {
+            taskId: branchTaskId,
+            stepId: '12-worktree-cleanup',
+            stepIndex: 12,
+            title: 'cleanup',
+            status: 'done',
+            endedAt: AFTER_RESET,
+            mergeResolveState: {
+              merged: true,
+              mergedAt: AFTER_RESET.toISOString(),
+              // A contrary event must not fall back to a matching state.
+              ...(scenario.landing === null
+                ? {}
+                : {
+                    baseBranch: scenario.kind === 'event' ? 'main' : scenario.landing,
+                  }),
+            } as never,
+          },
+        ]);
+        if (scenario.kind === 'event') {
+          await db.insert(schema.taskEvents).values({
+            taskId: branchTaskId,
+            eventType: 'merge.landed',
+            payload: {
+              baseShaBefore: 'a'.repeat(40),
+              baseShaAfter: 'b'.repeat(40),
+              landedOn: scenario.landing,
+              landedAt: AFTER_RESET.toISOString(),
+              repoPath: branchRoot,
+              dir: branchRoot,
+            },
+          });
+        }
+        const observed = await db.query.repositories.findFirst({
+          where: eq(schema.repositories.id, branchRepoId),
+          columns: { checkoutBranch: true },
+        });
+        const branchSteps = await loadProvenanceSteps(db, branchRepoId, RESET_AT);
+        const merged = resolveMergedTasks(branchSteps, RESET_AT, observed!.checkoutBranch);
+        check(`branch provenance ${label}`, merged.has(branchTaskId) === scenario.count);
+        const written = collectWrittenCliContent(branchSteps, [], merged);
+        const skill = join(branchRoot, '.claude/skills/personal/SKILL.md');
+        await mkdir(join(branchRoot, '.claude/skills/personal'), { recursive: true });
+        await writeFile(skill, 'untouched personal skill');
+        await resetOnboardingArtifacts(branchRoot, {
+          writtenHashes: new Map(),
+          haiveDirs: written.dirs,
+          haiveEntries: written.entries,
+        });
+        const remaining = await readFile(skill, 'utf8').catch(() => null);
+        check(
+          `reset respects landing branch ${label}`,
+          scenario.count ? remaining === null : remaining === 'untouched personal skill',
+          remaining,
+        );
+      } finally {
+        await rm(branchRoot, { recursive: true, force: true });
+      }
+    }
+
     // A live WORKFLOW merges its worktree at `12-worktree-cleanup`, landing 11d's skills in the
     // root — so a reset must refuse while one is running, or a merge completing mid-sweep leaves
     // that workflow without the artifacts it just merged. Another query the unit suite cannot
