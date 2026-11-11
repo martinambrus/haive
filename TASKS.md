@@ -81,6 +81,20 @@ All low.
 8. Stale log wording `dead-task-boot.ts` ~:333; misleading test title `branch-revert.test.ts` ~:368; `root-merge-redrive.test.ts` ~:15 mocks into `shared/dist` by a relative path.
 9. `ReopenStepFormError` messages in plan steps are internal control text (not shown since the notice is opt-in); reword if ever shown.
 
+### T599 · FNF[rules-reconcile-followups] · task-end rules re-render follow-ups (+8)
+
+status: open · kind: fix · found: B (#443, #386, #317) reviews 2026-11-10/11 · priority: P4
+All low unless marked. Code in `worker/src/project-state/task-end-rules.ts` and `sync.ts`.
+
+1. The repository path-mismatch refusal (`task-end-rules.ts` ~:62-63) is transient by design but has no test.
+2. The `holder`, `reset` and `git` guards are tested for keeping the intent, not for a later successful retry (`upgrade-apply-rules-stamp.test.ts` ~:322-395; `journal` is the only retry control).
+3. The no-outbox-row path is covered by the fake DB only; `project-state-writer-postgres.test.ts` is not in CI GATED (`ci.yml` ~:464). PRE-EXISTING.
+4. A `deferred` intent whose incoming file is conflicted or rejected keeps the row in the 10 s sweep with no log line (`sync.ts` ~:1197-1205). PRE-EXISTING.
+5. Tooling save and conflict resolve owe no rules-region render (`tooling-upgrades.ts` ~:855-861, `resolve.ts` ~:609). PRE-EXISTING.
+6. Reset and repository delete clearing the intent have no test; the uncommitted re-render may trip a later `--ff-only` refresh; `sync.ts` and `task-end-rules.ts` import each other.
+7. Carried from earlier rounds, not re-verified: an `''` override leaves an empty AGENTS.md region; `loadCliRulesRenderHashes` ignores `backfill` rows; rollback availability after a backfill row.
+8. Any successful sync caller may now write AGENTS.md when it drains a ready intent; confirm no caller runs while a checkout write it does not own is in flight.
+
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
 **Found something outside your task?** Search the board first (`grep -n "<file>\|<symbol>\|<slug>"`).
@@ -128,6 +142,7 @@ Owner triage 2026-11-10 (AskUserQuestion, 8 rounds; register `.claude/tmp/codex-
 
 T524's 2026-11-01 owner round answered 42 questions. Decisions are recorded on the affected task blocks; the durable local answer register is `.claude/tmp/codex-run/backlog-decisions-20261101/decisions.json`. No unanswered owner-policy question remains from this round.
 
+- T443 + T386 + T317 — a rules-override import is deferred during a live upgrade and the task-end import (onboarding and onboarding_upgrade) re-renders the AGENTS.md region through `project_state_outbox.rules_reconcile_intent` (migration 0227), retried on transient refusals and dropped with one warning on permanent ones; the updater keeps its hold when an upgrade died before recording its found state; a stamped RTK choice wins against the first record import — PR #1064 (0106f9edd), 2026-11-11. Follow-ups T599.
 - T402: operator script with dry run, before-image and undo. The owner subsequently requested indefinite development-record retention: transcripts changed from 90 to 0/forever through the audited admin API; prompts were already 0. Historical expiry estimates no longer govern this install. Missing old logs remain unrecoverable.
 - T300: one owned validation attempt before feature work; stop at 90 minutes or $50 notional usage, whichever comes first, or on an unexpected failure. No automatic retry loops.
 - T331: live Google OAuth intentionally remains parked; prepare setup instructions when its turn comes. T358 stays deferred until its first real provider-pinning consumer.
@@ -300,13 +315,6 @@ status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 A: six non-merge move paths drop the kept map after a re-sync that may have returned false. B: projection writers create files as root (verify on dev). C: persisted keptMetadata never settled again. D: reachDone / settleGoneMerge after a failed re-sync. Options: inherit owner from parent dir; persist the kept map per repo; retry the re-sync before restoring.
 
 User decision 2026-11-01: Preserve captured owner/mode until recovery completes; never silently discard metadata.
-
-### T317 · FNF[rtk-first-import] · a stamped RTK choice loses to the first record import
-
-status: in progress (bundle B, overnight run 2026-11-10, branch fix/B-upgrade-rtk) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-sync.ts:514 (`row !== null`) and :528; pinned by project-state-sync.test.ts:1850 and onboarding-upgrades.md. Fix if approved: drop `row !== null`, flip the test.
-
-User decision 2026-11-01: A stamped local RTK choice wins against first imported record.
 
 ### T318 · FNF[task-lock-wait-2] · remaining unbounded waits on start paths (+9)
 
@@ -866,14 +874,6 @@ status: parked · was modular #257 · reason: diminishing returns (2026-11-01 sc
 
 User reconciliation 2026-11-01: helper/read-contract consolidation (members1/2/5) stays parked. Failed-read members3/4 transfer to T495 correctness verification and must be deduplicated against its members4/5/6/7/8 and the completed T397 work; no second refactoring batch.
 
-### T386 · FNF[upgrade-early-death-hold] · an upgrade that dies before recording its found state restores normal and lifts an admin's hold
-
-status: in progress (bundle B, overnight run 2026-11-10, branch fix/B-upgrade-rtk) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-A run that dies between startRun (updater cli.ts ~:161) and recordFoundState (run.ts ~:181) has no metadata.foundState, so a later restore writes `normal`.
-Needs a marker that tells an older updater's run apart from a new run that died early.
-
-User decision 2026-11-01: Keep maintenance/hold on unknown prior state; report uncertainty instead of silently restoring normal
-
 ### T389 · FNF[repo-loose-objects] · Haive's git no longer triggers auto-maintenance (#256), so busy repos accumulate loose objects
 
 status: parked · kind: design · was modular #270 · reason: diminishing returns (2026-11-01 scan): Loose-object growth is unmeasured; no current operational impact established; resume when resume when measured repository growth warrants safe maintenance · priority: P4
@@ -950,13 +950,6 @@ User decision 2026-11-01: Persist the latest refresh result and per-source failu
 
 status: parked · reason: diminishing returns (2026-11-01 scan): Runner launch-spec mismatch is explicitly minor with unmeasured consequences; resume when resume when changed launch settings cause a demonstrated runtime problem · priority: P4
 From the T431 review (2026-10-30). PRE-EXISTING, minor, consequence unmeasured. worker sandbox/app-runner.ts ~:326-333 reuses a running app runner when its workspace subpath matches and compares nothing else, so the image tag, resource caps, publish args and debug env chosen at create never reach a running runner (the class T431 fixed for the editor). Unlike an editor, recreating a runner stops the running app, so decide when a changed launch may replace it (idle only, on the next explicit start, or never with a notice) before stamping a spec label as T431 did (`haive.ide.spec`).
-
-### T443 · FNF[rules-override-retry] · a 02 retry after the record write moved the repository rules override refuses and the region stays at the old override until the next upgrade
-
-status: in progress (bundle B, overnight run 2026-11-10, branch fix/B-upgrade-rtk) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-From the T119 review (2026-10-30). Introduced by T119, fails closed. worker onboarding-upgrade 02-upgrade-apply.ts ~:924-932 refuses the plan (`PLAN_NO_LONGER_HOLDS`) when `repositories.agent_rules_override` differs from the value 01 stamped; it has no counterpart of the render-context `ownRecordColumn` exemption (~:915-921). The writer-embedded import at 02's own record write (worker project-state write.ts ~:818) can import another install's override after 02 wrote the region, so the committed AGENTS.md block keeps the old override until the next upgrade heals it as `clean_update`, and a 02 retry needs a re-plan. Decide: defer the settings import while an upgrade is live, re-render the region on retry, or accept and document (the docs record it as a residual).
-
-User decision 2026-11-01: Defer imported repository-rules overrides until the running upgrade finishes, then reconcile.
 
 ### T444 · FNF[agent-rules-size-cap] [design] · the repository rules override may be 64 KiB, but codex reads only the first 32 KiB of AGENTS.md
 
