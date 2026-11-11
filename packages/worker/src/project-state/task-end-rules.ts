@@ -19,7 +19,8 @@ import {
 import { rewriteFileIfNoFollow, updateFileNoFollow } from '@haive/shared/fs-safe';
 import { readUpgradeFile, RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
-import { readRenderContextColumn } from '@haive/shared/project-state';
+import { isRtkChoiceRecorded, readRenderContextColumn } from '@haive/shared/project-state';
+import { recordableContext } from '../step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { readAgentRulesOverrideRaw } from '../step-engine/_agent-rules-override.js';
 import { cliRulesRegionRecord } from '../step-engine/steps/onboarding/_rules-files.js';
 import { writeApplicableTemplateIds, type RulesOverrideImport } from './sync.js';
@@ -86,11 +87,15 @@ export async function reconcileTaskEndRules(
       if (writtenRegion !== null && render !== null) {
         const record = cliRulesRegionRecord(writtenRegion, render, new Set());
         const context = readRenderContextColumn(repo.renderContext);
-        // Snapshots omit the column's own flag; a row carrying it fails isRenderContextSnapshot.
+        // Snapshots omit the column's own flag (a row carrying it fails isRenderContextSnapshot)
+        // and, as 01 records them, keep `rtkEnabled` only where an RTK choice was made.
         let snapshot: Record<string, unknown> | null = null;
         if (context.kind === 'column') {
-          const { rtkChoiceRecorded: _flag, ...rest } = context.column;
-          snapshot = rest;
+          const { rtkChoiceRecorded, ...rest } = context.column;
+          snapshot = recordableContext(
+            rest,
+            isRtkChoiceRecorded(rtkChoiceRecorded, repo.rtkChoiceMadeAt),
+          );
         }
         await tx.insert(schema.onboardingArtifacts).values({
           userId: repo.userId,

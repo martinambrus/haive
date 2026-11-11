@@ -148,7 +148,8 @@ describe('02 and the rules override its plan was made from', () => {
       const s = await setup(local, local);
       await recordWritten(s.apply());
       Object.assign(s.fake.rows(schema.repositories)[0]!, {
-        renderContext: { ...REFERENCE_CONTEXT, rtkChoiceRecorded: false },
+        renderContext: { ...REFERENCE_CONTEXT, rtkEnabled: true, rtkChoiceRecorded: false },
+        rtkChoiceMadeAt: null,
       });
       const path = join(s.root, '.haive-data/state/settings/agent-rules.md');
       if (incoming === null) await unlink(path);
@@ -182,6 +183,8 @@ describe('02 and the rules override its plan was made from', () => {
         // upgrade-status compares these same schema/hash fields against the shared renderer.
         expect(live).toHaveLength(1);
         expect(isRenderContextSnapshot(live[0]!.formValuesSnapshot)).toBe(true);
+        // No RTK choice was made, so the snapshot records no RTK value.
+        expect(live[0]!.formValuesSnapshot).not.toHaveProperty('rtkEnabled');
         expect(
           classifyEntry({
             live: live[0] as unknown as LiveArtifactRow,
