@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import * as subject from './left-committed-merge.js';
 import { leftCommittedMerges } from '@haive/shared/merge-left-open';
+import { worktreeDirPaths, worktreeDirName } from '../repo/worktree-paths.js';
 import * as gitMerge from './git-merge.js';
 import * as gitPush from '../repo/git-push.js';
 
@@ -188,6 +189,39 @@ describe('explicit undo of a cancel-left committed merge', () => {
       expect(h.sync).toHaveBeenCalled();
     },
   );
+  it.each(['personal', 'unrecorded-base'])(
+    'refuses a base checked out in another %s worktree without changing its index',
+    async (kind) => {
+      const f = await fixture();
+      await git(f.dir, 'switch', 'feature');
+      const linked =
+        kind === 'personal'
+          ? path.join(f.root, 'personal tree')
+          : worktreeDirPaths(f.dir, '', `${worktreeDirName('main')}--base`).worktreePath;
+      await git(f.dir, 'worktree', 'add', linked, 'main');
+      const status = await git(linked, 'status', '--porcelain');
+      await f.run();
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+      expect(await git(linked, 'status', '--porcelain')).toBe(status);
+      expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+      await git(f.dir, 'worktree', 'remove', linked);
+      await f.run();
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+    },
+  );
+  it('resets the recorded transient base worktree and leaves its index clean', async () => {
+    const f = await fixture();
+    await git(f.dir, 'switch', 'feature');
+    const linked = worktreeDirPaths(f.dir, '', `${worktreeDirName('main')}--base`).worktreePath;
+    await git(f.dir, 'worktree', 'add', linked, 'main');
+    f.payload.dir = linked;
+    f.job.dir = linked;
+    await f.run();
+    expect(await git(linked, 'rev-parse', 'HEAD')).toBe(f.before);
+    expect(await git(linked, 'status', '--porcelain')).toBe('');
+    expect(await readFile(path.join(f.dir, 'feature'), 'utf8')).toBe('feature');
+    expect(f.settled()[0]?.payload.outcome).toBe('undone');
+  });
   it('does not drop another commit appended since landing', async () => {
     const f = await fixture();
     await git(f.dir, 'commit', '--allow-empty', '-m', 'other');

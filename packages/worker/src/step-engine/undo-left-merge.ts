@@ -18,6 +18,7 @@ import {
 } from '@haive/shared/merge-left-open';
 import { lstatNoFollow, relUnder } from '@haive/shared/fs-safe';
 import { detectOrigin, gitRun, originGitRun, buildCredentialHelper } from '../repo/git-push.js';
+import { worktreeDirPaths, worktreeDirName } from '../repo/worktree-paths.js';
 import { checkoutHoldingTasks } from '../repo/refresh.js';
 import { findWorktreePathClaimant } from '../repo/worktree-claims.js';
 import { resyncHaiveProjections } from '../project-state/set-aside.js';
@@ -200,6 +201,7 @@ export async function undoLeftMerge(db: Database, payload: UndoLeftMergePayload)
   }
   let root: RootClaimHandle | null = null;
   let needsSync = false;
+  let movedCheckout: string | null = null;
   try {
     await inMergeDirLock(db, dir, async (tx) => {
       const m = leftCommittedMerges(await records(tx, taskId)).find(
@@ -328,6 +330,32 @@ export async function undoLeftMerge(db: Database, payload: UndoLeftMergePayload)
         // Preserve the moved-away commit as a git root too: a JSON sha alone cannot stop gc.
         // This create-only ref also identifies an admitted attempt if SQL fails after git moved.
         const undoRef = `refs/haive/undo-left-merge/${taskId}/${baseShaAfter}`;
+        // Porcelain -z keeps paths literal, including spaces, quotes and newlines. Git's
+        // update-ref does not protect a branch checked out in another worktree.
+        const listed = await gitRun(cwd, ['worktree', 'list', '--porcelain', '-z']);
+        if (listed.code !== 0) throw new Error('Cannot read the repository worktrees');
+        const holders: string[] = [];
+        let worktree = '';
+        for (const field of listed.stdout.split('\0')) {
+          if (field.startsWith('worktree ')) worktree = field.slice(9);
+          if (field === `branch ${branch}`) holders.push(worktree);
+        }
+        const transient = worktreeDirPaths(
+          cwd,
+          '',
+          `${worktreeDirName(m.landedOn)}--base`,
+        ).worktreePath;
+        if (
+          holders.length > 1 ||
+          holders.some((p) => p !== cwd && (p !== m.dir || p !== transient))
+        ) {
+          await settle(
+            'refused',
+            'The base branch is checked out in another worktree. Release that checkout before trying Undo again.',
+          );
+          return;
+        }
+        movedCheckout = holders[0] ?? null;
         const prior = await revParse(cwd, undoRef);
         const tip = await revParse(cwd, branch);
         if (tip !== m.baseShaAfter) {
@@ -347,11 +375,7 @@ export async function undoLeftMerge(db: Database, payload: UndoLeftMergePayload)
           await settle('refused', remote.reason, remote.permanent);
           return;
         }
-        const symbolic = await gitRun(cwd, ['symbolic-ref', '-q', 'HEAD']);
-        if (symbolic.code !== 0 && symbolic.code !== 1)
-          throw new Error('Cannot read the checkout branch');
-        const checkedOut = symbolic.code === 0 && symbolic.stdout.trim() === branch;
-        if (checkedOut && (await revParse(cwd, 'HEAD')) !== m.baseShaAfter) {
+        if (movedCheckout && (await revParse(movedCheckout, 'HEAD')) !== m.baseShaAfter) {
           await settle('moved', 'The checkout moved since this merge; nothing was changed.');
           return;
         }
@@ -361,8 +385,8 @@ export async function undoLeftMerge(db: Database, payload: UndoLeftMergePayload)
             throw new Error('The merge commit could not be preserved for recovery');
         }
         const move = await gitRun(
-          cwd,
-          checkedOut
+          movedCheckout ?? cwd,
+          movedCheckout
             ? ['reset', '--keep', m.baseShaBefore]
             : ['update-ref', branch, m.baseShaBefore, m.baseShaAfter],
         );
@@ -382,7 +406,7 @@ export async function undoLeftMerge(db: Database, payload: UndoLeftMergePayload)
       }
     });
     if (needsSync) {
-      await handBackAfterMove(initial.repoPath, initial.baseShaAfter);
+      if (movedCheckout) await handBackAfterMove(movedCheckout, initial.baseShaAfter);
       if (!(await resyncHaiveProjections(db, task.repositoryId, initial.repoPath, taskId)))
         throw new Error("Haive's project files were not re-synced yet; the job will retry");
     }
