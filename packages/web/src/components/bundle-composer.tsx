@@ -6,10 +6,12 @@ import type {
   BundleComposerInitial,
   CreateGitBundleRequest,
   InitBundleUploadRequest,
+  BundleReplacementMode,
 } from '@haive/shared';
 import { Button, FormError, Input, Label } from '@/components/ui';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { API_BASE_URL } from '@/lib/api-client';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
 
 /** Bundle row threaded through the form's value array. Mirrors what
  *  06_3-custom-bundles.apply expects: an `id` is enough — the worker
@@ -21,6 +23,8 @@ export interface BundleComposerEntry {
   status: 'active' | 'syncing' | 'failed';
   itemCount: number;
   lastSyncError?: string | null;
+  lastSyncNote?: string | null;
+  archiveFilename?: string | null;
 }
 
 interface BundleComposerProps {
@@ -152,6 +156,10 @@ export function BundleComposer({
   const [uploadProgress, setUploadProgress] = useState<{ name: string; pct: number } | null>(null);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [filesByBundle, setFilesByBundle] = useState<Record<string, BundleFilesState>>({});
+  const [replacement, setReplacement] = useState<{ entry: BundleComposerEntry; file: File } | null>(
+    null,
+  );
+  const [replacementMode, setReplacementMode] = useState<BundleReplacementMode | null>(null);
 
   const fileGenerations = useRef<Record<string, number>>({});
   const expandedIdsRef = useRef(expandedIds);
@@ -268,6 +276,8 @@ export function BundleComposer({
             status: 'active' | 'syncing' | 'failed';
             itemCounts?: { agent?: number; skill?: number };
             lastSyncError?: string | null;
+            lastSyncNote?: string | null;
+            archiveFilename?: string | null;
           }>;
         };
         if (cancelled) return;
@@ -278,6 +288,8 @@ export function BundleComposer({
           sourceType: b.sourceType,
           status: b.status,
           lastSyncError: b.lastSyncError,
+          lastSyncNote: b.lastSyncNote,
+          archiveFilename: b.archiveFilename,
           itemCount: (b.itemCounts?.agent ?? 0) + (b.itemCounts?.skill ?? 0),
         }));
         const current = valueRef.current;
@@ -362,8 +374,14 @@ export function BundleComposer({
     }
   };
 
-  const replaceZipBundle = async (entry: BundleComposerEntry, file: File) => {
-    if (disabled || busy) return;
+  const replaceZipBundle = async (
+    entry: BundleComposerEntry,
+    file: File,
+    mode: BundleReplacementMode,
+  ) => {
+    if (disabled || busy || entry.status === 'syncing') return;
+    setReplacement(null);
+    setReplacementMode(null);
     setError(null);
     setBusy(true);
     setUploadProgress({ name: file.name, pct: 0 });
@@ -402,12 +420,15 @@ export function BundleComposer({
       }
       const completeRes = await fetch(
         `${API_BASE_URL}/bundles/${entry.id}/replace/${uploadId}/complete`,
-        { method: 'POST', credentials: 'include' },
+        {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ mode }),
+        },
       );
       if (!completeRes.ok) throw new Error(`replace complete failed (${completeRes.status})`);
-      onChange(
-        value.map((v) => (v.id === entry.id ? { ...v, status: 'syncing', itemCount: 0 } : v)),
-      );
+      onChange(value.map((v) => (v.id === entry.id ? { ...v, status: 'syncing' } : v)));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -528,6 +549,95 @@ export function BundleComposer({
 
   return (
     <div className="flex flex-col gap-3">
+      <Dialog
+        open={replacement !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setReplacement(null);
+            setReplacementMode(null);
+          }
+        }}
+      >
+        {replacement && (
+          <DialogContent
+            className="max-h-[85dvh] overflow-y-auto"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="replace-zip-title"
+          >
+            <DialogHeader>
+              <DialogTitle id="replace-zip-title">Replace ZIP</DialogTitle>
+            </DialogHeader>
+            <dl className="mb-4 text-sm text-neutral-300">
+              <dt>Bundle</dt>
+              <dd>{replacement.entry.name}</dd>
+              <dt>New uploaded archive</dt>
+              <dd>
+                {replacement.file.name} ({formatBytes(replacement.file.size)})
+              </dd>
+              <dt>Previous uploaded archive</dt>
+              <dd>{replacement.entry.archiveFilename ?? 'Name unavailable'}</dd>
+              <dt>Old extracted tree</dt>
+              <dd>
+                {(() => {
+                  const known = filesByBundle[replacement.entry.id];
+                  return known && !known.loading && !known.error
+                    ? `${known.truncated ? 'At least ' : ''}${known.files.length} files (${formatBytes(known.files.reduce((sum, f) => sum + f.size, 0))})`
+                    : 'Size unavailable';
+                })()}
+              </dd>
+            </dl>
+            <MarkdownView body="Choose what happens to the old extracted files. Uploaded archives remain on disk in both modes; the replacement upload also needs disk space." />
+            <fieldset className="my-4 flex flex-col gap-3" disabled={disabled || busy}>
+              <legend className="sr-only">Replacement mode</legend>
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="radio"
+                  name="bundle-replacement-mode"
+                  value="keep_until_success"
+                  checked={replacementMode === 'keep_until_success'}
+                  onChange={() => setReplacementMode('keep_until_success')}
+                />
+                <MarkdownView body="**Keep old until success.** Needs space for both extracted trees. The old tree and catalog are replaced only after import succeeds. A failed replacement restores the previous usable bundle with automatic rollback." />
+              </label>
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="radio"
+                  name="bundle-replacement-mode"
+                  value="remove_first"
+                  checked={replacementMode === 'remove_first'}
+                  onChange={() => setReplacementMode('remove_first')}
+                />
+                <MarkdownView body="**Remove old extracted files first to free disk.** Removes the extracted tree before import, while keeping uploaded archives. There is no automatic rollback. A failed replacement leaves no extracted tree and the bundle is failed." />
+              </label>
+            </fieldset>
+            <div className="flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => {
+                  setReplacement(null);
+                  setReplacementMode(null);
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                disabled={
+                  !replacementMode || disabled || busy || replacement.entry.status === 'syncing'
+                }
+                onClick={() => {
+                  if (replacementMode)
+                    void replaceZipBundle(replacement.entry, replacement.file, replacementMode);
+                }}
+              >
+                Confirm replacement
+              </Button>
+            </div>
+          </DialogContent>
+        )}
+      </Dialog>
       {value.length === 0 ? (
         <p className="text-sm text-neutral-400">No bundles configured for this repository yet.</p>
       ) : (
@@ -576,19 +686,22 @@ export function BundleComposer({
                   {entry.sourceType === 'zip' && (
                     <label
                       className="inline-flex h-10 cursor-pointer items-center justify-center gap-2 rounded-md bg-transparent px-4 text-sm font-medium text-neutral-100 transition-colors hover:bg-neutral-800"
-                      aria-disabled={disabled || busy}
+                      aria-disabled={disabled || busy || entry.status === 'syncing'}
                     >
                       Replace ZIP
                       <input
                         type="file"
                         accept=".zip,.tar,.tar.gz,.tgz"
                         className="hidden"
-                        disabled={disabled || busy}
+                        disabled={disabled || busy || entry.status === 'syncing'}
                         onChange={(e) => {
                           const f = e.target.files?.[0];
                           // Reset so the same file can be picked twice.
                           e.target.value = '';
-                          if (f) void replaceZipBundle(entry, f);
+                          if (f) {
+                            setReplacementMode(null);
+                            setReplacement({ entry, file: f });
+                          }
                         }}
                       />
                     </label>
@@ -608,6 +721,14 @@ export function BundleComposer({
                     className="min-w-0 border-t border-red-900/50 px-3 py-2 text-sm text-red-300 [&_.haive-md]:break-words"
                   >
                     <MarkdownView body={entry.lastSyncError} />
+                  </div>
+                )}
+                {entry.status === 'active' && entry.lastSyncNote && (
+                  <div
+                    role="status"
+                    className="border-t border-amber-900/50 px-3 py-2 text-sm text-amber-200"
+                  >
+                    <MarkdownView body={entry.lastSyncNote} />
                   </div>
                 )}
                 {isExpanded && (

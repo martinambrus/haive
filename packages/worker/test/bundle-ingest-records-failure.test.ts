@@ -32,6 +32,65 @@ afterEach(async () => {
 
 type Handler = (payload: BundleJobPayload, db: Database, root: string) => Promise<void>;
 
+it('T487: a corrupt keep-mode replacement leaves the old tree, catalog and usable bundle', async () => {
+  const dest = path.join(root, USER, BUNDLE, 'extracted');
+  const archivePath = path.join(root, USER, BUNDLE, 'source.new.zip');
+  const oldArchive = path.join(root, USER, BUNDLE, 'source.zip');
+  await mkdir(dest, { recursive: true });
+  await writeFile(path.join(dest, 'keep'), 'existing bundle');
+  await writeFile(archivePath, 'corrupt zip');
+  const fake = createFakeDb({
+    customBundles: schema.customBundles,
+    customBundleItems: schema.customBundleItems,
+  });
+  fake.insert(schema.customBundles, {
+    id: BUNDLE,
+    userId: USER,
+    repositoryId: REPO,
+    name: 'kit',
+    sourceType: 'zip',
+    archivePath,
+    archiveFormat: 'zip',
+    archiveFilename: 'broken.zip',
+    storageRoot: dest,
+    status: 'syncing',
+  });
+  fake.insert(schema.customBundleItems, {
+    id: '00000000-0000-4000-8000-0000000000e1',
+    bundleId: BUNDLE,
+    sourcePath: 'keep',
+    contentHash: 'old',
+  });
+  const before = structuredClone(fake.rows(schema.customBundleItems));
+  const error = await handleIngestZip(
+    {
+      bundleId: BUNDLE,
+      userId: USER,
+      archivePath,
+      replacement: {
+        mode: 'keep_until_success',
+        previousArchive: {
+          archivePath: oldArchive,
+          archiveFilename: 'old.zip',
+          archiveFormat: 'zip',
+        },
+      },
+    } as BundleJobPayload,
+    fake.db as unknown as Database,
+    root,
+  ).catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(Error);
+  expect(await readFile(path.join(dest, 'keep'), 'utf8')).toBe('existing bundle');
+  expect(fake.rows(schema.customBundleItems)).toEqual(before);
+  expect(fake.rows(schema.customBundles)[0]).toMatchObject({
+    status: 'active',
+    archivePath: oldArchive,
+    archiveFilename: 'old.zip',
+    lastSyncError: null,
+    lastSyncNote: expect.stringContaining('previous bundle remains in use'),
+  });
+});
+
 const cases: Array<[string, Handler, Record<string, unknown>]> = [
   [
     'handleIngestZip without an archive path',

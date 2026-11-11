@@ -329,7 +329,15 @@ function reaperClaimsBeforeTheRoutesWrite(family: Family): void {
 }
 
 const request = (app: Hono<AppEnv>, method: 'POST' | 'DELETE', url: string) =>
-  app.request(url, { method });
+  app.request(url, {
+    method,
+    ...(method === 'POST' && url.includes('/replace/')
+      ? {
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ mode: 'remove_first' }),
+        }
+      : {}),
+  });
 const errorOf = async (res: Response) => ((await res.json()) as { error: string }).error;
 
 describe('U3: a complete that a reaper claim reaches first', () => {

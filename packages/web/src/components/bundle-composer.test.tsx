@@ -9,6 +9,11 @@ import {
   type Renderer,
 } from '../../test/render-tree';
 
+vi.mock('react-dom', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('react-dom')>()),
+  createPortal: (children: unknown) => children,
+}));
+
 const updaterReplay = vi.hoisted(() => ({ enabled: false }));
 const loaderProbe = vi.hoisted(() => ({ enabled: false, render: 0, writes: [] as number[] }));
 
@@ -99,7 +104,11 @@ function holdFiles() {
 const listing = (path: string) => ({ files: [{ path, size: 1 }], truncated: false, cap: 37 });
 let syncError: string | null = null;
 
-async function fakeFetch(input: unknown) {
+let replacementBodies: unknown[] = [];
+let replacementInits = 0;
+let syncNote: string | null = null;
+const keyListeners = new Set<(event: unknown) => void>();
+async function fakeFetch(input: unknown, init?: RequestInit) {
   const url = new URL(String(input), 'http://localhost');
   if (url.pathname.endsWith('/bundles')) {
     const body = {
@@ -110,6 +119,8 @@ async function fakeFetch(input: unknown) {
           sourceType: bundleSource,
           status: bundleState,
           lastSyncError: syncError,
+          lastSyncNote: syncNote,
+          archiveFilename: 'old.zip',
           itemCounts: { agent: 1 },
         },
         ...(secondBundleState === null
@@ -132,8 +143,12 @@ async function fakeFetch(input: unknown) {
     bundleState = 'syncing';
     return reply({});
   }
-  if (url.pathname.endsWith('/bundles/b1/replace/init')) return reply({ session: { id: 'u1' } });
+  if (url.pathname.endsWith('/bundles/b1/replace/init')) {
+    replacementInits += 1;
+    return reply({ session: { id: 'u1' } });
+  }
   if (url.pathname.endsWith('/bundles/b1/replace/u1/complete')) {
+    replacementBodies.push(JSON.parse(String(init?.body)));
     bundleState = 'syncing';
     return reply({});
   }
@@ -143,6 +158,16 @@ async function fakeFetch(input: unknown) {
 
 beforeAll(() => {
   vi.stubGlobal('fetch', fakeFetch);
+  vi.stubGlobal('document', {
+    body: {},
+    activeElement: null,
+    addEventListener(type: string, callback: (event: unknown) => void) {
+      if (type === 'keydown') keyListeners.add(callback);
+    },
+    removeEventListener(type: string, callback: (event: unknown) => void) {
+      if (type === 'keydown') keyListeners.delete(callback);
+    },
+  });
   // Drive the composer's interval explicitly; flush() keeps its real setTimeout.
   vi.stubGlobal('setInterval', (callback: () => void) => {
     poll = callback;
@@ -152,6 +177,10 @@ beforeAll(() => {
 });
 afterAll(() => vi.unstubAllGlobals());
 beforeEach(() => {
+  replacementBodies = [];
+  replacementInits = 0;
+  syncNote = null;
+  keyListeners.clear();
   updaterReplay.enabled = false;
   loaderProbe.enabled = false;
   loaderProbe.render = 0;
@@ -489,6 +518,13 @@ describe('file listings follow the final synced tree', () => {
     }) => void;
     onChange({ target: { files: [new File(['zip'], 'docs.zip')], value: 'docs.zip' } });
     await settle(live.view);
+    const radio = findAll(
+      live.view.tree(),
+      (h) => h.tag === 'input' && h.props.value === 'keep_until_success',
+    )[0]!;
+    (radio.props.onChange as () => void)();
+    await settle(live.view);
+    await live.click('Confirm replacement');
     expect(live.text()).toContain('syncing');
     expect(live.text()).toContain('a.md');
     const fresh = holdFiles();
@@ -499,6 +535,68 @@ describe('file listings follow the final synced tree', () => {
     await settle(live.view);
     expect(live.text()).toContain('replacement.md');
   });
+});
+
+it.each(['keep_until_success', 'remove_first'])(
+  'T487: requires a deliberate choice and sends %s',
+  async (mode) => {
+    const live = await mountLive();
+    const input = findAll(
+      live.view.tree(),
+      (h) => h.tag === 'input' && h.props.type === 'file',
+    )[0]!;
+    const pick = () =>
+      (input.props.onChange as (e: unknown) => void)({
+        target: { files: [new File(['zip'], 'replacement.zip')], value: '' },
+      });
+    pick();
+    await settle(live.view);
+    expect(replacementBodies).toEqual([]);
+    expect(replacementInits).toBe(0);
+    expect(live.text()).toContain('automatic rollback');
+    const confirm = () =>
+      findAll(
+        live.view.tree(),
+        (h) => h.tag === 'button' && textOf(h).includes('Confirm replacement'),
+      )[0]!;
+    expect(confirm()?.props.disabled).toBe(true);
+    (confirm().props.onClick as () => void)();
+    await settle(live.view);
+    expect(replacementInits).toBe(0);
+    const radios = findAll(live.view.tree(), (h) => h.tag === 'input' && h.props.type === 'radio');
+    expect(radios).toHaveLength(2);
+    expect(radios.every((r) => !r.props.checked)).toBe(true);
+    (radios.find((r) => r.props.value === mode)!.props.onChange as () => void)();
+    await settle(live.view);
+    await live.click('Confirm replacement');
+    expect(replacementBodies).toEqual([{ mode }]);
+    bundleState = 'active';
+    pick();
+    await settle(live.view);
+    expect(confirm().props.disabled).toBe(true);
+  },
+);
+
+it('closes the replacement dialog on Escape before uploading anything', async () => {
+  const live = await mountLive();
+  const input = findAll(live.view.tree(), (h) => h.tag === 'input' && h.props.type === 'file')[0]!;
+  (input.props.onChange as (e: unknown) => void)({
+    target: { files: [new File(['zip'], 'new.zip')], value: '' },
+  });
+  await settle(live.view);
+  expect(live.text()).toContain('old.zip');
+  expect(live.text()).toContain('Uploaded archives remain on disk');
+  for (const callback of keyListeners) callback({ key: 'Escape', stopImmediatePropagation() {} });
+  await settle(live.view);
+  expect(findAll(live.view.tree(), (h) => h.props.role === 'dialog')).toHaveLength(0);
+  expect(replacementInits).toBe(0);
+});
+
+it('shows a rolled-back replacement warning on the active bundle', async () => {
+  syncNote = 'Replacement failed; the previous bundle remains in use.';
+  const live = await mountLive();
+  expect(live.text()).toContain(syncNote);
+  expect(findAll(live.view.tree(), (h) => h.props.role === 'alert')).toHaveLength(0);
 });
 
 it.each(['first expand', 'retry'] as const)(

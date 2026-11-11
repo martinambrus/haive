@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   classified: null as unknown,
   user: '00000000-0000-4000-8000-0000000000a1',
   removed: 0,
+  failCatalog: false,
 }));
 
 // Parsing proper reads the repository's CLI providers through a join; the classifier it starts
@@ -19,7 +20,15 @@ vi.mock('../src/bundle-parser/index.js', () => ({
     h.classified = await classifyBundle(root, `${h.user}/${bundleId}/extracted`);
     return { items: [], ambiguous: [], dropped: [] };
   },
-  persistBundleItems: async () => ({ inserted: 0, updated: 0, removed: h.removed }),
+  persistBundleItems: async (db: Database, bundleId: string) => {
+    if (h.failCatalog) {
+      await db
+        .delete(schema.customBundleItems)
+        .where((await import('drizzle-orm')).eq(schema.customBundleItems.bundleId, bundleId));
+      throw new Error('catalog write failed');
+    }
+    return { inserted: 0, updated: 0, removed: h.removed };
+  },
 }));
 
 import { schema } from '@haive/database';
@@ -56,6 +65,7 @@ function run(cmd: string, args: string[], cwd?: string): Promise<void> {
 let tmpRoot: string;
 
 beforeEach(async () => {
+  h.failCatalog = false;
   tmpRoot = await mkdtemp(path.join(os.tmpdir(), 'haive-bundle-'));
 });
 
@@ -141,6 +151,78 @@ describe('handleIngestZip', () => {
   }
 
   const agent = '---\nname: reviewer\ndescription: reviews\n---\nbody\n';
+
+  it.each(['success', 'catalog failure'] as const)(
+    'publishes a keep-mode replacement atomically: %s',
+    async (outcome) => {
+      const dir = path.join(tmpRoot, h.user, BUNDLE);
+      const dest = path.join(dir, 'extracted');
+      const archivePath = path.join(dir, 'source.new.zip');
+      await mkdir(dest, { recursive: true });
+      await writeFile(path.join(dest, 'old.md'), 'old tree');
+      const zip = new JSZip();
+      zip.file('agents/new.md', agent);
+      await writeFile(archivePath, await zip.generateAsync({ type: 'nodebuffer' }));
+      const fake = createFakeDb({
+        customBundles: schema.customBundles,
+        customBundleItems: schema.customBundleItems,
+      });
+      fake.insert(schema.customBundles, {
+        id: BUNDLE,
+        userId: h.user,
+        repositoryId: REPOSITORY,
+        name: 'bundle',
+        sourceType: 'zip',
+        archivePath,
+        archiveFormat: 'zip',
+        storageRoot: dest,
+        status: 'syncing',
+      });
+      fake.insert(schema.customBundleItems, {
+        id: REPOSITORY,
+        bundleId: BUNDLE,
+        sourcePath: 'old.md',
+        contentHash: 'old',
+      });
+      const oldItems = structuredClone(fake.rows(schema.customBundleItems));
+      h.failCatalog = outcome === 'catalog failure';
+      const result = handleIngestZip(
+        {
+          bundleId: BUNDLE,
+          userId: h.user,
+          archivePath,
+          replacement: {
+            mode: 'keep_until_success',
+            previousArchive: {
+              archivePath: path.join(dir, 'source.zip'),
+              archiveFilename: 'old.zip',
+              archiveFormat: 'zip',
+            },
+          },
+        },
+        fake.db as unknown as Database,
+        tmpRoot,
+      );
+      if (outcome === 'catalog failure') {
+        await expect(result).rejects.toThrow('catalog write failed');
+        expect(await readFile(path.join(dest, 'old.md'), 'utf8')).toBe('old tree');
+        expect(fake.rows(schema.customBundleItems)).toEqual(oldItems);
+        expect(fake.rows(schema.customBundles)[0]).toMatchObject({
+          status: 'active',
+          archiveFilename: 'old.zip',
+        });
+      } else {
+        await result;
+        expect(await readFile(path.join(dest, 'agents/new.md'), 'utf8')).toBe(agent);
+        expect(await readdir(dest)).not.toContain('old.md');
+        expect(fake.rows(schema.customBundles)[0]).toMatchObject({
+          status: 'active',
+          archivePath,
+          lastSyncNote: null,
+        });
+      }
+    },
+  );
 
   it('keeps a lone agents/ folder, which carries what makes its files agents', async () => {
     const out = await ingest({ 'agents/reviewer.md': agent });

@@ -3,11 +3,11 @@ import { bundleGitAuth } from './bundle-git.js';
 import { redactGitUrl } from '@haive/shared/schemas';
 import path from 'node:path';
 import { ensureDirNoFollow, lstatNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { logger, type ArchiveFormat, type BundleJobPayload } from '@haive/shared';
-import { boundQueryError, safeErrorMessage } from '@haive/shared/logger';
+import { boundQueryError, safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
 import { isBundleRootDir } from '../bundle-parser/classifier.js';
 import { parseBundle, persistBundleItems } from '../bundle-parser/index.js';
 import { assertCloneUrl, extractArchive, gitClone } from './clone.js';
@@ -123,10 +123,15 @@ export async function handleIngestZip(
   bundleStorageRoot: string,
 ): Promise<void> {
   const bundle = await loadBundle(db, payload.bundleId);
+  // A redelivered job for a superseded upload must not touch the current source or catalog.
+  if (payload.archivePath && payload.archivePath !== bundle.archivePath) return;
   const dest = bundleExtractedDir(bundleStorageRoot, payload.userId, bundle.id);
+  let published = false;
+  let catalogStarted = false;
+  let rollbackComplete = false;
   try {
     if (!bundle.archivePath || !bundle.archiveFormat) {
-      throw new Error('zip-source bundle missing archivePath / archiveFormat');
+      throw new Error('zip-source bundle missing archivePath or archiveFormat');
     }
     const archiveRel = bundleArchiveRel(
       bundleStorageRoot,
@@ -135,34 +140,54 @@ export async function handleIngestZip(
       bundle.id,
     );
     if (!archiveRel) throw new Error('bundle archive is not the file this bundle uploaded');
+    let parsed!: Awaited<ReturnType<typeof parseBundle>>;
+    let counts!: Awaited<ReturnType<typeof persistBundleItems>>;
     const report = await extractArchive(
       { anchor: bundleStorageRoot, rel: archiveRel },
       bundle.archiveFormat as ArchiveFormat,
       { anchor: bundleStorageRoot, rel: `${bundleDirRel(payload.userId, bundle.id)}/extracted` },
-      { keepLoneDir: isBundleRootDir },
+      {
+        keepLoneDir: isBundleRootDir,
+        afterSwap: async (extraction) => {
+          catalogStarted = true;
+          // All catalog writes roll back together, and extractArchive restores the tree if this
+          // transaction fails. No pooled connection is held during archive extraction.
+          await db.transaction(async (tx) => {
+            const [owned] = await tx
+              .update(schema.customBundles)
+              .set({ storageRoot: dest, updatedAt: new Date() })
+              .where(
+                and(
+                  eq(schema.customBundles.id, bundle.id),
+                  bundle.archivePath
+                    ? eq(schema.customBundles.archivePath, bundle.archivePath)
+                    : undefined,
+                ),
+              )
+              .returning({ id: schema.customBundles.id });
+            if (!owned)
+              throw new Error('The bundle source changed before its catalog could be saved.');
+            const catalogDb = tx as unknown as Database;
+            parsed = await parseBundle(bundle.id, catalogDb, logger, bundleStorageRoot);
+            counts = await persistBundleItems(catalogDb, bundle.id, parsed);
+            await markIfItemsRemoved(catalogDb, bundle.repositoryId, counts.removed);
+            await setBundleActive(catalogDb, bundle.id, {
+              storageRoot: dest,
+              lastSyncAt: new Date(),
+              lastSyncError: null,
+              lastSyncNote: extraction.note,
+            });
+          });
+          published = true;
+        },
+        afterRollback: () => {
+          rollbackComplete = true;
+        },
+      },
     );
     if (report.note) {
       logger.warn({ bundleId: bundle.id, dropped: report.dropped }, report.note);
     }
-    // Update storageRoot before parsing so the parser reads from the freshly
-    // extracted tree.
-    await db
-      .update(schema.customBundles)
-      .set({ storageRoot: dest, updatedAt: new Date() })
-      .where(eq(schema.customBundles.id, bundle.id));
-    const parsed = await parseBundle(bundle.id, db, logger, bundleStorageRoot);
-    const counts = await persistBundleItems(db, bundle.id, parsed);
-    await markIfItemsRemoved(db, bundle.repositoryId, counts.removed);
-    await setBundleActive(db, bundle.id, {
-      storageRoot: dest,
-      lastSyncAt: new Date(),
-      lastSyncError: null,
-      // Written UNCONDITIONALLY — null when nothing was dropped — because the note describes the
-      // tree THIS extraction produced. A re-upload that drops nothing would otherwise inherit the
-      // previous run's report, and this write is what owns the column's whole lifecycle, so the
-      // api's sync-start clears need no counterpart. `06_3-custom-bundles` surfaces it.
-      lastSyncNote: report.note,
-    });
     logger.info(
       {
         bundleId: bundle.id,
@@ -177,7 +202,55 @@ export async function handleIngestZip(
     );
   } catch (err) {
     const msg = safeErrorMessage(err);
-    await setBundleFailed(db, bundle.id, msg);
+    const previous =
+      payload.replacement?.mode === 'keep_until_success'
+        ? payload.replacement.previousArchive
+        : null;
+    const tree =
+      previous && !published && (!catalogStarted || rollbackComplete)
+        ? await lstatNoFollow(
+            bundleStorageRoot,
+            `${bundleDirRel(payload.userId, bundle.id)}/extracted`,
+          )
+        : null;
+    if (previous && tree?.kind === 'directory') {
+      await db
+        .update(schema.customBundles)
+        .set({
+          ...previous,
+          status: 'active',
+          lastSyncError: null,
+          lastSyncNote: [
+            bundle.lastSyncNote,
+            `Replacement failed; the previous bundle remains in use. ${scrubErrorPaths(msg)}`,
+          ]
+            .filter(Boolean)
+            .join('\n\n'),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.customBundles.id, bundle.id),
+            eq(schema.customBundles.archivePath, bundle.archivePath!),
+          ),
+        );
+    } else {
+      await db
+        .update(schema.customBundles)
+        .set({
+          status: 'failed',
+          lastSyncError: scrubErrorPaths(msg),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.customBundles.id, bundle.id),
+            bundle.archivePath
+              ? eq(schema.customBundles.archivePath, bundle.archivePath)
+              : undefined,
+          ),
+        );
+    }
     throw err;
   }
 }

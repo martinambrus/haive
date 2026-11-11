@@ -1397,7 +1397,10 @@ describe('the routes that start a background job', () => {
         await writeFile(join(tree, 'agent.md'), 'the current tree');
       },
       send: (app) =>
-        app.request(`/bundles/${JOB_BUNDLE}/replace/${JOB_UPLOAD}/complete`, { method: 'POST' }),
+        app.request(
+          `/bundles/${JOB_BUNDLE}/replace/${JOB_UPLOAD}/complete`,
+          jsonRequest('POST', { mode: 'remove_first' }),
+        ),
       status: 200,
       jobs: [BUNDLE_JOB_NAMES.INGEST_ZIP],
       early: true,

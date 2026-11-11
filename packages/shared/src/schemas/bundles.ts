@@ -7,6 +7,22 @@ export const customBundleStatusSchema = z.enum(['active', 'syncing', 'failed']);
 export const customBundleItemKindSchema = z.enum(['agent', 'skill']);
 export const customBundleItemSourceFormatSchema = z.enum(['claude-md', 'codex-toml', 'gemini-md']);
 
+export const bundleReplacementModeSchema = z.enum(['keep_until_success', 'remove_first']);
+export type BundleReplacementMode = z.infer<typeof bundleReplacementModeSchema>;
+
+/** Durable completion intent; retained across a refused enqueue or a dead API process. */
+export const bundleReplacementSchema = z.object({
+  mode: bundleReplacementModeSchema,
+  previousArchive: z
+    .object({
+      archivePath: z.string().nullable(),
+      archiveFilename: z.string().nullable(),
+      archiveFormat: z.string().nullable(),
+    })
+    .nullable(),
+});
+export type BundleReplacement = z.infer<typeof bundleReplacementSchema>;
+
 /** Body for POST /api/bundles. Git-source only — ZIP-source bundles are
  *  created by the upload-complete endpoint after a chunked upload finishes. */
 export const createGitBundleRequestSchema = z.object({
@@ -79,6 +95,7 @@ export const bundleSummarySchema = z.object({
   lastSyncAt: z.string().nullable(),
   lastSyncCommit: z.string().nullable(),
   lastSyncError: z.string().nullable(),
+  lastSyncNote: z.string().nullable().optional(),
   itemCounts: z.object({
     agent: z.number().int().nonnegative(),
     skill: z.number().int().nonnegative(),

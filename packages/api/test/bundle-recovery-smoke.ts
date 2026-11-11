@@ -86,7 +86,9 @@ try {
         origin: webOrigin,
         'content-type': 'application/json',
       },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(body === undefined && !url.includes('/replace/')
+        ? {}
+        : { body: JSON.stringify(body ?? { mode: 'remove_first' }) }),
     });
   const [git] = await db
     .insert(schema.customBundles)

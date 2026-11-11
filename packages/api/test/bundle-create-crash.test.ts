@@ -175,15 +175,104 @@ afterEach(async () => {
 const post = async (url: string, body?: unknown) =>
   app.request(
     url,
-    body === undefined
+    body === undefined && !url.includes('/replace/')
       ? { method: 'POST' }
       : {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(body),
+          body: JSON.stringify(body ?? { mode: 'remove_first' }),
         },
   );
 const complete = (id: string) => post(`/uploads/${id}/complete`);
+
+describe('T487: explicit replacement mode', () => {
+  it.each([undefined, {}, { mode: 'automatic' }])(
+    'refuses an absent or invalid mode: %j',
+    async (body) => {
+      const dir = await seedZipBundle();
+      await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+      const response = await app.request(`/${BUNDLE}/replace/${REPLACE}/complete`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: expect.stringContaining('Choose') });
+      expect(await readFile(path.join(dir, 'extracted', 'old.md'), 'utf8')).toBe('old');
+      expect(fake.rows(schema.customBundles)[0]).toMatchObject({ status: 'active' });
+      expect(ingestJobs()).toHaveLength(0);
+    },
+  );
+
+  it('keeps the old extracted tree until a keep-mode replacement succeeds', async () => {
+    const dir = await seedZipBundle();
+    await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+    h.beforeRemove = () => {
+      throw new Error('keep mode must not remove anything');
+    };
+    expect2xx(await post(`/${BUNDLE}/replace/${REPLACE}/complete`, { mode: 'keep_until_success' }));
+    expect(await readFile(path.join(dir, 'extracted', 'old.md'), 'utf8')).toBe('old');
+    expect(ingestJobs()[0]?.data).toMatchObject({ replacement: { mode: 'keep_until_success' } });
+  });
+
+  it('keeps its original choice and rollback source across an enqueue failure', async () => {
+    const dir = await seedZipBundle();
+    await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+    queue.state.refuse = new Error('queue unavailable');
+    const url = `/${BUNDLE}/replace/${REPLACE}/complete`;
+    expect((await post(url, { mode: 'keep_until_success' })).status).toBe(500);
+    expect(fake.rows(schema.customBundles)[0]).toMatchObject({
+      status: 'active',
+      archivePath: path.join(dir, 'source.zip'),
+    });
+    queue.state.refuse = null;
+    expect((await post(url, { mode: 'remove_first' })).status).toBe(409);
+    expect(await readFile(path.join(dir, 'extracted', 'old.md'), 'utf8')).toBe('old');
+    expect2xx(await post(url, { mode: 'keep_until_success' }));
+    expect(ingestJobs()[0]?.data).toMatchObject({
+      replacement: {
+        mode: 'keep_until_success',
+        previousArchive: { archivePath: path.join(dir, 'source.zip') },
+      },
+    });
+  });
+
+  it('refuses an old replacement record after another archive became active', async () => {
+    const dir = await seedZipBundle();
+    await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+    queue.state.refuse = new Error('queue unavailable');
+    const url = `/${BUNDLE}/replace/${REPLACE}/complete`;
+    expect((await post(url, { mode: 'keep_until_success' })).status).toBe(500);
+    queue.state.refuse = null;
+    fake.patch(schema.customBundles, BUNDLE, {
+      archivePath: path.join(dir, 'source.other.zip'),
+      status: 'active',
+    });
+    expect((await post(url, { mode: 'keep_until_success' })).status).toBe(409);
+    expect(await readFile(path.join(dir, 'extracted', 'old.md'), 'utf8')).toBe('old');
+    expect(ingestJobs()).toHaveLength(0);
+  });
+
+  it.each(['keep_until_success', 'remove_first'])(
+    'fences a stale completion before enqueue in %s mode',
+    async (mode) => {
+      const dir = await seedZipBundle();
+      await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+      const replacementPath = path.join(dir, `source.${REPLACE}.zip`);
+      fake.hooks.beforeCommit = () => {
+        if (fake.rows(schema.customBundles)[0]?.archivePath === replacementPath) {
+          fake.hooks.beforeCommit = null;
+          fake.patch(schema.customBundles, BUNDLE, {
+            archivePath: path.join(dir, 'source.takeover.zip'),
+          });
+        }
+      };
+      expect((await post(`/${BUNDLE}/replace/${REPLACE}/complete`, { mode })).status).toBe(409);
+      expect(await readFile(path.join(dir, 'extracted', 'old.md'), 'utf8')).toBe('old');
+      expect(ingestJobs()).toHaveLength(0);
+    },
+  );
+});
 
 function expect2xx(res: Response) {
   expect(res.status).toBeGreaterThanOrEqual(200);
@@ -601,6 +690,7 @@ describe('replacement continuation', () => {
     fake.hooks.beforeUpdate = null;
     expect((await app.request(`/uploads/${REPLACE}`, { method: 'DELETE' })).status).toBe(200);
     await expect(stat(replacementFile())).rejects.toThrow();
+    await expect(stat(`${replacementFile()}.replacement.json`)).rejects.toThrow();
     expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe('OLD-ARCHIVE');
   });
 
