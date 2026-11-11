@@ -93,6 +93,11 @@ describe('step-12 durable landed merge', () => {
     ]);
     db.state = null;
     expect(events[0]?.payload.baseShaAfter).toBe(after);
+    expect(events[0]?.payload).toMatchObject({
+      featureBranch: 'feature',
+      featureSha: await git(dir, 'rev-parse', 'feature'),
+      mergeStage: 'feature',
+    });
     expect(await git(dir, 'rev-parse', 'main')).toBe(after);
   });
   it('keeps the durable fact when cancel took the step during the merge section', async () => {
