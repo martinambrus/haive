@@ -12,6 +12,8 @@ export type PlanPatchErrorKind =
   /** expectedVersion did not match — someone else wrote this node first. NOT
    *  retryable without showing a human the other write. */
   | 'conflict'
+  /** Another patch still owns this repository's plan. Retry the same patch. */
+  | 'busy'
   /** A referenced node/edge is not in this repository. */
   | 'not_found'
   /** The repository itself is gone: it was deleted while the patch was being applied. Not the

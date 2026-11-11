@@ -1896,6 +1896,19 @@ export interface PlanMergeMessage {
   createdAt: string;
 }
 
+/** An ended conversation kept discoverable until a later merge succeeds. */
+export interface PlanMergeFailure {
+  taskId: string;
+  status: 'failed';
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export interface PlanMergeResponse {
+  merge: PlanMergeState | null;
+  failedMerge: PlanMergeFailure | null;
+}
+
 export interface PlanMergeState {
   taskId: string;
   status: TaskStatus;
@@ -2309,8 +2322,8 @@ export function startPlanMerge(
 
 /** The open merge conversation, or `{ merge: null }`. Polled by the plan page, so
  *  it answers with state rather than a 404. */
-export function getPlanMerge(repositoryId: string): Promise<{ merge: PlanMergeState | null }> {
-  return api.get<{ merge: PlanMergeState | null }>(`${planBase(repositoryId)}/merge`);
+export function getPlanMerge(repositoryId: string): Promise<PlanMergeResponse> {
+  return api.get<PlanMergeResponse>(`${planBase(repositoryId)}/merge`);
 }
 
 export function discardPlanMerge(
