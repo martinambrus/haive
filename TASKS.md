@@ -171,11 +171,13 @@ Low unless marked. Code in `worker/src/queues/plan-mirror-queue.ts` (`integrateO
 ### T604 · design · the 5 s start-admission bound against a large claim ledger
 
 status: open · kind: design · found: F1 (#318) review 2026-11-11 · priority: P3
+DECIDED by the owner 2026-11-11: resolved through T605 (narrow the key); no separate bound change.
 A task start waits at most 5 s for the repository task lock and row admission, then answers 409 busy (`repository-task-lock.ts`). MEASURED: the foreground project-state writer holds that lock 844-2,072 ms at 512 claim files; extrapolated, 5 s covers about 1,300-1,800 claim files, while the record allows 4,096 entries (`shared/src/project-state/limits.ts`). A repository near the cap can therefore answer busy to routine starts while a write runs. Decide: raise the bound with the ledger size, shorten the writer's hold (batch outside the lock), or accept and document.
 
 ### T605 · design · git work under the task-creation key
 
 status: open · kind: design · found: F1 (#318) and D2 (#484) reviews 2026-11-11 · priority: P3
+DECIDED by the owner 2026-11-11: narrow the creation key to the row admission; git and file work fenced by the task's own epoch. Overnight run authorized; covers T604.
 Task creation holds the creation key across git and file work (worktree and branch checks, attachment staging), so a slow git or disk holds every other creation and start for that repository behind it. PRE-EXISTING, consequential. Decide whether the key covers only the row admission, with the file work fenced by the task's own epoch instead.
 
 ### T606 · FNF[refresh-run-followups] · latest refresh-run record follow-ups (+12)
@@ -217,14 +219,10 @@ Low unless marked. Code in `worker/src/project-state/kept-metadata.ts`, `set-asi
 8. A false re-sync is retried without a diagnosis (`kept-metadata-recovery.ts:33`).
 9. Refresh, 00a and plan Pull ignore the re-sync boolean.
 
-### T609 · design · chmod between judge and removal widens a kept mode
-
-status: open · kind: design · found: D3 (#310) Codex review P2 2026-11-11 · priority: P3
-A chmod after `captureProjectionMetadata` and before the removal goes unseen, so recovery can restore a stale, wider mode (e.g. 0600 → 0644). Refusing on mismatch alone is not enough: `rememberKeptMetadata` merges `new || existing` and the existing entry wins on retry. A fix needs a re-judge that replaces its own first entry. Decide whether that window is worth a mechanism.
-
 ### T610 · investigate · two-install smoke: project-state sweep held once in CI
 
 status: open · kind: investigate · found: D3 (#1077) PR CI 2026-11-11 · priority: P3
+DECIDED by the owner 2026-11-11: add logging of `refreshProjectState` outcome and reason in the two-install smoke. Overnight run authorized.
 Run 43074635866 attempt 1 (head a4737e4e9), `smoke:two-install`: the check "a boot marks a repository with a render context dirty, and a row still dirty once" failed with outbox `revision 22, written_revision 21, last_error null`, and every later sweep check in that run failed the same way (nothing written, checkout clean), so the row stayed held for the rest of the run; the job then hit its 15 min limit. It passed locally (218/218) and on the CI rerun.
 Read so far: `refreshProjectState` (`worker/src/project-state/refresh.ts` ~:100-145) holds without writing an error only on `gitOperationInProgress` or a `held` result from `syncProjectStateFromCheckout`; D3 touched neither file, and its kept-metadata restore runs after both flushes in `resyncHaiveProjections`, so D3 is not implicated by the code read. Next: make the smoke log `refreshProjectState`'s outcome and reason on a failed check, then look for what left a git operation or held sync behind (an earlier check's leftover `MERGE_HEAD` or a lease) if it recurs.
 
@@ -257,6 +255,7 @@ Code in web `lib/api-proxy.server.ts`, `lib/api-base.server.ts`, `app/api/haive/
 ### T613 · design · code-server shares the web origin in cross-host proxy mode
 
 status: open · kind: design · found: H2 (#435) review 2026-11-11 · priority: P2
+DECIDED by the owner 2026-11-11: separate editor hostname (e.g. `ide.<domain>`) with a scoped handshake token for cross-host installs. Overnight run authorized.
 In cross-host mode `/ide` is proxied on the web origin, so code-server (which runs repository code) runs with the app's origin and can reach its API session. Options: a separate editor hostname (needs DNS/TLS per install), an API-host editor with its own scoped handshake token, or a sandboxed opaque-origin iframe (code-server may need storage it then lacks). Costs: `.claude/tmp/codex-run/H2-S/codex-2/editor-options.txt`. Needs an owner decision. Same-hostname installs are unaffected.
 
 ### T614 · FNF[cancel-left-merge-followups] · cancel-left committed-merge report follow-ups (+2)
@@ -270,6 +269,7 @@ Code in `worker/src/step-engine/left-committed-merge.ts`.
 ### T615 · design · reset provenance credits a merge into another branch
 
 status: open · kind: design · found: E2 (#1080) Greptile P1 2026-11-11 · priority: P2
+DECIDED by the owner 2026-11-11: the worker records the checkout branch when the reset starts; provenance counts only landings whose `landedOn` equals it; old merges without a branch stay counted as today. Overnight run authorized.
 `resolveMergedTasks` (api `routes/repos.ts` ~:1195-1245) counts a task's 11d skill-sync output as reaching the checkout when its step 12 merged, whatever branch the merge landed on: the legacy `merge_resolve_state.merged === true` path (PRE-EXISTING; `merge-resolver.ts` sets it with no branch check) and, since #1080, a `merge.landed` event. A cross-branch merge leaves the checkout unchanged, so a later onboarding reset can delete a user's untouched skill at the same path. A fix must compare the landing's `landedOn` with the branch the reset is reading, which the api cannot read (no git there): record the checkout branch at reset start in the worker, or have the worker resolve provenance. Decide where.
 
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
@@ -1552,6 +1552,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 ### T587 · Cancel, step abort and plan discard clear an administrator's pause with no audit row (owner confirm)
 
 status: open · kind: decision · found: #1058 review 2026-11-10 · priority: P4
+DECIDED by the owner 2026-11-11: add a best-effort audit row when Cancel, step abort or plan discard clear an administrator's pause, as Retry's resume does. Overnight run authorized.
 PRE-EXISTING. Cancel (api tasks/index.ts ~:1379), step abort (tasks/steps.ts ~:1756) and plan merge discard (routes/plan.ts ~:1406) clear any pause, an administrator's included, with no `byAdmin` event or audit row. release.md ~:120 documents that they clear any pause; decide whether the audit trail should record it (a best-effort row like the Retry resume) or stay as documented.
 
 ### T588 · FNF[worker-audit-writer] · worker audit writer follow-ups (+5)
@@ -1576,6 +1577,7 @@ status: open · kind: design · found: #1060 reviews 2026-11-10 · priority: P3
 ### T590 · FNF[cli-auth-lock-followups] · CLI auth lock and sign-out follow-ups (+17)
 
 status: open (items 1, 3, 5 done in #1062; the rest unapproved, awaiting owner pick) · kind: fix · found: #1061 reviews 2026-11-10 · priority: P3
+DECIDED by the owner 2026-11-11: all remaining groups approved (lock correctness 4, 6, 7, 15; sign-out flow 8, 9, 10, 14, 18; web UI 16, 17; tests and minor 11, 12, 13). Item 2 stays accepted and documented. Overnight run authorized.
 
 1. DONE #1062. `DELETE /:providerId/usage-auth` and `DELETE /:providerId/secrets/:secretName` (api cli-providers.ts ~:1165-1230) take no auth lock, so a usage refresh that read the secret before the delete can write it back. PRE-EXISTING, moderate. Fix: take the lock (`withCliAuthLock`) like the writers.
 2. A task's sync-back waits 30 s for the lock, then the task copy is removed (worker sandbox/task-auth-volume.ts ~:1312-1323); an open login dialog on the same CLI (up to 10 min) loses the token the task rotated. Accepted and documented (sandbox.md); waits are sequential per provider inside a step-summary slot. REGRESSION, minor.
@@ -1631,6 +1633,7 @@ Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/rou
 
 ## Done
 
+- T609 — closed by the owner 2026-11-11: the chmod window between capture and removal is accepted (milliseconds, needs a person chmodding a Haive projection mid-move, result is only the earlier mode); no mechanism
 - T329 part A + items 1-2 — a merge a cancel left committed on the local base is recorded (`merge.landed`, in the step-state transaction) and reported once under the merge-dir lock (`merge.left_committed`, banner), never undone; reset provenance counts it; cancelled push copy and step-retry guard comments corrected — PR #1080 (8256fdff6), 2026-11-11; full suite + PR CI green; part B open (E3)
 - T435 — different web/API hostnames: browser session traffic goes through the web origin (`/api/haive`, `/ide`), cookies stay host-only; raw task files carry nosniff + CSP sandbox; cross-host throttle operator rule documented — PR #1079 (a51990ce9), 2026-11-11; full suite + PR CI green; editor origin open as T613
 - T487 — every Replace ZIP needs an explicit mode; keep-until-success survives crashes through a durable replacement record and the stranded-replacement sweep — PR #1078 (ec585209f), 2026-11-11; migration 0230; full suite + PR CI green
