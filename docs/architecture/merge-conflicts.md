@@ -42,6 +42,14 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   (`decideTaskWorktree` says root) is refused with 409 "A merge is still open in the repository
   checkout. Finish or abort it, then try again." while a same-branch merge is open there
   (`assertRootMergeIdle`, `api/src/lib/root-merge-busy.ts`, run under the same task-creation lock).
+  Every re-drive of a root task takes the same check under the same lock and answers the same 409
+  before it writes or queues anything: task and step Retry, AI Retry, Resume, Skip, a CLI switch that
+  re-runs a step, a form or clarification answer that reopens a failed task, and the worker's
+  allowance, form and fix-loop reopening (`taskRootMergeBusy`, `shared/src/root-merge-busy.ts`).
+  Dead-task revival reads it as a transient hold: the task stays dead, the reason is logged at info
+  and `retryHeldRevivals` tries again once the merge settles. The claim's own task is left out,
+  since its Retry is what resumes the merge. A live task's continuation (an answer to its own
+  merge's clarification, an auto-continue wakeup) is not a re-drive and is not checked.
   Open means a live merge-dir claim on the root whose step's `merge_resolve_state` is same-branch and
   not done or pushing, judged by the worker's own `liveClaimHolder` (shared): a completed task's, a
   skipped step's or a torn-down cancelled task's claim is stale and refuses nothing. It also means a

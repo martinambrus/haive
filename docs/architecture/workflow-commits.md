@@ -131,7 +131,12 @@ parent mismatch reads as "branch changed", any other ref-update failure is an er
 preview cannot be built in full (a diff read failed, or more than 500 changed files) Commit is
 hidden and the form says why: an oversized session is committed from the terminal, and Finish still
 works without committing. Its commit refuses while a merge is open in the checkout ("Finish or abort
-the open merge before committing session edits.").
+the open merge before committing session edits."). A Retry after a later failure (a failed
+put-back or push) recognises the commit it already made by structure, not by message: HEAD whose
+parent is the preview's parent and whose tree is the pinned tree, or the exact put-back commit
+recorded on top of it. It then skips the commit and goes straight to put-back and push, keeping
+`committed: true` and the original commit. A foreign commit, a branch change or an edit to a reviewed
+path still reopens the form.
 
 Run app's Finish form treats Commit and Push as independent choices. A push with Commit unticked
 publishes the branch's existing commits without staging or committing session edits; the ordinary
