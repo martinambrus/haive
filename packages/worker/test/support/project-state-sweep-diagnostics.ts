@@ -58,7 +58,7 @@ export async function projectStateSweepDiagnostic(
           {
             GIT_OPTIONAL_LOCKS: '0',
           },
-          { maxBuffer: 8192 },
+          { maxBuffer: 8192, timeout: 10_000 },
         )
       : Promise.resolve(null),
   ]);
