@@ -556,7 +556,7 @@ PRE-EXISTING, minor. `configSchema` (api routes/global-kb.ts ~:292-293) accepts 
 
 ### T580 · plan[sleep-paper-lessons] · calibrate effort estimates on the LLM's recorded estimate; keep learnings reachable past 60 (+2)
 
-status: parked · reason: diminishing returns (owner triage 2026-11-10); PR 1 shipped #1047 884f5c074; resume when step 11 changes or a repository nears 60 learnings · kind: fix · found: SLEEP paper assessment 2026-11-09 · priority: P3
+status: taken · owner: t580-learnings@DESKTOP-IUBG9OP · since: 2026-11-11T10:16Z · last: 2026-11-11T10:16Z · PR 1 shipped #1047 884f5c074; PR 2 and items 1-2 resumed by the user 2026-11-11 · kind: fix · found: SLEEP paper assessment 2026-11-09 · priority: P3
 Plan: `docs/plans/sleep-paper-lessons.md`. PR 1: `hydrateAnchors` and `GET /tasks/estimation-accuracy` read the latest `estimate.recorded.aiHours` instead of the column `06b-sprint-planning` overwrites. PR 2 (low urgency, when step 11 is next touched or a repository nears 60 learnings): list every learning id and title, not an unsorted first 60. Both PRE-EXISTING. P3 of the plan, the backtest, waits for its trigger query.
 
 Appended 2026-11-11 from the Anthropic dreaming assessment; both bear on step 11 seeing and reconciling learnings:
