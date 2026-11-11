@@ -63,6 +63,9 @@ describe('reconcileStrandedSyncingBundles', () => {
       process.env.BUNDLE_STORAGE_ROOT = root;
       try {
         const fixture = await seedCrashedReplacement(root, fake, point);
+        fake.patch(schema.customBundles, fixture.payload.bundleId, {
+          lastReplacementNote: 'Replacement failed; the previous bundle remains in use.',
+        });
         const items = structuredClone(fake.rows(schema.customBundleItems));
         await run();
         expect(fake.rows(schema.customBundleItems)).toEqual(items);
@@ -70,6 +73,7 @@ describe('reconcileStrandedSyncingBundles', () => {
         if (point === 'previous lost') {
           expect(current).toMatchObject({
             status: 'failed',
+            lastReplacementNote: null,
             lastSyncError: expect.stringContaining('previous extracted tree is unavailable'),
           });
         } else {
@@ -130,12 +134,15 @@ describe('reconcileStrandedSyncingBundles', () => {
   });
 
   it('fails a bundle that has been syncing for minutes with no job in the queue', async () => {
-    bundle(STRANDED);
+    bundle(STRANDED, {
+      lastReplacementNote: 'Replacement failed; the previous bundle remains in use.',
+    });
     getJobs.mockResolvedValue([{ data: { bundleId: OTHER } }]);
 
     await run();
 
     expect(row(STRANDED).status).toBe('failed');
+    expect(row(STRANDED).lastReplacementNote).toBeNull();
     expect(String(row(STRANDED).lastSyncError)).not.toBe('');
   });
 

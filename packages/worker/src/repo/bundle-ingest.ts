@@ -116,6 +116,7 @@ async function setBundleFailed(db: Database, bundleId: string, error: string): P
     .set({
       status: 'failed',
       lastSyncError: error,
+      lastReplacementNote: null,
       updatedAt: new Date(),
     })
     .where(eq(schema.customBundles.id, bundleId));
@@ -295,6 +296,7 @@ export async function handleIngestZip(
         .set({
           status: 'failed',
           lastSyncError: scrubErrorPaths(msg),
+          lastReplacementNote: null,
           updatedAt: new Date(),
         })
         .where(

@@ -261,6 +261,33 @@ describe('T487: explicit replacement mode', () => {
     );
   });
 
+  it.each(['keep_until_success', 'remove_first'])(
+    'clears the previous replacement warning when starting %s',
+    async (mode) => {
+      await seedZipBundle();
+      await stage(REPLACE, 'BAD-ARCHIVE', { bundleId: BUNDLE });
+      queue.state.refuse = new Error('queue unavailable');
+      expect(
+        (await post(`/${BUNDLE}/replace/${REPLACE}/complete`, { mode: 'keep_until_success' }))
+          .status,
+      ).toBe(500);
+      expect(fake.rows(schema.customBundles)[0]?.lastReplacementNote).toContain(
+        'previous bundle remains in use',
+      );
+      await stage(SESSION, 'NEXT-ARCHIVE', { bundleId: BUNDLE });
+      queue.state.refuse = null;
+      let atEnqueue: unknown;
+      queue.state.onAdd = () => {
+        atEnqueue = structuredClone(fake.rows(schema.customBundles)[0]);
+      };
+
+      const response = await post(`/${BUNDLE}/replace/${SESSION}/complete`, { mode });
+      expect(atEnqueue).toMatchObject({ status: 'syncing', lastReplacementNote: null });
+      expect2xx(response);
+      expect(fake.rows(schema.customBundles)[0]?.lastReplacementNote).toBeNull();
+    },
+  );
+
   it('keeps its original choice and rollback source across an enqueue failure', async () => {
     const dir = await seedZipBundle();
     await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });

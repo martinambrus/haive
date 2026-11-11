@@ -93,6 +93,31 @@ it('T487: a corrupt keep-mode replacement leaves the old tree, catalog and usabl
   });
 });
 
+it('clears an earlier keep-mode warning when a remove-first ingest fails', async () => {
+  const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');
+  const fake = createFakeDb({
+    customBundles: schema.customBundles,
+    customBundleItems: schema.customBundleItems,
+  });
+  const fixture = await seedCrashedReplacement(root, fake, 'before extract');
+  const replacement = { mode: 'remove_first' as const, previousArchive: fixture.previousArchive };
+  await writeFile(`${fixture.archivePath}.replacement.json`, JSON.stringify(replacement));
+  await rm(fixture.dest, { recursive: true });
+  fake.patch(schema.customBundles, fixture.payload.bundleId, {
+    lastReplacementNote: 'Replacement failed; the previous bundle remains in use.',
+  });
+
+  await expect(
+    handleIngestZip({ ...fixture.payload, replacement }, fake.db as unknown as Database, root),
+  ).rejects.toThrow();
+
+  expect(fake.rows(schema.customBundles)[0]).toMatchObject({
+    status: 'failed',
+    lastReplacementNote: null,
+  });
+  await expect(readFile(path.join(fixture.dest, 'old.md'))).rejects.toThrow();
+});
+
 const cases: Array<[string, Handler, Record<string, unknown>]> = [
   [
     'handleIngestZip without an archive path',
@@ -119,6 +144,7 @@ describe('a bundle handler that throws before it starts working', () => {
       sourceType: 'git',
       storageRoot: '',
       status: 'syncing',
+      lastReplacementNote: 'Replacement failed; the previous bundle remains in use.',
       updatedAt: new Date(),
       ...over,
     });
@@ -134,6 +160,7 @@ describe('a bundle handler that throws before it starts working', () => {
     expect(err).toBeInstanceOf(Error);
     const stored = fake.rows(schema.customBundles)[0]!;
     expect(stored.status).toBe('failed');
+    expect(stored.lastReplacementNote).toBeNull();
     expect(stored.lastSyncError).toBe((err as Error).message);
   });
 });

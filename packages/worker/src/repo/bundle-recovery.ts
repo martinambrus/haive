@@ -106,6 +106,7 @@ export async function restoreReplacementBundle(
           }
         : {
             status: 'failed',
+            lastReplacementNote: null,
             lastSyncError: `Replacement failed and the previous extracted tree is unavailable; automatic rollback cannot restore it. ${reason}`,
             updatedAt: new Date(),
           },

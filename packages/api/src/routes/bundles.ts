@@ -381,6 +381,7 @@ async function addBundleJobOrMarkFailed(
       .update(schema.customBundles)
       .set({
         status: 'failed',
+        lastReplacementNote: null,
         lastSyncError:
           'Could not queue the job that imports this bundle. Use Resync (git) or Replace ZIP to try again, or remove the bundle.',
         updatedAt: new Date(),
@@ -948,6 +949,7 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
             storageRoot: newExtracted,
             status: 'syncing',
             lastSyncError: null,
+            lastReplacementNote: null,
             updatedAt: new Date(),
           })
           .where(

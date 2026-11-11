@@ -569,6 +569,7 @@ export async function reconcileStrandedSyncingBundles(db: Database): Promise<voi
           .update(schema.customBundles)
           .set({
             status: 'failed',
+            lastReplacementNote: null,
             lastSyncError:
               'Importing this bundle did not finish: nothing is queued or running for it. Use Resync (git) or Replace ZIP to try again, or remove the bundle.',
             updatedAt: new Date(),
