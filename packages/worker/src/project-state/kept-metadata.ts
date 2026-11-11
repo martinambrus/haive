@@ -1,3 +1,4 @@
+import { projectionRecoveryHeld, withProjectionRecovery } from './projection-move.js';
 import { eq, sql } from 'drizzle-orm';
 import { schema, type Database, type MergeResolveState } from '@haive/database';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
@@ -89,12 +90,16 @@ export async function rememberKeptMetadata(
 }
 
 /** The snapshot is consumed only if it is still the one restored; a concurrent capture stays owed. */
-export async function restorePendingKeptMetadata(
+export const restorePendingKeptMetadata: typeof restorePendingInRecovery = (...args) =>
+  withProjectionRecovery(args[2], () => restorePendingInRecovery(...args));
+
+async function restorePendingInRecovery(
   db: Database,
   repositoryId: string,
   repoPath: string,
   restore: (repoPath: string, kept: KeptFiles) => Promise<boolean>,
 ): Promise<boolean> {
+  if (projectionRecoveryHeld(repoPath)) return false;
   const [row] = await db
     .select({ kept: schema.projectStateOutbox.keptMetadata })
     .from(schema.projectStateOutbox)
@@ -103,6 +108,7 @@ export async function restorePendingKeptMetadata(
   const metadata = row?.kept?.[repoPath];
   if (!metadata) return true;
   if (!(await restore(repoPath, keptFilesOf(metadata)))) return false;
+  if (projectionRecoveryHeld(repoPath)) return false;
   await db.execute(sql`
     UPDATE project_state_outbox SET
       kept_metadata = nullif(kept_metadata - ${repoPath}::text, '{}'::jsonb), updated_at = now()

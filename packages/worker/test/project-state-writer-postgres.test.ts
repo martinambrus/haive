@@ -57,6 +57,7 @@ import {
   sweepDirtyProjectStates,
 } from '../src/project-state/refresh.js';
 import { applyPlanPatch } from '@haive/shared/plan';
+import { withProjectionMove } from '../src/project-state/projection-move.js';
 import { sweepKeptProjectionMetadata } from '../src/project-state/kept-metadata-recovery.js';
 import { writePlanMirror, reconcilePlanFromCheckout } from '../src/plan/mirror.js';
 import { persistDetection } from '../src/repo/clone.js';
@@ -283,6 +284,65 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
         expect(step!.mergeResolveState!.keptMetadata).toBeUndefined();
       } else expect((await s.outbox())!.keptMetadata).toBeNull();
       expect(await sweepKeptProjectionMetadata(db!)).toBe(0);
+    },
+  );
+
+  it.each(['capture', 'removed'] as const)(
+    'a sweep during %s leaves metadata for recovery after the mover crashes',
+    async (phase) => {
+      const s = await fixture();
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: s.root });
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.name=T',
+          '-c',
+          'user.email=t@local',
+          'commit',
+          '--allow-empty',
+          '-qm',
+          'initial',
+        ],
+        { cwd: s.root },
+      );
+      await s.write();
+      const rel = '.haive-data/state/project/render.json';
+      await chmod(join(s.root, rel), 0o600);
+      let resume!: () => void;
+      let captured!: () => void;
+      const pause = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      const ready = new Promise<void>((resolve) => {
+        captured = resolve;
+      });
+      const crash = async () => {
+        captured();
+        await pause;
+        throw new Error('mover died');
+      };
+      if (phase === 'capture') restoreFaults.afterBase = crash;
+      const move = withProjectionMove(async () => {
+        await setAsideHaiveProjections(db!, s.repo.id, s.root);
+        await expect(stat(join(s.root, rel))).rejects.toMatchObject({ code: 'ENOENT' });
+        return crash();
+      });
+      const ended = expect(move).rejects.toThrow('mover died');
+      await ready;
+      try {
+        expect(await sweepKeptProjectionMetadata(db!)).toBe(0);
+        expect((await s.outbox())!.keptMetadata?.[s.root]?.[rel]?.mode).toBe(0o600);
+      } finally {
+        resume();
+        await ended;
+        delete restoreFaults.afterBase;
+      }
+      // The process lost its in-memory map after the tick, and a writer recreated the file.
+      if (phase === 'capture') await chmod(join(s.root, rel), 0o644);
+      expect(await sweepKeptProjectionMetadata(db!)).toBe(1);
+      expect((await stat(join(s.root, rel))).mode & 0o7777).toBe(0o600);
+      expect((await s.outbox())!.keptMetadata).toBeNull();
     },
   );
 

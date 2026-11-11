@@ -1,3 +1,4 @@
+import { withProjectionMove } from '../project-state/projection-move.js';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray } from 'drizzle-orm';
@@ -1135,7 +1136,10 @@ async function haltUnaborted(
  *  Returns resolved:true once the merge commits (or the action is not a merge / the
  *  merge is cleanly skipped) so the runner falls through to apply; resolved:false
  *  parks the step (waiting_cli) or halts it (failed). */
-export async function resolveMergePhase(
+export const resolveMergePhase: typeof resolveMergePhaseInMove = (...args) =>
+  withProjectionMove(() => resolveMergePhaseInMove(...args));
+
+async function resolveMergePhaseInMove(
   db: Database,
   stepDef: StepDefinition,
   current: TaskStepRow,

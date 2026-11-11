@@ -1,3 +1,4 @@
+import { projectionMoveStep } from '../../../project-state/projection-move.js';
 import { prepareProjectStatePush, commitProjectStatePush } from '../../../project-state/push.js';
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, gt, inArray, ne, or } from 'drizzle-orm';
@@ -286,7 +287,7 @@ function buildPrompt(d: PlanMergeDetect): string {
   ].join('\n');
 }
 
-export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
+export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = projectionMoveStep({
   metadata: {
     id: '01-plan-merge',
     workflowType: 'plan_merge',
@@ -764,7 +765,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     await recordMessage(ctx.db, ctx.taskId, ctx.taskStepId, 'assistant', result.summary);
     return result;
   },
-};
+});
 
 /** Discard a cancelled conversation's scratch worktree unless another conversation of the repository
  *  may hold it: a live one, or a failed one opened after this one, whose Retry resumes it. Never

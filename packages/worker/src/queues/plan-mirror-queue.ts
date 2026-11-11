@@ -1,3 +1,4 @@
+import { withProjectionMove } from '../project-state/projection-move.js';
 import { prepareProjectStatePush, commitProjectStatePush } from '../project-state/push.js';
 import { safeProcessor } from './safe-processor.js';
 import { Queue, Worker, type Job } from 'bullmq';
@@ -243,7 +244,10 @@ export interface IntegrateOutcome {
  * Haive's own pending projection files are set aside before the branch moves: `kept` holds
  * them, and they are put back here unless the checkout moved, when the caller re-syncs.
  */
-export async function integrateOrigin(args: {
+export const integrateOrigin: typeof integrateOriginInMove = (...args) =>
+  withProjectionMove(() => integrateOriginInMove(...args));
+
+async function integrateOriginInMove(args: {
   repositoryId: string;
   repoPath: string;
   branch: string;
@@ -601,7 +605,9 @@ export async function saveCore(
  * leave a half-merged tree that every later step then runs against. Refusing and
  * saying why is the honest option.
  */
-export async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult> {
+export const pull: typeof pullInMove = (...args) => withProjectionMove(() => pullInMove(...args));
+
+async function pullInMove(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult> {
   if (!payload.repositoryId || !payload.userId) throw new Error('repositoryId and userId required');
   const db = getDb();
   const repo = await requireOwnedRepository(payload.repositoryId, payload.userId);

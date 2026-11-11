@@ -1,3 +1,4 @@
+import { withProjectionMove } from '../project-state/projection-move.js';
 import { checkoutWorktreeRefusal } from '@haive/shared/repo-rebuild';
 import { CheckoutRepairNeededError } from './repair-needed.js';
 import path from 'node:path';
@@ -278,7 +279,10 @@ function unreadableOperationRefusal(err: unknown): string {
 
 /** Fast-forward the checkout to its source. Answers why it was left as it was, or null once it is
  *  up to date. `merge --ff-only` never drops a commit or overwrites a local change: git refuses. */
-export async function fastForward(
+export const fastForward: typeof fastForwardInMove = (...args) =>
+  withProjectionMove(() => fastForwardInMove(...args));
+
+async function fastForwardInMove(
   db: Database,
   payload: RepoJobPayload,
   dest: string,

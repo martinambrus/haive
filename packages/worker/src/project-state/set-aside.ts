@@ -1,3 +1,8 @@
+import {
+  withProjectionMove,
+  holdProjectionMove,
+  projectionRecoveryHeld,
+} from './projection-move.js';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
@@ -743,13 +748,17 @@ async function pruneEmptyStateDirs(
  *  mark that says the files are stale is raised first, which a crash then finds. A file that is not what
  *  Haive last wrote, in the working tree or in the index, refuses the move and is named. After the move,
  *  `resyncHaiveProjections` brings the new head in and writes the pending changes over it. */
-export async function setAsideHaiveProjections(
+export const setAsideHaiveProjections: typeof setAsideHaiveProjectionsInMove = (...args) =>
+  withProjectionMove(() => setAsideHaiveProjectionsInMove(...args));
+
+async function setAsideHaiveProjectionsInMove(
   db: Database,
   repositoryId: string,
   repoPath: string,
   fence?: CheckoutFence,
   sections?: { restore: RestoreSection; putBack: RestoreSection },
 ): Promise<SetAsideResult> {
+  await holdProjectionMove(repoPath);
   const pending = await pendingStateWrite(db, repositoryId);
   if (pending) return pending;
   const restored = new Set<string>();
@@ -932,6 +941,7 @@ export async function resyncHaiveProjections(
   repoPath: string,
   endingTaskId?: string,
 ): Promise<boolean> {
+  if (projectionRecoveryHeld(repoPath)) return false;
   // A merge, rebase, cherry-pick or revert still open holds an intermediate record: nothing is read in until it ends.
   try {
     if (await gitOperationInProgress(repoPath)) return false;
@@ -1026,6 +1036,7 @@ const WRITER_FILE_MODE = 0o644;
  *  writer-owned. An interrupted hand-back resumes at the captured uid only at the writer's default
  *  mode; a group or nondefault file mode changed meanwhile stays. */
 export async function restoreKeptMetadata(repoPath: string, kept: KeptFiles): Promise<boolean> {
+  if (projectionRecoveryHeld(repoPath)) return false;
   let restored = true;
   await restoreFaults.beforeKeptMetadata?.();
   const writer = process.getuid?.();

@@ -1,3 +1,4 @@
+import { projectionMoveStep } from '../../../project-state/projection-move.js';
 import { eq } from 'drizzle-orm';
 import { lockRepositoryTasksKey, schema } from '@haive/database';
 import type { FormField, FormSchema } from '@haive/shared';
@@ -141,7 +142,7 @@ async function taskRepositoryId(ctx: StepContext): Promise<string | null> {
   return task?.repositoryId ?? null;
 }
 
-export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
+export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = projectionMoveStep({
   metadata: {
     id: '00a-sync-base',
     workflowType: 'workflow',
@@ -706,4 +707,4 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     await releaseMergeDir(ctx.db, owner);
     return out;
   },
-};
+});
