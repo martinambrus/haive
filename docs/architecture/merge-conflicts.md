@@ -230,7 +230,9 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   writes in the scratch worktree, so what one that failed, was stopped or was re-dispatched left is
   moved aside before the next is sent in (`llm.prepareWorkspace`) and before Save or Pull removes
   the worktree, reported by the event alone; Save or Pull fails and keeps the worktree when that
-  cannot be done. A tree git could not record is kept the same way, so every later fixer of that
+  cannot be done. Save and Pull move it aside and write that event in a transaction of their own,
+  committed (and the manifest marked) before the merge's transaction, so a later failure of the
+  merge takes back no report; an index git would not give up still commits the report, then fails. A tree git could not record is kept the same way, so every later fixer of that
   merge is reported unchecked, a later pass's before its fixer is sent in, rather than a fresh
   record taking in what one left. A merge a pass opens is recorded afresh, since an earlier merge of
   the same two commits was another tree. A conversation that resumes another's merge also reports

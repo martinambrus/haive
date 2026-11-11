@@ -15,10 +15,10 @@ const h = vi.hoisted(() => ({
   restore: 'clean' as 'clean' | 'retry' | 'refused' | 'throw',
   holding: 0,
   leftoverHandles: [] as unknown[],
-  transactionHandle: null as unknown,
   transactions: [] as unknown[],
   transactionActive: false,
   reports: [] as boolean[],
+  indexHeld: false,
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -58,6 +58,7 @@ vi.mock('../src/plan/merge-baseline.js', async (original) => ({
     afterCommit?.(async () => {
       h.reports.push(h.transactionActive);
     });
+    if (h.indexHeld) throw new Error('index held');
   },
 }));
 vi.mock('../src/plan/mirror.js', () => ({
@@ -185,12 +186,12 @@ beforeEach(() => {
   h.leftoverHandles = [];
   h.transactions = [];
   h.reports = [];
+  h.indexHeld = false;
   h.transactionActive = false;
   const db = {
     transaction: async (fn: (conn: unknown) => Promise<unknown>) => {
       try {
         const tx = { select: db.select };
-        h.transactionHandle = tx;
         h.transactions.push(tx);
         h.transactionActive = true;
         return await fn(tx);
@@ -251,6 +252,18 @@ describe('a Save/Pull landing', () => {
       expect(h.handBacks).toEqual([]);
     },
   );
+});
+
+describe('a Save/Pull whose leftovers left the index held', () => {
+  it('commits and marks the report, then fails with the worktree kept', async () => {
+    fixture(false);
+    h.indexHeld = true;
+    await expect(run()).rejects.toThrow('index held');
+    expect(h.transactions).toHaveLength(1);
+    expect(h.reports).toEqual([false]);
+    expect(h.removes).toBe(0);
+    expect(hasScratch(worktrees())).toBe(true);
+  });
 });
 
 describe('a confirm landing', () => {
