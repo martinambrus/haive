@@ -12,11 +12,12 @@ import { getPlanMirrorQueue, getPlanMirrorQueueEvents } from '../queues.js';
 
 /** Five seconds for the entire Redis/worker round trip, including enqueue and event readiness.
  * Never reuse a page hint's job: a reset needs an observation that started after this request.
- * The caller reads checkout_branch only on success; any failure makes this reset UNKNOWN. */
+ * Returns the branch the job itself read, never the shared column, which a concurrent watcher
+ * holding an older read may overwrite. null = UNKNOWN (failure, detached, older worker). */
 export async function observeCheckoutBranchForReset(
   repositoryId: string,
   userId: string,
-): Promise<boolean> {
+): Promise<string | null> {
   const timeoutMs = 5_000;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -31,8 +32,9 @@ export async function observeCheckoutBranchForReset(
         },
       );
       const result: unknown = await job.waitUntilFinished(getPlanMirrorQueueEvents(), timeoutMs);
-      if (result !== true) throw new Error('checkout branch observation did not complete');
-      return true;
+      if (typeof result !== 'object' || result === null || !('branch' in result))
+        throw new Error('checkout branch observation did not complete');
+      return typeof result.branch === 'string' ? result.branch : null;
     };
     return await Promise.race([
       observe(),
@@ -45,7 +47,7 @@ export async function observeCheckoutBranchForReset(
     ]);
   } catch (err) {
     logger.warn({ err, repositoryId }, 'reset checkout branch is unknown: observation failed');
-    return false;
+    return null;
   } finally {
     clearTimeout(timer);
   }

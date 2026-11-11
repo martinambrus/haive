@@ -867,6 +867,7 @@ export function startPlanMirrorWorker(): Worker<
   | ProjectStateResolveResult
   | HaiveDataSaveResult
   | CheckoutWatchResult
+  | { branch: string | null }
   | boolean
   | number
 > {
@@ -876,6 +877,7 @@ export function startPlanMirrorWorker(): Worker<
     | ProjectStateResolveResult
     | HaiveDataSaveResult
     | CheckoutWatchResult
+    | { branch: string | null }
     | boolean
     | number
   >(
@@ -915,7 +917,12 @@ export function startPlanMirrorWorker(): Worker<
             return watchCheckout(getDb(), data.repositoryId);
           case PLAN_MIRROR_JOB_NAMES.OBSERVE_CHECKOUT_BRANCH:
             if (!data.repositoryId) throw new Error('repositoryId required');
-            return (await observeCheckoutBranch(getDb(), data.repositoryId)) !== null;
+            {
+              // Return what THIS job read: a concurrent watcher may overwrite the column with an
+              // older observation before the reset reads it.
+              const observed = await observeCheckoutBranch(getDb(), data.repositoryId);
+              return observed ? { branch: observed.checkoutBranch } : false;
+            }
           default:
             throw new Error(`unknown plan-mirror job: ${job.name}`);
         }

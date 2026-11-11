@@ -109,7 +109,7 @@ describe.skipIf(!url || !redisUrl)('real checkout scheduler and worker queue', (
       { jobId: `reset-checkout-${randomUUID()}`, removeOnComplete: true },
     );
 
-    expect(await job.waitUntilFinished(events!, 5_000)).toBe(true);
+    expect(await job.waitUntilFinished(events!, 5_000)).toEqual({ branch: 'feature-x' });
     expect(
       (await db!.select().from(schema.repositories).where(eq(schema.repositories.id, repo!.id)))[0],
     ).toMatchObject({ checkoutBranch: 'feature-x', renderContext: null });

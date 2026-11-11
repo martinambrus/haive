@@ -23,10 +23,10 @@ describe('reset-time branch observation', () => {
   it('waits for a unique observation on every reset, even when record sync is disabled', async () => {
     vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
     h.add.mockResolvedValue({ waitUntilFinished: h.wait });
-    h.wait.mockResolvedValue(true);
+    h.wait.mockResolvedValue({ branch: 'main' });
 
-    expect(await observeCheckoutBranchForReset(REPO, USER)).toBe(true);
-    expect(await observeCheckoutBranchForReset(REPO, USER)).toBe(true);
+    expect(await observeCheckoutBranchForReset(REPO, USER)).toBe('main');
+    expect(await observeCheckoutBranchForReset(REPO, USER)).toBe('main');
 
     expect(h.add.mock.calls[0]).toEqual([
       'observe-checkout-branch',
@@ -53,7 +53,7 @@ describe('reset-time branch observation', () => {
 
     await vi.advanceTimersByTimeAsync(5_000);
 
-    expect(await result).toBe(false);
+    expect(await result).toBeNull();
     expect(warn).toHaveBeenCalledWith(
       expect.objectContaining({ repositoryId: REPO }),
       expect.any(String),
@@ -61,12 +61,23 @@ describe('reset-time branch observation', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('treats a worker unable to observe the checkout as unknown', async () => {
+  it.each([false, true, null])(
+    'treats a worker result of %s (cannot observe, or an older worker) as unknown',
+    async (result) => {
+      h.add.mockResolvedValue({ waitUntilFinished: h.wait });
+      h.wait.mockResolvedValue(result);
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      expect(await observeCheckoutBranchForReset(REPO, USER)).toBeNull();
+      expect(warn).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('returns a detached checkout as unknown without a warning', async () => {
     h.add.mockResolvedValue({ waitUntilFinished: h.wait });
-    h.wait.mockResolvedValue(false);
+    h.wait.mockResolvedValue({ branch: null });
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
-    expect(await observeCheckoutBranchForReset(REPO, USER)).toBe(false);
-    expect(warn).toHaveBeenCalledTimes(1);
+    expect(await observeCheckoutBranchForReset(REPO, USER)).toBeNull();
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 

@@ -29,10 +29,11 @@ export async function observeCheckoutBranch(db: Database, repositoryId: string) 
   // checkout or an active reset must replace the previous branch with the current answer.
   // No pooled connection is held across Git.
   let head: Awaited<ReturnType<typeof readNamedCheckout>> = null;
+  let checkoutBranch: string | null = null;
   try {
     head = await readNamedCheckout(repoPath);
   } finally {
-    const checkoutBranch = head?.ref.slice('refs/heads/'.length) ?? null;
+    checkoutBranch = head?.ref.slice('refs/heads/'.length) ?? null;
     await db
       .update(schema.repositories)
       .set({ checkoutBranch })
@@ -45,7 +46,7 @@ export async function observeCheckoutBranch(db: Database, repositoryId: string) 
         ),
       );
   }
-  return { repoPath, head };
+  return { repoPath, head, checkoutBranch };
 }
 
 /** Observe only this checkout: never fetch, pull, change branch or visit a folder import's source. */

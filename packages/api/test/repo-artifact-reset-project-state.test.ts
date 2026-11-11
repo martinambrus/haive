@@ -464,12 +464,13 @@ describe('resetting a repository through the route', () => {
     async (kind) => {
       const { root, fake } = await mergedSkill('main', kind);
       h.wait.mockImplementation(async () => {
-        // The worker now observes feature-x; the sweep's persisted main was stale.
+        // The reset's own job observes feature-x. A concurrent watcher holding an older read
+        // then writes main back to the column; the reset must use its job's answer.
         await fake.db
           .update(schema.repositories)
-          .set({ checkoutBranch: 'feature-x' })
+          .set({ checkoutBranch: 'main' })
           .where(eq(schema.repositories.id, REPO));
-        return true;
+        return { branch: 'feature-x' };
       });
 
       expect((await reset()).status).toBe(200);

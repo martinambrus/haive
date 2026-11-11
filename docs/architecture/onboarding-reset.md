@@ -90,7 +90,8 @@ untouched skill at the same path. The worker records the checkout's symbolic bra
 `repositories.checkout_branch` (0231; null when detached, unborn or unreadable): every watcher
 pass that runs writes it before its config gate, and a reset asks for a fresh read when it starts
 (`observeCheckoutBranchForReset`, a dedicated plan-mirror job that takes no lock, bounded at 5 s
-for the whole round trip). `resolveMergedTasks` then counts a `merge.landed` event or a legacy
+for the whole round trip) and uses the branch that job returns, never the column, which a
+concurrent watcher holding an older read may overwrite meanwhile. `resolveMergedTasks` then counts a `merge.landed` event or a legacy
 `merged` state only when its `landedOn` (or the state's `baseBranch`) equals that branch.
 `repositories.branch` is the CONFIGURED branch and is never used here. When the read fails or
 times out (both plan-mirror slots busy, Redis down, a worker without the job), or the branch is

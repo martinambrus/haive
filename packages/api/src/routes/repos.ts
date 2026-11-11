@@ -3187,10 +3187,10 @@ async function runOnboardingArtifactReset(
   // exclude that run for good. Its writes land after the reset, so it belongs on the new side.
   const resetStartedAt = new Date();
   // The root claim is a lease, not a pooled connection. No transaction spans this worker wait.
-  const branchObserved = await observeCheckoutBranchForReset(id, userId);
+  const checkoutBranch = await observeCheckoutBranchForReset(id, userId);
   const repoRow = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
-    columns: { onboardingResetAt: true, renderContext: true, checkoutBranch: true },
+    columns: { onboardingResetAt: true, renderContext: true },
   });
   const root = await resolveRepoRoot(db, userId, id);
 
@@ -3235,11 +3235,7 @@ async function runOnboardingArtifactReset(
   const written = collectWrittenCliContent(
     onboardingSteps,
     live,
-    resolveMergedTasks(
-      onboardingSteps,
-      epoch,
-      branchObserved ? (repoRow?.checkoutBranch ?? null) : null,
-    ),
+    resolveMergedTasks(onboardingSteps, epoch, checkoutBranch),
   );
 
   // Read before the transaction below deletes the sync row.
