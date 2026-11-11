@@ -12,6 +12,7 @@ const DEFER_RETRY_STEP_MS = 1_000;
 
 /**
  * Move a job this worker holds back to `delayed`, retrying a refusal for DEFER_RETRY_WINDOW_MS.
+ * Optional idempotent preparation shares that retry; latestAt bounds the retry's scheduled time.
  *
  * The cli-exec gates (agent lane cap, pause, per-task cap, runtime-holder reserve) hold a job by
  * deferring it, and the defer is a write to the same Redis whose trouble can be the reason the
@@ -29,13 +30,14 @@ export async function deferJob(
   delayMs: number,
   token: string,
   prepare?: () => Promise<void>,
+  latestAt?: number,
 ): Promise<void> {
   const giveUpAt = Date.now() + DEFER_RETRY_WINDOW_MS;
   for (let attempt = 1; ; attempt += 1) {
     try {
       // Metadata and the move share one refusal budget; repeating preparation is idempotent.
       await prepare?.();
-      await job.moveToDelayed(Date.now() + delayMs, token);
+      await job.moveToDelayed(Math.min(Date.now() + delayMs, latestAt ?? Infinity), token);
       return;
     } catch (err) {
       if (Date.now() >= giveUpAt) throw err;

@@ -467,7 +467,7 @@ it('fails after thirty minutes of auth contention without removing anything', as
       job as any,
     ),
   ).rejects.toThrow(
-    'A CLI sign-in or credential update kept this account busy. Nothing was removed.',
+    'Sign-out did not start within 30 minutes. Nothing was removed. Try signing out again.',
   );
   expect(job.moveToDelayed).not.toHaveBeenCalled();
   expect(runner.removed).toEqual([]);
@@ -551,4 +551,62 @@ it('bounds repeated scope changes independently of auth-lock contention', async 
   expect(lock.release).toHaveBeenCalledTimes(6);
   expect(runner.removed).toEqual([]);
   expect(calls.updateSet).toBeNull();
+});
+
+it.each([false, true])('expires from enqueue even with a %s busy scope', async (busy) => {
+  if (busy) lock.acquire.mockResolvedValue(null);
+  const row = makeProviderRow();
+  const calls: DbCalls = { updateSet: null };
+  const runner = makeRunner({ existing: ['haive_cli_auth_user1_gemini_0'] });
+  const job = {
+    timestamp: Date.now() - CLI_SIGN_OUT_AUTH_WAIT_MS - 1,
+    data: { authContentionStartedAt: Date.now() },
+    token: 'token',
+    updateData: vi.fn(),
+    moveToDelayed: vi.fn(),
+  };
+  await expect(
+    handleSignOutJob(
+      makeDb(row, calls),
+      { providerId: row.id, userId: row.userId },
+      runner,
+      job as any,
+    ),
+  ).rejects.toThrow(
+    'Sign-out did not start within 30 minutes. Nothing was removed. Try signing out again.',
+  );
+  expect(job.moveToDelayed).not.toHaveBeenCalled();
+  expect(runner.removed).toEqual([]);
+  expect(calls.updateSet).toBeNull();
+});
+it('never defers auth contention beyond the enqueue deadline', async () => {
+  vi.useFakeTimers();
+  try {
+    lock.acquire.mockResolvedValue(null);
+    const row = makeProviderRow();
+    const job = {
+      timestamp: Date.now() - CLI_SIGN_OUT_AUTH_WAIT_MS + 500,
+      data: {},
+      token: 'token',
+      updateData: vi.fn(async () => {}),
+      moveToDelayed: vi.fn(async () => {}),
+    };
+    await expect(
+      handleSignOutJob(
+        makeDb(row, { updateSet: null }),
+        { providerId: row.id, userId: row.userId },
+        makeRunner(),
+        job as any,
+      ),
+    ).rejects.toMatchObject({ name: 'DelayedError' });
+    expect(job.moveToDelayed).toHaveBeenCalledWith(
+      job.timestamp + CLI_SIGN_OUT_AUTH_WAIT_MS,
+      'token',
+    );
+    expect(job.updateData).toHaveBeenCalledWith(
+      expect.objectContaining({ signOutWaitReason: 'auth_busy' }),
+    );
+  } finally {
+    vi.useRealTimers();
+  }
 });

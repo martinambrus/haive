@@ -15,6 +15,7 @@ import {
   VERSION_REFRESH_JOB_ID,
   CLI_POLLABLE_JOB_OPTS,
   CLI_SIGN_OUT_AUTH_WAIT_MS,
+  CLI_SIGN_OUT_EXPIRED_MESSAGE,
   CONFIG_CONCURRENCY_CHANNEL,
   CONFIG_KEYS,
   ConfigUnavailableError,
@@ -1231,6 +1232,14 @@ export async function handleSignOutJob(
   runner: DockerRunner = defaultDockerRunner,
   job?: Job,
 ): Promise<CliSignOutJobResult> {
+  // BullMQ's timestamp survives every deferred retry, including time behind agent work.
+  const enqueuedAt = job?.timestamp ?? job?.data?.authContentionStartedAt;
+  const deadline = enqueuedAt === undefined ? undefined : enqueuedAt + CLI_SIGN_OUT_AUTH_WAIT_MS;
+  const assertInWindow = () => {
+    if (deadline !== undefined && Date.now() >= deadline)
+      throw new UnrecoverableError(CLI_SIGN_OUT_EXPIRED_MESSAGE);
+  };
+  assertInWindow();
   let provider = await db.query.cliProviders.findFirst({
     where: eq(schema.cliProviders.id, payload.providerId),
   });
@@ -1243,25 +1252,26 @@ export async function handleSignOutJob(
   const release = await tryCliAuthLock(db, lockedScope);
   if (!release) {
     if (!job) throw new Error('CLI authentication is busy');
-    const startedAt = job.data?.authContentionStartedAt ?? Date.now();
+    const startedAt = enqueuedAt ?? Date.now();
     const waitedMs = Date.now() - startedAt;
-    if (waitedMs >= CLI_SIGN_OUT_AUTH_WAIT_MS) {
-      throw new UnrecoverableError(
-        'A CLI sign-in or credential update kept this account busy. Nothing was removed.',
-      );
-    }
     const attempt = (job.data?.authContentionAttempts ?? 0) + 1;
     const delayMs = Math.min(2_000 * 2 ** Math.min(attempt - 1, 3), 15_000);
     log.debug(
       { providerId: provider.id, scope: cliAuthScope(provider), attempt, waitedMs, delayMs },
       'cli sign-out deferred: a sign-in or credential update holds authentication',
     );
-    await deferJob(job, delayMs, job.token!, () =>
-      job.updateData({
-        ...job.data,
-        authContentionStartedAt: startedAt,
-        authContentionAttempts: attempt,
-      }),
+    await deferJob(
+      job,
+      delayMs,
+      job.token!,
+      () =>
+        job.updateData({
+          ...job.data,
+          authContentionStartedAt: startedAt,
+          authContentionAttempts: attempt,
+          signOutWaitReason: 'auth_busy',
+        }),
+      deadline,
     );
     throw new DelayedError();
   }
@@ -1284,8 +1294,17 @@ export async function handleSignOutJob(
           'CLI authentication settings kept changing. Nothing was removed. Try signing out again.',
         );
       }
-      await deferJob(job, 1_000, job.token!, () =>
-        job.updateData({ ...job.data, authScopeChangeAttempts: attempts + 1 }),
+      await deferJob(
+        job,
+        1_000,
+        job.token!,
+        () =>
+          job.updateData({
+            ...job.data,
+            authScopeChangeAttempts: attempts + 1,
+            signOutWaitReason: 'settings_changed',
+          }),
+        deadline,
       );
       throw new DelayedError();
     }
@@ -1296,6 +1315,7 @@ export async function handleSignOutJob(
       log.info({ providerId: provider.id }, 'cli sign-out superseded by a newer login');
       return { ok: true, superseded: true, removed: [], failed: [] };
     }
+    assertInWindow();
     const meta = getCliProviderMetadata(provider.name);
     const removed: string[] = [];
     const failed: { name: string; stderr: string }[] = [];
