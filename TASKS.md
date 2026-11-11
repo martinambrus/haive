@@ -133,6 +133,30 @@ All low unless marked. Code in `worker/src/queues/validation-recheck.ts`, `07b-p
 11. The no-07c PG controls prove only the cap-escalation arm (`handle-result-lost-db.test.ts` ~:499 seeds `maxFixRounds: 0`); the `unreadable` arm returns before reading a snapshot, so it does not exercise a read failure.
 12. `ValidationSnapshotError` is reused for the missing-07c configuration error (naming only); `step.done` is no longer written before a snapshot failure of the same hand-off.
 
+### T602 · FNF[repair-recovery-followups] · repair-needed checkout recovery follow-ups (+18)
+
+status: open · kind: fix · found: F2 (#460, #512) reviews 2026-11-10/11 · priority: P3
+Low unless marked. Code in `worker/src/project-state/refresh.ts`, `worker/src/queues/repo-queue.ts`, `api/src/routes/repos.ts`, `shared/src/repo-rebuild.ts` and `worker/src/project-state/write.ts`.
+
+1. CONSEQUENTIAL, PRE-EXISTING: bases advance before publication of the rebuilt checkout.
+2. CONSEQUENTIAL, PRE-EXISTING: a task start after the move-aside can overlap the rebuild's clone (documented window in `repository-refresh.md`).
+3. A non-recovery rebuild never settles a pending project-state write intent (PRE-EXISTING).
+4. `.rebuild-*` and `.aside-*` folders are never cleaned (see T486).
+5. A check-only job queued during a recovery fails on the root claim and flips the row to `error` while the recovery still runs (a second recovery is still refused).
+6. A failed recovery or failed enqueue relabels `source_repair_needed` as `checkout_repair_needed` (`repo-queue.ts` ~:62-67, `repos.ts` ~:3680).
+7. "Check repair" writes the repair code it read with no compare-and-swap, so a stale tab can re-stamp it on a healthy row.
+8. `findWorktreePathClaimant` (`worker/src/repo/worktree-claims.ts` ~:59-70) cannot see a legacy-only worktree sharer (the rebuild refusal now can).
+9. `repos.ts` ~:3620 `checkCheckoutOnly || recovery ? repairErrorCode : null` equals plain `repairErrorCode`; the condition hides the invariant (nit).
+10. Legacy journal stage regex duplicates `JOURNAL_STAGE_PREFIX`.
+11. The intent marker is coupled to `discardWriteIntentOnFailure`.
+12. A null-marked intent on a replaced tree refuses forever.
+13. The in-transaction intent recheck before the move is untested.
+14. Settle lstat errors are not wrapped.
+15. The final revival test matrix was only partly shown red.
+16. Fence PG race control missing; the mirror holds the task key.
+17. Doubled "but" in a refusal message.
+18. CI budget: the gated Postgres step is at 134 of 138 rows its 26-minute limit holds; measure before the next raise (`docs/architecture/ci-smokes.md`).
+
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
 **Found something outside your task?** Search the board first (`grep -n "<file>\|<symbol>\|<slug>"`).
@@ -998,16 +1022,6 @@ From the T452 review (2026-10-31). PRE-EXISTING, minor; reachable only when outp
 
 In api routes/cli-login-banner.ts `onStreamData` (~:876-882), a success or error line in a chunk that arrives after `cleanupSession` still reaches `detectAuthResult` and starts `runProbeAndSave`, which queues a probe job for a session that is gone: `canDetectAuth` (~:666) has no `cleanedUp` check, while `captureClaudeOauthToken` and `offerAuthUrl` do. Codex, grok and amp take this branch (grok measured by the T452 driver with a scratch test: probe jobs 0 -> 1 after `ws.close()` and a "Signed in" chunk). Decide whether a login that completes during teardown should still be verified (the CLI has stored its credentials either way, so a skipped probe leaves Haive's provider state stale until the next check). If not, one `if (session.cleanedUp) return;` at the top of `onStreamData` closes it and makes T452's gate on the antigravity URL step redundant.
 
-### T460 · FNF[retry-repo-deleted] · a Retry revives a failed task whose repository was deleted (+1)
-
-status: in progress (bundle F2, overnight run 2026-11-10, branch fix/F2-retry-repo-state) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-From the T349 review (2026-10-31). PRE-EXISTING. A failed task whose repository was deleted still passes `checkRevive` (database repository-task-lock.ts ~:109), while the repository delete's `cancelOpenTasksForRepo` (api lib/cancel-task.ts ~:130) skips failed tasks; a Retry then sets it `running` with no repository and the worker's next advance throws. Decide: refuse that Retry (say why on the page), or have the delete cancel failed tasks too. Cross-reference T393, T394, T409.
-
-Also (T349 fix-round review, 2026-10-31, reasoned from the code, not reproduced): since T349 the delete takes the task-creation key a Retry takes, but a Retry already waiting on the key when the delete commits goes on: `checkRevive` returns null after the wait without reading the repository again (database repository-task-lock.ts ~:109-113), so the task is revived to `running` with a NULL repository. Whichever way this is decided, the Retry must read the repository again after its wait.
-Note (T458 fix round, 2026-10-31): the repository delete's cancel (`cancelOpenTasksForRepo`, api routes/repos.ts ~:3384) clears no pause, while Cancel, abort and the plan merge discard now do; if a revival of such a task stays possible, it would be parked again by the stale `paused_at`.
-
-User decision 2026-11-01: Refuse Retry for a deleted repository with a clear explanation; re-read repository existence after waiting for its lock.
-
 ### T462 · FNF[project-state-notices] [design] · the repository page cannot say a sync replaced or refused a value (+3)
 
 status: parked · reason: diminishing returns (2026-11-01 scan): Bundle adds notices and visibility for existing conservative sync behavior; remaining consequences are minor; resume when resume when hidden refusals materially block repository state synchronization · priority: P4
@@ -1324,17 +1338,6 @@ From the T365 fix round 1 (2026-10-31), verified against cx-365. PRE-EXISTING, m
 
 Executable verification scope: Prioritize user-supplied endpoint bodies and a safe bounded over-limit reproduction. Trusted-vendor generalization, helper deduplication and error wording remain deferred. No automatic full-bundle repair: prove a supported current consequence, then scope the fix; park the remainder.
 
-### T512 · FNF[retry-cannot-help] · the repositories page offers Retry on an errored repository whose message says Retry cannot help
-
-status: in progress (bundle F2, overnight run 2026-11-10, branch fix/F2-retry-repo-state) · kind: feature · user decision: resolved 2026-11-01 · priority: P2
-From the T397 fix round 4 (2026-10-31). Minor (UX); arrives with T397.
-
-After T397 a refresh that finds a `.git` git refuses (exit 128) but that no structural read proves dead ends `error` with a message saying Retry cannot help until the checkout is repaired and that removing and re-adding the repository rebuilds it. The repositories page still offers Retry for every `error` row, and it must not key on the message text (AGENTS.md: a message is display copy). Decision needed: a structural signal (for example an error code column on `repositories`, written with the status) that the page reads to hide Retry and offer remove-and-re-add, or keep Retry (it is harmless, three attempts) and only reword. Single.
-
-User decision 2026-11-01: Add a structural repair-needed error code and a dedicated recovery action; do not gate on message text.
-
-User explicitly selected the structural-code/recovery-action option rather than copy-only cleanup. State is gated on a structural column/code, never status_message text. Preserve repository data through the recovery flow.
-
 ### T513 · FNF[test-env-hygiene] · test environment, fixture cleanup and measured flake leftovers
 
 status: parked · reason: diminishing returns (2026-11-01 scan): Entire bundle concerns test environment dependence, temporary files, duplication, and load-sensitive fixtures; resume when resume when these failures block required CI or dependable local validation · priority: P4
@@ -1604,6 +1607,7 @@ Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/rou
 
 ## Done
 
+- T460 + T512 — Retry, Resume and dead-task revival refuse a task whose repository was deleted (409 `task_repository_deleted`), and revival applies the Retry/Resume holds whatever the stored status; `repositories.error_code` (migration 0225) classifies a repair-needed checkout, "Check repair" is check only and never rebuilds, and "Rebuild checkout" moves the old checkout aside and restores this install's settings, KB and plan data; recovery keeps the repair code until detection succeeds, stranded preparations keep it, and rebuilds are refused while an unfinished task (legacy setup-output pointer included) has a worktree under the checkout — PR #1065 (2c16ca95e), 2026-11-11; dev 0225 applied, 0 of 79 repositories flagged. Follow-ups T602. Owner check: when this install has no plan rows, recovery keeps the incoming plan files.
 - T598 — Claude Code's `.claude/settings.local.json` ("don't ask again" saves the approved command verbatim, secrets included) is kept out of every Haive `git add -A` by a `**/.claude/settings.local.json` entry `ensureGitExcludeEntry` writes to `.git/info/exclude` next to `.haive/`; tracked copies still commit; not via the secret-mask globs, which `carry-untracked.ts` copies into worktrees — PR #1072 (b9482ff32), 2026-11-11.
 - T580 — effort estimates calibrate on the LLM's recorded estimate (`hydrateAnchors` and `GET /tasks/estimation-accuracy` read the latest `estimate.recorded.aiHours`, not the column `06b-sprint-planning` overwrites); step 11 lists every learning and skill (sorted by id, up to 500, excerpts on the first 60, ids filtered and titles collapsed at build time, an omission line past the cap, an open-before-update line for title-only entries); the `learning-recorder` persona allows update and delete and defers to the calling step's output — PR #1047 (884f5c074, 2026-11-09) and PR #1070 (7578584bb), 2026-11-11. Item 1 closed, not a defect: the `.haive-data/` move recorded no dual-read, and re-onboarding migrates `.claude/learnings/`. Plan `sleep-paper-lessons` shipped apart from P3; further work continues in `docs/plans/agent-memory-lessons.md`.
 - T270 + T497 — path-changing plan patches serialise per repository on a bounded advisory lock (409 `plan_busy`; update-only patches take none; worker callers retry busy; mirror flush keeps its base lock order); a failed plan merge stays visible after a reload (`failedMerge` on `GET /repositories/:id/plan/merge`) — PR #1067 (0df87b7c9), 2026-11-11. Follow-ups T596, T597.
