@@ -220,6 +220,22 @@ describe('explicit undo of a cancel-left committed merge', () => {
     expect(await git(f.dir, 'rev-parse', `${tip}^`)).toBe(f.after);
     expect(f.settled()[0]?.payload.outcome).toBe('moved');
   });
+  it.each(['other', '--detach'])(
+    'never resets a checkout switched to %s at the same commit while Undo prepares',
+    async (target) => {
+      const f = await fixture();
+      await git(f.dir, 'branch', 'other');
+      h.duringPrep = async () => {
+        await git(f.dir, 'switch', target);
+      };
+      await f.run();
+      expect(await git(f.dir, 'rev-parse', 'HEAD')).toBe(f.after);
+      expect(await git(f.dir, 'rev-parse', 'other')).toBe(f.after);
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+      expect(f.settled()[0]?.payload.outcome).toBe('moved');
+      expect(h.sync).not.toHaveBeenCalled();
+    },
+  );
   it.each(['personal', 'unrecorded-base'])(
     'refuses a base checked out in another %s worktree without changing its index',
     async (kind) => {
