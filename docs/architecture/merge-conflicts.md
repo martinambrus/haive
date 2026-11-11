@@ -31,7 +31,7 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   the same lock to move it from `created` to `queued` (`markQueuedForStart`), so none becomes a holder
   between that count and the move; a create with a repository takes it before its insert, as every
   other holder does, so no create inverts it with the repository row or the database-snapshot lock. An api start waits
-  at most 30 s for that lock (`boundedLockWait`, `api/src/lib/repository-busy.ts`; the plan-merge
+  at most 5 s for that lock (`TASK_START_LOCK_TIMEOUT_MS`) (`boundedLockWait`, `api/src/lib/repository-busy.ts`; the plan-merge
   start's wait on its own lock too) and otherwise answers 409 "The repository is busy, try again",
   having created and queued nothing; the bound is lifted once the lock is held. The worker's movers
   wait without a bound, since none of them retries.

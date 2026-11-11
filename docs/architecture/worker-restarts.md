@@ -157,7 +157,9 @@ duplicate; `created` is left alone, since a deferred-start draft waits there on 
 route that starts a task moves it from `created` to `queued` before it queues START, after every
 write that can fail (`markQueuedForStart`, `api/src/lib/task-start.ts`), under the repository's
 task-creation lock, since a queued task holds the checkout and a checkout move holds that lock. The
-api waits at most 30 s for it and otherwise answers 409 with nothing created or queued. So a
+api waits at most 5 s for each repository or plan key and row lock it takes there, and 1 s for the
+shared new-work fence (`TASK_START_LOCK_TIMEOUT_MS`, `NEW_WORK_FENCE_LOCK_TIMEOUT_MS`), and otherwise
+answers 409 with nothing created or queued; other `boundedLockWait` callers keep the 30 s default. So a
 START that was lost or could not be queued is the sweep's to give, and the route answers as though
 it had been queued. POST /tasks, `spawnPlanTask` (its seed included) and the global-KB enrich each
 insert the task and claim its START in one transaction, taking that lock before the insert, so a
@@ -244,14 +246,14 @@ to `error`. The final update repeats status, age and claim checks. It starts no 
 no task or runtime state. Both repository and bundle Workers tolerate ten stalls; this policy
 belongs to those two queues alone.
 
-**START claims the task, or does nothing.** `claimTaskStart` moves a `created` or `queued` task to
-`running`, pointed at its first step, in one statement fenced on the epoch START read. A START that
+**START claims the task, or does nothing.** `claimTaskStart` moves only a `queued` task to
+`running` (a stray START leaves a `created` draft alone), pointed at its first step, in one statement fenced on the epoch START read. A START that
 finds the task anywhere else — redelivered after the task ran on, a second START a task Retry
 queued, a task a repository deletion cancelled — logs and returns, where it used to restart the
 task from its first step or revive a cancelled one. The pointer is load-bearing: a task Retry
 leaves it on the step that failed, so under a pause the advance START queues for a first step
 already `done` read the chain as moved and was dropped, leaving a `running` task nothing drove. A
-START that throws before its claim fails the task only while it is still `created` or `queued` at
+START that throws before its claim fails the task only while it is still `queued` at
 the epoch it read, since a Retry can re-queue the task in between, and fails nothing when it could
 not read the task at all; `markTaskFailed` never writes over `cancelled` or `completed` from any
 caller. Once START has claimed, its redelivery is
@@ -327,7 +329,9 @@ cannot reopen it during a drain. The early read fails open on an error other tha
 whether to try; an outage reads as `'unreadable'`, which `holdsNewWork` counts as held, so the
 advance is dropped and the answer stays on its row; the
 read under the fence fails closed: a state it cannot read writes nothing and throws
-`MaintenanceStateUnreadable`, so the job fails and is retried with the answer still on its row. A
+`MaintenanceStateUnreadable`; that, like a revival that met a busy lock (`RevivalBusy`), moves the
+job to delayed for 30 s without failing the task or spending an attempt, and it is retried with the
+answer still on its row. A
 hold it sees also travels into the write that follows (`taskWriteTarget`, `held`): the task row is
 written only while it is not `failed`, so a task that failed after that read is not reopened either. Both
 answer routes read the task's status inside their own
@@ -377,7 +381,7 @@ so does a task whose current row does not exist yet (a hand-off wrote the pointe
 has not created the row): the api cannot create a step row, and failing only the task would send its
 Retry down the START replay. What a Stop leaves there, a `failed` row and a `failed` task at the
 same epoch, the worker does not touch: an advance for it, at that epoch or an older one, is refused
-(`failedTaskRefusesAdvance`), a START claims only a `created` or `queued` task, the stalled sweep
+(`failedTaskRefusesAdvance`), a START claims only a `queued` task, the stalled sweep
 takes `running` tasks (and answered forms of waiting ones), and a claim flips only a `pending` row
 and refuses a failed task, so the next write to the row is a Retry's reset. No reader sees a run cancelled beside a step still running, and a
 Stop that fails leaves every run as it was and kills nothing. When the Stop's own update fails the
@@ -409,7 +413,7 @@ task, which the delete finds among the open ones and cancels. The delete waits f
 30 s (`boundedLockWait`) and otherwise answers 409 `The repository is busy, try again` with nothing
 written. Its repository-row take has a separate 30 s bound, so a relink holding that row cannot
 leave the delete waiting without a bound after it obtained the task-creation key. The plan advisory route takes the same key, before its plan node row, since the delete
-holds the key and cascades into the node rows. The cancel itself is described after this paragraph. A pass a Stop cut off
+holds the key and cascades into the node rows, with the same 5 s admission bound. The cancel itself is described after this paragraph. A pass a Stop cut off
 mid-apply then releases what the failed task holds (`settleFailedTask`), as its own failure would
 have; a Stop that finds no pass queues the same release as a `settle-stopped-task` job (see
 `failedAt` above), and when both run a second settlement of one failure is harmless. The cancel poll also stops a

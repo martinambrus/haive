@@ -21,7 +21,9 @@ export const REPOSITORY_TASKS_LOCK_TIMEOUT_MS = 30_000;
 
 /** Admission waits for repository/plan keys and rows. Measured with 512 claim files: the
  *  longest foreground hold was 2.072 s, the sweep 1.735 s; 1,000-file git sections took
- *  118-131 ms. Five seconds leaves routine writers headroom while bounding pool occupancy. */
+ *  118-131 ms. Five seconds leaves routine writers headroom while bounding pool occupancy.
+ *  The hold grows with the record: about 1,300-1,800 claim files fill 5 s, and a record at its
+ *  4,096-entry ceiling holds about 10-14 s, so a start behind such a write answers 409 busy. */
 export const TASK_START_LOCK_TIMEOUT_MS = 5_000;
 
 /** The exclusive maintenance holder only toggles state; it needs no filesystem/git budget. */
