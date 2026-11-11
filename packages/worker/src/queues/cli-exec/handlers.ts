@@ -652,6 +652,39 @@ export async function handleProbeJob(
     };
   }
 
+  // Candidate probes never read or publish active credentials. Ordinary probes own the
+  // scope from the credential read through health publication, so sign-out cannot remove
+  // those credentials and then be overwritten by the old probe's result.
+  if (payload.oauthCandidate !== undefined) return probeProvider(db, payload, provider);
+  const scope = cliAuthScope(provider);
+  const release = await tryCliAuthLock(db, scope);
+  if (!release) return probeUnavailable(payload, 'CLI authentication is busy');
+  try {
+    const current = await db.query.cliProviders.findFirst({
+      where: eq(schema.cliProviders.id, provider.id),
+    });
+    if (!current || cliAuthScope(current) !== scope)
+      return probeUnavailable(payload, 'CLI authentication settings changed; try again');
+    return await probeProvider(db, payload, current);
+  } finally {
+    await release();
+  }
+}
+
+function probeUnavailable(payload: CliProbeJobPayload, error: string): CliProbeResult {
+  return {
+    ok: false,
+    providerId: payload.providerId,
+    targetMode: 'cli',
+    cli: { ok: false, error },
+  };
+}
+
+async function probeProvider(
+  db: Database,
+  payload: CliProbeJobPayload,
+  provider: typeof schema.cliProviders.$inferSelect,
+): Promise<CliProbeResult> {
   if (!cliAdapterRegistry.has(provider.name)) {
     return {
       ok: false,
@@ -1113,6 +1146,25 @@ export async function handleLoginCreateJob(
     return { ok: false, error: `no adapter registered for ${provider.name}` };
   }
 
+  const scope = cliAuthScope(provider);
+  const release = await tryCliAuthLock(db, scope);
+  if (!release) return { ok: false, error: 'CLI authentication is busy; try again' };
+  try {
+    const current = await db.query.cliProviders.findFirst({
+      where: eq(schema.cliProviders.id, provider.id),
+    });
+    if (!current || current.userId !== payload.userId || cliAuthScope(current) !== scope)
+      return { ok: false, error: 'CLI authentication settings changed; try again' };
+    return await createLoginUnderAuthLock(db, current);
+  } finally {
+    await release();
+  }
+}
+
+async function createLoginUnderAuthLock(
+  db: Database,
+  provider: typeof schema.cliProviders.$inferSelect,
+): Promise<CliLoginCreateResult> {
   const adapter = cliAdapterRegistry.get(provider.name);
   const executable =
     provider.wrapperPath?.trim() || provider.executablePath?.trim() || adapter.defaultExecutable;
