@@ -1059,12 +1059,21 @@ export async function restoreKeptMetadata(repoPath: string, kept: KeptFiles): Pr
   await restoreFaults.beforeKeptMetadata?.();
   const writer = process.getuid?.();
   for (const [path, { bytes, owner, mode, untracked, parents }] of kept) {
-    if (!(await restoreKeptParents(repoPath, parents))) restored = false;
-    if (!untracked || !Buffer.isBuffer(bytes) || !owner || mode === undefined) continue;
+    if (!untracked || !Buffer.isBuffer(bytes) || !owner || mode === undefined) {
+      if (!(await restoreKeptParents(repoPath, parents))) restored = false;
+      continue;
+    }
     const warn = metadataWarn(repoPath, path);
     try {
       const now = await lstatNoFollow(repoPath, path, { strict: true });
-      if (now?.kind !== 'file') continue;
+      // Reset can remove a captured path before it is recreated. Keep that obligation
+      // until restoration succeeds (or explicit repository deletion retires its outbox).
+      // Do not touch its parents on every absent-file retry either.
+      if (now?.kind !== 'file') {
+        restored = false;
+        continue;
+      }
+      if (!(await restoreKeptParents(repoPath, parents))) restored = false;
       // A prior attempt may have handed back the owner, then failed its chmod. Only the
       // captured owner at the writer's default mode is eligible for that resumed hand-back.
       if (
@@ -1104,7 +1113,10 @@ async function restoreKeptParents(
     const warn = metadataWarn(repoPath, path);
     try {
       const now = await lstatNoFollow(repoPath, path, { strict: true });
-      if (now?.kind !== 'directory') continue;
+      if (now?.kind !== 'directory') {
+        restored = false;
+        continue;
+      }
       if (
         now.stats.uid !== writer &&
         !(now.stats.uid === owner.uid && (now.stats.mode & 0o7777) === 0o755)

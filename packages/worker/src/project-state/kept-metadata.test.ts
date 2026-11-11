@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   chmod: vi.fn(),
   chown: vi.fn(),
   unreadable: false,
+  absent: false,
   uid: 0,
   gid: 0,
   mode: 0o644,
@@ -23,7 +24,7 @@ vi.mock('@haive/shared/fs-safe', async (original) => ({
   ...(await original<typeof import('@haive/shared/fs-safe')>()),
   lstatNoFollow: async (_anchor: string, _rel: string, opts?: { strict?: boolean }) => {
     if (h.unreadable && opts?.strict) throw new Error('metadata unreadable');
-    if (h.unreadable) return null;
+    if (h.unreadable || h.absent) return null;
     return { kind: 'file', stats: { uid: h.uid, gid: h.gid, mode: h.mode } };
   },
   chmodNoFollow: h.chmod,
@@ -81,6 +82,7 @@ beforeEach(() => {
   vi.spyOn(process, 'getgid').mockReturnValue(0);
   h.outcome = 'held';
   h.unreadable = false;
+  h.absent = false;
   h.uid = 0;
   h.gid = 0;
   h.mode = 0o644;
@@ -96,6 +98,35 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('persisted projection metadata', () => {
+  it('retains an absent captured file until recreated, then consumes it once', async () => {
+    const f = fixture();
+    h.outcome = 'absent';
+    h.absent = true;
+    expect(await resyncHaiveProjections(f.db, 'repo-1', '/repo')).toBe(false);
+    expect(f.pending()).toEqual({ '/repo': metadata });
+    expect(h.chown).not.toHaveBeenCalled();
+    h.absent = false;
+    h.outcome = 'applied';
+    expect(await resyncHaiveProjections(f.db, 'repo-1', '/repo')).toBe(true);
+    expect(h.mode).toBe(0o600);
+    expect(f.pending()).toBeNull();
+    h.mode = 0o644;
+    await resyncHaiveProjections(f.db, 'repo-1', '/repo');
+    expect(h.mode).toBe(0o644);
+  });
+
+  it('retains a different capture at the same path during the guarded clear', async () => {
+    const f = fixture();
+    const replacement = { '.haive-data/plan.json': { owner: { uid: 42, gid: 42 }, mode: 0o640 } };
+    expect(
+      await restorePendingKeptMetadata(f.db, 'repo-1', '/repo', async () => {
+        f.capture(replacement);
+        return true;
+      }),
+    ).toBe(true);
+    expect(f.pending()).toEqual({ '/repo': replacement });
+  });
+
   it('leaves a second capture pending when it races the guarded clear', async () => {
     const f = fixture();
     const captured = {
@@ -178,6 +209,7 @@ describe('persisted projection metadata', () => {
     expect(await resyncHaiveProjections(f.db, 'repo-1', '/repo')).toBe(false);
     expect(f.pending()).not.toBeNull();
     h.unreadable = false;
+    h.absent = false;
     expect(await resyncHaiveProjections(f.db, 'repo-1', '/repo')).toBe(true);
     expect(h.mode).toBe(0o600);
   });
