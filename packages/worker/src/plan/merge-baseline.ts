@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import type { Database } from '@haive/database';
+import type { Database, DbTx } from '@haive/database';
 import {
   captureFixBaseline,
   fixerIndexHeldNote,
@@ -32,7 +32,7 @@ async function openMergeIds(dir: string): Promise<{ head: string; mergeHead: str
 
 /** The newest tree recorded for the repository, while the merge it was taken of is still open. */
 async function recordedFixBaseline(
-  db: Database,
+  db: Database | DbTx,
   repositoryId: string,
   worktreePath: string,
 ): Promise<RecordedFixBaseline | null> {
@@ -65,7 +65,7 @@ async function recordedFixBaseline(
 /** One tree per open merge, so a fixer that failed or was stopped is compared with it too. A merge
  *  this pass opened is a new tree, even where a merge of the same two commits was recorded. */
 export async function planMergeFixBaseline(
-  db: Database,
+  db: Database | DbTx,
   at: { repositoryId: string; taskId: string; taskStepId: string; worktreePath: string },
   opened: boolean,
 ): Promise<{
@@ -96,10 +96,11 @@ export async function planMergeFixBaseline(
 
 /** Move aside what fixers left in the merge `recorded` was taken of, reported on its task. */
 export async function moveAsideFixerLeftovers(
-  db: Database,
+  db: Database | DbTx,
   worktreePath: string,
   recorded: RecordedFixBaseline,
   branch: string,
+  afterCommit?: (markReported: () => Promise<void>) => void,
 ): Promise<void> {
   const leftovers = await relocateFixerChanges(
     worktreePath,
@@ -112,18 +113,26 @@ export async function moveAsideFixerLeftovers(
     () => taskSecretMaskPolicy(db, recorded.taskId),
   );
   if (leftovers) {
-    await recordFixerLeftovers(db, recorded.taskId, recorded.taskStepId, branch, leftovers);
+    await recordFixerLeftovers(
+      db,
+      recorded.taskId,
+      recorded.taskStepId,
+      branch,
+      leftovers,
+      afterCommit,
+    );
   }
   if (leftovers?.indexHeld) throw new Error(fixerIndexHeldNote(leftovers.indexHeld));
 }
 
 /** What fixers left in a merge a conversation left open, moved aside before it is discarded. */
 export async function moveAsideRecordedLeftovers(
-  db: Database,
+  db: Database | DbTx,
   repositoryId: string,
   worktreePath: string,
   branch: string,
+  afterCommit?: (markReported: () => Promise<void>) => void,
 ): Promise<void> {
   const recorded = await recordedFixBaseline(db, repositoryId, worktreePath);
-  if (recorded) await moveAsideFixerLeftovers(db, worktreePath, recorded, branch);
+  if (recorded) await moveAsideFixerLeftovers(db, worktreePath, recorded, branch, afterCommit);
 }

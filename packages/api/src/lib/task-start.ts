@@ -1,5 +1,10 @@
 import { and, eq, isNull } from 'drizzle-orm';
-import { lockRepositoryTasksKey, schema, type DbTx } from '@haive/database';
+import {
+  TASK_START_LOCK_TIMEOUT_MS,
+  lockRepositoryTasksKey,
+  schema,
+  type DbTx,
+} from '@haive/database';
 import { TASK_JOB_NAMES, type TaskJobPayload } from '@haive/shared';
 import { assertCustomToolsUsable } from './custom-tools-start-check.js';
 import { assertRootMergeIdle } from './root-merge-busy.js';
@@ -48,7 +53,11 @@ export async function markQueuedForStart(
     // A queued task holds the checkout, so its start waits out a move that holds this lock.
     const repositoryId = task?.repositoryId;
     if (repositoryId) {
-      await boundedLockWait(tx, () => lockRepositoryTasksKey(tx, repositoryId));
+      await boundedLockWait(
+        tx,
+        () => lockRepositoryTasksKey(tx, repositoryId),
+        TASK_START_LOCK_TIMEOUT_MS,
+      );
       if (task?.status === 'created' && task.deadAt == null) {
         await assertRootMergeIdle(tx, taskId, { ...task, repositoryId });
       }
@@ -56,11 +65,16 @@ export async function markQueuedForStart(
     // Unrecorded counts keep the ordinary create/start path. For a recorded count, serialize
     // starts before checking it so an already-started task never conflicts over missing files.
     if (task?.expectedAttachmentCount != null) {
-      const [current] = await tx
-        .select({ status: schema.tasks.status, deadAt: schema.tasks.deadAt })
-        .from(schema.tasks)
-        .where(eq(schema.tasks.id, taskId))
-        .for('update');
+      const [current] = await boundedLockWait(
+        tx,
+        async () =>
+          tx
+            .select({ status: schema.tasks.status, deadAt: schema.tasks.deadAt })
+            .from(schema.tasks)
+            .where(eq(schema.tasks.id, taskId))
+            .for('update'),
+        TASK_START_LOCK_TIMEOUT_MS,
+      );
       if (!current || current.status !== 'created' || current.deadAt != null) return undefined;
       const expected = task.expectedAttachmentCount;
       if (expected > 0 && !confirmMissingAttachments) {
@@ -78,17 +92,22 @@ export async function markQueuedForStart(
           throw new MissingTaskAttachmentsError(landed.length, expected);
       }
     }
-    const [queued] = await tx
-      .update(schema.tasks)
-      .set({ status: 'queued', updatedAt: new Date() })
-      .where(
-        and(
-          eq(schema.tasks.id, taskId),
-          eq(schema.tasks.status, 'created'),
-          isNull(schema.tasks.deadAt),
-        ),
-      )
-      .returning();
+    const [queued] = await boundedLockWait(
+      tx,
+      async () =>
+        tx
+          .update(schema.tasks)
+          .set({ status: 'queued', updatedAt: new Date() })
+          .where(
+            and(
+              eq(schema.tasks.id, taskId),
+              eq(schema.tasks.status, 'created'),
+              isNull(schema.tasks.deadAt),
+            ),
+          )
+          .returning(),
+      TASK_START_LOCK_TIMEOUT_MS,
+    );
     return queued;
   });
 }

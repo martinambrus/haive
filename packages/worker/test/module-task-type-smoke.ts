@@ -237,7 +237,7 @@ async function main(): Promise<void> {
         metadata: def.repoOptional ? { anchorRepositoryId: repositoryId } : null,
         runListSnapshot: def.runListSnapshot,
         customSteps: def.customSteps,
-        status: 'created',
+        status: 'queued',
       })
       .returning({ id: schema.tasks.id });
     const taskId = task!.id;

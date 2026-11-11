@@ -264,24 +264,26 @@ describe('an answer to a form still parked, when the stored state cannot be read
   });
   afterEach(() => vi.restoreAllMocks());
 
-  it('goes on past the early check, which fails open, and reopens the task', async () => {
+  it('defers on an unreadable early check and preserves the answer', async () => {
     reads(new Error('redis went away'), 'normal');
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
 
-    await processTaskJob(answer(), 'tok').catch(() => {});
+    const pending = answer();
+    await expect(processTaskJob(pending, 'tok')).rejects.toMatchObject({ name: 'DelayedError' });
 
-    expect(h.state.writes).not.toEqual([]);
+    expect(pending.moveToDelayed).toHaveBeenCalledTimes(1);
+    expect(h.state.writes).toEqual([]);
     expect(warn).toHaveBeenCalledWith(
       expect.objectContaining({ taskId: 'task-1', err: expect.any(Error) }),
       expect.any(String),
     );
   });
 
-  it('fails the job rather than dropping the answer when the transaction that reopens the task cannot read it', async () => {
+  it('defers rather than dropping the answer when the transaction that reopens the task cannot read it', async () => {
     reads('normal', new Error('redis went away'));
 
     await expect(processTaskJob(answer(), 'tok')).rejects.toMatchObject({
-      name: 'MaintenanceStateUnreadable',
+      name: 'DelayedError',
     });
   });
 });

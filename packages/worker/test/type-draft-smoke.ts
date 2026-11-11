@@ -238,7 +238,7 @@ async function main(): Promise<void> {
           ...(editingSlug !== undefined ? { editingSlug } : {}),
         },
         runListSnapshot: definitionSteps,
-        status: 'created',
+        status: 'queued',
       })
       .returning({ id: schema.tasks.id });
     await db.insert(schema.taskEvents).values({

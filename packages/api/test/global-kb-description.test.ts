@@ -5,6 +5,7 @@ const h = vi.hoisted(() => ({
   db: undefined as unknown,
   gdb: undefined as unknown,
   add: vi.fn(),
+  waits: [] as (number | undefined)[],
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -12,6 +13,20 @@ vi.mock('../src/queues.js', () => ({
   getGlobalKbSyncQueue: () => ({ add: h.add }),
   getTaskQueue: vi.fn(),
 }));
+vi.mock('../src/lib/repository-busy.js', async (original) => {
+  const real = await original<typeof import('../src/lib/repository-busy.js')>();
+  return {
+    ...real,
+    boundedLockWait: async <T>(
+      tx: Parameters<typeof real.boundedLockWait>[0],
+      take: () => Promise<T>,
+      timeoutMs?: number,
+    ) => {
+      h.waits.push(timeoutMs);
+      return real.boundedLockWait(tx, take, timeoutMs);
+    },
+  };
+});
 vi.mock('../src/lib/task-start.js', () => ({
   enqueueStart: vi.fn(async () => {}),
   markQueuedForStart: async () => true,
@@ -39,7 +54,11 @@ vi.mock('../src/lib/task-type-definition.js', async (importOriginal) => ({
 }));
 
 import { Hono } from 'hono';
-import { schema } from '@haive/database';
+import {
+  schema,
+  TASK_START_LOCK_TIMEOUT_MS,
+  NEW_WORK_FENCE_LOCK_TIMEOUT_MS,
+} from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { GLOBAL_KB_DESCRIPTION_MAX, globalKbEntries } from '@haive/shared/global-kb';
 import { enrichSchema, globalKbRoutes, updateSchema } from '../src/routes/global-kb.js';
@@ -54,7 +73,12 @@ app.route('/', globalKbRoutes);
 app.onError(errorHandler);
 
 const makeFake = () =>
-  createFakeDb({ tasks: schema.tasks, cliProviders: schema.cliProviders, globalKbEntries });
+  createFakeDb({
+    tasks: schema.tasks,
+    cliProviders: schema.cliProviders,
+    repositories: schema.repositories,
+    globalKbEntries,
+  });
 let fake: ReturnType<typeof makeFake>;
 
 const send = (method: string, url: string, body: unknown) =>
@@ -68,6 +92,7 @@ const stored = (id = ENTRY) => fake.rows(globalKbEntries).find((r) => r.id === i
 
 beforeEach(() => {
   h.add.mockReset();
+  h.waits = [];
   fake = makeFake();
   h.db = fake.db;
   h.gdb = fake.db;
@@ -233,6 +258,15 @@ describe('POST /enrich and the description', () => {
   };
   const skeleton = () => fake.rows(globalKbEntries).find((r) => r.status === 'skeleton')!;
   const task = () => fake.rows(schema.tasks)[0]!;
+
+  it('uses the shared admission budget before inserting an anchored kb-author task', async () => {
+    const repositoryId = '00000000-0000-4000-8000-0000000000d1';
+    fake.insert(schema.repositories, { id: repositoryId, userId: USER });
+    const res = await send('POST', '/enrich', { ...request, repositoryId });
+    expect(res.status).toBe(201);
+    expect(h.waits).toEqual([NEW_WORK_FENCE_LOCK_TIMEOUT_MS, TASK_START_LOCK_TIMEOUT_MS]);
+    expect(task().repositoryId).toBe(repositoryId);
+  });
 
   it('keeps capped author fields and long notes/scope/domain values intact', async () => {
     const title = 't'.repeat(300);

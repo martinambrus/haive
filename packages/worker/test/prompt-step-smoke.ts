@@ -123,7 +123,7 @@ async function main(): Promise<void> {
         type: TYPE,
         title,
         description: 'prompt step smoke',
-        status: 'created',
+        status: 'queued',
         runListSnapshot: snapshot,
         customSteps: customSteps as Record<string, unknown> | null,
       })
