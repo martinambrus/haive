@@ -490,7 +490,14 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
           .select()
           .from(schema.planMirrorState)
           .where(eq(schema.planMirrorState.repositoryId, m.s.repo.id));
-        expect(mirror!.syncedSnapshot).toEqual(JSON.parse(await readFile(planPath, 'utf8')));
+        expect(mirror!.syncedSnapshot).toEqual(
+          area === 'earlier plan base'
+            ? {
+                ...plan,
+                nodes: plan.nodes.map((n: object) => ({ ...n, title: 'Before saved plan' })),
+              }
+            : plan,
+        );
       }
       expect(claimSeen).toBe(true);
       expect(m.git(m.dest, 'rev-parse', 'HEAD')).toBe(head); // Recovery writes, never commits.
@@ -516,15 +523,63 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
         .from(schema.planNodes)
         .where(eq(schema.planNodes.repositoryId, m.s.repo.id));
       expect(later!.rtkVersion).toBe('3.0.0');
-      expect(laterNode!.title).toBe('Later edit');
+      expect(laterNode!.title).toBe(area === 'earlier plan base' ? 'Saved plan' : 'Later edit');
       expect(
         await db!
           .select()
           .from(schema.projectStateConflicts)
           .where(eq(schema.projectStateConflicts.repositoryId, m.s.repo.id)),
-      ).toEqual([]);
+      ).toMatchObject(
+        area === 'earlier plan base'
+          ? [{ unit: 'plan/' + plan.nodes[0].id + '#title', resolution: null }]
+          : [],
+      );
     },
   );
+
+  it('recovery keeps an unpushed local plan node when a later remote plan lacks it', async () => {
+    const m = await moveFixture();
+    await applyPlanPatch(
+      db!,
+      { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Shared root' }] },
+      { repositoryId: m.s.repo.id, origin: 'llm' },
+    );
+    await writePlanMirror(db!, m.s.repo.id, m.dest);
+    const planPath = join(m.dest, '.haive-data/plan.json');
+    const shared = JSON.parse(await readFile(planPath, 'utf8'));
+    await db!
+      .update(schema.planMirrorState)
+      .set({ syncedSnapshot: shared })
+      .where(eq(schema.planMirrorState.repositoryId, m.s.repo.id));
+    await applyPlanPatch(
+      db!,
+      {
+        ops: [
+          {
+            op: 'upsert',
+            nodeRef: 'local-child',
+            parentRef: shared.nodes[0].id,
+            title: 'Unpushed child',
+          },
+        ],
+      },
+      { repositoryId: m.s.repo.id, origin: 'llm' },
+    );
+    await writeFile(join(m.dest, '.git/config'), '[core\n');
+    await handleRefresh({ ...m.payload, recoverCheckout: true }, db!, m.storage);
+    await writeFile(planPath, JSON.stringify(shared));
+    await reconcilePlanFromCheckout(db!, m.s.repo.id, m.dest);
+    expect(
+      (
+        await db!
+          .select()
+          .from(schema.planNodes)
+          .where(eq(schema.planNodes.repositoryId, m.s.repo.id))
+      )
+        .map((n) => n.title)
+        .sort(),
+    ).toEqual(['Shared root', 'Unpushed child']);
+  });
 
   it.each(['active', 'persisted', 'late'] as const)(
     'defers a clean public refresh with a %s journal and retries after explicit recovery',
