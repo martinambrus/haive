@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, ne, sql } from 'drizzle-orm';
 import * as schema from './schema/index.js';
 import { isRootClaimLive, type RootClaimKind } from './repo-root-claim.js';
 import type { DbTx } from './task-attachments-lock.js';
@@ -58,6 +58,7 @@ export async function liveTaskIdOfType(
   repositoryId: string,
   type: 'onboarding' | 'onboarding_upgrade',
   userId?: string,
+  excludeTaskId?: string,
 ): Promise<string | null> {
   const [live] = await db
     .select({ id: schema.tasks.id })
@@ -68,6 +69,7 @@ export async function liveTaskIdOfType(
         eq(schema.tasks.type, type),
         inArray(schema.tasks.status, [...LIVE_TASK_STATUSES]),
         ...(userId ? [eq(schema.tasks.userId, userId)] : []),
+        ...(excludeTaskId ? [ne(schema.tasks.id, excludeTaskId)] : []),
       ),
     )
     .limit(1);
@@ -134,10 +136,16 @@ export async function checkRevive(
   const repo = await lockRepositoryRow(tx, task.repositoryId);
   if (!repo) return { task, refusal: { reason: 'no-repository' } };
   const [current] = await tx
-    .select({ status: schema.tasks.status })
+    .select({ status: schema.tasks.status, deadAt: schema.tasks.deadAt })
     .from(schema.tasks)
     .where(eq(schema.tasks.id, taskId));
-  if (!current || (LIVE_TASK_STATUSES as readonly string[]).includes(current.status)) return null;
+  // Dead tasks keep their live status but gave up the checkout; revival must re-admit them.
+  // An active task's Retry/Resume retains the existing admission behaviour.
+  if (
+    !current ||
+    (!current.deadAt && (LIVE_TASK_STATUSES as readonly string[]).includes(current.status))
+  )
+    return null;
   if (isRootClaimLive(repo.rootClaimedAt)) {
     return {
       task,
@@ -146,11 +154,23 @@ export async function checkRevive(
   }
   let refusal: ReviveRefusal | null = null;
   if (task.type === 'onboarding') {
-    const upgradeId = await liveTaskIdOfType(tx, task.repositoryId, 'onboarding_upgrade');
+    const upgradeId = await liveTaskIdOfType(
+      tx,
+      task.repositoryId,
+      'onboarding_upgrade',
+      undefined,
+      taskId,
+    );
     if (upgradeId) refusal = { reason: 'live-upgrade', taskId: upgradeId };
   }
   if (!refusal) {
-    const onboardingId = await liveTaskIdOfType(tx, task.repositoryId, 'onboarding', task.userId);
+    const onboardingId = await liveTaskIdOfType(
+      tx,
+      task.repositoryId,
+      'onboarding',
+      task.userId,
+      taskId,
+    );
     if (onboardingId) refusal = { reason: 'live-onboarding', taskId: onboardingId };
   }
   return refusal ? { task, refusal } : { task, repo, refusal: null };
