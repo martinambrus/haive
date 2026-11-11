@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { GitMerge } from 'lucide-react';
 import { api, type TaskEvent } from '@/lib/api-client';
-import { leftMergeBanners } from '@/lib/step-banners';
+import { leftMergeBanners, leftCommittedMergeBanner } from '@/lib/step-banners';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { Button, FormError } from '@/components/ui';
@@ -30,6 +30,7 @@ export function TaskLeftMergeBanner({
   const [error, setError] = useState<string | null>(null);
 
   const banners = leftMergeBanners(events, { taskStatus });
+  const committed = leftCommittedMergeBanner(events, { taskStatus });
   const inFlight = (key: string) => {
     const b = banners.find((x) => x.key === key && x.canAbort);
     return b !== undefined && requested.get(key) === b.refusals;
@@ -45,7 +46,7 @@ export function TaskLeftMergeBanner({
     const load = async () => {
       try {
         const data = await api.get<{ events: TaskEvent[] }>(
-          `/tasks/${taskId}/events?type=merge.left_open,merge.left_open_settled,${CANCEL_FINISHED}`,
+          `/tasks/${taskId}/events?type=merge.left_committed,merge.left_open,merge.left_open_settled,${CANCEL_FINISHED}`,
         );
         if (!stop) setEvents(data.events);
       } catch {
@@ -60,7 +61,7 @@ export function TaskLeftMergeBanner({
     };
   }, [taskId, taskStatus, polling]);
 
-  if (banners.length === 0) return null;
+  if (banners.length === 0 && !committed) return null;
 
   async function abort(key: string): Promise<void> {
     const target = banners.find((b) => b.key === key);
@@ -83,6 +84,15 @@ export function TaskLeftMergeBanner({
 
   return (
     <>
+      {committed && (
+        <div
+          role="status"
+          className="flex items-start gap-3 rounded-md border border-amber-900 bg-amber-950/40 px-4 py-3 text-amber-300"
+        >
+          <GitMerge className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
+          <InlineMarkdown className="text-sm [overflow-wrap:anywhere]" body={committed.text} />
+        </div>
+      )}
       {banners.map((b) => (
         <div
           key={b.key}

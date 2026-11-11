@@ -1,3 +1,4 @@
+import { recordLeftCommittedMerge } from './left-committed-merge.js';
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray, isNotNull, ne, sql } from 'drizzle-orm';
 import { schema, type Database, type MergeResolveState } from '@haive/database';
@@ -264,6 +265,7 @@ export async function recordLeftOpenMerges(db: Database, taskId: string): Promis
     if (found === 'gone') await settleGoneMerge(db, taskId, recorded);
     else if (found) known.push({ ...found, settled: null, refused: null });
   }
+  await recordLeftCommittedMerge(db, taskId);
 }
 
 async function maskSourceOnce(db: Database, taskId: string): Promise<SecretMaskSource> {

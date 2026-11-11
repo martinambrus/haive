@@ -1,3 +1,4 @@
+import { MERGE_LEFT_COMMITTED_EVENT, readLandedMerge } from '@haive/shared/merge-left-open';
 import { leftOpenMerges, type MergeLeftOpenOutcome } from '@haive/shared/merge-left-open';
 import { parseUpgradeInstant } from './upgrade-time';
 import { parseStepId } from '@haive/shared/modularity';
@@ -397,4 +398,21 @@ export function upgradeAttemptBanner(
     kind: attempt.status,
     text: `${title} (${codeSpan(attempt.toVersion)}). ${attempt.error ?? 'The updater stopped before starting the upgrade.'}`,
   };
+}
+
+/** A cancelled task's landed-merge report is structural evidence, independent of step copy. */
+export function leftCommittedMergeBanner(
+  events: readonly LeftMergeEventRow[],
+  opts: { taskStatus: string },
+): { text: string } | null {
+  if (opts.taskStatus !== 'cancelled') return null;
+  const merge = events
+    .filter((e) => e.eventType === MERGE_LEFT_COMMITTED_EVENT)
+    .map((e) => readLandedMerge(e.payload))
+    .find((m) => m !== null);
+  return merge
+    ? {
+        text: `This task's merge stays committed on ${codeSpan(merge.landedOn)} and was not undone when the task was cancelled.`,
+      }
+    : null;
 }

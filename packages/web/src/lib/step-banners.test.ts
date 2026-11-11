@@ -7,6 +7,7 @@ import {
   invocationBanner,
   isTaskDead,
   leftMergeBanners,
+  leftCommittedMergeBanner,
   modelIdentityBanner,
   moduleStopBanner,
   parkBanner,
@@ -635,5 +636,44 @@ describe('upgradeAttemptBanner', () => {
     expect(upgradeAttemptBanner({ ...attempt, status: 'failed', error: null })?.kind).toBe(
       'failed',
     );
+  });
+});
+
+describe('leftCommittedMergeBanner', () => {
+  const payload = {
+    baseShaBefore: 'a'.repeat(40),
+    baseShaAfter: 'b'.repeat(40),
+    landedOn: 'release/test',
+    landedAt: '2026-10-12T00:00:00Z',
+    repoPath: '/host-fs/repo',
+    dir: '/host-fs/repo',
+  };
+  it('shows the committed report for cancelled tasks, including pushed and host-fs merges', () => {
+    expect(
+      leftCommittedMergeBanner([{ eventType: 'merge.left_committed', payload }], {
+        taskStatus: 'cancelled',
+      }),
+    ).toEqual({
+      text: expect.stringContaining('stays committed on `release/test` and was not undone'),
+    });
+  });
+  it('does not show copy or a landed fact as a cancellation report', () => {
+    expect(
+      leftCommittedMergeBanner([{ eventType: 'merge.landed', payload }], {
+        taskStatus: 'cancelled',
+      }),
+    ).toBeNull();
+    expect(
+      leftCommittedMergeBanner(
+        [{ eventType: 'merge.left_committed', payload: { message: 'merge stays committed' } }],
+        { taskStatus: 'cancelled' },
+      ),
+    ).toBeNull();
+    expect(
+      leftCommittedMergeBanner([{ eventType: 'merge.left_committed', payload }], {
+        taskStatus: 'running',
+      }),
+    ).toBeNull();
+    expect(leftCommittedMergeBanner([], { taskStatus: 'cancelled' })).toBeNull();
   });
 });
