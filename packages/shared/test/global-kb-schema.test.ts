@@ -29,6 +29,7 @@ function fakeConn(
   opts: {
     vectorThrows?: string;
     unaccentThrows?: string;
+    lexicalFailure?: { match: string; code: string };
     lockThrowsOnce?: string;
     hnswThrows?: boolean;
     columnType?: string;
@@ -48,6 +49,7 @@ function fakeConn(
   const captured: string[] = [];
   const configs = new Set<string>();
   let lockFailure = opts.lockThrowsOnce;
+  let lexicalFailure = opts.lexicalFailure;
   const tag = (strings: TemplateStringsArray) => {
     const q = strings.join('');
     captured.push(q);
@@ -64,10 +66,15 @@ function fakeConn(
   const tx = Object.assign(tag, {
     unsafe: (q: string, params?: unknown[]) => {
       captured.push(q);
+      if (lexicalFailure && q.includes(lexicalFailure.match)) {
+        const { code } = lexicalFailure;
+        lexicalFailure = undefined;
+        return Promise.reject(pgError(code));
+      }
       if (q.includes('CREATE EXTENSION IF NOT EXISTS unaccent') && opts.unaccentThrows) {
         return Promise.reject(pgError(opts.unaccentThrows));
       }
-      if (q.startsWith('SELECT oid AS config')) {
+      if (q.startsWith('SELECT c.oid AS config')) {
         const name = /cfgname = '([^']+)'/.exec(q)![1]!;
         return Promise.resolve([{ config: configs.has(name) ? name : null }]);
       }
@@ -134,7 +141,7 @@ function fakeConn(
 }
 
 describe('ensureGlobalKbSchema', () => {
-  it.each(['42501', '58P01'])(
+  it.each(['42501', '58P01', '0A000'])(
     'records a verbatim fallback and warns once if unaccent is unavailable (%s)',
     async (code) => {
       logged.warn.mockClear();
@@ -145,6 +152,32 @@ describe('ensureGlobalKbSchema', () => {
       expect(queries()).not.toContain('CREATE TEXT SEARCH CONFIGURATION haive_english_unaccent_v1');
       expect(logged.warn).toHaveBeenCalledTimes(1);
       expect(logged.warn.mock.calls[0]![0]).toMatchObject({ err: { code } });
+    },
+  );
+
+  it.each(
+    ['55P03', '57014', '42710', 'XX000'].flatMap((code) =>
+      ['SELECT c.oid AS config', 'CREATE TEXT SEARCH CONFIGURATION'].map((match) => ({
+        code,
+        match,
+      })),
+    ),
+  )(
+    'does not record unavailability for a transient lexical failure ($code, $match)',
+    async ({ code, match }) => {
+      logged.warn.mockClear();
+      const { conn, queries } = fakeConn({ lexicalFailure: { code, match } });
+      await expect(ensureGlobalKbSchema(conn)).resolves.toMatchObject({ usedPgvector: true });
+      expect(queries()).not.toContain('CREATE TEXT SEARCH CONFIGURATION haive_english_verbatim_v1');
+      expect(logged.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.objectContaining({ code }) }),
+        expect.stringContaining('configuration setup failed'),
+      );
+      expect(logged.warn.mock.calls.every(([, message]) => !message.includes('unavailable'))).toBe(
+        true,
+      );
+      await ensureGlobalKbSchema(conn);
+      expect(queries()).toContain('CREATE TEXT SEARCH CONFIGURATION haive_english_unaccent_v1');
     },
   );
 
@@ -345,7 +378,7 @@ describe('ensureGlobalKbSchema', () => {
       ['ALTER TABLE global_kb_entries DROP', 'ALTER TABLE global_kb_entries ADD'],
       ['SELECT 1 FROM pg_trigger', 'CREATE TRIGGER trg_global_kb_clear_enforced_hash BEFORE'],
       [
-        'SELECT oid AS config',
+        'SELECT c.oid AS config',
         "SELECT format('%I.unaccent', n.nspname) AS",
         'CREATE TEXT SEARCH CONFIGURATION',
         'ALTER TEXT SEARCH CONFIGURATION',

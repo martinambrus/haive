@@ -60,7 +60,7 @@ function fakeConn(
     if (q.includes('CREATE EXTENSION IF NOT EXISTS unaccent') && opts.unaccentThrows) {
       return Promise.reject(pgError(opts.unaccentThrows));
     }
-    if (q.startsWith('SELECT oid AS config')) {
+    if (q.startsWith('SELECT c.oid AS config')) {
       const name = /cfgname = '([^']+)'/.exec(q)![1]!;
       return Promise.resolve([{ config: configs.has(name) ? name : null }]);
     }
@@ -303,6 +303,35 @@ describe.skipIf(!ADMIN_URL)('the identifier backfill against Postgres', () => {
     (
       await ragHybridSearch(conn, Array(8).fill(0.1), query, { lexicalOnly, knowledgeReserve: 0 })
     ).map((hit) => hit.sectionId);
+
+  it('ensures, indexes, searches and backfills a quoted mixed-case schema', async () => {
+    await ensureRagSchema(conn);
+    await pg.unsafe('CREATE SCHEMA "Haive"');
+    await pg.unsafe('SET search_path TO "Haive", public');
+    try {
+      await ensureRagSchema(conn);
+      await insert('mixed-new', 'kotolňa runs');
+      await insert('mixed-legacy', 'kotolňa');
+      await pg.unsafe(
+        `UPDATE ai_rag_embeddings SET content_tsv = to_tsvector('english', content)
+        || array_to_tsvector(ARRAY[$1]) WHERE section_id = 'mixed-legacy'`,
+        [IDENTIFIER_TSV_SENTINEL],
+      );
+      expect(await search('kotolna')).toEqual(['mixed-new']);
+      const before = await xmin('mixed-legacy');
+      await ensureRagSchema(conn);
+      for (const query of ['kotolna', 'kotolňa']) {
+        expect(await search(query)).toEqual(expect.arrayContaining(['mixed-new', 'mixed-legacy']));
+      }
+      expect(await xmin('mixed-legacy')).not.toBe(before);
+      const after = await xmin('mixed-legacy');
+      await ensureRagSchema(conn);
+      expect(await xmin('mixed-legacy')).toBe(after);
+    } finally {
+      await pg.unsafe('SET search_path TO public');
+      await pg.unsafe('DROP SCHEMA "Haive" CASCADE');
+    }
+  }, 30_000);
 
   it.each(['public', 'custom', 'dictionary-refused'])(
     'keeps an external %s store searchable without extension privileges, warns once, and upgrades when restored',

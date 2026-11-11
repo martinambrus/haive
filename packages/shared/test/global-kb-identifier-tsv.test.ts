@@ -1,6 +1,9 @@
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ensureGlobalKbSchema } from '../src/global-kb/ensure-schema.js';
+import {
+  backfillGlobalIdentifierTsv,
+  ensureGlobalKbSchema,
+} from '../src/global-kb/ensure-schema.js';
 import { IDENTIFIER_TSV_SENTINEL } from '../src/rag/identifiers.js';
 import { ragHybridSearch } from '../src/rag/search.js';
 
@@ -83,6 +86,155 @@ describe.skipIf(!ADMIN_URL)('identifier lexemes in the global KB store', () => {
     const before = await xmins();
     await ensure();
     expect(await xmins()).toEqual(before);
+  }, 30_000);
+
+  it('ensures, indexes, searches and backfills a quoted mixed-case global schema', async () => {
+    await ensure();
+    await pg.unsafe('CREATE SCHEMA "Haive"');
+    await pg.unsafe('SET search_path TO "Haive", public');
+    try {
+      await ensure();
+      await insert('mixed-new', 'kotolňa runs');
+      await insert('mixed-legacy', 'kotolňa');
+      await pg.unsafe(
+        `UPDATE ai_rag_embeddings SET content_tsv = to_tsvector('english', content)
+        || array_to_tsvector(ARRAY[$1]) WHERE section_id = 'mixed-legacy'`,
+        [IDENTIFIER_TSV_SENTINEL],
+      );
+      const conn = {
+        pg,
+        mode: 'internal',
+        embeddingDimensions: DIMS,
+        close: async () => {},
+      } as const;
+      const search = async (query: string) =>
+        (await ragHybridSearch(conn, [], query, { lexicalOnly: true })).map((hit) => hit.sectionId);
+      expect(await search('kotolna')).toEqual(['mixed-new']);
+      const before = await xmins();
+      await ensure();
+      for (const query of ['kotolna', 'kotolňa']) {
+        expect(await search(query)).toEqual(expect.arrayContaining(['mixed-new', 'mixed-legacy']));
+      }
+      expect(await xmins()).not.toEqual(before);
+      const after = await xmins();
+      await ensure();
+      expect(await xmins()).toEqual(after);
+    } finally {
+      await pg.unsafe('SET search_path TO public');
+      await pg.unsafe('DROP SCHEMA "Haive" CASCADE');
+    }
+  }, 30_000);
+
+  it('leaves no fallback marker after a real config timeout and upgrades on the next ensure', async () => {
+    await ensure();
+    await pg.unsafe('CREATE SCHEMA timeout_recovery');
+    await pg.unsafe('SET search_path TO timeout_recovery, public');
+    let timedOut = false;
+    const interrupted = new Proxy(pg, {
+      get(target, key) {
+        if (key === 'begin')
+          return (run: (tx: postgres.TransactionSql) => Promise<unknown>) =>
+            target.begin((tx) =>
+              run(
+                new Proxy(tx, {
+                  get(transaction, property) {
+                    if (property === 'unsafe')
+                      return async (query: string, params: never) => {
+                        if (!timedOut && query.startsWith('CREATE TEXT SEARCH CONFIGURATION')) {
+                          timedOut = true;
+                          await transaction.unsafe('SET LOCAL statement_timeout = 10');
+                          await transaction.unsafe('SELECT pg_sleep(0.1)');
+                        }
+                        return transaction.unsafe(query, params);
+                      };
+                    return Reflect.get(transaction, property);
+                  },
+                }),
+              ),
+            );
+        return Reflect.get(target, key);
+      },
+    });
+    try {
+      await expect(
+        ensureGlobalKbSchema({ pg: interrupted, embeddingDimensions: DIMS }),
+      ).resolves.toBeDefined();
+      expect(timedOut).toBe(true);
+      const configs = await pg.unsafe(`SELECT cfgname FROM pg_ts_config c
+        JOIN pg_namespace n ON n.oid = c.cfgnamespace WHERE n.nspname = current_schema()`);
+      expect(configs).toEqual([]);
+      await insert('timeout', 'kotolňa runs');
+      const conn = {
+        pg,
+        mode: 'internal',
+        embeddingDimensions: DIMS,
+        close: async () => {},
+      } as const;
+      expect(
+        (await ragHybridSearch(conn, [], 'kotolňa', { lexicalOnly: true })).map(
+          (hit) => hit.sectionId,
+        ),
+      ).toEqual(['timeout']);
+      expect(await ragHybridSearch(conn, [], 'kotolna', { lexicalOnly: true })).toEqual([]);
+      await ensure();
+      expect(
+        (await ragHybridSearch(conn, [], 'kotolna', { lexicalOnly: true })).map(
+          (hit) => hit.sectionId,
+        ),
+      ).toEqual(['timeout']);
+    } finally {
+      await pg.unsafe('SET search_path TO public');
+      await pg.unsafe('DROP SCHEMA timeout_recovery CASCADE');
+    }
+  }, 30_000);
+
+  it('skips a locked backfill row, keeps its debt owed, and resumes after unlock', async () => {
+    await ensure();
+    await insert('locked', 'kotolňa');
+    await insert('unlocked', 'kotolňa');
+    await pg.unsafe(`UPDATE ai_rag_embeddings SET content_tsv = to_tsvector('english', content)
+      WHERE section_id IN ('locked', 'unlocked')`);
+    const locker = postgres(withDatabase(ADMIN_URL, SCRATCH_DB), { max: 1, onnotice: () => {} });
+    let release!: () => void;
+    let ready!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const locked = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    const held = locker.begin(async (tx) => {
+      await tx.unsafe(`SELECT id FROM ai_rag_embeddings WHERE section_id = 'locked' FOR UPDATE`);
+      ready();
+      await released;
+    });
+    const backfill = () =>
+      backfillGlobalIdentifierTsv((run) =>
+        pg.begin(async (tx) => {
+          await tx.unsafe('SET LOCAL statement_timeout = 250');
+          return run(tx);
+        }),
+      );
+    try {
+      await locked;
+      expect(await backfill()).toBe(false);
+      expect(await matches(`'${IDENTIFIER_TSV_SENTINEL}'`)).toContain('unlocked');
+      expect(await matches(`'${IDENTIFIER_TSV_SENTINEL}'`)).not.toContain('locked');
+    } finally {
+      release();
+      await held;
+      await locker.end({ timeout: 5 });
+    }
+    const before = await pg.unsafe(
+      `SELECT xmin::text AS x FROM ai_rag_embeddings WHERE section_id = 'unlocked'`,
+    );
+    expect(await backfill()).toBe(true);
+    expect(await matches(`'${IDENTIFIER_TSV_SENTINEL}'`)).toContain('locked');
+    expect(
+      await pg.unsafe(
+        `SELECT xmin::text AS x FROM ai_rag_embeddings WHERE section_id = 'unlocked'`,
+      ),
+    ).toEqual(before);
   }, 30_000);
 
   it('matches a snake_case name whole, for a new row and for a row written before', async () => {

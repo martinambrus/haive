@@ -430,14 +430,18 @@ export async function backfillGlobalIdentifierTsv(
       const result = await step((tx) =>
         tx.unsafe(
           `UPDATE ${VECTORS_TABLE} SET content = content
-             WHERE id IN (SELECT id ${unstamped} LIMIT $2)`,
+             WHERE id IN (SELECT id ${unstamped} LIMIT $2 FOR UPDATE SKIP LOCKED)`,
           [identifierTsvSentinelQuery(), IDENTIFIER_BACKFILL_BATCH],
         ),
       );
       const rows = result.count ?? 0;
       total += rows;
       if (rows < IDENTIFIER_BACKFILL_BATCH) {
-        finished = true;
+        // A short batch may have skipped locked rows. Keep their debt owed for the retry sweep.
+        const remaining = await step((tx) =>
+          tx.unsafe(`SELECT count(*)::int AS n ${unstamped}`, [identifierTsvSentinelQuery()]),
+        );
+        finished = Number(remaining[0]?.n) === 0;
         break;
       }
     }
