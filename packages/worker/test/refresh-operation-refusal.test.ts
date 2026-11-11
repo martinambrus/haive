@@ -219,18 +219,21 @@ it('an unknown checkout fails through the queue without detection, import or reb
   expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
 });
 
-it('a git read that never finished does not tell the user to repair the checkout', async () => {
-  const { dest, payload } = await fixture();
-  shim = await killGit(['rev-parse', '--show-cdup']);
-  await expect(runRefresh(payload)).rejects.toThrow(
-    /^Not refreshed: the checkout could not be examined \(.*SIGKILL.*\)\. Nothing was moved\.$/,
-  );
-  expect(row.status).toBe('error');
-  expect(row.statusMessage).not.toContain('Retry cannot help');
-  await shim.restore();
-  shim = null;
-  expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
-});
+it.each([false, true])(
+  'a git read that never finished does not tell the user to repair the checkout (check only: %s)',
+  async (checkCheckoutOnly) => {
+    const { dest, payload } = await fixture();
+    shim = await killGit(['rev-parse', '--show-cdup']);
+    await expect(runRefresh({ ...payload, checkCheckoutOnly })).rejects.toThrow(
+      /^Not refreshed: the checkout could not be examined \(.*SIGKILL.*\)\. Nothing was moved\.$/,
+    );
+    expect(row.status).toBe('error');
+    expect(row.statusMessage).not.toContain('Retry cannot help');
+    await shim.restore();
+    shim = null;
+    expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
+  },
+);
 
 it.each(['HEAD', '.git'] as const)(
   'Check repair leaves an unusable checkout with missing %s untouched',

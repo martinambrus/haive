@@ -710,7 +710,8 @@ export async function handleRefresh(
     payload.repositoryId,
     async () => {
       const state = await usableCheckout(dest);
-      if (payload.checkCheckoutOnly && state !== 'usable') {
+      // A read that never finished stays the transient failure below, not a repair verdict.
+      if (payload.checkCheckoutOnly && state === 'unusable') {
         throw new CheckoutRepairNeededError(
           'Not refreshed: the checkout still needs repair. Nothing was moved. Repair it in place or use Rebuild checkout.',
         );
