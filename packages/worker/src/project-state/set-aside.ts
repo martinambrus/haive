@@ -36,7 +36,6 @@ import { syncPlanFromCheckout } from '../plan/sync-checkout.js';
 import { gitRun } from '../repo/git-exec.js';
 import { GitOperationUnreadableError, gitOperationInProgress } from '../repo/git-operation.js';
 import { refreshProjectState } from './refresh.js';
-import { reconcileTaskEndRules } from './task-end-rules.js';
 import {
   readProjectStateBase,
   rebaseProjectStateOnHeadLocked,
@@ -911,7 +910,6 @@ export async function resyncHaiveProjections(
   db: Database,
   repositoryId: string,
   repoPath: string,
-  endingTaskId?: string,
 ): Promise<boolean> {
   // A merge, rebase, cherry-pick or revert still open holds an intermediate record: nothing is read in until it ends.
   try {
@@ -924,14 +922,11 @@ export async function resyncHaiveProjections(
   let synced = true;
   try {
     restoreFaults.beforeResync?.('state');
-    const { outcome, rulesOverrideImport } = await syncProjectStateFromCheckout(db, {
+    const { outcome } = await syncProjectStateFromCheckout(db, {
       repositoryId,
       repoPath,
       refuseDuringGitOperation: true,
     });
-    if (endingTaskId && rulesOverrideImport) {
-      await reconcileTaskEndRules(db, repositoryId, repoPath, endingTaskId, rulesOverrideImport);
-    }
     if (outcome === 'held' || outcome === 'superseded' || outcome === 'refused') synced = false;
     if (
       (await isDirty(db, schema.projectStateOutbox, repositoryId)) &&
@@ -975,7 +970,7 @@ export async function resyncAfterTaskEnd(db: Database, taskId: string): Promise<
       columns: { storagePath: true, localPath: true },
     });
     const repoPath = repo?.storagePath ?? repo?.localPath;
-    if (repoPath) await resyncHaiveProjections(db, task.repositoryId, repoPath, taskId);
+    if (repoPath) await resyncHaiveProjections(db, task.repositoryId, repoPath);
   } catch (err) {
     logger.warn({ err, taskId }, 'project state not re-synced after a task ended');
   }

@@ -23,24 +23,36 @@ import { isRtkChoiceRecorded, readRenderContextColumn } from '@haive/shared/proj
 import { recordableContext } from '../step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { readAgentRulesOverrideRaw } from '../step-engine/_agent-rules-override.js';
 import { cliRulesRegionRecord } from '../step-engine/steps/onboarding/_rules-files.js';
-import { writeApplicableTemplateIds, type RulesOverrideImport } from './sync.js';
+import { writeApplicableTemplateIds } from './sync.js';
 import { lockProjectState, refuseHeldCheckout } from './write.js';
 
-/** The override import has committed and its task released the checkout. Like 02, write the
- * region in the checkout and supersede/record its ledger row before the owed record is flushed.
- * The outbox owns only .haive-data/state, never AGENTS.md. A refusal leaves the next upgrade
- * its ordinary drift; it must not turn a task ending into a failed task or overwrite an edit. */
-export async function reconcileTaskEndRules(
+/** Drain the durable obligation created by an upgrade's deferred override import. Any sync
+ * caller may finish it; a refusal retains the intent for the next sweep. */
+export async function reconcileImportedRules(
   db: Database,
   repositoryId: string,
   repoPath: string,
-  taskId: string,
-  imported: RulesOverrideImport,
 ): Promise<void> {
+  let taskId: string | undefined;
   try {
+    const [pending] = await db
+      .select({ rules: schema.projectStateOutbox.rulesReconcileIntent })
+      .from(schema.projectStateOutbox)
+      .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+    if (pending?.rules?.phase !== 'ready') return;
     await db.transaction(async (tx) => {
       await lockRepositoryTasksKey(tx, repositoryId);
       await lockProjectState(tx, repositoryId);
+      const [outbox] = await tx
+        .select({
+          intent: schema.projectStateOutbox.writeIntent,
+          rules: schema.projectStateOutbox.rulesReconcileIntent,
+        })
+        .from(schema.projectStateOutbox)
+        .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+      const imported = outbox?.rules;
+      if (imported?.phase !== 'ready') return;
+      taskId = imported.taskId;
       await refuseHeldCheckout(tx, repositoryId, repoPath);
       const [repo] = await tx
         .select()
@@ -49,14 +61,11 @@ export async function reconcileTaskEndRules(
       if (
         !repo ||
         (repo.storagePath ?? repo.localPath) !== repoPath ||
-        (repo.onboardingResetAt?.getTime() ?? null) !== (imported.resetAt?.getTime() ?? null) ||
+        (repo.onboardingResetAt?.getTime() ?? null) !==
+          (imported.resetAt === null ? null : new Date(imported.resetAt).getTime()) ||
         (await readAgentRulesOverrideRaw(tx, repositoryId)) !== imported.after
       )
         throw new Error('repository changed after the rules override import');
-      const [outbox] = await tx
-        .select({ intent: schema.projectStateOutbox.writeIntent })
-        .from(schema.projectStateOutbox)
-        .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
       if (outbox?.intent) throw new Error('an interrupted project state write awaits recovery');
 
       const read = await readUpgradeFile(repoPath, CLI_RULES_DISK_PATH);
@@ -122,6 +131,10 @@ export async function reconcileTaskEndRules(
         requireResolved: repo.renderContext !== null,
       });
       await markProjectStateDirty(tx, repositoryId);
+      await tx
+        .update(schema.projectStateOutbox)
+        .set({ rulesReconcileIntent: null })
+        .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
       // No database wait while fs-safe parks the file. Judge the same bytes we read before
       // recording them, and preserve all text outside the region. A racing save stays put.
       if (next === before || (before === null && render === null)) return;
@@ -147,7 +160,7 @@ export async function reconcileTaskEndRules(
   } catch (err) {
     logger.warn(
       { err, repositoryId, taskId },
-      'task-end rules region not reconciled; the next upgrade will offer it',
+      'imported rules region not reconciled; the next sweep will retry it',
     );
   }
 }

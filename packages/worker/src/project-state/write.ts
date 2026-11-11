@@ -952,6 +952,16 @@ export async function writeProjectStateColumn(
             .set({ renderContext: column })
             .where(eq(schema.repositories.id, repositoryId));
           await markProjectStateDirty(tx, repositoryId);
+          const [outbox] = await tx
+            .select({ rules: schema.projectStateOutbox.rulesReconcileIntent })
+            .from(schema.projectStateOutbox)
+            .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+          // Preserve an earlier obligation until its guarded reconciliation succeeds.
+          if (!outbox?.rules && holdingTaskId)
+            await tx
+              .update(schema.projectStateOutbox)
+              .set({ rulesReconcileIntent: { phase: 'deferred', taskId: holdingTaskId } })
+              .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
         });
       }
       throw err;

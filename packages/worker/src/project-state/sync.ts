@@ -88,6 +88,7 @@ import { admitWatchedCheckout } from './watch-admission.js';
 import { gitOperationInProgress } from '../repo/git-operation.js';
 import { updateApplicableTemplateIds } from '../step-engine/template-manifest.js';
 import { readAgentRulesOverrideRaw } from '../step-engine/_agent-rules-override.js';
+import { reconcileImportedRules } from './task-end-rules.js';
 import { claimDiskHash } from './claim-disk.js';
 import { insertImportMarker, loadMarkerContext } from './import-marker.js';
 import { toolingColumnFromUnit } from './tooling-import.js';
@@ -721,7 +722,10 @@ export async function syncProjectStateFromCheckout(
     .where(eq(schema.repositories.id, repositoryId))
     .limit(1);
   const checkout = await readCheckout(repoPath);
-  if (checkout.kind === 'absent') return { outcome: 'absent' };
+  if (checkout.kind === 'absent') {
+    await reconcileImportedRules(db, repositoryId, repoPath);
+    return { outcome: 'absent' };
+  }
 
   const auditEvents: AuditEvent[] = [];
   return db
@@ -740,8 +744,10 @@ export async function syncProjectStateFromCheckout(
         seenRepo,
       });
     })
-    .then((result) => {
+    .then(async (result) => {
       auditEvents.forEach(logAuditEvent);
+      if (['applied', 'unchanged', 'conflict'].includes(result.outcome))
+        await reconcileImportedRules(db, repositoryId, repoPath);
       return result;
     })
     .catch((err: unknown) => {
@@ -778,7 +784,10 @@ export async function syncProjectStateLocked(
   },
 ): Promise<ProjectStateSyncResult> {
   const [writing] = await tx
-    .select({ intent: schema.projectStateOutbox.writeIntent })
+    .select({
+      intent: schema.projectStateOutbox.writeIntent,
+      rules: schema.projectStateOutbox.rulesReconcileIntent,
+    })
     .from(schema.projectStateOutbox)
     .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
   if (writing?.intent)
@@ -1163,8 +1172,8 @@ export async function syncProjectStateLocked(
     );
   }
 
-  // Only a committed import reports this move; task-end reconciliation must not mistake a
-  // concurrent Tooling save (or a held/refused import) for a deferred override it imported.
+  // Advance an upgrade's deferred obligation in the SAME transaction as its override import.
+  // Ordinary imports owe no region write, and a Tooling save cannot manufacture this intent.
   const rulesImport = Object.hasOwn(updates, 'agentRulesOverride')
     ? {
         rulesOverrideImport: {
@@ -1174,6 +1183,33 @@ export async function syncProjectStateLocked(
         },
       }
     : {};
+  const owed = writing?.rules;
+  if (rulesImport.rulesOverrideImport && owed) {
+    const imported = rulesImport.rulesOverrideImport;
+    await tx
+      .update(schema.projectStateOutbox)
+      .set({
+        rulesReconcileIntent: {
+          phase: 'ready',
+          taskId: owed.taskId,
+          before: owed.phase === 'ready' ? owed.before : imported.before,
+          after: imported.after,
+          resetAt: imported.resetAt?.toISOString() ?? null,
+        },
+      })
+      .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+  } else if (
+    owed?.phase === 'deferred' &&
+    !portable.conflicts.some(({ unit }) => unit === 'settings/agent-rules.md') &&
+    !portable.rejected.includes('agent-rules')
+  ) {
+    // The incoming override was withdrawn or a newer local choice kept it from moving.
+    // No import occurred, so a future ordinary import must not inherit this obligation.
+    await tx
+      .update(schema.projectStateOutbox)
+      .set({ rulesReconcileIntent: null })
+      .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+  }
   if (lastError !== null) return { outcome: 'conflict', reason: lastError, ...rulesImport };
   if (portable.conflicts.length > 0) {
     const names = portable.conflicts.map(({ unit }) => unit).join(', ');

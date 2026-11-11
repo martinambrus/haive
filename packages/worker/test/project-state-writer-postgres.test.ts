@@ -213,7 +213,8 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
     expect((await s.outbox())!.writtenRevision).toBe((await s.outbox())!.revision);
   });
 
-  it('defers rules imported by 02 and its retry, then reconciles through the task-end hook', async () => {
+  const rulesImporters = ['task-end', 'sweep', 'refused-sweep', 'direct'];
+  it.each(rulesImporters)('defers rules imported through %s', async (importer) => {
     const s = await fixture();
     const local = 'LOCAL RULES\n';
     const incoming = 'TEAM RULES\n';
@@ -356,7 +357,43 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
       .update(schema.tasks)
       .set({ status: 'completed' })
       .where(eq(schema.tasks.id, task!.id));
+    if (importer === 'refused-sweep') {
+      seam.beforeRewrite = async () => {
+        seam.beforeRewrite = null;
+        throw new Error('injected rules region write refusal');
+      };
+      await sweepDirtyProjectStates(db!);
+      expect(await readFile(join(s.root, 'AGENTS.md'), 'utf8')).toContain('LOCAL RULES');
+      expect((await s.outbox())!.rulesReconcileIntent).toMatchObject({ phase: 'ready' });
+      // The record may already be clean; its independent rules intent must still be swept.
+      expect((await s.outbox())!.writtenRevision).toBe((await s.outbox())!.revision);
+    }
+    if (importer === 'sweep' || importer === 'refused-sweep') {
+      expect(await sweepDirtyProjectStates(db!)).toBe(1);
+      expect(await readFile(join(s.root, 'AGENTS.md'), 'utf8')).toContain('TEAM RULES');
+    }
+    if (importer === 'direct') {
+      await syncProjectStateFromCheckout(db!, { repositoryId: s.repo.id, repoPath: s.root });
+      expect(await readFile(join(s.root, 'AGENTS.md'), 'utf8')).toContain('TEAM RULES');
+    }
+    const regionBeforeTaskEnd = await stat(join(s.root, 'AGENTS.md'));
     await resyncAfterTaskEnd(db!, task!.id);
+    if (importer !== 'task-end')
+      expect((await stat(join(s.root, 'AGENTS.md'))).ino).toBe(regionBeforeTaskEnd.ino);
+    expect((await s.outbox())!.rulesReconcileIntent).toBeNull();
+    const settledOutbox = await s.outbox();
+    const settledArtifacts = await db!
+      .select()
+      .from(schema.onboardingArtifacts)
+      .where(eq(schema.onboardingArtifacts.repositoryId, s.repo.id));
+    expect(await sweepDirtyProjectStates(db!)).toBe(0);
+    expect(await s.outbox()).toEqual(settledOutbox);
+    expect(
+      await db!
+        .select()
+        .from(schema.onboardingArtifacts)
+        .where(eq(schema.onboardingArtifacts.repositoryId, s.repo.id)),
+    ).toEqual(settledArtifacts);
 
     expect(await rules()).toBe(incoming);
     const region = extractRegion(

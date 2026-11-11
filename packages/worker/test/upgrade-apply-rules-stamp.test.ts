@@ -25,9 +25,10 @@ import type {
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+import { refreshProjectState } from '../src/project-state/refresh.js';
 import { resyncAfterTaskEnd } from '../src/project-state/set-aside.js';
 import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
-import { reconcileTaskEndRules } from '../src/project-state/task-end-rules.js';
+import * as importedRules from '../src/project-state/task-end-rules.js';
 import { classifyEntry } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import type { LiveArtifactRow } from '../src/step-engine/_upgrade-render.js';
 import { RECORD_WRITE_TABLES, recordWritten } from './support/upgrade-apply-record.js';
@@ -141,9 +142,13 @@ async function setup(stamp: string | null | undefined, live: string | null) {
 }
 
 describe('02 and the rules override its plan was made from', () => {
-  it.each(['IMPORTED RULES\n', '', null])(
-    'defers an imported override %j through the record write and a retry, then imports after completion',
-    async (incoming) => {
+  it.each(
+    (['IMPORTED RULES\n', '', null] as const).flatMap((incoming) =>
+      (['task-end', 'refresh', 'direct'] as const).map((importer) => [incoming, importer] as const),
+    ),
+  )(
+    'defers an imported override %j through the record write and a retry, then imports via %s',
+    async (incoming, importer) => {
       const local = 'PLANNED RULES\n';
       const s = await setup(local, local);
       await recordWritten(s.apply());
@@ -168,6 +173,18 @@ describe('02 and the rules override its plan was made from', () => {
       expect(await s.agentsMd()).toContain('PLANNED RULES');
 
       s.fake.patch(schema.tasks, TASK, { status: 'completed' });
+      if (importer === 'refresh') await refreshProjectState(s.fake.db as unknown as Database, REPO);
+      if (importer === 'direct')
+        await syncProjectStateFromCheckout(s.fake.db as unknown as Database, {
+          repositoryId: REPO,
+          repoPath: s.root,
+        });
+      if (importer !== 'task-end') {
+        const expected = buildRepoCliRulesBlock(incoming);
+        expect(extractRegion(await s.agentsMd(), CLI_RULES_START, CLI_RULES_END)).toBe(
+          expected === null ? null : extractRegion(expected, CLI_RULES_START, CLI_RULES_END),
+        );
+      }
       await resyncAfterTaskEnd(s.fake.db as unknown as Database, TASK);
 
       expect(s.fake.rows(schema.repositories)[0]!.agentRulesOverride).toBe(incoming);
@@ -210,6 +227,11 @@ describe('02 and the rules override its plan was made from', () => {
       expect(region).toBe(
         render === null ? null : extractRegion(render, CLI_RULES_START, CLI_RULES_END),
       );
+      const settledRows = structuredClone(s.fake.rows(schema.onboardingArtifacts));
+      const settledFile = await s.agentsMd();
+      await resyncAfterTaskEnd(s.fake.db as unknown as Database, TASK);
+      expect(await s.agentsMd()).toBe(settledFile);
+      expect(s.fake.rows(schema.onboardingArtifacts)).toEqual(settledRows);
     },
   );
 
@@ -226,11 +248,44 @@ describe('02 and the rules override its plan was made from', () => {
     expect(s.fake.rows(schema.onboardingArtifacts)).toEqual(rows);
   });
 
+  it('clears a deferral whose incoming override was withdrawn, without rendering', async () => {
+    const s = await setup('PLANNED RULES\n', 'PLANNED RULES\n');
+    await recordWritten(s.apply());
+    const path = join(s.root, '.haive-data/state/settings/agent-rules.md');
+    await writeFile(path, 'TEAM RULES\n');
+    expect((await s.apply()).recordWrite).toBe('deferred');
+    await writeFile(path, 'PLANNED RULES\n');
+    s.fake.patch(schema.tasks, TASK, { status: 'completed' });
+    const rows = structuredClone(s.fake.rows(schema.onboardingArtifacts));
+
+    await resyncAfterTaskEnd(s.fake.db as unknown as Database, TASK);
+
+    expect(s.fake.rows(schema.projectStateOutbox)[0]!.rulesReconcileIntent).toBeNull();
+    expect(s.fake.rows(schema.onboardingArtifacts)).toEqual(rows);
+    expect(await s.agentsMd()).toContain('PLANNED RULES');
+  });
+
+  it('leaves an ordinary override import for the next upgrade when no import was deferred', async () => {
+    const s = await setup('PLANNED RULES\n', 'PLANNED RULES\n');
+    await recordWritten(s.apply());
+    const before = await s.agentsMd();
+    const rows = structuredClone(s.fake.rows(schema.onboardingArtifacts));
+    await writeFile(join(s.root, '.haive-data/state/settings/agent-rules.md'), 'TEAM RULES\n');
+    s.fake.patch(schema.tasks, TASK, { status: 'completed' });
+
+    await resyncAfterTaskEnd(s.fake.db as unknown as Database, TASK);
+
+    expect(s.fake.rows(schema.repositories)[0]!.agentRulesOverride).toBe('TEAM RULES\n');
+    expect(await s.agentsMd()).toBe(before);
+    expect(s.fake.rows(schema.onboardingArtifacts)).toEqual(rows);
+  });
+
   it('preserves text outside the rules region after a deferred import', async () => {
     const s = await setup('PLANNED RULES\n', 'PLANNED RULES\n');
     await recordWritten(s.apply());
     await writeFile(join(s.root, 'AGENTS.md'), `# Project\n\n${await s.agentsMd()}\nUser notes\n`);
     await writeFile(join(s.root, '.haive-data/state/settings/agent-rules.md'), 'TEAM RULES\n');
+    expect((await s.apply()).recordWrite).toBe('deferred');
     s.fake.patch(schema.tasks, TASK, { status: 'completed' });
 
     await resyncAfterTaskEnd(s.fake.db as unknown as Database, TASK);
@@ -241,17 +296,28 @@ describe('02 and the rules override its plan was made from', () => {
   });
 
   it.each(['holder', 'reset', 'journal', 'git', 'override', 'reset epoch', 'edited region'])(
-    'leaves the region and ledger for the next upgrade when %s refuses the post-import write',
+    'retains the owed region and ledger when %s refuses the post-import write',
     async (guard) => {
       const s = await setup('PLANNED RULES\n', 'PLANNED RULES\n');
       await recordWritten(s.apply());
       await writeFile(join(s.root, '.haive-data/state/settings/agent-rules.md'), 'TEAM RULES\n');
+      expect((await s.apply()).recordWrite).toBe('deferred');
       s.fake.patch(schema.tasks, TASK, { status: 'completed' });
+      const drain = vi
+        .spyOn(importedRules, 'reconcileImportedRules')
+        .mockResolvedValueOnce(undefined);
       const result = await syncProjectStateFromCheckout(s.fake.db as unknown as Database, {
         repositoryId: REPO,
         repoPath: s.root,
       });
+      drain.mockRestore();
       expect(result.rulesOverrideImport).toBeDefined();
+      const owed = s.fake.rows(schema.projectStateOutbox)[0]!.rulesReconcileIntent;
+      expect(owed).toMatchObject({
+        phase: 'ready',
+        before: 'PLANNED RULES\n',
+        after: 'TEAM RULES\n',
+      });
       if (guard === 'holder') s.fake.patch(schema.tasks, TASK, { status: 'running' });
       if (guard === 'reset')
         s.fake.patch(schema.repositories, REPO, {
@@ -277,19 +343,14 @@ describe('02 and the rules override its plan was made from', () => {
       const rows = structuredClone(s.fake.rows(schema.onboardingArtifacts));
       const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
       try {
-        await reconcileTaskEndRules(
-          s.fake.db as unknown as Database,
-          REPO,
-          s.root,
-          TASK,
-          result.rulesOverrideImport!,
-        );
+        await importedRules.reconcileImportedRules(s.fake.db as unknown as Database, REPO, s.root);
         expect(warn).toHaveBeenCalledWith(
           expect.objectContaining({ repositoryId: REPO, taskId: TASK, err: expect.any(Error) }),
-          'task-end rules region not reconciled; the next upgrade will offer it',
+          'imported rules region not reconciled; the next sweep will retry it',
         );
         expect(await s.agentsMd()).toBe(before);
         expect(s.fake.rows(schema.onboardingArtifacts)).toEqual(rows);
+        expect(s.fake.rows(schema.projectStateOutbox)[0]!.rulesReconcileIntent).toEqual(owed);
       } finally {
         warn.mockRestore();
       }

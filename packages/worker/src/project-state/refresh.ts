@@ -198,10 +198,14 @@ export async function sweepDirtyProjectStates(db: Database): Promise<number> {
     )
     .where(
       and(
-        lt(schema.projectStateOutbox.writtenRevision, schema.projectStateOutbox.revision),
+        or(
+          lt(schema.projectStateOutbox.writtenRevision, schema.projectStateOutbox.revision),
+          isNotNull(schema.projectStateOutbox.rulesReconcileIntent),
+        ),
         or(
           isNotNull(schema.repositories.renderContext),
           isNotNull(schema.projectStateOutbox.writeIntent),
+          isNotNull(schema.projectStateOutbox.rulesReconcileIntent),
         ),
       ),
     )
