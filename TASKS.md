@@ -354,7 +354,7 @@ User decision 2026-11-01: Use a simple Haive H favicon.
 
 ### T310 · FNF[kept-metadata-moves] · captured owner/mode lost when a re-sync does not finish
 
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (bundle D3, run 2026-11-11, branch fix/D3-kept-metadata) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 A: six non-merge move paths drop the kept map after a re-sync that may have returned false. B: projection writers create files as root (verify on dev). C: persisted keptMetadata never settled again. D: reachDone / settleGoneMerge after a failed re-sync. Options: inherit owner from parent dir; persist the kept map per repo; retry the re-sync before restoring.
 
 User decision 2026-11-01: Preserve captured owner/mode until recovery completes; never silently discard metadata.
@@ -968,7 +968,7 @@ Cross-reference (T438, 2026-10-30): the device code now waits within the same de
 
 ### T440 · FNF[refresh-result-unrecorded] · a refresh's failed sources are never recorded, so a scheduled refresh's or a timed-out manual refresh's failures show nowhere
 
-status: open · kind: feature · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (bundle F3, run 2026-11-11, branch fix/F3-refresh-result) · kind: feature · user decision: resolved 2026-11-01 · priority: P2
 From the T428 review (2026-10-30). PRE-EXISTING, moderate. T428 shows the `ok: false` sources only on the page that started a refresh and only while its poll is open. A scheduled tick or boot refresh, and a manual refresh whose 10-minute poll window ends, surface nowhere; the poll-timeout copy even promises "reopen this page later to see the result" (web lib/cli-jobs.ts ~:33-38), which no page can show. FX has no durable trace at all: `fx_rates` has no error column (database schema/pricing.ts ~:126-135), a failure is only `log.warn` plus `ok: false` (worker cli-versions/model-prices.ts ~:329-332), and dispatch just returns the result (worker queues/cli-exec/handlers.ts ~:1529-1531). Decide between a last-result row per source, an FX fetch-state table, or one last refresh-run record the pages read; fix the timeout copy with it.
 
 User decision 2026-11-01: Persist the latest refresh result and per-source failures so the UI can reopen them later.
@@ -1112,7 +1112,7 @@ Engineering scope derived from the accepted policy (2026-11-01), not a new owner
 
 ### T484 · FNF[project-state-row-hold] · the project-state writers hold the repository row FOR UPDATE across file and git work
 
-status: open · kind: fix · policy: covered by accepted bounded-wait/consistency rules · priority: P2
+status: in progress (bundle D2, run 2026-11-11, branch fix/D2-project-state-row-hold) · kind: fix · policy: covered by accepted bounded-wait/consistency rules · priority: P2
 From the T459 review (2026-10-31). PRE-EXISTING, consequential (latency).
 
 The project-state writers take the repositories row FOR UPDATE (`watch-admission.ts` ~:24, `sync.ts` ~:733, through the write gate in write.ts ~:727-731) and keep it across file and git work: MEASURED by T459, 26-52 ms per foreground write with no claim files, 1.0-1.3 s with 150, and about 2 s per sweep write. Every child INSERT of the repository (a task start, a plan node, a mirror row) needs KEY SHARE on that row and waits as long. Decide whether the writers need FOR UPDATE (it also excludes the FK checks of every insert) or FOR NO KEY UPDATE (still excludes a delete and another writer), or a shorter hold.
@@ -1153,7 +1153,7 @@ Reconciled 2026-11-01: item2 is RESOLVED by T397: failedAfterMove names the kept
 
 ### T487 · FNF[bundle-replace-zip-tree] · ask whether to preserve the old bundle or remove it first to free disk
 
-status: open · kind: feature · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (bundle J, run 2026-11-11, branch fix/J-replace-zip-mode) · kind: feature · user decision: resolved 2026-11-01 · priority: P2
 From the T479 follow-up review (2026-10-31). PRE-EXISTING, minor.
 
 The Replace ZIP route (api routes/bundles.ts ~:895-907; the removal at ~:906, inside the bundle-then-upload transaction) deletes the bundle's `extracted/` tree before it enqueues the ingest job (`attempts: 1`, ~:921), so the worker's `extractArchive` finds no destination and a corrupt replacement zip leaves a failed bundle (bundle-ingest.ts ~:173-176) whose item rows stay (worker-restarts.md ~:130-131) with no tree behind them. Since T479 the swap restores the previous tree on failure, so the route's removal no longer buys atomicity; but the comment at bundles.ts ~:896-897 ties it to the stale-complete guard and the docs record it as intended. Decide whether the route keeps the tree and lets the swap replace it.
