@@ -249,7 +249,7 @@ status: open · kind: fix · found: H2 (#435) review 2026-11-11 · priority: P4
 Code in web `lib/api-proxy.server.ts`, `lib/api-base.server.ts`, `app/api/haive/[...path]/route.ts`, api routes serving inline files.
 
 1. The raw-file browser control (top-level SVG cannot run script) was never shown red against the old headers.
-2. The standalone `next start` entry used by the production image is not exercised by the harness (it runs `next build` + `next start` from source).
+2. The Next standalone server entry is not exercised; the harness runs `next build` + `next start` from source.
 3. An empty-string `HAIVE_PUBLIC_API_URL` in the `resolveServerApiBase` chain: confirm it falls through rather than resolving to an invalid base.
 4. The notification sound route serves inline without `X-Content-Type-Options: nosniff`.
 
