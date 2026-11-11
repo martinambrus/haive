@@ -88,6 +88,8 @@ export async function refreshProjectStateOutcome(
   db: Database,
   repositoryId: string,
   expectedCheckout?: NamedCheckout,
+  /** A private recovery replacement, before it is published under the rebuild's task fence. */
+  replacementPath?: string,
 ): Promise<ProjectStateRefreshOutcome> {
   const [repo] = await db
     .select({
@@ -97,7 +99,7 @@ export async function refreshProjectStateOutcome(
     .from(schema.repositories)
     .where(eq(schema.repositories.id, repositoryId))
     .limit(1);
-  const repoPath = repo?.storagePath ?? repo?.localPath ?? null;
+  const repoPath = replacementPath ?? repo?.storagePath ?? repo?.localPath ?? null;
   if (!repoPath) return { outcome: 'absent' };
   // The row stays dirty: that is the signal to write the record once the checkout is back.
   if (await checkoutMissing(repoPath)) {

@@ -259,14 +259,18 @@ export async function writePlanMirror(
   repositoryId: string,
   repoPath: string,
   changes?: PlanMirrorChanges,
+  options?: { recoveredCheckout: true },
 ): Promise<string[]> {
   try {
     const result = await db.transaction(async (tx) => {
       // Every writer (queue, plan steps, onboarding) enters here. Serialize per
       // repository across worker processes so an older render can never rename
       // over a newer one after the newer writer already marked itself current.
+      // Recovery runs on a private replacement inside the rebuild's root claim. Keep its base
+      // update in the same lock order as task admission and the record writer.
+      if (options?.recoveredCheckout) await lockRepositoryTasksKey(tx, repositoryId);
       await lockPlanMirror(tx, repositoryId);
-      return writePlanMirrorLocked(tx, repositoryId, repoPath, changes);
+      return writePlanMirrorLocked(tx, repositoryId, repoPath, changes, options);
     });
     // Thrown only once the stamp of the plan.json that landed is committed.
     if (result.failed !== undefined) throw result.failed;
@@ -366,6 +370,7 @@ async function writePlanMirrorLocked(
   repositoryId: string,
   repoPath: string,
   changes?: PlanMirrorChanges,
+  options?: { recoveredCheckout: true },
 ): Promise<{ written: string[]; failed?: unknown }> {
   let state = await loadMirrorState(db, repositoryId);
   if (!state) {
@@ -464,6 +469,14 @@ async function writePlanMirrorLocked(
   written.push(HAIVE_DATA_FILES.plan);
   changes?.written.push(HAIVE_DATA_FILES.plan);
   await stampSyncedHash(db, repositoryId, hashBytes(rendered.json));
+  // The replacement now holds this install's projection, so a later checkout edit must merge
+  // against these bytes rather than the pre-rebuild source. Keep pending question bases intact.
+  if (options?.recoveredCheckout)
+    await storeAgreedBase(
+      db,
+      repositoryId,
+      planMirrorPayloadSchema.parse(JSON.parse(rendered.json)),
+    );
   // A failed plan.md leaves the row dirty but keeps the stamp of the plan.json that landed.
   try {
     await write(HAIVE_DATA_FILES.planMarkdown, rendered.markdown);

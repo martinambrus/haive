@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import {
+  cp,
   mkdir,
   lstat,
   mkdtemp,
@@ -51,6 +52,7 @@ vi.mock('@haive/shared/fs-safe', async (original) => {
 
 const h = vi.hoisted(() => ({
   persist: vi.fn(),
+  restore: vi.fn(),
   seed: vi.fn(),
   helper: vi.fn(),
   clone: vi.fn(),
@@ -66,6 +68,7 @@ vi.mock('../src/repo/clone.js', async (original) => {
     ...real,
     withRootClaim: async (_db: unknown, _id: string, fn: () => Promise<void>) => fn(),
     persistDetection: h.persist,
+    restoreProjectData: h.restore,
     gitClone: h.clone,
     copyTree: (src: string, dest: string) =>
       h.copyFault ? h.copyFault(src, dest) : real.copyTree(src, dest),
@@ -139,6 +142,7 @@ beforeEach(async () => {
   fsFaults.remove = false;
   fsFaults.stat = null;
   h.seed.mockResolvedValue(undefined);
+  h.restore.mockReset().mockResolvedValue(undefined);
   delete row.statusMessage;
   h.persist.mockImplementation(async (_db, _id, _dest, note) => {
     row.status = 'ready';
@@ -848,4 +852,96 @@ it('holds the task lock for the rename and releases the transaction before cloni
   expect(h.clone).toHaveBeenCalledOnce();
   expect(await asidesOf(dest)).toHaveLength(1);
   expect(row.status).toBe('ready');
+});
+
+it.each(['copy', 'clone'] as const)(
+  'restores the private %s recovery before publishing and leaves source and aside intact',
+  async (kind) => {
+    const { dest, payload } = await fixture();
+    const source = payload.localPath!;
+    await mkdir(path.join(source, '.haive-data/state'), { recursive: true });
+    for (const file of [
+      'plan.json',
+      'plan.md',
+      'environment.json',
+      'tooling.json',
+      'exclusions.json',
+    ])
+      await writeFile(path.join(source, '.haive-data', file), 'stale');
+    await writeFile(path.join(source, '.haive-data/state/stale'), 'stale');
+    await mkdir(path.join(source, '.haive-data/knowledge_base'));
+    await writeFile(path.join(source, '.haive-data/knowledge_base/keep.md'), 'keep');
+    await writeFile(path.join(dest, '.git/config'), '[core\n');
+    if (kind === 'clone')
+      h.clone.mockImplementationOnce(async (_url, replacement) =>
+        cp(source, replacement, { recursive: true }),
+      );
+    h.restore.mockImplementationOnce(async (_db, _id, replacement) => {
+      expect(replacement).not.toBe(dest);
+      await expect(readFile(path.join(dest, '.git/HEAD'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      expect(await readdir(path.join(replacement, '.haive-data'))).toEqual(['knowledge_base']);
+      await writeFile(path.join(replacement, '.haive-data/plan.json'), 'restored');
+    });
+    await handleRefresh(
+      { ...(kind === 'copy' ? payload : remotePayload), recoverCheckout: true },
+      db,
+      root,
+    );
+    expect(h.restore).toHaveBeenCalledOnce();
+    expect(await readFile(path.join(dest, '.haive-data/plan.json'), 'utf8')).toBe('restored');
+    expect(await readFile(path.join(source, '.haive-data/plan.json'), 'utf8')).toBe('stale');
+    expect(await readFile(path.join(dest, '.haive-data/knowledge_base/keep.md'), 'utf8')).toBe(
+      'keep',
+    );
+    const aside = (await readdir(path.dirname(dest))).find((n) => n.includes('.aside-'))!;
+    expect(
+      await readFile(path.join(path.dirname(dest), aside, '.haive-data/plan.md'), 'utf8'),
+    ).toBe('pending\n');
+  },
+);
+
+it.each(['restore', 'late holder'] as const)(
+  'keeps a private recovery and its journal when %s prevents publication',
+  async (failure) => {
+    const { dest, payload } = await fixture();
+    await writeFile(path.join(dest, '.git/config'), '[core\n');
+    h.restore.mockImplementationOnce(async (_db, _id, replacement) => {
+      await mkdir(path.join(replacement, '.haive-data'), { recursive: true });
+      await writeFile(path.join(replacement, '.haive-data/journal-proof'), 'keep private bytes');
+      if (failure === 'restore') throw new Error('writer failed');
+      h.holding = 1;
+    });
+    await expect(handleRefresh({ ...payload, recoverCheckout: true }, db, root)).rejects.toThrow(
+      /private replacement was kept/,
+    );
+    expect(h.persist).not.toHaveBeenCalled();
+    await expect(readFile(path.join(dest, '.git/HEAD'))).rejects.toMatchObject({ code: 'ENOENT' });
+    const kept = (await readdir(path.dirname(dest))).find((n) => n.includes('.rebuild-'))!;
+    expect(
+      await readFile(path.join(path.dirname(dest), kept, '.haive-data/journal-proof'), 'utf8'),
+    ).toBe('keep private bytes');
+  },
+);
+
+it('does not report a private replacement after its publication acknowledgement failed', async () => {
+  const { dest, payload } = await fixture();
+  await writeFile(path.join(dest, '.git/config'), '[core\n');
+  let transactions = 0;
+  const failedAck = {
+    ...db,
+    transaction: async (fn: (tx: Database) => unknown) => {
+      const result = await fn(db);
+      if (++transactions === 2) throw new Error('publication acknowledgement lost');
+      return result;
+    },
+  } as unknown as Database;
+  await expect(
+    handleRefresh({ ...payload, recoverCheckout: true }, failedAck, root),
+  ).rejects.toThrow('restored replacement was published');
+  expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(
+    await git(payload.localPath!, ['rev-parse', 'HEAD']),
+  );
+  expect((await readdir(path.dirname(dest))).filter((n) => n.includes('.rebuild-'))).toEqual([]);
 });

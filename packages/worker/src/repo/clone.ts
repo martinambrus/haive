@@ -54,6 +54,8 @@ import { detectFromDirectory } from './framework-detect.js';
 import { holdImportedMcpServers } from '../sandbox/mcp-config.js';
 import { syncPlanFromCheckout } from '../plan/sync-checkout.js';
 import { syncProjectStateFromCheckout } from '../project-state/sync.js';
+import { refreshProjectStateOutcome } from '../project-state/refresh.js';
+import { writePlanMirror } from '../plan/mirror.js';
 import { raiseRtkQuestion } from '../project-state/rtk-conflict.js';
 import { seedBlankScaffold } from './blank-scaffold.js';
 import { buildCredentialHelper, OriginUrlError, scrubSecret } from './git-push.js';
@@ -280,6 +282,21 @@ async function importHaiveDataMirror(
   return deferred;
 }
 
+/** Restore only this install's projections in the private replacement, after rebuild discarded
+ *  the source mirrors and before its final publication fence. Both writers record their own bases
+ *  and write without committing. A failure must fail recovery, never become a best-effort import. */
+export async function restoreProjectData(
+  db: Database,
+  repositoryId: string,
+  replacementPath: string,
+): Promise<void> {
+  const state = await refreshProjectStateOutcome(db, repositoryId, undefined, replacementPath);
+  if (state.outcome !== 'written' && state.outcome !== 'absent') {
+    throw new Error(`Recovered checkout project data could not be written (${state.outcome})`);
+  }
+  await writePlanMirror(db, repositoryId, replacementPath, undefined, { recoveredCheckout: true });
+}
+
 export async function persistDetection(
   db: Database,
   repositoryId: string,
@@ -307,7 +324,7 @@ export async function persistDetection(
     })
     .where(eq(schema.repositories.id, repositoryId));
 
-  // A recovery keeps this install's settings, KB and plan; incoming mirrors are not authoritative.
+  // Recovery has already restored the private replacement before publishing it.
   if (options?.preserveProjectData) return;
 
   // Best-effort: a fresh clone of an already-onboarded repo restores its

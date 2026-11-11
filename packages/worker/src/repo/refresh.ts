@@ -15,11 +15,19 @@ import {
 import { lockRepositoryTasksKey, schema, type Database } from '@haive/database';
 import {
   CHECKOUT_HOLDING_TASK_STATUSES,
+  HAIVE_DATA_FILES,
   REPOSITORY_ERROR_CODES,
   logger,
   type RepoJobPayload,
 } from '@haive/shared';
-import { assertCloneUrl, copyTree, gitClone, persistDetection, withRootClaim } from './clone.js';
+import {
+  assertCloneUrl,
+  copyTree,
+  gitClone,
+  persistDetection,
+  restoreProjectData,
+  withRootClaim,
+} from './clone.js';
 import {
   MOVE_ATTEMPTS,
   putBackAfterFailure,
@@ -31,6 +39,7 @@ import {
   setAsideHaiveProjections,
   type KeptFiles,
 } from '../project-state/set-aside.js';
+import { PROJECT_STATE_DIR } from '@haive/shared/project-state';
 import { headCommit } from '../plan/merge.js';
 import { seedPlanBaseFromCheckout } from '../plan/mirror.js';
 import { handBackAfterMove } from '../step-engine/git-merge.js';
@@ -508,17 +517,71 @@ async function rebuild(
   });
   // Publish a folder copy only after it finishes. A failed or interrupted copy must never
   // leave a partial checkout that the next refresh could mistake for ready.
-  const stagingRel = fromFolder ? `${rel}.rebuild-${randomUUID()}` : null;
+  const stagingRel =
+    fromFolder || payload.recoverCheckout ? `${rel}.rebuild-${randomUUID()}` : null;
+  let restoring = false;
+  let published = false;
   try {
     if (fromFolder) {
       await ensureDirNoFollow(repoStorageRoot, stagingRel!);
       await copyTree(fromFolder, path.join(repoStorageRoot, stagingRel!));
-      await renameNoFollow(repoStorageRoot, stagingRel!, rel, { noReplace: true });
     } else {
       await ensureDirNoFollow(repoStorageRoot, payload.userId);
-      await gitClone(fromRemote!, dest, payload.branch, auth, { db, userId: payload.userId });
+      await gitClone(
+        fromRemote!,
+        stagingRel ? path.join(repoStorageRoot, stagingRel) : dest,
+        payload.branch,
+        auth,
+        { db, userId: payload.userId },
+      );
+    }
+    if (stagingRel) {
+      if (payload.recoverCheckout) {
+        // This is still a private replacement, never the preserved aside. No reader may see the
+        // source's stale projections before the ordinary writers recreate this install's data.
+        const replacement = path.join(repoStorageRoot, stagingRel);
+        for (const projection of [
+          PROJECT_STATE_DIR,
+          HAIVE_DATA_FILES.plan,
+          HAIVE_DATA_FILES.planMarkdown,
+          HAIVE_DATA_FILES.environment,
+          HAIVE_DATA_FILES.exclusions,
+          HAIVE_DATA_FILES.tooling,
+        ]) {
+          await removeNoFollow(replacement, projection, { recursive: true });
+        }
+        const built = await usableCheckout(replacement);
+        if (built !== 'usable')
+          throw new Error('the private recovery replacement is not a usable checkout');
+        // All writes stay off the public checkout. The writers commit their normal journals and
+        // bases before publication; keep this sibling on failure, including any undo capability.
+        restoring = true;
+        await restoreProjectData(db, payload.repositoryId, replacement);
+        await db.transaction(async (tx) => {
+          // Reuse the rebuild fence at publication too: a task admitted during the copy must
+          // not see a replacement or race its restore. No pool writer runs under this lock.
+          await lockRepositoryTasksKey(tx, payload.repositoryId);
+          const refusal = await checkoutWorktreeRefusal(tx, payload.repositoryId, dest);
+          if (refusal) throw new Error(refusal);
+          const holding = await checkoutHoldingTasks(tx, payload.repositoryId);
+          if (holding > 0) throw new Error(holdingRefusal(holding));
+          await renameNoFollow(repoStorageRoot, stagingRel, rel, { noReplace: true });
+          published = true;
+        });
+      } else {
+        await renameNoFollow(repoStorageRoot, stagingRel, rel, { noReplace: true });
+      }
     }
   } catch (err) {
+    if (restoring && stagingRel) {
+      throw failedAfterMove(
+        published
+          ? `the restored replacement was published, but the publication transaction failed (${err instanceof Error ? err.message : String(err)})`
+          : `the replacement's project data could not be restored or published (${err instanceof Error ? err.message : String(err)}); the private replacement was kept next to the checkout as ${path.basename(stagingRel)}`,
+        aside,
+        err,
+      );
+    }
     if (stagingRel) {
       try {
         await removeNoFollow(repoStorageRoot, stagingRel, { recursive: true });

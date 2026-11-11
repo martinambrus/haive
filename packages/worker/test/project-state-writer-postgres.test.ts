@@ -43,7 +43,14 @@ import {
   writeProjectStateRecord,
   writeProjectStateColumn,
 } from '../src/project-state/write.js';
-import { refreshProjectState, sweepDirtyProjectStates } from '../src/project-state/refresh.js';
+import {
+  markProjectStatesDirtyAtBoot,
+  refreshProjectState,
+  sweepDirtyProjectStates,
+} from '../src/project-state/refresh.js';
+import { applyPlanPatch } from '@haive/shared/plan';
+import { writePlanMirror, reconcilePlanFromCheckout } from '../src/plan/mirror.js';
+import { persistDetection } from '../src/repo/clone.js';
 import { handleRefresh } from '../src/repo/refresh.js';
 import {
   putBackProjections,
@@ -385,6 +392,140 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
     };
     return { s, source, storage, dest, git, payload, refresh, snapshot, leaveIntent };
   };
+  it.each(['state', 'plan', 'earlier plan base'] as const)(
+    'recovery keeps the database %s through a boot sweep and imports a later genuine edit',
+    async (area) => {
+      const m = await moveFixture();
+      await db!
+        .update(schema.repositories)
+        .set({
+          rtkVersion: '2.0.0',
+          agentRulesOverride: 'Keep this install\n',
+        })
+        .where(eq(schema.repositories.id, m.s.repo.id));
+      await writeProjectStateRecord(db!, {
+        repositoryId: m.s.repo.id,
+        repoPath: m.dest,
+        context: context('saved here') as never,
+        rtkChoiceRecorded: false,
+      });
+      // The database equals its last written base, but those bytes were never pushed.
+      await mkdir(join(m.source, '.haive-data/state/settings'), { recursive: true });
+      await writeFile(join(m.source, '.haive-data/state/settings/rtk-version.json'), '"1.0.0"\n');
+      await writeFile(join(m.source, '.haive-data/state/settings/agent-rules.md'), 'Older rules\n');
+      await applyPlanPatch(
+        db!,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Saved plan' }] },
+        { repositoryId: m.s.repo.id, origin: 'llm' },
+      );
+      await writePlanMirror(db!, m.s.repo.id, m.dest);
+      const planPath = join(m.dest, '.haive-data/plan.json');
+      const plan = JSON.parse(await readFile(planPath, 'utf8'));
+      await db!
+        .update(schema.planMirrorState)
+        .set({
+          syncedSnapshot:
+            area === 'earlier plan base'
+              ? {
+                  ...plan,
+                  nodes: plan.nodes.map((n: object) => ({ ...n, title: 'Before saved plan' })),
+                }
+              : plan,
+        })
+        .where(eq(schema.planMirrorState.repositoryId, m.s.repo.id));
+      const olderPlan = {
+        ...plan,
+        nodes: plan.nodes.map((n: object) => ({ ...n, title: 'Older plan' })),
+      };
+      await writeFile(join(m.source, '.haive-data/plan.json'), JSON.stringify(olderPlan));
+      // A legacy mirror must not fill an intentionally empty column on the next rescan.
+      await writeFile(
+        join(m.source, '.haive-data/tooling.json'),
+        JSON.stringify({
+          schemaVersion: 1,
+          tooling: { mcpSettingsJson: '{"mcpServers":{"old":{"command":"old"}}}' },
+        }),
+      );
+      await mkdir(join(m.source, '.haive-data/knowledge_base'), { recursive: true });
+      await writeFile(
+        join(m.source, '.haive-data/knowledge_base/keep.md'),
+        'Source knowledge stays\n',
+      );
+      const head = m.git(m.source, 'rev-parse', 'HEAD');
+      await writeFile(join(m.dest, '.git/config'), '[core\n');
+      let claimSeen = false;
+      seam.afterWrite = async () => {
+        const [repo] = await db!
+          .select()
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, m.s.repo.id));
+        expect(repo!.rootClaimKind).toBe('refresh');
+        expect(repo!.rootClaimedAt).not.toBeNull();
+        claimSeen = true;
+      };
+      await handleRefresh({ ...m.payload, recoverCheckout: true }, db!, m.storage);
+      seam.afterWrite = null;
+      await markProjectStatesDirtyAtBoot(db!);
+      await sweepDirtyProjectStates(db!);
+      await writePlanMirror(db!, m.s.repo.id, m.dest);
+      await persistDetection(db!, m.s.repo.id, m.dest);
+      const [repo] = await db!
+        .select()
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, m.s.repo.id));
+      if (area === 'state') {
+        expect(repo!.rtkVersion).toBe('2.0.0');
+        expect(repo!.agentRulesOverride).toBe('Keep this install\n');
+        expect((repo!.renderContext as ReturnType<typeof context>).projectInfo.name).toBe(
+          'saved here',
+        );
+        expect(repo!.onboardingTooling).toBeNull();
+      } else {
+        const [node] = await db!
+          .select()
+          .from(schema.planNodes)
+          .where(eq(schema.planNodes.repositoryId, m.s.repo.id));
+        expect(node!.title).toBe('Saved plan');
+        const [mirror] = await db!
+          .select()
+          .from(schema.planMirrorState)
+          .where(eq(schema.planMirrorState.repositoryId, m.s.repo.id));
+        expect(mirror!.syncedSnapshot).toEqual(JSON.parse(await readFile(planPath, 'utf8')));
+      }
+      expect(claimSeen).toBe(true);
+      expect(m.git(m.dest, 'rev-parse', 'HEAD')).toBe(head); // Recovery writes, never commits.
+      expect(await readFile(join(m.dest, '.haive-data/knowledge_base/keep.md'), 'utf8')).toBe(
+        'Source knowledge stays\n',
+      );
+      await writeFile(join(m.dest, '.haive-data/state/settings/rtk-version.json'), '"3.0.0"\n');
+      await writeFile(
+        planPath,
+        JSON.stringify({
+          ...plan,
+          nodes: plan.nodes.map((n: object) => ({ ...n, title: 'Later edit' })),
+        }),
+      );
+      await syncProjectStateFromCheckout(db!, { repositoryId: m.s.repo.id, repoPath: m.dest });
+      await reconcilePlanFromCheckout(db!, m.s.repo.id, m.dest);
+      const [later] = await db!
+        .select()
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, m.s.repo.id));
+      const [laterNode] = await db!
+        .select()
+        .from(schema.planNodes)
+        .where(eq(schema.planNodes.repositoryId, m.s.repo.id));
+      expect(later!.rtkVersion).toBe('3.0.0');
+      expect(laterNode!.title).toBe('Later edit');
+      expect(
+        await db!
+          .select()
+          .from(schema.projectStateConflicts)
+          .where(eq(schema.projectStateConflicts.repositoryId, m.s.repo.id)),
+      ).toEqual([]);
+    },
+  );
+
   it.each(['active', 'persisted', 'late'] as const)(
     'defers a clean public refresh with a %s journal and retries after explicit recovery',
     async (timing) => {

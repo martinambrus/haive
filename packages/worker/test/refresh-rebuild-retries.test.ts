@@ -20,6 +20,7 @@ if (redisUrl && !/^\/(?:[1-9]|1[0-5])$/.test(new URL(redisUrl).pathname))
 const h = vi.hoisted(() => ({
   redis: null as unknown,
   persist: vi.fn(),
+  restore: vi.fn(),
   seed: vi.fn(),
   holding: false,
   /** Stand in for the copy and the clone that follow the move. Null runs the real copy; the clone
@@ -33,6 +34,7 @@ vi.mock('../src/repo/clone.js', async (original) => {
     ...real,
     withRootClaim: async (_db: unknown, _id: string, fn: () => Promise<void>) => fn(),
     persistDetection: h.persist,
+    restoreProjectData: h.restore,
     copyTree: (src: string, dest: string) =>
       h.copyFault ? h.copyFault(src, dest) : real.copyTree(src, dest),
     gitClone: (url: string, dest: string) =>
@@ -86,6 +88,7 @@ beforeEach(async () => {
   h.copyFault = null;
   h.cloneFault = null;
   h.seed.mockResolvedValue(undefined);
+  h.restore.mockReset().mockResolvedValue(undefined);
   h.persist.mockImplementation(async (_db, _id, _dest, note) => {
     row.status = 'ready';
     row.errorCode = null;
