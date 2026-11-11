@@ -1,3 +1,4 @@
+import { pendingMetadataControl } from '../../test/support/pending-metadata-control.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database, MergeResolveState } from '@haive/database';
 
@@ -20,6 +21,33 @@ beforeEach(() => {
 });
 
 describe('merge metadata settlement', () => {
+  it.each([false, true])(
+    'settles absent metadata but rejects a real conflict: %s',
+    async (conflict) => {
+      const control = await pendingMetadataControl(conflict);
+      const save = vi.fn();
+      h.resync.mockImplementation(control.recover);
+      try {
+        expect(
+          await settleProjections(
+            {} as Database,
+            'r1',
+            {
+              mergeDir: '/repo',
+              keptMetadataStored: true,
+              keptMetadata: { '.haive-data/plan.json': { mode: 0o600 } },
+            } as unknown as MergeResolveState,
+            save,
+          ),
+        ).toBe(!conflict);
+        expect(control.pending()).not.toBeNull();
+        expect(save).toHaveBeenCalledTimes(conflict ? 0 : 1);
+      } finally {
+        await control.cleanup();
+      }
+    },
+  );
+
   it.each(['crash', 'guard-refused'] as const)(
     'atomically hands off legacy metadata when the marker save is %s',
     async (failure) => {

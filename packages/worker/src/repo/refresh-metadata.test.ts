@@ -1,3 +1,4 @@
+import { pendingMetadataControl } from '../../test/support/pending-metadata-control.js';
 import { expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import type { RepoJobPayload } from '@haive/shared';
@@ -42,32 +43,46 @@ vi.mock('../project-state/set-aside.js', () => ({
 
 import { fastForward } from './refresh.js';
 
-it('refresh leaves captured metadata for durable recovery after a failed re-sync', async () => {
-  const kept = new Map([
-    [
-      '.haive-data/plan.json',
-      {
-        bytes: Buffer.from('{}'),
-        index: null,
-        untracked: true,
-        owner: { uid: 1000, gid: 1000 },
-        mode: 0o600,
-      },
-    ],
-  ]);
-  h.aside.mockResolvedValue({ outcome: 'set-aside', kept });
-  h.resettle.mockResolvedValue(false);
-  const db = {
-    transaction: async (fn: (tx: unknown) => unknown) => fn(db),
-    execute: async () => [],
-    query: { tasks: { findMany: async () => [] } },
-  } as unknown as Database;
-  await fastForward(
-    db,
-    { source: 'github_https', repositoryId: 'r1', userId: 'u1' } as RepoJobPayload,
-    '/repo',
-  );
-  expect(h.resettle).toHaveBeenCalledWith(db, 'r1', '/repo', kept);
-  expect(h.metadata).not.toHaveBeenCalled();
-  expect(kept.size).toBe(1);
-});
+it.each([false, true])(
+  'refresh retains absent or failed metadata: conflict=%s',
+  async (conflict) => {
+    h.moved = false;
+    h.resettle.mockReset();
+    h.metadata.mockReset();
+    const control = await pendingMetadataControl(conflict);
+    const kept = new Map([
+      [
+        '.haive-data/plan.json',
+        {
+          bytes: Buffer.from('{}'),
+          index: null,
+          untracked: true,
+          owner: { uid: 1000, gid: 1000 },
+          mode: 0o600,
+        },
+      ],
+    ]);
+    h.aside.mockResolvedValue({ outcome: 'set-aside', kept });
+    h.resettle.mockImplementation(control.recover);
+    const db = {
+      transaction: async (fn: (tx: unknown) => unknown) => fn(db),
+      execute: async () => [],
+      query: { tasks: { findMany: async () => [] } },
+    } as unknown as Database;
+    try {
+      const result = await fastForward(
+        db,
+        { source: 'github_https', repositoryId: 'r1', userId: 'u1' } as RepoJobPayload,
+        '/repo',
+      );
+      expect(h.resettle).toHaveBeenCalledWith(db, 'r1', '/repo', kept);
+      expect(h.metadata).not.toHaveBeenCalled();
+      expect(kept.size).toBe(1);
+      expect(result).toBeDefined();
+      expect(await control.recover()).toBe(!conflict);
+      expect(control.pending()).not.toBeNull();
+    } finally {
+      await control.cleanup();
+    }
+  },
+);

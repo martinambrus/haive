@@ -3,6 +3,7 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { Database } from '@haive/database';
+import { logger } from '@haive/shared';
 
 const h = vi.hoisted(() => ({
   outcome: 'held',
@@ -102,7 +103,7 @@ describe('persisted projection metadata', () => {
     const f = fixture();
     h.outcome = 'absent';
     h.absent = true;
-    expect(await resyncHaiveProjections(f.db, 'repo-1', '/repo')).toBe(false);
+    expect(await resyncHaiveProjections(f.db, 'repo-1', '/repo')).toBe(true);
     expect(f.pending()).toEqual({ '/repo': metadata });
     expect(h.chown).not.toHaveBeenCalled();
     h.absent = false;
@@ -113,6 +114,22 @@ describe('persisted projection metadata', () => {
     h.mode = 0o644;
     await resyncHaiveProjections(f.db, 'repo-1', '/repo');
     expect(h.mode).toBe(0o644);
+  });
+
+  it('warns once for an absent capture across repeated recovery sweeps', async () => {
+    const f = fixture();
+    h.outcome = 'applied';
+    await resyncHaiveProjections(f.db, 'repo-1', '/repo');
+    f.capture(metadata);
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    h.absent = true;
+    for (let tick = 0; tick < 3; tick++)
+      expect(await resyncHaiveProjections(f.db, 'repo-1', '/repo')).toBe(true);
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ repoPath: '/repo', path: '.haive-data/plan.json' }),
+      expect.stringContaining('absent'),
+    );
+    expect(f.pending()).toEqual({ '/repo': metadata });
   });
 
   it('retains a different capture at the same path during the guarded clear', async () => {

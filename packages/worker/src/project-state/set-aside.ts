@@ -64,6 +64,7 @@ import {
   captureProjectionMetadata,
   clearKeptMetadata,
   type KeptMetadata,
+  type MetadataRestoreResult,
   keptMetadataOf,
   rememberKeptMetadata,
   restorePendingKeptMetadata,
@@ -951,7 +952,8 @@ async function isDirty(
  *  still has pending over them. A step that fails here leaves its mark raised, so the sweep retries it.
  *  Whether both halves re-synced: false while a merge, rebase, cherry-pick or revert is open, when either threw, or when the
  *  state sync was held, superseded or refused or its pending write did not run. A deferred write
- *  retains its metadata until the task-end re-sync or a later sweep finishes it. */
+ *  retains its metadata until the task-end re-sync or a later sweep finishes it. An absent captured
+ *  path remains owed by the outbox but does not fail an otherwise completed re-sync. */
 export async function resyncHaiveProjections(
   db: Database,
   repositoryId: string,
@@ -1047,15 +1049,33 @@ export async function resyncAfterTaskEnd(db: Database, taskId: string): Promise<
 const metadataWarn = (repoPath: string, path: string) => (err: unknown) =>
   logger.warn({ err, repoPath, path }, 'owner and mode not restored after a checkout move');
 
+// No durable warning flag: remember a bounded set of absent paths for this worker's lifetime.
+// Reappearance re-arms the warning; restart or cache eviction may emit it once again.
+const absentMetadataWarnings = new Set<string>();
+function metadataPresent(repoPath: string, path: string): void {
+  absentMetadataWarnings.delete(JSON.stringify([repoPath, path]));
+}
+function warnAbsentMetadata(repoPath: string, path: string): void {
+  const key = JSON.stringify([repoPath, path]);
+  if (absentMetadataWarnings.has(key)) return;
+  if (absentMetadataWarnings.size >= 4096)
+    absentMetadataWarnings.delete(absentMetadataWarnings.values().next().value!);
+  absentMetadataWarnings.add(key);
+  logger.warn({ repoPath, path }, 'captured projection metadata pending: path absent');
+}
+
 /** The mode fs-safe's createExclusive gives a file it creates; a file at any other mode was changed since. */
 const WRITER_FILE_MODE = 0o644;
 
 /** After the re-sync: removed projections and pruned directories get their metadata back while
  *  writer-owned. An interrupted hand-back resumes at the captured uid only at the writer's default
  *  mode; a group or nondefault file mode changed meanwhile stays. */
-export async function restoreKeptMetadata(repoPath: string, kept: KeptFiles): Promise<boolean> {
+export async function restoreKeptMetadata(
+  repoPath: string,
+  kept: KeptFiles,
+): Promise<MetadataRestoreResult> {
   if (projectionRecoveryHeld(repoPath)) return false;
-  let restored = true;
+  let restored: MetadataRestoreResult = true;
   await restoreFaults.beforeKeptMetadata?.();
   const writer = process.getuid?.();
   for (const [path, { bytes, owner, mode, untracked, parents }] of kept) {
@@ -1069,10 +1089,13 @@ export async function restoreKeptMetadata(repoPath: string, kept: KeptFiles): Pr
       // Reset can remove a captured path before it is recreated. Keep that obligation
       // until restoration succeeds (or explicit repository deletion retires its outbox).
       // Do not touch its parents on every absent-file retry either.
-      if (now?.kind !== 'file') {
-        restored = false;
+      if (!now) {
+        warnAbsentMetadata(repoPath, path);
+        if (restored !== false) restored = 'pending';
         continue;
       }
+      metadataPresent(repoPath, path);
+      if (now.kind !== 'file') throw new Error('captured projection path is not a regular file');
       if (!(await restoreKeptParents(repoPath, parents))) restored = false;
       // A prior attempt may have handed back the owner, then failed its chmod. Only the
       // captured owner at the writer's default mode is eligible for that resumed hand-back.
@@ -1181,7 +1204,7 @@ export async function putBackProjections(
           if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
           // A prior attempt may have created the file before metadata failed.
           // Finish that hand-back before consuming its durable obligation.
-          if (!(await restoreKeptMetadata(repoPath, new Map([[path, kept.get(path)!]]))))
+          if ((await restoreKeptMetadata(repoPath, new Map([[path, kept.get(path)!]]))) !== true)
             throw new Error('set-aside file metadata not restored');
         }
       } else if (bytes === null) {

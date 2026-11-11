@@ -1,3 +1,4 @@
+import { pendingMetadataControl } from '../../../../test/support/pending-metadata-control.js';
 import { fixtureBase, networkGitArgs, httpOrigin } from '../../../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -1882,35 +1883,42 @@ it('sync preserves hand-back failure when resync also throws', async () => {
 });
 
 describe('fast-forward metadata recovery', () => {
-  it('retains the kept map when the re-sync fails', async () => {
-    const { bare, seed } = await seedOrigin();
-    const local = await cloneLocal(bare);
-    try {
-      await advanceOrigin(seed, 'incoming.txt');
-      const ctx = mkCtx(local, 'repo-1');
-      const d = await syncBaseStep.detect!(ctx);
-      const kept = new Map([
-        [
-          KEPT_FILE,
-          {
-            bytes: Buffer.from('{}'),
-            index: null,
-            untracked: true,
-            owner: { uid: 1000, gid: 1000 },
-            mode: 0o600,
-          },
-        ],
-      ]);
-      projections.setAside.mockResolvedValue({ outcome: 'set-aside', kept });
-      projections.resync.mockResolvedValue(false);
-      await syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }));
-      expect(projections.resettle).toHaveBeenCalledWith(ctx.db, 'repo-1', local, kept);
-      expect(projections.metadata).not.toHaveBeenCalled();
-      expect(kept.size).toBe(1);
-    } finally {
-      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
-      await rm(seed, { recursive: true, force: true });
-      await rm(local, { recursive: true, force: true });
-    }
-  });
+  it.each([false, true])(
+    'retains absent or failed metadata after fast-forward: conflict=%s',
+    async (conflict) => {
+      const control = await pendingMetadataControl(conflict);
+      const { bare, seed } = await seedOrigin();
+      const local = await cloneLocal(bare);
+      try {
+        await advanceOrigin(seed, 'incoming.txt');
+        const ctx = mkCtx(local, 'repo-1');
+        const d = await syncBaseStep.detect!(ctx);
+        const kept = new Map([
+          [
+            KEPT_FILE,
+            {
+              bytes: Buffer.from('{}'),
+              index: null,
+              untracked: true,
+              owner: { uid: 1000, gid: 1000 },
+              mode: 0o600,
+            },
+          ],
+        ]);
+        projections.setAside.mockResolvedValue({ outcome: 'set-aside', kept });
+        projections.resettle.mockImplementation(control.recover);
+        await syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }));
+        expect(projections.resettle).toHaveBeenCalledWith(ctx.db, 'repo-1', local, kept);
+        expect(projections.metadata).not.toHaveBeenCalled();
+        expect(kept.size).toBe(1);
+        expect(await control.recover()).toBe(!conflict);
+        expect(control.pending()).not.toBeNull();
+      } finally {
+        await control.cleanup();
+        await rm(bare, { recursive: true, force: true, maxRetries: 5 });
+        await rm(seed, { recursive: true, force: true });
+        await rm(local, { recursive: true, force: true });
+      }
+    },
+  );
 });

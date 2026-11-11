@@ -1,3 +1,5 @@
+import { pendingMetadataControl } from '../../test/support/pending-metadata-control.js';
+import * as aside from '../project-state/set-aside.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { logger } from '@haive/shared';
@@ -393,6 +395,32 @@ describe('abortLeftMerge', () => {
       projections.settleProjections.mockReset().mockResolvedValue(true);
       git.relocateFixerChanges.mockResolvedValue(null);
     });
+
+    it.each([false, true])(
+      'abort settles absent metadata but rejects a real conflict: %s',
+      async (conflict) => {
+        const control = await pendingMetadataControl(conflict);
+        const real =
+          await vi.importActual<typeof import('./merge-projections.js')>('./merge-projections.js');
+        const resync = vi
+          .spyOn(aside, 'resyncHaiveProjections')
+          .mockImplementation(control.recover);
+        projections.settleProjections.mockImplementation((db, id, state, save) =>
+          real.settleProjections(db, id, { ...state, keptMetadataStored: true }, save),
+        );
+        git.relocateFixerChanges.mockResolvedValue(null);
+        const { db, inserted } = settleFixture();
+        try {
+          if (conflict) await expect(abortLeftMerge(db, job)).rejects.toThrow('not re-synced yet');
+          else await abortLeftMerge(db, job);
+          expect(inserted).toHaveLength(conflict ? 0 : 1);
+          expect(control.pending()).not.toBeNull();
+        } finally {
+          resync.mockRestore();
+          await control.cleanup();
+        }
+      },
+    );
 
     it('is retried, not settled as refused, when putting Haive’s files back fails', async () => {
       git.revParse.mockResolvedValue(null);

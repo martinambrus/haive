@@ -7,6 +7,8 @@ import { posix } from 'node:path';
 import type { KeptFile, KeptFiles } from './set-aside.js';
 
 type DbOrTx = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
+/** true: applied; pending: absent, still owed by the outbox; false: refused or failed. */
+export type MetadataRestoreResult = boolean | 'pending';
 export type KeptMetadata = NonNullable<MergeResolveState['keptMetadata']>;
 
 export function keptMetadataOf(kept: KeptFiles): KeptMetadata {
@@ -101,7 +103,7 @@ async function restorePendingInRecovery(
   db: Database,
   repositoryId: string,
   repoPath: string,
-  restore: (repoPath: string, kept: KeptFiles) => Promise<boolean>,
+  restore: (repoPath: string, kept: KeptFiles) => Promise<MetadataRestoreResult>,
 ): Promise<boolean> {
   if (projectionRecoveryHeld(repoPath)) return false;
   const [row] = await db
@@ -114,8 +116,10 @@ async function restorePendingInRecovery(
   let restored = true;
   for (const [path, entry] of Object.entries(metadata)) {
     if (projectionRecoveryHeld(repoPath)) return false;
-    if (!(await restore(repoPath, keptFilesOf({ [path]: entry })))) {
-      restored = false;
+    const result = await restore(repoPath, keptFilesOf({ [path]: entry }));
+    if (result !== true) {
+      // An absent path is settled for the caller, but its capture remains owed.
+      if (result === false) restored = false;
       continue;
     }
     if (projectionRecoveryHeld(repoPath)) return false;
