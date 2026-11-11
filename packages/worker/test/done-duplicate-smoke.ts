@@ -170,9 +170,8 @@ async function main(): Promise<void> {
     // Must run AFTER startTaskWorker registers the real steps, or override would collide.
     overrideParkingStub('07-phase-2-implement', 7);
     overrideParkingStub('03b-business-requirements', 3.5);
-    // 07b's own successor under quick_bugfix (index 7.8, right after 07b's 7.7) — the accept
-    // case's forward hand-off target.
-    overrideParkingStub('07c-ddev-reconcile', 7.8);
+    // 07c reconciles before 07b; 08b is the gate-accept forward hand-off target.
+    overrideParkingStub('08b-test-management', 7.9);
 
     const makeTask = async (title: string, opts: Partial<typeof schema.tasks.$inferInsert>) => {
       const [task] = await db
@@ -242,7 +241,7 @@ async function main(): Promise<void> {
         currentStepId: '07b-phase-4-validate',
         currentRound: 0,
       });
-      await insertDoneStep(taskId, '07b-phase-4-validate', 0, 7.7, {
+      await insertDoneStep(taskId, '07b-phase-4-validate', 0, 7.8, {
         verdict: 'ISSUES_FOUND',
         issues: [{ severity: 'high', file: 'package.json', description: 'smoke-forced issue' }],
         findingsSummary: 'smoke-forced blocking finding',
@@ -393,7 +392,7 @@ async function main(): Promise<void> {
         currentStepId: '08b-test-management',
         currentRound: 0,
       });
-      await insertDoneStep(taskId, '07b-phase-4-validate', 0, 7.7, {
+      await insertDoneStep(taskId, '07b-phase-4-validate', 0, 7.8, {
         verdict: 'ISSUES_FOUND',
         issues: [{ severity: 'high', file: 'package.json', description: 'smoke-forced issue' }],
         findingsSummary: 'would have been blocking, but the chain moved on',
@@ -440,7 +439,7 @@ async function main(): Promise<void> {
         currentStepId: '07b-phase-4-validate',
         currentRound: 0,
       });
-      await insertDoneStep(taskId, '07b-phase-4-validate', 0, 7.7, {
+      await insertDoneStep(taskId, '07b-phase-4-validate', 0, 7.8, {
         verdict: 'ISSUES_FOUND',
         issues: [{ severity: 'high', file: 'package.json', description: 'smoke-forced issue' }],
         findingsSummary: 'smoke-forced blocking finding',
@@ -451,12 +450,12 @@ async function main(): Promise<void> {
 
       const task = await pollUntil(
         () => loadTask(db, taskId),
-        (t) => t.currentStepId === '07c-ddev-reconcile' && t.currentRound === 0,
-        'gate-accept case: task advancing to 07c-ddev-reconcile at round 0',
+        (t) => t.currentStepId === '08b-test-management' && t.currentRound === 0,
+        'gate-accept case: task advancing to 08b-test-management at round 0',
       );
       check(
         'gate accept: task advanced to the successor at the SAME round (not 07-phase-2-implement round 1)',
-        task.currentStepId === '07c-ddev-reconcile' && task.currentRound === 0,
+        task.currentStepId === '08b-test-management' && task.currentRound === 0,
         task,
       );
 
@@ -498,7 +497,7 @@ async function main(): Promise<void> {
         currentStepId: '07b-phase-4-validate',
         currentRound: 0,
       });
-      await insertDoneStep(taskId, '07b-phase-4-validate', 0, 7.7, {
+      await insertDoneStep(taskId, '07b-phase-4-validate', 0, 7.8, {
         verdict: 'ISSUES_FOUND',
         issues: [{ severity: 'high', file: 'package.json', description: 'smoke-forced issue' }],
         findingsSummary: 'smoke-forced blocking finding',
@@ -509,8 +508,8 @@ async function main(): Promise<void> {
 
       const task = await pollUntil(
         () => loadTask(db, taskId),
-        (t) => t.currentStepId === '07c-ddev-reconcile' && t.currentRound === 0,
-        'gate-accept-after-failure case: task advancing to 07c-ddev-reconcile at round 0',
+        (t) => t.currentStepId === '08b-test-management' && t.currentRound === 0,
+        'gate-accept-after-failure case: task advancing to 08b-test-management at round 0',
       );
       check(
         'gate accept after failure: task status is no longer failed',
@@ -544,7 +543,7 @@ async function main(): Promise<void> {
         currentStepId: '07b-phase-4-validate',
         currentRound: 0,
       });
-      await insertDoneStep(taskId, '07b-phase-4-validate', 0, 7.7, {
+      await insertDoneStep(taskId, '07b-phase-4-validate', 0, 7.8, {
         verdict: 'ISSUES_FOUND',
         issues: [{ severity: 'high', file: 'package.json', description: 'smoke-forced issue' }],
         findingsSummary: 'smoke-forced blocking finding',
@@ -607,7 +606,7 @@ async function main(): Promise<void> {
         taskId,
         '07b-phase-4-validate',
         0,
-        7.7,
+        7.8,
         {
           verdict: 'ISSUES_FOUND',
           issues: [{ severity: 'high', file: 'package.json', description: 'smoke-forced issue' }],

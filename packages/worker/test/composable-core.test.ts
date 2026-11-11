@@ -16,9 +16,41 @@ const replace = (stepId: string, patch: Partial<ComposableStepEntry>): Composabl
 describe('core composable catalog', () => {
   beforeAll(() => registerStepsOnce());
 
-  it('holds the 34 curated steps and passes the assert on the real registry', () => {
-    expect(CORE_COMPOSABLE_STEPS).toHaveLength(34);
+  it('holds the 35 curated steps and passes the assert on the real registry', () => {
+    expect(CORE_COMPOSABLE_STEPS).toHaveLength(35);
     expect(() => assertCoreComposableCatalog(stepRegistry)).not.toThrow();
+  });
+
+  it('accepts run configuration before implementation without requiring a spec or runtime', () => {
+    expect(
+      validateComposition(
+        [
+          '06-run-config',
+          '01-worktree-setup',
+          '07-phase-2-implement',
+          '08b-test-management',
+          '08-phase-5-verify',
+        ],
+        catalog,
+      ),
+    ).toEqual([]);
+  });
+
+  it('allows run configuration after commit because commit consumes none of its settings', () => {
+    expect(
+      validateComposition(['01-worktree-setup', '10-gate-3-commit', '06-run-config'], catalog),
+    ).toEqual([]);
+  });
+
+  it.each([
+    ['01-worktree-setup', '07-phase-2-implement'],
+    ['01-worktree-setup', '07-phase-2-implement', '08b-test-management'],
+    ['01-worktree-setup', '07-phase-2-implement', '08-phase-5-verify'],
+    ['01-worktree-setup', '01c-ddev-env', '01c1-restore-database', '06a-db-migrate'],
+  ])('refuses run configuration after a consumer: %j', (...order) => {
+    expect(validateComposition([...order, '06-run-config'], catalog)).toContainEqual(
+      expect.objectContaining({ kind: 'too-late', stepId: '06-run-config' }),
+    );
   });
 
   it('flags exactly the steps whose stored output is purely agent-authored', () => {
@@ -250,7 +282,7 @@ describe('core composable catalog', () => {
     ['10-gate-3-commit', '11-phase-8-learning', 'learnings'],
     ['08-phase-5-verify', '11-phase-8-learning', 'learnings'],
     ['01b-install-plugins', '07-phase-2-implement', 'implementation'],
-    ['07b-phase-4-validate', '07c-ddev-reconcile', 'reconciled'],
+    ['07c-ddev-reconcile', '07b-phase-4-validate', 'validation'],
     ['07-phase-2-implement', '11b1-rag-source-selection', 'rag-scope'],
     ['04-verify-environment', '07-phase-2-implement', 'implementation'],
     ['04-verify-environment', '03-phase-0a-discovery', 'discovery'],
@@ -281,6 +313,29 @@ describe('core composable catalog', () => {
       expect.objectContaining({ kind: 'too-late', stepId: early, token }),
     );
   });
+
+  it.each([null, 'full_workflow', 'quick_bugfix', 'plan_tasklist'] as const)(
+    'reconciles after implementation and before validation on path %s (including DAG)',
+    (path) => {
+      const main = stepRegistry.listByWorkflow('workflow');
+      const lists = [
+        main,
+        orderWorkflowRunList(main, stepRegistry.listByWorkflow('env_replicate'), path),
+      ];
+      for (const list of lists) {
+        const ids = list.map((s) => s.metadata.id);
+        const reconcile = ids.indexOf('07c-ddev-reconcile');
+        expect(reconcile).toBeGreaterThan(ids.indexOf('07-phase-2-implement'));
+        if (ids.includes('06c-dag-execute')) {
+          expect(reconcile).toBeGreaterThan(ids.indexOf('06c-dag-execute'));
+        }
+        if (ids.includes('07a-code-simplify')) {
+          expect(reconcile).toBeGreaterThan(ids.indexOf('07a-code-simplify'));
+        }
+        expect(reconcile).toBeLessThan(ids.indexOf('07b-phase-4-validate'));
+      }
+    },
+  );
 
   it('keeps the built-in workflow tree committed before push and cleanup', () => {
     const order = stepRegistry

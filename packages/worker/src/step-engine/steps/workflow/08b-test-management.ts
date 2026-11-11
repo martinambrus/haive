@@ -729,10 +729,11 @@ export const testManagementStep: StepDefinition<TestManagementDetect, TestManage
   // the 07→07c chain, so re-ensure rather than assume. 'if-serving' keeps a
   // code-only repo out of the runtime pool.
   needsRuntime: 'if-serving',
+  editsCodeOrTests: true,
   metadata: {
     id: '08b-test-management',
     workflowType: 'workflow',
-    // Between 07c-ddev-reconcile (7.8) and 08-phase-5-verify (8): tests must be
+    // After 07c reconciliation (7.7) and 07b validation (7.8), before verify (8): tests must be
     // reconciled with the change before verify runs the full suite, else a stale
     // assertion costs an implementation round. The `08b-` id is kept despite the
     // move — it is the persisted task_steps.step_id and the pre_answers /

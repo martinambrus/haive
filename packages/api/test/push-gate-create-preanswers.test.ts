@@ -14,6 +14,7 @@ vi.mock('../src/middleware/auth.js', () => ({
   requireAdmin: async (_c: unknown, next: () => Promise<void>) => next(),
 }));
 import { Hono } from 'hono';
+import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { configService } from '@haive/shared';
@@ -21,6 +22,13 @@ import { validateComposition, type ComposableStepEntry } from '@haive/shared/mod
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
+
+// Use the worker's shipped entry without adding a server package dependency to the API.
+const catalogModule = new URL('../../worker/src/step-engine/composable-core.js', import.meta.url)
+  .href;
+const { CORE_COMPOSABLE_STEPS } = (await import(catalogModule)) as {
+  CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[];
+};
 const REPO = '00000000-0000-4000-8000-0000000000b1';
 const GATE = '11a-gate-4-push';
 const entries: ComposableStepEntry[] = [
@@ -171,4 +179,41 @@ it.each([
     (fake.rows(schema.tasks)[0]!.preAnswers as Record<string, Record<string, unknown>>)[GATE]
       ?.remoteUrl,
   ).toBe(remoteUrl);
+});
+
+it('creates a custom type with run configuration and copies all its presets into the task', async () => {
+  setup('https://example.test/repo');
+  const config = CORE_COMPOSABLE_STEPS.find((entry) => entry.stepId === '06-run-config');
+  expect(config).toBeDefined();
+  if (!config) throw new Error('Shipped run configuration catalog entry is missing');
+  fake.insert(schema.stepCatalog, {
+    stepId: config.stepId,
+    source: 'core',
+    title: config.label,
+    dispatchesCli: config.dispatchesCli,
+    composable: true,
+    entry: config,
+  });
+  const definition = fake.rows(schema.taskTypeDefinitions)[0]!;
+  definition.stepIds = ['06-run-config', ...entries.map((e) => e.stepId)];
+  definition.preAnswerDefaults = {
+    ...(definition.preAnswerDefaults as Record<string, Record<string, unknown>>),
+    '06-run-config': { browserMode: 'skip', verifyRunTest: false },
+  };
+  expect(
+    validateComposition(
+      definition.stepIds as string[],
+      new Map([config, ...entries].map((entry) => [entry.stepId, entry])),
+    ),
+  ).toEqual([]);
+  await fake.db
+    .update(schema.taskTypeDefinitions)
+    .set({
+      stepIds: definition.stepIds as string[],
+      preAnswerDefaults: definition.preAnswerDefaults as Record<string, Record<string, unknown>>,
+    })
+    .where(eq(schema.taskTypeDefinitions.slug, 'credential-push'));
+  expect((await create()).status).toBe(201);
+  expect(fake.rows(schema.tasks)[0]!.preAnswers).toEqual(definition.preAnswerDefaults);
+  expect(fake.rows(schema.tasks)[0]!.runListSnapshot).toContain('06-run-config');
 });

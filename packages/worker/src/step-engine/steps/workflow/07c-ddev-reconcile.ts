@@ -35,7 +35,7 @@ import { isDdevAgentFixableFailure } from '../../../sandbox/ddev-build-guard.js'
 // never re-apply it — so the verify (08) and browser (08a) steps would exercise the wrong
 // runtime. Drift is detected by hashing the whole authored `.ddev/` tree (git-tracked +
 // untracked, minus DDEV's own gitignored generated files), NOT just config.yaml. This
-// step, between validation (07b) and verify (08), brings the runner in line:
+// step, before validation (07b) and verify (08), brings the runner in line:
 //   - any authored `.ddev/` input change -> `ddev restart` (data preserved).
 //   - MySQL/MariaDB version or type change -> snapshot + `ddev utility
 //     migrate-database <type>:<version>` (the original dump was consumed at 01c,
@@ -273,10 +273,10 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
   metadata: {
     id: '07c-ddev-reconcile',
     workflowType: 'workflow',
-    index: 7.8,
+    index: 7.7,
     title: 'DDEV reconcile',
     description:
-      'Applies post-implementation .ddev/config.yaml changes (php restart; MySQL/MariaDB version migration) to the running DDEV env before verify and browser testing.',
+      'Applies post-implementation .ddev/config.yaml changes (php restart; MySQL/MariaDB version migration) to the running DDEV env before validation, verify and browser testing.',
     requiresCli: false,
     allowSkip: true,
   },

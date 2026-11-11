@@ -110,7 +110,7 @@ interface ApiControl {
 }
 
 const SRC = '07b-phase-4-validate';
-const SRC_INDEX = 7.7;
+const SRC_INDEX = 7.8;
 const VERIFY = '08-phase-5-verify';
 const VERIFY_INDEX = 8;
 const EPOCH = 3;

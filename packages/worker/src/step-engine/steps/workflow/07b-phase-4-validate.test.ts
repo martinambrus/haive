@@ -36,6 +36,7 @@ import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { TaskCancelledError } from '../../step-definition.js';
 import { changeFingerprint } from '../../../orchestrator/house-rules-dispatch.js';
+import * as validationSnapshots from './_validation-snapshot.js';
 import {
   parseValidatorOutput,
   parseFixerOutput,
@@ -1455,7 +1456,67 @@ describe('phase4ValidateStep.apply: the change the validator checked', () => {
     expect(out.source).toBe('validator');
     expect(out.changeFingerprint).toMatch(DIGEST);
     expect(out.changeFingerprint).toBe(await changeFingerprint(dir, 'main'));
+    expect(out.validationSnapshot).toEqual({ 'a.php': expect.any(String) });
   });
+
+  it('leaves the local loop when its own fixer changes DDEV inputs', async () => {
+    const dir = await checkout();
+    const w = worldOf(dir);
+    const text = reply({
+      issues: [
+        {
+          severity: 'high',
+          file: '.ddev/config.yaml:1',
+          description: 'wrong PHP version',
+          fix: 'update config',
+        },
+      ],
+    });
+    const initial = await runApply(w.ctx, text, { invocationId: VALIDATOR_1 });
+    await mkdir(path.join(dir, '.ddev'));
+    await writeFile(path.join(dir, '.ddev/config.yaml'), 'php_version: "8.4"');
+    const fixed = await runApply(w.ctx, FIXER_REPLY, {
+      iteration: 1,
+      previous: [passRecord(0, text, initial)],
+      invocationId: FIXER_1,
+    });
+    expect(fixed.runtimeChanged).toBe(true);
+    expect(
+      await phase4ValidateStep.loop!.shouldContinue({ applyOutput: fixed, iteration: 1 } as never),
+    ).toBe(false);
+    // The stale validator verdict must not spend an implementation fix round.
+    expect(phase4ValidateStep.fixLoop!.evaluate(fixed)).toBeNull();
+  });
+
+  it.each(['before', 'after'] as const)(
+    'requires reconciliation when the %s-fix snapshot is unavailable',
+    async (missing) => {
+      const dir = await checkout();
+      const w = worldOf(dir);
+      const text = reply();
+      const initial = await runApply(w.ctx, text, { invocationId: VALIDATOR_1 });
+      if (missing === 'before') initial.validationSnapshot = null;
+      const read = vi.spyOn(validationSnapshots, 'readValidationSnapshot');
+      if (missing === 'after') read.mockResolvedValueOnce(null);
+      try {
+        const fixed = await runApply(w.ctx, FIXER_REPLY, {
+          iteration: 1,
+          previous: [passRecord(0, text, initial)],
+          invocationId: FIXER_1,
+        });
+        expect(fixed.runtimeChanged).toBe(true);
+        expect(
+          await phase4ValidateStep.loop!.shouldContinue({
+            applyOutput: fixed,
+            iteration: 1,
+          } as never),
+        ).toBe(false);
+        expect(phase4ValidateStep.fixLoop!.evaluate(fixed)).toBeNull();
+      } finally {
+        read.mockRestore();
+      }
+    },
+  );
 
   it('stores another one once the change has moved, and the same one while it has not', async () => {
     const dir = await checkout();
