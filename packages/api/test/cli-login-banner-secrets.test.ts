@@ -2113,3 +2113,31 @@ it.each(['enqueue', 'attach', 'start'] as const)(
     expect(vi.getTimerCount()).toBe(0);
   },
 );
+
+it('releases the auth hold after bounded Docker teardown and observes a late removal safely', async () => {
+  await start();
+  let resume!: () => void;
+  h.remove.mockImplementation(
+    () =>
+      new Promise<void>((resolve) => {
+        resume = resolve;
+      }),
+  );
+  ws.close();
+  await settle();
+  try {
+    await vi.advanceTimersByTimeAsync(30_000);
+    await settle();
+    expect(h.releaseAuth).toHaveBeenCalledOnce();
+    expect(h.updates.some((v) => v.status === 'destroyed')).toBe(false);
+    expect(
+      h.log.warn.mock.calls.some(([, message]) => message === 'login container removal timed out'),
+    ).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    resume();
+    await settle();
+  }
+  expect(h.updates.some((v) => v.status === 'destroyed')).toBe(true);
+  expect(h.releaseAuth).toHaveBeenCalledOnce();
+});

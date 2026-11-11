@@ -68,6 +68,7 @@ const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 const QUEUE_REPORT_MS = 2_000;
 // Bound on the post-cancel drain only. Reached only when the worker had already picked the job
 // up, so it is waiting on a container create that is seconds away, not on a queue.
+const CONTAINER_TEARDOWN_TIMEOUT_MS = 30_000;
 const CANCEL_DRAIN_MS = 2 * 60 * 1000;
 
 /** Raised when the user closes the dialog while a cli-exec job is still queued. Distinct from a
@@ -1580,19 +1581,41 @@ async function teardownContainer(
   docker: Docker,
   dockerContainerId: string,
 ): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const removing = (async () => {
+    try {
+      await docker.getContainer(dockerContainerId).remove({ force: true });
+    } catch (err) {
+      log.warn({ error: safeErrorDetails(err), dockerContainerId }, 'docker remove failed');
+      return;
+    }
+    const db = getDb();
+    await db
+      .update(schema.containers)
+      .set({ status: 'destroyed', destroyedAt: new Date() })
+      .where(eq(schema.containers.id, containerRowId))
+      .catch((err) => {
+        log.warn({ error: safeErrorDetails(err), containerRowId }, 'container row update failed');
+      });
+  })();
   try {
-    await docker.getContainer(dockerContainerId).remove({ force: true });
-  } catch (err) {
-    log.warn({ error: safeErrorDetails(err), dockerContainerId }, 'docker remove failed');
+    await Promise.race([
+      removing,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          // Keep the row until removal really finishes. If it never does,
+          // reapOrphanedAuthVolumes removes the container when its owner is gone.
+          log.warn(
+            { containerRowId, dockerContainerId, timeoutMs: CONTAINER_TEARDOWN_TIMEOUT_MS },
+            'login container removal timed out',
+          );
+          resolve();
+        }, CONTAINER_TEARDOWN_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
-  const db = getDb();
-  await db
-    .update(schema.containers)
-    .set({ status: 'destroyed', destroyedAt: new Date() })
-    .where(eq(schema.containers.id, containerRowId))
-    .catch((err) => {
-      log.warn({ error: safeErrorDetails(err), containerRowId }, 'container row update failed');
-    });
 }
 
 function extractProviderId(rawUrl: string, pathPrefix: string): string | null {
