@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { expect, type APIRequest, type APIRequestContext } from '@playwright/test';
 import postgres from 'postgres';
 import { API_BASE, loginUser, type RegisteredUser } from './auth.js';
@@ -45,11 +45,12 @@ export async function seedTaskFixture(
 ): Promise<TaskFixture> {
   // Retry and Resume refuse a task whose repository is gone, so the fixture has one (with no
   // checkout for the worker) unless a test needs a task with no repository at all.
+  // Its sidebar group is a button, so its name carries no test word a locator might match.
   const repoId = repository ? randomUUID() : null;
   if (repoId) {
     await sql`
       insert into repositories (id, user_id, name, source, status)
-      values (${repoId}, ${userId}, ${`e2e task ${titleSuffix}`}, 'local_path', 'ready')
+      values (${repoId}, ${userId}, ${`e2e fixture ${randomInt(1e9)}`}, 'local_path', 'ready')
     `;
   }
   const taskId = randomUUID();
