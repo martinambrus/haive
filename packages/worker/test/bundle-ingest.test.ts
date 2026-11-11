@@ -10,12 +10,14 @@ const h = vi.hoisted(() => ({
   user: '00000000-0000-4000-8000-0000000000a1',
   removed: 0,
   failCatalog: false,
+  beforeParse: null as null | (() => Promise<void>),
 }));
 
 // Parsing proper reads the repository's CLI providers through a join; the classifier it starts
 // from is the part the extracted layout decides, so that is what the stub runs.
 vi.mock('../src/bundle-parser/index.js', () => ({
   parseBundle: async (bundleId: string, _db: unknown, _logger: unknown, root: string) => {
+    await h.beforeParse?.();
     const { classifyBundle } = await import('../src/bundle-parser/classifier.js');
     h.classified = await classifyBundle(root, `${h.user}/${bundleId}/extracted`);
     return { items: [], ambiguous: [], dropped: [] };
@@ -68,6 +70,7 @@ let tmpRoot: string;
 
 beforeEach(async () => {
   h.failCatalog = false;
+  h.beforeParse = null;
   tmpRoot = await mkdtemp(path.join(os.tmpdir(), 'haive-bundle-'));
 });
 
@@ -236,6 +239,53 @@ describe('handleIngestZip', () => {
         });
       }
       await expect(readFile(`${archivePath}.replacement.json`)).rejects.toThrow();
+    },
+  );
+
+  it.each(['success', 'superseded'])(
+    'holds no transaction during a stalled catalog parse: %s',
+    async (outcome) => {
+      const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');
+      const fake = createFakeDb({
+        customBundles: schema.customBundles,
+        customBundleItems: schema.customBundleItems,
+      });
+      const fixture = await seedCrashedReplacement(tmpRoot, fake, 'before extract');
+      const zip = new JSZip();
+      zip.file('agents/new.md', agent);
+      await writeFile(fixture.archivePath, await zip.generateAsync({ type: 'nodebuffer' }));
+      const tx = vi.spyOn(fake.db, 'transaction');
+      let reached!: () => void;
+      let release!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      h.beforeParse = async () => {
+        reached();
+        await gate;
+      };
+      const result = handleIngestZip(fixture.payload, fake.db as unknown as Database, tmpRoot);
+      await entered;
+      const transactionsWhileStalled = tx.mock.calls.length;
+      if (outcome === 'superseded') {
+        fake.patch(schema.customBundles, BUNDLE, { archivePath: fixture.archivePath + '.newer' });
+      }
+      release();
+      if (outcome === 'superseded') {
+        await expect(result).rejects.toThrow('bundle source changed');
+        expect(fake.rows(schema.customBundles)[0]?.archivePath).toBe(
+          fixture.archivePath + '.newer',
+        );
+        expect(await readFile(path.join(fixture.dest, 'old.md'), 'utf8')).toBe('old tree');
+      } else {
+        await result;
+        expect(fake.rows(schema.customBundles)[0]?.status).toBe('active');
+        expect(await readFile(path.join(fixture.dest, 'agents/new.md'), 'utf8')).toBe(agent);
+      }
+      expect(transactionsWhileStalled).toBe(0);
     },
   );
 

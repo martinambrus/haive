@@ -221,10 +221,15 @@ export async function parseBundle(
   db: Database,
   logger: ParserLogger,
   bundleStorageRoot: string,
+  source?: { storageRoot: string; repositoryId: string },
 ): Promise<ParseBundleResult> {
-  const bundle = await db.query.customBundles.findFirst({
-    where: eq(schema.customBundles.id, bundleId),
-  });
+  // ZIP ingest supplies the source it extracted before opening the catalog transaction.
+  // Other callers load their row here; neither path holds a connection over tree reads.
+  const bundle =
+    source ??
+    (await db.query.customBundles.findFirst({
+      where: eq(schema.customBundles.id, bundleId),
+    }));
   if (!bundle) throw new Error(`bundle not found: ${bundleId}`);
   if (!bundle.storageRoot) throw new Error(`bundle has no storageRoot: ${bundleId}`);
 
