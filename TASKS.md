@@ -259,6 +259,19 @@ Code in web `lib/api-proxy.server.ts`, `lib/api-base.server.ts`, `app/api/haive/
 status: open · kind: design · found: H2 (#435) review 2026-11-11 · priority: P2
 In cross-host mode `/ide` is proxied on the web origin, so code-server (which runs repository code) runs with the app's origin and can reach its API session. Options: a separate editor hostname (needs DNS/TLS per install), an API-host editor with its own scoped handshake token, or a sandboxed opaque-origin iframe (code-server may need storage it then lacks). Costs: `.claude/tmp/codex-run/H2-S/codex-2/editor-options.txt`. Needs an owner decision. Same-hostname installs are unaffected.
 
+### T614 · FNF[cancel-left-merge-followups] · cancel-left committed-merge report follow-ups (+2)
+
+status: open · kind: fix · found: E2 (#329) reviews 2026-11-11 · priority: P4
+Code in `worker/src/step-engine/left-committed-merge.ts`.
+
+1. Every git no-exit result is treated as "cannot confirm" and reported as nothing, including a signal kill or an `EMFILE`/`EAGAIN` spawn failure that a re-drive could fix (~:65). Kept on purpose: a persistent spawn error that rethrows would hold the abandon pass forever. Narrow to `ENOENT` only if a retry bound for the abandon pass exists.
+2. One report per task, from the latest landing only: with landings in two directories the earlier one is never checked (~:40-62). Reachable only with two step-12 landings in different directories.
+
+### T615 · design · reset provenance credits a merge into another branch
+
+status: open · kind: design · found: E2 (#1080) Greptile P1 2026-11-11 · priority: P2
+`resolveMergedTasks` (api `routes/repos.ts` ~:1195-1245) counts a task's 11d skill-sync output as reaching the checkout when its step 12 merged, whatever branch the merge landed on: the legacy `merge_resolve_state.merged === true` path (PRE-EXISTING; `merge-resolver.ts` sets it with no branch check) and, since #1080, a `merge.landed` event. A cross-branch merge leaves the checkout unchanged, so a later onboarding reset can delete a user's untouched skill at the same path. A fix must compare the landing's `landedOn` with the branch the reset is reading, which the api cannot read (no git there): record the checkout branch at reset start in the worker, or have the worker resolve provenance. Decide where.
+
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
 **Found something outside your task?** Search the board first (`grep -n "<file>\|<symbol>\|<slug>"`).
@@ -457,7 +470,7 @@ User decision 2026-11-01: Re-measure current batching gain and keep scope bounde
 
 ### T329 · FNF[cancel-merge-commit] · cancel reports a merge left COMMITTED on local base + one-click undo (+2)
 
-status: in progress (bundle E2 = part A + items 1-2, PR #1080; bundle E3 = part B, branch fix/E3-undo-left-merge stacked on E2; run 2026-11-11) · was modular #3 · priority: P2
+status: in progress (part A + items 1-2 DONE as #1080; part B = bundle E3, branch fix/E3-undo-left-merge, run 2026-11-11) · was modular #3 · priority: P2
 DECIDED by the user 2026-10-12: cancel reports a merge left COMMITTED on the local base, plus a one-click Undo. The Undo resets only if the base is still at that merge commit and no claim is live. Never auto-undo.
 Two PRs:
 
@@ -1618,6 +1631,7 @@ Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/rou
 
 ## Done
 
+- T329 part A + items 1-2 — a merge a cancel left committed on the local base is recorded (`merge.landed`, in the step-state transaction) and reported once under the merge-dir lock (`merge.left_committed`, banner), never undone; reset provenance counts it; cancelled push copy and step-retry guard comments corrected — PR #1080 (8256fdff6), 2026-11-11; full suite + PR CI green; part B open (E3)
 - T435 — different web/API hostnames: browser session traffic goes through the web origin (`/api/haive`, `/ide`), cookies stay host-only; raw task files carry nosniff + CSP sandbox; cross-host throttle operator rule documented — PR #1079 (a51990ce9), 2026-11-11; full suite + PR CI green; editor origin open as T613
 - T487 — every Replace ZIP needs an explicit mode; keep-until-success survives crashes through a durable replacement record and the stranded-replacement sweep — PR #1078 (ec585209f), 2026-11-11; migration 0230; full suite + PR CI green
 - T310 — captured projection owner/mode stay durable in `project_state_outbox.kept_metadata` until a restore applies them; an absent path stays pending, a conflict warns once and stays owed, an atomic legacy handoff — PR #1077 (306f62e35), 2026-11-11; migration 0229; full suite + PR CI green (two-install rerun, see T610)
