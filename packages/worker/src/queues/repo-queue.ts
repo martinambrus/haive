@@ -54,12 +54,18 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
           .update(schema.repositories)
           .set({
             status: 'error',
-            errorCode:
-              err instanceof CheckoutRepairNeededError
-                ? err.code
-                : payload.recoverCheckout
-                  ? REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED
-                  : null,
+            // A check-only job runs for a repair code and keeps it whatever failed, so its
+            // Retry stays a check and a rebuild still needs the explicit recovery.
+            ...(payload.checkCheckoutOnly
+              ? {}
+              : {
+                  errorCode:
+                    err instanceof CheckoutRepairNeededError
+                      ? err.code
+                      : payload.recoverCheckout
+                        ? REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED
+                        : null,
+                }),
             statusMessage: message,
             updatedAt: new Date(),
           })

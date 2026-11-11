@@ -112,7 +112,9 @@ const git = async (cwd: string, args: string[]) =>
   ).stdout.trim();
 let root: string;
 let shim: FakeGit | null = null;
-const row: { status: string; statusMessage?: string } = { status: 'ready' };
+const row: { status: string; statusMessage?: string; errorCode?: string | null } = {
+  status: 'ready',
+};
 const db = {
   execute: async () => {},
   query: {
@@ -144,6 +146,7 @@ beforeEach(async () => {
   h.seed.mockResolvedValue(undefined);
   h.restore.mockReset().mockResolvedValue(undefined);
   delete row.statusMessage;
+  delete row.errorCode;
   h.persist.mockImplementation(async (_db, _id, _dest, note) => {
     row.status = 'ready';
     row.statusMessage = note;
@@ -223,12 +226,15 @@ it.each([false, true])(
   'a git read that never finished does not tell the user to repair the checkout (check only: %s)',
   async (checkCheckoutOnly) => {
     const { dest, payload } = await fixture();
+    row.errorCode = 'source_repair_needed';
     shim = await killGit(['rev-parse', '--show-cdup']);
     await expect(runRefresh({ ...payload, checkCheckoutOnly })).rejects.toThrow(
       /^Not refreshed: the checkout could not be examined \(.*SIGKILL.*\)\. Nothing was moved\.$/,
     );
     expect(row.status).toBe('error');
     expect(row.statusMessage).not.toContain('Retry cannot help');
+    // A check-only job keeps the repair code it was started for, so Retry cannot rebuild.
+    expect(row.errorCode).toBe(checkCheckoutOnly ? 'source_repair_needed' : null);
     await shim.restore();
     shim = null;
     expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
@@ -239,12 +245,13 @@ it.each(['HEAD', '.git'] as const)(
   'Check repair leaves an unusable checkout with missing %s untouched',
   async (missing) => {
     const { dest, payload } = await fixture();
+    row.errorCode = 'source_repair_needed';
     await rm(path.join(dest, missing === 'HEAD' ? '.git/HEAD' : '.git'), { recursive: true });
     expect(await usableCheckout(dest)).toBe('unusable');
     await expect(runRefresh({ ...payload, checkCheckoutOnly: true })).rejects.toThrow(
       /checkout.*repair/i,
     );
-    expect(row).toMatchObject({ status: 'error', errorCode: 'checkout_repair_needed' });
+    expect(row).toMatchObject({ status: 'error', errorCode: 'source_repair_needed' });
     expect(await readdir(path.dirname(dest))).toEqual(['r1']);
     expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
     expect(
