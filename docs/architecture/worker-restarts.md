@@ -325,9 +325,9 @@ like any other. While the system drains or is in maintenance (`refusesNewWork`, 
 cache early in the job and again in the transaction that reopens the task, under the shared new-work
 fence a drain's write waits for) that exception closes, as does the fix-loop gate one below: the answer
 stays stored on its row and the advance is dropped, so an answer accepted while the task was live
-cannot reopen it during a drain. The early read fails open on an error other than a configuration outage, since it only decides
-whether to try; an outage reads as `'unreadable'`, which `holdsNewWork` counts as held, so the
-advance is dropped and the answer stays on its row; the
+cannot reopen it during a drain. Any error on the early read reads as `'unreadable'`, which `holdsNewWork` counts as held: the advance
+throws `MaintenanceStateUnreadable` before it writes, and the allowance auto-resume skips that task
+with a warning and goes on to the next armed one; the
 read under the fence fails closed: a state it cannot read writes nothing and throws
 `MaintenanceStateUnreadable`; that, like a revival that met a busy lock (`RevivalBusy`), moves the
 job to delayed for 30 s without failing the task or spending an attempt, and it is retried with the
