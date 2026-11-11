@@ -23,7 +23,7 @@ import {
 import type { TreeNode } from '@haive/shared';
 import { REPOSITORY_ERROR_CODES } from '@haive/shared/constants';
 import { api, API_BASE_URL, type Repository } from '@/lib/api-client';
-import { Badge, Card, CardHeader, CardTitle, CardDescription } from '@/components/ui';
+import { Badge, Button, Card, CardHeader, CardTitle, CardDescription } from '@/components/ui';
 import { DirectoryTreeSelect } from '@/components/directory-tree-select';
 import { UpgradeAvailableBanner } from '@/components/upgrade-available-banner';
 import { ProjectStateConflictsBanner } from '@/components/project-state-conflicts-banner';
