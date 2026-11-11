@@ -457,8 +457,13 @@ the override (a text, an empty override or a deletion) is deferred: the sync lea
 base and the record as they were, and 02's or 04's own record write reports `recordWrite:
 'deferred'` and keeps its owed write dirty with the context it was approved with. The task-end resync
 (`resyncAfterTaskEnd`, on completion, failure, cancel, stop and the dead-task paths) then imports the
-override and writes the record, so a 02 retry no longer refuses its plan. The rules region in
-AGENTS.md still holds the old override until the next upgrade offers it as a `clean_update`. A
+override and writes the record, so a 02 retry no longer refuses its plan. When that import moves the
+override, the resync also re-renders the AGENTS.md rules region from the new column under the
+checkout guards (`project-state/task-end-rules.ts`) and records it as a `backfill` row, so the next
+upgrade reads the region as current and a rollback does not claim it; a task end that imports no
+override leaves AGENTS.md untouched. A refused write (another holder, a git operation, the file
+changed since it was read) is logged and left for the next upgrade to offer. The re-rendered file is
+written to the checkout only, uncommitted, like every refresh write. A
 deferred write retires no legacy mirror and no `.haive/install.json`, and neither does the
 task-end resync or any other refresh (the sweep, the boot mark, the observer, a Save): the legacy
 mirrors wait for the next successful 12 or 02 record write, and `.haive/install.json` for the next
