@@ -6,6 +6,7 @@ import { bundleReplacementSchema, type BundleReplacement } from '@haive/shared/s
 import {
   fileIdentity,
   lstatNoFollow,
+  isPathContainmentError,
   openDirNoFollow,
   readFileNoFollow,
   removeNoFollow,
@@ -13,8 +14,8 @@ import {
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 
-/** A replacement record that was read but does not parse: no later read will do better, so the
- *  bundle is failed rather than left for a retry. An I/O error stays a plain error, left to retry. */
+/** A malformed record or refused record leaf cannot supply the saved choice, so the bundle
+ *  is failed rather than left for a retry. An I/O error stays a plain error, left to retry. */
 export class ReplacementRecordUnreadable extends Error {
   constructor(cause: unknown) {
     super('the bundle replacement record could not be parsed', { cause });
@@ -29,9 +30,20 @@ export async function readReplacement(
   root: string,
   archiveRel: string,
 ): Promise<BundleReplacement | null> {
-  const saved = await readFileNoFollow(root, `${archiveRel}.replacement.json`, {
+  const recordRel = `${archiveRel}.replacement.json`;
+  const saved = await readFileNoFollow(root, recordRel, {
     maxBytes: 8192,
     strict: true,
+  }).catch((err: unknown) => {
+    // A refused leaf cannot become a valid record on a later tick. Leave real I/O faults
+    // retryable, and never follow or remove a refused leaf to recover its contents.
+    if (
+      isPathContainmentError(err) &&
+      err.at === recordRel &&
+      (err.reason === 'link' || err.reason === 'not-regular-file')
+    )
+      throw new ReplacementRecordUnreadable(err);
+    throw err;
   });
   if (!saved) return null;
   try {

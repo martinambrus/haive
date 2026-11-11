@@ -265,32 +265,44 @@ describe('handleIngestZip', () => {
     expect(tx).not.toHaveBeenCalled();
   });
 
-  it('fails a bundle whose replacement record does not parse, keeping the old tree and items', async () => {
-    const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');
-    const fake = createFakeDb({
-      customBundles: schema.customBundles,
-      customBundleItems: schema.customBundleItems,
-    });
-    const fixture = await seedCrashedReplacement(tmpRoot, fake, 'before extract');
-    const items = structuredClone(fake.rows(schema.customBundleItems));
-    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
-    await writeFile(`${fixture.archivePath}.replacement.json`, '{invalid json');
+  it.each(['invalid JSON', 'directory', 'symlink'])(
+    'fails a bundle with a refused replacement record: %s',
+    async (fault) => {
+      const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');
+      const fake = createFakeDb({
+        customBundles: schema.customBundles,
+        customBundleItems: schema.customBundleItems,
+      });
+      const fixture = await seedCrashedReplacement(tmpRoot, fake, 'before extract');
+      const items = structuredClone(fake.rows(schema.customBundleItems));
+      vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const record = `${fixture.archivePath}.replacement.json`;
+      if (fault === 'invalid JSON') await writeFile(record, '{invalid json');
+      else {
+        await rm(record);
+        if (fault === 'directory') await mkdir(record);
+        else {
+          const { symlink } = await import('node:fs/promises');
+          await symlink(path.join(fixture.dest, 'old.md'), record);
+        }
+      }
 
-    const error = await handleIngestZip(
-      fixture.payload,
-      fake.db as unknown as Database,
-      tmpRoot,
-    ).catch((err: unknown) => err);
+      const error = await handleIngestZip(
+        fixture.payload,
+        fake.db as unknown as Database,
+        tmpRoot,
+      ).catch((err: unknown) => err);
 
-    expect(error).toBeInstanceOf(recovery.ReplacementRecordUnreadable);
-    expect(fake.rows(schema.customBundles)[0]).toMatchObject({
-      status: 'failed',
-      lastSyncError: recovery.UNREADABLE_REPLACEMENT_ERROR,
-      lastReplacementNote: null,
-    });
-    expect(fake.rows(schema.customBundleItems)).toEqual(items);
-    expect(await readFile(path.join(fixture.dest, 'old.md'), 'utf8')).toBe('old tree');
-  });
+      expect(error).toBeInstanceOf(recovery.ReplacementRecordUnreadable);
+      expect(fake.rows(schema.customBundles)[0]).toMatchObject({
+        status: 'failed',
+        lastSyncError: recovery.UNREADABLE_REPLACEMENT_ERROR,
+        lastReplacementNote: null,
+      });
+      expect(fake.rows(schema.customBundleItems)).toEqual(items);
+      expect(await readFile(path.join(fixture.dest, 'old.md'), 'utf8')).toBe('old tree');
+    },
+  );
 
   it.each(['restore I/O'])(
     'leaves the bundle unchanged and logs a recovery fault: %s',
