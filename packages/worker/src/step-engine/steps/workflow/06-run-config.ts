@@ -20,7 +20,7 @@ import { resolveTaskReviewDimensions } from '../../review-dimension-context.js';
 
 // Run configuration — split out of 06-gate-1-spec-approval so the spec approve/reject
 // decision stays uncluttered (a reject revises back to 04 and never reaches this step).
-// Runs only after the spec is approved, before 06a-db-migrate (the first consumer of the
+// The built-in workflow runs it after spec approval, before 06a-db-migrate (the first consumer of the
 // pre-answers it writes). Always gated — the user decides the run config every time; it
 // never auto-submits. Records the front-loaded answers for the hands-free stretch to
 // Gate 2 into tasks.pre_answers + the task run-config columns.
@@ -142,7 +142,7 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
     index: 6.05,
     title: 'Run configuration',
     description:
-      'Configure the implementation and verification run (adversarial QA, code simplification, sprint mode, verify/browser/test options) applied hands-free from here until Gate 2. Shown only after the spec is approved.',
+      'Configure the implementation and verification run (adversarial QA, code simplification, sprint mode, verify/browser/test options) applied hands-free from here until Gate 2. Uses the specification when available.',
     requiresCli: false,
   },
 
@@ -514,6 +514,19 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
       '08e-insights-triage': { selectedInsights: [] },
     };
 
+    // Creation copied the type presets through normalizeStepFormValues. This step
+    // is their only later writer: keep unrelated steps and fields, with this submitted
+    // run configuration taking precedence on the exact fields it controls. Empty
+    // 06a/07 entries must not erase a type's migration or implementation guidance.
+    const task = await ctx.db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, ctx.taskId),
+      columns: { preAnswers: true },
+    });
+    const mergedPreAnswers = { ...task?.preAnswers };
+    for (const [stepId, answers] of Object.entries(preAnswers)) {
+      mergedPreAnswers[stepId] = { ...mergedPreAnswers[stepId], ...answers };
+    }
+
     await ctx.db
       .update(schema.tasks)
       .set({
@@ -523,7 +536,7 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
         maxFixRounds: runConfig.maxFixRounds,
         exposeDbPort: runConfig.exposeDbPort,
         reviewDimensions: runConfig.reviewDimensions,
-        preAnswers,
+        preAnswers: mergedPreAnswers,
         updatedAt: new Date(),
       })
       .where(eq(schema.tasks.id, ctx.taskId));

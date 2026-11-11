@@ -254,6 +254,29 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
     loopTargetStepId: '04-phase-0b-pre-planning',
   },
   {
+    stepId: '06-run-config',
+    label: 'Run configuration',
+    group: 'build',
+    dispatchesCli: true,
+    // Spec, worktree and runtime inputs are optional probes, with empty fallbacks.
+    // No consumer requires this step: types may use presets without a config form.
+    requires: [],
+    provides: [],
+    // These steps consume the downstream answers or task-level review/run settings.
+    // Worktree, discovery and spec do not consume the answers 06 writes, and run
+    // before 06 in the shipped workflow. Sprint/browser/insights are not catalogued.
+    precedes: [
+      'db-migrated',
+      'implementation',
+      'reconciled',
+      'validation',
+      'tests',
+      'verification',
+      'review',
+      'commit',
+    ],
+  },
+  {
     stepId: IMPLEMENT,
     label: 'Phase 2: Implement',
     group: 'build',

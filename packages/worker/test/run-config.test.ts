@@ -39,9 +39,13 @@ function leafFields(schema: FormSchema): Map<string, Record<string, unknown>> {
   return map;
 }
 
-function makeApplyCtx(): { ctx: StepContext; sets: Record<string, unknown>[] } {
+function makeApplyCtx(preAnswers: Record<string, Record<string, unknown>> | null = null): {
+  ctx: StepContext;
+  sets: Record<string, unknown>[];
+} {
   const sets: Record<string, unknown>[] = [];
   const db = {
+    query: { tasks: { findFirst: async () => ({ preAnswers }) } },
     update: () => ({
       set: (v: Record<string, unknown>) => {
         sets.push(v);
@@ -200,6 +204,26 @@ describe('06-run-config server-side validation', () => {
 });
 
 describe('06-run-config apply', () => {
+  it('keeps custom presets and unrelated downstream fields while submitted config wins', async () => {
+    const { ctx, sets } = makeApplyCtx({
+      '06-run-config': { browserMode: 'interactive' },
+      '01-worktree-setup': { branchName: 'feature/custom' },
+      '06a-db-migrate': { command: 'custom migrate' },
+      '07-phase-2-implement': { guidance: 'keep this' },
+      '08-phase-5-verify': { runTest: true, extra: 'keep too' },
+      '11a-gate-4-push': { remoteUrl: 'https://example.com/repo.git' },
+    });
+    await runConfigStep.apply(ctx, applyArgs({ verifyRunTest: false }));
+    expect(sets[0]!.preAnswers).toMatchObject({
+      '06-run-config': { browserMode: 'interactive' },
+      '01-worktree-setup': { branchName: 'feature/custom' },
+      '06a-db-migrate': { command: 'custom migrate' },
+      '07-phase-2-implement': { guidance: 'keep this' },
+      '08-phase-5-verify': { runTest: false, extra: 'keep too' },
+      '11a-gate-4-push': { remoteUrl: 'https://example.com/repo.git' },
+    });
+  });
+
   it('writes the chosen review dimensions to the task row', async () => {
     const { ctx, sets } = makeApplyCtx();
     const out = await runConfigStep.apply(

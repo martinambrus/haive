@@ -16,9 +16,35 @@ const replace = (stepId: string, patch: Partial<ComposableStepEntry>): Composabl
 describe('core composable catalog', () => {
   beforeAll(() => registerStepsOnce());
 
-  it('holds the 34 curated steps and passes the assert on the real registry', () => {
-    expect(CORE_COMPOSABLE_STEPS).toHaveLength(34);
+  it('holds the 35 curated steps and passes the assert on the real registry', () => {
+    expect(CORE_COMPOSABLE_STEPS).toHaveLength(35);
     expect(() => assertCoreComposableCatalog(stepRegistry)).not.toThrow();
+  });
+
+  it('accepts run configuration before implementation without requiring a spec or runtime', () => {
+    expect(
+      validateComposition(
+        [
+          '06-run-config',
+          '01-worktree-setup',
+          '07-phase-2-implement',
+          '08b-test-management',
+          '08-phase-5-verify',
+        ],
+        catalog,
+      ),
+    ).toEqual([]);
+  });
+
+  it.each([
+    ['01-worktree-setup', '07-phase-2-implement'],
+    ['01-worktree-setup', '07-phase-2-implement', '08b-test-management'],
+    ['01-worktree-setup', '07-phase-2-implement', '08-phase-5-verify'],
+    ['01-worktree-setup', '01c-ddev-env', '01c1-restore-database', '06a-db-migrate'],
+  ])('refuses run configuration after a consumer: %j', (...order) => {
+    expect(validateComposition([...order, '06-run-config'], catalog)).toContainEqual(
+      expect.objectContaining({ kind: 'too-late', stepId: '06-run-config' }),
+    );
   });
 
   it('flags exactly the steps whose stored output is purely agent-authored', () => {

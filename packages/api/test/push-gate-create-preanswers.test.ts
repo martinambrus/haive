@@ -14,6 +14,7 @@ vi.mock('../src/middleware/auth.js', () => ({
   requireAdmin: async (_c: unknown, next: () => Promise<void>) => next(),
 }));
 import { Hono } from 'hono';
+import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { configService } from '@haive/shared';
@@ -171,4 +172,47 @@ it.each([
     (fake.rows(schema.tasks)[0]!.preAnswers as Record<string, Record<string, unknown>>)[GATE]
       ?.remoteUrl,
   ).toBe(remoteUrl);
+});
+
+it('creates a custom type with run configuration and copies all its presets into the task', async () => {
+  setup('https://example.test/repo');
+  const config: ComposableStepEntry = {
+    stepId: '06-run-config',
+    label: 'Run configuration',
+    group: 'build',
+    dispatchesCli: true,
+    requires: [],
+    provides: [],
+    precedes: ['commit'],
+  };
+  fake.insert(schema.stepCatalog, {
+    stepId: config.stepId,
+    source: 'core',
+    title: config.label,
+    dispatchesCli: true,
+    composable: true,
+    entry: config,
+  });
+  const definition = fake.rows(schema.taskTypeDefinitions)[0]!;
+  definition.stepIds = ['06-run-config', ...entries.map((e) => e.stepId)];
+  definition.preAnswerDefaults = {
+    ...(definition.preAnswerDefaults as Record<string, Record<string, unknown>>),
+    '06-run-config': { browserMode: 'skip', verifyRunTest: false },
+  };
+  expect(
+    validateComposition(
+      definition.stepIds as string[],
+      new Map([config, ...entries].map((entry) => [entry.stepId, entry])),
+    ),
+  ).toEqual([]);
+  await fake.db
+    .update(schema.taskTypeDefinitions)
+    .set({
+      stepIds: definition.stepIds as string[],
+      preAnswerDefaults: definition.preAnswerDefaults as Record<string, Record<string, unknown>>,
+    })
+    .where(eq(schema.taskTypeDefinitions.slug, 'credential-push'));
+  expect((await create()).status).toBe(201);
+  expect(fake.rows(schema.tasks)[0]!.preAnswers).toEqual(definition.preAnswerDefaults);
+  expect(fake.rows(schema.tasks)[0]!.runListSnapshot).toContain('06-run-config');
 });
