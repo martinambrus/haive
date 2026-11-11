@@ -1384,9 +1384,8 @@ taskRoutes.post('/:id/action', async (c) => {
       // or another cancel may have ended the task meanwhile, so it is decided again under the locks.
       const result = await db.transaction((tx) => cancelTaskIfOpen(tx, id, { by: userId }));
       if (!result.cancelled) return c.json({ ok: true, status: result.status });
-      // Cancelling a paused task must not leave the hold behind: the step-retry endpoint has
-      // no status guard, so a cancelled task is still resumable, and a stale paused_at would
-      // silently park it again the moment someone revived it.
+      // Cancel ends the pause as well. Step actions refuse cancelled tasks through
+      // unendedTask in steps.ts; clearing this marker records that no hold remains.
       await clearTaskPause(db, id);
       await enqueueCancelJob(id, userId);
       return c.json({ ok: true, status: 'cancelled' });

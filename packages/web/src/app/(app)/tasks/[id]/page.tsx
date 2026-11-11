@@ -3652,7 +3652,7 @@ function StepCardImpl({
   const globalPaused = useGlobalPause();
   // A locked pause takes the same neutral copy: the stored per-task line tells the viewer to resume it.
   const park = parkBanner(step, { taskEnded, paused: globalPaused || pauseLocked, dead: taskDead });
-  const failure = failureBanner(step);
+  const failure = failureBanner(step, { taskStatus });
   // The live browser/VNC needs a running task runtime; once the task is completed or
   // cancelled that runtime is torn down (cleanup/teardown), so hide the browser
   // panels entirely instead of letting them reconnect to nothing (WebSocket 1006

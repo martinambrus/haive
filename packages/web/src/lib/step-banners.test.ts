@@ -677,3 +677,35 @@ describe('leftCommittedMergeBanner', () => {
     expect(leftCommittedMergeBanner([], { taskStatus: 'cancelled' })).toBeNull();
   });
 });
+
+describe('cancelled step-12 push failure copy', () => {
+  const failedPush = {
+    ...step({
+      status: 'failed',
+      errorMessage:
+        'Merge committed, but push failed. The merge is saved locally — retry the push.',
+    }),
+    stepId: '12-worktree-cleanup',
+    mergeResolveState: { phase: 'pushing', baseBranch: 'main', pushed: false },
+  };
+  it('offers a manual push on a cancelled task rather than an impossible retry', () => {
+    const banner = failureBanner(failedPush, { taskStatus: 'cancelled' });
+    expect(banner?.text).not.toContain('retry');
+    expect(banner?.text).toContain('Push `main` manually');
+  });
+  it('uses structural state even if the error wording changes, and keeps live-task diagnosis', () => {
+    expect(
+      failureBanner(
+        { ...failedPush, errorMessage: 'origin unavailable' },
+        { taskStatus: 'cancelled' },
+      )?.text,
+    ).toContain('Push `main` manually');
+    expect(failureBanner(failedPush, { taskStatus: 'failed' })?.text).toBe(failedPush.errorMessage);
+    expect(
+      failureBanner({ ...failedPush, status: 'done' }, { taskStatus: 'cancelled' }),
+    ).toBeNull();
+    expect(
+      failureBanner({ ...failedPush, stepId: 'other' }, { taskStatus: 'cancelled' })?.text,
+    ).toBe(failedPush.errorMessage);
+  });
+});
