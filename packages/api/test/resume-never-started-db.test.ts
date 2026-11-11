@@ -86,6 +86,7 @@ const expectAbout = (what: string, actual: number, expected: number) => {
 
 describe.skipIf(!url)('re-opening a failed step that never started, on Postgres', () => {
   let db: Database;
+  let repositoryId: string;
   /** Runs once inside the next `transaction` call, before it starts: the moment after the route
    *  has read the row and before it writes. */
   let beforeTransaction: (() => Promise<void>) | undefined;
@@ -111,6 +112,7 @@ describe.skipIf(!url)('re-opening a failed step that never started, on Postgres'
       .insert(schema.tasks)
       .values({
         userId: USER,
+        repositoryId,
         type: 'workflow',
         title: 'resume-never-started',
         status,
@@ -170,6 +172,11 @@ describe.skipIf(!url)('re-opening a failed step that never started, on Postgres'
       passwordHash: 'not-real',
       role: 'user',
     });
+    const [repository] = await db
+      .insert(schema.repositories)
+      .values({ userId: USER, name: 'resume-never-started', source: 'local_path', status: 'ready' })
+      .returning({ id: schema.repositories.id });
+    repositoryId = repository!.id;
   });
 
   beforeEach(async () => {

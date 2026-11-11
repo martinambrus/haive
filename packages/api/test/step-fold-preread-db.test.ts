@@ -132,6 +132,7 @@ describe.skipIf(!url)(
   'step folds and the CLI switch beside a peer that changes the row after the writer read it, on Postgres',
   () => {
     let db: Database;
+    let repositoryId: string;
     let peer: Database;
     let providerId: string;
 
@@ -147,6 +148,11 @@ describe.skipIf(!url)(
         passwordHash: 'not-real',
         role: 'user',
       });
+      const [repository] = await db
+        .insert(schema.repositories)
+        .values({ userId: USER, name: 'step-fold-preread', source: 'local_path', status: 'ready' })
+        .returning({ id: schema.repositories.id });
+      repositoryId = repository!.id;
       const [provider] = await db
         .insert(schema.cliProviders)
         .values({ userId: USER, name: 'claude-code', label: 'step fold pre-read', enabled: true })
@@ -174,6 +180,7 @@ describe.skipIf(!url)(
         .insert(schema.tasks)
         .values({
           userId: USER,
+          repositoryId,
           type: 'workflow',
           title: 'step fold pre-read',
           status,

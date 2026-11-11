@@ -194,6 +194,7 @@ const NO_WAIT = 'adds no wait (pin: a missing marker is a wait of 0, not headroo
 
 describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, on Postgres', () => {
   let db: Database;
+  let repositoryId: string;
   const mergeDirs = new Set<string>();
 
   const post = (path: string, body?: unknown) =>
@@ -211,6 +212,7 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
       .insert(schema.tasks)
       .values({
         userId: USER,
+        repositoryId,
         type: 'workflow',
         title: 'park-fold',
         status,
@@ -262,6 +264,11 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
       passwordHash: 'not-real',
       role: 'user',
     });
+    const [repository] = await db
+      .insert(schema.repositories)
+      .values({ userId: USER, name: 'park-fold', source: 'local_path', status: 'ready' })
+      .returning({ id: schema.repositories.id });
+    repositoryId = repository!.id;
   });
 
   beforeEach(async () => {

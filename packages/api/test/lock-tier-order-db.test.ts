@@ -220,6 +220,7 @@ describe.skipIf(!url)(
   'the fan-out Resume and the late sweep beside peers that take runs, minings and step rows in the Retry order, on Postgres',
   () => {
     let db: Database;
+    let repositoryId: string;
     let peer: Database;
 
     beforeAll(async () => {
@@ -234,6 +235,11 @@ describe.skipIf(!url)(
         passwordHash: 'not-real',
         role: 'user',
       });
+      const [repository] = await db
+        .insert(schema.repositories)
+        .values({ userId: USER, name: 'lock-tier-order', source: 'local_path', status: 'ready' })
+        .returning({ id: schema.repositories.id });
+      repositoryId = repository!.id;
     });
 
     beforeEach(async () => {
@@ -256,6 +262,7 @@ describe.skipIf(!url)(
         .insert(schema.tasks)
         .values({
           userId: USER,
+          repositoryId,
           type: 'workflow',
           title: 'lock tier order',
           status,
