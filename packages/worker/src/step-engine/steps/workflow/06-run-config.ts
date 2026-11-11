@@ -21,11 +21,13 @@ import { resolveTaskReviewDimensions } from '../../review-dimension-context.js';
 // Run configuration — split out of 06-gate-1-spec-approval so the spec approve/reject
 // decision stays uncluttered (a reject revises back to 04 and never reaches this step).
 // The built-in workflow runs it after spec approval, before 06a-db-migrate (the first consumer of the
-// pre-answers it writes). Always gated — the user decides the run config every time; it
-// never auto-submits. Records the front-loaded answers for the hands-free stretch to
+// pre-answers it writes). Waits for the user unless the type supplies a 06 preset,
+// which auto-submits it. Records the front-loaded answers for the hands-free stretch to
 // Gate 2 into tasks.pre_answers + the task run-config columns.
 
 interface RunConfigDetect {
+  /** Downstream answers mapped back to form fields; absent on older detect payloads. */
+  preAnswerDefaults?: Record<string, unknown>;
   /** Approved spec body (markdown), used only to ground the recommendation LLM. */
   specBody: string;
   /** Whether the workspace has a .ddev config — gates the mcp/interactive
@@ -196,6 +198,7 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
         maxFixRounds: true,
         executionPath: true,
         exposeDbPort: true,
+        preAnswers: true,
       },
     });
     // A null execution_path means triage didn't filter the run (full_workflow): every step runs.
@@ -204,6 +207,14 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
     const verifyCommands = await loadDeclaredVerifyCommands(ctx.db, ctx.taskId, ctx.logger);
 
     return {
+      preAnswerDefaults: Object.fromEntries(
+        Object.entries(ANSWER_FIELDS).flatMap(([stepId, fields]) =>
+          Object.entries(fields).flatMap(([key, source]) => {
+            const value = taskRow?.preAnswers?.[stepId]?.[key];
+            return value === undefined ? [] : [[source, value]];
+          }),
+        ),
+      ),
       specBody,
       ddevMode,
       appRunnerMode,
@@ -307,7 +318,7 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
           detected.ddevMode || detected.appRunnerMode ? 'mcp' : 'skip',
         )
       : null;
-    return {
+    const form: FormSchema = {
       title: 'Run configuration',
       description:
         'Set how the implementation and verification steps run — these answers let them run hands-free until Gate 2 (developer verification). Sensible defaults are pre-filled (with an AI recommendation where available); adjust as needed.',
@@ -470,6 +481,23 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
       ],
       submitLabel: 'Save run configuration',
     };
+    // A Save submits every displayed default. Show downstream presets so an
+    // untouched control cannot silently replace them, but keep unavailable choices out.
+    form.fields = form.fields.map((field): FormField => {
+      const value = detected.preAnswerDefaults?.[field.id];
+      if (field.type === 'checkbox' && typeof value === 'boolean') {
+        return { ...field, default: value };
+      }
+      if (
+        (field.type === 'radio' || field.type === 'select') &&
+        typeof value === 'string' &&
+        field.options.some((option) => option.value === value)
+      ) {
+        return { ...field, default: value };
+      }
+      return field;
+    });
+    return form;
   },
 
   async apply(ctx, args): Promise<RunConfig> {
