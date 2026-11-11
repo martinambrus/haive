@@ -788,7 +788,7 @@ export async function foldCoverageResults(
         await recordCodeLinksDropped(ctx, result.agentId, applied.strippedCodeLinks);
       }
     } catch (err) {
-      // Contention can retry the saved reply; it is not a reason to re-prompt an agent.
+      // Busy retries are exhausted; fail this pass before classifying the reply as unusable.
       if (err instanceof PlanPatchError && err.kind === 'busy') throw err;
       hadFailure = true;
       const message = err instanceof Error ? err.message : String(err);

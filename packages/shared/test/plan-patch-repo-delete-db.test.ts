@@ -16,6 +16,7 @@ import {
 } from '../src/plan/apply-patch.js';
 import { PlanPatchError } from '../src/plan/errors.js';
 import { planNodePath } from '../src/plan/paths.js';
+import { lockPlanPatch, tryLockPlanPatch } from '../src/plan/patch-lock.js';
 
 const url = process.env.PLAN_PATCH_REPO_DELETE_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/plan_patch_repo_delete_test'))
@@ -809,6 +810,31 @@ describe.skipIf(!url)('a plan patch beside a repository delete, on Postgres', ()
       TEST_TIMEOUT,
     );
 
+    it('uses the same repository key for the blocking and non-blocking plan locks', async () => {
+      const ids = await seedRepository();
+      const other = await seedRepository();
+      const holding = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const holder = peerDb.transaction(async (tx) => {
+        await lockPlanPatch(tx, ids.repositoryId);
+        holding.resolve();
+        await release.promise;
+      });
+      try {
+        await holding.promise;
+        await patchDb.transaction(async (tx) => {
+          expect(await tryLockPlanPatch(tx, ids.repositoryId)).toBe(false);
+          expect(await tryLockPlanPatch(tx, other.repositoryId)).toBe(true);
+        });
+      } finally {
+        release.resolve();
+        await holder;
+      }
+      await patchDb.transaction(async (tx) => {
+        expect(await tryLockPlanPatch(tx, ids.repositoryId)).toBe(true);
+      });
+    });
+
     it(
       'allows an update-only patch while another connection holds the patch lock',
       async () => {
@@ -816,9 +842,7 @@ describe.skipIf(!url)('a plan patch beside a repository delete, on Postgres', ()
         const holding = Promise.withResolvers<void>();
         const release = Promise.withResolvers<void>();
         const holder = peerDb.transaction(async (tx) => {
-          await tx.execute(
-            sql`select pg_advisory_xact_lock(hashtextextended(${`plan-patch:${ids.repositoryId}`}, 0))`,
-          );
+          await lockPlanPatch(tx, ids.repositoryId);
           holding.resolve();
           await release.promise;
         });

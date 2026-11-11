@@ -5,6 +5,8 @@ import { PlanPatchError } from './errors.js';
 
 export const PLAN_PATCH_LOCK_TIMEOUT_MS = 1_000;
 
+const planPatchLockKey = (repositoryId: string): string => `plan-patch:${repositoryId}`;
+
 /**
  * Before any ancestry read or row lock: moving a subtree must exclude a child insert
  * that would otherwise keep its parent's old materialised path. Held until the
@@ -23,11 +25,19 @@ export async function lockPlanPatch(tx: PlanPatchTx, repositoryId: string): Prom
   await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${PLAN_PATCH_LOCK_TIMEOUT_MS}ms'`));
   try {
     await tx.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${`plan-patch:${repositoryId}`}, 0))`,
+      sql`select pg_advisory_xact_lock(hashtextextended(${planPatchLockKey(repositoryId)}, 0))`,
     );
   } catch (err) {
     if (!isLockNotAvailable(err)) throw err;
     throw new PlanPatchError('busy', 'The plan is busy. Try again.');
   }
   await tx.execute(sql.raw('SET LOCAL lock_timeout = DEFAULT'));
+}
+
+/** Non-blocking admission for a prepared reconcile; shares the ancestry writer's key. */
+export async function tryLockPlanPatch(tx: PlanPatchTx, repositoryId: string): Promise<boolean> {
+  const busy = await tx.execute(
+    sql`select 1 where not pg_try_advisory_xact_lock(hashtextextended(${planPatchLockKey(repositoryId)}, 0))`,
+  );
+  return busy.length === 0;
 }

@@ -141,9 +141,7 @@ describe.skipIf(!url)('the plan sweep when a checkout directory is gone', () => 
     const holding = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const holder = peer.transaction(async (tx) => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`plan-patch:${repo.id}`}, 0))`,
-      );
+      await lockPlanPatch(tx, repo.id);
       holding.resolve();
       await release.promise;
     });
@@ -509,9 +507,7 @@ describe.skipIf(!url)('the plan sweep when a checkout directory is gone', () => 
                     if (key !== 'execute') return Reflect.get(transaction, key, transaction);
                     return async (query: Parameters<typeof tx.execute>[0]) => {
                       const compiled = dialect.sqlToQuery(query as ReturnType<typeof sql>);
-                      const patchLock = compiled.params.some(
-                        (p) => typeof p === 'string' && p.startsWith('plan-patch:'),
-                      );
+                      const patchLock = compiled.sql.includes('pg_try_advisory_xact_lock');
                       if (patchLock) await beforeLock?.();
                       const result = await tx.execute(query);
                       if (patchLock) {
@@ -608,9 +604,7 @@ describe.skipIf(!url)('the plan sweep when a checkout directory is gone', () => 
     const holding = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const holder = peer.transaction(async (tx) => {
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`plan-patch:${repo.id}`}, 0))`,
-      );
+      await lockPlanPatch(tx, repo.id);
       holding.resolve();
       await release.promise;
     });

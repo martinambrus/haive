@@ -24,6 +24,7 @@ import {
 import { planMirrorPayloadSchema, planMirrorV2Schema } from '@haive/shared/schemas';
 import {
   lockPlanPatch,
+  tryLockPlanPatch,
   PlanPatchError,
   loadPlanEdges,
   loadPlanNodes,
@@ -1244,10 +1245,7 @@ async function reconcilePlanLocked(
   // the checkout after the writes, inside this transaction. Do not wait here with a
   // judged checkout: contention defers the reconcile, just like a held flush.
   await beforeApply();
-  const busy = await tx.execute(
-    sql`select 1 where not pg_try_advisory_xact_lock(hashtextextended(${`plan-patch:${repositoryId}`}, 0))`,
-  );
-  if (busy.length > 0) throw new PlanMirrorHeldError(HELD_RACED);
+  if (!(await tryLockPlanPatch(tx, repositoryId))) throw new PlanMirrorHeldError(HELD_RACED);
   // A path writer could have committed during preparation. Hash/base writers
   // are serialized by the mirror lock; patches advance revision. Re-read both
   // before any mutation, retaining the existing per-node version fences too.
