@@ -61,7 +61,7 @@ user's explicit consent to move the checkout aside although it could not be prov
 only refresh never rebuilds and, whatever fails, keeps the repair code it was admitted with: a
 checkout still unusable says so, a read that never finished stays a retryable failure, and only the
 recovery rebuilds, keeping this install's data. The
-code clears when an ordinary or recovery preparation starts or detection succeeds. A recovery job first re-checks the checkout: one that is
+code clears when an ordinary preparation starts or detection succeeds; a recovery keeps it until then, so a refresh sent while the recovery is queued or running stays check only, and a preparation stranded by a stop keeps it too. A recovery job first re-checks the checkout: one that is
 usable again (held by a task or not) finishes as an ordinary refresh, moves nothing and clears the
 code. Otherwise it takes the ordinary rebuild path (seed, source proof, move aside, build, verify),
 keeps every repository record and this install's settings, KB and plan data. Before the move it
@@ -80,7 +80,7 @@ incoming `plan.json`/`plan.md` stay for the ordinary first import, and when its 
 null the incoming state files stay for the ordinary sync, so a later Save cannot delete the team's
 files. A restore that reports `superseded` is retried up to three times; any other outcome fails the
 recovery. Any rebuild, recovery or not, is refused with a sentence naming the count while a task of the
-repository that is neither completed nor cancelled has a worktree under the checkout (a `failed`
+repository that is neither completed nor cancelled has a worktree under the checkout (its audit column, else the latest `01-worktree-setup` output for a legacy task; a `failed`
 or `created` one included, since its unpushed commits would move with the tree): the api refuses at
 admission (409), and the worker counts again, together with the holding tasks, under the
 task-creation lock (`lockRepositoryTasksKey`) in the transaction that renames the checkout aside;
