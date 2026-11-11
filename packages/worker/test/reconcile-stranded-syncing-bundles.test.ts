@@ -13,6 +13,7 @@ vi.mock('bullmq', () => ({
 vi.mock('../src/redis.js', () => ({ getBullRedis: () => ({}) }));
 
 const { reconcileStrandedSyncingBundles } = await import('../src/data-migrations.js');
+const { UNREADABLE_REPLACEMENT_ERROR } = await import('../src/repo/bundle-recovery.js');
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000f1';
@@ -120,7 +121,11 @@ describe('reconcileStrandedSyncingBundles', () => {
         await expect(run()).resolves.toBeUndefined();
 
         if (status === 'failed')
-          expect(row(STRANDED)).toMatchObject({ status: 'failed', lastReplacementNote: null });
+          expect(row(STRANDED)).toMatchObject({
+            status: 'failed',
+            lastReplacementNote: null,
+            lastSyncError: UNREADABLE_REPLACEMENT_ERROR,
+          });
         else expect(row(STRANDED)).toEqual(before);
         expect(row(fixture.payload.bundleId)).toMatchObject({
           status: 'active',

@@ -3,6 +3,7 @@ import {
   clearReplacementRecord,
   readReplacement,
   ReplacementRecordUnreadable,
+  UNREADABLE_REPLACEMENT_ERROR,
   restoreReplacementBundle,
 } from './repo/bundle-recovery.js';
 import { seedRepositoryCliTargets } from './project-state/cli-targets-backfill.js';
@@ -547,11 +548,13 @@ export async function reconcileStrandedSyncingBundles(db: Database): Promise<voi
           bundle.sourceType === 'zip' && bundle.archivePath
             ? bundleArchiveRel(root, bundle.archivePath, bundle.userId, bundle.id)
             : null;
+        let unreadableRecord = false;
         const replacement = archiveRel
           ? await readReplacement(root, archiveRel).catch((err: unknown) => {
-              // A record that does not parse never will: fail the bundle below, as for no record.
+              // A record that does not parse never will: fail the bundle below and say why.
               if (!(err instanceof ReplacementRecordUnreadable)) throw err;
               log.warn({ err, bundleId: id }, 'stranded bundle replacement record unreadable');
+              unreadableRecord = true;
               return null;
             })
           : null;
@@ -578,8 +581,9 @@ export async function reconcileStrandedSyncingBundles(db: Database): Promise<voi
           .set({
             status: 'failed',
             lastReplacementNote: null,
-            lastSyncError:
-              'Importing this bundle did not finish: nothing is queued or running for it. Use Resync (git) or Replace ZIP to try again, or remove the bundle.',
+            lastSyncError: unreadableRecord
+              ? UNREADABLE_REPLACEMENT_ERROR
+              : 'Importing this bundle did not finish: nothing is queued or running for it. Use Resync (git) or Replace ZIP to try again, or remove the bundle.',
             updatedAt: new Date(),
           })
           .where(eq(schema.customBundles.id, id));
