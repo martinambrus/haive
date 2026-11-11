@@ -82,6 +82,8 @@ export interface KeptFile {
   mode?: number;
   owner?: { uid: number; gid: number };
   untracked?: boolean;
+  /** Exact durable judge capture; follows this entry through callers' accumulated maps. */
+  capturedMetadata?: KeptMetadata[string];
   parents?: { path: string; owner: { uid: number; gid: number }; mode: number }[];
 }
 export type KeptFiles = Map<string, KeptFile>;
@@ -567,7 +569,10 @@ async function restoreJudged(
     const owner =
       entry?.kind === 'file' ? { uid: entry.stats.uid, gid: entry.stats.gid } : undefined;
     const untracked = (await headEntry(repoPath, path)) === null;
-    captured.set(path, bytes === undefined ? { index } : { bytes, index, mode, owner, untracked });
+    captured.set(path, {
+      ...(bytes === undefined ? { index } : { bytes, index, mode, owner, untracked }),
+      capturedMetadata: judgedMetadata.get(kept)?.[path],
+    });
   }
   // A write landing during the capture would be taken for Haive's: the judged state must still hold.
   for (const path of mine) {

@@ -11,7 +11,11 @@ export type KeptMetadata = NonNullable<MergeResolveState['keptMetadata']>;
 
 export function keptMetadataOf(kept: KeptFiles): KeptMetadata {
   const metadata: KeptMetadata = {};
-  for (const [path, { bytes, owner, mode, untracked, parents }] of kept) {
+  for (const [path, { bytes, owner, mode, untracked, parents, capturedMetadata }] of kept) {
+    if (capturedMetadata) {
+      metadata[path] = capturedMetadata;
+      continue;
+    }
     const entry: KeptMetadata[string] = {};
     if (untracked && Buffer.isBuffer(bytes) && owner && mode !== undefined) {
       entry.owner = owner;

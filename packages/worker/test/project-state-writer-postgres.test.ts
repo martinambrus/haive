@@ -213,6 +213,40 @@ async function diskRecord(root: string, name: string) {
 }
 
 describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
+  it('a copied-map put-back consumes exact captures and preserves a later chmod', async () => {
+    const s = await fixture();
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: s.root });
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.name=T',
+        '-c',
+        'user.email=t@local',
+        'commit',
+        '--allow-empty',
+        '-qm',
+        'initial',
+      ],
+      { cwd: s.root },
+    );
+    await s.write();
+    const rel = '.haive-data/state/project/render.json';
+    await chmod(join(s.root, rel), 0o600);
+    await withProjectionMove(async () => {
+      const aside = await setAsideHaiveProjections(db!, s.repo.id, s.root);
+      expect(aside.outcome).toBe('set-aside');
+      if (aside.outcome !== 'set-aside') throw new Error('expected set-aside');
+      // All accumulated move callers preserve entries but replace the Map itself.
+      const accumulated = new Map(aside.kept);
+      await putBackProjections(db!, s.repo.id, s.root, accumulated);
+    });
+    expect((await s.outbox())!.keptMetadata).toBeNull();
+    await chmod(join(s.root, rel), 0o644);
+    await sweepKeptProjectionMetadata(db!);
+    expect((await stat(join(s.root, rel))).mode & 0o7777).toBe(0o644);
+  });
+
   it.each(['outbox', 'legacy-done'] as const)(
     'recovers %s metadata from PostgreSQL even when projection revisions are clean',
     async (store) => {
