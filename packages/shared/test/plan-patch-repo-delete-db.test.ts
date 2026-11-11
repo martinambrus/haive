@@ -16,6 +16,7 @@ import {
 } from '../src/plan/apply-patch.js';
 import { PlanPatchError } from '../src/plan/errors.js';
 import { planNodePath } from '../src/plan/paths.js';
+import { lockPlanPatch, tryLockPlanPatch } from '../src/plan/patch-lock.js';
 
 const url = process.env.PLAN_PATCH_REPO_DELETE_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/plan_patch_repo_delete_test'))
@@ -723,6 +724,201 @@ describe.skipIf(!url)('a plan patch beside a repository delete, on Postgres', ()
         });
         expect(landed).toHaveLength(1);
         expect((await rowsOf(ids.repositoryId)).repositories).toBe(1);
+      },
+      TEST_TIMEOUT,
+    );
+  });
+
+  describe('plan patch serialization', () => {
+    it(
+      'keeps an inserted child in a concurrently moved subtree',
+      async () => {
+        const ids = await seedRepository();
+        const reached = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        let insertPid = 0;
+        let movePid = 0;
+        let moveEnded: string | undefined;
+        const gated = {
+          transaction: (callback: (tx: Tx) => Promise<unknown>) =>
+            patchDb.transaction(async (tx) => {
+              insertPid = await backendPid(tx);
+              return callback(
+                gateTx(tx, async (text) => {
+                  if (insertsNode.test(text)) {
+                    reached.resolve();
+                    await release.promise;
+                  }
+                }),
+              );
+            }),
+        } as unknown as Database;
+        const insert = settle(
+          applyPlanPatch(
+            gated,
+            {
+              ops: [{ op: 'upsert', nodeRef: 'child', parentRef: ids.a, title: 'Child' }],
+            },
+            userOptions(ids.repositoryId),
+          ),
+        );
+        let move: Promise<Outcome<ApplyPlanPatchResult>> | undefined;
+        try {
+          await Promise.race([
+            reached.promise,
+            insert.then(() => {
+              throw new Error('insert ended before its statement gate');
+            }),
+          ]);
+          move = settle(
+            peerDb.transaction(async (tx) => {
+              movePid = await backendPid(tx);
+              return applyPlanPatch(
+                tx,
+                {
+                  ops: [{ op: 'upsert', nodeRef: ids.a, parentRef: ids.b }],
+                },
+                userOptions(ids.repositoryId),
+              );
+            }),
+          );
+          void move.then((outcome) => {
+            moveEnded = describeOutcome(outcome);
+          });
+          await untilBlocked(
+            'move',
+            () => movePid,
+            () => insertPid,
+            () => moveEnded,
+          );
+        } finally {
+          release.resolve();
+          const outcomes = await Promise.all([insert, move]);
+          for (const outcome of outcomes) if (outcome) expect(outcome.ok).toBe(true);
+        }
+        const inserted = await insert;
+        if (!inserted.ok) throw inserted.error;
+        const child = await db.query.planNodes.findFirst({
+          where: eq(schema.planNodes.id, inserted.value.refs.child!),
+        });
+        const parent = await db.query.planNodes.findFirst({
+          where: eq(schema.planNodes.id, ids.a),
+        });
+        expect(parent?.parentId).toBe(ids.b);
+        expect(child?.path).toBe(planNodePath(parent!.path, child!.id));
+      },
+      TEST_TIMEOUT,
+    );
+
+    it('uses the same repository key for the blocking and non-blocking plan locks', async () => {
+      const ids = await seedRepository();
+      const other = await seedRepository();
+      const holding = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const holder = peerDb.transaction(async (tx) => {
+        await lockPlanPatch(tx, ids.repositoryId);
+        holding.resolve();
+        await release.promise;
+      });
+      try {
+        await holding.promise;
+        await patchDb.transaction(async (tx) => {
+          expect(await tryLockPlanPatch(tx, ids.repositoryId)).toBe(false);
+          expect(await tryLockPlanPatch(tx, other.repositoryId)).toBe(true);
+        });
+      } finally {
+        release.resolve();
+        await holder;
+      }
+      await patchDb.transaction(async (tx) => {
+        expect(await tryLockPlanPatch(tx, ids.repositoryId)).toBe(true);
+      });
+    });
+
+    it(
+      'allows an update-only patch while another connection holds the patch lock',
+      async () => {
+        const ids = await seedRepository();
+        const holding = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        const holder = peerDb.transaction(async (tx) => {
+          await lockPlanPatch(tx, ids.repositoryId);
+          holding.resolve();
+          await release.promise;
+        });
+        try {
+          await holding.promise;
+          const result = await applyPlanPatch(
+            patchDb,
+            {
+              ops: [{ op: 'upsert', nodeRef: ids.a, status: 'done' }],
+            },
+            userOptions(ids.repositoryId),
+          );
+          expect(result.updated).toEqual([ids.a]);
+        } finally {
+          release.resolve();
+          await holder;
+        }
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'bounds a held repository patch lock and keeps it through the outer transaction',
+      async () => {
+        const ids = await seedRepository();
+        const holding = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        const holder = peerDb.transaction(async (tx) => {
+          await applyPlanPatch(
+            tx,
+            {
+              ops: [{ op: 'upsert', nodeRef: ids.a, parentRef: ids.root }],
+            },
+            userOptions(ids.repositoryId),
+          );
+          holding.resolve();
+          await release.promise;
+        });
+        try {
+          await holding.promise;
+          const outcome = await settle(
+            applyPlanPatch(
+              patchDb,
+              {
+                ops: [{ op: 'upsert', nodeRef: ids.a, parentRef: ids.b, title: 'Must not land' }],
+              },
+              userOptions(ids.repositoryId),
+            ),
+          );
+          expect(describeOutcome(outcome)).toContain('PlanPatchError busy');
+          // The holder has not been released: refusal precedes its outer commit.
+          // Contention is per repository, so another plan remains writable.
+          const other = await seedRepository();
+          await applyPlanPatch(
+            patchDb,
+            {
+              ops: [{ op: 'upsert', nodeRef: other.a, title: 'Independent' }],
+            },
+            userOptions(other.repositoryId),
+          );
+        } finally {
+          release.resolve();
+          await holder;
+        }
+        const node = await db.query.planNodes.findFirst({
+          where: eq(schema.planNodes.id, ids.a),
+        });
+        expect(node?.title).toBe('A');
+        // The failed nested savepoint released its settings and locks.
+        await applyPlanPatch(
+          patchDb,
+          {
+            ops: [{ op: 'upsert', nodeRef: ids.a, title: 'Retry landed' }],
+          },
+          userOptions(ids.repositoryId),
+        );
       },
       TEST_TIMEOUT,
     );
