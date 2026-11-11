@@ -14,6 +14,7 @@ import {
   identifierTsvSql,
 } from '../src/rag/identifiers.js';
 import { orphanFacetMajorSql, trimFacetValueSql } from '../src/global-kb/schema.js';
+import { RAG_TEXT_CONFIG_SQL } from '../src/rag/lexical-config.js';
 
 type EnsureConn = Parameters<typeof ensureGlobalKbSchema>[0];
 
@@ -27,6 +28,8 @@ const pgError = (code: string) => Object.assign(new Error(`SQLSTATE ${code}`), {
 function fakeConn(
   opts: {
     vectorThrows?: string;
+    unaccentThrows?: string;
+    lexicalFailure?: { match: string; code: string };
     lockThrowsOnce?: string;
     hnswThrows?: boolean;
     columnType?: string;
@@ -44,7 +47,9 @@ function fakeConn(
   let unstamped = opts.unstampedRows ?? 0;
   const backfillParams: unknown[][] = [];
   const captured: string[] = [];
+  const configs = new Set<string>();
   let lockFailure = opts.lockThrowsOnce;
+  let lexicalFailure = opts.lexicalFailure;
   const tag = (strings: TemplateStringsArray) => {
     const q = strings.join('');
     captured.push(q);
@@ -61,6 +66,22 @@ function fakeConn(
   const tx = Object.assign(tag, {
     unsafe: (q: string, params?: unknown[]) => {
       captured.push(q);
+      if (lexicalFailure && q.includes(lexicalFailure.match)) {
+        const { code } = lexicalFailure;
+        lexicalFailure = undefined;
+        return Promise.reject(pgError(code));
+      }
+      if (q.includes('CREATE EXTENSION IF NOT EXISTS unaccent') && opts.unaccentThrows) {
+        return Promise.reject(pgError(opts.unaccentThrows));
+      }
+      if (q.startsWith('SELECT c.oid AS config')) {
+        const name = /cfgname = '([^']+)'/.exec(q)![1]!;
+        return Promise.resolve([{ config: configs.has(name) ? name : null }]);
+      }
+      if (q.includes('CREATE TEXT SEARCH CONFIGURATION')) {
+        configs.add(/CONFIGURATION ([^\s]+)/.exec(q)![1]!);
+      }
+      if (q.includes('AS dictionary')) return Promise.resolve([{ dictionary: 'public.unaccent' }]);
       if (q.includes('SET content = content')) {
         backfillParams.push(params ?? []);
         if (opts.backfillThrows) return Promise.reject(new Error('statement timeout'));
@@ -120,6 +141,46 @@ function fakeConn(
 }
 
 describe('ensureGlobalKbSchema', () => {
+  it.each(['42501', '58P01', '0A000'])(
+    'records a verbatim fallback and warns once if unaccent is unavailable (%s)',
+    async (code) => {
+      logged.warn.mockClear();
+      const { conn, queries } = fakeConn({ unaccentThrows: code });
+      await ensureGlobalKbSchema(conn);
+      await ensureGlobalKbSchema(conn);
+      expect(queries()).toContain('CREATE TEXT SEARCH CONFIGURATION haive_english_verbatim_v1');
+      expect(queries()).not.toContain('CREATE TEXT SEARCH CONFIGURATION haive_english_unaccent_v1');
+      expect(logged.warn).toHaveBeenCalledTimes(1);
+      expect(logged.warn.mock.calls[0]![0]).toMatchObject({ err: { code } });
+    },
+  );
+
+  it.each(
+    ['55P03', '57014', '42710', 'XX000'].flatMap((code) =>
+      ['SELECT c.oid AS config', 'CREATE TEXT SEARCH CONFIGURATION'].map((match) => ({
+        code,
+        match,
+      })),
+    ),
+  )(
+    'does not record unavailability for a transient lexical failure ($code, $match)',
+    async ({ code, match }) => {
+      logged.warn.mockClear();
+      const { conn, queries } = fakeConn({ lexicalFailure: { code, match } });
+      await expect(ensureGlobalKbSchema(conn)).resolves.toMatchObject({ usedPgvector: true });
+      expect(queries()).not.toContain('CREATE TEXT SEARCH CONFIGURATION haive_english_verbatim_v1');
+      expect(logged.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.objectContaining({ code }) }),
+        expect.stringContaining('configuration setup failed'),
+      );
+      expect(logged.warn.mock.calls.every(([, message]) => !message.includes('unavailable'))).toBe(
+        true,
+      );
+      await ensureGlobalKbSchema(conn);
+      expect(queries()).toContain('CREATE TEXT SEARCH CONFIGURATION haive_english_unaccent_v1');
+    },
+  );
+
   it('creates both tables, the upsert key, facet indexes, checks, and trigger (pgvector path)', async () => {
     const { conn, queries } = fakeConn();
     const res = await ensureGlobalKbSchema(conn);
@@ -317,6 +378,13 @@ describe('ensureGlobalKbSchema', () => {
       ['ALTER TABLE global_kb_entries DROP', 'ALTER TABLE global_kb_entries ADD'],
       ['SELECT 1 FROM pg_trigger', 'CREATE TRIGGER trg_global_kb_clear_enforced_hash BEFORE'],
       [
+        'SELECT c.oid AS config',
+        "SELECT format('%I.unaccent', n.nspname) AS",
+        'CREATE TEXT SEARCH CONFIGURATION',
+        'ALTER TEXT SEARCH CONFIGURATION',
+        'ALTER TEXT SEARCH CONFIGURATION',
+      ],
+      [
         "SELECT tgattr::text = ''",
         'DROP TRIGGER IF EXISTS',
         'CREATE TRIGGER trg_global_content_tsv BEFORE',
@@ -510,7 +578,7 @@ describe('ensureGlobalKbSchema', () => {
       /CREATE OR REPLACE FUNCTION update_content_tsv\(\)[\s\S]*?LANGUAGE plpgsql/,
     )![0];
 
-    expect(fn).toContain("to_tsvector('english', COALESCE(NEW.content, ''))");
+    expect(fn).toContain(`to_tsvector(${RAG_TEXT_CONFIG_SQL}, COALESCE(NEW.content, ''))`);
     expect(fn).toContain(identifierTsvSql("COALESCE(NEW.content, '')"));
     expect(fn).toContain(`array_to_tsvector(ARRAY['${IDENTIFIER_TSV_SENTINEL}'])`);
   });

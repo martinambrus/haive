@@ -1,4 +1,5 @@
 import { reviveRefusal } from '@haive/shared/onboarding-admission';
+import { taskRootMergeBusy, ROOT_MERGE_BUSY_MESSAGE } from '@haive/shared/root-merge-busy';
 import { ModuleAdmissionError } from '@haive/shared/modularity-server';
 import { and, desc, eq, inArray, isNotNull, isNull, notInArray, sql, type SQL } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
@@ -173,6 +174,10 @@ export async function reviveDeadTask(
     }
     const [current] = await readCandidates(tx, eq(schema.tasks.id, c.id));
     if (!current || (await currentIntegrationMissing(tx, current))) return null;
+    if (await taskRootMergeBusy(tx, c.id)) {
+      log.info({ taskId: c.id, reason: ROOT_MERGE_BUSY_MESSAGE }, 'dead task revival held');
+      return 'held' as const;
+    }
     const locked = await tx
       .select({ id: schema.tasks.id })
       .from(schema.tasks)

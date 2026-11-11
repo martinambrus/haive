@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { FIX_LOOP_ACTION_FIELD, type FormSchema } from '@haive/shared';
 import { restoreDatabaseStep } from '../src/step-engine/steps/workflow/01c1-restore-database.js';
+import { runConfigStep } from '../src/step-engine/steps/workflow/06-run-config.js';
 import { advanceStep } from '../src/step-engine/step-runner.js';
 import { recordLedgerEntry } from '../src/step-engine/task-ledger.js';
 import { ReopenStepFormError, type StepDefinition } from '../src/step-engine/step-definition.js';
@@ -1308,3 +1309,49 @@ it('preserves an unrelated form default even when its field is called remoteUrl'
   expect((await run(state, def, { push: false, remoteUrl: '' })).status).toBe('done');
   expect(copiedForms(state).includes('fixture-password')).toBe(true);
 });
+
+it.each(['submitted', 'saved', 'pre_answer'] as const)(
+  'run configuration keeps omitted downstream presets through %s validation',
+  async (source) => {
+    const state = freshState();
+    state.taskStepRow.stepId = '06-run-config';
+    const answers = { verifyRunTest: true };
+    state.taskRow = {
+      id: 'task-1',
+      autoContinue: true,
+      preAnswers: {
+        '08b-test-management': { action: 'skip', runTests: false },
+        '08-phase-5-verify': { runTest: false },
+        ...(source === 'pre_answer' ? { '06-run-config': answers } : {}),
+      },
+    };
+    if (source === 'saved') state.taskStepRow.formValues = answers;
+    const def = {
+      ...runConfigStep,
+      llm: undefined,
+      detect: async () => ({
+        specBody: '',
+        ddevMode: true,
+        appRunnerMode: false,
+        taskAdversarialQaLevel: null,
+        taskMaxFixRounds: 10,
+        runsBrowserVerify: true,
+        runsAdversarialQa: true,
+        dbExposeAvailable: false,
+        taskExposeDbPort: false,
+        reviewDimensionIds: ['security'],
+      }),
+    } as StepDefinition;
+    const result = await run(state, def, source === 'submitted' ? answers : undefined);
+    expect(result.status).toBe('done');
+    expect(state.taskStepRow.formValues).toEqual(answers);
+    const patch = state.updates.find((u) => u.table === 'tasks' && u.patch.preAnswers)?.patch;
+    expect(patch?.maxFixRounds).toBe(10);
+    expect(patch?.preAnswers).toMatchObject({
+      '08b-test-management': { action: 'skip', runTests: false },
+      '08-phase-5-verify': { runTest: true, runLint: true, runTypecheck: true },
+      '08a-browser-setup': { mode: 'mcp' },
+      '08a-browser-verify': { mode: 'mcp' },
+    });
+  },
+);

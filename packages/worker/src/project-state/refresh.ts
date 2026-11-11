@@ -183,6 +183,8 @@ export async function refreshProjectStateOutcome(
     if (err instanceof ProjectStateMovedError) return { outcome: 'superseded' };
     throw err;
   }
+  // Refresh owns only the record. A deferred upgrade has already released its checkout by the
+  // time this runs, so retirement waits for the next 02 or 12 and its normal guards and staging.
   return { outcome: 'written' };
 }
 
@@ -199,10 +201,14 @@ export async function sweepDirtyProjectStates(db: Database): Promise<number> {
     )
     .where(
       and(
-        lt(schema.projectStateOutbox.writtenRevision, schema.projectStateOutbox.revision),
+        or(
+          lt(schema.projectStateOutbox.writtenRevision, schema.projectStateOutbox.revision),
+          isNotNull(schema.projectStateOutbox.rulesReconcileIntent),
+        ),
         or(
           isNotNull(schema.repositories.renderContext),
           isNotNull(schema.projectStateOutbox.writeIntent),
+          isNotNull(schema.projectStateOutbox.rulesReconcileIntent),
         ),
       ),
     )

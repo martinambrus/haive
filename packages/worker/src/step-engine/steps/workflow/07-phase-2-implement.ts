@@ -270,6 +270,7 @@ function stubImplement(detect: ImplementDetect): {
 
 export const phase2ImplementStep: StepDefinition<ImplementDetect, ImplementApply> = {
   needsRuntime: 'if-serving',
+  editsCodeOrTests: true,
   metadata: {
     id: '07-phase-2-implement',
     workflowType: 'workflow',

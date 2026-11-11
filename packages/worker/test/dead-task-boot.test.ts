@@ -324,6 +324,37 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
     expect(after.supersededAt).toBeInstanceOf(Date);
   };
 
+  it('holds a root revival until the same-branch merge settles, then retries it', async () => {
+    const merger = await make({ repositoryId });
+    const merge = await openMerge(merger);
+    await db
+      .update(schema.repositories)
+      .set({ storagePath: merge.dir })
+      .where(eq(schema.repositories.id, repositoryId));
+    try {
+      const id = await makeDead({ repositoryId });
+      const { sent, deps } = recorder();
+      expect(await reviveDeadTask(db, await view(id), deps)).toBe('held');
+      expect((await task(id)).deadAt).toEqual(DEAD_AT);
+      expect(await events(id, 'task.revived')).toEqual([]);
+      expect(sent).toEqual([]);
+      const other = await makeDead({ repositoryId, worktreePath: merge.dir + '/other' });
+      expect(await reviveDeadTask(db, await view(other), deps)).toBe('advance');
+      await db
+        .update(schema.taskSteps)
+        .set({ mergeResolveState: { ...merge.step.mergeResolveState!, phase: 'done' } })
+        .where(eq(schema.taskSteps.id, merge.step.id));
+      expect(await reviveDeadTasks(db, deps)).toMatchObject({ revived: 1, held: 0 });
+      expect((await task(id)).deadAt).toBeNull();
+      expect(sent.filter((s) => s.taskId === id)).toHaveLength(1);
+    } finally {
+      await db
+        .update(schema.repositories)
+        .set({ storagePath: os.tmpdir() })
+        .where(eq(schema.repositories.id, repositoryId));
+    }
+  });
+
   beforeAll(async () => {
     db = createDatabase(url as string);
     h.db = db;

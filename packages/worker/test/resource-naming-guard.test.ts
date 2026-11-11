@@ -47,6 +47,9 @@ const NOT_A_RESOURCE = [
   // Service identity, user agents and a download filename: strings a human or an HTTP peer reads.
   /haive-(?:api|worker|web|cli-version-fetcher|ddev-rootCA|migrate)\b/,
   /haive_(?:build|version)\b/, // column names
+  // Text search configurations, created inside the RAG store's own schema and found by
+  // current_schema(): a store-local catalog object, like a column, never a reaped resource.
+  /^haive_english_(?:unaccent|verbatim)_v\d+$/,
   /HAIVE_[A-Z_]+/,
   /haive\.[a-z.]+/, // label KEYS and the haive.local hostname
   /haive-(?:env-build|sandbox-build|compose|net|dump|shots|merge-snapshot)-/, // host temp paths

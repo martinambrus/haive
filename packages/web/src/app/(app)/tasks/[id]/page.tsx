@@ -938,8 +938,8 @@ export default function TaskDetailPage() {
   // Labels for each round > 0 group, derived in one pass so the divider and the fixed-
   // header badge stay consistent. A round group is named by the step it RE-ENTERS at: the
   // spec gates fork a new round at 04 / 03b ("Spec revision"), the auto-fix loop re-enters
-  // at 07 ("Fix loop"). Numbered per-kind, not by the raw round int (the two kinds
-  // interleave rounds). byStepId → divider text at the group's first row ("Spec revision
+  // at 07 ("Fix loop"), and a revalidation enters at 07c / 07b. Each kind has its own
+  // counter, so revalidation never shifts the real fix-loop number. byStepId → divider text at the group's first row ("Spec revision
   // #1"); byRound → compact suffix for ANY row in that round ("spec rev 1") so the header
   // badge can label a mid-group step too.
   const roundLabels = useMemo(() => {
@@ -947,6 +947,7 @@ export default function TaskDetailPage() {
     const byRound = new Map<number, string>();
     let specN = 0;
     let fixN = 0;
+    let revalidationN = 0;
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i]!;
       if (step.round > 0 && (i === 0 || steps[i - 1]!.round !== step.round)) {
@@ -956,6 +957,10 @@ export default function TaskDetailPage() {
           const n = ++specN;
           byStepId.set(step.id, `Spec revision #${n}`);
           byRound.set(step.round, `spec rev ${n}`);
+        } else if (step.stepId === '07c-ddev-reconcile' || step.stepId === '07b-phase-4-validate') {
+          const n = ++revalidationN;
+          byStepId.set(step.id, `Revalidation #${n}`);
+          byRound.set(step.round, `revalidation ${n}`);
         } else {
           const n = ++fixN;
           byStepId.set(step.id, `Fix loop #${n}`);

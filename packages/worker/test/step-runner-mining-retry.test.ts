@@ -710,12 +710,31 @@ function reopeningFormStep(): StepDefinition {
       },
     },
     async apply() {
-      throw new ReopenStepFormError('bounded batch finished');
+      throw new ReopenStepFormError(
+        'The edits changed. Review the refreshed preview before finishing.',
+        { notice: true },
+      );
     },
   } as StepDefinition;
 }
 
 describe('advanceStep apply-to-form continuation', () => {
+  it('shows no notice for a reopen whose text is internal control text', async () => {
+    const state = freshState([miningRow('prior-batch-agent', 1)]);
+    const step = {
+      ...reopeningFormStep(),
+      async apply() {
+        throw new ReopenStepFormError('round 2 awaits answers');
+      },
+    } as StepDefinition;
+
+    const result = await run(makeMockDb(state), step, []);
+
+    expect(result.status).toBe('waiting_form');
+    const fields = (state.taskStepRow.formSchema as { fields: { id?: string }[] }).fields;
+    expect(fields.some((f) => f.id === 'reopenedFormNotice')).toBe(false);
+  });
+
   it('refreshes detection, clears the prior answer, and parks the same step', async () => {
     const state = freshState([miningRow('prior-batch-agent', 1)]);
     state.taskStepRow.formSchema = {
@@ -733,6 +752,12 @@ describe('advanceStep apply-to-form continuation', () => {
     expect(state.taskStepRow.formSchema).toMatchObject({
       title: 'More work remains',
       description: '42 items remain',
+      fields: expect.arrayContaining([
+        expect.objectContaining({
+          type: 'note',
+          body: 'The edits changed. Review the refreshed preview before finishing.',
+        }),
+      ]),
     });
     const stamp = (state.miningUpdateLog ?? []).find((u) => u.set.consumedAt instanceof Date);
     expect(conditionValues(stamp?.where)).toEqual(

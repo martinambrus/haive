@@ -1,5 +1,7 @@
 import { and, eq, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
+import { liveClaimHolder, type MergeDirHolder } from '@haive/shared';
+export { liveClaimHolder, type MergeDirHolder } from '@haive/shared';
 import { StepSupersededError, taskWriteTarget } from './step-ownership.js';
 
 export type DbHandle = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
@@ -10,11 +12,6 @@ export interface MergeDirOwner {
   taskId: string;
   /** The task epoch the pass runs under; unset checks only that the task is still live. */
   epoch?: number | null;
-}
-
-export interface MergeDirHolder {
-  id: string;
-  title: string;
 }
 
 export type MergeDirClaim = { kind: 'claimed' } | { kind: 'held'; holder: MergeDirHolder };
@@ -54,41 +51,6 @@ async function requireLiveOwner(tx: DbHandle, owner: MergeDirOwner): Promise<voi
     .from(schema.tasks)
     .where(taskWriteTarget(owner.taskId, fence));
   if (live.length === 0) throw new StepSupersededError(owner.stepId);
-}
-
-/** The task a claim holds the dir for, or null once the claim is stale: its task completed, its
- *  step skipped (a stale merge), or the task cancelled with its teardown recorded
- *  (`task.cancel_finished`: a CANCEL writes it after the release, an abandoned one before it). */
-export async function liveClaimHolder(
-  tx: DbHandle,
-  claim: { taskId: string; taskStepId: string },
-): Promise<MergeDirHolder | null> {
-  const [holder] = await tx
-    .select({
-      title: schema.tasks.title,
-      taskStatus: schema.tasks.status,
-      stepStatus: schema.taskSteps.status,
-    })
-    .from(schema.taskSteps)
-    .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
-    .where(eq(schema.taskSteps.id, claim.taskStepId));
-  const [tornDown] =
-    holder?.taskStatus === 'cancelled'
-      ? await tx
-          .select({ id: schema.taskEvents.id })
-          .from(schema.taskEvents)
-          .where(
-            and(
-              eq(schema.taskEvents.taskId, claim.taskId),
-              eq(schema.taskEvents.eventType, 'task.cancel_finished'),
-            ),
-          )
-          .limit(1)
-      : [];
-  if (holder && holder.taskStatus !== 'completed' && holder.stepStatus !== 'skipped' && !tornDown) {
-    return { id: claim.taskId, title: holder.title };
-  }
-  return null;
 }
 
 /** Another task's live claim on `mergeDir`, or null. Read under the dir's lock, so it holds until the

@@ -344,6 +344,16 @@ export const projectStateOutbox = pgTable(
     lastError: text('last_error'),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
     writeIntent: jsonb('write_intent'),
+    rulesReconcileIntent: jsonb('rules_reconcile_intent').$type<
+      | { phase: 'deferred'; taskId: string }
+      | {
+          phase: 'ready';
+          taskId: string;
+          before: string | null;
+          after: string | null;
+          resetAt: string | null;
+        }
+    >(),
   },
   (table) => [
     check('project_state_outbox_revision_nonnegative', sql`${table.revision} >= 0`),

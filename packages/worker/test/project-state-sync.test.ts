@@ -1928,17 +1928,28 @@ describe('syncProjectStateFromCheckout: the portable settings and the environmen
         },
       );
 
-      it('takes the record’s value on a first import with no sync row, as for every setting', async () => {
-        const s = await setup({ column: column(BASE, false) });
-        switchedOn(s);
-        await s.putRecord(withSettings({ ...OTHER_SETTING, 'rtk-enabled': false }));
+      it.each([true, false])(
+        'keeps a stamped %s choice on a first import with no sync row',
+        async (local) => {
+          const s = await setup({ column: column(BASE, false) });
+          switchedOn(s);
+          s.fake.patch(schema.repositories, REPO, { rtkEnabled: local });
+          await s.putRecord(withSettings({ ...OTHER_SETTING, 'rtk-enabled': !local }));
 
-        const { outcome } = await s.run();
+          const { outcome } = await s.run();
 
-        expect(outcome).toBe('applied');
-        expect(repoRow(s).rtkEnabled).toBe(false);
-        expect(s.pending()).toEqual([]);
-      });
+          expect(outcome).toBe('applied');
+          expect(repoRow(s).rtkEnabled).toBe(local);
+          expect(s.pending()).toEqual([]);
+          expect((json(s.syncRow()?.baseSnapshot) as Json).settings).toMatchObject({
+            'rtk-enabled': !local,
+          });
+          expect(dirtyMarks(s)).toHaveLength(1);
+          await s.run();
+          expect(repoRow(s).rtkEnabled).toBe(local);
+          expect(s.pending()).toEqual([]);
+        },
+      );
 
       it('keeps it through a second sync that runs before the writer does', async () => {
         const s = await setup({

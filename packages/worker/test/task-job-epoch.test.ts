@@ -193,6 +193,10 @@ const db = {
         h.state.repoGone ? undefined : { storagePath: '/tmp/repo', localPath: null },
     },
     cliProviders: { findFirst: async () => ({ name: 'claude-code' }) },
+    // The root merge fence a reopen checks: no setup row, no merge claim, no merge left open.
+    taskSteps: { findFirst: async () => undefined },
+    mergeDirClaims: { findFirst: async () => undefined },
+    taskEvents: { findMany: async () => [] },
     taskTypeDefinitions: {
       findFirst: async () =>
         h.state.taskType === 'workflow' ? undefined : { runListStrategy: 'static' },

@@ -87,6 +87,8 @@ import type { NamedCheckout } from '../repo/checkout-head.js';
 import { admitWatchedCheckout } from './watch-admission.js';
 import { gitOperationInProgress } from '../repo/git-operation.js';
 import { updateApplicableTemplateIds } from '../step-engine/template-manifest.js';
+import { readAgentRulesOverrideRaw } from '../step-engine/_agent-rules-override.js';
+import { reconcileImportedRules } from './task-end-rules.js';
 import { claimDiskHash } from './claim-disk.js';
 import { insertImportMarker, loadMarkerContext } from './import-marker.js';
 import { toolingColumnFromUnit } from './tooling-import.js';
@@ -103,12 +105,18 @@ type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 export type ProjectStateSyncOutcome =
   'absent' | 'refused' | 'deferred' | 'superseded' | 'held' | 'unchanged' | 'applied' | 'conflict';
 
-export interface ProjectStateSyncResult {
-  code?: 'write_pending' | 'git_operation';
-  outcome: ProjectStateSyncOutcome;
-  /** Why the record was refused, or what conflicted, worded as `last_error` holds it. */
-  reason?: string;
-}
+export type ProjectStateSyncResult =
+  | {
+      outcome: 'deferred';
+      code: 'upgrade_rules';
+      reason: string;
+    }
+  | {
+      code?: 'write_pending' | 'git_operation';
+      outcome: ProjectStateSyncOutcome;
+      /** Why the record was refused, or what conflicted, worded as `last_error` holds it. */
+      reason?: string;
+    };
 
 const MIB = 1024 * 1024;
 // A first sync can replace a claim per file: the list is cut, settings first; `count` is the total.
@@ -570,7 +578,6 @@ async function mergePortable(
   // this install's stands.
   if (
     repo.rtkChoiceMadeAt != null &&
-    row !== null &&
     previousSettings['rtk-enabled'] === undefined &&
     localSettings['rtk-enabled'] !== undefined
   ) {
@@ -678,6 +685,7 @@ export async function syncProjectStateFromCheckout(
     repoPath,
     refuseDuringGitOperation,
     expectedCheckout,
+    endingTaskId,
     actor,
   }: {
     actor?: AuditActor;
@@ -686,6 +694,8 @@ export async function syncProjectStateFromCheckout(
     /** An open merge, rebase, cherry-pick or revert holds the read. A checkout that changed since its first read always holds it. */
     refuseDuringGitOperation?: boolean;
     expectedCheckout?: NamedCheckout;
+    /** The upgrade task whose committed ending triggered this resync. */
+    endingTaskId?: string;
   },
 ): Promise<ProjectStateSyncResult> {
   // An uncommitted writer's partial files are not an incoming checkout. Only its fenced recovery
@@ -708,7 +718,10 @@ export async function syncProjectStateFromCheckout(
     .where(eq(schema.repositories.id, repositoryId))
     .limit(1);
   const checkout = await readCheckout(repoPath);
-  if (checkout.kind === 'absent') return { outcome: 'absent' };
+  if (checkout.kind === 'absent') {
+    await reconcileImportedRules(db, repositoryId, repoPath);
+    return { outcome: 'absent' };
+  }
 
   const auditEvents: AuditEvent[] = [];
   return db
@@ -722,13 +735,16 @@ export async function syncProjectStateFromCheckout(
         repoPath,
         refuseDuringGitOperation,
         expectedCheckout,
+        endingTaskId,
         checkout,
         seen,
         seenRepo,
       });
     })
-    .then((result) => {
+    .then(async (result) => {
       auditEvents.forEach(logAuditEvent);
+      if (['applied', 'unchanged', 'conflict'].includes(result.outcome))
+        await reconcileImportedRules(db, repositoryId, repoPath);
       return result;
     })
     .catch((err: unknown) => {
@@ -748,6 +764,7 @@ export async function syncProjectStateLocked(
     refuseDuringGitOperation,
     expectedCheckout,
     holdingTaskId,
+    endingTaskId,
     checkout,
     seen,
     seenRepo,
@@ -759,13 +776,17 @@ export async function syncProjectStateLocked(
     refuseDuringGitOperation?: boolean;
     expectedCheckout?: NamedCheckout;
     holdingTaskId?: string;
+    endingTaskId?: string;
     checkout: Checkout;
     seen: Awaited<ReturnType<typeof readSyncRow>>;
     seenRepo: { onboardingResetAt: Date | null } | undefined;
   },
 ): Promise<ProjectStateSyncResult> {
   const [writing] = await tx
-    .select({ intent: schema.projectStateOutbox.writeIntent })
+    .select({
+      intent: schema.projectStateOutbox.writeIntent,
+      rules: schema.projectStateOutbox.rulesReconcileIntent,
+    })
     .from(schema.projectStateOutbox)
     .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
   if (writing?.intent)
@@ -919,6 +940,32 @@ export async function syncProjectStateLocked(
   } catch (err) {
     if (err instanceof ReviewWatermarkUnavailableError) return refuse(err.message);
     throw err;
+  }
+  // Background imports already defer above. The writer may import for its own holding task,
+  // but changing that upgrade's rules after 02 rendered its region would invalidate its retry.
+  // Hold the whole unseen record before any import writes: the unchanged checkout and old base
+  // retain the incoming value (including deletion) for resyncAfterTaskEnd / the checkout sweep.
+  if (holdingTaskId && Object.hasOwn(portable.updates, 'agentRulesOverride')) {
+    const [upgrade] = await tx
+      .select({ id: schema.tasks.id })
+      .from(schema.tasks)
+      .where(
+        and(
+          eq(schema.tasks.id, holdingTaskId),
+          eq(schema.tasks.repositoryId, repositoryId),
+          eq(schema.tasks.type, 'onboarding_upgrade'),
+          inArray(schema.tasks.status, [...CHECKOUT_HOLDING_TASK_STATUSES]),
+          isNull(schema.tasks.deadAt),
+        ),
+      )
+      .limit(1);
+    if (upgrade) {
+      return {
+        outcome: 'deferred',
+        code: 'upgrade_rules',
+        reason: 'imported repository rules are waiting for this upgrade to finish',
+      };
+    }
   }
   const merged = merge.merged.render;
   let wrote = false;
@@ -1124,6 +1171,37 @@ export async function syncProjectStateLocked(
     );
   }
 
+  // The import itself commits the obligation: either a recorded deferral or an upgrade's
+  // task-end import owes a region write. Ordinary background imports do not create one.
+  const owed = writing?.rules;
+  const rulesTaskId = owed?.taskId ?? endingTaskId;
+  if (Object.hasOwn(updates, 'agentRulesOverride') && rulesTaskId) {
+    // A legacy install may not have an outbox row yet.
+    if (!writing) await markProjectStateDirty(tx, repositoryId);
+    await tx
+      .update(schema.projectStateOutbox)
+      .set({
+        rulesReconcileIntent: {
+          phase: 'ready',
+          taskId: rulesTaskId,
+          before: owed?.phase === 'ready' ? owed.before : (repo.agentRulesOverride ?? null),
+          after: await readAgentRulesOverrideRaw(tx, repositoryId),
+          resetAt: repo.onboardingResetAt?.toISOString() ?? null,
+        },
+      })
+      .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+  } else if (
+    owed?.phase === 'deferred' &&
+    !portable.conflicts.some(({ unit }) => unit === 'settings/agent-rules.md') &&
+    !portable.rejected.includes('agent-rules')
+  ) {
+    // The incoming override was withdrawn or a newer local choice kept it from moving.
+    // No import occurred, so a future ordinary import must not inherit this obligation.
+    await tx
+      .update(schema.projectStateOutbox)
+      .set({ rulesReconcileIntent: null })
+      .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+  }
   if (lastError !== null) return { outcome: 'conflict', reason: lastError };
   if (portable.conflicts.length > 0) {
     const names = portable.conflicts.map(({ unit }) => unit).join(', ');

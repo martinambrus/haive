@@ -39,7 +39,7 @@ import {
   type SetAsideResult,
 } from '../../../project-state/set-aside.js';
 
-// Pre-branch base sync. Runs after the model-health canary and before triage (the
+// Pre-branch base sync. Runs after the canary, before triage and the env prelude (the
 // explicit pull in orderWorkflowRunList places it there). Brings the LOCAL base
 // branch up to date with origin so 01-worktree-setup cuts the feature branch from
 // the fresh tip AND 12-worktree-cleanup's later base push is a fast-forward — neither

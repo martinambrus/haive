@@ -83,6 +83,21 @@ describe('orderWorkflowRunList', () => {
     step('01-declare-deps', 'env_replicate'),
     step('03-build-image', 'env_replicate'),
   ];
+  it.each([null, 'full_workflow', 'quick_bugfix', 'plan_tasklist'] as const)(
+    'syncs the base before env detection and retains the prelude after triage on %s',
+    (path) => {
+      const ids = orderWorkflowRunList(main, prelude, path).map((s) => s.metadata.id);
+      expect(ids.slice(0, 5)).toEqual([
+        '00-model-health-workflow',
+        SYNC_BASE_STEP_ID,
+        TRIAGE_STEP_ID,
+        '01-declare-deps',
+        '03-build-image',
+      ]);
+      expect(ids[ids.indexOf(TRIAGE_STEP_ID) + 1]).toBe('01-declare-deps');
+    },
+  );
+
   const ids = (path: Parameters<typeof orderWorkflowRunList>[2]) =>
     orderWorkflowRunList(main, prelude, path).map((s) => s.metadata.id);
 

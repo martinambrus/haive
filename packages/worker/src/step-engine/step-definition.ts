@@ -493,9 +493,13 @@ export class MiningWaveError extends Error {
  * to the person before another bounded batch is dispatched.
  */
 export class ReopenStepFormError extends Error {
-  constructor(message = 'step has another decision to present') {
+  /** True when `message` is written for the user: the refreshed form then shows it as a note.
+   *  Plan steps reopen with internal control text, which stays out of the form. */
+  readonly notice: boolean;
+  constructor(message = 'step has another decision to present', opts?: { notice?: boolean }) {
     super(message);
     this.name = 'ReopenStepFormError';
+    this.notice = opts?.notice === true;
   }
 }
 
@@ -561,6 +565,14 @@ export interface StepLoopSpec<TApply = unknown> {
 
 export interface StepDefinition<TDetect = unknown, TApply = unknown> {
   readonly metadata: StepMetadata;
+  /** May edit deliverable code or tests, including through a fixer. Its successful/skip
+   * hand-off compares validation snapshots when after 07b and before the commit gate.
+   * Prompt steps with the file_write capability opt in.
+   * File-writing knowledge/skill steps deliberately do not opt in. */
+  readonly editsCodeOrTests?: boolean;
+  /** Keep validated answers sparse when apply distinguishes submitted fields from defaults.
+   * The step supplies defaults for omitted fields; saved answers retain that distinction. */
+  readonly preserveOmittedFormFields?: boolean;
   /** When this step parks on a form (waiting_form), set the TASK status to this instead
    *  of the default 'waiting_user'. Used by 13-pr-wait to surface a task waiting for its
    *  PR to merge as 'waiting_pr'. Only takes effect when the step actually parks. */

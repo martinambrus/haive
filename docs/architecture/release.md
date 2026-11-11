@@ -38,8 +38,10 @@ is (the `draining` log line carries what it `found`). It keeps that state in the
 (`upgrade_runs.metadata.foundState`, written once, before the `draining` write) and puts it back when
 the run ends, on the commit and on the rollback alike: an upgrade over `maintenance` ends in
 `maintenance`, over `draining` in `draining`, over `normal` in `normal`. A restarted updater reads it
-from the journal, so a resumed run puts back the same state; a resumed run with no record (the first run died before
-the drain, or an older updater started it) puts back `normal`. A run still in its own draining phase
+from the journal, so a resumed run puts back the same state; a resumed run with no record puts back `normal` only when an older updater started it; a run this
+updater started carries `metadata.foundStateRequired` from its insert, so one that died before the
+record keeps whatever state stands (an administrator's hold included), logs the skip and records
+`metadata.restoreSkipped: 'found_state_unknown'` on the run. A run still in its own draining phase
 that has not recorded the found state (its first read, the fence or the record failed) has written
 nothing, so its rollback leaves the stored state alone. The updater's state writes retry only on
 `ConfigUnavailableError`: 20 attempts, 3 s apart, with the fence released between attempts. It then waits until no work is live,

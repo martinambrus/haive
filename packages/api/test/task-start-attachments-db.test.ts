@@ -108,6 +108,171 @@ describe.skipIf(!url)('deferred attachments through real Postgres routes', () =>
     return attachment!.id;
   };
 
+  it.each(['retry', 'resume'] as const)(
+    'refuses root task %s beside a live merge without writes or enqueue',
+    async (action) => {
+      const id = await create(false, undefined);
+      await db
+        .update(schema.tasks)
+        .set({ status: 'failed', pausedAt: new Date() })
+        .where(eq(schema.tasks.id, id));
+      const [merger] = await db
+        .insert(schema.tasks)
+        .values({
+          userId: USER,
+          repositoryId: REPO,
+          type: 'workflow',
+          title: 'merger',
+          status: 'waiting_user',
+        })
+        .returning();
+      const [step] = await db
+        .insert(schema.taskSteps)
+        .values({
+          taskId: merger!.id,
+          stepId: '12-worktree-cleanup',
+          stepIndex: 12,
+          title: 'merge',
+          round: 0,
+          status: 'waiting_cli',
+          mergeResolveState: {
+            mode: 'same-branch',
+            phase: 'resolving',
+            baseBranch: 'main',
+            featureBranch: 'feature',
+            mergeDir: '/unused/t363',
+          } as never,
+        })
+        .returning();
+      await db
+        .insert(schema.mergeDirClaims)
+        .values({ mergeDir: '/unused/t363', taskId: merger!.id, taskStepId: step!.id });
+      const before = await row(id);
+      const response = await post(`/tasks/${id}/action`, { action });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        error:
+          'A merge is still open in the repository checkout. Finish or abort it, then try again.',
+      });
+      expect(await row(id)).toEqual(before);
+      expect(h.add).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    'same-branch',
+    'cross-branch',
+    'done',
+    'left-open',
+    'settled',
+    'skipped',
+    'completed',
+    'cancelled-pending',
+    'cancelled-finished',
+  ] as const)('fences root START for %s merge state with a retryable 409', async (kind) => {
+    const id = await create(false, undefined);
+    const [merger] = await db
+      .insert(schema.tasks)
+      .values({
+        userId: USER,
+        repositoryId: REPO,
+        type: 'workflow',
+        title: 'merger',
+        status:
+          kind === 'completed'
+            ? 'completed'
+            : kind === 'left-open' || kind === 'settled' || kind.startsWith('cancelled-')
+              ? 'cancelled'
+              : 'waiting_user',
+      })
+      .returning();
+    const dir =
+      kind === 'cross-branch' ? '/unused/t363/.haive/worktrees/main--base' : '/unused/t363';
+    const [step] = await db
+      .insert(schema.taskSteps)
+      .values({
+        taskId: merger!.id,
+        stepId: '12-worktree-cleanup',
+        stepIndex: 12,
+        title: 'merge',
+        round: 0,
+        status: kind === 'skipped' ? 'skipped' : 'waiting_cli',
+        mergeResolveState: {
+          mode: kind === 'cross-branch' ? 'cross-branch' : 'same-branch',
+          phase: kind === 'done' ? 'done' : 'resolving',
+          baseBranch: 'main',
+          featureBranch: 'feature',
+          mergeDir: dir,
+        } as never,
+      })
+      .returning();
+    if (kind === 'left-open' || kind === 'settled') {
+      await db.insert(schema.taskEvents).values({
+        taskId: merger!.id,
+        taskStepId: step!.id,
+        eventType: 'merge.left_open',
+        payload: { dir, ref: 'feature', head: 'old', mergeHead: 'incoming' },
+      });
+      if (kind === 'settled')
+        await db.insert(schema.taskEvents).values({
+          taskId: merger!.id,
+          eventType: 'merge.left_open_settled',
+          payload: { dir, mergeHead: 'incoming', outcome: 'aborted', reason: 'done' },
+        });
+    } else {
+      await db
+        .insert(schema.mergeDirClaims)
+        .values({ mergeDir: dir, taskId: merger!.id, taskStepId: step!.id });
+    }
+    if (kind === 'cancelled-finished') {
+      await db.insert(schema.taskEvents).values({
+        taskId: merger!.id,
+        eventType: 'task.cancel_finished',
+        payload: {},
+      });
+    }
+    const busy = kind === 'same-branch' || kind === 'left-open' || kind === 'cancelled-pending';
+    const res = await post(`/tasks/${id}/action`, { action: 'start' });
+    expect(res.status).toBe(busy ? 409 : 200);
+    if (busy) {
+      expect(await res.json()).toMatchObject({ error: expect.stringMatching(/merge|busy/i) });
+      expect(await row(id)).toMatchObject({ status: 'created' });
+      expect(h.add).not.toHaveBeenCalled();
+    } else {
+      expect(await row(id)).toMatchObject({ status: 'queued' });
+      expect(h.add).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('rolls an immediate create back while a cancelled task has a root merge left open', async () => {
+    const [merger] = await db
+      .insert(schema.tasks)
+      .values({
+        userId: USER,
+        repositoryId: REPO,
+        type: 'workflow',
+        title: 'merger',
+        status: 'cancelled',
+      })
+      .returning();
+    await db.insert(schema.taskEvents).values({
+      taskId: merger!.id,
+      eventType: 'merge.left_open',
+      payload: { dir: '/unused/t363', ref: 'feature', head: 'old', mergeHead: 'incoming' },
+    });
+    const before = await db.select({ id: schema.tasks.id }).from(schema.tasks);
+    const res = await post('/tasks', {
+      type: 'workflow',
+      repositoryId: REPO,
+      title: 'new root task',
+      description: 'scratch',
+      deferStart: false,
+    });
+    expect(res.status).toBe(409);
+    expect(await db.select({ id: schema.tasks.id }).from(schema.tasks)).toEqual(before);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])(
     'persists the count in create and refuses a short start (plan=%s)',
     async (plan) => {

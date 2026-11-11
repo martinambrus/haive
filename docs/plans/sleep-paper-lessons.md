@@ -1,11 +1,11 @@
 # What the SLEEP paper offers Haive: calibrate on the model's own estimate, keep every learning reachable
 
-> **Not started** (2026-11-09). One source is reviewed: "Language Models Need Sleep: Learning to
-> Self-Modify and Consolidate Memories" (arXiv:2606.03979v2) and its Google Research blog post of
-> 2026-10-27. Verdict: no port, because the paper edits model weights and Haive drives hosted CLIs.
-> Two small fixes carry over (PR 1 and PR 2). A backtest is deferred until real data exists (P3).
-> Nothing here is proven to improve accuracy: see "What the data can and cannot say". Keep this file
-> current by editing the section a change belongs to.
+> **Shipped apart from P3.** PR 1 merged as #1047 (`884f5c074`, 2026-11-09). PR 2 landed with T580
+> (`a3d71d4f7`, 2026-11-11). P3, the backtest, waits for its trigger query. One source is reviewed:
+> "Language Models Need Sleep: Learning to Self-Modify and Consolidate Memories" (arXiv:2606.03979v2)
+> and its Google Research blog post of 2026-10-27. Verdict: no port, because the paper edits model
+> weights and Haive drives hosted CLIs. Nothing here is proven to improve accuracy: see "What the
+> data can and cannot say". Keep this file current by editing the section a change belongs to.
 
 ## Context
 
@@ -137,8 +137,9 @@ is unchanged.
 
 ## PR 2: every learning stays reachable past 60
 
-Low urgency: take it when step 11 is next touched, or when a repository nears 60 learnings (largest
-here is 29; at about 3.5 per run the cap arrives near 17 tasks).
+Taken on 2026-11-11 with T580, beside the `learning-recorder` persona fix (`agent-memory-lessons.md`,
+P0). It had been parked as low urgency: the largest repository here held 29 learnings, and at about
+3.5 per run the cap arrives near 17 tasks.
 
 **Defect.** `detect` in 11-phase-8-learning.ts takes `.slice(0, 60)` of `readExistingLearnings`,
 whose order is an unsorted `readdir` (`readdirNoFollow`). Past 60, the agent sees an arbitrary subset,
@@ -162,6 +163,11 @@ alphabetical tail can never be chosen as a `skillId`. It gets the same treatment
 - Outside the data, one instruction: an entry with no excerpt must be opened at
   `.haive-data/learnings/<id>.md` (`haiveDataBoundary` keeps it mounted) before an `update` or `delete`
   names it, since an update replaces the whole body. A person still reviews the diff at the form.
+
+**As built** (`a3d71d4f7`): `learningIndex` and `skillIndex` select, `renderExistingLearnings` and
+`renderExistingSkills` render, and detect records `omittedLearningCount` and `omittedSkillCount` for
+the omission line. Skills get the build-time filter, collapse and omission count too, since listing
+up to 500 widens their lines the same way.
 
 **Not changed.** `learningExcerpt`'s 200 characters, the reconciliation and apply paths.
 

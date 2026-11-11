@@ -589,3 +589,22 @@ it('shows the API explanation when Retry refuses a deleted repository', async ()
   await view.flush();
   expect(textOf(view.tree())).toContain(sentence);
 });
+
+describe('task page: round labels', () => {
+  it('labels revalidation distinctly without shifting real fix-loop numbering', async () => {
+    const steps = [
+      { ...stepRow(), id: 'r0', stepId: '07-phase-2-implement', round: 0, status: 'done' },
+      { ...stepRow(), id: 'r1', stepId: '07c-ddev-reconcile', round: 1, status: 'done' },
+      { ...stepRow(), id: 'r2', stepId: '07-phase-2-implement', round: 2, status: 'done' },
+      { ...stepRow(), id: 'r3', stepId: '07b-phase-4-validate', round: 3, status: 'done' },
+      { ...stepRow(), id: 'r4', stepId: '07-phase-2-implement', round: 4, status: 'running' },
+    ];
+    const view = await mount({ currentStepId: '07-phase-2-implement', currentRound: 4 }, steps);
+    const text = textOf(view.tree());
+    expect(text).toContain('Revalidation #1');
+    expect(text).toContain('Revalidation #2');
+    expect(text).toContain('Fix loop #1');
+    expect(text).toContain('Fix loop #2');
+    expect(text).not.toContain('Fix loop #3');
+  });
+});

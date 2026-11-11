@@ -22,27 +22,29 @@ export interface StepLabelRow {
   iterationCount: number;
 }
 
-/** Steps that a NEW round re-enters at when a spec gate sends the work back. Every other
- *  round-0 boundary is the auto-fix loop re-entering at the implementation step. */
+/** Steps that a new round re-enters at when a spec gate sends the work back. */
 const SPEC_REVISION_ENTRY_STEP_IDS = new Set([
   '04-phase-0b-pre-planning',
   '03b-business-requirements',
 ]);
 
-/** Compact per-round suffix ("fix loop 7", "spec rev 2") for any row in that round.
+/** Compact per-round suffix ("fix loop 7", "spec rev 2", "revalidation 1") for any row in that round.
  *
- *  Numbered per KIND, not by the raw round integer: spec revisions and fix loops interleave,
+ *  Numbered per KIND, not by the raw round integer: spec revisions, revalidations and fix loops interleave,
  *  so round 5 may be the 2nd spec revision. Requires steps in RUN ORDER (round, run_seq,
  *  created_at, step_index) because it names a round group by the step that opens it. */
 export function deriveRoundSuffixes(orderedSteps: readonly StepLabelRow[]): Map<number, string> {
   const byRound = new Map<number, string>();
   let specN = 0;
   let fixN = 0;
+  let revalidationN = 0;
   for (let i = 0; i < orderedSteps.length; i++) {
     const step = orderedSteps[i]!;
     if (step.round > 0 && (i === 0 || orderedSteps[i - 1]!.round !== step.round)) {
       if (SPEC_REVISION_ENTRY_STEP_IDS.has(step.stepId))
         byRound.set(step.round, `spec rev ${++specN}`);
+      else if (step.stepId === '07c-ddev-reconcile' || step.stepId === '07b-phase-4-validate')
+        byRound.set(step.round, `revalidation ${++revalidationN}`);
       else byRound.set(step.round, `fix loop ${++fixN}`);
     }
   }
