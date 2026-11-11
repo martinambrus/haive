@@ -10,6 +10,17 @@ boundary, never by committing edited dependency source.
 Older persisted validation outputs without structured issues remain report-only on replay;
 a verdict and prose summary alone cannot establish a high/critical repair assignment.
 
+A step after 07b and before gate 3 that declares `editsCodeOrTests` (the 07-family editors, and a
+custom prompt step whose capabilities include `file_write`) sends the task back through validation
+when it succeeds and the final change differs from 07b's stored snapshot
+(`queues/validation-recheck.ts`). This is not a fix round: fresh 07c and 07b rows run at the next
+round, and the return address is recorded in a `validation.recheck_requested` event, so a restart
+or Retry resumes after the late step. A validation fixer that changed `.ddev/`, or a 07b whose
+snapshot could not be read, hands off to 07c and then 07b the same way. Those hand-offs are bounded
+per task by `maxFixRounds`; at the bound, or when the run list has no 07c before 07b, ordinary
+verdict routing applies, with its cap, oscillation guard and escalation. A final snapshot that
+cannot be read after two attempts fails the step retryably (`ValidationSnapshotError`).
+
 A downstream step that finds a blocking defect returns `loop_back` instead of failing: the
 queue bumps the round, records the diagnosis as a `fix_loop.requested` task event and
 re-enters at `FIX_LOOP_TARGET_STEP_ID` (`_fix-loop.ts`), which is `07-phase-2-implement` and
