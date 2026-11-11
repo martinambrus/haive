@@ -425,7 +425,7 @@ User decision 2026-11-01: Re-measure current batching gain and keep scope bounde
 
 ### T329 · FNF[cancel-merge-commit] · cancel reports a merge left COMMITTED on local base + one-click undo (+2)
 
-status: open · was modular #3 · priority: P2
+status: in progress (bundle E2 = part A + items 1-2, run 2026-11-11, branch fix/E2-cancel-merge-report) · was modular #3 · priority: P2
 DECIDED by the user 2026-10-12: cancel reports a merge left COMMITTED on the local base, plus a one-click Undo. The Undo resets only if the base is still at that merge commit and no claim is live. Never auto-undo.
 Two PRs:
 
