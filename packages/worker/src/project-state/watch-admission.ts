@@ -14,6 +14,16 @@ export async function admitWatchedCheckout(
   repoPath: string,
   expected: NamedCheckout,
 ): Promise<boolean> {
+  return (
+    (await admitWatchedRepository(tx, repositoryId)) &&
+    !(await gitOperationInProgress(repoPath)) &&
+    (await checkoutMatches(repoPath, expected))
+  );
+}
+
+/** Database half of admission, for a caller that checks its checkout before taking
+ * an ancestry lock and re-asserts it after applying, inside the same transaction. */
+export async function admitWatchedRepository(tx: Tx, repositoryId: string): Promise<boolean> {
   const [repo] = await tx
     .select({
       status: schema.repositories.status,
@@ -38,9 +48,5 @@ export async function admitWatchedCheckout(
       ),
     )
     .limit(1);
-  return (
-    held.length === 0 &&
-    !(await gitOperationInProgress(repoPath)) &&
-    (await checkoutMatches(repoPath, expected))
-  );
+  return held.length === 0;
 }

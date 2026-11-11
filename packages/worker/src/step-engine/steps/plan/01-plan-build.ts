@@ -9,6 +9,7 @@ import {
 } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import {
+  PlanPatchError,
   findPlanRoot,
   loadPlanEdges,
   loadPlanSkeletons,
@@ -880,6 +881,8 @@ export function createPlanBuildStep(
             await recordCodeLinksDropped(ctx, result.agentId, applied.strippedCodeLinks);
           }
         } catch (err) {
+          // Busy retries are exhausted; fail this pass before classifying the reply as unusable.
+          if (err instanceof PlanPatchError && err.kind === 'busy') throw err;
           notApplied += 1;
           const message = err instanceof Error ? err.message : String(err);
           failures.push(`${result.agentTitle ?? result.agentId}: ${message}`);

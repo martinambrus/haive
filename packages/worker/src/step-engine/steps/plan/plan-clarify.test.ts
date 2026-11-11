@@ -362,6 +362,46 @@ describe('00b-plan-clarify apply', () => {
     expect(err.message).toContain('Retry this step');
   });
 
+  it('fails persistent busy truthfully without spending another planner turn', async () => {
+    vi.useFakeTimers();
+    try {
+      const { mined, apply, fake } = setup();
+      plan.refuse = new PlanPatchError('busy', 'The plan is busy. Try again.');
+      const outline = mined(
+        'clarify-outline',
+        json({ ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] }),
+      );
+      const pending = thrown(apply([outline], {}, false));
+      await vi.runAllTimersAsync();
+      const err = (await pending) as Error;
+      expect(err).not.toBeInstanceOf(MiningRetryError);
+      expect(err.message).toBe('The plan stayed busy. Retry this step to ask the planner again.');
+      expect(fake.rows(schema.taskStepAgentMinings)[0]?.consumedAt).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('applies the saved outline when busy clears within the retry budget', async () => {
+    vi.useFakeTimers();
+    try {
+      const { mined, apply, fake } = setup();
+      vi.mocked(applyAgentPatch).mockRejectedValueOnce(new PlanPatchError('busy', 'busy'));
+      const outline = mined(
+        'clarify-outline',
+        json({ ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] }),
+      );
+      const pending = apply([outline], {}, false).catch((error) => error);
+      await vi.runAllTimersAsync();
+      const result = await pending;
+      expect(result).toBeInstanceOf(MiningWaveError);
+      expect(fake.rows(schema.taskStepAgentMinings)[0]?.consumedAt).not.toBeNull();
+      expect(plan.patches).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // No planner reply can land in a repository that was deleted meanwhile, so a re-roll only spends
   // the planner again until its budget ends.
   it('fails an outline at once when its repository was deleted', async () => {
