@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, asc, eq, inArray } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { ROOT_CLAIM_STALE_MS, schema } from '@haive/database';
 import {
   leftOpenMerges,
   MERGE_LEFT_OPEN_EVENT,
@@ -88,6 +88,11 @@ const undoBody = z.object({
   baseShaAfter: z.string().regex(/^[0-9a-f]{40}$/),
 });
 
+const UNDO_RETRY_DELAY_MS = 2000;
+// A dead worker can leave a settled git move still owing projection recovery, with its root
+// lease fresh. Keep a retry beyond that lease; refusal outcomes themselves need no retry.
+const UNDO_ATTEMPTS = Math.ceil(Math.log2(ROOT_CLAIM_STALE_MS / UNDO_RETRY_DELAY_MS + 1)) + 1;
+
 mergeRoutes.post('/:id/merges/undo', async (c) => {
   const userId = c.get('userId');
   const taskId = c.req.param('id');
@@ -130,8 +135,8 @@ mergeRoutes.post('/:id/merges/undo', async (c) => {
         { taskId, userId, dir, baseShaAfter } satisfies UndoLeftMergePayload,
         {
           jobId: `undo-left-merge-${taskId}-${createHash('sha1').update(`${dir}\0${baseShaAfter}`).digest('hex')}`,
-          attempts: 5,
-          backoff: { type: 'exponential', delay: 2000 },
+          attempts: UNDO_ATTEMPTS,
+          backoff: { type: 'exponential', delay: UNDO_RETRY_DELAY_MS },
           removeOnComplete: true,
           removeOnFail: true,
         },

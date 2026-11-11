@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppEnv } from '../src/context.js';
+import { ROOT_CLAIM_STALE_MS } from '@haive/database';
 
 const TASK = '11111111-2222-3333-4444-555555555555';
 const DIR = '/var/lib/haive/repos/u/r';
@@ -164,6 +165,12 @@ describe('POST /tasks/:id/merges/undo', () => {
         baseShaAfter: payload.baseShaAfter,
       },
     ]);
+    const options = state.added[0]![2] as { attempts: number; backoff: { delay: number } };
+    const lastRetryAfter = options.backoff.delay * (2 ** (options.attempts - 1) - 1);
+    expect(
+      lastRetryAfter,
+      "post-move recovery must outlive a crashed worker's root lease",
+    ).toBeGreaterThan(ROOT_CLAIM_STALE_MS);
   });
   it.each(['done', 'refused', 'moved'])('refuses an already settled %s report', async (outcome) => {
     state.events.push({
