@@ -54,10 +54,13 @@ touching its row.
 cannot prove the checkout usable or unusable (the unknown path above) the row is `error` with
 `repositories.error_code = 'checkout_repair_needed'` (migration 0225; `'source_repair_needed'` when
 the folder source could not be examined and needs repair; the codes are `REPOSITORY_ERROR_CODES`, `@haive/shared`), and the
-page keys its actions on the code, never on the message: "Check repair" re-runs the ordinary refresh,
-and "Rebuild checkout" (when the source can rebuild) posts the recovery, the user's explicit consent
-to move the checkout aside although it could not be proved unusable. The code clears when
-preparation starts or detection succeeds. A recovery job first re-checks the checkout: one that is
+page keys its actions on the code, never on the message: "Check repair" re-runs the refresh as
+check only (`checkCheckoutOnly`, set by the api for a repository holding either repair code and
+enforced by the worker), and "Rebuild checkout" (when the source can rebuild) posts the recovery, the
+user's explicit consent to move the checkout aside although it could not be proved unusable. A check
+only refresh never rebuilds: a checkout still unusable keeps the repair code, a read that never
+finished stays a retryable failure, and only the recovery rebuilds, keeping this install's data. The
+code clears when an ordinary or recovery preparation starts or detection succeeds. A recovery job first re-checks the checkout: one that is
 usable again (held by a task or not) finishes as an ordinary refresh, moves nothing and clears the
 code. Otherwise it takes the ordinary rebuild path (seed, source proof, move aside, build, verify),
 keeps every repository record and this install's settings, KB and plan data. Before the move it
