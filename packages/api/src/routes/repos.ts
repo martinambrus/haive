@@ -3328,9 +3328,27 @@ async function runOnboardingArtifactReset(
         .delete(schema.projectStateConflicts)
         .where(inArray(schema.projectStateConflicts.id, takenBack));
     }
+    // The reset leaves the plan files standing. Keep their owner/mode obligation,
+    // while retiring the record write and rules work that the reset took back.
+    await tx
+      .update(schema.projectStateOutbox)
+      .set({
+        revision: 0,
+        writtenRevision: 0,
+        lastError: null,
+        writeIntent: null,
+        rulesReconcileIntent: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.projectStateOutbox.repositoryId, id));
     await tx
       .delete(schema.projectStateOutbox)
-      .where(eq(schema.projectStateOutbox.repositoryId, id));
+      .where(
+        and(
+          eq(schema.projectStateOutbox.repositoryId, id),
+          isNull(schema.projectStateOutbox.keptMetadata),
+        ),
+      );
   });
   return c.json({ ok: true, removed, cleaned, skipped, quarantined });
 }

@@ -24,6 +24,9 @@ const keys = vi.hoisted(() => ({ listeners: [] as KeyListener[] }));
 
 vi.mock('react', async (importOriginal) => ({
   ...(await importOriginal<typeof import('react')>()),
+  // These plain-tree fixtures read the default context; no provider is rendered.
+  createContext: (defaultValue: unknown) => ({ defaultValue }),
+  useContext: (context: { defaultValue: unknown }) => context.defaultValue,
   useState: (initial: unknown) => {
     const at = hooks.next++;
     if (!(at in hooks.slots)) hooks.slots[at] = initial;

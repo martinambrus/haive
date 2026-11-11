@@ -2,7 +2,14 @@ import { reviveRefusal } from '@haive/shared/onboarding-admission';
 import { taskRootMergeBusy, ROOT_MERGE_BUSY_MESSAGE } from '@haive/shared/root-merge-busy';
 import { ModuleAdmissionError } from '@haive/shared/modularity-server';
 import { and, desc, eq, inArray, isNotNull, isNull, notInArray, sql, type SQL } from 'drizzle-orm';
-import { schema, type Database, type DbTx } from '@haive/database';
+import {
+  schema,
+  boundedLockWait,
+  TASK_START_LOCK_TIMEOUT_MS,
+  isLockNotAvailable,
+  type Database,
+  type DbTx,
+} from '@haive/database';
 import { logger, TASK_DEAD_EVENT, type WorkflowType } from '@haive/shared';
 import { resyncAfterTaskEnd } from '../project-state/set-aside.js';
 import { stepRegistry, type StepRegistry } from '../step-engine/registry.js';
@@ -154,10 +161,14 @@ export async function reviveDeadTask(
   c: DeadTaskView,
   deps: DeadTaskBootDeps,
 ): Promise<ReviveJob['kind'] | 'held' | null> {
-  const revived = await db.transaction(async (tx) => {
+  const reviving = db.transaction(async (tx) => {
     if (await newWorkHeldUnderFence(tx)) return 'held' as const;
     try {
-      const refusal = await reviveRefusal(tx, c.id);
+      const refusal = await boundedLockWait(
+        tx,
+        () => reviveRefusal(tx, c.id),
+        TASK_START_LOCK_TIMEOUT_MS,
+      );
       if (refusal) {
         const reason = 'refusal' in refusal ? refusal.refusal.reason : refusal.admission.reason;
         log.info({ taskId: c.id, reason }, 'dead task revival refused');
@@ -178,11 +189,16 @@ export async function reviveDeadTask(
       log.info({ taskId: c.id, reason: ROOT_MERGE_BUSY_MESSAGE }, 'dead task revival held');
       return 'held' as const;
     }
-    const locked = await tx
-      .select({ id: schema.tasks.id })
-      .from(schema.tasks)
-      .where(eq(schema.tasks.id, c.id))
-      .for('update');
+    const locked = await boundedLockWait(
+      tx,
+      async () =>
+        tx
+          .select({ id: schema.tasks.id })
+          .from(schema.tasks)
+          .where(eq(schema.tasks.id, c.id))
+          .for('update'),
+      TASK_START_LOCK_TIMEOUT_MS,
+    );
     if (locked.length === 0) return null;
     const [row] = await tx
       .update(schema.tasks)
@@ -218,6 +234,10 @@ export async function reviveDeadTask(
       },
     });
     return { epoch: row.epoch, job };
+  });
+  const revived = await reviving.catch((err: unknown) => {
+    if (isLockNotAvailable(err)) return 'held' as const;
+    throw err;
   });
   if (revived === 'held') return 'held';
   if (!revived) return null;

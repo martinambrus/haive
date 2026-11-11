@@ -102,11 +102,14 @@ function fakeDb() {
       },
     }),
     // The conversation these tests leave open is abandoned, so no live one is found under the lock.
-    transaction: async <T>(fn: (tx: unknown) => Promise<T>) =>
+    transaction: async <T>(fn: (tx: unknown) => Promise<T>): Promise<T> =>
       fn({
         execute: async (q: unknown) => void flags.locked.push(q),
+        query: db.query,
+        insert: db.insert,
         select: () => ({
-          from: () => ({
+          from: (table: unknown) => ({
+            ...db.select().from(table),
             where: () => ({
               limit: async () => (flags.liveConversation ? [{ id: 't9' }] : []),
             }),

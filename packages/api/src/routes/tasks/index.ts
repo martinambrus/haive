@@ -23,6 +23,7 @@ import {
   sql,
 } from 'drizzle-orm';
 import {
+  TASK_START_LOCK_TIMEOUT_MS,
   schema,
   type DbTx,
   initializeTaskDatabaseState,
@@ -864,7 +865,11 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
             // Queuing takes this lock, and taken before the insert, as every holder does, it inverts no other.
             const lockedRepositoryId = body.repositoryId;
             if (lockedRepositoryId) {
-              await boundedLockWait(tx, () => lockRepositoryTasksKey(tx, lockedRepositoryId));
+              await boundedLockWait(
+                tx,
+                () => lockRepositoryTasksKey(tx, lockedRepositoryId),
+                TASK_START_LOCK_TIMEOUT_MS,
+              );
             }
             return create(tx);
           }));
@@ -1355,7 +1360,12 @@ taskRoutes.post('/:id/action', async (c) => {
         );
       }
       if (!started) {
-        return c.json({ ok: true, started: false, status: task.status });
+        const current = await db.query.tasks.findFirst({
+          where: eq(schema.tasks.id, id),
+          columns: { status: true },
+        });
+        if (!current) throw new HttpError(404, 'Task not found');
+        return c.json({ ok: true, started: false, status: current.status });
       }
       await appendTaskEvent(db, id, null, 'task.started', { by: userId });
       await enqueueStart(id, userId);

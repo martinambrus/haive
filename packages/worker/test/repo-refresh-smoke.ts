@@ -3789,8 +3789,10 @@ async function main(): Promise<void> {
               const keptAfter = (await stepRow())!.mergeResolveState!.keptMetadata;
               check(
                 `C12: ${ending}: a put-back that throws fails the job and settles nothing, so the retry still has the merge and the record to settle`,
+                // The re-sync catches and logs the put-back's fault (its callers rely on it never
+                // throwing); the abort then fails with its own retry error.
                 thrown instanceof Error &&
-                  thrown.message.includes('the put-back fails once') &&
+                  thrown.message.includes('not re-synced yet') &&
                   early.length === 0 &&
                   keptAfter !== undefined,
                 { thrown: String(thrown), early, keptAfter },

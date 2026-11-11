@@ -1,6 +1,14 @@
 'use client';
 
-import { useEffect, useInsertionEffect, useRef, type HTMLAttributes } from 'react';
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useInsertionEffect,
+  useRef,
+  type HTMLAttributes,
+  type RefObject,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { cn } from '@/lib/cn';
 
@@ -11,11 +19,58 @@ interface DialogProps {
   /** Override the centered wrapper's sizing (default `max-w-lg`). Merged with
    *  tailwind-merge, so e.g. `w-[95vw] max-w-6xl` widens it for a large modal. */
   className?: string;
+  'aria-label'?: string;
+  backdropClassName?: string;
+  /** Keep terminal sign-in sessions open until Close or Escape. */
+  dismissOnBackdrop?: boolean;
+  /** A replacement opener, e.g. the history bell exchanged by a sticky header. */
+  fallbackFocus?: () => HTMLElement | null;
 }
 
 const TABBABLE =
   'a[href], button, input, select, textarea, [tabindex], summary, iframe, [contenteditable], audio[controls], video[controls], area[href]';
-const openPanels: { panel: HTMLElement; opener: HTMLElement | null }[] = [];
+const DialogAncestors = createContext<RefObject<HTMLDivElement | null>[]>([]);
+
+// A keyed move can blur the opener before insertion effects run. Capture focus
+// before the opening interaction reaches React, and forget it at the next task.
+// Closed dialogs share these listeners instead of each tracking document focus.
+let closedDialogs = 0;
+let interactionOpener: HTMLElement | null = null;
+let forgetInteraction: ReturnType<typeof setTimeout> | undefined;
+function rememberOpeningInteraction() {
+  const active = document.activeElement as HTMLElement | null;
+  interactionOpener = active && active !== document.body ? active : null;
+  clearTimeout(forgetInteraction);
+  forgetInteraction = setTimeout(() => {
+    interactionOpener = null;
+    forgetInteraction = undefined;
+  }, 0);
+}
+function watchOpeningInteractions() {
+  if (closedDialogs++ === 0) {
+    document.addEventListener('click', rememberOpeningInteraction, true);
+    document.addEventListener('keydown', rememberOpeningInteraction, true);
+  }
+  return () => {
+    if (--closedDialogs !== 0) return;
+    document.removeEventListener('click', rememberOpeningInteraction, true);
+    document.removeEventListener('keydown', rememberOpeningInteraction, true);
+    clearTimeout(forgetInteraction);
+    forgetInteraction = undefined;
+    interactionOpener = null;
+  };
+}
+const openPanels: {
+  panel: HTMLElement;
+  wrapper: HTMLElement;
+  opener: HTMLElement | null;
+  ancestors: (HTMLElement | null)[];
+}[] = [];
+function paintLayers() {
+  openPanels.forEach((entry, index) => {
+    entry.wrapper.style.zIndex = String(50 + index);
+  });
+}
 
 const isRadio = (el: Element): el is HTMLInputElement => (el as HTMLInputElement).type === 'radio';
 const inGroup = (a: HTMLInputElement, b: HTMLInputElement) =>
@@ -50,12 +105,34 @@ function leavesPanel(panel: HTMLElement, stops: HTMLElement[], backwards: boolea
   return (edge.compareDocumentPosition(active) & beyond) !== 0;
 }
 
-export function Dialog({ open, onOpenChange, children, className }: DialogProps) {
+export function Dialog({
+  open,
+  onOpenChange,
+  children,
+  className,
+  'aria-label': label,
+  backdropClassName,
+  dismissOnBackdrop = true,
+  fallbackFocus,
+}: DialogProps) {
+  const ancestors = useContext(DialogAncestors);
+  const depth = ancestors.length;
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const fallbackFocusRef = useRef(fallbackFocus);
+  fallbackFocusRef.current = fallbackFocus;
   const openerRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (open || typeof document === 'undefined') return;
+    return watchOpeningInteractions();
+  }, [open]);
   // Insertion effects run before the layout phase, where a child's autoFocus takes focus.
   useInsertionEffect(() => {
-    if (open) openerRef.current = document.activeElement as HTMLElement | null;
+    if (open) {
+      const active = document.activeElement as HTMLElement | null;
+      openerRef.current =
+        active === document.body && interactionOpener?.isConnected ? interactionOpener : active;
+    }
   }, [open]);
 
   useEffect(() => {
@@ -81,23 +158,51 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
   useEffect(() => {
     const panel = panelRef.current;
     if (!open || !panel) return;
-    const entry = { panel, opener: openerRef.current };
-    if (!panel.contains(document.activeElement)) panel.focus();
-    openPanels.push(entry);
+    const entry = {
+      panel,
+      wrapper: wrapperRef.current!,
+      opener: openerRef.current,
+      ancestors: ancestors.map((ref) => ref.current),
+    };
+    // Children mount first. Insert a newly mounted parent before its descendants,
+    // while a later sibling still opens above the entire existing stack.
+    const descendant = openPanels.findIndex((other) => other.ancestors.includes(panel));
+    openPanels.splice(descendant < 0 ? openPanels.length : descendant, 0, entry);
+    paintLayers();
+    if (openPanels.at(-1) === entry && !panel.contains(document.activeElement)) panel.focus();
     const onTab = (e: KeyboardEvent) => {
       if (e.key !== 'Tab' || e.defaultPrevented || openPanels.at(-1) !== entry) return;
+      if (document.activeElement?.closest('[data-haive-toast-region]')) return;
       const ahead = tabbables(panel, document.activeElement);
       if (!leavesPanel(panel, ahead, e.shiftKey)) return;
       const stops = tabbables(panel, null);
       e.preventDefault();
       ((e.shiftKey ? stops.at(-1) : stops[0]) ?? panel).focus();
     };
+    // Native radio navigation and positive tabindex can choose a stop outside
+    // the panel. Guard the resulting focus as well as the key's predicted order.
+    let backwards = false;
+    const rememberDirection = (event: KeyboardEvent) => {
+      if (event.key === 'Tab') backwards = event.shiftKey;
+    };
+    const onFocus = () => {
+      if (openPanels.at(-1) !== entry || panel.contains(document.activeElement)) return;
+      // Portaled notification controls stay usable while the modal is open.
+      if (document.activeElement?.closest('[data-haive-toast-region]')) return;
+      const stops = tabbables(panel, null);
+      ((backwards ? stops.at(-1) : stops[0]) ?? panel).focus();
+    };
+    document.addEventListener('keydown', rememberDirection);
+    document.addEventListener('focusin', onFocus);
     document.addEventListener('keydown', onTab);
     return () => {
+      document.removeEventListener('keydown', rememberDirection);
+      document.removeEventListener('focusin', onFocus);
       document.removeEventListener('keydown', onTab);
       const at = openPanels.indexOf(entry);
       const wasTop = at === openPanels.length - 1;
       openPanels.splice(at, 1);
+      paintLayers();
       // Still attached means Strict Mode's rehearsal, not a close.
       if (panel.isConnected) return;
       openerRef.current = null;
@@ -107,33 +212,46 @@ export function Dialog({ open, onOpenChange, children, className }: DialogProps)
       }
       // A dialog still open above this one keeps the focus.
       if (!wasTop) return;
-      if (entry.opener?.isConnected) entry.opener.focus();
+      const returnTo = entry.opener?.isConnected ? entry.opener : fallbackFocusRef.current?.();
+      returnTo?.focus();
       const below = openPanels.at(-1);
       const focused = document.activeElement;
-      const onOpener = focused === entry.opener && focused !== document.body;
+      const onOpener = focused === returnTo && focused !== document.body;
       // Focus that is on neither the opener nor the dialog below goes to that dialog.
       if (below && !onOpener && !below.panel.contains(focused)) below.panel.focus();
     };
-  }, [open]);
+  }, [open, depth]);
 
   if (!open) return null;
   return createPortal(
     // Marked so page-level Escape handlers can tell a dialog is on top and
     // leave the key to it: without that, one Escape closes the dialog AND
     // whatever was behind it.
-    <div data-haive-dialog="" className="fixed inset-0 z-50 flex items-center justify-center">
+    <DialogAncestors value={[...ancestors, panelRef]}>
       <div
-        className="fixed inset-0 bg-black/60 backdrop-blur-sm"
-        onClick={() => onOpenChange(false)}
-      />
-      <div
-        ref={panelRef}
-        tabIndex={-1}
-        className={cn('relative z-10 w-full max-w-lg outline-none', className)}
+        ref={wrapperRef}
+        data-haive-dialog=""
+        style={{ zIndex: 50 + depth }}
+        className="fixed inset-0 flex items-center justify-center"
       >
-        {children}
+        <div
+          className={cn('fixed inset-0 bg-black/60 backdrop-blur-sm', backdropClassName)}
+          onClick={() => {
+            if (dismissOnBackdrop) onOpenChange(false);
+          }}
+        />
+        <div
+          ref={panelRef}
+          role={label ? 'dialog' : undefined}
+          aria-modal={label ? true : undefined}
+          aria-label={label}
+          tabIndex={-1}
+          className={cn('relative z-10 w-full max-w-lg outline-none', className)}
+        >
+          {children}
+        </div>
       </div>
-    </div>,
+    </DialogAncestors>,
     document.body,
   );
 }

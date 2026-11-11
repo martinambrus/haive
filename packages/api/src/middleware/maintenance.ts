@@ -1,6 +1,6 @@
 import type { MiddlewareHandler } from 'hono';
 import { eq } from 'drizzle-orm';
-import { schema, type DbTx } from '@haive/database';
+import { NEW_WORK_FENCE_LOCK_TIMEOUT_MS, schema, type DbTx } from '@haive/database';
 import {
   CONFIG_KEYS,
   configService,
@@ -13,6 +13,7 @@ import {
 import { verifyAccessToken } from '../auth/jwt.js';
 import { getAccessCookie } from '../auth/cookies.js';
 import { getDb } from '../db.js';
+import { boundedLockWait } from '../lib/repository-busy.js';
 import { HttpError, type AppEnv } from '../context.js';
 
 /**
@@ -111,7 +112,7 @@ export async function assertNewWorkAllowed(): Promise<void> {
 
 /** Call first in the transaction that writes the task: a state write waits for its commit. */
 export async function admitNewWork(tx: DbTx): Promise<void> {
-  await lockNewWorkFenceShared(tx);
+  await boundedLockWait(tx, () => lockNewWorkFenceShared(tx), NEW_WORK_FENCE_LOCK_TIMEOUT_MS);
   await assertNewWorkAllowed();
 }
 

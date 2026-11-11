@@ -2171,10 +2171,10 @@ describe('a START job', () => {
       moveToDelayed: vi.fn(async () => undefined),
     }) as unknown as Job;
 
-  it.each(['created', 'queued'])('claims a %s task and runs its first step', async (status) => {
+  it('claims a queued task and runs its first step', async () => {
     h.state.readsAnswer = true;
     h.state.taskType = 'epoch_chain';
-    h.state.taskStatus = status;
+    h.state.taskStatus = 'queued';
     await processTaskJob(start(), 'tok');
     expect(h.state.taskWrites[0]).toEqual({ epochs: [5], landed: true });
     expect(h.state.landedTaskPatches[0]).toMatchObject({
@@ -2190,14 +2190,14 @@ describe('a START job', () => {
     });
   });
 
-  it.each(['running', 'waiting_user', 'failed', 'cancelled', 'completed'])(
+  it.each(['created', 'running', 'waiting_user', 'failed', 'cancelled', 'completed'])(
     'does nothing to a %s task',
     async (status) => {
       h.state.readsAnswer = true;
       h.state.taskType = 'epoch_chain';
       h.state.taskStatus = status;
       await processTaskJob(start(), 'tok');
-      expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+      expect(h.state.taskWrites).toEqual([]);
       expect(h.state.events).toEqual([]);
       expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
       expect(h.state.add).not.toHaveBeenCalled();
@@ -2262,16 +2262,16 @@ describe('a START job', () => {
     expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
   });
 
-  it('fails nothing a Retry re-queued while a START that read it failed was before its claim', async () => {
+  it('leaves a task a Retry re-queued after START read it failed, since START claims only queued', async () => {
     h.state.taskType = 'epoch_chain';
     h.state.taskStatus = 'failed';
-    // The Retry lands once START has read the task, and the claim's own read then throws.
+    // The Retry lands after START read a failed task; START returns before the claim.
     h.state.onRead = () => {
       h.state.taskStatus = 'queued';
       h.state.taskEpoch = 6;
     };
-    await expect(processTaskJob(start(), 'tok')).rejects.toThrow('the job went no further');
-    expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
+    await processTaskJob(start(), 'tok');
+    expect(h.state.taskWrites).toEqual([]);
   });
 
   it('fails nothing when it could not read the task at all', async () => {

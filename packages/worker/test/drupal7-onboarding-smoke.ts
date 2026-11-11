@@ -155,7 +155,7 @@ async function main(): Promise<void> {
         repositoryId: repo.id,
         type: 'onboarding',
         title: 'drupal7 onboarding smoke',
-        status: 'created',
+        status: 'queued',
         metadata: null,
       })
       .returning();

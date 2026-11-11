@@ -1,4 +1,5 @@
 'use client';
+import { LinkButton } from '@/components/ui';
 
 import Link from 'next/link';
 import { startTaskWithAttachmentConfirmation } from '@/lib/start-task';
@@ -932,11 +933,9 @@ export default function NewTaskPage() {
               {marking ? 'Marking...' : 'Mark as onboarded'}
             </Button>
           )}
-          <Link href={origin?.href ?? '/tasks'}>
-            <Button variant="secondary" size="sm">
-              Cancel
-            </Button>
-          </Link>
+          <LinkButton href={origin?.href ?? '/tasks'} variant="secondary" size="sm">
+            Cancel
+          </LinkButton>
         </div>
       </div>
 
@@ -1242,11 +1241,9 @@ export default function NewTaskPage() {
             <div className="flex flex-col gap-1.5">
               <div className="flex items-center justify-between gap-2">
                 <Label htmlFor="cliProviderId">CLI provider (optional)</Label>
-                <Link href="/cli-providers">
-                  <Button type="button" variant="primary" size="sm">
-                    Add a CLI
-                  </Button>
-                </Link>
+                <LinkButton href="/cli-providers" variant="primary" size="sm">
+                  Add a CLI
+                </LinkButton>
               </div>
               <div className="flex items-center gap-2">
                 <select

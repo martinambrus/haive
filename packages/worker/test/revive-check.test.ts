@@ -1,3 +1,4 @@
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DbTx } from '@haive/database';
 import { ConfigUnavailableError, configService, logger } from '@haive/shared';
@@ -13,8 +14,9 @@ function setup(taskStatus: string | null = 'failed') {
     throw new Error(`a reopen check never sends ${what}`);
   };
   const tx = {
-    execute: async () => {
-      log.push('takes the fence');
+    execute: async (query: Parameters<PgDialect['sqlToQuery']>[0]) => {
+      if (!new PgDialect().sqlToQuery(query).sql.startsWith('SET LOCAL '))
+        log.push('takes the fence');
     },
     select: () => ({
       from: () => ({
@@ -114,11 +116,11 @@ describe('readMaintenanceState, the early checks outside the fence', () => {
     await expect(readMaintenanceState(TASK)).resolves.toBe('draining');
   });
 
-  it('answers normal and warns when the state cannot be read', async () => {
+  it('answers unreadable and warns when the state cannot be read', async () => {
     setup().stored(new Error('redis went away'));
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
 
-    await expect(readMaintenanceState(TASK)).resolves.toBe('normal');
+    await expect(readMaintenanceState(TASK)).resolves.toBe('unreadable');
 
     expect(warn).toHaveBeenCalledWith(
       expect.objectContaining({ taskId: TASK, err: expect.any(Error) }),
@@ -147,5 +149,12 @@ describe('holdsNewWork', () => {
     ['normal', false],
   ] as const)('answers %s as %s', (state, held) => {
     expect(holdsNewWork(state)).toBe(held);
+  });
+});
+
+describe('unreadable revival state', () => {
+  it('holds every rejected read, including an unexpected store error', async () => {
+    vi.spyOn(configService, 'getFresh').mockRejectedValue(new Error('unexpected store error'));
+    expect(await readMaintenanceState(TASK)).toBe('unreadable');
   });
 });

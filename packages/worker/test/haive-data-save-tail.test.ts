@@ -1,3 +1,4 @@
+import { pendingMetadataControl } from './support/pending-metadata-control.js';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { createFakeDb } from '@haive/database/testing';
 import { schema } from '@haive/database';
@@ -23,7 +24,7 @@ import * as workspace from '../src/repo/git-workspace.js';
 import * as operations from '../src/repo/git-operation.js';
 import * as mirror from '../src/plan/mirror.js';
 import * as merge from '../src/plan/merge.js';
-import { saveCore, SavePreconditionError } from '../src/queues/plan-mirror-queue.js';
+import { save, saveCore, SavePreconditionError } from '../src/queues/plan-mirror-queue.js';
 import { saveHaiveData } from '../src/project-state/save.js';
 let fake: ReturnType<typeof createFakeDb>;
 beforeEach(() => {
@@ -61,6 +62,48 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 describe('the Haive data Save push seam', () => {
+  it.each([
+    ['plan', false],
+    ['plan', true],
+    ['data', false],
+    ['data', true],
+  ] as const)(
+    'landed %s Save settles absent metadata but rejects conflicts: %s',
+    async (site, conflict) => {
+      const control = await pendingMetadataControl(conflict);
+      try {
+        const fs =
+          await vi.importActual<typeof import('@haive/shared/fs-safe')>('@haive/shared/fs-safe');
+        calls.lstat.mockImplementation((root, rel, options) =>
+          root === control.root ? fs.lstatNoFollow(root, rel, options) : Promise.resolve(null),
+        );
+        h.resync.mockImplementation(control.recover);
+        h.resettle.mockImplementation(control.recover);
+        const run = push.gitRun;
+        vi.spyOn(push, 'gitRun').mockImplementation(async (cwd, args, ...rest) =>
+          args.includes('refs/heads/main^{commit}')
+            ? { code: 0, stdout: 'merged', stderr: '' }
+            : run(cwd, args, ...rest),
+        );
+        vi.spyOn(mirror, 'advancePlanBaseFromCommit').mockResolvedValue(undefined);
+        if (site === 'plan') {
+          if (conflict) await expect(save(payload)).rejects.toThrow('re-sync failed');
+          else expect(await save(payload)).toMatchObject({ pushed: true });
+        } else {
+          const result = await saveHaiveData(payload);
+          expect(result).toMatchObject(
+            conflict
+              ? { outcome: 'refused', refusal: { code: 'resync_failed' } }
+              : { outcome: 'saved', pushed: true },
+          );
+        }
+        expect(control.pending()).not.toBeNull();
+      } finally {
+        await control.cleanup();
+      }
+    },
+  );
+
   it('returns a structured refusal when the plan keeps changing during its flush', async () => {
     await fake.db
       .update(schema.planMirrorState)
@@ -283,6 +326,8 @@ describe('data Save failure and race controls', () => {
       refusal: { code: 'resync_failed' },
     });
     expect(push.pushBranch).not.toHaveBeenCalled();
+    expect(h.resettle).toHaveBeenCalled();
+    expect(h.metadata).not.toHaveBeenCalled();
   });
   it('reports plan_merge opened inside integrateOrigin after prechecks', async () => {
     h.fetch.mockImplementation(async () => {

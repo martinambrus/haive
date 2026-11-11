@@ -1,10 +1,11 @@
 'use client';
+import { LinkButton } from '@/components/ui';
 
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type Task, type TaskListResponse, type TaskStatus } from '@/lib/api-client';
-import { Badge, Button, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
+import { Badge, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
 import { CircleDot, FolderGit2 } from 'lucide-react';
 import { SlotWaitBadge } from '@/components/slot-wait-badge';
 import { isTaskDead, moduleStopBanner } from '@/lib/step-banners';
@@ -533,9 +534,7 @@ export default function TasksPage() {
             />
             Show plan chats
           </label>
-          <Link href="/tasks/new">
-            <Button>New task</Button>
-          </Link>
+          <LinkButton href="/tasks/new">New task</LinkButton>
         </div>
       </div>
 
@@ -559,9 +558,9 @@ export default function TasksPage() {
               Create one to run the onboarding step engine against a repository.
             </CardDescription>
           </CardHeader>
-          <Link href="/tasks/new">
-            <Button size="sm">New task</Button>
-          </Link>
+          <LinkButton href="/tasks/new" size="sm">
+            New task
+          </LinkButton>
         </Card>
       )}
 

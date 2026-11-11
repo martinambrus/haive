@@ -31,7 +31,7 @@ export async function admitWatchedRepository(tx: Tx, repositoryId: string): Prom
     })
     .from(schema.repositories)
     .where(eq(schema.repositories.id, repositoryId))
-    .for('update');
+    .for('no key update');
   if (!repo || repo.status !== 'ready' || isRootClaimLive(repo.claimedAt)) return false;
   const held = await tx
     .select({ id: schema.tasks.id })

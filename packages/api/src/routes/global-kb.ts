@@ -8,6 +8,7 @@ import {
   isLockNotAvailable,
   isRefusedStatement,
   lockRepositoryTasksKey,
+  TASK_START_LOCK_TIMEOUT_MS,
   schema,
   type DbTx,
 } from '@haive/database';
@@ -805,7 +806,11 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
       // Queuing takes this lock; taken before the insert, it inverts no lock the row's insert holds.
       const lockedRepositoryId = data.repositoryId;
       if (lockedRepositoryId) {
-        await boundedLockWait(tx, () => lockRepositoryTasksKey(tx, lockedRepositoryId));
+        await boundedLockWait(
+          tx,
+          () => lockRepositoryTasksKey(tx, lockedRepositoryId),
+          TASK_START_LOCK_TIMEOUT_MS,
+        );
       }
       const { runListSnapshot, customSteps } = await definitionForCreate(tx, 'kb_author', {
         generic: false,

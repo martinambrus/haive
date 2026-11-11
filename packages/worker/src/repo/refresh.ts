@@ -1,3 +1,4 @@
+import { withProjectionMove } from '../project-state/projection-move.js';
 import { checkoutWorktreeRefusal } from '@haive/shared/repo-rebuild';
 import { CheckoutRepairNeededError } from './repair-needed.js';
 import path from 'node:path';
@@ -33,9 +34,8 @@ import {
   putBackAfterFailure,
   putBackProjections,
   recoverAfterMoveFailure,
-  restoreKeptMetadata,
   restoreProjectionsInTx,
-  resyncHaiveProjections,
+  resyncWithKeptMetadata,
   setAsideHaiveProjections,
   type KeptFiles,
 } from '../project-state/set-aside.js';
@@ -279,7 +279,10 @@ function unreadableOperationRefusal(err: unknown): string {
 
 /** Fast-forward the checkout to its source. Answers why it was left as it was, or null once it is
  *  up to date. `merge --ff-only` never drops a commit or overwrites a local change: git refuses. */
-export async function fastForward(
+export const fastForward: typeof fastForwardInMove = (...args) =>
+  withProjectionMove(() => fastForwardInMove(...args));
+
+async function fastForwardInMove(
   db: Database,
   payload: RepoJobPayload,
   dest: string,
@@ -418,15 +421,13 @@ export async function fastForward(
         throw err;
       } finally {
         try {
-          await resyncHaiveProjections(db, payload.repositoryId, dest);
+          await resyncWithKeptMetadata(db, payload.repositoryId, dest, kept);
         } catch (err) {
           if (!handBackFailed) throw err;
           logger.warn(
             { err, repositoryId: payload.repositoryId },
             'projection resync failed after hand-back failure',
           );
-        } finally {
-          await restoreKeptMetadata(dest, kept);
         }
       }
     } else if (asided) await putBackProjections(db, payload.repositoryId, dest, kept);

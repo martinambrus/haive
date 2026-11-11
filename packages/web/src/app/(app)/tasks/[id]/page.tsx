@@ -1,4 +1,6 @@
 'use client';
+import { PostLoginRetryDialog } from '@/components/post-login-retry-dialog';
+import { LinkButton } from '@/components/ui';
 
 import Link from 'next/link';
 import { startTaskWithAttachmentConfirmation } from '@/lib/start-task';
@@ -2284,26 +2286,22 @@ export default function TaskDetailPage() {
           )}
           {task.status === 'completed' && promotedDraftCount > 0 && (
             <div className="flex justify-center pt-2">
-              <Link href={`/settings/global-kb?status=draft&sourceTaskId=${task.id}`}>
-                <Button>
-                  Review {promotedDraftCount} global KB draft{promotedDraftCount === 1 ? '' : 's'}{' '}
-                  you promoted →
-                </Button>
-              </Link>
+              <LinkButton href={`/settings/global-kb?status=draft&sourceTaskId=${task.id}`}>
+                Review {promotedDraftCount} global KB draft{promotedDraftCount === 1 ? '' : 's'} you
+                promoted →
+              </LinkButton>
             </div>
           )}
           {isPlanTask && task.status === 'completed' && task.repositoryId && planNodeCount > 0 && (
             <div className="flex justify-center pt-2">
-              <Link href={`/repos/${task.repositoryId}/plan`}>
-                <Button>Continue to the plan →</Button>
-              </Link>
+              <LinkButton href={`/repos/${task.repositoryId}/plan`}>
+                Continue to the plan →
+              </LinkButton>
             </div>
           )}
           {isUpgradeTask && task.status === 'completed' && (
             <div className="flex justify-center pt-2">
-              <Link href="/repos">
-                <Button>Back to repositories</Button>
-              </Link>
+              <LinkButton href="/repos">Back to repositories</LinkButton>
             </div>
           )}
           {deadNote && <DeadTaskBanner text={deadNote.text} />}
@@ -2422,26 +2420,11 @@ export default function TaskDetailPage() {
         </div>
       )}
 
-      {pendingLoginRetry && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-          <Card className="flex max-w-md flex-col gap-4 p-5">
-            <h2 className="text-base font-semibold text-neutral-100">Login successful</h2>
-            <p className="text-sm text-neutral-300">
-              You&apos;re now signed in. Retry step{' '}
-              <span className="font-mono text-xs text-neutral-400">{pendingLoginRetry.stepId}</span>{' '}
-              now?
-            </p>
-            <div className="flex justify-end gap-2">
-              <Button variant="secondary" size="sm" onClick={() => setPendingLoginRetry(null)}>
-                Not now
-              </Button>
-              <Button size="sm" onClick={confirmPostLoginRetry}>
-                Retry step
-              </Button>
-            </div>
-          </Card>
-        </div>
-      )}
+      <PostLoginRetryDialog
+        stepId={pendingLoginRetry?.stepId ?? null}
+        onClose={() => setPendingLoginRetry(null)}
+        onRetry={confirmPostLoginRetry}
+      />
     </div>
   );
 }

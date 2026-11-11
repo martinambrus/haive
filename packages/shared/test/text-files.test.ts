@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const BINARY_EXTENSIONS = new Set(['.png']);
+const BINARY_EXTENSIONS = new Set(['.ico', '.png']);
 
 describe('tracked text files', () => {
   // grep reads a file holding a NUL byte as binary, and ripgrep skips it without a word.

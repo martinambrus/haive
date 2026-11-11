@@ -343,8 +343,9 @@ describe('the allowance auto-resume when the stored state cannot be read', () =>
   const down = new Error('redis went away');
   afterEach(() => vi.restoreAllMocks());
 
-  it('warns, treats the system as normal, and goes on to resume the next armed task', async () => {
-    storedStates(down, 'normal', down, 'normal');
+  it('holds the task it cannot read the state for, warns, and goes on to resume the next armed task', async () => {
+    // The early read for TASK rejects (held); NEXT_TASK reads normal early and under the fence.
+    storedStates(down, 'normal', 'normal');
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
     const t = setup();
     t.fake.insert(schema.tasks, { ...t.task(), id: NEXT_TASK });
@@ -363,10 +364,9 @@ describe('the allowance auto-resume when the stored state cannot be read', () =>
       expect.objectContaining({ taskId: TASK, err: expect.any(Error) }),
       expect.any(String),
     );
-    expect(t.task()).toMatchObject({ status: 'running', allowanceAutoResumeCount: 1 });
+    expect(t.task()).toMatchObject({ status: 'failed', allowanceAutoResumeCount: 0 });
     expect(t.task(NEXT_TASK)).toMatchObject({ status: 'running', allowanceAutoResumeCount: 1 });
     expect(h.queued).toMatchObject([
-      { name: TASK_JOB_NAMES.ADVANCE_STEP, data: { taskId: TASK } },
       { name: TASK_JOB_NAMES.ADVANCE_STEP, data: { taskId: NEXT_TASK } },
     ]);
   });

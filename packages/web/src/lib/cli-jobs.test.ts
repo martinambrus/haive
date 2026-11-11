@@ -73,6 +73,7 @@ describe('queued job polling', () => {
     expect(((await result) as Error).message).toContain(
       state === 'active' ? 'Still running.' : 'Still queued behind running CLI jobs.',
     );
+    expect(((await result) as Error).message).toContain('The latest refresh result is saved');
   });
 
   it('retries transient poll failures, resetting the bound after a successful poll', async () => {

@@ -21,6 +21,9 @@ vi.mock('../src/project-state/set-aside.js', async (original) => ({
   restoreProjectionsInTx: async () => ({ outcome: 'clean' }),
   putBackProjections: h.putBack,
   resyncHaiveProjections: h.resync,
+  // The move callers re-sync through this wrapper, which calls the module's own binding.
+  resyncWithKeptMetadata: (db: unknown, repositoryId: string, repoPath: string) =>
+    h.resync(db, repositoryId, repoPath),
   restoreKeptMetadata: h.metadata,
 }));
 vi.mock('../src/step-engine/git-merge.js', async (original) => ({
@@ -145,7 +148,9 @@ it('refresh finishes projection bookkeeping when hand-back throws after a move',
   await expect(fastForward(db, payload, dest)).rejects.toThrow(/hand-back failed/);
   expect(await git(dest, ['rev-parse', 'HEAD'])).not.toBe(before);
   expect(h.resync).toHaveBeenCalledOnce();
-  expect(h.metadata).toHaveBeenCalledWith(dest, expect.any(Map));
+  // The re-sync restores the captured owner/mode from the outbox; nothing restores it beside it.
+  expect(h.resync).toHaveBeenCalledWith(db, payload.repositoryId, dest);
+  expect(h.metadata).not.toHaveBeenCalled();
   expect(h.putBack).not.toHaveBeenCalled();
 });
 
@@ -198,7 +203,9 @@ it('refresh preserves hand-back failure when resync fails too', async () => {
       expect.objectContaining({ err: secondary }),
       expect.stringMatching(/resync/),
     );
-    expect(h.metadata).toHaveBeenCalledWith(dest, expect.any(Map));
+    // The re-sync restores the captured owner/mode from the outbox; nothing restores it beside it.
+    expect(h.resync).toHaveBeenCalledWith(db, payload.repositoryId, dest);
+    expect(h.metadata).not.toHaveBeenCalled();
     expect(h.putBack).not.toHaveBeenCalled();
   } finally {
     warning.mockRestore();

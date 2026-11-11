@@ -157,7 +157,9 @@ duplicate; `created` is left alone, since a deferred-start draft waits there on 
 route that starts a task moves it from `created` to `queued` before it queues START, after every
 write that can fail (`markQueuedForStart`, `api/src/lib/task-start.ts`), under the repository's
 task-creation lock, since a queued task holds the checkout and a checkout move holds that lock. The
-api waits at most 30 s for it and otherwise answers 409 with nothing created or queued. So a
+api waits at most 5 s for each repository or plan key and row lock it takes there, and 1 s for the
+shared new-work fence (`TASK_START_LOCK_TIMEOUT_MS`, `NEW_WORK_FENCE_LOCK_TIMEOUT_MS`), and otherwise
+answers 409 with nothing created or queued; other `boundedLockWait` callers keep the 30 s default. So a
 START that was lost or could not be queued is the sweep's to give, and the route answers as though
 it had been queued. POST /tasks, `spawnPlanTask` (its seed included) and the global-KB enrich each
 insert the task and claim its START in one transaction, taking that lock before the insert, so a
@@ -175,7 +177,7 @@ wave records the run, sets the workspace up and only then queues it, with the ro
 
 A `cancelled` task with a `task.cancelled` event five minutes old and no `task.cancel_finished` (the api commits the cancel before it queues the teardown) gets a CANCEL from the same sweep (`redriveCancelledTasks`), unless one is waiting, active or delayed; a finished or failed one in history does not count, since the finish record is what says the teardown ran, and the teardown is idempotent. The sweep waits for the newest `task.cancelled` event to be five minutes old, and the CANCEL job writes one of its own on every run that is not ignored (`markTaskCancelled`), so a teardown that keeps failing is re-driven at most once per five minutes (smoke case `rerunning-cancel`, `stalled-redrive-smoke.ts`). Each re-drive is a `task.cancel_redriven` event, and a task stops being re-driven after three (`CANCEL_REDRIVE_MAX`); cancellations older than seven days are not re-driven, since many predate the finish record. A task the re-drive no longer retries but that still holds a merge dir claim is given up instead (`abandonCancelledTeardowns`, started by the same sweep without being awaited, one pass at a time, since its dir locks can wait behind a long merge): capped with its last re-drive older than the cutoff, or with its `task.cancelled` event older than seven days whatever its re-drive count. Giving up keeps the CANCEL teardown's guard: it supersedes the task's runs, kills its cli sandboxes and goes on only when the listing shows none left, or the task keeps its claims for the next pass. Then it reports the merges left open (a failure stops there, with nothing released, and the next pass tries again), writes a `task.cancel_finished` event with `abandoned: true` and its reason (`re-drive cap reached` or `cancelled before the re-drive window`), and only then runs the claim release, the plan-merge discard and the re-sync, each logged and passed over when it fails. The event comes before the release because it is what frees the dir: a cancelled task with that record holds no claim (`liveClaimHolder`), so a pass cut off after it leaves only stale rows that the next claimer takes over. A re-drive whose CANCEL the queue refuses gives its `task.cancel_redriven` event back, so a queue outage never counts toward the cap. A task with a CANCEL waiting, active or delayed is left to it.
 
-The CANCEL teardown releases the task's `merge_dir_claims` rows once `cleanupTaskContainers` has returned and a docker listing (`listCliSandboxesForTask`, null on any failure) shows no cli sandbox of the task left (`releaseTaskMergeClaims`), each one under its dir's advisory lock, so a section the old pass is inside finishes first and a later section of it reads the task as cancelled and refuses. When that listing is not clean the teardown keeps the claims, skips the release, the report of merges left open (`recordLeftOpenMerges`, which otherwise precedes the release), the plan-merge discard and the scratch cleanup (they would remove a dir a fixer may still write), still runs the model unloads and the KB reconcile, then throws: the job fails, no `task.cancel_finished` is written, and the re-drive above repeats the whole idempotent teardown, at most three times, after which the teardown is given up as above and the dir is freed. A cancel that died before then keeps its merge dir held until the re-drive above finishes it; a crashed worker's claim stays held and the boot re-drive of the owning step resumes it ([merge conflicts](merge-conflicts.md)).
+The CANCEL teardown releases the task's `merge_dir_claims` rows once `cleanupTaskContainers` has returned and a docker listing (`listCliSandboxesForTask`, null on any failure) shows no cli sandbox of the task left (`releaseTaskMergeClaims`), each one under its dir's advisory lock, so a section the old pass is inside finishes first and a later section of it reads the task as cancelled and refuses. When that listing is not clean the teardown keeps the claims, skips the release, the report of merges left open (`recordLeftOpenMerges`, which otherwise precedes the release), the plan-merge discard and the scratch cleanup (they would remove a dir a fixer may still write), still runs the model unloads and the KB reconcile, then throws: the job fails, no `task.cancel_finished` is written, and the re-drive above repeats the whole idempotent teardown, at most three times, after which the teardown is given up as above and the dir is freed. A cancel that died before then keeps its merge dir held until the re-drive above finishes it; a crashed worker's claim stays held and the boot re-drive of the owning step resumes it ([merge conflicts](merge-conflicts.md)). A projection re-sync that does not finish during the teardown or the abandon pass is logged and left to the durable metadata sweep; it does not stop the release, the finish event, the plan-merge discard or the task-end re-sync.
 
 A repository delete records its two cleanup jobs (per-project RAG databases, then runners, env images, `haive_repos` files and the repository's finished upload archive, `_uploads/<user>/<repoId>.<ext>`, whose failed removal only warns) as `repo_cleanups` rows inside the delete's own transaction, with no foreign key to the repository that is going. The api queues the jobs after commit, passing each row's id as `cleanupId`, and a queue that refuses them no longer fails the request; the handlers delete their row when they succeed. The same sweep (`redriveRepoCleanups`) queues again any row stamped `last_enqueued_at` ten minutes ago, or never stamped ten minutes after it was written (so it does not race the api's own enqueue), claiming the row on its stamp, counting the attempt only once a queue has taken the job (a refused enqueue puts the stamp back and spends nothing), and carrying it in the job id (`repo-cleanup-<id>-<attempt>`, hyphens, since BullMQ only tolerates a colon in a custom id as a compatibility carve-out for three-part repeat ids), and drops with a warning a row whose job a queue has taken five times (`REPO_CLEANUP_MAX_ATTEMPTS`) so a cleanup that never succeeds is not looped on.
 
@@ -250,14 +252,14 @@ to `error`. The final update repeats status, age and claim checks. It starts no 
 no task or runtime state. Both repository and bundle Workers tolerate ten stalls; this policy
 belongs to those two queues alone.
 
-**START claims the task, or does nothing.** `claimTaskStart` moves a `created` or `queued` task to
-`running`, pointed at its first step, in one statement fenced on the epoch START read. A START that
+**START claims the task, or does nothing.** `claimTaskStart` moves only a `queued` task to
+`running` (a stray START leaves a `created` draft alone), pointed at its first step, in one statement fenced on the epoch START read. A START that
 finds the task anywhere else — redelivered after the task ran on, a second START a task Retry
 queued, a task a repository deletion cancelled — logs and returns, where it used to restart the
 task from its first step or revive a cancelled one. The pointer is load-bearing: a task Retry
 leaves it on the step that failed, so under a pause the advance START queues for a first step
 already `done` read the chain as moved and was dropped, leaving a `running` task nothing drove. A
-START that throws before its claim fails the task only while it is still `created` or `queued` at
+START that throws before its claim fails the task only while it is still `queued` at
 the epoch it read, since a Retry can re-queue the task in between, and fails nothing when it could
 not read the task at all; `markTaskFailed` never writes over `cancelled` or `completed` from any
 caller. Once START has claimed, its redelivery is
@@ -329,11 +331,13 @@ like any other. While the system drains or is in maintenance (`refusesNewWork`, 
 cache early in the job and again in the transaction that reopens the task, under the shared new-work
 fence a drain's write waits for) that exception closes, as does the fix-loop gate one below: the answer
 stays stored on its row and the advance is dropped, so an answer accepted while the task was live
-cannot reopen it during a drain. The early read fails open on an error other than a configuration outage, since it only decides
-whether to try; an outage reads as `'unreadable'`, which `holdsNewWork` counts as held, so the
-advance is dropped and the answer stays on its row; the
+cannot reopen it during a drain. Any error on the early read reads as `'unreadable'`, which `holdsNewWork` counts as held: the advance
+throws `MaintenanceStateUnreadable` before it writes, and the allowance auto-resume skips that task
+with a warning and goes on to the next armed one; the
 read under the fence fails closed: a state it cannot read writes nothing and throws
-`MaintenanceStateUnreadable`, so the job fails and is retried with the answer still on its row. A
+`MaintenanceStateUnreadable`; that, like a revival that met a busy lock (`RevivalBusy`), moves the
+job to delayed for 30 s without failing the task or spending an attempt, and it is retried with the
+answer still on its row. A
 hold it sees also travels into the write that follows (`taskWriteTarget`, `held`): the task row is
 written only while it is not `failed`, so a task that failed after that read is not reopened either. Both
 answer routes read the task's status inside their own
@@ -383,7 +387,7 @@ so does a task whose current row does not exist yet (a hand-off wrote the pointe
 has not created the row): the api cannot create a step row, and failing only the task would send its
 Retry down the START replay. What a Stop leaves there, a `failed` row and a `failed` task at the
 same epoch, the worker does not touch: an advance for it, at that epoch or an older one, is refused
-(`failedTaskRefusesAdvance`), a START claims only a `created` or `queued` task, the stalled sweep
+(`failedTaskRefusesAdvance`), a START claims only a `queued` task, the stalled sweep
 takes `running` tasks (and answered forms of waiting ones), and a claim flips only a `pending` row
 and refuses a failed task, so the next write to the row is a Retry's reset. No reader sees a run cancelled beside a step still running, and a
 Stop that fails leaves every run as it was and kills nothing. When the Stop's own update fails the
@@ -415,7 +419,7 @@ task, which the delete finds among the open ones and cancels. The delete waits f
 30 s (`boundedLockWait`) and otherwise answers 409 `The repository is busy, try again` with nothing
 written. Its repository-row take has a separate 30 s bound, so a relink holding that row cannot
 leave the delete waiting without a bound after it obtained the task-creation key. The plan advisory route takes the same key, before its plan node row, since the delete
-holds the key and cascades into the node rows. The cancel itself is described after this paragraph. A pass a Stop cut off
+holds the key and cascades into the node rows, with the same 5 s admission bound. The cancel itself is described after this paragraph. A pass a Stop cut off
 mid-apply then releases what the failed task holds (`settleFailedTask`), as its own failure would
 have; a Stop that finds no pass queues the same release as a `settle-stopped-task` job (see
 `failedAt` above), and when both run a second settlement of one failure is harmless. The cancel poll also stops a

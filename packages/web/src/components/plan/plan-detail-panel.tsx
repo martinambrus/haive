@@ -1,4 +1,5 @@
 'use client';
+import { LinkButton } from '@/components/ui';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
@@ -361,7 +362,12 @@ export function PlanDetailPanel({
             </div>
           )}
         </div>
-        <button type="button" onClick={onClose} className="text-sm text-neutral-500">
+        <button
+          type="button"
+          aria-label="Close plan details"
+          onClick={onClose}
+          className="text-sm text-neutral-500"
+        >
           ✕
         </button>
       </div>
@@ -538,9 +544,11 @@ export function PlanDetailPanel({
           <button
             key={t}
             type="button"
+            aria-label={t}
+            aria-pressed={tab === t}
             onClick={() => onTabChange(t)}
             className={`flex items-center gap-1 px-2 py-1 capitalize ${
-              tab === t ? 'border-b-2 border-indigo-400 text-neutral-100' : 'text-neutral-500'
+              tab === t ? 'border-b-2 border-indigo-400 text-neutral-100' : 'text-neutral-400'
             }`}
           >
             {t}
@@ -730,12 +738,13 @@ export function PlanDetailPanel({
               ) : (
                 /* The form carries the origin on to the task it creates, so the
                    whole plan → form → task chain leads back to this node. */
-                <Link
+                <LinkButton
                   href={`/tasks/new?repositoryId=${repositoryId}&planNodeId=${nodeId}&title=${encodeURIComponent(node.title)}`}
                   onClick={() => rememberTaskOrigin('/tasks/new', planOrigin(repositoryId, nodeId))}
+                  size="sm"
                 >
-                  <Button size="sm">Create a task from this</Button>
-                </Link>
+                  Create a task from this
+                </LinkButton>
               ))}
             {node.kind === 'research' && (
               <Button size="sm" disabled={saving} onClick={() => void researchOptions()}>

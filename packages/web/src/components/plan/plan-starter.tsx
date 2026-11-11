@@ -349,6 +349,7 @@ export function PlanStarter({
         <div className="flex flex-col gap-2">
           <p className="text-sm font-medium text-neutral-200">Describe a new project</p>
           <textarea
+            aria-label="Project description"
             value={brief}
             onChange={(e) => setBrief(e.target.value)}
             rows={3}
@@ -369,6 +370,7 @@ export function PlanStarter({
           ) : (
             <div className="flex flex-wrap items-center gap-2">
               <input
+                aria-label="Attach files"
                 ref={fileInput}
                 type="file"
                 multiple
@@ -382,6 +384,7 @@ export function PlanStarter({
                   picker or a folder picker, and the two questions are different
                   enough that a toggle would just hide one of them. */}
               <input
+                aria-label="Attach folder"
                 ref={folderInput}
                 type="file"
                 multiple
@@ -433,6 +436,7 @@ export function PlanStarter({
                     {formatBytes(entry.file.size)}
                   </span>
                   <Input
+                    aria-label={`Description for ${attachmentUploadName(entry.file)}`}
                     value={entry.description}
                     onChange={(e) => patch(index, { description: e.target.value })}
                     placeholder="What is this? (optional)"
@@ -442,15 +446,17 @@ export function PlanStarter({
                   />
                   {/* The state is on the row that has it, so a single failure in
                       a batch of eight is visible rather than summarised away. */}
-                  {entry.state === 'uploading' && (
-                    <span className="text-[11px] text-indigo-300">Uploading…</span>
-                  )}
-                  {entry.state === 'done' && (
-                    <span className="text-[11px] text-emerald-400">Uploaded</span>
-                  )}
-                  {entry.state === 'failed' && (
-                    <span className="text-[11px] text-rose-400">{entry.error ?? 'Failed'}</span>
-                  )}
+                  <span role="status" aria-live="polite" aria-atomic="true">
+                    {entry.state === 'uploading' && (
+                      <span className="text-[11px] text-indigo-300">Uploading…</span>
+                    )}
+                    {entry.state === 'done' && (
+                      <span className="text-[11px] text-emerald-400">Uploaded</span>
+                    )}
+                    {entry.state === 'failed' && (
+                      <span className="text-[11px] text-rose-400">{entry.error ?? 'Failed'}</span>
+                    )}
+                  </span>
                   <button
                     type="button"
                     disabled={busy || (draftTaskId !== null && entry.state === 'done')}
@@ -510,7 +516,14 @@ export function PlanStarter({
                 Open the draft task instead
               </Link>
             )}
-            {progress && <span className="text-xs text-indigo-300">{progress}</span>}
+            <span
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+              className="text-xs text-indigo-300"
+            >
+              {progress}
+            </span>
           </div>
         </div>
 
@@ -547,6 +560,7 @@ export function PlanStarter({
 
         <div className="flex flex-wrap gap-2 border-t border-neutral-800 pt-3">
           <Input
+            aria-label="Root title"
             value={rootTitle}
             onChange={(e) => setRootTitle(e.target.value)}
             placeholder="Or name the project to start by hand"

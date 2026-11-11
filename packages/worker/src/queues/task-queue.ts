@@ -196,6 +196,8 @@ import {
   admitReopen,
   holdsNewWork,
   NewWorkHeld,
+  MaintenanceStateUnreadable,
+  RevivalBusy,
   readMaintenanceState,
   refuseRevive,
 } from './_revive-check.js';
@@ -353,8 +355,8 @@ async function appendEventOnce(
   });
 }
 
-/** A task nobody has started yet: created, or queued by the start action or a task Retry. */
-const STARTABLE_TASK_STATUSES = ['created', 'queued'] as const satisfies readonly TaskStatus[];
+/** Only an admitted task: created drafts still await an explicit Start. */
+const STARTABLE_TASK_STATUSES = ['queued'] as const satisfies readonly TaskStatus[];
 
 /** START's claim: the task goes running, pointed at its first step, only while it is still
  *  startable at the epoch START read; false when anything else holds it and nothing was written. */
@@ -2822,6 +2824,13 @@ async function handleStartTask(
     logger.info({ taskId: ctx.taskId }, 'start-task skipped: the task is dead');
     return;
   }
+  if (ctx.status !== 'queued') {
+    logger.info(
+      { taskId: ctx.taskId, taskStatus: ctx.status },
+      'start-task skipped: task is not queued',
+    );
+    return;
+  }
   let steps: StepDefinition[];
   try {
     steps = await buildRunList(ctx, db);
@@ -3149,8 +3158,9 @@ async function handleAdvanceStep(
     ctx.completedAt,
     jobTimestamp,
   );
-  const newWorkHeld =
-    ctx.status === 'failed' && holdsNewWork(await readMaintenanceState(ctx.taskId));
+  const maintenance = ctx.status === 'failed' ? await readMaintenanceState(ctx.taskId) : 'normal';
+  if (maintenance === 'unreadable') throw new MaintenanceStateUnreadable();
+  const newWorkHeld = ctx.status === 'failed' && holdsNewWork(maintenance);
   if (
     failedTaskRefusesAdvance(
       ctx.status,
@@ -4600,6 +4610,18 @@ export async function processTaskJob(job: Job<TaskWorkerPayload>, token?: string
     job.name === TASK_JOB_NAMES.ADVANCE_STEP ? await holdStepAdvance(job, token) : null;
   try {
     await runTaskJob(job);
+  } catch (err) {
+    if (err instanceof RevivalBusy || err instanceof MaintenanceStateUnreadable) {
+      logger.info(
+        { err, taskId: (job.data as TaskJobPayload).taskId },
+        'task revival held; retrying later',
+      );
+      if (token) {
+        await job.moveToDelayed(Date.now() + 30_000, token);
+        throw new DelayedError();
+      }
+    }
+    throw err;
   } finally {
     release?.();
   }
@@ -4648,7 +4670,12 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
       throw new Error(`unknown task job ${job.name}`);
     }
   } catch (err) {
-    if (err instanceof RagCleanupDeferredError) throw err;
+    if (
+      err instanceof RagCleanupDeferredError ||
+      err instanceof RevivalBusy ||
+      err instanceof MaintenanceStateUnreadable
+    )
+      throw err;
     const message = safeErrorMessage(err);
     const taskId = (job.data as TaskJobPayload).taskId;
     logger.error({ taskId, jobName: job.name, err }, 'task job failed');

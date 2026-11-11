@@ -121,7 +121,7 @@ async function main(): Promise<void> {
         repositoryId: repo.id,
         type: 'onboarding',
         title: 'onboarding smoke',
-        status: 'created',
+        status: 'queued',
         metadata: null,
       })
       .returning();

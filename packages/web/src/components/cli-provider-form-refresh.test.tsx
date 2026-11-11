@@ -62,11 +62,15 @@ const OPENROUTER_FAILED: RefreshCliVersionsJobResult = {
 };
 
 let answer: Record<string, unknown>;
+let role: 'admin' | 'user' | null;
 
 beforeEach(() => {
   vi.useFakeTimers();
+  role = 'admin';
   h.post.mockReset().mockResolvedValue({ jobId: '7' });
   h.get.mockReset().mockImplementation(async (path: string) => {
+    if (path === '/auth/me') return { user: role ? { role } : null };
+    if (path.endsWith('/refresh-result')) return { run: null };
     if (path === POLL_PATH) return answer;
     throw new Error(`Unexpected GET ${path}`);
   });
@@ -76,6 +80,8 @@ afterEach(() => vi.useRealTimers());
 type View = ReturnType<typeof createRenderer>;
 
 async function settle(view: View) {
+  await vi.advanceTimersByTimeAsync(0);
+  view.draw();
   await vi.advanceTimersByTimeAsync(0);
   view.draw();
 }
@@ -92,6 +98,25 @@ const mount = () =>
   createRenderer(() => createElement(CliProviderForm, { mode: 'create', metadata }));
 
 describe('CLI version refresh in the provider form', () => {
+  it('shows the stored scheduled failure after reopening the form', async () => {
+    const original = h.get.getMockImplementation()!;
+    h.get.mockImplementation((path: string) =>
+      path.endsWith('/refresh-result')
+        ? Promise.resolve({
+            run: {
+              trigger: 'scheduled',
+              startedAt: '2026-11-01T00:00:00Z',
+              finishedAt: '2026-11-01T00:01:00Z',
+              result: OPENROUTER_FAILED,
+            },
+          })
+        : original(path),
+    );
+    const view = mount();
+    await settle(view);
+    expect(textOf(view.tree())).toContain('models endpoint HTTP 503');
+    expect(h.post).not.toHaveBeenCalled();
+  });
   it('names the failed source and its reason where the version is picked, and still applies the versions', async () => {
     answer = { status: 'done', entry, result: OPENROUTER_FAILED };
     const view = mount();
@@ -141,4 +166,49 @@ describe('CLI version refresh in the provider form', () => {
     expect(buttons(view.tree(), /^queued\.\.\.$/i)).toHaveLength(1);
     expect(alertsIn(view)).toHaveLength(0);
   });
+});
+
+it.each(['user', null] as const)(
+  'never polls or renders durable refresh results for role %s',
+  async (viewerRole) => {
+    role = viewerRole;
+    const view = mount();
+    await settle(view);
+    await vi.advanceTimersByTimeAsync(30_000);
+    view.draw();
+    expect(h.get.mock.calls.filter(([path]) => path.endsWith('/refresh-result'))).toHaveLength(0);
+    expect(alertsIn(view)).toHaveLength(0);
+  },
+);
+it('does not poll while the viewer role is unresolved', async () => {
+  const original = h.get.getMockImplementation()!;
+  h.get.mockImplementation((path: string) =>
+    path === '/auth/me' ? new Promise(() => {}) : original(path),
+  );
+  const view = mount();
+  await settle(view);
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(h.get.mock.calls.filter(([path]) => path.endsWith('/refresh-result'))).toHaveLength(0);
+});
+it('polls durable refresh results for admins', async () => {
+  const view = mount();
+  await settle(view);
+  await settle(view);
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(h.get.mock.calls.filter(([path]) => path.endsWith('/refresh-result'))).toHaveLength(4);
+  expect(h.get.mock.calls.filter(([path]) => path === '/auth/me')).toHaveLength(1);
+});
+it('still names the failed sources of a manual refresh when the role read failed', async () => {
+  const original = h.get.getMockImplementation()!;
+  h.get.mockImplementation((path: string) =>
+    path === '/auth/me' ? Promise.reject(new Error('network down')) : original(path),
+  );
+  answer = { status: 'done', entry, result: OPENROUTER_FAILED };
+  const view = mount();
+  await settle(view);
+  await clickRefresh(view);
+  const shown = alertsIn(view);
+  expect(shown).toHaveLength(1);
+  expect(textOf(shown[0]!)).toContain('models endpoint HTTP 503');
+  expect(h.get.mock.calls.filter(([path]) => path.endsWith('/refresh-result'))).toHaveLength(0);
 });

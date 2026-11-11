@@ -53,7 +53,12 @@ function marksDb(): Database {
       }),
     }),
   });
-  return { select } as unknown as Database;
+  const db = {
+    select,
+    execute: async () => [],
+    transaction: async (fn: (tx: Database) => Promise<unknown>) => fn(db),
+  } as unknown as Database;
+  return db;
 }
 
 beforeEach(() => {
@@ -86,11 +91,11 @@ describe('resyncHaiveProjections settles only a state sync that finished', () =>
     expect(await resyncHaiveProjections(marksDb(), 'repo-1', '/repo')).toBe(false);
   });
 
-  it('answers true for a deferred sync whose pending write deferred with it', async () => {
+  it('answers false for a deferred sync whose pending write deferred with it', async () => {
     calls.outcome = 'deferred';
     calls.dirty.state = true;
     calls.refreshed = false;
-    expect(await resyncHaiveProjections(marksDb(), 'repo-1', '/repo')).toBe(true);
+    expect(await resyncHaiveProjections(marksDb(), 'repo-1', '/repo')).toBe(false);
   });
 
   it('answers true when the pending state was written', async () => {
@@ -105,13 +110,16 @@ describe('an unreadable git never makes a re-sync throw', () => {
     expect(await resyncHaiveProjections(marksDb(), 'repo-1', '/repo')).toBe(false);
   });
 
-  it('answers false from settleProjections and saves nothing', async () => {
+  it('answers false from settleProjections and retains the durable handoff', async () => {
     calls.unreadable = true;
     const save = vi.fn();
     const given = { mergeDir: '/repo', keptMetadata: { 'a.json': { mode: 0o600 } } };
     expect(
       await settleProjections(marksDb(), 'repo-1', given as unknown as MergeResolveState, save),
     ).toBe(false);
-    expect(save).not.toHaveBeenCalled();
+    expect(save).toHaveBeenCalledExactlyOnceWith(
+      { ...given, keptMetadataStored: true },
+      expect.anything(),
+    );
   });
 });

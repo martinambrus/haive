@@ -453,6 +453,8 @@ export const CLI_EXEC_JOB_NAMES = {
 
 /** Stable scheduler key; BullMQ derives each refresh tick's job id from it. */
 export const VERSION_REFRESH_JOB_ID = 'cli-refresh-versions-repeatable';
+/** Durable latest-run key shared by the refresh writer and API readers. */
+export const VERSION_REFRESH_KIND = 'versions';
 
 /** Login banner refusals sent only after origin, authentication and ownership checks. */
 export const CLI_LOGIN_CLOSE_CODES = {
@@ -494,7 +496,11 @@ export interface CliSignOutJobResult {
   failed: { name: string; stderr: string }[];
 }
 
-export type RefreshCliVersionsJobPayload = Record<string, never>;
+export type RefreshTrigger = 'manual' | 'scheduled' | 'boot' | 'unknown';
+export interface RefreshCliVersionsJobPayload {
+  /** Absent on jobs queued before durable refresh results shipped. */
+  trigger?: RefreshTrigger;
+}
 
 export type CliExecQueuePayload =
   | CliExecJobPayload
@@ -507,9 +513,23 @@ export type CliExecQueuePayload =
   | OllamaProvisionJobPayload;
 
 export interface RefreshCliVersionsJobResult {
+  /** Absent on results from jobs completed before run tracking shipped. */
+  runId?: string;
+  startedAt?: string;
+  /** Sources intentionally skipped by configuration, rather than failed. */
+  skipped?: string[];
   ok: boolean;
   refreshed: { name: string; count: number; latest: string | null }[];
   errors: { name: string; error: string }[];
+}
+
+export interface LatestRefreshRun {
+  kind: string;
+  runId: string;
+  trigger: RefreshTrigger;
+  startedAt: string;
+  finishedAt: string | null;
+  result: RefreshCliVersionsJobResult | null;
 }
 
 export type CliExecInvocationKind =

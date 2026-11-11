@@ -1,3 +1,4 @@
+import { pendingMetadataControl } from '../../../../test/support/pending-metadata-control.js';
 import { fixtureBase, networkGitArgs, httpOrigin } from '../../../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -17,6 +18,7 @@ import { failGit } from '../../../../test/support/fake-git.js';
 const projections = vi.hoisted(() => ({
   setAside: vi.fn(),
   resync: vi.fn(),
+  resettle: vi.fn(),
   putBack: vi.fn(),
   restore: vi.fn(),
   seed: vi.fn(),
@@ -37,6 +39,7 @@ vi.mock('../../../plan/mirror.js', async (importOriginal) => ({
 vi.mock('../../../project-state/set-aside.js', () => ({
   setAsideHaiveProjections: projections.setAside,
   resyncHaiveProjections: projections.resync,
+  resyncWithKeptMetadata: projections.resettle,
   putBackProjections: projections.putBack,
   putBackAfterFailure: async (...args: unknown[]) => {
     await projections.putBack(...args.slice(0, 4));
@@ -100,6 +103,12 @@ beforeEach(() => {
   projections.setAside.mockReset();
   projections.resync.mockReset();
   projections.resync.mockResolvedValue(true);
+  projections.resettle.mockReset().mockImplementation(async (...args: unknown[]) => {
+    const synced = await projections.resync(...args.slice(0, 3));
+    if (synced) await projections.metadata(args[2], args[3]);
+    return synced;
+  });
+  projections.metadata.mockReset();
   projections.putBack.mockReset();
   projections.restore.mockReset();
   projections.seed.mockReset();
@@ -875,8 +884,10 @@ async function mergeOverKeptFile(synced: boolean) {
       ignoreSavedStepClis: false,
       stepDef: step,
     } as never;
-    const merge = await resolveMergePhase(h.db as never, step, current, mkCtx(local), params);
-    expect(merge.resolved).toBe(true);
+    const pass = resolveMergePhase(h.db as never, step, current, mkCtx(local), params);
+    expect((await pass).resolved).toBe(true);
+    expect(projections.resync).toHaveBeenCalledWith(h.db, 'repo-1', local);
+    expect(projections.metadata).not.toHaveBeenCalled();
     return h.getState();
   } finally {
     await rm(bare, { recursive: true, force: true, maxRetries: 5 });
@@ -989,7 +1000,7 @@ describe('00a-sync-base divergence (real git + merge phase)', () => {
     expect(state?.keptMetadata).toBeUndefined();
   });
 
-  it('a merge that lands past a re-sync that did not succeed keeps the record for a later settle', async () => {
+  it('a merge that lands past a failed re-sync keeps its metadata durably after completion', async () => {
     const state = await mergeOverKeptFile(false);
     expect(state).toMatchObject({ phase: 'done', merged: true });
     expect(state?.keptMetadata).toEqual({
@@ -1862,11 +1873,52 @@ it('sync preserves hand-back failure when resync also throws', async () => {
       expect.objectContaining({ err: secondary }),
       expect.stringMatching(/resync/),
     );
-    expect(projections.metadata).toHaveBeenCalledWith(local, expect.any(Map));
+    expect(projections.metadata).not.toHaveBeenCalled();
   } finally {
     await shim?.restore();
     asRoot.mockRestore();
     for (const dir of [bare, seed, local])
       await rm(dir, { recursive: true, force: true, maxRetries: 5 });
   }
+});
+
+describe('fast-forward metadata recovery', () => {
+  it.each([false, true])(
+    'retains absent or failed metadata after fast-forward: conflict=%s',
+    async (conflict) => {
+      const control = await pendingMetadataControl(conflict);
+      const { bare, seed } = await seedOrigin();
+      const local = await cloneLocal(bare);
+      try {
+        await advanceOrigin(seed, 'incoming.txt');
+        const ctx = mkCtx(local, 'repo-1');
+        const d = await syncBaseStep.detect!(ctx);
+        const kept = new Map([
+          [
+            KEPT_FILE,
+            {
+              bytes: Buffer.from('{}'),
+              index: null,
+              untracked: true,
+              owner: { uid: 1000, gid: 1000 },
+              mode: 0o600,
+            },
+          ],
+        ]);
+        projections.setAside.mockResolvedValue({ outcome: 'set-aside', kept });
+        projections.resettle.mockImplementation(control.recover);
+        await syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }));
+        expect(projections.resettle).toHaveBeenCalledWith(ctx.db, 'repo-1', local, kept);
+        expect(projections.metadata).not.toHaveBeenCalled();
+        expect(kept.size).toBe(1);
+        expect(await control.recover()).toBe(!conflict);
+        expect(control.pending()).not.toBeNull();
+      } finally {
+        await control.cleanup();
+        await rm(bare, { recursive: true, force: true, maxRetries: 5 });
+        await rm(seed, { recursive: true, force: true });
+        await rm(local, { recursive: true, force: true });
+      }
+    },
+  );
 });

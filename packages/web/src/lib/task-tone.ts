@@ -70,7 +70,9 @@ export const TASK_TONE_LABEL: Record<TaskTone, string> = {
 };
 
 export function taskToneLabel(task: TaskToneLike): string {
-  return isTaskDead(task) ? 'dead' : TASK_TONE_LABEL[taskTone(task)];
+  if (isTaskDead(task)) return 'dead';
+  if (task.status === 'created' && taskTone(task) === 'idle') return 'not started';
+  return TASK_TONE_LABEL[taskTone(task)];
 }
 
 /** The tones the sidebar offers as filters. `idle` is deliberately absent: it is the

@@ -33,7 +33,7 @@ import {
   type HaiveProjectionCommit,
 } from './commit.js';
 import { refreshProjectStateOutcome } from './refresh.js';
-import { restoreKeptMetadata, resyncHaiveProjections } from './set-aside.js';
+import { resyncWithKeptMetadata } from './set-aside.js';
 import { lockProjectState } from './write.js';
 
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
@@ -54,7 +54,7 @@ async function branchAt(repoPath: string): Promise<string | null> {
   return branch.stdout.trim() || null;
 }
 
-/** The caller supplies the repository row it has already read (FOR UPDATE in the final check).
+/** The caller supplies the repository row it has already read (FOR NO KEY UPDATE in the final check).
  * Every query inside that final check stays on its transaction's connection.
  * Keep the read-only mirror in api/src/lib/haive-data-status.ts in sync with these facts. */
 async function factsAt(
@@ -290,7 +290,7 @@ async function saveHaiveDataInScope(payload: HaiveDataSavePayload): Promise<Haiv
           .select()
           .from(schema.repositories)
           .where(eq(schema.repositories.id, repo.id))
-          .for('update');
+          .for('no key update');
         if (
           !locked ||
           locked.userId !== payload.userId ||
@@ -350,14 +350,10 @@ async function saveHaiveDataInScope(payload: HaiveDataSavePayload): Promise<Haiv
       },
       commit,
       async afterLanding(scope) {
-        try {
-          if (!(await resyncHaiveProjections(db, repo.id, scope.repoPath)))
-            fail({ code: 'resync_failed' });
-          // Re-check questions under all four locks before any new record is committed.
-          await commit(scope);
-        } finally {
-          await restoreKeptMetadata(scope.repoPath, scope.kept);
-        }
+        if (!(await resyncWithKeptMetadata(db, repo.id, scope.repoPath, scope.kept)))
+          fail({ code: 'resync_failed' });
+        // Re-check questions under all four locks before any new record is committed.
+        await commit(scope);
       },
     });
     return {

@@ -1,3 +1,8 @@
+import {
+  withProjectionMove,
+  holdProjectionMove,
+  projectionRecoveryHeld,
+} from './projection-move.js';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
@@ -55,6 +60,16 @@ import {
   overlaySettings,
 } from './write.js';
 
+import {
+  captureProjectionMetadata,
+  clearKeptMetadata,
+  type KeptMetadata,
+  type MetadataRestoreResult,
+  keptMetadataOf,
+  rememberKeptMetadata,
+  restorePendingKeptMetadata,
+} from './kept-metadata.js';
+
 type DbOrTx = Parameters<typeof markPlanMirrorDirty>[0];
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 
@@ -68,9 +83,12 @@ export interface KeptFile {
   mode?: number;
   owner?: { uid: number; gid: number };
   untracked?: boolean;
+  /** Exact durable judge capture; follows this entry through callers' accumulated maps. */
+  capturedMetadata?: KeptMetadata[string];
   parents?: { path: string; owner: { uid: number; gid: number }; mode: number }[];
 }
 export type KeptFiles = Map<string, KeptFile>;
+const judgedMetadata = new WeakMap<KeptFiles, KeptMetadata>();
 
 export type SetAsideResult =
   | { outcome: 'clean' }
@@ -454,6 +472,7 @@ export const restoreFaults: {
 } = {};
 
 interface RestoreGuard {
+  repositoryId: string;
   owns: (path: string) => boolean;
   lock: (tx: Tx) => Promise<unknown>;
   judgeLock: (tx: Tx) => Promise<unknown>;
@@ -477,7 +496,10 @@ async function judgeAndMark(
   repoPath: string,
   paths: readonly string[],
   guard: RestoreGuard,
-): Promise<{ stopped: SetAsideResult } | { prints: Map<string, string>; generation: string }> {
+): Promise<
+  | { stopped: SetAsideResult }
+  | { prints: Map<string, string>; generation: string; captured: KeptMetadata }
+> {
   await guard.judgeLock(tx);
   const blocked = await guard.blocked?.(tx);
   if (blocked) return { stopped: blocked };
@@ -489,8 +511,24 @@ async function judgeAndMark(
   await restoreFaults.afterJudgeFence?.();
   if (holding > 0) return { stopped: { outcome: 'held', holding } };
   await guard.mark(tx);
+  const metadata = await captureProjectionMetadata(
+    repoPath,
+    paths,
+    async (path) => (await headEntry(repoPath, path)) === null,
+  );
+  const [pending] = await tx
+    .select({ kept: schema.projectStateOutbox.keptMetadata })
+    .from(schema.projectStateOutbox)
+    .where(eq(schema.projectStateOutbox.repositoryId, guard.repositoryId))
+    .limit(1);
+  const captured = Object.fromEntries(
+    Object.entries(metadata).filter(
+      ([path]) => !Object.hasOwn(pending?.kept?.[repoPath] ?? {}, path),
+    ),
+  );
+  await rememberKeptMetadata(tx, guard.repositoryId, repoPath, metadata);
   await guard.base?.(tx);
-  return { prints, generation: await guard.generation(tx) };
+  return { prints, generation: await guard.generation(tx), captured };
 }
 
 /** Second transaction: the files are still as the first judged them (or already at HEAD) and the base and
@@ -532,7 +570,10 @@ async function restoreJudged(
     const owner =
       entry?.kind === 'file' ? { uid: entry.stats.uid, gid: entry.stats.gid } : undefined;
     const untracked = (await headEntry(repoPath, path)) === null;
-    captured.set(path, bytes === undefined ? { index } : { bytes, index, mode, owner, untracked });
+    captured.set(path, {
+      ...(bytes === undefined ? { index } : { bytes, index, mode, owner, untracked }),
+      capturedMetadata: judgedMetadata.get(kept)?.[path],
+    });
   }
   // A write landing during the capture would be taken for Haive's: the judged state must still hold.
   for (const path of mine) {
@@ -572,6 +613,7 @@ async function setAsideDomain(
 ): Promise<SetAsideResult | Changed | null> {
   const judged = await db.transaction((tx) => judgeAndMark(tx, repoPath, paths, guard));
   if ('stopped' in judged) return judged.stopped;
+  judgedMetadata.set(kept, { ...judgedMetadata.get(kept), ...judged.captured });
   await restoreFaults.afterBase?.();
   const restore = (tx: Tx) => restoreJudged(tx, repoPath, judged, guard, kept, after);
   return section ? section(restore) : db.transaction(restore);
@@ -596,6 +638,7 @@ const stateGuard = (
   head: HeadRecord,
   fence?: CheckoutFence,
 ): RestoreGuard => ({
+  repositoryId,
   owns: (path) => path.startsWith(STATE_PREFIX),
   lock: guardLock(repositoryId, fence, (tx) => lockProjectState(tx, repositoryId)),
   judgeLock: (tx) => lockProjectState(tx, repositoryId),
@@ -613,6 +656,7 @@ const planGuard = (
   plan: readonly string[],
   fence?: CheckoutFence,
 ): RestoreGuard => ({
+  repositoryId,
   owns: (path) => !path.startsWith(STATE_PREFIX),
   lock: guardLock(repositoryId, fence, (tx) => lockPlanMirror(tx, repositoryId)),
   judgeLock: (tx) => lockPlanMirror(tx, repositoryId),
@@ -723,21 +767,24 @@ async function pruneEmptyStateDirs(
  *  mark that says the files are stale is raised first, which a crash then finds. A file that is not what
  *  Haive last wrote, in the working tree or in the index, refuses the move and is named. After the move,
  *  `resyncHaiveProjections` brings the new head in and writes the pending changes over it. */
-export async function setAsideHaiveProjections(
+export const setAsideHaiveProjections: typeof setAsideHaiveProjectionsInMove = (...args) =>
+  withProjectionMove(() => setAsideHaiveProjectionsInMove(...args));
+
+async function setAsideHaiveProjectionsInMove(
   db: Database,
   repositoryId: string,
   repoPath: string,
   fence?: CheckoutFence,
   sections?: { restore: RestoreSection; putBack: RestoreSection },
 ): Promise<SetAsideResult> {
+  await holdProjectionMove(repoPath);
   const pending = await pendingStateWrite(db, repositoryId);
   if (pending) return pending;
   const restored = new Set<string>();
   const kept: KeptFiles = new Map();
   // A stop after anything was captured puts it back, since no move follows; the put-back skips what was not restored.
   const stop = async (result: SetAsideResult): Promise<SetAsideResult> => {
-    if (kept.size > 0)
-      await putBackProjections(db, repositoryId, repoPath, kept, sections?.putBack);
+    await putBackProjections(db, repositoryId, repoPath, kept, sections?.putBack);
     return result;
   };
   let busy = '';
@@ -904,14 +951,16 @@ async function isDirty(
 /** After a move of the checkout: reads the new head's record and plan in, then writes what this install
  *  still has pending over them. A step that fails here leaves its mark raised, so the sweep retries it.
  *  Whether both halves re-synced: false while a merge, rebase, cherry-pick or revert is open, when either threw, or when the
- *  state sync was held, superseded or refused or its pending write did not run. A sync deferred to a
- *  live onboarding or upgrade counts as done: that task re-syncs when it ends. */
+ *  state sync was held, superseded or refused or its pending write did not run. A deferred write
+ *  retains its metadata until the task-end re-sync or a later sweep finishes it. An absent captured
+ *  path remains owed by the outbox but does not fail an otherwise completed re-sync. */
 export async function resyncHaiveProjections(
   db: Database,
   repositoryId: string,
   repoPath: string,
   endingTaskId?: string,
 ): Promise<boolean> {
+  if (projectionRecoveryHeld(repoPath)) return false;
   // A merge, rebase, cherry-pick or revert still open holds an intermediate record: nothing is read in until it ends.
   try {
     if (await gitOperationInProgress(repoPath)) return false;
@@ -932,8 +981,7 @@ export async function resyncHaiveProjections(
     if (outcome === 'held' || outcome === 'superseded' || outcome === 'refused') synced = false;
     if (
       (await isDirty(db, schema.projectStateOutbox, repositoryId)) &&
-      !(await refreshProjectState(db, repositoryId)) &&
-      outcome !== 'deferred'
+      !(await refreshProjectState(db, repositoryId))
     ) {
       synced = false;
     }
@@ -953,7 +1001,27 @@ export async function resyncHaiveProjections(
     logger.warn({ err, repositoryId }, 'plan not re-synced after a checkout move');
     await raiseMarkAfterFailure(db, schema.planMirrorState, repositoryId, markPlanMirrorDirty);
   }
+  if (synced) {
+    try {
+      synced = await restorePendingKeptMetadata(db, repositoryId, repoPath, restoreKeptMetadata);
+    } catch (err) {
+      synced = false;
+      logger.warn({ err, repositoryId }, 'captured projection metadata not settled');
+    }
+  }
   return synced;
+}
+
+/** A move caller keeps its map in memory and in the outbox until the complete re-sync succeeds. */
+export async function resyncWithKeptMetadata(
+  db: Database,
+  repositoryId: string,
+  repoPath: string,
+  _kept: KeptFiles,
+): Promise<boolean> {
+  // Capture was committed by the judge before removal. Never re-introduce a map
+  // another successful recovery has already consumed.
+  return resyncHaiveProjections(db, repositoryId, repoPath);
 }
 
 /** The re-sync an onboarding or upgrade owes when it ends, since the sync deferred while it held the
@@ -981,29 +1049,96 @@ export async function resyncAfterTaskEnd(db: Database, taskId: string): Promise<
 const metadataWarn = (repoPath: string, path: string) => (err: unknown) =>
   logger.warn({ err, repoPath, path }, 'owner and mode not restored after a checkout move');
 
+// No durable warning flag: remember a bounded set of absent or conflicting paths for this worker's
+// lifetime, so the 10 s sweep does not log the same standing state on every tick. A path found in
+// the expected shape re-arms both warnings; restart or cache eviction may emit one once again.
+const metadataWarnings = new Set<string>();
+function metadataPresent(repoPath: string, path: string): void {
+  metadataWarnings.delete(JSON.stringify(['absent', repoPath, path]));
+  metadataWarnings.delete(JSON.stringify(['conflict', repoPath, path]));
+}
+function warnMetadataOnce(
+  kind: 'absent' | 'conflict',
+  repoPath: string,
+  path: string,
+  msg: string,
+): void {
+  const key = JSON.stringify([kind, repoPath, path]);
+  if (metadataWarnings.has(key)) return;
+  if (metadataWarnings.size >= 4096)
+    metadataWarnings.delete(metadataWarnings.values().next().value!);
+  metadataWarnings.add(key);
+  logger.warn({ repoPath, path }, msg);
+}
+function warnAbsentMetadata(repoPath: string, path: string): void {
+  warnMetadataOnce('absent', repoPath, path, 'captured projection metadata pending: path absent');
+}
+
 /** The mode fs-safe's createExclusive gives a file it creates; a file at any other mode was changed since. */
 const WRITER_FILE_MODE = 0o644;
 
-/** After the re-sync: an untracked projection the set-aside removed, and the directories it pruned, are new now and
- *  get back their owner and mode while the writer still owns them; a group or file mode changed meanwhile stays. */
-export async function restoreKeptMetadata(repoPath: string, kept: KeptFiles): Promise<void> {
+/** After the re-sync: removed projections and pruned directories get their metadata back while
+ *  writer-owned. An interrupted hand-back resumes at the captured uid only at the writer's default
+ *  mode; a group or nondefault file mode changed meanwhile stays. */
+export async function restoreKeptMetadata(
+  repoPath: string,
+  kept: KeptFiles,
+): Promise<MetadataRestoreResult> {
+  if (projectionRecoveryHeld(repoPath)) return false;
+  let restored: MetadataRestoreResult = true;
   await restoreFaults.beforeKeptMetadata?.();
   const writer = process.getuid?.();
   for (const [path, { bytes, owner, mode, untracked, parents }] of kept) {
-    await restoreKeptParents(repoPath, parents);
-    if (!untracked || !Buffer.isBuffer(bytes) || !owner || mode === undefined) continue;
+    if (!untracked || !Buffer.isBuffer(bytes) || !owner || mode === undefined) {
+      const result = await restoreKeptParents(repoPath, parents);
+      if (restored !== false && result !== true) restored = result;
+      continue;
+    }
     const warn = metadataWarn(repoPath, path);
     try {
-      const now = await lstatNoFollow(repoPath, path);
-      if (now?.kind !== 'file' || now.stats.uid !== writer) continue;
-      await chownNoFollow(repoPath, path, keptOwner(owner, now.stats.gid)).catch(warn);
+      const now = await lstatNoFollow(repoPath, path, { strict: true });
+      // Reset can remove a captured path before it is recreated. Keep that obligation
+      // until restoration succeeds (or explicit repository deletion retires its outbox).
+      // Do not touch its parents on every absent-file retry either.
+      if (!now) {
+        warnAbsentMetadata(repoPath, path);
+        if (restored !== false) restored = 'pending';
+        continue;
+      }
+      if (now.kind !== 'file') {
+        warnMetadataOnce(
+          'conflict',
+          repoPath,
+          path,
+          'captured projection path is not a regular file',
+        );
+        restored = false;
+        continue;
+      }
+      metadataPresent(repoPath, path);
+      const result = await restoreKeptParents(repoPath, parents);
+      if (result !== true) {
+        if (restored !== false) restored = result;
+        continue;
+      }
+      // A prior attempt may have handed back the owner, then failed its chmod. Only the
+      // captured owner at the writer's default mode is eligible for that resumed hand-back.
+      if (
+        now.stats.uid !== writer &&
+        !(now.stats.uid === owner.uid && (now.stats.mode & 0o7666) === WRITER_FILE_MODE)
+      )
+        continue;
+      await chownNoFollow(repoPath, path, keptOwner(owner, now.stats.gid));
+      // chown can clear setuid/setgid, so the captured mode must be applied afterwards.
       await chmodNoFollow(repoPath, path, (current) =>
         (current & ~0o111) === WRITER_FILE_MODE ? (mode & ~0o111) | (current & 0o111) : current,
       );
     } catch (err) {
+      restored = false;
       warn(err);
     }
   }
+  return restored;
 }
 
 /** The captured owner, keeping a group someone set since: the writer's own gid is the only one it gives a new node. */
@@ -1015,19 +1150,45 @@ function keptOwner(
 }
 
 /** The directory half of `restoreKeptMetadata`, deepest first, which the put-back shares. Never throws. */
-async function restoreKeptParents(repoPath: string, parents: KeptFile['parents']): Promise<void> {
+async function restoreKeptParents(
+  repoPath: string,
+  parents: KeptFile['parents'],
+): Promise<MetadataRestoreResult> {
+  let restored: MetadataRestoreResult = true;
   const writer = process.getuid?.();
   for (const { path, owner, mode } of parents ?? []) {
     const warn = metadataWarn(repoPath, path);
     try {
-      const now = await lstatNoFollow(repoPath, path);
-      if (now?.kind !== 'directory' || now.stats.uid !== writer) continue;
-      await chownNoFollow(repoPath, path, keptOwner(owner, now.stats.gid)).catch(warn);
+      const now = await lstatNoFollow(repoPath, path, { strict: true });
+      if (!now) {
+        warnAbsentMetadata(repoPath, path);
+        if (restored !== false) restored = 'pending';
+        continue;
+      }
+      if (now.kind !== 'directory') {
+        warnMetadataOnce(
+          'conflict',
+          repoPath,
+          path,
+          'captured projection parent is not a directory',
+        );
+        restored = false;
+        continue;
+      }
+      metadataPresent(repoPath, path);
+      if (
+        now.stats.uid !== writer &&
+        !(now.stats.uid === owner.uid && (now.stats.mode & 0o7777) === 0o755)
+      )
+        continue;
+      await chownNoFollow(repoPath, path, keptOwner(owner, now.stats.gid));
       await chmodNoFollow(repoPath, path, mode);
     } catch (err) {
+      restored = false;
       warn(err);
     }
   }
+  return restored;
 }
 
 /** After a set-aside that ends with no move: writes each kept file back as the set-aside found it, unless
@@ -1040,7 +1201,12 @@ export async function putBackProjections(
   kept: KeptFiles,
   section?: RestoreSection,
 ): Promise<void> {
-  if (kept.size === 0) return;
+  const captured = { ...keptMetadataOf(kept), ...judgedMetadata.get(kept) };
+  if (kept.size === 0) {
+    await clearKeptMetadata(db, repositoryId, repoPath, captured);
+    judgedMetadata.delete(kept);
+    return;
+  }
   await restoreFaults.beforePutBack?.();
   await (section ?? ((fn) => db.transaction(fn)))(async (tx) => {
     await lockProjectState(tx, repositoryId);
@@ -1066,10 +1232,17 @@ export async function putBackProjections(
             createParents: true,
             fileMode: mode,
           });
-          if (owner) await chownNoFollow(repoPath, path, owner).catch(() => undefined);
-          await restoreKeptParents(repoPath, parents);
+          if (owner) await chownNoFollow(repoPath, path, owner);
+          if (mode !== undefined) await chmodNoFollow(repoPath, path, mode);
+          if ((await restoreKeptParents(repoPath, parents)) !== true)
+            throw new Error('set-aside directory metadata not restored');
         } catch (err) {
           if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+          // A prior attempt may have created the file before metadata failed.
+          // Finish that hand-back before consuming its durable obligation. A non-file
+          // occupant is a real conflict; never retire its capture or replace that occupant.
+          if ((await restoreKeptMetadata(repoPath, new Map([[path, kept.get(path)!]]))) !== true)
+            throw new Error('set-aside file metadata not restored');
         }
       } else if (bytes === null) {
         const headMode = await headFileMode(repoPath, path);
@@ -1086,7 +1259,9 @@ export async function putBackProjections(
         });
       }
     }
+    await clearKeptMetadata(tx, repositoryId, repoPath, captured);
   });
+  judgedMetadata.delete(kept);
 }
 
 /** The put-back when the caller is failing: the snapshot dies with the call, so a put-back that fails too
@@ -1140,13 +1315,12 @@ export async function recoverAfterMoveFailure(
         'HEAD not readable after a failed move; re-syncing instead of putting files back',
       );
     }
-    await resyncHaiveProjections(db, repositoryId, repoPath).catch((resyncErr: unknown) =>
+    await resyncWithKeptMetadata(db, repositoryId, repoPath, kept).catch((resyncErr: unknown) =>
       logger.error(
         { err: resyncErr, repositoryId },
         'projections not re-synced after a failed move',
       ),
     );
-    await restoreKeptMetadata(repoPath, kept);
     throw err;
   }
   return putBackAfterFailure(db, repositoryId, repoPath, kept, err, section);

@@ -85,7 +85,7 @@ function task(over: Record<string, unknown>) {
     userId: 'user-1',
     type: 'my-custom-type',
     repositoryId: null,
-    status: 'created',
+    status: 'queued',
     orchestrationEpoch: 0,
     metadata: null,
     cliProviderId: null,

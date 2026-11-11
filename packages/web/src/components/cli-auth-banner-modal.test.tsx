@@ -22,6 +22,11 @@ vi.mock('react', async (original) => {
     },
   };
 });
+// Socket lifecycle controls isolate the shared dialog; DOM/focus is covered by overlays.a11y.test.tsx.
+vi.mock('@/components/dialog', () => ({
+  Dialog: ({ open, children }: { open: boolean; children: React.ReactNode }) =>
+    open ? children : null,
+}));
 vi.mock('@xterm/xterm', () => ({ Terminal: class {} }));
 vi.mock('@xterm/addon-fit', () => ({ FitAddon: class {} }));
 vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: class {} }));

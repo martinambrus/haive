@@ -137,7 +137,7 @@ export async function commitProjectStatePush(
       .select()
       .from(schema.repositories)
       .where(eq(schema.repositories.id, repositoryId))
-      .for('update');
+      .for('no key update');
     if (!repo || (repo.storagePath ?? repo.localPath) !== sourcePath)
       throw new Error('project state push checkout changed');
     if (isRootClaimLive(repo.rootClaimedAt))
