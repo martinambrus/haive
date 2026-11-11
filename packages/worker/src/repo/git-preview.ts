@@ -37,12 +37,12 @@ export async function gitPreview(
 ): Promise<GitPreview> {
   const name = `run-app-preview-${randomUUID()}`;
   const env = { GIT_INDEX_FILE: path.join(os.tmpdir(), name) };
-  const run = async (args: string[], scratch = false) => {
+  const run = async (args: string[], scratch = false, input?: Buffer) => {
     const result = await gitRun(
       cwd,
       ['-c', 'core.splitIndex=false', ...args],
       scratch ? env : undefined,
-      { maxBuffer: GIT_MAX_BUFFER },
+      { maxBuffer: GIT_MAX_BUFFER, input },
     );
     if (result.code !== 0) throw new Error(`git preview failed: ${result.stderr || result.stdout}`);
     return result.stdout.trim();
@@ -74,7 +74,52 @@ export async function gitPreview(
       ];
     }
     const scope = selected.map((p) => `:(top,literal)${p}`);
-    if (scope.length) await run(['add', '-A', '--', ...scope], true);
+    if (scope.length) {
+      // Keep HEAD outside the scope, but start selected paths from the real index.
+      // In particular, a staged removal must not make an ignored file tracked again.
+      const listing = await run(['ls-files', '-s', '-z', '--', ...scope]);
+      await run(
+        ['update-index', '--force-remove', '-z', '--stdin'],
+        true,
+        Buffer.from(`${selected.join('\0')}\0`),
+      );
+      await run(['update-index', '--add', '-z', '--index-info'], true, Buffer.from(listing));
+      const tagged = await run([
+        'ls-files',
+        '-v',
+        '-z',
+        '--cached',
+        '--others',
+        '--exclude-standard',
+        '--',
+        ...scope,
+      ]);
+      const assumed: string[] = [];
+      const skipped: string[] = [];
+      const add: string[] = [];
+      for (const record of tagged.split('\0')) {
+        if (!record) continue;
+        const tag = record.charAt(0);
+        const name = record.slice(2);
+        if (tag !== tag.toUpperCase()) assumed.push(name);
+        if (tag.toUpperCase() === 'S') skipped.push(name);
+        // Missing staged deletions and ignored, no-longer-tracked files are not
+        // listed. Hidden index entries must retain their staged bytes as well.
+        if (tag === tag.toUpperCase() && tag !== 'S') add.push(`:(top,literal)${name}`);
+      }
+      for (const [flag, names] of [
+        ['--assume-unchanged', assumed],
+        ['--skip-worktree', skipped],
+      ] as const) {
+        if (names.length)
+          await run(
+            ['update-index', '-z', flag, '--stdin'],
+            true,
+            Buffer.from(`${names.join('\0')}\0`),
+          );
+      }
+      if (add.length) await run(['add', '-A', '--', ...add], true);
+    }
     const tree = await run(['write-tree'], true);
     // No rename pairing: both the added destination and deleted source belong to the scope.
     const listed = await gitRun(

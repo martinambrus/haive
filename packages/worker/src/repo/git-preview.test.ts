@@ -3,6 +3,7 @@ import * as safeFs from '@haive/shared/fs-safe';
 import { git, identity, repoFixture } from '../../test/support/nested-repo.js';
 import * as gitExec from './git-exec.js';
 import { commitGitPreview, gitPreview } from './git-preview.js';
+import { buildCommitDiffArtifact } from '../step-engine/steps/workflow/_commit-diff.js';
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
@@ -14,6 +15,67 @@ async function setup() {
   cleanups.push(fixture.cleanup);
   return fixture.repo;
 }
+
+it('keeps an ignored file removed from the index out of the pinned tree', async () => {
+  const repo = await setup();
+  await safeFs.writeFileNoFollow(repo, '.env', 'previously public\n');
+  await safeFs.writeFileNoFollow(repo, '.gitignore', '.env\n');
+  await git(repo, ['add', '-f', '--', '.env', '.gitignore']);
+  await git(repo, ['commit', '-qm', 'track env']);
+  await git(repo, ['rm', '--cached', '--', '.env']);
+  await safeFs.writeFileNoFollow(repo, '.env', 'SECRET_CURRENT_BYTES\n');
+  expect(await git(repo, ['status', '--porcelain'])).toBe('D  .env\n');
+  const index = await git(repo, ['ls-files', '-s']);
+  await buildCommitDiffArtifact(repo, gitExec.gitRun);
+  const artifact = JSON.parse(
+    (await safeFs.readFileNoFollow(repo, '.haive/gate3-diff.json'))!.data.toString('utf8'),
+  );
+  expect(artifact.files).toEqual([
+    expect.objectContaining({ path: '.env', status: 'deleted', newContent: '' }),
+  ]);
+  expect(JSON.stringify(artifact)).not.toContain('SECRET_CURRENT_BYTES');
+
+  const preview = await gitPreview(repo);
+  expect(await git(repo, ['ls-files', '-s'])).toBe(index);
+  expect(preview.paths).toEqual(['.env']);
+  expect(await git(repo, ['ls-tree', '--name-only', preview.tree, '--', '.env'])).toBe('');
+  await git(repo, ['add', '-A']);
+  expect(preview.tree).toBe((await git(repo, ['write-tree'])).trim());
+  expect(await commitGitPreview(repo, preview, 'stop tracking env', identity)).toBe(true);
+  expect(await git(repo, ['ls-tree', '--name-only', 'HEAD', '--', '.env'])).toBe('');
+});
+
+it('pins an ordinary edit and new file while preserving a staged deletion', async () => {
+  const repo = await setup();
+  await safeFs.writeFileNoFollow(repo, 'deleted.txt', 'delete me\n');
+  await git(repo, ['add', '-A']);
+  await git(repo, ['commit', '-qm', 'add deletion fixture']);
+  await git(repo, ['rm', '--', 'deleted.txt']);
+  await safeFs.writeFileNoFollow(repo, 'a.txt', 'ordinary edit\n');
+  await safeFs.writeFileNoFollow(repo, 'new.txt', 'ordinary new file\n');
+  const preview = await gitPreview(repo);
+  expect(preview.paths).toEqual(['a.txt', 'deleted.txt', 'new.txt']);
+  expect(await git(repo, ['show', `${preview.tree}:a.txt`])).toBe('ordinary edit\n');
+  expect(await git(repo, ['show', `${preview.tree}:new.txt`])).toBe('ordinary new file\n');
+  expect(await git(repo, ['ls-tree', '--name-only', preview.tree, '--', 'deleted.txt'])).toBe('');
+  await git(repo, ['add', '-A']);
+  expect(preview.tree).toBe((await git(repo, ['write-tree'])).trim());
+});
+
+it.each(['--assume-unchanged', '--skip-worktree'])(
+  'preserves the real index entry hidden by %s in a supplied scope',
+  async (flag) => {
+    const repo = await setup();
+    await safeFs.writeFileNoFollow(repo, 'a.txt', 'staged bytes\n');
+    await git(repo, ['add', '--', 'a.txt']);
+    await git(repo, ['update-index', flag, '--', 'a.txt']);
+    await safeFs.writeFileNoFollow(repo, 'a.txt', 'hidden bytes\n');
+    const index = await git(repo, ['ls-files', '-v', '-s']);
+    const preview = await gitPreview(repo, ['a.txt']);
+    expect(await git(repo, ['show', `${preview.tree}:a.txt`])).toBe('staged bytes\n');
+    expect(await git(repo, ['ls-files', '-v', '-s'])).toBe(index);
+  },
+);
 
 it.each(['deletion', 'rename', 'executable-bit'] as const)(
   'commits a %s and refreshes only its index paths',
