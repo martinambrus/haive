@@ -408,11 +408,14 @@ describe('Retry of a failed paused task', () => {
       const fake = make();
       await pauseBy(OWNER);
       const read = fake.rows(schema.tasks)[0]?.pausedAt;
-      fake.hooks.beforeUpdate = async (table) => {
-        if (table !== schema.tasks) return;
-        fake.hooks.beforeUpdate = null;
-        await adminResume();
-        await adminPause();
+      // Retry has read the owner's hold, but must not hold the creation key yet:
+      // the administrator's Resume takes that key too, so awaiting it from an
+      // update hook inside Retry's locked transaction would wait on Retry itself.
+      fake.hooks.beforeLock = async (key) => {
+        if (key !== `onboarding-upgrade:${TASK}`) return;
+        fake.hooks.beforeLock = null;
+        expect((await adminResume()).status).toBe(200);
+        expect((await adminPause()).status).toBe(200);
       };
 
       const res = await retryBy(OWNER);

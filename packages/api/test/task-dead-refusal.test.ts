@@ -28,6 +28,7 @@ import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 import { seedStepCatalog } from './step-flags-fixture.js';
 
+const REPO = '00000000-0000-4000-8000-0000000000d1';
 const TASK = '00000000-0000-4000-8000-000000000001';
 const STEP_ROW = '00000000-0000-4000-8000-0000000000c1';
 const CLI = '00000000-0000-4000-8000-0000000000b1';
@@ -166,6 +167,7 @@ const WRITTEN = [
 function setup(f: Fixture, dead: boolean) {
   const fake = createFakeDb({
     modules: schema.modules,
+    repositories: schema.repositories,
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     taskEvents: schema.taskEvents,
@@ -179,10 +181,12 @@ function setup(f: Fixture, dead: boolean) {
     userStepCliRolePreferences: schema.userStepCliRolePreferences,
   });
   seedStepCatalog(fake);
+  fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', status: 'ready' });
   fake.insert(schema.cliProviders, { id: CLI, userId: USER, name: 'codex', enabled: true });
   fake.insert(schema.tasks, {
     id: TASK,
     userId: USER,
+    repositoryId: REPO,
     orchestrationEpoch: 3,
     currentRound: 0,
     completedAt: f.task.status === 'failed' ? fake.now() : null,
