@@ -32,12 +32,17 @@ export function TaskLeftMergeBanner({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [undoConfirming, setUndoConfirming] = useState(false);
-  const [undoRequested, setUndoRequested] = useState<string | null>(null);
+  const [undoRequested, setUndoRequested] = useState<{ sha: string; refusals: number } | null>(
+    null,
+  );
   const viewerId = useViewerId(taskStatus === 'cancelled');
 
   const banners = leftMergeBanners(events, { taskStatus });
   const committed = leftCommittedMergeBanner(events, { taskStatus, isOwner: viewerId === ownerId });
-  const undoInFlight = committed?.canUndo && undoRequested === committed.baseShaAfter;
+  const undoInFlight =
+    committed?.canUndo &&
+    undoRequested?.sha === committed.baseShaAfter &&
+    undoRequested.refusals === committed.refusals;
   const inFlight = (key: string) => {
     const b = banners.find((x) => x.key === key && x.canAbort);
     return b !== undefined && requested.get(key) === b.refusals;
@@ -100,7 +105,7 @@ export function TaskLeftMergeBanner({
         dir: committed.dir,
         baseShaAfter: committed.baseShaAfter,
       });
-      setUndoRequested(committed.baseShaAfter);
+      setUndoRequested({ sha: committed.baseShaAfter, refusals: committed.refusals });
       setUndoConfirming(false);
     } catch (e) {
       setError((e as Error).message);

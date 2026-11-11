@@ -106,3 +106,26 @@ it('confirms the exact move, posts only after confirmation, then displays the ou
   expect(document.body.textContent).toContain('Restored main');
   expect(button('Undo merge')).toBeUndefined();
 });
+
+it('offers another Undo after a retryable refusal and shows the reason', async () => {
+  await render();
+  await click('Undo merge');
+  const confirm = [...document.querySelector('[role="dialog"]')!.querySelectorAll('button')].find(
+    (b) => b.textContent === 'Undo merge',
+  )!;
+  await act(async () => confirm.click());
+  expect(document.body.textContent).toContain('Undoing…');
+  h.events = [
+    ...h.events,
+    {
+      eventType: 'merge.left_committed_settled',
+      payload: { ...payload, outcome: 'refused', reason: 'The root is busy.' },
+    },
+  ];
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(3000);
+  });
+  expect(document.body.textContent).toContain('The root is busy.');
+  expect(document.body.textContent).not.toContain('Undoing…');
+  expect(button('Undo merge')).toBeDefined();
+});

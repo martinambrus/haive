@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import * as subject from './left-committed-merge.js';
+import { leftCommittedMerges } from '@haive/shared/merge-left-open';
 import * as gitMerge from './git-merge.js';
 import * as gitPush from '../repo/git-push.js';
 
@@ -228,6 +229,9 @@ describe('explicit undo of a cancel-left committed merge', () => {
     await f.run();
     expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
     expect(f.settled()[0]?.payload.outcome).toBe('refused');
+    expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
   });
   it('refuses older events without immutable feature evidence', async () => {
     const f = await fixture();
@@ -257,6 +261,10 @@ describe('explicit undo of a cancel-left committed merge', () => {
     await f.run();
     expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
     expect(f.settled()[0]?.payload.outcome).toBe('refused');
+    expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+    Object.assign(h, { holder: false, root: true, holding: 0 });
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
   });
   it('keeps conflicting local changes and the index untouched', async () => {
     const f = await fixture();
@@ -267,6 +275,10 @@ describe('explicit undo of a cancel-left committed merge', () => {
     expect(await git(f.dir, 'status', '--porcelain')).toBe(status);
     expect(await readFile(path.join(f.dir, 'feature'), 'utf8')).toBe('local edit');
     expect(f.settled()[0]?.payload.outcome).toBe('refused');
+    expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+    await git(f.dir, 'restore', 'feature');
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
   });
   it('refuses a pushed merge even if the tracking ref is stale', async () => {
     const f = await fixture();

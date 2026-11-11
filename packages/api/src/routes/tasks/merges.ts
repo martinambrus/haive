@@ -134,7 +134,7 @@ mergeRoutes.post('/:id/merges/undo', async (c) => {
         TASK_JOB_NAMES.UNDO_LEFT_MERGE,
         { taskId, userId, dir, baseShaAfter } satisfies UndoLeftMergePayload,
         {
-          jobId: `undo-left-merge-${taskId}-${createHash('sha1').update(`${dir}\0${baseShaAfter}`).digest('hex')}`,
+          jobId: `undo-left-merge-${taskId}-${createHash('sha1').update(`${dir}\0${baseShaAfter}`).digest('hex')}-${target.refused?.count ?? 0}`,
           attempts: UNDO_ATTEMPTS,
           backoff: { type: 'exponential', delay: UNDO_RETRY_DELAY_MS },
           removeOnComplete: true,

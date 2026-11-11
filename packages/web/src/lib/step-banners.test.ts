@@ -737,7 +737,10 @@ describe('leftCommittedMergeBanner', () => {
       ];
       expect(
         leftCommittedMergeBanner(settled, { taskStatus: 'cancelled', isOwner: true }),
-      ).toMatchObject({ canUndo: false, text: expect.stringContaining('Outcome words') });
+      ).toMatchObject({
+        canUndo: outcome === 'refused',
+        text: expect.stringContaining('Outcome words'),
+      });
     }
   });
 });

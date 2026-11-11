@@ -78,16 +78,19 @@ async function remoteRefusal(
   userId: string,
   m: LeftCommittedMerge,
   credentialId?: string,
-): Promise<string | null> {
+): Promise<{ reason: string; permanent?: boolean } | null> {
   const ref = `refs/haive/undo-check/${randomUUID()}`;
   try {
     if ((await gitRun(m.repoPath, ['check-ref-format', `refs/heads/${m.landedOn}`])).code !== 0)
-      return 'The recorded base branch is invalid; the merge was left committed.';
+      return { reason: 'The recorded base branch is invalid; the merge was left committed.' };
     if (!(await detectOrigin(m.repoPath))) return null;
     const fetchUrl = await gitRun(m.repoPath, ['remote', 'get-url', '--all', 'origin']);
     const pushUrl = await gitRun(m.repoPath, ['remote', 'get-url', '--push', '--all', 'origin']);
     if (fetchUrl.code !== 0 || pushUrl.code !== 0 || fetchUrl.stdout !== pushUrl.stdout)
-      return 'The remote push destination cannot be checked safely; the merge was left committed.';
+      return {
+        reason:
+          'The remote push destination cannot be checked safely; the merge was left committed.',
+      };
     const helper = credentialId
       ? await buildCredentialHelper(db, credentialId, userId, fetchUrl.stdout.trim())
       : null;
@@ -106,7 +109,7 @@ async function remoteRefusal(
     );
     if (listed.code === 2) return null; // The remote has no such branch: it cannot contain the merge.
     if (listed.code !== 0)
-      return 'The remote branch could not be checked; the merge was left committed.';
+      return { reason: 'The remote branch could not be checked; the merge was left committed.' };
     const fetched = await originGitRun(
       m.repoPath,
       [
@@ -123,22 +126,25 @@ async function remoteRefusal(
       helper?.env,
     );
     if (fetched.code !== 0)
-      return 'The remote branch could not be checked; the merge was left committed.';
+      return { reason: 'The remote branch could not be checked; the merge was left committed.' };
     const contains = await gitRun(m.repoPath, ['merge-base', '--is-ancestor', m.baseShaAfter, ref]);
     if (contains.code === 0)
-      return 'The remote branch contains this merge; a pushed merge cannot be undone here.';
+      return {
+        reason: 'The remote branch contains this merge; a pushed merge cannot be undone here.',
+        permanent: true,
+      };
     return contains.code === 1
       ? null
-      : 'The remote history could not be checked; the merge was left committed.';
+      : { reason: 'The remote history could not be checked; the merge was left committed.' };
   } catch {
-    return 'The remote branch could not be checked; the merge was left committed.';
+    return { reason: 'The remote branch could not be checked; the merge was left committed.' };
   } finally {
     await gitRun(m.repoPath, ['update-ref', '-d', ref]);
   }
 }
 
 /** One confirmed click, one outcome under the same directory lock as every landing writer.
- * Refusals also settle the click. Re-delivery repairs post-move work without moving git again. */
+ * Retryable refusals record the click without closing the report. Re-delivery repairs post-move work without moving git again. */
 export async function undoLeftMerge(db: Database, payload: UndoLeftMergePayload): Promise<void> {
   const { taskId, userId, dir, baseShaAfter } = payload;
   const task = await db.query.tasks.findFirst({
@@ -175,7 +181,7 @@ export async function undoLeftMerge(db: Database, payload: UndoLeftMergePayload)
     return;
   }
   const contained = initial.repoPath === (repo.storagePath ?? repo.localPath);
-  let remote: string | null = null;
+  let remote: Awaited<ReturnType<typeof remoteRefusal>> = null;
   if (
     contained &&
     !isHostCheckout(initial.repoPath) &&
@@ -202,7 +208,11 @@ export async function undoLeftMerge(db: Database, payload: UndoLeftMergePayload)
       if (!m) return;
       needsSync = m.settled?.outcome === 'undone' || m.settled?.resyncRequired === true;
       if (m.settled && !needsSync) return;
-      const settle = async (outcome: MergeLeftCommittedOutcome, reason: string) => {
+      const settle = async (
+        outcome: MergeLeftCommittedOutcome,
+        reason: string,
+        permanent = false,
+      ) => {
         if (m.settled) throw new Error('Undo recovery cannot settle an already settled report');
         await tx.insert(schema.taskEvents).values({
           taskId,
@@ -215,6 +225,7 @@ export async function undoLeftMerge(db: Database, payload: UndoLeftMergePayload)
             landedOn: m.landedOn,
             outcome,
             reason,
+            ...(permanent ? { permanent: true } : {}),
             ...(needsSync ? { resyncRequired: true } : {}),
           },
         });
@@ -223,6 +234,7 @@ export async function undoLeftMerge(db: Database, payload: UndoLeftMergePayload)
         await settle(
           'refused',
           'This is not a writable Haive repository checkout; the merge was left committed.',
+          true,
         );
         return;
       }
@@ -230,6 +242,7 @@ export async function undoLeftMerge(db: Database, payload: UndoLeftMergePayload)
         await settle(
           'refused',
           'A pushed merge or a host checkout gets a report only; the merge was left committed.',
+          true,
         );
         return;
       }
@@ -307,6 +320,7 @@ export async function undoLeftMerge(db: Database, payload: UndoLeftMergePayload)
           await settle(
             'refused',
             "The recorded landing cannot be proved to be this task's own feature merge.",
+            true,
           );
           return;
         }
@@ -330,7 +344,7 @@ export async function undoLeftMerge(db: Database, payload: UndoLeftMergePayload)
           return;
         }
         if (remote) {
-          await settle('refused', remote);
+          await settle('refused', remote.reason, remote.permanent);
           return;
         }
         const symbolic = await gitRun(cwd, ['symbolic-ref', '-q', 'HEAD']);

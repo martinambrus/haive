@@ -172,13 +172,32 @@ describe('POST /tasks/:id/merges/undo', () => {
       "post-move recovery must outlive a crashed worker's root lease",
     ).toBeGreaterThan(ROOT_CLAIM_STALE_MS);
   });
-  it.each(['done', 'refused', 'moved'])('refuses an already settled %s report', async (outcome) => {
+  it.each(['done', 'moved'])('refuses an already settled %s report', async (outcome) => {
     state.events.push({
       eventType: 'merge.left_committed_settled',
       payload: { ...payload, outcome: outcome === 'done' ? 'undone' : outcome, reason: 'settled' },
     });
     expect((await undo()).status).toBe(409);
     expect(state.added).toEqual([]);
+  });
+  it('deduplicates the same attempt but queues a fresh job after a refusal', async () => {
+    await undo();
+    await undo();
+    const id = (index: number) => (state.added[index]![2] as { jobId: string }).jobId;
+    expect(id(0)).toBe(id(1));
+    state.events.push({
+      eventType: 'merge.left_committed_settled',
+      payload: { ...payload, outcome: 'refused', reason: 'busy' },
+    });
+    await undo();
+    expect(id(2)).not.toBe(id(0));
+  });
+  it('accepts another attempt after a retryable refusal', async () => {
+    state.events.push({
+      eventType: 'merge.left_committed_settled',
+      payload: { ...payload, outcome: 'refused', reason: 'busy' },
+    });
+    expect((await undo()).status).toBe(202);
   });
   it('refuses a mismatched report and an active task', async () => {
     expect((await undo({ dir: DIR, baseShaAfter: 'c'.repeat(40) })).status).toBe(409);
