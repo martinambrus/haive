@@ -115,6 +115,24 @@ All low unless marked. Code in `shared/src/rag/lexical-config.ts` and the RAG sc
 7. Global-store refusal coverage (0A000/58P01/42501) is fake-connection only; no Postgres control.
 8. The test of the identifier stamp inside prose checks only the parser, not a stored vector.
 
+### T601 · FNF[revalidation-followups] · validation order, revalidation and 06 in custom types follow-ups (+12)
+
+status: open · kind: fix · found: F4 (#334) reviews 2026-11-10/11 · priority: P4
+All low unless marked. Code in `worker/src/queues/validation-recheck.ts`, `07b-phase-4-validate.ts`, `task-queue.ts` and `06-run-config`.
+
+1. 06 reads stored defaults back as presets: answers 06 wrote itself cannot be told apart from a type's presets, so a Retry shows the previous run's stored answers as defaults.
+2. 08a's setup and verify answers collapse into one value in the preset mapping.
+3. The API pin of 06's catalog entry is not a red control.
+4. The merge fixer can run before the env prelude.
+5. A fix-loop Accept does not re-run the revalidation hand-off (`task-queue.ts` ~:2702).
+6. A stale catalog can be served for a window after a module update.
+7. Module and catalog steps cannot declare `editsCodeOrTests`; only built-in and prompt steps can (`validation-recheck.ts` ~:86).
+8. Unverified: a prompt step with `tool_use` but no `file_write` may still write into the worktree through a shell tool, and would reach commit unvalidated. Check, then decide.
+9. `.ddev` is matched as any path component (`07b-phase-4-validate.ts` ~:1062), so `docs/.ddev/` or `vendor/x/.ddev/` costs a reconcile round.
+10. Persisted 07b outputs from before the snapshot field turn the first fixer pass after upgrade into one extra 07c + 07b round (transitional); a missing before-snapshot writes the whole change list into the event payload.
+11. The no-07c PG controls prove only the cap-escalation arm (`handle-result-lost-db.test.ts` ~:499 seeds `maxFixRounds: 0`); the `unreadable` arm returns before reading a snapshot, so it does not exercise a read failure.
+12. `ValidationSnapshotError` is reused for the missing-07c configuration error (naming only); `step.done` is no longer written before a snapshot failure of the same hand-off.
+
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
 **Found something outside your task?** Search the board first (`grep -n "<file>\|<symbol>\|<slug>"`).
@@ -162,6 +180,7 @@ Owner triage 2026-11-10 (AskUserQuestion, 8 rounds; register `.claude/tmp/codex-
 
 T524's 2026-11-01 owner round answered 42 questions. Decisions are recorded on the affected task blocks; the durable local answer register is `.claude/tmp/codex-run/backlog-decisions-20261101/decisions.json`. No unanswered owner-policy question remains from this round.
 
+- T334 — 07c reconciles the runtime before 07b validates (migration 0226 reorders stored types), a later code or test edit before gate 3 hands off a bounded revalidation round, and custom task types can include 06-run-config ordered before the steps that read its answers — PR #1069 (1bfa2871b), 2026-11-11; dev 0226 changed 0 of 12 rows (pre-deploy export kept). Follow-ups T601.
 - T145 — lexical RAG search is accent-insensitive through a store-local unaccent text search configuration (with a recorded verbatim fallback when the extension is unavailable) and a backfill of existing vectors — PR #1071 (34dbd0bb4), 2026-11-11; dev global KB live-checked. Follow-ups T600.
 - T271 + T286 — a DAG level merge settles Haive's project files from the integration branch; root starts, Retry, Resume and revival refuse during another task's open same-branch merge; run-app Finish commits only the reviewed, pinned tree with a parent compare-and-swap and branch checks, and a Retry after a failed put-back pushes its landed commit — PR #1066 (73b7c672b), 2026-11-11. Follow-ups T595.
 - T443 + T386 + T317 — a rules-override import is deferred during a live upgrade and the task-end import (onboarding and onboarding_upgrade) re-renders the AGENTS.md region through `project_state_outbox.rules_reconcile_intent` (migration 0227), retried on transient refusals and dropped with one warning on permanent ones; the updater keeps its hold when an upgrade died before recording its found state; a stamped RTK choice wins against the first record import — PR #1064 (0106f9edd), 2026-11-11. Follow-ups T599.
@@ -357,22 +376,6 @@ status: parked: needs a real GCP OAuth client from the user · was modular #42 �
 Plan I7: REST by default, remote MCP opt-in. Blocked until the user provides an OAuth client.
 
 User decision 2026-11-01: keep live Google connection parked; prepare setup instructions when its turn comes. A live OAuth client is still an external prerequisite; never request a secret in chat.
-
-### T334 · FNF[builtin-order-hazards] · built-in workflow runs 07b before 07c, and 08b fixer edits after both
-
-status: in progress (bundle F4, overnight run 2026-11-10, branch fix/F4-workflow-order) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-All PRE-EXISTING.
-
-1. 07b-phase-4-validate boots and uses the runtime (07b:787) against a DDEV container that has not yet applied the implementation's .ddev change; 07c-ddev-reconcile runs after it in registry order (steps/workflow/index.ts).
-2. 08b-test-management writes tests and fixer edits after 07b validated and 07c reconciled; nothing re-validates or reconciles them.
-3. orderWorkflowRunList (execution-paths.ts:165) runs 00a-sync-base before the env prelude, so a merge-fix agent dispatched on a divergent base runs before the env image and LSP checks exist.
-   Decide:
-
-- whether to put 07c before 07b in the built-in workflow (then composable-core gets "07c precedes validation");
-- whether 08b's fixer edits need a re-check;
-- what to do about 06-run-config: it is the only writer of tasks.pre_answers and is not in the composable catalog, so custom types park forms that have no defaults.
-
-User decision 2026-11-01: Reconcile runtime before validation; revalidate affected final changes after a later fixer edits code or tests
 
 ### T531 · FNF[module-sources] · install-source fetch/pin follow-ups from T337 and T531 reviews (+6)
 
