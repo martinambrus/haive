@@ -1,9 +1,9 @@
 import { readValidationSnapshot } from '../src/step-engine/steps/workflow/_validation-snapshot.js';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { logger, type WorkflowType } from '@haive/shared';
@@ -15,7 +15,8 @@ import {
 import type { ResolvedTaskContext } from '../src/queues/run-list.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
-import type { AdvanceStepResult } from '../src/step-engine/step-runner.js';
+import { finishedRoutingVerdict, type AdvanceStepResult } from '../src/step-engine/step-runner.js';
+import { phase4ValidateStep } from '../src/step-engine/steps/workflow/07b-phase-4-validate.js';
 
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
@@ -518,6 +519,63 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
     await w.hand();
     expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '08-phase-5-verify', round: 0 });
     expect(await eventTypes(w.taskId)).not.toContain('validation.recheck_requested');
+  });
+
+  it('reconciles a validation fixer before validating again even at the fix cap', async () => {
+    const w = await lateFixer();
+    const validateId = '07b-phase-4-validate';
+    const baseline = await readValidationSnapshot({ db, taskId: w.taskId });
+    await mkdir(path.join(w.dir, '.ddev'));
+    await writeFile(path.join(w.dir, '.ddev/config.yaml'), 'php_version: "8.4"');
+    const output = {
+      runtimeChanged: true as const,
+      verdict: 'ISSUES_FOUND' as const,
+      issues: [{ severity: 'high' as const, file: '.ddev/config.yaml', description: 'fixed' }],
+      validationSnapshot: baseline,
+    };
+    const [row] = await db
+      .update(schema.taskSteps)
+      .set({ output })
+      .where(and(eq(schema.taskSteps.taskId, w.taskId), eq(schema.taskSteps.stepId, validateId)))
+      .returning();
+    await db
+      .update(schema.tasks)
+      .set({ currentStepId: validateId })
+      .where(eq(schema.tasks.id, w.taskId));
+    expect(await finishedRoutingVerdict(db, w.taskId, phase4ValidateStep, output)).toBeNull();
+    const ctx = { ...w.ctx, currentStepId: validateId };
+    await handleResult(db, ctx, validateId, { status: 'done', row: row!, output });
+    expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '07c-ddev-reconcile', round: 1 });
+    expect(await eventTypes(w.taskId)).not.toContain('fix_loop.requested');
+    expect(await eventTypes(w.taskId)).not.toContain('fix_loop.started');
+    const reconcile = await makeRow(w.taskId, {
+      stepId: '07c-ddev-reconcile',
+      status: 'done',
+      round: 1,
+    });
+    await handleResult(
+      db,
+      { ...ctx, currentStepId: reconcile.stepId, currentRound: 1 },
+      reconcile.stepId,
+      {
+        status: 'done',
+        row: reconcile,
+        output: {},
+      },
+    );
+    expect(h.adds.at(-1)?.data).toMatchObject({ stepId: validateId, round: 1 });
+    const validated = await makeRow(w.taskId, {
+      stepId: validateId,
+      status: 'done',
+      round: 1,
+      output: { validationSnapshot: await readValidationSnapshot({ db, taskId: w.taskId }) },
+    });
+    await handleResult(db, { ...ctx, currentRound: 1 }, validateId, {
+      status: 'done',
+      row: validated,
+      output: validated.output,
+    });
+    expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '08b-test-management', round: 1 });
   });
 
   it.each(['08b-test-management', '08a-browser-verify'])(

@@ -2157,7 +2157,14 @@ export async function handleResult(
       }
       let successor;
       try {
-        successor = await validationSuccessor(db, ctx, stepId, result.row.round, steps);
+        successor = await validationSuccessor(
+          db,
+          ctx,
+          stepId,
+          result.row.round,
+          steps,
+          result.row.output,
+        );
       } catch (err) {
         if (!(err instanceof ValidationSnapshotError)) throw err;
         // Snapshot failure belongs to this step's hand-off, so Retry can rerun it.

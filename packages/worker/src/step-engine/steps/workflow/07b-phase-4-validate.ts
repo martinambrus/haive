@@ -669,6 +669,9 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     // than routing back to implement, where re-implementing the same churn would
     // just burn another round.
     evaluate: (out) => {
+      // The fixer carried the PREVIOUS validator's findings. Reconcile and validate
+      // the edited runtime before deciding whether any implementation defect remains.
+      if (out.runtimeChanged) return null;
       // Older persisted outputs may contain only a verdict/summary. They provide no
       // structured repair assignments and must still be safe to replay after an upgrade.
       const issues = out.issues ?? [];

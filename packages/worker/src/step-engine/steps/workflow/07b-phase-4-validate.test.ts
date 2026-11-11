@@ -1483,8 +1483,8 @@ describe('phase4ValidateStep.apply: the change the validator checked', () => {
     expect(
       await phase4ValidateStep.loop!.shouldContinue({ applyOutput: fixed, iteration: 1 } as never),
     ).toBe(false);
-    // The existing bounded fix loop passes through 07c before another validator can use DDEV.
-    expect(phase4ValidateStep.fixLoop!.evaluate(fixed)?.blocking).toBe(true);
+    // The stale validator verdict must not spend an implementation fix round.
+    expect(phase4ValidateStep.fixLoop!.evaluate(fixed)).toBeNull();
   });
 
   it('stores another one once the change has moved, and the same one while it has not', async () => {

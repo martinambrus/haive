@@ -13,9 +13,10 @@ const RECONCILE = '07c-ddev-reconcile';
 export const VALIDATION_RECHECK_EVENT = 'validation.recheck_requested';
 
 export class ValidationSnapshotError extends Error {
-  constructor() {
+  constructor(message?: string) {
     super(
-      'Cannot snapshot final changes after two read attempts. Retry this step; if it repeats, check Git access and workspace readability.',
+      message ??
+        'Cannot snapshot final changes after two read attempts. Retry this step; if it repeats, check Git access and workspace readability.',
     );
     this.name = 'ValidationSnapshotError';
   }
@@ -37,6 +38,7 @@ export async function validationSuccessor(
   stepId: string,
   round: number,
   steps: readonly StepDefinition[],
+  output: unknown,
 ): Promise<ValidationSuccessor> {
   const ids = steps.map((s) => s.metadata.id);
   const index = ids.indexOf(stepId);
@@ -46,49 +48,66 @@ export async function validationSuccessor(
   if (validateIndex < 0 || index < validateIndex || (commitIndex >= 0 && index >= commitIndex)) {
     return ordinary;
   }
+  let resumeStepId = ordinary.next?.metadata.id ?? null;
+  let before: ValidationSnapshot | null | undefined;
   if (stepId === VALIDATE) {
-    if (round === 0) return ordinary;
-    const event = await db.query.taskEvents.findFirst({
+    const event =
+      round === 0
+        ? undefined
+        : await db.query.taskEvents.findFirst({
+            where: and(
+              eq(schema.taskEvents.taskId, ctx.taskId),
+              eq(schema.taskEvents.eventType, VALIDATION_RECHECK_EVENT),
+              sql`${schema.taskEvents.payload}->>'round' = ${String(round)}`,
+            ),
+            orderBy: [desc(schema.taskEvents.createdAt)],
+          });
+    if (event) resumeStepId = (event.payload as { resumeStepId: string | null }).resumeStepId;
+    const validation = output as {
+      runtimeChanged?: true;
+      validationSnapshot?: ValidationSnapshot | null;
+    } | null;
+    if (!validation?.runtimeChanged) {
+      if (!event) return ordinary;
+      if (resumeStepId === null) return { next: undefined, round };
+      const next = steps.find((s) => s.metadata.id === resumeStepId);
+      if (!next) throw new Error(`Validation return step ${resumeStepId} is not in the run list`);
+      return { next, round };
+    }
+    if (ids.indexOf(RECONCILE) < 0 || ids.indexOf(RECONCILE) >= validateIndex) {
+      throw new ValidationSnapshotError(
+        'Cannot revalidate changed runtime inputs: the run list must place 07c-ddev-reconcile before 07b-phase-4-validate.',
+      );
+    }
+    before = validation.validationSnapshot;
+  } else {
+    // Only declared code/test editors can make a successful late fixer require revalidation.
+    // This also bounds static lists with no commit gate: learning/skill writes are excluded.
+    if (steps[index]?.editsCodeOrTests !== true) return ordinary;
+    const validated = await db.query.taskSteps.findFirst({
       where: and(
-        eq(schema.taskEvents.taskId, ctx.taskId),
-        eq(schema.taskEvents.eventType, VALIDATION_RECHECK_EVENT),
-        sql`${schema.taskEvents.payload}->>'round' = ${String(round)}`,
+        eq(schema.taskSteps.taskId, ctx.taskId),
+        eq(schema.taskSteps.stepId, VALIDATE),
+        eq(schema.taskSteps.status, 'done'),
+        lte(schema.taskSteps.round, round),
       ),
-      orderBy: [desc(schema.taskEvents.createdAt)],
+      orderBy: [desc(schema.taskSteps.round)],
     });
-    if (!event) return ordinary;
-    const resume = (event.payload as { resumeStepId: string | null }).resumeStepId;
-    if (resume === null) return { next: undefined, round };
-    const next = steps.find((s) => s.metadata.id === resume);
-    if (!next) throw new Error(`Validation return step ${resume} is not in the run list`);
-    return { next, round };
+    // A type may intentionally omit or skip validation. Do not introduce it off-list.
+    if (!validated) return ordinary;
+    before = (validated.output as { validationSnapshot?: ValidationSnapshot | null } | null)
+      ?.validationSnapshot;
   }
-  // Only declared code/test editors can make a successful late fixer require revalidation.
-  // This also bounds static lists with no commit gate: learning/skill writes are excluded.
-  if (steps[index]?.editsCodeOrTests !== true) return ordinary;
-  const validated = await db.query.taskSteps.findFirst({
-    where: and(
-      eq(schema.taskSteps.taskId, ctx.taskId),
-      eq(schema.taskSteps.stepId, VALIDATE),
-      eq(schema.taskSteps.status, 'done'),
-      lte(schema.taskSteps.round, round),
-    ),
-    orderBy: [desc(schema.taskSteps.round)],
-  });
-  // A type may intentionally omit or skip validation. Do not introduce it off-list.
-  if (!validated) return ordinary;
-  const before = (validated.output as { validationSnapshot?: ValidationSnapshot | null } | null)
-    ?.validationSnapshot;
   const after = await readValidationSnapshot({ db, taskId: ctx.taskId });
   if (after === null) throw new ValidationSnapshotError();
   const affectedFiles = affectedValidationFiles(before, after);
-  if (before && affectedFiles.length === 0) return ordinary;
+  if (stepId !== VALIDATE && before && affectedFiles.length === 0) return ordinary;
   return {
     next:
       ids.indexOf(RECONCILE) >= 0 && ids.indexOf(RECONCILE) < validateIndex
         ? steps[ids.indexOf(RECONCILE)]
         : steps[validateIndex],
     round: round + 1,
-    recheck: { resumeStepId: ordinary.next?.metadata.id ?? null, affectedFiles },
+    recheck: { resumeStepId, affectedFiles },
   };
 }
