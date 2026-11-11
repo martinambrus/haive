@@ -31,10 +31,12 @@ structural proofs and exit-code distinctions were checked with git 2.43.0 and 2.
 Before moving an unusable checkout, a folder source must itself pass the same usable-checkout proof,
 and a remote must pass the clone URL rule. A missing, unborn, unusable or unreadable folder source
 ends in `error` with nothing moved. Whatever stood at the destination is then renamed to a
-`<repoId>.aside-<time>` sibling, never removed; strict stat failures stop before that move. A folder
-copy builds in a fresh `<repoId>.rebuild-<uuid>` sibling and publishes with `renameNoFollow` and
-`noReplace` only after the copy completes. A thrown copy failure removes only that attempt's staging
-entry; failed cleanup names both retained siblings. Remote clones still build directly at the
+`<repoId>.aside-<time>` sibling, never removed; strict stat failures stop before that move. Folder
+copies, and remote clones requested by a recovery, build in a fresh `<repoId>.rebuild-<uuid>`
+sibling and publish with `renameNoFollow` and `noReplace` only after the build and its verification
+complete. A failure before the data restore (below) removes only that attempt's staging entry;
+failed cleanup names both retained siblings. Once the restore has started, a failure keeps the
+private replacement and its journal images. Ordinary remote rebuilds still build directly at the
 destination (the separate incomplete-clone recovery finding remains queued in T486).
 
 The rebuilt tree must pass `usableCheckout` before detection is persisted. A build or verification
@@ -58,8 +60,17 @@ to move the checkout aside although it could not be proved unusable. The code cl
 preparation starts or detection succeeds. A recovery job first re-checks the checkout: one that is
 usable again (held by a task or not) finishes as an ordinary refresh, moves nothing and clears the
 code. Otherwise it takes the ordinary rebuild path (seed, source proof, move aside, build, verify),
-keeps every repository record and skips the incoming mirror imports, so settings, KB and plan data
-stay. Any rebuild, recovery or not, is refused with a sentence naming the count while a task of the
+keeps every repository record and this install's settings, KB and plan data. Before the move it
+settles a pending project-state write intent against the current checkout, or refuses with the
+cause and moves nothing; the move transaction re-checks that no intent appeared. The private
+replacement drops the legacy mirrors and is restored through the ordinary writers without a commit:
+the state record is written from the database with its base and watermark, and the plan is
+rendered from the database with `synced_hash` stamped and the agreed `synced_snapshot` left as it
+was, so a later remote plan still merges three-way. When this install holds no plan rows the
+incoming `plan.json`/`plan.md` stay for the ordinary first import, and when its render context is
+null the incoming state files stay for the ordinary sync, so a later Save cannot delete the team's
+files. A restore that reports `superseded` is retried up to three times; any other outcome fails the
+recovery. Any rebuild, recovery or not, is refused with a sentence naming the count while a task of the
 repository that is neither completed nor cancelled has a worktree under the checkout (a `failed`
 or `created` one included, since its unpushed commits would move with the tree): the api refuses at
 admission (409), and the worker counts again, together with the holding tasks, under the
