@@ -66,7 +66,7 @@ export async function raiseRtkQuestionLocked(tx: Tx, repositoryId: string): Prom
     .where(eq(schema.repositories.id, repositoryId))
     .limit(1)
     // Every writer of rtk_enabled updates this row, so a question cannot be raised past a switch-off.
-    .for('update');
+    .for('no key update');
   const column = readRenderContextColumn(repo?.renderContext);
   const rtkChoiceRecorded = column.kind === 'column' && column.column.rtkChoiceRecorded;
   if (repo && (!repo.rtkEnabled || isRtkChoiceRecorded(rtkChoiceRecorded, repo.rtkChoiceMadeAt))) {

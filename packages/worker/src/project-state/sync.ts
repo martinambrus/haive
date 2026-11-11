@@ -808,7 +808,7 @@ export async function syncProjectStateLocked(
   if (checkout.kind === 'record' && !sameValue(checkout, await readCheckout(repoPath))) {
     return { outcome: 'superseded' };
   }
-  // The row lock first: an upgrade's insert holds it, so the live-task read below sees that task.
+  // Upgrade admission takes FOR UPDATE explicitly; exclude it without blocking child FK checks.
   const [repo] = await tx
     .select({
       renderContext: schema.repositories.renderContext,
@@ -832,7 +832,7 @@ export async function syncProjectStateLocked(
     })
     .from(schema.repositories)
     .where(eq(schema.repositories.id, repositoryId))
-    .for('update');
+    .for('no key update');
   // Deleted since the files were read: its sync row went with it, and nothing is left to write to.
   if (!repo) return { outcome: 'superseded' };
   const live = await tx
