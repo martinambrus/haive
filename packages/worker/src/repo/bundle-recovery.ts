@@ -101,7 +101,7 @@ export async function restoreReplacementBundle(
             ...replacement.previousArchive,
             status: 'active',
             lastSyncError: null,
-            lastSyncNote: `Replacement failed; the previous bundle remains in use. ${reason}`,
+            lastReplacementNote: `Replacement failed; the previous bundle remains in use. ${reason}`,
             updatedAt: new Date(),
           }
         : {

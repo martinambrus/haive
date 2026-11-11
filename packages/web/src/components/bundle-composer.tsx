@@ -25,6 +25,7 @@ export interface BundleComposerEntry {
   itemCount: number;
   lastSyncError?: string | null;
   lastSyncNote?: string | null;
+  lastReplacementNote?: string | null;
   archiveFilename?: string | null;
 }
 
@@ -59,6 +60,7 @@ function summaryFromInitial(b: BundleComposerInitial): BundleComposerEntry {
     status: b.status,
     itemCount: b.itemCount,
     lastSyncError: b.lastSyncError,
+    lastReplacementNote: b.lastReplacementNote,
   };
 }
 
@@ -278,6 +280,7 @@ export function BundleComposer({
             itemCounts?: { agent?: number; skill?: number };
             lastSyncError?: string | null;
             lastSyncNote?: string | null;
+            lastReplacementNote?: string | null;
             archiveFilename?: string | null;
           }>;
         };
@@ -290,6 +293,7 @@ export function BundleComposer({
           status: b.status,
           lastSyncError: b.lastSyncError,
           lastSyncNote: b.lastSyncNote,
+          lastReplacementNote: b.lastReplacementNote,
           archiveFilename: b.archiveFilename,
           itemCount: (b.itemCounts?.agent ?? 0) + (b.itemCounts?.skill ?? 0),
         }));
@@ -320,7 +324,8 @@ export function BundleComposer({
               v.status === n.status &&
               v.itemCount === n.itemCount &&
               v.name === n.name &&
-              v.lastSyncError === n.lastSyncError
+              v.lastSyncError === n.lastSyncError &&
+              v.lastReplacementNote === n.lastReplacementNote
             );
           });
         if (!same) onChangeRef.current(next);
@@ -742,12 +747,12 @@ export function BundleComposer({
                     <MarkdownView body={entry.lastSyncError} />
                   </div>
                 )}
-                {entry.status === 'active' && entry.lastSyncNote && (
+                {entry.status === 'active' && entry.lastReplacementNote && (
                   <div
                     role="status"
                     className="border-t border-amber-900/50 px-3 py-2 text-sm text-amber-200"
                   >
-                    <MarkdownView body={entry.lastSyncNote} />
+                    <MarkdownView body={entry.lastReplacementNote} />
                   </div>
                 )}
                 {isExpanded && (

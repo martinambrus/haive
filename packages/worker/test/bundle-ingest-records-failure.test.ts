@@ -54,6 +54,7 @@ it('T487: a corrupt keep-mode replacement leaves the old tree, catalog and usabl
     archiveFilename: 'broken.zip',
     storageRoot: dest,
     status: 'syncing',
+    lastSyncNote: 'Dropped 1 symlink.',
   });
   fake.insert(schema.customBundleItems, {
     id: '00000000-0000-4000-8000-0000000000e1',
@@ -87,7 +88,8 @@ it('T487: a corrupt keep-mode replacement leaves the old tree, catalog and usabl
     archivePath: oldArchive,
     archiveFilename: 'old.zip',
     lastSyncError: null,
-    lastSyncNote: expect.stringContaining('previous bundle remains in use'),
+    lastSyncNote: 'Dropped 1 symlink.',
+    lastReplacementNote: expect.stringContaining('previous bundle remains in use'),
   });
 });
 

@@ -219,6 +219,7 @@ function bundleSummaryFromRow(
     lastSyncCommit: row.lastSyncCommit,
     lastSyncError: row.lastSyncError ? redactGitText(row.lastSyncError) : row.lastSyncError,
     lastSyncNote: row.lastSyncNote ? redactGitText(row.lastSyncNote) : null,
+    lastReplacementNote: row.lastReplacementNote ? redactGitText(row.lastReplacementNote) : null,
     itemCounts: { agent: counts?.agent ?? 0, skill: counts?.skill ?? 0 },
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -1020,12 +1021,8 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
             ...replacement!.previousArchive,
             status: 'active',
             lastSyncError: null,
-            lastSyncNote: [
-              bundle.lastSyncNote,
+            lastReplacementNote:
               'Replacement could not be queued; the previous bundle remains in use. Try Replace ZIP again.',
-            ]
-              .filter(Boolean)
-              .join('\n\n'),
           }
         : undefined,
     );

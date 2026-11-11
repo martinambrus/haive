@@ -103,6 +103,7 @@ export const bundleSummarySchema = z.object({
   lastSyncCommit: z.string().nullable(),
   lastSyncError: z.string().nullable(),
   lastSyncNote: z.string().nullable().optional(),
+  lastReplacementNote: z.string().nullable().optional(),
   itemCounts: z.object({
     agent: z.number().int().nonnegative(),
     skill: z.number().int().nonnegative(),

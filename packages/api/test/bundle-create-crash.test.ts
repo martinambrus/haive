@@ -246,6 +246,21 @@ describe('T487: explicit replacement mode', () => {
     expect(ingestJobs()[0]?.data).toMatchObject({ replacement: { mode: 'keep_until_success' } });
   });
 
+  it('replaces the last queue-failure note while preserving the extracted-tree note', async () => {
+    await seedZipBundle();
+    fake.patch(schema.customBundles, BUNDLE, { lastSyncNote: 'Dropped 1 symlink.' });
+    await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+    queue.state.refuse = new Error('queue unavailable');
+    const url = `/${BUNDLE}/replace/${REPLACE}/complete`;
+    for (let i = 0; i < 2; i++)
+      expect((await post(url, { mode: 'keep_until_success' })).status).toBe(500);
+    const current = fake.rows(schema.customBundles)[0]!;
+    expect(current.lastSyncNote).toBe('Dropped 1 symlink.');
+    expect(current.lastReplacementNote).toBe(
+      'Replacement could not be queued; the previous bundle remains in use. Try Replace ZIP again.',
+    );
+  });
+
   it('keeps its original choice and rollback source across an enqueue failure', async () => {
     const dir = await seedZipBundle();
     await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });

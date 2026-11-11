@@ -119,7 +119,7 @@ async function fakeFetch(input: unknown, init?: RequestInit) {
           sourceType: bundleSource,
           status: bundleState,
           lastSyncError: syncError,
-          lastSyncNote: syncNote,
+          lastReplacementNote: syncNote,
           archiveFilename: 'old.zip',
           itemCounts: { agent: 1 },
         },
@@ -684,4 +684,20 @@ it('retries an empty-string failure when reopened', async () => {
   expect(filesFetches).toBe(2);
   expect(live.text()).toContain('a.md');
   expect(live.text()).not.toContain('Error:');
+});
+
+it('updates and clears a replacement note when the polled bundle stays active', async () => {
+  secondBundleState = 'syncing';
+  syncNote = 'First replacement failure.';
+  const live = await mountLive();
+  expect(live.text()).toContain(syncNote);
+  syncNote = 'Latest replacement failure.';
+  poll();
+  await settle(live.view);
+  expect(live.text()).toContain(syncNote);
+  expect(live.text()).not.toContain('First replacement failure.');
+  syncNote = null;
+  poll();
+  await settle(live.view);
+  expect(live.text()).not.toContain('Latest replacement failure.');
 });

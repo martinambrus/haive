@@ -218,6 +218,7 @@ export async function handleIngestZip(
               lastSyncAt: new Date(),
               lastSyncError: null,
               lastSyncNote: extraction.note,
+              lastReplacementNote: null,
             });
           });
           published = true;
