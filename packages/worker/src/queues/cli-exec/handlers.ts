@@ -1252,16 +1252,17 @@ export async function handleSignOutJob(
     }
     const attempt = (job.data?.authContentionAttempts ?? 0) + 1;
     const delayMs = Math.min(2_000 * 2 ** Math.min(attempt - 1, 3), 15_000);
-    await job.updateData({
-      ...job.data,
-      authContentionStartedAt: startedAt,
-      authContentionAttempts: attempt,
-    });
     log.debug(
       { providerId: provider.id, scope: cliAuthScope(provider), attempt, waitedMs, delayMs },
       'cli sign-out deferred: a sign-in or credential update holds authentication',
     );
-    await deferJob(job, delayMs, job.token!);
+    await deferJob(job, delayMs, job.token!, () =>
+      job.updateData({
+        ...job.data,
+        authContentionStartedAt: startedAt,
+        authContentionAttempts: attempt,
+      }),
+    );
     throw new DelayedError();
   }
   try {

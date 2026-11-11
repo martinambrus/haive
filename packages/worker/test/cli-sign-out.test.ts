@@ -468,3 +468,39 @@ it('fails after thirty minutes of auth contention without removing anything', as
   expect(runner.removed).toEqual([]);
   expect(calls.updateSet).toBeNull();
 });
+
+it.each(['LOADING Redis is loading', 'OOM command not allowed'])(
+  'retries a refused sign-out metadata write before deferring (%s)',
+  async (reason) => {
+    vi.useFakeTimers();
+    try {
+      lock.acquire.mockResolvedValue(null);
+      const row = makeProviderRow();
+      const calls: DbCalls = { updateSet: null };
+      const runner = makeRunner({ existing: ['haive_cli_auth_user1_gemini_0'] });
+      const job = {
+        data: {},
+        timestamp: Date.now(),
+        token: 'token',
+        updateData: vi.fn().mockRejectedValueOnce(new Error(reason)).mockResolvedValue(undefined),
+        moveToDelayed: vi.fn(async () => {}),
+      };
+      const result = handleSignOutJob(
+        makeDb(row, calls),
+        { providerId: row.id, userId: row.userId },
+        runner,
+        job as any,
+      ).catch((error: Error) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(job.moveToDelayed).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await result).toMatchObject({ name: 'DelayedError' });
+      expect(job.updateData).toHaveBeenCalledTimes(2);
+      expect(job.moveToDelayed).toHaveBeenCalledOnce();
+      expect(runner.removed).toEqual([]);
+      expect(calls.updateSet).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);

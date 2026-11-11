@@ -28,10 +28,13 @@ export async function deferJob(
   job: Pick<Job, 'id' | 'moveToDelayed'>,
   delayMs: number,
   token: string,
+  prepare?: () => Promise<void>,
 ): Promise<void> {
   const giveUpAt = Date.now() + DEFER_RETRY_WINDOW_MS;
   for (let attempt = 1; ; attempt += 1) {
     try {
+      // Metadata and the move share one refusal budget; repeating preparation is idempotent.
+      await prepare?.();
       await job.moveToDelayed(Date.now() + delayMs, token);
       return;
     } catch (err) {
