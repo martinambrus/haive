@@ -577,6 +577,28 @@ it.each(['keep_until_success', 'remove_first'])(
   },
 );
 
+it('renders replacement option bodies with inline markdown outside their labels', async () => {
+  const live = await mountLive();
+  const input = findAll(live.view.tree(), (h) => h.tag === 'input' && h.props.type === 'file')[0]!;
+  (input.props.onChange as (e: unknown) => void)({
+    target: { files: [new File(['zip'], 'new.zip')], value: '' },
+  });
+  await settle(live.view);
+  const fieldset = findAll(live.view.tree(), (h) => h.tag === 'fieldset')[0]!;
+  const labels = findAll(fieldset, (h) => h.tag === 'label');
+  expect(labels).toHaveLength(2);
+  for (const label of labels) {
+    expect(findAll(label, (h) => ['div', 'p'].includes(h.tag))).toEqual([]);
+    expect(label.props.htmlFor).toBeTruthy();
+  }
+  const bodies = findAll(fieldset, (h) => String(h.props.className).includes('haive-md-inherit'));
+  expect(bodies).toHaveLength(2);
+  for (const input of findAll(fieldset, (h) => h.tag === 'input')) {
+    expect(labels.some((label) => label.props.htmlFor === input.props.id)).toBe(true);
+    expect(input.props['aria-describedby']).toBeTruthy();
+  }
+});
+
 it('closes the replacement dialog on Escape before uploading anything', async () => {
   const live = await mountLive();
   const input = findAll(live.view.tree(), (h) => h.tag === 'input' && h.props.type === 'file')[0]!;

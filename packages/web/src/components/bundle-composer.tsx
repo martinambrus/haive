@@ -9,6 +9,7 @@ import type {
   BundleReplacementMode,
 } from '@haive/shared';
 import { Button, FormError, Input, Label } from '@/components/ui';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { API_BASE_URL } from '@/lib/api-client';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
@@ -590,26 +591,44 @@ export function BundleComposer({
             <MarkdownView body="Choose what happens to the old extracted files. Uploaded archives remain on disk in both modes; the replacement upload also needs disk space." />
             <fieldset className="my-4 flex flex-col gap-3" disabled={disabled || busy}>
               <legend className="sr-only">Replacement mode</legend>
-              <label className="flex items-start gap-2 text-sm">
+              <div className="flex items-start gap-2 text-sm">
                 <input
+                  id="bundle-replacement-keep_until_success"
+                  aria-describedby="bundle-replacement-keep_until_success-description"
                   type="radio"
                   name="bundle-replacement-mode"
                   value="keep_until_success"
                   checked={replacementMode === 'keep_until_success'}
                   onChange={() => setReplacementMode('keep_until_success')}
                 />
-                <MarkdownView body="**Keep old until success.** Needs space for both extracted trees. The old tree and catalog are replaced only after import succeeds. A failed replacement restores the previous usable bundle with automatic rollback." />
-              </label>
-              <label className="flex items-start gap-2 text-sm">
+                <div>
+                  <label htmlFor="bundle-replacement-keep_until_success" className="font-medium">
+                    Keep old until success
+                  </label>
+                  <div id="bundle-replacement-keep_until_success-description">
+                    <InlineMarkdown body="Needs space for both extracted trees. The old tree and catalog are replaced only after import succeeds. A failed replacement restores the previous usable bundle with automatic rollback." />
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-start gap-2 text-sm">
                 <input
+                  id="bundle-replacement-remove_first"
+                  aria-describedby="bundle-replacement-remove_first-description"
                   type="radio"
                   name="bundle-replacement-mode"
                   value="remove_first"
                   checked={replacementMode === 'remove_first'}
                   onChange={() => setReplacementMode('remove_first')}
                 />
-                <MarkdownView body="**Remove old extracted files first to free disk.** Removes the extracted tree before import, while keeping uploaded archives. There is no automatic rollback. A failed replacement leaves no extracted tree and the bundle is failed." />
-              </label>
+                <div>
+                  <label htmlFor="bundle-replacement-remove_first" className="font-medium">
+                    Remove old extracted files first to free disk
+                  </label>
+                  <div id="bundle-replacement-remove_first-description">
+                    <InlineMarkdown body="Removes the extracted tree before import, while keeping uploaded archives. There is no automatic rollback. A failed replacement leaves no extracted tree and the bundle is failed." />
+                  </div>
+                </div>
+              </div>
             </fieldset>
             <div className="flex justify-end gap-2">
               <Button
