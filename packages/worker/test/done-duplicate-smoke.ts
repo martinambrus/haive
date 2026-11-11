@@ -606,7 +606,7 @@ async function main(): Promise<void> {
         taskId,
         '07b-phase-4-validate',
         0,
-        7.7,
+        7.8,
         {
           verdict: 'ISSUES_FOUND',
           issues: [{ severity: 'high', file: 'package.json', description: 'smoke-forced issue' }],
