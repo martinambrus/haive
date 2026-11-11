@@ -101,6 +101,20 @@ All low unless marked. Code in `worker/src/project-state/task-end-rules.ts` and 
 7. Carried from earlier rounds, not re-verified: an `''` override leaves an empty AGENTS.md region; `loadCliRulesRenderHashes` ignores `backfill` rows; rollback availability after a backfill row.
 8. Any successful sync caller may now write AGENTS.md when it drains a ready intent; confirm no caller runs while a checkout write it does not own is in flight.
 
+### T600 · FNF[rag-accent-followups] · accent-insensitive lexical search follow-ups (+8)
+
+status: open · kind: fix · found: K (#145) reviews 2026-11-10/11 · priority: P4
+All low unless marked. Code in `shared/src/rag/lexical-config.ts` and the RAG schema ensure.
+
+1. Accented queries miss rows until the backfill has restamped them; no progress or completion signal.
+2. Losing the `unaccent` extension later (dropped, privileges revoked) is not detected; the store keeps the accent configuration's mode.
+3. The global KB store upgrades to the accent configuration only at worker start (ensure runs once); a repository store on its next ensure.
+4. The global retry backfill sweep runs without the store's schema lock.
+5. `RAG_TSV_BACKFILL_PREDICATE` scans the whole table each pass (no index can serve it).
+6. Restamping every row churns the HNSW and GIN indexes on large stores.
+7. Global-store refusal coverage (0A000/58P01/42501) is fake-connection only; no Postgres control.
+8. The test of the identifier stamp inside prose checks only the parser, not a stored vector.
+
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
 **Found something outside your task?** Search the board first (`grep -n "<file>\|<symbol>\|<slug>"`).
@@ -148,6 +162,7 @@ Owner triage 2026-11-10 (AskUserQuestion, 8 rounds; register `.claude/tmp/codex-
 
 T524's 2026-11-01 owner round answered 42 questions. Decisions are recorded on the affected task blocks; the durable local answer register is `.claude/tmp/codex-run/backlog-decisions-20261101/decisions.json`. No unanswered owner-policy question remains from this round.
 
+- T145 — lexical RAG search is accent-insensitive through a store-local unaccent text search configuration (with a recorded verbatim fallback when the extension is unavailable) and a backfill of existing vectors — PR #1071 (34dbd0bb4), 2026-11-11; dev global KB live-checked. Follow-ups T600.
 - T271 + T286 — a DAG level merge settles Haive's project files from the integration branch; root starts, Retry, Resume and revival refuse during another task's open same-branch merge; run-app Finish commits only the reviewed, pinned tree with a parent compare-and-swap and branch checks, and a Retry after a failed put-back pushes its landed commit — PR #1066 (73b7c672b), 2026-11-11. Follow-ups T595.
 - T443 + T386 + T317 — a rules-override import is deferred during a live upgrade and the task-end import (onboarding and onboarding_upgrade) re-renders the AGENTS.md region through `project_state_outbox.rules_reconcile_intent` (migration 0227), retried on transient refusals and dropped with one warning on permanent ones; the updater keeps its hold when an upgrade died before recording its found state; a stamped RTK choice wins against the first record import — PR #1064 (0106f9edd), 2026-11-11. Follow-ups T599.
 - T402: operator script with dry run, before-image and undo. The owner subsequently requested indefinite development-record retention: transcripts changed from 90 to 0/forever through the audited admin API; prompts were already 0. Historical expiry estimates no longer govern this install. Missing old logs remain unrecoverable.
@@ -234,13 +249,6 @@ Execution fence 2026-11-01: Reconcile closed and overlapping members first. Focu
 
 status: parked · reason: no retrieval evaluation exists (owner triage 2026-11-10); resume when one does · kind: ranking change (gated on the retrieval eval) · priority: P3
 shared/src/rag/search.ts:449/:560 plainto_tsquery ANDs every term; 67.6% of logged searches with code hits had no two-ranker hit. TRAP: plain OR and coverage ranking measured WORSE (AGENTS.md "Identifier search"). Plan P2(b): a capped IDF ranker.
-
-### T145 · RAG F13 · Slovak text matches only verbatim
-
-status: in progress (bundle K, overnight run 2026-11-10, branch fix/K-slovak-rag) · kind: feature · user decision: resolved 2026-11-01 · priority: P3
-_rag-connection.ts:130 update_content_tsv uses to_tsvector('english') without unaccent ("kotolna" misses "kotolňa"). Needs a backfill (like backfillIdentifierTsv) and a fail-open path without the extension. Plan P2(e).
-
-User decision 2026-11-01: Approve bounded Slovak accent-insensitive retrieval with a backfill and extension-unavailable fallback; retain retrieval-evaluation gates for T144/T147.
 
 ### T147 · RAG F5 · identical chunk bodies across files are never collapsed
 
