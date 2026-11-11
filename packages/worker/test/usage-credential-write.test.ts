@@ -110,7 +110,7 @@ it('holds the shared scope across the usage credential read, grant and write wit
   expect(fake.rows(schema.cliProviders)[0]!.authGeneration).toBe(
     '00000000-0000-4000-8000-000000000001',
   );
-  expect(h.release).toHaveBeenCalledOnce();
+  expect(h.release).toHaveBeenCalledTimes(2);
 });
 it('a usage refresh after a sign-out request still removes the volumes and both Claude secrets', async () => {
   const fake = setup();
@@ -179,7 +179,7 @@ it('leaves the usage secret and login generation unchanged when the upsert fails
   );
 });
 
-it('polls two same-scope providers in one tick without locking when no refresh is due', async () => {
+it('polls two same-scope providers unlocked and serialises their short snapshot writes', async () => {
   const fake = setup(false);
   const first = fake.rows(schema.cliProviders)[0]!;
   fake.insert(schema.cliProviders, { ...first, id: randomUUID() });
@@ -187,9 +187,16 @@ it('polls two same-scope providers in one tick without locking when no refresh i
   h.acquire.mockImplementation(async (_db, scope: string) => {
     if (scopes.has(scope)) return null;
     scopes.add(scope);
-    return async () => {
-      scopes.delete(scope);
-    };
+    return Object.assign(
+      async () => {
+        scopes.delete(scope);
+      },
+      {
+        assertHeld: async () => {
+          if (!scopes.has(scope)) throw new Error('lock lost');
+        },
+      },
+    );
   });
   h.read.mockResolvedValue(
     JSON.stringify({
@@ -211,7 +218,7 @@ it('polls two same-scope providers in one tick without locking when no refresh i
       .map((row) => row.id)
       .sort(),
   );
-  expect(h.acquire).not.toHaveBeenCalled();
+  expect(h.acquire).toHaveBeenCalledTimes(2);
   expect(h.refresh).not.toHaveBeenCalled();
 });
 
@@ -230,7 +237,7 @@ it.each([
     return h.release;
   });
   await runUsagePollTick(fake.db as unknown as Database);
-  expect(h.read).toHaveBeenCalledTimes(2);
+  expect(h.read).toHaveBeenCalledTimes(token ? 3 : 2);
   expect(h.refresh).not.toHaveBeenCalled();
   expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
   if (token) {
@@ -243,7 +250,7 @@ it.each([
   } else {
     expect(h.fetch).not.toHaveBeenCalled();
   }
-  expect(h.release).toHaveBeenCalledOnce();
+  expect(h.release).toHaveBeenCalledTimes(token ? 2 : 1);
 });
 
 it('refreshes using the token re-read under the lock', async () => {
@@ -252,7 +259,7 @@ it('refreshes using the token re-read under the lock', async () => {
     JSON.stringify({ accessToken: 'obsolete', refreshToken: 'spent', expiresAt: 0 }),
   );
   await runUsagePollTick(fake.db as unknown as Database);
-  expect(h.read).toHaveBeenCalledTimes(2);
+  expect(h.read).toHaveBeenCalledTimes(3);
   expect(h.refresh).toHaveBeenCalledWith('refresh');
-  expect(h.release).toHaveBeenCalledOnce();
+  expect(h.release).toHaveBeenCalledTimes(2);
 });

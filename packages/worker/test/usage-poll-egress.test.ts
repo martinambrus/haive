@@ -6,6 +6,11 @@ import { eq } from 'drizzle-orm';
 import { configService } from '@haive/shared';
 import { guardedProbeFetch } from '@haive/shared/egress';
 
+vi.mock('@haive/database', async (original) => ({
+  ...(await original<typeof import('@haive/database')>()),
+  tryCliAuthLock: async () => Object.assign(async () => {}, { assertHeld: async () => {} }),
+}));
+
 vi.mock('../src/usage-window/token-source.js', () => ({
   readProviderSecretToken: async () => 'fixture-token',
   readAuthVolumeFile: async () => null,
@@ -37,7 +42,7 @@ function setup(baseUrl: string | null = privateUrl) {
   const db = {
     query: {
       users: { findFirst: findOwner },
-      cliProviders: { findMany: async () => [provider] },
+      cliProviders: { findMany: async () => [provider], findFirst: async () => provider },
     },
     insert: (table: unknown) => {
       expect(table).toBe(schema.usageWindowSnapshots);

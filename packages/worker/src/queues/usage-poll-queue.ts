@@ -13,7 +13,7 @@ import {
   type CliProviderName,
 } from '@haive/shared';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
-import { schema, tryCliAuthLock, type Database } from '@haive/database';
+import { schema, tryCliAuthLock, type CliAuthLock, type Database } from '@haive/database';
 import { getDb } from '../db.js';
 import { resolveProbeFetch } from '../cli-adapters/probe-fetch.js';
 import { getBullRedis } from '../redis.js';
@@ -226,12 +226,18 @@ async function resolveOauthRefreshToken(
             'usage OAuth refresh rejected (invalid_grant); marking needs_reconnect, polling paused until re-auth',
           );
           deadUsageRefreshToken.set(provider.id, stored.refreshToken);
-          await release.assertHeld();
-          await upsertSnapshot(db, provider, {
-            ok: false,
-            error: 'Usage tracking token expired — reconnect this provider to restore its meters.',
-            reconnect: true,
-          }).catch(() => {});
+          await writeSnapshotIfCurrent(
+            db,
+            provider,
+            { token: stored.accessToken },
+            {
+              ok: false,
+              error:
+                'Usage tracking token expired — reconnect this provider to restore its meters.',
+              reconnect: true,
+            },
+            release,
+          ).catch(() => {});
           return null;
         }
         // Transient (network / 5xx): try the stale token anyway; the fetch surfaces the
@@ -253,13 +259,26 @@ async function resolveToken(
   db: Database,
   provider: ProviderRow,
   cfg: ProviderUsageConfig,
+  refresh = true,
 ): Promise<{ token: string; accountId?: string | null } | null> {
   if (cfg.token.kind === 'secret') {
     const token = await readProviderSecretToken(db, provider.id, cfg.token.secretName);
     return token ? { token } : null;
   }
   if (cfg.token.kind === 'oauthRefresh') {
-    return resolveOauthRefreshToken(db, provider, cfg.token.secretName);
+    if (refresh) return resolveOauthRefreshToken(db, provider, cfg.token.secretName);
+    // Snapshot validation only reads: it must never refresh over HTTP while holding
+    // the short write lock, nor turn a disconnected secret into a new credential.
+    const raw = await readProviderSecretToken(db, provider.id, cfg.token.secretName);
+    if (!raw) return null;
+    try {
+      const stored = JSON.parse(raw) as Partial<ClaudeOauthTokens> | null;
+      return typeof stored?.accessToken === 'string' && stored.accessToken
+        ? { token: stored.accessToken }
+        : null;
+    } catch {
+      return null;
+    }
   }
   const raw = await readAuthVolumeFile(
     {
@@ -281,6 +300,66 @@ async function resolveToken(
   }
   const { token, accountId } = cfg.token.extract(json);
   return token ? { token, accountId } : null;
+}
+
+// Siblings sharing one volume finish their unlocked fetches together. Give their
+// short writes separate turns so they do not drop one another's first snapshot.
+const snapshotWrites = new Map<string, Promise<boolean>>();
+
+async function writeSnapshotIfCurrent(
+  db: Database,
+  provider: ProviderRow,
+  expected: { token: string; accountId?: string | null },
+  outcome: Parameters<typeof upsertSnapshot>[2],
+  held?: CliAuthLock,
+): Promise<boolean> {
+  if (held) return writeSnapshotUnderLock(db, provider, expected, outcome, held);
+  const scope = cliAuthScope(provider);
+  const prior = snapshotWrites.get(scope);
+  const writing = (async () => {
+    await prior?.catch(() => {});
+    return writeSnapshotUnderLock(db, provider, expected, outcome);
+  })();
+  snapshotWrites.set(scope, writing);
+  try {
+    return await writing;
+  } finally {
+    if (snapshotWrites.get(scope) === writing) snapshotWrites.delete(scope);
+  }
+}
+
+/** A fetch is intentionally unlocked. Re-read both scope and credential in the
+ * short write turn: Disconnect deletes its secret and snapshot in this same scope,
+ * and a reconnect must not inherit a response fetched for its previous token. */
+async function writeSnapshotUnderLock(
+  db: Database,
+  provider: ProviderRow,
+  expected: { token: string; accountId?: string | null },
+  outcome: Parameters<typeof upsertSnapshot>[2],
+  held?: CliAuthLock,
+): Promise<boolean> {
+  const release = held ?? (await tryCliAuthLock(db, cliAuthScope(provider)));
+  if (!release) return false;
+  try {
+    const current = await db.query.cliProviders.findFirst({
+      where: eq(schema.cliProviders.id, provider.id),
+    });
+    if (!current || cliAuthScope(current) !== cliAuthScope(provider)) return false;
+    const cfg = USAGE_PROVIDERS[current.name];
+    if (!cfg) return false;
+    const creds = await resolveToken(db, current, cfg, false);
+    if (
+      !creds ||
+      creds.token !== expected.token ||
+      (creds.accountId ?? null) !== (expected.accountId ?? null)
+    )
+      return false;
+    await release.assertHeld();
+    await upsertSnapshot(db, current, outcome);
+    return true;
+  } finally {
+    if (!held) await release();
+  }
 }
 
 async function upsertSnapshot(
@@ -405,7 +484,6 @@ async function pollProvider(db: Database, provider: ProviderRow): Promise<void> 
     // streak. A self-healing provider (codex/gemini) records a hidden `error` instead of the
     // actionable needs_reconnect nag — UNLESS the token it rejected had not expired yet, which
     // means the vendor revoked it and no amount of waiting for the CLI to refresh will help.
-    deadUsageFetchToken.set(provider.id, creds.token);
     backoff.delete(provider.id);
     authStrikes.delete(provider.id);
     const reconnectable =
@@ -418,7 +496,7 @@ async function pollProvider(db: Database, provider: ProviderRow): Promise<void> 
       { providerId: provider.id, provider: provider.name, error: outcome.error, reconnectable },
       'usage endpoint rejected the token past the strike threshold; pausing polls until it rotates',
     );
-    await upsertSnapshot(db, provider, {
+    const written = await writeSnapshotIfCurrent(db, provider, creds, {
       ok: false,
       // "rejected", not "expired": this branch now also covers a token the vendor revoked
       // while it was still within its own lifetime, and a diagnostic column that names the
@@ -428,13 +506,16 @@ async function pollProvider(db: Database, provider: ProviderRow): Promise<void> 
         : 'Usage tracking temporarily unavailable.',
       reconnect: reconnectable,
     });
+    // Contention must not permanently suppress a denial whose snapshot was skipped.
+    if (written) deadUsageFetchToken.set(provider.id, creds.token);
+    else authStrikes.set(provider.id, strikes);
     return;
   }
 
   authStrikes.delete(provider.id); // any non-auth response resets the auth-denial streak
   backoff.delete(provider.id); // any non-429 response clears the 429 backoff
   if (outcome.ok) deadUsageFetchToken.delete(provider.id); // recovered / token rotated
-  await upsertSnapshot(db, provider, outcome);
+  await writeSnapshotIfCurrent(db, provider, creds, outcome);
 }
 
 export async function runUsagePollTick(db: Database): Promise<void> {
