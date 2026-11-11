@@ -247,7 +247,17 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   flight, in the task's integration worktree) recorded, and only where MERGE_HEAD is the commit of
   the ref it was merging and the directory is not a host checkout (`isHostCheckout`, a person's own); one per directory and merge head, so a re-driven cancel adds none. The task
   page shows it with an "Abort merge" button behind a confirm (`POST /tasks/:id/merges/abort`, owner
-  only, cancelled tasks only, naming a directory an unsettled event reports). The worker job
+  only, cancelled tasks only, naming a directory an unsettled event reports).
+  Every step-12 section that lands a merge commit on the local base (clean merge, fixer finish,
+  by-hand commit, squash replacement) appends `merge.landed` `{dir, repoPath, landedOn,
+baseShaBefore, baseShaAfter, landedAt}` in the same transaction as the step state, so it
+  survives a step reset and a crash before `reachDone`; a re-entry with the same tip writes
+  none. Under the lock of every directory the step recorded, the CANCEL then appends one
+  `merge.left_committed` when the latest landing is still contained in `refs/heads/<landedOn>`
+  (`recordLeftCommittedMerge`, read-only; pushed merges and host checkouts included). A git
+  timeout or database fault throws (the re-drive retries); a deleted branch or repository
+  cannot be confirmed, warns and reports nothing, so it never holds the teardown. The task
+  page says the merge stays committed and was not undone; nothing undoes it. The worker job
   (`abortLeftMerge`) runs under the directory's lock and records `merge.left_open_settled`
   `{dir, mergeHead, outcome, reason}`: `refused` while a live task's `merge_dir_claims` row holds the
   directory (`liveClaimHolder`, the staleness rules `claimMergeDir` uses), `moved` with nothing

@@ -76,7 +76,7 @@ moved aside. `sub-skills` is therefore claimed only when the slugs in it were re
 task's WORKTREE (`resolveWorktree`), so until the merge its record describes a tree the reset is
 not looking at, and claiming from it would delete an untouched ROOT copy of a skill it only ever
 changed there. `12-worktree-cleanup` records that verdict as `merged`, set on the `merge_remove`
-path and only when the merge actually ran, so the two rows are read together — which is why
+path and only when the merge actually ran, or by a `merge.landed` event, which a cancel between the merge commit and that verdict leaves as the only record (its `landedAt` is the time compared with the reset), so the rows are read together — which is why
 `loadProvenanceSteps` also selects `task_id` and loads the cleanup step. Ignoring 11d wholesale
 was NOT safe either, and that is the subtler half: an 11d removal leaves 09_5's claim for that
 skill standing, so a file the user later recreates at the path is deleted as onboarding output.
