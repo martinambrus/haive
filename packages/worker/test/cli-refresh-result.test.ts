@@ -10,7 +10,14 @@ const h = vi.hoisted(() => ({
   ruby: vi.fn(),
   prices: vi.fn(),
   fx: vi.fn(),
+  warn: vi.fn(),
 }));
+vi.mock('@haive/shared', async (original) => {
+  const actual = await original<typeof import('@haive/shared')>();
+  const child = actual.logger.child({ test: 'refresh-result' });
+  vi.spyOn(child, 'warn').mockImplementation(h.warn);
+  return { ...actual, logger: { child: () => child } };
+});
 vi.mock('../src/cli-versions/index.js', () => ({
   refreshAllCliVersions: h.cli,
   refreshAllToolVersions: h.tools,
@@ -93,3 +100,32 @@ it('bounds each persisted failure reason', async () => {
   const row = await fake.db.query.refreshRuns.findFirst();
   expect((row?.result as { errors: { error: string }[] }).errors[0]?.error).toHaveLength(2000);
 });
+
+it.each(['start', 'finish'] as const)(
+  'continues refreshing when the %s result write fails and logs it',
+  async (phase) => {
+    const fake = fixture();
+    const err = new Error('result store unavailable');
+    if (phase === 'start')
+      vi.spyOn(fake.db, 'insert').mockImplementationOnce(() => {
+        throw err;
+      });
+    else
+      vi.spyOn(fake.db, 'update').mockImplementationOnce(() => {
+        throw err;
+      });
+    const result = await handleRefreshCliVersionsJob(fake.db as unknown as Database, 'manual');
+    expect(result.ok).toBe(true);
+    for (const fn of [h.cli, h.tools, h.catalog, h.browsers, h.ruby, h.prices, h.fx])
+      expect(fn).toHaveBeenCalledOnce();
+    expect(h.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err, runId: result.runId }),
+      expect.any(String),
+    );
+    if (phase === 'finish')
+      expect(await fake.db.query.refreshRuns.findFirst()).toMatchObject({
+        finishedAt: null,
+        result: null,
+      });
+  },
+);

@@ -1020,11 +1020,16 @@ export async function handleRefreshCliVersionsJob(
     finishedAt: null,
     result: null,
   };
-  // Commit before any remote work. A throw or process death leaves an unfinished run.
-  await db.insert(schema.refreshRuns).values(started).onConflictDoUpdate({
-    target: schema.refreshRuns.kind,
-    set: started,
-  });
+  // Record before remote work, best-effort: a result-store outage must not prevent
+  // sources from refreshing. A later throw or process death leaves an unfinished run.
+  try {
+    await db.insert(schema.refreshRuns).values(started).onConflictDoUpdate({
+      target: schema.refreshRuns.kind,
+      set: started,
+    });
+  } catch (err) {
+    log.warn({ err, runId }, 'failed to record refresh start');
+  }
   // The OpenRouter model catalog rides this job rather than getting its own: it is
   // the same kind of cached remote list on the same cadence, and reusing the job
   // means the provider form's existing "refresh versions" button refreshes it too.
@@ -1073,10 +1078,14 @@ export async function handleRefreshCliVersionsJob(
     ].map(({ name, error }) => ({ name, error: safeErrorMessage(error).slice(0, 2000) })),
   };
   // A newer start owns the row even when an older overlapping run finishes last.
-  await db
-    .update(schema.refreshRuns)
-    .set({ finishedAt: new Date(), result })
-    .where(and(eq(schema.refreshRuns.kind, 'versions'), eq(schema.refreshRuns.runId, runId)));
+  try {
+    await db
+      .update(schema.refreshRuns)
+      .set({ finishedAt: new Date(), result })
+      .where(and(eq(schema.refreshRuns.kind, 'versions'), eq(schema.refreshRuns.runId, runId)));
+  } catch (err) {
+    log.warn({ err, runId }, 'failed to record refresh completion');
+  }
   return result;
 }
 
