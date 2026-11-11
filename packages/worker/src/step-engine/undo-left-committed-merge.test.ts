@@ -285,6 +285,21 @@ describe('explicit undo of a cancel-left committed merge', () => {
     expect(await readFile(path.join(f.dir, 'feature'), 'utf8')).toBe('feature');
     expect(f.settled()[0]?.payload.outcome).toBe('undone');
   });
+  it('refuses a staged submodule pointer that a configured ignore would hide', async () => {
+    const f = await fixture();
+    await git(f.dir, 'config', 'diff.ignoreSubmodules', 'all');
+    await git(f.dir, 'update-index', '--add', '--cacheinfo', `160000,${f.before},vendored`);
+    const staged = await git(f.dir, 'ls-files', '--stage', '--', 'vendored');
+
+    await f.run();
+
+    expect(await git(f.dir, 'ls-files', '--stage', '--', 'vendored')).toBe(staged);
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    expect(f.settled()[0]?.payload).toMatchObject({
+      outcome: 'refused',
+      reason: expect.stringMatching(/commit or unstage/i),
+    });
+  });
   it.each(['repository', 'transient base'])(
     'refuses partially staged unrelated work in the %s checkout and allows retry after unstaging',
     async (kind) => {

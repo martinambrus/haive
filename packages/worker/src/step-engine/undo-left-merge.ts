@@ -537,7 +537,14 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
             }
             // --keep preserves working bytes but resets every index entry. Set-aside
             // already restores projection entries to HEAD, so no paths need excluding.
-            const staged = await gitRun(movedCheckout, ['diff', '--cached', '--quiet', 'HEAD']);
+            // A configured submodule ignore would hide a staged gitlink the reset then drops.
+            const staged = await gitRun(movedCheckout, [
+              'diff',
+              '--cached',
+              '--quiet',
+              '--ignore-submodules=none',
+              'HEAD',
+            ]);
             if (staged.code === 1) {
               await settle(
                 'refused',
