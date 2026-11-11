@@ -41,13 +41,17 @@ export async function seedTaskFixture(
   sql: postgres.Sql,
   userId: string,
   titleSuffix: string,
+  { repository = true }: { repository?: boolean } = {},
 ): Promise<TaskFixture> {
-  // Admission requires a repository even when this fixture has no checkout for the worker.
-  const repoId = randomUUID();
-  await sql`
-    insert into repositories (id, user_id, name, source, status)
-    values (${repoId}, ${userId}, ${`e2e task ${titleSuffix}`}, 'local_path', 'ready')
-  `;
+  // Retry and Resume refuse a task whose repository is gone, so the fixture has one (with no
+  // checkout for the worker) unless a test needs a task with no repository at all.
+  const repoId = repository ? randomUUID() : null;
+  if (repoId) {
+    await sql`
+      insert into repositories (id, user_id, name, source, status)
+      values (${repoId}, ${userId}, ${`e2e task ${titleSuffix}`}, 'local_path', 'ready')
+    `;
+  }
   const taskId = randomUUID();
   const failedStepId = randomUUID();
   const middleStepId = randomUUID();
@@ -79,9 +83,14 @@ export async function seedTaskFixture(
 }
 
 export async function cleanupTaskFixture(sql: postgres.Sql, taskId: string): Promise<void> {
+  const [task] = await sql<{ repository_id: string | null }[]>`
+    select repository_id from tasks where id = ${taskId}
+  `;
   await sql`delete from task_events where task_id = ${taskId}`;
   await sql`delete from task_steps where task_id = ${taskId}`;
   await sql`delete from tasks where id = ${taskId}`;
+  // seedTaskFixture made this repository for the task alone.
+  if (task?.repository_id) await sql`delete from repositories where id = ${task.repository_id}`;
 }
 
 export async function seedRepoFixture(

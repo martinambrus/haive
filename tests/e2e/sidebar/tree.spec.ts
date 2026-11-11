@@ -50,7 +50,7 @@ test.describe('sidebar task tree', () => {
     users,
   }) => {
     const { userId } = await users.register(page.request, { prefix: 'side-group' });
-    await seedTaskFixture(sql, userId, 'grouped');
+    await seedTaskFixture(sql, userId, 'grouped', { repository: false });
 
     await gotoWithSidebar(page);
     const aside = page.locator('aside');
