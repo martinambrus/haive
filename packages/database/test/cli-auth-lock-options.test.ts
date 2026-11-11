@@ -35,3 +35,27 @@ it('uses a fresh shared state and disables startup type fetching for each dedica
   await other?.();
   expect(client.end).toHaveBeenCalledWith({ timeout: 5 });
 });
+
+it('caps dedicated auth clients including concurrent acquisitions and frees slots on release', async () => {
+  h.create.mockClear();
+  h.create.mockImplementation(() =>
+    Object.assign(
+      vi.fn(async () => [{ held: true, pid: 1 }]),
+      { end: vi.fn(async () => {}) },
+    ),
+  );
+  const db = { $client: { options: { database: 'test', user: 'test' } } } as unknown as Database;
+  const holders = await Promise.all(
+    Array.from({ length: 40 }, (_, i) => tryCliAuthLock(db, String(i))),
+  );
+  try {
+    expect(h.create).toHaveBeenCalledTimes(32);
+    expect(holders.filter(Boolean)).toHaveLength(32);
+    expect(await tryCliAuthLock(db, 'over-cap')).toBeNull();
+  } finally {
+    await Promise.all(holders.map((h) => h?.()));
+  }
+  const next = await tryCliAuthLock(db, 'freed');
+  expect(next).not.toBeNull();
+  await next?.();
+});

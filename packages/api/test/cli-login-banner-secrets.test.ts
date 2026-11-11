@@ -2081,3 +2081,35 @@ it('stops an idle login when its auth backend is lost and refuses later input', 
   expect(write).not.toHaveBeenCalled();
   expect(vi.getTimerCount()).toBe(0);
 });
+
+it.each(['enqueue', 'attach', 'start'] as const)(
+  'bounds the pre-container auth hold while %s is stalled',
+  async (phase) => {
+    let resume!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    if (phase === 'enqueue') h.loginEnqueueGate = gate;
+    if (phase === 'attach')
+      h.attach.mockImplementation(async () => {
+        await gate;
+        return stream;
+      });
+    if (phase === 'start')
+      h.start.mockImplementation(async () => {
+        await gate;
+      });
+    await start('', false);
+    try {
+      await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+      await settle();
+      expect(ws.readyState).toBe(3);
+      expect(h.releaseAuth).toHaveBeenCalledOnce();
+    } finally {
+      resume();
+      await settle();
+    }
+    if (phase !== 'start') expect(h.start).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  },
+);

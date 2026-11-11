@@ -60,6 +60,7 @@ const ANSI_TAIL_MAX = 4096;
 // of output.
 const AUTH_URL_SETTLE_MS = 1_000;
 const HEARTBEAT_MS = 15_000;
+const PRE_CONTAINER_TIMEOUT_MS = 2 * 60 * 1000;
 const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 // How often the queued dialog is told what it is waiting for. Two queue reads per tick, both
 // O(queue length) against Redis, so keep it lazy — the numbers move on the scale of a CLI run
@@ -332,12 +333,22 @@ export function installCliLoginBannerWebSocket(
           closeRefused(CLI_LOGIN_CLOSE_CODES.AUTH_BUSY);
           return;
         }
+        const startupDeadline = Date.now() + PRE_CONTAINER_TIMEOUT_MS;
+        let startupExpired = false;
+        const unclaimedTimeout = setTimeout(() => {
+          startupExpired = true;
+          log.warn({ providerId }, 'login startup timeout before upgrade');
+          void releaseAuth();
+          socket.destroy();
+        }, PRE_CONTAINER_TIMEOUT_MS);
         if (auth.session.revoked || socket.destroyed) {
+          clearTimeout(unclaimedTimeout);
           await releaseAuth();
           return;
         }
 
         const releaseUnclaimed = () => {
+          clearTimeout(unclaimedTimeout);
           void releaseAuth();
         };
         socket.once('close', releaseUnclaimed);
@@ -350,13 +361,16 @@ export function installCliLoginBannerWebSocket(
               eq(schema.cliProviders.userId, auth.userId),
             ),
           });
+          if (startupExpired) throw new LoginCancelled();
           if (!lockedProvider || cliAuthScope(lockedProvider) !== cliAuthScope(provider)) {
             socket.removeListener('close', releaseUnclaimed);
+            clearTimeout(unclaimedTimeout);
             await releaseAuth();
             closeRefused(CLI_LOGIN_CLOSE_CODES.SETTINGS_CHANGED);
             return;
           }
           wss.handleUpgrade(req, socket, head, (ws) => {
+            clearTimeout(unclaimedTimeout);
             socket.removeListener('close', releaseUnclaimed);
             if (!auth.session.accept(ws)) {
               void releaseAuth();
@@ -369,6 +383,7 @@ export function installCliLoginBannerWebSocket(
               providerName: lockedProvider.name,
               provider: lockedProvider,
               releaseAuth,
+              startupDeadline,
               docker,
             }).catch(async (err) => {
               // The user closing the dialog unwinds the session through the same throw path as a
@@ -389,6 +404,7 @@ export function installCliLoginBannerWebSocket(
           });
         } catch (err) {
           socket.removeListener('close', releaseUnclaimed);
+          clearTimeout(unclaimedTimeout);
           await releaseAuth();
           throw err;
         }
@@ -403,6 +419,7 @@ export function installCliLoginBannerWebSocket(
 }
 
 interface RunBannerOpts {
+  startupDeadline: number;
   provider: CliAuthProvider;
   releaseAuth: CliAuthLock;
   ws: WebSocket;
@@ -420,6 +437,15 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   // mid-queue was simply unobserved. The 30s ttl used to bound the damage; without it a job the
   // user gave up on would go on to build a container nobody is attached to.
   const abort = createAbortHandle();
+  const startupTimeout = setTimeout(
+    () => {
+      log.warn({ providerId }, 'login startup timeout');
+      abort.fire();
+      wsSend(ws, { type: 'error', message: 'Login took too long to start. Retry the login.' });
+      ws.close(1011, 'startup_timeout');
+    },
+    Math.max(0, opts.startupDeadline - Date.now()),
+  );
   const heldAuth = opts.releaseAuth;
   let checkingLock = false;
   const lockWatch = setInterval(() => {
@@ -437,10 +463,12 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
         checkingLock = false;
       });
   }, 1_000);
+  let releasePending: Promise<void> | undefined;
   opts.releaseAuth = Object.assign(
     async () => {
       clearInterval(lockWatch);
-      await heldAuth();
+      clearTimeout(startupTimeout);
+      await (releasePending ??= heldAuth());
     },
     { assertHeld: heldAuth.assertHeld },
   );
@@ -483,7 +511,13 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   const dockerContainer = docker.getContainer(createResult.dockerContainerId);
   let stream: Duplex;
   try {
-    stream = await attachContainerStream(docker, createResult.dockerContainerId);
+    const attaching = attachContainerStream(docker, createResult.dockerContainerId).then(
+      (attached) => {
+        if (abort.aborted) attached.end();
+        return attached;
+      },
+    );
+    stream = await Promise.race([attaching, abort.signal]);
   } catch (err) {
     log.error({ error: safeErrorDetails(err), providerId }, 'attach failed');
     await teardownContainer(createResult.containerRowId, docker, createResult.dockerContainerId);
@@ -545,7 +579,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       await opts.releaseAuth.assertHeld();
       if (abort.aborted) throw new LoginCancelled();
       containerMayWrite = true;
-      await dockerContainer.start();
+      await Promise.race([dockerContainer.start(), abort.signal]);
     } catch (err) {
       log.error({ error: safeErrorDetails(err), providerId }, 'start failed');
       await cleanup();
@@ -566,6 +600,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       return;
     }
 
+    clearTimeout(startupTimeout);
     const session: BannerSession = {
       provider: opts.provider,
       releaseAuth: opts.releaseAuth,
@@ -1355,8 +1390,8 @@ async function runProbeAndSave(session: BannerSession): Promise<void> {
  *  Replaces a 30s ttl that was wrong by orders of magnitude: these jobs share the cli-exec
  *  worker's concurrency with agent invocations that hold a slot for minutes, so a busy machine
  *  was reported to the user as a broken provider. There is deliberately no replacement
- *  deadline — the dialog shows the queue state and the user decides how long to wait — and
- *  SESSION_TIMEOUT_MS still bounds everything from the moment a container exists.
+ *  per-job deadline: the enclosing login startup/session timers bound the auth hold
+ *  while this helper reports queue state and observes cancellation.
  */
 async function awaitQueuedJob<T>(job: Job, abort: AbortHandle, ws: WebSocket): Promise<T> {
   const queue = getCliExecQueue();
