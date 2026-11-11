@@ -1,12 +1,8 @@
+// @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ProjectStateConflictsBanner } from './project-state-conflicts-banner';
-import { createRenderer, findAll } from '../../test/render-tree';
+import { cleanup, render, screen } from '@testing-library/react';
 
-vi.mock('react', async (original) => ({
-  ...(await original<typeof import('react')>()),
-  ...(await import('../../test/render-tree')).reactHooks,
-}));
-vi.mock('next/link', () => ({ default: 'a' }));
 vi.mock('@/components/markdown/markdown-view', () => ({
   MarkdownView: ({ body }: { body: string }) => <div>{body}</div>,
 }));
@@ -26,28 +22,30 @@ const conflict = {
 beforeEach(() => {
   h.get.mockResolvedValue({ conflicts: [conflict] });
 });
-afterEach(() => vi.resetAllMocks());
+afterEach(() => {
+  cleanup();
+  vi.resetAllMocks();
+});
 
 it('links pending project questions to the encoded repository data page', async () => {
-  const view = createRenderer(() => <ProjectStateConflictsBanner repositoryId="a/b ?#" />);
-  await view.flush();
-  expect(findAll(view.tree(), (node) => node.tag === 'a').map((node) => node.props.href)).toContain(
+  render(<ProjectStateConflictsBanner repositoryId="a/b ?#" />);
+  expect((await screen.findByRole('link', { name: 'Open Haive data' })).getAttribute('href')).toBe(
     '/repos/a%2Fb%20%3F%23/haive-data',
   );
 });
 
 it('can suppress self-navigation on the Haive data page', async () => {
-  const view = createRenderer(() => (
-    <ProjectStateConflictsBanner repositoryId="repo" showHaiveDataLink={false} />
-  ));
-  await view.flush();
-  expect(findAll(view.tree(), (node) => node.tag === 'a')).toHaveLength(0);
+  render(<ProjectStateConflictsBanner repositoryId="repo" showHaiveDataLink={false} />);
+  await screen.findByText('Question about the project record');
+  expect(screen.queryByRole('link', { name: 'Open Haive data' })).toBeNull();
 });
 
 it('does not create an empty banner or a link when no questions remain', async () => {
   h.get.mockResolvedValue({ conflicts: [] });
-  const view = createRenderer(() => <ProjectStateConflictsBanner repositoryId="repo" />);
-  await view.flush();
-  expect(findAll(view.tree(), (node) => node.tag === 'a')).toHaveLength(0);
-  expect(view.tree().kids).toHaveLength(0);
+  const { container } = render(<ProjectStateConflictsBanner repositoryId="repo" />);
+  await import('@testing-library/react').then(({ waitFor }) =>
+    waitFor(() => expect(h.get).toHaveBeenCalled()),
+  );
+  expect(screen.queryByRole('link', { name: 'Open Haive data' })).toBeNull();
+  expect(container.childElementCount).toBe(0);
 });

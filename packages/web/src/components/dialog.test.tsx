@@ -237,6 +237,12 @@ class FakeElement extends FakeNode {
         c.attrs.every((name) => this.hasAttribute(name)),
     );
   }
+  closest(selector: string): FakeElement | null {
+    for (let at: FakeElement | null = this; at; at = at.parentElement) {
+      if (at.matches(selector)) return at;
+    }
+    return null;
+  }
   descendants(): FakeElement[] {
     return this.children.flatMap((c) => [c, ...c.descendants()]);
   }

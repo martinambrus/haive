@@ -1,9 +1,11 @@
+import Link from 'next/link';
 import {
   forwardRef,
   type ButtonHTMLAttributes,
   type InputHTMLAttributes,
   type LabelHTMLAttributes,
   type HTMLAttributes,
+  type ComponentProps,
 } from 'react';
 import { cn } from './cn.js';
 
@@ -39,18 +41,67 @@ const buttonSizes: Record<ButtonSize, string> = {
 // `whitespace-nowrap` is not cosmetic: every size sets a FIXED height, so a label
 // that wraps overflows its own box instead of growing it. A squeezed flex row is
 // what triggers it, and it renders as text spilling over the button's border.
+function buttonClasses(variant: ButtonVariant, size: ButtonSize, className?: string) {
+  return cn(
+    'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md font-medium transition-colors disabled:cursor-not-allowed',
+    buttonVariants[variant],
+    buttonSizes[size],
+    className,
+  );
+}
+
+/** A navigation action styled like Button, with one interactive element. */
+export function LinkButton({
+  variant = 'primary',
+  size = 'md',
+  className,
+  disabled = false,
+  onClick,
+  tabIndex,
+  ...props
+}: ComponentProps<typeof Link> & {
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+  disabled?: boolean;
+}) {
+  const appearance = cn(
+    buttonClasses(variant, size, className),
+    disabled && 'cursor-not-allowed opacity-50',
+  );
+  if (disabled) {
+    // Next Link requires a destination. Use a plain anchor with none, stripping
+    // navigation-only props while preserving anchor, ARIA and data attributes.
+    const {
+      href: _href,
+      as: _as,
+      replace: _replace,
+      scroll: _scroll,
+      shallow: _shallow,
+      passHref: _passHref,
+      prefetch: _prefetch,
+      locale: _locale,
+      legacyBehavior: _legacyBehavior,
+      onNavigate: _onNavigate,
+      transitionTypes: _transitionTypes,
+      ...anchorProps
+    } = props;
+    return (
+      <a
+        {...anchorProps}
+        role={props.role ?? 'link'}
+        className={appearance}
+        aria-disabled="true"
+        tabIndex={-1}
+        onClick={(event) => event.preventDefault()}
+      />
+    );
+  }
+  return <Link {...props} className={appearance} tabIndex={tabIndex} onClick={onClick} />;
+}
+
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
   ({ className, variant = 'primary', size = 'md', ...props }, ref) => (
-    <button
-      ref={ref}
-      className={cn(
-        'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md font-medium transition-colors disabled:cursor-not-allowed',
-        buttonVariants[variant],
-        buttonSizes[size],
-        className,
-      )}
-      {...props}
-    />
+    <button ref={ref} className={buttonClasses(variant, size, className)} {...props} />
   ),
 );
 Button.displayName = 'Button';

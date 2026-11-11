@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { Dialog } from '@/components/dialog';
 import { History, CircleAlert, X } from 'lucide-react';
 import { api, type TaskEvent, type TaskStep } from '@/lib/api-client';
 import {
@@ -219,8 +219,6 @@ export function TaskHistoryPanel({
   roundLabels: ReadonlyMap<number, string>;
   onSelectStep: (id: string) => void;
 }) {
-  const panelRef = useRef<HTMLElement>(null);
-  const closeRef = useRef<HTMLButtonElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const positions = useRef(new Map<string, { top: number; atBottom: boolean }>());
   const { open, setOpen } = history;
@@ -249,52 +247,22 @@ export function TaskHistoryPanel({
     scroller.scrollTop = saved.atBottom ? scroller.scrollHeight : saved.top;
   }, [open, history.taskId, history.entries, history.ready]);
 
-  useEffect(() => {
-    if (!open) return;
-    const previous = document.activeElement as HTMLElement | null;
-    closeRef.current?.focus();
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.stopPropagation();
-        close();
-      }
-      if (event.key !== 'Tab') return;
-      const targets = Array.from(
-        panelRef.current?.querySelectorAll<HTMLElement>('button, a[href], [tabindex="0"]') ?? [],
-      );
-      const first = targets[0];
-      const last = targets.at(-1);
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last?.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first?.focus();
-      }
-    };
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      // Scrolling can exchange the two bells while the panel is open.
-      const bell = previous?.isConnected
-        ? previous
-        : document.querySelector<HTMLElement>('[data-task-history-bell]');
-      bell?.focus({ preventScroll: true });
-    };
-  }, [open, close]);
-
   if (!open) return null;
   let previousDay = '';
-  return createPortal(
-    <div data-haive-dialog="" className="fixed inset-0 z-50">
-      <div className="absolute inset-0 bg-black/30" onClick={close} />
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) close();
+      }}
+      aria-label="Implementation history"
+      className="fixed bottom-3 right-3 top-14 w-[min(28rem,calc(100vw-1.5rem))] max-w-none md:bottom-auto md:right-8 md:max-h-[calc(100dvh-5rem)]"
+      backdropClassName="bg-black/30 backdrop-blur-none"
+      fallbackFocus={() => document.querySelector<HTMLElement>('[data-task-history-bell]')}
+    >
       <section
-        ref={panelRef}
         id={history.panelId}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Implementation history"
-        className="absolute bottom-3 right-3 top-14 flex w-[min(28rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-xl border border-neutral-700 bg-neutral-900 shadow-2xl md:bottom-auto md:right-8 md:max-h-[calc(100dvh-5rem)]"
+        className="flex h-full max-h-[inherit] flex-col overflow-hidden rounded-xl border border-neutral-700 bg-neutral-900 shadow-2xl"
       >
         <div className="flex shrink-0 items-center gap-2 border-b border-neutral-800 px-4 py-3">
           <div className="flex-1">
@@ -304,7 +272,7 @@ export function TaskHistoryPanel({
             </p>
           </div>
           <button
-            ref={closeRef}
+            autoFocus
             type="button"
             onClick={close}
             className="rounded p-1.5 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
@@ -377,8 +345,7 @@ export function TaskHistoryPanel({
           </div>
         )}
       </section>
-    </div>,
-    document.body,
+    </Dialog>
   );
 }
 

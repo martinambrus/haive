@@ -1,4 +1,5 @@
 'use client';
+import { LinkButton } from '@/components/ui';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
@@ -696,12 +697,7 @@ function TaskProposalCard({
           ? ' — they go green when it finishes.'
           : ' — recorded as affected; none marked done.'}
       </p>
-      <Link
-        // Everything the form needs is ADDRESSED, not carried: the proposal is
-        // already durable in this turn's `patch_json`, so the link names the turn
-        // and the form reads it back. A copy in browser storage was the previous
-        // shape and it silently degraded to a title with no description once the
-        // storage filled — a task nobody could submit.
+      <LinkButton
         href={`/tasks/new?${new URLSearchParams({
           repositoryId,
           planNodeIds: proposal.nodeRefs.join(','),
@@ -712,9 +708,10 @@ function TaskProposalCard({
         }).toString()}`}
         onClick={() => rememberTaskOrigin('/tasks/new', planOrigin(repositoryId))}
         className="self-start"
+        size="sm"
       >
-        <Button size="sm">Start this as one task</Button>
-      </Link>
+        Start this as one task
+      </LinkButton>
     </div>
   );
 }

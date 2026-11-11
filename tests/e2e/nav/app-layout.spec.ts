@@ -88,11 +88,11 @@ test.describe('app layout and navigation', () => {
 
       await page.goto('/dashboard');
 
-      await page.getByRole('button', { name: 'All tasks' }).click();
+      await page.getByRole('link', { name: 'All tasks' }).click();
       await expect(page).toHaveURL(/\/tasks$/);
 
       await page.goto('/dashboard');
-      await page.getByRole('button', { name: 'Advanced statistics' }).click();
+      await page.getByRole('link', { name: 'Advanced statistics' }).click();
       await expect(page).toHaveURL(/\/m\/statistics$/);
     } finally {
       if (userId) await cleanupUser(sql, userId);

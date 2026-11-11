@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import dynamic from 'next/dynamic';
 import type { ModuleDashboardWidgetProps } from '@haive/web-kit/host';
-import { Button, Card, CardDescription, CardHeader, CardTitle } from '@haive/web-kit/ui';
+import { Card, CardDescription, CardHeader, CardTitle, LinkButton } from '@haive/web-kit/ui';
 import { formatDuration } from '@haive/web-kit/format-duration';
 import { formatCost } from '@haive/web-kit/format-cost';
 import { formatTokens } from '@haive/web-kit/format-tokens';
@@ -383,11 +383,9 @@ export function StatsWidget({ moduleId, api }: ModuleDashboardWidgetProps) {
       )}
 
       <div className="flex gap-3">
-        <Link href={`/m/${moduleId}`}>
-          <Button variant="secondary" size="sm">
-            Advanced statistics
-          </Button>
-        </Link>
+        <LinkButton href={`/m/${moduleId}`} variant="secondary" size="sm">
+          Advanced statistics
+        </LinkButton>
       </div>
     </>
   );

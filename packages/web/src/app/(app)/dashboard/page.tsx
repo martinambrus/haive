@@ -1,9 +1,10 @@
 'use client';
+import { LinkButton } from '@/components/ui';
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { api, type Task } from '@/lib/api-client';
-import { Button, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
+import { Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
 import { moduleDashboardWidgets } from '@/generated/module-dashboard';
 import { ModuleDashboardWidgets } from '@/lib/module-dashboard';
 import { useModules } from '@/lib/use-modules';
@@ -87,11 +88,9 @@ export default function DashboardPage() {
       <ModuleDashboardWidgets widgets={moduleDashboardWidgets} modules={modules} />
 
       <div className="flex gap-3">
-        <Link href="/tasks">
-          <Button variant="secondary" size="sm">
-            All tasks
-          </Button>
-        </Link>
+        <LinkButton href="/tasks" variant="secondary" size="sm">
+          All tasks
+        </LinkButton>
       </div>
     </div>
   );

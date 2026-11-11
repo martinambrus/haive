@@ -1,4 +1,5 @@
 'use client';
+import { LinkButton } from '@/components/ui';
 
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -2237,11 +2238,9 @@ function AdminPageInner() {
                 ))}
               </select>
             </label>
-            <Link href="/admin/pricing">
-              <Button variant="secondary" size="sm">
-                Rates and overrides
-              </Button>
-            </Link>
+            <LinkButton href="/admin/pricing" variant="secondary" size="sm">
+              Rates and overrides
+            </LinkButton>
             {savingPricing && <span className="text-xs text-neutral-500">saving…</span>}
           </div>
         </Card>

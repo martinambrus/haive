@@ -1,52 +1,18 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { isValidElement, type ComponentProps, type ReactElement, type ReactNode } from 'react';
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MODULE_ID_PATTERN_SOURCE, MODULE_ID_MAX_LENGTH } from '@haive/shared/modularity';
-import { Dialog } from '@/components/dialog';
-import { FormError, Input } from '@/components/ui';
 import { ModuleSourceDialog, type ModuleSourceTarget } from './module-source-dialog';
 import type { ModuleInstallSource } from '@/lib/api-client';
-
-const hooks = vi.hoisted(() => ({ slots: [] as unknown[], next: 0 }));
 const api = vi.hoisted(() => ({
   createModuleSource: vi.fn(),
   updateModuleSource: vi.fn(),
   deleteModuleSource: vi.fn(),
 }));
-vi.mock('@/lib/api-client', () => api);
-vi.mock('react', async (original) => ({
-  ...(await original<typeof import('react')>()),
-  useState: (initial: unknown) => {
-    const at = hooks.next++;
-    if (!(at in hooks.slots)) hooks.slots[at] = initial;
-    return [
-      hooks.slots[at],
-      (value: unknown) => {
-        hooks.slots[at] = value;
-      },
-    ];
-  },
+vi.mock('@/lib/api-client', async (original) => ({
+  ...(await original<typeof import('@/lib/api-client')>()),
+  ...api,
 }));
-
-type El = ReactElement<{
-  children?: ReactNode;
-  id?: string;
-  pattern?: string;
-  maxLength?: number;
-  body?: string;
-  message?: string;
-  type?: string;
-  value?: string;
-  checked?: boolean;
-  disabled?: boolean;
-  onChange?: (event: { target: { value: string; checked: boolean } }) => void;
-  onSubmit?: (event: { preventDefault: () => void }) => Promise<void>;
-}>;
-const flat = (node: ReactNode): El[] =>
-  Array.isArray(node)
-    ? node.flatMap(flat)
-    : isValidElement<El['props']>(node)
-      ? [node, ...flat(node.props.children)]
-      : [];
 const source = {
   id: 's1',
   kind: 'git',
@@ -57,55 +23,25 @@ const source = {
   packageName: null,
   version: null,
 } as ModuleInstallSource;
-
 function mount(target: ModuleSourceTarget) {
   const onClose = vi.fn();
   const onSaved = vi.fn();
-  let tree: ReactNode;
-  const draw = () => {
-    hooks.next = 0;
-    tree = ModuleSourceDialog({ target, onClose, onSaved });
-  };
-  const field = (id: string) => flat(tree).find((e) => e.props.id === id)!;
-  draw();
-  return {
-    draw,
-    field,
-    onClose,
-    onSaved,
-    elements: () => flat(tree),
-    change: (id: string, value: string) => {
-      field(id).props.onChange!({ target: { value, checked: false } });
-      draw();
-    },
-    submit: async () => {
-      await flat(tree).find((e) => e.type === 'form')!.props.onSubmit!({
-        preventDefault: () => {},
-      });
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      draw();
-    },
-    closeFromDialog: () => {
-      (
-        flat(tree).find((e) => e.type === Dialog)! as unknown as ReactElement<
-          ComponentProps<typeof Dialog>
-        >
-      ).props.onOpenChange(false);
-    },
-  };
+  render(<ModuleSourceDialog target={target} onClose={onClose} onSaved={onSaved} />);
+  return { onClose, onSaved };
 }
+const change = (name: string, value: string) =>
+  fireEvent.change(screen.getByLabelText(name), { target: { value } });
+const submit = () => fireEvent.click(screen.getByRole('button', { name: 'Save source' }));
 beforeEach(() => {
-  hooks.slots = [];
   for (const fn of Object.values(api)) fn.mockReset().mockResolvedValue({});
 });
-describe('install source dialog', () => {
+afterEach(cleanup);
+describe('install source dialog with real React and DOM events', () => {
   it('uses the shared module id limits in the browser input', () => {
-    const view = mount({ mode: 'add' });
-    expect(view.field('source-module-id').props).toMatchObject({
-      maxLength: MODULE_ID_MAX_LENGTH,
-    });
-    const pattern = view.field('source-module-id').props.pattern!;
-    const browserPattern = new RegExp(`^(?:${pattern})$`, 'v');
+    mount({ mode: 'add' });
+    const field = screen.getByRole('textbox', { name: 'Module id' }) as HTMLInputElement;
+    expect(field.maxLength).toBe(MODULE_ID_MAX_LENGTH);
+    const browserPattern = new RegExp(`^(?:${field.pattern})$`, 'v');
     const sharedPattern = new RegExp(`^(?:${MODULE_ID_PATTERN_SOURCE})$`);
     for (const value of [
       'alpha',
@@ -116,72 +52,70 @@ describe('install source dialog', () => {
       'Alpha',
       'alpha_beta',
       'a'.repeat(MODULE_ID_MAX_LENGTH + 1),
-    ]) {
+    ])
       expect(browserPattern.test(value), value).toBe(sharedPattern.test(value));
-    }
     expect(browserPattern.test('alpha-2')).toBe(true);
     expect(browserPattern.test('alpha_beta')).toBe(false);
   });
   it('keeps a stored token blank and omits it from an edit', async () => {
     const view = mount({ mode: 'edit', source });
-    expect(view.field('source-token').type).toBe(Input);
-    expect(view.field('source-token').props.value).toBe('');
-    expect(view.elements().some((e) => e.props.body?.includes('Leave blank to keep'))).toBe(true);
-    await view.submit();
-    expect(api.updateModuleSource).toHaveBeenCalledWith('s1', {
-      kind: 'git',
-      moduleId: 'alpha',
-      url: source.url,
-      ref: 'main',
-    });
+    expect((screen.getByLabelText('Access token') as HTMLInputElement).value).toBe('');
+    expect(screen.getByText(/Leave blank to keep/)).toBeTruthy();
+    submit();
+    await waitFor(() =>
+      expect(api.updateModuleSource).toHaveBeenCalledWith('s1', {
+        kind: 'git',
+        moduleId: 'alpha',
+        url: source.url,
+        ref: 'main',
+      }),
+    );
     expect(view.onSaved).toHaveBeenCalledOnce();
     expect(view.onClose).toHaveBeenCalledOnce();
   });
   it('sends an explicit clear and disables token replacement', async () => {
-    const view = mount({ mode: 'edit', source });
-    view.change('source-token', 'replacement');
-    view.elements().find((e) => e.type === 'input' && e.props.type === 'checkbox')!.props.onChange!(
-      {
-        target: { value: '', checked: true },
-      },
+    mount({ mode: 'edit', source });
+    change('Access token', 'replacement');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Clear stored token' }));
+    const token = screen.getByLabelText('Access token') as HTMLInputElement;
+    expect(token.value).toBe('');
+    expect(token.disabled).toBe(true);
+    submit();
+    await waitFor(() =>
+      expect(api.updateModuleSource.mock.calls[0]?.[1]).toMatchObject({ clearToken: true }),
     );
-    view.draw();
-    expect(view.field('source-token').props.value).toBe('');
-    expect(view.field('source-token').props.disabled).toBe(true);
-    await view.submit();
-    expect(api.updateModuleSource.mock.calls[0]![1]).toMatchObject({ clearToken: true });
     expect(api.updateModuleSource.mock.calls[0]![1]).not.toHaveProperty('token');
   });
   it('records the exact registry package and replacement token', async () => {
-    const view = mount({ mode: 'add' });
-    view.change('source-kind', 'registry');
-    view.change('source-module-id', 'beta');
-    view.change('source-version', '1.2.3');
-    view.change('source-token', 'new-token');
-    await view.submit();
-    expect(api.createModuleSource).toHaveBeenCalledWith({
-      kind: 'registry',
-      moduleId: 'beta',
-      packageName: '@haive-module/beta',
-      version: '1.2.3',
-      token: 'new-token',
-    });
+    mount({ mode: 'add' });
+    change('Source kind', 'registry');
+    change('Module id', 'beta');
+    change('Exact version', '1.2.3');
+    change('Access token', 'new-token');
+    submit();
+    await waitFor(() =>
+      expect(api.createModuleSource).toHaveBeenCalledWith({
+        kind: 'registry',
+        moduleId: 'beta',
+        packageName: '@haive-module/beta',
+        version: '1.2.3',
+        token: 'new-token',
+      }),
+    );
   });
   it('waits for confirmation before deletion and supports the shared dialog close path', async () => {
     const view = mount({ mode: 'delete', source });
     expect(api.deleteModuleSource).not.toHaveBeenCalled();
-    view.closeFromDialog();
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
     expect(view.onClose).toHaveBeenCalledOnce();
-    await view.submit();
-    expect(api.deleteModuleSource).toHaveBeenCalledWith('s1');
+    fireEvent.click(screen.getByRole('button', { name: 'Delete source' }));
+    await waitFor(() => expect(api.deleteModuleSource).toHaveBeenCalledWith('s1'));
   });
   it('keeps a failed save open and shows the error', async () => {
     api.updateModuleSource.mockRejectedValue(new Error('A source already exists'));
     const view = mount({ mode: 'edit', source });
-    await view.submit();
-    expect(view.elements().find((e) => e.type === FormError)!.props.message).toBe(
-      'A source already exists',
-    );
+    submit();
+    expect((await screen.findByRole('alert')).textContent).toBe('A source already exists');
     expect(view.onClose).not.toHaveBeenCalled();
     expect(view.onSaved).not.toHaveBeenCalled();
   });

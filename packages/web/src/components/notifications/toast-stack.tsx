@@ -73,7 +73,10 @@ export function ToastStack({
   const shown = expanded ? toasts : toasts.slice(-COLLAPSED_VISIBLE);
 
   return createPortal(
-    <div className="fixed bottom-4 right-4 z-40 flex max-h-[calc(50dvh-1rem)] w-80 max-w-[calc(100vw-2rem)] flex-col gap-2">
+    <div
+      data-haive-toast-region=""
+      className="fixed bottom-4 right-4 z-40 flex max-h-[calc(50dvh-1rem)] w-80 max-w-[calc(100vw-2rem)] flex-col gap-2"
+    >
       {/* Kept with no toast: a live region created with its first message is not announced. */}
       <p role="status" aria-live="polite" className="sr-only">
         {/* New key per line: an identical line (a returning toast) must still change the DOM. */}

@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { ChevronDown, LoaderCircle, type LucideIcon } from 'lucide-react';
-import { Button } from '@/components/ui';
+import { Button, LinkButton } from '@/components/ui';
 import { cn } from '@/lib/cn';
 
 export interface ActionMenuItem {
@@ -57,6 +57,7 @@ export function ActionMenu({
 }) {
   const [open, setOpen] = useState(false);
   const [flip, setFlip] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const rowRefs = useRef<(HTMLElement | null)[]>([]);
 
@@ -96,7 +97,7 @@ export function ActionMenu({
   // The rows replace buttons that were all tab-reachable, so the menu has to hand focus
   // over rather than leave it on a trigger whose list nothing can reach by keyboard.
   useEffect(() => {
-    if (open) rowRefs.current[0]?.focus();
+    if (open) rowRefs.current.find((row) => row !== null)?.focus();
   }, [open]);
 
   if (ordered.length === 0) return null;
@@ -120,9 +121,17 @@ export function ActionMenu({
     return (
       <div className={className}>
         {only.href ? (
-          <Link href={only.href} onClick={only.onClick}>
-            {button}
-          </Link>
+          <LinkButton
+            href={only.href}
+            disabled={only.disabled}
+            onClick={only.onClick}
+            variant={only.danger ? 'destructive' : 'primary'}
+            size="sm"
+            title={only.title}
+          >
+            <ItemIcon item={only} />
+            {only.label}
+          </LinkButton>
         ) : (
           button
         )}
@@ -178,6 +187,7 @@ export function ActionMenu({
       <Button
         variant="primary"
         size="sm"
+        ref={triggerRef}
         onClick={toggle}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -210,21 +220,44 @@ export function ActionMenu({
                 {item.label}
               </>
             );
-            const rowClass = cn(ROW_CLASS, item.danger && DANGER_ROW_CLASS);
+            const rowClass = cn(
+              ROW_CLASS,
+              item.danger && DANGER_ROW_CLASS,
+              item.disabled && 'cursor-not-allowed opacity-50',
+            );
             const capture = (el: HTMLElement | null) => {
-              rowRefs.current[index] = el;
+              rowRefs.current[index] = item.disabled ? null : el;
             };
             return (
               <div key={item.key}>
                 {separated && <div className="my-1 border-t border-neutral-800" />}
-                {item.href ? (
+                {item.href && item.disabled ? (
+                  <a
+                    ref={capture}
+                    role="menuitem"
+                    aria-disabled="true"
+                    tabIndex={-1}
+                    title={item.title}
+                    className={rowClass}
+                    onClick={(event) => event.preventDefault()}
+                  >
+                    {body}
+                  </a>
+                ) : item.href ? (
                   <Link
                     ref={capture}
                     role="menuitem"
+                    aria-disabled={item.disabled || undefined}
+                    tabIndex={item.disabled ? -1 : 0}
                     href={item.href}
                     title={item.title}
                     className={rowClass}
-                    onClick={() => {
+                    onClick={(event) => {
+                      if (item.disabled) {
+                        event.preventDefault();
+                        return;
+                      }
+                      triggerRef.current?.focus();
                       item.onClick?.();
                       setOpen(false);
                     }}
@@ -240,6 +273,7 @@ export function ActionMenu({
                     disabled={item.disabled}
                     className={rowClass}
                     onClick={() => {
+                      triggerRef.current?.focus();
                       setOpen(false);
                       item.onClick?.();
                     }}
