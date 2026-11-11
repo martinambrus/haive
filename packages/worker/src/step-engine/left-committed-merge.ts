@@ -9,6 +9,7 @@ import {
 import { gitRun } from '../repo/git-push.js';
 import { GIT_TIMED_OUT } from '../repo/git-exec.js';
 import { inMergeDirLock, type DbHandle } from './merge-dir-claim.js';
+export { undoLeftMerge } from './undo-left-merge.js';
 
 const records = (db: DbHandle, taskId: string) =>
   db

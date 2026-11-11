@@ -57,7 +57,7 @@ export async function findBranchClaimant(
  *  BEFORE findBranchClaimant existed — but those rows are on disk now, and the removal is
  *  not undoable. Path rather than branch, because the path is what gets rm'd. */
 export async function findWorktreePathClaimant(
-  db: Database,
+  db: Pick<Database, 'query'>,
   params: { worktreePath: string; taskId: string },
 ): Promise<WorktreeClaimant | null> {
   const row = await db.query.tasks.findFirst({

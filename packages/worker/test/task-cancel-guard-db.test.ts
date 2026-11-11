@@ -9,6 +9,7 @@ import { asc, eq, inArray, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createDatabase,
+  acquireRootClaim,
   hasPgCode,
   isLockNotAvailable,
   schema,
@@ -158,6 +159,10 @@ vi.mock('../src/repo/scratch-workspace.js', async (importOriginal) => ({
 vi.mock('../src/project-state/set-aside.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   resyncAfterTaskEnd: async (_db: unknown, taskId: string) => h.seen('resyncAfterTaskEnd', taskId),
+  resyncHaiveProjections: async (_db: unknown, _repo: string, _path: string, taskId: string) => {
+    h.seen('resyncHaiveProjections', taskId);
+    return true;
+  },
 }));
 vi.mock('../src/step-engine/left-open-merge.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/step-engine/left-open-merge.js')>();
@@ -786,6 +791,70 @@ describe.skipIf(!url)(
       ).toEqual([]);
       expectTeardownRan(taskId);
     };
+
+    const undoFixture = async () => {
+      const f = await landedFixture();
+      await db.transaction(f.land);
+      await runCancel(f.taskId);
+      await db.update(schema.tasks).set({ repositoryId }).where(eq(schema.tasks.id, f.taskId));
+      await db
+        .update(schema.repositories)
+        .set({ storagePath: f.dir, localPath: f.dir })
+        .where(eq(schema.repositories.id, repositoryId));
+      const job = {
+        ...cancelJob(f.taskId),
+        name: 'undo-left-merge',
+        data: { taskId: f.taskId, userId, dir: f.dir, baseShaAfter: f.after },
+      };
+      return { ...f, undo: () => processTaskJob(job as Parameters<typeof processTaskJob>[0]), job };
+    };
+
+    it('Undo serializes concurrent jobs on the real directory lock and settles once', async () => {
+      const f = await undoFixture();
+      const outcomes = await Promise.allSettled([f.undo(), f.undo()]);
+      expect(outcomes.some((o) => o.status === 'fulfilled')).toBe(true);
+      await f.undo();
+      expect(await f.git('rev-parse', 'main')).toBe(f.before);
+      expect(await eventsOfType(f.taskId, 'merge.left_committed_settled')).toMatchObject([
+        { payload: { baseShaAfter: f.after, outcome: 'undone' } },
+      ]);
+      expect(await eventsOfType(f.taskId, 'merge.left_committed_settled')).toHaveLength(1);
+      expect(h.calls).toContain(`resyncHaiveProjections:${f.taskId}`);
+      expect(
+        (await db.query.repositories.findFirst({ where: eq(schema.repositories.id, repositoryId) }))
+          ?.rootClaimedAt,
+      ).toBeNull();
+    });
+
+    it.each(['directory', 'root', 'checkout'])(
+      'Undo refuses a live %s holder under the real fences',
+      async (kind) => {
+        const f = await undoFixture();
+        let root: Awaited<ReturnType<typeof acquireRootClaim>> = null;
+        if (kind === 'root') root = await acquireRootClaim(peer, repositoryId, 'refresh', userId);
+        else {
+          const other = await seedTask('running');
+          if (kind === 'directory') {
+            await seedStep(other, '12-worktree-cleanup', 12, 'running');
+            const step = await db.query.taskSteps.findFirst({
+              where: eq(schema.taskSteps.taskId, other),
+            });
+            await db
+              .insert(schema.mergeDirClaims)
+              .values({ mergeDir: f.dir, taskId: other, taskStepId: step!.id });
+          }
+        }
+        try {
+          await f.undo();
+          expect(await f.git('rev-parse', 'main')).toBe(f.after);
+          expect(await eventsOfType(f.taskId, 'merge.left_committed_settled')).toMatchObject([
+            { payload: { outcome: 'refused' } },
+          ]);
+        } finally {
+          await root?.release();
+        }
+      },
+    );
 
     it('a cancel after the local merge and before reachDone reports it once without undoing it', async () => {
       const f = await landedFixture();
