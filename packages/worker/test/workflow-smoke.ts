@@ -178,7 +178,7 @@ async function main(): Promise<void> {
         title: 'Add a logout button',
         description:
           'Users have asked for an explicit logout button in the top-right navigation. Keep the change minimal.',
-        status: 'created',
+        status: 'queued',
         metadata: null,
         // Walk the Phase 3.5 simplification step (bypass stub takes the
         // no-changes path). workflow-commit-smoke leaves it off to cover the skip.

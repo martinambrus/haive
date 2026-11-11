@@ -182,7 +182,7 @@ async function main(): Promise<void> {
         type: 'workflow',
         title: 'Add a logout button',
         description: 'Smoke test: real commit path.',
-        status: 'created',
+        status: 'queued',
         metadata: null,
       })
       .returning();

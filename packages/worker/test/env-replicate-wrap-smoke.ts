@@ -174,7 +174,7 @@ async function main(): Promise<void> {
         type: 'workflow',
         title: 'env-replicate wrap smoke',
         description: 'Workflow task with mandatory env_replicate prelude.',
-        status: 'created',
+        status: 'queued',
         metadata: null,
       })
       .returning();
