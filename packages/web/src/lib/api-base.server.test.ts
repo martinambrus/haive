@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { logger } from '@haive/shared/logger';
+import { FALLBACK_API_URL } from './api-origin';
 import { resolveServerApiBase } from './api-base.server';
 import { apiProxyTarget } from './api-proxy.server';
 import { fetchRegistrationStatus } from './registration-status.server';
@@ -41,6 +42,20 @@ describe('shared server API configuration', () => {
     vi.stubEnv('API_URL_INTERNAL', 'http://internal-api.test/');
     expect(resolveServerApiBase()).toBe('http://internal-api.test');
   });
+
+  it.each(['', '   \t\n'])(
+    'treats blank environment values %j as unset at every priority',
+    (blank) => {
+      vi.stubEnv('API_URL_INTERNAL', blank);
+      vi.stubEnv('HAIVE_PUBLIC_API_URL', 'https://public-api.test/');
+      vi.stubEnv('NEXT_PUBLIC_API_URL', 'https://build-api.test/');
+      expect(resolveServerApiBase()).toBe('https://public-api.test');
+      vi.stubEnv('HAIVE_PUBLIC_API_URL', blank);
+      expect(resolveServerApiBase()).toBe('https://build-api.test');
+      vi.stubEnv('NEXT_PUBLIC_API_URL', blank);
+      expect(resolveServerApiBase()).toBe(FALLBACK_API_URL);
+    },
+  );
 
   it.each(['api.test', '//api.test', 'ftp://api.test'])(
     'refuses malformed or non-HTTP upstream %s once',
