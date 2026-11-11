@@ -26,3 +26,28 @@ describe('refreshModelPrices with an unreadable config store', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
+
+it('records prices skipped by the operator without touching db or network', async () => {
+  const config = vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+  const fetchSpy = vi.spyOn(globalThis, 'fetch');
+  try {
+    const db = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('db touched');
+        },
+      },
+    ) as Database;
+    expect(await refreshModelPrices(db)).toEqual({
+      ok: true,
+      refreshed: [],
+      errors: [],
+      skipped: ['prices'],
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  } finally {
+    config.mockRestore();
+    fetchSpy.mockRestore();
+  }
+});

@@ -5,6 +5,7 @@ import { Hono } from 'hono';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
+  VERSION_REFRESH_KIND,
   CLI_POLLABLE_JOB_OPTS,
   CLI_INSTALL_METADATA,
   CLI_PROVIDER_CATALOG,
@@ -254,6 +255,16 @@ cliProviderRoutes.get('/catalog', async (c) => {
     };
   });
   return c.json({ providers });
+});
+
+// Like the completed-job poll, keep the global price/FX summary admin-only.
+cliProviderRoutes.get('/catalog/:name/refresh-result', async (c) => {
+  cliProviderNameSchema.parse(c.req.param('name'));
+  if (c.get('userRole') !== 'admin') return c.json({ run: null });
+  const run = await getDb().query.refreshRuns.findFirst({
+    where: eq(schema.refreshRuns.kind, VERSION_REFRESH_KIND),
+  });
+  return c.json({ run: run ?? null });
 });
 
 cliProviderRoutes.post('/catalog/:name/refresh-versions', async (c) => {

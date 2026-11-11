@@ -41,14 +41,21 @@ export const SIGN_OUT_POLL_TIMEOUT_MS = CLI_SIGN_OUT_AUTH_WAIT_MS + 2 * 60_000;
 function signOutPollTimeout(phase: QueuedJobPhase, state: string | undefined): Error {
   if (state !== 'delayed') return pollTimeout(phase);
   return new Error(
-    'Still waiting for this account to become available. Sign-out keeps going in the background — reopen this page later to see the result.',
+    'Still waiting for this account to become available. Sign-out keeps going in the background. Check the account status before trying again.',
   );
 }
 
 function pollTimeout(phase: QueuedJobPhase): Error {
   const state = phase === 'running' ? 'running' : 'queued behind running CLI jobs';
   return new Error(
-    `Still ${state}. The job keeps going in the background — reopen this page later to see the result.`,
+    `Still ${state}. The job keeps going in the background. Check its status before trying again.`,
+  );
+}
+
+function refreshPollTimeout(phase: QueuedJobPhase): Error {
+  const state = phase === 'running' ? 'running' : 'queued behind running CLI jobs';
+  return new Error(
+    `Still ${state}. The refresh keeps going in the background. The latest refresh result is saved. Administrators can view it here after it finishes, including after reopening this page.`,
   );
 }
 
@@ -176,6 +183,8 @@ export async function runCatalogVersionRefresh(
     `/cli-providers/catalog/${name}/refresh-versions`,
     (jobId) => `/cli-providers/catalog/${name}/refresh-versions/${jobId}`,
     onPhase,
+    undefined,
+    { timeoutMs: POLL_TIMEOUT_MS, timeoutError: refreshPollTimeout },
   );
   return { entry, result };
 }
@@ -189,6 +198,7 @@ export async function runPricingRefresh(
     (jobId) => `/cli-pricing/refresh/${jobId}`,
     onPhase,
     signal,
+    { timeoutMs: POLL_TIMEOUT_MS, timeoutError: refreshPollTimeout },
   );
   return result;
 }

@@ -1,7 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { RefreshCliVersionsJobResult } from '@haive/shared/constants';
 import { createRenderer, findAll, textOf } from '../../test/render-tree';
 import { groupRefreshFailures, RefreshFailures } from './refresh-failures';
+
+vi.mock('@/components/markdown/markdown-view', () => ({
+  MarkdownView: ({ body }: { body: string }) => body,
+}));
 
 const refreshed = [{ name: 'claude-code', count: 3, latest: '1.2.3' }];
 const errors = [

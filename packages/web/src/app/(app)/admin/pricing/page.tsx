@@ -5,7 +5,7 @@ import type { RefreshCliVersionsJobResult } from '@haive/shared/constants';
 import { api } from '@/lib/api-client';
 import { runPricingRefresh, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { Button, Badge, Input, FormError } from '@/components/ui';
-import { RefreshFailures } from '@/components/refresh-failures';
+import { LatestRefresh } from '@/components/latest-refresh';
 import { usePageTitle } from '@/lib/use-page-title';
 
 const selectClass =
@@ -242,7 +242,11 @@ export default function PricingPage() {
       </div>
 
       <FormError message={error} />
-      <RefreshFailures result={refreshResult} />
+      <LatestRefresh
+        endpoint="/cli-pricing/refresh/latest"
+        active={refreshPhase !== null}
+        result={refreshResult}
+      />
 
       <section className="space-y-2">
         <h3 className="text-base font-semibold text-neutral-100">Auto-update per CLI</h3>

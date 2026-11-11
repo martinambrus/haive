@@ -28,6 +28,7 @@ import {
   type OpenRouterModelEntry,
 } from '@/lib/api-client';
 import { Button, FormError, Input, Label } from '@/components/ui';
+import { LatestRefresh } from '@/components/latest-refresh';
 import { RefreshFailures } from '@/components/refresh-failures';
 import { runCatalogVersionRefresh, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { OllamaModelDownload } from '@/components/ollama-model-download';
@@ -204,6 +205,20 @@ export function CliProviderForm({
   const [versionCache, setVersionCache] = useState<CliPackageVersionsEntry | null>(
     metadata.versionCache,
   );
+  const [canReadRefresh, setCanReadRefresh] = useState(false);
+  useEffect(() => {
+    if (!metadata.versionPinnable) return;
+    const controller = new AbortController();
+    api
+      .get<{ user: { role: 'admin' | 'user' } | null }>('/auth/me', controller.signal)
+      .then(({ user }) => {
+        if (!controller.signal.aborted) setCanReadRefresh(user?.role === 'admin');
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setCanReadRefresh(false);
+      });
+    return () => controller.abort();
+  }, [metadata.versionPinnable]);
   const [refreshingVersions, setRefreshingVersions] = useState(false);
   const [refreshPhase, setRefreshPhase] = useState<QueuedJobPhase>('queued');
   const [refreshResult, setRefreshResult] = useState<RefreshCliVersionsJobResult | null>(null);
@@ -814,7 +829,16 @@ export function CliProviderForm({
                 Last refresh failed: {versionCache.fetchError}
               </p>
             )}
-            <RefreshFailures result={refreshResult} />
+            {canReadRefresh ? (
+              <LatestRefresh
+                endpoint={`/cli-providers/catalog/${metadata.name}/refresh-result`}
+                active={refreshingVersions}
+                result={refreshResult}
+              />
+            ) : (
+              // The role read can fail; this manual run's own result reaches only an admin anyway.
+              <RefreshFailures result={refreshResult} />
+            )}
           </>
         )}
       </div>

@@ -94,7 +94,7 @@ describe('the CLI catalog routes require a session', () => {
     expect(h.add).toHaveBeenCalledTimes(1);
     expect(h.add).toHaveBeenCalledWith(
       CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
-      {},
+      { trigger: 'manual' },
       CLI_POLLABLE_JOB_OPTS,
     );
     expect(h.add.mock.calls[0]?.[2]).not.toHaveProperty('jobId');
