@@ -151,6 +151,7 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
         userId,
         type: TYPE,
         title: 'dead task boot',
+        metadata: { anchorRepositoryId: null },
         status: 'running',
         orchestrationEpoch: 3,
         currentStepId: A,
@@ -322,6 +323,37 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
     expect(after.endedAt).toBeInstanceOf(Date);
     expect(after.supersededAt).toBeInstanceOf(Date);
   };
+
+  it('holds a root revival until the same-branch merge settles, then retries it', async () => {
+    const merger = await make({ repositoryId });
+    const merge = await openMerge(merger);
+    await db
+      .update(schema.repositories)
+      .set({ storagePath: merge.dir })
+      .where(eq(schema.repositories.id, repositoryId));
+    try {
+      const id = await makeDead({ repositoryId });
+      const { sent, deps } = recorder();
+      expect(await reviveDeadTask(db, await view(id), deps)).toBe('held');
+      expect((await task(id)).deadAt).toEqual(DEAD_AT);
+      expect(await events(id, 'task.revived')).toEqual([]);
+      expect(sent).toEqual([]);
+      const other = await makeDead({ repositoryId, worktreePath: merge.dir + '/other' });
+      expect(await reviveDeadTask(db, await view(other), deps)).toBe('advance');
+      await db
+        .update(schema.taskSteps)
+        .set({ mergeResolveState: { ...merge.step.mergeResolveState!, phase: 'done' } })
+        .where(eq(schema.taskSteps.id, merge.step.id));
+      expect(await reviveDeadTasks(db, deps)).toMatchObject({ revived: 1, held: 0 });
+      expect((await task(id)).deadAt).toBeNull();
+      expect(sent.filter((s) => s.taskId === id)).toHaveLength(1);
+    } finally {
+      await db
+        .update(schema.repositories)
+        .set({ storagePath: os.tmpdir() })
+        .where(eq(schema.repositories.id, repositoryId));
+    }
+  });
 
   beforeAll(async () => {
     db = createDatabase(url as string);
@@ -628,6 +660,28 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
   });
 
   describe('the revive fence', () => {
+    it('keeps a dead task dead after its repository was deleted', async () => {
+      const [repo] = await db
+        .insert(schema.repositories)
+        .values({
+          userId,
+          name: 'deleted anchor',
+          source: 'git_https',
+        })
+        .returning();
+      const id = await makeDead({
+        repositoryId: repo!.id,
+        metadata: { anchorRepositoryId: repo!.id },
+      });
+      const read = await view(id);
+      await db.delete(schema.repositories).where(eq(schema.repositories.id, repo!.id));
+      const { sent, deps } = recorder();
+      await expect(reviveDeadTask(db, read, deps)).resolves.toBeNull();
+      expect(await task(id)).toMatchObject({ deadAt: DEAD_AT, orchestrationEpoch: 3 });
+      expect(await events(id)).toHaveLength(0);
+      expect(sent).toEqual([]);
+    });
+
     it('refuses a task that moved to another epoch since it was read', async () => {
       const id = await makeDead();
       const read = await view(id);

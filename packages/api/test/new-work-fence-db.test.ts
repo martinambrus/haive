@@ -188,6 +188,7 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
       .insert(schema.tasks)
       .values({
         userId: USER,
+        repositoryId,
         type: 'workflow',
         title: 'fence-failed',
         status: 'failed',
@@ -200,7 +201,13 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
   const createdTask = async () => {
     const [row] = await db
       .insert(schema.tasks)
-      .values({ userId: USER, type: 'workflow', title: 'fence-created', status: 'created' })
+      .values({
+        userId: USER,
+        repositoryId,
+        type: 'workflow',
+        title: 'fence-created',
+        status: 'created',
+      })
       .returning();
     return row!;
   };
@@ -227,6 +234,7 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
       .insert(schema.tasks)
       .values({
         userId: USER,
+        repositoryId,
         type: 'workflow',
         title: 'fence-parked',
         status: 'failed',

@@ -1,4 +1,9 @@
 import {
+  validationSuccessor,
+  ValidationSnapshotError,
+  VALIDATION_RECHECK_EVENT,
+} from './validation-recheck.js';
+import {
   resolveDispatchIntegrations,
   stepIntegrationRequirements,
   invalidRequirementsFailure,
@@ -88,6 +93,7 @@ import {
   registerStepsOnce,
   dagTimeoutInfo,
   finishedStepResult,
+  finishedRoutingVerdict,
   isFreshStepEntry,
   willSkipBeforeAdmission,
   dispatchesCli,
@@ -1970,6 +1976,9 @@ const LOST_HANDOFF_READS_ROW = {
   round_cap_row: true,
   round_cap_task: false,
   fix_target: true,
+  revalidation_target: true,
+  successor_task: false,
+  validation_snapshot: true,
 } as const;
 
 type LostHandoffSite = keyof typeof LOST_HANDOFF_READS_ROW;
@@ -2103,10 +2112,6 @@ export async function handleResult(
     }
     case 'done':
     case 'skipped': {
-      await record(db, ctx.taskId, result.row.id, `step.${result.status}`, {
-        stepId,
-        endedAt: endedAtOf(result.row),
-      });
       // A fan-out step DEGRADES on a dead agent rather than failing (a reviewer that died
       // is not evidence the code is wrong), so its budget kills would otherwise leave no
       // trace the UI can act on: the hint below is written only on the failed branch, and
@@ -2147,23 +2152,113 @@ export async function handleResult(
         await markTaskDeadOnStep(db, ctx, result.row.id, result.row.round, stepId, [stepId]);
         return;
       }
-      const next = steps[idx + 1];
-      if (next) {
-        // Forward walk stays in the same round as the step that just finished.
-        const nextRound = result.row.round;
-        const pointed = await markTaskRunningWithStep(
+      let successor;
+      try {
+        successor = await validationSuccessor(
           db,
-          ctx.taskId,
-          next.metadata.id,
-          computeGlobalStepIndex(next.metadata.workflowType, next.metadata.index),
-          nextRound,
-          { epoch: ctx.orchestrationEpoch },
+          ctx,
+          stepId,
+          result.row.round,
+          steps,
+          result.row.output,
         );
-        if (!pointed) {
-          logger.info(
-            { taskId: ctx.taskId, stepId, nextStepId: next.metadata.id },
-            'successor not handed off: the task moved to a newer epoch',
+      } catch (err) {
+        if (!(err instanceof ValidationSnapshotError)) throw err;
+        // Snapshot failure belongs to this step's hand-off, so Retry can rerun it.
+        // As with every failed step, finishFailedStep also fails and settles its task.
+        try {
+          await db.transaction(async (tx) => {
+            const [failed] = await tx
+              .update(schema.taskSteps)
+              .set({
+                status: 'failed',
+                errorMessage: err.message,
+                endedAt: new Date(),
+                updatedAt: new Date(),
+                ...CLEAR_STEP_USAGE_STAMP,
+              })
+              .where(
+                and(
+                  eq(schema.taskSteps.id, result.row.id),
+                  eq(schema.taskSteps.status, result.status),
+                ),
+              )
+              .returning({ id: schema.taskSteps.id });
+            if (!failed) throw new ParkOvertaken();
+            const held = await tx
+              .select({ id: schema.tasks.id })
+              .from(schema.tasks)
+              .where(taskWriteTarget(ctx.taskId, { epoch: ctx.orchestrationEpoch }))
+              .for('share');
+            if (held.length === 0) throw new ParkOvertaken();
+          });
+        } catch (writeErr) {
+          if (!(writeErr instanceof ParkOvertaken)) throw writeErr;
+          await logLost('validation_snapshot');
+          return;
+        }
+        await finishFailedStep(db, ctx, stepId, result.row, err.message, OPEN_TASK_STATUSES);
+        return;
+      }
+      if (successor.evaluateFixLoop) {
+        // Runtime rechecks have their own cross-round bound. At that bound, restore
+        // the ordinary verdict, including suppression, oscillation and the fix cap.
+        const verdict = await finishedRoutingVerdict(db, ctx.taskId, stepDef, {
+          ...(result.row.output as Record<string, unknown>),
+          runtimeChanged: false,
+        });
+        if (verdict?.kind === 'loop_back') {
+          const { kind: _kind, ...routing } = verdict;
+          return handleResult(
+            db,
+            ctx,
+            stepId,
+            { status: 'loop_back', row: result.row, sourceStepId: stepId, ...routing },
+            opts,
           );
+        }
+      }
+      await record(db, ctx.taskId, result.row.id, `step.${result.status}`, {
+        stepId,
+        endedAt: endedAtOf(result.row),
+      });
+      const { next, round: nextRound } = successor;
+      if (next) {
+        if (successor.recheck) {
+          const reset = await resetStepAndDownstream(
+            db,
+            ctx.taskId,
+            next.metadata.id,
+            nextRound,
+            ctx.orchestrationEpoch,
+          );
+          if (reset === 'superseded') return;
+          if (reset) ctx.orchestrationEpoch = reset.newEpoch;
+        }
+        const point = (handle: Database | DbTx) =>
+          markTaskRunningWithStep(
+            handle,
+            ctx.taskId,
+            next.metadata.id,
+            computeGlobalStepIndex(next.metadata.workflowType, next.metadata.index),
+            nextRound,
+            { epoch: ctx.orchestrationEpoch },
+          );
+        // No Git/FS read runs while the source row or task is locked.
+        const pointed = successor.recheck
+          ? await db.transaction(async (tx) => {
+              if (result.status === 'done' && !(await lockOwnedStep(tx, result.row.id)))
+                return false;
+              if (!(await point(tx))) return false;
+              await appendEvent(tx, ctx.taskId, result.row.id, VALIDATION_RECHECK_EVENT, {
+                round: nextRound,
+                ...successor.recheck,
+              });
+              return true;
+            })
+          : await point(db);
+        if (!pointed) {
+          await logLost(successor.recheck ? 'revalidation_target' : 'successor_task');
           return;
         }
         await enqueueAdvance(

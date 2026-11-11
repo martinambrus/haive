@@ -33,13 +33,22 @@ vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 function setup(status: string) {
   const fake = createFakeDb({
     modules: schema.modules,
+    repositories: schema.repositories,
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     taskEvents: schema.taskEvents,
   });
+  fake.insert(schema.repositories, {
+    id: TASK,
+    userId: USER,
+    name: 'repo',
+    source: 'git_https',
+    status: 'ready',
+  });
   fake.insert(schema.tasks, {
     id: TASK,
     userId: USER,
+    repositoryId: TASK,
     status,
     errorMessage: status === 'failed' ? 'boom' : null,
     completedAt: status === 'failed' ? fake.now() : null,

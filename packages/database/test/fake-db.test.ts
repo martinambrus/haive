@@ -51,6 +51,33 @@ function setup() {
 }
 
 describe('the fake database', () => {
+  it('filters merge events by the string dir in their JSON payload', async () => {
+    const events = schema.taskEvents;
+    const fake = createFakeDb({ taskEvents: events });
+    const root = "/repos/o'neil";
+    for (const payload of [null, {}, { dir: null }, { dir: 123 }, { dir: '/other' }]) {
+      fake.insert(events, { taskId: TASK, eventType: 'merge.left_open', payload });
+    }
+    const matching = fake.insert(events, {
+      taskId: TASK,
+      eventType: 'merge.left_open',
+      payload: { dir: root },
+    });
+    fake.insert(events, { taskId: TASK, eventType: 'unrelated', payload: { dir: root } });
+
+    expect(
+      await fake.db.query.taskEvents.findMany({
+        where: and(
+          inArray(events.eventType, ['merge.left_open', 'merge.left_open_settled']),
+          sql`${events.payload} ->> 'dir' = ${root}`,
+        ),
+      }),
+    ).toEqual([matching]);
+    await expect(
+      fake.db.query.taskEvents.findMany({ where: sql`${events.eventType} ->> 'dir' = ${root}` }),
+    ).rejects.toThrow('unsupported condition');
+  });
+
   const runs = schema.cliInvocations;
   const steps = schema.taskSteps;
   const noLiveRun = (outer: Column = steps.id) =>

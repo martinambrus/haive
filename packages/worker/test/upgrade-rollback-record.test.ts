@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -9,6 +9,8 @@ import { normalizeContent, sha256Hex } from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
 import { recordWritten } from './support/upgrade-apply-record.js';
+import { writeProjectStateRecord } from '../src/project-state/write.js';
+import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -17,6 +19,7 @@ const UPGRADE_TASK = '00000000-0000-4000-8000-0000000000c2';
 const ONBOARDING_TASK = '00000000-0000-4000-8000-0000000000c3';
 const CREATED = '.claude/agents/new.md';
 const KEPT = '.claude/agents/old.md';
+const HAIVE_MANIFEST = JSON.stringify({ schemaVersion: 1, templateSetHash: 'old', templates: [] });
 const RECORD_RENDER = '.haive-data/state/project/render.json';
 
 const dirs: string[] = [];
@@ -52,6 +55,7 @@ async function rollback(
   older: Record<string, unknown> | null,
   installJson?: string,
   refuseRecordWrite = false,
+  deferredRules?: string | null,
 ) {
   const root = await mkdtemp(join(tmpdir(), 'upgrade-rollback-record-'));
   dirs.push(root);
@@ -64,6 +68,8 @@ async function rollback(
   }
 
   const fake = createFakeDb({
+    auditEvents: schema.auditEvents,
+    taskEvents: schema.taskEvents,
     tasks: schema.tasks,
     repositories: schema.repositories,
     onboardingArtifacts: schema.onboardingArtifacts,
@@ -159,8 +165,22 @@ async function rollback(
       }
     };
   }
-  const applied = upgradeRollbackStep.apply(ctx, { detected } as never);
-  const out = await (older === null
+  if (deferredRules !== undefined) {
+    fake.patch(schema.repositories, REPO, { agentRulesOverride: 'LOCAL RULES\n' });
+    await writeProjectStateRecord(fake.db as never, {
+      repositoryId: REPO,
+      repoPath: root,
+      context: UPGRADE as never,
+      rtkChoiceRecorded: true,
+      holdingTaskId: TASK,
+    });
+    const rulesPath = join(root, '.haive-data/state/settings/agent-rules.md');
+    if (deferredRules === null) await unlink(rulesPath);
+    else await writeFile(rulesPath, deferredRules);
+  }
+  const apply = () => upgradeRollbackStep.apply(ctx, { detected } as never);
+  const applied = apply();
+  const out = await (older === null || deferredRules !== undefined
     ? applied
     : recordWritten(applied, { recordWriteFails: refuseRecordWrite }));
   if (older === null) expect(out.recordWrite).toBe('skipped');
@@ -170,6 +190,8 @@ async function rollback(
     exists: (rel: string) => existsSync(join(root, rel)),
     column: fake.rows(schema.repositories)[0]!.renderContext,
     sync: fake.rows(schema.projectStateSync),
+    fake,
+    apply,
   };
 }
 
@@ -213,6 +235,27 @@ describe('the context a rollback records when the upgrade only created files', (
 });
 
 describe('what a rollback reports its record write did', () => {
+  it.each(['TEAM RULES\n', '', null])(
+    'defers imported rules %j through a retry until the rollback completes',
+    async (incoming) => {
+      const s = await rollback(BEFORE, HAIVE_MANIFEST, false, incoming);
+      expect(s.out.recordWrite).toBe('deferred');
+      expect((await s.apply()).recordWrite).toBe('deferred');
+      expect(s.fake.rows(schema.projectStateOutbox)[0]!.writeIntent).toBeNull();
+      expect(s.fake.rows(schema.repositories)[0]!.agentRulesOverride).toBe('LOCAL RULES\n');
+      expect(s.exists('.haive/install.json')).toBe(true);
+      expect(s.out.warnings).toContain(
+        'Project state record deferred: imported repository rules are waiting for this upgrade to finish',
+      );
+      s.fake.patch(schema.tasks, TASK, { status: 'completed' });
+      await syncProjectStateFromCheckout(s.fake.db as never, {
+        repositoryId: REPO,
+        repoPath: s.root,
+      });
+      expect(s.fake.rows(schema.repositories)[0]!.agentRulesOverride).toBe(incoming);
+    },
+  );
+
   it('written, when the record is written', async () => {
     const { out } = await rollback(BEFORE);
 

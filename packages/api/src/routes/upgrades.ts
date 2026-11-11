@@ -1,3 +1,4 @@
+import { assertTaskRootMergeIdle } from '../lib/root-merge-busy.js';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
@@ -1051,16 +1052,27 @@ async function lockRepositoryTasks(tx: DbTx, repositoryId: string) {
  *  revival runs too): an onboarding beside a live upgrade or rollback, an upgrade or rollback
  *  beside a live onboarding, a live root claim. An upgrade or rollback is also admitted again, as
  *  at creation, so one a reset has since cut off cannot continue. */
-export async function refuseReviveBesideLive(tx: DbTx, taskId: string): Promise<void> {
+export async function refuseReviveBesideLive(
+  tx: DbTx,
+  taskId: string,
+  options: { continuation?: boolean } = {},
+): Promise<void> {
   const verdict = await boundedLockWait(tx, () => reviveRefusal(tx, taskId));
-  if (!verdict) return;
+  if (!verdict) {
+    if (!options.continuation) await assertTaskRootMergeIdle(tx, taskId);
+    return;
+  }
   const rollback = (verdict.task.metadata as { mode?: unknown } | null)?.mode === 'rollback';
   const action = rollback ? 'rolled back' : 'upgraded';
   if ('refusal' in verdict) {
     const refusal = verdict.refusal;
     switch (refusal.reason) {
       case 'no-repository':
-        throw new HttpError(404, 'Repository not found');
+        throw new HttpError(
+          409,
+          'The repository of this task was deleted; it cannot be retried.',
+          'task_repository_deleted',
+        );
       case 'root-claim':
         throw new HttpError(409, rootClaimRefusal(refusal.claimKind));
       case 'live-upgrade':

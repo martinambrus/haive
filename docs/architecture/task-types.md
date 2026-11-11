@@ -70,7 +70,7 @@ module's own step id is not checked when it registers (`step_catalog.step_id` is
 
 1. register every core step, then the static-list asserts (provider-sensitive, CLI-dispatch,
    skippable, closed path sets);
-2. assert the core composable catalog (`CORE_COMPOSABLE_STEPS`, 34 entries);
+2. assert the core composable catalog (`CORE_COMPOSABLE_STEPS`, 35 entries);
 3. register module steps — after the static asserts, so the shared static lists stay authoritative for
    core ids only;
 4. `syncStepCatalog`;
@@ -133,6 +133,16 @@ values refuse task creation with a static error, no task/event/job and no echoed
 The other `definitionForCreate` callers copy snapshots and prompt steps only; they do not copy
 pre-answers. Worker default expansion is guarded separately at the final answer and schema-copy
 boundaries ([Secret and git-data masking](sandbox-masking.md)).
+
+A custom type may include `06-run-config`, which writes `tasks.pre_answers` for the steps after it as
+the workflow does. Its ordering rule makes it precede every token whose steps read those answers
+(`db-migrated`, `implementation`, `reconciled`, `validation`, `tests`, `verification`, `review`), so a
+type that places it later is refused `too-late`. Its form shows the type's presets for those steps
+(`ANSWER_FIELDS`, inverted in `detect`) as defaults, so an unchanged Save keeps them; a field the person
+changes wins, and a field left out (a headless or partial submit) keeps the preset, or gets 06's
+default when there is none (`preserveOmittedFormFields`). A preset for 06 itself auto-submits the
+step. A Retry shows the answers the previous run stored, which cannot be told apart from defaults 06
+wrote itself.
 
 **Availability** (`resolveTaskTypeAvailability`, pure, shared by create and every list), first match
 wins: `disabled` → `not-selectable` (generic route only) → `custom-types-off` → `module-types-off` →

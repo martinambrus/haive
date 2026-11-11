@@ -7,6 +7,7 @@ import {
 import type { NamedCheckout } from '../repo/checkout-head.js';
 import { admitWatchedCheckout } from './watch-admission.js';
 import { randomUUID } from 'node:crypto';
+import { basename } from 'node:path';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { isRootClaimLive, lockRepositoryTasksKey, schema, type Database } from '@haive/database';
 import {
@@ -146,6 +147,15 @@ export class ProjectStateMovedError extends Error {
 /** A moved-checkout refusal caused by admission, so refresh can report the hold separately from
  *  an open git operation. It retains ProjectStateMovedError's public name and refusal semantics. */
 export class ProjectStateCheckoutHeldError extends ProjectStateMovedError {}
+
+/** The incoming record stays on disk for the task-end reconciliation. No column, base, audit
+ *  row or record file was changed, so this deferral must neither clear the column nor re-plan 02. */
+export class ProjectStateImportDeferredError extends Error {
+  constructor() {
+    super('imported repository rules are waiting for this upgrade to finish');
+    this.name = 'ProjectStateImportDeferredError';
+  }
+}
 
 /** An interrupted attempt is preserved until a person repairs a path the undo journal cannot own. */
 export class ProjectStateRecoveryHeldError extends ProjectStateMovedError {
@@ -577,12 +587,16 @@ export async function writeProjectStateColumn(
     expectedCheckout,
     keepColumnOnFailure,
     refuseDuringGitOperation,
+    discardWriteIntentOnFailure,
   }: ProjectStateColumnInput & {
     column: RenderContextColumn;
     /** The column is what it was before the write, so a failure leaves it rather than clearing it. */
     keepColumnOnFailure?: boolean;
     /** A merge, rebase, cherry-pick or revert open in the checkout refuses the write, as the sweep refuses to start one. */
     refuseDuringGitOperation?: boolean;
+    /** Only for an unpublished replacement which will be abandoned on failure. Keep its journal
+     *  images, but never leave an undo intent for the next checkout to replay. */
+    discardWriteIntentOnFailure?: boolean;
   },
 ): Promise<ProjectStateWriteResult> {
   const written: string[] = [];
@@ -590,6 +604,7 @@ export async function writeProjectStateColumn(
   let attempted: ProjectRender | null = null;
   let mutatedFiles = false;
   let blocked = false;
+  let ownIntentId: string | undefined;
   try {
     const portable = portableRender(column);
     attempted = portable;
@@ -808,7 +823,7 @@ export async function writeProjectStateColumn(
     // Commit the retry signal before any filesystem mutation. Recheck admission and the checkout
     // after reacquiring the locks: a holder admitted between transactions leaves only this intent.
     const auditEvents: AuditEvent[] = [];
-    const prepared = await db.transaction(async (tx) => {
+    const preparation = db.transaction(async (tx) => {
       await gate(tx);
       await recoverWriteLocked(tx, repositoryId, repoPath, expectedCheckout);
       const checkout = await readCheckout(repoPath);
@@ -845,6 +860,7 @@ export async function writeProjectStateColumn(
           holdingTaskId,
           expectedCheckout,
         });
+        if (imported.code === 'upgrade_rules') throw new ProjectStateImportDeferredError();
         if (['refused', 'held', 'deferred', 'superseded'].includes(imported.outcome)) {
           throw new ProjectStateMovedError(imported.reason);
         }
@@ -910,9 +926,15 @@ export async function writeProjectStateColumn(
         if (stat === null) absentDirs.push(dir);
         else if (stat.kind !== 'directory') throw new ProjectStateMovedError();
       }
-      const intent: WriteIntent = { id: randomUUID(), changes, absentDirs };
+      const intent: WriteIntent = {
+        id: randomUUID(),
+        changes,
+        absentDirs,
+        privateReplacement: discardWriteIntentOnFailure ? basename(repoPath) : null,
+      };
       validateRecoveryIntent(intent);
       intent.stage = await prepareIntentFiles(repoPath, intent);
+      ownIntentId = intent.id;
       await markProjectStateDirty(tx, repositoryId);
       await tx
         .update(schema.projectStateOutbox)
@@ -929,6 +951,32 @@ export async function writeProjectStateColumn(
         previousBaseFiles,
         unownedMalformedRtk,
       };
+    });
+    const prepared = await preparation.catch(async (err: unknown) => {
+      if (err instanceof ProjectStateImportDeferredError) {
+        // The import transaction rolled back, but this foreground write still owes its approved
+        // context and ledger claims. Persist the local context and retry signal together, under
+        // the same task/column/reset fences; leave the incoming files and sync base untouched.
+        await db.transaction(async (tx) => {
+          await gate(tx);
+          await tx
+            .update(schema.repositories)
+            .set({ renderContext: column })
+            .where(eq(schema.repositories.id, repositoryId));
+          await markProjectStateDirty(tx, repositoryId);
+          const [outbox] = await tx
+            .select({ rules: schema.projectStateOutbox.rulesReconcileIntent })
+            .from(schema.projectStateOutbox)
+            .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+          // Preserve an earlier obligation until its guarded reconciliation succeeds.
+          if (!outbox?.rules && holdingTaskId)
+            await tx
+              .update(schema.projectStateOutbox)
+              .set({ rulesReconcileIntent: { phase: 'deferred', taskId: holdingTaskId } })
+              .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+        });
+      }
+      throw err;
     });
     auditEvents.forEach(logAuditEvent);
     if (!prepared) throw new ProjectStateMovedError();
@@ -1007,9 +1055,30 @@ export async function writeProjectStateColumn(
       await requireExpectedCheckout(tx, repositoryId, repoPath, expectedCheckout);
     });
   } catch (err) {
+    if (discardWriteIntentOnFailure && ownIntentId !== undefined) {
+      try {
+        await db.transaction(async (tx) => {
+          await lockRepositoryTasksKey(tx, repositoryId);
+          await lockProjectState(tx, repositoryId);
+          await tx
+            .update(schema.projectStateOutbox)
+            .set({ writeIntent: null })
+            .where(
+              and(
+                eq(schema.projectStateOutbox.repositoryId, repositoryId),
+                sql`${schema.projectStateOutbox.writeIntent}->>'id' = ${ownIntentId}`,
+              ),
+            );
+        });
+      } catch {
+        // Keep the writer's own error below. A discard that failed leaves the intent, and the
+        // next rebuild recognizes the abandoned private replacement before moving anything.
+      }
+    }
     // Admission and a CAS refused before our first mutation changed no semantic state. Once a
     // file did change, a moved checkout is a partial-write failure just like a SQL rollback: retain
     // its path report and foreground pending-local-side cleanup (background writers keep column).
+    if (err instanceof ProjectStateImportDeferredError) throw err;
     if (err instanceof ProjectStateMovedError && !mutatedFiles) throw err;
     const cleared =
       keepColumnOnFailure === true ||
@@ -1037,6 +1106,8 @@ export async function writeProjectStateColumn(
 
 interface WriteIntent {
   id: string;
+  /** The unpublished restore tree; null means the current checkout, omitted by older workers. */
+  privateReplacement?: string | null;
   /** Planned ancestors absent at preparation; omitted by journals from earlier workers. */
   absentDirs?: string[];
   stage?: JournalPrepared | null;

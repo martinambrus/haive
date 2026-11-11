@@ -1,6 +1,7 @@
+import { stageAllArgs } from '../repo/git-stage.js';
 import { assertDependencyCommitSafe } from './steps/workflow/_dependency-policy.js';
 import { parsePorcelainZ } from './steps/workflow/_commit-diff.js';
-import { warnStep } from '../project-state/branch-revert.js';
+import { putBackProjections, warnStep } from '../project-state/branch-revert.js';
 import {
   FlattenedRepositoryError,
   unregisteredGitlinks,
@@ -519,7 +520,7 @@ async function commitIssueWork(
       }),
     );
   }
-  const add = await gitRun(worktreePath, ['add', '-A']);
+  const add = await gitRun(worktreePath, stageAllArgs());
   if (add.code !== 0) {
     throw new Error(
       `git add failed for DAG issue ${issue.issueKey}: ${(add.stderr || add.stdout).trim()}`,
@@ -633,6 +634,7 @@ async function clearAiFix(db: Database, stepRowId: string): Promise<void> {
 
 interface MergeArgs {
   db: Database;
+  ctx: StepContext;
   integration: IntegrationWorktree;
   level: DagLevelRow;
   issues: DagIssueRow[];
@@ -721,6 +723,20 @@ async function haltUnaborted(
   );
 }
 
+/** Issue branches cannot carry agent edits of Haive's record or plan into the integration branch. */
+async function putBackIssueProjections(m: MergeArgs, issue: DagIssueRow): Promise<void> {
+  const ctx = { ...m.ctx, db: m.db, taskStepId: m.current.id };
+  await warnStep(
+    ctx,
+    await putBackProjections({
+      ctx,
+      worktree: issue.worktreePath,
+      branch: issue.branchName!,
+      target: m.integration.branch,
+    }),
+  );
+}
+
 /** Recreate the live conflict for `target` and dispatch one merge-fix agent into
  *  the integration worktree. Returns 'waiting' (agent in flight), 'halt', or, when
  *  the conflict no longer reproduces, the rest of the level merge's result. Shared
@@ -747,6 +763,7 @@ async function startConflictFix(
     return haltUnaborted(m, target.branchName!, stale);
   }
   if (staleOpen) await noteStaleMergeAborted(m, staleOpen);
+  await putBackIssueProjections(m, target);
   const opened = await openMerge(m.integration.path, target.branchName!, ['--no-edit'], m.gitEnv);
   if (opened.kind === 'refused') {
     await clearAiFix(m.db, m.current.id);
@@ -1017,6 +1034,12 @@ async function runLevelMerge(
     const cleared = await abortOtherMerge(integration.path, issue.branchName!);
     if (!cleared.ok) return haltUnaborted(m, issue.branchName!, cleared);
     if (wasOpen && !ours) await noteStaleMergeAborted(m, wasOpen);
+    if (ours) {
+      const aborted = await abortMerge(integration.path);
+      if (!aborted.ok) return haltUnaborted(m, issue.branchName!, aborted);
+      await noteStaleMergeAborted(m, wasOpen!);
+    }
+    await putBackIssueProjections(m, issue);
     const opened = await openMerge(integration.path, issue.branchName!, ['--no-edit'], gitEnv);
     if (opened.kind === 'refused') return haltRefused(m, issue.branchName!, opened.detail);
     if (opened.kind === 'merged') {
@@ -3226,6 +3249,7 @@ export async function resolveDagPhase(
     }
     const merge = await runLevelMerge({
       db,
+      ctx,
       integration,
       level: curLevel,
       issues,

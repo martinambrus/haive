@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -20,7 +20,9 @@ if (redisUrl && !/^\/(?:[1-9]|1[0-5])$/.test(new URL(redisUrl).pathname))
 const h = vi.hoisted(() => ({
   redis: null as unknown,
   persist: vi.fn(),
+  restore: vi.fn(),
   seed: vi.fn(),
+  holding: false,
   /** Stand in for the copy and the clone that follow the move. Null runs the real copy; the clone
    *  is never real, and with no stand-in it finishes and leaves nothing. */
   copyFault: null as null | ((src: string, dest: string) => Promise<void>),
@@ -32,6 +34,7 @@ vi.mock('../src/repo/clone.js', async (original) => {
     ...real,
     withRootClaim: async (_db: unknown, _id: string, fn: () => Promise<void>) => fn(),
     persistDetection: h.persist,
+    restoreProjectData: h.restore,
     copyTree: (src: string, dest: string) =>
       h.copyFault ? h.copyFault(src, dest) : real.copyTree(src, dest),
     gitClone: (url: string, dest: string) =>
@@ -60,9 +63,14 @@ const git = async (cwd: string, args: string[]) =>
       },
     })
   ).stdout.trim();
-const row: { status: string; statusMessage?: string } = { status: 'cloning' };
+const row: { status: string; statusMessage?: string; errorCode?: string | null } = {
+  status: 'cloning',
+};
 const db = {
-  query: { tasks: { findMany: async () => [] } },
+  execute: async () => {},
+  select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),
+  transaction: async (fn: (tx: unknown) => unknown) => fn(db),
+  query: { tasks: { findMany: async () => (h.holding ? [{ id: 'live' }] : []) } },
   update: () => ({ set: (values: object) => ({ where: async () => Object.assign(row, values) }) }),
 } as unknown as Database;
 
@@ -76,11 +84,15 @@ beforeEach(async () => {
   vi.clearAllMocks();
   row.status = 'cloning';
   delete row.statusMessage;
+  row.errorCode = 'stale';
+  h.holding = false;
   h.copyFault = null;
   h.cloneFault = null;
   h.seed.mockResolvedValue(undefined);
+  h.restore.mockReset().mockResolvedValue(undefined);
   h.persist.mockImplementation(async (_db, _id, _dest, note) => {
     row.status = 'ready';
+    row.errorCode = null;
     row.statusMessage = note;
   });
   root = await mkdtemp(path.join(tmpdir(), 'refresh-retries-'));
@@ -173,6 +185,7 @@ async function endedAfterOneRun(job: Job, dest: string) {
   expect(found).toHaveLength(1);
   expect(h.persist).not.toHaveBeenCalled();
   expect(row.status).toBe('error');
+  expect(row.errorCode).toBeNull();
   expect(row.statusMessage).toContain(`kept next to the checkout as ${found[0]!}`);
   expect(job.failedReason).toBe(row.statusMessage);
 }
@@ -186,6 +199,7 @@ describe.skipIf(!redisUrl)('a refresh job with attempts: 3 on a real queue', () 
     expect(await readdir(path.dirname(dest))).toEqual(['r1']);
     expect(h.persist).not.toHaveBeenCalled();
     expect(row.status).toBe('error');
+    expect(row.errorCode).toBeNull();
     expect(row.statusMessage).toMatch(/is not a usable git checkout\. Nothing was moved\.$/);
     expect(await job.getState()).toBe('failed');
   });
@@ -207,4 +221,92 @@ describe.skipIf(!redisUrl)('a refresh job with attempts: 3 on a real queue', () 
       await endedAfterOneRun(await refreshJob(kind === 'copy' ? payload : remote), dest);
     },
   );
+});
+
+describe.skipIf(!redisUrl)('repair-needed refresh and explicit checkout recovery', () => {
+  it('records a structural code for exit 128 over metadata not proved dead', async () => {
+    const { dest, payload } = await fixture();
+    await writeFile(path.join(dest, '.git/HEAD'), 'ref: refs/heads/main\n');
+    await writeFile(path.join(dest, '.git/config'), '[core\n');
+    const job = await refreshJob(payload);
+    expect(await job.getState()).toBe('failed');
+    expect(row).toMatchObject({ status: 'error', errorCode: 'checkout_repair_needed' });
+    expect(await asides(dest)).toEqual([]);
+    expect(h.persist).not.toHaveBeenCalled();
+  });
+
+  it('an explicit recovery keeps the old checkout and skips mirror import into existing data', async () => {
+    const { dest, payload } = await fixture();
+    await writeFile(path.join(dest, '.git/HEAD'), 'ref: refs/heads/main\n');
+    await writeFile(path.join(dest, '.git/config'), '[core\n');
+    const job = await refreshJob({ ...payload, recoverCheckout: true } as RepoJobPayload);
+    expect(await job.getState()).toBe('completed');
+    const kept = await asides(dest);
+    expect(kept).toHaveLength(1);
+    expect(await readFile(path.join(path.dirname(dest), kept[0]!, 'notes.md'), 'utf8')).toBe(
+      'keep me\n',
+    );
+    expect(h.persist).toHaveBeenCalledWith(db, 'r1', dest, expect.any(String), {
+      preserveProjectData: true,
+    });
+    expect(h.seed).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe.skipIf(!redisUrl)('a source folder that needs repair', () => {
+  it('records a source repair code and retains the managed checkout', async () => {
+    const { source, dest, payload } = await fixture();
+    await writeFile(path.join(source, '.git/config'), '[core\n');
+    const job = await refreshJob(payload);
+    expect(await job.getState()).toBe('failed');
+    expect(row).toMatchObject({ status: 'error', errorCode: 'source_repair_needed' });
+    expect(await asides(dest)).toEqual([]);
+    expect(h.persist).not.toHaveBeenCalled();
+  });
+});
+
+describe.skipIf(!redisUrl)('failed explicit recovery', () => {
+  it('keeps recovery explicit after a build failure, without importing mirrors on Retry', async () => {
+    const { dest, payload } = await fixture();
+    failBuilding('copy', new Error('copy failed'));
+    const job = await refreshJob({ ...payload, recoverCheckout: true });
+    expect(await job.getState()).toBe('failed');
+    expect(job.attemptsMade).toBe(1);
+    expect(row).toMatchObject({ status: 'error', errorCode: 'checkout_repair_needed' });
+    expect(await asides(dest)).toHaveLength(1);
+    expect(h.persist).not.toHaveBeenCalled();
+  });
+});
+
+describe.skipIf(!redisUrl)('recovery pickup task fence', () => {
+  it('finishes ready when tasks hold a checkout that was repaired before recovery pickup', async () => {
+    const { dest, payload } = await fixture();
+    await writeFile(path.join(dest, '.git/HEAD'), 'ref: refs/heads/main\n');
+    h.holding = true;
+    const job = await refreshJob({ ...payload, recoverCheckout: true });
+    expect(await job.getState()).toBe('completed');
+    expect(row).toMatchObject({ status: 'ready', errorCode: null });
+    expect(await asides(dest)).toEqual([]);
+    expect(h.persist).toHaveBeenCalledWith(
+      db,
+      'r1',
+      dest,
+      'Not refreshed: 1 task is using this repository. Refresh once it finishes.',
+    );
+  });
+});
+
+describe.skipIf(!redisUrl)('a rebuilt checkout that needs repair', () => {
+  it('keeps the repair code when final verification finds unknown Git metadata', async () => {
+    const { dest, payload } = await fixture();
+    h.copyFault = async (src, to) => {
+      await cp(src, to, { recursive: true });
+      await writeFile(path.join(to, '.git/config'), '[core\n');
+    };
+    const job = await refreshJob(payload);
+    expect(await job.getState()).toBe('failed');
+    expect(row).toMatchObject({ status: 'error', errorCode: 'checkout_repair_needed' });
+    expect(await asides(dest)).toHaveLength(1);
+    expect(h.persist).not.toHaveBeenCalled();
+  });
 });

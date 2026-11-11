@@ -144,9 +144,21 @@ async function main(): Promise<void> {
         body: JSON.stringify(body),
       });
 
+    const [repository] = await db
+      .insert(schema.repositories)
+      .values({ userId, name: 'step-retry-claim-race', source: 'local_path', status: 'ready' })
+      .returning({ id: schema.repositories.id });
+    if (!repository) throw new Error('repository insert failed');
+
     const [task] = await db
       .insert(schema.tasks)
-      .values({ userId, type: 'workflow', title: 'claim race smoke', status: 'failed' })
+      .values({
+        userId,
+        repositoryId: repository.id,
+        type: 'workflow',
+        title: 'claim race smoke',
+        status: 'failed',
+      })
       .returning();
     taskId = task!.id;
     const [retried, sibling, parked] = await db

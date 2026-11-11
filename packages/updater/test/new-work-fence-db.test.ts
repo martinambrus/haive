@@ -4,7 +4,13 @@ import { join } from 'node:path';
 import postgres, { type Sql, type TransactionSql } from 'postgres';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfigUnavailableError, configService } from '@haive/shared';
-import { ensureJournal, enterPhase, finishRun, startRun } from '../src/journal.js';
+import {
+  ensureJournal,
+  enterPhase,
+  finishRun,
+  recordFoundState,
+  startRun,
+} from '../src/journal.js';
 import {
   phaseCommit,
   phaseDraining,
@@ -734,6 +740,7 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
     });
 
     it('writes normal at once when no administrator holds the fence, and lets the fence go', async () => {
+      await recordFoundState(updater, runId, 'normal');
       await run(upgrade());
 
       expect(written).toEqual(['normal']);
@@ -742,6 +749,7 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
     });
 
     it('waits for an administrator holding the fence, and then writes normal once', async () => {
+      await recordFoundState(updater, runId, 'normal');
       await holdFence();
 
       updating = run(upgrade());
@@ -797,13 +805,24 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
         expect(stored).toBe('normal');
       });
 
-      it('puts back normal when the run never recorded what it found', async () => {
-        stored = 'maintenance';
+      it.each(['normal', 'draining', 'maintenance'])(
+        'keeps %s when a new run never recorded what it found, and reports the uncertainty',
+        async (state) => {
+          stored = state;
 
-        await run(upgrade());
+          await run(upgrade());
 
-        expect(stored).toBe('normal');
-      });
+          expect(stored).toBe(state);
+          expect(written).toEqual([]);
+          const [row] = await probe<{ metadata: Record<string, unknown> }[]>`
+            SELECT metadata FROM upgrade_runs WHERE id = ${runId}`;
+          expect(row!.metadata.restoreSkipped).toBe('found_state_unknown');
+          expect(logged).toContainEqual({
+            event: 'maintenance-restore-skipped',
+            fields: { reason: 'prior maintenance state is unknown; keeping the current state' },
+          });
+        },
+      );
 
       it('leaves an administrator hold alone when the run failed its first state read', async () => {
         stored = 'maintenance';

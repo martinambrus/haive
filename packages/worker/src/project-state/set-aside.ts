@@ -910,6 +910,7 @@ export async function resyncHaiveProjections(
   db: Database,
   repositoryId: string,
   repoPath: string,
+  endingTaskId?: string,
 ): Promise<boolean> {
   // A merge, rebase, cherry-pick or revert still open holds an intermediate record: nothing is read in until it ends.
   try {
@@ -926,6 +927,7 @@ export async function resyncHaiveProjections(
       repositoryId,
       repoPath,
       refuseDuringGitOperation: true,
+      endingTaskId,
     });
     if (outcome === 'held' || outcome === 'superseded' || outcome === 'refused') synced = false;
     if (
@@ -970,7 +972,7 @@ export async function resyncAfterTaskEnd(db: Database, taskId: string): Promise<
       columns: { storagePath: true, localPath: true },
     });
     const repoPath = repo?.storagePath ?? repo?.localPath;
-    if (repoPath) await resyncHaiveProjections(db, task.repositoryId, repoPath);
+    if (repoPath) await resyncHaiveProjections(db, task.repositoryId, repoPath, taskId);
   } catch (err) {
     logger.warn({ err, taskId }, 'project state not re-synced after a task ended');
   }

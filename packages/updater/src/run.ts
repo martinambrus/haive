@@ -234,7 +234,15 @@ async function restoreMaintenanceState(ctx: UpgradeContext): Promise<void> {
     });
     return;
   }
-  await setMaintenanceState(ctx, await readFoundState(ctx.sql, ctx.runId));
+  const found = await readFoundState(ctx.sql, ctx.runId);
+  if (found === null) {
+    await mergeMetadata(ctx.sql, ctx.runId, { restoreSkipped: 'found_state_unknown' });
+    ctx.log('maintenance-restore-skipped', {
+      reason: 'prior maintenance state is unknown; keeping the current state',
+    });
+    return;
+  }
+  await setMaintenanceState(ctx, found);
 }
 
 /** Recounts under the fence: a draining or held install with nothing live enters maintenance. */

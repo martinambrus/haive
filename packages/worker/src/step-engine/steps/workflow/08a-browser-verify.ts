@@ -482,6 +482,7 @@ async function bringUpLiveBrowser(
 
 export const browserVerifyStep: StepDefinition<BrowserVerifyDetect, BrowserVerifyApply> = {
   needsRuntime: 'if-serving',
+  editsCodeOrTests: true,
   metadata: {
     id: '08a-browser-verify',
     workflowType: 'workflow',

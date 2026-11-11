@@ -54,6 +54,8 @@ import { detectFromDirectory } from './framework-detect.js';
 import { holdImportedMcpServers } from '../sandbox/mcp-config.js';
 import { syncPlanFromCheckout } from '../plan/sync-checkout.js';
 import { syncProjectStateFromCheckout } from '../project-state/sync.js';
+import { refreshProjectStateOutcome } from '../project-state/refresh.js';
+import { writePlanMirror } from '../plan/mirror.js';
 import { raiseRtkQuestion } from '../project-state/rtk-conflict.js';
 import { seedBlankScaffold } from './blank-scaffold.js';
 import { buildCredentialHelper, OriginUrlError, scrubSecret } from './git-push.js';
@@ -280,6 +282,45 @@ async function importHaiveDataMirror(
   return deferred;
 }
 
+/** Restore this install's projections before publication, importing the incoming record or plan
+ *  only where this install has none. A failure must fail recovery, never be best-effort. */
+export async function restoreProjectData(
+  db: Database,
+  repositoryId: string,
+  replacementPath: string,
+): Promise<void> {
+  const [repo] = await db
+    .select({ renderContext: schema.repositories.renderContext })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .limit(1);
+  if (repo?.renderContext != null)
+    await removeNoFollow(replacementPath, PROJECT_STATE_DIR, { recursive: true });
+  let state = await refreshProjectStateOutcome(db, repositoryId, undefined, replacementPath);
+  for (let attempt = 1; state.outcome === 'superseded' && attempt < 3; attempt++) {
+    state = await refreshProjectStateOutcome(db, repositoryId, undefined, replacementPath);
+  }
+  if (state.outcome !== 'written' && state.outcome !== 'absent') {
+    throw new Error(`Recovered checkout project data could not be written (${state.outcome})`);
+  }
+  const [plan] = await db
+    .select({ id: schema.planNodes.id })
+    .from(schema.planNodes)
+    .where(eq(schema.planNodes.repositoryId, repositoryId))
+    .limit(1);
+  if (!plan) {
+    // The ordinary first import owns this decision; an empty database must not turn the team's
+    // committed plan into a tracked deletion at the next Save.
+    await syncPlanFromCheckout(db, repositoryId, replacementPath);
+  } else {
+    await removeNoFollow(replacementPath, HAIVE_DATA_FILES.plan);
+    await removeNoFollow(replacementPath, HAIVE_DATA_FILES.planMarkdown);
+    await writePlanMirror(db, repositoryId, replacementPath, undefined, {
+      recoveredCheckout: true,
+    });
+  }
+}
+
 export async function persistDetection(
   db: Database,
   repositoryId: string,
@@ -287,6 +328,7 @@ export async function persistDetection(
   /** Carried into `status_message` beside `status: 'ready'`. The repository IS ready — this is the
    *  "ready, with caveats" case, and the column exists for exactly that. */
   statusMessage?: string | null,
+  options?: { preserveProjectData: true },
 ): Promise<void> {
   const detection = await detectFromDirectory(storagePath);
   await db
@@ -298,12 +340,16 @@ export async function persistDetection(
       sizeBytes: detection.sizeBytes,
       storagePath,
       status: 'ready',
+      errorCode: null,
       // `null` when this import dropped nothing, so a clean re-import CLEARS a previous run's note
       // rather than leaving the repository labelled with a caveat that no longer applies.
       statusMessage: statusMessage ?? null,
       updatedAt: new Date(),
     })
     .where(eq(schema.repositories.id, repositoryId));
+
+  // Recovery has already restored the private replacement before publishing it.
+  if (options?.preserveProjectData) return;
 
   // Best-effort: a fresh clone of an already-onboarded repo restores its
   // onboarding-derived columns from the committed .haive-data/ mirror. Never

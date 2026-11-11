@@ -26,6 +26,11 @@ vi.mock('../../../repo/git-push.js', async (importOriginal) => ({
   detectOrigin: m.detectOrigin,
 }));
 
+vi.mock('../../../repo/git-preview.js', async (original) => ({
+  ...(await original<typeof import('../../../repo/git-preview.js')>()),
+  gitPreview: async () => ({ head: 'head', tree: 'tree', paths: [] }),
+}));
+
 import { TaskCancelledError } from '../../step-definition.js';
 import { runAppReadyStep } from './99-run-app-ready.js';
 

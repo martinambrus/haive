@@ -320,7 +320,7 @@ jobs:
   postgres-gated:
     name: Postgres-gated tests
     runs-on: ubuntu-latest
-    # 120 s setup allowance plus 7.5 s per GATED row; retain the 25-minute check limit.
+    # 120 s setup allowance plus 7.5 s per GATED row; retain the 26-minute check limit.
     # 30 minutes covers that whole limit plus setup and keeps >=600 s over modelled green.
     timeout-minutes: 30
     services:
@@ -424,7 +424,7 @@ jobs:
       # Setup, including module builds, ends at migrate; a failed setup never runs the list.
       - name: Postgres-gated tests
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
-        timeout-minutes: 25
+        timeout-minutes: 26
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
           PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}
@@ -465,6 +465,7 @@ jobs:
           shared test/logger-db-error-params.test.ts DB_ERROR_PARAMS_TEST_URL db_error_params_test pg
           worker test/database-snapshots.test.ts DATABASE_SNAPSHOT_TEST_URL snapshot_test pg
           worker test/context-backfill.postgres.test.ts CONTEXT_BACKFILL_TEST_URL t402_context_backfill_test pg
+          worker test/project-state-writer-postgres.test.ts T266_DATABASE_URL test_t266_ci pgvector
           worker test/task-type-seed.test.ts TASK_TYPE_SEED_TEST_URL task_type_seed_test pg
           worker test/task-type-seed-guard.test.ts TASK_TYPE_SEED_GUARD_TEST_URL task_type_seed_guard_test pg
           worker test/module-task-type-seed.test.ts MODULE_TASK_TYPE_SEED_TEST_URL module_task_type_seed_test pg
@@ -501,6 +502,7 @@ jobs:
           api test/module-missing-db.test.ts MODULE_MISSING_API_TEST_URL module_missing_api_test pg
           api test/module-purge-db.test.ts MODULE_PURGE_API_TEST_URL module_purge_api_test pg
           api test/task-create-path.test.ts TASK_CREATE_PATH_TEST_URL task_create_path_test pg
+          worker test/refresh-checkout-holders-db.test.ts CHECKOUT_HOLDERS_TEST_URL checkout_holders_test pg
           api test/task-start-attachments-db.test.ts TASK_START_ATTACHMENTS_TEST_URL task_start_attachments_test pg
           api test/repo-upload-retry-db.test.ts UPLOAD_RETRY_TEST_URL upload_retry_test_ci pg
           api test/task-list-dead.test.ts TASK_LIST_DEAD_TEST_URL task_list_dead_test pg
@@ -593,6 +595,7 @@ jobs:
           api test/forced-throttled-audit-db.test.ts FORCED_THROTTLED_AUDIT_TEST_URL forced_throttled_audit_test pg
           api test/stop-settle-db.test.ts STOP_SETTLE_TEST_URL stop_settle_test pg
           worker test/settle-stopped-task-db.test.ts WORKER_SETTLE_STOPPED_TEST_URL worker_settle_stopped_test pg
+          database test/repository-task-lock.test.ts REPOSITORY_TASK_LOCK_TEST_URL repository_task_lock_test pg
           GATED
           exit "$failed"
 

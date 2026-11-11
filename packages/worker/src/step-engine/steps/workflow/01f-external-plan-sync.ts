@@ -1,5 +1,6 @@
+import { applyPlanPatchWithRetry as applyPlanPatch } from '../../../plan/patch-retry.js';
 import { CONFIG_KEYS, configService, type FormSchema, type FormValues } from '@haive/shared';
-import { applyPlanPatch, findPlanRoot, PlanPatchError } from '@haive/shared/plan';
+import { findPlanRoot, PlanPatchError } from '@haive/shared/plan';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import { markPlanCodeLinksStaleForPaths } from '../../../plan/code-link-staleness.js';

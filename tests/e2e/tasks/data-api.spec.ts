@@ -136,7 +136,7 @@ test.describe('task data API', () => {
     // What the task's current_step_id becomes is NOT asserted, and deliberately. Advancing is
     // the worker's job off an enqueued ADVANCE_STEP, so this would be racing it — and on a
     // fixture task it is a race with a guaranteed loser: the worker fails the task with "has no
-    // resolvable repo path", because the fixture has no repository. Measured, not assumed.
+    // resolvable repo path", because the fixture has no checkout path. Measured, not assumed.
     const eventRows = await sql<{ event_type: string }[]>`
       select event_type from task_events where task_id = ${fixture.taskId}
     `;

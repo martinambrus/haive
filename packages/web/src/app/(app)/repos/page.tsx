@@ -21,6 +21,7 @@ import {
   X,
 } from 'lucide-react';
 import type { TreeNode } from '@haive/shared';
+import { REPOSITORY_ERROR_CODES } from '@haive/shared/constants';
 import { api, API_BASE_URL, type Repository } from '@/lib/api-client';
 import { Badge, Card, CardHeader, CardTitle, CardDescription } from '@/components/ui';
 import { DirectoryTreeSelect } from '@/components/directory-tree-select';
@@ -178,9 +179,16 @@ export default function ReposPage() {
   }
 
   // Retry extraction for a failed upload, or refresh from a folder/remote source.
-  async function handleRetry(id: string) {
+  async function handleRetry(id: string, recovery = false) {
+    if (
+      recovery &&
+      !confirm(
+        'Rebuild this checkout from its source? The old folder, including unpushed commits and local files, will be kept beside the new checkout. Task records, settings and knowledge base records will be preserved. Completed or cancelled tasks’ worktrees stay in the kept folder. Finish or cancel unfinished tasks with worktrees in this checkout before rebuilding.',
+      )
+    )
+      return;
     try {
-      await api.post(`/repos/${id}/refresh-tree`, {});
+      await api.post(`/repos/${id}/${recovery ? 'recover-checkout' : 'refresh-tree'}`, {});
       await reload();
     } catch (err) {
       setError((err as Error).message ?? 'Failed to retry repository');
@@ -281,6 +289,7 @@ export default function ReposPage() {
               onExpand={() => toggleExpand(repo)}
               onDelete={() => handleDelete(repo.id)}
               onRetry={() => handleRetry(repo.id)}
+              onRecover={() => handleRetry(repo.id, true)}
               onChangeIncluded={(paths) => handleChangeIncluded(repo.id, paths)}
               onReload={reload}
             />
@@ -300,6 +309,7 @@ interface RepoCardProps {
   onExpand: () => void;
   onDelete: () => void;
   onRetry: () => Promise<void>;
+  onRecover: () => Promise<void>;
   onChangeIncluded: (paths: string[]) => void;
   /** Reload the list after something changed the repository row itself. */
   onReload: () => Promise<void>;
@@ -315,6 +325,7 @@ function RepoCard(props: RepoCardProps) {
     onExpand,
     onDelete,
     onRetry,
+    onRecover,
     onChangeIncluded,
     onReload,
   } = props;
@@ -322,9 +333,20 @@ function RepoCard(props: RepoCardProps) {
   // The exclusions editor is available once onboarding has produced a scope deny
   // list (scopeExcludeGlobs !== null). Before that there is nothing to edit.
   const canEditScope = repo.status === 'ready' && repo.scopeExcludeGlobs !== null;
+  const repairNeeded =
+    repo.status === 'error' &&
+    (repo.errorCode === REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED ||
+      repo.errorCode === REPOSITORY_ERROR_CODES.SOURCE_REPAIR_NEEDED);
+  const canRebuild =
+    repairNeeded &&
+    (repo.source === 'local_path' ? !!repo.writable && !!repo.localPath : !!repo.remoteUrl);
+  const canCheckRepair = repo.source === 'local_path' ? !!repo.localPath : !!repo.remoteUrl;
   const retryUnavailableReason =
     repo.status === 'error' && repo.canRetry === false ? repo.retryUnavailableReason : null;
-  const statusMessage = retryUnavailableReason ?? repo.statusMessage;
+  const statusMessage = repairNeeded
+    ? repo.statusMessage
+    : (retryUnavailableReason ?? repo.statusMessage);
+  const [repairGuidance, setRepairGuidance] = useState(false);
   // A ready repo with onboarding markers still absent. Show a yellow badge and
   // route its primary CTA to onboarding — the new-task page auto-selects the
   // onboarding flow for a non-onboarded repo. (undefined = unknown → treat as
@@ -540,6 +562,7 @@ function RepoCard(props: RepoCardProps) {
               onClick: onExpand,
             },
             repo.status === 'error' &&
+              !repairNeeded &&
               repo.canRetry !== false && {
                 key: 'retry',
                 label: retrying ? 'Retrying...' : 'Retry',
@@ -548,10 +571,45 @@ function RepoCard(props: RepoCardProps) {
                 onClick: handleRetryClick,
                 disabled: retrying,
               },
+            repairNeeded &&
+              canRebuild &&
+              repo.errorCode === REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED && {
+                key: 'check-repair',
+                label: retrying ? 'Checking...' : 'Check repair',
+                icon: RefreshCw,
+                onClick: handleRetryClick,
+                disabled: retrying,
+              },
+            repairNeeded && {
+              key: 'recover',
+              label: canRebuild
+                ? 'Rebuild checkout'
+                : canCheckRepair
+                  ? 'Repair checkout'
+                  : 'Recovery instructions',
+              icon: RefreshCw,
+              onClick: canRebuild ? onRecover : () => setRepairGuidance(true),
+            },
             { key: 'delete', label: 'Delete', icon: Trash2, danger: true, onClick: onDelete },
           ]}
         />
       </div>
+      {repairGuidance && repairNeeded && (
+        <div className="space-y-2">
+          <InlineMarkdown
+            body={
+              canCheckRepair
+                ? 'Repair the Git metadata in the original folder, then choose Check repair. Haive cannot safely rebuild from a missing or unusable source. Keep the repository registered to preserve its tasks, settings and knowledge base.'
+                : 'There is no remote or writable source folder to rebuild from. Before removing and re-adding this repository, save all local files and unpushed commits, and export its tasks, settings and knowledge base. Removing the repository deletes its checkout and project records.'
+            }
+          />
+          {canCheckRepair && (
+            <Button onClick={handleRetryClick} disabled={retrying}>
+              Check repair
+            </Button>
+          )}
+        </div>
+      )}
       {linkingOrigin && (
         <LinkOriginDialog
           repositoryId={repo.id}

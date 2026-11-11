@@ -1,3 +1,4 @@
+import { assertTaskRootMergeIdle } from '../../lib/root-merge-busy.js';
 import { recordTaskModuleAdmissions } from '@haive/shared/modularity-server';
 import { normalizeStepFormValues } from '@haive/shared/schemas';
 import { Hono } from 'hono';
@@ -1516,6 +1517,7 @@ taskRoutes.post('/:id/action', async (c) => {
     case 'resume': {
       if (!task.pausedAt) return c.json({ ok: true, pausedAt: null });
       const resumed = await db.transaction(async (tx) => {
+        await assertTaskRootMergeIdle(tx, id);
         // Only the resume that changes the row is recorded.
         if (!(await clearTaskPause(tx, id))) return null;
         // Judged after the clear so a pause placed since the route's read is the one refused.

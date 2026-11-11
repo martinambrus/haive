@@ -72,9 +72,11 @@ function withoutDistinctFrom(node: unknown): unknown {
 function setup(initialState: string | Error = 'normal') {
   const fake = createFakeDb({
     modules: schema.modules,
+    repositories: schema.repositories,
     tasks: schema.tasks,
     taskEvents: schema.taskEvents,
     taskTypeDefinitions: schema.taskTypeDefinitions,
+    projectStateConflicts: schema.projectStateConflicts,
   });
   fake.insert(schema.taskTypeDefinitions, {
     slug: TYPE,
@@ -165,6 +167,7 @@ function setup(initialState: string | Error = 'normal') {
       userId: USER,
       type: TYPE,
       title: `dead ${n}`,
+      metadata: { anchorRepositoryId: null },
       status: 'queued',
       orchestrationEpoch: 3,
       currentStepId: null,
@@ -490,5 +493,144 @@ describe('retryHeldRevivals', () => {
 
     expect(t.fences()).toBe(0);
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('dead-task revival admission refusals', () => {
+  it.each(['failed', 'running', 'queued'])(
+    'keeps retrying a contested %s upgrade until its project-state conflict is answered',
+    async (status) => {
+      const t = setup();
+      const repoId = uuid(8);
+      t.fake.insert(schema.repositories, {
+        id: repoId,
+        userId: USER,
+        name: 'repo',
+        source: 'blank',
+      });
+      t.fake.insert(schema.taskTypeDefinitions, {
+        slug: 'onboarding_upgrade',
+        displayName: 'Upgrade',
+        runListStrategy: 'static',
+        source: 'test',
+      });
+      t.dead(1, { type: 'onboarding_upgrade', status, repositoryId: repoId });
+      t.dead(2, {
+        type: 'onboarding',
+        status: 'completed',
+        repositoryId: repoId,
+        completedAt: new Date(),
+        deadAt: null,
+      });
+      t.fake.insert(schema.projectStateConflicts, {
+        id: uuid(9),
+        repositoryId: repoId,
+        unit: 'project/render.json#projectName',
+        resolvedAt: null,
+      });
+      const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+      expect(await reviveDeadTasks(t.db, t.deps)).toEqual({ revived: 0, held: 1, failed: 0 });
+      expect(info).toHaveBeenCalledWith(
+        expect.objectContaining({ taskId: uuid(1), reason: 'contested' }),
+        expect.any(String),
+      );
+      expect(t.task(1).deadAt).toEqual(DEAD_AT);
+      expect(t.fake.rows(schema.taskEvents)).toEqual([]);
+      vi.useFakeTimers();
+      const stop = retryHeldRevivals(t.db, t.deps);
+      try {
+        await vi.advanceTimersByTimeAsync(DEAD_TASK_REVIVE_RETRY_MS);
+        expect(t.task(1).deadAt).toEqual(DEAD_AT);
+        expect(t.fake.rows(schema.taskEvents)).toEqual([]);
+        expect(vi.getTimerCount()).toBe(1);
+        await t.fake.db
+          .update(schema.projectStateConflicts)
+          .set({ resolvedAt: new Date(), resolution: 'keep_mine' })
+          .where(eq(schema.projectStateConflicts.id, uuid(9)));
+        await vi.advanceTimersByTimeAsync(DEAD_TASK_REVIVE_RETRY_MS);
+        expect(t.task(1)).toMatchObject({ deadAt: null, orchestrationEpoch: 4 });
+        expect(t.fake.rows(schema.taskEvents)).toMatchObject([
+          { taskId: uuid(1), eventType: 'task.revived' },
+        ]);
+        expect(vi.getTimerCount()).toBe(0);
+        expect(t.sent).toEqual(status === 'queued' ? [`start ${uuid(1)}`] : []);
+      } finally {
+        stop();
+      }
+    },
+  );
+
+  it.each(
+    (['failed', 'running', 'queued'] as const).flatMap((status) =>
+      (
+        [
+          { reason: 'root-claim', claimKind: 'reset' },
+          { reason: 'root-claim', claimKind: 'refresh' },
+          { reason: 'live-upgrade', claimKind: null },
+          { reason: 'live-onboarding', claimKind: null },
+        ] as const
+      ).map(({ reason, claimKind }) => ({ status, reason, claimKind })),
+    ),
+  )(
+    'logs and retries the transient $reason ($claimKind) refusal for a $status dead task once it clears',
+    async ({ status, reason, claimKind }) => {
+      const t = setup();
+      const repoId = uuid(8);
+      t.fake.insert(schema.repositories, {
+        id: repoId,
+        userId: USER,
+        name: 'repo',
+        source: 'blank',
+        ...(reason === 'root-claim' ? { rootClaimedAt: new Date(), rootClaimKind: claimKind } : {}),
+      });
+      t.fake.insert(schema.taskTypeDefinitions, {
+        slug: 'onboarding',
+        displayName: 'Onboarding',
+        runListStrategy: 'static',
+        source: 'test',
+      });
+      t.dead(1, { type: 'onboarding', status, repositoryId: repoId });
+      if (reason !== 'root-claim')
+        t.dead(2, {
+          type: reason === 'live-upgrade' ? 'onboarding_upgrade' : 'onboarding',
+          status: 'running',
+          repositoryId: repoId,
+          deadAt: null,
+        });
+      const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+      expect(await reviveDeadTasks(t.db, t.deps)).toEqual({ revived: 0, held: 1, failed: 0 });
+      expect(info).toHaveBeenCalledWith(
+        expect.objectContaining({ taskId: uuid(1), reason }),
+        expect.any(String),
+      );
+      expect(t.task(1).deadAt).toEqual(DEAD_AT);
+      vi.useFakeTimers();
+      const stop = retryHeldRevivals(t.db, t.deps);
+      if (reason === 'root-claim')
+        await t.fake.db
+          .update(schema.repositories)
+          .set({ rootClaimedAt: null })
+          .where(eq(schema.repositories.id, repoId));
+      else
+        await t.fake.db
+          .update(schema.tasks)
+          .set({ status: 'cancelled' })
+          .where(eq(schema.tasks.id, uuid(2)));
+      await vi.advanceTimersByTimeAsync(DEAD_TASK_REVIVE_RETRY_MS);
+      expect(t.task(1).deadAt).toBeNull();
+      expect(t.fake.rows(schema.taskEvents)).toHaveLength(1);
+      stop();
+    },
+  );
+  it('logs a deleted repository as permanent without retrying it', async () => {
+    const t = setup();
+    t.dead(1, { repositoryId: null, metadata: {} });
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+    expect(await reviveDeadTasks(t.db, t.deps)).toEqual({ revived: 0, held: 0, failed: 0 });
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: uuid(1), reason: 'no-repository' }),
+      expect.any(String),
+    );
+    t.untouched();
   });
 });

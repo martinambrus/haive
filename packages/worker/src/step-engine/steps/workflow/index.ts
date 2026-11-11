@@ -139,8 +139,8 @@ export function registerWorkflowSteps(registry: StepRegistry): void {
   registry.register(dagExecuteStep);
   registry.register(phase2ImplementStep);
   registry.register(codeSimplifyStep);
-  registry.register(phase4ValidateStep);
   registry.register(ddevReconcileStep);
+  registry.register(phase4ValidateStep);
   registry.register(testManagementStep);
   registry.register(phase5VerifyStep);
   registry.register(browserSetupStep);

@@ -1,3 +1,4 @@
+import { stageAllArgs } from '../../../repo/git-stage.js';
 import { initialGitlinkWarnings } from './_gitlink-registration.js';
 import { warnStep } from '../../../project-state/branch-revert.js';
 import path from 'node:path';
@@ -157,7 +158,7 @@ async function initGitRepo(
   // old ownership marker to become tracked and appear in every linked worktree.
   await initGitWorkspace(ctx.repoPath, initBranch);
   await initialGitlinkWarnings(ctx);
-  const add = await gitRun(ctx.repoPath, ['add', '-A']);
+  const add = await gitRun(ctx.repoPath, stageAllArgs());
   if (add.code !== 0) {
     throw new Error(`git add -A failed (exit ${add.code}): ${add.stderr || add.stdout}`);
   }

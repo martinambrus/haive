@@ -389,14 +389,17 @@ describe('POST /tasks/:id/action', () => {
     const fake = createFakeDb({
       modules: schema.modules,
       tasks: schema.tasks,
+      repositories: schema.repositories,
       taskSteps: schema.taskSteps,
       taskEvents: schema.taskEvents,
       cliInvocations: schema.cliInvocations,
     });
+    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', status: 'ready' });
     fake.insert(schema.tasks, {
       id: TASK,
       userId: USER,
       type: 'workflow',
+      repositoryId: REPO,
       title: 'a task',
       orchestrationEpoch: 1,
       currentRound: 0,
@@ -494,6 +497,7 @@ describe('POST /tasks/:id/steps/:stepId/action', () => {
     const fake = createFakeDb({
       modules: schema.modules,
       tasks: schema.tasks,
+      repositories: schema.repositories,
       taskSteps: schema.taskSteps,
       taskEvents: schema.taskEvents,
       cliInvocations: schema.cliInvocations,
@@ -502,10 +506,12 @@ describe('POST /tasks/:id/steps/:stepId/action', () => {
       stepCatalog: schema.stepCatalog,
     });
     seedStepCatalog(fake);
+    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', status: 'ready' });
     fake.insert(schema.tasks, {
       id: TASK,
       userId: USER,
       type: 'workflow',
+      repositoryId: REPO,
       title: 'a task',
       status: 'failed',
       errorMessage: 'boom',
@@ -708,6 +714,7 @@ describe('PATCH /tasks/:id/steps/:stepId/cli-provider', () => {
     const fake = createFakeDb({
       modules: schema.modules,
       tasks: schema.tasks,
+      repositories: schema.repositories,
       taskSteps: schema.taskSteps,
       taskEvents: schema.taskEvents,
       cliInvocations: schema.cliInvocations,
@@ -724,10 +731,12 @@ describe('PATCH /tasks/:id/steps/:stepId/cli-provider', () => {
       label: 'claude-code',
       enabled: true,
     });
+    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', status: 'ready' });
     fake.insert(schema.tasks, {
       id: TASK,
       userId: USER,
       type: 'workflow',
+      repositoryId: REPO,
       title: 'a task',
       status: 'failed',
       errorMessage: 'boom',
@@ -902,13 +911,16 @@ describe.each([
     const fake = createFakeDb({
       modules: schema.modules,
       tasks: schema.tasks,
+      repositories: schema.repositories,
       taskSteps: schema.taskSteps,
       taskEvents: schema.taskEvents,
     });
+    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', status: 'ready' });
     fake.insert(schema.tasks, {
       id: TASK,
       userId: USER,
       type: 'workflow',
+      repositoryId: REPO,
       title: 'a task',
       status,
       errorMessage: status === 'failed' ? 'boom' : null,

@@ -25,6 +25,11 @@ import {
   readExistingLearnings,
   notRunSuffix,
   verifyNotRunNotes,
+  learningIndex,
+  skillIndex,
+  renderExistingLearnings,
+  renderExistingSkills,
+  LEARNING_INDEX_MAX,
 } from './11-phase-8-learning.js';
 import { INVESTIGATIONS_DIR, LEARNING_DRAFTS_DIR } from '@haive/shared/knowledge-paths';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN, fencedAgentBlock } from '../_untrusted-repo.js';
@@ -1197,5 +1202,135 @@ describe("the learning gate's git runner", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('every learning and skill stays listed past 60', () => {
+  const ids = (n: number): string[] =>
+    Array.from({ length: n }, (_, i) => `l-${String(i).padStart(3, '0')}`);
+  const learning = (id: string) => ({
+    id,
+    title: `Title ${id}`,
+    body: `# Title ${id}\n\nBody ${id}.`,
+  });
+  const openFirst = 'listed by title alone carries no excerpt';
+
+  const promptWith = (detected: Record<string, unknown>): string =>
+    phase8LearningStep.llm!.buildPrompt({
+      detected: {
+        taskTitle: 'Task',
+        taskDescription: '',
+        filesTouched: [],
+        verifyPassed: true,
+        existingSkills: [],
+        existingLearnings: [],
+        existingGlobalArticles: [],
+        otherGlobalArticleTitles: [],
+        otherGlobalArticleDescriptions: [],
+        omittedGlobalArticleCount: 0,
+        isBugFix: false,
+        historyDigest: { text: '' },
+        ...detected,
+      },
+      formValues: {},
+    });
+
+  it('lists 61 entries with none left out, and 500 of 501 with one left out', () => {
+    const small = learningIndex(ids(61).map(learning));
+    expect(small.entries.map((e) => e.id)).toEqual(ids(61));
+    expect(small.omitted).toBe(0);
+
+    const large = learningIndex(ids(501).map(learning));
+    expect(LEARNING_INDEX_MAX).toBe(500);
+    expect(large.entries.map((e) => e.id)).toEqual(ids(500));
+    expect(large.omitted).toBe(1);
+  });
+
+  it('orders by id whatever order the directory listed them in', () => {
+    const sorted = ids(70);
+    const shuffled = [
+      ...sorted.filter((_, i) => i % 2 === 1).reverse(),
+      ...sorted.filter((_, i) => i % 2 === 0),
+    ];
+    expect(learningIndex(shuffled.map(learning)).entries.map((e) => e.id)).toEqual(sorted);
+    expect(learningIndex(['b', 'a', 'B', 'a-2'].map(learning)).entries.map((e) => e.id)).toEqual([
+      'B',
+      'a',
+      'a-2',
+      'b',
+    ]);
+  });
+
+  it('gives the first 60 their excerpt and the rest their title only', () => {
+    const { entries } = learningIndex(ids(61).map(learning));
+    expect(entries.slice(0, 60).map((e) => e.excerpt)).toEqual(ids(60).map((id) => `Body ${id}.`));
+    expect(entries[60]).toEqual({ id: 'l-060', title: 'Title l-060', excerpt: '' });
+  });
+
+  it('leaves out and counts an id that would break its line, and puts an excerpt on one line', () => {
+    const text = renderExistingLearnings(
+      [
+        { id: 'a', title: 'A', excerpt: 'line one\n\nline two' },
+        { id: 'b\nforged', title: 'B', excerpt: 'x' },
+        { id: 'c', title: 'C more', excerpt: '' },
+      ],
+      2,
+    );
+    expect(text.split('\n')).toEqual([
+      '- a — A: line one line two',
+      '- c — C more',
+      '- (+3 further learning(s) not listed; they are files under `.haive-data/learnings/`)',
+    ]);
+    expect(renderExistingLearnings([])).toBe('(none yet)');
+    expect(renderExistingLearnings([{ id: 'x\ny', title: 'X', excerpt: 'e' }])).toBe(
+      '- (+1 further learning(s) not listed; they are files under `.haive-data/learnings/`)',
+    );
+  });
+
+  it('asks the agent to open a title-only learning before naming it, only when one is listed', () => {
+    const { entries, omitted } = learningIndex(ids(61).map(learning));
+    const prompt = promptWith({ existingLearnings: entries, omittedLearningCount: omitted });
+    expect(prompt).toContain(openFirst);
+    expect(prompt).toContain('`.haive-data/learnings/<id>.md`');
+    expect(prompt).toContain('- l-060 — Title l-060\n');
+    expect(prompt.indexOf(openFirst)).toBeLessThan(prompt.indexOf('=== Existing learnings'));
+
+    const short = learningIndex(ids(3).map(learning));
+    expect(promptWith({ existingLearnings: short.entries })).not.toContain(openFirst);
+  });
+
+  it('renders a stored detect output with an excerpt on every row as before', () => {
+    const prompt = promptWith({
+      existingLearnings: [
+        { id: 'x', title: 'X', excerpt: 'e' },
+        { id: 'y', title: 'Y', excerpt: 'f' },
+      ],
+    });
+    expect(prompt).toContain(
+      '=== Existing learnings (reconcile against these; use their id as targetId) ===\n- x — X: e\n- y — Y: f\n',
+    );
+    expect(prompt).not.toContain(openFirst);
+    expect(prompt).not.toContain('not listed');
+  });
+
+  it('lists skills past 60 with a description on the first 60 only, and accepts a tail id', () => {
+    const skills = ids(501).map((id) => ({ id, title: id, description: `Does ${id}.` }));
+    const { entries, omitted } = skillIndex(skills);
+    expect(entries.map((s) => s.id)).toEqual(ids(500));
+    expect(entries[59]!.description).toBe('Does l-059.');
+    expect(entries[60]!.description).toBe('');
+    expect(omitted).toBe(1);
+
+    const text = renderExistingSkills(entries, omitted).split('\n');
+    expect(text[59]).toBe('- l-059 — l-059: Does l-059.');
+    expect(text[60]).toBe('- l-060 — l-060');
+    expect(text.at(-1)).toBe('- (+1 further skill(s) not listed)');
+    expect(renderExistingSkills([])).toBe('(none yet)');
+
+    const ops = parseSkillSync(
+      { skillSync: { ops: [{ op: 'feature_update', skillId: 'l-499', rationale: 'r' }] } },
+      new Set(entries.map((s) => s.id)),
+    );
+    expect(ops.map((o) => o.skillId)).toEqual(['l-499']);
   });
 });

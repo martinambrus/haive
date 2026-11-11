@@ -8,6 +8,7 @@ import { PROVIDER_FATAL_HEADLINES } from '../src/queues/cli-exec/failure-class.j
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const TASK = '00000000-0000-4000-8000-000000000001';
+const REPO = '00000000-0000-4000-8000-0000000000e1';
 const ROW = '00000000-0000-4000-8000-0000000000c1';
 const RUN = '00000000-0000-4000-8000-0000000000d1';
 const AGENT = '00000000-0000-4000-8000-0000000000e1';
@@ -17,15 +18,18 @@ function setup(taskStatus: 'failed' | 'running') {
   const fake = createFakeDb({
     modules: schema.modules,
     tasks: schema.tasks,
+    repositories: schema.repositories,
     taskSteps: schema.taskSteps,
     cliInvocations: schema.cliInvocations,
     taskStepAgentMinings: schema.taskStepAgentMinings,
     taskEvents: schema.taskEvents,
   });
   const outage = `${PROVIDER_FATAL_HEADLINES.rate_limit}: 429`;
+  fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', status: 'ready' });
   fake.insert(schema.tasks, {
     id: TASK,
     userId: USER,
+    repositoryId: REPO,
     status: taskStatus,
     allowanceAutoResumeCount: 0,
   });

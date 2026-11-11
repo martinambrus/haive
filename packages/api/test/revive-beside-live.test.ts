@@ -19,6 +19,7 @@ vi.mock('../src/middleware/auth.js', () => ({
 }));
 
 import { Hono } from 'hono';
+import { eq } from 'drizzle-orm';
 import { liveTaskIdOfType, ONE_LIVE_UPGRADE_INDEX, schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { configService } from '@haive/shared';
@@ -495,4 +496,32 @@ describe('a task Retry from START that is refused', () => {
       expect(h.add).toHaveBeenCalledTimes(1);
     },
   );
+});
+
+describe('reviving a task whose repository was deleted', () => {
+  describe.each(['workflow', 'onboarding', 'onboarding_upgrade', 'kb_author'])('%s', (type) => {
+    it.each(revivals)('refuses $name with an actionable 409', async (revival) => {
+      const t = setup(type, revival);
+      await t.fake.db.delete(schema.repositories).where(eq(schema.repositories.id, REPO));
+      const res = await revival.request();
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({
+        code: 'task_repository_deleted',
+        error: 'The repository of this task was deleted; it cannot be retried.',
+      });
+      expect(t.task()).toMatchObject({ status: 'failed', orchestrationEpoch: 3 });
+      expect(h.add).not.toHaveBeenCalled();
+    });
+  });
+  it('still admits a task explicitly created without a repository', async () => {
+    const revival = revivals[0]!;
+    const t = setup('kb_author', revival);
+    await t.fake.db.delete(schema.repositories).where(eq(schema.repositories.id, REPO));
+    await t.fake.db
+      .update(schema.tasks)
+      .set({ repositoryId: null, metadata: { anchorRepositoryId: null } })
+      .where(eq(schema.tasks.id, TASK));
+    const res = await revival.request();
+    expect(res.status).toBe(200);
+  });
 });

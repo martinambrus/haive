@@ -88,6 +88,8 @@ export async function refreshProjectStateOutcome(
   db: Database,
   repositoryId: string,
   expectedCheckout?: NamedCheckout,
+  /** A private recovery replacement, before it is published under the rebuild's task fence. */
+  replacementPath?: string,
 ): Promise<ProjectStateRefreshOutcome> {
   const [repo] = await db
     .select({
@@ -97,7 +99,7 @@ export async function refreshProjectStateOutcome(
     .from(schema.repositories)
     .where(eq(schema.repositories.id, repositoryId))
     .limit(1);
-  const repoPath = repo?.storagePath ?? repo?.localPath ?? null;
+  const repoPath = replacementPath ?? repo?.storagePath ?? repo?.localPath ?? null;
   if (!repoPath) return { outcome: 'absent' };
   // The row stays dirty: that is the signal to write the record once the checkout is back.
   if (await checkoutMissing(repoPath)) {
@@ -169,6 +171,7 @@ export async function refreshProjectStateOutcome(
       refuseDuringGitOperation: true,
       expectedCheckout,
       refuseWhileHeld: true,
+      discardWriteIntentOnFailure: replacementPath !== undefined,
     });
     if (written?.blocked) return { outcome: 'blocked', ...written.blocked };
   } catch (err) {
@@ -180,6 +183,8 @@ export async function refreshProjectStateOutcome(
     if (err instanceof ProjectStateMovedError) return { outcome: 'superseded' };
     throw err;
   }
+  // Refresh owns only the record. A deferred upgrade has already released its checkout by the
+  // time this runs, so retirement waits for the next 02 or 12 and its normal guards and staging.
   return { outcome: 'written' };
 }
 
@@ -196,10 +201,14 @@ export async function sweepDirtyProjectStates(db: Database): Promise<number> {
     )
     .where(
       and(
-        lt(schema.projectStateOutbox.writtenRevision, schema.projectStateOutbox.revision),
+        or(
+          lt(schema.projectStateOutbox.writtenRevision, schema.projectStateOutbox.revision),
+          isNotNull(schema.projectStateOutbox.rulesReconcileIntent),
+        ),
         or(
           isNotNull(schema.repositories.renderContext),
           isNotNull(schema.projectStateOutbox.writeIntent),
+          isNotNull(schema.projectStateOutbox.rulesReconcileIntent),
         ),
       ),
     )

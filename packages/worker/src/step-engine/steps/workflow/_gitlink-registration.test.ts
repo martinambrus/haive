@@ -299,8 +299,14 @@ describe('unregisteredGitlinks', () => {
 });
 
 describe('stageAllArgs', () => {
-  it('is a plain add -A with nothing excluded', () => {
-    expect(stageAllArgs([])).toEqual(['add', '-A']);
+  it('excludes writer temp files even with no excluded repositories', () => {
+    expect(stageAllArgs([])).toEqual([
+      'add',
+      '-A',
+      '--',
+      '.',
+      ':(top,exclude,glob)**/.*.haive-tmp-*',
+    ]);
   });
 
   it('excludes each repository by literal top-level path', () => {
@@ -309,6 +315,7 @@ describe('stageAllArgs', () => {
       '-A',
       '--',
       '.',
+      ':(top,exclude,glob)**/.*.haive-tmp-*',
       ':(top,exclude,literal)a',
       ':(top,exclude,literal)b c',
     ]);

@@ -55,10 +55,16 @@ async function seedTask(
   userId: string,
   stepId: string,
 ): Promise<{ taskId: string; taskStepId: string }> {
+  const [repository] = await db
+    .insert(schema.repositories)
+    .values({ userId, name: 'auto-resume smoke', source: 'local_path', status: 'ready' })
+    .returning({ id: schema.repositories.id });
+  if (!repository) throw new Error('repository insert failed');
   const taskId = randomUUID();
   await db.insert(schema.tasks).values({
     id: taskId,
     userId,
+    repositoryId: repository.id,
     type: 'plan_build',
     title: 'auto-resume smoke',
     status: 'failed',

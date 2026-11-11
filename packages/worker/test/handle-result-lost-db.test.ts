@@ -1,7 +1,13 @@
-import { eq } from 'drizzle-orm';
+import { readValidationSnapshot } from '../src/step-engine/steps/workflow/_validation-snapshot.js';
+import { execFileSync } from 'node:child_process';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { logger, type WorkflowType } from '@haive/shared';
+import { promptStepEntrySchema } from '@haive/shared/modularity';
 import {
   handleResult,
   markTaskCancelled,
@@ -10,7 +16,8 @@ import {
 import type { ResolvedTaskContext } from '../src/queues/run-list.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
-import type { AdvanceStepResult } from '../src/step-engine/step-runner.js';
+import { finishedRoutingVerdict, type AdvanceStepResult } from '../src/step-engine/step-runner.js';
+import { phase4ValidateStep } from '../src/step-engine/steps/workflow/07b-phase-4-validate.js';
 
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
@@ -100,6 +107,7 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
 
   const stub = (id: string, index: number): StepDefinition =>
     ({
+      editsCodeOrTests: ['08b-test-management', '08a-browser-verify'].includes(id),
       metadata: {
         id,
         workflowType: 'workflow' as WorkflowType,
@@ -423,6 +431,19 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
     userId = user!.id;
     stepRegistry.override(stub(S, 1));
     stepRegistry.override(stub(FIX_TARGET, 2));
+    for (const [index, id] of [
+      '01-worktree-setup',
+      '07c-ddev-reconcile',
+      '07b-phase-4-validate',
+      '08b-test-management',
+      '08-phase-5-verify',
+      '08a-browser-verify',
+      '10-gate-3-commit',
+      '11-phase-8-learning',
+      '11d-skill-sync',
+    ].entries()) {
+      stepRegistry.override(stub(id, index + 3));
+    }
     setContainerCleanupRunner(async () => 0);
   });
 
@@ -435,6 +456,7 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
 
   afterEach(() => {
     vi.restoreAllMocks();
+    stepRegistry.override(stub('07b-phase-4-validate', 5));
   });
 
   afterAll(async () => {
@@ -442,6 +464,507 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
     await db.delete(schema.users).where(eq(schema.users.emailBlindIndex, EMAIL_INDEX));
     await db.$client.end({ timeout: 5 });
+  });
+
+  const lateFixerDirs: string[] = [];
+  afterEach(async () => {
+    for (const dir of lateFixerDirs.splice(0)) await rm(dir, { recursive: true, force: true });
+  });
+
+  const lateFixer = async (
+    source = '08b-test-management',
+    options: { ddev?: boolean; commit?: boolean } = {},
+  ) => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'haive-late-fixer-'));
+    lateFixerDirs.push(dir);
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.email', 'test@test.local');
+    git('config', 'user.name', 'Test');
+    await writeFile(path.join(dir, 'a.ts'), 'export const a = 1;');
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    await writeFile(path.join(dir, 'a.ts'), 'export const a = 2;');
+    const runList = [
+      ...(options.ddev === false ? [] : ['07c-ddev-reconcile']),
+      '07b-phase-4-validate',
+      '08b-test-management',
+      '08-phase-5-verify',
+      '08a-browser-verify',
+      ...(options.commit === false ? [] : ['10-gate-3-commit']),
+    ];
+    const taskId = await makeTask({
+      currentStepId: source,
+      runListSnapshot: runList,
+      maxFixRounds: 0,
+    });
+    const setup = await makeRow(taskId, {
+      stepId: '01-worktree-setup',
+      status: 'done',
+      output: { worktreePath: dir, baseBranch: 'main' },
+    });
+    const snapshot = await readValidationSnapshot({ db, taskId });
+    expect(snapshot).not.toBeNull();
+    await makeRow(taskId, {
+      stepId: '07b-phase-4-validate',
+      status: 'done',
+      output: { validationSnapshot: snapshot },
+    });
+    const row = await makeRow(taskId, { stepId: source, status: 'done' });
+    const ctx = ctxFor(taskId, { currentStepId: source, runListSnapshot: runList });
+    const hand = () => handleResult(db, ctx, source, { status: 'done', row, output: {} });
+    return { dir, row, ctx, taskId, hand, setup };
+  };
+
+  it('skips revalidation when 08b made no edits', async () => {
+    const w = await lateFixer();
+    await w.hand();
+    expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '08-phase-5-verify', round: 0 });
+    expect(await eventTypes(w.taskId)).not.toContain('validation.recheck_requested');
+  });
+
+  it.each([true, false])(
+    'rechecks custom prompt source edits only with file_write=%s',
+    async (writes) => {
+      const source = 'custom.demo.edit';
+      const w = await lateFixer(source);
+      const runListSnapshot = w.ctx.runListSnapshot!.map((id) =>
+        id === '08b-test-management' ? source : id,
+      );
+      const customSteps = {
+        [source]: promptStepEntrySchema.parse({
+          slug: 'edit',
+          title: 'Edit',
+          template: 'Edit the source',
+          capabilities: writes ? ['file_write'] : [],
+          timeoutMs: 60_000,
+        }),
+      };
+      await db
+        .update(schema.tasks)
+        .set({ runListSnapshot, customSteps })
+        .where(eq(schema.tasks.id, w.taskId));
+      await writeFile(path.join(w.dir, 'a.ts'), 'export const a = 3;');
+      await handleResult(db, { ...w.ctx, runListSnapshot, customSteps }, source, {
+        status: 'done',
+        row: w.row,
+        output: {},
+      });
+      expect(h.adds.at(-1)?.data).toMatchObject({
+        stepId: writes ? '07c-ddev-reconcile' : '08-phase-5-verify',
+        round: writes ? 1 : 0,
+      });
+      const events = await db.query.taskEvents.findMany({
+        where: eq(schema.taskEvents.taskId, w.taskId),
+      });
+      const recheck = events.find((event) => event.eventType === 'validation.recheck_requested');
+      if (writes)
+        expect(recheck?.payload).toMatchObject({
+          affectedFiles: ['a.ts'],
+          resumeStepId: '08-phase-5-verify',
+          round: 1,
+        });
+      else expect(recheck).toBeUndefined();
+      expect(await eventTypes(w.taskId)).not.toContain('fix_loop.requested');
+    },
+  );
+
+  it('reconciles a validation fixer before validating again within the hand-off cap', async () => {
+    const w = await lateFixer();
+    const validateId = '07b-phase-4-validate';
+    await db.update(schema.tasks).set({ maxFixRounds: 2 }).where(eq(schema.tasks.id, w.taskId));
+    const baseline = await readValidationSnapshot({ db, taskId: w.taskId });
+    await mkdir(path.join(w.dir, '.ddev'));
+    await writeFile(path.join(w.dir, '.ddev/config.yaml'), 'php_version: "8.4"');
+    const output = {
+      runtimeChanged: true as const,
+      verdict: 'ISSUES_FOUND' as const,
+      issues: [{ severity: 'high' as const, file: '.ddev/config.yaml', description: 'fixed' }],
+      validationSnapshot: baseline,
+    };
+    const [row] = await db
+      .update(schema.taskSteps)
+      .set({ output })
+      .where(and(eq(schema.taskSteps.taskId, w.taskId), eq(schema.taskSteps.stepId, validateId)))
+      .returning();
+    await db
+      .update(schema.tasks)
+      .set({ currentStepId: validateId })
+      .where(eq(schema.tasks.id, w.taskId));
+    expect(await finishedRoutingVerdict(db, w.taskId, phase4ValidateStep, output)).toBeNull();
+    const ctx = { ...w.ctx, currentStepId: validateId };
+    await handleResult(db, ctx, validateId, { status: 'done', row: row!, output });
+    expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '07c-ddev-reconcile', round: 1 });
+    expect(await eventTypes(w.taskId)).not.toContain('fix_loop.requested');
+    expect(await eventTypes(w.taskId)).not.toContain('fix_loop.started');
+    const reconcile = await makeRow(w.taskId, {
+      stepId: '07c-ddev-reconcile',
+      status: 'done',
+      round: 1,
+    });
+    await handleResult(
+      db,
+      { ...ctx, currentStepId: reconcile.stepId, currentRound: 1 },
+      reconcile.stepId,
+      {
+        status: 'done',
+        row: reconcile,
+        output: {},
+      },
+    );
+    expect(h.adds.at(-1)?.data).toMatchObject({ stepId: validateId, round: 1 });
+    const validated = await makeRow(w.taskId, {
+      stepId: validateId,
+      status: 'done',
+      round: 1,
+      output: { validationSnapshot: await readValidationSnapshot({ db, taskId: w.taskId }) },
+    });
+    await handleResult(db, { ...ctx, currentRound: 1 }, validateId, {
+      status: 'done',
+      row: validated,
+      output: validated.output,
+    });
+    expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '08b-test-management', round: 1 });
+  });
+
+  it.each([false, true])(
+    'bounds repeated runtime hand-offs with legacy events=%s',
+    async (legacy) => {
+      const w = await lateFixer();
+      const validateId = '07b-phase-4-validate';
+      stepRegistry.override(phase4ValidateStep as StepDefinition);
+      const runListSnapshot = [FIX_TARGET, ...w.ctx.runListSnapshot!];
+      await db
+        .update(schema.tasks)
+        .set({ currentStepId: validateId, runListSnapshot, maxFixRounds: 2 })
+        .where(eq(schema.tasks.id, w.taskId));
+      const baseline = await readValidationSnapshot({ db, taskId: w.taskId });
+      await mkdir(path.join(w.dir, '.ddev'));
+      const ctx = { ...w.ctx, runListSnapshot, currentStepId: validateId };
+      for (let round = 0; round < 3; round++) {
+        await writeFile(path.join(w.dir, '.ddev/config.yaml'), 'php_version: "8.' + round + '"');
+        const output = {
+          runtimeChanged: true,
+          verdict: 'ISSUES_FOUND',
+          issues: [
+            { severity: 'high', file: '.ddev/config.yaml', description: 'blocking configuration' },
+          ],
+          validationSnapshot: baseline,
+        };
+        const row =
+          round === 0
+            ? (
+                await db
+                  .update(schema.taskSteps)
+                  .set({ output })
+                  .where(
+                    and(
+                      eq(schema.taskSteps.taskId, w.taskId),
+                      eq(schema.taskSteps.stepId, validateId),
+                    ),
+                  )
+                  .returning()
+              )[0]!
+            : await makeRow(w.taskId, { stepId: validateId, round, status: 'done', output });
+        await handleResult(db, { ...ctx, currentRound: round }, validateId, {
+          status: 'done',
+          row,
+          output,
+        });
+        expect(h.adds.at(-1)?.data).toMatchObject({
+          stepId: round < 2 ? '07c-ddev-reconcile' : FIX_TARGET,
+          round: round + 1,
+        });
+        if (legacy)
+          await db.execute(
+            sql`update task_events set payload = payload - 'sourceStepId' where task_id = ${w.taskId} and event_type = 'validation.recheck_requested'`,
+          );
+      }
+      const events = await eventTypes(w.taskId);
+      expect(events.filter((type) => type === 'validation.recheck_requested')).toHaveLength(2);
+      expect(events.filter((type) => type === 'fix_loop.started')).toHaveLength(1);
+      expect(events.filter((type) => type === 'step.done')).toHaveLength(2);
+      // Once the ordinary fix budget is exhausted, the same output parks at its existing gate.
+      await db
+        .insert(schema.taskEvents)
+        .values({ taskId: w.taskId, eventType: 'fix_loop.started', payload: { round: 99 } });
+      const output = {
+        runtimeChanged: true,
+        verdict: 'ISSUES_FOUND',
+        issues: [{ severity: 'high', file: 'a.ts', description: 'still blocking' }],
+      };
+      const row = await makeRow(w.taskId, { stepId: validateId, round: 3, status: 'done', output });
+      h.adds.length = 0;
+      await handleResult(db, { ...ctx, currentRound: 3 }, validateId, {
+        status: 'done',
+        row,
+        output,
+      });
+      expect(h.adds).toEqual([]);
+      expect(await rowOf(row.id)).toMatchObject({ status: 'waiting_form' });
+      expect(await eventTypes(w.taskId)).toContain('fix_loop.escalated');
+    },
+  );
+  it.each([
+    { later: false, unreadable: false },
+    { later: false, unreadable: true },
+    { later: true, unreadable: false },
+    { later: true, unreadable: true },
+  ])(
+    'keeps bounded validation routing without an earlier 07c: %j',
+    async ({ later, unreadable }) => {
+      const w = await lateFixer('08b-test-management', { ddev: false });
+      const validateId = '07b-phase-4-validate';
+      stepRegistry.override(phase4ValidateStep as StepDefinition);
+      const runListSnapshot = [FIX_TARGET, ...w.ctx.runListSnapshot!];
+      if (later)
+        runListSnapshot.splice(runListSnapshot.indexOf(validateId) + 1, 0, '07c-ddev-reconcile');
+      await db
+        .update(schema.tasks)
+        .set({ currentStepId: validateId, runListSnapshot })
+        .where(eq(schema.tasks.id, w.taskId));
+      const baseline = await readValidationSnapshot({ db, taskId: w.taskId });
+      await mkdir(path.join(w.dir, '.ddev'));
+      await writeFile(path.join(w.dir, '.ddev/config.yaml'), 'php_version: "8.4"');
+      if (unreadable)
+        await db
+          .update(schema.taskSteps)
+          .set({ output: { worktreePath: path.join(w.dir, 'gone'), baseBranch: 'main' } })
+          .where(eq(schema.taskSteps.id, w.setup.id));
+      const output = {
+        runtimeChanged: true,
+        verdict: 'ISSUES_FOUND',
+        issues: [
+          { severity: 'high', file: '.ddev/config.yaml', description: 'blocking configuration' },
+        ],
+        validationSnapshot: unreadable ? null : baseline,
+      };
+      const [row] = await db
+        .update(schema.taskSteps)
+        .set({ output })
+        .where(and(eq(schema.taskSteps.taskId, w.taskId), eq(schema.taskSteps.stepId, validateId)))
+        .returning();
+      await handleResult(db, { ...w.ctx, currentStepId: validateId, runListSnapshot }, validateId, {
+        status: 'done',
+        row: row!,
+        output,
+      });
+      expect(await rowOf(row!.id)).toMatchObject({ status: 'waiting_form' });
+      const task = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, w.taskId) });
+      expect(task).toMatchObject({ status: 'waiting_user' });
+      expect(await eventTypes(w.taskId)).toContain('fix_loop.escalated');
+      expect(await eventTypes(w.taskId)).not.toContain('validation.recheck_requested');
+      expect(h.adds).toEqual([]);
+    },
+  );
+  it.each(['08b-test-management', '08a-browser-verify'])(
+    'revalidates actual edits after a successful %s without spending a fix round',
+    async (source) => {
+      const w = await lateFixer(source);
+      await writeFile(path.join(w.dir, 'a.test.ts'), 'test("new test", () => {});');
+      await w.hand();
+      expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '07c-ddev-reconcile', round: 1 });
+      const events = await db.query.taskEvents.findMany({
+        where: eq(schema.taskEvents.taskId, w.taskId),
+      });
+      expect(
+        events.find((e) => e.eventType === 'validation.recheck_requested')?.payload,
+      ).toMatchObject({
+        round: 1,
+        affectedFiles: ['a.test.ts'],
+        resumeStepId: source === '08b-test-management' ? '08-phase-5-verify' : '10-gate-3-commit',
+      });
+      expect(await eventTypes(w.taskId)).not.toContain('fix_loop.requested');
+
+      // 07c's existing no-drift skip still advances to 07b; the persisted return address
+      // survives a new context (as on worker recovery), and never dispatches the tester twice.
+      const reconciled = await makeRow(w.taskId, {
+        stepId: '07c-ddev-reconcile',
+        status: 'skipped',
+        round: 1,
+      });
+      const recovered = ctxFor(w.taskId, {
+        ...w.ctx,
+        currentStepId: reconciled.stepId,
+        currentRound: 1,
+      });
+      await handleResult(db, recovered, reconciled.stepId, { status: 'skipped', row: reconciled });
+      expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '07b-phase-4-validate', round: 1 });
+      const validated = await makeRow(w.taskId, {
+        stepId: '07b-phase-4-validate',
+        status: 'done',
+        round: 1,
+        output: { validationSnapshot: await readValidationSnapshot({ db, taskId: w.taskId }) },
+      });
+      await handleResult(db, { ...recovered, currentStepId: validated.stepId }, validated.stepId, {
+        status: 'done',
+        row: validated,
+        output: validated.output,
+      });
+      expect(h.adds.at(-1)?.data).toMatchObject({
+        stepId: source === '08b-test-management' ? '08-phase-5-verify' : '10-gate-3-commit',
+        round: 1,
+      });
+    },
+  );
+
+  it('hands off revalidation when a skipped 08b already changed files', async () => {
+    const w = await lateFixer();
+    await writeFile(path.join(w.dir, 'a.test.ts'), 'test("new", () => {});');
+    const [row] = await db
+      .update(schema.taskSteps)
+      .set({ status: 'skipped' })
+      .where(eq(schema.taskSteps.id, w.row.id))
+      .returning();
+    await handleResult(db, w.ctx, row!.stepId, { status: 'skipped', row: row! });
+    expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '07c-ddev-reconcile', round: 1 });
+    expect(await eventTypes(w.taskId)).toContain('validation.recheck_requested');
+    expect(await eventTypes(w.taskId)).not.toContain('fix_loop.started');
+  });
+
+  it('names the revalidation hand-off site when a Retry took only the source row', async () => {
+    const w = await lateFixer();
+    await writeFile(path.join(w.dir, 'a.test.ts'), 'test("new", () => {});');
+    afterEpochCheck(async () => {
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'pending' })
+        .where(eq(schema.taskSteps.id, w.row.id));
+    });
+    await w.hand();
+    expect(h.adds).toEqual([]);
+    expect(handoffLines()).toEqual([
+      expect.objectContaining({
+        level: 'info',
+        fields: expect.objectContaining({ site: 'revalidation_target', reason: 'row_reset' }),
+      }),
+    ]);
+  });
+
+  it('revalidates a non-DDEV custom type through 07b without adding an off-list step', async () => {
+    const w = await lateFixer('08b-test-management', { ddev: false });
+    await writeFile(path.join(w.dir, 'a.ts'), 'export const a = 3;');
+    await w.hand();
+    expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '07b-phase-4-validate', round: 1 });
+  });
+
+  it.each(['11-phase-8-learning', '11d-skill-sync'])(
+    'does not recheck non-code/test edits from %s in a list without a commit gate',
+    async (source) => {
+      const w = await lateFixer(source, { commit: false });
+      const runListSnapshot = [...w.ctx.runListSnapshot!, source];
+      await writeFile(path.join(w.dir, 'knowledge.md'), 'learning');
+      await handleResult(db, { ...w.ctx, runListSnapshot }, source, {
+        status: 'done',
+        row: w.row,
+        output: {},
+      });
+      expect(await eventTypes(w.taskId)).not.toContain('validation.recheck_requested');
+    },
+  );
+
+  it('does not recheck a code/test editor placed after the commit gate', async () => {
+    const w = await lateFixer();
+    const runListSnapshot = ['07b-phase-4-validate', '10-gate-3-commit', '08b-test-management'];
+    await writeFile(path.join(w.dir, 'a.ts'), 'export const a = 3;');
+    await handleResult(db, { ...w.ctx, runListSnapshot }, w.row.stepId, {
+      status: 'done',
+      row: w.row,
+      output: {},
+    });
+    expect(await eventTypes(w.taskId)).not.toContain('validation.recheck_requested');
+  });
+
+  it('falls back to 07b for a pinned old-order run list instead of looping at 07c', async () => {
+    const w = await lateFixer();
+    const runListSnapshot = [
+      '07b-phase-4-validate',
+      '07c-ddev-reconcile',
+      '08b-test-management',
+      '08-phase-5-verify',
+      '10-gate-3-commit',
+    ];
+    await db.update(schema.tasks).set({ runListSnapshot }).where(eq(schema.tasks.id, w.taskId));
+    await writeFile(path.join(w.dir, 'a.ts'), 'export const a = 3;');
+    await handleResult(db, { ...w.ctx, runListSnapshot }, w.row.stepId, {
+      status: 'done',
+      row: w.row,
+      output: {},
+    });
+    expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '07b-phase-4-validate', round: 1 });
+    const row = await makeRow(w.taskId, {
+      stepId: '07b-phase-4-validate',
+      status: 'done',
+      round: 1,
+      output: { validationSnapshot: await readValidationSnapshot({ db, taskId: w.taskId }) },
+    });
+    await handleResult(
+      db,
+      { ...w.ctx, runListSnapshot, currentRound: 1, currentStepId: row.stepId },
+      row.stepId,
+      { status: 'done', row, output: row.output },
+    );
+    expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '08-phase-5-verify', round: 1 });
+  });
+
+  it('refuses an unreadable final change rather than assuming 08b made no edits', async () => {
+    const w = await lateFixer();
+    await db
+      .update(schema.taskSteps)
+      .set({ output: { worktreePath: path.join(w.dir, 'gone'), baseBranch: 'main' } })
+      .where(eq(schema.taskSteps.id, w.setup.id));
+    await w.hand();
+    const row = await db.query.taskSteps.findFirst({ where: eq(schema.taskSteps.id, w.row.id) });
+    expect(row).toMatchObject({
+      status: 'failed',
+      errorMessage: expect.stringContaining('Cannot snapshot final changes'),
+    });
+    const task = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, w.taskId) });
+    // finishFailedStep is the existing hand-off convention: a failed step also fails its task.
+    expect(task?.status).toBe('failed');
+    expect(h.adds).toEqual([]);
+    expect(await eventTypes(w.taskId)).not.toContain('validation.recheck_requested');
+  });
+
+  it('rolls back the revalidation pointer when its durable return-address write fails', async () => {
+    const w = await lateFixer();
+    await writeFile(path.join(w.dir, 'a.test.ts'), 'test("new test", () => {});');
+    await db.execute(sql`create function f4_refuse_recheck() returns trigger language plpgsql as $$
+      begin
+        if NEW.event_type = 'validation.recheck_requested' then raise exception 'recheck event refused'; end if;
+        return NEW;
+      end $$`);
+    await db.execute(
+      sql`create trigger f4_refuse_recheck before insert on task_events for each row execute function f4_refuse_recheck()`,
+    );
+    try {
+      await expect(w.hand()).rejects.toThrow();
+      const task = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, w.taskId) });
+      expect(task).toMatchObject({ currentStepId: '08b-test-management', currentRound: 0 });
+      expect(h.adds).toEqual([]);
+      expect(await eventTypes(w.taskId)).not.toContain('validation.recheck_requested');
+    } finally {
+      await db.execute(sql`drop trigger f4_refuse_recheck on task_events`);
+      await db.execute(sql`drop function f4_refuse_recheck()`);
+    }
+  });
+
+  it('hands off no revalidation and records no request after a Retry takes the source', async () => {
+    const w = await lateFixer();
+    await writeFile(path.join(w.dir, 'a.test.ts'), 'test("new test", () => {});');
+    afterEpochCheck(async () => {
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'pending' })
+        .where(eq(schema.taskSteps.id, w.row.id));
+      await db
+        .update(schema.tasks)
+        .set({ orchestrationEpoch: E + 1 })
+        .where(eq(schema.tasks.id, w.taskId));
+    });
+    await w.hand();
+    expect(h.adds).toEqual([]);
+    expect(await eventTypes(w.taskId)).not.toContain('validation.recheck_requested');
   });
 
   const ROW_TAKEN: { reason: string; status: StepRow['status']; what: string }[] = [

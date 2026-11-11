@@ -353,3 +353,49 @@ describe('persistDetection and a legacy tooling.json next to the tooling unit', 
     });
   });
 });
+
+describe('checkout recovery preserves project data', () => {
+  it('keeps settings and plan records instead of importing the rebuilt checkout mirrors', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'recovery-data-'));
+    dirs.push(root);
+    await mkdir(join(root, '.haive-data'));
+    await writeFile(
+      join(root, '.haive-data/exclusions.json'),
+      '{"schemaVersion":1,"scopeExcludeGlobs":["incoming/**"]}',
+    );
+    const fake = createFakeDb({
+      repositories: schema.repositories,
+      planNodes: schema.planNodes,
+    });
+    fake.insert(schema.repositories, {
+      id: REPO,
+      userId: USER,
+      name: 'keep',
+      source: 'git_https',
+      status: 'error',
+      errorCode: 'checkout_repair_needed',
+      scopeExcludeGlobs: ['existing/**'],
+      agentRulesOverride: 'existing rules',
+    });
+    fake.insert(schema.planNodes, {
+      repositoryId: REPO,
+      parentId: null,
+      title: 'existing plan',
+      path: '/existing/',
+    });
+    const plan = structuredClone(fake.rows(schema.planNodes));
+    await persistDetection(fake.db as unknown as Database, REPO, root, 'Old folder kept.', {
+      preserveProjectData: true,
+    });
+    expect(fake.rows(schema.repositories)[0]).toMatchObject({
+      status: 'ready',
+      errorCode: null,
+      scopeExcludeGlobs: ['existing/**'],
+      agentRulesOverride: 'existing rules',
+    });
+    expect(fake.rows(schema.planNodes)).toEqual(plan);
+    expect(syncProjectStateFromCheckout).not.toHaveBeenCalled();
+    expect(importPlanMirror).not.toHaveBeenCalled();
+    expect(reconcilePlanFromCheckout).not.toHaveBeenCalled();
+  });
+});

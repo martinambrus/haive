@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -248,5 +249,21 @@ describe('POST /repos/upload/:id/complete', () => {
     expectOmitted(text, repository);
     expect(repository.id).not.toBe(REPO);
     expectStoredAsItWas();
+  });
+});
+
+it('serializes the structural repository error code in the polled list', async () => {
+  await fake.db
+    .update(schema.repositories)
+    .set({
+      status: 'error',
+      errorCode: 'checkout_repair_needed',
+      statusMessage: 'arbitrary copy',
+    })
+    .where(eq(schema.repositories.id, REPO));
+  const response = await app.request('/repos');
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({
+    repositories: [expect.objectContaining({ errorCode: 'checkout_repair_needed' })],
   });
 });

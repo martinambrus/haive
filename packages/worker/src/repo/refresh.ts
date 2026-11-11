@@ -1,7 +1,9 @@
+import { checkoutWorktreeRefusal } from '@haive/shared/repo-rebuild';
+import { CheckoutRepairNeededError } from './repair-needed.js';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { UnrecoverableError } from 'bullmq';
-import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
+import { and, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import {
   ensureDirNoFollow,
   lstatNoFollow,
@@ -11,8 +13,21 @@ import {
   renameNoFollow,
 } from '@haive/shared/fs-safe';
 import { lockRepositoryTasksKey, schema, type Database } from '@haive/database';
-import { CHECKOUT_HOLDING_TASK_STATUSES, logger, type RepoJobPayload } from '@haive/shared';
-import { assertCloneUrl, copyTree, gitClone, persistDetection, withRootClaim } from './clone.js';
+import {
+  CHECKOUT_HOLDING_TASK_STATUSES,
+  HAIVE_DATA_FILES,
+  REPOSITORY_ERROR_CODES,
+  logger,
+  type RepoJobPayload,
+} from '@haive/shared';
+import {
+  assertCloneUrl,
+  copyTree,
+  gitClone,
+  persistDetection,
+  restoreProjectData,
+  withRootClaim,
+} from './clone.js';
 import {
   MOVE_ATTEMPTS,
   putBackAfterFailure,
@@ -26,6 +41,7 @@ import {
 } from '../project-state/set-aside.js';
 import { headCommit } from '../plan/merge.js';
 import { seedPlanBaseFromCheckout } from '../plan/mirror.js';
+import { lockProjectState, recoverProjectStateWrite } from '../project-state/write.js';
 import { handBackAfterMove } from '../step-engine/git-merge.js';
 import { GitOperationUnreadableError } from './git-operation.js';
 import { GIT_TIMED_OUT, gitGaveNoAnswer, type GitRunResult } from './git-exec.js';
@@ -41,7 +57,7 @@ const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' 
 const firstLine = (text: string): string => text.trim().split('\n')[0] ?? '';
 
 /** Tasks holding this repository's checkout right now. `rootOnly` counts only tasks with no worktree of
- *  their own, which work in the checkout itself; `excludeTaskId` leaves out the caller's task. */
+ *  their own (including a latest skipped 01), which work in the checkout itself; `excludeTaskId` leaves out the caller's task. */
 export async function checkoutHoldingTasks(
   db: Pick<Database, 'query'>,
   repositoryId: string,
@@ -53,7 +69,26 @@ export async function checkoutHoldingTasks(
       inArray(schema.tasks.status, [...CHECKOUT_HOLDING_TASK_STATUSES]),
       isNull(schema.tasks.deadAt),
       opts.excludeTaskId ? ne(schema.tasks.id, opts.excludeTaskId) : undefined,
-      opts.rootOnly ? isNull(schema.tasks.worktreePath) : undefined,
+      // Mirror decideTaskWorktree: latest Skip overrides audit columns; otherwise columns win,
+      // with the latest output as the fallback for tasks created before those columns existed.
+      opts.rootOnly
+        ? sql<boolean>`coalesce((
+            select case
+              when latest.status = 'skipped' then true
+              when nullif(${schema.tasks.worktreePath}, '') is not null
+                or nullif(${schema.tasks.worktreeBranch}, '') is not null then false
+              when (jsonb_typeof(latest.output -> 'worktreePath') = 'string'
+                    and nullif(latest.output ->> 'worktreePath', '') is not null)
+                or (jsonb_typeof(latest.output -> 'branchName') = 'string'
+                    and nullif(latest.output ->> 'branchName', '') is not null) then false
+              else true
+            end
+            from task_steps as latest
+            where latest.task_id = ${schema.tasks.id} and latest.step_id = '01-worktree-setup'
+            order by latest.round desc limit 1
+          ), nullif(${schema.tasks.worktreePath}, '') is null
+             and nullif(${schema.tasks.worktreeBranch}, '') is null)`
+        : undefined,
     ),
     columns: { id: true },
   });
@@ -85,7 +120,7 @@ const REPAIR_ADVICE =
  *  reads cannot prove dead (a corrupt config, unreadable, linked or external metadata), or a HEAD
  *  read other than exit 0 or 1. `repairNeeded` marks the ones where git answered with an exit
  *  status of its own.
- *  Unknown must never trigger a rebuild: it moves the folder. */
+ *  An ordinary refresh never rebuilds unknown metadata; explicit recovery may retain it aside. */
 export async function usableCheckout(
   dest: string,
 ): Promise<'usable' | 'unusable' | { unknown: string; repairNeeded?: true }> {
@@ -452,6 +487,8 @@ async function rebuild(
   rel: string,
   dest: string,
 ): Promise<void> {
+  const worktreeRefusal = await checkoutWorktreeRefusal(db, payload.repositoryId, dest);
+  if (worktreeRefusal) throw new Error(worktreeRefusal);
   const fromFolder = payload.source === 'local_path' ? payload.localPath : undefined;
   const fromRemote = payload.source === 'local_path' ? undefined : payload.remoteUrl;
   if (!fromFolder && !fromRemote) {
@@ -475,30 +512,166 @@ async function rebuild(
       );
     }
     if (source !== 'usable') {
-      throw new Error(
+      const message =
         `Not refreshed: the folder this repository was imported from (${fromFolder}) could not be examined (${source.unknown}). Nothing was moved.` +
-          (source.repairNeeded ? ' Retry cannot help until that folder is repaired.' : ''),
-      );
+        (source.repairNeeded ? ' Retry cannot help until that folder is repaired.' : '');
+      throw source.repairNeeded
+        ? new CheckoutRepairNeededError(message, REPOSITORY_ERROR_CODES.SOURCE_REPAIR_NEEDED)
+        : new Error(message);
     }
   }
   const auth =
     fromRemote && payload.credentialsId
       ? await buildCredentialHelper(db, payload.credentialsId, payload.userId, payload.remoteUrl)
       : undefined;
-  const aside = await moveAside(repoStorageRoot, rel);
+  if (payload.recoverCheckout) {
+    const pending = await db.transaction(async (tx) => {
+      await lockRepositoryTasksKey(tx, payload.repositoryId);
+      await lockProjectState(tx, payload.repositoryId);
+      const [row] = await tx
+        .select({ intent: schema.projectStateOutbox.writeIntent })
+        .from(schema.projectStateOutbox)
+        .where(eq(schema.projectStateOutbox.repositoryId, payload.repositoryId))
+        .limit(1);
+      if (row?.intent == null) return { recover: false };
+      const intent = row.intent as {
+        privateReplacement?: string | null;
+        stage?: { rel?: unknown } | null;
+      };
+      let reason: string | undefined;
+      if (typeof intent.privateReplacement === 'string') {
+        reason = 'the write belongs to an abandoned private replacement';
+      } else if (!(await lstatNoFollow(repoStorageRoot, rel, { strict: true }))) {
+        // The tree it journaled is gone; there are no checkout bytes or images to replay here.
+        reason = 'the checkout is absent, so its journal cannot be replayed';
+      } else if (
+        intent.privateReplacement === undefined &&
+        typeof intent.stage?.rel === 'string' &&
+        /^\.haive-data\/\.state-writes\/[0-9a-f-]{36}$/.test(intent.stage.rel) &&
+        !(await lstatNoFollow(dest, intent.stage.rel, { strict: true }))
+      ) {
+        // Older workers recorded no tree marker. A journal present under dest still goes through
+        // normal recovery (including identity checks); one absent here cannot belong to this tree.
+        reason =
+          'the legacy journal stage is absent from the checkout; nothing can be replayed here';
+      }
+      if (!reason) return { recover: true };
+      await tx
+        .update(schema.projectStateOutbox)
+        .set({ writeIntent: null })
+        .where(eq(schema.projectStateOutbox.repositoryId, payload.repositoryId));
+      // Retain every tree and journal image. Only detach the intent from the next checkout.
+      return {
+        recover: false,
+        reason,
+        privateReplacement: intent.privateReplacement,
+        stage: intent.stage?.rel,
+      };
+    });
+    if ('reason' in pending) {
+      logger.warn(
+        { repositoryId: payload.repositoryId, ...pending },
+        'abandoned project data write intent cleared before rebuild',
+      );
+    }
+    if (pending.recover) {
+      try {
+        // Its journal belongs to the current tree, never to the replacement or a later retry.
+        await recoverProjectStateWrite(db, payload.repositoryId, dest);
+      } catch (err) {
+        throw new Error(
+          `Not refreshed: the pending project data write could not be recovered (${err instanceof Error ? err.message : String(err)}). Nothing was moved.`,
+          { cause: err },
+        );
+      }
+    }
+  }
+  const aside = await db.transaction(async (tx) => {
+    // Starts and revivals take this key before writing task state. Recount after the slow
+    // preparation, then hold the key only through the rename, never through the clone or copy.
+    await lockRepositoryTasksKey(tx, payload.repositoryId);
+    const worktreeRefusal = await checkoutWorktreeRefusal(tx, payload.repositoryId, dest);
+    if (worktreeRefusal) throw new Error(worktreeRefusal);
+    const holding = await checkoutHoldingTasks(tx, payload.repositoryId);
+    if (holding > 0) throw new Error(holdingRefusal(holding));
+    if (payload.recoverCheckout) {
+      await lockProjectState(tx, payload.repositoryId);
+      const [pending] = await tx
+        .select({ intent: schema.projectStateOutbox.writeIntent })
+        .from(schema.projectStateOutbox)
+        .where(eq(schema.projectStateOutbox.repositoryId, payload.repositoryId))
+        .limit(1);
+      if (pending?.intent != null)
+        throw new Error(
+          'Not refreshed: a pending project data write appeared before the rebuild. Nothing was moved; retry after recovery finishes.',
+        );
+    }
+    return moveAside(repoStorageRoot, rel);
+  });
   // Publish a folder copy only after it finishes. A failed or interrupted copy must never
   // leave a partial checkout that the next refresh could mistake for ready.
-  const stagingRel = fromFolder ? `${rel}.rebuild-${randomUUID()}` : null;
+  const stagingRel =
+    fromFolder || payload.recoverCheckout ? `${rel}.rebuild-${randomUUID()}` : null;
+  let restoring = false;
+  let published = false;
   try {
     if (fromFolder) {
       await ensureDirNoFollow(repoStorageRoot, stagingRel!);
       await copyTree(fromFolder, path.join(repoStorageRoot, stagingRel!));
-      await renameNoFollow(repoStorageRoot, stagingRel!, rel, { noReplace: true });
     } else {
       await ensureDirNoFollow(repoStorageRoot, payload.userId);
-      await gitClone(fromRemote!, dest, payload.branch, auth, { db, userId: payload.userId });
+      await gitClone(
+        fromRemote!,
+        stagingRel ? path.join(repoStorageRoot, stagingRel) : dest,
+        payload.branch,
+        auth,
+        { db, userId: payload.userId },
+      );
+    }
+    if (stagingRel) {
+      if (payload.recoverCheckout) {
+        // This is still a private replacement, never the preserved aside. No reader may see the
+        // source's stale projections before the ordinary writers recreate this install's data.
+        const replacement = path.join(repoStorageRoot, stagingRel);
+        for (const projection of [
+          HAIVE_DATA_FILES.environment,
+          HAIVE_DATA_FILES.exclusions,
+          HAIVE_DATA_FILES.tooling,
+        ]) {
+          await removeNoFollow(replacement, projection, { recursive: true });
+        }
+        const built = await usableCheckout(replacement);
+        if (built !== 'usable')
+          throw new Error('the private recovery replacement is not a usable checkout');
+        // All writes stay off the public checkout. The writers commit their normal journals and
+        // bases before publication; keep this sibling on failure, including any undo capability.
+        restoring = true;
+        await restoreProjectData(db, payload.repositoryId, replacement);
+        await db.transaction(async (tx) => {
+          // Reuse the rebuild fence at publication too: a task admitted during the copy must
+          // not see a replacement or race its restore. No pool writer runs under this lock.
+          await lockRepositoryTasksKey(tx, payload.repositoryId);
+          const refusal = await checkoutWorktreeRefusal(tx, payload.repositoryId, dest);
+          if (refusal) throw new Error(refusal);
+          const holding = await checkoutHoldingTasks(tx, payload.repositoryId);
+          if (holding > 0) throw new Error(holdingRefusal(holding));
+          await renameNoFollow(repoStorageRoot, stagingRel, rel, { noReplace: true });
+          published = true;
+        });
+      } else {
+        await renameNoFollow(repoStorageRoot, stagingRel, rel, { noReplace: true });
+      }
     }
   } catch (err) {
+    if (restoring && stagingRel) {
+      throw failedAfterMove(
+        published
+          ? `the restored replacement was published, but the publication transaction failed (${err instanceof Error ? err.message : String(err)})`
+          : `the replacement's project data could not be restored or published (${err instanceof Error ? err.message : String(err)}); the private replacement was kept next to the checkout as ${path.basename(stagingRel)}`,
+        aside,
+        err,
+      );
+    }
     if (stagingRel) {
       try {
         await removeNoFollow(repoStorageRoot, stagingRel, { recursive: true });
@@ -522,20 +695,24 @@ async function rebuild(
   }
   const built = await usableCheckout(dest);
   if (built !== 'usable') {
-    throw failedAfterMove(
+    const failure = failedAfterMove(
       built === 'unusable'
         ? 'the rebuilt checkout is not usable'
         : `the rebuilt checkout could not be examined (${built.unknown})`,
       aside,
     );
+    throw typeof built === 'object' && built.repairNeeded
+      ? new CheckoutRepairNeededError(failure.message)
+      : failure;
   }
   await persistDetection(
     db,
     payload.repositoryId,
     dest,
     aside
-      ? `The previous folder was not a usable checkout; it was kept next to the checkout as ${path.basename(aside)}.`
+      ? `The previous folder was kept next to the checkout as ${path.basename(aside)}. Its files and unpushed commits are retained there.`
       : null,
+    ...(payload.recoverCheckout ? [{ preserveProjectData: true } as const] : []),
   );
 }
 
@@ -552,10 +729,16 @@ export async function handleRefresh(
     payload.repositoryId,
     async () => {
       const state = await usableCheckout(dest);
-      if (typeof state === 'object') {
-        // The queue starts at cloning. Throw so its catch records error and offers Retry;
-        // detection would import a mirror from a checkout we could not examine.
-        throw new Error(
+      // A read that never finished stays the transient failure below, not a repair verdict.
+      if (payload.checkCheckoutOnly && state === 'unusable') {
+        throw new CheckoutRepairNeededError(
+          'Not refreshed: the checkout still needs repair. Nothing was moved. Repair it in place or use Rebuild checkout.',
+        );
+      }
+      if (typeof state === 'object' && !payload.recoverCheckout) {
+        // Do not import mirrors from a checkout Git cannot examine.
+        const Failure = state.repairNeeded ? CheckoutRepairNeededError : Error;
+        throw new Failure(
           `Not refreshed: the checkout could not be examined (${state.unknown}). Nothing was moved.` +
             (state.repairNeeded ? ` ${REPAIR_ADVICE}` : ''),
         );

@@ -94,6 +94,7 @@ const STEP = '08b-test-management';
 
 describe.skipIf(!url)('Stop over a fix-loop gate row on Postgres', () => {
   let db: Database;
+  let repositoryId: string;
 
   const post = (path: string, body?: unknown) =>
     app.request(path, {
@@ -110,6 +111,7 @@ describe.skipIf(!url)('Stop over a fix-loop gate row on Postgres', () => {
       .insert(schema.tasks)
       .values({
         userId: USER,
+        repositoryId,
         type: 'workflow',
         title: 'gate-stop',
         status,
@@ -166,6 +168,11 @@ describe.skipIf(!url)('Stop over a fix-loop gate row on Postgres', () => {
       passwordHash: 'not-real',
       role: 'user',
     });
+    const [repository] = await db
+      .insert(schema.repositories)
+      .values({ userId: USER, name: 'gate-stop-wedge', source: 'local_path', status: 'ready' })
+      .returning({ id: schema.repositories.id });
+    repositoryId = repository!.id;
   });
 
   beforeEach(async () => {

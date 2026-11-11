@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { FormSchema } from '@haive/shared';
 import { ALL_REVIEW_DIMENSION_IDS } from '@haive/shared/review';
-import { validateFormValues } from '@haive/shared';
+import { configService, extractFormDefaults, validateFormValues } from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { runConfigStep } from '../src/step-engine/steps/workflow/06-run-config.js';
 
@@ -39,9 +39,16 @@ function leafFields(schema: FormSchema): Map<string, Record<string, unknown>> {
   return map;
 }
 
-function makeApplyCtx(): { ctx: StepContext; sets: Record<string, unknown>[] } {
+function makeApplyCtx(preAnswers: Record<string, Record<string, unknown>> | null = null): {
+  ctx: StepContext;
+  sets: Record<string, unknown>[];
+} {
   const sets: Record<string, unknown>[] = [];
   const db = {
+    select: () => ({
+      from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => [] }) }) }),
+    }),
+    query: { tasks: { findFirst: async () => ({ preAnswers }) } },
     update: () => ({
       set: (v: Record<string, unknown>) => {
         sets.push(v);
@@ -77,6 +84,88 @@ function applyArgs(formValues: Record<string, unknown>) {
 }
 
 describe('06-run-config form', () => {
+  it('shows downstream presets and keeps them on a full submit of displayed defaults', async () => {
+    const presets = {
+      '06b-sprint-planning': {
+        decision: 'use_single_agent',
+        autoResolveConflicts: false,
+        reviewEnabled: false,
+      },
+      '08-phase-5-verify': { runTest: false, runLint: false, runTypecheck: false },
+      '08a-browser-setup': { mode: 'skip' },
+      '08a-browser-verify': { mode: 'skip' },
+      '08b-test-management': { action: 'skip', runTests: false },
+      'custom.other': { unrelated: 'keep' },
+    };
+    const { ctx, sets } = makeApplyCtx(presets);
+    const config = vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+    let detected;
+    try {
+      detected = await runConfigStep.detect!(ctx);
+    } finally {
+      config.mockRestore();
+    }
+    // detect_output is persisted as JSON before the form is rendered.
+    detected = JSON.parse(JSON.stringify(detected));
+    const form = runConfigStep.form!(ctx, detected) as FormSchema;
+    expect(leafFields(form).get('testAction')!.default).toBe('skip');
+    const displayed = extractFormDefaults(form);
+    expect(displayed).toMatchObject({
+      sprintDecision: 'use_single_agent',
+      sprintAutoResolveConflicts: false,
+      sprintReviewEnabled: false,
+      verifyRunTest: false,
+      verifyRunLint: false,
+      verifyRunTypecheck: false,
+      browserMode: 'skip',
+      testAction: 'skip',
+      testRunTests: false,
+    });
+    const submitted = validateFormValues(form, displayed);
+    expect(submitted.success).toBe(true);
+    if (!submitted.success) throw new Error(submitted.issues.join('; '));
+    await runConfigStep.apply(ctx, {
+      detected,
+      formValues: submitted.data,
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(sets[0]!.preAnswers).toMatchObject(presets);
+  });
+
+  it.each(['08a-browser-setup', '08a-browser-verify'])(
+    'ignores unavailable preset options while showing a valid %s mode',
+    async (browserStep) => {
+      const { ctx } = makeApplyCtx({
+        [browserStep]: { mode: 'interactive' },
+        '08b-test-management': { action: 'unknown', runTests: 'false' },
+        '06b-sprint-planning': { decision: 'unknown' },
+      });
+      const config = vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+      let detected;
+      try {
+        detected = await runConfigStep.detect!(ctx);
+      } finally {
+        config.mockRestore();
+      }
+      const unavailable = extractFormDefaults(runConfigStep.form!(ctx, detected) as FormSchema);
+      expect(unavailable).toMatchObject({
+        browserMode: 'skip',
+        testAction: 'manage',
+        testRunTests: true,
+        sprintDecision: 'proceed',
+      });
+      const available = runConfigStep.form!(
+        ctx,
+        { ...detected, ddevMode: true },
+        {
+          browserMode: 'mcp',
+        },
+      ) as FormSchema;
+      expect(extractFormDefaults(available).browserMode).toBe('interactive');
+    },
+  );
+
   it('offers mcp/interactive browser modes only in ddev mode', () => {
     const withDdev = runConfigStep.form!(makeApplyCtx().ctx, detectedStub(true)) as FormSchema;
     const without = runConfigStep.form!(makeApplyCtx().ctx, detectedStub(false)) as FormSchema;
@@ -88,7 +177,7 @@ describe('06-run-config form', () => {
     expect(modeWithout.options.map((o) => o.value)).not.toContain('interactive');
   });
 
-  it('never auto-submits — the user always decides the run config', () => {
+  it('does not auto-submit defaults without a preset', () => {
     const schema = runConfigStep.form!(makeApplyCtx().ctx, detectedStub(true)) as FormSchema;
     expect(schema.autoSubmit).toBeUndefined();
     expect(runConfigStep.metadata.autoSubmitDefaults).toBeUndefined();
@@ -200,6 +289,80 @@ describe('06-run-config server-side validation', () => {
 });
 
 describe('06-run-config apply', () => {
+  it('keeps mapped presets when the corresponding config fields were omitted', async () => {
+    const presets = {
+      '06b-sprint-planning': {
+        decision: 'use_single_agent',
+        autoResolveConflicts: false,
+        reviewEnabled: false,
+      },
+      '08-phase-5-verify': { runTest: false, runLint: false, runTypecheck: false },
+      '08a-browser-setup': { mode: 'interactive' },
+      '08a-browser-verify': { mode: 'mcp' },
+      '08b-test-management': { action: 'skip', runTests: false },
+      '08e-insights-triage': { selectedInsights: ['keep-insight'] },
+    };
+    const { ctx, sets } = makeApplyCtx(presets);
+    await runConfigStep.apply(ctx, applyArgs({}));
+    expect(sets[0]!.preAnswers).toMatchObject(presets);
+  });
+
+  it('replaces mapped presets with submitted values, including values equal to defaults', async () => {
+    const { ctx, sets } = makeApplyCtx({
+      '08b-test-management': { action: 'skip', runTests: true },
+      '08a-browser-setup': { mode: 'interactive' },
+      '08a-browser-verify': { mode: 'mcp' },
+    });
+    await runConfigStep.apply(
+      ctx,
+      applyArgs({ testAction: 'manage', testRunTests: false, browserMode: 'skip' }),
+    );
+    expect(sets[0]!.preAnswers).toMatchObject({
+      '08b-test-management': { action: 'manage', runTests: false },
+      '08a-browser-setup': { mode: 'skip' },
+      '08a-browser-verify': { mode: 'skip' },
+    });
+  });
+
+  it('keeps all workflow defaults when there are no presets', async () => {
+    const { ctx, sets } = makeApplyCtx();
+    await runConfigStep.apply(ctx, applyArgs({}));
+    expect(sets[0]!.preAnswers).toEqual({
+      '06a-db-migrate': {},
+      '06b-sprint-planning': {
+        decision: 'proceed',
+        autoResolveConflicts: true,
+        reviewEnabled: true,
+      },
+      '07-phase-2-implement': {},
+      '08-phase-5-verify': { runTest: true, runLint: true, runTypecheck: true },
+      '08a-browser-setup': { mode: 'skip' },
+      '08a-browser-verify': { mode: 'skip' },
+      '08b-test-management': { action: 'manage', runTests: true },
+      '08e-insights-triage': { selectedInsights: [] },
+    });
+  });
+
+  it('keeps custom presets and unrelated downstream fields while submitted config wins', async () => {
+    const { ctx, sets } = makeApplyCtx({
+      '06-run-config': { browserMode: 'interactive' },
+      '01-worktree-setup': { branchName: 'feature/custom' },
+      '06a-db-migrate': { command: 'custom migrate' },
+      '07-phase-2-implement': { guidance: 'keep this' },
+      '08-phase-5-verify': { runTest: true, extra: 'keep too' },
+      '11a-gate-4-push': { remoteUrl: 'https://example.com/repo.git' },
+    });
+    await runConfigStep.apply(ctx, applyArgs({ verifyRunTest: false }));
+    expect(sets[0]!.preAnswers).toMatchObject({
+      '06-run-config': { browserMode: 'interactive' },
+      '01-worktree-setup': { branchName: 'feature/custom' },
+      '06a-db-migrate': { command: 'custom migrate' },
+      '07-phase-2-implement': { guidance: 'keep this' },
+      '08-phase-5-verify': { runTest: false, extra: 'keep too' },
+      '11a-gate-4-push': { remoteUrl: 'https://example.com/repo.git' },
+    });
+  });
+
   it('writes the chosen review dimensions to the task row', async () => {
     const { ctx, sets } = makeApplyCtx();
     const out = await runConfigStep.apply(

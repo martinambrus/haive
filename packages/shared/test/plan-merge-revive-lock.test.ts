@@ -14,7 +14,17 @@ describe('reviving a task', () => {
   ])(
     'a %s takes the plan-merge lock only when it holds the scratch worktree',
     async (type, want) => {
-      const fake = createFakeDb({ modules: schema.modules, tasks: schema.tasks });
+      const fake = createFakeDb({
+        modules: schema.modules,
+        tasks: schema.tasks,
+        repositories: schema.repositories,
+      });
+      fake.insert(schema.repositories, {
+        id: REPO,
+        userId: USER,
+        name: 'repo',
+        source: 'git_https',
+      });
       fake.insert(schema.tasks, {
         id: TASK,
         userId: USER,

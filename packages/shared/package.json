@@ -131,6 +131,10 @@
       "types": "./dist/attachments-fs.d.ts",
       "import": "./dist/attachments-fs.js"
     },
+    "./repo-rebuild": {
+      "types": "./dist/repo-rebuild.d.ts",
+      "import": "./dist/repo-rebuild.js"
+    },
     "./onboarding-admission": {
       "types": "./dist/onboarding-admission.d.ts",
       "import": "./dist/onboarding-admission.js"
@@ -154,6 +158,10 @@
     "./modularity-server": {
       "types": "./dist/modularity-server/index.d.ts",
       "import": "./dist/modularity-server/index.js"
+    },
+    "./root-merge-busy": {
+      "types": "./dist/root-merge-busy.d.ts",
+      "import": "./dist/root-merge-busy.js"
     },
     "./merge-left-open": {
       "types": "./dist/merge-left-open.d.ts",

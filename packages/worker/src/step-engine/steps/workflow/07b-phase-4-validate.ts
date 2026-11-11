@@ -1,3 +1,8 @@
+import {
+  affectedValidationFiles,
+  readValidationSnapshot,
+  type ValidationSnapshot,
+} from './_validation-snapshot.js';
 import { z } from 'zod';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -155,6 +160,10 @@ interface DimensionResult {
 }
 
 interface ValidateApply {
+  /** The deliverables this validator saw; a fixer carries its preceding validator stamp. */
+  validationSnapshot?: ValidationSnapshot | null;
+  /** A local fixer changed DDEV inputs; return through reconciliation before another validator. */
+  runtimeChanged?: true;
   /** Upstream observations require a user decision, never an automatic repair round. */
   upstreamIssues?: ValidationIssue[];
   verdict: ValidationVerdict;
@@ -640,10 +649,11 @@ function outputContract(docsOnly: boolean, dimensions: readonly ReviewDimension[
 
 export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> = {
   needsRuntime: 'if-serving',
+  editsCodeOrTests: true,
   metadata: {
     id: '07b-phase-4-validate',
     workflowType: 'workflow',
-    index: 7.7,
+    index: 7.8,
     title: 'Phase 4: Implementation validation',
     description:
       'An implementation-validator agent checks the code against the approved spec (logic, edge cases, refactoring impact, dead code, UI language, review dimensions) and loops a fixer agent until valid.',
@@ -659,6 +669,9 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     // than routing back to implement, where re-implementing the same churn would
     // just burn another round.
     evaluate: (out) => {
+      // The fixer carried the PREVIOUS validator's findings. Reconcile and validate
+      // the edited runtime before deciding whether any implementation defect remains.
+      if (out.runtimeChanged) return null;
       // Older persisted outputs may contain only a verdict/summary. They provide no
       // structured repair assignments and must still be safe to replay after an upgrade.
       const issues = out.issues ?? [];
@@ -843,11 +856,13 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     passesPerRound: 2,
     resolveRole: roleForIteration,
     shouldContinue: ({ applyOutput, iteration }) => {
-      // After a fix (odd) always re-validate; after a validation (even) keep
+      // After a fix (odd) re-validate, unless changed DDEV inputs require 07c first.
+      // After a validation (even) keep
       // going only while issues remain. UNPARSEABLE never loops. A churn-bailed
       // validator pass also stops — the human decides at gate-2.
-      if (roleForIteration(iteration) === ROLE_FIXER) return true;
       const out = applyOutput as ValidateApply;
+      if (out.runtimeChanged) return false;
+      if (roleForIteration(iteration) === ROLE_FIXER) return true;
       const issues = out.issues ?? [];
       if ((out.upstreamIssues?.length ?? 0) > 0 || issues.some(findingUpstream)) return false;
       if (out.verdict !== 'ISSUES_FOUND') return false;
@@ -1040,7 +1055,17 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         ctx,
         (args.detected as ValidateDetect).worktreePath,
       );
+      const afterFix = await readValidationSnapshot(ctx);
+      const runtimeChanged =
+        prior?.validationSnapshot && afterFix
+          ? affectedValidationFiles(prior.validationSnapshot, afterFix).some((file) =>
+              file.split('/').includes('.ddev'),
+            )
+          : // An unavailable read proves no equality. Reconcile before another
+            // validator; the hand-off fails retryably if the tree remains unreadable.
+            true;
       return {
+        ...(runtimeChanged ? { runtimeChanged: true as const } : {}),
         verdict: prior?.verdict ?? 'ISSUES_FOUND',
         summary: prior?.summary ?? '',
         issues: prior?.issues ?? [],
@@ -1068,11 +1093,15 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
         report: prior?.report ?? '',
         ...(prior?.reportChars === undefined ? {} : { reportChars: prior.reportChars }),
         validatorPasses,
+        ...(prior?.validationSnapshot === undefined
+          ? {}
+          : { validationSnapshot: prior.validationSnapshot }),
         source: 'fixer',
       };
     }
 
-    // Validator pass.
+    // Validator pass. A parse miss still records which tree the report concerns.
+    const validationSnapshot = await readValidationSnapshot(ctx);
     const reply =
       typeof args.llmOutput === 'string' ? args.llmOutput : JSON.stringify(args.llmOutput ?? '');
     const report = reply.length > REPORT_CAP ? excerptDiagnosis(reply, REPORT_CAP, false) : reply;
@@ -1141,6 +1170,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
       // Only a pass the gate can find by its invocation id is worth a read of the whole change.
       const fingerprint = args.llmInvocationId ? await taskChangeFingerprint(ctx) : null;
       return {
+        validationSnapshot,
         verdict,
         summary: parsed.summary,
         issues,
@@ -1172,6 +1202,7 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
     // Parse miss: never wedge the loop, never silently pass — gate-2 shows it.
     ctx.logger.warn('phase-4 validator output unparseable — surfacing as UNPARSEABLE at gate-2');
     return {
+      validationSnapshot,
       verdict: 'UNPARSEABLE',
       summary: 'Validator output could not be parsed; review the raw report at gate 2.',
       issues: [],

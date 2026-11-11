@@ -31,10 +31,12 @@ structural proofs and exit-code distinctions were checked with git 2.43.0 and 2.
 Before moving an unusable checkout, a folder source must itself pass the same usable-checkout proof,
 and a remote must pass the clone URL rule. A missing, unborn, unusable or unreadable folder source
 ends in `error` with nothing moved. Whatever stood at the destination is then renamed to a
-`<repoId>.aside-<time>` sibling, never removed; strict stat failures stop before that move. A folder
-copy builds in a fresh `<repoId>.rebuild-<uuid>` sibling and publishes with `renameNoFollow` and
-`noReplace` only after the copy completes. A thrown copy failure removes only that attempt's staging
-entry; failed cleanup names both retained siblings. Remote clones still build directly at the
+`<repoId>.aside-<time>` sibling, never removed; strict stat failures stop before that move. Folder
+copies, and remote clones requested by a recovery, build in a fresh `<repoId>.rebuild-<uuid>`
+sibling and publish with `renameNoFollow` and `noReplace` only after the build and its verification
+complete. A failure before the data restore (below) removes only that attempt's staging entry;
+failed cleanup names both retained siblings. Once the restore has started, a failure keeps the
+private replacement and its journal images. Ordinary remote rebuilds still build directly at the
 destination (the separate incomplete-clone recovery finding remains queued in T486).
 
 The rebuilt tree must pass `usableCheckout` before detection is persisted. A build or verification
@@ -47,6 +49,43 @@ Retry can clear the only notice; T486 tracks retention and durable reporting. A 
 `persistDetection` write remains retryable. Neither rebuild nor Retry deletes the preserved tree. A read-only folder
 import is re-scanned as before, and a repository with no remote and no folder answers 409 without
 touching its row.
+
+**A checkout git cannot read gets a repair code and an explicit rebuild.** When the refresh
+cannot prove the checkout usable or unusable (the unknown path above) the row is `error` with
+`repositories.error_code = 'checkout_repair_needed'` (migration 0225; `'source_repair_needed'` when
+the folder source could not be examined and needs repair; the codes are `REPOSITORY_ERROR_CODES`, `@haive/shared`), and the
+page keys its actions on the code, never on the message: "Check repair" re-runs the refresh as
+check only (`checkCheckoutOnly`, set by the api for a repository holding either repair code and
+enforced by the worker), and "Rebuild checkout" (when the source can rebuild) posts the recovery, the
+user's explicit consent to move the checkout aside although it could not be proved unusable. A check
+only refresh never rebuilds and, whatever fails, keeps the repair code it was admitted with: a
+checkout still unusable says so, a read that never finished stays a retryable failure, and only the
+recovery rebuilds, keeping this install's data. The
+code clears when an ordinary preparation starts or detection succeeds; a recovery keeps it until then, so a refresh sent while the recovery is queued or running stays check only, and a preparation stranded by a stop keeps it too. A recovery job first re-checks the checkout: one that is
+usable again (held by a task or not) finishes as an ordinary refresh, moves nothing and clears the
+code. Otherwise it takes the ordinary rebuild path (seed, source proof, move aside, build, verify),
+keeps every repository record and this install's settings, KB and plan data. Before the move it
+handles a pending project-state write intent under the task key and then the project-state lock.
+An intent naming an abandoned private replacement (a stopped earlier restore), or one left with no
+checkout at all, is cleared; no tree or journal image is deleted. An older unmarked intent with a
+recorded journal stage is classified by whether that stage is present under the current checkout.
+A current-checkout intent, and an unmarked one with no stage, still settles against the current
+checkout or refuses with the cause and moves nothing. The move transaction re-checks that no
+intent appeared. The private
+replacement drops the legacy mirrors and is restored through the ordinary writers without a commit:
+the state record is written from the database with its base and watermark, and the plan is
+rendered from the database with `synced_hash` stamped and the agreed `synced_snapshot` left as it
+was, so a later remote plan still merges three-way. When this install holds no plan rows the
+incoming `plan.json`/`plan.md` stay for the ordinary first import, and when its render context is
+null the incoming state files stay for the ordinary sync, so a later Save cannot delete the team's
+files. A restore that reports `superseded` is retried up to three times; any other outcome fails the
+recovery. Any rebuild, recovery or not, is refused with a sentence naming the count while a task of the
+repository that is neither completed nor cancelled has a worktree under the checkout (its audit column, else the latest `01-worktree-setup` output for a legacy task; a `failed`
+or `created` one included, since its unpushed commits would move with the tree): the api refuses at
+admission (409), and the worker counts again, together with the holding tasks, under the
+task-creation lock (`lockRepositoryTasksKey`) in the transaction that renames the checkout aside;
+the lock spans only the recount and the rename, never the clone. Cancel the task, or finish it, and
+rebuild. A start after the rename can still overlap the clone (the window above).
 
 The list's `canRetry` / `retryUnavailableReason` describe the durable source the retry
 route can use: a local folder, a remote URL, or a completed upload record belonging to the

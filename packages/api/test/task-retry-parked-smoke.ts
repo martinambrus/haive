@@ -87,10 +87,17 @@ async function main(): Promise<void> {
     });
     const cookie = `${ACCESS_COOKIE}=${await signAccessToken({ sub: userId, role: 'user', tv: 0 })}`;
 
+    const [repository] = await db
+      .insert(schema.repositories)
+      .values({ userId, name: 'task-retry-parked', source: 'local_path', status: 'ready' })
+      .returning({ id: schema.repositories.id });
+    if (!repository) throw new Error('repository insert failed');
+
     const [task] = await db
       .insert(schema.tasks)
       .values({
         userId,
+        repositoryId: repository.id,
         type: 'workflow',
         title: 'retry parked smoke',
         status: 'failed',

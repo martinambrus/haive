@@ -3101,6 +3101,14 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       current = await updateRow(db, current.id, { formSchema: persistedSchema });
     }
 
+    const answersForPersistence = (validated: FormValues, input: FormValues): FormValues =>
+      stepDef.preserveOmittedFormFields
+        ? Object.fromEntries(
+            Object.entries(validated).filter(
+              ([key]) => input[key] !== undefined && input[key] !== null && input[key] !== '',
+            ),
+          )
+        : validated;
     let formValues = current.formValues as FormValues | null;
     if (formValues) {
       const normalized = normalizeStepFormValues(meta.id, formValues);
@@ -3178,7 +3186,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
             ? normalizeStepFormValues(meta.id, expanded.data)
             : expanded;
           if (validation.success) {
-            formValues = validation.data;
+            formValues = answersForPersistence(validation.data, candidate);
             current = await updateRow(db, current.id, { formValues, status: 'running' });
             ctx.logger.info(
               {
@@ -3241,7 +3249,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           error: validation.issues.join('; '),
         };
       }
-      formValues = validation.data;
+      formValues = answersForPersistence(validation.data, submitted);
       current = await updateRow(db, current.id, {
         formValues,
         status: 'running',
@@ -3431,6 +3439,15 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
             throw new Error(
               `${meta.id} requested another form, but refreshed detection produced no form`,
             );
+          }
+          if (applyErr.notice) {
+            refreshedSchema.fields.unshift({
+              type: 'note',
+              id: 'reopenedFormNotice',
+              label: 'Review before continuing',
+              body: applyErr.message,
+              variant: 'warning',
+            });
           }
           current = await updateRow(db, current.id, {
             status: 'waiting_form',

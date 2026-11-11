@@ -238,7 +238,9 @@ export const restoreDatabaseStep: StepDefinition<RestoreDetect, { imported: bool
         args.formValues.action !== `restore:${d.databaseSnapshotId}` ||
         state?.sourceSnapshotId !== d.databaseSnapshotId
       ) {
-        throw new ReopenStepFormError('Choose whether to restore the offered database checkpoint');
+        throw new ReopenStepFormError('Choose whether to restore the offered database checkpoint', {
+          notice: true,
+        });
       }
     }
     if (!d.repoSubpath) throw new Error('No DDEV workspace is available for the selected database');

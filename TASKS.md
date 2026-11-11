@@ -53,6 +53,110 @@ Owner decision: a consumed `db_uploads` row is deleted once 90 days have passed 
 2. A Retry or reopen of such a task that reaches `01c1-restore-database` with no dump must fail with a plain sentence saying the dump expired and how to upload a new one, never a generic error. Add that control.
 3. Docs: `database-persistence.md` retention paragraph.
 
+### T594 · FNF[repo-recovery-followups] · checkout recovery and revival follow-ups (+7)
+
+status: open · kind: fix · found: F2 (#1065) reviews 2026-11-10/11 · priority: P3
+All PRE-EXISTING.
+
+1. C1: a recovery that fails after `moveAside` leaves `dest` missing or partial with the code set; each further recovery moves it aside again, accumulating `.aside-*` siblings (`worker/src/repo/refresh.ts` ~:427-442). Fix: reuse or clean the failed destination before moving aside again.
+2. C2: a task that starts after the rename can overlap the minutes-long clone while `dest` is absent (`refresh.ts` ~:509-520); a start does not read the root claim (`repository-refresh.md` :18-19). Fix: task start refuses while a root claim of a rebuild is held.
+3. C3: `reconcileStrandedCloningRepos` writes `error_code = null` (`worker/src/data-migrations.ts` ~:478), so a recovery stranded by a worker death becomes an ordinary Retry. Fix: keep the code.
+4. C4: the task page offers Retry on a failed task whose repository was deleted until the click returns the 409 (`web/src/app/(app)/tasks/[id]/page.tsx` ~:1948). Fix: hide it on the structural NULL repository.
+5. C5: a Rebuild clicked right after Cancel can race the asynchronous teardown touching the worktree under the checkout. Fix: count tasks with a pending teardown as holders.
+6. R1: `refreshRepository` flips an ordinary refresh of a `ready` repo to `cloning` unconditionally (`api/src/routes/repos.ts` ~:3606-3620).
+7. D4a: dead-task revival polling for transient holds is unbounded (`worker/src/queues/dead-task-boot.ts` `retryHeldRevivals`). Fix: cap or back off, log once.
+
+### T595 · FNF[root-merge-runapp-followups] · run-app commit and root merge fence follow-ups (+15)
+
+status: open · kind: fix · found: E1 (#286, #271) reviews 2026-11-10/11 · priority: P4
+All low.
+
+1. An index-refresh failure after a landed run-app commit (`worker/src/repo/git-preview.ts` ~:148-160) fails the step; the Retry that recognises the landed commit skips the refresh, so it is never repaired. Fix: re-run the refresh on that Retry.
+2. `99-run-app-ready.ts` ~:440 `catch {}` hides database and git read failures behind a form reopen. Fix: reopen only on a structural mismatch; surface read failures.
+3. Each reopen re-runs the whole `detect`, including `ensureAppServing` and the in-runner browser navigation (`99-run-app-ready.ts` ~:113-146), resetting the user's VNC browser to the app root.
+4. The DAG put-back throws generically where 12 halts Retry-able (`merge-resolver.ts` ~:1081-1095); `putBackIssueProjections` warns through a fresh row while `m.current` stays stale, so a last-in-pass note can be lost.
+5. The `reopenedFormNotice` stays in `form_schema` of a row that later completes (display only).
+6. More than 500 changed files: `detect` runs `gitPreview` twice before discovering `truncated` (cost).
+7. Test gaps: a frozen legacy run-app form through `advanceStep` end to end; Skip, CLI switch, failed-task form submit and the worker `refuseRevive` branch of the root merge fence; a DAG projection-only conflict on the already-open path.
+8. Stale log wording `dead-task-boot.ts` ~:333; misleading test title `branch-revert.test.ts` ~:368; `root-merge-redrive.test.ts` ~:15 mocks into `shared/dist` by a relative path.
+9. `ReopenStepFormError` messages in plan steps are internal control text (not shown since the notice is opt-in); reword if ever shown.
+10. A branch switch found at the push seam becomes a best-effort "push failed" note whose text says put-back was stopped and to retry, though put-back already ran and the step finished (`99-run-app-ready.ts` ~:506-532). Fix: a push-seam text variant; pin which outcome each seam gives.
+11. A Retry after a branch switch that followed a landed commit reopens the form instead of naming the branch the commit landed on.
+12. `computeUnregisteredGitlinks` builds `entries`/`mayAddGitlink` in pinned mode and spawns `read-tree`/`diff-index` for an empty scope (`_gitlink-registration.ts` ~:228-269). Harmless cost. No control that a gitlink already in the parent, or one the preview only moves, is not judged.
+13. Preview test gaps (verified by emulation only): intent-to-add, `git rm --cached` of a non-ignored file with its copy kept, untracked nested repo, staged gitlink, unmerged, and the Retry rebuild after a commit that removed an ignored tracked file (`repo/git-preview.test.ts`).
+14. Gate 3's commit diff (`_commit-diff.ts` ~:213-225) shows work-tree bytes for assume-unchanged or skip-worktree entries while `git add -A` keeps their staged bytes, so gate 3 can commit bytes it did not show. PRE-EXISTING; run app now refuses such a preview, gate 3 does not. Medium-low.
+15. One process spawn between the second branch check and the index-only reset stays open (git has no atomic HEAD-and-ref check; documented in workflow-commits.md); at worst a reviewed path's staged entry is reset on the newly checked-out branch.
+
+### T599 · FNF[rules-reconcile-followups] · task-end rules re-render follow-ups (+8)
+
+status: open · kind: fix · found: B (#443, #386, #317) reviews 2026-11-10/11 · priority: P4
+All low unless marked. Code in `worker/src/project-state/task-end-rules.ts` and `sync.ts`.
+
+1. The repository path-mismatch refusal (`task-end-rules.ts` ~:62-63) is transient by design but has no test.
+2. The `holder`, `reset` and `git` guards are tested for keeping the intent, not for a later successful retry (`upgrade-apply-rules-stamp.test.ts` ~:322-395; `journal` is the only retry control).
+3. The no-outbox-row path is covered by the fake DB only; `project-state-writer-postgres.test.ts` is not in CI GATED (`ci.yml` ~:464). PRE-EXISTING.
+4. A `deferred` intent whose incoming file is conflicted or rejected keeps the row in the 10 s sweep with no log line (`sync.ts` ~:1197-1205). PRE-EXISTING.
+5. Tooling save and conflict resolve owe no rules-region render (`tooling-upgrades.ts` ~:855-861, `resolve.ts` ~:609). PRE-EXISTING.
+6. Reset and repository delete clearing the intent have no test; the uncommitted re-render may trip a later `--ff-only` refresh; `sync.ts` and `task-end-rules.ts` import each other.
+7. Carried from earlier rounds, not re-verified: an `''` override leaves an empty AGENTS.md region; `loadCliRulesRenderHashes` ignores `backfill` rows; rollback availability after a backfill row.
+8. Any successful sync caller may now write AGENTS.md when it drains a ready intent; confirm no caller runs while a checkout write it does not own is in flight.
+
+### T600 · FNF[rag-accent-followups] · accent-insensitive lexical search follow-ups (+8)
+
+status: open · kind: fix · found: K (#145) reviews 2026-11-10/11 · priority: P4
+All low unless marked. Code in `shared/src/rag/lexical-config.ts` and the RAG schema ensure.
+
+1. Accented queries miss rows until the backfill has restamped them; no progress or completion signal.
+2. Losing the `unaccent` extension later (dropped, privileges revoked) is not detected; the store keeps the accent configuration's mode.
+3. The global KB store upgrades to the accent configuration only at worker start (ensure runs once); a repository store on its next ensure.
+4. The global retry backfill sweep runs without the store's schema lock.
+5. `RAG_TSV_BACKFILL_PREDICATE` scans the whole table each pass (no index can serve it).
+6. Restamping every row churns the HNSW and GIN indexes on large stores.
+7. Global-store refusal coverage (0A000/58P01/42501) is fake-connection only; no Postgres control.
+8. The test of the identifier stamp inside prose checks only the parser, not a stored vector.
+
+### T601 · FNF[revalidation-followups] · validation order, revalidation and 06 in custom types follow-ups (+12)
+
+status: open · kind: fix · found: F4 (#334) reviews 2026-11-10/11 · priority: P4
+All low unless marked. Code in `worker/src/queues/validation-recheck.ts`, `07b-phase-4-validate.ts`, `task-queue.ts` and `06-run-config`.
+
+1. 06 reads stored defaults back as presets: answers 06 wrote itself cannot be told apart from a type's presets, so a Retry shows the previous run's stored answers as defaults.
+2. 08a's setup and verify answers collapse into one value in the preset mapping.
+3. The API pin of 06's catalog entry is not a red control.
+4. The merge fixer can run before the env prelude.
+5. A fix-loop Accept does not re-run the revalidation hand-off (`task-queue.ts` ~:2702).
+6. A stale catalog can be served for a window after a module update.
+7. Module and catalog steps cannot declare `editsCodeOrTests`; only built-in and prompt steps can (`validation-recheck.ts` ~:86).
+8. Unverified: a prompt step with `tool_use` but no `file_write` may still write into the worktree through a shell tool, and would reach commit unvalidated. Check, then decide.
+9. `.ddev` is matched as any path component (`07b-phase-4-validate.ts` ~:1062), so `docs/.ddev/` or `vendor/x/.ddev/` costs a reconcile round.
+10. Persisted 07b outputs from before the snapshot field turn the first fixer pass after upgrade into one extra 07c + 07b round (transitional); a missing before-snapshot writes the whole change list into the event payload.
+11. The no-07c PG controls prove only the cap-escalation arm (`handle-result-lost-db.test.ts` ~:499 seeds `maxFixRounds: 0`); the `unreadable` arm returns before reading a snapshot, so it does not exercise a read failure.
+12. `ValidationSnapshotError` is reused for the missing-07c configuration error (naming only); `step.done` is no longer written before a snapshot failure of the same hand-off.
+
+### T602 · FNF[repair-recovery-followups] · repair-needed checkout recovery follow-ups (+18)
+
+status: open · kind: fix · found: F2 (#460, #512) reviews 2026-11-10/11 · priority: P3
+Low unless marked. Code in `worker/src/project-state/refresh.ts`, `worker/src/queues/repo-queue.ts`, `api/src/routes/repos.ts`, `shared/src/repo-rebuild.ts` and `worker/src/project-state/write.ts`.
+
+1. CONSEQUENTIAL, PRE-EXISTING: bases advance before publication of the rebuilt checkout.
+2. CONSEQUENTIAL, PRE-EXISTING: a task start after the move-aside can overlap the rebuild's clone (documented window in `repository-refresh.md`).
+3. A non-recovery rebuild never settles a pending project-state write intent (PRE-EXISTING).
+4. `.rebuild-*` and `.aside-*` folders are never cleaned (see T486).
+5. A check-only job queued during a recovery fails on the root claim and flips the row to `error` while the recovery still runs (a second recovery is still refused).
+6. A failed recovery or failed enqueue relabels `source_repair_needed` as `checkout_repair_needed` (`repo-queue.ts` ~:62-67, `repos.ts` ~:3680).
+7. "Check repair" writes the repair code it read with no compare-and-swap, so a stale tab can re-stamp it on a healthy row.
+8. `findWorktreePathClaimant` (`worker/src/repo/worktree-claims.ts` ~:59-70) cannot see a legacy-only worktree sharer (the rebuild refusal now can).
+9. `repos.ts` ~:3620 `checkCheckoutOnly || recovery ? repairErrorCode : null` equals plain `repairErrorCode`; the condition hides the invariant (nit).
+10. Legacy journal stage regex duplicates `JOURNAL_STAGE_PREFIX`.
+11. The intent marker is coupled to `discardWriteIntentOnFailure`.
+12. A null-marked intent on a replaced tree refuses forever.
+13. The in-transaction intent recheck before the move is untested.
+14. Settle lstat errors are not wrapped.
+15. The final revival test matrix was only partly shown red.
+16. Fence PG race control missing; the mirror holds the task key.
+17. Doubled "but" in a refusal message.
+18. CI budget: the gated Postgres step is at 134 of 138 rows its 26-minute limit holds; measure before the next raise (`docs/architecture/ci-smokes.md`).
+
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
 **Found something outside your task?** Search the board first (`grep -n "<file>\|<symbol>\|<slug>"`).
@@ -100,6 +204,10 @@ Owner triage 2026-11-10 (AskUserQuestion, 8 rounds; register `.claude/tmp/codex-
 
 T524's 2026-11-01 owner round answered 42 questions. Decisions are recorded on the affected task blocks; the durable local answer register is `.claude/tmp/codex-run/backlog-decisions-20261101/decisions.json`. No unanswered owner-policy question remains from this round.
 
+- T334 — 07c reconciles the runtime before 07b validates (migration 0226 reorders stored types), a later code or test edit before gate 3 hands off a bounded revalidation round, and custom task types can include 06-run-config ordered before the steps that read its answers — PR #1069 (1bfa2871b), 2026-11-11; dev 0226 changed 0 of 12 rows (pre-deploy export kept). Follow-ups T601.
+- T145 — lexical RAG search is accent-insensitive through a store-local unaccent text search configuration (with a recorded verbatim fallback when the extension is unavailable) and a backfill of existing vectors — PR #1071 (34dbd0bb4), 2026-11-11; dev global KB live-checked. Follow-ups T600.
+- T271 + T286 — a DAG level merge settles Haive's project files from the integration branch; root starts, Retry, Resume and revival refuse during another task's open same-branch merge; run-app Finish commits only the reviewed, pinned tree with a parent compare-and-swap and branch checks, and a Retry after a failed put-back pushes its landed commit — PR #1066 (73b7c672b), 2026-11-11. Follow-ups T595.
+- T443 + T386 + T317 — a rules-override import is deferred during a live upgrade and the task-end import (onboarding and onboarding_upgrade) re-renders the AGENTS.md region through `project_state_outbox.rules_reconcile_intent` (migration 0227), retried on transient refusals and dropped with one warning on permanent ones; the updater keeps its hold when an upgrade died before recording its found state; a stamped RTK choice wins against the first record import — PR #1064 (0106f9edd), 2026-11-11. Follow-ups T599.
 - T402: operator script with dry run, before-image and undo. The owner subsequently requested indefinite development-record retention: transcripts changed from 90 to 0/forever through the audited admin API; prompts were already 0. Historical expiry estimates no longer govern this install. Missing old logs remain unrecoverable.
 - T300: one owned validation attempt before feature work; stop at 90 minutes or $50 notional usage, whichever comes first, or on an unexpected failure. No automatic retry loops.
 - T331: live Google OAuth intentionally remains parked; prepare setup instructions when its turn comes. T358 stays deferred until its first real provider-pinning consumer.
@@ -135,21 +243,6 @@ All PRE-EXISTING.
 5. Latent, minor: the reaper removes a path without checking it is still the file it lstat'ed (upload-reaper.ts removeFile); fs-safe's lstatNoFollow returns numeric Stats, so dev/ino cannot be compared losslessly. Cannot bite today (upload names are fresh UUIDs). Fix: a bigint lstat identity export in fs-safe, compared before the unlink.
 
 User decision 2026-11-01: Retain complete/consumed upload metadata 90 days; protect active or retry-needed rows. Item5 identity-hardening remains parked until reachable impact.
-
-### T286 · FNF[root-work] · a task at the root after 01 was skipped escapes the fences (+3)
-
-status: in progress (bundle E1, overnight run 2026-11-10, branch fix/E1-dag-merge-root-fences) · area: touches finishMerge — heads-up to modular-haive-plan first · #278 (fnf/278-merge-dir-reads) LANDED as PR #884 (c48df1953) 2026-10-24: git-operation.ts, set-aside.ts, git-merge.ts, merge-projections.ts, merge-baseline.ts and left-open-merge.ts are free · priority: P2
-All PRE-EXISTING; notes .claude/tmp/track-b/b3/b31c/analysis/guard.md.
-
-1. checkoutHoldingTasks({rootOnly}) (repo/refresh.ts:32-46) misses a task whose latest 01 round was skipped; count it in SQL like decideTaskWorktree.
-2. 99-run-app-ready builds its preview at detect but commits `git add -A` at submit; can commit unseen files incl. Haive state.
-3. Low, verify first: a root `git add -A` racing a projection writer can stage its temp file.
-4. DECIDED D22: fence the whole open-merge window — refuse/delay a root task's START while a same-branch merge is open, under lockRepositoryTasksKey.
-
-### T271 · FNF[dag] · the DAG level merge never settles Haive's own files
-
-status: in progress (bundle E1, overnight run 2026-11-10, branch fix/E1-dag-merge-root-fences) · priority: P2
-dag-executor.ts (~681, ~951) aborts level merges without resolveHaiveProjectionConflicts, so a conflict only in Haive files goes to a fixer. Fix: run B3.1c's revert helper on each DAG issue branch before its level merge. (#274 merged, so unblocked.)
 
 ### T308 · FNF[worktree-aliases] · hard links planted into .haive/worktrees before #800 survive
 
@@ -199,13 +292,6 @@ Execution fence 2026-11-01: Reconcile closed and overlapping members first. Focu
 
 status: parked · reason: no retrieval evaluation exists (owner triage 2026-11-10); resume when one does · kind: ranking change (gated on the retrieval eval) · priority: P3
 shared/src/rag/search.ts:449/:560 plainto_tsquery ANDs every term; 67.6% of logged searches with code hits had no two-ranker hit. TRAP: plain OR and coverage ranking measured WORSE (AGENTS.md "Identifier search"). Plan P2(b): a capped IDF ranker.
-
-### T145 · RAG F13 · Slovak text matches only verbatim
-
-status: in progress (bundle K, overnight run 2026-11-10, branch fix/K-slovak-rag) · kind: feature · user decision: resolved 2026-11-01 · priority: P3
-_rag-connection.ts:130 update_content_tsv uses to_tsvector('english') without unaccent ("kotolna" misses "kotolňa"). Needs a backfill (like backfillIdentifierTsv) and a fail-open path without the extension. Plan P2(e).
-
-User decision 2026-11-01: Approve bounded Slovak accent-insensitive retrieval with a backfill and extension-unavailable fallback; retain retrieval-evaluation gates for T144/T147.
 
 ### T147 · RAG F5 · identical chunk bodies across files are never collapsed
 
@@ -266,26 +352,12 @@ Add an icon via the Next app-router convention (src/app/icon.svg or favicon.ico)
 
 User decision 2026-11-01: Use a simple Haive H favicon.
 
-### T270 · FNF[plan] · a child insert can take a parent's path from before a concurrent move
-
-status: in progress (bundle G, overnight run 2026-11-10, branch fix/G-plan-lock-merge-visibility) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-applyPlanPatch's loadNode reads the parent path unlocked (shared/src/plan/apply-patch.ts:415). FOR SHARE on the parent is not enough (a move rewrites descendants in one UPDATE). Direction: a per-repository plan-patch advisory lock first in applyOps; lock-order analysis owed.
-
-User decision 2026-11-01: Serialize conflicting edits; bound waits and return explicit retryable busy responses. Lock-order analysis remains required.
-
 ### T310 · FNF[kept-metadata-moves] · captured owner/mode lost when a re-sync does not finish
 
 status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 A: six non-merge move paths drop the kept map after a re-sync that may have returned false. B: projection writers create files as root (verify on dev). C: persisted keptMetadata never settled again. D: reachDone / settleGoneMerge after a failed re-sync. Options: inherit owner from parent dir; persist the kept map per repo; retry the re-sync before restoring.
 
 User decision 2026-11-01: Preserve captured owner/mode until recovery completes; never silently discard metadata.
-
-### T317 · FNF[rtk-first-import] · a stamped RTK choice loses to the first record import
-
-status: in progress (bundle B, overnight run 2026-11-10, branch fix/B-upgrade-rtk) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-sync.ts:514 (`row !== null`) and :528; pinned by project-state-sync.test.ts:1850 and onboarding-upgrades.md. Fix if approved: drop `row !== null`, flip the test.
-
-User decision 2026-11-01: A stamped local RTK choice wins against first imported record.
 
 ### T318 · FNF[task-lock-wait-2] · remaining unbounded waits on start paths (+9)
 
@@ -328,22 +400,6 @@ status: parked: needs a real GCP OAuth client from the user · was modular #42 �
 Plan I7: REST by default, remote MCP opt-in. Blocked until the user provides an OAuth client.
 
 User decision 2026-11-01: keep live Google connection parked; prepare setup instructions when its turn comes. A live OAuth client is still an external prerequisite; never request a secret in chat.
-
-### T334 · FNF[builtin-order-hazards] · built-in workflow runs 07b before 07c, and 08b fixer edits after both
-
-status: in progress (bundle F4, overnight run 2026-11-10, branch fix/F4-workflow-order) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-All PRE-EXISTING.
-
-1. 07b-phase-4-validate boots and uses the runtime (07b:787) against a DDEV container that has not yet applied the implementation's .ddev change; 07c-ddev-reconcile runs after it in registry order (steps/workflow/index.ts).
-2. 08b-test-management writes tests and fixer edits after 07b validated and 07c reconciled; nothing re-validates or reconciles them.
-3. orderWorkflowRunList (execution-paths.ts:165) runs 00a-sync-base before the env prelude, so a merge-fix agent dispatched on a divergent base runs before the env image and LSP checks exist.
-   Decide:
-
-- whether to put 07c before 07b in the built-in workflow (then composable-core gets "07c precedes validation");
-- whether 08b's fixer edits need a re-check;
-- what to do about 06-run-config: it is the only writer of tasks.pre_answers and is not in the composable catalog, so custom types park forms that have no defaults.
-
-User decision 2026-11-01: Reconcile runtime before validation; revalidate affected final changes after a later fixer edits code or tests
 
 ### T531 · FNF[module-sources] · install-source fetch/pin follow-ups from T337 and T531 reviews (+6)
 
@@ -532,11 +588,6 @@ PRE-EXISTING link, new consequence of #1044. Auto-link picks the entry a draft r
 
 status: open · kind: fix · found: T558 run 2026-11-09 · priority: P4
 PRE-EXISTING, minor. `configSchema` (api routes/global-kb.ts ~:292-293) accepts `ollamaUrl`/`embedModel` with surrounding whitespace and `putConfig` writes them as sent; the non-admin compare trims, so only the stored value and its dials see the whitespace. Fix: trim in the schema.
-
-### T580 · plan[sleep-paper-lessons] · calibrate effort estimates on the LLM's recorded estimate; keep learnings reachable past 60
-
-status: parked · reason: diminishing returns (owner triage 2026-11-10); PR 1 shipped #1047 884f5c074; resume when step 11 changes or a repository nears 60 learnings · kind: fix · found: SLEEP paper assessment 2026-11-09 · priority: P3
-Plan: `docs/plans/sleep-paper-lessons.md`. PR 1: `hydrateAnchors` and `GET /tasks/estimation-accuracy` read the latest `estimate.recorded.aiHours` instead of the column `06b-sprint-planning` overwrites. PR 2 (low urgency, when step 11 is next touched or a repository nears 60 learnings): list every learning id and title, not an unsorted first 60. Both PRE-EXISTING. P3 of the plan, the backtest, waits for its trigger query.
 
 ### T559 · FNF[gated-test-hygiene] · gated test addresses and the gated-list check in driver gates (+1)
 
@@ -850,14 +901,6 @@ status: parked · was modular #257 · reason: diminishing returns (2026-11-01 sc
 
 User reconciliation 2026-11-01: helper/read-contract consolidation (members1/2/5) stays parked. Failed-read members3/4 transfer to T495 correctness verification and must be deduplicated against its members4/5/6/7/8 and the completed T397 work; no second refactoring batch.
 
-### T386 · FNF[upgrade-early-death-hold] · an upgrade that dies before recording its found state restores normal and lifts an admin's hold
-
-status: in progress (bundle B, overnight run 2026-11-10, branch fix/B-upgrade-rtk) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-A run that dies between startRun (updater cli.ts ~:161) and recordFoundState (run.ts ~:181) has no metadata.foundState, so a later restore writes `normal`.
-Needs a marker that tells an older updater's run apart from a new run that died early.
-
-User decision 2026-11-01: Keep maintenance/hold on unknown prior state; report uncertainty instead of silently restoring normal
-
 ### T389 · FNF[repo-loose-objects] · Haive's git no longer triggers auto-maintenance (#256), so busy repos accumulate loose objects
 
 status: parked · kind: design · was modular #270 · reason: diminishing returns (2026-11-01 scan): Loose-object growth is unmeasured; no current operational impact established; resume when resume when measured repository growth warrants safe maintenance · priority: P4
@@ -935,13 +978,6 @@ User decision 2026-11-01: Persist the latest refresh result and per-source failu
 status: parked · reason: diminishing returns (2026-11-01 scan): Runner launch-spec mismatch is explicitly minor with unmeasured consequences; resume when resume when changed launch settings cause a demonstrated runtime problem · priority: P4
 From the T431 review (2026-10-30). PRE-EXISTING, minor, consequence unmeasured. worker sandbox/app-runner.ts ~:326-333 reuses a running app runner when its workspace subpath matches and compares nothing else, so the image tag, resource caps, publish args and debug env chosen at create never reach a running runner (the class T431 fixed for the editor). Unlike an editor, recreating a runner stops the running app, so decide when a changed launch may replace it (idle only, on the next explicit start, or never with a notice) before stamping a spec label as T431 did (`haive.ide.spec`).
 
-### T443 · FNF[rules-override-retry] · a 02 retry after the record write moved the repository rules override refuses and the region stays at the old override until the next upgrade
-
-status: in progress (bundle B, overnight run 2026-11-10, branch fix/B-upgrade-rtk) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-From the T119 review (2026-10-30). Introduced by T119, fails closed. worker onboarding-upgrade 02-upgrade-apply.ts ~:924-932 refuses the plan (`PLAN_NO_LONGER_HOLDS`) when `repositories.agent_rules_override` differs from the value 01 stamped; it has no counterpart of the render-context `ownRecordColumn` exemption (~:915-921). The writer-embedded import at 02's own record write (worker project-state write.ts ~:818) can import another install's override after 02 wrote the region, so the committed AGENTS.md block keeps the old override until the next upgrade heals it as `clean_update`, and a 02 retry needs a re-plan. Decide: defer the settings import while an upgrade is live, re-render the region on retry, or accept and document (the docs record it as a residual).
-
-User decision 2026-11-01: Defer imported repository-rules overrides until the running upgrade finishes, then reconcile.
-
 ### T444 · FNF[agent-rules-size-cap] [design] · the repository rules override may be 64 KiB, but codex reads only the first 32 KiB of AGENTS.md
 
 status: parked · reason: diminishing returns (2026-11-01 scan): Explicitly minor oversized-override edge requires unusually large rules; resume when resume when actual repository rules exceed Codex's readable limit · priority: P4
@@ -985,16 +1021,6 @@ status: parked · reason: diminishing returns (2026-11-01 scan): Minor teardown-
 From the T452 review (2026-10-31). PRE-EXISTING, minor; reachable only when output arrives during teardown.
 
 In api routes/cli-login-banner.ts `onStreamData` (~:876-882), a success or error line in a chunk that arrives after `cleanupSession` still reaches `detectAuthResult` and starts `runProbeAndSave`, which queues a probe job for a session that is gone: `canDetectAuth` (~:666) has no `cleanedUp` check, while `captureClaudeOauthToken` and `offerAuthUrl` do. Codex, grok and amp take this branch (grok measured by the T452 driver with a scratch test: probe jobs 0 -> 1 after `ws.close()` and a "Signed in" chunk). Decide whether a login that completes during teardown should still be verified (the CLI has stored its credentials either way, so a skipped probe leaves Haive's provider state stale until the next check). If not, one `if (session.cleanedUp) return;` at the top of `onStreamData` closes it and makes T452's gate on the antigravity URL step redundant.
-
-### T460 · FNF[retry-repo-deleted] · a Retry revives a failed task whose repository was deleted (+1)
-
-status: in progress (bundle F2, overnight run 2026-11-10, branch fix/F2-retry-repo-state) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-From the T349 review (2026-10-31). PRE-EXISTING. A failed task whose repository was deleted still passes `checkRevive` (database repository-task-lock.ts ~:109), while the repository delete's `cancelOpenTasksForRepo` (api lib/cancel-task.ts ~:130) skips failed tasks; a Retry then sets it `running` with no repository and the worker's next advance throws. Decide: refuse that Retry (say why on the page), or have the delete cancel failed tasks too. Cross-reference T393, T394, T409.
-
-Also (T349 fix-round review, 2026-10-31, reasoned from the code, not reproduced): since T349 the delete takes the task-creation key a Retry takes, but a Retry already waiting on the key when the delete commits goes on: `checkRevive` returns null after the wait without reading the repository again (database repository-task-lock.ts ~:109-113), so the task is revived to `running` with a NULL repository. Whichever way this is decided, the Retry must read the repository again after its wait.
-Note (T458 fix round, 2026-10-31): the repository delete's cancel (`cancelOpenTasksForRepo`, api routes/repos.ts ~:3384) clears no pause, while Cancel, abort and the plan merge discard now do; if a revival of such a task stays possible, it would be parked again by the stale `paused_at`.
-
-User decision 2026-11-01: Refuse Retry for a deleted repository with a clear explanation; re-read repository existence after waiting for its lock.
 
 ### T462 · FNF[project-state-notices] [design] · the repository page cannot say a sync replaced or refused a value (+3)
 
@@ -1195,13 +1221,6 @@ Reconciled 2026-11-01: item9's failed-HEAD-read defect is RESOLVED by T397 (curr
 
 Execution fence 2026-11-01: Deduplicate the resolved T397 paths and T379 overlap first. Select at most three current consequential caller cases; no twelve-item generic Git-read audit. The fixed item9 HEAD probe must not be reimplemented.
 
-### T497 · FNF[plan-merge-failed-visibility] · after a reload a failed plan merge leaves no trace on the plan page
-
-status: in progress (bundle G, overnight run 2026-11-10, branch fix/G-plan-lock-merge-visibility) · kind: feature · user decision: resolved 2026-11-01 · priority: P2
-From the T491 review (2026-10-31). `GET /plan/merge` lists open merges only (api plan.ts ~:447-459) and `plan_merge` tasks are hidden from the task list (tasks/index.ts ~:289-292), so once the page that saw the failure is gone, a FAILED merge (which keeps its worktree for a Retry) cannot be found from the plan page. Options: the route also returns the newest failed merge not followed by a successful one, shown with its Retry link; or a plan-page notice from the task events. Recommended: the first.
-
-User decision 2026-11-01: Show the latest unresolved failed plan merge with its Retry/task link after reload.
-
 ### T499 · FNF[parks-accounting] · verify whether a parked current row beside another active row can stall recovery
 
 status: open · gate: bounded verification · executable members: 4 · priority: P2
@@ -1318,17 +1337,6 @@ From the T365 fix round 1 (2026-10-31), verified against cx-365. PRE-EXISTING, m
 6. (PR #1054 review) Worker user-set sites shipped (ollama-probe.ts, openrouter-compat.ts, zai usage fetcher; `readBounded` now exported from `@haive/shared/forge`). Left: fixed-vendor usage bodies claude-code.ts ~:55, codex.ts ~:79, gemini.ts ~:48, grok-oauth.ts ~:175,180 (member 2); api module-vendor-client.ts ~:102 now duplicates the exported `readBounded` (member 3); the probes return on 2xx (OpenRouter on any non-400) without cancelling the body, holding the socket to the 20 s abort; an OpenRouter 400 body whose read fails mid-way still returns `compatible: false`. Minor.
 
 Executable verification scope: Prioritize user-supplied endpoint bodies and a safe bounded over-limit reproduction. Trusted-vendor generalization, helper deduplication and error wording remain deferred. No automatic full-bundle repair: prove a supported current consequence, then scope the fix; park the remainder.
-
-### T512 · FNF[retry-cannot-help] · the repositories page offers Retry on an errored repository whose message says Retry cannot help
-
-status: in progress (bundle F2, overnight run 2026-11-10, branch fix/F2-retry-repo-state) · kind: feature · user decision: resolved 2026-11-01 · priority: P2
-From the T397 fix round 4 (2026-10-31). Minor (UX); arrives with T397.
-
-After T397 a refresh that finds a `.git` git refuses (exit 128) but that no structural read proves dead ends `error` with a message saying Retry cannot help until the checkout is repaired and that removing and re-adding the repository rebuilds it. The repositories page still offers Retry for every `error` row, and it must not key on the message text (AGENTS.md: a message is display copy). Decision needed: a structural signal (for example an error code column on `repositories`, written with the status) that the page reads to hide Retry and offer remove-and-re-add, or keep Retry (it is harmless, three attempts) and only reword. Single.
-
-User decision 2026-11-01: Add a structural repair-needed error code and a dedicated recovery action; do not gate on message text.
-
-User explicitly selected the structural-code/recovery-action option rather than copy-only cleanup. State is gated on a structural column/code, never status_message text. Preserve repository data through the recovery flow.
 
 ### T513 · FNF[test-env-hygiene] · test environment, fixture cleanup and measured flake leftovers
 
@@ -1577,8 +1585,32 @@ PRE-EXISTING, minor.
 1. Park recovery (worker `fs-recovery.ts`, driven by the write-path temp sweep) visits only directories fs-safe writes into; a park left in a directory nothing writes again stays under its park name. Fix: also visit the dirs that parked a file (record them) or accept and document.
 2. A park written before #1063 with a leaf long enough to be truncated in its park name has no `.name` record, so recovery cannot know the original name and only warns. Fix: none needed unless a user reports one; manual restore.
 
+### T596 · FNF[plan-patch-lock-followups] · plan-patch lock and failed-merge notice follow-ups (+9)
+
+status: open · kind: fix · found: G (#270, #497) reviews 2026-11-10/11 · priority: P4
+All low unless marked.
+
+1. Update-only patches write `version = readVersion + 1` with no version predicate in the update `where` (`shared/src/plan/apply-patch.ts` ~:856): two concurrent update-only patches, or one beside a move, can both write the same version. PRE-EXISTING. Fix: add the read version to the `where` and retry or refuse on a miss.
+2. Legacy mirror rows with no base take the outbox row before the node rows (`convergePlanQuestions` `worker/src/plan/mirror.ts` ~:1004; no-op reconcile `seedBaseFrom` then converge ~:1081-1086): same inversion as the one fixed in the flush, rare, can 40P01. PRE-EXISTING. Fix: take the converge node locks before the outbox row.
+3. `patch-lock.ts` ~:32 `SET LOCAL lock_timeout = DEFAULT` clobbers a bound a caller set earlier in the same transaction; no current caller sets one. Latent. Fix: save and restore the previous value.
+4. `worker/test/checkout-watch-postgres.test.ts` ~:282 expects `held` but the guard throws `GitOperationUnreadableError` (gated PG test, fails on main). PRE-EXISTING. Fix the expectation or the guard's classification.
+5. `writePlanMirror` still maps any 40001 to `PlanMirrorHeldError` (`mirror.ts` ~:300, `hasPgCode` import ~:15); nothing at READ COMMITTED raises it, so it can only mislabel another failure. Remove.
+6. Test `commits an automatic reconcile before the flush writes files` (`worker/test/plan-mirror-gone-checkout-db.test.ts` ~:583-599) never asserts its `fsSafe` spies were hit, so it can pass vacuously. Add `toHaveBeenCalled`.
+7. Op-set coverage of the lock: no case for `delete` and `depends_on` taking it, nor for `affects`/`unlink`/an ordinal-only upsert not taking it. The retry in `completePlanNodesForTask` (`worker/src/plan/task-link.ts` ~:68) can no longer fire (its patch is update-only); keep or drop.
+8. Failed-merge notice edges (display only): cancelling the newest failed conversation surfaces an older failed one; the notice persists after Save/Pull discards its worktree; two reads in `Promise.all` can show one task as both `merge` and `failedMerge` for one poll.
+9. `lockPlanPatch` is typed `DbOrTx`, so a pool handle would silently drop the xact lock; the re-entrant call in `reconcilePlanLocked` is redundant; the busy test's 800-2500 ms window can flake on a loaded runner.
+
+### T597 · Retry of a mining step re-buys agents whose replies were saved
+
+status: open · kind: design · found: G (#270) review 1 2026-11-10 · priority: P3
+Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/routes/tasks/steps.ts` ~:171-191), which deletes the step's done agent mining rows and supersedes their invocations; the Resume arm that keeps done rows needs `failed` rows (~:1257-1330). Any apply-time failure after the replies landed (a busy plan patch, a refused write) therefore re-pays the whole wave. PRE-EXISTING. Needs a decision: a "re-apply saved replies" Retry mode, or Resume accepting done unfolded rows.
+
 ## Done
 
+- T460 + T512 — Retry, Resume and dead-task revival refuse a task whose repository was deleted (409 `task_repository_deleted`), and revival applies the Retry/Resume holds whatever the stored status; `repositories.error_code` (migration 0225) classifies a repair-needed checkout, "Check repair" is check only and never rebuilds, and "Rebuild checkout" moves the old checkout aside and restores this install's settings, KB and plan data; recovery keeps the repair code until detection succeeds, stranded preparations keep it, and rebuilds are refused while an unfinished task (legacy setup-output pointer included) has a worktree under the checkout — PR #1065 (2c16ca95e), 2026-11-11; dev 0225 applied, 0 of 79 repositories flagged. Follow-ups T602. Owner check: when this install has no plan rows, recovery keeps the incoming plan files.
+- T598 — Claude Code's `.claude/settings.local.json` ("don't ask again" saves the approved command verbatim, secrets included) is kept out of every Haive `git add -A` by a `**/.claude/settings.local.json` entry `ensureGitExcludeEntry` writes to `.git/info/exclude` next to `.haive/`; tracked copies still commit; not via the secret-mask globs, which `carry-untracked.ts` copies into worktrees — PR #1072 (b9482ff32), 2026-11-11.
+- T580 — effort estimates calibrate on the LLM's recorded estimate (`hydrateAnchors` and `GET /tasks/estimation-accuracy` read the latest `estimate.recorded.aiHours`, not the column `06b-sprint-planning` overwrites); step 11 lists every learning and skill (sorted by id, up to 500, excerpts on the first 60, ids filtered and titles collapsed at build time, an omission line past the cap, an open-before-update line for title-only entries); the `learning-recorder` persona allows update and delete and defers to the calling step's output — PR #1047 (884f5c074, 2026-11-09) and PR #1070 (7578584bb), 2026-11-11. Item 1 closed, not a defect: the `.haive-data/` move recorded no dual-read, and re-onboarding migrates `.claude/learnings/`. Plan `sleep-paper-lessons` shipped apart from P3; further work continues in `docs/plans/agent-memory-lessons.md`.
+- T270 + T497 — path-changing plan patches serialise per repository on a bounded advisory lock (409 `plan_busy`; update-only patches take none; worker callers retry busy; mirror flush keeps its base lock order); a failed plan merge stays visible after a reload (`failedMerge` on `GET /repositories/:id/plan/merge`) — PR #1067 (0df87b7c9), 2026-11-11. Follow-ups T596, T597.
 - T291 + T323 item 4 — a file parked by a process death is put back after 24 h (ctime age, worker write-path sweep, bounded warnings, `.name` records for long leaves); RTK strip/append record before parking; complete/consumed upload rows deleted 90 days after `updated_at` (protected states kept) — PR #1063 (a49293f6e), 2026-11-10. T323 item 5 stays parked; follow-ups T592.
 - T590 items 1, 3, 5 — CLI login-secret deletes take the auth-scope lock (409 `cli_auth_busy`, no generation advance); sign-out poll window past the shared 30 min cap (`CLI_SIGN_OUT_AUTH_WAIT_MS`); busy or settings-moved login upgrade closes with 4409/4410 and the modal says why — PR #1062 (0f52f236c), 2026-11-10. T590 stays open with items 2, 4, 6-18; follow-ups T591, T502 item 4.
 - T586 — a late CLI sign-out no longer deletes a newer login's credential: `cli_providers.auth_generation` (migration 0224) stamped at login and secret writes, the sign-out job skips a superseded login; one advisory lock per auth scope held by login, sign-out, sync-back, refresh and PATCH, with scope recheck after the lock — PR #1061 (f715e40a7), 2026-11-10. Follow-ups T590.

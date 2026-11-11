@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import {
+  cp,
   mkdir,
   lstat,
   mkdtemp,
@@ -17,6 +18,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { REPO_JOB_NAMES } from '@haive/shared';
 import { UnrecoverableError, type Job, type Processor } from 'bullmq';
 import { schema } from '@haive/database';
+import * as repositoryLocks from '@haive/database';
+import * as fsSafe from '@haive/shared/fs-safe';
 import { restoreFaults } from '../src/project-state/set-aside.js';
 import * as projections from '../src/project-state/set-aside.js';
 import type { Database } from '@haive/database';
@@ -49,12 +52,15 @@ vi.mock('@haive/shared/fs-safe', async (original) => {
 
 const h = vi.hoisted(() => ({
   persist: vi.fn(),
+  restore: vi.fn(),
   seed: vi.fn(),
   helper: vi.fn(),
   clone: vi.fn(),
   /** Stands in for the copy that follows the move; null runs the real one. */
   copyFault: null as null | ((src: string, dest: string) => Promise<void>),
   holding: 0,
+  taskWorktrees: [] as Record<string, unknown>[],
+  legacyWorktrees: [] as Record<string, unknown>[],
   processor: null as Processor | null,
 }));
 vi.mock('../src/repo/clone.js', async (original) => {
@@ -63,6 +69,7 @@ vi.mock('../src/repo/clone.js', async (original) => {
     ...real,
     withRootClaim: async (_db: unknown, _id: string, fn: () => Promise<void>) => fn(),
     persistDetection: h.persist,
+    restoreProjectData: h.restore,
     gitClone: h.clone,
     copyTree: (src: string, dest: string) =>
       h.copyFault ? h.copyFault(src, dest) : real.copyTree(src, dest),
@@ -106,12 +113,20 @@ const git = async (cwd: string, args: string[]) =>
   ).stdout.trim();
 let root: string;
 let shim: FakeGit | null = null;
-const row: { status: string; statusMessage?: string } = { status: 'ready' };
+const row: { status: string; statusMessage?: string; errorCode?: string | null } = {
+  status: 'ready',
+};
 const db = {
   execute: async () => {},
   query: {
+    taskSteps: { findMany: async () => h.legacyWorktrees },
     users: { findFirst: async () => ({ role: 'admin' }) },
-    tasks: { findMany: async () => Array.from({ length: h.holding }, () => ({ id: 'holder' })) },
+    tasks: {
+      findMany: async (opts: { columns?: { worktreePath?: boolean } }) =>
+        opts.columns?.worktreePath
+          ? h.taskWorktrees
+          : Array.from({ length: h.holding }, () => ({ id: 'holder' })),
+    },
   },
   transaction: async (fn: (tx: unknown) => unknown) => fn(db),
   select: () => ({
@@ -126,11 +141,15 @@ beforeEach(async () => {
   vi.clearAllMocks();
   row.status = 'cloning';
   h.holding = 0;
+  h.taskWorktrees = [];
+  h.legacyWorktrees = [];
   h.copyFault = null;
   fsFaults.remove = false;
   fsFaults.stat = null;
   h.seed.mockResolvedValue(undefined);
+  h.restore.mockReset().mockResolvedValue(undefined);
   delete row.statusMessage;
+  delete row.errorCode;
   h.persist.mockImplementation(async (_db, _id, _dest, note) => {
     row.status = 'ready';
     row.statusMessage = note;
@@ -206,17 +225,55 @@ it('an unknown checkout fails through the queue without detection, import or reb
   expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
 });
 
-it('a git read that never finished does not tell the user to repair the checkout', async () => {
+it.each([false, true])(
+  'a git read that never finished does not tell the user to repair the checkout (check only: %s)',
+  async (checkCheckoutOnly) => {
+    const { dest, payload } = await fixture();
+    row.errorCode = 'source_repair_needed';
+    shim = await killGit(['rev-parse', '--show-cdup']);
+    await expect(runRefresh({ ...payload, checkCheckoutOnly })).rejects.toThrow(
+      /^Not refreshed: the checkout could not be examined \(.*SIGKILL.*\)\. Nothing was moved\.$/,
+    );
+    expect(row.status).toBe('error');
+    expect(row.statusMessage).not.toContain('Retry cannot help');
+    // A check-only job keeps the repair code it was started for, so Retry cannot rebuild.
+    expect(row.errorCode).toBe(checkCheckoutOnly ? 'source_repair_needed' : null);
+    await shim.restore();
+    shim = null;
+    expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
+  },
+);
+
+it.each(['HEAD', '.git'] as const)(
+  'Check repair leaves an unusable checkout with missing %s untouched',
+  async (missing) => {
+    const { dest, payload } = await fixture();
+    row.errorCode = 'source_repair_needed';
+    await rm(path.join(dest, missing === 'HEAD' ? '.git/HEAD' : '.git'), { recursive: true });
+    expect(await usableCheckout(dest)).toBe('unusable');
+    await expect(runRefresh({ ...payload, checkCheckoutOnly: true })).rejects.toThrow(
+      /checkout.*repair/i,
+    );
+    expect(row).toMatchObject({ status: 'error', errorCode: 'source_repair_needed' });
+    expect(await readdir(path.dirname(dest))).toEqual(['r1']);
+    expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
+    expect(
+      await lstat(path.join(dest, missing === 'HEAD' ? '.git/HEAD' : '.git')).catch(() => null),
+    ).toBeNull();
+    expect(h.seed).not.toHaveBeenCalled();
+    expect(h.restore).not.toHaveBeenCalled();
+    expect(h.persist).not.toHaveBeenCalled();
+  },
+);
+
+it('Check repair resumes an ordinary refresh once the checkout is usable', async () => {
   const { dest, payload } = await fixture();
-  shim = await killGit(['rev-parse', '--show-cdup']);
-  await expect(runRefresh(payload)).rejects.toThrow(
-    /^Not refreshed: the checkout could not be examined \(.*SIGKILL.*\)\. Nothing was moved\.$/,
+  await runRefresh({ ...payload, checkCheckoutOnly: true });
+  expect(row.status).toBe('ready');
+  expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(
+    await git(payload.localPath!, ['rev-parse', 'HEAD']),
   );
-  expect(row.status).toBe('error');
-  expect(row.statusMessage).not.toContain('Retry cannot help');
-  await shim.restore();
-  shim = null;
-  expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
+  expect(h.restore).not.toHaveBeenCalled();
 });
 
 async function runRefresh(payload: RepoJobPayload) {
@@ -695,3 +752,272 @@ it.each(['copy', 'clone'] as const)(
     expect(row.status).toBe('error');
   },
 );
+
+it('rechecks a repaired checkout on a recovery job, keeping its files and clearing the code', async () => {
+  const { dest, payload } = await fixture();
+  await writeFile(path.join(dest, 'notes.txt'), 'uncommitted work');
+  await handleRefresh({ ...payload, recoverCheckout: true }, db, root);
+  expect((await readdir(path.dirname(dest))).filter((n) => n.includes('.aside-'))).toEqual([]);
+  expect(await readFile(path.join(dest, 'notes.txt'), 'utf8')).toBe('uncommitted work');
+  expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(
+    await git(payload.localPath!, ['rev-parse', 'HEAD']),
+  );
+  expect(h.persist).toHaveBeenCalledWith(db, 'r1', dest, null);
+});
+
+it.each([false, true])(
+  'a usable checkout with holding tasks finishes ready without moving it (recovery: %s)',
+  async (recoverCheckout) => {
+    const { dest, payload } = await fixture();
+    const before = await git(dest, ['rev-parse', 'HEAD']);
+    await writeFile(path.join(dest, 'notes.txt'), 'uncommitted work');
+    h.holding = 1;
+    await handleRefresh({ ...payload, recoverCheckout }, db, root);
+    expect(h.persist).toHaveBeenCalledWith(
+      db,
+      'r1',
+      dest,
+      'Not refreshed: 1 task is using this repository. Refresh once it finishes.',
+    );
+    expect(row.status).toBe('ready');
+    expect(await readdir(path.dirname(dest))).toEqual(['r1']);
+    expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(before);
+    expect(await readFile(path.join(dest, 'notes.txt'), 'utf8')).toBe('uncommitted work');
+    expect(h.seed).not.toHaveBeenCalled();
+    expect(h.clone).not.toHaveBeenCalled();
+  },
+);
+
+it('seeds the legacy plan base before a recovery moves the old tree, best effort', async () => {
+  const { dest, payload } = await fixture();
+  await writeFile(path.join(dest, '.git/config'), '[core\n');
+  h.seed.mockImplementationOnce(async () => {
+    expect((await readdir(path.dirname(dest))).filter((n) => n.includes('.aside-'))).toEqual([]);
+    expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
+    throw new Error('legacy plan base unreadable');
+  });
+  await handleRefresh({ ...payload, recoverCheckout: true }, db, root);
+  expect(h.seed).toHaveBeenCalledTimes(1);
+  expect(row.status).toBe('ready');
+});
+
+it('refuses a rebuild at pickup when an unfinished task has a worktree under the checkout', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  h.taskWorktrees = [
+    { id: 'failed-task', worktreePath: path.join(dest, '.haive/worktrees/feature') },
+  ];
+  await expect(handleRefresh({ ...payload, recoverCheckout: true }, db, root)).rejects.toThrow(
+    '1 task has a worktree inside this checkout',
+  );
+  expect((await readdir(path.dirname(dest))).filter((n) => n.includes('.aside-'))).toEqual([]);
+  expect(h.persist).not.toHaveBeenCalled();
+});
+
+it.each([false, true])(
+  'recounts legacy worktrees under the task lock (recovery: %s)',
+  async (recoverCheckout) => {
+    const { dest } = await fixture();
+    await rm(path.join(dest, '.git/HEAD'));
+    h.helper.mockImplementationOnce(async () => {
+      h.taskWorktrees = [{ id: 'legacy-task', worktreePath: null }];
+      h.legacyWorktrees = [
+        {
+          taskId: 'legacy-task',
+          output: { mode: 'worktree', worktreePath: path.join(dest, '.haive/worktrees/legacy') },
+        },
+      ];
+    });
+
+    await expect(handleRefresh({ ...remotePayload, recoverCheckout }, db, root)).rejects.toThrow(
+      '1 task has a worktree inside this checkout',
+    );
+    expect(h.clone).not.toHaveBeenCalled();
+    expect(h.persist).not.toHaveBeenCalled();
+    expect((await readdir(path.dirname(dest))).filter((n) => n.includes('.aside-'))).toEqual([]);
+  },
+);
+
+it.each([false, true])(
+  'recounts worktrees under the task lock after credentials are prepared (recovery: %s)',
+  async (recoverCheckout) => {
+    const { dest } = await fixture();
+    await rm(path.join(dest, '.git/HEAD'));
+    h.helper.mockImplementationOnce(async () => {
+      h.taskWorktrees = [{ worktreePath: path.join(dest, '.haive/worktrees/late-task') }];
+    });
+    const lock = vi.spyOn(repositoryLocks, 'lockRepositoryTasksKey');
+    const tx = { ...db };
+    tx.query = {
+      ...db.query,
+      tasks: {
+        ...db.query.tasks,
+        findMany: vi.fn(async (opts: Parameters<typeof db.query.tasks.findMany>[0]) => {
+          expect(lock).toHaveBeenCalledWith(tx, 'r1');
+          return db.query.tasks.findMany(opts);
+        }) as unknown as typeof db.query.tasks.findMany,
+      } as unknown as typeof db.query.tasks,
+    };
+    const fenced = {
+      ...db,
+      transaction: async (fn: (conn: typeof tx) => unknown) => fn(tx),
+    } as unknown as Database;
+    await expect(
+      handleRefresh({ ...remotePayload, recoverCheckout }, fenced, root),
+    ).rejects.toThrow('1 task has a worktree inside this checkout');
+    expect(tx.query.tasks.findMany).toHaveBeenCalled();
+    expect(h.helper).toHaveBeenCalledOnce();
+    expect(h.clone).not.toHaveBeenCalled();
+    await untouched(dest);
+  },
+);
+
+it('recounts checkout holders under the task lock after credentials are prepared', async () => {
+  const { dest } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  h.helper.mockImplementationOnce(async () => {
+    h.holding = 1;
+  });
+  await expect(handleRefresh(remotePayload, db, root)).rejects.toThrow(
+    'Not refreshed: 1 task is using this repository. Refresh once it finishes.',
+  );
+  expect(h.clone).not.toHaveBeenCalled();
+  await untouched(dest);
+});
+
+it('holds the task lock for the rename and releases the transaction before cloning', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  let inTransaction = false;
+  const lock = vi.spyOn(repositoryLocks, 'lockRepositoryTasksKey');
+  const tx = { ...db };
+  const fenced = {
+    ...db,
+    transaction: async (fn: (conn: typeof tx) => Promise<unknown>) => {
+      inTransaction = true;
+      try {
+        return await fn(tx);
+      } finally {
+        inTransaction = false;
+      }
+    },
+  } as unknown as Database;
+  const rename = fsSafe.renameNoFollow;
+  vi.spyOn(fsSafe, 'renameNoFollow').mockImplementation(async (...args) => {
+    expect(inTransaction).toBe(true);
+    expect(lock).toHaveBeenCalledWith(tx, 'r1');
+    return rename(...args);
+  });
+  h.helper.mockImplementationOnce(async () => {
+    expect(inTransaction).toBe(false);
+  });
+  h.clone.mockImplementationOnce(async (_url, to) => {
+    expect(inTransaction).toBe(false);
+    await git(root, ['clone', payload.localPath!, to]);
+  });
+  await handleRefresh(remotePayload, fenced, root);
+  expect(lock).toHaveBeenCalledOnce();
+  expect(h.clone).toHaveBeenCalledOnce();
+  expect(await asidesOf(dest)).toHaveLength(1);
+  expect(row.status).toBe('ready');
+});
+
+it.each(['copy', 'clone'] as const)(
+  'restores the private %s recovery before publishing and leaves source and aside intact',
+  async (kind) => {
+    const { dest, payload } = await fixture();
+    const source = payload.localPath!;
+    await mkdir(path.join(source, '.haive-data/state'), { recursive: true });
+    for (const file of [
+      'plan.json',
+      'plan.md',
+      'environment.json',
+      'tooling.json',
+      'exclusions.json',
+    ])
+      await writeFile(path.join(source, '.haive-data', file), 'stale');
+    await writeFile(path.join(source, '.haive-data/state/stale'), 'stale');
+    await mkdir(path.join(source, '.haive-data/knowledge_base'));
+    await writeFile(path.join(source, '.haive-data/knowledge_base/keep.md'), 'keep');
+    await writeFile(path.join(dest, '.git/config'), '[core\n');
+    if (kind === 'clone')
+      h.clone.mockImplementationOnce(async (_url, replacement) =>
+        cp(source, replacement, { recursive: true }),
+      );
+    h.restore.mockImplementationOnce(async (_db, _id, replacement) => {
+      expect(replacement).not.toBe(dest);
+      await expect(readFile(path.join(dest, '.git/HEAD'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      expect((await readdir(path.join(replacement, '.haive-data'))).sort()).toEqual([
+        'knowledge_base',
+        'plan.json',
+        'plan.md',
+        'state',
+      ]);
+      await writeFile(path.join(replacement, '.haive-data/plan.json'), 'restored');
+    });
+    await handleRefresh(
+      { ...(kind === 'copy' ? payload : remotePayload), recoverCheckout: true },
+      db,
+      root,
+    );
+    expect(h.restore).toHaveBeenCalledOnce();
+    expect(await readFile(path.join(dest, '.haive-data/plan.json'), 'utf8')).toBe('restored');
+    expect(await readFile(path.join(source, '.haive-data/plan.json'), 'utf8')).toBe('stale');
+    expect(await readFile(path.join(dest, '.haive-data/knowledge_base/keep.md'), 'utf8')).toBe(
+      'keep',
+    );
+    const aside = (await readdir(path.dirname(dest))).find((n) => n.includes('.aside-'))!;
+    expect(
+      await readFile(path.join(path.dirname(dest), aside, '.haive-data/plan.md'), 'utf8'),
+    ).toBe('pending\n');
+  },
+);
+
+it.each(['restore', 'late holder'] as const)(
+  'keeps a private recovery and its journal when %s prevents publication',
+  async (failure) => {
+    const { dest, payload } = await fixture();
+    await writeFile(path.join(dest, '.git/config'), '[core\n');
+    h.restore.mockImplementationOnce(async (_db, _id, replacement) => {
+      await mkdir(path.join(replacement, '.haive-data'), { recursive: true });
+      await writeFile(path.join(replacement, '.haive-data/journal-proof'), 'keep private bytes');
+      if (failure === 'restore') throw new Error('writer failed');
+      h.holding = 1;
+    });
+    await expect(handleRefresh({ ...payload, recoverCheckout: true }, db, root)).rejects.toThrow(
+      /private replacement was kept/,
+    );
+    expect(h.persist).not.toHaveBeenCalled();
+    await expect(readFile(path.join(dest, '.git/HEAD'))).rejects.toMatchObject({ code: 'ENOENT' });
+    const kept = (await readdir(path.dirname(dest))).find((n) => n.includes('.rebuild-'))!;
+    expect(
+      await readFile(path.join(path.dirname(dest), kept, '.haive-data/journal-proof'), 'utf8'),
+    ).toBe('keep private bytes');
+  },
+);
+
+it('does not report a private replacement after its publication acknowledgement failed', async () => {
+  const { dest, payload } = await fixture();
+  await writeFile(path.join(dest, '.git/config'), '[core\n');
+  let restored = false;
+  h.restore.mockImplementationOnce(async () => {
+    restored = true;
+  });
+  const failedAck = {
+    ...db,
+    transaction: async (fn: (tx: Database) => unknown) => {
+      const result = await fn(db);
+      if (restored) throw new Error('publication acknowledgement lost');
+      return result;
+    },
+  } as unknown as Database;
+  await expect(
+    handleRefresh({ ...payload, recoverCheckout: true }, failedAck, root),
+  ).rejects.toThrow('restored replacement was published');
+  expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(
+    await git(payload.localPath!, ['rev-parse', 'HEAD']),
+  );
+  expect((await readdir(path.dirname(dest))).filter((n) => n.includes('.rebuild-'))).toEqual([]);
+});

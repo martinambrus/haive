@@ -1291,6 +1291,73 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
     return dir;
   }
 
+  it.each([false, true])(
+    'puts back issue projections before a level merge (retry=%s), without a fixer',
+    async (retry) => {
+      const integrationDir = await mkdtemp(path.join(tmpdir(), 'dag-projection-'));
+      try {
+        await git(integrationDir, ['init', '-b', 'main']);
+        await mkdir(path.join(integrationDir, '.haive-data'), { recursive: true });
+        const projection = path.join(integrationDir, '.haive-data/plan.md');
+        await writeFile(projection, 'original plan\n');
+        await git(integrationDir, ['add', '-A']);
+        await git(integrationDir, ['commit', '-m', 'initial']);
+        await git(integrationDir, ['checkout', '-b', 'main--ISSUE-1']);
+        await writeFile(projection, 'agent plan edit\n');
+        await writeFile(path.join(integrationDir, 'issue.txt'), 'implementation\n');
+        await git(integrationDir, ['add', '-A']);
+        await git(integrationDir, ['commit', '-m', 'ISSUE-1: implementation']);
+        await git(integrationDir, ['checkout', 'main']);
+        await writeFile(projection, 'current plan\n');
+        await git(integrationDir, ['commit', '-am', 'plan writer']);
+        const h = makeDagMergeWaitDb({
+          invocation: undefined,
+          integrationDir,
+          autoResolveConflicts: true,
+          issue: { mergeStatus: retry ? 'conflict' : null, worktreePath: integrationDir },
+          checkpointAfterFirstRead: true,
+        });
+        const result = await resolveDagPhase(
+          h.db as never,
+          dagExecuteStep as never,
+          {
+            id: 'step1',
+            status: 'running',
+            round: 0,
+            aiFixContext: retry ? { reason: 'retry' } : null,
+          } as never,
+          {
+            taskId: 'task1',
+            userId: 'user1',
+            taskStepId: 'step1',
+            repoPath: integrationDir,
+            sandboxWorkdir: integrationDir,
+            logger,
+            emitProgress: async () => {},
+          } as never,
+          {
+            userId: 'user1',
+            taskId: 'task1',
+            providers: [],
+            deps: { enqueueCliInvocation: async () => {} },
+          } as never,
+        );
+        expect(result.resolved).toBe(true);
+        expect(h.getIssueMergeStatus()).toBe('clean');
+        expect(h.invocationInserts).toEqual([]);
+        expect(h.events).toContainEqual(
+          expect.objectContaining({ eventType: 'branch.projections_put_back' }),
+        );
+        expect(await readFile(projection, 'utf8')).toBe('current plan\n');
+        expect(await readFile(path.join(integrationDir, 'issue.txt'), 'utf8')).toBe(
+          'implementation\n',
+        );
+      } finally {
+        await rm(integrationDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('is recognised as over rather than waited on forever once supersededAt is set', async () => {
     const integrationDir = await setupConflictedIntegration();
     try {

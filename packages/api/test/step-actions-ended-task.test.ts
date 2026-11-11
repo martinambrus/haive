@@ -20,6 +20,7 @@ import type { AppEnv } from '../src/context.js';
 import { seedStepCatalog } from './step-flags-fixture.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
+const REPO = '00000000-0000-4000-8000-0000000000d1';
 const TASK = '00000000-0000-4000-8000-000000000001';
 const STEP_ROW = '00000000-0000-4000-8000-0000000000c1';
 const STEP = '11d-skill-sync';
@@ -37,6 +38,7 @@ vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 function setup(status: string) {
   const fake = createFakeDb({
     modules: schema.modules,
+    repositories: schema.repositories,
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     taskEvents: schema.taskEvents,
@@ -46,9 +48,11 @@ function setup(status: string) {
     stepCatalog: schema.stepCatalog,
   });
   seedStepCatalog(fake);
+  fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', status: 'ready' });
   fake.insert(schema.tasks, {
     id: TASK,
     userId: USER,
+    repositoryId: REPO,
     status,
     orchestrationEpoch: 3,
     currentStepId: STEP,

@@ -17,7 +17,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { claimRepositoryRoot, createDatabase, schema, type Database } from '@haive/database';
 import {
@@ -29,6 +29,14 @@ import {
   projectStateHash,
   renderProjectState,
 } from '@haive/shared/project-state';
+import {
+  buildRepoCliRulesBlock,
+  CLI_RULES_END,
+  CLI_RULES_START,
+  extractRegion,
+  normalizeContent,
+  sha256Hex,
+} from '@haive/shared';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
@@ -43,10 +51,18 @@ import {
   writeProjectStateRecord,
   writeProjectStateColumn,
 } from '../src/project-state/write.js';
-import { refreshProjectState, sweepDirtyProjectStates } from '../src/project-state/refresh.js';
+import {
+  markProjectStatesDirtyAtBoot,
+  refreshProjectState,
+  sweepDirtyProjectStates,
+} from '../src/project-state/refresh.js';
+import { applyPlanPatch } from '@haive/shared/plan';
+import { writePlanMirror, reconcilePlanFromCheckout } from '../src/plan/mirror.js';
+import { persistDetection } from '../src/repo/clone.js';
 import { handleRefresh } from '../src/repo/refresh.js';
 import {
   putBackProjections,
+  resyncAfterTaskEnd,
   restoreFaults,
   setAsideHaiveProjections,
 } from '../src/project-state/set-aside.js';
@@ -106,7 +122,11 @@ vi.mock('../src/project-state/set-aside.js', async (original) => {
 
 // Deliberately no DATABASE_URL fallback. This suite is opt-in, only on its exclusive fixture.
 const url = process.env.T266_DATABASE_URL;
-if (url && !/^\/(?:codex|test)_t266_[a-z0-9_]+$/.test(new URL(url).pathname))
+if (
+  url &&
+  (!['/codex_t266_', '/test_t266_'].some((prefix) => new URL(url).pathname.startsWith(prefix)) ||
+    !/^\/[a-z]+_t266_[a-z0-9_]+$/.test(new URL(url).pathname))
+)
   throw new Error('T266 requires its assigned database');
 if (url && ['', '5432', '6379'].includes(new URL(url).port))
   throw new Error('T266 requires its assigned PostgreSQL port');
@@ -183,6 +203,298 @@ async function diskRecord(root: string, name: string) {
 }
 
 describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
+  it.each(['sweep', 'boot'] as const)('%s refresh leaves legacy mirrors alone', async (mode) => {
+    const s = await fixture();
+    await db!
+      .update(schema.repositories)
+      .set({ onboardingEnvironment: { schemaVersion: 1, envDetectData: {}, confirmedValues: {} } })
+      .where(eq(schema.repositories.id, s.repo.id));
+    await s.write();
+    const path = join(s.root, '.haive-data/environment.json');
+    const legacy = JSON.stringify({ schemaVersion: 1, envDetectData: {}, confirmedValues: {} });
+    await writeFile(path, legacy);
+    if (mode === 'boot') await markProjectStatesDirtyAtBoot(db!);
+    else await markProjectStateDirty(db!, s.repo.id);
+    expect(await sweepDirtyProjectStates(db!)).toBe(1);
+    expect(await readFile(path, 'utf8')).toBe(legacy);
+    expect((await s.outbox())!.writtenRevision).toBe((await s.outbox())!.revision);
+  });
+
+  const rulesImporters = ['task-end', 'sweep', 'refused-sweep', 'direct'];
+  it.each(rulesImporters)('defers rules imported through %s', async (importer) => {
+    const s = await fixture();
+    const local = 'LOCAL RULES\n';
+    const incoming = 'TEAM RULES\n';
+    const diskPath = '.claude/workflow-config.json';
+    const content = 'upgraded config\n';
+    const hash = sha256Hex(content);
+    const git = (...args: string[]) =>
+      execFileSync('git', args, {
+        cwd: s.root,
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: 'fixture',
+          GIT_AUTHOR_EMAIL: 'fixture@local',
+          GIT_COMMITTER_NAME: 'fixture',
+          GIT_COMMITTER_EMAIL: 'fixture@local',
+        },
+      });
+    git('init', '-q', '-b', 'main');
+    git('commit', '--allow-empty', '-qm', 'initial');
+    await db!
+      .update(schema.repositories)
+      .set({ agentRulesOverride: local, scopeExcludeGlobs: ['vendor/**'] })
+      .where(eq(schema.repositories.id, s.repo.id));
+    await s.write();
+    const [planned] = await db!
+      .select()
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, s.repo.id));
+    await writeFile(join(s.root, 'AGENTS.md'), buildRepoCliRulesBlock(local)!);
+    const path = join(s.root, '.haive-data/state/settings/agent-rules.md');
+    await writeFile(path, incoming);
+    const [task] = await db!
+      .insert(schema.tasks)
+      .values({
+        userId: s.userId,
+        repositoryId: s.repo.id,
+        type: 'onboarding_upgrade',
+        title: 'rules import',
+        status: 'running',
+      })
+      .returning();
+    const ctx = {
+      db: db!,
+      repoPath: s.root,
+      workspacePath: s.root,
+      taskId: task!.id,
+      userId: s.userId,
+      logger: { info() {}, warn() {}, error() {}, debug() {} },
+      throwIfCancelled() {},
+    } as unknown as StepContext;
+    const apply = (next?: { taskId: string; column: unknown }) =>
+      upgradeApplyStep.apply(next ? { ...ctx, taskId: next.taskId } : ctx, {
+        detected: {
+          repositoryId: s.repo.id,
+          ranBackfill: false,
+          entries: next
+            ? []
+            : [
+                {
+                  entryId: 'config',
+                  bucket: 'new_artifact',
+                  templateId: 'workflow-config',
+                  templateKind: 'workflow-config',
+                  diskPath,
+                  liveArtifactId: null,
+                  currentContent: null,
+                  newContent: content,
+                  baselineContent: null,
+                  currentHash: null,
+                  baselineWrittenHash: null,
+                  newContentHash: hash,
+                  baselineTemplateContentHash: null,
+                  currentTemplateContentHash: hash,
+                  templateSchemaVersion: 2,
+                  delta: null,
+                },
+              ],
+          counts: {},
+          installedTemplateSetHash: null,
+          currentTemplateSetHash: 'set',
+          renderCtxSnapshot: {
+            ...REFERENCE_CONTEXT,
+            ...context('upgraded'),
+            cliTargets: [],
+            agentTargets: [],
+            enabledCliProviders: [],
+            rtkEnabled: false,
+          },
+          renderContextColumn: next?.column ?? planned!.renderContext,
+          agentRulesOverride: next ? incoming : local,
+          rtkFollowsLive: false,
+          backfilledRows: 0,
+        },
+        formValues: { selectedNew: ['config'] },
+        iteration: 0,
+        previousIterations: [],
+      } as never);
+    const rules = async () =>
+      (
+        await db!.select().from(schema.repositories).where(eq(schema.repositories.id, s.repo.id))
+      )[0]!.agentRulesOverride;
+    const base = async () =>
+      (
+        await db!
+          .select()
+          .from(schema.projectStateSync)
+          .where(eq(schema.projectStateSync.repositoryId, s.repo.id))
+      )[0]!.baseSnapshot;
+    const beforeBase = await base();
+
+    await mkdir(join(s.root, '.haive'), { recursive: true });
+    await writeFile(
+      join(s.root, '.haive/install.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        templateSetHash: 'old',
+        templates: [],
+      }),
+    );
+    await writeFile(
+      join(s.root, '.haive-data/exclusions.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        scopeExcludeGlobs: ['vendor/**'],
+      }),
+    );
+    const applied = await apply();
+    expect(applied.appliedCount).toBe(1);
+    const dirty = (await s.outbox())!;
+    expect(dirty.writtenRevision).toBeLessThan(dirty.revision);
+    expect(applied.recordWrite).toBe('deferred');
+    expect(await rules()).toBe(local);
+    expect((await apply()).recordWrite).toBe('deferred');
+    expect(await rules()).toBe(local);
+    expect(await readFile(path, 'utf8')).toBe(incoming);
+    expect(await base()).toEqual(beforeBase);
+    expect((await s.outbox())!.writeIntent).toBeNull();
+
+    await db!
+      .update(schema.tasks)
+      .set({ status: 'completed' })
+      .where(eq(schema.tasks.id, task!.id));
+    if (importer === 'refused-sweep') {
+      seam.beforeRewrite = async () => {
+        seam.beforeRewrite = null;
+        throw new Error('injected rules region write refusal');
+      };
+      await sweepDirtyProjectStates(db!);
+      expect(await readFile(join(s.root, 'AGENTS.md'), 'utf8')).toContain('LOCAL RULES');
+      expect((await s.outbox())!.rulesReconcileIntent).toMatchObject({ phase: 'ready' });
+      // The record may already be clean; its independent rules intent must still be swept.
+      expect((await s.outbox())!.writtenRevision).toBe((await s.outbox())!.revision);
+    }
+    if (importer === 'sweep' || importer === 'refused-sweep') {
+      expect(await sweepDirtyProjectStates(db!)).toBe(1);
+      expect(await readFile(join(s.root, 'AGENTS.md'), 'utf8')).toContain('TEAM RULES');
+    }
+    if (importer === 'direct') {
+      await syncProjectStateFromCheckout(db!, { repositoryId: s.repo.id, repoPath: s.root });
+      expect(await readFile(join(s.root, 'AGENTS.md'), 'utf8')).toContain('TEAM RULES');
+    }
+    const regionBeforeTaskEnd = await stat(join(s.root, 'AGENTS.md'));
+    await resyncAfterTaskEnd(db!, task!.id);
+    if (importer !== 'task-end')
+      expect((await stat(join(s.root, 'AGENTS.md'))).ino).toBe(regionBeforeTaskEnd.ino);
+    expect((await s.outbox())!.rulesReconcileIntent).toBeNull();
+    const settledOutbox = await s.outbox();
+    const settledArtifacts = await db!
+      .select()
+      .from(schema.onboardingArtifacts)
+      .where(eq(schema.onboardingArtifacts.repositoryId, s.repo.id));
+    expect(await sweepDirtyProjectStates(db!)).toBe(0);
+    expect(await s.outbox()).toEqual(settledOutbox);
+    expect(
+      await db!
+        .select()
+        .from(schema.onboardingArtifacts)
+        .where(eq(schema.onboardingArtifacts.repositoryId, s.repo.id)),
+    ).toEqual(settledArtifacts);
+
+    expect(await rules()).toBe(incoming);
+    const region = extractRegion(
+      await readFile(join(s.root, 'AGENTS.md'), 'utf8'),
+      CLI_RULES_START,
+      CLI_RULES_END,
+    );
+    const rulesHash = sha256Hex(normalizeContent(buildRepoCliRulesBlock(incoming)!));
+    expect(sha256Hex(normalizeContent(region!))).toBe(rulesHash);
+    const [rulesRow] = await db!
+      .select()
+      .from(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, s.repo.id),
+          eq(schema.onboardingArtifacts.diskPath, 'AGENTS.md'),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      );
+    expect(rulesRow).toMatchObject({
+      templateContentHash: rulesHash,
+      writtenHash: rulesHash,
+      writtenContent: region,
+      source: 'backfill',
+    });
+    expect(await s.render()).toMatchObject({ projectInfo: { name: 'upgraded' } });
+    const claim = JSON.parse(
+      await readFile(join(s.root, '.haive-data/state', claimFileName(diskPath)), 'utf8'),
+    );
+    expect(claim).toMatchObject({ path: diskPath, writtenHash: hash });
+    expect((await s.outbox())!.writtenRevision).toBe((await s.outbox())!.revision);
+    expect(await readFile(join(s.root, '.haive/install.json'), 'utf8')).toContain(
+      'templateSetHash',
+    );
+    expect(await readFile(join(s.root, '.haive-data/exclusions.json'), 'utf8')).toContain(
+      'vendor/**',
+    );
+    expect(await readFile(path, 'utf8')).toBe(incoming);
+    expect(((await base()) as { settings: Record<string, unknown> }).settings['agent-rules']).toBe(
+      incoming,
+    );
+    expect(
+      await db!.select().from(schema.auditEvents).where(eq(schema.auditEvents.targetId, s.repo.id)),
+    ).toHaveLength(1);
+
+    // A new 02 owns the checkout again and can retire with its normal event/staging rules.
+    const [nextTask] = await db!
+      .insert(schema.tasks)
+      .values({
+        userId: s.userId,
+        repositoryId: s.repo.id,
+        type: 'onboarding_upgrade',
+        title: 'retire owed mirrors',
+        status: 'running',
+      })
+      .returning();
+    const [current] = await db!
+      .select()
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, s.repo.id));
+    const next = { taskId: nextTask!.id, column: current!.renderContext };
+    expect((await apply(next)).recordWrite).toBe('written');
+    expect((await s.outbox())!.writtenRevision).toBe((await s.outbox())!.revision);
+    expect((await apply(next)).recordWrite).toBe('written');
+    const retired = await db!
+      .select()
+      .from(schema.taskEvents)
+      .where(
+        and(
+          eq(schema.taskEvents.taskId, nextTask!.id),
+          eq(schema.taskEvents.eventType, 'upgrade.haive_file_retired'),
+        ),
+      );
+    expect(retired.map((event) => event.payload)).toEqual(
+      expect.arrayContaining([
+        { path: '.haive/install.json' },
+        { path: '.haive-data/exclusions.json' },
+      ]),
+    );
+    expect(retired).toHaveLength(2);
+    await db!
+      .update(schema.tasks)
+      .set({ status: 'completed' })
+      .where(eq(schema.tasks.id, nextTask!.id));
+    const clean = await s.outbox();
+    let rewrites = 0;
+    seam.afterWrite = async () => {
+      rewrites++;
+    };
+    await resyncAfterTaskEnd(db!, nextTask!.id);
+    expect(rewrites).toBe(0);
+    expect(await s.outbox()).toEqual(clean);
+  });
+
   it.each(['prepared', 'partial'] as const)(
     'defers conflict answers while a %s record journal owns another render key',
     async (phase) => {
@@ -385,6 +697,394 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
     };
     return { s, source, storage, dest, git, payload, refresh, snapshot, leaveIntent };
   };
+  it.each(['state', 'plan', 'earlier plan base'] as const)(
+    'recovery keeps the database %s through a boot sweep and imports a later genuine edit',
+    async (area) => {
+      const m = await moveFixture();
+      await db!
+        .update(schema.repositories)
+        .set({
+          rtkVersion: '2.0.0',
+          agentRulesOverride: 'Keep this install\n',
+        })
+        .where(eq(schema.repositories.id, m.s.repo.id));
+      await writeProjectStateRecord(db!, {
+        repositoryId: m.s.repo.id,
+        repoPath: m.dest,
+        context: context('saved here') as never,
+        rtkChoiceRecorded: false,
+      });
+      // The database equals its last written base, but those bytes were never pushed.
+      await mkdir(join(m.source, '.haive-data/state/settings'), { recursive: true });
+      await writeFile(join(m.source, '.haive-data/state/settings/rtk-version.json'), '"1.0.0"\n');
+      await writeFile(join(m.source, '.haive-data/state/settings/agent-rules.md'), 'Older rules\n');
+      await applyPlanPatch(
+        db!,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Saved plan' }] },
+        { repositoryId: m.s.repo.id, origin: 'llm' },
+      );
+      await writePlanMirror(db!, m.s.repo.id, m.dest);
+      const planPath = join(m.dest, '.haive-data/plan.json');
+      const plan = JSON.parse(await readFile(planPath, 'utf8'));
+      await db!
+        .update(schema.planMirrorState)
+        .set({
+          syncedSnapshot:
+            area === 'earlier plan base'
+              ? {
+                  ...plan,
+                  nodes: plan.nodes.map((n: object) => ({ ...n, title: 'Before saved plan' })),
+                }
+              : plan,
+        })
+        .where(eq(schema.planMirrorState.repositoryId, m.s.repo.id));
+      const olderPlan = {
+        ...plan,
+        nodes: plan.nodes.map((n: object) => ({ ...n, title: 'Older plan' })),
+      };
+      await writeFile(join(m.source, '.haive-data/plan.json'), JSON.stringify(olderPlan));
+      // A legacy mirror must not fill an intentionally empty column on the next rescan.
+      await writeFile(
+        join(m.source, '.haive-data/tooling.json'),
+        JSON.stringify({
+          schemaVersion: 1,
+          tooling: { mcpSettingsJson: '{"mcpServers":{"old":{"command":"old"}}}' },
+        }),
+      );
+      await mkdir(join(m.source, '.haive-data/knowledge_base'), { recursive: true });
+      await writeFile(
+        join(m.source, '.haive-data/knowledge_base/keep.md'),
+        'Source knowledge stays\n',
+      );
+      const head = m.git(m.source, 'rev-parse', 'HEAD');
+      await writeFile(join(m.dest, '.git/config'), '[core\n');
+      let claimSeen = false;
+      seam.afterWrite = async () => {
+        const [repo] = await db!
+          .select()
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, m.s.repo.id));
+        expect(repo!.rootClaimKind).toBe('refresh');
+        expect(repo!.rootClaimedAt).not.toBeNull();
+        claimSeen = true;
+      };
+      await handleRefresh({ ...m.payload, recoverCheckout: true }, db!, m.storage);
+      seam.afterWrite = null;
+      await markProjectStatesDirtyAtBoot(db!);
+      await sweepDirtyProjectStates(db!);
+      await writePlanMirror(db!, m.s.repo.id, m.dest);
+      await persistDetection(db!, m.s.repo.id, m.dest);
+      const [repo] = await db!
+        .select()
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, m.s.repo.id));
+      if (area === 'state') {
+        expect(repo!.rtkVersion).toBe('2.0.0');
+        expect(repo!.agentRulesOverride).toBe('Keep this install\n');
+        expect((repo!.renderContext as ReturnType<typeof context>).projectInfo.name).toBe(
+          'saved here',
+        );
+        expect(repo!.onboardingTooling).toBeNull();
+      } else {
+        const [node] = await db!
+          .select()
+          .from(schema.planNodes)
+          .where(eq(schema.planNodes.repositoryId, m.s.repo.id));
+        expect(node!.title).toBe('Saved plan');
+        const [mirror] = await db!
+          .select()
+          .from(schema.planMirrorState)
+          .where(eq(schema.planMirrorState.repositoryId, m.s.repo.id));
+        expect(mirror!.syncedSnapshot).toEqual(
+          area === 'earlier plan base'
+            ? {
+                ...plan,
+                nodes: plan.nodes.map((n: object) => ({ ...n, title: 'Before saved plan' })),
+              }
+            : plan,
+        );
+      }
+      expect(claimSeen).toBe(true);
+      expect(m.git(m.dest, 'rev-parse', 'HEAD')).toBe(head); // Recovery writes, never commits.
+      expect(await readFile(join(m.dest, '.haive-data/knowledge_base/keep.md'), 'utf8')).toBe(
+        'Source knowledge stays\n',
+      );
+      await writeFile(join(m.dest, '.haive-data/state/settings/rtk-version.json'), '"3.0.0"\n');
+      await writeFile(
+        planPath,
+        JSON.stringify({
+          ...plan,
+          nodes: plan.nodes.map((n: object) => ({ ...n, title: 'Later edit' })),
+        }),
+      );
+      await syncProjectStateFromCheckout(db!, { repositoryId: m.s.repo.id, repoPath: m.dest });
+      await reconcilePlanFromCheckout(db!, m.s.repo.id, m.dest);
+      const [later] = await db!
+        .select()
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, m.s.repo.id));
+      const [laterNode] = await db!
+        .select()
+        .from(schema.planNodes)
+        .where(eq(schema.planNodes.repositoryId, m.s.repo.id));
+      expect(later!.rtkVersion).toBe('3.0.0');
+      expect(laterNode!.title).toBe(area === 'earlier plan base' ? 'Saved plan' : 'Later edit');
+      expect(
+        await db!
+          .select()
+          .from(schema.projectStateConflicts)
+          .where(eq(schema.projectStateConflicts.repositoryId, m.s.repo.id)),
+      ).toMatchObject(
+        area === 'earlier plan base'
+          ? [{ unit: 'plan/' + plan.nodes[0].id + '#title', resolution: null }]
+          : [],
+      );
+    },
+  );
+
+  it('recovery keeps an unpushed local plan node when a later remote plan lacks it', async () => {
+    const m = await moveFixture();
+    await applyPlanPatch(
+      db!,
+      { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Shared root' }] },
+      { repositoryId: m.s.repo.id, origin: 'llm' },
+    );
+    await writePlanMirror(db!, m.s.repo.id, m.dest);
+    const planPath = join(m.dest, '.haive-data/plan.json');
+    const shared = JSON.parse(await readFile(planPath, 'utf8'));
+    await db!
+      .update(schema.planMirrorState)
+      .set({ syncedSnapshot: shared })
+      .where(eq(schema.planMirrorState.repositoryId, m.s.repo.id));
+    await applyPlanPatch(
+      db!,
+      {
+        ops: [
+          {
+            op: 'upsert',
+            nodeRef: 'local-child',
+            parentRef: shared.nodes[0].id,
+            title: 'Unpushed child',
+          },
+        ],
+      },
+      { repositoryId: m.s.repo.id, origin: 'llm' },
+    );
+    await writeFile(join(m.dest, '.git/config'), '[core\n');
+    await handleRefresh({ ...m.payload, recoverCheckout: true }, db!, m.storage);
+    await writeFile(planPath, JSON.stringify(shared));
+    await reconcilePlanFromCheckout(db!, m.s.repo.id, m.dest);
+    expect(
+      (
+        await db!
+          .select()
+          .from(schema.planNodes)
+          .where(eq(schema.planNodes.repositoryId, m.s.repo.id))
+      )
+        .map((n) => n.title)
+        .sort(),
+    ).toEqual(['Shared root', 'Unpushed child']);
+  });
+
+  it.each([false, true])(
+    'recovery imports the source plan with no local rows (empty context: %s)',
+    async (emptyContext) => {
+      const m = await moveFixture();
+      await applyPlanPatch(
+        db!,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Team plan' }] },
+        { repositoryId: m.s.repo.id, origin: 'llm' },
+      );
+      await writePlanMirror(db!, m.s.repo.id, m.source);
+      const plan = await readFile(join(m.source, '.haive-data/plan.json'), 'utf8');
+      const markdown = await readFile(join(m.source, '.haive-data/plan.md'), 'utf8');
+      m.git(m.source, 'add', '.haive-data/plan.json', '.haive-data/plan.md');
+      m.git(m.source, 'commit', '-qm', 'team plan');
+      await db!.delete(schema.planNodes).where(eq(schema.planNodes.repositoryId, m.s.repo.id));
+      if (emptyContext) {
+        await db!
+          .update(schema.repositories)
+          .set({ renderContext: null })
+          .where(eq(schema.repositories.id, m.s.repo.id));
+        await db!
+          .delete(schema.projectStateSync)
+          .where(eq(schema.projectStateSync.repositoryId, m.s.repo.id));
+      }
+      await writeFile(join(m.dest, '.git/config'), '[core\n');
+      await handleRefresh({ ...m.payload, recoverCheckout: true }, db!, m.storage);
+      expect(await readFile(join(m.dest, '.haive-data/plan.json'), 'utf8')).toBe(plan);
+      expect(await readFile(join(m.dest, '.haive-data/plan.md'), 'utf8')).toBe(markdown);
+      expect(
+        (
+          await db!
+            .select()
+            .from(schema.planNodes)
+            .where(eq(schema.planNodes.repositoryId, m.s.repo.id))
+        ).map((n) => n.title),
+      ).toEqual(['Team plan']);
+      if (emptyContext) {
+        const [repo] = await db!
+          .select()
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, m.s.repo.id));
+        expect((repo!.renderContext as ReturnType<typeof context>).projectInfo.name).toBe(
+          'incoming',
+        );
+        expect(
+          JSON.parse(await readFile(join(m.dest, '.haive-data/state/project/render.json'), 'utf8'))
+            .projectInfo.name,
+        ).toBe('incoming');
+      }
+      expect(m.git(m.dest, 'diff', '--name-only', '--diff-filter=D')).not.toContain(
+        '.haive-data/plan',
+      );
+    },
+  );
+
+  it.each(['recoverable', 'held', 'missing images', 'legacy recoverable', 'legacy held'] as const)(
+    'recovery handles a %s pending intent before moving the checkout',
+    async (kind) => {
+      const m = await moveFixture();
+      await m.leaveIntent();
+      if (kind.startsWith('legacy')) {
+        const intent = { ...((await m.s.outbox())!.writeIntent as Record<string, unknown>) };
+        delete intent.privateReplacement;
+        await db!
+          .update(schema.projectStateOutbox)
+          .set({ writeIntent: intent })
+          .where(eq(schema.projectStateOutbox.repositoryId, m.s.repo.id));
+      }
+      if (kind.endsWith('held'))
+        await writeFile(join(m.dest, '.haive-data/state/project/render.json'), 'foreign edit');
+      if (kind === 'missing images') {
+        const intent = (await m.s.outbox())!.writeIntent as { stage: { rel: string } };
+        await rm(join(m.dest, intent.stage.rel), { recursive: true });
+      }
+      // A lost git directory needs a rebuild but leaves the journal and record available for undo.
+      await rm(join(m.dest, '.git'), { recursive: true });
+      const rebuild = () => handleRefresh({ ...m.payload, recoverCheckout: true }, db!, m.storage);
+      if (kind.endsWith('recoverable')) {
+        await rebuild();
+        expect(m.git(m.dest, 'rev-parse', 'HEAD')).toBe(m.git(m.source, 'rev-parse', 'HEAD'));
+        expect((await m.s.outbox())!.writeIntent).toBeNull();
+      } else {
+        await expect(rebuild()).rejects.toThrow(/pending project data write.*Nothing was moved/);
+        expect(await readdir(join(m.storage, m.s.userId))).toEqual([m.s.repo.id]);
+        if (kind.endsWith('held'))
+          expect(
+            await readFile(join(m.dest, '.haive-data/state/project/render.json'), 'utf8'),
+          ).toBe('foreign edit');
+        expect((await m.s.outbox())!.writeIntent).toBeTruthy();
+      }
+    },
+  );
+
+  it.each(['marked', 'legacy'] as const)(
+    'a stopped private restore intent (%s) never blocks the next rebuild',
+    async (kind) => {
+      const m = await moveFixture();
+      await writeFile(join(m.dest, '.git/config'), '[core\n');
+      let stopped = false;
+      const stoppedWorker = new Proxy(db!, {
+        get(target, prop) {
+          if (prop !== 'transaction') return Reflect.get(target, prop);
+          return async (fn: Parameters<Database['transaction']>[0]) => {
+            // Simulate death after the intent commits: no final write or in-process discard.
+            if (stopped) throw new Error('worker stopped');
+            const result = await target.transaction(fn);
+            if (result && typeof result === 'object' && 'intentId' in result) {
+              stopped = true;
+              throw new Error('worker stopped');
+            }
+            return result;
+          };
+        },
+      }) as Database;
+      await expect(
+        handleRefresh({ ...m.payload, recoverCheckout: true }, stoppedWorker, m.storage),
+      ).rejects.toThrow('worker stopped');
+      expect(stopped).toBe(true);
+      const intent = (await m.s.outbox())!.writeIntent as {
+        privateReplacement?: string;
+        stage: { rel: string };
+      };
+      expect(intent).toBeTruthy();
+      const siblings = await readdir(join(m.storage, m.s.userId));
+      const replacement = siblings.find((name) => name.startsWith(`${m.s.repo.id}.rebuild-`))!;
+      expect(replacement).toBeTruthy();
+      if (kind === 'marked') expect.soft(intent.privateReplacement).toBe(replacement);
+      else {
+        delete intent.privateReplacement;
+        await db!
+          .update(schema.projectStateOutbox)
+          .set({ writeIntent: intent })
+          .where(eq(schema.projectStateOutbox.repositoryId, m.s.repo.id));
+      }
+      const journal = join(m.storage, m.s.userId, replacement, intent.stage.rel);
+      const images = await readdir(journal);
+      expect(images.length).toBeGreaterThan(0);
+      const before = await Promise.all(images.map((name) => readFile(join(journal, name))));
+      // A different unusable tree can appear at dest before the next recovery.
+      await mkdir(m.dest);
+      await writeFile(join(m.dest, 'keep.txt'), 'new checkout entry');
+      if (kind === 'marked') {
+        // Even a same-named stage in another tree is not the private restore's journal.
+        await mkdir(join(m.dest, intent.stage.rel), { recursive: true });
+        await writeFile(join(m.dest, intent.stage.rel, 'unrelated-image'), 'keep other tree');
+      }
+      await handleRefresh({ ...m.payload, recoverCheckout: true }, db!, m.storage);
+      expect(m.git(m.dest, 'rev-parse', 'HEAD')).toBe(m.git(m.source, 'rev-parse', 'HEAD'));
+      expect((await m.s.outbox())!.writeIntent).toBeNull();
+      expect(await readdir(journal)).toEqual(images);
+      expect(await Promise.all(images.map((name) => readFile(join(journal, name))))).toEqual(
+        before,
+      );
+      expect(await readdir(join(m.storage, m.s.userId))).toContain(replacement);
+    },
+  );
+
+  it.each(['marked', 'legacy'] as const)(
+    'recovery clears a current-checkout intent (%s) when that checkout is absent',
+    async (kind) => {
+      const m = await moveFixture();
+      await m.leaveIntent();
+      if (kind === 'legacy') {
+        const intent = { ...((await m.s.outbox())!.writeIntent as Record<string, unknown>) };
+        delete intent.privateReplacement;
+        await db!
+          .update(schema.projectStateOutbox)
+          .set({ writeIntent: intent })
+          .where(eq(schema.projectStateOutbox.repositoryId, m.s.repo.id));
+      }
+      // Retain the vanished checkout elsewhere, including its journal, as an external move would.
+      const gone = `${m.dest}.externally-moved`;
+      await rename(m.dest, gone);
+      const before = await readdir(gone);
+      await handleRefresh({ ...m.payload, recoverCheckout: true }, db!, m.storage);
+      expect(m.git(m.dest, 'rev-parse', 'HEAD')).toBe(m.git(m.source, 'rev-parse', 'HEAD'));
+      expect((await m.s.outbox())!.writeIntent).toBeNull();
+      expect(await readdir(gone)).toEqual(before);
+    },
+  );
+
+  it('a second rebuild is not blocked by a failed private restore intent', async () => {
+    const m = await moveFixture();
+    await writeFile(join(m.dest, '.git/config'), '[core\n');
+    seam.afterWrite = async () => {
+      seam.afterWrite = null;
+      throw new Error('private restore failed after first mutation');
+    };
+    await expect(
+      handleRefresh({ ...m.payload, recoverCheckout: true }, db!, m.storage),
+    ).rejects.toThrow('private restore failed after first mutation');
+    expect.soft((await m.s.outbox())!.writeIntent).toBeNull();
+    const siblings = await readdir(join(m.storage, m.s.userId));
+    expect(siblings.some((n) => n.includes('.rebuild-'))).toBe(true);
+    await handleRefresh({ ...m.payload, recoverCheckout: true }, db!, m.storage);
+    expect(m.git(m.dest, 'rev-parse', 'HEAD')).toBe(m.git(m.source, 'rev-parse', 'HEAD'));
+    expect((await m.s.outbox())!.writeIntent).toBeNull();
+  });
+
   it.each(['active', 'persisted', 'late'] as const)(
     'defers a clean public refresh with a %s journal and retries after explicit recovery',
     async (timing) => {

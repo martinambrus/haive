@@ -1,4 +1,8 @@
-import type { TaskIntegrationChoice, TaskIntegrationPreview } from '@haive/shared';
+import type {
+  RepositoryErrorCode,
+  TaskIntegrationChoice,
+  TaskIntegrationPreview,
+} from '@haive/shared';
 import type { IntegrationConnection, IntegrationProvider } from './integrations';
 import type { SidebarTree } from './sidebar-tree';
 import type { TaskToneFilter } from './task-tone';
@@ -340,6 +344,7 @@ export interface Repository {
   branch: string | null;
   status: 'cloning' | 'ready' | 'error';
   statusMessage: string | null;
+  errorCode?: RepositoryErrorCode | null;
   /** List-only retry capability. Absent means unknown; the API still checks admission. */
   canRetry?: boolean;
   /** List-only: recorded reason an errored repository cannot be retried. Absent means unknown. */
@@ -1891,6 +1896,19 @@ export interface PlanMergeMessage {
   createdAt: string;
 }
 
+/** An ended conversation kept discoverable until a later merge succeeds. */
+export interface PlanMergeFailure {
+  taskId: string;
+  status: 'failed';
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export interface PlanMergeResponse {
+  merge: PlanMergeState | null;
+  failedMerge: PlanMergeFailure | null;
+}
+
 export interface PlanMergeState {
   taskId: string;
   status: TaskStatus;
@@ -2304,8 +2322,8 @@ export function startPlanMerge(
 
 /** The open merge conversation, or `{ merge: null }`. Polled by the plan page, so
  *  it answers with state rather than a 404. */
-export function getPlanMerge(repositoryId: string): Promise<{ merge: PlanMergeState | null }> {
-  return api.get<{ merge: PlanMergeState | null }>(`${planBase(repositoryId)}/merge`);
+export function getPlanMerge(repositoryId: string): Promise<PlanMergeResponse> {
+  return api.get<PlanMergeResponse>(`${planBase(repositoryId)}/merge`);
 }
 
 export function discardPlanMerge(

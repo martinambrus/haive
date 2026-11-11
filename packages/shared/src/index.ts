@@ -18,3 +18,4 @@ export * from './knowledge-paths.js';
 export * from './task-scratch.js';
 export * from './task-worktree.js';
 export * from './merge-left-open.js';
+export * from './merge-dir-claim.js';

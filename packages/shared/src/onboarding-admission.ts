@@ -1,3 +1,4 @@
+import { taskMayRunWithoutRepository } from './task-scratch.js';
 import { guardTaskModuleAdmission } from './modularity-server/module-drain.js';
 import { and, desc, eq, gt, inArray, isNull, max, or } from 'drizzle-orm';
 import {
@@ -654,14 +655,18 @@ export async function reviveRefusal(
   await guardTaskModuleAdmission(tx, taskId);
   // A revived merge conversation takes its scratch worktree back, so it waits for Save, Pull or a discard.
   const [revived] = await tx
-    .select({ type: schema.tasks.type, repositoryId: schema.tasks.repositoryId })
+    .select({
+      type: schema.tasks.type,
+      repositoryId: schema.tasks.repositoryId,
+      metadata: schema.tasks.metadata,
+    })
     .from(schema.tasks)
     .where(eq(schema.tasks.id, taskId))
     .limit(1);
   if (revived?.type === 'plan_merge' && revived.repositoryId) {
     await lockPlanMerge(tx, revived.repositoryId);
   }
-  const check = await checkRevive(tx, taskId);
+  const check = await checkRevive(tx, taskId, !!revived && taskMayRunWithoutRepository(revived));
   if (!check) return null;
   if (check.refusal) return { task: check.task, refusal: check.refusal };
   if (check.task.type !== 'onboarding_upgrade') return null;

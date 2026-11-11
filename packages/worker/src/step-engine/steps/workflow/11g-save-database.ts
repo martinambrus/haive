@@ -133,6 +133,7 @@ export const saveDatabaseStep: StepDefinition<Detected, { outcome: string; snaps
       ) {
         throw new ReopenStepFormError(
           'Choose whether to save the database; review the current project snapshot',
+          { notice: true },
         );
       }
       let candidate = d.candidate?.status === 'ready' ? d.candidate : null;
@@ -224,6 +225,7 @@ export const saveDatabaseStep: StepDefinition<Detected, { outcome: string; snaps
           await sweepDatabaseSnapshots(ctx.db);
           throw new ReopenStepFormError(
             'Database export failed; choose whether to retry saving or finish without saving',
+            { notice: true },
           );
         }
       }
@@ -231,6 +233,7 @@ export const saveDatabaseStep: StepDefinition<Detected, { outcome: string; snaps
       if (outcome === 'conflict') {
         throw new ReopenStepFormError(
           'Another task changed the current database; review the latest snapshot',
+          { notice: true },
         );
       }
       await sweepDatabaseSnapshots(ctx.db);

@@ -1,3 +1,4 @@
+import { stageAllArgs } from './repo/git-stage.js';
 import { lstat, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -76,7 +77,7 @@ async function gitStamp(top: string, env: NodeJS.ProcessEnv, deadline: number): 
         GIT_ALTERNATE_OBJECT_DIRECTORIES: alternates,
       });
     }
-    await index(['add', '-A']);
+    await index(stageAllArgs());
     const forced = (await git(['ls-files', '-ci', '--exclude-standard', '-z']))
       .split('\0')
       .filter(Boolean);

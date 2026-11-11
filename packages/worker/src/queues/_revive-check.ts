@@ -1,3 +1,4 @@
+import { taskRootMergeBusy } from '@haive/shared/root-merge-busy';
 import { eq } from 'drizzle-orm';
 import { schema, type DbTx } from '@haive/database';
 import {
@@ -98,7 +99,7 @@ export async function newWorkHeldUnderFence(tx: DbTx): Promise<boolean> {
  *  admitReopen in the transaction that revives a failed task; null if the revival may go ahead. */
 export async function refuseRevive(tx: DbTx, taskId: string): Promise<ReviveRefused | null> {
   const verdict = await reviveRefusal(tx, taskId);
-  if (!verdict) return null;
+  if (!verdict) return (await taskRootMergeBusy(tx, taskId)) ? { reason: 'root-merge-busy' } : null;
   const why = 'refusal' in verdict ? verdict.refusal : verdict.admission;
   return 'taskId' in why ? { reason: why.reason, otherTaskId: why.taskId } : { reason: why.reason };
 }

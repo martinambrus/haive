@@ -1,7 +1,8 @@
+import { applyPlanPatchWithRetry as applyPlanPatch } from '../../../plan/patch-retry.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, type FormSchema, type PlanNodeStatus } from '@haive/shared';
-import { applyPlanPatch, loadPlanNode } from '@haive/shared/plan';
+import { loadPlanNode } from '@haive/shared/plan';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import type { AdvisoryFindings } from './01-advisory-research.js';

@@ -46,6 +46,8 @@ function setup() {
   const fake = createFakeDb({
     cliProviders: schema.cliProviders,
     tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+    mergeDirClaims: schema.mergeDirClaims,
     taskAttachments: schema.taskAttachments,
     taskEvents: schema.taskEvents,
     repositories: schema.repositories,
