@@ -7,11 +7,6 @@ import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { logger, safeErrorForTransport } from '@haive/shared/logger';
 
-vi.mock('@haive/database', async (original) => ({
-  ...(await original<typeof import('@haive/database')>()),
-  tryCliAuthLock: async () => async () => {},
-}));
-
 const h = vi.hoisted(() => ({
   error: undefined as unknown,
   persist: vi.fn(),
@@ -231,7 +226,7 @@ it.each([true, false])(
       query: {
         cliProviders: {
           findFirst: async () => {
-            if (++reads <= 2) return provider;
+            if (++reads <= 1) return provider;
             throw error;
           },
         },
@@ -242,7 +237,7 @@ it.each([true, false])(
       userId: USER,
       targetMode: 'cli',
     });
-    expect(reads).toBe(3);
+    expect(reads).toBe(2);
     expect(result).toMatchObject({
       ok: false,
       providerId: PROVIDER,

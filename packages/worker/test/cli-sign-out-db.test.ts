@@ -1,12 +1,29 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { secretsService } from '@haive/shared';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { createDatabase, schema, tryCliAuthLock } from '@haive/database';
 import { cliAuthScope, advanceVolumeLoginGeneration } from '@haive/shared/cli-auth-state';
 import { copySecretLikeProviderEnv } from '../src/secrets/move-secret-env.js';
-import { handleSignOutJob } from '../src/queues/cli-exec-queue.js';
+import {
+  handleLoginCreateJob,
+  handleProbeJob,
+  handleSignOutJob,
+} from '../src/queues/cli-exec/handlers.js';
 import type { DockerRunner } from '../src/sandbox/docker-runner.js';
+
+const login = vi.hoisted(() => ({ create: vi.fn(), run: vi.fn(), probe: vi.fn() }));
+vi.mock('../src/sandbox/login-container.js', () => ({
+  createSandboxLoginContainer: login.create,
+}));
+vi.mock('../src/sandbox/docker-runner.js', async (original) => ({
+  ...(await original<typeof import('../src/sandbox/docker-runner.js')>()),
+  defaultDockerRunner: { run: login.run },
+}));
+vi.mock('../src/queues/cli-exec/images.js', async (original) => ({
+  ...(await original<typeof import('../src/queues/cli-exec/images.js')>()),
+  probeCliPath: login.probe,
+}));
 
 const url = process.env.CLI_SIGN_OUT_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/cli_secrets_audit_test'))
@@ -21,6 +38,7 @@ describe.skipIf(!url)('sign-out generation and critical section on PostgreSQL', 
     await db.$client.end({ timeout: 5 });
   });
   beforeEach(async () => {
+    vi.resetAllMocks();
     vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue('ab'.repeat(32));
     const [user] = await db
       .insert(schema.users)
@@ -36,6 +54,218 @@ describe.skipIf(!url)('sign-out generation and critical section on PostgreSQL', 
     vi.restoreAllMocks();
     await db.delete(schema.users).where(eq(schema.users.id, userId));
   });
+  // Docker and CLI execution are controlled; provider rows, UPDATE predicates and
+  // advisory-lock connections are real. This is the lock held by the API session.
+  it('creates a login while its API session owns the real auth scope', async () => {
+    const [provider] = await db
+      .insert(schema.cliProviders)
+      .values({
+        userId,
+        name: 'codex',
+        label: 'login',
+        authMode: 'subscription',
+      })
+      .returning();
+    const release = await tryCliAuthLock(db, cliAuthScope(provider!));
+    expect(release).not.toBeNull();
+    login.run.mockImplementation(async () => {
+      expect(await tryCliAuthLock(db, cliAuthScope(provider!))).toBeNull();
+      return { exitCode: 0 };
+    });
+    login.create.mockResolvedValue({
+      containerRowId: 'created-row',
+      dockerContainerId: 'created-container',
+    });
+    try {
+      expect(await handleLoginCreateJob(db, { providerId: provider!.id, userId })).toMatchObject({
+        ok: true,
+        dockerContainerId: 'created-container',
+      });
+      expect(login.run).toHaveBeenCalled();
+      expect(login.create).toHaveBeenCalled();
+    } finally {
+      await release?.();
+    }
+  });
+
+  it('publishes the post-login probe while its API session owns the real auth scope', async () => {
+    const [provider] = await db
+      .insert(schema.cliProviders)
+      .values({
+        userId,
+        name: 'codex',
+        label: 'post-login',
+        authMode: 'subscription',
+      })
+      .returning();
+    const release = await tryCliAuthLock(db, cliAuthScope(provider!));
+    expect(release).not.toBeNull();
+    login.probe.mockResolvedValue({ ok: true, authStatus: 'ok', authMessage: 'authenticated' });
+    try {
+      await advanceVolumeLoginGeneration(db, provider!);
+      expect(
+        await handleProbeJob(db, { providerId: provider!.id, userId, targetMode: 'cli' }),
+      ).toMatchObject({ ok: true, cli: { authStatus: 'ok' } });
+      expect(
+        (await db.query.cliProviders.findFirst({
+          where: eq(schema.cliProviders.id, provider!.id),
+        }))!.authStatus,
+      ).toBe('ok');
+    } finally {
+      await release?.();
+    }
+  });
+
+  it.each([null, new Date('2026-01-01T00:00:00Z')])(
+    'does not publish a probe read before sign-out (previous check: %s)',
+    async (authLastCheckedAt) => {
+      const [provider] = await db
+        .insert(schema.cliProviders)
+        .values({
+          userId,
+          name: 'gemini',
+          label: 'probe-signout',
+          authMode: 'subscription',
+          authStatus: 'ok',
+          authLastCheckedAt,
+        })
+        .returning();
+      let afterSignOut: typeof provider;
+      login.probe.mockImplementationOnce(async () => {
+        // Sign-out succeeding here proves the probe holds no advisory lock during exec.
+        expect(
+          await handleSignOutJob(db, { providerId: provider!.id, userId }, {
+            volumeExists: async () => false,
+          } as unknown as DockerRunner),
+        ).toMatchObject({ ok: true });
+        afterSignOut = await db.query.cliProviders.findFirst({
+          where: eq(schema.cliProviders.id, provider!.id),
+        });
+        return { ok: true, authStatus: 'ok', authMessage: 'stale success' };
+      });
+      await expect(
+        handleProbeJob(db, { providerId: provider!.id, userId, targetMode: 'cli' }),
+      ).resolves.toMatchObject({ ok: true });
+      expect(login.probe).toHaveBeenCalledOnce();
+      expect(
+        await db.query.cliProviders.findFirst({
+          where: eq(schema.cliProviders.id, provider!.id),
+        }),
+      ).toEqual(afterSignOut!);
+    },
+  );
+
+  it('does not publish health after a newer login generation lands during the probe', async () => {
+    const [provider] = await db
+      .insert(schema.cliProviders)
+      .values({
+        userId,
+        name: 'gemini',
+        label: 'probe-new-login',
+        authMode: 'subscription',
+      })
+      .returning();
+    login.probe.mockImplementationOnce(async () => {
+      await advanceVolumeLoginGeneration(db, provider!);
+      return { ok: true, authStatus: 'ok', authMessage: 'old credential' };
+    });
+    await handleProbeJob(db, { providerId: provider!.id, userId, targetMode: 'cli' });
+    expect(
+      (await db.query.cliProviders.findFirst({
+        where: eq(schema.cliProviders.id, provider!.id),
+      }))!.authStatus,
+    ).toBe('unknown');
+  });
+
+  it('advances the sign-out check stamp even when the previous stamp is ahead of the clock', async () => {
+    // Date-only faking leaves postgres connection timers real.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    try {
+      const [provider] = await db
+        .insert(schema.cliProviders)
+        .values({
+          userId,
+          name: 'gemini',
+          label: 'same-check-time',
+          authMode: 'subscription',
+          authStatus: 'unknown',
+          authLastCheckedAt: new Date('2100-01-01T00:00:00Z'),
+        })
+        .returning();
+      login.probe.mockImplementationOnce(async () => {
+        expect(
+          await handleSignOutJob(db, { providerId: provider!.id, userId }, {
+            volumeExists: async () => false,
+          } as unknown as DockerRunner),
+        ).toMatchObject({ ok: true });
+        return { ok: true, authStatus: 'ok', authMessage: 'stale success' };
+      });
+      await expect(
+        handleProbeJob(db, { providerId: provider!.id, userId, targetMode: 'cli' }),
+      ).resolves.toMatchObject({ ok: true });
+      expect(login.probe).toHaveBeenCalledOnce();
+      const current = (await db.query.cliProviders.findFirst({
+        where: eq(schema.cliProviders.id, provider!.id),
+      }))!;
+      // PostgreSQL advances one microsecond, below Date's precision; the CAS must
+      // retain the original database timestamp rather than round it through Date.
+      expect(current.authLastCheckedAt).toEqual(provider!.authLastCheckedAt);
+      expect(current.authStatus).toBe('unknown');
+      expect(current.authMessage).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('publishes health when the probe only updates image-build metadata', async () => {
+    const [provider] = await db
+      .insert(schema.cliProviders)
+      .values({
+        userId,
+        name: 'gemini',
+        label: 'probe-build',
+        authMode: 'subscription',
+      })
+      .returning();
+    login.probe.mockImplementationOnce(async () => {
+      // A cache-miss probe builds inline and marks its provider's image ready.
+      await db
+        .update(schema.cliProviders)
+        .set({ sandboxImageBuildStatus: 'ready' })
+        .where(eq(schema.cliProviders.id, provider!.id));
+      return { ok: true, authStatus: 'ok' };
+    });
+    await handleProbeJob(db, { providerId: provider!.id, userId, targetMode: 'cli' });
+    expect(login.probe).toHaveBeenCalledOnce();
+    expect(
+      (await db.query.cliProviders.findFirst({
+        where: eq(schema.cliProviders.id, provider!.id),
+      }))!.authStatus,
+    ).toBe('ok');
+  });
+
+  it('publishes unchanged health whose previous check has submillisecond precision', async () => {
+    const [provider] = await db
+      .insert(schema.cliProviders)
+      .values({
+        userId,
+        name: 'gemini',
+        label: 'precise-check',
+        authMode: 'subscription',
+        authLastCheckedAt: sql`'2026-01-01 00:00:00.000123'::timestamp`,
+      })
+      .returning();
+    login.probe.mockResolvedValueOnce({ ok: true, authStatus: 'ok' });
+    await handleProbeJob(db, { providerId: provider!.id, userId, targetMode: 'cli' });
+    expect(login.probe).toHaveBeenCalledOnce();
+    expect(
+      (await db.query.cliProviders.findFirst({
+        where: eq(schema.cliProviders.id, provider!.id),
+      }))!.authStatus,
+    ).toBe('ok');
+  });
+
   it('legacy secret migration fences a late sign-out and advances only the credential it creates', async () => {
     const [provider] = await db
       .insert(schema.cliProviders)

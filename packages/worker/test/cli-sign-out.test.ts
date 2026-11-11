@@ -262,17 +262,26 @@ describe('handleSignOutJob', () => {
   });
 
   it('reports failed volumes and skips authStatus reset when remove fails', async () => {
-    const calls: DbCalls = { updateSet: null };
-    const userId = 'failuser-1234';
-    const userSlug = 'failuser1234';
-    const failVol = `haive_cli_auth_${userSlug}_gemini_0`;
-    const row = makeProviderRow({ userId });
-    const db = makeDb(row, calls);
-    const runner = makeRunner({ existing: [failVol], removeFails: [failVol] });
-    const result = await handleSignOutJob(db, { providerId: row.id, userId }, runner);
-    expect(result.ok).toBe(false);
-    expect(result.failed).toEqual([{ name: failVol, stderr: 'in use' }]);
-    expect(calls.updateSet).toBeNull();
+    vi.useFakeTimers();
+    try {
+      const calls: DbCalls = { updateSet: null };
+      const userId = 'failuser-1234';
+      const userSlug = 'failuser1234';
+      const failVol = `haive_cli_auth_${userSlug}_gemini_0`;
+      const row = makeProviderRow({ userId });
+      const db = makeDb(row, calls);
+      const runner = makeRunner({ existing: [failVol], removeFails: [failVol] });
+      const removing = handleSignOutJob(db, { providerId: row.id, userId }, runner);
+      await vi.runAllTimersAsync();
+      const result = await removing;
+      expect(result.ok).toBe(false);
+      expect(result.failed).toEqual([{ name: failVol, stderr: 'in use' }]);
+      expect(calls.updateSet).toBeNull();
+      expect(runner.order.filter((call) => call.startsWith('remove:'))).toHaveLength(6);
+      expect(lock.release).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -606,6 +615,35 @@ it('never defers auth contention beyond the enqueue deadline', async () => {
     expect(job.updateData).toHaveBeenCalledWith(
       expect.objectContaining({ signOutWaitReason: 'auth_busy' }),
     );
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('retries removal until an abandoned login ownership helper releases its volume', async () => {
+  vi.useFakeTimers();
+  try {
+    const row = makeProviderRow();
+    const calls: DbCalls = { updateSet: null };
+    const volume = 'haive_cli_auth_user1_gemini_0';
+    const runner = makeRunner({ existing: [volume] });
+    const remove = vi
+      .spyOn(runner, 'volumeRemove')
+      .mockResolvedValueOnce({ ok: false, stderr: 'volume is in use' })
+      .mockResolvedValueOnce({ ok: false, stderr: 'volume is in use' });
+    const removing = handleSignOutJob(
+      makeDb(row, calls),
+      {
+        providerId: row.id,
+        userId: row.userId,
+      },
+      runner,
+    );
+    await vi.runAllTimersAsync();
+    expect(await removing).toMatchObject({ ok: true, removed: [volume], failed: [] });
+    expect(remove).toHaveBeenCalledTimes(3);
+    expect(calls.updateSet?.authStatus).toBe('unknown');
+    expect(lock.release).toHaveBeenCalledOnce();
   } finally {
     vi.useRealTimers();
   }

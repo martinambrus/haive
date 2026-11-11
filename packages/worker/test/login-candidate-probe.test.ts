@@ -10,10 +10,7 @@ const h = vi.hoisted(() => ({
   fail: false,
   throwOutput: false,
 }));
-vi.mock('@haive/database', async (original) => ({
-  ...(await original<typeof import('@haive/database')>()),
-  tryCliAuthLock: async () => async () => {},
-}));
+
 const KEK = 'ab'.repeat(32);
 const USER = 'candidate-owner';
 const PROVIDER = 'candidate-provider';
