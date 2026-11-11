@@ -74,6 +74,8 @@ export const customBundles = pgTable(
      *  Declared LAST because `ALTER TABLE ADD COLUMN` appends while `drizzle-kit push` builds in
      *  declaration order, and `schema-parity` compares the two. */
     lastSyncNote: text('last_sync_note'),
+    /** Latest replacement failure; independent of the current tree's extraction report. */
+    lastReplacementNote: text('last_replacement_note'),
   },
   (table) => [
     index('custom_bundles_repository_id_idx').on(table.repositoryId),

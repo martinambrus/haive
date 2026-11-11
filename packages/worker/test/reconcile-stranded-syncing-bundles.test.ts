@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
+import { logger } from '@haive/shared';
 import { createFakeDb } from '@haive/database/testing';
 
 const getJobs = vi.fn<(types: string[]) => Promise<Array<{ data: unknown }>>>();
@@ -12,6 +13,7 @@ vi.mock('bullmq', () => ({
 vi.mock('../src/redis.js', () => ({ getBullRedis: () => ({}) }));
 
 const { reconcileStrandedSyncingBundles } = await import('../src/data-migrations.js');
+const { UNREADABLE_REPLACEMENT_ERROR } = await import('../src/repo/bundle-recovery.js');
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000f1';
@@ -21,7 +23,10 @@ const OTHER = '00000000-0000-4000-8000-0000000000c2';
 const minutesAgo = (n: number) => new Date(Date.now() - n * 60_000);
 
 function makeFake() {
-  return createFakeDb({ customBundles: schema.customBundles });
+  return createFakeDb({
+    customBundles: schema.customBundles,
+    customBundleItems: schema.customBundleItems,
+  });
 }
 let fake: ReturnType<typeof makeFake>;
 
@@ -47,13 +52,110 @@ beforeEach(() => {
 });
 
 describe('reconcileStrandedSyncingBundles', () => {
+  it.each(['before extract', 'mid extract', 'between renames', 'after swap', 'previous lost'])(
+    'recovers a stranded keep-mode replacement: %s',
+    async (point) => {
+      const { mkdtemp, readFile, rm } = await import('node:fs/promises');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+      const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');
+      const root = await mkdtemp(join(tmpdir(), 'bundle-sweep-'));
+      const saved = process.env.BUNDLE_STORAGE_ROOT;
+      process.env.BUNDLE_STORAGE_ROOT = root;
+      try {
+        const fixture = await seedCrashedReplacement(root, fake, point);
+        fake.patch(schema.customBundles, fixture.payload.bundleId, {
+          lastReplacementNote: 'Replacement failed; the previous bundle remains in use.',
+        });
+        const items = structuredClone(fake.rows(schema.customBundleItems));
+        await run();
+        expect(fake.rows(schema.customBundleItems)).toEqual(items);
+        const current = fake.rows(schema.customBundles)[0]!;
+        if (point === 'previous lost') {
+          expect(current).toMatchObject({
+            status: 'failed',
+            lastReplacementNote: null,
+            lastSyncError: expect.stringContaining('previous extracted tree is unavailable'),
+          });
+        } else {
+          expect(current).toMatchObject({ status: 'active', ...fixture.previousArchive });
+          await expect(readFile(`${fixture.archivePath}.replacement.json`)).rejects.toThrow();
+          expect(await readFile(join(fixture.dest, 'old.md'), 'utf8')).toBe('old tree');
+        }
+        await run();
+        expect(fake.rows(schema.customBundles)[0]).toEqual(current);
+      } finally {
+        if (saved === undefined) delete process.env.BUNDLE_STORAGE_ROOT;
+        else process.env.BUNDLE_STORAGE_ROOT = saved;
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([
+    ['does not parse', 'failed'],
+    ['cannot be read', 'syncing'],
+  ] as const)(
+    'a stranded bundle whose record %s ends %s, and the next bundle recovers',
+    async (fault, status) => {
+      const { mkdir, mkdtemp, readFile, rm, writeFile } = await import('node:fs/promises');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+      const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');
+      const root = await mkdtemp(join(tmpdir(), 'bundle-sweep-fault-'));
+      const saved = process.env.BUNDLE_STORAGE_ROOT;
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      process.env.BUNDLE_STORAGE_ROOT = root;
+      try {
+        const dir = join(root, USER, STRANDED);
+        const archivePath = join(dir, 'source.new.zip');
+        await mkdir(dir, { recursive: true });
+        // A directory where the record belongs is an I/O fault, left for a later tick.
+        if (fault === 'cannot be read') await mkdir(`${archivePath}.replacement.json`);
+        else await writeFile(`${archivePath}.replacement.json`, '{invalid json');
+        bundle(STRANDED, { sourceType: 'zip', archivePath, lastReplacementNote: 'stale warning' });
+        const before = structuredClone(row(STRANDED));
+        const fixture = await seedCrashedReplacement(root, fake, 'after swap');
+        const items = structuredClone(fake.rows(schema.customBundleItems));
+
+        await expect(run()).resolves.toBeUndefined();
+
+        if (status === 'failed')
+          expect(row(STRANDED)).toMatchObject({
+            status: 'failed',
+            lastReplacementNote: null,
+            lastSyncError: UNREADABLE_REPLACEMENT_ERROR,
+          });
+        else expect(row(STRANDED)).toEqual(before);
+        expect(row(fixture.payload.bundleId)).toMatchObject({
+          status: 'active',
+          ...fixture.previousArchive,
+        });
+        expect(await readFile(join(fixture.dest, 'old.md'), 'utf8')).toBe('old tree');
+        expect(fake.rows(schema.customBundleItems)).toEqual(items);
+        expect(warn).toHaveBeenCalledWith(
+          expect.objectContaining({ bundleId: STRANDED, err: expect.any(Error) }),
+          expect.any(String),
+        );
+      } finally {
+        warn.mockRestore();
+        if (saved === undefined) delete process.env.BUNDLE_STORAGE_ROOT;
+        else process.env.BUNDLE_STORAGE_ROOT = saved;
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('fails a bundle that has been syncing for minutes with no job in the queue', async () => {
-    bundle(STRANDED);
+    bundle(STRANDED, {
+      lastReplacementNote: 'Replacement failed; the previous bundle remains in use.',
+    });
     getJobs.mockResolvedValue([{ data: { bundleId: OTHER } }]);
 
     await run();
 
     expect(row(STRANDED).status).toBe('failed');
+    expect(row(STRANDED).lastReplacementNote).toBeNull();
     expect(String(row(STRANDED).lastSyncError)).not.toBe('');
   });
 

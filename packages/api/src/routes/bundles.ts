@@ -6,22 +6,30 @@ import { and, asc, eq, inArray, ne, or, sql, type SQL } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   BUNDLE_JOB_NAMES,
+  bundleReplacementModeSchema,
+  bundleReplacementSchema,
   createGitBundleRequestSchema,
   initBundleUploadRequestSchema,
   logger,
   type ArchiveFormat,
   type BundleJobPayload,
+  type BundleReplacement,
   type BundleSummary,
   type BundleUploadSession,
   type CustomBundleItemKind,
   type CustomBundleSourceType,
 } from '@haive/shared';
 import {
+  fileIdentity,
+  removeFileIfIdentityNoFollow,
+  type FileIdentity,
   isWalkDepthError,
   openFileNoFollow,
   walkFilesNoFollow,
   removeNoFollow,
   renameNoFollow,
+  readFileNoFollow,
+  writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { getDb } from '../db.js';
@@ -210,6 +218,8 @@ function bundleSummaryFromRow(
     lastSyncAt: row.lastSyncAt ? row.lastSyncAt.toISOString() : null,
     lastSyncCommit: row.lastSyncCommit,
     lastSyncError: row.lastSyncError ? redactGitText(row.lastSyncError) : row.lastSyncError,
+    lastSyncNote: row.lastSyncNote ? redactGitText(row.lastSyncNote) : null,
+    lastReplacementNote: row.lastReplacementNote ? redactGitText(row.lastReplacementNote) : null,
     itemCounts: { agent: counts?.agent ?? 0, skill: counts?.skill ?? 0 },
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -362,6 +372,7 @@ async function addBundleJobOrMarkFailed(
   bundleId: string,
   add: () => Promise<unknown>,
   fence?: SQL,
+  failurePatch?: Partial<typeof schema.customBundles.$inferInsert>,
 ): Promise<void> {
   try {
     await add();
@@ -370,9 +381,11 @@ async function addBundleJobOrMarkFailed(
       .update(schema.customBundles)
       .set({
         status: 'failed',
+        lastReplacementNote: null,
         lastSyncError:
           'Could not queue the job that imports this bundle. Use Resync (git) or Replace ZIP to try again, or remove the bundle.',
         updatedAt: new Date(),
+        ...failurePatch,
       })
       .where(
         and(
@@ -817,6 +830,18 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
   const uploadId = c.req.param('uploadId');
   const db = getDb();
 
+  const body: unknown = await c.req.json().catch(() => null);
+  const parsedMode = bundleReplacementModeSchema.safeParse(
+    body && typeof body === 'object' && 'mode' in body ? body.mode : undefined,
+  );
+  if (!parsedMode.success) {
+    throw new HttpError(
+      400,
+      'Choose whether to keep the old bundle until success or remove its extracted files first.',
+    );
+  }
+  const mode = parsedMode.data;
+
   const bundle = await loadBundle(userId, bundleId);
   if (bundle.sourceType !== 'zip') {
     throw new HttpError(400, 'only zip-source bundles support archive replace');
@@ -864,38 +889,104 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
       });
       return;
     }
-    await db.transaction(async (tx) => {
-      await admitNewWork(tx);
-      // A different replace may have won since the pre-read. Only this source can resume syncing.
-      const [promoted] = await tx
-        .update(schema.customBundles)
-        .set({
-          archiveFilename: row.filename,
-          archiveFormat: row.archiveFormat,
-          archivePath: finalArchive,
-          storageRoot: newExtracted,
-          status: 'syncing',
-          lastSyncError: null,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(schema.customBundles.id, bundleId),
-            or(
-              ne(schema.customBundles.status, 'syncing'),
-              eq(schema.customBundles.archivePath, finalArchive),
+    let replacement: BundleReplacement;
+    const intentRel = `${finalRel}.replacement.json`;
+    let createdIntent: FileIdentity | null = null;
+    try {
+      await db.transaction(async (tx) => {
+        await admitNewWork(tx);
+        const [current] = await tx
+          .select()
+          .from(schema.customBundles)
+          .where(eq(schema.customBundles.id, bundleId))
+          .for('update');
+        if (!current) throw new HttpError(404, 'bundle not found');
+        if (current.status === 'syncing' && current.archivePath !== finalArchive) {
+          throw new HttpError(409, 'another import of this bundle is already running');
+        }
+        await refuseLiveBundleJob(queue, bundleId);
+        const saved = await readFileNoFollow(anchor, intentRel, { maxBytes: 8192, strict: true });
+        if (saved) {
+          replacement = bundleReplacementSchema.parse(JSON.parse(saved.data.toString('utf8')));
+          if (replacement.mode !== mode)
+            throw new HttpError(
+              409,
+              'This upload already has a different replacement mode. Start a new replacement to change it.',
+            );
+          if (
+            current.archivePath !== finalArchive &&
+            (replacement.previousArchive
+              ? current.archivePath !== replacement.previousArchive.archivePath
+              : current.status === 'active')
+          ) {
+            throw new HttpError(
+              409,
+              'The bundle changed since this replacement started. Start a new replacement.',
+            );
+          }
+        } else {
+          if (current.archivePath === finalArchive)
+            throw new HttpError(409, 'The replacement record is missing. Start a new replacement.');
+          replacement = {
+            mode,
+            previousArchive:
+              current.status === 'active'
+                ? {
+                    archivePath: current.archivePath,
+                    archiveFilename: current.archiveFilename,
+                    archiveFormat: current.archiveFormat,
+                  }
+                : null,
+          };
+        }
+        // A different replace may have won since the pre-read. Only this source can resume syncing.
+        const [promoted] = await tx
+          .update(schema.customBundles)
+          .set({
+            archiveFilename: row.filename,
+            archiveFormat: row.archiveFormat,
+            archivePath: finalArchive,
+            storageRoot: newExtracted,
+            status: 'syncing',
+            lastSyncError: null,
+            lastReplacementNote: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.customBundles.id, bundleId),
+              or(
+                ne(schema.customBundles.status, 'syncing'),
+                eq(schema.customBundles.archivePath, finalArchive),
+              ),
             ),
-          ),
-        )
-        .returning({ id: schema.customBundles.id });
-      if (!promoted) throw new HttpError(409, 'another import of this bundle is already running');
-      await refuseLiveBundleJob(queue, bundleId);
-      // Fence promotion to the held upload; a takeover rolls the transaction back.
-      await claim.write(tx, { bundleId });
-    });
+          )
+          .returning({ id: schema.customBundles.id });
+        if (!promoted) throw new HttpError(409, 'another import of this bundle is already running');
+        // Fence promotion to the held upload; a takeover rolls the transaction back.
+        await claim.write(tx, { bundleId });
+        // The durable write follows promotion and the held-upload fence. A refused claim never
+        // creates a record; a commit failure removes only this request's inode.
+        if (!saved) {
+          await writeFileNoFollow(anchor, intentRel, JSON.stringify(replacement), {
+            durable: true,
+          });
+          const held = await openFileNoFollow(anchor, intentRel, 'read', { strict: true });
+          if (!held) throw new Error('replacement record disappeared before commit');
+          try {
+            createdIntent = await fileIdentity(held);
+          } finally {
+            await held.close();
+          }
+        }
+      });
+    } catch (err) {
+      if (createdIntent) await removeFileIfIdentityNoFollow(anchor, intentRel, createdIntent);
+      throw err;
+    }
     await db.transaction(async (tx) => {
-      // Keep the same lock order as promotion: bundle, then upload. A stale complete cannot
-      // remove a tree that a takeover's worker is now parsing.
+      // Keep bundle-then-upload ownership fencing in BOTH modes. A stale complete must neither
+      // remove a takeover's tree nor enqueue against its source when keep mode skips removal.
       const [current] = await tx
         .select({ archivePath: schema.customBundles.archivePath })
         .from(schema.customBundles)
@@ -904,7 +995,9 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
       if (current?.archivePath !== finalArchive)
         throw new HttpError(409, 'bundle source changed during completion');
       await claim.write(tx, { bundleId });
-      await removeNoFollow(anchor, bundleRel(userId, bundleId, 'extracted'), { recursive: true });
+      if (mode === 'remove_first') {
+        await removeNoFollow(anchor, bundleRel(userId, bundleId, 'extracted'), { recursive: true });
+      }
     });
     if (existing) await existing.remove();
     const payload: BundleJobPayload = {
@@ -912,6 +1005,7 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
       userId,
       archivePath: finalArchive,
       archiveFormat: row.archiveFormat as ArchiveFormat,
+      replacement: replacement!,
     };
     await addBundleJobOrMarkFailed(
       db,
@@ -924,6 +1018,15 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
           removeOnFail: 100,
         }),
       eq(schema.customBundles.archivePath, finalArchive),
+      replacement!.mode === 'keep_until_success' && replacement!.previousArchive
+        ? {
+            ...replacement!.previousArchive,
+            status: 'active',
+            lastSyncError: null,
+            lastReplacementNote:
+              'Replacement could not be queued; the previous bundle remains in use. Try Replace ZIP again.',
+          }
+        : undefined,
     );
     await claim.write(db, { status: 'complete', archivePath: finalArchive, updatedAt: new Date() });
   });

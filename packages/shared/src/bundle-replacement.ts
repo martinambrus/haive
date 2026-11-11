@@ -109,7 +109,10 @@ export async function discardReplacementArchive(
     dev: BigInt(record.dev),
     ino: BigInt(record.ino),
   });
-  if (removed !== 'kept') await removeNoFollow(anchor, `${final}.move.json`);
+  if (removed !== 'kept') {
+    await removeNoFollow(anchor, `${final}.move.json`);
+    await removeNoFollow(anchor, `${final}.replacement.json`);
+  }
 }
 
 export function replacementArchiveRel(

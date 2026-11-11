@@ -491,4 +491,5 @@ export interface BundleJobPayload {
    *  archive into the bundle's storage root before extraction. Null for git jobs. */
   archivePath?: string;
   archiveFormat?: ArchiveFormat;
+  replacement?: import('../schemas/bundles.js').BundleReplacement;
 }

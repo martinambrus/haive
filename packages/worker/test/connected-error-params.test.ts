@@ -18,7 +18,16 @@ vi.mock('../src/bundle-parser/index.js', () => ({
 }));
 vi.mock('../src/repo/clone.js', async (original) => ({
   ...(await original<object>()),
-  extractArchive: async () => ({ note: null, dropped: [] }),
+  extractArchive: async (
+    _source: unknown,
+    _format: unknown,
+    _dest: unknown,
+    options?: { afterSwap?: (report: { note: null; dropped: [] }) => Promise<void> },
+  ) => {
+    const report = { note: null, dropped: [] as [] };
+    await options?.afterSwap?.(report);
+    return report;
+  },
   gitClone: async () => undefined,
   buildAuthenticatedUrl: () => {
     throw new Error('fixture never uses credentials');

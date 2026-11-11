@@ -618,7 +618,14 @@ export async function extractArchive(
   archive: { anchor: string; rel: string },
   format: ArchiveFormat,
   dest: { anchor: string; rel: string },
-  opts: { keepLoneDir?: (name: string) => boolean; repositoryImport?: boolean } = {},
+  opts: {
+    keepLoneDir?: (name: string) => boolean;
+    repositoryImport?: boolean;
+    /** Persist recovery information before either rename can change the destination. */
+    beforeSwap?: (stageRel: string) => Promise<void>;
+    /** Publish the catalog while the previous tree is still available for rollback. */
+    afterSwap?: (report: ExtractReport) => Promise<void>;
+  } = {},
 ): Promise<ExtractReport> {
   if (format !== 'zip' && format !== 'tar' && format !== 'tar.gz') {
     throw new Error(`unsupported archive format: ${format as string}`);
@@ -718,14 +725,36 @@ export async function extractArchive(
         );
       }
 
+      await opts.beforeSwap?.(stageRel);
       const oldRel = `${stageRel}/old`;
       const hadDest = (await lstatNoFollow(anchor, dest.rel)) !== null;
       if (hadDest) {
         await renameNoFollow(anchor, dest.rel, oldRel);
       }
+      const report = {
+        dropped,
+        note: [describeDrops(dropped), gitNote].filter(Boolean).join(' ') || null,
+      };
+      let published = false;
       try {
         await renameNoFollow(anchor, sourceRel, dest.rel);
+        published = true;
+        await opts.afterSwap?.(report);
       } catch (err) {
+        // A catalog failure is a failed replacement too. Move the new tree back into the stage
+        // before restoring the previous destination; cleanup below removes only the rejected tree.
+        if (published) {
+          try {
+            await renameNoFollow(anchor, dest.rel, sourceRel);
+          } catch (restoreErr) {
+            preserveStage = true;
+            logger.error(
+              { err: restoreErr, anchor, oldRel },
+              'archive rollback could not withdraw the new tree',
+            );
+            throw err;
+          }
+        }
         if (hadDest) {
           try {
             await renameNoFollow(anchor, oldRel, dest.rel);
@@ -741,11 +770,12 @@ export async function extractArchive(
               },
               'archive swap rollback failed; previous destination retained in stage',
             );
+            throw err;
           }
         }
         throw err;
       }
-      return { dropped, note: [describeDrops(dropped), gitNote].filter(Boolean).join(' ') || null };
+      return report;
     } finally {
       if (!preserveStage) {
         await removeNoFollow(anchor, stageRel, {

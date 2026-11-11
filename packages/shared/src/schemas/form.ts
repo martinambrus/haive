@@ -204,6 +204,7 @@ export const bundleComposerInitialSchema = z.object({
   itemCount: z.number().int().nonnegative(),
   status: z.enum(['active', 'syncing', 'failed']),
   lastSyncError: z.string().nullable().optional(),
+  lastReplacementNote: z.string().nullable().optional(),
 });
 
 export type BundleComposerInitial = z.infer<typeof bundleComposerInitialSchema>;

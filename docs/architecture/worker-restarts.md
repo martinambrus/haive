@@ -181,7 +181,7 @@ The CANCEL teardown releases the task's `merge_dir_claims` rows once `cleanupTas
 
 A repository delete records its two cleanup jobs (per-project RAG databases, then runners, env images, `haive_repos` files and the repository's finished upload archive, `_uploads/<user>/<repoId>.<ext>`, whose failed removal only warns) as `repo_cleanups` rows inside the delete's own transaction, with no foreign key to the repository that is going. The api queues the jobs after commit, passing each row's id as `cleanupId`, and a queue that refuses them no longer fails the request; the handlers delete their row when they succeed. The same sweep (`redriveRepoCleanups`) queues again any row stamped `last_enqueued_at` ten minutes ago, or never stamped ten minutes after it was written (so it does not race the api's own enqueue), claiming the row on its stamp, counting the attempt only once a queue has taken the job (a refused enqueue puts the stamp back and spends nothing), and carrying it in the job id (`repo-cleanup-<id>-<attempt>`, hyphens, since BullMQ only tolerates a colon in a custom id as a compatibility carve-out for three-part repeat ids), and drops with a warning a row whose job a queue has taken five times (`REPO_CLEANUP_MAX_ATTEMPTS`) so a cleanup that never succeeds is not looped on.
 
-A custom bundle left at `syncing` five minutes after its last update, with no waiting, active, delayed, prioritized or waiting-children job naming it, is marked `failed` with a reason by the same sweep (`reconcileStrandedSyncingBundles`), never re-driven: failed is what re-enables Resync and Replace ZIP. The update is guarded on the status and on that age, since a resync or a replace puts a bundle back at `syncing` with a fresh `updated_at`. The routes need it less often than before: a zip complete keys the bundle and its job (`ingest-zip-<uploadId>`) on the upload, so a repeated or resumed complete finds both instead of making a second bundle, and a job that cannot be queued marks its bundle failed at once (`addBundleJobOrMarkFailed`).
+A custom bundle left at `syncing` five minutes after its last update, with no waiting, active, delayed, prioritized or waiting-children job naming it, is marked `failed` with a reason by the same sweep (`reconcileStrandedSyncingBundles`), never re-driven: failed is what re-enables Resync and Replace ZIP. A Replace ZIP the user chose to keep the previous bundle for (`keep_until_success`) is instead restored from its durable record when the previous extracted tree can be verified (the stage and the previous directory's identity are recorded before either swap rename): the previous tree, item rows and archive metadata come back `active` with a warning, and the job's own re-delivery does the same. A record that does not parse fails the bundle; a fault reading or restoring one bundle is logged and leaves that bundle for a later tick, and the sweep goes on to the next. The update is guarded on the status and on that age, since a resync or a replace puts a bundle back at `syncing` with a fresh `updated_at`. The routes need it less often than before: a zip complete keys the bundle and its job (`ingest-zip-<uploadId>`) on the upload, so a repeated or resumed complete finds both instead of making a second bundle, and a job that cannot be queued marks its bundle failed at once (`addBundleJobOrMarkFailed`).
 
 An upload left unfinished is reaped by the worker's upload reaper (`repo/upload-reaper.ts`), which
 runs at boot and every 15 minutes. It has these passes:
@@ -207,8 +207,14 @@ source descriptor's device and inode as lossless decimal strings. Retry accepts 
 when its held identity and size match that intent. A vanished partial alone proves nothing, and
 another upload's archive is never adopted or overwritten. Promotion takes the bundle row to
 `syncing` and points it at that source in a transaction fenced by the held upload. A different
-replacement already syncing refuses it. The old archive and item rows stay; the extracted tree
-is removed afterward under the same bundle-then-upload lock order, before enqueue. A retry that
+replacement already syncing refuses it. Every Replace ZIP names its mode, chosen in the dialog and
+never inferred: `keep_until_success` keeps the previous extracted tree and catalog until the new one
+imports and rolls them back on failure, while `remove_first` removes only the extracted tree
+(afterward, under the same bundle-then-upload lock order, before enqueue) and gives up that
+rollback. Both keep the uploaded archives and the item rows. The choice is written beside the
+archive (`.replacement.json`) only after the ownership fence, so a retry of the completion keeps it,
+and it is cleared after a successful import or a restore. A replacement's warning goes in
+`last_replacement_note`, apart from the current tree's extraction report. A retry that
 finds its `ingest-zip-<uploadId>` job live or completed finishes the upload without repeating
 cleanup; a failed job can be replaced. The upload becomes `complete` only after enqueue, and a
 repeated completed request returns the current bundle. The response re-reads the row, including
