@@ -1,6 +1,7 @@
 /** Isolated browser fixture: real auth routes, signing, middleware and Postgres rotation.
  * Synthetic secrets and authenticated sidebar fixtures keep this independent of provider APIs. */
-import type { Server } from 'node:http';
+import { createServer, type Server } from 'node:http';
+import Docker from 'dockerode';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -136,7 +137,15 @@ app.post('/__fixture/workspace/:id', async (c) => {
       type: 'workflow',
     })
     .returning();
-  return c.json({ taskId: task!.id, svgPath });
+  const [container] = await db
+    .insert(schema.containers)
+    .values({
+      taskId: task!.id,
+      status: 'running',
+      dockerContainerId: 'h2b-terminal-fixture',
+    })
+    .returning();
+  return c.json({ taskId: task!.id, svgPath, containerId: container!.id });
 });
 app.use('/tasks/*', requireAuth);
 app.route('/tasks', fileRoutes);
@@ -198,10 +207,27 @@ app.get('*', requireAuth, (c) =>
   c.json({ tasks: [], repositories: [], providers: [], state: 'normal' }),
 );
 const server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 46101 });
-installTerminalWebSocket(server as unknown as Server);
+// A loopback Docker-attach protocol fixture exercises the real terminal handler and DB ownership,
+// without contacting a Docker daemon or starting any task container.
+const terminalBackend = createServer();
+terminalBackend.on('upgrade', (req, socket) => {
+  socket.on('error', () => {});
+  if (!req.url?.startsWith('/containers/h2b-terminal-fixture/attach?')) {
+    socket.end('HTTP/1.1 404 Not Found\r\n\r\n');
+    return;
+  }
+  socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n');
+  socket.pipe(socket);
+});
+await new Promise<void>((resolve) => terminalBackend.listen(0, '127.0.0.1', resolve));
+const terminalPort = (terminalBackend.address() as { port: number }).port;
+installTerminalWebSocket(server as unknown as Server, {
+  docker: new Docker({ host: '127.0.0.1', port: terminalPort }),
+});
 installIdeWebSocket(server as unknown as Server);
 async function stop() {
   server.close();
+  terminalBackend.close();
   await closeRedis();
   await db.$client.end({ timeout: 5 });
   process.exit(0);

@@ -173,3 +173,67 @@ test('raw SVG headers survive the proxy, block top-level script and retain image
     await context.request.delete(`${API}/__fixture/session/${user.id}`);
   }
 });
+
+test('terminal WebSocket completes a 101 upgrade and relays input and output through web', async ({
+  page,
+  context,
+}) => {
+  const seed = await context.request.post(`${API}/__fixture/session`, { data: {} });
+  const user = (await seed.json()) as { id: string; email: string };
+  try {
+    const workspace = await context.request.post(`${API}/__fixture/workspace/${user.id}`);
+    expect(workspace.status()).toBe(200);
+    const { containerId } = (await workspace.json()) as { containerId: string };
+    await context.clearCookies();
+    expect(
+      (
+        await context.request.post(`${WEB}${PREFIX}/auth/login`, {
+          data: { email: user.email, password: 'synthetic-original-password-1' },
+          headers: { Origin: WEB },
+        })
+      ).status(),
+    ).toBe(200);
+    await page.goto(`${WEB}/settings/account`);
+    const result = await page.evaluate(
+      (url) =>
+        new Promise<{ opened: boolean; output: string }>((resolve, reject) => {
+          const ws = new WebSocket(url);
+          let opened = false;
+          const timeout = setTimeout(() => {
+            ws.close();
+            reject(new Error('Terminal relay timed out'));
+          }, 10_000);
+          ws.onopen = () => {
+            opened = true;
+          };
+          ws.onerror = () => {
+            clearTimeout(timeout);
+            reject(new Error('Terminal upgrade failed'));
+          };
+          ws.onmessage = (event) => {
+            const frame = JSON.parse(String(event.data)) as {
+              type: string;
+              data?: string;
+              message?: string;
+            };
+            if (frame.type === 'connected')
+              ws.send(JSON.stringify({ type: 'input', data: 'h2b-terminal-echo' }));
+            if (frame.type === 'output') {
+              clearTimeout(timeout);
+              ws.close();
+              resolve({ opened, output: frame.data ?? '' });
+            }
+            if (frame.type === 'error') {
+              clearTimeout(timeout);
+              ws.close();
+              reject(new Error(frame.message));
+            }
+          };
+        }),
+      `ws://localhost:46100${PREFIX}/terminal/${containerId}`,
+    );
+    expect(result).toEqual({ opened: true, output: 'h2b-terminal-echo' });
+  } finally {
+    await context.request.delete(`${API}/__fixture/session/${user.id}`);
+  }
+});
