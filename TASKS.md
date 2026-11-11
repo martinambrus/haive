@@ -196,6 +196,12 @@ Low unless marked. Code in `worker/src/queues/cli-exec/handlers.ts` (refresh_run
 11. A failed `/auth/me` read never retries, so the stored-run panel stays hidden until reload.
 12. Probe and sign-out results are still not durable.
 
+### T607 · FNF[a11y-sweep-2] · hand-faked React hooks in web tests (+1)
+
+status: open · kind: fix · found: H1 (#343) 2026-11-11 · priority: P4
+
+1. 15 web test harnesses still fake React hooks by hand (item 7 of the old T343, partly done in #1073, which moved the touched ones to Testing Library + JSDOM). Move the rest to real React rendering or one shared helper.
+
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
 **Found something outside your task?** Search the board first (`grep -n "<file>\|<symbol>\|<slug>"`).
@@ -383,13 +389,6 @@ Read .claude/tmp/house-rules/ledger for a PR7a live-check entry; if absent, run 
 Validation scheduling decision 2026-11-01: attach to the dedicated capped T300 run before feature work; actual evidence/data prerequisites remain, and no successful live result is inferred.
 
 The owner scheduled one capped validation attempt; this block is an evidence dependency, not an unanswered policy question.
-
-### T199 · /favicon.ico answers 404 on every page
-
-status: in progress (bundle H1, overnight run 2026-11-10, branch fix/H1-a11y-favicon) · kind: feature · user decision: resolved 2026-11-01 · priority: P3
-Add an icon via the Next app-router convention (src/app/icon.svg or favicon.ico).
-
-User decision 2026-11-01: Use a simple Haive H favicon.
 
 ### T310 · FNF[kept-metadata-moves] · captured owner/mode lost when a re-sync does not finish
 
@@ -753,28 +752,6 @@ status: parked · kind: design · was modular #146 · reason: diminishing return
 4. The rag and ddev routes parse the bearer header by hand; use the shared parse in lib/task-call-auth.ts.
 5. Per-run `<uuid>` dirs in the wrappers volume are removed only by runInSandbox's finally. Add a boot or periodic sweep.
 
-### T343 · FNF[a11y-sweep] · links wrap buttons at 17 sites; sidebar rename input sits inside a button; plan panel close and tabs lack names (+12)
-
-status: in progress (bundle H1, overnight run 2026-11-10, branch fix/H1-a11y-favicon) · was modular #151 · priority: P2
-All PRE-EXISTING unless marked.
-
-1. Base items:
-   - links wrap buttons at 17 sites;
-   - the sidebar rename input sits inside a button;
-   - the plan panel's close button and tabs lack names and state.
-2. web-kit tabs.tsx TabNav sets no aria-current on the active tab.
-3. Three overlays bypass the shared Dialog: cli-auth-banner-modal.tsx:445, tasks/[id]/page.tsx:2308 ("Login successful"), and task-history.tsx:289.
-4. A dialog opened from an ActionMenu row loses its opener, so focus goes to BODY.
-5. A nested Dialog mounted in the same commit as its parent paints under it. Fix: z-index by depth.
-6. In a none-checked radio group, Tab can leave the trap. Fix: a focusin guard.
-7. 13 web tests fake React hooks by hand. Fix: use real React or one shared helper.
-8. An overflowing scroll region (code-preview-dialog.tsx ~:156) is not keyboard-scrollable. Fix: tabIndex={0} plus a name.
-9. A positive tabindex escapes the trap.
-10. REGRESSION from #774 (rare): an opener that a keyed reorder moves reads as body.
-11. The sidebar labels a `created` task "queued" (lib/task-tone.ts:69). Fix: "not started".
-12. plan-starter.tsx inputs (~:316, :399, :509) rely on placeholders as names, and the state and progress text sits outside a live region.
-13. (T454 review, 2026-10-31) PRE-EXISTING, minor, by code reading: the GitHub repo picker on /repos/new is not keyboard-operable and lacks combobox semantics (web components/new-repo-form.tsx ~:317, ~:325-327, ~:339); its blur timer closes the list 150 ms after Tab.
-
 ### T344 · FNF[task-type-e2e] · task-type e2e specs need no instance-wide switch flip and cover the unsaved-changes guard (+2)
 
 status: parked · reason: diminishing returns · user confirmed routine coverage stays parked, 2026-11-01 · priority: P4
@@ -1003,15 +980,6 @@ From the T431 review (2026-10-30). PRE-EXISTING, minor, consequence unmeasured. 
 status: parked · reason: diminishing returns (2026-11-01 scan): Explicitly minor oversized-override edge requires unusually large rules; resume when resume when actual repository rules exceed Codex's readable limit · priority: P4
 From the T119 review (2026-10-30). Minor. shared project-state limits.ts ~:12 `MAX_AGENT_RULES_BYTES` is 64 KiB, while codex reads only the first 32 KiB of AGENTS.md (the reason AGENTS.md itself is kept under 32 KiB), so a large override silently truncates what codex sees, and the rest of the file after the block with it. Decide: a 24-32 KiB cap, or a size hint on the Tooling editor.
 
-### T446 · FNF[bundle-descriptor-removal] · document the chosen claim-based descriptor-removal rule in upgrade commits
-
-status: in progress (bundle B, overnight run 2026-11-10, branch fix/B-upgrade-rtk) · kind: documentation · user decision: resolved 2026-11-01 · priority: P3
-From the T119 review (2026-10-30). Verified 2026-10-31 by the T446 driver (evidence in .claude/tmp/sonnet-run/T446/): INTENDED by the documented rule in docs/architecture/onboarding-upgrades.md ~:662-671. A descriptor that the previous base names but no local bundle holds is kept while a claim names its source, and is removed and reported in `removed` once none does; it "can flap across pushes". Measured on real git with a two-install smoke harness (packages/worker/test/two-install-smoke.ts): B's record writer (worker project-state/write.ts ~:684-711, run by 12, 02, 04, the 10 s dirty sweep and the checkout watcher) removes A's claim-less descriptor; Haive's own 02+03 with the commit box ticked commits that removal; A writes the file again at its next record write. Nothing reads an unclaimed descriptor, and A's bundle row, storage, items and ledger are untouched, so nothing is lost.
-
-Question for the owner: keep the rule (recommended, adding to the docs that 12 and 03 stage the removal when their commit box is ticked), or make a claim-less descriptor team-wide. Option 2: a descriptor exists only while a claim names its source. Option 3: the sync adds a checkout descriptor to the base only if a local bundle, a claim or the previous base names it. The flip lists are in the driver report. If flipped, also make the two-install smoke assert the rule across installs: it commits B's deletion (~:2477) and `treesDiffer` skips `bundles/` (~:2879).
-
-User decision 2026-11-01: Keep current claim-based descriptor rule; document that12/03 can commit automatic descriptor removal. No team-wide descriptor policy change.
-
 ### T450 · FNF[install-ownership-of-runners] · the runtime-runner reaper removes runners this install's database does not know, volumes included
 
 status: open · priority: P2 · gate: bounded verification
@@ -1129,15 +1097,6 @@ Since T459 a plan patch that may insert takes the repository row FOR KEY SHARE f
 Note (T459 fix round): 01-plan-build (~:882, and 10_8 with it), 02-plan-coverage (~:793), 03-plan-sequence (~:630) and 01-plan-chat (~:318) catch every fold error alike, so a repository deleted under them is stamped as a failed apply rather than failing at once; minor, since the repository delete cancels the task's open steps first.
 
 Engineering scope derived from the accepted policy (2026-11-01), not a new owner decision: Use the selected serialization/bounded-wait policy for reachable plan/delete conflicts; prove lock order with current callers before a locking change. Existing data consistency stays intact.
-
-### T484 · FNF[project-state-row-hold] · the project-state writers hold the repository row FOR UPDATE across file and git work
-
-status: in progress (bundle D2, run 2026-11-11, branch fix/D2-project-state-row-hold) · kind: fix · policy: covered by accepted bounded-wait/consistency rules · priority: P2
-From the T459 review (2026-10-31). PRE-EXISTING, consequential (latency).
-
-The project-state writers take the repositories row FOR UPDATE (`watch-admission.ts` ~:24, `sync.ts` ~:733, through the write gate in write.ts ~:727-731) and keep it across file and git work: MEASURED by T459, 26-52 ms per foreground write with no claim files, 1.0-1.3 s with 150, and about 2 s per sweep write. Every child INSERT of the repository (a task start, a plan node, a mirror row) needs KEY SHARE on that row and waits as long. Decide whether the writers need FOR UPDATE (it also excludes the FK checks of every insert) or FOR NO KEY UPDATE (still excludes a delete and another writer), or a shorter hold.
-
-Engineering scope derived from the accepted policy (2026-11-01), not a new owner decision: Reduce or bound row holds under the accepted short-wait policy, preserving writer/delete exclusion and atomic project-state semantics. SQL lock strength is an implementation choice requiring a measured control.
 
 ### T485 · FNF[credential-connection-leftovers] · credential and connection edges T341 left: a drifted row still reads connected, the delete dialog names only the connection (+6)
 
@@ -1627,6 +1586,9 @@ Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/rou
 
 ## Done
 
+- T484 — all nine project-state row takes use `FOR NO KEY UPDATE`, so a child row's FK check (plan node, mirror row, task row) no longer waits for a project-state write (measured: lock timeout at 300 ms before, 3-15 ms after; delete, root claim and row writer still excluded) — PR #1074 (436bd881f), 2026-11-11. The task-creation key held across the same work is T605 (design).
+- T343 + T199 — accessibility sweep: navigation actions are `LinkButton`s (no link wraps a button, the statistics module's Advanced statistics included), the sidebar rename input is out of its button, a `created` task reads "not started", plan panel close and tabs are named, `TabNav` sets `aria-current`, three overlays use the shared `Dialog`, dialog focus restore, depth stacking and a focusin trap guard, a keyboard-scrollable code preview, named plan-starter inputs with live progress, a keyboard combobox for the GitHub repo picker; a Haive "H" favicon (`src/app/icon.svg`) — PR #1073 (c8bc4e09d), 2026-11-11. T343 item 7 continues as T607.
+- T446 — the claim-based descriptor-removal rule is kept and documented (`onboarding-upgrades.md` ~:739: 12 and 03 stage the removal when their commit box is ticked) — PR #950, verified on main 2026-11-11.
 - T440 — the latest version and price refresh run is durable (`refresh_runs`, migration 0228, one row per kind: run id, trigger, start/finish, sanitized per-source errors and kill-switch skips; an older overlapping completion never overwrites a newer run; both writes best-effort); admin-only `GET /cli-pricing/refresh/latest` and `GET /cli-providers/catalog/:name/refresh-result`; `LatestRefresh` on `/admin/pricing` and the provider form (admins poll every 10 s; a page prefers its own job's result; the manual result still shows when the role read failed); docs model-pricing.md, error-diagnostics.md — PR #1076 (5f74b1a71), 2026-11-11. Follow-ups T606 (+12).
 - T318 — task start admission (POST /tasks, Start next, spawn-plan, enrich, kb-author, upgrades, plan advisory, root-merge check) waits at most 5 s per repository/plan key or row lock and 1 s for the new-work fence, then answers 409 busy with nothing created (other `boundedLockWait` callers keep 30 s); worker revivals delay 30 s on lock expiry or an unreadable maintenance read, which now counts as held; `claimTaskStart` claims only `queued`; `mergeInScratch` runs on its caller's transaction; Plan Save/Pull report moved-aside merge leftovers in their own committed transaction before the merge; docs worker-restarts.md, merge-conflicts.md, plan-canvas.md — PR #1075 (e7f56b678), 2026-11-11. Follow-ups T603 (+5), T604 (design), T605 (design).
 - T460 + T512 — Retry, Resume and dead-task revival refuse a task whose repository was deleted (409 `task_repository_deleted`), and revival applies the Retry/Resume holds whatever the stored status; `repositories.error_code` (migration 0225) classifies a repair-needed checkout, "Check repair" is check only and never rebuilds, and "Rebuild checkout" moves the old checkout aside and restores this install's settings, KB and plan data; recovery keeps the repair code until detection succeeds, stranded preparations keep it, and rebuilds are refused while an unfinished task (legacy setup-output pointer included) has a worktree under the checkout — PR #1065 (2c16ca95e), 2026-11-11; dev 0225 applied, 0 of 79 repositories flagged. Follow-ups T602. Owner check: when this install has no plan rows, recovery keeps the incoming plan files.
