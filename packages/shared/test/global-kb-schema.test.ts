@@ -382,6 +382,7 @@ describe('ensureGlobalKbSchema', () => {
         "SELECT format('%I.unaccent', n.nspname) AS",
         'CREATE TEXT SEARCH CONFIGURATION',
         'ALTER TEXT SEARCH CONFIGURATION',
+        'ALTER TEXT SEARCH CONFIGURATION',
       ],
       [
         "SELECT tgattr::text = ''",

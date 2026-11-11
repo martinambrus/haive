@@ -304,6 +304,22 @@ describe.skipIf(!ADMIN_URL)('the identifier backfill against Postgres', () => {
       await ragHybridSearch(conn, Array(8).fill(0.1), query, { lexicalOnly, knowledgeReserve: 0 })
     ).map((hit) => hit.sectionId);
 
+  it('matches a numbered term with or without its accents', async () => {
+    await ensureRagSchema(conn);
+    await insert('numbered-accent', 'kotolňa2 runs');
+    await insert('numbered-plain', 'kotolna-2b runs');
+    try {
+      for (const query of ['kotolna2', 'kotolňa2'])
+        expect(await search(query)).toContain('numbered-accent');
+      for (const query of ['kotolňa-2b', 'kotolna-2b'])
+        expect(await search(query)).toContain('numbered-plain');
+    } finally {
+      await pg.unsafe(
+        `DELETE FROM ai_rag_embeddings WHERE section_id IN ('numbered-accent', 'numbered-plain')`,
+      );
+    }
+  }, 30_000);
+
   it('ensures, indexes, searches and backfills a quoted mixed-case schema', async () => {
     await ensureRagSchema(conn);
     await pg.unsafe('CREATE SCHEMA "Haive"');

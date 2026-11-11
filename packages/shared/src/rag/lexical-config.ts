@@ -64,9 +64,12 @@ export async function ensureRagLexicalConfig(
       await tx.unsafe(
         `CREATE TEXT SEARCH CONFIGURATION ${ACCENT_CONFIG} (COPY = pg_catalog.english)`,
       );
-      return tx.unsafe(`ALTER TEXT SEARCH CONFIGURATION ${ACCENT_CONFIG}
+      await tx.unsafe(`ALTER TEXT SEARCH CONFIGURATION ${ACCENT_CONFIG}
         ALTER MAPPING FOR asciiword, asciihword, hword_asciipart, word, hword, hword_part
         WITH ${dictionary}, pg_catalog.english_stem`);
+      // Words with digits (kotolňa2) parse as numword and keep english's simple dictionary.
+      return tx.unsafe(`ALTER TEXT SEARCH CONFIGURATION ${ACCENT_CONFIG}
+        ALTER MAPPING FOR numword, numhword, hword_numpart WITH ${dictionary}, pg_catalog.simple`);
     });
   } catch (err) {
     if (!UNACCENT_UNAVAILABLE_CODES.some((code) => hasPgCode(err, code))) {
