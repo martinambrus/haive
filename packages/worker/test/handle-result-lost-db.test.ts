@@ -105,6 +105,7 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
 
   const stub = (id: string, index: number): StepDefinition =>
     ({
+      editsCodeOrTests: ['08b-test-management', '08a-browser-verify'].includes(id),
       metadata: {
         id,
         workflowType: 'workflow' as WorkflowType,
@@ -436,6 +437,8 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
       '08-phase-5-verify',
       '08a-browser-verify',
       '10-gate-3-commit',
+      '11-phase-8-learning',
+      '11d-skill-sync',
     ].entries()) {
       stepRegistry.override(stub(id, index + 3));
     }
@@ -606,6 +609,33 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
     await writeFile(path.join(w.dir, 'a.ts'), 'export const a = 3;');
     await w.hand();
     expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '07b-phase-4-validate', round: 1 });
+  });
+
+  it.each(['11-phase-8-learning', '11d-skill-sync'])(
+    'does not recheck non-code/test edits from %s in a list without a commit gate',
+    async (source) => {
+      const w = await lateFixer(source, { commit: false });
+      const runListSnapshot = [...w.ctx.runListSnapshot!, source];
+      await writeFile(path.join(w.dir, 'knowledge.md'), 'learning');
+      await handleResult(db, { ...w.ctx, runListSnapshot }, source, {
+        status: 'done',
+        row: w.row,
+        output: {},
+      });
+      expect(await eventTypes(w.taskId)).not.toContain('validation.recheck_requested');
+    },
+  );
+
+  it('does not recheck a code/test editor placed after the commit gate', async () => {
+    const w = await lateFixer();
+    const runListSnapshot = ['07b-phase-4-validate', '10-gate-3-commit', '08b-test-management'];
+    await writeFile(path.join(w.dir, 'a.ts'), 'export const a = 3;');
+    await handleResult(db, { ...w.ctx, runListSnapshot }, w.row.stepId, {
+      status: 'done',
+      row: w.row,
+      output: {},
+    });
+    expect(await eventTypes(w.taskId)).not.toContain('validation.recheck_requested');
   });
 
   it('falls back to 07b for a pinned old-order run list instead of looping at 07c', async () => {

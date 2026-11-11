@@ -649,6 +649,7 @@ function outputContract(docsOnly: boolean, dimensions: readonly ReviewDimension[
 
 export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> = {
   needsRuntime: 'if-serving',
+  editsCodeOrTests: true,
   metadata: {
     id: '07b-phase-4-validate',
     workflowType: 'workflow',

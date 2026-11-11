@@ -561,6 +561,10 @@ export interface StepLoopSpec<TApply = unknown> {
 
 export interface StepDefinition<TDetect = unknown, TApply = unknown> {
   readonly metadata: StepMetadata;
+  /** May edit deliverable code or tests, including through a fixer. Its successful/skip
+   * hand-off compares validation snapshots when after 07b and before the commit gate.
+   * File-writing knowledge/skill steps deliberately do not opt in. */
+  readonly editsCodeOrTests?: boolean;
   /** When this step parks on a form (waiting_form), set the TASK status to this instead
    *  of the default 'waiting_user'. Used by 13-pr-wait to surface a task waiting for its
    *  PR to merge as 'waiting_pr'. Only takes effect when the step actually parks. */

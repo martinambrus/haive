@@ -195,6 +195,7 @@ const CODE_SIMPLIFIER_DEFINITION = [
 ] as const;
 
 export const codeSimplifyStep: StepDefinition<SimplifyDetect, SimplifyApply> = {
+  editsCodeOrTests: true,
   metadata: {
     id: '07a-code-simplify',
     workflowType: 'workflow',

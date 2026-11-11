@@ -183,6 +183,7 @@ const SEARCH_LADDER = [
 ] as const;
 
 export const insightsTriageStep: StepDefinition<TriageDetect, TriageApply> = {
+  editsCodeOrTests: true,
   metadata: {
     id: '08e-insights-triage',
     workflowType: 'workflow',

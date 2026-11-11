@@ -44,6 +44,28 @@ describe('currentStepLabel', () => {
     expect(byRound.get(3)).toBe('fix loop 2');
   });
 
+  it('numbers revalidations independently from real fix loops and spec revisions', () => {
+    const steps = [
+      step({ round: 0 }),
+      step({ stepId: '07c-ddev-reconcile', round: 1 }),
+      step({ stepId: '07b-phase-4-validate', round: 1 }),
+      step({ stepId: '07-phase-2-implement', round: 2 }),
+      step({ stepId: '04-phase-0b-pre-planning', round: 3 }),
+      step({ stepId: '07b-phase-4-validate', round: 4 }),
+      step({ stepId: '07-phase-2-implement', round: 5 }),
+    ];
+    expect([...deriveRoundSuffixes(steps)]).toEqual([
+      [1, 'revalidation 1'],
+      [2, 'fix loop 1'],
+      [3, 'spec rev 1'],
+      [4, 'revalidation 2'],
+      [5, 'fix loop 2'],
+    ]);
+    expect(currentStepLabel(steps, '07b-phase-4-validate', 1, flags)).toBe(
+      'Phase 4: Implementation validation (revalidation 1)',
+    );
+  });
+
   it('falls back to the in-place pass count on round 0', () => {
     // A step with no CLI roles does one pass per iteration, so passes are reported as-is.
     const plain = step({ stepId: '03-phase-0a-discovery', title: 'Discovery', iterationCount: 3 });

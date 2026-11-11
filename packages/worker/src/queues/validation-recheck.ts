@@ -63,6 +63,9 @@ export async function validationSuccessor(
     if (!next) throw new Error(`Validation return step ${resume} is not in the run list`);
     return { next, round };
   }
+  // Only declared code/test editors can make a successful late fixer require revalidation.
+  // This also bounds static lists with no commit gate: learning/skill writes are excluded.
+  if (steps[index]?.editsCodeOrTests !== true) return ordinary;
   const validated = await db.query.taskSteps.findFirst({
     where: and(
       eq(schema.taskSteps.taskId, ctx.taskId),
