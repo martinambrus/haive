@@ -889,6 +889,7 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
       });
       return;
     }
+    await refuseLiveBundleJob(queue, bundleId);
     let replacement: BundleReplacement;
     const intentRel = `${finalRel}.replacement.json`;
     let createdIntent: FileIdentity | null = null;
@@ -904,7 +905,15 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
         if (current.status === 'syncing' && current.archivePath !== finalArchive) {
           throw new HttpError(409, 'another import of this bundle is already running');
         }
-        await refuseLiveBundleJob(queue, bundleId);
+        // The queue snapshot precedes this transaction. Refuse a changed generation rather than
+        // admitting against a snapshot taken before another import finished or failed.
+        if (
+          current.updatedAt.getTime() !== bundle.updatedAt.getTime() ||
+          current.status !== bundle.status ||
+          current.archivePath !== bundle.archivePath
+        ) {
+          throw new HttpError(409, 'The bundle changed while checking its import jobs. Try again.');
+        }
         const saved = await readFileNoFollow(anchor, intentRel, { maxBytes: 8192, strict: true });
         if (saved) {
           replacement = bundleReplacementSchema.parse(JSON.parse(saved.data.toString('utf8')));
@@ -1048,16 +1057,30 @@ bundleRoutes.post('/:id/sync', requireNewWorkAllowed, async (c) => {
 
   const db = getDb();
   const queue = getBundleQueue();
+  await refuseLiveBundleJob(queue, bundleId);
   const syncingAt = new Date();
   await db.transaction(async (tx) => {
     await admitNewWork(tx);
+    const [current] = await tx
+      .select()
+      .from(schema.customBundles)
+      .where(eq(schema.customBundles.id, bundleId))
+      .for('update');
+    if (!current) throw new HttpError(404, 'bundle not found');
+    // Compare the values read by the driver under the row lock. SQL timestamp equality
+    // against a JS Date would reject an unchanged database default with microseconds.
+    if (
+      current.updatedAt.getTime() !== row.updatedAt.getTime() ||
+      current.status !== row.status ||
+      current.archivePath !== row.archivePath
+    )
+      throw new HttpError(409, 'The bundle changed while checking its import jobs. Try again.');
     const [taken] = await tx
       .update(schema.customBundles)
       .set({ status: 'syncing', lastSyncError: null, updatedAt: syncingAt })
       .where(and(eq(schema.customBundles.id, bundleId), ne(schema.customBundles.status, 'syncing')))
       .returning({ id: schema.customBundles.id });
     if (!taken) throw new HttpError(409, 'an import of this bundle is already running');
-    await refuseLiveBundleJob(queue, bundleId);
   });
 
   const payload: BundleJobPayload = { bundleId, userId };
