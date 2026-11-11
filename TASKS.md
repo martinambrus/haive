@@ -294,13 +294,6 @@ Add an icon via the Next app-router convention (src/app/icon.svg or favicon.ico)
 
 User decision 2026-11-01: Use a simple Haive H favicon.
 
-### T270 · FNF[plan] · a child insert can take a parent's path from before a concurrent move
-
-status: in progress (bundle G, overnight run 2026-11-10, branch fix/G-plan-lock-merge-visibility) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-applyPlanPatch's loadNode reads the parent path unlocked (shared/src/plan/apply-patch.ts:415). FOR SHARE on the parent is not enough (a move rewrites descendants in one UPDATE). Direction: a per-repository plan-patch advisory lock first in applyOps; lock-order analysis owed.
-
-User decision 2026-11-01: Serialize conflicting edits; bound waits and return explicit retryable busy responses. Lock-order analysis remains required.
-
 ### T310 · FNF[kept-metadata-moves] · captured owner/mode lost when a re-sync does not finish
 
 status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
@@ -1228,13 +1221,6 @@ Reconciled 2026-11-01: item9's failed-HEAD-read defect is RESOLVED by T397 (curr
 
 Execution fence 2026-11-01: Deduplicate the resolved T397 paths and T379 overlap first. Select at most three current consequential caller cases; no twelve-item generic Git-read audit. The fixed item9 HEAD probe must not be reimplemented.
 
-### T497 · FNF[plan-merge-failed-visibility] · after a reload a failed plan merge leaves no trace on the plan page
-
-status: in progress (bundle G, overnight run 2026-11-10, branch fix/G-plan-lock-merge-visibility) · kind: feature · user decision: resolved 2026-11-01 · priority: P2
-From the T491 review (2026-10-31). `GET /plan/merge` lists open merges only (api plan.ts ~:447-459) and `plan_merge` tasks are hidden from the task list (tasks/index.ts ~:289-292), so once the page that saw the failure is gone, a FAILED merge (which keeps its worktree for a Retry) cannot be found from the plan page. Options: the route also returns the newest failed merge not followed by a successful one, shown with its Retry link; or a plan-page notice from the task events. Recommended: the first.
-
-User decision 2026-11-01: Show the latest unresolved failed plan merge with its Retry/task link after reload.
-
 ### T499 · FNF[parks-accounting] · verify whether a parked current row beside another active row can stall recovery
 
 status: open · gate: bounded verification · executable members: 4 · priority: P2
@@ -1632,6 +1618,7 @@ Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/rou
 
 ## Done
 
+- T270 + T497 — path-changing plan patches serialise per repository on a bounded advisory lock (409 `plan_busy`; update-only patches take none; worker callers retry busy; mirror flush keeps its base lock order); a failed plan merge stays visible after a reload (`failedMerge` on `GET /repositories/:id/plan/merge`) — PR #1067 (0df87b7c9), 2026-11-11. Follow-ups T596, T597.
 - T291 + T323 item 4 — a file parked by a process death is put back after 24 h (ctime age, worker write-path sweep, bounded warnings, `.name` records for long leaves); RTK strip/append record before parking; complete/consumed upload rows deleted 90 days after `updated_at` (protected states kept) — PR #1063 (a49293f6e), 2026-11-10. T323 item 5 stays parked; follow-ups T592.
 - T590 items 1, 3, 5 — CLI login-secret deletes take the auth-scope lock (409 `cli_auth_busy`, no generation advance); sign-out poll window past the shared 30 min cap (`CLI_SIGN_OUT_AUTH_WAIT_MS`); busy or settings-moved login upgrade closes with 4409/4410 and the modal says why — PR #1062 (0f52f236c), 2026-11-10. T590 stays open with items 2, 4, 6-18; follow-ups T591, T502 item 4.
 - T586 — a late CLI sign-out no longer deletes a newer login's credential: `cli_providers.auth_generation` (migration 0224) stamped at login and secret writes, the sign-out job skips a superseded login; one advisory lock per auth scope held by login, sign-out, sync-back, refresh and PATCH, with scope recheck after the lock — PR #1061 (f715e40a7), 2026-11-10. Follow-ups T590.
