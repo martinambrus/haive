@@ -642,6 +642,7 @@ describe('collectWrittenCliContent', () => {
     { checkout: 'main', landing: 'feature-x', count: false },
     { checkout: null, landing: 'feature-x', count: true },
     { checkout: 'main', landing: undefined, count: true },
+    { checkout: 'main', landing: '', count: true },
   ])('compares legacy baseBranch: $checkout / $landing', ({ checkout, landing, count }) => {
     const written = collectMerged(
       [
