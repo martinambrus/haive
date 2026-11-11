@@ -66,6 +66,8 @@ export function leftOpenMerges(events: readonly LeftOpenEventRow[]): LeftOpenMer
 /** Durable step-12 facts live in task events: resetting a step never deletes them. */
 export const MERGE_LANDED_EVENT = 'merge.landed';
 export const MERGE_LEFT_COMMITTED_EVENT = 'merge.left_committed';
+export const MERGE_LEFT_COMMITTED_SETTLED_EVENT = 'merge.left_committed_settled';
+export type MergeLeftCommittedOutcome = 'undone' | 'moved' | 'refused';
 export interface LandedMerge {
   baseShaBefore: string;
   baseShaAfter: string;
@@ -73,6 +75,13 @@ export interface LandedMerge {
   landedAt: string;
   repoPath: string;
   dir: string;
+  /** Immutable feature evidence captured at landing; absent on older report-only events. */
+  featureBranch?: string;
+  featureSha?: string;
+  mergeStage?: 'feature' | 'base-sync';
+  squashMergeSha?: string;
+  hostCheckout?: boolean;
+  pushed?: boolean;
 }
 export function readLandedMerge(value: unknown): LandedMerge | null {
   if (!value || typeof value !== 'object') return null;
@@ -89,4 +98,37 @@ export function readLandedMerge(value: unknown): LandedMerge | null {
     return null;
   if (!Number.isFinite(Date.parse(v.landedAt as string))) return null;
   return v as unknown as LandedMerge;
+}
+
+export interface LeftCommittedMerge extends LandedMerge {
+  settled: { outcome: MergeLeftCommittedOutcome; reason: string; resyncRequired?: boolean } | null;
+}
+
+/** Every attempt has one terminal outcome, including a refusal. The directory lock serializes
+ * the writer; readers match the exact report, never copy or the latest branch tip. */
+export function leftCommittedMerges(events: readonly LeftOpenEventRow[]): LeftCommittedMerge[] {
+  const merges = new Map<string, LeftCommittedMerge>();
+  const key = (dir: string, sha: string) => JSON.stringify([dir, sha]);
+  for (const e of events) {
+    if (e.eventType !== MERGE_LEFT_COMMITTED_EVENT) continue;
+    const m = readLandedMerge(e.payload);
+    if (m && !merges.has(key(m.dir, m.baseShaAfter)))
+      merges.set(key(m.dir, m.baseShaAfter), { ...m, settled: null });
+  }
+  for (const e of events) {
+    if (e.eventType !== MERGE_LEFT_COMMITTED_SETTLED_EVENT) continue;
+    const dir = text(e.payload?.dir);
+    const after = text(e.payload?.baseShaAfter);
+    const outcome = text(e.payload?.outcome);
+    if (dir === null || after === null || !['undone', 'moved', 'refused'].includes(outcome ?? ''))
+      continue;
+    const m = merges.get(key(dir, after));
+    if (m && !m.settled)
+      m.settled = {
+        outcome: outcome as MergeLeftCommittedOutcome,
+        reason: text(e.payload?.reason) ?? '',
+        ...(e.payload?.resyncRequired === true ? { resyncRequired: true } : {}),
+      };
+  }
+  return [...merges.values()];
 }

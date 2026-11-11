@@ -12,6 +12,11 @@ const state = vi.hoisted(() => ({
   hang: false,
 }));
 
+vi.mock('@haive/shared', async (original) => ({
+  ...(await original<object>()),
+  configService: { get: async () => null, getFresh: async () => null },
+}));
+
 vi.mock('../src/db.js', () => ({
   getDb: () => ({
     query: { tasks: { findFirst: async () => state.task } },
@@ -126,6 +131,71 @@ describe('POST /tasks/:id/merges/abort', () => {
       body: JSON.stringify({ dir: DIR, mergeHead: 'm1' }),
     });
     expect(res.status).toBe(403);
+    expect(state.added).toEqual([]);
+  });
+});
+
+describe('POST /tasks/:id/merges/undo', () => {
+  const payload = {
+    dir: DIR,
+    repoPath: DIR,
+    landedOn: 'main',
+    landedAt: '2026-11-11T00:00:00Z',
+    baseShaBefore: 'a'.repeat(40),
+    baseShaAfter: 'b'.repeat(40),
+  };
+  const undo = (body: unknown = { dir: DIR, baseShaAfter: payload.baseShaAfter }) =>
+    app.request(`/tasks/${TASK}/merges/undo`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  beforeEach(() => {
+    state.events = [{ eventType: 'merge.left_committed', payload }];
+  });
+  it('queues only the exact reported merge of the cancelled task', async () => {
+    expect((await undo()).status).toBe(202);
+    expect(state.added[0]?.slice(0, 2)).toEqual([
+      'undo-left-merge',
+      {
+        taskId: TASK,
+        userId: 'u1',
+        dir: DIR,
+        baseShaAfter: payload.baseShaAfter,
+      },
+    ]);
+  });
+  it.each(['done', 'refused', 'moved'])('refuses an already settled %s report', async (outcome) => {
+    state.events.push({
+      eventType: 'merge.left_committed_settled',
+      payload: { ...payload, outcome: outcome === 'done' ? 'undone' : outcome, reason: 'settled' },
+    });
+    expect((await undo()).status).toBe(409);
+    expect(state.added).toEqual([]);
+  });
+  it('refuses a mismatched report and an active task', async () => {
+    expect((await undo({ dir: DIR, baseShaAfter: 'c'.repeat(40) })).status).toBe(409);
+    state.task!.status = 'running';
+    expect((await undo()).status).toBe(409);
+    expect(state.added).toEqual([]);
+  });
+  it('requires ownership and a valid sha', async () => {
+    expect((await undo({ dir: DIR, baseShaAfter: '--bad' })).status).toBe(400);
+    state.task = null;
+    expect((await undo()).status).toBe(404);
+    expect(state.added).toEqual([]);
+  });
+  it('is protected by the foreign-origin gate and authentication', async () => {
+    const full = createApiApp('http://localhost:3000');
+    expect(
+      (
+        await full.request(`/tasks/${TASK}/merges/undo`, {
+          method: 'POST',
+          headers: { origin: 'http://localhost:5173' },
+        })
+      ).status,
+    ).toBe(403);
+    expect((await full.request(`/tasks/${TASK}/merges/undo`, { method: 'POST' })).status).toBe(401);
     expect(state.added).toEqual([]);
   });
 });

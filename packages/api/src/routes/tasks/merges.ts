@@ -14,6 +14,12 @@ import { getDb } from '../../db.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { getTaskQueue } from '../../queues.js';
 import { addOrRefuse } from '../../lib/queue-bounded.js';
+import {
+  leftCommittedMerges,
+  MERGE_LEFT_COMMITTED_EVENT,
+  MERGE_LEFT_COMMITTED_SETTLED_EVENT,
+} from '@haive/shared/merge-left-open';
+import type { UndoLeftMergePayload } from '@haive/shared';
 
 // Merges a cancelled task left open. Auth + task ownership come from the parent taskRoutes
 // (requireAuth + userId), mirroring browser-access.ts. The abort runs in the worker: the api
@@ -72,6 +78,65 @@ mergeRoutes.post('/:id/merges/abort', async (c) => {
         },
       ),
     'abort left merge',
+    { taskId },
+  );
+  return c.json({ queued: true }, 202);
+});
+
+const undoBody = z.object({
+  dir: z.string().min(1),
+  baseShaAfter: z.string().regex(/^[0-9a-f]{40}$/),
+});
+
+mergeRoutes.post('/:id/merges/undo', async (c) => {
+  const userId = c.get('userId');
+  const taskId = c.req.param('id');
+  const parsed = undoBody.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) throw new HttpError(400, 'dir and baseShaAfter are required');
+  const { dir, baseShaAfter } = parsed.data;
+  const db = getDb();
+  const task = await db.query.tasks.findFirst({
+    where: and(eq(schema.tasks.id, taskId), eq(schema.tasks.userId, userId)),
+    columns: { id: true, status: true },
+  });
+  if (!task) throw new HttpError(404, 'Task not found');
+  if (task.status !== 'cancelled')
+    throw new HttpError(409, 'Only a cancelled task can undo this merge');
+  const events = await db
+    .select({ eventType: schema.taskEvents.eventType, payload: schema.taskEvents.payload })
+    .from(schema.taskEvents)
+    .where(
+      and(
+        eq(schema.taskEvents.taskId, taskId),
+        inArray(schema.taskEvents.eventType, [
+          MERGE_LEFT_COMMITTED_EVENT,
+          MERGE_LEFT_COMMITTED_SETTLED_EVENT,
+        ]),
+      ),
+    )
+    .orderBy(asc(schema.taskEvents.createdAt));
+  const target = leftCommittedMerges(events).find(
+    (m) => m.dir === dir && m.baseShaAfter === baseShaAfter,
+  );
+  if (!target || target.settled)
+    throw new HttpError(
+      409,
+      'No unsettled committed merge is reported for that directory and commit',
+    );
+  await addOrRefuse(
+    () =>
+      getTaskQueue().add(
+        TASK_JOB_NAMES.UNDO_LEFT_MERGE,
+        { taskId, userId, dir, baseShaAfter } satisfies UndoLeftMergePayload,
+        {
+          jobId: `undo-left-merge-${taskId}-${createHash('sha1').update(`${dir}\0${baseShaAfter}`).digest('hex')}`,
+          attempts: 5,
+          backoff: { type: 'exponential', delay: 2000 },
+          removeOnComplete: true,
+          removeOnFail: true,
+        },
+      ),
+    'undo left merge',
     { taskId },
   );
   return c.json({ queued: true }, 202);
