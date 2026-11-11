@@ -1112,7 +1112,7 @@ Engineering scope derived from the accepted policy (2026-11-01), not a new owner
 
 ### T484 · FNF[project-state-row-hold] · the project-state writers hold the repository row FOR UPDATE across file and git work
 
-status: open · kind: fix · policy: covered by accepted bounded-wait/consistency rules · priority: P2
+status: in progress (bundle D2, run 2026-11-11, branch fix/D2-project-state-row-hold) · kind: fix · policy: covered by accepted bounded-wait/consistency rules · priority: P2
 From the T459 review (2026-10-31). PRE-EXISTING, consequential (latency).
 
 The project-state writers take the repositories row FOR UPDATE (`watch-admission.ts` ~:24, `sync.ts` ~:733, through the write gate in write.ts ~:727-731) and keep it across file and git work: MEASURED by T459, 26-52 ms per foreground write with no claim files, 1.0-1.3 s with 150, and about 2 s per sweep write. Every child INSERT of the repository (a task start, a plan node, a mirror row) needs KEY SHARE on that row and waits as long. Decide whether the writers need FOR UPDATE (it also excludes the FK checks of every insert) or FOR NO KEY UPDATE (still excludes a delete and another writer), or a shorter hold.
