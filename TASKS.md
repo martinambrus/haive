@@ -176,8 +176,9 @@ A task start waits at most 5 s for the repository task lock and row admission, t
 
 ### T605 · design · git work under the task-creation key
 
-status: open · kind: design · found: F1 (#318) and D2 (#484) reviews 2026-11-11 · priority: P3
+status: parked (owner decision after the L1 map) · kind: design · found: F1 (#318) and D2 (#484) reviews 2026-11-11 · priority: P3
 DECIDED by the owner 2026-11-11: narrow the creation key to the row admission; git and file work fenced by the task's own epoch. Overnight run authorized; covers T604.
+RESULT 2026-11-11 (L1 map, no code; `.claude/tmp/codex-run/L1-S/codex-1/report.md`): the premise is partly INVALID. Ordinary task creation does no git or file work under the key (only admission, snapshot pinning and queue rows); upgrade admission probes filesystem markers under it (`shared/src/onboarding-admission.ts:572`). The hold that makes T604 busy is the WORKER project-state writer (`worker/src/project-state/write.ts:747`), which holds the key and the repository row across preparation and publication. Shortening it needs a reciprocal publication protocol across api, database and worker (private preparation per task epoch, publication fenced by `orchestration_epoch`, a shared handoff for background writers). Needs a new owner decision: build that protocol as a planned feature, or accept and document the bound.
 Task creation holds the creation key across git and file work (worktree and branch checks, attachment staging), so a slow git or disk holds every other creation and start for that repository behind it. PRE-EXISTING, consequential. Decide whether the key covers only the row admission, with the file work fenced by the task's own epoch instead.
 
 ### T606 · FNF[refresh-run-followups] · latest refresh-run record follow-ups (+12)
@@ -254,7 +255,7 @@ Code in web `lib/api-proxy.server.ts`, `lib/api-base.server.ts`, `app/api/haive/
 
 ### T613 · design · code-server shares the web origin in cross-host proxy mode
 
-status: open · kind: design · found: H2 (#435) review 2026-11-11 · priority: P2
+status: taken (bundle M2, overnight 2026-11-11) · kind: design · found: H2 (#435) review 2026-11-11 · priority: P2
 DECIDED by the owner 2026-11-11: separate editor hostname (e.g. `ide.<domain>`) with a scoped handshake token for cross-host installs. Overnight run authorized.
 In cross-host mode `/ide` is proxied on the web origin, so code-server (which runs repository code) runs with the app's origin and can reach its API session. Options: a separate editor hostname (needs DNS/TLS per install), an API-host editor with its own scoped handshake token, or a sandboxed opaque-origin iframe (code-server may need storage it then lacks). Costs: `.claude/tmp/codex-run/H2-S/codex-2/editor-options.txt`. Needs an owner decision. Same-hostname installs are unaffected.
 
@@ -274,7 +275,7 @@ DECIDED by the owner 2026-11-11: the worker records the checkout branch when the
 
 ### T616 · fix · boot warning for the cross-host sign-in throttle
 
-status: open · kind: fix · found: H2 (#435) · priority: P3
+status: taken (bundle M1, overnight 2026-11-11) · kind: fix · found: H2 (#435) · priority: P3
 DECIDED by the owner 2026-11-11: when web and api hostnames differ (web-origin proxy mode) and web's address is not covered by `HAIVE_TRUSTED_PROXIES`, log one warning at api boot naming the operator rule in `docs/architecture/api-auth.md` (cross-host web-proxy mode). The docs rule stays; the warning only reports it. Overnight run authorized.
 
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
@@ -1556,7 +1557,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ### T587 · Cancel, step abort and plan discard clear an administrator's pause with no audit row (owner confirm)
 
-status: open · kind: decision · found: #1058 review 2026-11-10 · priority: P4
+status: taken (bundle M1, overnight 2026-11-11) · kind: decision · found: #1058 review 2026-11-10 · priority: P4
 DECIDED by the owner 2026-11-11: add a best-effort audit row when Cancel, step abort or plan discard clear an administrator's pause, as Retry's resume does. Overnight run authorized.
 PRE-EXISTING. Cancel (api tasks/index.ts ~:1379), step abort (tasks/steps.ts ~:1756) and plan merge discard (routes/plan.ts ~:1406) clear any pause, an administrator's included, with no `byAdmin` event or audit row. release.md ~:120 documents that they clear any pause; decide whether the audit trail should record it (a best-effort row like the Retry resume) or stay as documented.
 
@@ -1581,7 +1582,7 @@ status: open · kind: design · found: #1060 reviews 2026-11-10 · priority: P3
 
 ### T590 · FNF[cli-auth-lock-followups] · CLI auth lock and sign-out follow-ups (+17)
 
-status: open (items 1, 3, 5 done in #1062; the rest unapproved, awaiting owner pick) · kind: fix · found: #1061 reviews 2026-11-10 · priority: P3
+status: taken (bundle N1 (group A), overnight 2026-11-11) · kind: fix · found: #1061 reviews 2026-11-10 · priority: P3
 DECIDED by the owner 2026-11-11: all remaining groups approved (lock correctness 4, 6, 7, 15; sign-out flow 8, 9, 10, 14, 18; web UI 16, 17; tests and minor 11, 12, 13). Item 2 stays accepted and documented. Overnight run authorized.
 
 1. DONE #1062. `DELETE /:providerId/usage-auth` and `DELETE /:providerId/secrets/:secretName` (api cli-providers.ts ~:1165-1230) take no auth lock, so a usage refresh that read the secret before the delete can write it back. PRE-EXISTING, moderate. Fix: take the lock (`withCliAuthLock`) like the writers.
