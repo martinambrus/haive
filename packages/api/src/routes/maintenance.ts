@@ -1,3 +1,4 @@
+import { assertTaskRootMergeIdle } from '../lib/root-merge-busy.js';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
@@ -378,6 +379,7 @@ maintenanceRoutes.post('/tasks/:id/action', async (c) => {
     case 'resume': {
       if (!task.pausedAt) return c.json({ ok: true, pausedAt: null });
       const ev = await db.transaction(async (tx) => {
+        await assertTaskRootMergeIdle(tx, taskId);
         // Only the resume that changes the row is recorded.
         if (!(await clearTaskPause(tx, taskId))) return null;
         return recordAdminResume(tx, taskId, actorUserId, task.userId);

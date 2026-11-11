@@ -108,6 +108,57 @@ describe.skipIf(!url)('deferred attachments through real Postgres routes', () =>
     return attachment!.id;
   };
 
+  it.each(['retry', 'resume'] as const)(
+    'refuses root task %s beside a live merge without writes or enqueue',
+    async (action) => {
+      const id = await create(false, undefined);
+      await db
+        .update(schema.tasks)
+        .set({ status: 'failed', pausedAt: new Date() })
+        .where(eq(schema.tasks.id, id));
+      const [merger] = await db
+        .insert(schema.tasks)
+        .values({
+          userId: USER,
+          repositoryId: REPO,
+          type: 'workflow',
+          title: 'merger',
+          status: 'waiting_user',
+        })
+        .returning();
+      const [step] = await db
+        .insert(schema.taskSteps)
+        .values({
+          taskId: merger!.id,
+          stepId: '12-worktree-cleanup',
+          stepIndex: 12,
+          title: 'merge',
+          round: 0,
+          status: 'waiting_cli',
+          mergeResolveState: {
+            mode: 'same-branch',
+            phase: 'resolving',
+            baseBranch: 'main',
+            featureBranch: 'feature',
+            mergeDir: '/unused/t363',
+          } as never,
+        })
+        .returning();
+      await db
+        .insert(schema.mergeDirClaims)
+        .values({ mergeDir: '/unused/t363', taskId: merger!.id, taskStepId: step!.id });
+      const before = await row(id);
+      const response = await post(`/tasks/${id}/action`, { action });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        error:
+          'A merge is still open in the repository checkout. Finish or abort it, then try again.',
+      });
+      expect(await row(id)).toEqual(before);
+      expect(h.add).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([
     'same-branch',
     'cross-branch',
