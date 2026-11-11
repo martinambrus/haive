@@ -118,3 +118,21 @@ it('skips index refresh and names the landed branch when HEAD switches after upd
   expect((await git(repo, ['rev-parse', 'other'])).trim()).toBe(preview.head);
   expect(await git(repo, ['ls-files', '-s'])).toBe(index);
 });
+
+it('commits from a detached checkout and refuses once a branch is checked out', async () => {
+  const repo = await setup();
+  await git(repo, ['switch', '--detach']);
+  await safeFs.writeFileNoFollow(repo, 'a.txt', 'detached edit');
+  const detached = await gitPreview(repo);
+  expect(detached.ref).toBe('HEAD');
+  expect(await commitGitPreview(repo, detached, 'detached edit', identity)).toBe(true);
+  expect((await git(repo, ['rev-parse', 'HEAD^{tree}'])).trim()).toBe(detached.tree);
+
+  await safeFs.writeFileNoFollow(repo, 'a.txt', 'second edit');
+  const second = await gitPreview(repo);
+  await git(repo, ['switch', '-c', 'attached']);
+  await expect(commitGitPreview(repo, second, 'second edit', identity)).rejects.toThrow(
+    /branch changed since the commit preview/,
+  );
+  expect((await git(repo, ['rev-parse', 'attached'])).trim()).toBe(second.head);
+});

@@ -120,6 +120,9 @@ export async function assertGitPreviewBranch(
   if (symbolic.code !== 0 && symbolic.code !== 1)
     throw new Error(`${landed}the checkout branch could not be read for the commit preview.`);
   if (symbolic.code === 0 && symbolic.stdout.trim() === preview.ref) return;
+  // A detached preview (ref 'HEAD') stays valid while HEAD is still detached; the ref CAS
+  // on HEAD then catches a detached move to another commit.
+  if (symbolic.code === 1 && preview.ref === 'HEAD') return;
   throw new Error(
     committed
       ? `${landed}the checked-out branch changed. Further index updates, projection put-back and push are stopped; return to that branch before retrying.`
