@@ -99,6 +99,18 @@ describe('a WebSocket handshake', () => {
         'HTTP/1.1 401 Unauthorized',
       );
     });
+
+    it(`preserves web and foreign origins through a different-host proxy (${h.file})`, async () => {
+      vi.stubEnv('WEB_ORIGIN', 'https://web.example.com');
+      vi.stubEnv('HAIVE_PUBLIC_API_URL', 'https://api.example.com');
+      const port = await listen(h.install);
+      expect(await handshake(port, h.path, 'https://web.example.com', 'api:3001')).toBe(
+        'HTTP/1.1 401 Unauthorized',
+      );
+      expect(await handshake(port, h.path, 'https://foreign.example.com', 'api:3001')).toBe(
+        'HTTP/1.1 403 Forbidden',
+      );
+    });
   }
 
   it('is listened for only by the handlers above', () => {

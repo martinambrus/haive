@@ -2,6 +2,9 @@
 const nextConfig = {
   output: 'standalone',
   reactStrictMode: true,
+  // Editor upgrade URLs end in '/'. Next's automatic slash redirect runs before the proxy
+  // and cannot answer an upgrade. Preserve transport paths; proxy.ts normalizes page URLs.
+  skipTrailingSlashRedirect: true,
   // `next dev` started from an AI agent's shell writes packages/web/AGENTS.md and CLAUDE.md
   // with Vercel's own instruction block. Project instructions live in the root AGENTS.md.
   agentRules: false,

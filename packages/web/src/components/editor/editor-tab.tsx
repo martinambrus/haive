@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Maximize2, Minimize2 } from 'lucide-react';
-import { api, API_BASE_URL, type ApiError } from '@/lib/api-client';
+import { api, apiEditorUrl, type ApiError } from '@/lib/api-client';
 import { Button } from '@/components/ui';
 import { TaskSource } from '@/components/task-source';
 import { MarkdownView } from '@/components/markdown/markdown-view';
@@ -153,7 +153,7 @@ export function EditorTab({ taskId, repositoryId, className }: EditorTabProps) {
         </div>
         {/* Keep the iframe mounted while changing size so the editor session and buffers survive. */}
         <iframe
-          src={`${API_BASE_URL}${editorPath}`}
+          src={apiEditorUrl(editorPath)}
           title="Editor"
           className="min-h-0 w-full flex-1 rounded border border-neutral-800 bg-neutral-950"
           allow="clipboard-read; clipboard-write; fullscreen"

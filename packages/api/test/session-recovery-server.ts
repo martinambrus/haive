@@ -1,9 +1,13 @@
 /** Isolated browser fixture: real auth routes, signing, middleware and Postgres rotation.
  * Synthetic secrets and authenticated sidebar fixtures keep this independent of provider APIs. */
+import type { Server } from 'node:http';
 import { serve } from '@hono/node-server';
+import { installTerminalWebSocket } from '../src/routes/terminal.js';
+import { installIdeWebSocket } from '../src/routes/ide.js';
 import jwt from 'jsonwebtoken';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { streamSSE } from 'hono/streaming';
 import { configService, secretsService, decryptEmail, CONFIG_KEYS } from '@haive/shared';
 import { eq } from 'drizzle-orm';
 import { initDatabase } from '../src/db.js';
@@ -38,7 +42,7 @@ configService.get = async (key) =>
   key === CONFIG_KEYS.REGISTRATION_MODE ? registrationMode : null;
 secretsService.getJwtSecret = async () => 'cd'.repeat(32);
 secretsService.getEmailBlindIndexPepper = async () => 'ef'.repeat(32);
-const web = 'http://127.0.0.1:46100';
+const web = process.env.SESSION_RECOVERY_WEB_ORIGIN ?? 'http://127.0.0.1:46100';
 const app = new Hono<AppEnv>().onError(errorHandler);
 let meStatus: 503 | null = null;
 let holdNextMe = false;
@@ -113,6 +117,19 @@ app.post('/__fixture/expire-access/:id', (c) => {
   return c.json({ ok: true });
 });
 app.route('/auth', authRoutes);
+app.post('/__fixture/echo', requireAuth, (c) => new Response(c.req.raw.body));
+app.get('/__fixture/events', requireAuth, (c) =>
+  streamSSE(c, async (stream) => {
+    await stream.writeSSE({ data: 'first' });
+    await stream.sleep(35_000);
+    await stream.writeSSE({ data: 'after-default-proxy-timeout' });
+  }),
+);
+app.get('/ide/:id/*', requireAuth, (c) =>
+  c.req.path.endsWith('/redirect')
+    ? c.redirect(`/ide/${c.req.param('id')}/asset.js`)
+    : c.text('editor asset'),
+);
 app.get('/user-settings/ui-prefs', requireAuth, (c) =>
   c.json({ settingsJson: '{"sidebarWidthPx":333}' }),
 );
@@ -142,6 +159,8 @@ app.get('*', requireAuth, (c) =>
   c.json({ tasks: [], repositories: [], providers: [], state: 'normal' }),
 );
 const server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 46101 });
+installTerminalWebSocket(server as unknown as Server);
+installIdeWebSocket(server as unknown as Server);
 async function stop() {
   server.close();
   await closeRedis();

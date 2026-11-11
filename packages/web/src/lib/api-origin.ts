@@ -19,8 +19,7 @@
  */
 
 export interface RuntimeApiConfig {
-  /** Explicit, absolute, and wins outright. For a reverse proxy or a public hostname, where the
-   *  api is not simply "this host on another port". */
+  /** Explicit API address. A different hostname uses the web's session proxy in the browser. */
   apiUrl?: string;
   /** The port the api is published on. Combined with the browser's own protocol and hostname. */
   apiPort?: string;
@@ -30,13 +29,14 @@ export interface ApiOriginInputs {
   /** Injected by the root layout. Absent when the page was served by an older build. */
   config: RuntimeApiConfig | undefined;
   /** `window.location` — protocol includes its colon, e.g. `https:`. */
-  location: { protocol: string; hostname: string } | undefined;
+  location: { protocol: string; hostname: string; port?: string } | undefined;
   /** The build-time value, kept as the last resort so nothing regresses for an install that
    *  never set any of this. */
   buildTime: string | undefined;
 }
 
 export const FALLBACK_API_URL = 'http://localhost:3001';
+export const API_PROXY_PATH = '/api/haive';
 
 /** The config the server hands the browser, from the container's environment. Server-only: these
  *  names are not `NEXT_PUBLIC_*`, so the client bundle reads them as undefined. */
@@ -50,9 +50,16 @@ export function runtimeApiConfig(): RuntimeApiConfig {
 export function resolveApiOrigin(inputs: ApiOriginInputs): string {
   const { config, location, buildTime } = inputs;
 
-  // An operator who states the URL means it: a reverse proxy can put the api on a path, a
-  // different host, or the same port as the web app, and none of that is derivable.
-  if (config?.apiUrl) return stripTrailingSlash(config.apiUrl);
+  const browserBase = (api: string): string => {
+    // Host-only session cookies must reach the web's proxy and Server Components. Ports on
+    // the same hostname already share cookies and retain their existing direct transport.
+    if (location && new URL(api).hostname !== location.hostname) {
+      const port = location.port ? `:${location.port}` : '';
+      return `${location.protocol}//${location.hostname}${port}${API_PROXY_PATH}`;
+    }
+    return stripTrailingSlash(api);
+  };
+  if (config?.apiUrl) return browserBase(config.apiUrl);
 
   // The common case. `hostname`, never `host`: `host` carries the WEB app's port, which is
   // exactly the part being replaced.
@@ -60,7 +67,7 @@ export function resolveApiOrigin(inputs: ApiOriginInputs): string {
     return `${location.protocol}//${location.hostname}:${config.apiPort}`;
   }
 
-  return stripTrailingSlash(buildTime ?? FALLBACK_API_URL);
+  return browserBase(buildTime ?? FALLBACK_API_URL);
 }
 
 /** `new URL(path, base)` treats a trailing slash as significant, and an operator writing a base

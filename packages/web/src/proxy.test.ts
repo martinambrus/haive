@@ -14,6 +14,18 @@ function request(path: string, cookie = '') {
 }
 
 describe('the actual Next proxy response', () => {
+  it('retains page slash normalization while preserving editor upgrade slashes', async () => {
+    const page = await proxy(request('/login/?session=expired'));
+    expect(page.status).toBe(308);
+    expect(page.headers.get('location')).toBe('http://localhost:3000/login?session=expired');
+    vi.stubEnv('API_URL_INTERNAL', 'http://api:3001');
+    const editor = await proxy(
+      new NextRequest('http://localhost:3000/ide/id/', {
+        headers: { upgrade: 'websocket' },
+      }),
+    );
+    expect(editor.headers.get('x-middleware-rewrite')).toBe('http://api:3001/ide/id/');
+  });
   it('redirects an anonymous private request without modifying cookies', async () => {
     const response = await proxy(request('/dashboard'));
     expect(response.status).toBe(307);
@@ -32,12 +44,29 @@ describe('the actual Next proxy response', () => {
     expect(response.headers.get('set-cookie')).toBeNull();
   });
 
-  it('uses the explicit public API origin without admitting its path or unrelated hosts', async () => {
+  it('keeps cross-host API resources on the web origin', async () => {
     vi.stubEnv('HAIVE_PUBLIC_API_URL', 'https://api.example.test:9443/prefix/');
     const response = await proxy(request('/login'));
     const policy = response.headers.get('content-security-policy')!;
-    expect(policy).toContain('http://api.example.test:9443 https://api.example.test:9443');
-    expect(policy).not.toMatch(/prefix|browser\.example|\*/);
+    expect(policy).toContain("img-src 'self'");
+    expect(policy).not.toMatch(/api\.example|prefix|\*/);
+  });
+
+  it('rewrites API upgrades without page-cookie redirects or changing Origin', async () => {
+    vi.stubEnv('API_URL_INTERNAL', 'http://api:3001');
+    const request = new NextRequest('http://localhost:3000/api/haive/terminal/id?token=kept', {
+      headers: {
+        host: 'web.example:3000',
+        origin: 'https://foreign.example',
+        upgrade: 'websocket',
+      },
+    });
+    const response = await proxy(request);
+    expect(response.headers.get('x-middleware-rewrite')).toBe(
+      'http://api:3001/terminal/id?token=kept',
+    );
+    expect(request.headers.get('origin')).toBe('https://foreign.example');
+    expect(response.headers.get('set-cookie')).toBeNull();
   });
 
   it.each([401, 503])(

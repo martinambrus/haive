@@ -66,6 +66,7 @@ describe('behind a proxy that rewrites Host', () => {
   it("the api's configured public origin goes through, and another page is still refused", async () => {
     vi.stubEnv('HAIVE_PUBLIC_API_URL', 'https://api.example.com/base/');
     const app = createApiApp('https://haive.example.com');
+    expect((await post(app, 'https://haive.example.com')).status).toBe(404);
     expect((await post(app, 'https://api.example.com')).status).toBe(404);
     expect((await post(app, 'https://evil.example.com')).status).toBe(403);
   });

@@ -4,9 +4,11 @@ import { defineConfig } from '@playwright/test';
 // server as described in docs/architecture/session-recovery.md.
 export default defineConfig({
   testDir: '../..',
-  testMatch: process.env.SESSION_RECOVERY_AUTH_CHECKS
-    ? ['**/harness/session-recovery/session-recovery.spec.ts', '**/auth/session.spec.ts']
-    : '**/harness/session-recovery/*.spec.ts',
+  testMatch: process.env.SESSION_RECOVERY_CROSS_HOST
+    ? '**/harness/session-recovery/web-origin.spec.ts'
+    : process.env.SESSION_RECOVERY_AUTH_CHECKS
+      ? ['**/harness/session-recovery/session-recovery.spec.ts', '**/auth/session.spec.ts']
+      : '**/harness/session-recovery/*.spec.ts',
   workers: 1,
   timeout: 60_000,
   expect: { timeout: 15_000 },
