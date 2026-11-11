@@ -171,6 +171,7 @@ export async function refreshProjectStateOutcome(
       refuseDuringGitOperation: true,
       expectedCheckout,
       refuseWhileHeld: true,
+      discardWriteIntentOnFailure: replacementPath !== undefined,
     });
     if (written?.blocked) return { outcome: 'blocked', ...written.blocked };
   } catch (err) {

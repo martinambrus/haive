@@ -577,12 +577,16 @@ export async function writeProjectStateColumn(
     expectedCheckout,
     keepColumnOnFailure,
     refuseDuringGitOperation,
+    discardWriteIntentOnFailure,
   }: ProjectStateColumnInput & {
     column: RenderContextColumn;
     /** The column is what it was before the write, so a failure leaves it rather than clearing it. */
     keepColumnOnFailure?: boolean;
     /** A merge, rebase, cherry-pick or revert open in the checkout refuses the write, as the sweep refuses to start one. */
     refuseDuringGitOperation?: boolean;
+    /** Only for an unpublished replacement which will be abandoned on failure. Keep its journal
+     *  images, but never leave an undo intent for the next checkout to replay. */
+    discardWriteIntentOnFailure?: boolean;
   },
 ): Promise<ProjectStateWriteResult> {
   const written: string[] = [];
@@ -590,6 +594,7 @@ export async function writeProjectStateColumn(
   let attempted: ProjectRender | null = null;
   let mutatedFiles = false;
   let blocked = false;
+  let ownIntentId: string | undefined;
   try {
     const portable = portableRender(column);
     attempted = portable;
@@ -913,6 +918,7 @@ export async function writeProjectStateColumn(
       const intent: WriteIntent = { id: randomUUID(), changes, absentDirs };
       validateRecoveryIntent(intent);
       intent.stage = await prepareIntentFiles(repoPath, intent);
+      ownIntentId = intent.id;
       await markProjectStateDirty(tx, repositoryId);
       await tx
         .update(schema.projectStateOutbox)
@@ -1007,6 +1013,21 @@ export async function writeProjectStateColumn(
       await requireExpectedCheckout(tx, repositoryId, repoPath, expectedCheckout);
     });
   } catch (err) {
+    if (discardWriteIntentOnFailure && ownIntentId !== undefined) {
+      await db.transaction(async (tx) => {
+        await lockRepositoryTasksKey(tx, repositoryId);
+        await lockProjectState(tx, repositoryId);
+        await tx
+          .update(schema.projectStateOutbox)
+          .set({ writeIntent: null })
+          .where(
+            and(
+              eq(schema.projectStateOutbox.repositoryId, repositoryId),
+              sql`${schema.projectStateOutbox.writeIntent}->>'id' = ${ownIntentId}`,
+            ),
+          );
+      });
+    }
     // Admission and a CAS refused before our first mutation changed no semantic state. Once a
     // file did change, a moved checkout is a partial-write failure just like a SQL rollback: retain
     // its path report and foreground pending-local-side cleanup (background writers keep column).

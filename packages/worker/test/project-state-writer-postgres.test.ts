@@ -636,6 +636,49 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
     },
   );
 
+  it.each(['recoverable', 'held'] as const)(
+    'recovery handles a %s pending intent before moving the checkout',
+    async (kind) => {
+      const m = await moveFixture();
+      await m.leaveIntent();
+      if (kind === 'held')
+        await writeFile(join(m.dest, '.haive-data/state/project/render.json'), 'foreign edit');
+      // A lost git directory needs a rebuild but leaves the journal and record available for undo.
+      await rm(join(m.dest, '.git'), { recursive: true });
+      const rebuild = () => handleRefresh({ ...m.payload, recoverCheckout: true }, db!, m.storage);
+      if (kind === 'recoverable') {
+        await rebuild();
+        expect(m.git(m.dest, 'rev-parse', 'HEAD')).toBe(m.git(m.source, 'rev-parse', 'HEAD'));
+        expect((await m.s.outbox())!.writeIntent).toBeNull();
+      } else {
+        await expect(rebuild()).rejects.toThrow(/pending project data write.*Nothing was moved/);
+        expect(await readdir(join(m.storage, m.s.userId))).toEqual([m.s.repo.id]);
+        expect(await readFile(join(m.dest, '.haive-data/state/project/render.json'), 'utf8')).toBe(
+          'foreign edit',
+        );
+        expect((await m.s.outbox())!.writeIntent).toBeTruthy();
+      }
+    },
+  );
+
+  it('a second rebuild is not blocked by a failed private restore intent', async () => {
+    const m = await moveFixture();
+    await writeFile(join(m.dest, '.git/config'), '[core\n');
+    seam.afterWrite = async () => {
+      seam.afterWrite = null;
+      throw new Error('private restore failed after first mutation');
+    };
+    await expect(
+      handleRefresh({ ...m.payload, recoverCheckout: true }, db!, m.storage),
+    ).rejects.toThrow('private restore failed after first mutation');
+    expect.soft((await m.s.outbox())!.writeIntent).toBeNull();
+    const siblings = await readdir(join(m.storage, m.s.userId));
+    expect(siblings.some((n) => n.includes('.rebuild-'))).toBe(true);
+    await handleRefresh({ ...m.payload, recoverCheckout: true }, db!, m.storage);
+    expect(m.git(m.dest, 'rev-parse', 'HEAD')).toBe(m.git(m.source, 'rev-parse', 'HEAD'));
+    expect((await m.s.outbox())!.writeIntent).toBeNull();
+  });
+
   it.each(['active', 'persisted', 'late'] as const)(
     'defers a clean public refresh with a %s journal and retries after explicit recovery',
     async (timing) => {

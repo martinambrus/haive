@@ -41,6 +41,7 @@ import {
 } from '../project-state/set-aside.js';
 import { headCommit } from '../plan/merge.js';
 import { seedPlanBaseFromCheckout } from '../plan/mirror.js';
+import { lockProjectState, recoverProjectStateWrite } from '../project-state/write.js';
 import { handBackAfterMove } from '../step-engine/git-merge.js';
 import { GitOperationUnreadableError } from './git-operation.js';
 import { GIT_TIMED_OUT, gitGaveNoAnswer, type GitRunResult } from './git-exec.js';
@@ -504,6 +505,24 @@ async function rebuild(
     fromRemote && payload.credentialsId
       ? await buildCredentialHelper(db, payload.credentialsId, payload.userId, payload.remoteUrl)
       : undefined;
+  if (payload.recoverCheckout) {
+    const [pending] = await db
+      .select({ intent: schema.projectStateOutbox.writeIntent })
+      .from(schema.projectStateOutbox)
+      .where(eq(schema.projectStateOutbox.repositoryId, payload.repositoryId))
+      .limit(1);
+    if (pending?.intent != null) {
+      try {
+        // Its journal belongs to the current tree, never to the replacement or a later retry.
+        await recoverProjectStateWrite(db, payload.repositoryId, dest);
+      } catch (err) {
+        throw new Error(
+          `Not refreshed: the pending project data write could not be recovered (${err instanceof Error ? err.message : String(err)}). Nothing was moved.`,
+          { cause: err },
+        );
+      }
+    }
+  }
   const aside = await db.transaction(async (tx) => {
     // Starts and revivals take this key before writing task state. Recount after the slow
     // preparation, then hold the key only through the rename, never through the clone or copy.
@@ -512,6 +531,18 @@ async function rebuild(
     if (worktreeRefusal) throw new Error(worktreeRefusal);
     const holding = await checkoutHoldingTasks(tx, payload.repositoryId);
     if (holding > 0) throw new Error(holdingRefusal(holding));
+    if (payload.recoverCheckout) {
+      await lockProjectState(tx, payload.repositoryId);
+      const [pending] = await tx
+        .select({ intent: schema.projectStateOutbox.writeIntent })
+        .from(schema.projectStateOutbox)
+        .where(eq(schema.projectStateOutbox.repositoryId, payload.repositoryId))
+        .limit(1);
+      if (pending?.intent != null)
+        throw new Error(
+          'Not refreshed: a pending project data write appeared before the rebuild. Nothing was moved; retry after recovery finishes.',
+        );
+    }
     return moveAside(repoStorageRoot, rel);
   });
   // Publish a folder copy only after it finishes. A failed or interrupted copy must never
