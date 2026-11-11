@@ -340,7 +340,7 @@ describe('explicit checkout recovery', () => {
     expect(fake.rows(schema.repositories)).toHaveLength(1);
     expect(fake.rows(schema.repositories)[0]).toMatchObject({
       status: 'cloning',
-      errorCode: null,
+      errorCode: 'checkout_repair_needed',
       agentRulesOverride: 'keep settings',
     });
     expect(h.add).toHaveBeenCalledWith(
@@ -351,6 +351,25 @@ describe('explicit checkout recovery', () => {
     expect((await recover()).status).toBe(409);
     expect(h.add).toHaveBeenCalledTimes(1);
   });
+  it.each(['checkout_repair_needed', 'source_repair_needed'])(
+    'keeps a direct refresh check-only while recovery of %s is queued',
+    async (errorCode) => {
+      setup({
+        source: 'git_https',
+        remoteUrl: 'https://example.com/r.git',
+        status: 'error',
+        errorCode,
+      });
+      expect((await recover()).status).toBe(200);
+      h.getJobs.mockResolvedValue([{ data: { repositoryId: REPO } }]);
+
+      expect((await refresh()).status).toBe(200);
+      expect(h.add).toHaveBeenCalledTimes(2);
+      expect(h.add.mock.calls[0]![1]).toMatchObject({ recoverCheckout: true });
+      expect(h.add.mock.calls[1]![1]).toMatchObject({ checkCheckoutOnly: true });
+      expect(h.add.mock.calls[1]![1]).not.toHaveProperty('recoverCheckout');
+    },
+  );
   it.each(['checkout_repair_needed', 'source_repair_needed'])(
     'a direct refresh of %s queues a check that cannot rebuild',
     async (errorCode) => {

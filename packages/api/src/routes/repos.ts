@@ -3615,8 +3615,9 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
       .set({
         status: 'cloning',
         statusMessage: null,
-        // Keep the repair signal through pickup: another refresh must also remain check-only.
-        errorCode: checkCheckoutOnly ? repairErrorCode : null,
+        // Keep the repair signal until recovery settles: even before enqueue, another refresh
+        // must remain check-only rather than rebuild without restoring this install's data.
+        errorCode: checkCheckoutOnly || recovery ? repairErrorCode : null,
         updatedAt: new Date(),
       })
       .where(
