@@ -1080,7 +1080,8 @@ export async function restoreKeptMetadata(
   const writer = process.getuid?.();
   for (const [path, { bytes, owner, mode, untracked, parents }] of kept) {
     if (!untracked || !Buffer.isBuffer(bytes) || !owner || mode === undefined) {
-      if (!(await restoreKeptParents(repoPath, parents))) restored = false;
+      const result = await restoreKeptParents(repoPath, parents);
+      if (restored !== false && result !== true) restored = result;
       continue;
     }
     const warn = metadataWarn(repoPath, path);
@@ -1096,7 +1097,11 @@ export async function restoreKeptMetadata(
       }
       metadataPresent(repoPath, path);
       if (now.kind !== 'file') throw new Error('captured projection path is not a regular file');
-      if (!(await restoreKeptParents(repoPath, parents))) restored = false;
+      const result = await restoreKeptParents(repoPath, parents);
+      if (result !== true) {
+        if (restored !== false) restored = result;
+        continue;
+      }
       // A prior attempt may have handed back the owner, then failed its chmod. Only the
       // captured owner at the writer's default mode is eligible for that resumed hand-back.
       if (
@@ -1129,17 +1134,21 @@ function keptOwner(
 async function restoreKeptParents(
   repoPath: string,
   parents: KeptFile['parents'],
-): Promise<boolean> {
-  let restored = true;
+): Promise<MetadataRestoreResult> {
+  let restored: MetadataRestoreResult = true;
   const writer = process.getuid?.();
   for (const { path, owner, mode } of parents ?? []) {
     const warn = metadataWarn(repoPath, path);
     try {
       const now = await lstatNoFollow(repoPath, path, { strict: true });
-      if (now?.kind !== 'directory') {
-        restored = false;
+      if (!now) {
+        warnAbsentMetadata(repoPath, path);
+        if (restored !== false) restored = 'pending';
         continue;
       }
+      metadataPresent(repoPath, path);
+      if (now.kind !== 'directory')
+        throw new Error('captured projection parent is not a directory');
       if (
         now.stats.uid !== writer &&
         !(now.stats.uid === owner.uid && (now.stats.mode & 0o7777) === 0o755)
@@ -1198,12 +1207,13 @@ export async function putBackProjections(
           });
           if (owner) await chownNoFollow(repoPath, path, owner);
           if (mode !== undefined) await chmodNoFollow(repoPath, path, mode);
-          if (!(await restoreKeptParents(repoPath, parents)))
+          if ((await restoreKeptParents(repoPath, parents)) !== true)
             throw new Error('set-aside directory metadata not restored');
         } catch (err) {
           if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
           // A prior attempt may have created the file before metadata failed.
-          // Finish that hand-back before consuming its durable obligation.
+          // Finish that hand-back before consuming its durable obligation. A non-file
+          // occupant is a real conflict; never retire its capture or replace that occupant.
           if ((await restoreKeptMetadata(repoPath, new Map([[path, kept.get(path)!]]))) !== true)
             throw new Error('set-aside file metadata not restored');
         }
