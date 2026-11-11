@@ -1610,6 +1610,26 @@ PRE-EXISTING, minor.
 1. Park recovery (worker `fs-recovery.ts`, driven by the write-path temp sweep) visits only directories fs-safe writes into; a park left in a directory nothing writes again stays under its park name. Fix: also visit the dirs that parked a file (record them) or accept and document.
 2. A park written before #1063 with a leaf long enough to be truncated in its park name has no `.name` record, so recovery cannot know the original name and only warns. Fix: none needed unless a user reports one; manual restore.
 
+### T596 · FNF[plan-patch-lock-followups] · plan-patch lock and failed-merge notice follow-ups (+9)
+
+status: open · kind: fix · found: G (#270, #497) reviews 2026-11-10/11 · priority: P4
+All low unless marked.
+
+1. Update-only patches write `version = readVersion + 1` with no version predicate in the update `where` (`shared/src/plan/apply-patch.ts` ~:856): two concurrent update-only patches, or one beside a move, can both write the same version. PRE-EXISTING. Fix: add the read version to the `where` and retry or refuse on a miss.
+2. Legacy mirror rows with no base take the outbox row before the node rows (`convergePlanQuestions` `worker/src/plan/mirror.ts` ~:1004; no-op reconcile `seedBaseFrom` then converge ~:1081-1086): same inversion as the one fixed in the flush, rare, can 40P01. PRE-EXISTING. Fix: take the converge node locks before the outbox row.
+3. `patch-lock.ts` ~:32 `SET LOCAL lock_timeout = DEFAULT` clobbers a bound a caller set earlier in the same transaction; no current caller sets one. Latent. Fix: save and restore the previous value.
+4. `worker/test/checkout-watch-postgres.test.ts` ~:282 expects `held` but the guard throws `GitOperationUnreadableError` (gated PG test, fails on main). PRE-EXISTING. Fix the expectation or the guard's classification.
+5. `writePlanMirror` still maps any 40001 to `PlanMirrorHeldError` (`mirror.ts` ~:300, `hasPgCode` import ~:15); nothing at READ COMMITTED raises it, so it can only mislabel another failure. Remove.
+6. Test `commits an automatic reconcile before the flush writes files` (`worker/test/plan-mirror-gone-checkout-db.test.ts` ~:583-599) never asserts its `fsSafe` spies were hit, so it can pass vacuously. Add `toHaveBeenCalled`.
+7. Op-set coverage of the lock: no case for `delete` and `depends_on` taking it, nor for `affects`/`unlink`/an ordinal-only upsert not taking it. The retry in `completePlanNodesForTask` (`worker/src/plan/task-link.ts` ~:68) can no longer fire (its patch is update-only); keep or drop.
+8. Failed-merge notice edges (display only): cancelling the newest failed conversation surfaces an older failed one; the notice persists after Save/Pull discards its worktree; two reads in `Promise.all` can show one task as both `merge` and `failedMerge` for one poll.
+9. `lockPlanPatch` is typed `DbOrTx`, so a pool handle would silently drop the xact lock; the re-entrant call in `reconcilePlanLocked` is redundant; the busy test's 800-2500 ms window can flake on a loaded runner.
+
+### T597 · Retry of a mining step re-buys agents whose replies were saved
+
+status: open · kind: design · found: G (#270) review 1 2026-11-10 · priority: P3
+Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/routes/tasks/steps.ts` ~:171-191), which deletes the step's done agent mining rows and supersedes their invocations; the Resume arm that keeps done rows needs `failed` rows (~:1257-1330). Any apply-time failure after the replies landed (a busy plan patch, a refused write) therefore re-pays the whole wave. PRE-EXISTING. Needs a decision: a "re-apply saved replies" Retry mode, or Resume accepting done unfolded rows.
+
 ## Done
 
 - T291 + T323 item 4 — a file parked by a process death is put back after 24 h (ctime age, worker write-path sweep, bounded warnings, `.name` records for long leaves); RTK strip/append record before parking; complete/consumed upload rows deleted 90 days after `updated_at` (protected states kept) — PR #1063 (a49293f6e), 2026-11-10. T323 item 5 stays parked; follow-ups T592.
