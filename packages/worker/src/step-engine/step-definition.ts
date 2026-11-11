@@ -563,6 +563,7 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
   readonly metadata: StepMetadata;
   /** May edit deliverable code or tests, including through a fixer. Its successful/skip
    * hand-off compares validation snapshots when after 07b and before the commit gate.
+   * Prompt steps with the file_write capability opt in.
    * File-writing knowledge/skill steps deliberately do not opt in. */
   readonly editsCodeOrTests?: boolean;
   /** Keep validated answers sparse when apply distinguishes submitted fields from defaults.
