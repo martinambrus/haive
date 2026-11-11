@@ -4,6 +4,7 @@ import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
+  VERSION_REFRESH_KIND,
   CLI_PROVIDER_LIST,
   DISPLAY_CURRENCIES,
   PRICE_FEEDS,
@@ -248,7 +249,7 @@ cliPricingRoutes.post('/refresh', async (c) => {
 /** Durable result, independent of queue retention and the caller's poll window. */
 cliPricingRoutes.get('/refresh/latest', async (c) => {
   const run = await getDb().query.refreshRuns.findFirst({
-    where: eq(schema.refreshRuns.kind, 'versions'),
+    where: eq(schema.refreshRuns.kind, VERSION_REFRESH_KIND),
   });
   return c.json({ run: run ?? null });
 });

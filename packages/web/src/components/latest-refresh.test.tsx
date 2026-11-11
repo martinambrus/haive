@@ -118,3 +118,116 @@ it('also reports skipped prices in the just-completed job result', () => {
   expect(textOf(view.tree())).toContain('Skipped: prices');
   expect(textOf(view.tree())).not.toContain('All sources refreshed successfully');
 });
+
+it('clears the scheduled poll and aborts its request on unmount', async () => {
+  h.get.mockResolvedValue({ run: null });
+  let mounted = true;
+  const view = createRenderer(() =>
+    mounted ? <LatestRefresh endpoint="/latest" active={false} result={null} /> : null,
+  );
+  await settle(view);
+  const signal = h.get.mock.calls[0]![1] as AbortSignal;
+  expect(vi.getTimerCount()).toBe(1);
+  mounted = false;
+  view.draw();
+  expect(signal.aborted).toBe(true);
+  expect(vi.getTimerCount()).toBe(0);
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(h.get).toHaveBeenCalledOnce();
+});
+it('does not restart polling when an in-flight read resolves after unmount', async () => {
+  let release!: (value: { run: null }) => void;
+  h.get.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  );
+  let mounted = true;
+  const view = createRenderer(() =>
+    mounted ? <LatestRefresh endpoint="/latest" active={false} result={null} /> : null,
+  );
+  mounted = false;
+  view.draw();
+  expect((h.get.mock.calls[0]![1] as AbortSignal).aborted).toBe(true);
+  release({ run: null });
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(h.get).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(0);
+});
+it('keeps one 10-second poll chain across active changes and repeated renders', async () => {
+  h.get.mockResolvedValue({ run: null });
+  let active = false;
+  const view = createRenderer(() => (
+    <LatestRefresh endpoint="/latest" active={active} result={null} />
+  ));
+  await settle(view);
+  for (const next of [true, false, true, false]) {
+    active = next;
+    view.draw();
+    await settle(view);
+    view.draw();
+    expect(vi.getTimerCount()).toBe(1);
+  }
+  expect(h.get).toHaveBeenCalledTimes(5);
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(h.get).toHaveBeenCalledTimes(8);
+  expect(vi.getTimerCount()).toBe(1);
+});
+it('waits for a slow read to settle before scheduling another poll', async () => {
+  let release!: (value: { run: null }) => void;
+  h.get
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    )
+    .mockResolvedValue({ run: null });
+  createRenderer(() => <LatestRefresh endpoint="/latest" active={false} result={null} />);
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(h.get).toHaveBeenCalledOnce();
+  release({ run: null });
+  await vi.advanceTimersByTimeAsync(9_999);
+  expect(h.get).toHaveBeenCalledOnce();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(h.get).toHaveBeenCalledTimes(2);
+});
+it('shows a load error and clears it after a successful retry', async () => {
+  h.get.mockRejectedValueOnce(new Error('offline')).mockResolvedValue({ run: null });
+  const view = createRenderer(() => (
+    <LatestRefresh endpoint="/latest" active={false} result={null} />
+  ));
+  await settle(view);
+  expect(textOf(view.tree())).toContain('Unable to load');
+  await vi.advanceTimersByTimeAsync(10_000);
+  view.draw();
+  expect(textOf(view.tree())).not.toContain('Unable to load');
+  expect(h.get).toHaveBeenCalledTimes(2);
+  expect(vi.getTimerCount()).toBe(1);
+});
+it('ignores an aborted old endpoint response and keeps one poll for the new endpoint', async () => {
+  let release!: (value: { run: LatestRefreshRun }) => void;
+  h.get
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    )
+    .mockResolvedValue({ run: null });
+  let endpoint = '/old';
+  const view = createRenderer(() => (
+    <LatestRefresh endpoint={endpoint} active={false} result={null} />
+  ));
+  endpoint = '/new';
+  view.draw();
+  await settle(view);
+  release({ run: stored() });
+  await settle(view);
+  expect(textOf(view.tree())).not.toContain('has not finished');
+  expect((h.get.mock.calls[0]![1] as AbortSignal).aborted).toBe(true);
+  expect(vi.getTimerCount()).toBe(1);
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(h.get.mock.calls.map(([path]) => path)).toEqual(['/old', '/new', '/new']);
+});

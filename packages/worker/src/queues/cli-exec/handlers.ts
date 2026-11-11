@@ -11,6 +11,7 @@ import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
 import { safeErrorMessage, safeErrorForTransport } from '@haive/shared/logger';
 import {
   CLI_EXEC_JOB_NAMES,
+  VERSION_REFRESH_KIND,
   VERSION_REFRESH_JOB_ID,
   CLI_POLLABLE_JOB_OPTS,
   CLI_SIGN_OUT_AUTH_WAIT_MS,
@@ -1013,7 +1014,7 @@ export async function handleRefreshCliVersionsJob(
 ): Promise<RefreshCliVersionsJobResult> {
   const runId = randomUUID();
   const started = {
-    kind: 'versions',
+    kind: VERSION_REFRESH_KIND,
     runId,
     trigger,
     startedAt: new Date(),
@@ -1083,7 +1084,9 @@ export async function handleRefreshCliVersionsJob(
     await db
       .update(schema.refreshRuns)
       .set({ finishedAt: new Date(), result })
-      .where(and(eq(schema.refreshRuns.kind, 'versions'), eq(schema.refreshRuns.runId, runId)));
+      .where(
+        and(eq(schema.refreshRuns.kind, VERSION_REFRESH_KIND), eq(schema.refreshRuns.runId, runId)),
+      );
   } catch (err) {
     log.warn({ err, runId }, 'failed to record refresh completion');
   }
