@@ -9,6 +9,7 @@ import {
   submitPlanMergeTurn,
   type ApiError,
   type PlanMergeState,
+  type PlanMergeFailure,
   type Task,
   type TaskStep,
 } from '@/lib/api-client';
@@ -25,7 +26,7 @@ const ENDED_MERGE_STATUSES = new Set<Task['status']>(['completed', 'cancelled', 
 
 type MergeNotice = { taskId: string; text: string; retry?: boolean };
 
-function mergeOutcome(taskId: string, task: Task): MergeNotice | null {
+function mergeOutcome(taskId: string, task: Pick<Task, 'status'>): MergeNotice | null {
   if (!ENDED_MERGE_STATUSES.has(task.status)) return null;
   return {
     taskId,
@@ -56,6 +57,7 @@ function mergeOutcome(taskId: string, task: Task): MergeNotice | null {
 export function PlanMergePanel({
   repositoryId,
   merge,
+  failedMerge,
   onChanged,
   onSettled,
 }: {
@@ -65,6 +67,8 @@ export function PlanMergePanel({
    *  first version of this panel fetched only on MOUNT, so a merge that started
    *  afterwards never appeared at all. */
   merge: PlanMergeState | null;
+  /** Durable outcome polled by the page. Null clears a superseded local failure notice. */
+  failedMerge?: PlanMergeFailure | null;
   /** Re-read the merge (new turns in the transcript). */
   onChanged: () => void;
   /** Called when an end is polled or recovered, or a discard settles (including when
@@ -264,17 +268,27 @@ export function PlanMergePanel({
     }
   }
 
+  const shownNotice =
+    merge === null && failedMerge !== undefined
+      ? failedMerge
+        ? mergeOutcome(failedMerge.taskId, failedMerge)
+        : notice?.retry
+          ? null
+          : notice
+      : notice;
   const outcome =
-    notice && (merge === null || merge.taskId === notice.taskId) ? (
+    shownNotice && (merge === null || merge.taskId === shownNotice.taskId) ? (
       <div
         role="status"
         className="rounded-md border border-neutral-800 px-3 py-2 text-xs text-neutral-400"
       >
-        <InlineMarkdown body={notice.text} />
-        {notice.retry && (
+        <InlineMarkdown body={shownNotice.text} />
+        {shownNotice.retry && (
           <Link
-            href={`/tasks/${notice.taskId}`}
-            onClick={() => rememberTaskOrigin(`/tasks/${notice.taskId}`, planOrigin(repositoryId))}
+            href={`/tasks/${shownNotice.taskId}`}
+            onClick={() =>
+              rememberTaskOrigin(`/tasks/${shownNotice.taskId}`, planOrigin(repositoryId))
+            }
             className="text-indigo-300 underline"
           >
             Open the task to retry

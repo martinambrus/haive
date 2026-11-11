@@ -1,7 +1,7 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
-import { applyPlanPatch } from '@haive/shared/plan';
+import { applyPlanPatchWithRetry as applyPlanPatch } from './patch-retry.js';
 import { flushPlanMirrorForRepository } from './mirror.js';
 
 /**

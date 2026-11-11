@@ -275,6 +275,71 @@ describe.skipIf(!url)('DELETE /plan/merge beside a completion and a peer, on Pos
     return { status: res.status, body: (await res.json()) as Record<string, unknown> };
   };
 
+  describe('failed merge visibility after reload', () => {
+    const stamp = (day: number) => new Date(Date.UTC(2026, 9, day));
+    const readMerge = async () => {
+      const response = await app.request(`/repositories/${repositoryId}/plan/merge`);
+      expect(response.status).toBe(200);
+      return response.json() as Promise<{
+        merge: { taskId: string } | null;
+        failedMerge: { taskId: string; status: string } | null;
+      }>;
+    };
+
+    it('returns the newest failure by completion time, with no live merge required', async () => {
+      await seedTask('failed', [], { createdAt: stamp(2), completedAt: stamp(3) });
+      const newest = await seedTask('failed', [], { createdAt: stamp(1), completedAt: stamp(4) });
+      expect(await readMerge()).toMatchObject({
+        merge: null,
+        failedMerge: { taskId: newest.taskId, status: 'failed' },
+      });
+    });
+
+    it('hides a failure followed by a successful merge, even if that merge was created earlier', async () => {
+      await seedTask('failed', [], { createdAt: stamp(2), completedAt: stamp(3) });
+      await seedTask('completed', [], { createdAt: stamp(1), completedAt: stamp(4) });
+      expect(await readMerge()).toMatchObject({ merge: null, failedMerge: null });
+    });
+
+    it('keeps a failure after an earlier success or a later cancellation', async () => {
+      await seedTask('completed', [], { createdAt: stamp(1), completedAt: stamp(2) });
+      const failure = await seedTask('failed', [], { createdAt: stamp(3), completedAt: stamp(4) });
+      await seedTask('cancelled', [], { createdAt: stamp(5), completedAt: stamp(6) });
+      expect((await readMerge()).failedMerge?.taskId).toBe(failure.taskId);
+    });
+
+    it('ignores successful tasks of another repository or another type', async () => {
+      const failure = await seedTask('failed', [], { createdAt: stamp(1), completedAt: stamp(2) });
+      const other = await seedRepository('other repository');
+      await seedTask('completed', [], {
+        repositoryId: other,
+        createdAt: stamp(3),
+        completedAt: stamp(4),
+      });
+      await seedTask('completed', [], {
+        type: 'workflow',
+        createdAt: stamp(3),
+        completedAt: stamp(4),
+      });
+      expect((await readMerge()).failedMerge?.taskId).toBe(failure.taskId);
+    });
+
+    it('falls back to creation time for a historical failure with no completion stamp', async () => {
+      const failure = await seedTask('failed', [], { createdAt: stamp(2), completedAt: null });
+      await seedTask('completed', [], { createdAt: stamp(1), completedAt: stamp(1) });
+      expect((await readMerge()).failedMerge?.taskId).toBe(failure.taskId);
+    });
+
+    it('keeps returning the live conversation alongside the unresolved failure', async () => {
+      const failure = await seedTask('failed', [], { createdAt: stamp(1), completedAt: stamp(2) });
+      const live = await seedTask('running', [], { createdAt: stamp(3) });
+      expect(await readMerge()).toMatchObject({
+        merge: { taskId: live.taskId },
+        failedMerge: { taskId: failure.taskId },
+      });
+    });
+  });
+
   const taskOf = async (id: string) =>
     (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, id) }))!;
   const rowOf = async (id: string) =>
