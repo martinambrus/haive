@@ -1,13 +1,19 @@
 import { mkdtemp, readFile, rm, writeFile, unlink } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { eq } from 'drizzle-orm';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
   CLI_RULES_END,
   CLI_RULES_START,
   CLI_RULES_TEMPLATE_KIND,
+  CLI_RULES_SCHEMA_VERSION,
+  buildRepoCliRulesBlock,
+  extractRegion,
+  logger,
   normalizeContent,
   sha256Hex,
 } from '@haive/shared';
@@ -18,7 +24,11 @@ import type {
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+import { resyncAfterTaskEnd } from '../src/project-state/set-aside.js';
 import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
+import { reconcileTaskEndRules } from '../src/project-state/task-end-rules.js';
+import { classifyEntry } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
+import type { LiveArtifactRow } from '../src/step-engine/_upgrade-render.js';
 import { RECORD_WRITE_TABLES, recordWritten } from './support/upgrade-apply-record.js';
 
 // 02 writes the region from the plan's `newContent` and never renders it again, so a form that parked
@@ -61,6 +71,7 @@ const entry: UpgradePlanEntry = {
 async function setup(stamp: string | null | undefined, live: string | null) {
   const root = await mkdtemp(join(tmpdir(), 'upgrade-apply-rules-stamp-'));
   dirs.push(root);
+  execFileSync('git', ['init', '-q'], { cwd: root });
   const fake = createFakeDb({
     auditEvents: schema.auditEvents,
     taskSteps: schema.taskSteps,
@@ -69,6 +80,8 @@ async function setup(stamp: string | null | undefined, live: string | null) {
     customBundles: schema.customBundles,
     customBundleItems: schema.customBundleItems,
     cliProviders: schema.cliProviders,
+    planNodes: schema.planNodes,
+    planMirrorState: schema.planMirrorState,
     ...RECORD_WRITE_TABLES,
   });
   fake.insert(schema.repositories, {
@@ -76,6 +89,7 @@ async function setup(stamp: string | null | undefined, live: string | null) {
     userId: USER,
     name: 'acme',
     source: 'blank',
+    storagePath: root,
     agentRulesOverride: live,
   });
   fake.insert(schema.tasks, {
@@ -149,12 +163,128 @@ describe('02 and the rules override its plan was made from', () => {
       expect(await s.agentsMd()).toContain('PLANNED RULES');
 
       s.fake.patch(schema.tasks, TASK, { status: 'completed' });
-      await syncProjectStateFromCheckout(s.fake.db as unknown as Database, {
+      await resyncAfterTaskEnd(s.fake.db as unknown as Database, TASK);
+
+      expect(s.fake.rows(schema.repositories)[0]!.agentRulesOverride).toBe(incoming);
+      const render = buildRepoCliRulesBlock(incoming);
+      const region = extractRegion(await s.agentsMd(), CLI_RULES_START, CLI_RULES_END);
+      const live = s.fake
+        .rows(schema.onboardingArtifacts)
+        .filter((row) => row.diskPath === 'AGENTS.md' && row.supersededAt == null);
+      if (render === null) {
+        expect(live).toEqual([]);
+      } else {
+        const hash = sha256Hex(normalizeContent(render));
+        // upgrade-status compares these same schema/hash fields against the shared renderer.
+        expect(live).toHaveLength(1);
+        expect(
+          classifyEntry({
+            live: live[0] as unknown as LiveArtifactRow,
+            current: {
+              templateId: 'cli-rules',
+              templateKind: CLI_RULES_TEMPLATE_KIND,
+              templateSchemaVersion: CLI_RULES_SCHEMA_VERSION,
+              templateContentHash: hash,
+              diskPath: 'AGENTS.md',
+              content: render,
+              writtenHash: hash,
+            },
+            diskHash: region === null ? null : sha256Hex(normalizeContent(region)),
+          }),
+        ).toBe('unchanged');
+        expect(live[0]).toMatchObject({
+          templateSchemaVersion: CLI_RULES_SCHEMA_VERSION,
+          templateContentHash: hash,
+          writtenHash: hash,
+          writtenContent: region,
+        });
+      }
+      expect(region).toBe(
+        render === null ? null : extractRegion(render, CLI_RULES_START, CLI_RULES_END),
+      );
+    },
+  );
+
+  it('leaves AGENTS.md and its ledger byte-identical at task end without a deferred import', async () => {
+    const s = await setup('PLANNED RULES\n', 'PLANNED RULES\n');
+    await recordWritten(s.apply());
+    const before = await s.agentsMd();
+    const rows = structuredClone(s.fake.rows(schema.onboardingArtifacts));
+    s.fake.patch(schema.tasks, TASK, { status: 'completed' });
+
+    await resyncAfterTaskEnd(s.fake.db as unknown as Database, TASK);
+
+    expect(await s.agentsMd()).toBe(before);
+    expect(s.fake.rows(schema.onboardingArtifacts)).toEqual(rows);
+  });
+
+  it('preserves text outside the rules region after a deferred import', async () => {
+    const s = await setup('PLANNED RULES\n', 'PLANNED RULES\n');
+    await recordWritten(s.apply());
+    await writeFile(join(s.root, 'AGENTS.md'), `# Project\n\n${await s.agentsMd()}\nUser notes\n`);
+    await writeFile(join(s.root, '.haive-data/state/settings/agent-rules.md'), 'TEAM RULES\n');
+    s.fake.patch(schema.tasks, TASK, { status: 'completed' });
+
+    await resyncAfterTaskEnd(s.fake.db as unknown as Database, TASK);
+
+    expect(await s.agentsMd()).toContain('# Project\n\n');
+    expect(await s.agentsMd()).toContain('TEAM RULES');
+    expect(await s.agentsMd()).toContain('User notes\n');
+  });
+
+  it.each(['holder', 'reset', 'journal', 'git', 'override', 'reset epoch', 'edited region'])(
+    'leaves the region and ledger for the next upgrade when %s refuses the post-import write',
+    async (guard) => {
+      const s = await setup('PLANNED RULES\n', 'PLANNED RULES\n');
+      await recordWritten(s.apply());
+      await writeFile(join(s.root, '.haive-data/state/settings/agent-rules.md'), 'TEAM RULES\n');
+      s.fake.patch(schema.tasks, TASK, { status: 'completed' });
+      const result = await syncProjectStateFromCheckout(s.fake.db as unknown as Database, {
         repositoryId: REPO,
         repoPath: s.root,
       });
-
-      expect(s.fake.rows(schema.repositories)[0]!.agentRulesOverride).toBe(incoming);
+      expect(result.rulesOverrideImport).toBeDefined();
+      if (guard === 'holder') s.fake.patch(schema.tasks, TASK, { status: 'running' });
+      if (guard === 'reset')
+        s.fake.patch(schema.repositories, REPO, {
+          rootClaimKind: 'reset',
+          rootClaimedAt: new Date(),
+        });
+      if (guard === 'journal')
+        await s.fake.db
+          .update(schema.projectStateOutbox)
+          .set({ writeIntent: { pending: true } })
+          .where(eq(schema.projectStateOutbox.repositoryId, REPO));
+      if (guard === 'git') await writeFile(join(s.root, '.git/MERGE_HEAD'), 'a'.repeat(40) + '\n');
+      if (guard === 'override')
+        s.fake.patch(schema.repositories, REPO, { agentRulesOverride: 'NEWER RULES\n' });
+      if (guard === 'reset epoch')
+        s.fake.patch(schema.repositories, REPO, { onboardingResetAt: new Date() });
+      if (guard === 'edited region')
+        await writeFile(
+          join(s.root, 'AGENTS.md'),
+          REGION.replace('PLANNED RULES', 'PERSONAL EDIT'),
+        );
+      const before = await s.agentsMd();
+      const rows = structuredClone(s.fake.rows(schema.onboardingArtifacts));
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      try {
+        await reconcileTaskEndRules(
+          s.fake.db as unknown as Database,
+          REPO,
+          s.root,
+          TASK,
+          result.rulesOverrideImport!,
+        );
+        expect(warn).toHaveBeenCalledWith(
+          expect.objectContaining({ repositoryId: REPO, taskId: TASK, err: expect.any(Error) }),
+          'task-end rules region not reconciled; the next upgrade will offer it',
+        );
+        expect(await s.agentsMd()).toBe(before);
+        expect(s.fake.rows(schema.onboardingArtifacts)).toEqual(rows);
+      } finally {
+        warn.mockRestore();
+      }
     },
   );
 

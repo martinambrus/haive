@@ -17,7 +17,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { claimRepositoryRoot, createDatabase, schema, type Database } from '@haive/database';
 import {
@@ -29,7 +29,14 @@ import {
   projectStateHash,
   renderProjectState,
 } from '@haive/shared/project-state';
-import { sha256Hex } from '@haive/shared';
+import {
+  buildRepoCliRulesBlock,
+  CLI_RULES_END,
+  CLI_RULES_START,
+  extractRegion,
+  normalizeContent,
+  sha256Hex,
+} from '@haive/shared';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
@@ -235,6 +242,7 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
       .select()
       .from(schema.repositories)
       .where(eq(schema.repositories.id, s.repo.id));
+    await writeFile(join(s.root, 'AGENTS.md'), buildRepoCliRulesBlock(local)!);
     const path = join(s.root, '.haive-data/state/settings/agent-rules.md');
     await writeFile(path, incoming);
     const [task] = await db!
@@ -351,6 +359,29 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
     await resyncAfterTaskEnd(db!, task!.id);
 
     expect(await rules()).toBe(incoming);
+    const region = extractRegion(
+      await readFile(join(s.root, 'AGENTS.md'), 'utf8'),
+      CLI_RULES_START,
+      CLI_RULES_END,
+    );
+    const rulesHash = sha256Hex(normalizeContent(buildRepoCliRulesBlock(incoming)!));
+    expect(sha256Hex(normalizeContent(region!))).toBe(rulesHash);
+    const [rulesRow] = await db!
+      .select()
+      .from(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, s.repo.id),
+          eq(schema.onboardingArtifacts.diskPath, 'AGENTS.md'),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      );
+    expect(rulesRow).toMatchObject({
+      templateContentHash: rulesHash,
+      writtenHash: rulesHash,
+      writtenContent: region,
+      source: 'backfill',
+    });
     expect(await s.render()).toMatchObject({ projectInfo: { name: 'upgraded' } });
     const claim = JSON.parse(
       await readFile(join(s.root, '.haive-data/state', claimFileName(diskPath)), 'utf8'),

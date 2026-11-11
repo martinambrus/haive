@@ -87,6 +87,7 @@ import type { NamedCheckout } from '../repo/checkout-head.js';
 import { admitWatchedCheckout } from './watch-admission.js';
 import { gitOperationInProgress } from '../repo/git-operation.js';
 import { updateApplicableTemplateIds } from '../step-engine/template-manifest.js';
+import { readAgentRulesOverrideRaw } from '../step-engine/_agent-rules-override.js';
 import { claimDiskHash } from './claim-disk.js';
 import { insertImportMarker, loadMarkerContext } from './import-marker.js';
 import { toolingColumnFromUnit } from './tooling-import.js';
@@ -103,7 +104,13 @@ type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 export type ProjectStateSyncOutcome =
   'absent' | 'refused' | 'deferred' | 'superseded' | 'held' | 'unchanged' | 'applied' | 'conflict';
 
-export type ProjectStateSyncResult =
+export interface RulesOverrideImport {
+  before: string | null;
+  after: string | null;
+  resetAt: Date | null;
+}
+
+export type ProjectStateSyncResult = (
   | {
       outcome: 'deferred';
       code: 'upgrade_rules';
@@ -114,7 +121,8 @@ export type ProjectStateSyncResult =
       outcome: ProjectStateSyncOutcome;
       /** Why the record was refused, or what conflicted, worded as `last_error` holds it. */
       reason?: string;
-    };
+    }
+) & { rulesOverrideImport?: RulesOverrideImport };
 
 const MIB = 1024 * 1024;
 // A first sync can replace a claim per file: the list is cut, settings first; `count` is the total.
@@ -1155,15 +1163,27 @@ export async function syncProjectStateLocked(
     );
   }
 
-  if (lastError !== null) return { outcome: 'conflict', reason: lastError };
+  // Only a committed import reports this move; task-end reconciliation must not mistake a
+  // concurrent Tooling save (or a held/refused import) for a deferred override it imported.
+  const rulesImport = Object.hasOwn(updates, 'agentRulesOverride')
+    ? {
+        rulesOverrideImport: {
+          before: repo.agentRulesOverride ?? null,
+          after: await readAgentRulesOverrideRaw(tx, repositoryId),
+          resetAt: repo.onboardingResetAt ?? null,
+        },
+      }
+    : {};
+  if (lastError !== null) return { outcome: 'conflict', reason: lastError, ...rulesImport };
   if (portable.conflicts.length > 0) {
     const names = portable.conflicts.map(({ unit }) => unit).join(', ');
     return {
       outcome: 'conflict',
       reason: `settings conflict with the checkout's record: ${names}`,
+      ...rulesImport,
     };
   }
-  return { outcome: wrote || imported || settingsMoved ? 'applied' : 'unchanged' };
+  return { outcome: wrote || imported || settingsMoved ? 'applied' : 'unchanged', ...rulesImport };
 }
 
 /** Points the sync base at the record the checkout holds now, so a sync after the checkout moves merges
