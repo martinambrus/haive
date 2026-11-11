@@ -6,6 +6,17 @@ import { api } from '@/lib/api-client';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { RefreshFailures } from './refresh-failures';
 
+function refreshSummary(result: RefreshCliVersionsJobResult | null): string {
+  if (result?.skipped?.length) {
+    return `${result.ok ? ' Other sources refreshed successfully.' : ''} Skipped: ${result.skipped.join(', ')}.`;
+  }
+  return result?.ok ? ' All sources refreshed successfully.' : '';
+}
+
+function triggerLabel(trigger: string): string {
+  return trigger === 'manual' || trigger === 'scheduled' || trigger === 'boot' ? ` ${trigger}` : '';
+}
+
 /** Read even with no manual poll: boot and scheduled runs have no browser job id. */
 export function LatestRefresh({
   endpoint,
@@ -60,13 +71,15 @@ export function LatestRefresh({
       {loadError && (
         <InlineMarkdown body="Unable to load the latest refresh result. Retrying shortly." />
       )}
-      {preferResult && !displayedRun && <InlineMarkdown body="The requested refresh finished." />}
+      {preferResult && !displayedRun && (
+        <InlineMarkdown body={`The requested refresh finished.${refreshSummary(result)}`} />
+      )}
       {displayedRun && (
         <InlineMarkdown
           body={
             displayedRun.finishedAt === null
-              ? `The latest ${displayedRun.trigger} refresh started at ${displayedRun.startedAt} and has not finished. It may still be running or have been interrupted.`
-              : `The latest ${displayedRun.trigger} refresh finished at ${displayedRun.finishedAt}.${displayedRun.result?.ok ? ' All sources refreshed successfully.' : ''}`
+              ? `The latest${triggerLabel(displayedRun.trigger)} refresh started at ${new Date(displayedRun.startedAt).toLocaleString()} and has not finished. It may still be running or have been interrupted.`
+              : `The latest${triggerLabel(displayedRun.trigger)} refresh finished at ${new Date(displayedRun.finishedAt).toLocaleString()}.${refreshSummary(displayedRun.result)}`
           }
         />
       )}

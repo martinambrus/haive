@@ -73,3 +73,48 @@ it('lets a structurally newer stored run supersede the previous manual result', 
   expect(textOf(view.tree())).toContain('has not finished');
   expect(textOf(view.tree())).not.toContain('current failure');
 });
+
+it.each(['unknown', 'legacy-trigger'])(
+  'describes a %s trigger plainly with readable dates',
+  async (trigger) => {
+    h.get.mockResolvedValue({
+      run: stored({
+        trigger: trigger as LatestRefreshRun['trigger'],
+        finishedAt: '2026-11-11T12:01:00Z',
+        result: { ok: true, refreshed: [], errors: [] },
+      }),
+    });
+    const view = createRenderer(() => (
+      <LatestRefresh endpoint="/latest" active={false} result={null} />
+    ));
+    await settle(view);
+    const text = textOf(view.tree());
+    expect(text).toContain('The latest refresh finished at');
+    expect(text).not.toContain(trigger);
+    expect(text).not.toContain('2026-11-11T12:01:00Z');
+    expect(text).toContain(new Date('2026-11-11T12:01:00Z').toLocaleString());
+  },
+);
+it.each([true, false])('reports structurally skipped prices when ok=%s', async (ok) => {
+  h.get.mockResolvedValue({
+    run: stored({
+      finishedAt: '2026-11-11T12:01:00Z',
+      result: { ok, refreshed: [], errors: [], skipped: ['prices'] },
+    }),
+  });
+  const view = createRenderer(() => (
+    <LatestRefresh endpoint="/latest" active={false} result={null} />
+  ));
+  await settle(view);
+  expect(textOf(view.tree())).toContain('Skipped: prices');
+  expect(textOf(view.tree())).not.toContain('All sources refreshed successfully');
+});
+it('also reports skipped prices in the just-completed job result', () => {
+  h.get.mockResolvedValue({ run: null });
+  const completed = { ok: true, refreshed: [], errors: [], skipped: ['prices'] };
+  const view = createRenderer(() => (
+    <LatestRefresh endpoint="/latest" active={false} result={completed} />
+  ));
+  expect(textOf(view.tree())).toContain('Skipped: prices');
+  expect(textOf(view.tree())).not.toContain('All sources refreshed successfully');
+});

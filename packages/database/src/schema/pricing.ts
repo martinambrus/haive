@@ -25,6 +25,9 @@ export const refreshRuns = pgTable('refresh_runs', {
   finishedAt: timestamp('finished_at'),
   result: jsonb('result').$type<{
     ok: boolean;
+    runId?: string;
+    startedAt?: string;
+    skipped?: string[];
     refreshed: { name: string; count: number; latest: string | null }[];
     errors: { name: string; error: string }[];
   }>(),

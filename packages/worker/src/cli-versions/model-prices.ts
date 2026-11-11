@@ -82,7 +82,7 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
   }
   if (!enabledGlobally) {
     log.info('price sync disabled by PRICING_AUTO_UPDATE_ENABLED; leaving rates untouched');
-    return { ok: true, refreshed: [], errors: [] };
+    return { ok: true, refreshed: [], errors: [], skipped: ['prices'] };
   }
 
   const syncRows = await db.select().from(schema.cliPricingSync);

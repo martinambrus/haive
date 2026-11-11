@@ -129,3 +129,13 @@ it.each(['start', 'finish'] as const)(
       });
   },
 );
+
+it('persists and returns the structural skipped-source list', async () => {
+  const fake = fixture();
+  h.prices.mockResolvedValue({ ok: true, refreshed: [], errors: [], skipped: ['prices'] });
+  const result = await handleRefreshCliVersionsJob(fake.db as unknown as Database, 'scheduled');
+  expect(result).toMatchObject({ ok: true, skipped: ['prices'] });
+  expect(await fake.db.query.refreshRuns.findFirst()).toMatchObject({
+    result: { skipped: ['prices'] },
+  });
+});

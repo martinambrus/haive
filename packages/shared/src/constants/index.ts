@@ -514,6 +514,8 @@ export interface RefreshCliVersionsJobResult {
   /** Absent on results from jobs completed before run tracking shipped. */
   runId?: string;
   startedAt?: string;
+  /** Sources intentionally skipped by configuration, rather than failed. */
+  skipped?: string[];
   ok: boolean;
   refreshed: { name: string; count: number; latest: string | null }[];
   errors: { name: string; error: string }[];
