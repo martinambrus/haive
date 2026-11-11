@@ -227,15 +227,17 @@ describe('recordLeftOpenMerges for a merge that is already gone', () => {
     expect(projections.settleProjections).not.toHaveBeenCalled();
   });
 
-  it('fails the cancel for retry when re-sync returned false, without clearing the metadata', async () => {
+  it('lets repeated cancel and abandon teardown finish while re-sync stays unfinished', async () => {
     projections.settleProjections.mockResolvedValue(false);
-    await expect(run(step())).rejects.toThrow(/re-sync/);
+    await expect(run(step())).resolves.toBeDefined();
+    await expect(run(step())).resolves.toBeDefined();
+    expect(logger.warn).toHaveBeenCalled();
     expect(projections.settleProjections.mock.calls[0]![2].keptMetadata).toEqual(kept);
   });
 
-  it('fails the cancel for retry when the put-back fails', async () => {
+  it('logs a put-back failure and lets teardown continue', async () => {
     projections.settleProjections.mockRejectedValue(new Error('disk full'));
-    await expect(run(step())).rejects.toThrow('disk full');
+    await expect(run(step())).resolves.toBeDefined();
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ taskId: 'task-1', dir: '/repo' }),
       expect.any(String),
