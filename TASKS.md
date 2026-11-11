@@ -178,6 +178,24 @@ A task start waits at most 5 s for the repository task lock and row admission, t
 status: open · kind: design · found: F1 (#318) and D2 (#484) reviews 2026-11-11 · priority: P3
 Task creation holds the creation key across git and file work (worktree and branch checks, attachment staging), so a slow git or disk holds every other creation and start for that repository behind it. PRE-EXISTING, consequential. Decide whether the key covers only the row admission, with the file work fenced by the task's own epoch instead.
 
+### T606 · FNF[refresh-run-followups] · latest refresh-run record follow-ups (+12)
+
+status: open · kind: fix · found: F3 (#440) reviews 2026-11-11 · priority: P4
+Low unless marked. Code in `worker/src/queues/cli-exec/handlers.ts` (refresh_runs writes), `web/src/components/latest-refresh.tsx` and its pages, `@haive/database/testing` fake db.
+
+1. The start upsert's `setWhere` (an older overlapping start never overwrites a newer run) has no failing test: the fake db ignores `setWhere` and `<=`. Verified by hand on postgres:18 only.
+2. The fake db drops conflict options it does not support instead of failing, so a test can pass against a write the real database would treat differently.
+3. Run ordering compares `started_at` from the worker's clock; a clock step can reorder runs.
+4. A finished result with no `startedAt` beats the stored run.
+5. `skipped` sources are recorded only for prices; the copy shows raw source tokens.
+6. The inline `LatestRefresh` variants have no test.
+7. The trigger label (manual / scheduled / boot) is hard-coded in the component.
+8. The 10 s admin poll keeps running in a hidden tab.
+9. The result shape is declared twice (shared constants and the api response).
+10. A manual refresh that joins an in-flight job keeps that job's trigger.
+11. A failed `/auth/me` read never retries, so the stored-run panel stays hidden until reload.
+12. Probe and sign-out results are still not durable.
+
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
 **Found something outside your task?** Search the board first (`grep -n "<file>\|<symbol>\|<slug>"`).
@@ -975,13 +993,6 @@ From the T433 review (2026-10-30). Residual of T433's fallback: api routes/cli-l
 
 Cross-reference (T438, 2026-10-30): the device code now waits within the same deadline, so a code cut at the deadline goes out as it stands (cli-login-banner.ts ~:716) and is never corrected either; success text in output that arrives while the frame is held is evaluated only at the next chunk (`canDetectAuth` needs `authUrlSent`, ~:838-840; a human cannot approve before the link shows); and the login modal shows nothing about the code when the frame carries none (web cli-auth-banner-modal.tsx ~:634, now rarer). A re-send mechanism would cover the first and the last.
 
-### T440 · FNF[refresh-result-unrecorded] · a refresh's failed sources are never recorded, so a scheduled refresh's or a timed-out manual refresh's failures show nowhere
-
-status: in progress (bundle F3, run 2026-11-11, branch fix/F3-refresh-result) · kind: feature · user decision: resolved 2026-11-01 · priority: P2
-From the T428 review (2026-10-30). PRE-EXISTING, moderate. T428 shows the `ok: false` sources only on the page that started a refresh and only while its poll is open. A scheduled tick or boot refresh, and a manual refresh whose 10-minute poll window ends, surface nowhere; the poll-timeout copy even promises "reopen this page later to see the result" (web lib/cli-jobs.ts ~:33-38), which no page can show. FX has no durable trace at all: `fx_rates` has no error column (database schema/pricing.ts ~:126-135), a failure is only `log.warn` plus `ok: false` (worker cli-versions/model-prices.ts ~:329-332), and dispatch just returns the result (worker queues/cli-exec/handlers.ts ~:1529-1531). Decide between a last-result row per source, an FX fetch-state table, or one last refresh-run record the pages read; fix the timeout copy with it.
-
-User decision 2026-11-01: Persist the latest refresh result and per-source failures so the UI can reopen them later.
-
 ### T442 · FNF[runner-launch-spec] [design] · a running app runner is reused whatever image, caps, ports or debug env it was created with
 
 status: parked · reason: diminishing returns (2026-11-01 scan): Runner launch-spec mismatch is explicitly minor with unmeasured consequences; resume when resume when changed launch settings cause a demonstrated runtime problem · priority: P4
@@ -1616,6 +1627,7 @@ Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/rou
 
 ## Done
 
+- T440 — the latest version and price refresh run is durable (`refresh_runs`, migration 0228, one row per kind: run id, trigger, start/finish, sanitized per-source errors and kill-switch skips; an older overlapping completion never overwrites a newer run; both writes best-effort); admin-only `GET /cli-pricing/refresh/latest` and `GET /cli-providers/catalog/:name/refresh-result`; `LatestRefresh` on `/admin/pricing` and the provider form (admins poll every 10 s; a page prefers its own job's result; the manual result still shows when the role read failed); docs model-pricing.md, error-diagnostics.md — PR #1076 (5f74b1a71), 2026-11-11. Follow-ups T606 (+12).
 - T318 — task start admission (POST /tasks, Start next, spawn-plan, enrich, kb-author, upgrades, plan advisory, root-merge check) waits at most 5 s per repository/plan key or row lock and 1 s for the new-work fence, then answers 409 busy with nothing created (other `boundedLockWait` callers keep 30 s); worker revivals delay 30 s on lock expiry or an unreadable maintenance read, which now counts as held; `claimTaskStart` claims only `queued`; `mergeInScratch` runs on its caller's transaction; Plan Save/Pull report moved-aside merge leftovers in their own committed transaction before the merge; docs worker-restarts.md, merge-conflicts.md, plan-canvas.md — PR #1075 (e7f56b678), 2026-11-11. Follow-ups T603 (+5), T604 (design), T605 (design).
 - T460 + T512 — Retry, Resume and dead-task revival refuse a task whose repository was deleted (409 `task_repository_deleted`), and revival applies the Retry/Resume holds whatever the stored status; `repositories.error_code` (migration 0225) classifies a repair-needed checkout, "Check repair" is check only and never rebuilds, and "Rebuild checkout" moves the old checkout aside and restores this install's settings, KB and plan data; recovery keeps the repair code until detection succeeds, stranded preparations keep it, and rebuilds are refused while an unfinished task (legacy setup-output pointer included) has a worktree under the checkout — PR #1065 (2c16ca95e), 2026-11-11; dev 0225 applied, 0 of 79 repositories flagged. Follow-ups T602. Owner check: when this install has no plan rows, recovery keeps the incoming plan files.
 - T598 — Claude Code's `.claude/settings.local.json` ("don't ask again" saves the approved command verbatim, secrets included) is kept out of every Haive `git add -A` by a `**/.claude/settings.local.json` entry `ensureGitExcludeEntry` writes to `.git/info/exclude` next to `.haive/`; tracked copies still commit; not via the secret-mask globs, which `carry-untracked.ts` copies into worktrees — PR #1072 (b9482ff32), 2026-11-11.
