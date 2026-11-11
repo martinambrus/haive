@@ -11,6 +11,8 @@ import {
 import {
   clearReplacementRecord,
   readReplacement,
+  ReplacementRecordUnreadable,
+  UNREADABLE_REPLACEMENT_ERROR,
   recordReplacementSwap,
   restoreReplacementBundle,
   restoreReplacementTree,
@@ -153,6 +155,22 @@ export async function handleIngestZip(
       replacement = (await readReplacement(bundleStorageRoot, archiveRel)) ?? replacement;
     } catch (err) {
       logger.warn({ err, bundleId: bundle.id }, 'bundle replacement record could not be read');
+      if (err instanceof ReplacementRecordUnreadable) {
+        await db
+          .update(schema.customBundles)
+          .set({
+            status: 'failed',
+            lastSyncError: UNREADABLE_REPLACEMENT_ERROR,
+            lastReplacementNote: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.customBundles.id, bundle.id),
+              eq(schema.customBundles.archivePath, bundle.archivePath!),
+            ),
+          );
+      }
       throw err;
     }
   }

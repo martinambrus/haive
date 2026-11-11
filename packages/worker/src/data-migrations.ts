@@ -2,6 +2,7 @@ import { bundleArchiveRel } from './repo/bundle-ingest.js';
 import {
   clearReplacementRecord,
   readReplacement,
+  ReplacementRecordUnreadable,
   restoreReplacementBundle,
 } from './repo/bundle-recovery.js';
 import { seedRepositoryCliTargets } from './project-state/cli-targets-backfill.js';
@@ -546,7 +547,14 @@ export async function reconcileStrandedSyncingBundles(db: Database): Promise<voi
           bundle.sourceType === 'zip' && bundle.archivePath
             ? bundleArchiveRel(root, bundle.archivePath, bundle.userId, bundle.id)
             : null;
-        const replacement = archiveRel ? await readReplacement(root, archiveRel) : null;
+        const replacement = archiveRel
+          ? await readReplacement(root, archiveRel).catch((err: unknown) => {
+              // A record that does not parse never will: fail the bundle below, as for no record.
+              if (!(err instanceof ReplacementRecordUnreadable)) throw err;
+              log.warn({ err, bundleId: id }, 'stranded bundle replacement record unreadable');
+              return null;
+            })
+          : null;
         if (
           archiveRel &&
           replacement &&

@@ -239,7 +239,34 @@ describe('handleIngestZip', () => {
     },
   );
 
-  it.each(['corrupt record', 'restore I/O'])(
+  it('fails a bundle whose replacement record does not parse, keeping the old tree and items', async () => {
+    const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');
+    const fake = createFakeDb({
+      customBundles: schema.customBundles,
+      customBundleItems: schema.customBundleItems,
+    });
+    const fixture = await seedCrashedReplacement(tmpRoot, fake, 'before extract');
+    const items = structuredClone(fake.rows(schema.customBundleItems));
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    await writeFile(`${fixture.archivePath}.replacement.json`, '{invalid json');
+
+    const error = await handleIngestZip(
+      fixture.payload,
+      fake.db as unknown as Database,
+      tmpRoot,
+    ).catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(recovery.ReplacementRecordUnreadable);
+    expect(fake.rows(schema.customBundles)[0]).toMatchObject({
+      status: 'failed',
+      lastSyncError: recovery.UNREADABLE_REPLACEMENT_ERROR,
+      lastReplacementNote: null,
+    });
+    expect(fake.rows(schema.customBundleItems)).toEqual(items);
+    expect(await readFile(path.join(fixture.dest, 'old.md'), 'utf8')).toBe('old tree');
+  });
+
+  it.each(['restore I/O'])(
     'leaves the bundle unchanged and logs a recovery fault: %s',
     async (fault) => {
       const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');
@@ -252,11 +279,7 @@ describe('handleIngestZip', () => {
       const items = structuredClone(fake.rows(schema.customBundleItems));
       const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
       const restoreError = Object.assign(new Error('restore denied'), { code: 'EACCES' });
-      if (fault === 'corrupt record') {
-        await writeFile(`${fixture.archivePath}.replacement.json`, '{invalid json');
-      } else {
-        vi.spyOn(recovery, 'restoreReplacementBundle').mockRejectedValueOnce(restoreError);
-      }
+      vi.spyOn(recovery, 'restoreReplacementBundle').mockRejectedValueOnce(restoreError);
       const record = await readFile(`${fixture.archivePath}.replacement.json`, 'utf8');
 
       const error = await handleIngestZip(

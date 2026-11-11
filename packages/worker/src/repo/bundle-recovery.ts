@@ -13,6 +13,18 @@ import {
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 
+/** A replacement record that was read but does not parse: no later read will do better, so the
+ *  bundle is failed rather than left for a retry. An I/O error stays a plain error, left to retry. */
+export class ReplacementRecordUnreadable extends Error {
+  constructor(cause: unknown) {
+    super('the bundle replacement record could not be parsed', { cause });
+    this.name = 'ReplacementRecordUnreadable';
+  }
+}
+
+export const UNREADABLE_REPLACEMENT_ERROR =
+  'The saved replacement choice for this bundle could not be read, so the import stopped. Use Replace ZIP to try again, or remove the bundle.';
+
 export async function readReplacement(
   root: string,
   archiveRel: string,
@@ -21,7 +33,12 @@ export async function readReplacement(
     maxBytes: 8192,
     strict: true,
   });
-  return saved ? bundleReplacementSchema.parse(JSON.parse(saved.data.toString('utf8'))) : null;
+  if (!saved) return null;
+  try {
+    return bundleReplacementSchema.parse(JSON.parse(saved.data.toString('utf8')));
+  } catch (err) {
+    throw new ReplacementRecordUnreadable(err);
+  }
 }
 
 export async function recordReplacementSwap(

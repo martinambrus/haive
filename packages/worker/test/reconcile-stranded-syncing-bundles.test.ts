@@ -91,7 +91,7 @@ describe('reconcileStrandedSyncingBundles', () => {
     },
   );
 
-  it('leaves a corrupt stranded bundle unchanged and recovers the next bundle', async () => {
+  it('fails a stranded bundle whose record does not parse and recovers the next bundle', async () => {
     const { mkdir, mkdtemp, readFile, rm, writeFile } = await import('node:fs/promises');
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
@@ -107,14 +107,12 @@ describe('reconcileStrandedSyncingBundles', () => {
       const corruptRecord = '{invalid json';
       await writeFile(`${archivePath}.replacement.json`, corruptRecord);
       bundle(STRANDED, { sourceType: 'zip', archivePath });
-      const before = structuredClone(row(STRANDED));
       const fixture = await seedCrashedReplacement(root, fake, 'after swap');
       const items = structuredClone(fake.rows(schema.customBundleItems));
 
       await expect(run()).resolves.toBeUndefined();
 
-      expect(row(STRANDED)).toEqual(before);
-      expect(await readFile(`${archivePath}.replacement.json`, 'utf8')).toBe(corruptRecord);
+      expect(row(STRANDED)).toMatchObject({ status: 'failed', lastReplacementNote: null });
       expect(row(fixture.payload.bundleId)).toMatchObject({
         status: 'active',
         ...fixture.previousArchive,
