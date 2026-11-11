@@ -586,7 +586,8 @@ bundleRoutes.put('/uploads/:id/chunk', async (c) => {
       await fh.truncate(Number(row.bytesReceived)).catch(() => {});
       await fh.close().catch(() => {});
       if (err instanceof HttpError) throw err;
-      throw new HttpError(500, `chunk write failed: ${(err as Error).message}`);
+      logger.error({ err, userId, uploadId: row.id }, 'Bundle upload chunk write failed');
+      throw new HttpError(500, 'chunk write failed');
     }
 
     const advanced = await tx
@@ -678,7 +679,8 @@ bundleRoutes.post('/uploads/:id/complete', requireNewWorkAllowed, async (c) => {
         await renameNoFollow(anchor, archiveRel, finalRel, { createParents: true });
       } catch (err) {
         if (!(await wholeFileAt(finalRel))) {
-          throw new HttpError(500, `failed to move archive: ${(err as Error).message}`);
+          logger.error({ err, userId, uploadId: row.id }, 'Bundle archive move failed');
+          throw new HttpError(500, 'failed to move archive');
         }
       }
     }

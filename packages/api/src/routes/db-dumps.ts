@@ -3,7 +3,7 @@ import path from 'node:path';
 import { Hono } from 'hono';
 import { eq, and } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { initDbUploadRequestSchema, type DbDumpFormat } from '@haive/shared';
+import { initDbUploadRequestSchema, logger, type DbDumpFormat } from '@haive/shared';
 import { openFileNoFollow, renameNoFollow } from '@haive/shared/fs-safe';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -220,7 +220,8 @@ dbDumpRoutes.put('/upload/:id/chunk', async (c) => {
       await fh.truncate(Number(row.bytesReceived)).catch(() => {});
       await fh.close().catch(() => {});
       if (err instanceof HttpError) throw err;
-      throw new HttpError(500, `chunk write failed: ${(err as Error).message}`);
+      logger.error({ err, userId, uploadId: row.id }, 'Database dump upload chunk write failed');
+      throw new HttpError(500, 'chunk write failed');
     }
 
     const advanced = await tx
