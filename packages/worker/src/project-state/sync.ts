@@ -105,13 +105,7 @@ type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 export type ProjectStateSyncOutcome =
   'absent' | 'refused' | 'deferred' | 'superseded' | 'held' | 'unchanged' | 'applied' | 'conflict';
 
-export interface RulesOverrideImport {
-  before: string | null;
-  after: string | null;
-  resetAt: Date | null;
-}
-
-export type ProjectStateSyncResult = (
+export type ProjectStateSyncResult =
   | {
       outcome: 'deferred';
       code: 'upgrade_rules';
@@ -122,8 +116,7 @@ export type ProjectStateSyncResult = (
       outcome: ProjectStateSyncOutcome;
       /** Why the record was refused, or what conflicted, worded as `last_error` holds it. */
       reason?: string;
-    }
-) & { rulesOverrideImport?: RulesOverrideImport };
+    };
 
 const MIB = 1024 * 1024;
 // A first sync can replace a claim per file: the list is cut, settings first; `count` is the total.
@@ -692,6 +685,7 @@ export async function syncProjectStateFromCheckout(
     repoPath,
     refuseDuringGitOperation,
     expectedCheckout,
+    endingTaskId,
     actor,
   }: {
     actor?: AuditActor;
@@ -700,6 +694,8 @@ export async function syncProjectStateFromCheckout(
     /** An open merge, rebase, cherry-pick or revert holds the read. A checkout that changed since its first read always holds it. */
     refuseDuringGitOperation?: boolean;
     expectedCheckout?: NamedCheckout;
+    /** The upgrade task whose committed ending triggered this resync. */
+    endingTaskId?: string;
   },
 ): Promise<ProjectStateSyncResult> {
   // An uncommitted writer's partial files are not an incoming checkout. Only its fenced recovery
@@ -739,6 +735,7 @@ export async function syncProjectStateFromCheckout(
         repoPath,
         refuseDuringGitOperation,
         expectedCheckout,
+        endingTaskId,
         checkout,
         seen,
         seenRepo,
@@ -767,6 +764,7 @@ export async function syncProjectStateLocked(
     refuseDuringGitOperation,
     expectedCheckout,
     holdingTaskId,
+    endingTaskId,
     checkout,
     seen,
     seenRepo,
@@ -778,6 +776,7 @@ export async function syncProjectStateLocked(
     refuseDuringGitOperation?: boolean;
     expectedCheckout?: NamedCheckout;
     holdingTaskId?: string;
+    endingTaskId?: string;
     checkout: Checkout;
     seen: Awaited<ReturnType<typeof readSyncRow>>;
     seenRepo: { onboardingResetAt: Date | null } | undefined;
@@ -1172,29 +1171,22 @@ export async function syncProjectStateLocked(
     );
   }
 
-  // Advance an upgrade's deferred obligation in the SAME transaction as its override import.
-  // Ordinary imports owe no region write, and a Tooling save cannot manufacture this intent.
-  const rulesImport = Object.hasOwn(updates, 'agentRulesOverride')
-    ? {
-        rulesOverrideImport: {
-          before: repo.agentRulesOverride ?? null,
-          after: await readAgentRulesOverrideRaw(tx, repositoryId),
-          resetAt: repo.onboardingResetAt ?? null,
-        },
-      }
-    : {};
+  // The import itself commits the obligation: either a recorded deferral or an upgrade's
+  // task-end import owes a region write. Ordinary background imports do not create one.
   const owed = writing?.rules;
-  if (rulesImport.rulesOverrideImport && owed) {
-    const imported = rulesImport.rulesOverrideImport;
+  const rulesTaskId = owed?.taskId ?? endingTaskId;
+  if (Object.hasOwn(updates, 'agentRulesOverride') && rulesTaskId) {
+    // A legacy install may not have an outbox row yet.
+    if (!writing) await markProjectStateDirty(tx, repositoryId);
     await tx
       .update(schema.projectStateOutbox)
       .set({
         rulesReconcileIntent: {
           phase: 'ready',
-          taskId: owed.taskId,
-          before: owed.phase === 'ready' ? owed.before : imported.before,
-          after: imported.after,
-          resetAt: imported.resetAt?.toISOString() ?? null,
+          taskId: rulesTaskId,
+          before: owed?.phase === 'ready' ? owed.before : (repo.agentRulesOverride ?? null),
+          after: await readAgentRulesOverrideRaw(tx, repositoryId),
+          resetAt: repo.onboardingResetAt?.toISOString() ?? null,
         },
       })
       .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
@@ -1210,16 +1202,15 @@ export async function syncProjectStateLocked(
       .set({ rulesReconcileIntent: null })
       .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
   }
-  if (lastError !== null) return { outcome: 'conflict', reason: lastError, ...rulesImport };
+  if (lastError !== null) return { outcome: 'conflict', reason: lastError };
   if (portable.conflicts.length > 0) {
     const names = portable.conflicts.map(({ unit }) => unit).join(', ');
     return {
       outcome: 'conflict',
       reason: `settings conflict with the checkout's record: ${names}`,
-      ...rulesImport,
     };
   }
-  return { outcome: wrote || imported || settingsMoved ? 'applied' : 'unchanged', ...rulesImport };
+  return { outcome: wrote || imported || settingsMoved ? 'applied' : 'unchanged' };
 }
 
 /** Points the sync base at the record the checkout holds now, so a sync after the checkout moves merges

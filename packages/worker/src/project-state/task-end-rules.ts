@@ -26,8 +26,10 @@ import { cliRulesRegionRecord } from '../step-engine/steps/onboarding/_rules-fil
 import { writeApplicableTemplateIds } from './sync.js';
 import { lockProjectState, refuseHeldCheckout } from './write.js';
 
-/** Drain the durable obligation created by an upgrade's deferred override import. Any sync
- * caller may finish it; a refusal retains the intent for the next sweep. */
+class PermanentRulesRefusal extends Error {}
+
+/** Drain the durable obligation created by an upgrade's override import. Any sync caller may
+ * finish it; only transient refusals retain the intent for the next sweep. */
 export async function reconcileImportedRules(
   db: Database,
   repositoryId: string,
@@ -40,7 +42,7 @@ export async function reconcileImportedRules(
       .from(schema.projectStateOutbox)
       .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
     if (pending?.rules?.phase !== 'ready') return;
-    await db.transaction(async (tx) => {
+    const refusal = await db.transaction(async (tx) => {
       await lockRepositoryTasksKey(tx, repositoryId);
       await lockProjectState(tx, repositoryId);
       const [outbox] = await tx
@@ -58,14 +60,21 @@ export async function reconcileImportedRules(
         .select()
         .from(schema.repositories)
         .where(eq(schema.repositories.id, repositoryId));
+      if (!repo || (repo.storagePath ?? repo.localPath) !== repoPath)
+        throw new Error('repository changed after the rules override import');
+      const abandon = async (reason: string) => {
+        await tx
+          .update(schema.projectStateOutbox)
+          .set({ rulesReconcileIntent: null })
+          .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+        return new PermanentRulesRefusal(reason);
+      };
       if (
-        !repo ||
-        (repo.storagePath ?? repo.localPath) !== repoPath ||
         (repo.onboardingResetAt?.getTime() ?? null) !==
           (imported.resetAt === null ? null : new Date(imported.resetAt).getTime()) ||
         (await readAgentRulesOverrideRaw(tx, repositoryId)) !== imported.after
       )
-        throw new Error('repository changed after the rules override import');
+        return abandon('repository changed after the rules override import');
       if (outbox?.intent) throw new Error('an interrupted project state write awaits recovery');
 
       const read = await readUpgradeFile(repoPath, CLI_RULES_DISK_PATH);
@@ -77,7 +86,7 @@ export async function reconcileImportedRules(
       const hash = (text: string | null) =>
         text === null ? null : sha256Hex(normalizeContent(text));
       if (hash(region) !== hash(oldRender) && hash(region) !== hash(render))
-        throw new Error('the rules region was edited or removed after it was rendered');
+        return abandon('the rules region was edited or removed after it was rendered');
       const next = upsertRegion(before ?? '', render ?? '', CLI_RULES_START, CLI_RULES_END);
       const writtenRegion = extractRegion(next, CLI_RULES_START, CLI_RULES_END);
       const now = new Date();
@@ -157,6 +166,11 @@ export async function reconcileImportedRules(
         if (result !== 'rewritten') throw new Error('AGENTS.md changed after the rules read');
       }
     });
+    if (refusal instanceof PermanentRulesRefusal)
+      logger.warn(
+        { err: refusal, repositoryId, taskId },
+        'imported rules region not reconciled; left for the next upgrade',
+      );
   } catch (err) {
     logger.warn(
       { err, repositoryId, taskId },

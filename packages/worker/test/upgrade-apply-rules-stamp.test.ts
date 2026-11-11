@@ -273,35 +273,46 @@ describe('02 and the rules override its plan was made from', () => {
     await writeFile(join(s.root, '.haive-data/state/settings/agent-rules.md'), 'TEAM RULES\n');
     s.fake.patch(schema.tasks, TASK, { status: 'completed' });
 
-    await resyncAfterTaskEnd(s.fake.db as unknown as Database, TASK);
+    await syncProjectStateFromCheckout(s.fake.db as unknown as Database, {
+      repositoryId: REPO,
+      repoPath: s.root,
+    });
 
     expect(s.fake.rows(schema.repositories)[0]!.agentRulesOverride).toBe('TEAM RULES\n');
     expect(await s.agentsMd()).toBe(before);
     expect(s.fake.rows(schema.onboardingArtifacts)).toEqual(rows);
   });
 
-  it('preserves text outside the rules region after a deferred import', async () => {
-    const s = await setup('PLANNED RULES\n', 'PLANNED RULES\n');
-    await recordWritten(s.apply());
-    await writeFile(join(s.root, 'AGENTS.md'), `# Project\n\n${await s.agentsMd()}\nUser notes\n`);
-    await writeFile(join(s.root, '.haive-data/state/settings/agent-rules.md'), 'TEAM RULES\n');
-    expect((await s.apply()).recordWrite).toBe('deferred');
-    s.fake.patch(schema.tasks, TASK, { status: 'completed' });
+  it.each([true, false])(
+    'preserves text outside the rules region at task end (outbox exists: %s)',
+    async (outboxExists) => {
+      const s = await setup('PLANNED RULES\n', 'PLANNED RULES\n');
+      await recordWritten(s.apply());
+      if (!outboxExists)
+        await s.fake.db
+          .delete(schema.projectStateOutbox)
+          .where(eq(schema.projectStateOutbox.repositoryId, REPO));
+      await writeFile(
+        join(s.root, 'AGENTS.md'),
+        `# Project\n\n${await s.agentsMd()}\nUser notes\n`,
+      );
+      await writeFile(join(s.root, '.haive-data/state/settings/agent-rules.md'), 'TEAM RULES\n');
+      s.fake.patch(schema.tasks, TASK, { status: 'completed' });
 
-    await resyncAfterTaskEnd(s.fake.db as unknown as Database, TASK);
+      await resyncAfterTaskEnd(s.fake.db as unknown as Database, TASK);
 
-    expect(await s.agentsMd()).toContain('# Project\n\n');
-    expect(await s.agentsMd()).toContain('TEAM RULES');
-    expect(await s.agentsMd()).toContain('User notes\n');
-  });
+      expect(await s.agentsMd()).toContain('# Project\n\n');
+      expect(await s.agentsMd()).toContain('TEAM RULES');
+      expect(await s.agentsMd()).toContain('User notes\n');
+    },
+  );
 
   it.each(['holder', 'reset', 'journal', 'git', 'override', 'reset epoch', 'edited region'])(
-    'retains the owed region and ledger when %s refuses the post-import write',
+    'preserves the region and ledger and settles the obligation when %s refuses the write',
     async (guard) => {
       const s = await setup('PLANNED RULES\n', 'PLANNED RULES\n');
       await recordWritten(s.apply());
       await writeFile(join(s.root, '.haive-data/state/settings/agent-rules.md'), 'TEAM RULES\n');
-      expect((await s.apply()).recordWrite).toBe('deferred');
       s.fake.patch(schema.tasks, TASK, { status: 'completed' });
       const drain = vi
         .spyOn(importedRules, 'reconcileImportedRules')
@@ -309,9 +320,10 @@ describe('02 and the rules override its plan was made from', () => {
       const result = await syncProjectStateFromCheckout(s.fake.db as unknown as Database, {
         repositoryId: REPO,
         repoPath: s.root,
+        endingTaskId: TASK,
       });
       drain.mockRestore();
-      expect(result.rulesOverrideImport).toBeDefined();
+      expect(result.outcome).toBe('applied');
       const owed = s.fake.rows(schema.projectStateOutbox)[0]!.rulesReconcileIntent;
       expect(owed).toMatchObject({
         phase: 'ready',
@@ -342,15 +354,42 @@ describe('02 and the rules override its plan was made from', () => {
       const before = await s.agentsMd();
       const rows = structuredClone(s.fake.rows(schema.onboardingArtifacts));
       const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const permanent = ['override', 'reset epoch', 'edited region'].includes(guard);
       try {
         await importedRules.reconcileImportedRules(s.fake.db as unknown as Database, REPO, s.root);
-        expect(warn).toHaveBeenCalledWith(
-          expect.objectContaining({ repositoryId: REPO, taskId: TASK, err: expect.any(Error) }),
-          'imported rules region not reconciled; the next sweep will retry it',
-        );
         expect(await s.agentsMd()).toBe(before);
         expect(s.fake.rows(schema.onboardingArtifacts)).toEqual(rows);
-        expect(s.fake.rows(schema.projectStateOutbox)[0]!.rulesReconcileIntent).toEqual(owed);
+        expect(s.fake.rows(schema.projectStateOutbox)[0]!.rulesReconcileIntent).toEqual(
+          permanent ? null : owed,
+        );
+        expect(warn).toHaveBeenCalledWith(
+          expect.objectContaining({ repositoryId: REPO, taskId: TASK, err: expect.any(Error) }),
+          permanent
+            ? 'imported rules region not reconciled; left for the next upgrade'
+            : 'imported rules region not reconciled; the next sweep will retry it',
+        );
+        if (permanent) {
+          await importedRules.reconcileImportedRules(
+            s.fake.db as unknown as Database,
+            REPO,
+            s.root,
+          );
+          expect(warn).toHaveBeenCalledTimes(1);
+        }
+        if (guard === 'journal') {
+          await s.fake.db
+            .update(schema.projectStateOutbox)
+            .set({ writeIntent: null })
+            .where(eq(schema.projectStateOutbox.repositoryId, REPO));
+          await importedRules.reconcileImportedRules(
+            s.fake.db as unknown as Database,
+            REPO,
+            s.root,
+          );
+          expect(await s.agentsMd()).toContain('TEAM RULES');
+          expect(s.fake.rows(schema.projectStateOutbox)[0]!.rulesReconcileIntent).toBeNull();
+          expect(warn).toHaveBeenCalledTimes(1);
+        }
       } finally {
         warn.mockRestore();
       }
