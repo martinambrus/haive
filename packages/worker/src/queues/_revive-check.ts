@@ -4,6 +4,7 @@ import {
   schema,
   boundedLockWait,
   TASK_START_LOCK_TIMEOUT_MS,
+  NEW_WORK_FENCE_LOCK_TIMEOUT_MS,
   isLockNotAvailable,
   type DbTx,
 } from '@haive/database';
@@ -47,9 +48,13 @@ export class RevivalBusy extends Error {
   }
 }
 
-async function boundedRevivalWait<T>(tx: DbTx, take: () => Promise<T>): Promise<T> {
+async function boundedRevivalWait<T>(
+  tx: DbTx,
+  take: () => Promise<T>,
+  timeoutMs = TASK_START_LOCK_TIMEOUT_MS,
+): Promise<T> {
   try {
-    return await boundedLockWait(tx, take, TASK_START_LOCK_TIMEOUT_MS);
+    return await boundedLockWait(tx, take, timeoutMs);
   } catch (err) {
     if (isLockNotAvailable(err)) throw new RevivalBusy(err);
     throw err;
@@ -76,7 +81,7 @@ export async function readMaintenanceState(taskId: string): Promise<ObservedMain
 
 /** The shared fence, then the stored state past the cache; throws MaintenanceStateUnreadable when it cannot be read. */
 async function readStateUnderFence(tx: DbTx): Promise<MaintenanceState> {
-  await boundedRevivalWait(tx, () => lockNewWorkFenceShared(tx));
+  await boundedRevivalWait(tx, () => lockNewWorkFenceShared(tx), NEW_WORK_FENCE_LOCK_TIMEOUT_MS);
   return parseMaintenanceState(
     await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE).catch((err: unknown) => {
       throw new MaintenanceStateUnreadable(err);

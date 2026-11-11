@@ -28,7 +28,14 @@ vi.mock('../src/lib/plan-mirror.js', () => ({
 
 import { eq, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { createDatabase, lockRepositoryTasksKey, schema, type Database } from '@haive/database';
+import {
+  createDatabase,
+  lockRepositoryTasksKey,
+  schema,
+  TASK_START_LOCK_TIMEOUT_MS,
+  NEW_WORK_FENCE_LOCK_TIMEOUT_MS,
+  type Database,
+} from '@haive/database';
 import { configService, lockNewWorkFenceExclusive } from '@haive/shared';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { planRoutes } from '../src/routes/plan.js';
@@ -349,11 +356,11 @@ describe.skipIf(!url)('deferred attachments through real Postgres routes', () =>
     expect(h.add).toHaveBeenCalledTimes(1);
   });
 
-  // The peer commits at 1.8s, beyond the interactive 1s lock budget. On unchanged
-  // source this lets an unbounded wait finish, so the control fails without hanging.
+  // Release the peer even if the bound regresses, so a failing control cannot hang.
   const besideLock = async <T>(
     lock: (tx: Parameters<Parameters<Database['transaction']>[0]>[0]) => Promise<unknown>,
     work: () => T | Promise<T>,
+    holdMs = 1800,
   ) => {
     const peer = createDatabase(url!);
     let release!: () => void;
@@ -370,7 +377,7 @@ describe.skipIf(!url)('deferred attachments through real Postgres routes', () =>
       await gate;
     });
     await taken;
-    const timer = setTimeout(release, 1800);
+    const timer = setTimeout(release, holdMs);
     try {
       return await work();
     } finally {
@@ -380,6 +387,24 @@ describe.skipIf(!url)('deferred attachments through real Postgres routes', () =>
       await peer.$client.end({ timeout: 5 });
     }
   };
+
+  it.each(['creation', 'task-row'] as const)(
+    'starts after a routine 1.8s %s hold',
+    async (kind) => {
+      const id = await create(false, undefined);
+      h.add.mockClear();
+      const res = await besideLock(
+        (tx) =>
+          kind === 'creation'
+            ? lockRepositoryTasksKey(tx, REPO)
+            : Promise.resolve(tx.execute(sql`select id from tasks where id = ${id} for update`)),
+        () => post(`/tasks/${id}/action`, { action: 'start' }),
+      );
+      expect(res.status).toBe(200);
+      expect(await row(id)).toMatchObject({ status: 'queued' });
+      expect(h.add).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it.each(['creation', 'new-work', 'task-row', 'counted-task-row'] as const)(
     'returns busy without starting behind the %s lock',
@@ -395,12 +420,14 @@ describe.skipIf(!url)('deferred attachments through real Postgres routes', () =>
               ? lockNewWorkFenceExclusive(tx)
               : Promise.resolve(tx.execute(sql`select id from tasks where id = ${id} for update`)),
         () => post(`/tasks/${id}/action`, { action: 'start' }),
+        (kind === 'new-work' ? NEW_WORK_FENCE_LOCK_TIMEOUT_MS : TASK_START_LOCK_TIMEOUT_MS) + 800,
       );
       expect(res.status).toBe(409);
       expect(await res.json()).toMatchObject({ error: 'The repository is busy, try again' });
       expect(await row(id)).toEqual(before);
       expect(h.add).not.toHaveBeenCalled();
     },
+    TASK_START_LOCK_TIMEOUT_MS + 5_000,
   );
 
   it('accepts a live clarification while a checkout move holds the creation key', async () => {
@@ -432,22 +459,27 @@ describe.skipIf(!url)('deferred attachments through real Postgres routes', () =>
     ).toBeNull();
   });
 
-  it('bounds the advisory node lock and inserts no task on contention', async () => {
-    const [node] = await db
-      .insert(schema.planNodes)
-      .values({ repositoryId: REPO, title: 'research', kind: 'research', path: '/research/' })
-      .returning();
-    const res = await besideLock(
-      async (tx) => {
-        await tx.execute(sql`select id from plan_nodes where id = ${node!.id} for update`);
-      },
-      () => post(`/repos/${REPO}/plan/nodes/${node!.id}/advisory`, { question: 'find it' }),
-    );
-    expect(res.status).toBe(409);
-    expect(await res.json()).toMatchObject({ error: 'The repository is busy, try again' });
-    expect(
-      await db.query.tasks.findFirst({ where: eq(schema.tasks.repositoryId, REPO) }),
-    ).toBeUndefined();
-    expect(h.add).not.toHaveBeenCalled();
-  });
+  it(
+    'bounds the advisory node lock and inserts no task on contention',
+    async () => {
+      const [node] = await db
+        .insert(schema.planNodes)
+        .values({ repositoryId: REPO, title: 'research', kind: 'research', path: '/research/' })
+        .returning();
+      const res = await besideLock(
+        async (tx) => {
+          await tx.execute(sql`select id from plan_nodes where id = ${node!.id} for update`);
+        },
+        () => post(`/repos/${REPO}/plan/nodes/${node!.id}/advisory`, { question: 'find it' }),
+        TASK_START_LOCK_TIMEOUT_MS + 800,
+      );
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ error: 'The repository is busy, try again' });
+      expect(
+        await db.query.tasks.findFirst({ where: eq(schema.tasks.repositoryId, REPO) }),
+      ).toBeUndefined();
+      expect(h.add).not.toHaveBeenCalled();
+    },
+    TASK_START_LOCK_TIMEOUT_MS + 5_000,
+  );
 });

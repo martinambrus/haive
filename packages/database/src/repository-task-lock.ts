@@ -19,8 +19,13 @@ export const LIVE_TASK_STATUSES = [
  *  key, a plan or project-state key, or its row) before giving up. */
 export const REPOSITORY_TASKS_LOCK_TIMEOUT_MS = 30_000;
 
-/** Interactive admissions release a contended pool connection promptly; movers retain their budget. */
-export const TASK_START_LOCK_TIMEOUT_MS = 1_000;
+/** Admission waits for repository/plan keys and rows. Measured with 512 claim files: the
+ *  longest foreground hold was 2.072 s, the sweep 1.735 s; 1,000-file git sections took
+ *  118-131 ms. Five seconds leaves routine writers headroom while bounding pool occupancy. */
+export const TASK_START_LOCK_TIMEOUT_MS = 5_000;
+
+/** The exclusive maintenance holder only toggles state; it needs no filesystem/git budget. */
+export const NEW_WORK_FENCE_LOCK_TIMEOUT_MS = 1_000;
 
 /** The shared lock-wait mechanism. A timeout aborts the transaction; callers translate it only
  * after giving up the transaction, and never continue using state read before the wait. */

@@ -6,6 +6,8 @@ import path from 'node:path';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  TASK_START_LOCK_TIMEOUT_MS,
+  NEW_WORK_FENCE_LOCK_TIMEOUT_MS,
   createDatabase,
   lockRepositoryTasksKey,
   schema,
@@ -694,7 +696,10 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
           await gate;
         });
         await taken;
-        const timer = setTimeout(release, 1800);
+        const timer = setTimeout(
+          release,
+          (kind === 'new-work' ? NEW_WORK_FENCE_LOCK_TIMEOUT_MS : TASK_START_LOCK_TIMEOUT_MS) + 800,
+        );
         try {
           await expect(reviveDeadTask(db, read, deps)).resolves.toBe('held');
         } finally {
@@ -763,7 +768,7 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
         await gate;
       });
       await taken;
-      const timer = setTimeout(release, 1800);
+      const timer = setTimeout(release, TASK_START_LOCK_TIMEOUT_MS + 800);
       const pending = job(TASK_JOB_NAMES.ADVANCE_STEP, {
         taskId: id,
         userId,

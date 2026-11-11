@@ -70,4 +70,8 @@ export { lockStepRows } from './step-row-lock.js';
 
 export { tryCliAuthLock } from './cli-auth-lock.js';
 
-export { boundedLockWait, TASK_START_LOCK_TIMEOUT_MS } from './repository-task-lock.js';
+export {
+  boundedLockWait,
+  TASK_START_LOCK_TIMEOUT_MS,
+  NEW_WORK_FENCE_LOCK_TIMEOUT_MS,
+} from './repository-task-lock.js';
