@@ -314,8 +314,9 @@ async function deleteBundleRow(bundleId: string, repositoryId: string): Promise<
 }
 
 /** A failed row may still owe a job whose enqueue acknowledgement was lost. This read runs
- * under the winning row update's lock; a duplicate admission rolls back without changing copy.
- * A capped or unavailable queue read is unknown, never evidence that the bundle has no job. */
+ * before the admission transaction; under the row lock, callers then refuse any row generation
+ * changed since their pre-read snapshot. A capped or unavailable queue read is unknown, never
+ * evidence that the bundle has no job. */
 async function refuseLiveBundleJob(
   queue: ReturnType<typeof getBundleQueue>,
   bundleId: string,
