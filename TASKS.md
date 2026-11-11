@@ -463,6 +463,7 @@ Two PRs:
 
 - A (report): baseShaAfter/landedOn recorded at merge time, a merge.left_committed event, and a banner.
 - B (undo): UNDO_LEFT_MERGE job, root claim, merge-dir lock, 00a fence and containment, `reset --keep` with a sha CAS or update-ref CAS.
+  B note (E2 review, 2026-11-11): the `merge.landed` dedupe key does not pin the commit. A `mergeCommitted` re-entry after the base advanced for another reason writes a later `baseShaAfter`, and a base-sync round (`prePushSync`) records `(preFeature, syncMerge)`, which covers upstream commits. An undo to `baseShaBefore` would then drop commits that are not the task's; B must CAS on the task's own merge commit, not the latest landing tip.
   Defaults: step 12 only. Undo re-creates a deleted feature branch (create-only). Pushed merges and /host-fs get the report only. Agree the merge-resolver hunks with the owner of merge-resolver.ts before building.
 
 1. (PRE-EXISTING) A cancel between the merge commit and reachDone leaves merged:false, so onboarding-reset provenance (api repos.ts ~:1103-1150) misses a merge that is on the base. A's baseShaAfter makes this cheap to fix.
