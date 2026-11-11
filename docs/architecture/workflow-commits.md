@@ -140,12 +140,15 @@ path still reopens the form. Its gitlink check judges the pinned tree, not the l
 scratch index is filled from `preview.tree`, only gitlinks it adds or changes against the preview's
 parent are judged, and `.gitmodules` is read from that same tree, so a registration staged after the
 preview does not count. Before the ref compare-and-swap, before the index reset, and on that Retry
-before put-back and before push, `symbolic-ref -q HEAD` (exit code only) must still name the
-previewed branch, or still be detached for a detached preview. A switch found before the write
+before put-back and before push, `symbolic-ref -q HEAD` must still print the previewed branch
+(exit 0), or still exit 1 (detached) for a detached preview. A switch found before the write
 refuses with "branch changed"; one found after the ref moved skips the reset and names the branch
 the commit landed on (at the push seam that text is the push's failure note). Git has no atomic
 HEAD-and-ref check, so one process spawn between the second check and the index-only reset of the
-reviewed paths stays open; at worst a reviewed path shows as unstaged on the new branch.
+reviewed paths stays open; at worst a reviewed path shows as unstaged on the new branch. A
+detached preview has one more such window: `update-ref HEAD` follows a HEAD that was just attached
+to a branch at the preview's parent, so the commit lands on that branch and the second check
+refuses the reset.
 
 Run app's Finish form treats Commit and Push as independent choices. A push with Commit unticked
 publishes the branch's existing commits without staging or committing session edits; the ordinary
