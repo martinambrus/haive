@@ -45,21 +45,34 @@ export function LatestRefresh({
   }, [endpoint, active]);
 
   if (active) return null;
+  // The durable read can lag the job poll or fail. Only a newer run may supersede
+  // the completed result we already have; old jobs without identity still win locally.
+  const preferResult =
+    result !== null &&
+    (!run ||
+      run.runId === result.runId ||
+      !result.startedAt ||
+      new Date(run.startedAt).getTime() <= new Date(result.startedAt).getTime());
+  const displayedRun =
+    preferResult && (run?.runId !== result?.runId || run?.finishedAt === null) ? null : run;
   return (
     <div className="space-y-2 text-sm text-neutral-400">
       {loadError && (
         <InlineMarkdown body="Unable to load the latest refresh result. Retrying shortly." />
       )}
-      {run && (
+      {preferResult && !displayedRun && <InlineMarkdown body="The requested refresh finished." />}
+      {displayedRun && (
         <InlineMarkdown
           body={
-            run.finishedAt === null
-              ? `The latest ${run.trigger} refresh started at ${run.startedAt} and has not finished. It may still be running or have been interrupted.`
-              : `The latest ${run.trigger} refresh finished at ${run.finishedAt}.${run.result?.ok ? ' All sources refreshed successfully.' : ''}`
+            displayedRun.finishedAt === null
+              ? `The latest ${displayedRun.trigger} refresh started at ${displayedRun.startedAt} and has not finished. It may still be running or have been interrupted.`
+              : `The latest ${displayedRun.trigger} refresh finished at ${displayedRun.finishedAt}.${displayedRun.result?.ok ? ' All sources refreshed successfully.' : ''}`
           }
         />
       )}
-      <RefreshFailures result={run ? (run.finishedAt === null ? null : run.result) : result} />
+      <RefreshFailures
+        result={preferResult ? result : displayedRun?.finishedAt ? displayedRun.result : null}
+      />
     </div>
   );
 }

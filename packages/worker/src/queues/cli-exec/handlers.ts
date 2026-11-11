@@ -1050,6 +1050,8 @@ export async function handleRefreshCliVersionsJob(
   const prices = await refreshModelPrices(db);
   const fx = await refreshFxRates(db);
   const result: RefreshCliVersionsJobResult = {
+    runId,
+    startedAt: started.startedAt.toISOString(),
     ok: cli.ok && tools.ok && openrouter.ok && browsers.ok && ruby.ok && prices.ok && fx.ok,
     refreshed: [
       ...cli.refreshed,

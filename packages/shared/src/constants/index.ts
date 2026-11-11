@@ -511,6 +511,9 @@ export type CliExecQueuePayload =
   | OllamaProvisionJobPayload;
 
 export interface RefreshCliVersionsJobResult {
+  /** Absent on results from jobs completed before run tracking shipped. */
+  runId?: string;
+  startedAt?: string;
   ok: boolean;
   refreshed: { name: string; count: number; latest: string | null }[];
   errors: { name: string; error: string }[];

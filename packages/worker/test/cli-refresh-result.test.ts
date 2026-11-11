@@ -42,6 +42,10 @@ it('persists a scheduled refresh and its failing FX source', async () => {
   const result = await handleRefreshCliVersionsJob(fake.db as unknown as Database, 'scheduled');
   const row = await fake.db.query.refreshRuns.findFirst();
   expect(row).toMatchObject({ kind: 'versions', trigger: 'scheduled', result });
+  expect(result).toMatchObject({
+    runId: row?.runId,
+    startedAt: (row?.startedAt as Date).toISOString(),
+  });
   expect(row?.startedAt).toBeInstanceOf(Date);
   expect(row?.finishedAt).toBeInstanceOf(Date);
   expect(result.errors).toEqual([{ name: 'fx', error: 'ECB HTTP 503' }]);
