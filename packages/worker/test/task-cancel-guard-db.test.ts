@@ -883,10 +883,15 @@ describe.skipIf(!url)(
       expect(outcomes.some((o) => o.status === 'fulfilled')).toBe(true);
       await f.undo();
       expect(await f.git('rev-parse', 'main')).toBe(f.before);
-      expect(await eventsOfType(f.taskId, 'merge.left_committed_settled')).toMatchObject([
-        { payload: { baseShaAfter: f.after, outcome: 'undone' } },
-      ]);
-      expect(await eventsOfType(f.taskId, 'merge.left_committed_settled')).toHaveLength(1);
+      // The losing job may record a retryable refusal while the winner holds the root claim;
+      // only one FINAL settlement may exist, and it is the undo.
+      const settledEvents = await eventsOfType(f.taskId, 'merge.left_committed_settled');
+      const payloads = settledEvents.map(
+        (e) => e.payload as { outcome?: string; permanent?: boolean },
+      );
+      const final = payloads.filter((p) => p.outcome !== 'refused' || p.permanent === true);
+      expect(final).toMatchObject([{ baseShaAfter: f.after, outcome: 'undone' }]);
+      expect(payloads.filter((p) => p.outcome === 'refused' && p.permanent === true)).toEqual([]);
       expect(h.calls).toContain(`resyncHaiveProjections:${f.taskId}`);
       expect(
         (await db.query.repositories.findFirst({ where: eq(schema.repositories.id, repositoryId) }))
