@@ -129,3 +129,14 @@ it('offers another Undo after a retryable refusal and shows the reason', async (
   expect(document.body.textContent).not.toContain('Undoing…');
   expect(button('Undo merge')).toBeDefined();
 });
+
+it('waits for cancellation teardown before offering Undo', async () => {
+  h.events = h.events.filter((e) => e.eventType !== 'task.cancel_finished');
+  await render();
+  expect(button('Undo merge')).toBeUndefined();
+  h.events = [...h.events, { eventType: 'task.cancel_finished', payload: {} }];
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(3000);
+  });
+  expect(button('Undo merge')).toBeDefined();
+});

@@ -46,6 +46,7 @@ const records = (db: DbHandle, taskId: string) =>
       and(
         eq(schema.taskEvents.taskId, taskId),
         inArray(schema.taskEvents.eventType, [
+          'task.cancel_finished',
           MERGE_LANDED_EVENT,
           MERGE_LEFT_COMMITTED_EVENT,
           MERGE_LEFT_COMMITTED_SETTLED_EVENT,
@@ -168,10 +169,31 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
     where: and(eq(schema.tasks.id, taskId), eq(schema.tasks.userId, userId)),
   });
   if (task?.status !== 'cancelled') return;
-  const initial = leftCommittedMerges(await records(db, taskId)).find(
+  const initialEvents = await records(db, taskId);
+  const initial = leftCommittedMerges(initialEvents).find(
     (m) => m.dir === dir && m.baseShaAfter === baseShaAfter,
   );
   if (!initial) return;
+  if (!initialEvents.some((e) => e.eventType === 'task.cancel_finished')) {
+    await inMergeDirLock(db, dir, async (tx) => {
+      const m = leftCommittedMerges(await records(tx, taskId)).find(
+        (m) => m.dir === dir && m.baseShaAfter === baseShaAfter,
+      );
+      if (m && !m.settled)
+        await tx.insert(schema.taskEvents).values({
+          taskId,
+          taskStepId: null,
+          eventType: MERGE_LEFT_COMMITTED_SETTLED_EVENT,
+          payload: {
+            dir,
+            baseShaAfter,
+            outcome: 'refused',
+            reason: 'Cancellation cleanup is still running; try again after it finishes.',
+          },
+        });
+    });
+    return;
+  }
   const repo = task.repositoryId
     ? await db.query.repositories.findFirst({
         where: eq(schema.repositories.id, task.repositoryId),

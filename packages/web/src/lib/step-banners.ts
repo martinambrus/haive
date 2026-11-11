@@ -435,6 +435,7 @@ export function leftCommittedMergeBanner(
     refused: 'Undo refused:',
   };
   const canUndo =
+    events.some((e) => e.eventType === 'task.cancel_finished') &&
     opts.isOwner === true &&
     merge.settled === null &&
     merge.mergeStage === 'feature' &&

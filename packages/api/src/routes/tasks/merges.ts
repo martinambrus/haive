@@ -114,12 +114,15 @@ mergeRoutes.post('/:id/merges/undo', async (c) => {
       and(
         eq(schema.taskEvents.taskId, taskId),
         inArray(schema.taskEvents.eventType, [
+          'task.cancel_finished',
           MERGE_LEFT_COMMITTED_EVENT,
           MERGE_LEFT_COMMITTED_SETTLED_EVENT,
         ]),
       ),
     )
     .orderBy(asc(schema.taskEvents.createdAt));
+  if (!events.some((e) => e.eventType === 'task.cancel_finished'))
+    throw new HttpError(409, 'Cancellation cleanup is still running; try again after it finishes.');
   const target = leftCommittedMerges(events).find(
     (m) => m.dir === dir && m.baseShaAfter === baseShaAfter,
   );

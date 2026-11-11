@@ -152,7 +152,19 @@ describe('POST /tasks/:id/merges/undo', () => {
       body: JSON.stringify(body),
     });
   beforeEach(() => {
-    state.events = [{ eventType: 'merge.left_committed', payload }];
+    state.events = [
+      { eventType: 'merge.left_committed', payload },
+      { eventType: 'task.cancel_finished', payload: {} },
+    ];
+  });
+  it('refuses Undo before cancellation teardown finishes with a plain 409 reason', async () => {
+    state.events = state.events.filter((e) => e.eventType !== 'task.cancel_finished');
+    const res = await undo();
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      error: 'Cancellation cleanup is still running; try again after it finishes.',
+    });
+    expect(state.added).toEqual([]);
   });
   it('queues only the exact reported merge of the cancelled task', async () => {
     expect((await undo()).status).toBe(202);

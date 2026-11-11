@@ -128,6 +128,7 @@ async function fixture() {
     mergeStage: 'feature',
   };
   const events: { eventType: string; payload: Record<string, unknown> }[] = [
+    { eventType: 'task.cancel_finished', payload: {} },
     { eventType: 'merge.landed', payload },
     { eventType: 'merge.left_committed', payload },
   ];
@@ -161,6 +162,16 @@ async function fixture() {
 }
 
 describe('explicit undo of a cancel-left committed merge', () => {
+  it('refuses Undo before cancellation teardown finishes', async () => {
+    const f = await fixture();
+    f.events.splice(0, 1);
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+    f.events.push({ eventType: 'task.cancel_finished', payload: {} });
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+  });
   it('settles a redirected merge directory as refused without following the link', async () => {
     const f = await fixture();
     await symlink('/etc', path.join(f.dir, 'redirect'));

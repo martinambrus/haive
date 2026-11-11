@@ -710,6 +710,13 @@ describe('leftCommittedMergeBanner', () => {
         },
       },
     ];
+    expect(
+      leftCommittedMergeBanner(events, { taskStatus: 'cancelled', isOwner: true })?.canUndo,
+    ).toBe(false);
+    events.push({
+      eventType: 'task.cancel_finished',
+      payload: {} as (typeof events)[number]['payload'],
+    });
     const owned = leftCommittedMergeBanner(events, { taskStatus: 'cancelled', isOwner: true });
     expect(owned).toMatchObject({
       canUndo: true,
