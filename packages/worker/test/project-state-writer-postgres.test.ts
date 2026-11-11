@@ -211,7 +211,7 @@ async function diskRecord(root: string, name: string) {
 }
 
 describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
-  it.each(['plan node', 'mirror row', 'task'] as const)(
+  it.each(['plan node', 'mirror row', 'plain FK task row'] as const)(
     'repository row hold permits a %s insert during the final filesystem write',
     async (child) => {
       const s = await fixture();
@@ -238,7 +238,8 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
           } else if (child === 'mirror row') {
             await tx.insert(schema.planMirrorState).values({ repositoryId: s.repo.id });
           } else {
-            // Plain FK admission is independent of the stronger real task-start fence below.
+            // A raw FK insert only: a real task start also takes the task-creation key, which the
+            // writer still holds across the same work, so it still waits (see the next test).
             await tx.insert(schema.tasks).values({
               userId: s.userId,
               repositoryId: s.repo.id,

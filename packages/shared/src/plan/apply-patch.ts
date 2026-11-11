@@ -230,9 +230,9 @@ async function lockRepositoryForPlanWrite(tx: DbOrTx, repositoryId: string): Pro
  * Whether a patch can insert a row that references the repository: a node it creates (a ref that
  * is neither a uuid nor an alias), an edge, a code link, or the repository's first mirror row.
  * Conservative: a link that already exists still counts. An update-only patch of a plan whose
- * mirror row exists inserts nothing and takes no repository lock, so a writer that holds the
- * repository row for a while (a project-state write holds it through its file and git work) does
- * not stall an interactive edit.
+ * mirror row exists inserts nothing and takes no repository lock, so an interactive edit never
+ * waits on a repository delete or an upgrade admission (FOR UPDATE). A project-state write holds
+ * the row only FOR NO KEY UPDATE, which an inserting patch's KEY SHARE does not wait for.
  */
 async function mayInsertPlanRows(
   tx: DbOrTx,
