@@ -21,6 +21,7 @@ import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import { hasFileLineEvidence } from './_review-findings.js';
+import { isListableName } from './_impl-changes.js';
 import { loadPreviousStepOutput, resolveTaskSkillTargetDirs } from '../onboarding/_helpers.js';
 import { readDiskSkillSummaries } from '../onboarding/09_5b-skill-repair.js';
 import { loadTaskMeta } from './_task-meta.js';
@@ -69,13 +70,19 @@ interface LearningDetect {
   /** The per-task worktree (feature branch) the pipeline operates in — loaded from
    *  01-worktree-setup, where KB/learnings are written. */
   worktreePath: string;
-  /** Bounded summary of the existing learnings entries (id + title +
-   *  excerpt) so the agent can reconcile (dedup / update / delete) against them. */
+  /** Every existing learning up to `LEARNING_INDEX_MAX` (id + title, plus an excerpt
+   *  on the first 60, '' after them) so the agent can reconcile (dedup / update /
+   *  delete) against them. See `learningIndex`. */
   existingLearnings: { id: string; title: string; excerpt: string }[];
-  /** Bounded summary of the installed skills (id + title + description) so the agent
-   *  can decide which capability the task touched and pick a real skillId for a
-   *  feature_update / feature_removal. Empty when the repo has no skills. */
+  /** Learnings past `LEARNING_INDEX_MAX`, not listed. Absent on a payload stored
+   *  before every learning was listed. */
+  omittedLearningCount?: number;
+  /** The installed skills, bounded like the learnings (description '' past the first
+   *  60), so the agent can decide which capability the task touched and pick a real
+   *  skillId for a feature_update / feature_removal. Empty when the repo has no skills. */
   existingSkills: { id: string; title: string; description: string }[];
+  /** Skills past `LEARNING_INDEX_MAX`, not listed. Absent on older payloads. */
+  omittedSkillCount?: number;
   /** Repo's installed-stack anchors (from its onboarding) for version-anchoring a
    *  promoted global article; null when the repo never completed onboarding. */
   repoStack: Awaited<ReturnType<typeof loadRepoStackAnchors>>;
@@ -619,6 +626,88 @@ function learningExcerpt(body: string): string {
   return prose.length > 200 ? `${prose.slice(0, 200)}…` : prose;
 }
 
+/** How many learnings, and skills, the prompt lists at most. A judgement: every entry must be
+ *  listed for the agent to update or delete it, and the list is fed by files in the repository,
+ *  so it still needs a bound. */
+export const LEARNING_INDEX_MAX = 500;
+/** How many listed entries keep their excerpt (a skill, its description); the rest are listed
+ *  by title alone. */
+const EXCERPTED_ENTRIES = 60;
+
+/** The learnings `detect` lists: sorted by id (code units, so a retry sees the same list), every
+ *  entry up to `LEARNING_INDEX_MAX`, the first `EXCERPTED_ENTRIES` with their excerpt. */
+export function learningIndex(all: readonly ExistingLearning[]): {
+  entries: LearningDetect['existingLearnings'];
+  omitted: number;
+} {
+  const sorted = [...all].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const entries = sorted.slice(0, LEARNING_INDEX_MAX).map((e, i) => ({
+    id: e.id,
+    title: e.title,
+    excerpt: i < EXCERPTED_ENTRIES ? learningExcerpt(e.body) : '',
+  }));
+  return { entries, omitted: sorted.length - entries.length };
+}
+
+/** The skills `detect` lists, bounded like the learnings. `readDiskSkillSummaries` returns them
+ *  sorted already. */
+export function skillIndex(all: readonly LearningDetect['existingSkills'][number][]): {
+  entries: LearningDetect['existingSkills'];
+  omitted: number;
+} {
+  const entries = all
+    .slice(0, LEARNING_INDEX_MAX)
+    .map((s, i) => (i < EXCERPTED_ENTRIES ? s : { ...s, description: '' }));
+  return { entries, omitted: all.length - entries.length };
+}
+
+/** One listed entry per line. Rendered at prompt-build time because a stored `detect_output` is
+ *  replayed: an id that would not survive as one line is left out and counted, and a title or
+ *  excerpt is collapsed onto its line. */
+function renderIndexLines(
+  entries: readonly { id: string; title: string; detail: string }[],
+  omittedBeyondCap: number,
+  omittedLine: (n: number) => string,
+): string {
+  const listed = entries.filter((e) => isListableName(e.id));
+  const omitted = omittedBeyondCap + entries.length - listed.length;
+  const lines = listed.map((e) => {
+    const title = collapseToLine(e.title);
+    const detail = collapseToLine(e.detail);
+    return detail ? `- ${e.id} — ${title}: ${detail}` : `- ${e.id} — ${title}`;
+  });
+  if (omitted > 0) lines.push(omittedLine(omitted));
+  return lines.length > 0 ? lines.join('\n') : '(none yet)';
+}
+
+export function renderExistingLearnings(
+  entries: LearningDetect['existingLearnings'],
+  omittedBeyondCap = 0,
+): string {
+  return renderIndexLines(
+    entries.map((e) => ({ id: e.id, title: e.title, detail: e.excerpt })),
+    omittedBeyondCap,
+    (n) => `- (+${n} further learning(s) not listed; they are files under \`${LEARNINGS_DIR}/\`)`,
+  );
+}
+
+export function renderExistingSkills(
+  entries: LearningDetect['existingSkills'],
+  omittedBeyondCap = 0,
+): string {
+  return renderIndexLines(
+    entries.map((s) => ({ id: s.id, title: s.title, detail: s.description })),
+    omittedBeyondCap,
+    (n) => `- (+${n} further skill(s) not listed)`,
+  );
+}
+
+/** Whether the prompt lists a learning by title alone, which the agent must read before it names
+ *  it in an `update` or `delete`. */
+function listsTitleOnlyLearning(entries: LearningDetect['existingLearnings']): boolean {
+  return entries.some((e) => isListableName(e.id) && collapseToLine(e.excerpt) === '');
+}
+
 /** Pick a free slug for an insert so a title that collides with an existing
  *  learning never silently overwrites it (the prior append-only data-loss bug). */
 function resolveInsertId(slug: string, taken: Set<string>): string {
@@ -985,16 +1074,13 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       ctx.logger.warn({ worktreePath }, 'worktree git is unusable; skipping knowledge diff');
     }
     const hasGit = gitStatus === 'ok';
-    const existingLearnings = (await readExistingLearnings(worktreePath))
-      .slice(0, 60)
-      .map((e) => ({ id: e.id, title: e.title, excerpt: learningExcerpt(e.body) }));
+    const learnings = learningIndex(await readExistingLearnings(worktreePath));
     // Installed skills (from the primary skills dir) so the agent can pick a real
     // skillId for an update/removal. Reads the worktree (feature branch), like learnings.
     const skillDirs = await resolveTaskSkillTargetDirs(ctx, ['.claude/skills']);
-    const existingSkills =
-      skillDirs.length > 0
-        ? (await readDiskSkillSummaries(worktreePath, skillDirs[0]!)).slice(0, 60)
-        : [];
+    const skills = skillIndex(
+      skillDirs.length > 0 ? await readDiskSkillSummaries(worktreePath, skillDirs[0]!) : [],
+    );
     const implementOutput = (implement?.output as ImplementOutput | null) ?? {};
     const verifyOutput = (verify?.output as VerifyOutput | null) ?? {};
     const commitOutput = (commit?.output as CommitOutput | null) ?? {};
@@ -1049,8 +1135,10 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       feature: meta.feature,
       affectedClients: meta.affectedClients,
       historyDigest,
-      existingLearnings,
-      existingSkills,
+      existingLearnings: learnings.entries,
+      omittedLearningCount: learnings.omitted,
+      existingSkills: skills.entries,
+      omittedSkillCount: skills.omitted,
       repoStack,
       existingGlobalArticles: globalArticleSelection.articles,
       otherGlobalArticleTitles: globalArticleSelection.otherTitles,
@@ -1148,6 +1236,9 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         '- "update" with `targetId` = an existing learning id when refining/replacing it; put the FULL new content in `body`.',
         '- "delete" with `targetId` = an existing learning id when this run proved that lesson WRONG or obsolete.',
         'Only use a `targetId` that EXACTLY matches an id in the existing list (an unknown target is treated as an insert, or dropped for delete). Do not duplicate a lesson that already exists — update it instead.',
+        listsTitleOnlyLearning(detected.existingLearnings)
+          ? `An existing learning listed by title alone carries no excerpt: read \`${LEARNINGS_DIR}/<id>.md\` before an "update" or "delete" names it, because an "update" replaces the whole body.`
+          : '',
         '',
         detected.kbSyncSkipped
           ? `KNOWLEDGE BASE SYNC — skipped for this task (${detected.kbSyncSkipped}). Do NOT create or edit any file under \`${KB_DIR}/\`. Classify the task anyway, because SKILL SYNC below uses it:`
@@ -1183,16 +1274,10 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         `Files touched: ${detected.filesTouched.join(', ') || '(none)'}`,
         '',
         '=== Existing learnings (reconcile against these; use their id as targetId) ===',
-        detected.existingLearnings.length > 0
-          ? detected.existingLearnings.map((l) => `- ${l.id} — ${l.title}: ${l.excerpt}`).join('\n')
-          : '(none yet)',
+        renderExistingLearnings(detected.existingLearnings, detected.omittedLearningCount),
         '',
         '=== Existing skills (pick a skillId from here for a feature_update / feature_removal) ===',
-        detected.existingSkills.length > 0
-          ? detected.existingSkills
-              .map((s) => `- ${s.id} — ${s.title}: ${s.description}`)
-              .join('\n')
-          : '(none yet)',
+        renderExistingSkills(detected.existingSkills, detected.omittedSkillCount),
         '',
         '=== Existing global house-standard articles for this stack (to UPDATE one, re-use its tech and author the full merged body) ===',
         detected.existingGlobalArticles.length > 0

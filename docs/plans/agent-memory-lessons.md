@@ -1,12 +1,12 @@
 # What Anthropic's agent-memory research offers Haive: close the learning loop, measure it, then consolidate
 
-> **Not started** (2026-11-11), apart from P0, which is in flight as T580. Sources reviewed: "The
-> components of agent memory" (Anthropic research, 2026-11-06), the Managed Agents Dreams docs and
-> the "Dreaming with a dynamic workflow" cookbook. Verdict: no dream pass yet. Fix the step 11
-> defects that keep the loop from closing (P0), add the records the next benchmark round needs (P1),
-> take the measurements (P2), and build only the gaps the measurements justify (P3). The dev
-> install's learning data predates the RAG and knowledge rework, so nothing here is decided from it.
-> Keep this file current by editing the section a change belongs to.
+> **Not started** (2026-11-11), apart from P0, which landed with T580 (`a3d71d4f7` and `dfa43bf68`).
+> Sources reviewed: "The components of agent memory" (Anthropic research, 2026-11-06), the Managed
+> Agents Dreams docs and the "Dreaming with a dynamic workflow" cookbook. Verdict: no dream pass yet.
+> Fix the step 11 defects that keep the loop from closing (P0), add the records the next benchmark
+> round needs (P1), take the measurements (P2), and build only the gaps the measurements justify
+> (P3). The dev install's learning data predates the RAG and knowledge rework, so nothing here is
+> decided from it. Keep this file current by editing the section a change belongs to.
 
 ## Context
 
@@ -53,7 +53,7 @@ the evidence; P2 says what it must record.
 | Offline consolidation | None | G1 |
 | Review, then adopt or discard | The knowledge-diff gate at step 11's form | Reusable by G1 |
 
-## P0 (in flight, T580): make step 11 able to reconcile
+## P0 (shipped with T580): make step 11 able to reconcile
 
 These need no data: each is a contradiction or a cap visible in the code.
 
