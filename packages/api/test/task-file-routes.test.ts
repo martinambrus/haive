@@ -143,6 +143,23 @@ describe('task file read routes', () => {
   });
 
   describe('GET /files/raw', () => {
+    it.each([
+      [
+        'untrusted.svg',
+        'image/svg+xml',
+        '<svg xmlns="http://www.w3.org/2000/svg"><script>parent.pwned=true</script></svg>',
+      ],
+      ['untrusted.html', 'application/octet-stream', '<script>parent.pwned=true</script>'],
+    ])('sandboxes raw %s without changing its bytes', async (name, mime, bytes) => {
+      await writeFile(path.join(worktree, name), bytes);
+      const res = await get('/files/raw', { path: path.join(worktree, name) });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toBe(mime);
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(res.headers.get('content-security-policy')).toBe('sandbox');
+      await expect(res.text()).resolves.toBe(bytes);
+    });
+
     it('streams the file with its own length', async () => {
       const res = await get('/files/raw', { path: path.join(worktree, 'README.md') });
       expect(res.status).toBe(200);

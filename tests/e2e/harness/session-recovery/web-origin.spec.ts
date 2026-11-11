@@ -130,3 +130,46 @@ test('web-origin login establishes the SSR and proxied API session across hostna
     await context.request.delete(`${API}/__fixture/session/${user.id}`);
   }
 });
+
+test('raw SVG headers survive the proxy, block top-level script and retain image rendering', async ({
+  page,
+  context,
+}) => {
+  const seed = await context.request.post(`${API}/__fixture/session`, { data: {} });
+  const user = (await seed.json()) as { id: string; email: string };
+  try {
+    const workspace = await context.request.post(`${API}/__fixture/workspace/${user.id}`);
+    expect(workspace.status()).toBe(200);
+    const { taskId, svgPath } = (await workspace.json()) as { taskId: string; svgPath: string };
+    const path = `/tasks/${taskId}/files/raw?path=${encodeURIComponent(svgPath)}`;
+    const direct = await context.request.get(`${API}${path}`);
+    expect(direct.status()).toBe(200);
+    expect(direct.headers()['x-content-type-options']).toBe('nosniff');
+    expect(direct.headers()['content-security-policy']).toBe('sandbox');
+    await context.clearCookies();
+    const login = await context.request.post(`${WEB}${PREFIX}/auth/login`, {
+      data: { email: user.email, password: 'synthetic-original-password-1' },
+      headers: { Origin: WEB },
+    });
+    expect(login.status()).toBe(200);
+    const raw = await context.request.get(`${WEB}${PREFIX}${path}`);
+    expect(raw.status()).toBe(200);
+    expect(raw.headers()['x-content-type-options']).toBe('nosniff');
+    expect(raw.headers()['content-security-policy']).toBe('sandbox');
+    await page.goto(`${WEB}/login?session=expired`);
+    await page.evaluate(() => localStorage.removeItem('raw-script-ran'));
+    await page.setContent(`<img src="${WEB}${PREFIX}${path}">`);
+    await expect
+      .poll(() =>
+        page
+          .locator('img')
+          .evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth === 16),
+      )
+      .toBe(true);
+    await page.goto(`${WEB}${PREFIX}${path}`);
+    await page.goto(`${WEB}/login?session=expired`);
+    expect(await page.evaluate(() => localStorage.getItem('raw-script-ran'))).toBeNull();
+  } finally {
+    await context.request.delete(`${API}/__fixture/session/${user.id}`);
+  }
+});

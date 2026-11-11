@@ -1,6 +1,10 @@
 /** Isolated browser fixture: real auth routes, signing, middleware and Postgres rotation.
  * Synthetic secrets and authenticated sidebar fixtures keep this independent of provider APIs. */
 import type { Server } from 'node:http';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileRoutes } from '../src/routes/tasks/files.js';
 import { serve } from '@hono/node-server';
 import { installTerminalWebSocket } from '../src/routes/terminal.js';
 import { installIdeWebSocket } from '../src/routes/ide.js';
@@ -44,6 +48,7 @@ secretsService.getJwtSecret = async () => 'cd'.repeat(32);
 secretsService.getEmailBlindIndexPepper = async () => 'ef'.repeat(32);
 const web = process.env.SESSION_RECOVERY_WEB_ORIGIN ?? 'http://127.0.0.1:46100';
 const app = new Hono<AppEnv>().onError(errorHandler);
+const workspaces = new Map<string, string>();
 let meStatus: 503 | null = null;
 let holdNextMe = false;
 let heldMe = false;
@@ -104,8 +109,42 @@ app.post('/__fixture/session', async (c) => {
   setAuthCookies(c, access, token);
   return c.json({ id: user.id, email: decryptEmail(user.emailEncrypted, FIELD_KEY) });
 });
+app.post('/__fixture/workspace/:id', async (c) => {
+  const userId = c.req.param('id');
+  const root = await mkdtemp(join(tmpdir(), 'h2b-raw-'));
+  workspaces.set(userId, root);
+  const svgPath = join(root, 'untrusted.svg');
+  await writeFile(
+    svgPath,
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><script>localStorage.setItem("raw-script-ran","yes")</script><rect width="16" height="16" fill="red"/></svg>',
+  );
+  const [repo] = await db
+    .insert(schema.repositories)
+    .values({
+      userId,
+      name: 'Raw fixture',
+      source: 'local_path',
+      localPath: root,
+    })
+    .returning();
+  const [task] = await db
+    .insert(schema.tasks)
+    .values({
+      userId,
+      repositoryId: repo!.id,
+      title: 'Raw fixture',
+      type: 'workflow',
+    })
+    .returning();
+  return c.json({ taskId: task!.id, svgPath });
+});
+app.use('/tasks/*', requireAuth);
+app.route('/tasks', fileRoutes);
 app.delete('/__fixture/session/:id', async (c) => {
   await db.delete(schema.users).where(eq(schema.users.id, c.req.param('id')));
+  const root = workspaces.get(c.req.param('id'));
+  if (root) await rm(root, { recursive: true, force: true });
+  workspaces.delete(c.req.param('id'));
   return c.json({ ok: true });
 });
 app.post('/__fixture/expire-access/:id', (c) => {
