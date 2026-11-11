@@ -43,7 +43,30 @@ over silently: ask the user, then set `owner:` to yourself with a note naming th
 and write where the work stands (branch, PR, evidence path) in its body.
 
 **Finish**: when the PR is merged and main CI is green, delete the task's block and add one line to
-`## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
+`### T593 · consumed DB-dump upload rows expire 90 days after their task ended
+
+status: open · kind: fix · found: D1 (#1063) owner decision 2026-11-11 · priority: P3
+
+Owner decision: a consumed `db_uploads` row is deleted once 90 days have passed and every task that names it is completed or cancelled. Today the consumed-row expiry in `worker/src/repo/upload-reaper.ts` (`pin` ~:326-334) keeps the row while ANY task row names it, ended tasks included, so in practice it goes only with its repository.
+
+1. Narrow the `db_uploads` pin to the rule `claimDump` already uses for complete dumps (`keptByTask` ~:363-374): a task not in `ENDED_TASK_STATUSES`, or one updated within the cutoff, keeps the row. `tasks.db_upload_id` is `ON DELETE SET NULL`, so the named tasks lose the link.
+2. A Retry or reopen of such a task that reaches `01c1-restore-database` with no dump must fail with a plain sentence saying the dump expired and how to upload a new one, never a generic error. Add that control.
+3. Docs: `database-persistence.md` retention paragraph.
+
+### T594 · FNF[repo-recovery-followups] · checkout recovery and revival follow-ups (+7)
+
+status: open · kind: fix · found: F2 (#1065) reviews 2026-11-10/11 · priority: P3
+All PRE-EXISTING.
+
+1. C1: a recovery that fails after `moveAside` leaves `dest` missing or partial with the code set; each further recovery moves it aside again, accumulating `.aside-*` siblings (`worker/src/repo/refresh.ts` ~:427-442). Fix: reuse or clean the failed destination before moving aside again.
+2. C2: a task that starts after the rename can overlap the minutes-long clone while `dest` is absent (`refresh.ts` ~:509-520); a start does not read the root claim (`repository-refresh.md` :18-19). Fix: task start refuses while a root claim of a rebuild is held.
+3. C3: `reconcileStrandedCloningRepos` writes `error_code = null` (`worker/src/data-migrations.ts` ~:478), so a recovery stranded by a worker death becomes an ordinary Retry. Fix: keep the code.
+4. C4: the task page offers Retry on a failed task whose repository was deleted until the click returns the 409 (`web/src/app/(app)/tasks/[id]/page.tsx` ~:1948). Fix: hide it on the structural NULL repository.
+5. C5: a Rebuild clicked right after Cancel can race the asynchronous teardown touching the worktree under the checkout. Fix: count tasks with a pending teardown as holders.
+6. R1: `refreshRepository` flips an ordinary refresh of a `ready` repo to `cloning` unconditionally (`api/src/routes/repos.ts` ~:3606-3620).
+7. D4a: dead-task revival polling for transient holds is unbounded (`worker/src/queues/dead-task-boot.ts` `retryHeldRevivals`). Fix: cap or back off, log once.
+
+## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
 **Found something outside your task?** Search the board first (`grep -n "<file>\|<symbol>\|<slug>"`).
 
@@ -523,10 +546,15 @@ PRE-EXISTING link, new consequence of #1044. Auto-link picks the entry a draft r
 status: open · kind: fix · found: T558 run 2026-11-09 · priority: P4
 PRE-EXISTING, minor. `configSchema` (api routes/global-kb.ts ~:292-293) accepts `ollamaUrl`/`embedModel` with surrounding whitespace and `putConfig` writes them as sent; the non-admin compare trims, so only the stored value and its dials see the whitespace. Fix: trim in the schema.
 
-### T580 · plan[sleep-paper-lessons] · calibrate effort estimates on the LLM's recorded estimate; keep learnings reachable past 60
+### T580 · plan[sleep-paper-lessons] · calibrate effort estimates on the LLM's recorded estimate; keep learnings reachable past 60 (+2)
 
 status: parked · reason: diminishing returns (owner triage 2026-11-10); PR 1 shipped #1047 884f5c074; resume when step 11 changes or a repository nears 60 learnings · kind: fix · found: SLEEP paper assessment 2026-11-09 · priority: P3
 Plan: `docs/plans/sleep-paper-lessons.md`. PR 1: `hydrateAnchors` and `GET /tasks/estimation-accuracy` read the latest `estimate.recorded.aiHours` instead of the column `06b-sprint-planning` overwrites. PR 2 (low urgency, when step 11 is next touched or a repository nears 60 learnings): list every learning id and title, not an unsorted first 60. Both PRE-EXISTING. P3 of the plan, the backtest, waits for its trigger query.
+
+Appended 2026-11-11 from the Anthropic dreaming assessment; both bear on step 11 seeing and reconciling learnings:
+
+1. Learnings written before the `.haive-data/` move are unreachable. PRE-EXISTING. `readExistingLearnings` (worker 11-phase-8-learning.ts ~:591) and `collectKbFiles` (worker \_rag-index.ts ~:94, `KNOWLEDGE_SOURCE_PREFIXES`) read only `.haive-data/learnings/`, and `migrateLegacyKnowledge` (onboarding \_kb-legacy.ts) runs only from 08-knowledge-acquisition, so a repository keeps them dark until it is re-onboarded. MEASURED on the dev install: 192 of 198 learnings at HEAD sit under `.claude/learnings/` in 59 repositories; 0 of 70 step-11 runs were shown an existing learning. Fix direction: run the learnings half of the migration on the workflow path before 02-pre-rag-sync indexes, or read both dirs.
+2. The `learning-recorder` persona forbids what step 11 asks for. PRE-EXISTING. The template (onboarding \_agent-templates.ts ~:805-864) says "Add, never overwrite" and lists folding a lesson into an existing entry as an anti-pattern; step 11 asks for `update`/`delete` ops (~:1146-1150) and tells the agent to follow that persona when the repository has it (~:1119-1125), which most onboarded repositories do. MEASURED: 247 entries over 70 runs, all inserts (confounded by item 1). Fix direction: make the template match the reconcile protocol, with the template-manifest bump `docs/architecture/onboarding-upgrades.md` asks for.
 
 ### T559 · FNF[gated-test-hygiene] · gated test addresses and the gated-list check in driver gates (+1)
 
