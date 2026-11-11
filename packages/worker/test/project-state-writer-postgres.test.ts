@@ -113,7 +113,11 @@ vi.mock('../src/project-state/set-aside.js', async (original) => {
 
 // Deliberately no DATABASE_URL fallback. This suite is opt-in, only on its exclusive fixture.
 const url = process.env.T266_DATABASE_URL;
-if (url && !/^\/(?:codex|test)_t266_[a-z0-9_]+$/.test(new URL(url).pathname))
+if (
+  url &&
+  (!['/codex_t266_', '/test_t266_'].some((prefix) => new URL(url).pathname.startsWith(prefix)) ||
+    !/^\/[a-z]+_t266_[a-z0-9_]+$/.test(new URL(url).pathname))
+)
   throw new Error('T266 requires its assigned database');
 if (url && ['', '5432', '6379'].includes(new URL(url).port))
   throw new Error('T266 requires its assigned PostgreSQL port');
