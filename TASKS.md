@@ -228,7 +228,7 @@ Read so far: `refreshProjectState` (`worker/src/project-state/refresh.ts` ~:100-
 
 ### T611 · FNF[replace-zip-followups] · Replace ZIP mode and replacement-record follow-ups (+10)
 
-status: open · kind: fix · found: J (#487) reviews 2026-11-11 · priority: P3
+status: in progress (bundle K2, run 2026-11-11, branch fix/K2-replace-zip-followups) · kind: fix · found: J (#487) reviews 2026-11-11 · priority: P3
 Low unless marked. Code in api `routes/bundles.ts`, worker `bundle-ingest.ts`, `data-migrations.ts` (stranded-replacement sweep), web `bundle-composer.tsx`.
 
 1. (PRE-EXISTING, consequential) Replacement admission holds a DB transaction open during its Redis job check (`bundles.ts` ~:899). Do the Redis check outside the transaction or bound it.
