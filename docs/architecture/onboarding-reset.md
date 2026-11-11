@@ -21,7 +21,7 @@ name the sync base holds, with `settings/` swept before `state/`: a settings fil
 AGENTS.md rules override itself survives the reset, as every portable setting column does, and the
 next 12 writes `settings/agent-rules.md` again from it. A sync that read the checkout before the
 reset stands down (`superseded`, by `onboarding_reset_at`) and one that meets a reset holding the
-root claim defers, so neither writes the column, the ledger or a base back. It retires the record's pending revision, write and rules work but keeps any pending owner/mode metadata (`project_state_outbox.kept_metadata`), including entries for the `plan.json` and `plan.md` it leaves in place.
+root claim defers, so neither writes the column, the ledger or a base back. It retires the record's pending revision, write and rules work but keeps any pending owner/mode metadata (`project_state_outbox.kept_metadata`), including entries for the `plan.json` and `plan.md` it leaves in place. An entry whose file the reset removed stays pending until re-onboarding recreates the file.
 
 It also removes `cli/<provider>.json` for validated names recorded in the valid current explicit CLI
 contract or the sync base, read before either is cleared; prior base names still prove ownership
