@@ -209,6 +209,7 @@ export function buildPromptStep(
   index: number,
 ): StepDefinition<PromptStepDetect, PromptStepOutput> {
   const def: StepDefinition<PromptStepDetect, PromptStepOutput> = {
+    editsCodeOrTests: entry.capabilities.includes('file_write'),
     metadata: {
       id: stepId,
       workflowType: 'custom',

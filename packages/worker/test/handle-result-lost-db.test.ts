@@ -7,6 +7,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { logger, type WorkflowType } from '@haive/shared';
+import { promptStepEntrySchema } from '@haive/shared/modularity';
 import {
   handleResult,
   markTaskCancelled,
@@ -520,6 +521,52 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
     expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '08-phase-5-verify', round: 0 });
     expect(await eventTypes(w.taskId)).not.toContain('validation.recheck_requested');
   });
+
+  it.each([true, false])(
+    'rechecks custom prompt source edits only with file_write=%s',
+    async (writes) => {
+      const source = 'custom.demo.edit';
+      const w = await lateFixer(source);
+      const runListSnapshot = w.ctx.runListSnapshot!.map((id) =>
+        id === '08b-test-management' ? source : id,
+      );
+      const customSteps = {
+        [source]: promptStepEntrySchema.parse({
+          slug: 'edit',
+          title: 'Edit',
+          template: 'Edit the source',
+          capabilities: writes ? ['file_write'] : [],
+          timeoutMs: 60_000,
+        }),
+      };
+      await db
+        .update(schema.tasks)
+        .set({ runListSnapshot, customSteps })
+        .where(eq(schema.tasks.id, w.taskId));
+      await writeFile(path.join(w.dir, 'a.ts'), 'export const a = 3;');
+      await handleResult(db, { ...w.ctx, runListSnapshot, customSteps }, source, {
+        status: 'done',
+        row: w.row,
+        output: {},
+      });
+      expect(h.adds.at(-1)?.data).toMatchObject({
+        stepId: writes ? '07c-ddev-reconcile' : '08-phase-5-verify',
+        round: writes ? 1 : 0,
+      });
+      const events = await db.query.taskEvents.findMany({
+        where: eq(schema.taskEvents.taskId, w.taskId),
+      });
+      const recheck = events.find((event) => event.eventType === 'validation.recheck_requested');
+      if (writes)
+        expect(recheck?.payload).toMatchObject({
+          affectedFiles: ['a.ts'],
+          resumeStepId: '08-phase-5-verify',
+          round: 1,
+        });
+      else expect(recheck).toBeUndefined();
+      expect(await eventTypes(w.taskId)).not.toContain('fix_loop.requested');
+    },
+  );
 
   it('reconciles a validation fixer before validating again even at the fix cap', async () => {
     const w = await lateFixer();
