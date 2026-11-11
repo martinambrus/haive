@@ -60,6 +60,7 @@ const h = vi.hoisted(() => ({
   copyFault: null as null | ((src: string, dest: string) => Promise<void>),
   holding: 0,
   taskWorktrees: [] as Record<string, unknown>[],
+  legacyWorktrees: [] as Record<string, unknown>[],
   processor: null as Processor | null,
 }));
 vi.mock('../src/repo/clone.js', async (original) => {
@@ -118,6 +119,7 @@ const row: { status: string; statusMessage?: string; errorCode?: string | null }
 const db = {
   execute: async () => {},
   query: {
+    taskSteps: { findMany: async () => h.legacyWorktrees },
     users: { findFirst: async () => ({ role: 'admin' }) },
     tasks: {
       findMany: async (opts: { columns?: { worktreePath?: boolean } }) =>
@@ -140,6 +142,7 @@ beforeEach(async () => {
   row.status = 'cloning';
   h.holding = 0;
   h.taskWorktrees = [];
+  h.legacyWorktrees = [];
   h.copyFault = null;
   fsFaults.remove = false;
   fsFaults.stat = null;
@@ -810,6 +813,30 @@ it('refuses a rebuild at pickup when an unfinished task has a worktree under the
   expect((await readdir(path.dirname(dest))).filter((n) => n.includes('.aside-'))).toEqual([]);
   expect(h.persist).not.toHaveBeenCalled();
 });
+
+it.each([false, true])(
+  'recounts legacy worktrees under the task lock (recovery: %s)',
+  async (recoverCheckout) => {
+    const { dest } = await fixture();
+    await rm(path.join(dest, '.git/HEAD'));
+    h.helper.mockImplementationOnce(async () => {
+      h.taskWorktrees = [{ id: 'legacy-task', worktreePath: null }];
+      h.legacyWorktrees = [
+        {
+          taskId: 'legacy-task',
+          output: { mode: 'worktree', worktreePath: path.join(dest, '.haive/worktrees/legacy') },
+        },
+      ];
+    });
+
+    await expect(handleRefresh({ ...remotePayload, recoverCheckout }, db, root)).rejects.toThrow(
+      '1 task has a worktree inside this checkout',
+    );
+    expect(h.clone).not.toHaveBeenCalled();
+    expect(h.persist).not.toHaveBeenCalled();
+    expect((await readdir(path.dirname(dest))).filter((n) => n.includes('.aside-'))).toEqual([]);
+  },
+);
 
 it.each([false, true])(
   'recounts worktrees under the task lock after credentials are prepared (recovery: %s)',

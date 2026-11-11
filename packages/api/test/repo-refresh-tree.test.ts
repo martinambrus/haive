@@ -38,6 +38,7 @@ function setup(repo: Record<string, unknown>, taskStatus?: string, task = {}) {
   const fake = createFakeDb({
     repositories: schema.repositories,
     tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
     repoUploads: schema.repoUploads,
   });
   fake.insert(schema.repositories, {
@@ -441,6 +442,31 @@ it('keeps the recovery action available when its enqueue fails', async () => {
 describe('rebuild admission for task worktrees and repaired sources', () => {
   const recover = () => app.request(`/${REPO}/recover-checkout`, { method: 'POST' });
   const checkout = `/var/lib/haive/repos/${USER}/${REPO}`;
+  it('refuses a failed task with only a legacy setup output pointer', async () => {
+    const fake = setup(
+      {
+        source: 'git_https',
+        remoteUrl: 'https://example.com/r.git',
+        status: 'error',
+        errorCode: 'checkout_repair_needed',
+      },
+      'failed',
+      { id: '00000000-0000-4000-8000-0000000000d1', worktreePath: null, worktreeBranch: null },
+    );
+    fake.insert(schema.taskSteps, {
+      taskId: '00000000-0000-4000-8000-0000000000d1',
+      stepId: '01-worktree-setup',
+      round: 0,
+      status: 'done',
+      output: { mode: 'worktree', worktreePath: `${checkout}/.haive/worktrees/legacy` },
+    });
+
+    const response = await recover();
+    expect(response.status).toBe(409);
+    expect(await response.text()).toContain('1 task has a worktree inside this checkout');
+    expect(status(fake)).toBe('error');
+    expect(h.add).not.toHaveBeenCalled();
+  });
   it.each(['failed', 'created'])(
     'refuses a %s task worktree until the task is cancelled',
     async (taskStatus) => {
