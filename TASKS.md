@@ -1601,7 +1601,7 @@ Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/rou
 
 ### T598 · gate-3 commit stages a Claude Code `.claude/settings.local.json`
 
-status: taken · owner: t598-settings-local@DESKTOP-IUBG9OP · since: 2026-11-11T12:00Z · last: 2026-11-11T12:00Z · kind: fix · found: user report 2026-11-11 · priority: P2
+status: taken · owner: t598-settings-local@DESKTOP-IUBG9OP · since: 2026-11-11T12:00Z · last: 2026-11-11T12:10Z · PR #1072 (branch fix/T598-claude-settings-local); fix moved to `.git/info/exclude` (secret-mask globs would carry the file into worktrees) · kind: fix · found: user report 2026-11-11 · priority: P2
 "Yes, and don't ask again" in an interactive Claude Code session writes the approved command verbatim (secrets included) into `.claude/settings.local.json`. A user running `claude` in the task terminal (it opens in the task worktree) creates that file there, and `10-gate-3-commit` stages with `git add -A` (`stageAllArgs`, `_gitlink-registration.ts` ~:25), so a repository that does not gitignore it gets it committed. The default secret-mask globs do not list it either. Fix: exclude `**/.claude/settings.local.json` from the gate-3 stage and add it to the default secret-mask globs.
 
 ## Done
