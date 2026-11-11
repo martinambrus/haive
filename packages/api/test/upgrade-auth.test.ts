@@ -1,6 +1,6 @@
 vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
-  tryCliAuthLock: async () => async () => {},
+  tryCliAuthLock: async () => Object.assign(async () => {}, { assertHeld: async () => {} }),
 }));
 import { readFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';

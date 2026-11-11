@@ -1,4 +1,10 @@
-const authLock = vi.hoisted(() => ({ acquire: vi.fn(), release: vi.fn(async () => {}) }));
+const authLock = vi.hoisted(() => ({
+  acquire: vi.fn(),
+  release: Object.assign(
+    vi.fn(async () => {}),
+    { assertHeld: vi.fn(async () => {}) },
+  ),
+}));
 vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
   tryCliAuthLock: authLock.acquire,
