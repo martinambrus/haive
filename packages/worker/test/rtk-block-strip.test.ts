@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, readlink, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -10,6 +10,7 @@ import {
 } from '@haive/shared';
 import { RULES_FILE_READ_CAP, rtkBlockFiles } from '@haive/shared/rules-files';
 import {
+  appendRtkBlock,
   restoreRtkBlocks,
   stripRtkBlocks,
   withoutRtkBlocks,
@@ -68,6 +69,47 @@ describe('stripRtkBlocks', () => {
 
   const read = (rel: string) => readFile(path.join(repo, rel), 'utf8');
   const noRecord = async () => {};
+
+  it.each(['strip', 'append'] as const)(
+    '%s records while the public file is still present',
+    async (action) => {
+      const before = action === 'strip' ? appendBlock('# Project\n') : '# Project\n';
+      await writeFile(path.join(repo, 'AGENTS.md'), before);
+      let recorded = false;
+      const record = async () => {
+        expect(await read('AGENTS.md')).toBe(before);
+        expect((await readdir(repo)).some((name) => name.includes('.haive-park-'))).toBe(false);
+        recorded = true;
+      };
+      if (action === 'strip') {
+        expect((await stripRtkBlocks(repo, record))[0]?.result).toBe('stripped');
+      } else {
+        expect(
+          (await appendRtkBlock(repo, 'AGENTS.md', buildRtkAwarenessBlock(), record)).result,
+        ).toBe('appended');
+      }
+      expect(recorded).toBe(true);
+    },
+  );
+
+  it.each(['strip', 'append'] as const)(
+    '%s keeps an edit saved during the record write',
+    async (action) => {
+      await writeFile(
+        path.join(repo, 'AGENTS.md'),
+        action === 'strip' ? appendBlock('# Project\n') : '# Project\n',
+      );
+      const record = async () => {
+        await writeFile(path.join(repo, 'AGENTS.md'), '# Saved meanwhile\n');
+      };
+      const result =
+        action === 'strip'
+          ? (await stripRtkBlocks(repo, record))[0]!
+          : await appendRtkBlock(repo, 'AGENTS.md', buildRtkAwarenessBlock(), record);
+      expect(result.result).toBe('refused');
+      expect(await read('AGENTS.md')).toBe('# Saved meanwhile\n');
+    },
+  );
 
   it('strips the awareness block and a legacy import, leaving a file with none alone', async () => {
     await writeFile(path.join(repo, 'AGENTS.md'), appendBlock('# Project\n'));
