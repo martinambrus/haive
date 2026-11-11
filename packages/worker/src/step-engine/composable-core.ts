@@ -273,7 +273,6 @@ export const CORE_COMPOSABLE_STEPS: readonly ComposableStepEntry[] = [
       'tests',
       'verification',
       'review',
-      'commit',
     ],
   },
   {

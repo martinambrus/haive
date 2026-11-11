@@ -2,7 +2,7 @@ import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormField, FormSchema, ExecutionPath, VerifyCommands } from '@haive/shared';
-import { CONFIG_KEYS, configService } from '@haive/shared';
+import { CONFIG_KEYS, configService, extractFormDefaults } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { loadDeclaredVerifyCommands, resolveDdevWorkspace } from './_task-meta.js';
@@ -135,7 +135,25 @@ function declaredVerifyNote(declared: VerifyCommands | undefined): FormField[] {
   ];
 }
 
+// The source field for each downstream answer. Fixed defaults have no source field.
+const ANSWER_FIELDS: Record<string, Record<string, keyof RunConfig>> = {
+  '06b-sprint-planning': {
+    decision: 'sprintDecision',
+    autoResolveConflicts: 'sprintAutoResolveConflicts',
+    reviewEnabled: 'sprintReviewEnabled',
+  },
+  '08-phase-5-verify': {
+    runTest: 'verifyRunTest',
+    runLint: 'verifyRunLint',
+    runTypecheck: 'verifyRunTypecheck',
+  },
+  '08a-browser-setup': { mode: 'browserMode' },
+  '08a-browser-verify': { mode: 'browserMode' },
+  '08b-test-management': { action: 'testAction', runTests: 'testRunTests' },
+};
+
 export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
+  preserveOmittedFormFields: true,
   metadata: {
     id: '06-run-config',
     workflowType: 'workflow',
@@ -292,7 +310,7 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
     return {
       title: 'Run configuration',
       description:
-        'The spec is approved. Set how the implementation and verification steps run — these answers let them run hands-free until Gate 2 (developer verification). Sensible defaults are pre-filled (with an AI recommendation where available); adjust as needed.',
+        'Set how the implementation and verification steps run — these answers let them run hands-free until Gate 2 (developer verification). Sensible defaults are pre-filled (with an AI recommendation where available); adjust as needed.',
       fields: [
         {
           type: 'select',
@@ -455,7 +473,13 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
   },
 
   async apply(ctx, args): Promise<RunConfig> {
-    const values = args.formValues as Record<string, unknown>;
+    const submitted = args.formValues as Record<string, unknown>;
+    // The runner keeps this step's answers sparse so omitted fields cannot masquerade
+    // as submitted overrides. Resolve the same dynamic defaults as its form for workflows.
+    const defaults = extractFormDefaults(
+      runConfigStep.form!(ctx, args.detected, args.llmOutput) as FormSchema,
+    );
+    const values = { ...defaults, ...submitted };
     const str = (v: unknown, fallback: string): string => (typeof v === 'string' ? v : fallback);
     const bool = (v: unknown, fallback: boolean): boolean =>
       typeof v === 'boolean' ? v : fallback;
@@ -490,41 +514,32 @@ export const runConfigStep: StepDefinition<RunConfigDetect, RunConfig> = {
     // never blocks the run.
     const preAnswers: Record<string, Record<string, unknown>> = {
       '06a-db-migrate': {},
-      '06b-sprint-planning': {
-        decision: runConfig.sprintDecision,
-        autoResolveConflicts: runConfig.sprintAutoResolveConflicts,
-        reviewEnabled: runConfig.sprintReviewEnabled,
-      },
       '07-phase-2-implement': {},
-      '08-phase-5-verify': {
-        runTest: runConfig.verifyRunTest,
-        runLint: runConfig.verifyRunLint,
-        runTypecheck: runConfig.verifyRunTypecheck,
-      },
-      // Propagate the chosen browser mode to BOTH the setup step (whose output
-      // 08a-verify / Gate-2 read to drive the live browser + the directAccess flag)
-      // and the verify step's own form, so 06 is the single browser-mode source of
-      // truth. 06 never auto-submits, so this is the user's explicit choice.
-      '08a-browser-setup': { mode: runConfig.browserMode },
-      '08a-browser-verify': { mode: runConfig.browserMode },
-      '08b-test-management': {
-        action: runConfig.testAction,
-        runTests: runConfig.testRunTests,
-      },
       '08e-insights-triage': { selectedInsights: [] },
     };
+    for (const [stepId, fields] of Object.entries(ANSWER_FIELDS)) {
+      preAnswers[stepId] = Object.fromEntries(
+        Object.entries(fields).map(([key, source]) => [key, runConfig[source]]),
+      );
+    }
 
     // Creation copied the type presets through normalizeStepFormValues. This step
-    // is their only later writer: keep unrelated steps and fields, with this submitted
-    // run configuration taking precedence on the exact fields it controls. Empty
-    // 06a/07 entries must not erase a type's migration or implementation guidance.
+    // is their only later writer: submitted fields win, while defaults only fill gaps.
+    // Empty 06a/07 entries must not erase migration or implementation guidance.
     const task = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
       columns: { preAnswers: true },
     });
     const mergedPreAnswers = { ...task?.preAnswers };
     for (const [stepId, answers] of Object.entries(preAnswers)) {
-      mergedPreAnswers[stepId] = { ...mergedPreAnswers[stepId], ...answers };
+      const merged = { ...mergedPreAnswers[stepId] };
+      for (const [key, value] of Object.entries(answers)) {
+        const source = ANSWER_FIELDS[stepId]?.[key];
+        if (!Object.hasOwn(merged, key) || (source && Object.hasOwn(submitted, source))) {
+          merged[key] = value;
+        }
+      }
+      mergedPreAnswers[stepId] = merged;
     }
 
     await ctx.db

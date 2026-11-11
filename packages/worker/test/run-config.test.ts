@@ -204,6 +204,60 @@ describe('06-run-config server-side validation', () => {
 });
 
 describe('06-run-config apply', () => {
+  it('keeps mapped presets when the corresponding config fields were omitted', async () => {
+    const presets = {
+      '06b-sprint-planning': {
+        decision: 'use_single_agent',
+        autoResolveConflicts: false,
+        reviewEnabled: false,
+      },
+      '08-phase-5-verify': { runTest: false, runLint: false, runTypecheck: false },
+      '08a-browser-setup': { mode: 'interactive' },
+      '08a-browser-verify': { mode: 'mcp' },
+      '08b-test-management': { action: 'skip', runTests: false },
+      '08e-insights-triage': { selectedInsights: ['keep-insight'] },
+    };
+    const { ctx, sets } = makeApplyCtx(presets);
+    await runConfigStep.apply(ctx, applyArgs({}));
+    expect(sets[0]!.preAnswers).toMatchObject(presets);
+  });
+
+  it('replaces mapped presets with submitted values, including values equal to defaults', async () => {
+    const { ctx, sets } = makeApplyCtx({
+      '08b-test-management': { action: 'skip', runTests: true },
+      '08a-browser-setup': { mode: 'interactive' },
+      '08a-browser-verify': { mode: 'mcp' },
+    });
+    await runConfigStep.apply(
+      ctx,
+      applyArgs({ testAction: 'manage', testRunTests: false, browserMode: 'skip' }),
+    );
+    expect(sets[0]!.preAnswers).toMatchObject({
+      '08b-test-management': { action: 'manage', runTests: false },
+      '08a-browser-setup': { mode: 'skip' },
+      '08a-browser-verify': { mode: 'skip' },
+    });
+  });
+
+  it('keeps all workflow defaults when there are no presets', async () => {
+    const { ctx, sets } = makeApplyCtx();
+    await runConfigStep.apply(ctx, applyArgs({}));
+    expect(sets[0]!.preAnswers).toEqual({
+      '06a-db-migrate': {},
+      '06b-sprint-planning': {
+        decision: 'proceed',
+        autoResolveConflicts: true,
+        reviewEnabled: true,
+      },
+      '07-phase-2-implement': {},
+      '08-phase-5-verify': { runTest: true, runLint: true, runTypecheck: true },
+      '08a-browser-setup': { mode: 'skip' },
+      '08a-browser-verify': { mode: 'skip' },
+      '08b-test-management': { action: 'manage', runTests: true },
+      '08e-insights-triage': { selectedInsights: [] },
+    });
+  });
+
   it('keeps custom presets and unrelated downstream fields while submitted config wins', async () => {
     const { ctx, sets } = makeApplyCtx({
       '06-run-config': { browserMode: 'interactive' },

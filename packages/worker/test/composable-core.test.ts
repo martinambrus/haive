@@ -36,6 +36,12 @@ describe('core composable catalog', () => {
     ).toEqual([]);
   });
 
+  it('allows run configuration after commit because commit consumes none of its settings', () => {
+    expect(
+      validateComposition(['01-worktree-setup', '10-gate-3-commit', '06-run-config'], catalog),
+    ).toEqual([]);
+  });
+
   it.each([
     ['01-worktree-setup', '07-phase-2-implement'],
     ['01-worktree-setup', '07-phase-2-implement', '08b-test-management'],
