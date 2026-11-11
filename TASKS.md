@@ -283,11 +283,6 @@ status: in progress (bundle K1, run 2026-11-11, branch fix/K1-reset-provenance-b
 DECIDED by the owner 2026-11-11: the worker records the checkout branch when the reset starts; provenance counts only landings whose `landedOn` equals it; old merges without a branch stay counted as today. Overnight run authorized.
 `resolveMergedTasks` (api `routes/repos.ts` ~:1195-1245) counts a task's 11d skill-sync output as reaching the checkout when its step 12 merged, whatever branch the merge landed on: the legacy `merge_resolve_state.merged === true` path (PRE-EXISTING; `merge-resolver.ts` sets it with no branch check) and, since #1080, a `merge.landed` event. A cross-branch merge leaves the checkout unchanged, so a later onboarding reset can delete a user's untouched skill at the same path. A fix must compare the landing's `landedOn` with the branch the reset is reading, which the api cannot read (no git there): record the checkout branch at reset start in the worker, or have the worker resolve provenance. Decide where.
 
-### T616 · fix · boot warning for the cross-host sign-in throttle
-
-status: taken (bundle M1, overnight 2026-11-11) · kind: fix · found: H2 (#435) · priority: P3
-DECIDED by the owner 2026-11-11: when web and api hostnames differ (web-origin proxy mode) and web's address is not covered by `HAIVE_TRUSTED_PROXIES`, log one warning at api boot naming the operator rule in `docs/architecture/api-auth.md` (cross-host web-proxy mode). The docs rule stays; the warning only reports it. Overnight run authorized.
-
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
 **Found something outside your task?** Search the board first (`grep -n "<file>\|<symbol>\|<slug>"`).
@@ -1565,12 +1560,6 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
-### T587 · Cancel, step abort and plan discard clear an administrator's pause with no audit row (owner confirm)
-
-status: taken (bundle M1, overnight 2026-11-11) · kind: decision · found: #1058 review 2026-11-10 · priority: P4
-DECIDED by the owner 2026-11-11: add a best-effort audit row when Cancel, step abort or plan discard clear an administrator's pause, as Retry's resume does. Overnight run authorized.
-PRE-EXISTING. Cancel (api tasks/index.ts ~:1379), step abort (tasks/steps.ts ~:1756) and plan merge discard (routes/plan.ts ~:1406) clear any pause, an administrator's included, with no `byAdmin` event or audit row. release.md ~:120 documents that they clear any pause; decide whether the audit trail should record it (a best-effort row like the Retry resume) or stay as documented.
-
 ### T588 · FNF[worker-audit-writer] · worker audit writer follow-ups (+5)
 
 status: open · kind: fix · found: #1057 reviews 2026-11-10 · priority: P4
@@ -1649,6 +1638,7 @@ Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/rou
 
 ## Done
 
+- T587 + T616 — Cancel, step abort and plan merge discard write the Retry-style `task.resumed` event and `task.admin_resume` row (best effort, savepoint) when they clear an administrator's pause; the api warns once at boot in cross-host proxy mode with an empty `HAIVE_TRUSTED_PROXIES` — PR #1084 (be18fe456), 2026-11-11. Lows: the api's hostname compare duplicates the web rule; a list of only invalid entries counts as configured.
 - T611 items 1, 3-10 — Replace ZIP admission checks the bundle job outside its transaction and re-checks the row generation under the lock; catalogs parse before the write transaction; refused record leaves fail the replacement; stored bundle git failures and upload write/move 500s carry no paths; the composer shows API refusal reasons — PR #1083 (0de15fd1d), 2026-11-11.
 - T609 — closed by the owner 2026-11-11: the chmod window between capture and removal is accepted (milliseconds, needs a person chmodding a Haive projection mid-move, result is only the earlier mode); no mechanism
 - T329 part A + items 1-2 — a merge a cancel left committed on the local base is recorded (`merge.landed`, in the step-state transaction) and reported once under the merge-dir lock (`merge.left_committed`, banner), never undone; reset provenance counts it; cancelled push copy and step-retry guard comments corrected — PR #1080 (8256fdff6), 2026-11-11; full suite + PR CI green; part B open (E3)
