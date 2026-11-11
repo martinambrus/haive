@@ -22,6 +22,7 @@ describe('validation successor runtime hand-off', () => {
       const steps = [step(RECONCILE), step(VALIDATE), step('verify'), step('commit')];
       const db = {
         query: {
+          tasks: { findFirst: vi.fn().mockResolvedValue({ maxFixRounds: 2 }) },
           taskEvents: {
             findFirst: vi.fn().mockResolvedValue(
               round
@@ -33,6 +34,11 @@ describe('validation successor runtime hand-off', () => {
           },
         },
       } as unknown as Database;
+      Object.assign(db, {
+        select: () => ({
+          from: () => ({ leftJoin: () => ({ where: async () => [{ n: round }] }) }),
+        }),
+      });
       h.snapshot.mockResolvedValue({ '.ddev/config.yaml': 'after' });
       expect(
         await validationSuccessor(db, ctx, VALIDATE, round, steps, {
@@ -43,12 +49,30 @@ describe('validation successor runtime hand-off', () => {
         next: steps[0],
         round: round + 1,
         recheck: {
+          sourceStepId: VALIDATE,
           resumeStepId: round ? 'commit' : 'verify',
           affectedFiles: ['.ddev/config.yaml'],
         },
       });
     },
   );
+  it.each([0, 2])('restores ordinary verdict routing after %s runtime hand-offs', async (cap) => {
+    const steps = [step(RECONCILE), step(VALIDATE), step('verify')];
+    const db = {
+      query: {
+        tasks: { findFirst: vi.fn().mockResolvedValue({ maxFixRounds: cap }) },
+        taskEvents: { findFirst: vi.fn().mockResolvedValue(undefined) },
+      },
+      select: () => ({
+        from: () => ({ leftJoin: () => ({ where: async () => [{ n: cap }] }) }),
+      }),
+    } as unknown as Database;
+    h.snapshot.mockClear();
+    expect(
+      await validationSuccessor(db, ctx, VALIDATE, cap, steps, { runtimeChanged: true }),
+    ).toEqual({ next: steps[2], round: cap, evaluateFixLoop: true });
+    expect(h.snapshot).not.toHaveBeenCalled();
+  });
 
   it.each([{ tail: [] }, { tail: [step(RECONCILE)] }])(
     'refuses a runtime change without an earlier reconciliation step: %j',

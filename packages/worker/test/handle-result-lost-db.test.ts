@@ -456,6 +456,7 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
 
   afterEach(() => {
     vi.restoreAllMocks();
+    stepRegistry.override(stub('07b-phase-4-validate', 5));
   });
 
   afterAll(async () => {
@@ -568,9 +569,10 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
     },
   );
 
-  it('reconciles a validation fixer before validating again even at the fix cap', async () => {
+  it('reconciles a validation fixer before validating again within the hand-off cap', async () => {
     const w = await lateFixer();
     const validateId = '07b-phase-4-validate';
+    await db.update(schema.tasks).set({ maxFixRounds: 2 }).where(eq(schema.tasks.id, w.taskId));
     const baseline = await readValidationSnapshot({ db, taskId: w.taskId });
     await mkdir(path.join(w.dir, '.ddev'));
     await writeFile(path.join(w.dir, '.ddev/config.yaml'), 'php_version: "8.4"');
@@ -625,6 +627,84 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
     expect(h.adds.at(-1)?.data).toMatchObject({ stepId: '08b-test-management', round: 1 });
   });
 
+  it.each([false, true])(
+    'bounds repeated runtime hand-offs with legacy events=%s',
+    async (legacy) => {
+      const w = await lateFixer();
+      const validateId = '07b-phase-4-validate';
+      stepRegistry.override(phase4ValidateStep as StepDefinition);
+      const runListSnapshot = [FIX_TARGET, ...w.ctx.runListSnapshot!];
+      await db
+        .update(schema.tasks)
+        .set({ currentStepId: validateId, runListSnapshot, maxFixRounds: 2 })
+        .where(eq(schema.tasks.id, w.taskId));
+      const baseline = await readValidationSnapshot({ db, taskId: w.taskId });
+      await mkdir(path.join(w.dir, '.ddev'));
+      const ctx = { ...w.ctx, runListSnapshot, currentStepId: validateId };
+      for (let round = 0; round < 3; round++) {
+        await writeFile(path.join(w.dir, '.ddev/config.yaml'), 'php_version: "8.' + round + '"');
+        const output = {
+          runtimeChanged: true,
+          verdict: 'ISSUES_FOUND',
+          issues: [
+            { severity: 'high', file: '.ddev/config.yaml', description: 'blocking configuration' },
+          ],
+          validationSnapshot: baseline,
+        };
+        const row =
+          round === 0
+            ? (
+                await db
+                  .update(schema.taskSteps)
+                  .set({ output })
+                  .where(
+                    and(
+                      eq(schema.taskSteps.taskId, w.taskId),
+                      eq(schema.taskSteps.stepId, validateId),
+                    ),
+                  )
+                  .returning()
+              )[0]!
+            : await makeRow(w.taskId, { stepId: validateId, round, status: 'done', output });
+        await handleResult(db, { ...ctx, currentRound: round }, validateId, {
+          status: 'done',
+          row,
+          output,
+        });
+        expect(h.adds.at(-1)?.data).toMatchObject({
+          stepId: round < 2 ? '07c-ddev-reconcile' : FIX_TARGET,
+          round: round + 1,
+        });
+        if (legacy)
+          await db.execute(
+            sql`update task_events set payload = payload - 'sourceStepId' where task_id = ${w.taskId} and event_type = 'validation.recheck_requested'`,
+          );
+      }
+      const events = await eventTypes(w.taskId);
+      expect(events.filter((type) => type === 'validation.recheck_requested')).toHaveLength(2);
+      expect(events.filter((type) => type === 'fix_loop.started')).toHaveLength(1);
+      expect(events.filter((type) => type === 'step.done')).toHaveLength(2);
+      // Once the ordinary fix budget is exhausted, the same output parks at its existing gate.
+      await db
+        .insert(schema.taskEvents)
+        .values({ taskId: w.taskId, eventType: 'fix_loop.started', payload: { round: 99 } });
+      const output = {
+        runtimeChanged: true,
+        verdict: 'ISSUES_FOUND',
+        issues: [{ severity: 'high', file: 'a.ts', description: 'still blocking' }],
+      };
+      const row = await makeRow(w.taskId, { stepId: validateId, round: 3, status: 'done', output });
+      h.adds.length = 0;
+      await handleResult(db, { ...ctx, currentRound: 3 }, validateId, {
+        status: 'done',
+        row,
+        output,
+      });
+      expect(h.adds).toEqual([]);
+      expect(await rowOf(row.id)).toMatchObject({ status: 'waiting_form' });
+      expect(await eventTypes(w.taskId)).toContain('fix_loop.escalated');
+    },
+  );
   it.each(['08b-test-management', '08a-browser-verify'])(
     'revalidates actual edits after a successful %s without spending a fix round',
     async (source) => {

@@ -1,4 +1,4 @@
-import { and, desc, eq, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, lte, or, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import {
@@ -7,6 +7,7 @@ import {
   type ValidationSnapshot,
 } from '../step-engine/steps/workflow/_validation-snapshot.js';
 import type { ResolvedTaskContext } from './run-list.js';
+import { DEFAULT_MAX_FIX_ROUNDS } from '../step-engine/steps/workflow/_fix-loop.js';
 
 const VALIDATE = '07b-phase-4-validate';
 const RECONCILE = '07c-ddev-reconcile';
@@ -25,7 +26,8 @@ export class ValidationSnapshotError extends Error {
 export interface ValidationSuccessor {
   next: StepDefinition | undefined;
   round: number;
-  recheck?: { resumeStepId: string | null; affectedFiles: string[] };
+  recheck?: { sourceStepId: string; resumeStepId: string | null; affectedFiles: string[] };
+  evaluateFixLoop?: true;
 }
 
 /** A successful late fixer is not a defect: use fresh rows for 07c/07b, then resume AFTER it.
@@ -67,17 +69,40 @@ export async function validationSuccessor(
       runtimeChanged?: true;
       validationSnapshot?: ValidationSnapshot | null;
     } | null;
-    if (!validation?.runtimeChanged) {
+    const resumed = (): ValidationSuccessor => {
       if (!event) return ordinary;
       if (resumeStepId === null) return { next: undefined, round };
       const next = steps.find((s) => s.metadata.id === resumeStepId);
       if (!next) throw new Error(`Validation return step ${resumeStepId} is not in the run list`);
       return { next, round };
-    }
+    };
+    if (!validation?.runtimeChanged) return resumed();
     if (ids.indexOf(RECONCILE) < 0 || ids.indexOf(RECONCILE) >= validateIndex) {
       throw new ValidationSnapshotError(
         'Cannot revalidate changed runtime inputs: the run list must place 07c-ddev-reconcile before 07b-phase-4-validate.',
       );
+    }
+    const task = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, ctx.taskId),
+      columns: { maxFixRounds: true },
+    });
+    const counts = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(schema.taskEvents)
+      // Events written before sourceStepId existed still identify their source row.
+      .leftJoin(schema.taskSteps, eq(schema.taskSteps.id, schema.taskEvents.taskStepId))
+      .where(
+        and(
+          eq(schema.taskEvents.taskId, ctx.taskId),
+          eq(schema.taskEvents.eventType, VALIDATION_RECHECK_EVENT),
+          or(
+            sql`${schema.taskEvents.payload}->>'sourceStepId' = ${VALIDATE}`,
+            eq(schema.taskSteps.stepId, VALIDATE),
+          ),
+        ),
+      );
+    if ((counts[0]?.n ?? 0) >= (task?.maxFixRounds ?? DEFAULT_MAX_FIX_ROUNDS)) {
+      return { ...resumed(), evaluateFixLoop: true };
     }
     before = validation.validationSnapshot;
   } else {
@@ -108,6 +133,6 @@ export async function validationSuccessor(
         ? steps[ids.indexOf(RECONCILE)]
         : steps[validateIndex],
     round: round + 1,
-    recheck: { resumeStepId, affectedFiles },
+    recheck: { sourceStepId: stepId, resumeStepId, affectedFiles },
   };
 }

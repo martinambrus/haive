@@ -93,6 +93,7 @@ import {
   registerStepsOnce,
   dagTimeoutInfo,
   finishedStepResult,
+  finishedRoutingVerdict,
   isFreshStepEntry,
   willSkipBeforeAdmission,
   dispatchesCli,
@@ -2111,10 +2112,6 @@ export async function handleResult(
     }
     case 'done':
     case 'skipped': {
-      await record(db, ctx.taskId, result.row.id, `step.${result.status}`, {
-        stepId,
-        endedAt: endedAtOf(result.row),
-      });
       // A fan-out step DEGRADES on a dead agent rather than failing (a reviewer that died
       // is not evidence the code is wrong), so its budget kills would otherwise leave no
       // trace the UI can act on: the hint below is written only on the failed branch, and
@@ -2203,6 +2200,28 @@ export async function handleResult(
         await finishFailedStep(db, ctx, stepId, result.row, err.message, OPEN_TASK_STATUSES);
         return;
       }
+      if (successor.evaluateFixLoop) {
+        // Runtime rechecks have their own cross-round bound. At that bound, restore
+        // the ordinary verdict, including suppression, oscillation and the fix cap.
+        const verdict = await finishedRoutingVerdict(db, ctx.taskId, stepDef, {
+          ...(result.row.output as Record<string, unknown>),
+          runtimeChanged: false,
+        });
+        if (verdict?.kind === 'loop_back') {
+          const { kind: _kind, ...routing } = verdict;
+          return handleResult(
+            db,
+            ctx,
+            stepId,
+            { status: 'loop_back', row: result.row, sourceStepId: stepId, ...routing },
+            opts,
+          );
+        }
+      }
+      await record(db, ctx.taskId, result.row.id, `step.${result.status}`, {
+        stepId,
+        endedAt: endedAtOf(result.row),
+      });
       const { next, round: nextRound } = successor;
       if (next) {
         if (successor.recheck) {
