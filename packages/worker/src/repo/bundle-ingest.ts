@@ -121,7 +121,7 @@ async function setBundleFailed(db: Database, bundleId: string, error: string): P
     .update(schema.customBundles)
     .set({
       status: 'failed',
-      lastSyncError: error,
+      lastSyncError: scrubErrorPaths(error),
       lastReplacementNote: null,
       updatedAt: new Date(),
     })
