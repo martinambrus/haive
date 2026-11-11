@@ -38,7 +38,26 @@ export async function watchCheckout(
     .where(eq(schema.repositories.id, repositoryId));
   const repoPath = repo?.storagePath ?? repo?.localPath;
   if (!repoPath || repo?.status !== 'ready') return 'held';
-  const head = await readNamedCheckout(repoPath);
+  // This observation is independent of record-import admission: even a detached/unreadable
+  // checkout or an active reset must replace the previous branch with the current answer.
+  // No pooled connection is held across Git. Reset reads the last completed observation.
+  let head: Awaited<ReturnType<typeof readNamedCheckout>> = null;
+  try {
+    head = await readNamedCheckout(repoPath);
+  } finally {
+    const checkoutBranch = head?.ref.slice('refs/heads/'.length) ?? null;
+    await db
+      .update(schema.repositories)
+      .set({ checkoutBranch })
+      .where(
+        and(
+          eq(schema.repositories.id, repositoryId),
+          eq(schema.repositories.status, 'ready'),
+          sql`coalesce(${schema.repositories.storagePath}, ${schema.repositories.localPath}) = ${repoPath}`,
+          sql`${schema.repositories.checkoutBranch} IS DISTINCT FROM ${checkoutBranch}`,
+        ),
+      );
+  }
   if (!head) return 'held';
   try {
     // Public recovery and refresh own their ordered transactions. Never call either under our lock.
