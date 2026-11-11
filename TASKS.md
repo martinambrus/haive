@@ -951,7 +951,7 @@ status: parked · area: modular-haive-plan owns merge-resolver.ts landing sectio
 
 ### T435 · FNF[web-api-cookie-transport] · different web/API hostnames cannot establish the server-rendered session
 
-status: open · kind: feature · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (bundle H2, run 2026-11-11, branch fix/H2-web-origin-session) · kind: feature · user decision: resolved 2026-11-01 · priority: P2
 
 PRE-EXISTING, verified during T382/T432 recovery review. API cookies are host-only (`packages/api/src/auth/cookies.ts`), while the web proxy/layout require cookies at the web hostname; `packages/web/src/lib/api-origin.ts` accepts a different explicit API hostname. Login against that API cannot establish the SSR web session. CORS does not transfer cookies between hostnames; different sites also face SameSite=Lax. Same hostname/different ports is supported and tested. Decide on web-origin API proxying or an explicit cookie/SSO deployment contract before changing transport. Evidence: `.claude/tmp/board-run/T382/codex-review-session-recovery-fix-2.md` F2 and branch session-recovery.md. Keep single-use refresh rotation; this is separate from the current T382 correction.
 
