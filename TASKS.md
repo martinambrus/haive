@@ -222,10 +222,11 @@ Low unless marked. Code in `worker/src/project-state/kept-metadata.ts`, `set-asi
 status: open · kind: design · found: D3 (#310) Codex review P2 2026-11-11 · priority: P3
 A chmod after `captureProjectionMetadata` and before the removal goes unseen, so recovery can restore a stale, wider mode (e.g. 0600 → 0644). Refusing on mismatch alone is not enough: `rememberKeptMetadata` merges `new || existing` and the existing entry wins on retry. A fix needs a re-judge that replaces its own first entry. Decide whether that window is worth a mechanism.
 
-### T610 · investigate · two-install smoke: sweep written_revision stuck once in CI
+### T610 · investigate · two-install smoke: project-state sweep held once in CI
 
-status: open · kind: investigate · found: D3 (#1077) PR CI 2026-11-11 · priority: P2
-Run 43074635866 (head a4737e4e9): End-to-end smokes, two-install, plan-mirror sweep `written_revision` stuck at 21 until the step timed out. It passed locally (218/218) and on the CI rerun. Unknown whether PRE-EXISTING or from D3, which changed what the sweep owes (an absent restore stays pending). First check whether a pending or false `restorePendingKeptMetadata` result can hold a flush, then the job log for the sweep's `last_error`.
+status: open · kind: investigate · found: D3 (#1077) PR CI 2026-11-11 · priority: P3
+Run 43074635866 attempt 1 (head a4737e4e9), `smoke:two-install`: the check "a boot marks a repository with a render context dirty, and a row still dirty once" failed with outbox `revision 22, written_revision 21, last_error null`, and every later sweep check in that run failed the same way (nothing written, checkout clean), so the row stayed held for the rest of the run; the job then hit its 15 min limit. It passed locally (218/218) and on the CI rerun.
+Read so far: `refreshProjectState` (`worker/src/project-state/refresh.ts` ~:100-145) holds without writing an error only on `gitOperationInProgress` or a `held` result from `syncProjectStateFromCheckout`; D3 touched neither file, and its kept-metadata restore runs after both flushes in `resyncHaiveProjections`, so D3 is not implicated by the code read. Next: make the smoke log `refreshProjectState`'s outcome and reason on a failed check, then look for what left a git operation or held sync behind (an earlier check's leftover `MERGE_HEAD` or a lease) if it recurs.
 
 ### T611 · FNF[replace-zip-followups] · Replace ZIP mode and replacement-record follow-ups (+10)
 
