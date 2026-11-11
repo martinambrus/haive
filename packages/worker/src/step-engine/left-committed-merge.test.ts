@@ -8,9 +8,13 @@ import type { Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import * as gitPush from '../repo/git-push.js';
 import { recordLeftCommittedMerge } from './left-committed-merge.js';
+const locks = vi.hoisted(() => ({
+  seen: [] as string[],
+  before: undefined as ((dir: string) => void) | undefined,
+}));
 let tail = Promise.resolve();
 vi.mock('./merge-dir-claim.js', () => ({
-  inMergeDirLock: async (db: unknown, _dir: string, fn: (tx: unknown) => Promise<unknown>) => {
+  inMergeDirLock: async (db: unknown, dir: string, fn: (tx: unknown) => Promise<unknown>) => {
     const previous = tail;
     let release!: () => void;
     tail = new Promise<void>((resolve) => {
@@ -18,6 +22,8 @@ vi.mock('./merge-dir-claim.js', () => ({
     });
     await previous;
     try {
+      locks.seen.push(dir);
+      locks.before?.(dir);
       return await fn(db);
     } finally {
       release();
@@ -28,6 +34,8 @@ const exec = promisify(execFile);
 const dirs: string[] = [];
 afterEach(async () => {
   vi.restoreAllMocks();
+  locks.seen.length = 0;
+  locks.before = undefined;
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 const env = {
@@ -78,6 +86,17 @@ async function fixture() {
   return { dir, before, after, payload, events, db: db as unknown as Database };
 }
 describe('cancel reports a merge left committed on the local base', () => {
+  it('checks every recorded directory before deciding that no landing exists', async () => {
+    const f = await fixture();
+    f.events.length = 0;
+    locks.before = (dir) => {
+      if (dir === '/other')
+        f.events.push({ eventType: 'merge.landed', payload: { ...f.payload, dir } });
+    };
+    await recordLeftCommittedMerge(f.db, 't', [f.dir, '/other', f.dir]);
+    expect(locks.seen).toEqual([f.dir, '/other']);
+    expect(f.events.filter((e) => e.eventType === 'merge.left_committed')).toHaveLength(1);
+  });
   it('reports before reachDone, once across concurrent cancels and teardown retries, without undoing', async () => {
     const f = await fixture();
     await Promise.all([recordLeftCommittedMerge(f.db, 't'), recordLeftCommittedMerge(f.db, 't')]);

@@ -821,6 +821,60 @@ describe.skipIf(!url)(
       await expectCancelFinished(f.taskId);
     });
 
+    it('reports once when a merge-dir section commits its landing while cancels wait for the lock', async () => {
+      const f = await landedFixture();
+      // Pushing no longer has an open merge to report, but its recorded directory must
+      // still fence the committed report. The section already passed its liveness check.
+      f.state.phase = 'pushing';
+      await db
+        .update(schema.taskSteps)
+        .set({ mergeResolveState: f.state })
+        .where(eq(schema.taskSteps.id, f.stepId));
+      let held!: () => void;
+      const holding = new Promise<void>((resolve) => (held = resolve));
+      let publish!: () => void;
+      const publishing = new Promise<void>((resolve) => (publish = resolve));
+      const writer = settle(
+        peer.transaction(async (tx) => {
+          await tx.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended(${'merge-dir:' + f.dir}, 0))`,
+          );
+          held();
+          await publishing;
+          await f.land(tx);
+        }),
+      );
+      await Promise.race([
+        holding,
+        writer.then((outcome) => {
+          if (!outcome.ok) throw outcome.error;
+        }),
+      ]);
+      const cancels = [settle(runCancel(f.taskId)), settle(runCancel(f.taskId))];
+      try {
+        const deadline = Date.now() + BLOCKED_WITHIN_MS;
+        while (seamsOf(f.taskId).filter((seam) => seam === 'recordLeftOpenMerges').length < 2) {
+          if (Date.now() > deadline) throw new Error('cancels never reached the merge report');
+          await sleep(20);
+        }
+        expect(await eventsOfType(f.taskId, 'merge.landed')).toEqual([]);
+        expect(await eventsOfType(f.taskId, 'task.cancel_finished')).toEqual([]);
+      } finally {
+        publish();
+        const outcomes = await Promise.all([writer, ...cancels]);
+        expect(outcomes.map(describeOutcome)).toEqual(['resolved', 'resolved', 'resolved']);
+      }
+      expect(await eventsOfType(f.taskId, 'merge.left_committed')).toHaveLength(1);
+      expect(await f.git('rev-parse', 'main')).toBe(f.after);
+      expect(
+        await db
+          .select()
+          .from(schema.mergeDirClaims)
+          .where(eq(schema.mergeDirClaims.taskId, f.taskId)),
+      ).toEqual([]);
+      expect(await eventsOfType(f.taskId, 'task.cancel_finished')).not.toHaveLength(0);
+    });
+
     it(
       'W7: a CANCEL that waits for a step row does not hold the task row, so a claim beside it cannot deadlock',
       async () => {
