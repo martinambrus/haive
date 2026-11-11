@@ -425,6 +425,7 @@ async function reachDone(
   // in both the merge state and the outbox; task-end recovery or the sweep settles it later.
   if (repositoryId)
     await settleProjections(db, repositoryId, state, async (cleared) => {
+      await saveMergeState(db, current.id, cleared);
       state = cleared;
     });
   // Pushes the commit a section read, so a pass that lost the dir cannot send another task's work.
@@ -1242,7 +1243,13 @@ async function resolveMergePhaseInMove(
   };
   const withKept = (from: MergeResolveState): MergeResolveState => {
     const metadata = { ...keptMetadataOf(kept), ...from.keptMetadata };
-    return Object.keys(metadata).length > 0 ? { ...from, keptMetadata: metadata } : from;
+    return Object.keys(metadata).length > 0
+      ? {
+          ...from,
+          keptMetadata: metadata,
+          keptMetadataStored: from.keptMetadata ? from.keptMetadataStored : true,
+        }
+      : from;
   };
   /** Saves into this step what a cancelled task's set-aside kept for the merge it left open in
    *  `dir`, committed before that merge is aborted: once it is, nothing finds that task again. */

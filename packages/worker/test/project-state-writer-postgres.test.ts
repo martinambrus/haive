@@ -57,6 +57,7 @@ import {
   sweepDirtyProjectStates,
 } from '../src/project-state/refresh.js';
 import { applyPlanPatch } from '@haive/shared/plan';
+import { settleProjections } from '../src/step-engine/merge-projections.js';
 import { withProjectionMove } from '../src/project-state/projection-move.js';
 import { sweepKeptProjectionMetadata } from '../src/project-state/kept-metadata-recovery.js';
 import { writePlanMirror, reconcilePlanFromCheckout } from '../src/plan/mirror.js';
@@ -340,11 +341,81 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
       }
       // The process lost its in-memory map after the tick, and a writer recreated the file.
       if (phase === 'capture') await chmod(join(s.root, rel), 0o644);
-      expect(await sweepKeptProjectionMetadata(db!)).toBe(1);
-      expect((await stat(join(s.root, rel))).mode & 0o7777).toBe(0o600);
+      expect(await sweepKeptProjectionMetadata(db!)).toBe(phase === 'capture' ? 0 : 1);
+      expect((await stat(join(s.root, rel))).mode & 0o7777).toBe(
+        phase === 'capture' ? 0o644 : 0o600,
+      );
       expect((await s.outbox())!.keptMetadata).toBeNull();
     },
   );
+
+  it.each(['beforeCapture', 'afterRestore'] as const)(
+    'put-back consumes judge metadata after %s failure',
+    async (point) => {
+      const s = await fixture();
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: s.root });
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.name=T',
+          '-c',
+          'user.email=t@local',
+          'commit',
+          '--allow-empty',
+          '-qm',
+          'initial',
+        ],
+        { cwd: s.root },
+      );
+      await s.write();
+      const rel = '.haive-data/state/project/render.json';
+      await chmod(join(s.root, rel), 0o600);
+      restoreFaults[point] = () => {
+        throw new Error('stop before move');
+      };
+      try {
+        await expect(setAsideHaiveProjections(db!, s.repo.id, s.root)).rejects.toThrow(
+          'stop before move',
+        );
+      } finally {
+        delete restoreFaults[point];
+      }
+      expect((await stat(join(s.root, rel))).mode & 0o7777).toBe(0o600);
+      expect((await s.outbox())!.keptMetadata).toBeNull();
+      await chmod(join(s.root, rel), 0o644);
+      await sweepKeptProjectionMetadata(db!);
+      expect((await stat(join(s.root, rel))).mode & 0o7777).toBe(0o644);
+    },
+  );
+
+  it('does not reapply a consumed map after the final merge-state save fails', async () => {
+    const s = await fixture();
+    await s.write();
+    const rel = '.haive-data/state/project/render.json';
+    let state = {
+      phase: 'done',
+      mode: 'same-branch',
+      mergeDir: s.root,
+      keptMetadata: {
+        [rel]: { owner: { uid: process.getuid!(), gid: process.getgid!() }, mode: 0o600 },
+      },
+    } as unknown as import('@haive/database').MergeResolveState;
+    await expect(
+      settleProjections(db!, s.repo.id, state, async (next) => {
+        if (!next.keptMetadata) throw new Error('final state save failed');
+        state = next;
+      }),
+    ).rejects.toThrow('final state save failed');
+    expect((await stat(join(s.root, rel))).mode & 0o7777).toBe(0o600);
+    await chmod(join(s.root, rel), 0o644);
+    expect(
+      await settleProjections(db!, s.repo.id, state, async (next) => {
+        state = next;
+      }),
+    ).toBe(true);
+    expect((await stat(join(s.root, rel))).mode & 0o7777).toBe(0o644);
+  });
 
   it('commits captured metadata before removal and keeps it after failed re-sync', async () => {
     const s = await fixture();

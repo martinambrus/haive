@@ -885,7 +885,8 @@ async function mergeOverKeptFile(synced: boolean) {
     } as never;
     const pass = resolveMergePhase(h.db as never, step, current, mkCtx(local), params);
     expect((await pass).resolved).toBe(true);
-    expect(projections.resettle).toHaveBeenCalledWith(h.db, 'repo-1', local, expect.any(Map));
+    expect(projections.resync).toHaveBeenCalledWith(h.db, 'repo-1', local);
+    expect(projections.metadata).not.toHaveBeenCalled();
     return h.getState();
   } finally {
     await rm(bare, { recursive: true, force: true, maxRetries: 5 });

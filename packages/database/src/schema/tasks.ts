@@ -760,6 +760,8 @@ export interface MergeResolveState {
    *  carries the shrink notice. Cleared when that fixer is dispatched. */
   lastFixerCut?: boolean;
   /** Owner and mode of the untracked projections a set-aside removed, by path; the merge's end gives them back. */
+  /** The outbox already owns this map; its absence there means it was consumed. */
+  keptMetadataStored?: boolean;
   keptMetadata?: Record<
     string,
     {

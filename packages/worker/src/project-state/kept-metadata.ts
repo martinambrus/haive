@@ -107,12 +107,37 @@ async function restorePendingInRecovery(
     .limit(1);
   const metadata = row?.kept?.[repoPath];
   if (!metadata) return true;
-  if (!(await restore(repoPath, keptFilesOf(metadata)))) return false;
-  if (projectionRecoveryHeld(repoPath)) return false;
-  await db.execute(sql`
-    UPDATE project_state_outbox SET
-      kept_metadata = nullif(kept_metadata - ${repoPath}::text, '{}'::jsonb), updated_at = now()
-    WHERE repository_id = ${repositoryId} AND kept_metadata -> ${repoPath}::text = ${JSON.stringify(metadata)}::jsonb
-  `);
-  return true;
+  let restored = true;
+  for (const [path, entry] of Object.entries(metadata)) {
+    if (projectionRecoveryHeld(repoPath)) return false;
+    if (!(await restore(repoPath, keptFilesOf({ [path]: entry })))) {
+      restored = false;
+      continue;
+    }
+    if (projectionRecoveryHeld(repoPath)) return false;
+    // Consume each successful file immediately. A concurrent capture of another
+    // file must neither be discarded nor make this spent capture run again.
+    await clearKeptMetadata(db, repositoryId, repoPath, { [path]: entry });
+  }
+  return restored;
+}
+
+/** Retire only the exact per-file captures a successful restore or put-back fulfilled. */
+export async function clearKeptMetadata(
+  db: DbOrTx,
+  repositoryId: string,
+  repoPath: string,
+  metadata: KeptMetadata,
+): Promise<void> {
+  for (const [path, entry] of Object.entries(metadata)) {
+    await db.execute(sql`
+      UPDATE project_state_outbox SET
+        kept_metadata = CASE WHEN (kept_metadata -> ${repoPath}::text) - ${path}::text = '{}'::jsonb
+          THEN nullif(kept_metadata - ${repoPath}::text, '{}'::jsonb)
+          ELSE jsonb_set(kept_metadata, ARRAY[${repoPath}::text], (kept_metadata -> ${repoPath}::text) - ${path}::text)
+        END, updated_at = now()
+      WHERE repository_id = ${repositoryId}
+        AND kept_metadata -> ${repoPath}::text -> ${path}::text = ${JSON.stringify(entry)}::jsonb
+    `);
+  }
 }

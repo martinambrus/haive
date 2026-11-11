@@ -62,6 +62,8 @@ import {
 
 import {
   captureProjectionMetadata,
+  clearKeptMetadata,
+  type KeptMetadata,
   keptMetadataOf,
   rememberKeptMetadata,
   restorePendingKeptMetadata,
@@ -83,6 +85,7 @@ export interface KeptFile {
   parents?: { path: string; owner: { uid: number; gid: number }; mode: number }[];
 }
 export type KeptFiles = Map<string, KeptFile>;
+const judgedMetadata = new WeakMap<KeptFiles, KeptMetadata>();
 
 export type SetAsideResult =
   | { outcome: 'clean' }
@@ -490,7 +493,10 @@ async function judgeAndMark(
   repoPath: string,
   paths: readonly string[],
   guard: RestoreGuard,
-): Promise<{ stopped: SetAsideResult } | { prints: Map<string, string>; generation: string }> {
+): Promise<
+  | { stopped: SetAsideResult }
+  | { prints: Map<string, string>; generation: string; captured: KeptMetadata }
+> {
   await guard.judgeLock(tx);
   const blocked = await guard.blocked?.(tx);
   if (blocked) return { stopped: blocked };
@@ -502,18 +508,24 @@ async function judgeAndMark(
   await restoreFaults.afterJudgeFence?.();
   if (holding > 0) return { stopped: { outcome: 'held', holding } };
   await guard.mark(tx);
-  await rememberKeptMetadata(
-    tx,
-    guard.repositoryId,
+  const metadata = await captureProjectionMetadata(
     repoPath,
-    await captureProjectionMetadata(
-      repoPath,
-      paths,
-      async (path) => (await headEntry(repoPath, path)) === null,
+    paths,
+    async (path) => (await headEntry(repoPath, path)) === null,
+  );
+  const [pending] = await tx
+    .select({ kept: schema.projectStateOutbox.keptMetadata })
+    .from(schema.projectStateOutbox)
+    .where(eq(schema.projectStateOutbox.repositoryId, guard.repositoryId))
+    .limit(1);
+  const captured = Object.fromEntries(
+    Object.entries(metadata).filter(
+      ([path]) => !Object.hasOwn(pending?.kept?.[repoPath] ?? {}, path),
     ),
   );
+  await rememberKeptMetadata(tx, guard.repositoryId, repoPath, metadata);
   await guard.base?.(tx);
-  return { prints, generation: await guard.generation(tx) };
+  return { prints, generation: await guard.generation(tx), captured };
 }
 
 /** Second transaction: the files are still as the first judged them (or already at HEAD) and the base and
@@ -595,6 +607,7 @@ async function setAsideDomain(
 ): Promise<SetAsideResult | Changed | null> {
   const judged = await db.transaction((tx) => judgeAndMark(tx, repoPath, paths, guard));
   if ('stopped' in judged) return judged.stopped;
+  judgedMetadata.set(kept, { ...judgedMetadata.get(kept), ...judged.captured });
   await restoreFaults.afterBase?.();
   const restore = (tx: Tx) => restoreJudged(tx, repoPath, judged, guard, kept, after);
   return section ? section(restore) : db.transaction(restore);
@@ -765,8 +778,7 @@ async function setAsideHaiveProjectionsInMove(
   const kept: KeptFiles = new Map();
   // A stop after anything was captured puts it back, since no move follows; the put-back skips what was not restored.
   const stop = async (result: SetAsideResult): Promise<SetAsideResult> => {
-    if (kept.size > 0)
-      await putBackProjections(db, repositoryId, repoPath, kept, sections?.putBack);
+    await putBackProjections(db, repositoryId, repoPath, kept, sections?.putBack);
     return result;
   };
   let busy = '';
@@ -998,9 +1010,10 @@ export async function resyncWithKeptMetadata(
   db: Database,
   repositoryId: string,
   repoPath: string,
-  kept: KeptFiles,
+  _kept: KeptFiles,
 ): Promise<boolean> {
-  await rememberKeptMetadata(db, repositoryId, repoPath, keptMetadataOf(kept));
+  // Capture was committed by the judge before removal. Never re-introduce a map
+  // another successful recovery has already consumed.
   return resyncHaiveProjections(db, repositoryId, repoPath);
 }
 
@@ -1112,7 +1125,12 @@ export async function putBackProjections(
   kept: KeptFiles,
   section?: RestoreSection,
 ): Promise<void> {
-  if (kept.size === 0) return;
+  const captured = { ...keptMetadataOf(kept), ...judgedMetadata.get(kept) };
+  if (kept.size === 0) {
+    await clearKeptMetadata(db, repositoryId, repoPath, captured);
+    judgedMetadata.delete(kept);
+    return;
+  }
   await restoreFaults.beforePutBack?.();
   await (section ?? ((fn) => db.transaction(fn)))(async (tx) => {
     await lockProjectState(tx, repositoryId);
@@ -1138,10 +1156,16 @@ export async function putBackProjections(
             createParents: true,
             fileMode: mode,
           });
-          if (owner) await chownNoFollow(repoPath, path, owner).catch(() => undefined);
-          await restoreKeptParents(repoPath, parents);
+          if (owner) await chownNoFollow(repoPath, path, owner);
+          if (mode !== undefined) await chmodNoFollow(repoPath, path, mode);
+          if (!(await restoreKeptParents(repoPath, parents)))
+            throw new Error('set-aside directory metadata not restored');
         } catch (err) {
           if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+          // A prior attempt may have created the file before metadata failed.
+          // Finish that hand-back before consuming its durable obligation.
+          if (!(await restoreKeptMetadata(repoPath, new Map([[path, kept.get(path)!]]))))
+            throw new Error('set-aside file metadata not restored');
         }
       } else if (bytes === null) {
         const headMode = await headFileMode(repoPath, path);
@@ -1158,7 +1182,9 @@ export async function putBackProjections(
         });
       }
     }
+    await clearKeptMetadata(tx, repositoryId, repoPath, captured);
   });
+  judgedMetadata.delete(kept);
 }
 
 /** The put-back when the caller is failing: the snapshot dies with the call, so a put-back that fails too

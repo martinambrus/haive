@@ -105,13 +105,13 @@ describe('an unreadable git never makes a re-sync throw', () => {
     expect(await resyncHaiveProjections(marksDb(), 'repo-1', '/repo')).toBe(false);
   });
 
-  it('answers false from settleProjections and saves nothing', async () => {
+  it('answers false from settleProjections and retains the durable handoff', async () => {
     calls.unreadable = true;
     const save = vi.fn();
     const given = { mergeDir: '/repo', keptMetadata: { 'a.json': { mode: 0o600 } } };
     expect(
       await settleProjections(marksDb(), 'repo-1', given as unknown as MergeResolveState, save),
     ).toBe(false);
-    expect(save).not.toHaveBeenCalled();
+    expect(save).toHaveBeenCalledExactlyOnceWith({ ...given, keptMetadataStored: true });
   });
 });

@@ -68,23 +68,25 @@ export async function sweepKeptProjectionMetadata(db: Database): Promise<number>
     .limit(25);
   for (const row of legacy) {
     const state = row.state!;
+    let expected = state;
     try {
       if (
         !(await checkoutMissing(state.mergeDir)) &&
-        (await settleProjections(db, row.repositoryId!, state, async () => {
+        (await settleProjections(db, row.repositoryId!, state, async (next) => {
           // Do not replace a newer merge state with the snapshot this sweep read.
           await db
             .update(schema.taskSteps)
             .set({
-              mergeResolveState: sql`${schema.taskSteps.mergeResolveState} - 'keptMetadata'`,
+              mergeResolveState: next,
               updatedAt: new Date(),
             })
             .where(
               and(
                 eq(schema.taskSteps.id, row.id),
-                sql`${schema.taskSteps.mergeResolveState} = ${JSON.stringify(state)}::jsonb`,
+                sql`${schema.taskSteps.mergeResolveState} = ${JSON.stringify(expected)}::jsonb`,
               ),
             );
+          expected = next;
         }))
       )
         settled++;
