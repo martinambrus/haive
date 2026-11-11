@@ -1,5 +1,9 @@
-import { MERGE_LEFT_COMMITTED_EVENT, readLandedMerge } from '@haive/shared/merge-left-open';
-import { leftOpenMerges, type MergeLeftOpenOutcome } from '@haive/shared/merge-left-open';
+import {
+  MERGE_LEFT_COMMITTED_EVENT,
+  readLandedMerge,
+  leftOpenMerges,
+  type MergeLeftOpenOutcome,
+} from '@haive/shared/merge-left-open';
 import { parseUpgradeInstant } from './upgrade-time';
 import { parseStepId } from '@haive/shared/modularity';
 
@@ -140,7 +144,7 @@ export function failureBanner(
     step.mergeResolveState.pushed !== true
   ) {
     return {
-      text: `The merge was saved locally, but its push did not finish. This task was cancelled. Push ${codeSpan(step.mergeResolveState.baseBranch)} manually from the repository terminal if you want to publish it.`,
+      text: `The merge was saved locally, but its push may not have finished. This task was cancelled. Push ${codeSpan(step.mergeResolveState.baseBranch)} manually from the repository terminal if you want to publish it.`,
     };
   }
   return { text: step.errorMessage };

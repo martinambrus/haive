@@ -692,6 +692,23 @@ describe('cancelled step-12 push failure copy', () => {
     const banner = failureBanner(failedPush, { taskStatus: 'cancelled' });
     expect(banner?.text).not.toContain('retry');
     expect(banner?.text).toContain('Push `main` manually');
+    expect(banner?.text).toContain('its push may not have finished');
+  });
+  it('does not claim an in-flight push failed when cancel took the step', () => {
+    const interrupted = {
+      ...failedPush,
+      errorMessage: 'Task cancelled',
+      mergeResolveState: { phase: 'pushing', baseBranch: 'main' },
+    };
+    expect(failureBanner(interrupted, { taskStatus: 'cancelled' })?.text).toContain(
+      'its push may not have finished',
+    );
+    expect(
+      failureBanner(
+        { ...interrupted, mergeResolveState: { ...interrupted.mergeResolveState, pushed: true } },
+        { taskStatus: 'cancelled' },
+      )?.text,
+    ).toBe('Task cancelled');
   });
   it('uses structural state even if the error wording changes, and keeps live-task diagnosis', () => {
     expect(
