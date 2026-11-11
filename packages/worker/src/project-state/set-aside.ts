@@ -1049,19 +1049,29 @@ export async function resyncAfterTaskEnd(db: Database, taskId: string): Promise<
 const metadataWarn = (repoPath: string, path: string) => (err: unknown) =>
   logger.warn({ err, repoPath, path }, 'owner and mode not restored after a checkout move');
 
-// No durable warning flag: remember a bounded set of absent paths for this worker's lifetime.
-// Reappearance re-arms the warning; restart or cache eviction may emit it once again.
-const absentMetadataWarnings = new Set<string>();
+// No durable warning flag: remember a bounded set of absent or conflicting paths for this worker's
+// lifetime, so the 10 s sweep does not log the same standing state on every tick. A path found in
+// the expected shape re-arms both warnings; restart or cache eviction may emit one once again.
+const metadataWarnings = new Set<string>();
 function metadataPresent(repoPath: string, path: string): void {
-  absentMetadataWarnings.delete(JSON.stringify([repoPath, path]));
+  metadataWarnings.delete(JSON.stringify(['absent', repoPath, path]));
+  metadataWarnings.delete(JSON.stringify(['conflict', repoPath, path]));
+}
+function warnMetadataOnce(
+  kind: 'absent' | 'conflict',
+  repoPath: string,
+  path: string,
+  msg: string,
+): void {
+  const key = JSON.stringify([kind, repoPath, path]);
+  if (metadataWarnings.has(key)) return;
+  if (metadataWarnings.size >= 4096)
+    metadataWarnings.delete(metadataWarnings.values().next().value!);
+  metadataWarnings.add(key);
+  logger.warn({ repoPath, path }, msg);
 }
 function warnAbsentMetadata(repoPath: string, path: string): void {
-  const key = JSON.stringify([repoPath, path]);
-  if (absentMetadataWarnings.has(key)) return;
-  if (absentMetadataWarnings.size >= 4096)
-    absentMetadataWarnings.delete(absentMetadataWarnings.values().next().value!);
-  absentMetadataWarnings.add(key);
-  logger.warn({ repoPath, path }, 'captured projection metadata pending: path absent');
+  warnMetadataOnce('absent', repoPath, path, 'captured projection metadata pending: path absent');
 }
 
 /** The mode fs-safe's createExclusive gives a file it creates; a file at any other mode was changed since. */
@@ -1095,8 +1105,17 @@ export async function restoreKeptMetadata(
         if (restored !== false) restored = 'pending';
         continue;
       }
+      if (now.kind !== 'file') {
+        warnMetadataOnce(
+          'conflict',
+          repoPath,
+          path,
+          'captured projection path is not a regular file',
+        );
+        restored = false;
+        continue;
+      }
       metadataPresent(repoPath, path);
-      if (now.kind !== 'file') throw new Error('captured projection path is not a regular file');
       const result = await restoreKeptParents(repoPath, parents);
       if (result !== true) {
         if (restored !== false) restored = result;
@@ -1146,9 +1165,17 @@ async function restoreKeptParents(
         if (restored !== false) restored = 'pending';
         continue;
       }
+      if (now.kind !== 'directory') {
+        warnMetadataOnce(
+          'conflict',
+          repoPath,
+          path,
+          'captured projection parent is not a directory',
+        );
+        restored = false;
+        continue;
+      }
       metadataPresent(repoPath, path);
-      if (now.kind !== 'directory')
-        throw new Error('captured projection parent is not a directory');
       if (
         now.stats.uid !== writer &&
         !(now.stats.uid === owner.uid && (now.stats.mode & 0o7777) === 0o755)

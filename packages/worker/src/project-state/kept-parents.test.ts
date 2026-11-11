@@ -2,15 +2,17 @@ import { execFileSync } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import type { Database } from '@haive/database';
+import { logger } from '@haive/shared';
 import { keptFilesOf, restorePendingKeptMetadata, type KeptMetadata } from './kept-metadata.js';
 import { putBackProjections, restoreKeptMetadata } from './set-aside.js';
 
 const roots: string[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 async function fixture(capture: KeptMetadata) {
@@ -59,9 +61,15 @@ it.each(['file', 'symlink'] as const)(
     await mkdir(join(f.root, '.haive-data'));
     if (kind === 'file') await writeFile(join(f.root, parent), 'user file');
     else await symlink('missing', join(f.root, parent));
+    const warn = vi.spyOn(logger, 'warn');
     expect(await restoreKeptMetadata(f.root, keptFilesOf(capture))).toBe(false);
     expect(await f.recover()).toBe(false);
+    expect(await f.recover()).toBe(false);
     expect(f.pending()).toEqual({ [f.root]: capture });
+    // The sweep revisits a standing conflict every tick; it is reported once per path.
+    expect(
+      warn.mock.calls.filter(([fields]) => (fields as { path?: string }).path === parent),
+    ).toHaveLength(1);
   },
 );
 
