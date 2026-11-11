@@ -66,7 +66,7 @@ All PRE-EXISTING.
 6. R1: `refreshRepository` flips an ordinary refresh of a `ready` repo to `cloning` unconditionally (`api/src/routes/repos.ts` ~:3606-3620).
 7. D4a: dead-task revival polling for transient holds is unbounded (`worker/src/queues/dead-task-boot.ts` `retryHeldRevivals`). Fix: cap or back off, log once.
 
-### T595 · FNF[root-merge-runapp-followups] · run-app commit and root merge fence follow-ups (+9)
+### T595 · FNF[root-merge-runapp-followups] · run-app commit and root merge fence follow-ups (+15)
 
 status: open · kind: fix · found: E1 (#286, #271) reviews 2026-11-10/11 · priority: P4
 All low.
@@ -80,6 +80,12 @@ All low.
 7. Test gaps: a frozen legacy run-app form through `advanceStep` end to end; Skip, CLI switch, failed-task form submit and the worker `refuseRevive` branch of the root merge fence; a DAG projection-only conflict on the already-open path.
 8. Stale log wording `dead-task-boot.ts` ~:333; misleading test title `branch-revert.test.ts` ~:368; `root-merge-redrive.test.ts` ~:15 mocks into `shared/dist` by a relative path.
 9. `ReopenStepFormError` messages in plan steps are internal control text (not shown since the notice is opt-in); reword if ever shown.
+10. A branch switch found at the push seam becomes a best-effort "push failed" note whose text says put-back was stopped and to retry, though put-back already ran and the step finished (`99-run-app-ready.ts` ~:506-532). Fix: a push-seam text variant; pin which outcome each seam gives.
+11. A Retry after a branch switch that followed a landed commit reopens the form instead of naming the branch the commit landed on.
+12. `computeUnregisteredGitlinks` builds `entries`/`mayAddGitlink` in pinned mode and spawns `read-tree`/`diff-index` for an empty scope (`_gitlink-registration.ts` ~:228-269). Harmless cost. No control that a gitlink already in the parent, or one the preview only moves, is not judged.
+13. Preview test gaps (verified by emulation only): intent-to-add, `git rm --cached` of a non-ignored file with its copy kept, untracked nested repo, staged gitlink, unmerged, and the Retry rebuild after a commit that removed an ignored tracked file (`repo/git-preview.test.ts`).
+14. Gate 3's commit diff (`_commit-diff.ts` ~:213-225) shows work-tree bytes for assume-unchanged or skip-worktree entries while `git add -A` keeps their staged bytes, so gate 3 can commit bytes it did not show. PRE-EXISTING; run app now refuses such a preview, gate 3 does not. Medium-low.
+15. One process spawn between the second branch check and the index-only reset stays open (git has no atomic HEAD-and-ref check; documented in workflow-commits.md); at worst a reviewed path's staged entry is reset on the newly checked-out branch.
 
 ### T599 · FNF[rules-reconcile-followups] · task-end rules re-render follow-ups (+8)
 
@@ -142,6 +148,7 @@ Owner triage 2026-11-10 (AskUserQuestion, 8 rounds; register `.claude/tmp/codex-
 
 T524's 2026-11-01 owner round answered 42 questions. Decisions are recorded on the affected task blocks; the durable local answer register is `.claude/tmp/codex-run/backlog-decisions-20261101/decisions.json`. No unanswered owner-policy question remains from this round.
 
+- T271 + T286 — a DAG level merge settles Haive's project files from the integration branch; root starts, Retry, Resume and revival refuse during another task's open same-branch merge; run-app Finish commits only the reviewed, pinned tree with a parent compare-and-swap and branch checks, and a Retry after a failed put-back pushes its landed commit — PR #1066 (73b7c672b), 2026-11-11. Follow-ups T595.
 - T443 + T386 + T317 — a rules-override import is deferred during a live upgrade and the task-end import (onboarding and onboarding_upgrade) re-renders the AGENTS.md region through `project_state_outbox.rules_reconcile_intent` (migration 0227), retried on transient refusals and dropped with one warning on permanent ones; the updater keeps its hold when an upgrade died before recording its found state; a stamped RTK choice wins against the first record import — PR #1064 (0106f9edd), 2026-11-11. Follow-ups T599.
 - T402: operator script with dry run, before-image and undo. The owner subsequently requested indefinite development-record retention: transcripts changed from 90 to 0/forever through the audited admin API; prompts were already 0. Historical expiry estimates no longer govern this install. Missing old logs remain unrecoverable.
 - T300: one owned validation attempt before feature work; stop at 90 minutes or $50 notional usage, whichever comes first, or on an unexpected failure. No automatic retry loops.
@@ -178,21 +185,6 @@ All PRE-EXISTING.
 5. Latent, minor: the reaper removes a path without checking it is still the file it lstat'ed (upload-reaper.ts removeFile); fs-safe's lstatNoFollow returns numeric Stats, so dev/ino cannot be compared losslessly. Cannot bite today (upload names are fresh UUIDs). Fix: a bigint lstat identity export in fs-safe, compared before the unlink.
 
 User decision 2026-11-01: Retain complete/consumed upload metadata 90 days; protect active or retry-needed rows. Item5 identity-hardening remains parked until reachable impact.
-
-### T286 · FNF[root-work] · a task at the root after 01 was skipped escapes the fences (+3)
-
-status: in progress (bundle E1, overnight run 2026-11-10, branch fix/E1-dag-merge-root-fences) · area: touches finishMerge — heads-up to modular-haive-plan first · #278 (fnf/278-merge-dir-reads) LANDED as PR #884 (c48df1953) 2026-10-24: git-operation.ts, set-aside.ts, git-merge.ts, merge-projections.ts, merge-baseline.ts and left-open-merge.ts are free · priority: P2
-All PRE-EXISTING; notes .claude/tmp/track-b/b3/b31c/analysis/guard.md.
-
-1. checkoutHoldingTasks({rootOnly}) (repo/refresh.ts:32-46) misses a task whose latest 01 round was skipped; count it in SQL like decideTaskWorktree.
-2. 99-run-app-ready builds its preview at detect but commits `git add -A` at submit; can commit unseen files incl. Haive state.
-3. Low, verify first: a root `git add -A` racing a projection writer can stage its temp file.
-4. DECIDED D22: fence the whole open-merge window — refuse/delay a root task's START while a same-branch merge is open, under lockRepositoryTasksKey.
-
-### T271 · FNF[dag] · the DAG level merge never settles Haive's own files
-
-status: in progress (bundle E1, overnight run 2026-11-10, branch fix/E1-dag-merge-root-fences) · priority: P2
-dag-executor.ts (~681, ~951) aborts level merges without resolveHaiveProjectionConflicts, so a conflict only in Haive files goes to a fixer. Fix: run B3.1c's revert helper on each DAG issue branch before its level merge. (#274 merged, so unblocked.)
 
 ### T308 · FNF[worktree-aliases] · hard links planted into .haive/worktrees before #800 survive
 
