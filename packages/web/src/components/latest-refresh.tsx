@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import type { LatestRefreshRun, RefreshCliVersionsJobResult } from '@haive/shared/constants';
 import { api } from '@/lib/api-client';
-import { MarkdownView } from '@/components/markdown/markdown-view';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { RefreshFailures } from './refresh-failures';
 
 /** Read even with no manual poll: boot and scheduled runs have no browser job id. */
@@ -48,10 +48,10 @@ export function LatestRefresh({
   return (
     <div className="space-y-2 text-sm text-neutral-400">
       {loadError && (
-        <MarkdownView body="Unable to load the latest refresh result. Retrying shortly." />
+        <InlineMarkdown body="Unable to load the latest refresh result. Retrying shortly." />
       )}
       {run && (
-        <MarkdownView
+        <InlineMarkdown
           body={
             run.finishedAt === null
               ? `The latest ${run.trigger} refresh started at ${run.startedAt} and has not finished. It may still be running or have been interrupted.`
