@@ -283,10 +283,15 @@ describe('02 and the rules override its plan was made from', () => {
     expect(s.fake.rows(schema.onboardingArtifacts)).toEqual(rows);
   });
 
-  it.each([true, false])(
-    'preserves text outside the rules region at task end (outbox exists: %s)',
-    async (outboxExists) => {
+  it.each([
+    [true, 'onboarding_upgrade'],
+    [false, 'onboarding_upgrade'],
+    [true, 'onboarding'],
+  ] as const)(
+    'preserves text outside the rules region at task end (outbox exists: %s, %s)',
+    async (outboxExists, type) => {
       const s = await setup('PLANNED RULES\n', 'PLANNED RULES\n');
+      s.fake.patch(schema.tasks, TASK, { type });
       await recordWritten(s.apply());
       if (!outboxExists)
         await s.fake.db

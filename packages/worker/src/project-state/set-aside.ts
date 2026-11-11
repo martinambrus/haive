@@ -972,13 +972,7 @@ export async function resyncAfterTaskEnd(db: Database, taskId: string): Promise<
       columns: { storagePath: true, localPath: true },
     });
     const repoPath = repo?.storagePath ?? repo?.localPath;
-    if (repoPath)
-      await resyncHaiveProjections(
-        db,
-        task.repositoryId,
-        repoPath,
-        task.type === 'onboarding_upgrade' ? taskId : undefined,
-      );
+    if (repoPath) await resyncHaiveProjections(db, task.repositoryId, repoPath, taskId);
   } catch (err) {
     logger.warn({ err, taskId }, 'project state not re-synced after a task ended');
   }
