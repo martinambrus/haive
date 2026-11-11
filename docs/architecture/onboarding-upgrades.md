@@ -958,7 +958,20 @@ and the usual complete, bounded record. A link or refused read is never treated 
 file and each directory its removal empties keep the owner and mode captured with them, which
 whatever re-creates them, the put-back or the writer during the re-sync after a move, gets back while
 the writer still owns it (`restoreKeptMetadata`, best-effort, as fs-safe's inherited owner is); a group
-someone set meanwhile is kept, and so is a file mode other than the 0644 the writer gives a new file. The
+someone set meanwhile is kept, and so is a file mode other than the 0644 the writer gives a new file.
+That captured map is durable: the judge commits it to `project_state_outbox.kept_metadata` before
+anything is removed, and the outbox owns its restore, so a crash between the removal and the
+re-creation still gets owner and mode back. A successful restore or a no-move put-back clears only
+the entries it applied (a guarded clear on what it read), leaving a newer capture and a failed file
+pending, and a restored file is never restored again. Each kept entry carries its exact capture
+through the move callers' accumulated maps, so a no-move put-back clears the capture it fulfilled
+and never replays it over a later change. A captured file that is absent stays pending until it is
+recreated: no retry limit drops it, and deleting the repository retires it with its outbox row.
+An absent captured file or directory stays pending without failing an otherwise completed re-sync
+(the restore answers applied, pending or failed, and only an applied capture is cleared); the first
+time a path is found absent the worker warns once, naming it. A recovery waits while another move scope owns
+that checkout; the scope spans set-aside, move and recovery, holds no pooled connection, and is
+process-local, which relies on the one worker per install (see [Worker restarts](worker-restarts.md)). The
 put-back is the same steps in reverse under the same rules (the stored patch applied with `-R`), and
 every put-back 00a triggers runs under its checkout's merge-dir lock (`inMergeDirUnlessClaimed`) and
 is refused while another task's claim holds it. Each restore runs under the domain's lock, after the

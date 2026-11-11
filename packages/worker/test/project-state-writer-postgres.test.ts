@@ -65,12 +65,20 @@ import {
   sweepDirtyProjectStates,
 } from '../src/project-state/refresh.js';
 import { applyPlanPatch } from '@haive/shared/plan';
+import {
+  rememberKeptMetadata,
+  restorePendingKeptMetadata,
+} from '../src/project-state/kept-metadata.js';
+import { settleProjections } from '../src/step-engine/merge-projections.js';
+import { withProjectionMove } from '../src/project-state/projection-move.js';
+import { sweepKeptProjectionMetadata } from '../src/project-state/kept-metadata-recovery.js';
 import { writePlanMirror, reconcilePlanFromCheckout } from '../src/plan/mirror.js';
 import { persistDetection } from '../src/repo/clone.js';
 import { handleRefresh } from '../src/repo/refresh.js';
 import {
   putBackProjections,
   resyncAfterTaskEnd,
+  resyncWithKeptMetadata,
   restoreFaults,
   setAsideHaiveProjections,
 } from '../src/project-state/set-aside.js';
@@ -154,6 +162,8 @@ afterEach(async () => {
   seam.afterDirRemove = null;
   seam.afterSetAside = null;
   delete restoreFaults.afterBase;
+  delete restoreFaults.beforeResync;
+  delete restoreFaults.beforeRestore;
   for (const id of users.splice(0)) await db!.delete(schema.users).where(eq(schema.users.id, id));
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
@@ -211,6 +221,388 @@ async function diskRecord(root: string, name: string) {
 }
 
 describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
+  it('a copied-map put-back consumes exact captures and preserves a later chmod', async () => {
+    const s = await fixture();
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: s.root });
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.name=T',
+        '-c',
+        'user.email=t@local',
+        'commit',
+        '--allow-empty',
+        '-qm',
+        'initial',
+      ],
+      { cwd: s.root },
+    );
+    await s.write();
+    // The pre-capture-carrier base leaves this file pending because its rebuilt
+    // entry omits the captured parent. Chmod this exact entry, not render.json.
+    const rel = '.haive-data/state/format.json';
+    await chmod(join(s.root, rel), 0o600);
+    await withProjectionMove(async () => {
+      const aside = await setAsideHaiveProjections(db!, s.repo.id, s.root);
+      expect(aside.outcome).toBe('set-aside');
+      if (aside.outcome !== 'set-aside') throw new Error('expected set-aside');
+      // All accumulated move callers preserve entries but replace the Map itself.
+      const accumulated = new Map(aside.kept);
+      await putBackProjections(db!, s.repo.id, s.root, accumulated);
+    });
+    // Keep running on a stale capture too, so the later chmod assertion can fail
+    // independently when a sweep replays it.
+    expect.soft((await s.outbox())!.keptMetadata).toBeNull();
+    await chmod(join(s.root, rel), 0o644);
+    await sweepKeptProjectionMetadata(db!);
+    expect((await stat(join(s.root, rel))).mode & 0o7777).toBe(0o644);
+  });
+
+  it.each(['outbox', 'legacy-done'] as const)(
+    'recovers %s metadata from PostgreSQL even when projection revisions are clean',
+    async (store) => {
+      const s = await fixture();
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: s.root });
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.name=T',
+          '-c',
+          'user.email=t@local',
+          'commit',
+          '--allow-empty',
+          '-qm',
+          'initial',
+        ],
+        { cwd: s.root },
+      );
+      await s.write();
+      const rel = '.haive-data/state/project/render.json';
+      const metadata = {
+        [rel]: { owner: { uid: process.getuid!(), gid: process.getgid!() }, mode: 0o600 },
+      };
+      let stepId: string | undefined;
+      if (store === 'outbox') {
+        await db!
+          .update(schema.projectStateOutbox)
+          .set({ keptMetadata: { [s.root]: metadata } })
+          .where(eq(schema.projectStateOutbox.repositoryId, s.repo.id));
+      } else {
+        const [task] = await db!
+          .insert(schema.tasks)
+          .values({
+            userId: s.userId,
+            repositoryId: s.repo.id,
+            type: 'workflow',
+            title: 'completed merge',
+            status: 'completed',
+          })
+          .returning();
+        const [step] = await db!
+          .insert(schema.taskSteps)
+          .values({
+            taskId: task!.id,
+            stepId: '00a-sync-base',
+            stepIndex: 0,
+            title: 'merge',
+            status: 'done',
+            mergeResolveState: {
+              phase: 'done',
+              mode: 'same-branch',
+              mergeDir: s.root,
+              keptMetadata: metadata,
+            } as never,
+          })
+          .returning();
+        stepId = step!.id;
+      }
+      const mark = (await s.outbox())!;
+      expect(mark.revision).toBe(mark.writtenRevision);
+      restoreFaults.beforeResync = () => {
+        throw new Error('still unavailable');
+      };
+      expect(await sweepKeptProjectionMetadata(db!)).toBe(0);
+      delete restoreFaults.beforeResync;
+      expect(await sweepKeptProjectionMetadata(db!)).toBe(store === 'legacy-done' ? 2 : 1);
+      expect((await stat(join(s.root, rel))).mode & 0o7777).toBe(0o600);
+      if (stepId) {
+        const [step] = await db!
+          .select()
+          .from(schema.taskSteps)
+          .where(eq(schema.taskSteps.id, stepId));
+        expect(step!.mergeResolveState!.keptMetadata).toBeUndefined();
+      } else expect((await s.outbox())!.keptMetadata).toBeNull();
+      expect(await sweepKeptProjectionMetadata(db!)).toBe(0);
+    },
+  );
+
+  it.each(['capture', 'removed'] as const)(
+    'a sweep during %s leaves metadata for recovery after the mover crashes',
+    async (phase) => {
+      const s = await fixture();
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: s.root });
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.name=T',
+          '-c',
+          'user.email=t@local',
+          'commit',
+          '--allow-empty',
+          '-qm',
+          'initial',
+        ],
+        { cwd: s.root },
+      );
+      await s.write();
+      const rel = '.haive-data/state/project/render.json';
+      await chmod(join(s.root, rel), 0o600);
+      let resume!: () => void;
+      let captured!: () => void;
+      const pause = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      const ready = new Promise<void>((resolve) => {
+        captured = resolve;
+      });
+      const crash = async () => {
+        captured();
+        await pause;
+        throw new Error('mover died');
+      };
+      if (phase === 'capture') restoreFaults.afterBase = crash;
+      const move = withProjectionMove(async () => {
+        await setAsideHaiveProjections(db!, s.repo.id, s.root);
+        await expect(stat(join(s.root, rel))).rejects.toMatchObject({ code: 'ENOENT' });
+        return crash();
+      });
+      const ended = expect(move).rejects.toThrow('mover died');
+      await ready;
+      try {
+        expect(await sweepKeptProjectionMetadata(db!)).toBe(0);
+        expect((await s.outbox())!.keptMetadata?.[s.root]?.[rel]?.mode).toBe(0o600);
+      } finally {
+        resume();
+        await ended;
+        delete restoreFaults.afterBase;
+      }
+      // The process lost its in-memory map after the tick, and a writer recreated the file.
+      if (phase === 'capture') await chmod(join(s.root, rel), 0o644);
+      expect(await sweepKeptProjectionMetadata(db!)).toBe(phase === 'capture' ? 0 : 1);
+      expect((await stat(join(s.root, rel))).mode & 0o7777).toBe(
+        phase === 'capture' ? 0o644 : 0o600,
+      );
+      expect((await s.outbox())!.keptMetadata).toBeNull();
+    },
+  );
+
+  it.each(['beforeCapture', 'afterRestore'] as const)(
+    'put-back consumes judge metadata after %s failure',
+    async (point) => {
+      const s = await fixture();
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: s.root });
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.name=T',
+          '-c',
+          'user.email=t@local',
+          'commit',
+          '--allow-empty',
+          '-qm',
+          'initial',
+        ],
+        { cwd: s.root },
+      );
+      await s.write();
+      const rel = '.haive-data/state/project/render.json';
+      await chmod(join(s.root, rel), 0o600);
+      restoreFaults[point] = () => {
+        throw new Error('stop before move');
+      };
+      try {
+        await expect(setAsideHaiveProjections(db!, s.repo.id, s.root)).rejects.toThrow(
+          'stop before move',
+        );
+      } finally {
+        delete restoreFaults[point];
+      }
+      expect((await stat(join(s.root, rel))).mode & 0o7777).toBe(0o600);
+      expect((await s.outbox())!.keptMetadata).toBeNull();
+      await chmod(join(s.root, rel), 0o644);
+      await sweepKeptProjectionMetadata(db!);
+      expect((await stat(join(s.root, rel))).mode & 0o7777).toBe(0o644);
+    },
+  );
+
+  it.each(['crash', 'guard-refused'] as const)(
+    'rolls back the legacy handoff when its marker save is %s',
+    async (failure) => {
+      const s = await fixture();
+      await s.write();
+      const rel = '.haive-data/state/project/render.json';
+      const state = {
+        phase: 'done',
+        mode: 'same-branch',
+        mergeDir: s.root,
+        keptMetadata: {
+          [rel]: { owner: { uid: process.getuid!(), gid: process.getgid!() }, mode: 0o600 },
+        },
+      } as unknown as import('@haive/database').MergeResolveState;
+      const [task] = await db!
+        .insert(schema.tasks)
+        .values({
+          userId: s.userId,
+          repositoryId: s.repo.id,
+          type: 'workflow',
+          title: 'completed merge',
+          status: 'completed',
+        })
+        .returning();
+      const [step] = await db!
+        .insert(schema.taskSteps)
+        .values({
+          taskId: task!.id,
+          stepId: '00a-sync-base',
+          stepIndex: 0,
+          title: 'merge',
+          status: 'done',
+          mergeResolveState: state,
+        })
+        .returning();
+      const save = async (
+        next: typeof state,
+        handle: Database | Parameters<Parameters<Database['transaction']>[0]>[0] = db!,
+      ) => {
+        if (failure === 'guard-refused') return false;
+        await handle
+          .update(schema.taskSteps)
+          .set({ mergeResolveState: next })
+          .where(eq(schema.taskSteps.id, step!.id));
+        throw new Error('crash between handoff writes');
+      };
+      if (failure === 'crash')
+        await expect(settleProjections(db!, s.repo.id, state, save)).rejects.toThrow(
+          'crash between handoff writes',
+        );
+      else expect(await settleProjections(db!, s.repo.id, state, save)).toBe(false);
+      expect((await s.outbox())!.keptMetadata).toBeNull();
+      const [saved] = await db!
+        .select()
+        .from(schema.taskSteps)
+        .where(eq(schema.taskSteps.id, step!.id));
+      expect(saved!.mergeResolveState).toEqual(state);
+      await chmod(join(s.root, rel), 0o644);
+      // A crash/refusal did not publish half a handoff for the outbox sweep.
+      expect((await s.outbox())!.keptMetadata).toBeNull();
+    },
+  );
+
+  it('does not reapply a consumed map after the final merge-state save fails', async () => {
+    const s = await fixture();
+    await s.write();
+    const rel = '.haive-data/state/project/render.json';
+    let state = {
+      phase: 'done',
+      mode: 'same-branch',
+      mergeDir: s.root,
+      keptMetadata: {
+        [rel]: { owner: { uid: process.getuid!(), gid: process.getgid!() }, mode: 0o600 },
+      },
+    } as unknown as import('@haive/database').MergeResolveState;
+    await expect(
+      settleProjections(db!, s.repo.id, state, async (next) => {
+        if (!next.keptMetadata) throw new Error('final state save failed');
+        state = next;
+      }),
+    ).rejects.toThrow('final state save failed');
+    expect((await stat(join(s.root, rel))).mode & 0o7777).toBe(0o600);
+    await chmod(join(s.root, rel), 0o644);
+    expect(
+      await settleProjections(db!, s.repo.id, state, async (next) => {
+        state = next;
+      }),
+    ).toBe(true);
+    expect((await stat(join(s.root, rel))).mode & 0o7777).toBe(0o644);
+  });
+
+  it('a second PostgreSQL capture survives a restore that read the earlier map', async () => {
+    const s = await fixture();
+    await s.write();
+    const first = { '.haive-data/plan.json': { mode: 0o600 } };
+    const second = { '.haive-data/plan.md': { mode: 0o640 } };
+    await rememberKeptMetadata(db!, s.repo.id, s.root, first);
+    let entered!: () => void;
+    let resume!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const pause = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const competing = createDatabase(url!);
+    const restoring = restorePendingKeptMetadata(db!, s.repo.id, s.root, async () => {
+      entered();
+      await pause;
+      return true;
+    });
+    try {
+      await ready;
+      await rememberKeptMetadata(competing, s.repo.id, s.root, second);
+    } finally {
+      resume();
+      await competing.$client.end({ timeout: 5 });
+    }
+    expect(await restoring).toBe(true);
+    expect((await s.outbox())!.keptMetadata?.[s.root]).toEqual(second);
+    expect(await restorePendingKeptMetadata(db!, s.repo.id, s.root, async () => true)).toBe(true);
+    expect((await s.outbox())!.keptMetadata).toBeNull();
+  });
+
+  it('commits captured metadata before removal and keeps it after failed re-sync', async () => {
+    const s = await fixture();
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: s.root });
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.name=T',
+        '-c',
+        'user.email=t@local',
+        'commit',
+        '--allow-empty',
+        '-qm',
+        'initial',
+      ],
+      { cwd: s.root },
+    );
+    await s.write();
+    const rel = '.haive-data/state/project/render.json';
+    await chmod(join(s.root, rel), 0o600);
+    await chmod(join(s.root, '.haive-data/state/project'), 0o700);
+    restoreFaults.beforeRestore = async () => {
+      const pending = (await s.outbox())!.keptMetadata?.[s.root];
+      expect(pending?.[rel]?.mode).toBe(0o600);
+      expect(pending?.[rel]?.owner?.uid).toBe(process.getuid!());
+      expect(pending?.[rel]?.parents).toContainEqual(
+        expect.objectContaining({ path: '.haive-data/state/project', mode: 0o700 }),
+      );
+    };
+    const aside = await setAsideHaiveProjections(db!, s.repo.id, s.root);
+    expect(aside.outcome).toBe('set-aside');
+    if (aside.outcome !== 'set-aside') throw new Error('expected kept metadata');
+    restoreFaults.beforeResync = () => {
+      throw new Error('transient re-sync failure');
+    };
+    expect(await resyncWithKeptMetadata(db!, s.repo.id, s.root, aside.kept)).toBe(false);
+    expect((await s.outbox())!.keptMetadata?.[s.root]?.[rel]?.mode).toBe(0o600);
+    expect(aside.kept.get(rel)?.mode).toBe(0o600);
+  });
+
   it.each(['plan node', 'mirror row', 'plain FK task row'] as const)(
     'repository row hold permits a %s insert during the final filesystem write',
     async (child) => {
@@ -1281,6 +1673,8 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
     let before: Awaited<ReturnType<typeof m.snapshot>> | undefined;
     restoreFaults.afterBase = async () => {
       delete restoreFaults.afterBase;
+      delete restoreFaults.beforeResync;
+      delete restoreFaults.beforeRestore;
       await m.leaveIntent();
       before = await m.snapshot();
     };

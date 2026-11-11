@@ -1,3 +1,4 @@
+import { projectionMoveStep } from '../../../project-state/projection-move.js';
 import { prepareProjectStatePush, commitProjectStatePush } from '../../../project-state/push.js';
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, gt, inArray, ne, or } from 'drizzle-orm';
@@ -29,9 +30,8 @@ import {
   MOVE_ATTEMPTS,
   putBackProjections,
   recoverAfterMoveFailure,
-  restoreKeptMetadata,
   restoreProjectionsInTx,
-  resyncHaiveProjections,
+  resyncWithKeptMetadata,
   setAsideHaiveProjections,
   type KeptFiles,
 } from '../../../project-state/set-aside.js';
@@ -287,7 +287,7 @@ function buildPrompt(d: PlanMergeDetect): string {
   ].join('\n');
 }
 
-export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
+export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = projectionMoveStep({
   metadata: {
     id: '01-plan-merge',
     workflowType: 'plan_merge',
@@ -694,8 +694,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
           message: 'docs: save project plan',
           identity,
         });
-        await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
-        await restoreKeptMetadata(ctx.repoPath, kept);
+        await resyncWithKeptMetadata(ctx.db, repositoryId, ctx.repoPath, kept);
       }
     } catch (err) {
       return recoverAfterMoveFailure(ctx.db, repositoryId, ctx.repoPath, kept, before, err);
@@ -766,7 +765,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     await recordMessage(ctx.db, ctx.taskId, ctx.taskStepId, 'assistant', result.summary);
     return result;
   },
-};
+});
 
 /** Discard a cancelled conversation's scratch worktree unless another conversation of the repository
  *  may hold it: a live one, or a failed one opened after this one, whose Retry resumes it. Never

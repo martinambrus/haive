@@ -94,6 +94,7 @@ vi.mock('../src/project-state/set-aside.js', () => ({
   putBackProjections: async () => {},
   restoreKeptMetadata: async () => {},
   resyncHaiveProjections: async () => {},
+  resyncWithKeptMetadata: async () => true,
   recoverAfterMoveFailure: async (...args: unknown[]) => {
     throw args[5];
   },

@@ -1,3 +1,4 @@
+import { withProjectionMove } from '../project-state/projection-move.js';
 import { prepareProjectStatePush, commitProjectStatePush } from '../project-state/push.js';
 import { safeProcessor } from './safe-processor.js';
 import { Queue, Worker, type Job } from 'bullmq';
@@ -26,6 +27,7 @@ import type {
 } from '@haive/shared/project-state';
 import { resolveProjectStateConflict } from '../project-state/resolve.js';
 import { markProjectStatesDirtyAtBoot, sweepDirtyProjectStates } from '../project-state/refresh.js';
+import { sweepKeptProjectionMetadata } from '../project-state/kept-metadata-recovery.js';
 import {
   sweepCheckoutRepositories,
   watchCheckout,
@@ -35,9 +37,8 @@ import {
   MOVE_ATTEMPTS,
   putBackProjections,
   recoverAfterMoveFailure,
-  restoreKeptMetadata,
   restoreProjectionsInTx,
-  resyncHaiveProjections,
+  resyncWithKeptMetadata,
   setAsideHaiveProjections,
   type CheckoutFence,
   type KeptFiles,
@@ -243,7 +244,10 @@ export interface IntegrateOutcome {
  * Haive's own pending projection files are set aside before the branch moves: `kept` holds
  * them, and they are put back here unless the checkout moved, when the caller re-syncs.
  */
-export async function integrateOrigin(args: {
+export const integrateOrigin: typeof integrateOriginInMove = (...args) =>
+  withProjectionMove(() => integrateOriginInMove(...args));
+
+async function integrateOriginInMove(args: {
   repositoryId: string;
   repoPath: string;
   branch: string;
@@ -465,9 +469,8 @@ const planSaveSeams: SaveSeams = {
     await reconcilePlanFromCheckout(getDb(), repo.id, repoPath);
     await flushPlanMirrorForRepository(getDb(), repo.id);
     await commitPlanSnapshotFiles({ repoPath, message, identity });
-    if (!(await resyncHaiveProjections(getDb(), repo.id, repoPath)))
+    if (!(await resyncWithKeptMetadata(getDb(), repo.id, repoPath, kept)))
       throw new Error('project state re-sync failed before pushing');
-    await restoreKeptMetadata(repoPath, kept);
   },
 };
 
@@ -633,7 +636,9 @@ export async function saveCore(
  * leave a half-merged tree that every later step then runs against. Refusing and
  * saying why is the honest option.
  */
-export async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult> {
+export const pull: typeof pullInMove = (...args) => withProjectionMove(() => pullInMove(...args));
+
+async function pullInMove(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult> {
   if (!payload.repositoryId || !payload.userId) throw new Error('repositoryId and userId required');
   const db = getDb();
   const repo = await requireOwnedRepository(payload.repositoryId, payload.userId);
@@ -748,8 +753,7 @@ export async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
       // checkout's plan.json no longer says everything the plan does.
       const files = outcome.skipped ? [] : (await flushPlanMirrorForRepository(db, repo.id)).files;
       if (integrated.landed) {
-        await resyncHaiveProjections(db, repo.id, repoPath);
-        await restoreKeptMetadata(repoPath, kept);
+        await resyncWithKeptMetadata(db, repo.id, repoPath, kept);
       }
 
       return resultFor(repo.id, files, {
@@ -814,6 +818,11 @@ async function sweepAll(): Promise<number> {
     swept += await sweepDirtyProjectStates(getDb());
   } catch (err) {
     logger.warn({ err }, 'project state sweep failed');
+  }
+  try {
+    swept += await sweepKeptProjectionMetadata(getDb());
+  } catch (err) {
+    logger.warn({ err }, 'projection metadata sweep failed');
   }
   return swept;
 }

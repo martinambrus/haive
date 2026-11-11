@@ -1,3 +1,4 @@
+import { withProjectionMove } from '../project-state/projection-move.js';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray } from 'drizzle-orm';
@@ -63,7 +64,6 @@ import {
   putBackProjections,
   recoverAfterMoveFailure,
   restoreProjectionsInTx,
-  resyncHaiveProjections,
   setAsideHaiveProjections,
   type KeptFiles,
   type RestoreSection,
@@ -85,7 +85,6 @@ import {
 import {
   adoptKept,
   keptMetadataOf,
-  restoreKeptMetadataOf,
   settleProjections,
   type KeptMetadata,
 } from './merge-projections.js';
@@ -405,8 +404,8 @@ async function settleGivenUp(
   const repositoryId =
     given.mode === 'same-branch' ? await taskRepositoryId(db, params.taskId) : null;
   if (!repositoryId) return;
-  await settleProjections(db, repositoryId, given, (cleared) =>
-    saveMergeState(db, current.id, cleared),
+  await settleProjections(db, repositoryId, given, (cleared, handle) =>
+    saveMergeState(handle, current.id, cleared),
   );
 }
 
@@ -422,9 +421,13 @@ async function reachDone(
   // The push may fail, so the record and plan the merge brought in are re-synced first.
   const repositoryId =
     state.mode === 'same-branch' ? await taskRepositoryId(db, params.taskId) : null;
-  if (repositoryId && (await resyncHaiveProjections(db, repositoryId, state.mergeDir))) {
-    state = await restoreKeptMetadataOf(state);
-  }
+  // Completion releases an onboarding/upgrade's deferred sync. A false result keeps the map
+  // in both the merge state and the outbox; task-end recovery or the sweep settles it later.
+  if (repositoryId)
+    await settleProjections(db, repositoryId, state, async (cleared, handle) => {
+      await saveMergeState(handle, current.id, cleared);
+      state = cleared;
+    });
   // Pushes the commit a section read, so a pass that lost the dir cannot send another task's work.
   // Idempotent on re-entry: a completed push reports "up-to-date".
   if (state.pushAfterMerge && !state.pushed) {
@@ -1134,7 +1137,10 @@ async function haltUnaborted(
  *  Returns resolved:true once the merge commits (or the action is not a merge / the
  *  merge is cleanly skipped) so the runner falls through to apply; resolved:false
  *  parks the step (waiting_cli) or halts it (failed). */
-export async function resolveMergePhase(
+export const resolveMergePhase: typeof resolveMergePhaseInMove = (...args) =>
+  withProjectionMove(() => resolveMergePhaseInMove(...args));
+
+async function resolveMergePhaseInMove(
   db: Database,
   stepDef: StepDefinition,
   current: TaskStepRow,
@@ -1237,7 +1243,13 @@ export async function resolveMergePhase(
   };
   const withKept = (from: MergeResolveState): MergeResolveState => {
     const metadata = { ...keptMetadataOf(kept), ...from.keptMetadata };
-    return Object.keys(metadata).length > 0 ? { ...from, keptMetadata: metadata } : from;
+    return Object.keys(metadata).length > 0
+      ? {
+          ...from,
+          keptMetadata: metadata,
+          keptMetadataStored: from.keptMetadata ? from.keptMetadataStored : true,
+        }
+      : from;
   };
   /** Saves into this step what a cancelled task's set-aside kept for the merge it left open in
    *  `dir`, committed before that merge is aborted: once it is, nothing finds that task again. */

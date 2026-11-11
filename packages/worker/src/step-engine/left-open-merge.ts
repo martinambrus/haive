@@ -179,14 +179,21 @@ async function settle(
 }
 
 /** A cancel leaves the step `failed`, which `updateOwnedStep` refuses: write its state by id. */
-const saveByStepId = (db: Database, stepId: string) => async (state: MergeResolveState) => {
-  await db
-    .update(schema.taskSteps)
-    .set({ mergeResolveState: state, updatedAt: new Date() })
-    .where(eq(schema.taskSteps.id, stepId));
-};
+const saveByStepId =
+  (db: Database, stepId: string) =>
+  async (
+    state: MergeResolveState,
+    handle: Database | Parameters<Parameters<Database['transaction']>[0]>[0] = db,
+  ) => {
+    const rows = await handle
+      .update(schema.taskSteps)
+      .set({ mergeResolveState: state, updatedAt: new Date() })
+      .where(eq(schema.taskSteps.id, stepId))
+      .returning({ id: schema.taskSteps.id });
+    return rows.length > 0;
+  };
 
-/** A merge gone before the cancel has no report: re-sync and put its files back here, never throwing. */
+/** A merge gone before the cancel has no report: try recovery here; the durable outbox retries without holding teardown. */
 async function settleGoneMerge(
   db: Database,
   taskId: string,
@@ -200,7 +207,13 @@ async function settleGoneMerge(
       columns: { repositoryId: true },
     });
     if (task?.repositoryId) {
-      await settleProjections(db, task.repositoryId, state, saveByStepId(db, recorded.stepId));
+      if (
+        !(await settleProjections(db, task.repositoryId, state, saveByStepId(db, recorded.stepId)))
+      )
+        logger.warn(
+          { taskId, dir: recorded.dir },
+          'project files re-sync pending; the metadata sweep will retry',
+        );
     }
   } catch (err) {
     logger.warn(

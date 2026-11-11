@@ -1,58 +1,45 @@
 import type { Database, MergeResolveState } from '@haive/database';
-import {
-  restoreKeptMetadata,
-  resyncHaiveProjections,
-  type KeptFile,
-  type KeptFiles,
-} from '../project-state/set-aside.js';
+import { resyncHaiveProjections } from '../project-state/set-aside.js';
 
-export type KeptMetadata = NonNullable<MergeResolveState['keptMetadata']>;
+import { rememberKeptMetadata, type KeptMetadata } from '../project-state/kept-metadata.js';
+type DbOrTx = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
+class HandoffSuperseded extends Error {}
 
-export function keptMetadataOf(kept: KeptFiles): KeptMetadata {
-  const metadata: KeptMetadata = {};
-  for (const [path, { bytes, owner, mode, untracked, parents }] of kept) {
-    const entry: KeptMetadata[string] = {};
-    if (untracked && Buffer.isBuffer(bytes) && owner && mode !== undefined) {
-      entry.owner = owner;
-      entry.mode = mode;
-    }
-    if (parents && parents.length > 0) entry.parents = parents;
-    if (Object.keys(entry).length > 0) metadata[path] = entry;
-  }
-  return metadata;
-}
-
-function keptFilesOf(metadata: KeptMetadata): KeptFiles {
-  return new Map(
-    Object.entries(metadata).map(([path, { owner, mode, parents }]): [string, KeptFile] => [
-      path,
-      { index: null, bytes: Buffer.alloc(0), untracked: owner !== undefined, owner, mode, parents },
-    ]),
-  );
-}
-
-export async function restoreKeptMetadataOf(state: MergeResolveState): Promise<MergeResolveState> {
-  if (!state.keptMetadata) return state;
-  await restoreKeptMetadata(state.mergeDir, keptFilesOf(state.keptMetadata));
-  return { ...state, keptMetadata: undefined };
-}
+export { keptMetadataOf, type KeptMetadata } from '../project-state/kept-metadata.js';
 
 /** `from` with what another task's set-aside kept: captured before this one's, so it wins. */
 export function adoptKept(from: MergeResolveState, adopted: KeptMetadata): MergeResolveState {
   return Object.keys(adopted).length > 0
-    ? { ...from, keptMetadata: { ...from.keptMetadata, ...adopted } }
+    ? { ...from, keptMetadataStored: false, keptMetadata: { ...from.keptMetadata, ...adopted } }
     : from;
 }
 
-/** Once a same-branch merge is over: re-syncs, restores `keptMetadata`, saves the state cleared. A re-sync
- *  that did not complete returns false and saves nothing, so a later settle still has the metadata. */
+/** The outbox owns restoration. A legacy map is handed off once; successful sync
+ *  clears the redundant state copy without ever applying it a second time. */
 export async function settleProjections(
   db: Database,
   repositoryId: string,
   given: MergeResolveState,
-  save: (cleared: MergeResolveState) => Promise<unknown>,
+  save: (cleared: MergeResolveState, db: DbOrTx) => Promise<unknown>,
 ): Promise<boolean> {
-  if (!(await resyncHaiveProjections(db, repositoryId, given.mergeDir))) return false;
-  if (given.keptMetadata) await save(await restoreKeptMetadataOf(given));
+  let state = given;
+  if (state.keptMetadata && !state.keptMetadataStored) {
+    const handedOff = { ...state, keptMetadataStored: true };
+    try {
+      await db.transaction(async (tx) => {
+        // Save the marker and map together, before any filesystem recovery.
+        // A stale guarded state write must roll back the whole handoff.
+        if ((await save(handedOff, tx)) === false) throw new HandoffSuperseded();
+        await rememberKeptMetadata(tx, repositoryId, state.mergeDir, state.keptMetadata!);
+      });
+    } catch (err) {
+      if (err instanceof HandoffSuperseded) return false;
+      throw err;
+    }
+    state = handedOff;
+  }
+  if (!(await resyncHaiveProjections(db, repositoryId, state.mergeDir))) return false;
+  if (state.keptMetadata && (await save({ ...state, keptMetadata: undefined }, db)) === false)
+    return false;
   return true;
 }

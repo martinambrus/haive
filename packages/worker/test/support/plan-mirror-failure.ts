@@ -12,6 +12,7 @@ type Hook =
   | 'flush'
   | 'commit'
   | 'resync'
+  | 'resettle'
   | 'metadata'
   | 'putBack'
   | 'record'
@@ -28,6 +29,7 @@ const h: { db: unknown; head: string } & Record<Hook, Mock> = vi.hoisted(() => (
   flush: vi.fn(),
   commit: vi.fn(),
   resync: vi.fn(),
+  resettle: vi.fn(),
   metadata: vi.fn(),
   putBack: vi.fn(),
   record: vi.fn(),
@@ -82,6 +84,7 @@ vi.mock('../../src/project-state/set-aside.js', async (original) => ({
   setAsideHaiveProjections: h.aside,
   restoreProjectionsInTx: h.restore,
   resyncHaiveProjections: h.resync,
+  resyncWithKeptMetadata: h.resettle,
   restoreKeptMetadata: h.metadata,
 }));
 vi.mock('../../src/project-state/sync.js', () => ({
@@ -125,6 +128,11 @@ export function setup() {
   h.reconcile.mockResolvedValue({ skipped: false });
   h.commit.mockResolvedValue({ committed: true, commitSha: 'saved' });
   h.resync.mockResolvedValue(true);
+  h.resettle.mockImplementation(async (...args: unknown[]) => {
+    const synced = await h.resync(...args.slice(0, 3));
+    if (synced) await h.metadata(args[2], args[3]);
+    return synced;
+  });
   h.metadata.mockResolvedValue(undefined);
   const fake = createFakeDb({
     repositories: schema.repositories,

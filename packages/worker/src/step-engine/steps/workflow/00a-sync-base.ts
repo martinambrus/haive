@@ -1,3 +1,4 @@
+import { projectionMoveStep } from '../../../project-state/projection-move.js';
 import { eq } from 'drizzle-orm';
 import { lockRepositoryTasksKey, schema } from '@haive/database';
 import type { FormField, FormSchema } from '@haive/shared';
@@ -30,8 +31,8 @@ import {
   putBackAfterFailure,
   putBackProjections,
   recoverAfterMoveFailure,
-  restoreKeptMetadata,
   restoreProjectionsInTx,
+  resyncWithKeptMetadata,
   resyncHaiveProjections,
   setAsideHaiveProjections,
   type KeptFiles,
@@ -141,7 +142,7 @@ async function taskRepositoryId(ctx: StepContext): Promise<string | null> {
   return task?.repositoryId ?? null;
 }
 
-export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
+export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = projectionMoveStep({
   metadata: {
     id: '00a-sync-base',
     workflowType: 'workflow',
@@ -654,12 +655,10 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         } finally {
           if (repositoryId) {
             try {
-              await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
+              await resyncWithKeptMetadata(ctx.db, repositoryId, ctx.repoPath, kept);
             } catch (err) {
               if (!handBackFailed) throw err;
               ctx.logger.warn({ err }, 'projection resync failed after hand-back failure');
-            } finally {
-              await restoreKeptMetadata(ctx.repoPath, kept);
             }
           }
         }
@@ -708,4 +707,4 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     await releaseMergeDir(ctx.db, owner);
     return out;
   },
-};
+});

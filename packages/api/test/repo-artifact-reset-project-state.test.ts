@@ -644,6 +644,30 @@ describe('resetting a repository through the route', () => {
 });
 
 describe('resetting a repository with a dirty project state outbox', () => {
+  it('preserves pending ownership metadata for the plan files the reset leaves', async () => {
+    const root = await repoRoot();
+    const fake = await setup(root);
+    const keptMetadata = {
+      [root]: {
+        '.haive-data/plan.json': { owner: { uid: 1000, gid: 1000 }, mode: 0o600 },
+        '.haive-data/plan.md': { mode: 0o640 },
+        [RENDER]: { mode: 0o600 },
+      },
+    };
+    const row = fake.rows(schema.projectStateOutbox).find((r) => r.repositoryId === REPO)!;
+    fake.patch(schema.projectStateOutbox, String(row.id), { keptMetadata });
+    expect((await reset()).status).toBe(200);
+    const pending = fake.rows(schema.projectStateOutbox).find((r) => r.repositoryId === REPO);
+    expect(pending?.keptMetadata).toEqual(keptMetadata);
+    expect(pending).toMatchObject({
+      revision: 0,
+      writtenRevision: 0,
+      writeIntent: null,
+      rulesReconcileIntent: null,
+    });
+    expect(await exists(root, '.haive-data/plan.json')).toBe(true);
+  });
+
   it('deletes its outbox row, and only that repository’s', async () => {
     const fake = await setup(await repoRoot());
 

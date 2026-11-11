@@ -15,7 +15,7 @@ import {
 } from 'drizzle-orm/pg-core';
 import { relations, sql } from 'drizzle-orm';
 import { users } from './auth.js';
-import { tasks } from './tasks.js';
+import { tasks, type MergeResolveState } from './tasks.js';
 import { envTemplates } from './env.js';
 import { customBundles } from './bundles.js';
 
@@ -354,6 +354,11 @@ export const projectStateOutbox = pgTable(
           resetAt: string | null;
         }
     >(),
+    /** Captured projection metadata by checkout path, retained until a successful re-sync. */
+    keptMetadata:
+      jsonb('kept_metadata').$type<
+        Record<string, NonNullable<MergeResolveState['keptMetadata']>>
+      >(),
   },
   (table) => [
     check('project_state_outbox_revision_nonnegative', sql`${table.revision} >= 0`),

@@ -1,3 +1,5 @@
+import { pendingMetadataControl } from '../../test/support/pending-metadata-control.js';
+import * as aside from '../project-state/set-aside.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { logger } from '@haive/shared';
@@ -74,8 +76,12 @@ function chainDb(results: unknown[][], findFirst: unknown = null) {
     }),
     update: () => ({
       set: (v: unknown) => ({
-        where: async () => {
+        where: () => {
           updates.push(v);
+          return {
+            returning: async () => [{ id: 'step-1' }],
+            then: (resolve: (value: unknown) => void) => resolve(undefined),
+          };
         },
       }),
     }),
@@ -227,7 +233,15 @@ describe('recordLeftOpenMerges for a merge that is already gone', () => {
     expect(projections.settleProjections).not.toHaveBeenCalled();
   });
 
-  it('does not fail the cancel when the put-back fails', async () => {
+  it('lets repeated cancel and abandon teardown finish while re-sync stays unfinished', async () => {
+    projections.settleProjections.mockResolvedValue(false);
+    await expect(run(step())).resolves.toBeDefined();
+    await expect(run(step())).resolves.toBeDefined();
+    expect(logger.warn).toHaveBeenCalled();
+    expect(projections.settleProjections.mock.calls[0]![2].keptMetadata).toEqual(kept);
+  });
+
+  it('logs a put-back failure and lets teardown continue', async () => {
     projections.settleProjections.mockRejectedValue(new Error('disk full'));
     await expect(run(step())).resolves.toBeDefined();
     expect(logger.warn).toHaveBeenCalledWith(
@@ -381,6 +395,32 @@ describe('abortLeftMerge', () => {
       projections.settleProjections.mockReset().mockResolvedValue(true);
       git.relocateFixerChanges.mockResolvedValue(null);
     });
+
+    it.each([false, true])(
+      'abort settles absent metadata but rejects a real conflict: %s',
+      async (conflict) => {
+        const control = await pendingMetadataControl(conflict);
+        const real =
+          await vi.importActual<typeof import('./merge-projections.js')>('./merge-projections.js');
+        const resync = vi
+          .spyOn(aside, 'resyncHaiveProjections')
+          .mockImplementation(control.recover);
+        projections.settleProjections.mockImplementation((db, id, state, save) =>
+          real.settleProjections(db, id, { ...state, keptMetadataStored: true }, save),
+        );
+        git.relocateFixerChanges.mockResolvedValue(null);
+        const { db, inserted } = settleFixture();
+        try {
+          if (conflict) await expect(abortLeftMerge(db, job)).rejects.toThrow('not re-synced yet');
+          else await abortLeftMerge(db, job);
+          expect(inserted).toHaveLength(conflict ? 0 : 1);
+          expect(control.pending()).not.toBeNull();
+        } finally {
+          resync.mockRestore();
+          await control.cleanup();
+        }
+      },
+    );
 
     it('is retried, not settled as refused, when putting Haive’s files back fails', async () => {
       git.revParse.mockResolvedValue(null);
