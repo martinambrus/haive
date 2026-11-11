@@ -322,6 +322,8 @@ export interface RepoJobPayload {
   archiveFormat?: ArchiveFormat;
   /** Explicit recovery: keep the old tree aside and preserve existing project records. */
   recoverCheckout?: boolean;
+  /** Repair probe: an unusable checkout must stay in place until explicit recovery. */
+  checkCheckoutOnly?: boolean;
 }
 
 /* ------------------------------------------------------------------ */

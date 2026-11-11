@@ -351,6 +351,28 @@ describe('explicit checkout recovery', () => {
     expect((await recover()).status).toBe(409);
     expect(h.add).toHaveBeenCalledTimes(1);
   });
+  it.each(['checkout_repair_needed', 'source_repair_needed'])(
+    'a direct refresh of %s queues a check that cannot rebuild',
+    async (errorCode) => {
+      const fake = setup({
+        source: 'git_https',
+        remoteUrl: 'https://example.com/r.git',
+        status: 'error',
+        errorCode,
+      });
+      expect((await refresh()).status).toBe(200);
+      expect(h.add).toHaveBeenCalledWith(
+        REPO_JOB_NAMES.REFRESH,
+        expect.objectContaining({ checkCheckoutOnly: true }),
+        expect.any(Object),
+      );
+      expect(h.add.mock.calls[0]![1]).not.toHaveProperty('recoverCheckout');
+      expect(fake.rows(schema.repositories)[0]!.errorCode).toBe(errorCode);
+      // A second API call before pickup cannot turn the queued check into an ordinary rebuild.
+      expect((await refresh()).status).toBe(200);
+      expect(h.add.mock.calls[1]![1]).toMatchObject({ checkCheckoutOnly: true });
+    },
+  );
   it('refuses recovery for an ordinary error', async () => {
     setup({ source: 'git_https', remoteUrl: 'https://example.com/r.git', status: 'error' });
     expect((await recover()).status).toBe(409);

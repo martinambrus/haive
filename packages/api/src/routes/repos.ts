@@ -3534,6 +3534,13 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
   ) {
     throw new HttpError(409, 'This repository does not need checkout recovery.');
   }
+  const repairErrorCode =
+    repo.errorCode === REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED
+      ? REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED
+      : repo.errorCode === REPOSITORY_ERROR_CODES.SOURCE_REPAIR_NEEDED
+        ? REPOSITORY_ERROR_CODES.SOURCE_REPAIR_NEEDED
+        : null;
+  const checkCheckoutOnly = !recovery && repairErrorCode !== null;
   if (recovery && repo.source === 'local_path' && (!repo.writable || !repo.localPath)) {
     throw new HttpError(
       409,
@@ -3605,7 +3612,13 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
     await admitNewWork(tx);
     const changed = await tx
       .update(schema.repositories)
-      .set({ status: 'cloning', statusMessage: null, errorCode: null, updatedAt: new Date() })
+      .set({
+        status: 'cloning',
+        statusMessage: null,
+        // Keep the repair signal through pickup: another refresh must also remain check-only.
+        errorCode: checkCheckoutOnly ? repairErrorCode : null,
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(schema.repositories.id, id),
@@ -3631,6 +3644,7 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
     userId,
     source: repo.source,
     ...(recovery ? { recoverCheckout: true } : {}),
+    ...(checkCheckoutOnly ? { checkCheckoutOnly: true } : {}),
     ...(upload
       ? { archivePath: upload.archivePath, archiveFormat: upload.archiveFormat as ArchiveFormat }
       : {}),
@@ -3662,7 +3676,11 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
               backoff: { type: 'exponential', delay: 5000 },
             },
       ),
-    recovery ? REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED : null,
+    recovery
+      ? REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED
+      : checkCheckoutOnly
+        ? repairErrorCode
+        : null,
   );
 
   return c.json({ ok: true });

@@ -710,6 +710,11 @@ export async function handleRefresh(
     payload.repositoryId,
     async () => {
       const state = await usableCheckout(dest);
+      if (payload.checkCheckoutOnly && state !== 'usable') {
+        throw new CheckoutRepairNeededError(
+          'Not refreshed: the checkout still needs repair. Nothing was moved. Repair it in place or use Rebuild checkout.',
+        );
+      }
       if (typeof state === 'object' && !payload.recoverCheckout) {
         // Do not import mirrors from a checkout Git cannot examine.
         const Failure = state.repairNeeded ? CheckoutRepairNeededError : Error;

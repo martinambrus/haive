@@ -232,6 +232,37 @@ it('a git read that never finished does not tell the user to repair the checkout
   expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
 });
 
+it.each(['HEAD', '.git'] as const)(
+  'Check repair leaves an unusable checkout with missing %s untouched',
+  async (missing) => {
+    const { dest, payload } = await fixture();
+    await rm(path.join(dest, missing === 'HEAD' ? '.git/HEAD' : '.git'), { recursive: true });
+    expect(await usableCheckout(dest)).toBe('unusable');
+    await expect(runRefresh({ ...payload, checkCheckoutOnly: true })).rejects.toThrow(
+      /checkout.*repair/i,
+    );
+    expect(row).toMatchObject({ status: 'error', errorCode: 'checkout_repair_needed' });
+    expect(await readdir(path.dirname(dest))).toEqual(['r1']);
+    expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
+    expect(
+      await lstat(path.join(dest, missing === 'HEAD' ? '.git/HEAD' : '.git')).catch(() => null),
+    ).toBeNull();
+    expect(h.seed).not.toHaveBeenCalled();
+    expect(h.restore).not.toHaveBeenCalled();
+    expect(h.persist).not.toHaveBeenCalled();
+  },
+);
+
+it('Check repair resumes an ordinary refresh once the checkout is usable', async () => {
+  const { dest, payload } = await fixture();
+  await runRefresh({ ...payload, checkCheckoutOnly: true });
+  expect(row.status).toBe('ready');
+  expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(
+    await git(payload.localPath!, ['rev-parse', 'HEAD']),
+  );
+  expect(h.restore).not.toHaveBeenCalled();
+});
+
 async function runRefresh(payload: RepoJobPayload) {
   startRepoWorker(root);
   return h.processor!({ name: REPO_JOB_NAMES.REFRESH, data: payload } as Job);
