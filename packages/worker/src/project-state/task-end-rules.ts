@@ -86,6 +86,12 @@ export async function reconcileTaskEndRules(
       if (writtenRegion !== null && render !== null) {
         const record = cliRulesRegionRecord(writtenRegion, render, new Set());
         const context = readRenderContextColumn(repo.renderContext);
+        // Snapshots omit the column's own flag; a row carrying it fails isRenderContextSnapshot.
+        let snapshot: Record<string, unknown> | null = null;
+        if (context.kind === 'column') {
+          const { rtkChoiceRecorded: _flag, ...rest } = context.column;
+          snapshot = rest;
+        }
         await tx.insert(schema.onboardingArtifacts).values({
           userId: repo.userId,
           repositoryId,
@@ -99,13 +105,17 @@ export async function reconcileTaskEndRules(
           writtenContent: record.content,
           lastObservedDiskHash: record.writtenHash,
           userModified: false,
-          formValuesSnapshot: context.kind === 'column' ? { ...context.column } : null,
+          formValuesSnapshot: snapshot,
           source: 'backfill',
           sourceStepId: 'task-end-rules-resync',
           haiveVersion: getHaiveVersion(),
         });
       }
-      await writeApplicableTemplateIds(tx, { repositoryId, userId: repo.userId });
+      await writeApplicableTemplateIds(tx, {
+        repositoryId,
+        userId: repo.userId,
+        requireResolved: repo.renderContext !== null,
+      });
       await markProjectStateDirty(tx, repositoryId);
       // No database wait while fs-safe parks the file. Judge the same bytes we read before
       // recording them, and preserve all text outside the region. A racing save stays put.

@@ -17,6 +17,7 @@ import {
   normalizeContent,
   sha256Hex,
 } from '@haive/shared';
+import { isRenderContextSnapshot } from '@haive/shared/project-state';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import type {
   UpgradePlanEntry,
@@ -146,6 +147,9 @@ describe('02 and the rules override its plan was made from', () => {
       const local = 'PLANNED RULES\n';
       const s = await setup(local, local);
       await recordWritten(s.apply());
+      Object.assign(s.fake.rows(schema.repositories)[0]!, {
+        renderContext: { ...REFERENCE_CONTEXT, rtkChoiceRecorded: false },
+      });
       const path = join(s.root, '.haive-data/state/settings/agent-rules.md');
       if (incoming === null) await unlink(path);
       else await writeFile(path, incoming);
@@ -177,6 +181,7 @@ describe('02 and the rules override its plan was made from', () => {
         const hash = sha256Hex(normalizeContent(render));
         // upgrade-status compares these same schema/hash fields against the shared renderer.
         expect(live).toHaveLength(1);
+        expect(isRenderContextSnapshot(live[0]!.formValuesSnapshot)).toBe(true);
         expect(
           classifyEntry({
             live: live[0] as unknown as LiveArtifactRow,
