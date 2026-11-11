@@ -9,6 +9,7 @@ import { splitUploadPath } from './worktree-paths.js';
 const log = logger.child({ module: 'upload-reaper' });
 
 const IDLE_MS = 24 * 60 * 60 * 1000;
+const FINISHED_METADATA_MS = 90 * IDLE_MS;
 const REAP_RETRY_MS = IDLE_MS;
 const SWEEP_INTERVAL_MS = 15 * 60 * 1000;
 const UPLOADS_DIR = '_uploads';
@@ -296,6 +297,69 @@ async function deleteCancelledSessions(
   }
 }
 
+/** Metadata only: source files and bundles have their own lifecycle. None of these tables has a
+ *  finished_at; completion/consumption stamps updated_at, the closest existing finish timestamp.
+ *  Keep retry sources and every task's consumed-dump link (even ended tasks): ON DELETE SET NULL
+ *  would otherwise let a Retry fall through to a saved database instead of the consumed upload. */
+async function deleteFinishedMetadata(db: Database, kind: UploadKind, cutoff: Date): Promise<void> {
+  const table = kind.table;
+  const pin =
+    table === schema.repoUploads
+      ? db
+          .select({ id: schema.repositories.id })
+          .from(schema.repositories)
+          .where(
+            and(
+              eq(schema.repositories.id, table.id),
+              inArray(schema.repositories.status, ['cloning', 'error']),
+            ),
+          )
+      : table === schema.customBundleUploads
+        ? db
+            .select({ id: schema.customBundles.id })
+            .from(schema.customBundles)
+            .where(
+              and(
+                eq(schema.customBundles.id, schema.customBundleUploads.bundleId),
+                inArray(schema.customBundles.status, ['syncing', 'failed']),
+              ),
+            )
+        : db
+            .select({ id: schema.tasks.id })
+            .from(schema.tasks)
+            .where(eq(schema.tasks.dbUploadId, table.id));
+  const eligible = and(
+    eq(table.status, table === schema.dbUploads ? 'consumed' : 'complete'),
+    lt(table.updatedAt, cutoff),
+    notExists(pin),
+  );
+  const rows = await db
+    .select({ id: table.id })
+    .from(table)
+    .where(eligible)
+    .orderBy(table.updatedAt, table.id)
+    .limit(BATCH);
+  if (rows.length === 0) return;
+  // Repeat status, age and reference checks at the deletion, rather than trusting the read.
+  const removed = await db
+    .delete(table)
+    .where(
+      and(
+        inArray(
+          table.id,
+          rows.map((row) => row.id),
+        ),
+        eligible,
+      ),
+    )
+    .returning({ id: table.id });
+  if (removed.length > 0)
+    log.info(
+      { table: getTableName(table), rows: removed.length },
+      'finished upload metadata expired',
+    );
+}
+
 async function claimDump(db: Database, dumpId: string, cutoff: Date): Promise<boolean> {
   const keptByTask = db
     .select({ id: schema.tasks.id })
@@ -461,6 +525,7 @@ async function reapOrphanPartials(
 /** One reaper pass: claim the idle and the ended, finish what is reaping, sweep orphan partials. */
 export async function reapAbandonedUploads(db: Database): Promise<UploadReapResult> {
   const cutoff = new Date(Date.now() - IDLE_MS);
+  const finishedCutoff = new Date(Date.now() - FINISHED_METADATA_MS);
   await forgetGoneOrphanFailures();
   const result: UploadReapResult = { sessions: 0, dumps: 0, orphans: 0 };
   const guarded = async <T>(what: string, run: () => Promise<T>, skipped: T): Promise<T> => {
@@ -487,6 +552,11 @@ export async function reapAbandonedUploads(db: Database): Promise<UploadReapResu
     await guarded(
       'a cancelled-row pass',
       () => deleteCancelledSessions(db, kind, cutoff),
+      undefined,
+    );
+    await guarded(
+      'a finished-metadata pass',
+      () => deleteFinishedMetadata(db, kind, finishedCutoff),
       undefined,
     );
   }

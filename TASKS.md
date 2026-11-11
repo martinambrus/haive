@@ -43,7 +43,45 @@ over silently: ask the user, then set `owner:` to yourself with a note naming th
 and write where the work stands (branch, PR, evidence path) in its body.
 
 **Finish**: when the PR is merged and main CI is green, delete the task's block and add one line to
-`## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
+`### T593 · consumed DB-dump upload rows expire 90 days after their task ended
+
+status: open · kind: fix · found: D1 (#1063) owner decision 2026-11-11 · priority: P3
+
+Owner decision: a consumed `db_uploads` row is deleted once 90 days have passed and every task that names it is completed or cancelled. Today the consumed-row expiry in `worker/src/repo/upload-reaper.ts` (`pin` ~:326-334) keeps the row while ANY task row names it, ended tasks included, so in practice it goes only with its repository.
+
+1. Narrow the `db_uploads` pin to the rule `claimDump` already uses for complete dumps (`keptByTask` ~:363-374): a task not in `ENDED_TASK_STATUSES`, or one updated within the cutoff, keeps the row. `tasks.db_upload_id` is `ON DELETE SET NULL`, so the named tasks lose the link.
+2. A Retry or reopen of such a task that reaches `01c1-restore-database` with no dump must fail with a plain sentence saying the dump expired and how to upload a new one, never a generic error. Add that control.
+3. Docs: `database-persistence.md` retention paragraph.
+
+### T594 · FNF[repo-recovery-followups] · checkout recovery and revival follow-ups (+7)
+
+status: open · kind: fix · found: F2 (#1065) reviews 2026-11-10/11 · priority: P3
+All PRE-EXISTING.
+
+1. C1: a recovery that fails after `moveAside` leaves `dest` missing or partial with the code set; each further recovery moves it aside again, accumulating `.aside-*` siblings (`worker/src/repo/refresh.ts` ~:427-442). Fix: reuse or clean the failed destination before moving aside again.
+2. C2: a task that starts after the rename can overlap the minutes-long clone while `dest` is absent (`refresh.ts` ~:509-520); a start does not read the root claim (`repository-refresh.md` :18-19). Fix: task start refuses while a root claim of a rebuild is held.
+3. C3: `reconcileStrandedCloningRepos` writes `error_code = null` (`worker/src/data-migrations.ts` ~:478), so a recovery stranded by a worker death becomes an ordinary Retry. Fix: keep the code.
+4. C4: the task page offers Retry on a failed task whose repository was deleted until the click returns the 409 (`web/src/app/(app)/tasks/[id]/page.tsx` ~:1948). Fix: hide it on the structural NULL repository.
+5. C5: a Rebuild clicked right after Cancel can race the asynchronous teardown touching the worktree under the checkout. Fix: count tasks with a pending teardown as holders.
+6. R1: `refreshRepository` flips an ordinary refresh of a `ready` repo to `cloning` unconditionally (`api/src/routes/repos.ts` ~:3606-3620).
+7. D4a: dead-task revival polling for transient holds is unbounded (`worker/src/queues/dead-task-boot.ts` `retryHeldRevivals`). Fix: cap or back off, log once.
+
+### T595 · FNF[root-merge-runapp-followups] · run-app commit and root merge fence follow-ups (+9)
+
+status: open · kind: fix · found: E1 (#286, #271) reviews 2026-11-10/11 · priority: P4
+All low.
+
+1. An index-refresh failure after a landed run-app commit (`worker/src/repo/git-preview.ts` ~:148-160) fails the step; the Retry that recognises the landed commit skips the refresh, so it is never repaired. Fix: re-run the refresh on that Retry.
+2. `99-run-app-ready.ts` ~:440 `catch {}` hides database and git read failures behind a form reopen. Fix: reopen only on a structural mismatch; surface read failures.
+3. Each reopen re-runs the whole `detect`, including `ensureAppServing` and the in-runner browser navigation (`99-run-app-ready.ts` ~:113-146), resetting the user's VNC browser to the app root.
+4. The DAG put-back throws generically where 12 halts Retry-able (`merge-resolver.ts` ~:1081-1095); `putBackIssueProjections` warns through a fresh row while `m.current` stays stale, so a last-in-pass note can be lost.
+5. The `reopenedFormNotice` stays in `form_schema` of a row that later completes (display only).
+6. More than 500 changed files: `detect` runs `gitPreview` twice before discovering `truncated` (cost).
+7. Test gaps: a frozen legacy run-app form through `advanceStep` end to end; Skip, CLI switch, failed-task form submit and the worker `refuseRevive` branch of the root merge fence; a DAG projection-only conflict on the already-open path.
+8. Stale log wording `dead-task-boot.ts` ~:333; misleading test title `branch-revert.test.ts` ~:368; `root-merge-redrive.test.ts` ~:15 mocks into `shared/dist` by a relative path.
+9. `ReopenStepFormError` messages in plan steps are internal control text (not shown since the notice is opt-in); reword if ever shown.
+
+## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
 **Found something outside your task?** Search the board first (`grep -n "<file>\|<symbol>\|<slug>"`).
 
@@ -119,10 +157,9 @@ Verification fence: one short pass, at most three supported cases per candidate,
 
 ### T323 · FNF[uploads-3] · finished upload rows are never deleted; the reaper's removal is not identity-checked (+1)
 
-status: in progress (item 4 in bundle D1, overnight run 2026-11-10) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
+status: open (item 5 parked; item 4 done #1063) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 All PRE-EXISTING.
 
-4. PARKED (user): `complete` rows in repo_uploads/custom_bundle_uploads and `consumed` db_uploads rows are never deleted — needs a retention rule.
 5. Latent, minor: the reaper removes a path without checking it is still the file it lstat'ed (upload-reaper.ts removeFile); fs-safe's lstatNoFollow returns numeric Stats, so dev/ino cannot be compared losslessly. Cannot bite today (upload names are fresh UUIDs). Fix: a bigint lstat identity export in fs-safe, compared before the unlink.
 
 User decision 2026-11-01: Retain complete/consumed upload metadata 90 days; protect active or retry-needed rows. Item5 identity-hardening remains parked until reachable impact.
@@ -141,15 +178,6 @@ All PRE-EXISTING; notes .claude/tmp/track-b/b3/b31c/analysis/guard.md.
 
 status: in progress (bundle E1, overnight run 2026-11-10, branch fix/E1-dag-merge-root-fences) · priority: P2
 dag-executor.ts (~681, ~951) aborts level merges without resolveHaiveProjectionConflicts, so a conflict only in Haive files goes to a fixer. Fix: run B3.1c's revert helper on each DAG issue branch before its level merge. (#274 merged, so unblocked.)
-
-### T291 · FNF[fs-park] · a process death mid-park leaves the file under its park name (+2)
-
-status: in progress (bundle D1, overnight run 2026-11-10, branch fix/D1-park-sweep-upload-retention) · priority: P2
-All PRE-EXISTING.
-
-1. fs-safe.ts ~1115-1262 parks as `.<leaf>.haive-park-<pid>-<uuid>`; a kill between rename and settle leaves it there; nothing sweeps it. Fix: boot/temp sweep puts it back when the name is free, else reports.
-2. _rules-files.ts stripRtkBlocks (~180) / appendRtkBlock (~336) await 02's DB insert while AGENTS.md/CLAUDE.md is parked; record before the park.
-3. plan/mirror.ts ~287/~316 await git while plan.json is parked — deliberate; item 1 covers it.
 
 ### T308 · FNF[worktree-aliases] · hard links planted into .haive/worktrees before #800 survive
 
@@ -202,7 +230,7 @@ shared/src/rag/search.ts:449/:560 plainto_tsquery ANDs every term; 67.6% of logg
 
 ### T145 · RAG F13 · Slovak text matches only verbatim
 
-status: open · kind: feature · user decision: resolved 2026-11-01 · priority: P3
+status: in progress (bundle K, overnight run 2026-11-10, branch fix/K-slovak-rag) · kind: feature · user decision: resolved 2026-11-01 · priority: P3
 _rag-connection.ts:130 update_content_tsv uses to_tsvector('english') without unaccent ("kotolna" misses "kotolňa"). Needs a backfill (like backfillIdentifierTsv) and a fail-open path without the extension. Plan P2(e).
 
 User decision 2026-11-01: Approve bounded Slovak accent-insensitive retrieval with a backfill and extension-unavailable fallback; retain retrieval-evaluation gates for T144/T147.
@@ -261,7 +289,7 @@ The owner scheduled one capped validation attempt; this block is an evidence dep
 
 ### T199 · /favicon.ico answers 404 on every page
 
-status: open · kind: feature · user decision: resolved 2026-11-01 · priority: P3
+status: in progress (bundle H1, overnight run 2026-11-10, branch fix/H1-a11y-favicon) · kind: feature · user decision: resolved 2026-11-01 · priority: P3
 Add an icon via the Next app-router convention (src/app/icon.svg or favicon.ico).
 
 User decision 2026-11-01: Use a simple Haive H favicon.
@@ -331,7 +359,7 @@ User decision 2026-11-01: keep live Google connection parked; prepare setup inst
 
 ### T334 · FNF[builtin-order-hazards] · built-in workflow runs 07b before 07c, and 08b fixer edits after both
 
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (bundle F4, overnight run 2026-11-10, branch fix/F4-workflow-order) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 All PRE-EXISTING.
 
 1. 07b-phase-4-validate boots and uses the runtime (07b:787) against a DDEV container that has not yet applied the implementation's .ddev change; 07c-ddev-reconcile runs after it in registry order (steps/workflow/index.ts).
@@ -533,10 +561,15 @@ PRE-EXISTING link, new consequence of #1044. Auto-link picks the entry a draft r
 status: open · kind: fix · found: T558 run 2026-11-09 · priority: P4
 PRE-EXISTING, minor. `configSchema` (api routes/global-kb.ts ~:292-293) accepts `ollamaUrl`/`embedModel` with surrounding whitespace and `putConfig` writes them as sent; the non-admin compare trims, so only the stored value and its dials see the whitespace. Fix: trim in the schema.
 
-### T580 · plan[sleep-paper-lessons] · calibrate effort estimates on the LLM's recorded estimate; keep learnings reachable past 60
+### T580 · plan[sleep-paper-lessons] · calibrate effort estimates on the LLM's recorded estimate; keep learnings reachable past 60 (+2)
 
 status: parked · reason: diminishing returns (owner triage 2026-11-10); PR 1 shipped #1047 884f5c074; resume when step 11 changes or a repository nears 60 learnings · kind: fix · found: SLEEP paper assessment 2026-11-09 · priority: P3
 Plan: `docs/plans/sleep-paper-lessons.md`. PR 1: `hydrateAnchors` and `GET /tasks/estimation-accuracy` read the latest `estimate.recorded.aiHours` instead of the column `06b-sprint-planning` overwrites. PR 2 (low urgency, when step 11 is next touched or a repository nears 60 learnings): list every learning id and title, not an unsorted first 60. Both PRE-EXISTING. P3 of the plan, the backtest, waits for its trigger query.
+
+Appended 2026-11-11 from the Anthropic dreaming assessment; both bear on step 11 seeing and reconciling learnings:
+
+1. Learnings written before the `.haive-data/` move are unreachable. PRE-EXISTING. `readExistingLearnings` (worker 11-phase-8-learning.ts ~:591) and `collectKbFiles` (worker \_rag-index.ts ~:94, `KNOWLEDGE_SOURCE_PREFIXES`) read only `.haive-data/learnings/`, and `migrateLegacyKnowledge` (onboarding \_kb-legacy.ts) runs only from 08-knowledge-acquisition, so a repository keeps them dark until it is re-onboarded. MEASURED on the dev install: 192 of 198 learnings at HEAD sit under `.claude/learnings/` in 59 repositories; 0 of 70 step-11 runs were shown an existing learning. Fix direction: run the learnings half of the migration on the workflow path before 02-pre-rag-sync indexes, or read both dirs.
+2. The `learning-recorder` persona forbids what step 11 asks for. PRE-EXISTING. The template (onboarding \_agent-templates.ts ~:805-864) says "Add, never overwrite" and lists folding a lesson into an existing entry as an anti-pattern; step 11 asks for `update`/`delete` ops (~:1146-1150) and tells the agent to follow that persona when the repository has it (~:1119-1125), which most onboarded repositories do. MEASURED: 247 entries over 70 runs, all inserts (confounded by item 1). Fix direction: make the template match the reconcile protocol, with the template-manifest bump `docs/architecture/onboarding-upgrades.md` asks for.
 
 ### T559 · FNF[gated-test-hygiene] · gated test addresses and the gated-list check in driver gates (+1)
 
@@ -677,7 +710,7 @@ status: parked · kind: design · was modular #146 · reason: diminishing return
 
 ### T343 · FNF[a11y-sweep] · links wrap buttons at 17 sites; sidebar rename input sits inside a button; plan panel close and tabs lack names (+12)
 
-status: open · was modular #151 · priority: P2
+status: in progress (bundle H1, overnight run 2026-11-10, branch fix/H1-a11y-favicon) · was modular #151 · priority: P2
 All PRE-EXISTING unless marked.
 
 1. Base items:
@@ -1569,8 +1602,17 @@ status: open (items 1, 3, 5 done in #1062; the rest unapproved, awaiting owner p
 status: open · kind: fix · found: T590 (#1062) Codex and review 2026-11-10 · priority: P4
 PRE-EXISTING, minor to moderate. A browser cannot read a refused upgrade's status, so these show a generic error: api routes/terminal.ts ~:66 ("Container not running"), ~:70 ("Container not bound to docker"); routes/terminal-shell.ts ~:137 (task status disables the terminal), ~:552, ~:559 (repository eligibility). Clients: web Terminal.tsx ~:247-253, InteractiveShell.tsx ~:241-247. Fix: the #1062 pattern (accept after the origin, auth and ownership checks, then close with a 4000-4999 code from a shared constant; the client keys its sentence on the code).
 
+### T592 · FNF[fs-park-recovery] · park recovery runs only where fs-safe writes; legacy truncated parks (+1)
+
+status: open · kind: fix · found: D1 (#1063) Codex and review 2026-11-10 · priority: P4
+PRE-EXISTING, minor.
+
+1. Park recovery (worker `fs-recovery.ts`, driven by the write-path temp sweep) visits only directories fs-safe writes into; a park left in a directory nothing writes again stays under its park name. Fix: also visit the dirs that parked a file (record them) or accept and document.
+2. A park written before #1063 with a leaf long enough to be truncated in its park name has no `.name` record, so recovery cannot know the original name and only warns. Fix: none needed unless a user reports one; manual restore.
+
 ## Done
 
+- T291 + T323 item 4 — a file parked by a process death is put back after 24 h (ctime age, worker write-path sweep, bounded warnings, `.name` records for long leaves); RTK strip/append record before parking; complete/consumed upload rows deleted 90 days after `updated_at` (protected states kept) — PR #1063 (a49293f6e), 2026-11-10. T323 item 5 stays parked; follow-ups T592.
 - T590 items 1, 3, 5 — CLI login-secret deletes take the auth-scope lock (409 `cli_auth_busy`, no generation advance); sign-out poll window past the shared 30 min cap (`CLI_SIGN_OUT_AUTH_WAIT_MS`); busy or settings-moved login upgrade closes with 4409/4410 and the modal says why — PR #1062 (0f52f236c), 2026-11-10. T590 stays open with items 2, 4, 6-18; follow-ups T591, T502 item 4.
 - T586 — a late CLI sign-out no longer deletes a newer login's credential: `cli_providers.auth_generation` (migration 0224) stamped at login and secret writes, the sign-out job skips a superseded login; one advisory lock per auth scope held by login, sign-out, sync-back, refresh and PATCH, with scope recheck after the lock — PR #1061 (f715e40a7), 2026-11-10. Follow-ups T590.
 - T570 + T554 items 1-3 — encryption key SET NX winner (checked on every production read); private endpoint seed retries unresolved names (cap 10, admin save ends seed ownership); one shared allowlist lock name; item 4 invalid (egress guard already warns), item 5 no change — PR #1060 (5f90d186a), 2026-11-10. Leftovers T589.
