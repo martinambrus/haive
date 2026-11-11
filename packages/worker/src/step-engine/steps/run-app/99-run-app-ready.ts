@@ -4,6 +4,7 @@ import type { FormSchema } from '@haive/shared';
 import { CONFIG_KEYS, configService } from '@haive/shared';
 import {
   TaskCancelledError,
+  ReopenStepFormError,
   type StepContext,
   type StepDefinition,
 } from '../../step-definition.js';
@@ -22,9 +23,21 @@ import {
   unregisteredGitlinks,
   unregisteredGitlinksMessage,
 } from '../workflow/_gitlink-registration.js';
-import { gitCommitStaged } from '../../../repo/git-commit.js';
+import {
+  gitPreview,
+  GitPreviewHiddenEntriesError,
+  gitPreviewWasCommitted,
+  commitGitPreview,
+  assertGitPreviewBranch,
+  RUN_APP_PATHSPECS,
+  type GitPreview,
+} from '../../../repo/git-preview.js';
 import { gitWorkspaceStatus } from '../../../repo/git-workspace.js';
-import { putBackProjections, warnStep } from '../../../project-state/branch-revert.js';
+import {
+  commitBeforeProjectionPutBack,
+  putBackProjections,
+  warnStep,
+} from '../../../project-state/branch-revert.js';
 
 // Git identity fallback when the user has no name/email on file — mirrors
 // 10-gate-3-commit so a commit-back never fails for a missing identity.
@@ -60,6 +73,10 @@ interface RunAppReadyDetect {
   branchError?: string | null;
   dirtyFiles: number;
   diffArtifactPath: string | null;
+  /** Absent on older parked forms or when the preview could not be read safely. */
+  commitPreview?: GitPreview | null;
+  /** Optional for forms parked before preview availability was recorded. */
+  commitPreviewError?: string | null;
   changedFileCount: number;
   /** The branch 01 forked the worktree from; absent where 01 did not run or the output predates it. */
   baseBranch?: string | null;
@@ -177,6 +194,8 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
     let dirtyFiles = 0;
     let diffArtifactPath: string | null = null;
     let changedFileCount = 0;
+    let commitPreview: GitPreview | null = null;
+    let commitPreviewError: string | null = null;
     if (hasGit) {
       const branchRes = await gitRun(workspacePath, ['rev-parse', '--abbrev-ref', 'HEAD']);
       branch = branchRes.code === 0 ? branchRes.stdout.trim() : null;
@@ -210,11 +229,37 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
         }
         dirtyFiles = status.stdout.split('\n').filter((l) => l.trim().length > 0).length;
         if (dirtyFiles > 0) {
-          const res = await buildCommitDiffArtifact(workspacePath, gitRun);
+          const before = await gitPreview(workspacePath);
+          const res = await buildCommitDiffArtifact(workspacePath, (cwd, argv) =>
+            gitRun(cwd, argv.includes('status') ? [...argv, '--', ...RUN_APP_PATHSPECS] : argv),
+          );
+          const after = await gitPreview(workspacePath);
+          if (res.truncated) {
+            commitPreviewError =
+              'The commit preview is unavailable because not all changed files can be shown. Commit your edits from the Terminal tab, or finish without committing.';
+            throw new Error(commitPreviewError);
+          }
+          if (
+            before.head !== after.head ||
+            before.ref !== after.ref ||
+            before.tree !== after.tree
+          ) {
+            throw new Error(
+              'The commit preview changed while it was being read; reopen it to review the current edits.',
+            );
+          }
           diffArtifactPath = res.artifactPath;
           changedFileCount = res.changedFileCount;
+          commitPreview = before;
+        } else {
+          commitPreview = await gitPreview(workspacePath, []);
         }
       } catch (err) {
+        if (err instanceof GitPreviewHiddenEntriesError)
+          commitPreviewError ??=
+            'The commit preview is unavailable because some changed files are marked assume-unchanged or skip-worktree, so their staged contents cannot be shown. Commit your edits from the Terminal tab, or finish without committing.';
+        commitPreviewError ??=
+          'The commit preview is unavailable because the edits could not be read safely. Commit your edits from the Terminal tab, or finish without committing.';
         ctx.logger.warn({ err }, 'run-app-ready: failed to build commit diff artifact');
       }
     }
@@ -234,6 +279,8 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       branchError,
       dirtyFiles,
       diffArtifactPath,
+      commitPreview,
+      commitPreviewError,
       changedFileCount,
       baseBranch: worktreeOutput?.baseBranch ?? null,
     };
@@ -260,21 +307,39 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
             'When you are done, finish to tear down the environment. Optionally commit your',
             'session edits back to this task’s branch first.',
           ];
-    const fields: FormSchema['fields'] = [
-      {
-        type: 'checkbox',
-        id: 'commit',
-        label: 'Commit my session edits before finishing',
-        default: false,
-      },
-      {
-        type: 'textarea',
-        id: 'commitMessage',
-        label: 'Commit message',
-        rows: 3,
-        default: 'chore: run-app session edits',
-      },
-    ];
+    lines.push(
+      '',
+      'Only the edits shown below are committed. If they change, review the refreshed preview and finish again.',
+    );
+    const fields: FormSchema['fields'] =
+      !detected.hasGit || detected.commitPreview
+        ? [
+            {
+              type: 'checkbox',
+              id: 'commit',
+              label: 'Commit my session edits before finishing',
+              default: false,
+            },
+            {
+              type: 'textarea',
+              id: 'commitMessage',
+              label: 'Commit message',
+              rows: 3,
+              default: 'chore: run-app session edits',
+            },
+          ]
+        : [];
+    if (detected.hasGit && !detected.commitPreview) {
+      fields.push({
+        type: 'note',
+        id: 'commitPreviewUnavailable',
+        label: 'Commit preview unavailable',
+        body:
+          detected.commitPreviewError ??
+          'The commit preview is unavailable. Commit your edits from the Terminal tab, or finish without committing.',
+        variant: 'warning',
+      });
+    }
     if (detected.hasOrigin && !detected.branchError) {
       fields.push({
         type: 'checkbox',
@@ -329,6 +394,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
 
     const workspace = detected.workspacePath;
     let nothing = true;
+    let committedPreviewSha: string | null = null;
     // A push can publish commits already on the branch. Leaving commit unticked
     // must keep the user's index and uncommitted session edits untouched.
     if (values.commit) {
@@ -341,16 +407,71 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       ]);
       if (status.code !== 0)
         throw new Error(`git status failed: ${status.stderr || status.stdout}`);
-      const orphans = await unregisteredGitlinks(workspace, status.stdout, []);
+      const orphans = await unregisteredGitlinks(
+        workspace,
+        status.stdout,
+        [],
+        detected.commitPreview?.paths,
+        detected.commitPreview ?? undefined,
+      );
       if (orphans.length) throw new Error(unregisteredGitlinksMessage(orphans));
-      const add = await gitRun(workspace, ['add', '-A']);
-      if (add.code !== 0) {
-        throw new Error(`git add failed: ${add.stderr || add.stdout}`);
+      const preview = detected.commitPreview;
+      if (!preview?.ref) {
+        throw new ReopenStepFormError(
+          'The edits need a fresh commit preview. Review the refreshed preview before finishing.',
+          { notice: true },
+        );
       }
-      const message = (values.commitMessage ?? '').trim() || 'chore: run-app session edits';
-      const userEnv = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
-      const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
-      nothing = !(await gitCommitStaged(workspace, message, commitEnv));
+      let current: GitPreview;
+      let alreadyCommitted = false;
+      try {
+        // Rebuild against the reviewed parent, including deletions already committed.
+        // This also ignores the projection-only tree changes put-back may have made.
+        // An initially clean session needs an unscoped read to offer later edits for review.
+        current = await gitPreview(
+          workspace,
+          preview.paths.length ? preview.paths : undefined,
+          preview.head,
+        );
+        if (current.head !== preview.head && current.ref === preview.ref) {
+          alreadyCommitted = await gitPreviewWasCommitted(workspace, preview, current.head);
+          if (alreadyCommitted) committedPreviewSha = current.head;
+          if (!alreadyCommitted && detected.branch) {
+            const beforePutBack = await commitBeforeProjectionPutBack(
+              ctx,
+              detected.branch,
+              current.head,
+            );
+            alreadyCommitted =
+              beforePutBack !== null &&
+              (await gitPreviewWasCommitted(workspace, preview, beforePutBack));
+            if (alreadyCommitted) committedPreviewSha = beforePutBack;
+          }
+        }
+      } catch {
+        throw new ReopenStepFormError(
+          'The edits changed or could not be read. Review the refreshed preview before finishing.',
+          { notice: true },
+        );
+      }
+      if (
+        (current.head !== preview.head && !alreadyCommitted) ||
+        current.ref !== preview.ref ||
+        current.tree !== preview.tree
+      ) {
+        throw new ReopenStepFormError(
+          'The edits changed since the commit preview. Review the refreshed preview before finishing.',
+          { notice: true },
+        );
+      }
+      if (alreadyCommitted) {
+        nothing = false;
+      } else {
+        const message = (values.commitMessage ?? '').trim() || 'chore: run-app session edits';
+        const userEnv = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
+        const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
+        nothing = !(await commitGitPreview(workspace, preview, message, commitEnv));
+      }
     }
     const commitNote = values.commit
       ? nothing
@@ -374,7 +495,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       };
     }
     const shaRes = nothing ? null : await gitRun(workspace, ['rev-parse', 'HEAD']);
-    const commitSha = shaRes?.code === 0 ? shaRes.stdout.trim() : null;
+    const commitSha = committedPreviewSha ?? (shaRes?.code === 0 ? shaRes.stdout.trim() : null);
 
     // Optional best-effort push: existing commits are safe on the branch, so a
     // push failure must never block teardown. Uses the repo's bound credential.
@@ -384,6 +505,8 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       // Not best effort: a put-back that fails fails the step, and its Retry finishes it.
       if (detected.baseBranch) {
         const target = detected.baseBranch;
+        if (values.commit && detected.commitPreview)
+          await assertGitPreviewBranch(workspace, detected.commitPreview, !nothing);
         await warnStep(
           ctx,
           await putBackProjections({ ctx, worktree: workspace, branch: pushTo, target }),
@@ -400,6 +523,8 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
               columns: { credentialsSecretId: true, remoteUrl: true },
             })
           : null;
+        if (values.commit && detected.commitPreview)
+          await assertGitPreviewBranch(workspace, detected.commitPreview, !nothing);
         await pushBranch({
           cwd: workspace,
           branch: pushTo,

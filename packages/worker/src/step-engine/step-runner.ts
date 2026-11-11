@@ -3432,6 +3432,15 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
               `${meta.id} requested another form, but refreshed detection produced no form`,
             );
           }
+          if (applyErr.notice) {
+            refreshedSchema.fields.unshift({
+              type: 'note',
+              id: 'reopenedFormNotice',
+              label: 'Review before continuing',
+              body: applyErr.message,
+              variant: 'warning',
+            });
+          }
           current = await updateRow(db, current.id, {
             status: 'waiting_form',
             detectOutput: refreshedDetected,

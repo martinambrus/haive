@@ -21,16 +21,8 @@ const LISTING = { maxBuffer: GIT_MAX_BUFFER, encoding: 'latin1' } as const;
 // A split index writes `.git/sharedindex.*` into the repository, so every scratch-index write turns it off.
 const NO_SPLIT_INDEX = ['-c', 'core.splitIndex=false'] as const;
 
-/** The argv of the gate's `git add -A`, shared by the real add and the check of what it would stage. */
-export function stageAllArgs(excluded: string[]): string[] {
-  return [
-    'add',
-    '-A',
-    ...(excluded.length
-      ? ['--', '.', ...excluded.map((p) => `:(top,exclude,literal)${p.slice(0, -1)}`)]
-      : []),
-  ];
-}
+import { stageAllArgs } from '../../../repo/git-stage.js';
+export { stageAllArgs } from '../../../repo/git-stage.js';
 
 function failure(what: string, res: GitRunResult): Error {
   const line = res.stderr.trim().split('\n', 1)[0] ?? '';
@@ -41,20 +33,28 @@ function expectOk(what: string, res: GitRunResult): void {
   if (gitGaveNoAnswer(res) || res.code !== 0) throw failure(what, res);
 }
 
-async function newGitlinks(workspace: string, env?: Record<string, string>): Promise<string[]> {
-  const head = await gitRun(workspace, ['rev-parse', '-q', '--verify', 'HEAD']);
-  if (head.code !== 0 && head.code !== 1) throw failure('git HEAD read', head);
+async function newGitlinks(
+  workspace: string,
+  env?: Record<string, string>,
+  baseHead?: string,
+): Promise<string[]> {
+  let unborn = false;
+  if (!baseHead) {
+    const head = await gitRun(workspace, ['rev-parse', '-q', '--verify', 'HEAD']);
+    if (head.code !== 0 && head.code !== 1) throw failure('git HEAD read', head);
+    unborn = head.code === 1;
+  }
   const res = await gitRun(
     workspace,
     [
-      head.code === 1 ? 'diff' : 'diff-index',
+      unborn ? 'diff' : 'diff-index',
       '--cached',
       '--raw',
       '-z',
       '--no-renames',
       '--ignore-submodules=none',
       '--diff-filter=AT',
-      ...(head.code === 1 ? [] : ['HEAD']),
+      ...(unborn ? [] : [baseHead ?? 'HEAD']),
     ],
     env,
   );
@@ -193,6 +193,7 @@ async function refuseFlattenedRepositories(
  * Index paths of gitlinks the commit about to be made would add that no `.gitmodules` entry in that
  * commit registers with a url. What `git add -A` would stage is worked out on a scratch copy of the
  * index, so the real index is never written. Throws when git cannot answer: a refusal is never skipped.
+ * A pinned preview instead loads that exact tree and judges additions against its parent.
  * Throws `FlattenedRepositoryError` when the add would flatten a nested repository in a tracked directory.
  */
 export async function unregisteredGitlinks(
@@ -200,13 +201,14 @@ export async function unregisteredGitlinks(
   status: string,
   excluded: string[],
   scope?: readonly string[],
+  pinned?: { head: string; tree: string },
 ): Promise<string[]> {
   await refuseFlattenedRepositories(
     workspace,
     parsePorcelainZ(status).filter((entry) => pathInScope(entry.path, scope)),
     excluded,
   );
-  return computeUnregisteredGitlinks(workspace, status, excluded, scope);
+  return computeUnregisteredGitlinks(workspace, status, excluded, scope, pinned);
 }
 
 function pathInScope(file: string, scope?: readonly string[]): boolean {
@@ -220,10 +222,11 @@ async function computeUnregisteredGitlinks(
   status: string,
   excluded: string[],
   scope?: readonly string[],
+  pinned?: { head: string; tree: string },
 ): Promise<string[]> {
   const inScope = (file: string) => pathInScope(file, scope);
   const entries = parsePorcelainZ(status).filter((entry) => inScope(entry.path));
-  const staged = (await newGitlinks(workspace)).filter(inScope);
+  const staged = pinned ? [] : (await newGitlinks(workspace)).filter(inScope);
   // A nested repository that replaces a tracked file shows as ` T path`, and one that replaces an
   // intent-to-add file as ` A path`, not as `?? path/`.
   const mayAddGitlink = entries.some(
@@ -232,33 +235,38 @@ async function computeUnregisteredGitlinks(
       e.y === 'T' ||
       e.y === 'A',
   );
-  if (staged.length === 0 && !mayAddGitlink) return [];
+  if (!pinned && staged.length === 0 && !mayAddGitlink) return [];
   const name = `gate-3-gitlinks-index-${randomUUID()}`;
   const env = { GIT_INDEX_FILE: path.join(os.tmpdir(), name) };
   try {
-    const listing = await gitRun(workspace, ['ls-files', '-s', '-z'], undefined, LISTING);
-    expectOk('git ls-files', listing);
-    const fill = await gitRun(
-      workspace,
-      [...NO_SPLIT_INDEX, 'update-index', '--add', '-z', '--index-info'],
-      env,
-      { input: Buffer.from(listing.stdout, 'latin1') },
-    );
-    expectOk('git update-index', fill);
-    await copyIndexFlags(workspace, env);
-    const batches = scope
-      ? Array.from({ length: Math.ceil(scope.length / 128) }, (_, i) => [
-          'add',
-          '-A',
-          '--',
-          ...scope.slice(i * 128, (i + 1) * 128).map((p) => `:(top,literal)${p}`),
-        ])
-      : [stageAllArgs(excluded)];
-    for (const args of batches) {
-      const add = await gitRun(workspace, [...NO_SPLIT_INDEX, ...args], env);
-      expectOk('git add', add);
+    if (pinned) {
+      const fill = await gitRun(workspace, [...NO_SPLIT_INDEX, 'read-tree', pinned.tree], env);
+      expectOk('git read-tree', fill);
+    } else {
+      const listing = await gitRun(workspace, ['ls-files', '-s', '-z'], undefined, LISTING);
+      expectOk('git ls-files', listing);
+      const fill = await gitRun(
+        workspace,
+        [...NO_SPLIT_INDEX, 'update-index', '--add', '-z', '--index-info'],
+        env,
+        { input: Buffer.from(listing.stdout, 'latin1') },
+      );
+      expectOk('git update-index', fill);
+      await copyIndexFlags(workspace, env);
+      const batches = scope
+        ? Array.from({ length: Math.ceil(scope.length / 128) }, (_, i) => [
+            'add',
+            '-A',
+            '--',
+            ...scope.slice(i * 128, (i + 1) * 128).map((p) => `:(top,literal)${p}`),
+          ])
+        : [stageAllArgs(excluded)];
+      for (const args of batches) {
+        const add = await gitRun(workspace, [...NO_SPLIT_INDEX, ...args], env);
+        expectOk('git add', add);
+      }
     }
-    const added = (await newGitlinks(workspace, env)).filter(inScope);
+    const added = (await newGitlinks(workspace, env, pinned?.head)).filter(inScope);
     if (added.length === 0) return [];
     const registered = await registeredPaths(workspace, env);
     return added.filter((p) => !registered.has(p));

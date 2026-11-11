@@ -978,7 +978,8 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
   const now = new Date();
   await db.transaction(async (tx) => {
     const reopens = await admitAnswer(tx, id);
-    await refuseReviveBesideLive(tx, id);
+    // A live merge's answer continues the merge it must finish; a failed task's answer revives it.
+    await refuseReviveBesideLive(tx, id, { continuation: !reopens });
     // Persist the answer to task_events (NOT form_values) and close the idle period.
     await tx.insert(schema.taskEvents).values({
       taskId: id,

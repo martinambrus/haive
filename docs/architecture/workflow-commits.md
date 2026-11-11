@@ -120,6 +120,41 @@ Whether there is anything to commit is decided by structure, never by git's word
 
 After its commit lands, gate 3 reads the new HEAD sha and the changed files. A read git gave no answer for (`gitGaveNoAnswer`) is retried once; if it still has none, `tasks.commit_sha` keeps whatever an earlier round stored (NULL on a first round) and a step warning names the read; a plain non-zero exit still writes NULL. A NULL sha means `haiveOwnShas` cannot recognise that commit as Haive's own later.
 
+Run app's Finish commits only what the form showed. The form pins the reviewed paths, their parent
+commit and the tree built from them (`commitPreview`; Haive's projections and atomic-write temp files
+are left out), and Finish commits that pinned tree with a compare-and-swap on the parent
+(`commitGitPreview`, `repo/git-preview.ts`): an edit made in the terminal after the preview, or
+other staged work, is neither swept into the commit nor lost. The reviewed paths start from the real index,
+so a staged removal stays removed (an ignored file taken out of tracking is not added back) and
+paths outside the scope stay at the parent. A reviewed path marked assume-unchanged or
+skip-worktree makes the preview unavailable, since git would commit its staged bytes while the
+diff shows the work tree. A preview taken with no edits reopens at Finish once the session has
+some; a non-empty preview leaves later edits to other paths uncommitted. If the reviewed bytes or the branch
+changed before Finish, the form comes back refreshed with a warning note asking to review the new
+preview (older parked forms too, since the note is added outside their frozen schema); only the
+parent mismatch reads as "branch changed", any other ref-update failure is an error. When the
+preview cannot be built in full (a diff read failed, or more than 500 changed files) Commit is
+hidden and the form says why: an oversized session is committed from the terminal, and Finish still
+works without committing. Its commit refuses while a merge is open in the checkout ("Finish or abort
+the open merge before committing session edits."). A Retry after a later failure (a failed
+put-back or push) recognises the commit it already made by structure, not by message: HEAD whose
+parent is the preview's parent and whose tree is the pinned tree, or the exact put-back commit
+recorded on top of it. It then skips the commit and goes straight to put-back and push, keeping
+`committed: true` and the original commit. A foreign commit, a branch change or an edit to a reviewed
+path still reopens the form. Its gitlink check judges the pinned tree, not the live index: the
+scratch index is filled from `preview.tree`, only gitlinks it adds or changes against the preview's
+parent are judged, and `.gitmodules` is read from that same tree, so a registration staged after the
+preview does not count. Before the ref compare-and-swap, before the index reset, and on that Retry
+before put-back and before push, `symbolic-ref -q HEAD` must still print the previewed branch
+(exit 0), or still exit 1 (detached) for a detached preview. A switch found before the write
+refuses with "branch changed"; one found after the ref moved skips the reset and names the branch
+the commit landed on (at the push seam that text is the push's failure note). Git has no atomic
+HEAD-and-ref check, so one process spawn between the second check and the index-only reset of the
+reviewed paths stays open; at worst a reviewed path shows as unstaged on the new branch. A
+detached preview has one more such window: `update-ref HEAD` follows a HEAD that was just attached
+to a branch at the preview's parent, so the commit lands on that branch and the second check
+refuses the reset.
+
 Run app's Finish form treats Commit and Push as independent choices. A push with Commit unticked
 publishes the branch's existing commits without staging or committing session edits; the ordinary
 projection put-back still precedes the push and leaves unrelated staged and unstaged work alone.

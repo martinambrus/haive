@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { UnrecoverableError } from 'bullmq';
-import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
+import { and, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import {
   ensureDirNoFollow,
   lstatNoFollow,
@@ -41,7 +41,7 @@ const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' 
 const firstLine = (text: string): string => text.trim().split('\n')[0] ?? '';
 
 /** Tasks holding this repository's checkout right now. `rootOnly` counts only tasks with no worktree of
- *  their own, which work in the checkout itself; `excludeTaskId` leaves out the caller's task. */
+ *  their own (including a latest skipped 01), which work in the checkout itself; `excludeTaskId` leaves out the caller's task. */
 export async function checkoutHoldingTasks(
   db: Pick<Database, 'query'>,
   repositoryId: string,
@@ -53,7 +53,26 @@ export async function checkoutHoldingTasks(
       inArray(schema.tasks.status, [...CHECKOUT_HOLDING_TASK_STATUSES]),
       isNull(schema.tasks.deadAt),
       opts.excludeTaskId ? ne(schema.tasks.id, opts.excludeTaskId) : undefined,
-      opts.rootOnly ? isNull(schema.tasks.worktreePath) : undefined,
+      // Mirror decideTaskWorktree: latest Skip overrides audit columns; otherwise columns win,
+      // with the latest output as the fallback for tasks created before those columns existed.
+      opts.rootOnly
+        ? sql<boolean>`coalesce((
+            select case
+              when latest.status = 'skipped' then true
+              when nullif(${schema.tasks.worktreePath}, '') is not null
+                or nullif(${schema.tasks.worktreeBranch}, '') is not null then false
+              when (jsonb_typeof(latest.output -> 'worktreePath') = 'string'
+                    and nullif(latest.output ->> 'worktreePath', '') is not null)
+                or (jsonb_typeof(latest.output -> 'branchName') = 'string'
+                    and nullif(latest.output ->> 'branchName', '') is not null) then false
+              else true
+            end
+            from task_steps as latest
+            where latest.task_id = ${schema.tasks.id} and latest.step_id = '01-worktree-setup'
+            order by latest.round desc limit 1
+          ), nullif(${schema.tasks.worktreePath}, '') is null
+             and nullif(${schema.tasks.worktreeBranch}, '') is null)`
+        : undefined,
     ),
     columns: { id: true },
   });

@@ -21,6 +21,7 @@ vi.mock('../workflow/_app-runtime.js', async (importOriginal) => ({
 
 import { failGit, type FakeGit } from '../../../../test/support/fake-git.js';
 import { killGit, type KilledGit } from '../../../../test/support/kill-git.js';
+import { gitPreview } from '../../../repo/git-preview.js';
 import { runAppReadyStep } from './99-run-app-ready.js';
 
 const BRANCH_READ = ['rev-parse', '--abbrev-ref', 'HEAD'];
@@ -219,6 +220,7 @@ describe('run-app ready gate apply when a push is asked for', () => {
       dirtyFiles: 1,
       diffArtifactPath: null,
       changedFileCount: 1,
+      commitPreview: await gitPreview(repo),
       ...detectedPatch,
     };
     const form = runAppReadyStep.form!(applyCtx, detected)!;
