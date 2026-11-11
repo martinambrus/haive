@@ -1,3 +1,5 @@
+import { bundleArchiveRel } from './repo/bundle-ingest.js';
+import { readReplacement, restoreReplacementBundle } from './repo/bundle-recovery.js';
 import { seedRepositoryCliTargets } from './project-state/cli-targets-backfill.js';
 import { isDeepStrictEqual } from 'node:util';
 import {
@@ -495,7 +497,7 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
 export async function reconcileStrandedSyncingBundles(db: Database): Promise<void> {
   const cutoff = new Date(Date.now() - STRANDED_SYNCING_MIN_AGE_MS);
   const syncing = await db
-    .select({ id: schema.customBundles.id })
+    .select()
     .from(schema.customBundles)
     .where(
       and(eq(schema.customBundles.status, 'syncing'), lt(schema.customBundles.updatedAt, cutoff)),
@@ -519,21 +521,49 @@ export async function reconcileStrandedSyncingBundles(db: Database): Promise<voi
   const stranded = syncing.filter((row) => !live.has(row.id)).map((row) => row.id);
   if (stranded.length === 0) return;
 
-  await db
-    .update(schema.customBundles)
-    .set({
-      status: 'failed',
-      lastSyncError:
-        'Importing this bundle did not finish: nothing is queued or running for it. Use Resync (git) or Replace ZIP to try again, or remove the bundle.',
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        inArray(schema.customBundles.id, stranded),
-        eq(schema.customBundles.status, 'syncing'),
-        lt(schema.customBundles.updatedAt, cutoff),
-      ),
-    );
+  for (const id of stranded) {
+    await db.transaction(async (tx) => {
+      const [bundle] = await tx
+        .select()
+        .from(schema.customBundles)
+        .where(
+          and(
+            eq(schema.customBundles.id, id),
+            eq(schema.customBundles.status, 'syncing'),
+            lt(schema.customBundles.updatedAt, cutoff),
+          ),
+        )
+        .for('update');
+      if (!bundle) return;
+      const root = process.env.BUNDLE_STORAGE_ROOT ?? '/var/lib/haive/bundles';
+      const archiveRel =
+        bundle.sourceType === 'zip' && bundle.archivePath
+          ? bundleArchiveRel(root, bundle.archivePath, bundle.userId, bundle.id)
+          : null;
+      const replacement = archiveRel ? await readReplacement(root, archiveRel) : null;
+      if (
+        archiveRel &&
+        replacement &&
+        (await restoreReplacementBundle(
+          tx as unknown as Database,
+          root,
+          bundle,
+          replacement,
+          'The worker stopped before import finished.',
+        ))
+      )
+        return;
+      await tx
+        .update(schema.customBundles)
+        .set({
+          status: 'failed',
+          lastSyncError:
+            'Importing this bundle did not finish: nothing is queued or running for it. Use Resync (git) or Replace ZIP to try again, or remove the bundle.',
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.customBundles.id, id));
+    });
+  }
   log.warn({ count: stranded.length }, 'failed bundles stranded at syncing');
 }
 

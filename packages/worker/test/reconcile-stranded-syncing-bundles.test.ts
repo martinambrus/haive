@@ -21,7 +21,10 @@ const OTHER = '00000000-0000-4000-8000-0000000000c2';
 const minutesAgo = (n: number) => new Date(Date.now() - n * 60_000);
 
 function makeFake() {
-  return createFakeDb({ customBundles: schema.customBundles });
+  return createFakeDb({
+    customBundles: schema.customBundles,
+    customBundleItems: schema.customBundleItems,
+  });
 }
 let fake: ReturnType<typeof makeFake>;
 
@@ -47,6 +50,41 @@ beforeEach(() => {
 });
 
 describe('reconcileStrandedSyncingBundles', () => {
+  it.each(['before extract', 'mid extract', 'between renames', 'after swap', 'previous lost'])(
+    'recovers a stranded keep-mode replacement: %s',
+    async (point) => {
+      const { mkdtemp, readFile, rm } = await import('node:fs/promises');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+      const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');
+      const root = await mkdtemp(join(tmpdir(), 'bundle-sweep-'));
+      const saved = process.env.BUNDLE_STORAGE_ROOT;
+      process.env.BUNDLE_STORAGE_ROOT = root;
+      try {
+        const fixture = await seedCrashedReplacement(root, fake, point);
+        const items = structuredClone(fake.rows(schema.customBundleItems));
+        await run();
+        expect(fake.rows(schema.customBundleItems)).toEqual(items);
+        const current = fake.rows(schema.customBundles)[0]!;
+        if (point === 'previous lost') {
+          expect(current).toMatchObject({
+            status: 'failed',
+            lastSyncError: expect.stringContaining('previous extracted tree is unavailable'),
+          });
+        } else {
+          expect(current).toMatchObject({ status: 'active', ...fixture.previousArchive });
+          expect(await readFile(join(fixture.dest, 'old.md'), 'utf8')).toBe('old tree');
+        }
+        await run();
+        expect(fake.rows(schema.customBundles)[0]).toEqual(current);
+      } finally {
+        if (saved === undefined) delete process.env.BUNDLE_STORAGE_ROOT;
+        else process.env.BUNDLE_STORAGE_ROOT = saved;
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('fails a bundle that has been syncing for minutes with no job in the queue', async () => {
     bundle(STRANDED);
     getJobs.mockResolvedValue([{ data: { bundleId: OTHER } }]);

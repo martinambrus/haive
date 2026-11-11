@@ -224,6 +224,76 @@ describe('handleIngestZip', () => {
     },
   );
 
+  it('recovers the real swap after SIGKILL and a failing redelivery', async () => {
+    const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');
+    const fake = createFakeDb({
+      customBundles: schema.customBundles,
+      customBundleItems: schema.customBundleItems,
+    });
+    const fixture = await seedCrashedReplacement(tmpRoot, fake, 'before extract');
+    const zip = new JSZip();
+    zip.file('agents/new.md', agent);
+    await writeFile(fixture.archivePath, await zip.generateAsync({ type: 'nodebuffer' }));
+    const child = spawn(
+      process.execPath,
+      ['--import', 'tsx', 'test/bundle-extract-crash-child.ts', tmpRoot, fixture.archivePath],
+      { stdio: 'pipe' },
+    );
+    let stderr = '';
+    child.stderr.on('data', (data: Buffer) => {
+      stderr += data.toString();
+    });
+    const signal = await new Promise((resolve, reject) => {
+      child.on('error', reject);
+      child.on('exit', (_code, signal) => resolve(signal));
+    });
+    expect(signal, stderr).toBe('SIGKILL');
+    expect(await readFile(path.join(fixture.dest, 'agents/new.md'), 'utf8')).toBe(agent);
+    const record = JSON.parse(await readFile(`${fixture.archivePath}.replacement.json`, 'utf8'));
+    expect(record.recovery).toMatchObject({
+      stageName: expect.stringMatching(/^\.haive-extract-/),
+      dev: expect.any(String),
+      ino: expect.any(String),
+    });
+    await writeFile(fixture.archivePath, 'corrupt zip');
+    await expect(
+      handleIngestZip(fixture.payload, fake.db as unknown as Database, tmpRoot),
+    ).rejects.toThrow();
+    expect(await readFile(path.join(fixture.dest, 'old.md'), 'utf8')).toBe('old tree');
+    expect(fake.rows(schema.customBundles)[0]).toMatchObject({
+      status: 'active',
+      ...fixture.previousArchive,
+    });
+    expect(fake.rows(schema.customBundleItems)[0]).toMatchObject({ sourcePath: 'old.md' });
+  });
+
+  it.each(['before extract', 'mid extract', 'between renames', 'after swap', 'previous lost'])(
+    'restores durable keep-mode state on a failing redelivery: %s',
+    async (point) => {
+      const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');
+      const fake = createFakeDb({
+        customBundles: schema.customBundles,
+        customBundleItems: schema.customBundleItems,
+      });
+      const fixture = await seedCrashedReplacement(tmpRoot, fake, point);
+      const items = structuredClone(fake.rows(schema.customBundleItems));
+      await expect(
+        handleIngestZip(fixture.payload, fake.db as unknown as Database, tmpRoot),
+      ).rejects.toThrow();
+      expect(fake.rows(schema.customBundleItems)).toEqual(items);
+      const row = fake.rows(schema.customBundles)[0]!;
+      if (point === 'previous lost') {
+        expect(row).toMatchObject({
+          status: 'failed',
+          lastSyncError: expect.stringContaining('previous extracted tree is unavailable'),
+        });
+      } else {
+        expect(await readFile(path.join(fixture.dest, 'old.md'), 'utf8')).toBe('old tree');
+        expect(row).toMatchObject({ status: 'active', ...fixture.previousArchive });
+      }
+    },
+  );
+
   it('keeps a lone agents/ folder, which carries what makes its files agents', async () => {
     const out = await ingest({ 'agents/reviewer.md': agent });
     expect(out.agents).toEqual([

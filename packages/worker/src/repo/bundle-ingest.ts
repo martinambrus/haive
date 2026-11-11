@@ -3,6 +3,13 @@ import { bundleGitAuth } from './bundle-git.js';
 import { redactGitUrl } from '@haive/shared/schemas';
 import path from 'node:path';
 import { ensureDirNoFollow, lstatNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
+import {
+  readReplacement,
+  recordReplacementSwap,
+  restoreReplacementBundle,
+  restoreReplacementTree,
+} from './bundle-recovery.js';
+import { writeFileNoFollow } from '@haive/shared/fs-safe';
 import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
@@ -126,20 +133,41 @@ export async function handleIngestZip(
   // A redelivered job for a superseded upload must not touch the current source or catalog.
   if (payload.archivePath && payload.archivePath !== bundle.archivePath) return;
   const dest = bundleExtractedDir(bundleStorageRoot, payload.userId, bundle.id);
+  if (payload.archivePath && bundle.status === 'active') return;
+  const archiveRel = bundle.archivePath
+    ? bundleArchiveRel(bundleStorageRoot, bundle.archivePath, payload.userId, bundle.id)
+    : null;
+  const destRel = `${bundleDirRel(payload.userId, bundle.id)}/extracted`;
+  let replacement = payload.replacement;
+  let replacementRead = false;
   let published = false;
-  let catalogStarted = false;
-  let rollbackComplete = false;
   try {
     if (!bundle.archivePath || !bundle.archiveFormat) {
       throw new Error('zip-source bundle missing archivePath or archiveFormat');
     }
-    const archiveRel = bundleArchiveRel(
-      bundleStorageRoot,
-      bundle.archivePath,
-      payload.userId,
-      bundle.id,
-    );
     if (!archiveRel) throw new Error('bundle archive is not the file this bundle uploaded');
+    replacement = (await readReplacement(bundleStorageRoot, archiveRel)) ?? replacement;
+    replacementRead = true;
+    if (
+      replacement?.mode === 'keep_until_success' &&
+      replacement.previousArchive &&
+      replacement.recovery
+    ) {
+      if (!(await restoreReplacementTree(bundleStorageRoot, destRel, replacement))) {
+        throw new Error(
+          'The previous extracted tree is unavailable; automatic rollback cannot restore it.',
+        );
+      }
+      // Retire the old attempt before starting another stage; a failed re-extract still has the
+      // original tree, never the uncommitted tree left by the crashed pass.
+      delete replacement.recovery;
+      await writeFileNoFollow(
+        bundleStorageRoot,
+        `${archiveRel}.replacement.json`,
+        JSON.stringify(replacement),
+        { durable: true },
+      );
+    }
     let parsed!: Awaited<ReturnType<typeof parseBundle>>;
     let counts!: Awaited<ReturnType<typeof persistBundleItems>>;
     const report = await extractArchive(
@@ -148,8 +176,18 @@ export async function handleIngestZip(
       { anchor: bundleStorageRoot, rel: `${bundleDirRel(payload.userId, bundle.id)}/extracted` },
       {
         keepLoneDir: isBundleRootDir,
+        beforeSwap:
+          replacement?.mode === 'keep_until_success' && replacement.previousArchive
+            ? (stageRel) =>
+                recordReplacementSwap(
+                  bundleStorageRoot,
+                  archiveRel,
+                  destRel,
+                  stageRel,
+                  replacement!,
+                )
+            : undefined,
         afterSwap: async (extraction) => {
-          catalogStarted = true;
           // All catalog writes roll back together, and extractArchive restores the tree if this
           // transaction fails. No pooled connection is held during archive extraction.
           await db.transaction(async (tx) => {
@@ -180,9 +218,6 @@ export async function handleIngestZip(
           });
           published = true;
         },
-        afterRollback: () => {
-          rollbackComplete = true;
-        },
       },
     );
     if (report.note) {
@@ -202,39 +237,31 @@ export async function handleIngestZip(
     );
   } catch (err) {
     const msg = safeErrorMessage(err);
-    const previous =
-      payload.replacement?.mode === 'keep_until_success'
-        ? payload.replacement.previousArchive
-        : null;
-    const tree =
-      previous && !published && (!catalogStarted || rollbackComplete)
-        ? await lstatNoFollow(
-            bundleStorageRoot,
-            `${bundleDirRel(payload.userId, bundle.id)}/extracted`,
-          )
-        : null;
-    if (previous && tree?.kind === 'directory') {
-      await db
-        .update(schema.customBundles)
-        .set({
-          ...previous,
-          status: 'active',
-          lastSyncError: null,
-          lastSyncNote: [
-            bundle.lastSyncNote,
-            `Replacement failed; the previous bundle remains in use. ${scrubErrorPaths(msg)}`,
-          ]
-            .filter(Boolean)
-            .join('\n\n'),
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(schema.customBundles.id, bundle.id),
-            eq(schema.customBundles.archivePath, bundle.archivePath!),
-          ),
-        );
-    } else {
+    const restored =
+      !published && replacementRead && archiveRel && replacement
+        ? await db.transaction(async (tx) => {
+            const [current] = await tx
+              .select()
+              .from(schema.customBundles)
+              .where(
+                and(
+                  eq(schema.customBundles.id, bundle.id),
+                  eq(schema.customBundles.archivePath, bundle.archivePath!),
+                  eq(schema.customBundles.status, 'syncing'),
+                ),
+              )
+              .for('update');
+            if (!current) return true; // A newer admission or completed catalog owns the tree.
+            return restoreReplacementBundle(
+              tx as unknown as Database,
+              bundleStorageRoot,
+              current,
+              replacement!,
+              scrubErrorPaths(msg),
+            );
+          })
+        : false;
+    if (!restored) {
       await db
         .update(schema.customBundles)
         .set({

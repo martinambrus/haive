@@ -621,6 +621,8 @@ export async function extractArchive(
   opts: {
     keepLoneDir?: (name: string) => boolean;
     repositoryImport?: boolean;
+    /** Persist recovery information before either rename can change the destination. */
+    beforeSwap?: (stageRel: string) => Promise<void>;
     /** Publish the catalog while the previous tree is still available for rollback. */
     afterSwap?: (report: ExtractReport) => Promise<void>;
     afterRollback?: () => void;
@@ -724,6 +726,7 @@ export async function extractArchive(
         );
       }
 
+      await opts.beforeSwap?.(stageRel);
       const oldRel = `${stageRel}/old`;
       const hadDest = (await lstatNoFollow(anchor, dest.rel)) !== null;
       if (hadDest) {

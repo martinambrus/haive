@@ -13,6 +13,13 @@ export type BundleReplacementMode = z.infer<typeof bundleReplacementModeSchema>;
 /** Durable completion intent; retained across a refused enqueue or a dead API process. */
 export const bundleReplacementSchema = z.object({
   mode: bundleReplacementModeSchema,
+  recovery: z
+    .object({
+      stageName: z.string().regex(/^\.haive-extract-\d+-[0-9a-f-]+$/),
+      dev: z.string().regex(/^\d+$/),
+      ino: z.string().regex(/^\d+$/),
+    })
+    .optional(),
   previousArchive: z
     .object({
       archivePath: z.string().nullable(),
