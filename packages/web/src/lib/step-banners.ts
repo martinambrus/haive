@@ -1,6 +1,5 @@
 import {
-  MERGE_LEFT_COMMITTED_EVENT,
-  readLandedMerge,
+  leftCommittedMerges,
   leftOpenMerges,
   type MergeLeftOpenOutcome,
 } from '@haive/shared/merge-left-open';
@@ -425,16 +424,33 @@ export function upgradeAttemptBanner(
 /** A cancelled task's landed-merge report is structural evidence, independent of step copy. */
 export function leftCommittedMergeBanner(
   events: readonly LeftMergeEventRow[],
-  opts: { taskStatus: string },
-): { text: string } | null {
+  opts: { taskStatus: string; isOwner?: boolean },
+) {
   if (opts.taskStatus !== 'cancelled') return null;
-  const merge = events
-    .filter((e) => e.eventType === MERGE_LEFT_COMMITTED_EVENT)
-    .map((e) => readLandedMerge(e.payload))
-    .find((m) => m !== null);
-  return merge
-    ? {
-        text: `This task's merge stays committed on ${codeSpan(merge.landedOn)} and was not undone when the task was cancelled.`,
-      }
-    : null;
+  const merge = leftCommittedMerges(events)[0];
+  if (!merge) return null;
+  const labels = {
+    undone: 'Merge undone:',
+    moved: 'Merge left as it is:',
+    refused: 'Undo refused:',
+  };
+  const canUndo =
+    opts.isOwner === true &&
+    merge.settled === null &&
+    merge.mergeStage === 'feature' &&
+    typeof merge.featureBranch === 'string' &&
+    typeof merge.featureSha === 'string' &&
+    merge.pushed !== true &&
+    merge.hostCheckout !== true &&
+    merge.repoPath !== '/host-fs' &&
+    !merge.repoPath.startsWith('/host-fs/');
+  return {
+    dir: merge.dir,
+    baseShaAfter: merge.baseShaAfter,
+    canUndo,
+    confirm: `Move the local branch ${codeSpan(merge.landedOn)} from ${codeSpan(merge.baseShaAfter)} back to ${codeSpan(merge.baseShaBefore)}. Undo runs only if this is still the task's own unpushed merge and no task holds the checkout. A deleted feature branch is re-created at its recorded tip. Local changes are kept.`,
+    text: merge.settled
+      ? `${labels[merge.settled.outcome]} ${merge.settled.reason}`
+      : `This task's merge stays committed on ${codeSpan(merge.landedOn)} and was not undone when the task was cancelled.`,
+  };
 }

@@ -648,12 +648,32 @@ describe('leftCommittedMergeBanner', () => {
     repoPath: '/host-fs/repo',
     dir: '/host-fs/repo',
   };
+  it.each([{ pushed: true }, { hostCheckout: true }])(
+    'keeps a report-only landing report-only',
+    (fact) => {
+      const m = {
+        ...payload,
+        repoPath: '/repo',
+        dir: '/repo',
+        featureSha: 'c'.repeat(40),
+        featureBranch: 'feature',
+        mergeStage: 'feature',
+        ...fact,
+      };
+      expect(
+        leftCommittedMergeBanner([{ eventType: 'merge.left_committed', payload: m }], {
+          taskStatus: 'cancelled',
+          isOwner: true,
+        })?.canUndo,
+      ).toBe(false);
+    },
+  );
   it('shows the committed report for cancelled tasks, including pushed and host-fs merges', () => {
     expect(
       leftCommittedMergeBanner([{ eventType: 'merge.left_committed', payload }], {
         taskStatus: 'cancelled',
       }),
-    ).toEqual({
+    ).toMatchObject({
       text: expect.stringContaining('stays committed on `release/test` and was not undone'),
     });
   });
@@ -675,6 +695,50 @@ describe('leftCommittedMergeBanner', () => {
       }),
     ).toBeNull();
     expect(leftCommittedMergeBanner([], { taskStatus: 'cancelled' })).toBeNull();
+  });
+  it('offers Undo only to the owner of an unsettled cancelled report, with exact branch and shas', () => {
+    const events = [
+      {
+        eventType: 'merge.left_committed',
+        payload: {
+          ...payload,
+          repoPath: '/repo',
+          dir: '/repo',
+          featureBranch: 'feature',
+          featureSha: 'c'.repeat(40),
+          mergeStage: 'feature',
+        },
+      },
+    ];
+    const owned = leftCommittedMergeBanner(events, { taskStatus: 'cancelled', isOwner: true });
+    expect(owned).toMatchObject({
+      canUndo: true,
+      dir: '/repo',
+      baseShaAfter: payload.baseShaAfter,
+    });
+    expect(owned?.confirm).toContain('release/test');
+    expect(owned?.confirm).toContain(payload.baseShaBefore);
+    expect(owned?.confirm).toContain(payload.baseShaAfter);
+    expect(
+      leftCommittedMergeBanner(events, { taskStatus: 'cancelled', isOwner: false })?.canUndo,
+    ).toBe(false);
+    for (const outcome of ['undone', 'moved', 'refused']) {
+      const settled = [
+        ...events,
+        {
+          eventType: 'merge.left_committed_settled',
+          payload: {
+            dir: '/repo',
+            baseShaAfter: payload.baseShaAfter,
+            outcome,
+            reason: 'Outcome words',
+          },
+        },
+      ];
+      expect(
+        leftCommittedMergeBanner(settled, { taskStatus: 'cancelled', isOwner: true }),
+      ).toMatchObject({ canUndo: false, text: expect.stringContaining('Outcome words') });
+    }
   });
 });
 
