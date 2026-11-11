@@ -1606,6 +1606,11 @@ All low unless marked.
 status: open · kind: design · found: G (#270) review 1 2026-11-10 · priority: P3
 Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/routes/tasks/steps.ts` ~:171-191), which deletes the step's done agent mining rows and supersedes their invocations; the Resume arm that keeps done rows needs `failed` rows (~:1257-1330). Any apply-time failure after the replies landed (a busy plan patch, a refused write) therefore re-pays the whole wave. PRE-EXISTING. Needs a decision: a "re-apply saved replies" Retry mode, or Resume accepting done unfolded rows.
 
+### T598 · gate-3 commit stages a Claude Code `.claude/settings.local.json`
+
+status: taken · owner: t598-settings-local@DESKTOP-IUBG9OP · since: 2026-11-11T12:00Z · last: 2026-11-11T12:00Z · kind: fix · found: user report 2026-11-11 · priority: P2
+"Yes, and don't ask again" in an interactive Claude Code session writes the approved command verbatim (secrets included) into `.claude/settings.local.json`. A user running `claude` in the task terminal (it opens in the task worktree) creates that file there, and `10-gate-3-commit` stages with `git add -A` (`stageAllArgs`, `_gitlink-registration.ts` ~:25), so a repository that does not gitignore it gets it committed. The default secret-mask globs do not list it either. Fix: exclude `**/.claude/settings.local.json` from the gate-3 stage and add it to the default secret-mask globs.
+
 ## Done
 
 - T580 — effort estimates calibrate on the LLM's recorded estimate (`hydrateAnchors` and `GET /tasks/estimation-accuracy` read the latest `estimate.recorded.aiHours`, not the column `06b-sprint-planning` overwrites); step 11 lists every learning and skill (sorted by id, up to 500, excerpts on the first 60, ids filtered and titles collapsed at build time, an omission line past the cap, an open-before-update line for title-only entries); the `learning-recorder` persona allows update and delete and defers to the calling step's output — PR #1047 (884f5c074, 2026-11-09) and PR #1070 (7578584bb), 2026-11-11. Item 1 closed, not a defect: the `.haive-data/` move recorded no dual-read, and re-onboarding migrates `.claude/learnings/`. Plan `sleep-paper-lessons` shipped apart from P3; further work continues in `docs/plans/agent-memory-lessons.md`.
