@@ -2,7 +2,12 @@ import { buildCredentialHelper, originGitRun, scrubSecret } from './git-push.js'
 import { bundleGitAuth } from './bundle-git.js';
 import { redactGitUrl } from '@haive/shared/schemas';
 import path from 'node:path';
-import { ensureDirNoFollow, lstatNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
+import {
+  ensureDirNoFollow,
+  lstatNoFollow,
+  removeNoFollow,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
 import {
   clearReplacementRecord,
   readReplacement,
@@ -10,7 +15,6 @@ import {
   restoreReplacementBundle,
   restoreReplacementTree,
 } from './bundle-recovery.js';
-import { writeFileNoFollow } from '@haive/shared/fs-safe';
 import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';

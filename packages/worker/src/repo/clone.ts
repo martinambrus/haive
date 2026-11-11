@@ -625,7 +625,6 @@ export async function extractArchive(
     beforeSwap?: (stageRel: string) => Promise<void>;
     /** Publish the catalog while the previous tree is still available for rollback. */
     afterSwap?: (report: ExtractReport) => Promise<void>;
-    afterRollback?: () => void;
   } = {},
 ): Promise<ExtractReport> {
   if (format !== 'zip' && format !== 'tar' && format !== 'tar.gz') {
@@ -774,7 +773,6 @@ export async function extractArchive(
             throw err;
           }
         }
-        opts.afterRollback?.();
         throw err;
       }
       return report;
