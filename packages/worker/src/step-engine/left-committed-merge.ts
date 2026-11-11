@@ -1,11 +1,13 @@
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
+import { logger } from '@haive/shared';
 import {
   MERGE_LANDED_EVENT,
   MERGE_LEFT_COMMITTED_EVENT,
   readLandedMerge,
 } from '@haive/shared/merge-left-open';
 import { gitRun } from '../repo/git-push.js';
+import { GIT_TIMED_OUT } from '../repo/git-exec.js';
 import { inMergeDirLock, type DbHandle } from './merge-dir-claim.js';
 
 const records = (db: DbHandle, taskId: string) =>
@@ -50,8 +52,23 @@ export async function recordLeftCommittedMerge(db: Database, taskId: string): Pr
       `refs/heads/${landed.landedOn}`,
     ]);
     if (contains.code === 1) return;
-    if (contains.code !== 0)
+    if (contains.code === GIT_TIMED_OUT)
       throw new Error(`Cannot check the cancelled task's landed merge: ${contains.stderr}`);
+    if (contains.code !== 0) {
+      // A deleted branch/repository or an invalid object cannot be repaired by re-driving
+      // cancel. Leave it unreported rather than holding the claims and teardown forever.
+      logger.warn(
+        {
+          taskId,
+          dir: landed.dir,
+          landedOn: landed.landedOn,
+          code: contains.code,
+          noExit: contains.noExit,
+        },
+        "Cannot confirm the cancelled task's landed merge; cancel teardown continues",
+      );
+      return;
+    }
     await tx.insert(schema.taskEvents).values({
       taskId,
       taskStepId: null,

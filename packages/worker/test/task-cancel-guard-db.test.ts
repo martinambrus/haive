@@ -5,7 +5,7 @@ import { recordLandedMerge } from '../src/step-engine/landed-merge.js';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { asc, eq, inArray, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createDatabase,
@@ -169,11 +169,16 @@ vi.mock('../src/step-engine/left-open-merge.js', async (importOriginal) => {
     },
   };
 });
-vi.mock('../src/step-engine/merge-dir-claim.js', async (importOriginal) => ({
-  ...(await importOriginal<object>()),
-  releaseTaskMergeClaims: async (_db: unknown, taskId: string) =>
-    h.seen('releaseTaskMergeClaims', taskId),
-}));
+vi.mock('../src/step-engine/merge-dir-claim.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/step-engine/merge-dir-claim.js')>();
+  return {
+    ...actual,
+    releaseTaskMergeClaims: async (db: Database, taskId: string) => {
+      h.seen('releaseTaskMergeClaims', taskId);
+      if (h.realMergeReport) await actual.releaseTaskMergeClaims(db, taskId);
+    },
+  };
+});
 vi.mock('../src/step-engine/steps/plan/01-plan-merge.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   discardPlanMerge: async (_db: unknown, taskId: string) => h.seen('discardPlanMerge', taskId),
@@ -704,8 +709,14 @@ describe.skipIf(!url)(
       TEST_TIMEOUT,
     );
 
-    it('a cancel after the local merge and before reachDone reports it once without undoing it', async () => {
+    const mergeDirs: string[] = [];
+    afterEach(async () => {
+      for (const dir of mergeDirs.splice(0)) await rm(dir, { recursive: true, force: true });
+    });
+
+    const landedFixture = async () => {
       const dir = await mkdtemp(path.join(os.tmpdir(), 'e2-cancel-landed-'));
+      mergeDirs.push(dir);
       const exec = promisify(execFile);
       const git = async (...args: string[]) =>
         (
@@ -720,63 +731,94 @@ describe.skipIf(!url)(
             },
           })
         ).stdout.trim();
-      try {
-        await git('init', '-b', 'main');
-        await writeFile(path.join(dir, 'base'), 'base');
-        await git('add', '.');
-        await git('commit', '-m', 'base');
-        const before = await git('rev-parse', 'HEAD');
-        await git('switch', '-c', 'feature');
-        await writeFile(path.join(dir, 'feature'), 'feature');
-        await git('add', '.');
-        await git('commit', '-m', 'feature');
-        await git('switch', 'main');
-        await git('merge', '--no-ff', 'feature', '-m', 'merge');
-        const after = await git('rev-parse', 'HEAD');
-        const taskId = await seedTask('running', { repositoryId: null });
-        await seedStep(taskId, '12-worktree-cleanup', 12, 'running');
-        const step = await db.query.taskSteps.findFirst({
-          where: eq(schema.taskSteps.taskId, taskId),
+      await git('init', '-b', 'main');
+      await writeFile(path.join(dir, 'base'), 'base');
+      await git('add', '.');
+      await git('commit', '-m', 'base');
+      const before = await git('rev-parse', 'HEAD');
+      await git('switch', '-c', 'feature');
+      await writeFile(path.join(dir, 'feature'), 'feature');
+      await git('add', '.');
+      await git('commit', '-m', 'feature');
+      await git('switch', 'main');
+      await git('merge', '--no-ff', 'feature', '-m', 'merge');
+      const after = await git('rev-parse', 'HEAD');
+      const taskId = await seedTask('running', { repositoryId: null });
+      await seedStep(taskId, '12-worktree-cleanup', 12, 'running');
+      const step = await db.query.taskSteps.findFirst({
+        where: eq(schema.taskSteps.taskId, taskId),
+      });
+      const state = {
+        phase: 'squashing',
+        mode: 'same-branch',
+        mergeDir: dir,
+        baseBranch: 'main',
+        featureBranch: 'feature',
+        baseShaBefore: before,
+        merged: false,
+      } as import('@haive/database').MergeResolveState;
+
+      await db.insert(schema.mergeDirClaims).values({
+        mergeDir: dir,
+        taskId,
+        taskStepId: step!.id,
+      });
+      h.realMergeReport = true;
+      const land = (tx: Tx) =>
+        recordLandedMerge(tx, {
+          taskId,
+          stepId: step!.id,
+          stepKey: '12-worktree-cleanup',
+          repoPath: dir,
+          state,
         });
-        const state = {
-          phase: 'squashing',
-          mode: 'same-branch',
-          mergeDir: dir,
-          baseBranch: 'main',
-          featureBranch: 'feature',
-          baseShaBefore: before,
-          merged: false,
-        } as import('@haive/database').MergeResolveState;
-        h.realMergeReport = true;
-        await db.transaction((tx) =>
-          recordLandedMerge(tx, {
-            taskId,
-            stepId: step!.id,
-            stepKey: '12-worktree-cleanup',
-            repoPath: dir,
-            state,
-          }),
-        );
-        h.realMergeReport = true;
-        await runCancel(taskId);
-        await runCancel(taskId);
-        const reports = await eventsOfType(taskId, 'merge.left_committed');
-        expect(reports).toHaveLength(1);
-        expect(await git('rev-parse', 'main')).toBe(after);
-        const report = await db.query.taskEvents.findFirst({
-          where: and(
-            eq(schema.taskEvents.taskId, taskId),
-            eq(schema.taskEvents.eventType, 'merge.left_committed'),
-          ),
-        });
-        expect(report?.payload).toMatchObject({
-          baseShaBefore: before,
-          baseShaAfter: after,
-          landedOn: 'main',
-        });
-      } finally {
-        await rm(dir, { recursive: true, force: true });
-      }
+      return { dir, git, taskId, before, after, land, state, stepId: step!.id };
+    };
+
+    const expectCancelFinished = async (taskId: string) => {
+      expect((await taskView(taskId)).status).toBe('cancelled');
+      expect(await eventsOfType(taskId, 'task.cancel_finished')).toHaveLength(1);
+      expect(
+        await db
+          .select()
+          .from(schema.mergeDirClaims)
+          .where(eq(schema.mergeDirClaims.taskId, taskId)),
+      ).toEqual([]);
+      expectTeardownRan(taskId);
+    };
+
+    it('a cancel after the local merge and before reachDone reports it once without undoing it', async () => {
+      const f = await landedFixture();
+      await db.transaction(f.land);
+      await runCancel(f.taskId);
+      await runCancel(f.taskId);
+      const reports = await eventsOfType(f.taskId, 'merge.left_committed');
+      expect(reports).toHaveLength(1);
+      expect(await f.git('rev-parse', 'main')).toBe(f.after);
+      expect(reports[0]?.payload).toMatchObject({
+        baseShaBefore: f.before,
+        baseShaAfter: f.after,
+        landedOn: 'main',
+      });
+    });
+
+    it('a cancel finishes and releases claims when the landed-on branch was deleted', async () => {
+      const f = await landedFixture();
+      await db.transaction(f.land);
+      await f.git('switch', 'feature');
+      await f.git('branch', '-D', 'main');
+      await runCancel(f.taskId);
+      expect(await eventsOfType(f.taskId, 'merge.left_committed')).toEqual([]);
+      await expectCancelFinished(f.taskId);
+    });
+
+    it('a cancel with no landing event writes no merge report and finishes', async () => {
+      const f = await landedFixture();
+      await runCancel(f.taskId);
+      expect(await eventsOfType(f.taskId, 'merge.landed')).toEqual([]);
+      expect(await eventsOfType(f.taskId, 'merge.left_committed')).toEqual([]);
+      expect(await eventsOfType(f.taskId, 'merge.left_open')).toEqual([]);
+      await expectCancelFinished(f.taskId);
     });
 
     it(

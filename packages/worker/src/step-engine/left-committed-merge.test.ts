@@ -5,6 +5,8 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
+import { logger } from '@haive/shared';
+import * as gitPush from '../repo/git-push.js';
 import { recordLeftCommittedMerge } from './left-committed-merge.js';
 let tail = Promise.resolve();
 vi.mock('./merge-dir-claim.js', () => ({
@@ -25,6 +27,7 @@ vi.mock('./merge-dir-claim.js', () => ({
 const exec = promisify(execFile);
 const dirs: string[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 const env = {
@@ -114,7 +117,7 @@ describe('cancel reports a merge left committed on the local base', () => {
       payload: { baseShaAfter: after },
     });
   });
-  it('does not swallow a failed report write or an unreadable repository', async () => {
+  it('does not swallow a failed report write', async () => {
     const f = await fixture();
     vi.spyOn(f.db, 'insert').mockImplementationOnce(
       () =>
@@ -125,7 +128,35 @@ describe('cancel reports a merge left committed on the local base', () => {
         }) as never,
     );
     await expect(recordLeftCommittedMerge(f.db, 't')).rejects.toThrow('write refused');
-    await rm(path.join(f.dir, '.git'), { recursive: true, force: true });
-    await expect(recordLeftCommittedMerge(f.db, 't')).rejects.toThrow();
+  });
+  it.each(['deleted branch', 'missing repository', 'invalid repository', 'missing object'])(
+    'warns without reporting or failing cancel for a %s',
+    async (failure) => {
+      const f = await fixture();
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      if (failure === 'deleted branch') {
+        await git(f.dir, 'switch', 'feature');
+        await git(f.dir, 'branch', '-D', 'main');
+      } else if (failure === 'missing repository') {
+        await rm(f.dir, { recursive: true, force: true });
+      } else if (failure === 'invalid repository') {
+        await rm(path.join(f.dir, '.git'), { recursive: true, force: true });
+      } else {
+        f.payload.baseShaAfter = '0'.repeat(40);
+      }
+      await expect(recordLeftCommittedMerge(f.db, 't')).resolves.toBeUndefined();
+      expect(f.events.filter((e) => e.eventType === 'merge.left_committed')).toEqual([]);
+      expect(warn).toHaveBeenCalledOnce();
+    },
+  );
+  it('keeps a git timeout retryable', async () => {
+    const f = await fixture();
+    vi.spyOn(gitPush, 'gitRun').mockResolvedValueOnce({
+      code: 124,
+      stdout: '',
+      stderr: 'git merge-base timed out',
+    });
+    await expect(recordLeftCommittedMerge(f.db, 't')).rejects.toThrow('timed out');
+    expect(f.events).toHaveLength(1);
   });
 });
