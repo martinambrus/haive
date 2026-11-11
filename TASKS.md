@@ -66,6 +66,21 @@ All PRE-EXISTING.
 6. R1: `refreshRepository` flips an ordinary refresh of a `ready` repo to `cloning` unconditionally (`api/src/routes/repos.ts` ~:3606-3620).
 7. D4a: dead-task revival polling for transient holds is unbounded (`worker/src/queues/dead-task-boot.ts` `retryHeldRevivals`). Fix: cap or back off, log once.
 
+### T595 · FNF[root-merge-runapp-followups] · run-app commit and root merge fence follow-ups (+9)
+
+status: open · kind: fix · found: E1 (#286, #271) reviews 2026-11-10/11 · priority: P4
+All low.
+
+1. An index-refresh failure after a landed run-app commit (`worker/src/repo/git-preview.ts` ~:148-160) fails the step; the Retry that recognises the landed commit skips the refresh, so it is never repaired. Fix: re-run the refresh on that Retry.
+2. `99-run-app-ready.ts` ~:440 `catch {}` hides database and git read failures behind a form reopen. Fix: reopen only on a structural mismatch; surface read failures.
+3. Each reopen re-runs the whole `detect`, including `ensureAppServing` and the in-runner browser navigation (`99-run-app-ready.ts` ~:113-146), resetting the user's VNC browser to the app root.
+4. The DAG put-back throws generically where 12 halts Retry-able (`merge-resolver.ts` ~:1081-1095); `putBackIssueProjections` warns through a fresh row while `m.current` stays stale, so a last-in-pass note can be lost.
+5. The `reopenedFormNotice` stays in `form_schema` of a row that later completes (display only).
+6. More than 500 changed files: `detect` runs `gitPreview` twice before discovering `truncated` (cost).
+7. Test gaps: a frozen legacy run-app form through `advanceStep` end to end; Skip, CLI switch, failed-task form submit and the worker `refuseRevive` branch of the root merge fence; a DAG projection-only conflict on the already-open path.
+8. Stale log wording `dead-task-boot.ts` ~:333; misleading test title `branch-revert.test.ts` ~:368; `root-merge-redrive.test.ts` ~:15 mocks into `shared/dist` by a relative path.
+9. `ReopenStepFormError` messages in plan steps are internal control text (not shown since the notice is opt-in); reword if ever shown.
+
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
 **Found something outside your task?** Search the board first (`grep -n "<file>\|<symbol>\|<slug>"`).
