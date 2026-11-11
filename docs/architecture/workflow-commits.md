@@ -136,7 +136,16 @@ put-back or push) recognises the commit it already made by structure, not by mes
 parent is the preview's parent and whose tree is the pinned tree, or the exact put-back commit
 recorded on top of it. It then skips the commit and goes straight to put-back and push, keeping
 `committed: true` and the original commit. A foreign commit, a branch change or an edit to a reviewed
-path still reopens the form.
+path still reopens the form. Its gitlink check judges the pinned tree, not the live index: the
+scratch index is filled from `preview.tree`, only gitlinks it adds or changes against the preview's
+parent are judged, and `.gitmodules` is read from that same tree, so a registration staged after the
+preview does not count. Before the ref compare-and-swap, before the index reset, and on that Retry
+before put-back and before push, `symbolic-ref -q HEAD` (exit code only) must still name the
+previewed branch, or still be detached for a detached preview. A switch found before the write
+refuses with "branch changed"; one found after the ref moved skips the reset and names the branch
+the commit landed on (at the push seam that text is the push's failure note). Git has no atomic
+HEAD-and-ref check, so one process spawn between the second check and the index-only reset of the
+reviewed paths stays open; at worst a reviewed path shows as unstaged on the new branch.
 
 Run app's Finish form treats Commit and Push as independent choices. A push with Commit unticked
 publishes the branch's existing commits without staging or committing session edits; the ordinary
