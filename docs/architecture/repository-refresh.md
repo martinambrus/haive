@@ -58,8 +58,9 @@ page keys its actions on the code, never on the message: "Check repair" re-runs 
 check only (`checkCheckoutOnly`, set by the api for a repository holding either repair code and
 enforced by the worker), and "Rebuild checkout" (when the source can rebuild) posts the recovery, the
 user's explicit consent to move the checkout aside although it could not be proved unusable. A check
-only refresh never rebuilds: a checkout still unusable keeps the repair code, a read that never
-finished stays a retryable failure, and only the recovery rebuilds, keeping this install's data. The
+only refresh never rebuilds and, whatever fails, keeps the repair code it was admitted with: a
+checkout still unusable says so, a read that never finished stays a retryable failure, and only the
+recovery rebuilds, keeping this install's data. The
 code clears when an ordinary or recovery preparation starts or detection succeeds. A recovery job first re-checks the checkout: one that is
 usable again (held by a task or not) finishes as an ordinary refresh, moves nothing and clears the
 code. Otherwise it takes the ordinary rebuild path (seed, source proof, move aside, build, verify),
