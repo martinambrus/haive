@@ -204,6 +204,20 @@ export function CliProviderForm({
   const [versionCache, setVersionCache] = useState<CliPackageVersionsEntry | null>(
     metadata.versionCache,
   );
+  const [canReadRefresh, setCanReadRefresh] = useState(false);
+  useEffect(() => {
+    if (!metadata.versionPinnable) return;
+    const controller = new AbortController();
+    api
+      .get<{ user: { role: 'admin' | 'user' } | null }>('/auth/me', controller.signal)
+      .then(({ user }) => {
+        if (!controller.signal.aborted) setCanReadRefresh(user?.role === 'admin');
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setCanReadRefresh(false);
+      });
+    return () => controller.abort();
+  }, [metadata.versionPinnable]);
   const [refreshingVersions, setRefreshingVersions] = useState(false);
   const [refreshPhase, setRefreshPhase] = useState<QueuedJobPhase>('queued');
   const [refreshResult, setRefreshResult] = useState<RefreshCliVersionsJobResult | null>(null);
@@ -814,11 +828,13 @@ export function CliProviderForm({
                 Last refresh failed: {versionCache.fetchError}
               </p>
             )}
-            <LatestRefresh
-              endpoint={`/cli-providers/catalog/${metadata.name}/refresh-result`}
-              active={refreshingVersions}
-              result={refreshResult}
-            />
+            {canReadRefresh && (
+              <LatestRefresh
+                endpoint={`/cli-providers/catalog/${metadata.name}/refresh-result`}
+                active={refreshingVersions}
+                result={refreshResult}
+              />
+            )}
           </>
         )}
       </div>
