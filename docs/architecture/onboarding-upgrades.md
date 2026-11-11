@@ -777,9 +777,9 @@ pass. It never uses timestamps or the configured repository branch as proof: a d
 branch may import, while a detached or unborn HEAD, unreadable Git state, no usable Git root of
 its own, an open Git operation, a live root claim or a checkout holder defers observation. It does
 not fetch, switch branches or copy from a folder import's source; those still require Refresh. Each
-pass also records the checkout's current branch in `repositories.checkout_branch` before the sync
-gates, even with `PROJECT_STATE_SYNC_ENABLED` off; an onboarding reset reads it fresh
-([onboarding reset](onboarding-reset.md)).
+pass also records the checkout's current branch in `repositories.checkout_branch` before its own
+config gate; with `PROJECT_STATE_SYNC_ENABLED` off the sweep does not run and only an onboarding
+reset's fresh read writes it ([onboarding reset](onboarding-reset.md)).
 Recovery precedes record import. The observer passes the expected ref and HEAD through the
 existing admission, recovery, sync and writer transactions, which recheck them before committing.
 Plan import/reconciliation uses its separate lock and admission checks, even when HEAD and the

@@ -88,7 +88,7 @@ moved aside.
 into another branch left the checkout untouched, so its 11d record would delete a person's
 untouched skill at the same path. The worker records the checkout's symbolic branch in
 `repositories.checkout_branch` (0231; null when detached, unborn or unreadable): every watcher
-pass writes it before its sync gates, and a reset asks for a fresh read when it starts
+pass that runs writes it before its config gate, and a reset asks for a fresh read when it starts
 (`observeCheckoutBranchForReset`, a dedicated plan-mirror job that takes no lock, bounded at 5 s
 for the whole round trip). `resolveMergedTasks` then counts a `merge.landed` event or a legacy
 `merged` state only when its `landedOn` (or the state's `baseBranch`) equals that branch.
