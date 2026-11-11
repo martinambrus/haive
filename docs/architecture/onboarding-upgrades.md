@@ -963,7 +963,10 @@ the entries it applied (a guarded clear on what it read), leaving a newer captur
 pending, and a restored file is never restored again. Each kept entry carries its exact capture
 through the move callers' accumulated maps, so a no-move put-back clears the capture it fulfilled
 and never replays it over a later change. A captured file that is absent stays pending until it is
-recreated: no retry limit drops it, and deleting the repository retires it with its outbox row. A recovery waits while another move scope owns
+recreated: no retry limit drops it, and deleting the repository retires it with its outbox row.
+An absent captured file or directory stays pending without failing an otherwise completed re-sync
+(the restore answers applied, pending or failed, and only an applied capture is cleared); the first
+time a path is found absent the worker warns once, naming it. A recovery waits while another move scope owns
 that checkout; the scope spans set-aside, move and recovery, holds no pooled connection, and is
 process-local, which relies on the one worker per install (see [Worker restarts](worker-restarts.md)). The
 put-back is the same steps in reverse under the same rules (the stored patch applied with `-R`), and

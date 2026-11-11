@@ -257,7 +257,8 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   `moved` and `aborted` also put back the projections its set-aside moved away, with the owner and
   mode it kept (`settleProjections`; a legacy kept map and its handoff marker commit in one
   transaction before anything is restored, and a guarded state save that updates no row rolls the
-  handoff back and stops the settlement), and a `moved` reason then says so; a put-back that throws, or
+  handoff back and stops the settlement; once the outbox owns a capture, an absent path does not hold
+  the settlement open, while a real restore failure still does), and a `moved` reason then says so; a put-back that throws, or
   whose re-sync did not finish, fails the job, which is retried rather than settled, so the report
   stays open until the owner and mode go back. A cancel that finds such a merge already
   gone reports nothing but puts the files back the same way at once. A failure while recording a
