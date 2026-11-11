@@ -202,6 +202,31 @@ status: open · kind: fix · found: H1 (#343) 2026-11-11 · priority: P4
 
 1. 15 web test harnesses still fake React hooks by hand (item 7 of the old T343, partly done in #1073, which moved the touched ones to Testing Library + JSDOM). Move the rest to real React rendering or one shared helper.
 
+### T608 · FNF[kept-metadata-recovery-followups] · durable owner/mode recovery follow-ups (+9)
+
+status: open · kind: fix · found: D3 (#310) reviews 2026-11-11 · priority: P4
+Low unless marked. Code in `worker/src/project-state/kept-metadata.ts`, `set-aside.ts`, `kept-metadata-recovery.ts`, the outbox sweep.
+
+1. ENOTDIR on a restore read is treated as absent (pending), not as a conflict.
+2. File metadata waits for its parents to be restorable; a parent conflict holds the file's restore too.
+3. The sweep's "settled" count includes rows that are still pending.
+4. The 4096-entry warn-once bound (`metadataWarnings`) is untested.
+5. A judged-but-not-kept entry can ride along on copied maps (review-3 D4).
+6. Kept metadata has no lifetime bound, and the 0644 default is a heuristic (review-3 D5).
+7. Test hygiene and the save handle's type (review-3 D6).
+8. A false re-sync is retried without a diagnosis (`kept-metadata-recovery.ts:33`).
+9. Refresh, 00a and plan Pull ignore the re-sync boolean.
+
+### T609 · design · chmod between judge and removal widens a kept mode
+
+status: open · kind: design · found: D3 (#310) Codex review P2 2026-11-11 · priority: P3
+A chmod after `captureProjectionMetadata` and before the removal goes unseen, so recovery can restore a stale, wider mode (e.g. 0600 → 0644). Refusing on mismatch alone is not enough: `rememberKeptMetadata` merges `new || existing` and the existing entry wins on retry. A fix needs a re-judge that replaces its own first entry. Decide whether that window is worth a mechanism.
+
+### T610 · investigate · two-install smoke: sweep written_revision stuck once in CI
+
+status: open · kind: investigate · found: D3 (#1077) PR CI 2026-11-11 · priority: P2
+Run 43074635866 (head a4737e4e9): End-to-end smokes, two-install, plan-mirror sweep `written_revision` stuck at 21 until the step timed out. It passed locally (218/218) and on the CI rerun. Unknown whether PRE-EXISTING or from D3, which changed what the sweep owes (an absent restore stays pending). First check whether a pending or false `restorePendingKeptMetadata` result can hold a flush, then the job log for the sweep's `last_error`.
+
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
 **Found something outside your task?** Search the board first (`grep -n "<file>\|<symbol>\|<slug>"`).
@@ -389,13 +414,6 @@ Read .claude/tmp/house-rules/ledger for a PR7a live-check entry; if absent, run 
 Validation scheduling decision 2026-11-01: attach to the dedicated capped T300 run before feature work; actual evidence/data prerequisites remain, and no successful live result is inferred.
 
 The owner scheduled one capped validation attempt; this block is an evidence dependency, not an unanswered policy question.
-
-### T310 · FNF[kept-metadata-moves] · captured owner/mode lost when a re-sync does not finish
-
-status: in progress (bundle D3, run 2026-11-11, branch fix/D3-kept-metadata) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-A: six non-merge move paths drop the kept map after a re-sync that may have returned false. B: projection writers create files as root (verify on dev). C: persisted keptMetadata never settled again. D: reachDone / settleGoneMerge after a failed re-sync. Options: inherit owner from parent dir; persist the kept map per repo; retry the re-sync before restoring.
-
-User decision 2026-11-01: Preserve captured owner/mode until recovery completes; never silently discard metadata.
 
 ### T319 · FNF[set-aside-batch] · set-aside spends 20-24 git spawns per dirty path (+1)
 
@@ -1586,6 +1604,7 @@ Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/rou
 
 ## Done
 
+- T310 — captured projection owner/mode stay durable in `project_state_outbox.kept_metadata` until a restore applies them; an absent path stays pending, a conflict warns once and stays owed, an atomic legacy handoff — PR #1077 (306f62e35), 2026-11-11; migration 0229; full suite + PR CI green (two-install rerun, see T610)
 - T484 — all nine project-state row takes use `FOR NO KEY UPDATE`, so a child row's FK check (plan node, mirror row, task row) no longer waits for a project-state write (measured: lock timeout at 300 ms before, 3-15 ms after; delete, root claim and row writer still excluded) — PR #1074 (436bd881f), 2026-11-11. The task-creation key held across the same work is T605 (design).
 - T343 + T199 — accessibility sweep: navigation actions are `LinkButton`s (no link wraps a button, the statistics module's Advanced statistics included), the sidebar rename input is out of its button, a `created` task reads "not started", plan panel close and tabs are named, `TabNav` sets `aria-current`, three overlays use the shared `Dialog`, dialog focus restore, depth stacking and a focusin trap guard, a keyboard-scrollable code preview, named plan-starter inputs with live progress, a keyboard combobox for the GitHub repo picker; a Haive "H" favicon (`src/app/icon.svg`) — PR #1073 (c8bc4e09d), 2026-11-11. T343 item 7 continues as T607.
 - T446 — the claim-based descriptor-removal rule is kept and documented (`onboarding-upgrades.md` ~:739: 12 and 03 stage the removal when their commit box is ticked) — PR #950, verified on main 2026-11-11.
