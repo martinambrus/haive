@@ -68,6 +68,9 @@ let filesFetches = 0;
 type StubResponse = { ok: boolean; status: number; json: () => Promise<unknown> };
 let filesQueue: Array<() => Promise<StubResponse>> = [];
 let syncFailure: StubResponse | null = null;
+let actionFailure: { path: string; method: string; response: StubResponse } | null = null;
+let actionRequests: string[] = [];
+
 let bundleState: 'active' | 'syncing' | 'failed' = 'active';
 let bundleSource: 'zip' | 'git' = 'zip';
 let secondBundleState: 'active' | 'syncing' | null = null;
@@ -111,6 +114,12 @@ let syncNote: string | null = null;
 const keyListeners = new Set<(event: unknown) => void>();
 async function fakeFetch(input: unknown, init?: RequestInit) {
   const url = new URL(String(input), 'http://localhost');
+  const method = init?.method ?? 'GET';
+  actionRequests.push(`${method} ${url.pathname}`);
+  if (actionFailure?.path === url.pathname && actionFailure.method === method)
+    return actionFailure.response;
+  if (url.pathname.endsWith('/bundles/uploads/init')) return reply({ session: { id: 'u1' } });
+
   if (url.pathname.endsWith('/bundles')) {
     const body = {
       bundles: [
@@ -197,6 +206,8 @@ beforeEach(() => {
   pollReplies = [];
   filesQueue = [];
   syncFailure = null;
+  actionFailure = null;
+  actionRequests = [];
   syncError = null;
   filesFailure = null;
   filesFetches = 0;
@@ -310,7 +321,7 @@ async function settle(view: Renderer) {
   for (let i = 0; i < 3; i += 1) await view.flush();
 }
 
-async function mountLive() {
+async function mountLive(allowAdd = false) {
   let entries: Parameters<typeof BundleComposer>[0]['value'] = [];
   let mounted = true;
   const view = createRenderer(
@@ -318,8 +329,8 @@ async function mountLive() {
       mounted && (
         <BundleComposer
           initialBundles={[]}
-          allowAddZip={false}
-          allowAddGit={false}
+          allowAddZip={allowAdd}
+          allowAddGit={allowAdd}
           credentialOptions={[]}
           repositoryId="r1"
           value={entries}
@@ -620,6 +631,69 @@ it.each([
   await live.click('Confirm replacement');
   expect(live.text()).toContain(message);
   expect(bundleState).toBe('active');
+});
+
+it.each([
+  ['delete', 'DELETE', '/bundles/b1', ['DELETE /bundles/b1']],
+  ['resync', 'POST', '/bundles/b1/sync', ['POST /bundles/b1/sync']],
+  ['git create', 'POST', '/bundles', ['POST /bundles']],
+  ['upload init', 'POST', '/bundles/uploads/init', ['POST /bundles/uploads/init']],
+  [
+    'upload chunk',
+    'PUT',
+    '/bundles/uploads/u1/chunk',
+    ['POST /bundles/uploads/init', 'PUT /bundles/uploads/u1/chunk'],
+  ],
+  [
+    'upload complete',
+    'POST',
+    '/bundles/uploads/u1/complete',
+    [
+      'POST /bundles/uploads/init',
+      'PUT /bundles/uploads/u1/chunk',
+      'POST /bundles/uploads/u1/complete',
+    ],
+  ],
+] as const)('shows the API refusal for %s', async (action, method, path, requests) => {
+  const reason = `Cannot perform ${action} while an import is running.`;
+  actionFailure = {
+    path,
+    method,
+    response: { ok: false, status: 409, json: async () => ({ error: `  ${reason}  ` }) },
+  };
+  if (action === 'resync') bundleSource = 'git';
+  const live = await mountLive(true);
+  actionRequests = [];
+
+  const change = async (id: string, target: Record<string, unknown>) => {
+    const input = findAll(live.view.tree(), (h) => h.tag === 'input' && h.props.id === id)[0]!;
+    (input.props.onChange as (event: unknown) => void)({ target });
+    await settle(live.view);
+  };
+  if (action === 'delete') {
+    await live.click('Remove');
+  } else if (action === 'resync') {
+    await live.click('Resync');
+  } else if (action === 'git create') {
+    await live.click('Add git bundle');
+    await change('bundle-git-name', { value: 'new git bundle' });
+    await change('bundle-git-url', { value: 'https://example.com/docs.git' });
+    await live.click('Create');
+  } else {
+    await live.click('Add ZIP bundle');
+    await change('bundle-zip-name', { value: 'new zip bundle' });
+    await change('bundle-zip-file', { files: [new File(['zip'], 'new.zip')] });
+    await live.click('Upload');
+  }
+
+  expect(live.text()).toContain(reason);
+  expect(live.text()).not.toContain(`  ${reason}  `);
+  expect(actionRequests).toEqual(requests);
+  expect(bundleState).toBe('active');
+  expect(live.text()).toContain('docs');
+  expect(findAll(live.view.tree(), (h) => h.tag === 'button').every((h) => !h.props.disabled)).toBe(
+    true,
+  );
 });
 
 it('renders replacement option bodies with inline markdown outside their labels', async () => {
