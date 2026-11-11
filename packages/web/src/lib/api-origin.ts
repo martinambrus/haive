@@ -47,27 +47,50 @@ export function runtimeApiConfig(): RuntimeApiConfig {
   };
 }
 
-export function resolveApiOrigin(inputs: ApiOriginInputs): string {
+export interface ApiTransport {
+  base: string;
+  viaWebProxy: boolean;
+}
+
+/** Carries the transport decision with the address; a configured path is never a mode flag. */
+export function resolveApiTransport(inputs: ApiOriginInputs): ApiTransport {
   const { config, location, buildTime } = inputs;
 
-  const browserBase = (api: string): string => {
-    // Host-only session cookies must reach the web's proxy and Server Components. Ports on
-    // the same hostname already share cookies and retain their existing direct transport.
-    if (location && new URL(api).hostname !== location.hostname) {
-      const port = location.port ? `:${location.port}` : '';
-      return `${location.protocol}//${location.hostname}${port}${API_PROXY_PATH}`;
+  const browserBase = (api: string): ApiTransport => {
+    let direct = false;
+    try {
+      const parsed = new URL(api);
+      direct =
+        ['http:', 'https:'].includes(parsed.protocol) &&
+        (!location || parsed.hostname === location.hostname);
+    } catch {
+      // Keep the document renderable. The server proxy diagnoses invalid config and answers 502.
     }
-    return stripTrailingSlash(api);
+    if (location && !direct) {
+      const port = location.port ? `:${location.port}` : '';
+      return {
+        base: `${location.protocol}//${location.hostname}${port}${API_PROXY_PATH}`,
+        viaWebProxy: true,
+      };
+    }
+    return { base: stripTrailingSlash(api), viaWebProxy: false };
   };
   if (config?.apiUrl) return browserBase(config.apiUrl);
 
   // The common case. `hostname`, never `host`: `host` carries the WEB app's port, which is
   // exactly the part being replaced.
   if (config?.apiPort && location) {
-    return `${location.protocol}//${location.hostname}:${config.apiPort}`;
+    return {
+      base: `${location.protocol}//${location.hostname}:${config.apiPort}`,
+      viaWebProxy: false,
+    };
   }
 
   return browserBase(buildTime ?? FALLBACK_API_URL);
+}
+
+export function resolveApiOrigin(inputs: ApiOriginInputs): string {
+  return resolveApiTransport(inputs).base;
 }
 
 /** `new URL(path, base)` treats a trailing slash as significant, and an operator writing a base

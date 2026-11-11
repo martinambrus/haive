@@ -14,6 +14,22 @@ function request(path: string, cookie = '') {
 }
 
 describe('the actual Next proxy response', () => {
+  it('keeps public pages renderable with a malformed configured URL', async () => {
+    vi.stubEnv('HAIVE_PUBLIC_API_URL', 'api.example.com');
+    const response = await proxy(request('/login'));
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-middleware-next')).toBe('1');
+  });
+
+  it('uses the public server configuration for the auth probe when internal is absent', async () => {
+    vi.stubEnv('API_URL_INTERNAL', undefined);
+    vi.stubEnv('HAIVE_PUBLIC_API_URL', 'https://api.example.test/prefix/');
+    const fetcher = vi.fn().mockResolvedValue(new Response('{}'));
+    vi.stubGlobal('fetch', fetcher);
+    await proxy(request('/login', 'haive_access=valid'));
+    expect(fetcher.mock.calls[0]![0]).toBe('https://api.example.test/prefix/auth/me');
+  });
+
   it('retains page slash normalization while preserving editor upgrade slashes', async () => {
     const page = await proxy(request('/login/?session=expired'));
     expect(page.status).toBe(308);

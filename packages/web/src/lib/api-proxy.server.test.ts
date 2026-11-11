@@ -1,12 +1,58 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { logger } from '@haive/shared/logger';
 import { apiProxyTarget, proxyApiRequest } from './api-proxy.server';
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
 });
 
 describe('web-origin API forwarding', () => {
+  it('drops Expect and forbidden hop headers before a real undici fetch', async () => {
+    const { createServer } = await import('node:http');
+    const server = createServer((_req, res) => res.end('accepted'));
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address() as { port: number };
+    vi.stubEnv('API_URL_INTERNAL', 'http://127.0.0.1:' + address.port);
+    try {
+      const res = await proxyApiRequest(
+        new Request('http://web.test/api/haive/upload', {
+          method: 'POST',
+          body: 'payload',
+          headers: {
+            expect: '100-continue',
+            upgrade: 'websocket',
+            connection: 'x-hop',
+            'x-hop': 'drop',
+            'transfer-encoding': 'chunked',
+          },
+        }),
+      );
+      expect(res.status).toBe(200);
+      await expect(res.text()).resolves.toBe('accepted');
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) =>
+        server.close((err) => (err ? reject(err) : resolve())),
+      );
+    }
+  });
+
+  it('reports invalid upstream configuration once and returns 502 on repeated requests', async () => {
+    vi.stubEnv('API_URL_INTERNAL', 'missing-scheme.invalid');
+    const log = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+    for (let i = 0; i < 2; i++) {
+      const res = await proxyApiRequest(new Request('http://web.test/api/haive/auth/login'));
+      expect(res.status).toBe(502);
+      expect(await res.text()).toMatch(/invalid.*API.*URL/i);
+    }
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledOnce();
+  });
+
   it('uses only the configured upstream, retaining path, query and editor namespace', () => {
     vi.stubEnv('API_URL_INTERNAL', 'http://api:3001/base/');
     expect(apiProxyTarget('https://web.test/api/haive//evil.test/asset.js?q=%2F')?.href).toBe(

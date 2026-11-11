@@ -8,6 +8,7 @@ import {
 import { resolveApiOrigin, runtimeApiConfig } from '@/lib/api-origin';
 import { browserHostname, contentSecurityPolicy } from '@/lib/content-security-policy';
 import { apiProxyTarget } from '@/lib/api-proxy.server';
+import { resolveServerApiBase } from '@/lib/api-base.server';
 
 const ACCESS_COOKIE = 'haive_access';
 const REFRESH_COOKIE = 'haive_refresh';
@@ -15,8 +16,12 @@ const REFRESH_COOKIE = 'haive_refresh';
 export async function proxy(request: NextRequest) {
   // Next's existing upgrade handler forwards this rewrite, preserving Origin and Cookie.
   // HTTP uses streaming route handlers so auth refresh has no proxy response deadline.
-  const target = apiProxyTarget(request.url);
-  if (target) return NextResponse.rewrite(target);
+  try {
+    const target = apiProxyTarget(request.url);
+    if (target) return NextResponse.rewrite(target);
+  } catch {
+    return new NextResponse('Invalid server API URL configuration', { status: 502 });
+  }
 
   if (request.nextUrl.pathname !== '/' && request.nextUrl.pathname.endsWith('/')) {
     const canonical = new URL(request.url);
@@ -36,8 +41,7 @@ export async function proxy(request: NextRequest) {
     // setup, registration and invitations; a live session keeps the ordinary dashboard redirect.
     // This probe is read-only: rotation stays in the browser, where cookies can be installed.
     try {
-      const apiBase =
-        process.env.API_URL_INTERNAL ?? process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
+      const apiBase = resolveServerApiBase();
       const result = await fetch(`${apiBase}/auth/me`, {
         headers: { Cookie: request.headers.get('cookie') ?? '' },
         cache: 'no-store',

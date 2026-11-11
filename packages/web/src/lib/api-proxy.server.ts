@@ -1,4 +1,5 @@
-import { API_PROXY_PATH, FALLBACK_API_URL } from './api-origin';
+import { API_PROXY_PATH } from './api-origin';
+import { resolveServerApiBase } from './api-base.server';
 
 /** The upstream is operator configuration only. Neither Host nor a path supplied by a client
  * can select another server. Keep /ide intact for the editor's redirects and relative assets. */
@@ -11,12 +12,7 @@ export function apiProxyTarget(requestUrl: string): URL | null {
       ? path
       : null;
   if (suffix === null) return null;
-  const target = new URL(
-    process.env.API_URL_INTERNAL ??
-      process.env.HAIVE_PUBLIC_API_URL ??
-      process.env.NEXT_PUBLIC_API_URL ??
-      FALLBACK_API_URL,
-  );
+  const target = new URL(resolveServerApiBase());
   target.pathname = `${target.pathname.replace(/\/$/, '')}${suffix}`;
   target.search = request.search;
   return target;
@@ -26,6 +22,7 @@ function endToEndHeaders(source: Headers): Headers {
   const headers = new Headers(source);
   const hopByHop = [
     'connection',
+    'expect',
     'keep-alive',
     'proxy-authenticate',
     'proxy-authorization',
@@ -44,7 +41,12 @@ function endToEndHeaders(source: Headers): Headers {
 /** Stream uploads and SSE without buffering; return every Set-Cookie separately. The API still
  * authenticates and checks the original browser Origin. No session rotation happens here. */
 export async function proxyApiRequest(request: Request): Promise<Response> {
-  const target = apiProxyTarget(request.url);
+  let target: URL | null;
+  try {
+    target = apiProxyTarget(request.url);
+  } catch {
+    return new Response('Invalid server API URL configuration', { status: 502 });
+  }
   if (!target) return new Response('Not found', { status: 404 });
   const headers = endToEndHeaders(request.headers);
   headers.delete('host');

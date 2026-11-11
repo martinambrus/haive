@@ -51,6 +51,13 @@ describe('deriving from the browser', () => {
 });
 
 describe('an explicit URL', () => {
+  it.each(['api.example.com', 'localhost', '//api.example.com', 'ftp://api.example.com'])(
+    'keeps pages renderable for invalid configuration %s',
+    (apiUrl) => {
+      expect(resolveApiOrigin(inputs({ config: { apiUrl } }))).toBe('http://localhost/api/haive');
+    },
+  );
+
   it('uses the web proxy when the configured hostname differs', () => {
     const d = resolveApiOrigin(
       inputs({

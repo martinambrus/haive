@@ -25,7 +25,7 @@ import type { HostApi, HostApiError as ApiError } from '@haive/web-kit/host';
 
 // A real runtime import, unlike the type-only ones above. `api-origin` has no imports of its own,
 // so it introduces no cycle.
-import { API_PROXY_PATH, resolveApiOrigin, type RuntimeApiConfig } from './api-origin';
+import { resolveApiTransport, type RuntimeApiConfig } from './api-origin';
 // Runtime too, and for the same reason: `route-access` has no imports of its own.
 import { decideSessionEnd } from './route-access';
 import { recoverBrowserSession, withBrowserSessionLock } from './browser-session';
@@ -39,15 +39,15 @@ declare global {
 
 // Resolved ONCE at module load, which is why the layout injects its script into <head>: an inline
 // classic script executes during parse, ahead of the deferred module scripts that evaluate this.
-const API_BASE = resolveApiOrigin({
+const API_TRANSPORT = resolveApiTransport({
   config: typeof window === 'undefined' ? undefined : window.__HAIVE_RUNTIME__,
   location: typeof window === 'undefined' ? undefined : window.location,
   buildTime: process.env.NEXT_PUBLIC_API_URL,
 });
 
+const API_BASE = API_TRANSPORT.base;
 export const API_BASE_URL = API_BASE;
-const API_USES_WEB_PROXY =
-  typeof window !== 'undefined' && API_BASE === `${window.location.origin}${API_PROXY_PATH}`;
+export const API_USES_WEB_PROXY = API_TRANSPORT.viaWebProxy;
 
 export function apiWebSocketUrl(path: string): string {
   const base = new URL(API_BASE);
