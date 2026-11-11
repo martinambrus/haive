@@ -185,6 +185,77 @@ const post = async (url: string, body?: unknown) =>
   );
 const complete = (id: string) => post(`/uploads/${id}/complete`);
 
+describe('bundle admission queue isolation', () => {
+  it.each(['replace', 'resync'])('%s opens no transaction while Redis is stalled', async (site) => {
+    if (site === 'replace') {
+      await seedZipBundle();
+      await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+    } else seedGitBundle();
+    const tx = vi.spyOn(h.db as { transaction: (...args: unknown[]) => unknown }, 'transaction');
+    let release!: () => void;
+    let reached!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(queue, 'getRanges').mockImplementation(async () => {
+      reached();
+      await gate;
+      return [];
+    });
+    const response = post(
+      site === 'replace' ? `/${BUNDLE}/replace/${REPLACE}/complete` : `/${BUNDLE}/sync`,
+    );
+    await entered;
+    const transactionsWhileStalled = tx.mock.calls.length;
+    release();
+    expect2xx(await response);
+    expect(transactionsWhileStalled).toBe(0);
+  });
+
+  it.each(['replace', 'resync'])(
+    '%s refuses a bundle changed during the queue read',
+    async (site) => {
+      if (site === 'replace') {
+        await seedZipBundle();
+        await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+      } else seedGitBundle();
+      vi.spyOn(queue, 'getRanges').mockImplementation(async () => {
+        fake.patch(schema.customBundles, BUNDLE, { updatedAt: new Date(Date.now() + 60_000) });
+        return [];
+      });
+      const response = await post(
+        site === 'replace' ? `/${BUNDLE}/replace/${REPLACE}/complete` : `/${BUNDLE}/sync`,
+      );
+      expect(response.status).toBe(409);
+      expect(queue.jobs).toHaveLength(0);
+      expect(fake.rows(schema.customBundles)[0]?.status).toBe('active');
+    },
+  );
+});
+
+it.each(['replace', 'resync'])(
+  '%s refuses a structural change within the same timestamp',
+  async (site) => {
+    if (site === 'replace') {
+      await seedZipBundle();
+      await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+    } else seedGitBundle();
+    vi.spyOn(queue, 'getRanges').mockImplementation(async () => {
+      fake.patch(schema.customBundles, BUNDLE, { status: 'failed' });
+      return [];
+    });
+    const response = await post(
+      site === 'replace' ? `/${BUNDLE}/replace/${REPLACE}/complete` : `/${BUNDLE}/sync`,
+    );
+    expect(response.status).toBe(409);
+    expect(queue.jobs).toHaveLength(0);
+    expect(fake.rows(schema.customBundles)[0]?.status).toBe('failed');
+  },
+);
+
 describe('T487: explicit replacement mode', () => {
   it.each([undefined, {}, { mode: 'automatic' }])(
     'refuses an absent or invalid mode: %j',

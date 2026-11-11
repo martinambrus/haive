@@ -7,7 +7,8 @@ import { classifyBundle } from '../src/bundle-parser/classifier.js';
 import { decodeClaudeAgent, decodeClaudeSkill } from '../src/bundle-parser/decoders/claude-md.js';
 import { decodeCodexAgent } from '../src/bundle-parser/decoders/codex-toml.js';
 import { decodeGeminiAgent } from '../src/bundle-parser/decoders/gemini-md.js';
-import { hashIr } from '../src/bundle-parser/index.js';
+import type { Database } from '@haive/database';
+import { hashIr, parseBundle } from '../src/bundle-parser/index.js';
 import {
   buildAgentFileMarkdown,
   buildAgentFileToml,
@@ -72,6 +73,57 @@ describe('classifier', () => {
     expect(result.unknown.find((u) => u.sourcePath === 'README.md')).toBeUndefined();
   });
 });
+
+it.each(['stored root', 'source snapshot'])(
+  'excludes replacement sidecars and stages from the catalog via %s',
+  async (sourceMode) => {
+    const dir = path.join(tmpRoot, 'user', 'bundle');
+    const extracted = path.join(dir, 'extracted');
+    const stage = path.join(dir, '.haive-extract-123-11111111-1111-4111-8111-111111111111');
+    const agent = '---\nname: reviewer\ndescription: Reviews code\n---\n# Reviewer\nBody\n';
+    await mkdir(path.join(extracted, 'agents'), { recursive: true });
+    await mkdir(path.join(stage, 'old', 'agents'), { recursive: true });
+    await writeFile(path.join(extracted, 'agents', 'reviewer.md'), agent);
+    await writeFile(path.join(stage, 'old', 'agents', 'stale.md'), agent);
+    await writeFile(path.join(dir, 'source.new.zip'), 'archive');
+    await writeFile(path.join(dir, 'source.new.zip.move.json'), '{}');
+    await writeFile(
+      path.join(dir, 'source.new.zip.replacement.json'),
+      JSON.stringify({
+        mode: 'keep_until_success',
+        previousArchive: {
+          archivePath: path.join(dir, 'source.zip'),
+          archiveFilename: 'old.zip',
+          archiveFormat: 'zip',
+        },
+        recovery: { stageName: path.basename(stage), dev: '1', ino: '2' },
+      }),
+    );
+    const source = { storageRoot: extracted, repositoryId: 'repository' };
+    const db = {
+      query: { customBundles: { findFirst: async () => source } },
+      select: () => ({
+        from: () => ({
+          innerJoin: () => ({
+            where: () => ({
+              orderBy: () => ({ limit: async () => [] }),
+            }),
+          }),
+        }),
+      }),
+    } as unknown as Database;
+    const parsed = await parseBundle(
+      'bundle',
+      db,
+      { warn: () => undefined },
+      tmpRoot,
+      sourceMode === 'source snapshot' ? source : undefined,
+    );
+    expect(parsed.items.map((item) => item.sourcePath)).toEqual(['agents/reviewer.md']);
+    expect(parsed.ambiguous).toEqual([]);
+    expect(parsed.dropped).toEqual([]);
+  },
+);
 
 describe('decoders', () => {
   it('decodeClaudeAgent extracts frontmatter into AgentSpec', () => {
