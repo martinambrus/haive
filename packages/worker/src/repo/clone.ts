@@ -296,7 +296,10 @@ export async function restoreProjectData(
     .limit(1);
   if (repo?.renderContext != null)
     await removeNoFollow(replacementPath, PROJECT_STATE_DIR, { recursive: true });
-  const state = await refreshProjectStateOutcome(db, repositoryId, undefined, replacementPath);
+  let state = await refreshProjectStateOutcome(db, repositoryId, undefined, replacementPath);
+  for (let attempt = 1; state.outcome === 'superseded' && attempt < 3; attempt++) {
+    state = await refreshProjectStateOutcome(db, repositoryId, undefined, replacementPath);
+  }
   if (state.outcome !== 'written' && state.outcome !== 'absent') {
     throw new Error(`Recovered checkout project data could not be written (${state.outcome})`);
   }
