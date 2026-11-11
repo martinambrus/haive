@@ -157,6 +157,27 @@ Low unless marked. Code in `worker/src/project-state/refresh.ts`, `worker/src/qu
 17. Doubled "but" in a refusal message.
 18. CI budget: the gated Postgres step is at 134 of 138 rows its 26-minute limit holds; measure before the next raise (`docs/architecture/ci-smokes.md`).
 
+### T603 · FNF[task-start-wait-followups] · bounded start waits and plan-merge leftovers follow-ups (+5)
+
+status: open · kind: fix · found: F1 (#318) reviews 2026-11-11 · priority: P4
+Low unless marked. Code in `worker/src/queues/plan-mirror-queue.ts` (`integrateOrigin`), `worker/src/queues/usage-poll-queue.ts`, `01-plan-merge.ts`.
+
+1. `RevivalBusy` is logged at error level (`usage-poll-queue.ts` ~:654); a busy revival is expected and retried, so warn.
+2. `integrateOrigin`'s first transaction rethrows after the leftover marks by `reports.length`, not by error class (a failure before any report rethrows at once; one after is held until the marks commit). Key it on where the failure happened.
+3. No real-order test for the index-held path (worktree kept, removes 0); the unit test drives a fake.
+4. No real-PostgreSQL test that the leftovers report survives a failure in the merge transaction, nor one for a conversation opening between the two transactions.
+5. `discardPlanMerge` uses the pool inside a transaction (`01-plan-merge.ts` ~:794), the shape item 4 of the old T318 fixed in `mergeInScratch`. PRE-EXISTING.
+
+### T604 · design · the 5 s start-admission bound against a large claim ledger
+
+status: open · kind: design · found: F1 (#318) review 2026-11-11 · priority: P3
+A task start waits at most 5 s for the repository task lock and row admission, then answers 409 busy (`repository-task-lock.ts`). MEASURED: the foreground project-state writer holds that lock 844-2,072 ms at 512 claim files; extrapolated, 5 s covers about 1,300-1,800 claim files, while the record allows 4,096 entries (`shared/src/project-state/limits.ts`). A repository near the cap can therefore answer busy to routine starts while a write runs. Decide: raise the bound with the ledger size, shorten the writer's hold (batch outside the lock), or accept and document.
+
+### T605 · design · git work under the task-creation key
+
+status: open · kind: design · found: F1 (#318) and D2 (#484) reviews 2026-11-11 · priority: P3
+Task creation holds the creation key across git and file work (worktree and branch checks, attachment staging), so a slow git or disk holds every other creation and start for that repository behind it. PRE-EXISTING, consequential. Decide whether the key covers only the row admission, with the file work fenced by the task's own epoch instead.
+
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
 **Found something outside your task?** Search the board first (`grep -n "<file>\|<symbol>\|<slug>"`).
@@ -358,18 +379,6 @@ status: in progress (bundle D3, run 2026-11-11, branch fix/D3-kept-metadata) · 
 A: six non-merge move paths drop the kept map after a re-sync that may have returned false. B: projection writers create files as root (verify on dev). C: persisted keptMetadata never settled again. D: reachDone / settleGoneMerge after a failed re-sync. Options: inherit owner from parent dir; persist the kept map per repo; retry the re-sync before restoring.
 
 User decision 2026-11-01: Preserve captured owner/mode until recovery completes; never silently discard metadata.
-
-### T318 · FNF[task-lock-wait-2] · remaining unbounded waits on start paths (+9)
-
-status: in progress (bundle F1, run 2026-11-11, branch fix/F1-start-waits) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
-
-1. /clarify takes the creation lock for a live task (api tasks/steps.ts:821). 2. Worker revival wait unbounded (_revive-check.ts:86); needs a soft-fail path first. 3. reviveDeadTask takes no creation lock. 4. mergeInScratch uses the pool inside the plan-merge transaction. 5. New-work fence and the advisory start's plan_nodes lock wait unbounded. 6. Ten waiting starts can starve the api pool for 30 s.
-
-From the T355 build (2026-11-07), PRE-EXISTING: 7. api middleware/maintenance.ts ~:45-54 fence read sits inside the start path with no bound of its own beyond the config store's 2 s. 8. worker `_revive-check.ts` ~:60 revival read: decide hold vs fail now that the read can reject.
-
-User decision 2026-11-01: Bound conflicting task-start waits and report a clear retryable busy response; do not proceed from stale state.
-
-From the T346 build (2026-11-08), PRE-EXISTING: 9. `claimTaskStart` accepts `created` (worker task-queue.ts:351, 355, 390); dormant, no producer sends START for a created task. 10. A losing concurrent Start reports a stale `status: "created"` (api tasks/index.ts:1343-1344).
 
 ### T319 · FNF[set-aside-batch] · set-aside spends 20-24 git spawns per dirty path (+1)
 
@@ -1607,6 +1616,7 @@ Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/rou
 
 ## Done
 
+- T318 — task start admission (POST /tasks, Start next, spawn-plan, enrich, kb-author, upgrades, plan advisory, root-merge check) waits at most 5 s per repository/plan key or row lock and 1 s for the new-work fence, then answers 409 busy with nothing created (other `boundedLockWait` callers keep 30 s); worker revivals delay 30 s on lock expiry or an unreadable maintenance read, which now counts as held; `claimTaskStart` claims only `queued`; `mergeInScratch` runs on its caller's transaction; Plan Save/Pull report moved-aside merge leftovers in their own committed transaction before the merge; docs worker-restarts.md, merge-conflicts.md, plan-canvas.md — PR #1075 (e7f56b678), 2026-11-11. Follow-ups T603 (+5), T604 (design), T605 (design).
 - T460 + T512 — Retry, Resume and dead-task revival refuse a task whose repository was deleted (409 `task_repository_deleted`), and revival applies the Retry/Resume holds whatever the stored status; `repositories.error_code` (migration 0225) classifies a repair-needed checkout, "Check repair" is check only and never rebuilds, and "Rebuild checkout" moves the old checkout aside and restores this install's settings, KB and plan data; recovery keeps the repair code until detection succeeds, stranded preparations keep it, and rebuilds are refused while an unfinished task (legacy setup-output pointer included) has a worktree under the checkout — PR #1065 (2c16ca95e), 2026-11-11; dev 0225 applied, 0 of 79 repositories flagged. Follow-ups T602. Owner check: when this install has no plan rows, recovery keeps the incoming plan files.
 - T598 — Claude Code's `.claude/settings.local.json` ("don't ask again" saves the approved command verbatim, secrets included) is kept out of every Haive `git add -A` by a `**/.claude/settings.local.json` entry `ensureGitExcludeEntry` writes to `.git/info/exclude` next to `.haive/`; tracked copies still commit; not via the secret-mask globs, which `carry-untracked.ts` copies into worktrees — PR #1072 (b9482ff32), 2026-11-11.
 - T580 — effort estimates calibrate on the LLM's recorded estimate (`hydrateAnchors` and `GET /tasks/estimation-accuracy` read the latest `estimate.recorded.aiHours`, not the column `06b-sprint-planning` overwrites); step 11 lists every learning and skill (sorted by id, up to 500, excerpts on the first 60, ids filtered and titles collapsed at build time, an omission line past the cap, an open-before-update line for title-only entries); the `learning-recorder` persona allows update and delete and defers to the calling step's output — PR #1047 (884f5c074, 2026-11-09) and PR #1070 (7578584bb), 2026-11-11. Item 1 closed, not a defect: the `.haive-data/` move recorded no dual-read, and re-onboarding migrates `.claude/learnings/`. Plan `sleep-paper-lessons` shipped apart from P3; further work continues in `docs/plans/agent-memory-lessons.md`.
