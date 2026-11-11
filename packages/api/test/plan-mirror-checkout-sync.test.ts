@@ -33,8 +33,8 @@ describe('reset-time branch observation', () => {
       { repositoryId: REPO, userId: USER },
       {
         jobId: expect.stringContaining(`reset-checkout-${REPO}-`),
-        removeOnComplete: true,
-        removeOnFail: true,
+        removeOnComplete: { age: 300 },
+        removeOnFail: { age: 300 },
       },
     ]);
     expect(h.add.mock.calls[0]?.[2].jobId).not.toBe(h.add.mock.calls[1]?.[2].jobId);

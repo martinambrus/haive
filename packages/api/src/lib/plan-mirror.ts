@@ -27,8 +27,10 @@ export async function observeCheckoutBranchForReset(
         { repositoryId, userId } satisfies PlanMirrorJobPayload,
         {
           jobId: `reset-checkout-${repositoryId}-${randomUUID()}`,
-          removeOnComplete: true,
-          removeOnFail: true,
+          // Keep the result a while: a job that finishes before the events listener is ready
+          // (first reset after api start) is recovered from its stored state, not from an event.
+          removeOnComplete: { age: 300 },
+          removeOnFail: { age: 300 },
         },
       );
       const result: unknown = await job.waitUntilFinished(getPlanMirrorQueueEvents(), timeoutMs);
