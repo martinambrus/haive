@@ -73,7 +73,8 @@ import { loadUsableProvider, writeStepCliChoice } from '../lib/step-cli-choice.j
 import { loadOpenPlanAdvisories, OPEN_PLAN_TASK_STATES } from '../lib/plan-advisories.js';
 import { enqueuePlanMirrorRefresh, pullPlanMirror, savePlanMirror } from '../lib/plan-mirror.js';
 import { cancelTaskIfOpen, enqueueCancelJob } from '../lib/cancel-task.js';
-import { clearTaskPause, stopActiveCliInvocations } from '../lib/task-control.js';
+import { stopActiveCliInvocations } from '../lib/task-control.js';
+import { clearCancelledTaskPause } from './tasks/_helpers.js';
 
 const exec = promisify(execFile);
 
@@ -464,7 +465,7 @@ async function findOpenPlanMerge(
       eq(schema.tasks.type, 'plan_merge'),
       inArray(schema.tasks.status, [...PLAN_MERGE_LIVE_STATUSES]),
     ),
-    columns: { id: true, status: true, cliProviderId: true, createdAt: true },
+    columns: { id: true, userId: true, status: true, cliProviderId: true, createdAt: true },
   });
 }
 
@@ -1432,7 +1433,7 @@ planRoutes.delete('/:id/plan/merge', async (c) => {
   const result = await db.transaction((tx) => cancelTaskIfOpen(tx, task.id, { by: userId }));
   if (!result.cancelled) return c.json({ ok: true, cancelled: false });
   // Cancel ends the pause as well; step actions refuse this terminal task.
-  await clearTaskPause(db, task.id);
+  await clearCancelledTaskPause(db, task.id, userId, task.userId);
   await enqueueCancelJob(task.id, userId);
   return c.json({ ok: true, cancelled: true, taskId: task.id });
 });

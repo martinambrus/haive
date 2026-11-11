@@ -181,7 +181,7 @@ The CANCEL teardown releases the task's `merge_dir_claims` rows once `cleanupTas
 
 A repository delete records its two cleanup jobs (per-project RAG databases, then runners, env images, `haive_repos` files and the repository's finished upload archive, `_uploads/<user>/<repoId>.<ext>`, whose failed removal only warns) as `repo_cleanups` rows inside the delete's own transaction, with no foreign key to the repository that is going. The api queues the jobs after commit, passing each row's id as `cleanupId`, and a queue that refuses them no longer fails the request; the handlers delete their row when they succeed. The same sweep (`redriveRepoCleanups`) queues again any row stamped `last_enqueued_at` ten minutes ago, or never stamped ten minutes after it was written (so it does not race the api's own enqueue), claiming the row on its stamp, counting the attempt only once a queue has taken the job (a refused enqueue puts the stamp back and spends nothing), and carrying it in the job id (`repo-cleanup-<id>-<attempt>`, hyphens, since BullMQ only tolerates a colon in a custom id as a compatibility carve-out for three-part repeat ids), and drops with a warning a row whose job a queue has taken five times (`REPO_CLEANUP_MAX_ATTEMPTS`) so a cleanup that never succeeds is not looped on.
 
-A custom bundle left at `syncing` five minutes after its last update, with no waiting, active, delayed, prioritized or waiting-children job naming it, is marked `failed` with a reason by the same sweep (`reconcileStrandedSyncingBundles`), never re-driven: failed is what re-enables Resync and Replace ZIP. A Replace ZIP the user chose to keep the previous bundle for (`keep_until_success`) is instead restored from its durable record when the previous extracted tree can be verified (the stage and the previous directory's identity are recorded before either swap rename): the previous tree, item rows and archive metadata come back `active` with a warning, and the job's own re-delivery does the same. A record that does not parse fails the bundle; a fault reading or restoring one bundle is logged and leaves that bundle for a later tick, and the sweep goes on to the next. The update is guarded on the status and on that age, since a resync or a replace puts a bundle back at `syncing` with a fresh `updated_at`. The routes need it less often than before: a zip complete keys the bundle and its job (`ingest-zip-<uploadId>`) on the upload, so a repeated or resumed complete finds both instead of making a second bundle, and a job that cannot be queued marks its bundle failed at once (`addBundleJobOrMarkFailed`).
+A custom bundle left at `syncing` five minutes after its last update, with no waiting, active, delayed, prioritized or waiting-children job naming it, is marked `failed` with a reason by the same sweep (`reconcileStrandedSyncingBundles`), never re-driven: failed is what re-enables Resync and Replace ZIP. A Replace ZIP the user chose to keep the previous bundle for (`keep_until_success`) is instead restored from its durable record when the previous extracted tree can be verified (the stage and the previous directory's identity are recorded before either swap rename): the previous tree, item rows and archive metadata come back `active` with a warning, and the job's own re-delivery does the same. A record that does not parse, or whose leaf is a link or a directory, fails the bundle; a fault reading or restoring one bundle is logged and leaves that bundle for a later tick, and the sweep goes on to the next. The update is guarded on the status and on that age, since a resync or a replace puts a bundle back at `syncing` with a fresh `updated_at`. The routes need it less often than before: a zip complete keys the bundle and its job (`ingest-zip-<uploadId>`) on the upload, so a repeated or resumed complete finds both instead of making a second bundle, and a job that cannot be queued marks its bundle failed at once (`addBundleJobOrMarkFailed`).
 
 An upload left unfinished is reaped by the worker's upload reaper (`repo/upload-reaper.ts`), which
 runs at boot and every 15 minutes. It has these passes:
@@ -233,14 +233,18 @@ retained older archives and move intents.
 
 Git bundle Resync atomically changes a non-syncing row to `syncing` in its new-work admission
 transaction. Concurrent requests return 409 and leave the admitted request's job and error alone.
-The winning update holds the bundle row while a bounded queue read checks live jobs, including
-older anonymous ingest and sync jobs: an enqueue whose acknowledgement was lost can leave a
+A bounded queue read checks live jobs before the admission transaction opens, so no transaction
+waits on Redis, including older anonymous ingest and sync jobs: an enqueue whose acknowledgement was lost can leave a
 failed row with a real job. Completeness comes from the public BullMQ range API's atomic ID
 snapshot, before hydration: a removed hash must not shrink a capped page into an apparently
 complete one. A small snapshot with a missing hash is unknown too, and the five-second deadline
 covers the snapshot and hydration together. A live job refuses admission, and a failed or capped queue read holds
 with 503 rather than assuming absence. Replacement admission uses the same check, so it cannot
-remove a tree an earlier ingest still owns.
+remove a tree an earlier ingest still owns. Under the row lock the admission then compares the
+row's generation (`updated_at`, status and archive path, the timestamp compared in JavaScript at
+the driver's precision) with the one the queue read was taken against, and refuses with a
+retryable 409 when it changed, so a read taken before another import finished or failed never
+admits.
 A refused enqueue marks only that admission's stamp failed; a lost enqueue that cannot be marked
 is covered by the stranded-bundle sweep. The composer carries the API's redacted `lastSyncError`
 from both initial and polled summaries and renders it through `MarkdownView` only for `failed`.

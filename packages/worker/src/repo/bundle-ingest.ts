@@ -121,7 +121,7 @@ async function setBundleFailed(db: Database, bundleId: string, error: string): P
     .update(schema.customBundles)
     .set({
       status: 'failed',
-      lastSyncError: error,
+      lastSyncError: scrubErrorPaths(error),
       lastReplacementNote: null,
       updatedAt: new Date(),
     })
@@ -220,8 +220,13 @@ export async function handleIngestZip(
                 )
             : undefined,
         afterSwap: async (extraction) => {
-          // All catalog writes roll back together, and extractArchive restores the tree if this
-          // transaction fails. No pooled connection is held during archive extraction.
+          // Parse the swapped tree before taking a pooled connection or bundle lock. The source
+          // check below still fences every catalog write, and a refusal restores the old tree.
+          parsed = await parseBundle(bundle.id, db, logger, bundleStorageRoot, {
+            storageRoot: dest,
+            repositoryId: bundle.repositoryId,
+          });
+          // All catalog writes roll back together; extraction restores the tree on failure.
           await db.transaction(async (tx) => {
             const [owned] = await tx
               .update(schema.customBundles)
@@ -238,7 +243,6 @@ export async function handleIngestZip(
             if (!owned)
               throw new Error('The bundle source changed before its catalog could be saved.');
             const catalogDb = tx as unknown as Database;
-            parsed = await parseBundle(bundle.id, catalogDb, logger, bundleStorageRoot);
             counts = await persistBundleItems(catalogDb, bundle.id, parsed);
             await markIfItemsRemoved(catalogDb, bundle.repositoryId, counts.removed);
             await setBundleActive(catalogDb, bundle.id, {

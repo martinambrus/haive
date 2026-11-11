@@ -743,7 +743,8 @@ repoRoutes.put('/upload/:id/chunk', async (c) => {
       await fh.truncate(Number(row.bytesReceived)).catch(() => {});
       await fh.close().catch(() => {});
       if (err instanceof HttpError) throw err;
-      throw new HttpError(500, `chunk write failed: ${(err as Error).message}`);
+      logger.error({ err, userId, uploadId: row.id }, 'Repository upload chunk write failed');
+      throw new HttpError(500, 'chunk write failed');
     }
 
     const advanced = await tx

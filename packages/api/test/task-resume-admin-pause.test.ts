@@ -22,8 +22,9 @@ import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { TASK_JOB_NAMES, configService } from '@haive/shared';
+import { TASK_JOB_NAMES, configService, logger } from '@haive/shared';
 import { maintenanceRoutes } from '../src/routes/maintenance.js';
+import { planRoutes } from '../src/routes/plan.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -37,6 +38,7 @@ const LATER_ROW = '00000000-0000-4000-8000-0000000000c3';
 
 const app = new Hono<AppEnv>();
 app.route('/tasks', taskRoutes);
+app.route('/repositories', planRoutes);
 app.route('/admin/maintenance', maintenanceRoutes);
 app.onError(errorHandler);
 vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
@@ -460,5 +462,92 @@ describe.each([
     expect(fake.rows(schema.tasks)[0]).toEqual(before);
     expect(fake.rows(schema.taskSteps)).toEqual(steps);
     expect(h.add).not.toHaveBeenCalled();
+  });
+});
+
+describe.each(['cancel', 'abort', 'discard'] as const)('%s clearing a pause', (action) => {
+  const act = () => {
+    h.actor = OWNER;
+    if (action === 'discard') {
+      return app.request(`/repositories/${TASK}/plan/merge?taskId=${TASK}`, { method: 'DELETE' });
+    }
+    return post(
+      action === 'abort' ? `/tasks/${TASK}/steps/test-step/action` : `/tasks/${TASK}/action`,
+      action,
+    );
+  };
+  const seed = () => {
+    const fake = setup({ type: action === 'discard' ? 'plan_merge' : 'workflow' });
+    fake.insert(schema.taskSteps, {
+      id: TARGET_ROW,
+      taskId: TASK,
+      stepId: 'test-step',
+      stepIndex: 0,
+      round: 0,
+      title: 'a step',
+      status: 'failed',
+    });
+    return fake;
+  };
+  const audits = (fake: ReturnType<typeof setup>) =>
+    fake.rows(schema.auditEvents).filter((e) => e.action === 'task.admin_resume');
+  const events = (fake: ReturnType<typeof setup>) =>
+    fake.rows(schema.taskEvents).filter((e) => e.eventType === 'task.resumed');
+  const expectCancelled = (fake: ReturnType<typeof setup>) => {
+    expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'cancelled', pausedAt: null });
+    expect(h.add.mock.calls.some(([name]) => name === TASK_JOB_NAMES.CANCEL)).toBe(true);
+  };
+
+  it('records the administrator hold cleared by the owner, once', async () => {
+    const fake = seed();
+    expect((await adminPause()).status).toBe(200);
+
+    expect((await act()).status).toBe(200);
+
+    expectCancelled(fake);
+    expect(audits(fake)).toHaveLength(1);
+    expect(audits(fake)[0]).toMatchObject({
+      actorUserId: OWNER.id,
+      targetType: 'task',
+      targetId: TASK,
+      metadata: { ownerUserId: OWNER.id },
+    });
+    expect(events(fake).map((e) => e.payload)).toEqual([{ by: OWNER.id, byAdmin: true }]);
+    expect((await act()).status).toBe(200);
+    expect(audits(fake)).toHaveLength(1);
+  });
+
+  it.each(['owner hold', 'no hold'])('writes no resume audit for %s', async (kind) => {
+    const fake = seed();
+    if (kind === 'owner hold') expect((await pauseBy(OWNER)).status).toBe(200);
+
+    expect((await act()).status).toBe(200);
+
+    expectCancelled(fake);
+    expect(audits(fake)).toEqual([]);
+    expect(events(fake)).toEqual([]);
+  });
+
+  it('keeps the clear and queues cancellation when the audit savepoint fails', async () => {
+    const fake = seed();
+    expect((await adminPause()).status).toBe(200);
+    let attempted = false;
+    fake.hooks.beforeInsert = async (table) => {
+      if (table !== schema.auditEvents) return;
+      attempted = true;
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'cancelled', pausedAt: null });
+      throw new Error('audit insert refused');
+    };
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      expect((await act()).status).toBe(200);
+      expect(attempted).toBe(true);
+      expectCancelled(fake);
+      expect(audits(fake)).toEqual([]);
+      expect(events(fake)).toEqual([]);
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

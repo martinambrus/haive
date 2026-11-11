@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { and, desc, eq, inArray, isNotNull, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { schema, type DbTx } from '@haive/database';
 import {
+  logger,
   decideTaskWorktree,
   WORKTREE_SUBDIR,
   worktreeDirName,
@@ -24,7 +25,7 @@ import {
 import { getDb } from '../../db.js';
 import { clearTaskPause } from '../../lib/task-control.js';
 import { appendTaskEvent } from '../../lib/task-events.js';
-import { insertAuditEvent, type AuditEvent } from '../../lib/audit.js';
+import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../../lib/audit.js';
 import { HttpError } from '../../context.js';
 import { compositionSurvivesWithout, type StepFlagMap } from '../../lib/step-flags.js';
 import { uploadsStorageRoot } from '../../lib/uploads.js';
@@ -1151,6 +1152,38 @@ export async function recordAdminResume(
   };
   await insertAuditEvent(tx, event);
   return event;
+}
+
+/** Cancel already committed and stopped live work. Match Retry's audit-before-commit
+ * ordering, with a savepoint so a refused audit cannot undo the clear or refuse teardown. */
+export async function clearCancelledTaskPause(
+  db: ReturnType<typeof getDb>,
+  taskId: string,
+  actorUserId: string,
+  ownerUserId: string,
+): Promise<void> {
+  const result = await db.transaction(async (tx) => {
+    if (!(await clearTaskPause(tx, taskId))) return null;
+    // The clear holds the task row lock: judge the pause actually cleared, not a stale read.
+    if (!(await findAdminPausedTaskIds(tx, [taskId])).has(taskId)) return null;
+    try {
+      const audit = await tx.transaction((auditTx) =>
+        recordAdminResume(auditTx, taskId, actorUserId, ownerUserId),
+      );
+      return { audit };
+    } catch (err) {
+      return { err };
+    }
+  });
+  if (!result) return;
+  if ('err' in result) {
+    logger.warn(
+      { err: result.err, taskId },
+      'failed to audit administrator pause cleared by cancellation',
+    );
+  } else {
+    logAuditEvent(result.audit);
+  }
 }
 
 /** One statement binds at most 65534 parameters, so the ids go in chunks. */

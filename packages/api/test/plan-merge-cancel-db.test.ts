@@ -748,4 +748,54 @@ describe.skipIf(!url)('DELETE /plan/merge beside a completion and a peer, on Pos
     },
     TEST_TIMEOUT,
   );
+  it.each(['administrator', 'owner', 'refused audit'] as const)(
+    'clears a %s pause with best-effort auditing on Postgres',
+    async (kind) => {
+      const { taskId } = await seedTask('running', [], { pausedAt: new Date() });
+      await db.insert(schema.taskEvents).values({
+        taskId,
+        eventType: 'task.paused',
+        payload: { by: USER, ...(kind === 'owner' ? {} : { byAdmin: true }) },
+      });
+      if (kind === 'refused audit') {
+        await db.execute(sql`CREATE FUNCTION m1_refuse_pause_audit() RETURNS trigger
+          LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'audit insert refused'; END $$`);
+        await db.execute(sql`CREATE TRIGGER m1_refuse_pause_audit BEFORE INSERT ON audit_events
+          FOR EACH ROW WHEN (NEW.action = 'task.admin_resume')
+          EXECUTE FUNCTION m1_refuse_pause_audit()`);
+      }
+      try {
+        expect(await removeMerge(taskId)).toMatchObject({ status: 200, body: { cancelled: true } });
+        expect(await taskOf(taskId)).toMatchObject({ status: 'cancelled', pausedAt: null });
+        expect(cancelJobs()).toHaveLength(1);
+        const audits = await db
+          .select()
+          .from(schema.auditEvents)
+          .where(eq(schema.auditEvents.targetId, taskId));
+        const resumed = (await eventsOf(taskId)).filter(
+          (event) => event.eventType === 'task.resumed',
+        );
+        if (kind === 'administrator') {
+          expect(audits).toMatchObject([
+            {
+              action: 'task.admin_resume',
+              actorUserId: USER,
+              targetType: 'task',
+              targetId: taskId,
+              metadata: { ownerUserId: USER },
+            },
+          ]);
+          expect(resumed.map((event) => event.payload)).toEqual([{ by: USER, byAdmin: true }]);
+        } else {
+          expect(audits).toEqual([]);
+          expect(resumed).toEqual([]);
+        }
+      } finally {
+        if (kind === 'refused audit') {
+          await db.execute(sql`DROP TRIGGER m1_refuse_pause_audit ON audit_events`);
+          await db.execute(sql`DROP FUNCTION m1_refuse_pause_audit()`);
+        }
+      }
+    },
+  );
 });
