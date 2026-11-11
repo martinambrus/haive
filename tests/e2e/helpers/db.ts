@@ -42,6 +42,12 @@ export async function seedTaskFixture(
   userId: string,
   titleSuffix: string,
 ): Promise<TaskFixture> {
+  // Admission requires a repository even when this fixture has no checkout for the worker.
+  const repoId = randomUUID();
+  await sql`
+    insert into repositories (id, user_id, name, source, status)
+    values (${repoId}, ${userId}, ${`e2e task ${titleSuffix}`}, 'local_path', 'ready')
+  `;
   const taskId = randomUUID();
   const failedStepId = randomUUID();
   const middleStepId = randomUUID();
@@ -50,10 +56,10 @@ export async function seedTaskFixture(
 
   await sql`
     insert into tasks (
-      id, user_id, type, title, status, error_message,
+      id, user_id, repository_id, type, title, status, error_message,
       current_step_id, current_step_index, created_at, updated_at
     ) values (
-      ${taskId}, ${userId}, 'workflow',
+      ${taskId}, ${userId}, ${repoId}, 'workflow',
       ${`e2e retry/skip ${titleSuffix} ${randomBytes(3).toString('hex')}`},
       'failed', 'simulated failure', ${FIXTURE_FAILED_STEP_ID}, 0, ${now}, ${now}
     )
