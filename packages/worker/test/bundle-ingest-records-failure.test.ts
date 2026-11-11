@@ -3,9 +3,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const fault = vi.hoisted(() => ({ error: new Error('credentials cannot be decrypted') }));
+
 vi.mock('../src/repo/credentials.js', () => ({
   getDecryptedCredentials: async () => {
-    throw new Error('credentials cannot be decrypted');
+    throw fault.error;
   },
 }));
 
@@ -23,6 +25,7 @@ const CREDENTIALS = '00000000-0000-4000-8000-0000000000d1';
 let root: string;
 
 beforeEach(async () => {
+  fault.error = new Error('credentials cannot be decrypted');
   root = await mkdtemp(path.join(os.tmpdir(), 'bundle-failure-'));
 });
 
@@ -31,6 +34,35 @@ afterEach(async () => {
 });
 
 type Handler = (payload: BundleJobPayload, db: Database, root: string) => Promise<void>;
+
+it.each([
+  ['clone', handleIngestGit],
+  ['resync', handleResyncGit],
+] as const)('scrubs filesystem paths before storing a Git %s failure', async (_site, handler) => {
+  const dest = path.join(root, USER, BUNDLE, 'extracted');
+  await mkdir(path.join(dest, '.git'), { recursive: true });
+  fault.error = new Error(
+    'credentials unavailable at /private/haive/key; remote https://example.com/kit.git',
+  );
+  const fake = createFakeDb({ customBundles: schema.customBundles });
+  fake.insert(schema.customBundles, {
+    id: BUNDLE,
+    userId: USER,
+    repositoryId: REPO,
+    sourceType: 'git',
+    gitUrl: 'https://example.com/kit.git',
+    gitCredentialsId: CREDENTIALS,
+    storageRoot: dest,
+    status: 'syncing',
+  });
+  await expect(
+    handler({ bundleId: BUNDLE, userId: USER }, fake.db as unknown as Database, root),
+  ).rejects.toThrow();
+  expect(fake.rows(schema.customBundles)[0]).toMatchObject({
+    status: 'failed',
+    lastSyncError: 'credentials unavailable at [path]; remote https://example.com/kit.git',
+  });
+});
 
 it('T487: a corrupt keep-mode replacement leaves the old tree, catalog and usable bundle', async () => {
   const dest = path.join(root, USER, BUNDLE, 'extracted');

@@ -597,7 +597,7 @@ export async function reconcileStrandedSyncingBundles(db: Database): Promise<voi
       log.warn({ err, bundleId: id }, 'stranded bundle recovery failed; leaving bundle unchanged');
     }
   }
-  log.warn({ count: stranded.length }, 'failed bundles stranded at syncing');
+  log.warn({ attempted: stranded.length }, 'attempted recovery of bundles stranded at syncing');
 }
 
 /** Record, on every `kb_author` task that predates the record, whether it was created with a

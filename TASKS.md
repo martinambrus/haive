@@ -229,7 +229,7 @@ Read so far: `refreshProjectState` (`worker/src/project-state/refresh.ts` ~:100-
 
 ### T611 · FNF[replace-zip-followups] · Replace ZIP mode and replacement-record follow-ups (+10)
 
-status: in progress (bundle K2, run 2026-11-11, branch fix/K2-replace-zip-followups) · kind: fix · found: J (#487) reviews 2026-11-11 · priority: P3
+status: open (items 1, 3-10 done in #1083: 3 was already handled on base; item 2 remains, a retention design) · kind: fix · found: J (#487) reviews 2026-11-11 · priority: P3
 Low unless marked. Code in api `routes/bundles.ts`, worker `bundle-ingest.ts`, `data-migrations.ts` (stranded-replacement sweep), web `bundle-composer.tsx`.
 
 1. (PRE-EXISTING, consequential) Replacement admission holds a DB transaction open during its Redis job check (`bundles.ts` ~:899). Do the Redis check outside the transaction or bound it.
@@ -242,6 +242,16 @@ Low unless marked. Code in api `routes/bundles.ts`, worker `bundle-ingest.ts`, `
 8. The composer drops the API's refusal reason and shows a generic error.
 9. The catalog parse holds a pooled connection while it reads the archive.
 10. The fence that keeps the replacement record out of the catalog is not pinned by a test.
+
+### T618 · FNF[bundle-replace-followups-2] · Replace ZIP follow-ups after #1083 (+5)
+
+status: open · kind: fix · found: K2 (#1083) reviews 2026-11-11 · priority: P4
+
+1. A git bundle's sync tick bumps `updated_at` with no queue job (`worker/src/repo/bundle-sync.ts:91-94`), so a Replace ZIP admitted during it answers a retryable 409 "The bundle changed while checking its import jobs" (`api/src/routes/bundles.ts` ~:910). Fails safe. Minor.
+2. `readReplacement` (`worker/src/repo/bundle-recovery.ts`) handles a link or non-directory only at the record LEAF; one in a parent component throws a plain error the stranded sweep retries forever. PRE-EXISTING, minor. Fix: classify as the leaf case.
+3. `bundle-composer.tsx:190` keeps its own copy of the refusal parsing that `refusalError` now centralises. PRE-EXISTING, minor.
+4. The stranded-bundle sweep holds a transaction and row lock across filesystem reads and tree restoration (`worker/src/data-migrations.ts:521-585`). Same class as #1083 items 1 and 9. PRE-EXISTING, minor.
+5. `api/src/routes/repos.ts:2710` puts raw `err.message` in a response reason; whether it can carry a path is unchecked. PRE-EXISTING. Also the composer renders refusal prose as plain `FormError`, not `MarkdownView` (`bundle-composer.tsx:841`, markdown-rendering.md). PRE-EXISTING, minor.
 
 ### T612 · FNF[web-origin-proxy-followups] · cross-host web-origin proxy follow-ups (+4)
 
@@ -1639,6 +1649,7 @@ Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/rou
 
 ## Done
 
+- T611 items 1, 3-10 — Replace ZIP admission checks the bundle job outside its transaction and re-checks the row generation under the lock; catalogs parse before the write transaction; refused record leaves fail the replacement; stored bundle git failures and upload write/move 500s carry no paths; the composer shows API refusal reasons — PR #1083 (0de15fd1d), 2026-11-11.
 - T609 — closed by the owner 2026-11-11: the chmod window between capture and removal is accepted (milliseconds, needs a person chmodding a Haive projection mid-move, result is only the earlier mode); no mechanism
 - T329 part A + items 1-2 — a merge a cancel left committed on the local base is recorded (`merge.landed`, in the step-state transaction) and reported once under the merge-dir lock (`merge.left_committed`, banner), never undone; reset provenance counts it; cancelled push copy and step-retry guard comments corrected — PR #1080 (8256fdff6), 2026-11-11; full suite + PR CI green; part B open (E3)
 - T435 — different web/API hostnames: browser session traffic goes through the web origin (`/api/haive`, `/ide`), cookies stay host-only; raw task files carry nosniff + CSP sandbox; cross-host throttle operator rule documented — PR #1079 (a51990ce9), 2026-11-11; full suite + PR CI green; editor origin open as T613
