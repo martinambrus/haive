@@ -14,6 +14,8 @@ import * as gitPush from '../repo/git-push.js';
 const h = vi.hoisted(() => ({
   holder: false,
   root: true,
+  claimError: null as Error | null,
+  liveClaimError: null as Error | null,
   holding: 0,
   synced: true,
   sync: vi.fn(),
@@ -22,12 +24,18 @@ const h = vi.hoisted(() => ({
 }));
 vi.mock('@haive/database', async (original) => ({
   ...(await original<object>()),
-  acquireRootClaim: async () => (h.root ? { release: h.release, lost: () => false } : null),
+  acquireRootClaim: async () => {
+    if (h.claimError) throw h.claimError;
+    return h.root ? { release: h.release, lost: () => false } : null;
+  },
   lockRepositoryTasksKey: async () => undefined,
 }));
 let tail = Promise.resolve();
 vi.mock('./merge-dir-claim.js', () => ({
-  liveClaimHolder: async () => (h.holder ? { id: 'other', title: 'Other' } : null),
+  liveClaimHolder: async () => {
+    if (h.liveClaimError) throw h.liveClaimError;
+    return h.holder ? { id: 'other', title: 'Other' } : null;
+  },
   otherLiveClaim: async () => (h.holder ? { id: 'other', title: 'Other' } : null),
   inMergeDirLock: async (db: unknown, _dir: string, fn: (tx: unknown) => Promise<unknown>) => {
     const prev = tail;
@@ -93,7 +101,15 @@ const env = {
 const git = async (dir: string, ...args: string[]) =>
   (await exec('git', args, { cwd: dir, env })).stdout.trim();
 beforeEach(() => {
-  Object.assign(h, { holder: false, root: true, holding: 0, synced: true, duringPrep: null });
+  Object.assign(h, {
+    holder: false,
+    root: true,
+    holding: 0,
+    synced: true,
+    duringPrep: null,
+    claimError: null,
+    liveClaimError: null,
+  });
   h.sync.mockClear();
   h.release.mockClear();
 });
@@ -479,6 +495,46 @@ describe('explicit undo of a cancel-left committed merge', () => {
     expect(await git(f.dir, 'rev-parse', 'feature')).toBe(f.feature);
     expect(h.sync).toHaveBeenCalled();
   });
+  it.each(['holder', 'root', 'holding', 'claim-error', 'holder-error'])(
+    'leaves redelivered Undo recovery pending behind a live %s fence',
+    async (kind) => {
+      const f = await fixture();
+      h.synced = false;
+      await expect(f.run()).rejects.toThrow(/re-sync/);
+      expect(f.settled()[0]?.payload.outcome).toBe('undone');
+      await git(f.dir, 'branch', '-D', 'feature');
+      h.synced = true;
+      h.sync.mockClear();
+      h.release.mockClear();
+      if (kind === 'holder') h.holder = true;
+      else if (kind === 'root') h.root = false;
+      else if (kind === 'holding') h.holding = 1;
+      else if (kind === 'claim-error') h.claimError = new Error('root claim failed');
+      else h.liveClaimError = new Error('live claim failed');
+
+      await expect(f.run()).rejects.toThrow(/pending|claim failed/);
+      expect(h.sync).not.toHaveBeenCalled();
+      expect(await git(f.dir, 'branch', '--list', 'feature')).toBe('');
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+      expect(f.settled()).toHaveLength(1);
+      expect(leftCommittedMerges(f.events)[0]?.settled?.outcome).toBe('undone');
+      expect(h.release).toHaveBeenCalledTimes(kind === 'holding' ? 1 : 0);
+
+      Object.assign(h, {
+        holder: false,
+        root: true,
+        holding: 0,
+        synced: true,
+        claimError: null,
+        liveClaimError: null,
+      });
+      await f.run();
+      expect(h.sync).toHaveBeenCalledTimes(1);
+      expect(await git(f.dir, 'rev-parse', 'feature')).toBe(f.feature);
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+      expect(f.settled()).toHaveLength(1);
+    },
+  );
   it('retries projection recovery without resetting or settling again', async () => {
     const f = await fixture();
     h.synced = false;

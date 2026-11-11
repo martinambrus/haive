@@ -322,8 +322,9 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
           (m) => m.dir === dir && m.baseShaAfter === baseShaAfter,
         );
         if (!m) return;
-        needsSync = m.settled?.outcome === 'undone' || m.settled?.resyncRequired === true;
-        if (m.settled && !needsSync) return;
+        const recoveryPending =
+          m.settled?.outcome === 'undone' || m.settled?.resyncRequired === true;
+        if (m.settled && !recoveryPending) return;
         const settle = async (
           outcome: MergeLeftCommittedOutcome,
           reason: string,
@@ -426,6 +427,9 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
             }
           };
           if (m.settled) {
+            // Arm recovery in finally only after the live-claim, root-claim, checkout
+            // and containment checks admit it; a refused attempt leaves recovery pending.
+            needsSync = true;
             await restoreFeature();
             const symbolic = await gitRun(m.dir, ['symbolic-ref', '-q', 'HEAD']);
             if (

@@ -894,6 +894,26 @@ describe.skipIf(!url)(
       ).toBeNull();
     });
 
+    it('Undo redelivery leaves recovery pending while another root claim is live', async () => {
+      const f = await undoFixture();
+      await f.undo();
+      const syncs = () => h.calls.filter((call) => call === `resyncHaiveProjections:${f.taskId}`);
+      expect(syncs()).toHaveLength(1);
+      const root = await acquireRootClaim(peer, repositoryId, 'refresh', userId);
+      expect(root).not.toBeNull();
+      try {
+        await expect(f.undo()).rejects.toThrow('Root claimed while Undo recovery is pending');
+        expect(syncs()).toHaveLength(1);
+        expect(await f.git('rev-parse', 'main')).toBe(f.before);
+        expect(await eventsOfType(f.taskId, 'merge.left_committed_settled')).toHaveLength(1);
+      } finally {
+        await root?.release();
+      }
+      await f.undo();
+      expect(syncs()).toHaveLength(2);
+      expect(await eventsOfType(f.taskId, 'merge.left_committed_settled')).toHaveLength(1);
+    });
+
     it.each(['directory', 'root', 'checkout'])(
       'Undo refuses a live %s holder under the real fences',
       async (kind) => {
