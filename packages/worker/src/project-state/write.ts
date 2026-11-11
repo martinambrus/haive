@@ -1014,19 +1014,24 @@ export async function writeProjectStateColumn(
     });
   } catch (err) {
     if (discardWriteIntentOnFailure && ownIntentId !== undefined) {
-      await db.transaction(async (tx) => {
-        await lockRepositoryTasksKey(tx, repositoryId);
-        await lockProjectState(tx, repositoryId);
-        await tx
-          .update(schema.projectStateOutbox)
-          .set({ writeIntent: null })
-          .where(
-            and(
-              eq(schema.projectStateOutbox.repositoryId, repositoryId),
-              sql`${schema.projectStateOutbox.writeIntent}->>'id' = ${ownIntentId}`,
-            ),
-          );
-      });
+      try {
+        await db.transaction(async (tx) => {
+          await lockRepositoryTasksKey(tx, repositoryId);
+          await lockProjectState(tx, repositoryId);
+          await tx
+            .update(schema.projectStateOutbox)
+            .set({ writeIntent: null })
+            .where(
+              and(
+                eq(schema.projectStateOutbox.repositoryId, repositoryId),
+                sql`${schema.projectStateOutbox.writeIntent}->>'id' = ${ownIntentId}`,
+              ),
+            );
+        });
+      } catch {
+        // Keep the writer's own error below. A discard that failed leaves the intent, and the
+        // next rebuild settles or refuses it before moving anything.
+      }
     }
     // Admission and a CAS refused before our first mutation changed no semantic state. Once a
     // file did change, a moved checkout is a partial-write failure just like a SQL rollback: retain
