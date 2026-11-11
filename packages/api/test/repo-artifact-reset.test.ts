@@ -1940,3 +1940,33 @@ describe('resetTouchedNothing', () => {
     expect(resetTouchedNothing(nothing, 1, 1)).toBe(false);
   });
 });
+
+describe('cancel-left merge provenance', () => {
+  const landedMerge = {
+    baseShaBefore: 'a'.repeat(40),
+    baseShaAfter: 'b'.repeat(40),
+    landedOn: 'main',
+    landedAt: '2026-10-12T00:00:00Z',
+    repoPath: '/repo',
+    dir: '/repo',
+  };
+  it('uses the durable landing even when cancel left merged false or reset the cleanup row', () => {
+    const rows = [
+      {
+        taskId: 'cancelled',
+        stepId: '11d-skill-sync',
+        mergeResolveState: null,
+        landedMerge,
+        endedAt: new Date('2026-10-11T00:00:00Z'),
+      },
+    ];
+    expect(resolveMergedTasks(rows, null).get('cancelled')).toEqual(new Date(landedMerge.landedAt));
+    expect(resolveMergedTasks(rows, new Date('2026-10-13T00:00:00Z')).has('cancelled')).toBe(false);
+    expect(
+      resolveMergedTasks(
+        [{ ...rows[0]!, stepId: '12-worktree-cleanup', mergeResolveState: { merged: false } }],
+        null,
+      ).has('cancelled'),
+    ).toBe(true);
+  });
+});

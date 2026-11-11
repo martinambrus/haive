@@ -300,6 +300,60 @@ async function main(): Promise<void> {
       withCleanup.map((r) => r.stepId),
     );
 
+    // Cancellation before reachDone leaves merged:false; the task journal survives a step reset.
+    const cancelledMergeId = randomUUID();
+    await db.insert(schema.tasks).values({
+      id: cancelledMergeId,
+      userId,
+      repositoryId: repoId,
+      type: 'workflow',
+      title: 'cancel-left merge',
+      status: 'cancelled',
+    });
+    await db.insert(schema.taskSteps).values({
+      taskId: cancelledMergeId,
+      stepId: '11d-skill-sync',
+      stepIndex: 11,
+      title: 'sync',
+      status: 'done',
+      endedAt: BEFORE_RESET,
+    });
+    await db.insert(schema.taskSteps).values({
+      taskId: cancelledMergeId,
+      stepId: '12-worktree-cleanup',
+      stepIndex: 12,
+      title: 'cleanup',
+      status: 'pending',
+      mergeResolveState: null,
+    });
+    await db.insert(schema.taskEvents).values({
+      taskId: cancelledMergeId,
+      eventType: 'merge.landed',
+      payload: {
+        baseShaBefore: 'a'.repeat(40),
+        baseShaAfter: 'b'.repeat(40),
+        landedOn: 'main',
+        landedAt: AFTER_RESET.toISOString(),
+        repoPath: '/repo',
+        dir: '/repo',
+      },
+    });
+    const cancelledSteps = await loadProvenanceSteps(db, repoId, RESET_AT);
+    check(
+      'a durable cancel-left merge counts with no cleanup state and a pre-reset sync',
+      resolveMergedTasks(cancelledSteps, RESET_AT).get(cancelledMergeId)?.getTime() ===
+        AFTER_RESET.getTime(),
+      cancelledSteps.filter((r) => r.taskId === cancelledMergeId),
+    );
+    check(
+      'a cancel-left merge before the reset is excluded',
+      !resolveMergedTasks(cancelledSteps, new Date(AFTER_RESET.getTime() + 1)).has(
+        cancelledMergeId,
+      ),
+      null,
+    );
+    await db.delete(schema.tasks).where(eq(schema.tasks.id, cancelledMergeId));
+
     // A live WORKFLOW merges its worktree at `12-worktree-cleanup`, landing 11d's skills in the
     // root — so a reset must refuse while one is running, or a merge completing mid-sweep leaves
     // that workflow without the artifacts it just merged. Another query the unit suite cannot

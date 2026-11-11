@@ -1,3 +1,4 @@
+import { MERGE_LANDED_EVENT, readLandedMerge } from '@haive/shared/merge-left-open';
 import { checkoutWorktreeRefusal } from '@haive/shared/repo-rebuild';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
@@ -1173,6 +1174,8 @@ export interface ProvenanceStepRow {
   endedAt: Date | null;
   /** The merge phase's durable record, read instead of the cleanup step's apply output. */
   mergeResolveState: unknown;
+  /** Task journal, surviving reset or cancellation of the cleanup step. */
+  landedMerge?: unknown;
 }
 
 /**
@@ -1195,11 +1198,20 @@ export function resolveMergedTasks(
     stepId: string;
     mergeResolveState: unknown;
     endedAt: Date | null;
+    landedMerge?: unknown;
   }>,
   epoch: Date | null,
 ): Map<string, Date> {
   const merged = new Map<string, Date>();
   for (const row of rows) {
+    // The task journal proves the commit even when cancel preceded reachDone, or a reset
+    // discarded the cleanup state. Its original landing time must still obey the epoch.
+    const landed = readLandedMerge(row.landedMerge);
+    if (landed) {
+      const at = new Date(landed.landedAt);
+      if (epoch === null || at > epoch) merged.set(row.taskId, at);
+      continue;
+    }
     if (row.stepId !== WORKTREE_CLEANUP_STEP_ID) continue;
     // The LOCAL merge, and only that. A PR merge never reaches this checkout: the poller records
     // the forge verdict and `13-pr-wait` removes the worktree — nothing pulls. Claiming those
@@ -1299,6 +1311,11 @@ export async function loadProvenanceSteps(
         output: schema.taskSteps.output,
         endedAt: schema.taskSteps.endedAt,
         mergeResolveState: schema.taskSteps.mergeResolveState,
+        // Read alongside every provenance row, including 11d: cleanup may have been reset
+        // to pending, and is then deliberately absent from this query's candidate rows.
+        landedMerge: sql<unknown>`(select e.payload from ${schema.taskEvents} e
+          where e.task_id = ${schema.tasks.id} and e.event_type = ${MERGE_LANDED_EVENT}
+          order by e.created_at desc limit 1)`,
       })
       .from(schema.taskSteps)
       .innerJoin(schema.tasks, eq(schema.tasks.id, schema.taskSteps.taskId))
