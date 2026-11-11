@@ -729,6 +729,22 @@ describe('leftCommittedMergeBanner', () => {
     expect(
       leftCommittedMergeBanner(events, { taskStatus: 'cancelled', isOwner: false })?.canUndo,
     ).toBe(false);
+    const permanent = [
+      ...events,
+      {
+        eventType: 'merge.left_committed_settled',
+        payload: {
+          dir: '/repo',
+          baseShaAfter: payload.baseShaAfter,
+          outcome: 'refused',
+          permanent: true,
+          reason: 'Pushed merge',
+        },
+      },
+    ];
+    expect(
+      leftCommittedMergeBanner(permanent, { taskStatus: 'cancelled', isOwner: true })?.canUndo,
+    ).toBe(false);
     for (const outcome of ['undone', 'moved', 'refused']) {
       const settled = [
         ...events,

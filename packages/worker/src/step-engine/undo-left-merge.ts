@@ -1,3 +1,4 @@
+import { safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import {
@@ -38,6 +39,15 @@ import {
   type DbHandle,
 } from './merge-dir-claim.js';
 
+/** Expected local git failures end this attempt immediately; a person can repair and retry. */
+class UndoGitError extends Error {}
+const undoRevParse = (dir: string, spec: string) =>
+  revParse(dir, spec).catch(() => {
+    throw new UndoGitError(
+      'Git could not read the recorded merge or checkout. Repair the repository and retry Undo.',
+    );
+  });
+
 const records = (db: DbHandle, taskId: string) =>
   db
     .select({ eventType: schema.taskEvents.eventType, payload: schema.taskEvents.payload })
@@ -57,20 +67,25 @@ const records = (db: DbHandle, taskId: string) =>
 
 const sha = (v: unknown): v is string => typeof v === 'string' && /^[0-9a-f]{40}$/.test(v);
 
+async function validBranch(dir: string, branch: string): Promise<boolean> {
+  const result = await gitRun(dir, ['check-ref-format', `refs/heads/${branch}`]);
+  if (result.code === 0) return true;
+  if (result.code === 1) return false;
+  throw new UndoGitError(
+    'Git could not validate the recorded branch. Repair the repository and retry Undo.',
+  );
+}
+
 /** Never infer ownership from containment alone. A re-entry's later tip fails these parent
  * checks; a base-sync round is excluded even when it happens to look like a feature merge.
  * A replacement squash needs the original two-parent merge and its identical tree as proof. */
 async function ownMerge(dir: string, m: LeftCommittedMerge): Promise<boolean> {
   if (m.mergeStage !== 'feature' || !sha(m.featureSha) || typeof m.featureBranch !== 'string')
     return false;
-  if (
-    (await gitRun(dir, ['check-ref-format', `refs/heads/${m.featureBranch}`])).code !== 0 ||
-    m.featureBranch === m.landedOn
-  )
-    return false;
+  if (!(await validBranch(dir, m.featureBranch)) || m.featureBranch === m.landedOn) return false;
   const parents = async (commit: string) => {
     const result = await gitRun(dir, ['rev-list', '--parents', '-n', '1', commit]);
-    if (result.code !== 0) throw new Error('Cannot read the merge parents');
+    if (result.code !== 0) throw new UndoGitError('Cannot read the merge parents');
     return result.stdout.trim().split(/\s+/);
   };
   const p = await parents(m.baseShaAfter);
@@ -81,8 +96,8 @@ async function ownMerge(dir: string, m: LeftCommittedMerge): Promise<boolean> {
     original.length === 3 &&
     original[1] === m.baseShaBefore &&
     original[2] === m.featureSha &&
-    (await revParse(dir, `${m.baseShaAfter}^{tree}`)) ===
-      (await revParse(dir, `${m.squashMergeSha}^{tree}`))
+    (await undoRevParse(dir, `${m.baseShaAfter}^{tree}`)) ===
+      (await undoRevParse(dir, `${m.squashMergeSha}^{tree}`))
   );
 }
 
@@ -160,8 +175,45 @@ async function remoteRefusal(
 
 /** One confirmed click, one outcome under the same directory lock as every landing writer.
  * Retryable refusals record the click without closing the report. Re-delivery repairs post-move work without moving git again. */
-export const undoLeftMerge: typeof undoLeftMergeInMove = (...args) =>
-  withProjectionMove(() => undoLeftMergeInMove(...args));
+export const undoLeftMerge: typeof undoLeftMergeInMove = (db, payload) =>
+  withProjectionMove(async () => {
+    try {
+      await undoLeftMergeInMove(db, payload);
+    } catch (err) {
+      if (!(err instanceof UndoGitError) || !(await recordUndoFailure(db, payload, err))) throw err;
+    }
+  });
+
+/** Also used after the queue's bounded retries, so a thrown job cannot leave Undo waiting forever.
+ * A journal failure is thrown; it must never turn an unrecorded attempt into a completed job. */
+export async function recordUndoFailure(
+  db: Database,
+  payload: UndoLeftMergePayload,
+  err: unknown,
+): Promise<boolean> {
+  return inMergeDirLock(db, payload.dir, async (tx) => {
+    const task = await tx.query.tasks.findFirst({
+      where: and(eq(schema.tasks.id, payload.taskId), eq(schema.tasks.userId, payload.userId)),
+    });
+    if (task?.status !== 'cancelled') return false;
+    const m = leftCommittedMerges(await records(tx, payload.taskId)).find(
+      (m) => m.dir === payload.dir && m.baseShaAfter === payload.baseShaAfter,
+    );
+    if (!m || m.settled) return false;
+    await tx.insert(schema.taskEvents).values({
+      taskId: payload.taskId,
+      taskStepId: null,
+      eventType: MERGE_LEFT_COMMITTED_SETTLED_EVENT,
+      payload: {
+        dir: payload.dir,
+        baseShaAfter: payload.baseShaAfter,
+        outcome: 'refused',
+        reason: `Undo failed: ${scrubErrorPaths(safeErrorMessage(err))}`,
+      },
+    });
+    return true;
+  });
+}
 
 async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload): Promise<void> {
   const { taskId, userId, dir, baseShaAfter } = payload;
@@ -358,10 +410,10 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
           const restoreFeature = async () => {
             if (typeof m.featureBranch !== 'string' || !sha(m.featureSha)) return;
             const ref = `refs/heads/${m.featureBranch}`;
-            if ((await revParse(cwd, ref)) === null) {
+            if ((await undoRevParse(cwd, ref)) === null) {
               const created = await gitRun(cwd, ['update-ref', ref, m.featureSha, '0'.repeat(40)]);
-              if (created.code !== 0 && (await revParse(cwd, ref)) === null)
-                throw new Error('Feature branch could not be restored');
+              if (created.code !== 0 && (await undoRevParse(cwd, ref)) === null)
+                throw new UndoGitError('Feature branch could not be restored');
             }
           };
           if (m.settled) {
@@ -370,15 +422,12 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
             if (
               symbolic.code === 0 &&
               symbolic.stdout.trim() === `refs/heads/${m.landedOn}` &&
-              (await revParse(m.dir, 'HEAD')) === m.baseShaBefore
+              (await undoRevParse(m.dir, 'HEAD')) === m.baseShaBefore
             )
               movedCheckout = m.dir;
             return;
           }
-          if (
-            (await gitRun(cwd, ['check-ref-format', `refs/heads/${m.landedOn}`])).code !== 0 ||
-            !(await ownMerge(cwd, m))
-          ) {
+          if (!(await validBranch(cwd, m.landedOn)) || !(await ownMerge(cwd, m))) {
             await settle(
               'refused',
               "The recorded landing cannot be proved to be this task's own feature merge.",
@@ -393,7 +442,7 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
           // Porcelain -z keeps paths literal, including spaces, quotes and newlines. Git's
           // update-ref does not protect a branch checked out in another worktree.
           const listed = await gitRun(cwd, ['worktree', 'list', '--porcelain', '-z']);
-          if (listed.code !== 0) throw new Error('Cannot read the repository worktrees');
+          if (listed.code !== 0) throw new UndoGitError('Cannot read the repository worktrees');
           const holders: string[] = [];
           let worktree = '';
           for (const field of listed.stdout.split('\0')) {
@@ -416,14 +465,14 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
             return;
           }
           movedCheckout = holders[0] ?? null;
-          const prior = await revParse(cwd, undoRef);
-          const tip = await revParse(cwd, branch);
+          const prior = await undoRevParse(cwd, undoRef);
+          const tip = await undoRevParse(cwd, branch);
           if (tip !== m.baseShaAfter) {
             if (tip === m.baseShaBefore && prior === m.baseShaAfter) {
               needsSync = true;
               await restoreFeature();
               await settle(
-                'moved',
+                'undone',
                 'The base is already at the pre-merge commit after an earlier Undo attempt; recovery will re-sync the project files.',
               );
               return;
@@ -435,14 +484,14 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
             await settle('refused', remote.reason, remote.permanent);
             return;
           }
-          if (movedCheckout && (await revParse(movedCheckout, 'HEAD')) !== m.baseShaAfter) {
+          if (movedCheckout && (await undoRevParse(movedCheckout, 'HEAD')) !== m.baseShaAfter) {
             await settle('moved', 'The checkout moved since this merge; nothing was changed.');
             return;
           }
           if (prior !== m.baseShaAfter) {
             const keep = await gitRun(cwd, ['update-ref', undoRef, m.baseShaAfter, '0'.repeat(40)]);
             if (keep.code !== 0)
-              throw new Error('The merge commit could not be preserved for recovery');
+              throw new UndoGitError('The merge commit could not be preserved for recovery');
           }
           if (movedCheckout === m.repoPath) {
             if (!prepared) return true;
@@ -467,7 +516,7 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
             const refreshed = await gitRun(movedCheckout, ['update-index', '-q', '--refresh']);
             // Exit 1 also reports real local edits, which reset --keep must judge and preserve.
             if (refreshed.code !== 0 && refreshed.code !== 1)
-              throw new Error('Git could not refresh the checkout index before Undo.');
+              throw new UndoGitError('Git could not refresh the checkout index before Undo.');
           }
           const move = await gitRun(
             movedCheckout ?? cwd,

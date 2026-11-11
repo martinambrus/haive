@@ -168,7 +168,6 @@ export function TaskLeftMergeBanner({
       ))}
       <Dialog
         open={confirming !== null}
-        aria-label="Abort merge"
         onOpenChange={(open) => !open && !busy && setConfirming(null)}
       >
         <DialogContent>

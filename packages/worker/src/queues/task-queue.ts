@@ -185,7 +185,7 @@ import {
 import { getCliExecQueue } from './cli-exec-queue.js';
 import { releaseTaskMergeClaims } from '../step-engine/merge-dir-claim.js';
 import { abortLeftMerge, recordLeftOpenMerges } from '../step-engine/left-open-merge.js';
-import { undoLeftMerge } from '../step-engine/undo-left-merge.js';
+import { undoLeftMerge, recordUndoFailure } from '../step-engine/undo-left-merge.js';
 import {
   StepSupersededError,
   TERMINAL_TASK_STATUSES,
@@ -4652,7 +4652,13 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
     }
 
     if (job.name === TASK_JOB_NAMES.UNDO_LEFT_MERGE) {
-      await undoLeftMerge(db, job.data as UndoLeftMergePayload);
+      try {
+        await undoLeftMerge(db, job.data as UndoLeftMergePayload);
+      } catch (err) {
+        if ((job.attemptsMade ?? 0) + 1 >= (job.opts?.attempts ?? 1))
+          await recordUndoFailure(db, job.data as UndoLeftMergePayload, err);
+        throw err;
+      }
       return;
     }
 

@@ -192,6 +192,19 @@ describe('POST /tasks/:id/merges/undo', () => {
     expect((await undo()).status).toBe(409);
     expect(state.added).toEqual([]);
   });
+  it('refuses another attempt after a permanent report-only refusal', async () => {
+    state.events.push({
+      eventType: 'merge.left_committed_settled',
+      payload: {
+        ...payload,
+        outcome: 'refused',
+        permanent: true,
+        reason: 'Pushed merge',
+      },
+    });
+    expect((await undo()).status).toBe(409);
+    expect(state.added).toEqual([]);
+  });
   it('deduplicates the same attempt but queues a fresh job after a refusal', async () => {
     await undo();
     await undo();

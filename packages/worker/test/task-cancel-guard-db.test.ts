@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile, mkdir, readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
+import * as undoGit from '../src/repo/git-push.js';
+import { leftCommittedMerges } from '@haive/shared/merge-left-open';
 import { recordLandedMerge } from '../src/step-engine/landed-merge.js';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
@@ -814,16 +816,31 @@ describe.skipIf(!url)(
     };
 
     it('Undo sets aside a dirty Haive projection before reset --keep', async () => {
-      const f = await undoFixture(true);
-      await db.delete(schema.planNodes).where(eq(schema.planNodes.repositoryId, repositoryId));
-      await db.insert(schema.planNodes).values({ repositoryId, path: '1', title: 'Plan' });
-      await writeFile(path.join(f.dir, '.haive-data/plan.md'), 'pending plan');
-      await f.undo();
-      expect(await eventsOfType(f.taskId, 'merge.left_committed_settled')).toMatchObject([
-        { payload: { outcome: 'undone' } },
-      ]);
-      expect(await f.git('rev-parse', 'main')).toBe(f.before);
-      expect(h.calls).toContain(`resyncHaiveProjections:${f.taskId}`);
+      const actual = undoGit.gitRun;
+      const moves: string[] = [];
+      const spy = vi.spyOn(undoGit, 'gitRun').mockImplementation(async (dir, args, ...rest) => {
+        const result = await actual(dir, args, ...rest);
+        if (args[0] === 'reset') moves.push(result.stderr);
+        return result;
+      });
+      try {
+        const f = await undoFixture(true);
+        await db.delete(schema.planNodes).where(eq(schema.planNodes.repositoryId, repositoryId));
+        await db.insert(schema.planNodes).values({ repositoryId, path: '1', title: 'Plan' });
+        await writeFile(path.join(f.dir, '.haive-data/plan.md'), 'pending plan');
+        await f.undo();
+        expect(
+          (await eventsOfType(f.taskId, 'merge.left_committed_settled'))[0]?.payload?.reason,
+          moves.join('\n'),
+        ).toContain('Moved main');
+        expect(await eventsOfType(f.taskId, 'merge.left_committed_settled')).toMatchObject([
+          { payload: { outcome: 'undone' } },
+        ]);
+        expect(await f.git('rev-parse', 'main')).toBe(f.before);
+        expect(h.calls).toContain(`resyncHaiveProjections:${f.taskId}`);
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it('Undo puts projections back if local edits refuse the reset', async () => {
@@ -836,6 +853,28 @@ describe.skipIf(!url)(
       expect(await f.git('rev-parse', 'main')).toBe(f.after);
       expect(await readFile(path.join(f.dir, '.haive-data/plan.md'), 'utf8')).toBe('pending plan');
       expect(await readFile(path.join(f.dir, 'feature'), 'utf8')).toBe('local edit');
+    });
+
+    it('Undo records a retryable failure when the final queue attempt throws', async () => {
+      const f = await undoFixture();
+      const actual = undoGit.gitRun;
+      const spy = vi.spyOn(undoGit, 'gitRun').mockImplementation(async (dir, args, ...rest) => {
+        if (args[0] === 'rev-list') throw new Error('local git runner failed');
+        return actual(dir, args, ...rest);
+      });
+      try {
+        await expect(f.undo()).rejects.toThrow('local git runner failed');
+        const reports = [
+          ...(await eventsOfType(f.taskId, 'merge.left_committed')),
+          ...(await eventsOfType(f.taskId, 'merge.left_committed_settled')),
+        ];
+        expect(leftCommittedMerges(reports)[0]).toMatchObject({
+          settled: null,
+          refused: { count: 1 },
+        });
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it('Undo serializes concurrent jobs on the real directory lock and settles once', async () => {

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
-import * as subject from './left-committed-merge.js';
+import { undoLeftMerge, recordUndoFailure } from './undo-left-merge.js';
 import { leftCommittedMerges } from '@haive/shared/merge-left-open';
 import { worktreeDirPaths, worktreeDirName } from '../repo/worktree-paths.js';
 import * as gitMerge from './git-merge.js';
@@ -153,10 +153,7 @@ async function fixture() {
     }),
   } as unknown as Database;
   const job = { taskId: 't', userId: 'u', dir, baseShaAfter: after };
-  const run = () =>
-    (
-      subject as unknown as { undoLeftMerge: (db: Database, payload: typeof job) => Promise<void> }
-    ).undoLeftMerge(db, job);
+  const run = () => undoLeftMerge(db, job);
   const settled = () => events.filter((e) => e.eventType === 'merge.left_committed_settled');
   return { root, dir, before, after, feature, payload, events, db, job, run, settled };
 }
@@ -368,6 +365,41 @@ describe('explicit undo of a cancel-left committed merge', () => {
     expect(await git(f.dir, 'rev-parse', 'feature')).toBe(existing ? f.before : f.feature);
     expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
   });
+  it('keeps an exhausted failed job retryable and fails if its audit cannot be written', async () => {
+    const f = await fixture();
+    await recordUndoFailure(f.db, f.job, new Error('failed operation'));
+    expect(leftCommittedMerges(f.events)[0]).toMatchObject({
+      settled: null,
+      refused: { count: 1 },
+    });
+    vi.spyOn(f.db, 'insert').mockImplementationOnce(
+      () =>
+        ({
+          values: async () => {
+            throw new Error('audit failed');
+          },
+        }) as never,
+    );
+    await expect(recordUndoFailure(f.db, f.job, new Error('failure'))).rejects.toThrow(
+      'audit failed',
+    );
+  });
+  it('records a git read failure as a retryable attempt immediately', async () => {
+    const f = await fixture();
+    const actual = gitPush.gitRun;
+    vi.spyOn(gitPush, 'gitRun').mockImplementation(async (dir, args, ...rest) =>
+      args[0] === 'rev-list'
+        ? { code: 128, stdout: '', stderr: 'fatal: unreadable object' }
+        : actual(dir, args, ...rest),
+    );
+    await expect(f.run()).resolves.toBeUndefined();
+    expect(f.settled()[0]?.payload.outcome).toBe('refused');
+    expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    vi.restoreAllMocks();
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+  });
   it('recovers a git move whose audit transaction failed, without a second reset', async () => {
     const f = await fixture();
     await git(f.dir, 'update-ref', `refs/haive/undo-left-merge/t/${f.after}`, f.after);
@@ -376,7 +408,7 @@ describe('explicit undo of a cancel-left committed merge', () => {
     await f.run();
     await f.run();
     expect(f.settled()).toHaveLength(1);
-    expect(f.settled()[0]?.payload.outcome).toBe('moved');
+    expect(f.settled()[0]?.payload.outcome).toBe('undone');
     expect(await git(f.dir, 'rev-parse', 'feature')).toBe(f.feature);
     expect(h.sync).toHaveBeenCalled();
   });
