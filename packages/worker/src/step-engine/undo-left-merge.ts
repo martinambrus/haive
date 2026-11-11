@@ -517,6 +517,12 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
             // Exit 1 also reports real local edits, which reset --keep must judge and preserve.
             if (refreshed.code !== 0 && refreshed.code !== 1)
               throw new UndoGitError('Git could not refresh the checkout index before Undo.');
+            // reset --keep moves whatever HEAD is now: re-check last, so a commit made in the
+            // checkout during the preparation above is never dropped from the branch.
+            if ((await undoRevParse(movedCheckout, 'HEAD')) !== m.baseShaAfter) {
+              await settle('moved', 'The checkout moved since this merge; nothing was changed.');
+              return;
+            }
           }
           const move = await gitRun(
             movedCheckout ?? cwd,

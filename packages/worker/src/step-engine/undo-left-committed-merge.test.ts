@@ -18,6 +18,7 @@ const h = vi.hoisted(() => ({
   synced: true,
   sync: vi.fn(),
   release: vi.fn(),
+  duringPrep: null as null | (() => Promise<void>),
 }));
 vi.mock('@haive/database', async (original) => ({
   ...(await original<object>()),
@@ -46,7 +47,10 @@ vi.mock('../repo/refresh.js', () => ({ checkoutHoldingTasks: async () => h.holdi
 vi.mock('../repo/worktree-claims.js', () => ({ findWorktreePathClaimant: async () => null }));
 vi.mock('../project-state/set-aside.js', () => ({
   setAsideHaiveProjections: async () => ({ outcome: 'clean' }),
-  restoreProjectionsInTx: async () => ({ outcome: 'clean' }),
+  restoreProjectionsInTx: async () => {
+    await h.duringPrep?.();
+    return { outcome: 'clean' };
+  },
   putBackProjections: async () => undefined,
   resyncHaiveProjections: async (...args: unknown[]) => {
     h.sync(...args);
@@ -89,7 +93,7 @@ const env = {
 const git = async (dir: string, ...args: string[]) =>
   (await exec('git', args, { cwd: dir, env })).stdout.trim();
 beforeEach(() => {
-  Object.assign(h, { holder: false, root: true, holding: 0, synced: true });
+  Object.assign(h, { holder: false, root: true, holding: 0, synced: true, duringPrep: null });
   h.sync.mockClear();
   h.release.mockClear();
 });
@@ -201,6 +205,21 @@ describe('explicit undo of a cancel-left committed merge', () => {
       expect(h.sync).toHaveBeenCalled();
     },
   );
+  it('never drops a commit made in the checkout while Undo prepares', async () => {
+    const f = await fixture();
+    h.duringPrep = async () => {
+      await writeFile(path.join(f.dir, 'person.txt'), 'mine');
+      await git(f.dir, 'add', 'person.txt');
+      await git(f.dir, 'commit', '-m', 'person');
+    };
+    const mine = async () => git(f.dir, 'rev-parse', 'main');
+    await f.run();
+    const tip = await mine();
+    expect(tip).not.toBe(f.before);
+    expect(tip).not.toBe(f.after);
+    expect(await git(f.dir, 'rev-parse', `${tip}^`)).toBe(f.after);
+    expect(f.settled()[0]?.payload.outcome).toBe('moved');
+  });
   it.each(['personal', 'unrecorded-base'])(
     'refuses a base checked out in another %s worktree without changing its index',
     async (kind) => {
