@@ -640,28 +640,129 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
     },
   );
 
-  it.each(['recoverable', 'held'] as const)(
+  it.each(['recoverable', 'held', 'missing images', 'legacy recoverable', 'legacy held'] as const)(
     'recovery handles a %s pending intent before moving the checkout',
     async (kind) => {
       const m = await moveFixture();
       await m.leaveIntent();
-      if (kind === 'held')
+      if (kind.startsWith('legacy')) {
+        const intent = { ...((await m.s.outbox())!.writeIntent as Record<string, unknown>) };
+        delete intent.privateReplacement;
+        await db!
+          .update(schema.projectStateOutbox)
+          .set({ writeIntent: intent })
+          .where(eq(schema.projectStateOutbox.repositoryId, m.s.repo.id));
+      }
+      if (kind.endsWith('held'))
         await writeFile(join(m.dest, '.haive-data/state/project/render.json'), 'foreign edit');
+      if (kind === 'missing images') {
+        const intent = (await m.s.outbox())!.writeIntent as { stage: { rel: string } };
+        await rm(join(m.dest, intent.stage.rel), { recursive: true });
+      }
       // A lost git directory needs a rebuild but leaves the journal and record available for undo.
       await rm(join(m.dest, '.git'), { recursive: true });
       const rebuild = () => handleRefresh({ ...m.payload, recoverCheckout: true }, db!, m.storage);
-      if (kind === 'recoverable') {
+      if (kind.endsWith('recoverable')) {
         await rebuild();
         expect(m.git(m.dest, 'rev-parse', 'HEAD')).toBe(m.git(m.source, 'rev-parse', 'HEAD'));
         expect((await m.s.outbox())!.writeIntent).toBeNull();
       } else {
         await expect(rebuild()).rejects.toThrow(/pending project data write.*Nothing was moved/);
         expect(await readdir(join(m.storage, m.s.userId))).toEqual([m.s.repo.id]);
-        expect(await readFile(join(m.dest, '.haive-data/state/project/render.json'), 'utf8')).toBe(
-          'foreign edit',
-        );
+        if (kind.endsWith('held'))
+          expect(
+            await readFile(join(m.dest, '.haive-data/state/project/render.json'), 'utf8'),
+          ).toBe('foreign edit');
         expect((await m.s.outbox())!.writeIntent).toBeTruthy();
       }
+    },
+  );
+
+  it.each(['marked', 'legacy'] as const)(
+    'a stopped private restore intent (%s) never blocks the next rebuild',
+    async (kind) => {
+      const m = await moveFixture();
+      await writeFile(join(m.dest, '.git/config'), '[core\n');
+      let stopped = false;
+      const stoppedWorker = new Proxy(db!, {
+        get(target, prop) {
+          if (prop !== 'transaction') return Reflect.get(target, prop);
+          return async (fn: Parameters<Database['transaction']>[0]) => {
+            // Simulate death after the intent commits: no final write or in-process discard.
+            if (stopped) throw new Error('worker stopped');
+            const result = await target.transaction(fn);
+            if (result && typeof result === 'object' && 'intentId' in result) {
+              stopped = true;
+              throw new Error('worker stopped');
+            }
+            return result;
+          };
+        },
+      }) as Database;
+      await expect(
+        handleRefresh({ ...m.payload, recoverCheckout: true }, stoppedWorker, m.storage),
+      ).rejects.toThrow('worker stopped');
+      expect(stopped).toBe(true);
+      const intent = (await m.s.outbox())!.writeIntent as {
+        privateReplacement?: string;
+        stage: { rel: string };
+      };
+      expect(intent).toBeTruthy();
+      const siblings = await readdir(join(m.storage, m.s.userId));
+      const replacement = siblings.find((name) => name.startsWith(`${m.s.repo.id}.rebuild-`))!;
+      expect(replacement).toBeTruthy();
+      if (kind === 'marked') expect.soft(intent.privateReplacement).toBe(replacement);
+      else {
+        delete intent.privateReplacement;
+        await db!
+          .update(schema.projectStateOutbox)
+          .set({ writeIntent: intent })
+          .where(eq(schema.projectStateOutbox.repositoryId, m.s.repo.id));
+      }
+      const journal = join(m.storage, m.s.userId, replacement, intent.stage.rel);
+      const images = await readdir(journal);
+      expect(images.length).toBeGreaterThan(0);
+      const before = await Promise.all(images.map((name) => readFile(join(journal, name))));
+      // A different unusable tree can appear at dest before the next recovery.
+      await mkdir(m.dest);
+      await writeFile(join(m.dest, 'keep.txt'), 'new checkout entry');
+      if (kind === 'marked') {
+        // Even a same-named stage in another tree is not the private restore's journal.
+        await mkdir(join(m.dest, intent.stage.rel), { recursive: true });
+        await writeFile(join(m.dest, intent.stage.rel, 'unrelated-image'), 'keep other tree');
+      }
+      await handleRefresh({ ...m.payload, recoverCheckout: true }, db!, m.storage);
+      expect(m.git(m.dest, 'rev-parse', 'HEAD')).toBe(m.git(m.source, 'rev-parse', 'HEAD'));
+      expect((await m.s.outbox())!.writeIntent).toBeNull();
+      expect(await readdir(journal)).toEqual(images);
+      expect(await Promise.all(images.map((name) => readFile(join(journal, name))))).toEqual(
+        before,
+      );
+      expect(await readdir(join(m.storage, m.s.userId))).toContain(replacement);
+    },
+  );
+
+  it.each(['marked', 'legacy'] as const)(
+    'recovery clears a current-checkout intent (%s) when that checkout is absent',
+    async (kind) => {
+      const m = await moveFixture();
+      await m.leaveIntent();
+      if (kind === 'legacy') {
+        const intent = { ...((await m.s.outbox())!.writeIntent as Record<string, unknown>) };
+        delete intent.privateReplacement;
+        await db!
+          .update(schema.projectStateOutbox)
+          .set({ writeIntent: intent })
+          .where(eq(schema.projectStateOutbox.repositoryId, m.s.repo.id));
+      }
+      // Retain the vanished checkout elsewhere, including its journal, as an external move would.
+      const gone = `${m.dest}.externally-moved`;
+      await rename(m.dest, gone);
+      const before = await readdir(gone);
+      await handleRefresh({ ...m.payload, recoverCheckout: true }, db!, m.storage);
+      expect(m.git(m.dest, 'rev-parse', 'HEAD')).toBe(m.git(m.source, 'rev-parse', 'HEAD'));
+      expect((await m.s.outbox())!.writeIntent).toBeNull();
+      expect(await readdir(gone)).toEqual(before);
     },
   );
 

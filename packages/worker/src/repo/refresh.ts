@@ -506,12 +506,56 @@ async function rebuild(
       ? await buildCredentialHelper(db, payload.credentialsId, payload.userId, payload.remoteUrl)
       : undefined;
   if (payload.recoverCheckout) {
-    const [pending] = await db
-      .select({ intent: schema.projectStateOutbox.writeIntent })
-      .from(schema.projectStateOutbox)
-      .where(eq(schema.projectStateOutbox.repositoryId, payload.repositoryId))
-      .limit(1);
-    if (pending?.intent != null) {
+    const pending = await db.transaction(async (tx) => {
+      await lockRepositoryTasksKey(tx, payload.repositoryId);
+      await lockProjectState(tx, payload.repositoryId);
+      const [row] = await tx
+        .select({ intent: schema.projectStateOutbox.writeIntent })
+        .from(schema.projectStateOutbox)
+        .where(eq(schema.projectStateOutbox.repositoryId, payload.repositoryId))
+        .limit(1);
+      if (row?.intent == null) return { recover: false };
+      const intent = row.intent as {
+        privateReplacement?: string | null;
+        stage?: { rel?: unknown } | null;
+      };
+      let reason: string | undefined;
+      if (typeof intent.privateReplacement === 'string') {
+        reason = 'the write belongs to an abandoned private replacement';
+      } else if (!(await lstatNoFollow(repoStorageRoot, rel, { strict: true }))) {
+        // The tree it journaled is gone; there are no checkout bytes or images to replay here.
+        reason = 'the checkout is absent, so its journal cannot be replayed';
+      } else if (
+        intent.privateReplacement === undefined &&
+        typeof intent.stage?.rel === 'string' &&
+        /^\.haive-data\/\.state-writes\/[0-9a-f-]{36}$/.test(intent.stage.rel) &&
+        !(await lstatNoFollow(dest, intent.stage.rel, { strict: true }))
+      ) {
+        // Older workers recorded no tree marker. A journal present under dest still goes through
+        // normal recovery (including identity checks); one absent here cannot belong to this tree.
+        reason =
+          'the legacy journal stage is absent from the checkout; nothing can be replayed here';
+      }
+      if (!reason) return { recover: true };
+      await tx
+        .update(schema.projectStateOutbox)
+        .set({ writeIntent: null })
+        .where(eq(schema.projectStateOutbox.repositoryId, payload.repositoryId));
+      // Retain every tree and journal image. Only detach the intent from the next checkout.
+      return {
+        recover: false,
+        reason,
+        privateReplacement: intent.privateReplacement,
+        stage: intent.stage?.rel,
+      };
+    });
+    if ('reason' in pending) {
+      logger.warn(
+        { repositoryId: payload.repositoryId, ...pending },
+        'abandoned project data write intent cleared before rebuild',
+      );
+    }
+    if (pending.recover) {
       try {
         // Its journal belongs to the current tree, never to the replacement or a later retry.
         await recoverProjectStateWrite(db, payload.repositoryId, dest);

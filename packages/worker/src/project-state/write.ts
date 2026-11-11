@@ -7,6 +7,7 @@ import {
 import type { NamedCheckout } from '../repo/checkout-head.js';
 import { admitWatchedCheckout } from './watch-admission.js';
 import { randomUUID } from 'node:crypto';
+import { basename } from 'node:path';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { isRootClaimLive, lockRepositoryTasksKey, schema, type Database } from '@haive/database';
 import {
@@ -915,7 +916,12 @@ export async function writeProjectStateColumn(
         if (stat === null) absentDirs.push(dir);
         else if (stat.kind !== 'directory') throw new ProjectStateMovedError();
       }
-      const intent: WriteIntent = { id: randomUUID(), changes, absentDirs };
+      const intent: WriteIntent = {
+        id: randomUUID(),
+        changes,
+        absentDirs,
+        privateReplacement: discardWriteIntentOnFailure ? basename(repoPath) : null,
+      };
       validateRecoveryIntent(intent);
       intent.stage = await prepareIntentFiles(repoPath, intent);
       ownIntentId = intent.id;
@@ -1030,7 +1036,7 @@ export async function writeProjectStateColumn(
         });
       } catch {
         // Keep the writer's own error below. A discard that failed leaves the intent, and the
-        // next rebuild settles or refuses it before moving anything.
+        // next rebuild recognizes the abandoned private replacement before moving anything.
       }
     }
     // Admission and a CAS refused before our first mutation changed no semantic state. Once a
@@ -1063,6 +1069,8 @@ export async function writeProjectStateColumn(
 
 interface WriteIntent {
   id: string;
+  /** The unpublished restore tree; null means the current checkout, omitted by older workers. */
+  privateReplacement?: string | null;
   /** Planned ancestors absent at preparation; omitted by journals from earlier workers. */
   absentDirs?: string[];
   stage?: JournalPrepared | null;

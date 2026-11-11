@@ -933,12 +933,15 @@ it.each(['restore', 'late holder'] as const)(
 it('does not report a private replacement after its publication acknowledgement failed', async () => {
   const { dest, payload } = await fixture();
   await writeFile(path.join(dest, '.git/config'), '[core\n');
-  let transactions = 0;
+  let restored = false;
+  h.restore.mockImplementationOnce(async () => {
+    restored = true;
+  });
   const failedAck = {
     ...db,
     transaction: async (fn: (tx: Database) => unknown) => {
       const result = await fn(db);
-      if (++transactions === 2) throw new Error('publication acknowledgement lost');
+      if (restored) throw new Error('publication acknowledgement lost');
       return result;
     },
   } as unknown as Database;
