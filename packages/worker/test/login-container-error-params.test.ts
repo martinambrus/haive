@@ -1,11 +1,21 @@
 import { randomBytes } from 'node:crypto';
 import { DrizzleQueryError } from 'drizzle-orm/errors';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
-const h = vi.hoisted(() => ({ create: vi.fn() }));
+const h = vi.hoisted(() => ({ create: vi.fn(), run: vi.fn(), acquire: vi.fn(), release: vi.fn() }));
+vi.mock('@haive/database', async (original) => ({
+  ...(await original<typeof import('@haive/database')>()),
+  tryCliAuthLock: h.acquire,
+}));
+beforeEach(() => {
+  vi.clearAllMocks();
+  h.acquire.mockResolvedValue(h.release);
+  h.run.mockResolvedValue({ exitCode: 0 });
+  h.create.mockResolvedValue({ containerRowId: 'row', dockerContainerId: 'container' });
+});
 vi.mock('../src/sandbox/login-container.js', () => ({ createSandboxLoginContainer: h.create }));
 vi.mock('../src/sandbox/docker-runner.js', () => ({
-  defaultDockerRunner: { run: async () => ({ exitCode: 0 }) },
+  defaultDockerRunner: { run: h.run },
 }));
 vi.mock('../src/cli-adapters/registry.js', () => ({
   cliAdapterRegistry: { has: () => true, get: () => ({ defaultExecutable: 'claude' }) },
@@ -49,4 +59,52 @@ it('returns a safe failure when the container insert binds environment secrets',
     ),
   ).toBe(false);
   expect(h.create).toHaveBeenCalledOnce();
+});
+
+const provider = () => ({
+  id: 'provider',
+  userId: 'user',
+  name: 'claude-code',
+  authMode: 'subscription',
+  isolateAuth: false,
+});
+const makeDb = (row = provider()) => ({
+  query: { cliProviders: { findFirst: vi.fn(async () => ({ ...row })) } },
+});
+const payload = { providerId: 'provider', userId: 'user' };
+it('holds the auth scope throughout ownership helpers and login container creation', async () => {
+  h.run.mockImplementation(async () => {
+    expect(h.acquire).toHaveBeenCalledWith(expect.anything(), 'haive_cli_auth_user_claude-code_0');
+    expect(h.release).not.toHaveBeenCalled();
+    return { exitCode: 0 };
+  });
+  h.create.mockImplementationOnce(async () => {
+    expect(h.release).not.toHaveBeenCalled();
+    return { containerRowId: 'row', dockerContainerId: 'container' };
+  });
+  expect(await handleLoginCreateJob(makeDb() as never, payload)).toMatchObject({ ok: true });
+  expect(h.run).toHaveBeenCalled();
+  expect(h.release).toHaveBeenCalledOnce();
+});
+it('mounts nothing while sign-out owns the auth scope', async () => {
+  h.acquire.mockResolvedValueOnce(null);
+  expect(await handleLoginCreateJob(makeDb() as never, payload)).toMatchObject({ ok: false });
+  expect(h.run).not.toHaveBeenCalled();
+  expect(h.create).not.toHaveBeenCalled();
+});
+it('refuses a moved scope before mounting any ownership helper', async () => {
+  const row = provider();
+  h.acquire.mockImplementationOnce(async () => {
+    row.isolateAuth = true;
+    return h.release;
+  });
+  expect(await handleLoginCreateJob(makeDb(row) as never, payload)).toMatchObject({ ok: false });
+  expect(h.run).not.toHaveBeenCalled();
+  expect(h.create).not.toHaveBeenCalled();
+  expect(h.release).toHaveBeenCalledOnce();
+});
+it('releases the scope even when login container creation fails', async () => {
+  h.create.mockRejectedValueOnce(new Error('create failed'));
+  expect(await handleLoginCreateJob(makeDb() as never, payload)).toMatchObject({ ok: false });
+  expect(h.release).toHaveBeenCalledOnce();
 });
