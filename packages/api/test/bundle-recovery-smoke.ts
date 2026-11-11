@@ -2,7 +2,7 @@
  * --serve keeps the real API and seeded onboarding form available for a browser check. */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { serve } from '@hono/node-server';
@@ -25,7 +25,9 @@ const { initRedis: initWorkerRedis, closeRedis: closeWorkerRedis } = await impor
   workerRedisModule
 );
 const { startBundleWorker } = await import(workerQueueModule);
-const { reconcileStrandedCloningRepos } = await import(workerRecoveryModule);
+const { reconcileStrandedCloningRepos, reconcileStrandedSyncingBundles } = await import(
+  workerRecoveryModule
+);
 
 const databaseUrl = process.env.HAIVE_TEST_DATABASE_URL;
 const redisUrl = process.env.HAIVE_TEST_REDIS_URL;
@@ -86,7 +88,9 @@ try {
         origin: webOrigin,
         'content-type': 'application/json',
       },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(body === undefined && !url.includes('/replace/')
+        ? {}
+        : { body: JSON.stringify(body ?? { mode: 'remove_first' }) }),
     });
   const [git] = await db
     .insert(schema.customBundles)
@@ -291,6 +295,93 @@ try {
   console.info(
     'PASS actual init/chunk/complete routes: concurrent completion and duplicate response retain one ingest job',
   );
+
+  // Route admission, swap-crash state and recovery all use the actual PostgreSQL catalog.
+  const ingestModule = new URL('../../worker/src/repo/bundle-ingest.js', import.meta.url).href;
+  const { handleIngestZip } = await import(ingestModule);
+  for (const recoveryPath of ['redelivery', 'sweep']) {
+    const id = randomUUID();
+    const dir = path.join(storage, userId, id);
+    const extracted = path.join(dir, 'extracted');
+    const previousArchive = {
+      archivePath: path.join(dir, 'source.zip'),
+      archiveFilename: 'old.zip',
+      archiveFormat: 'zip',
+    };
+    await mkdir(extracted, { recursive: true });
+    await writeFile(path.join(extracted, 'old.md'), 'previous catalog tree');
+    await writeFile(previousArchive.archivePath, 'old archive');
+    await db.insert(schema.customBundles).values({
+      id,
+      userId,
+      repositoryId: repo.id,
+      name: 'Keep recovery',
+      sourceType: 'zip',
+      storageRoot: extracted,
+      status: 'active',
+      ...previousArchive,
+    });
+    const initKeep = await post(`/bundles/${id}/replace/init`, {
+      filename: 'broken.zip',
+      totalSize: 7,
+      chunkSize: 7,
+    });
+    assert.equal(initKeep.status, 201);
+    const keepSession = ((await initKeep.json()) as { session: { id: string } }).session.id;
+    assert.equal(
+      (
+        await app.request(`/bundles/uploads/${keepSession}/chunk`, {
+          method: 'PUT',
+          headers: {
+            cookie: `haive_access=${token}`,
+            origin: webOrigin,
+            'content-range': 'bytes 0-6/7',
+          },
+          body: 'CORRUPT',
+        })
+      ).status,
+      200,
+    );
+    assert.equal(
+      (await post(`/bundles/${id}/replace/${keepSession}/complete`, { mode: 'keep_until_success' }))
+        .status,
+      200,
+    );
+    assert.equal(await readFile(path.join(extracted, 'old.md'), 'utf8'), 'previous catalog tree');
+    const keepJob = (await queue.getJobs(['waiting'])).find((job) => job.data.bundleId === id);
+    assert(keepJob);
+    const payload = keepJob.data;
+    await keepJob.remove();
+    const identity = await stat(extracted, { bigint: true });
+    const stageName = `.haive-extract-123-${randomUUID()}`;
+    const stageDir = path.join(dir, stageName);
+    await mkdir(stageDir);
+    const archive = payload.archivePath!;
+    const record = JSON.parse(await readFile(`${archive}.replacement.json`, 'utf8'));
+    record.recovery = { stageName, dev: String(identity.dev), ino: String(identity.ino) };
+    await writeFile(`${archive}.replacement.json`, JSON.stringify(record));
+    await rename(extracted, path.join(stageDir, 'old'));
+    await mkdir(extracted);
+    await writeFile(path.join(extracted, 'new.md'), 'uncommitted replacement tree');
+    if (recoveryPath === 'redelivery') await assert.rejects(handleIngestZip(payload, db, storage));
+    else {
+      await db
+        .update(schema.customBundles)
+        .set({ updatedAt: old })
+        .where(eq(schema.customBundles.id, id));
+      await reconcileStrandedSyncingBundles(db);
+    }
+    const restored = await db.query.customBundles.findFirst({
+      where: eq(schema.customBundles.id, id),
+    });
+    assert.equal(restored?.status, 'active');
+    assert.equal(restored?.archivePath, previousArchive.archivePath);
+    assert.equal(restored?.archiveFilename, 'old.zip');
+    assert.equal(await readFile(path.join(extracted, 'old.md'), 'utf8'), 'previous catalog tree');
+    console.info(
+      `PASS actual keep-mode ${recoveryPath}: after-swap crash restores previous tree and archive metadata`,
+    );
+  }
 
   async function exerciseCappedSnapshot(
     bundleId: string,

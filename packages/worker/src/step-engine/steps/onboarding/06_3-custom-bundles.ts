@@ -22,6 +22,7 @@ export interface CustomBundleSummary {
   lastSyncError: string | null;
   /** Non-fatal: archive members the extraction dropped. An `active` bundle can carry one. */
   lastSyncNote: string | null;
+  lastReplacementNote: string | null;
 }
 
 export interface CustomBundlesDetect {
@@ -64,6 +65,7 @@ async function loadInitialBundles(
       enabledKinds: schema.customBundles.enabledKinds,
       status: schema.customBundles.status,
       lastSyncError: schema.customBundles.lastSyncError,
+      lastReplacementNote: schema.customBundles.lastReplacementNote,
     })
     .from(schema.customBundles)
     .where(eq(schema.customBundles.repositoryId, repositoryId));
@@ -97,6 +99,7 @@ async function loadInitialBundles(
     itemCount: countByBundle.get(b.id) ?? 0,
     status: b.status as 'active' | 'syncing' | 'failed',
     lastSyncError: b.lastSyncError ? redactGitText(b.lastSyncError) : undefined,
+    lastReplacementNote: b.lastReplacementNote ? redactGitText(b.lastReplacementNote) : undefined,
   }));
 }
 
@@ -141,6 +144,7 @@ async function summarizeBundle(
     skillCount,
     lastSyncError: row.lastSyncError ? redactGitText(row.lastSyncError) : null,
     lastSyncNote: row.lastSyncNote ?? null,
+    lastReplacementNote: row.lastReplacementNote ? redactGitText(row.lastReplacementNote) : null,
   };
 }
 
@@ -236,6 +240,9 @@ export const customBundlesStep: StepDefinition<CustomBundlesDetect, CustomBundle
         const line = `bundle ${summary.name} (${summary.id}): ${summary.lastSyncNote}`;
         warnings.push(line);
         dropNotes.push(line);
+      }
+      if (summary.lastReplacementNote) {
+        warnings.push(`bundle ${summary.name} (${summary.id}): ${summary.lastReplacementNote}`);
       }
       bundles.push(summary);
     }

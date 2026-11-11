@@ -1,9 +1,18 @@
 /** Isolated browser fixture: real auth routes, signing, middleware and Postgres rotation.
  * Synthetic secrets and authenticated sidebar fixtures keep this independent of provider APIs. */
+import { createServer, type Server } from 'node:http';
+import Docker from 'dockerode';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileRoutes } from '../src/routes/tasks/files.js';
 import { serve } from '@hono/node-server';
+import { installTerminalWebSocket } from '../src/routes/terminal.js';
+import { installIdeWebSocket } from '../src/routes/ide.js';
 import jwt from 'jsonwebtoken';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { streamSSE } from 'hono/streaming';
 import { configService, secretsService, decryptEmail, CONFIG_KEYS } from '@haive/shared';
 import { eq } from 'drizzle-orm';
 import { initDatabase } from '../src/db.js';
@@ -38,8 +47,9 @@ configService.get = async (key) =>
   key === CONFIG_KEYS.REGISTRATION_MODE ? registrationMode : null;
 secretsService.getJwtSecret = async () => 'cd'.repeat(32);
 secretsService.getEmailBlindIndexPepper = async () => 'ef'.repeat(32);
-const web = 'http://127.0.0.1:46100';
+const web = process.env.SESSION_RECOVERY_WEB_ORIGIN ?? 'http://127.0.0.1:46100';
 const app = new Hono<AppEnv>().onError(errorHandler);
+const workspaces = new Map<string, string>();
 let meStatus: 503 | null = null;
 let holdNextMe = false;
 let heldMe = false;
@@ -100,8 +110,50 @@ app.post('/__fixture/session', async (c) => {
   setAuthCookies(c, access, token);
   return c.json({ id: user.id, email: decryptEmail(user.emailEncrypted, FIELD_KEY) });
 });
+app.post('/__fixture/workspace/:id', async (c) => {
+  const userId = c.req.param('id');
+  const root = await mkdtemp(join(tmpdir(), 'h2b-raw-'));
+  workspaces.set(userId, root);
+  const svgPath = join(root, 'untrusted.svg');
+  await writeFile(
+    svgPath,
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><script>localStorage.setItem("raw-script-ran","yes")</script><rect width="16" height="16" fill="red"/></svg>',
+  );
+  const [repo] = await db
+    .insert(schema.repositories)
+    .values({
+      userId,
+      name: 'Raw fixture',
+      source: 'local_path',
+      localPath: root,
+    })
+    .returning();
+  const [task] = await db
+    .insert(schema.tasks)
+    .values({
+      userId,
+      repositoryId: repo!.id,
+      title: 'Raw fixture',
+      type: 'workflow',
+    })
+    .returning();
+  const [container] = await db
+    .insert(schema.containers)
+    .values({
+      taskId: task!.id,
+      status: 'running',
+      dockerContainerId: 'h2b-terminal-fixture',
+    })
+    .returning();
+  return c.json({ taskId: task!.id, svgPath, containerId: container!.id });
+});
+app.use('/tasks/*', requireAuth);
+app.route('/tasks', fileRoutes);
 app.delete('/__fixture/session/:id', async (c) => {
   await db.delete(schema.users).where(eq(schema.users.id, c.req.param('id')));
+  const root = workspaces.get(c.req.param('id'));
+  if (root) await rm(root, { recursive: true, force: true });
+  workspaces.delete(c.req.param('id'));
   return c.json({ ok: true });
 });
 app.post('/__fixture/expire-access/:id', (c) => {
@@ -113,6 +165,19 @@ app.post('/__fixture/expire-access/:id', (c) => {
   return c.json({ ok: true });
 });
 app.route('/auth', authRoutes);
+app.post('/__fixture/echo', requireAuth, (c) => new Response(c.req.raw.body));
+app.get('/__fixture/events', requireAuth, (c) =>
+  streamSSE(c, async (stream) => {
+    await stream.writeSSE({ data: 'first' });
+    await stream.sleep(35_000);
+    await stream.writeSSE({ data: 'after-default-proxy-timeout' });
+  }),
+);
+app.get('/ide/:id/*', requireAuth, (c) =>
+  c.req.path.endsWith('/redirect')
+    ? c.redirect(`/ide/${c.req.param('id')}/asset.js`)
+    : c.text('editor asset'),
+);
 app.get('/user-settings/ui-prefs', requireAuth, (c) =>
   c.json({ settingsJson: '{"sidebarWidthPx":333}' }),
 );
@@ -142,8 +207,27 @@ app.get('*', requireAuth, (c) =>
   c.json({ tasks: [], repositories: [], providers: [], state: 'normal' }),
 );
 const server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 46101 });
+// A loopback Docker-attach protocol fixture exercises the real terminal handler and DB ownership,
+// without contacting a Docker daemon or starting any task container.
+const terminalBackend = createServer();
+terminalBackend.on('upgrade', (req, socket) => {
+  socket.on('error', () => {});
+  if (!req.url?.startsWith('/containers/h2b-terminal-fixture/attach?')) {
+    socket.end('HTTP/1.1 404 Not Found\r\n\r\n');
+    return;
+  }
+  socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n');
+  socket.pipe(socket);
+});
+await new Promise<void>((resolve) => terminalBackend.listen(0, '127.0.0.1', resolve));
+const terminalPort = (terminalBackend.address() as { port: number }).port;
+installTerminalWebSocket(server as unknown as Server, {
+  docker: new Docker({ host: '127.0.0.1', port: terminalPort }),
+});
+installIdeWebSocket(server as unknown as Server);
 async function stop() {
   server.close();
+  terminalBackend.close();
   await closeRedis();
   await db.$client.end({ timeout: 5 });
   process.exit(0);

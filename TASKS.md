@@ -222,10 +222,42 @@ Low unless marked. Code in `worker/src/project-state/kept-metadata.ts`, `set-asi
 status: open · kind: design · found: D3 (#310) Codex review P2 2026-11-11 · priority: P3
 A chmod after `captureProjectionMetadata` and before the removal goes unseen, so recovery can restore a stale, wider mode (e.g. 0600 → 0644). Refusing on mismatch alone is not enough: `rememberKeptMetadata` merges `new || existing` and the existing entry wins on retry. A fix needs a re-judge that replaces its own first entry. Decide whether that window is worth a mechanism.
 
-### T610 · investigate · two-install smoke: sweep written_revision stuck once in CI
+### T610 · investigate · two-install smoke: project-state sweep held once in CI
 
-status: open · kind: investigate · found: D3 (#1077) PR CI 2026-11-11 · priority: P2
-Run 43074635866 (head a4737e4e9): End-to-end smokes, two-install, plan-mirror sweep `written_revision` stuck at 21 until the step timed out. It passed locally (218/218) and on the CI rerun. Unknown whether PRE-EXISTING or from D3, which changed what the sweep owes (an absent restore stays pending). First check whether a pending or false `restorePendingKeptMetadata` result can hold a flush, then the job log for the sweep's `last_error`.
+status: open · kind: investigate · found: D3 (#1077) PR CI 2026-11-11 · priority: P3
+Run 43074635866 attempt 1 (head a4737e4e9), `smoke:two-install`: the check "a boot marks a repository with a render context dirty, and a row still dirty once" failed with outbox `revision 22, written_revision 21, last_error null`, and every later sweep check in that run failed the same way (nothing written, checkout clean), so the row stayed held for the rest of the run; the job then hit its 15 min limit. It passed locally (218/218) and on the CI rerun.
+Read so far: `refreshProjectState` (`worker/src/project-state/refresh.ts` ~:100-145) holds without writing an error only on `gitOperationInProgress` or a `held` result from `syncProjectStateFromCheckout`; D3 touched neither file, and its kept-metadata restore runs after both flushes in `resyncHaiveProjections`, so D3 is not implicated by the code read. Next: make the smoke log `refreshProjectState`'s outcome and reason on a failed check, then look for what left a git operation or held sync behind (an earlier check's leftover `MERGE_HEAD` or a lease) if it recurs.
+
+### T611 · FNF[replace-zip-followups] · Replace ZIP mode and replacement-record follow-ups (+10)
+
+status: open · kind: fix · found: J (#487) reviews 2026-11-11 · priority: P3
+Low unless marked. Code in api `routes/bundles.ts`, worker `bundle-ingest.ts`, `data-migrations.ts` (stranded-replacement sweep), web `bundle-composer.tsx`.
+
+1. (PRE-EXISTING, consequential) Replacement admission holds a DB transaction open during its Redis job check (`bundles.ts` ~:899). Do the Redis check outside the transaction or bound it.
+2. Orphan `.haive-extract-*` stages, superseded archives and `.replacement.json` sidecars accumulate; nothing collects them.
+3. The replacement record compares inode only; compare dev and inode.
+4. The committed-replay path (record says committed, tree already swapped) has no test.
+5. A replacement record path that is a symlink or directory strands the bundle permanently in the sweep.
+6. The sweep's count log wording counts attempted rows as recovered.
+7. (PRE-EXISTING) `lastSyncError` may keep filesystem or git paths (`bundle-ingest.ts` ~:110).
+8. The composer drops the API's refusal reason and shows a generic error.
+9. The catalog parse holds a pooled connection while it reads the archive.
+10. The fence that keeps the replacement record out of the catalog is not pinned by a test.
+
+### T612 · FNF[web-origin-proxy-followups] · cross-host web-origin proxy follow-ups (+4)
+
+status: open · kind: fix · found: H2 (#435) review 2026-11-11 · priority: P4
+Code in web `lib/api-proxy.server.ts`, `lib/api-base.server.ts`, `app/api/haive/[...path]/route.ts`, api routes serving inline files.
+
+1. The raw-file browser control (top-level SVG cannot run script) was never shown red against the old headers.
+2. The Next standalone server entry is not exercised; the harness runs `next build` + `next start` from source.
+3. An empty-string `HAIVE_PUBLIC_API_URL` in the `resolveServerApiBase` chain: confirm it falls through rather than resolving to an invalid base.
+4. The notification sound route serves inline without `X-Content-Type-Options: nosniff`.
+
+### T613 · design · code-server shares the web origin in cross-host proxy mode
+
+status: open · kind: design · found: H2 (#435) review 2026-11-11 · priority: P2
+In cross-host mode `/ide` is proxied on the web origin, so code-server (which runs repository code) runs with the app's origin and can reach its API session. Options: a separate editor hostname (needs DNS/TLS per install), an API-host editor with its own scoped handshake token, or a sandboxed opaque-origin iframe (code-server may need storage it then lacks). Costs: `.claude/tmp/codex-run/H2-S/codex-2/editor-options.txt`. Needs an owner decision. Same-hostname installs are unaffected.
 
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
@@ -425,12 +457,13 @@ User decision 2026-11-01: Re-measure current batching gain and keep scope bounde
 
 ### T329 · FNF[cancel-merge-commit] · cancel reports a merge left COMMITTED on local base + one-click undo (+2)
 
-status: open · was modular #3 · priority: P2
+status: in progress (bundle E2 = part A + items 1-2, run 2026-11-11, branch fix/E2-cancel-merge-report) · was modular #3 · priority: P2
 DECIDED by the user 2026-10-12: cancel reports a merge left COMMITTED on the local base, plus a one-click Undo. The Undo resets only if the base is still at that merge commit and no claim is live. Never auto-undo.
 Two PRs:
 
 - A (report): baseShaAfter/landedOn recorded at merge time, a merge.left_committed event, and a banner.
 - B (undo): UNDO_LEFT_MERGE job, root claim, merge-dir lock, 00a fence and containment, `reset --keep` with a sha CAS or update-ref CAS.
+  B note (E2 review, 2026-11-11): the `merge.landed` dedupe key does not pin the commit. A `mergeCommitted` re-entry after the base advanced for another reason writes a later `baseShaAfter`, and a base-sync round (`prePushSync`) records `(preFeature, syncMerge)`, which covers upstream commits. An undo to `baseShaBefore` would then drop commits that are not the task's; B must CAS on the task's own merge commit, not the latest landing tip.
   Defaults: step 12 only. Undo re-creates a deleted feature branch (create-only). Pushed merges and /host-fs get the report only. Agree the merge-resolver hunks with the owner of merge-resolver.ts before building.
 
 1. (PRE-EXISTING) A cancel between the merge commit and reachDone leaves merged:false, so onboarding-reset provenance (api repos.ts ~:1103-1150) misses a merge that is on the base. A's baseShaAfter makes this cheap to fix.
@@ -967,14 +1000,6 @@ status: parked · area: modular-haive-plan owns merge-resolver.ts landing sectio
 1. merge-resolver.ts ~:1320-1322, ~:1362: persist baseShaBefore before the merge.
 2. reopen (~:1642) never calls ensureBaseWorktree.
 
-### T435 · FNF[web-api-cookie-transport] · different web/API hostnames cannot establish the server-rendered session
-
-status: in progress (bundle H2, run 2026-11-11, branch fix/H2-web-origin-session) · kind: feature · user decision: resolved 2026-11-01 · priority: P2
-
-PRE-EXISTING, verified during T382/T432 recovery review. API cookies are host-only (`packages/api/src/auth/cookies.ts`), while the web proxy/layout require cookies at the web hostname; `packages/web/src/lib/api-origin.ts` accepts a different explicit API hostname. Login against that API cannot establish the SSR web session. CORS does not transfer cookies between hostnames; different sites also face SameSite=Lax. Same hostname/different ports is supported and tested. Decide on web-origin API proxying or an explicit cookie/SSO deployment contract before changing transport. Evidence: `.claude/tmp/board-run/T382/codex-review-session-recovery-fix-2.md` F2 and branch session-recovery.md. Keep single-use refresh rotation; this is separate from the current T382 correction.
-
-User decision 2026-11-01: Route browser/session traffic through the web origin API proxy when web and API hostnames differ.
-
 ### T436 · FNF[attachment-count-lifecycle] [design] · persisted attachment counts have no live reader or restart reconciliation
 
 status: parked · kind: design · scope: queued broader finding, not approved implementation · reason: diminishing returns (2026-11-01 scan): Attachment counts have no operational consumer; affected worker helpers are dormant; resume when resume when a live consumer needs reliable attachment counts · priority: P4
@@ -1147,17 +1172,6 @@ From the T479 review (2026-10-31). PRE-EXISTING, minor (needs a crash between tw
 8. T397 round7 introduces a unique <repoId>.rebuild-<uuid> staging sibling for folder refreshes. A kill or refused cleanup retains it, and repository deletion/sweeps do not list it. REGRESSION-adjacent retention limit, minor; include these exact owned siblings in this task's eventual report/sweep design, never remove the only copy blindly. Item4's partial folder-destination defect is fixed by staging; the equivalent remote clone path still writes directly at dest and remains open. A clone checkout failing after HEAD resolves may then be accepted as usable on Retry (code trace verified, git interruption order still unmeasured).
 
 Reconciled 2026-11-01: item2 is RESOLVED by T397: failedAfterMove names the kept aside on rebuild failure. Item4 is RESOLVED for folder copies by staging; the remote-clone equivalent remains a verification candidate as item8 records. Never count the folder case as an open defect or sweep the only remaining copy. Retention/reporting design remains open.
-
-### T487 · FNF[bundle-replace-zip-tree] · ask whether to preserve the old bundle or remove it first to free disk
-
-status: in progress (bundle J, run 2026-11-11, branch fix/J-replace-zip-mode) · kind: feature · user decision: resolved 2026-11-01 · priority: P2
-From the T479 follow-up review (2026-10-31). PRE-EXISTING, minor.
-
-The Replace ZIP route (api routes/bundles.ts ~:895-907; the removal at ~:906, inside the bundle-then-upload transaction) deletes the bundle's `extracted/` tree before it enqueues the ingest job (`attempts: 1`, ~:921), so the worker's `extractArchive` finds no destination and a corrupt replacement zip leaves a failed bundle (bundle-ingest.ts ~:173-176) whose item rows stay (worker-restarts.md ~:130-131) with no tree behind them. Since T479 the swap restores the previous tree on failure, so the route's removal no longer buys atomicity; but the comment at bundles.ts ~:896-897 ties it to the stale-complete guard and the docs record it as intended. Decide whether the route keeps the tree and lets the swap replace it.
-
-User decision 2026-11-01: Ask the user at Replace ZIP: keep old until replacement succeeds, or remove old first to free disk. Explain that remove-first sacrifices automatic rollback; do not silently select a mode.
-
-This explicitly SUPERSEDES the earlier keep-old-only answer. Ask at each Replace ZIP operation, explain the disk-space/rollback trade-off, and require a deliberate mode choice before destructive removal. Never silently infer remove-first from low disk space. The UI must distinguish the uploaded archive and extracted tree when presenting what will be removed.
 
 ### T490 · FNF[error-text-paths-2] [verify-first] · other surfaces still show raw worker error text with server paths (+8)
 
@@ -1604,6 +1618,8 @@ Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/rou
 
 ## Done
 
+- T435 — different web/API hostnames: browser session traffic goes through the web origin (`/api/haive`, `/ide`), cookies stay host-only; raw task files carry nosniff + CSP sandbox; cross-host throttle operator rule documented — PR #1079 (a51990ce9), 2026-11-11; full suite + PR CI green; editor origin open as T613
+- T487 — every Replace ZIP needs an explicit mode; keep-until-success survives crashes through a durable replacement record and the stranded-replacement sweep — PR #1078 (ec585209f), 2026-11-11; migration 0230; full suite + PR CI green
 - T310 — captured projection owner/mode stay durable in `project_state_outbox.kept_metadata` until a restore applies them; an absent path stays pending, a conflict warns once and stays owed, an atomic legacy handoff — PR #1077 (306f62e35), 2026-11-11; migration 0229; full suite + PR CI green (two-install rerun, see T610)
 - T484 — all nine project-state row takes use `FOR NO KEY UPDATE`, so a child row's FK check (plan node, mirror row, task row) no longer waits for a project-state write (measured: lock timeout at 300 ms before, 3-15 ms after; delete, root claim and row writer still excluded) — PR #1074 (436bd881f), 2026-11-11. The task-creation key held across the same work is T605 (design).
 - T343 + T199 — accessibility sweep: navigation actions are `LinkButton`s (no link wraps a button, the statistics module's Advanced statistics included), the sidebar rename input is out of its button, a `created` task reads "not started", plan panel close and tabs are named, `TabNav` sets `aria-current`, three overlays use the shared `Dialog`, dialog focus restore, depth stacking and a focusin trap guard, a keyboard-scrollable code preview, named plan-starter inputs with live progress, a keyboard combobox for the GitHub repo picker; a Haive "H" favicon (`src/app/icon.svg`) — PR #1073 (c8bc4e09d), 2026-11-11. T343 item 7 continues as T607.

@@ -168,6 +168,8 @@ fileRoutes.get('/:id/files/raw', async (c) => {
   if (fh === null) throw new HttpError(404, 'File not found');
   const size = (await fh.stat()).size;
 
+  c.header('X-Content-Type-Options', 'nosniff');
+  c.header('Content-Security-Policy', 'sandbox');
   c.header('Content-Type', mimeForExtension(extname(rel).toLowerCase()));
   c.header('Content-Length', String(size));
   c.header('Cache-Control', 'no-store');

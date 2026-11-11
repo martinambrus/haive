@@ -32,6 +32,92 @@ afterEach(async () => {
 
 type Handler = (payload: BundleJobPayload, db: Database, root: string) => Promise<void>;
 
+it('T487: a corrupt keep-mode replacement leaves the old tree, catalog and usable bundle', async () => {
+  const dest = path.join(root, USER, BUNDLE, 'extracted');
+  const archivePath = path.join(root, USER, BUNDLE, 'source.new.zip');
+  const oldArchive = path.join(root, USER, BUNDLE, 'source.zip');
+  await mkdir(dest, { recursive: true });
+  await writeFile(path.join(dest, 'keep'), 'existing bundle');
+  await writeFile(archivePath, 'corrupt zip');
+  const fake = createFakeDb({
+    customBundles: schema.customBundles,
+    customBundleItems: schema.customBundleItems,
+  });
+  fake.insert(schema.customBundles, {
+    id: BUNDLE,
+    userId: USER,
+    repositoryId: REPO,
+    name: 'kit',
+    sourceType: 'zip',
+    archivePath,
+    archiveFormat: 'zip',
+    archiveFilename: 'broken.zip',
+    storageRoot: dest,
+    status: 'syncing',
+    lastSyncNote: 'Dropped 1 symlink.',
+  });
+  fake.insert(schema.customBundleItems, {
+    id: '00000000-0000-4000-8000-0000000000e1',
+    bundleId: BUNDLE,
+    sourcePath: 'keep',
+    contentHash: 'old',
+  });
+  const before = structuredClone(fake.rows(schema.customBundleItems));
+  const error = await handleIngestZip(
+    {
+      bundleId: BUNDLE,
+      userId: USER,
+      archivePath,
+      replacement: {
+        mode: 'keep_until_success',
+        previousArchive: {
+          archivePath: oldArchive,
+          archiveFilename: 'old.zip',
+          archiveFormat: 'zip',
+        },
+      },
+    } as BundleJobPayload,
+    fake.db as unknown as Database,
+    root,
+  ).catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(Error);
+  expect(await readFile(path.join(dest, 'keep'), 'utf8')).toBe('existing bundle');
+  expect(fake.rows(schema.customBundleItems)).toEqual(before);
+  expect(fake.rows(schema.customBundles)[0]).toMatchObject({
+    status: 'active',
+    archivePath: oldArchive,
+    archiveFilename: 'old.zip',
+    lastSyncError: null,
+    lastSyncNote: 'Dropped 1 symlink.',
+    lastReplacementNote: expect.stringContaining('previous bundle remains in use'),
+  });
+});
+
+it('clears an earlier keep-mode warning when a remove-first ingest fails', async () => {
+  const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');
+  const fake = createFakeDb({
+    customBundles: schema.customBundles,
+    customBundleItems: schema.customBundleItems,
+  });
+  const fixture = await seedCrashedReplacement(root, fake, 'before extract');
+  const replacement = { mode: 'remove_first' as const, previousArchive: fixture.previousArchive };
+  await writeFile(`${fixture.archivePath}.replacement.json`, JSON.stringify(replacement));
+  await rm(fixture.dest, { recursive: true });
+  fake.patch(schema.customBundles, fixture.payload.bundleId, {
+    lastReplacementNote: 'Replacement failed; the previous bundle remains in use.',
+  });
+
+  await expect(
+    handleIngestZip({ ...fixture.payload, replacement }, fake.db as unknown as Database, root),
+  ).rejects.toThrow();
+
+  expect(fake.rows(schema.customBundles)[0]).toMatchObject({
+    status: 'failed',
+    lastReplacementNote: null,
+  });
+  await expect(readFile(path.join(fixture.dest, 'old.md'))).rejects.toThrow();
+});
+
 const cases: Array<[string, Handler, Record<string, unknown>]> = [
   [
     'handleIngestZip without an archive path',
@@ -58,6 +144,7 @@ describe('a bundle handler that throws before it starts working', () => {
       sourceType: 'git',
       storageRoot: '',
       status: 'syncing',
+      lastReplacementNote: 'Replacement failed; the previous bundle remains in use.',
       updatedAt: new Date(),
       ...over,
     });
@@ -73,6 +160,7 @@ describe('a bundle handler that throws before it starts working', () => {
     expect(err).toBeInstanceOf(Error);
     const stored = fake.rows(schema.customBundles)[0]!;
     expect(stored.status).toBe('failed');
+    expect(stored.lastReplacementNote).toBeNull();
     expect(stored.lastSyncError).toBe((err as Error).message);
   });
 });

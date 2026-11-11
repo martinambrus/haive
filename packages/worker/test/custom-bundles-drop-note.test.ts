@@ -155,3 +155,18 @@ it('redacts legacy credential URLs in saved bundle errors before detect, form an
   expect(text.includes('fixture-user')).toBe(false);
   expect(text).toContain('failed https://example.test/repo');
 });
+
+it('keeps replacement failures out of the dropped-member diagnosis by structural field', async () => {
+  const ctx = makeCtx(
+    {
+      ...baseRow,
+      lastSyncNote: 'Dropped 1 symlink.',
+      lastReplacementNote: 'Latest replacement failed.',
+    },
+    READS,
+  );
+  const out = (await customBundlesStep.apply!(ctx, applyArgs(['bundle-1']))) as CustomBundlesApply;
+  expect(out.warnings).toContain('bundle curated (bundle-1): Latest replacement failed.');
+  expect(out.degradedNote).toContain('Dropped 1 symlink.');
+  expect(out.degradedNote).not.toContain('Latest replacement');
+});

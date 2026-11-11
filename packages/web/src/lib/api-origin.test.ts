@@ -51,21 +51,40 @@ describe('deriving from the browser', () => {
 });
 
 describe('an explicit URL', () => {
-  it('wins outright, because a reverse proxy is not derivable', () => {
+  it.each(['api.example.com', 'localhost', '//api.example.com', 'ftp://api.example.com'])(
+    'keeps pages renderable for invalid configuration %s',
+    (apiUrl) => {
+      expect(resolveApiOrigin(inputs({ config: { apiUrl } }))).toBe('http://localhost/api/haive');
+    },
+  );
+
+  it('uses the web proxy when the configured hostname differs', () => {
     const d = resolveApiOrigin(
       inputs({
         config: { apiUrl: 'https://api.example.com', apiPort: '3003' },
-        location: { protocol: 'http:', hostname: 'localhost' },
+        location: { protocol: 'http:', hostname: 'localhost', port: '3000' },
       }),
     );
-    expect(d).toBe('https://api.example.com');
+    expect(d).toBe('http://localhost:3000/api/haive');
   });
 
   // `new URL(path, base)` treats a trailing slash as significant, and an operator is as likely to
   // write one as not.
   it('is normalised so a trailing slash cannot change what a path resolves to', () => {
-    expect(resolveApiOrigin(inputs({ config: { apiUrl: 'https://api.example.com/' } }))).toBe(
-      'https://api.example.com',
+    expect(resolveApiOrigin(inputs({ config: { apiUrl: 'http://localhost:3001/' } }))).toBe(
+      'http://localhost:3001',
+    );
+  });
+
+  it('retains a same-host URL including its port and path', () => {
+    expect(resolveApiOrigin(inputs({ config: { apiUrl: 'http://localhost:9443/prefix/' } }))).toBe(
+      'http://localhost:9443/prefix',
+    );
+  });
+
+  it('also proxies a different hostname in the build-time fallback', () => {
+    expect(resolveApiOrigin(inputs({ buildTime: 'https://api.example.com' }))).toBe(
+      'http://localhost/api/haive',
     );
   });
 });
