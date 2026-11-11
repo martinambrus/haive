@@ -354,7 +354,7 @@ User decision 2026-11-01: Use a simple Haive H favicon.
 
 ### T310 · FNF[kept-metadata-moves] · captured owner/mode lost when a re-sync does not finish
 
-status: open · kind: fix · user decision: resolved 2026-11-01 · priority: P2
+status: in progress (bundle D3, run 2026-11-11, branch fix/D3-kept-metadata) · kind: fix · user decision: resolved 2026-11-01 · priority: P2
 A: six non-merge move paths drop the kept map after a re-sync that may have returned false. B: projection writers create files as root (verify on dev). C: persisted keptMetadata never settled again. D: reachDone / settleGoneMerge after a failed re-sync. Options: inherit owner from parent dir; persist the kept map per repo; retry the re-sync before restoring.
 
 User decision 2026-11-01: Preserve captured owner/mode until recovery completes; never silently discard metadata.
