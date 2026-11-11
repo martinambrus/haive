@@ -18,6 +18,13 @@ export const RUN_APP_PATHSPECS = [
   PROJECTION_TEMP_EXCLUDE,
 ];
 
+/** The scope holds assume-unchanged or skip-worktree entries; no preview can show their bytes. */
+export class GitPreviewHiddenEntriesError extends Error {
+  constructor(readonly paths: string[]) {
+    super(`assume-unchanged or skip-worktree paths in the commit preview: ${paths.join(', ')}`);
+  }
+}
+
 export interface GitPreview {
   head: string;
   ref: string;
@@ -94,30 +101,19 @@ export async function gitPreview(
         '--',
         ...scope,
       ]);
-      const assumed: string[] = [];
-      const skipped: string[] = [];
+      const hidden: string[] = [];
       const add: string[] = [];
       for (const record of tagged.split('\0')) {
         if (!record) continue;
         const tag = record.charAt(0);
         const name = record.slice(2);
-        if (tag !== tag.toUpperCase()) assumed.push(name);
-        if (tag.toUpperCase() === 'S') skipped.push(name);
-        // Missing staged deletions and ignored, no-longer-tracked files are not
-        // listed. Hidden index entries must retain their staged bytes as well.
-        if (tag === tag.toUpperCase() && tag !== 'S') add.push(`:(top,literal)${name}`);
+        // Missing staged deletions and ignored, no-longer-tracked files are not listed.
+        if (tag !== tag.toUpperCase() || tag === 'S') hidden.push(name);
+        else add.push(`:(top,literal)${name}`);
       }
-      for (const [flag, names] of [
-        ['--assume-unchanged', assumed],
-        ['--skip-worktree', skipped],
-      ] as const) {
-        if (names.length)
-          await run(
-            ['update-index', '-z', flag, '--stdin'],
-            true,
-            Buffer.from(`${names.join('\0')}\0`),
-          );
-      }
+      // Git does not read the work tree of these entries, so a commit would carry staged bytes
+      // the diff (which reads the work tree) never showed.
+      if (hidden.length) throw new GitPreviewHiddenEntriesError(hidden);
       if (add.length) await run(['add', '-A', '--', ...add], true);
     }
     const tree = await run(['write-tree'], true);

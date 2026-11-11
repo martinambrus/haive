@@ -25,6 +25,7 @@ import {
 } from '../workflow/_gitlink-registration.js';
 import {
   gitPreview,
+  GitPreviewHiddenEntriesError,
   gitPreviewWasCommitted,
   commitGitPreview,
   assertGitPreviewBranch,
@@ -254,6 +255,9 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
           commitPreview = await gitPreview(workspacePath, []);
         }
       } catch (err) {
+        if (err instanceof GitPreviewHiddenEntriesError)
+          commitPreviewError ??=
+            'The commit preview is unavailable because some changed files are marked assume-unchanged or skip-worktree, so their staged contents cannot be shown. Commit your edits from the Terminal tab, or finish without committing.';
         commitPreviewError ??=
           'The commit preview is unavailable because the edits could not be read safely. Commit your edits from the Terminal tab, or finish without committing.';
         ctx.logger.warn({ err }, 'run-app-ready: failed to build commit diff artifact');

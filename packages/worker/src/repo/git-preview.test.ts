@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import * as safeFs from '@haive/shared/fs-safe';
 import { git, identity, repoFixture } from '../../test/support/nested-repo.js';
 import * as gitExec from './git-exec.js';
-import { commitGitPreview, gitPreview } from './git-preview.js';
+import { GitPreviewHiddenEntriesError, commitGitPreview, gitPreview } from './git-preview.js';
 import { buildCommitDiffArtifact } from '../step-engine/steps/workflow/_commit-diff.js';
 
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -63,7 +63,7 @@ it('pins an ordinary edit and new file while preserving a staged deletion', asyn
 });
 
 it.each(['--assume-unchanged', '--skip-worktree'])(
-  'preserves the real index entry hidden by %s in a supplied scope',
+  'refuses a preview whose scope holds an entry hidden by %s',
   async (flag) => {
     const repo = await setup();
     await safeFs.writeFileNoFollow(repo, 'a.txt', 'staged bytes\n');
@@ -71,8 +71,8 @@ it.each(['--assume-unchanged', '--skip-worktree'])(
     await git(repo, ['update-index', flag, '--', 'a.txt']);
     await safeFs.writeFileNoFollow(repo, 'a.txt', 'hidden bytes\n');
     const index = await git(repo, ['ls-files', '-v', '-s']);
-    const preview = await gitPreview(repo, ['a.txt']);
-    expect(await git(repo, ['show', `${preview.tree}:a.txt`])).toBe('staged bytes\n');
+    for (const scope of [['a.txt'], undefined])
+      await expect(gitPreview(repo, scope)).rejects.toBeInstanceOf(GitPreviewHiddenEntriesError);
     expect(await git(repo, ['ls-files', '-v', '-s'])).toBe(index);
   },
 );

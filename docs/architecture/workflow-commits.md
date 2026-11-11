@@ -124,7 +124,12 @@ Run app's Finish commits only what the form showed. The form pins the reviewed p
 commit and the tree built from them (`commitPreview`; Haive's projections and atomic-write temp files
 are left out), and Finish commits that pinned tree with a compare-and-swap on the parent
 (`commitGitPreview`, `repo/git-preview.ts`): an edit made in the terminal after the preview, or
-other staged work, is neither swept into the commit nor lost. If the reviewed bytes or the branch
+other staged work, is neither swept into the commit nor lost. The reviewed paths start from the real index,
+so a staged removal stays removed (an ignored file taken out of tracking is not added back) and
+paths outside the scope stay at the parent. A reviewed path marked assume-unchanged or
+skip-worktree makes the preview unavailable, since git would commit its staged bytes while the
+diff shows the work tree. A preview taken with no edits reopens at Finish once the session has
+some; a non-empty preview leaves later edits to other paths uncommitted. If the reviewed bytes or the branch
 changed before Finish, the form comes back refreshed with a warning note asking to review the new
 preview (older parked forms too, since the note is added outside their frozen schema); only the
 parent mismatch reads as "branch changed", any other ref-update failure is an error. When the
