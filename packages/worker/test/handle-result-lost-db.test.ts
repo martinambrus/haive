@@ -705,6 +705,58 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
       expect(await eventTypes(w.taskId)).toContain('fix_loop.escalated');
     },
   );
+  it.each([
+    { later: false, unreadable: false },
+    { later: false, unreadable: true },
+    { later: true, unreadable: false },
+    { later: true, unreadable: true },
+  ])(
+    'keeps bounded validation routing without an earlier 07c: %j',
+    async ({ later, unreadable }) => {
+      const w = await lateFixer('08b-test-management', { ddev: false });
+      const validateId = '07b-phase-4-validate';
+      stepRegistry.override(phase4ValidateStep as StepDefinition);
+      const runListSnapshot = [FIX_TARGET, ...w.ctx.runListSnapshot!];
+      if (later)
+        runListSnapshot.splice(runListSnapshot.indexOf(validateId) + 1, 0, '07c-ddev-reconcile');
+      await db
+        .update(schema.tasks)
+        .set({ currentStepId: validateId, runListSnapshot })
+        .where(eq(schema.tasks.id, w.taskId));
+      const baseline = await readValidationSnapshot({ db, taskId: w.taskId });
+      await mkdir(path.join(w.dir, '.ddev'));
+      await writeFile(path.join(w.dir, '.ddev/config.yaml'), 'php_version: "8.4"');
+      if (unreadable)
+        await db
+          .update(schema.taskSteps)
+          .set({ output: { worktreePath: path.join(w.dir, 'gone'), baseBranch: 'main' } })
+          .where(eq(schema.taskSteps.id, w.setup.id));
+      const output = {
+        runtimeChanged: true,
+        verdict: 'ISSUES_FOUND',
+        issues: [
+          { severity: 'high', file: '.ddev/config.yaml', description: 'blocking configuration' },
+        ],
+        validationSnapshot: unreadable ? null : baseline,
+      };
+      const [row] = await db
+        .update(schema.taskSteps)
+        .set({ output })
+        .where(and(eq(schema.taskSteps.taskId, w.taskId), eq(schema.taskSteps.stepId, validateId)))
+        .returning();
+      await handleResult(db, { ...w.ctx, currentStepId: validateId, runListSnapshot }, validateId, {
+        status: 'done',
+        row: row!,
+        output,
+      });
+      expect(await rowOf(row!.id)).toMatchObject({ status: 'waiting_form' });
+      const task = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, w.taskId) });
+      expect(task).toMatchObject({ status: 'waiting_user' });
+      expect(await eventTypes(w.taskId)).toContain('fix_loop.escalated');
+      expect(await eventTypes(w.taskId)).not.toContain('validation.recheck_requested');
+      expect(h.adds).toEqual([]);
+    },
+  );
   it.each(['08b-test-management', '08a-browser-verify'])(
     'revalidates actual edits after a successful %s without spending a fix round',
     async (source) => {

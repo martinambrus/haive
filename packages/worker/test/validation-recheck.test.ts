@@ -75,14 +75,16 @@ describe('validation successor runtime hand-off', () => {
   });
 
   it.each([{ tail: [] }, { tail: [step(RECONCILE)] }])(
-    'refuses a runtime change without an earlier reconciliation step: %j',
+    'restores ordinary routing without an earlier reconciliation step: %j',
     async ({ tail }) => {
       const steps = [step(VALIDATE), ...tail, step('commit')];
-      await expect(
-        validationSuccessor({} as Database, ctx, VALIDATE, 0, steps, {
+      h.snapshot.mockClear();
+      expect(
+        await validationSuccessor({} as Database, ctx, VALIDATE, 0, steps, {
           runtimeChanged: true,
         }),
-      ).rejects.toThrow('run list must place 07c-ddev-reconcile before 07b-phase-4-validate');
+      ).toEqual({ next: steps[1], round: 0, evaluateFixLoop: true });
+      expect(h.snapshot).not.toHaveBeenCalled();
     },
   );
 });

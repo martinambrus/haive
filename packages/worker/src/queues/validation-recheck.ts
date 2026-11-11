@@ -78,9 +78,9 @@ export async function validationSuccessor(
     };
     if (!validation?.runtimeChanged) return resumed();
     if (ids.indexOf(RECONCILE) < 0 || ids.indexOf(RECONCILE) >= validateIndex) {
-      throw new ValidationSnapshotError(
-        'Cannot revalidate changed runtime inputs: the run list must place 07c-ddev-reconcile before 07b-phase-4-validate.',
-      );
+      // A pinned custom/old-order list may have no earlier runtime reconcile step.
+      // Keep its ordinary verdict routing, even when the snapshot is unreadable.
+      return { ...resumed(), evaluateFixLoop: true };
     }
     const task = await db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
