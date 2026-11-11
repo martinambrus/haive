@@ -273,7 +273,7 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
       };
       expect(await sweepKeptProjectionMetadata(db!)).toBe(0);
       delete restoreFaults.beforeResync;
-      expect(await sweepKeptProjectionMetadata(db!)).toBe(1);
+      expect(await sweepKeptProjectionMetadata(db!)).toBe(store === 'legacy-done' ? 2 : 1);
       expect((await stat(join(s.root, rel))).mode & 0o7777).toBe(0o600);
       if (stepId) {
         const [step] = await db!

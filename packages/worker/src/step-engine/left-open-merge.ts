@@ -186,7 +186,7 @@ const saveByStepId = (db: Database, stepId: string) => async (state: MergeResolv
     .where(eq(schema.taskSteps.id, stepId));
 };
 
-/** A merge gone before the cancel has no report: re-sync and put its files back here, never throwing. */
+/** A merge gone before the cancel has no report: finish recovery here, or fail the cancel for retry. */
 async function settleGoneMerge(
   db: Database,
   taskId: string,
@@ -200,13 +200,17 @@ async function settleGoneMerge(
       columns: { repositoryId: true },
     });
     if (task?.repositoryId) {
-      await settleProjections(db, task.repositoryId, state, saveByStepId(db, recorded.stepId));
+      if (
+        !(await settleProjections(db, task.repositoryId, state, saveByStepId(db, recorded.stepId)))
+      )
+        throw new Error('project files re-sync did not finish; retry to complete recovery');
     }
   } catch (err) {
     logger.warn(
       { err, taskId, dir: recorded.dir },
       "a cancelled task's project files not put back",
     );
+    throw err;
   }
 }
 

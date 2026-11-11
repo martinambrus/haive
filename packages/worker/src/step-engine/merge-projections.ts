@@ -1,39 +1,13 @@
 import type { Database, MergeResolveState } from '@haive/database';
-import {
-  restoreKeptMetadata,
-  resyncHaiveProjections,
-  type KeptFile,
-  type KeptFiles,
-} from '../project-state/set-aside.js';
+import { restoreKeptMetadata, resyncWithKeptMetadata } from '../project-state/set-aside.js';
 
-export type KeptMetadata = NonNullable<MergeResolveState['keptMetadata']>;
-
-export function keptMetadataOf(kept: KeptFiles): KeptMetadata {
-  const metadata: KeptMetadata = {};
-  for (const [path, { bytes, owner, mode, untracked, parents }] of kept) {
-    const entry: KeptMetadata[string] = {};
-    if (untracked && Buffer.isBuffer(bytes) && owner && mode !== undefined) {
-      entry.owner = owner;
-      entry.mode = mode;
-    }
-    if (parents && parents.length > 0) entry.parents = parents;
-    if (Object.keys(entry).length > 0) metadata[path] = entry;
-  }
-  return metadata;
-}
-
-function keptFilesOf(metadata: KeptMetadata): KeptFiles {
-  return new Map(
-    Object.entries(metadata).map(([path, { owner, mode, parents }]): [string, KeptFile] => [
-      path,
-      { index: null, bytes: Buffer.alloc(0), untracked: owner !== undefined, owner, mode, parents },
-    ]),
-  );
-}
+import { keptFilesOf, type KeptMetadata } from '../project-state/kept-metadata.js';
+export { keptMetadataOf, type KeptMetadata } from '../project-state/kept-metadata.js';
 
 export async function restoreKeptMetadataOf(state: MergeResolveState): Promise<MergeResolveState> {
   if (!state.keptMetadata) return state;
-  await restoreKeptMetadata(state.mergeDir, keptFilesOf(state.keptMetadata));
+  if ((await restoreKeptMetadata(state.mergeDir, keptFilesOf(state.keptMetadata))) === false)
+    return state;
   return { ...state, keptMetadata: undefined };
 }
 
@@ -52,7 +26,19 @@ export async function settleProjections(
   given: MergeResolveState,
   save: (cleared: MergeResolveState) => Promise<unknown>,
 ): Promise<boolean> {
-  if (!(await resyncHaiveProjections(db, repositoryId, given.mergeDir))) return false;
-  if (given.keptMetadata) await save(await restoreKeptMetadataOf(given));
+  if (
+    !(await resyncWithKeptMetadata(
+      db,
+      repositoryId,
+      given.mergeDir,
+      keptFilesOf(given.keptMetadata ?? {}),
+    ))
+  )
+    return false;
+  if (given.keptMetadata) {
+    const cleared = await restoreKeptMetadataOf(given);
+    if (cleared.keptMetadata) return false;
+    await save(cleared);
+  }
   return true;
 }

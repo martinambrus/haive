@@ -883,8 +883,9 @@ async function mergeOverKeptFile(synced: boolean) {
       ignoreSavedStepClis: false,
       stepDef: step,
     } as never;
-    const merge = await resolveMergePhase(h.db as never, step, current, mkCtx(local), params);
-    expect(merge.resolved).toBe(true);
+    const pass = resolveMergePhase(h.db as never, step, current, mkCtx(local), params);
+    expect((await pass).resolved).toBe(true);
+    expect(projections.resettle).toHaveBeenCalledWith(h.db, 'repo-1', local, expect.any(Map));
     return h.getState();
   } finally {
     await rm(bare, { recursive: true, force: true, maxRetries: 5 });
@@ -997,7 +998,7 @@ describe('00a-sync-base divergence (real git + merge phase)', () => {
     expect(state?.keptMetadata).toBeUndefined();
   });
 
-  it('a merge that lands past a re-sync that did not succeed keeps the record for a later settle', async () => {
+  it('a merge that lands past a failed re-sync keeps its metadata durably after completion', async () => {
     const state = await mergeOverKeptFile(false);
     expect(state).toMatchObject({ phase: 'done', merged: true });
     expect(state?.keptMetadata).toEqual({

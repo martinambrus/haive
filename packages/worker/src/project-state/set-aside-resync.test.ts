@@ -53,7 +53,7 @@ function marksDb(): Database {
       }),
     }),
   });
-  return { select } as unknown as Database;
+  return { select, execute: async () => [] } as unknown as Database;
 }
 
 beforeEach(() => {

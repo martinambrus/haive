@@ -1022,8 +1022,9 @@ const metadataWarn = (repoPath: string, path: string) => (err: unknown) =>
 /** The mode fs-safe's createExclusive gives a file it creates; a file at any other mode was changed since. */
 const WRITER_FILE_MODE = 0o644;
 
-/** After the re-sync: an untracked projection the set-aside removed, and the directories it pruned, are new now and
- *  get back their owner and mode while the writer still owns them; a group or file mode changed meanwhile stays. */
+/** After the re-sync: removed projections and pruned directories get their metadata back while
+ *  writer-owned. An interrupted hand-back resumes at the captured uid only at the writer's default
+ *  mode; a group or nondefault file mode changed meanwhile stays. */
 export async function restoreKeptMetadata(repoPath: string, kept: KeptFiles): Promise<boolean> {
   let restored = true;
   await restoreFaults.beforeKeptMetadata?.();
@@ -1033,12 +1034,20 @@ export async function restoreKeptMetadata(repoPath: string, kept: KeptFiles): Pr
     if (!untracked || !Buffer.isBuffer(bytes) || !owner || mode === undefined) continue;
     const warn = metadataWarn(repoPath, path);
     try {
-      const now = await lstatNoFollow(repoPath, path);
-      if (now?.kind !== 'file' || now.stats.uid !== writer) continue;
+      const now = await lstatNoFollow(repoPath, path, { strict: true });
+      if (now?.kind !== 'file') continue;
+      // A prior attempt may have handed back the owner, then failed its chmod. Only the
+      // captured owner at the writer's default mode is eligible for that resumed hand-back.
+      if (
+        now.stats.uid !== writer &&
+        !(now.stats.uid === owner.uid && (now.stats.mode & 0o7666) === WRITER_FILE_MODE)
+      )
+        continue;
+      await chownNoFollow(repoPath, path, keptOwner(owner, now.stats.gid));
+      // chown can clear setuid/setgid, so the captured mode must be applied afterwards.
       await chmodNoFollow(repoPath, path, (current) =>
         (current & ~0o111) === WRITER_FILE_MODE ? (mode & ~0o111) | (current & 0o111) : current,
       );
-      await chownNoFollow(repoPath, path, keptOwner(owner, now.stats.gid));
     } catch (err) {
       restored = false;
       warn(err);
@@ -1065,10 +1074,15 @@ async function restoreKeptParents(
   for (const { path, owner, mode } of parents ?? []) {
     const warn = metadataWarn(repoPath, path);
     try {
-      const now = await lstatNoFollow(repoPath, path);
-      if (now?.kind !== 'directory' || now.stats.uid !== writer) continue;
-      await chmodNoFollow(repoPath, path, mode);
+      const now = await lstatNoFollow(repoPath, path, { strict: true });
+      if (now?.kind !== 'directory') continue;
+      if (
+        now.stats.uid !== writer &&
+        !(now.stats.uid === owner.uid && (now.stats.mode & 0o7777) === 0o755)
+      )
+        continue;
       await chownNoFollow(repoPath, path, keptOwner(owner, now.stats.gid));
+      await chmodNoFollow(repoPath, path, mode);
     } catch (err) {
       restored = false;
       warn(err);

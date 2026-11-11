@@ -227,9 +227,15 @@ describe('recordLeftOpenMerges for a merge that is already gone', () => {
     expect(projections.settleProjections).not.toHaveBeenCalled();
   });
 
-  it('does not fail the cancel when the put-back fails', async () => {
+  it('fails the cancel for retry when re-sync returned false, without clearing the metadata', async () => {
+    projections.settleProjections.mockResolvedValue(false);
+    await expect(run(step())).rejects.toThrow(/re-sync/);
+    expect(projections.settleProjections.mock.calls[0]![2].keptMetadata).toEqual(kept);
+  });
+
+  it('fails the cancel for retry when the put-back fails', async () => {
     projections.settleProjections.mockRejectedValue(new Error('disk full'));
-    await expect(run(step())).resolves.toBeDefined();
+    await expect(run(step())).rejects.toThrow('disk full');
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ taskId: 'task-1', dir: '/repo' }),
       expect.any(String),

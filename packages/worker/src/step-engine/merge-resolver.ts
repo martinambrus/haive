@@ -63,7 +63,6 @@ import {
   putBackProjections,
   recoverAfterMoveFailure,
   restoreProjectionsInTx,
-  resyncHaiveProjections,
   setAsideHaiveProjections,
   type KeptFiles,
   type RestoreSection,
@@ -85,7 +84,6 @@ import {
 import {
   adoptKept,
   keptMetadataOf,
-  restoreKeptMetadataOf,
   settleProjections,
   type KeptMetadata,
 } from './merge-projections.js';
@@ -422,9 +420,12 @@ async function reachDone(
   // The push may fail, so the record and plan the merge brought in are re-synced first.
   const repositoryId =
     state.mode === 'same-branch' ? await taskRepositoryId(db, params.taskId) : null;
-  if (repositoryId && (await resyncHaiveProjections(db, repositoryId, state.mergeDir))) {
-    state = await restoreKeptMetadataOf(state);
-  }
+  // Completion releases an onboarding/upgrade's deferred sync. A false result keeps the map
+  // in both the merge state and the outbox; task-end recovery or the sweep settles it later.
+  if (repositoryId)
+    await settleProjections(db, repositoryId, state, async (cleared) => {
+      state = cleared;
+    });
   // Pushes the commit a section read, so a pass that lost the dir cannot send another task's work.
   // Idempotent on re-entry: a completed push reports "up-to-date".
   if (state.pushAfterMerge && !state.pushed) {
