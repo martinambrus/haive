@@ -19,6 +19,23 @@ export const LIVE_TASK_STATUSES = [
  *  key, a plan or project-state key, or its row) before giving up. */
 export const REPOSITORY_TASKS_LOCK_TIMEOUT_MS = 30_000;
 
+/** Interactive admissions release a contended pool connection promptly; movers retain their budget. */
+export const TASK_START_LOCK_TIMEOUT_MS = 1_000;
+
+/** The shared lock-wait mechanism. A timeout aborts the transaction; callers translate it only
+ * after giving up the transaction, and never continue using state read before the wait. */
+export async function boundedLockWait<T>(
+  tx: DbTx,
+  take: () => Promise<T>,
+  timeoutMs = REPOSITORY_TASKS_LOCK_TIMEOUT_MS,
+): Promise<T> {
+  await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${timeoutMs}ms'`));
+  const result = await take();
+  // Later writes retain their ordinary wait policy.
+  await tx.execute(sql.raw('SET LOCAL lock_timeout = DEFAULT'));
+  return result;
+}
+
 /** The repository's task-creation lock alone, without the row: a checkout move holds it so no task is
  *  created between its last check and the move, while plain inserts still go through. */
 export async function lockRepositoryTasksKey(tx: DbTx, repositoryId: string): Promise<void> {

@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import {
+  TASK_START_LOCK_TIMEOUT_MS,
   isRootClaimLive,
   liveTaskIdOfType,
   lockRepositoryRow,
@@ -1038,7 +1039,11 @@ export async function withRepositoryTaskLock<T>(
 }
 
 async function lockRepositoryTasks(tx: DbTx, repositoryId: string) {
-  const repo = await boundedLockWait(tx, () => lockRepositoryRow(tx, repositoryId));
+  const repo = await boundedLockWait(
+    tx,
+    () => lockRepositoryRow(tx, repositoryId),
+    TASK_START_LOCK_TIMEOUT_MS,
+  );
   if (!repo) throw new HttpError(404, 'Repository not found');
   if (isRootClaimLive(repo.rootClaimedAt)) {
     throw new HttpError(409, rootClaimRefusal(repo.rootClaimKind as RootClaimKind | null));
@@ -1057,7 +1062,11 @@ export async function refuseReviveBesideLive(
   taskId: string,
   options: { continuation?: boolean } = {},
 ): Promise<void> {
-  const verdict = await boundedLockWait(tx, () => reviveRefusal(tx, taskId));
+  const verdict = await boundedLockWait(
+    tx,
+    () => reviveRefusal(tx, taskId),
+    TASK_START_LOCK_TIMEOUT_MS,
+  );
   if (!verdict) {
     if (!options.continuation) await assertTaskRootMergeIdle(tx, taskId);
     return;

@@ -65,7 +65,8 @@ function setup(status: 'failed' | 'running' = 'failed') {
         fn({
           ...tx,
           execute: async (query: Parameters<typeof tx.execute>[0]) => {
-            log.push(dialect.sqlToQuery(query as never).sql);
+            const statement = dialect.sqlToQuery(query as never).sql;
+            if (!statement.startsWith('SET LOCAL ')) log.push(statement);
             return tx.execute(query);
           },
         }),

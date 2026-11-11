@@ -1,4 +1,9 @@
-import { lockRepositoryTasksKey, schema, type DbTx } from '@haive/database';
+import {
+  TASK_START_LOCK_TIMEOUT_MS,
+  lockRepositoryTasksKey,
+  schema,
+  type DbTx,
+} from '@haive/database';
 import { getDb } from '../db.js';
 import { HttpError } from '../context.js';
 import { admitNewWork } from '../middleware/maintenance.js';
@@ -42,7 +47,11 @@ export async function spawnPlanTask(args: {
   const create = async (tx: DbTx): Promise<string> => {
     await admitNewWork(tx);
     // Queuing takes this lock; taken before the insert, it inverts no lock the row's insert holds.
-    await boundedLockWait(tx, () => lockRepositoryTasksKey(tx, args.repositoryId));
+    await boundedLockWait(
+      tx,
+      () => lockRepositoryTasksKey(tx, args.repositoryId),
+      TASK_START_LOCK_TIMEOUT_MS,
+    );
     const { runListSnapshot, customSteps } = await definitionForCreate(tx, args.type, {
       generic: false,
     });

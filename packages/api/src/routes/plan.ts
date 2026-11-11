@@ -8,7 +8,12 @@ import { promisify } from 'node:util';
 import { isAllowedGitRemoteUrl, redactEditableGitUrl } from '@haive/shared/schemas';
 import { hardenGitArgs } from '@haive/shared/git-args';
 import { and, asc, desc, eq, inArray, notInArray, sql } from 'drizzle-orm';
-import { lockRepositoryTasksKey, schema, type DbTx } from '@haive/database';
+import {
+  TASK_START_LOCK_TIMEOUT_MS,
+  lockRepositoryTasksKey,
+  schema,
+  type DbTx,
+} from '@haive/database';
 import {
   CONFIG_KEYS,
   HAIVE_DATA_FILES,
@@ -1324,7 +1329,7 @@ planRoutes.post('/:id/plan/merge', requireNewWorkAllowed, async (c) => {
   // Under the lock a Save/Pull integration and a cancel's discard take around the scratch worktree.
   const taskId = await getDb().transaction(async (tx) => {
     await admitNewWork(tx);
-    await boundedLockWait(tx, () => lockPlanMerge(tx, repositoryId));
+    await boundedLockWait(tx, () => lockPlanMerge(tx, repositoryId), TASK_START_LOCK_TIMEOUT_MS);
     // One live merge worktree per repository. A second conversation would build its
     // own on top of the first one's and neither could land.
     if (await findOpenPlanMerge(repositoryId, tx)) {
@@ -1485,14 +1490,25 @@ planRoutes.post('/:id/plan/nodes/:nodeId/advisory', requireNewWorkAllowed, async
   const { taskId, created } = await getDb().transaction(async (tx) => {
     await admitNewWork(tx);
     // Before the node row: a repository delete holds this key and cascades into plan_nodes.
-    await boundedLockWait(tx, () => lockRepositoryTasksKey(tx, repositoryId));
+    await boundedLockWait(
+      tx,
+      () => lockRepositoryTasksKey(tx, repositoryId),
+      TASK_START_LOCK_TIMEOUT_MS,
+    );
     // Two clicks (including from two tabs) serialize on the node, so both
     // continue the same advisory. Its row commits before any queue delivery.
-    const [locked] = await tx
-      .select({ id: schema.planNodes.id })
-      .from(schema.planNodes)
-      .where(and(eq(schema.planNodes.id, nodeId), eq(schema.planNodes.repositoryId, repositoryId)))
-      .for('update');
+    const [locked] = await boundedLockWait(
+      tx,
+      async () =>
+        tx
+          .select({ id: schema.planNodes.id })
+          .from(schema.planNodes)
+          .where(
+            and(eq(schema.planNodes.id, nodeId), eq(schema.planNodes.repositoryId, repositoryId)),
+          )
+          .for('update'),
+      TASK_START_LOCK_TIMEOUT_MS,
+    );
     if (!locked) throw new HttpError(404, 'Plan node not found');
     const existing = (await loadOpenPlanAdvisories(tx, repositoryId)).find(
       (t) => t.nodeId === nodeId,

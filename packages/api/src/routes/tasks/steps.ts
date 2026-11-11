@@ -976,10 +976,7 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
   if (!step) throw formNotWaiting('clarification', stepId);
 
   const now = new Date();
-  await db.transaction(async (tx) => {
-    const reopens = await admitAnswer(tx, id);
-    // A live merge's answer continues the merge it must finish; a failed task's answer revives it.
-    await refuseReviveBesideLive(tx, id, { continuation: !reopens });
+  const writeAnswer = async (tx: DbHandle) => {
     // Persist the answer to task_events (NOT form_values) and close the idle period.
     await tx.insert(schema.taskEvents).values({
       taskId: id,
@@ -996,9 +993,12 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
     if (answered.length === 0) throw formNotWaiting('clarification', stepId);
 
     await appendTaskEvent(tx, id, step.id, 'step.clarified', { stepId });
-    if (!reopens) return;
-    // Answering reopens a task that failed while this form waited. The answer rides task_events
-    // rather than the job, so the worker cannot tell this advance from one queued before the failure.
+  };
+  await db.transaction(async (tx) => {
+    // A live clarification continues its merge; only a failed task needs revival admission.
+    if (!(await admitAnswer(tx, id))) return writeAnswer(tx);
+    await refuseReviveBesideLive(tx, id);
+    await writeAnswer(tx);
     await reopenFailedTask(tx, id, now);
   });
 

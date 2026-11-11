@@ -1,9 +1,14 @@
 import { taskRootMergeBusy } from '@haive/shared/root-merge-busy';
 import { eq } from 'drizzle-orm';
-import { schema, type DbTx } from '@haive/database';
+import {
+  schema,
+  boundedLockWait,
+  TASK_START_LOCK_TIMEOUT_MS,
+  isLockNotAvailable,
+  type DbTx,
+} from '@haive/database';
 import {
   CONFIG_KEYS,
-  ConfigUnavailableError,
   configService,
   lockNewWorkFenceShared,
   logger,
@@ -28,9 +33,26 @@ export class NewWorkHeld extends Error {
 
 /** Thrown, with nothing written, when the state a reopen reads under the fence cannot be read. */
 export class MaintenanceStateUnreadable extends Error {
-  constructor(cause: unknown) {
+  constructor(cause?: unknown) {
     super('the maintenance state could not be read, so a failed task is not reopened', { cause });
     this.name = 'MaintenanceStateUnreadable';
+  }
+}
+
+/** Contention is a hold, never a diagnosis that fails the task. */
+export class RevivalBusy extends Error {
+  constructor(cause: unknown) {
+    super('The repository is busy, try again', { cause });
+    this.name = 'RevivalBusy';
+  }
+}
+
+async function boundedRevivalWait<T>(tx: DbTx, take: () => Promise<T>): Promise<T> {
+  try {
+    return await boundedLockWait(tx, take, TASK_START_LOCK_TIMEOUT_MS);
+  } catch (err) {
+    if (isLockNotAvailable(err)) throw new RevivalBusy(err);
+    throw err;
   }
 }
 
@@ -47,18 +69,14 @@ export async function readMaintenanceState(taskId: string): Promise<ObservedMain
   try {
     return parseMaintenanceState(await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE));
   } catch (err) {
-    if (err instanceof ConfigUnavailableError) {
-      logger.warn({ err, taskId }, 'maintenance state unreadable; treated as held');
-      return 'unreadable';
-    }
-    logger.warn({ err, taskId }, 'maintenance state unreadable; not held');
-    return parseMaintenanceState(null);
+    logger.warn({ err, taskId }, 'maintenance state unreadable; treated as held');
+    return 'unreadable';
   }
 }
 
 /** The shared fence, then the stored state past the cache; throws MaintenanceStateUnreadable when it cannot be read. */
 async function readStateUnderFence(tx: DbTx): Promise<MaintenanceState> {
-  await lockNewWorkFenceShared(tx);
+  await boundedRevivalWait(tx, () => lockNewWorkFenceShared(tx));
   return parseMaintenanceState(
     await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE).catch((err: unknown) => {
       throw new MaintenanceStateUnreadable(err);
@@ -89,7 +107,7 @@ export async function newWorkHeldUnderFence(tx: DbTx): Promise<boolean> {
   try {
     return refusesNewWork(await readStateUnderFence(tx));
   } catch (err) {
-    if (err instanceof MaintenanceStateUnreadable) return true;
+    if (err instanceof MaintenanceStateUnreadable || err instanceof RevivalBusy) return true;
     throw err;
   }
 }
@@ -98,7 +116,7 @@ export async function newWorkHeldUnderFence(tx: DbTx): Promise<boolean> {
  *  lock, then, for an upgrade or rollback, the reset admission on the locked row. Call it after
  *  admitReopen in the transaction that revives a failed task; null if the revival may go ahead. */
 export async function refuseRevive(tx: DbTx, taskId: string): Promise<ReviveRefused | null> {
-  const verdict = await reviveRefusal(tx, taskId);
+  const verdict = await boundedRevivalWait(tx, () => reviveRefusal(tx, taskId));
   if (!verdict) return (await taskRootMergeBusy(tx, taskId)) ? { reason: 'root-merge-busy' } : null;
   const why = 'refusal' in verdict ? verdict.refusal : verdict.admission;
   return 'taskId' in why ? { reason: why.reason, otherTaskId: why.taskId } : { reason: why.reason };
