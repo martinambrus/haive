@@ -57,6 +57,10 @@ import {
   sweepDirtyProjectStates,
 } from '../src/project-state/refresh.js';
 import { applyPlanPatch } from '@haive/shared/plan';
+import {
+  rememberKeptMetadata,
+  restorePendingKeptMetadata,
+} from '../src/project-state/kept-metadata.js';
 import { settleProjections } from '../src/step-engine/merge-projections.js';
 import { withProjectionMove } from '../src/project-state/projection-move.js';
 import { sweepKeptProjectionMetadata } from '../src/project-state/kept-metadata-recovery.js';
@@ -415,6 +419,39 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
       }),
     ).toBe(true);
     expect((await stat(join(s.root, rel))).mode & 0o7777).toBe(0o644);
+  });
+
+  it('a second PostgreSQL capture survives a restore that read the earlier map', async () => {
+    const s = await fixture();
+    await s.write();
+    const first = { '.haive-data/plan.json': { mode: 0o600 } };
+    const second = { '.haive-data/plan.md': { mode: 0o640 } };
+    await rememberKeptMetadata(db!, s.repo.id, s.root, first);
+    let entered!: () => void;
+    let resume!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const pause = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const competing = createDatabase(url!);
+    const restoring = restorePendingKeptMetadata(db!, s.repo.id, s.root, async () => {
+      entered();
+      await pause;
+      return true;
+    });
+    try {
+      await ready;
+      await rememberKeptMetadata(competing, s.repo.id, s.root, second);
+    } finally {
+      resume();
+      await competing.$client.end({ timeout: 5 });
+    }
+    expect(await restoring).toBe(true);
+    expect((await s.outbox())!.keptMetadata?.[s.root]).toEqual(second);
+    expect(await restorePendingKeptMetadata(db!, s.repo.id, s.root, async () => true)).toBe(true);
+    expect((await s.outbox())!.keptMetadata).toBeNull();
   });
 
   it('commits captured metadata before removal and keeps it after failed re-sync', async () => {

@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
+import { isDeepStrictEqual } from 'node:util';
 import type { Database } from '@haive/database';
 
 const h = vi.hoisted(() => ({
@@ -27,24 +30,50 @@ vi.mock('@haive/shared/fs-safe', async (original) => ({
   chownNoFollow: h.chown,
 }));
 
+import { holdProjectionMove, withProjectionMove } from './projection-move.js';
 import { resyncHaiveProjections, resyncWithKeptMetadata } from './set-aside.js';
-import { keptFilesOf } from './kept-metadata.js';
+import { restorePendingKeptMetadata, keptFilesOf, type KeptMetadata } from './kept-metadata.js';
 
-const metadata = { '.haive-data/plan.json': { owner: { uid: 1000, gid: 1000 }, mode: 0o600 } };
-function fixture(captured = metadata) {
-  let pending: Record<string, typeof metadata> | null = { '/repo': captured };
-  const execute = vi.fn(async () => {
-    pending = null;
+const metadata: KeptMetadata = {
+  '.haive-data/plan.json': { owner: { uid: 1000, gid: 1000 }, mode: 0o600 },
+};
+function fixture(captured: KeptMetadata = metadata) {
+  let pending: Record<string, KeptMetadata> | null = { '/repo': structuredClone(captured) };
+  const dialect = new PgDialect();
+  const execute = vi.fn(async (statement: SQL) => {
+    const query = dialect.sqlToQuery(statement);
+    if (query.sql.trimStart().startsWith('UPDATE')) {
+      const key = query.params[0] as string;
+      const path = query.params[1] as string;
+      const expected = JSON.parse(query.params.at(-1) as string);
+      if (
+        !query.sql.includes('AND kept_metadata ->') ||
+        isDeepStrictEqual(pending?.[key]?.[path], expected)
+      ) {
+        if (pending?.[key]) delete pending[key][path];
+        if (pending?.[key] && Object.keys(pending[key]).length === 0) delete pending[key];
+        if (pending && Object.keys(pending).length === 0) pending = null;
+      }
+    }
   });
   const db = {
     select: () => ({
       from: () => ({
-        where: () => ({ limit: async () => [{ revision: 1, written: 1, kept: pending }] }),
+        where: () => ({
+          limit: async () => [{ revision: 1, written: 1, kept: structuredClone(pending) }],
+        }),
       }),
     }),
     execute,
   } as unknown as Database;
-  return { db, execute, pending: () => pending };
+  return {
+    db,
+    execute,
+    pending: () => pending,
+    capture: (next: KeptMetadata) => {
+      pending = { '/repo': structuredClone(next) };
+    },
+  };
 }
 
 beforeEach(() => {
@@ -67,6 +96,70 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('persisted projection metadata', () => {
+  it('leaves a second capture pending when it races the guarded clear', async () => {
+    const f = fixture();
+    const captured = {
+      ...metadata,
+      '.haive-data/plan.md': { owner: { uid: 42, gid: 42 }, mode: 0o640 },
+    };
+    expect(
+      await restorePendingKeptMetadata(f.db, 'repo-1', '/repo', async () => {
+        f.capture(captured);
+        return true;
+      }),
+    ).toBe(true);
+    expect(f.pending()).toEqual({
+      '/repo': { '.haive-data/plan.md': captured['.haive-data/plan.md'] },
+    });
+  });
+
+  it('consumes a successful file while retaining only the file whose restore failed', async () => {
+    const second = { owner: { uid: 42, gid: 42 }, mode: 0o640 };
+    const f = fixture({ ...metadata, '.haive-data/plan.md': second });
+    const restored: string[] = [];
+    expect(
+      await restorePendingKeptMetadata(f.db, 'repo-1', '/repo', async (_root, kept) => {
+        const [path] = [...kept.keys()];
+        restored.push(path!);
+        return path !== '.haive-data/plan.md';
+      }),
+    ).toBe(false);
+    expect(f.pending()).toEqual({ '/repo': { '.haive-data/plan.md': second } });
+    expect(restored).toEqual(['.haive-data/plan.json', '.haive-data/plan.md']);
+  });
+
+  it('waits for an in-flight restore and clear before a new move captures', async () => {
+    const f = fixture();
+    let resume!: () => void;
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const pause = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const recovery = restorePendingKeptMetadata(f.db, 'repo-1', '/repo', async () => {
+      started();
+      await pause;
+      return true;
+    });
+    await ready;
+    let moved = false;
+    const move = withProjectionMove(async () => {
+      await holdProjectionMove('/repo');
+      moved = true;
+    });
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(moved).toBe(false);
+    } finally {
+      resume();
+      await recovery;
+      await move;
+    }
+    expect(moved).toBe(true);
+  });
+
   it('preserves captured special mode bits when ownership changes', async () => {
     const f = fixture({
       '.haive-data/plan.json': { owner: { uid: 1000, gid: 1000 }, mode: 0o6400 },
