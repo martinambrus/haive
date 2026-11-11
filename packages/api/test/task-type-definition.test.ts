@@ -185,14 +185,19 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
       const b = '07b-phase-4-validate';
       const c = '07c-ddev-reconcile';
       await db.delete(schema.stepCatalog);
-      await db.insert(schema.stepCatalog).values([
-        { ...catalogRow(b), entry: { ...catalogRow(b).entry!, provides: ['validation'] } },
-        { ...catalogRow(c), entry: { ...catalogRow(c).entry!, precedes: ['validation'] } },
-      ]);
-      await db.insert(schema.taskTypeDefinitions).values(row(slug, { source, stepIds: [b, c] }));
+      await db
+        .insert(schema.stepCatalog)
+        .values([
+          catalogRow(QUIET),
+          { ...catalogRow(b), entry: { ...catalogRow(b).entry!, provides: ['validation'] } },
+          { ...catalogRow(c), entry: { ...catalogRow(c).entry!, precedes: ['validation'] } },
+        ]);
+      await db
+        .insert(schema.taskTypeDefinitions)
+        .values(row(slug, { source, stepIds: [b, QUIET, c] }));
       const migration = await readFile(
         new URL(
-          '../../database/migrations/0225_task_type_reconcile_before_validate.sql',
+          '../../database/migrations/0226_task_type_reconcile_before_validate.sql',
           import.meta.url,
         ),
         'utf8',
@@ -203,7 +208,7 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
         });
         await db.$client.unsafe(migration);
         await expect(definitionForCreate(db, slug, { generic: true })).resolves.toMatchObject({
-          runListSnapshot: [c, b],
+          runListSnapshot: [c, b, QUIET],
         });
         const once = await db.query.taskTypeDefinitions.findFirst({
           where: eq(schema.taskTypeDefinitions.slug, slug),

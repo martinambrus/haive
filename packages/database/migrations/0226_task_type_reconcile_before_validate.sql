@@ -1,8 +1,8 @@
 -- Stored static types used to require validation before reconciliation.
--- Swap only that pair; leave every other position and all pinned task snapshots intact.
+-- Move reconciliation immediately before validation; preserve every other relative order
+-- and all pinned task snapshots.
 -- Undo: restore step_ids, content_hash and updated_at from a pre-migration export for
--- the affected slugs. Equivalently swap these two positions again for ONLY those slugs;
--- do not reverse rows that were already in the new order before this migration.
+-- the affected slugs. Do not reverse every new-order row: some were already correct.
 WITH positions AS (
   SELECT slug, step_ids,
     (SELECT ordinality::int - 1 FROM jsonb_array_elements_text(step_ids) WITH ORDINALITY
@@ -19,9 +19,12 @@ WITH positions AS (
       WHERE value = '07c-ddev-reconcile') = 1
 )
 UPDATE task_type_definitions AS definition
-SET step_ids = jsonb_set(
-    jsonb_set(positions.step_ids, ARRAY[validate_at::text], '"07c-ddev-reconcile"'::jsonb),
-    ARRAY[reconcile_at::text], '"07b-phase-4-validate"'::jsonb),
+SET step_ids = (
+    SELECT jsonb_agg(value ORDER BY
+      CASE WHEN ordinality::int - 1 = reconcile_at
+        THEN validate_at + 0.5 ELSE ordinality END)
+    FROM jsonb_array_elements(positions.step_ids) WITH ORDINALITY
+  ),
   content_hash = NULL,
   updated_at = now()
 FROM positions
