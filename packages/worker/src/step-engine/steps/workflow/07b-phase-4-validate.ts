@@ -1061,7 +1061,9 @@ export const phase4ValidateStep: StepDefinition<ValidateDetect, ValidateApply> =
           ? affectedValidationFiles(prior.validationSnapshot, afterFix).some((file) =>
               file.split('/').includes('.ddev'),
             )
-          : false;
+          : // An unavailable read proves no equality. Reconcile before another
+            // validator; the hand-off fails retryably if the tree remains unreadable.
+            true;
       return {
         ...(runtimeChanged ? { runtimeChanged: true as const } : {}),
         verdict: prior?.verdict ?? 'ISSUES_FOUND',
