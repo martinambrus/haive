@@ -404,8 +404,8 @@ async function settleGivenUp(
   const repositoryId =
     given.mode === 'same-branch' ? await taskRepositoryId(db, params.taskId) : null;
   if (!repositoryId) return;
-  await settleProjections(db, repositoryId, given, (cleared) =>
-    saveMergeState(db, current.id, cleared),
+  await settleProjections(db, repositoryId, given, (cleared, handle) =>
+    saveMergeState(handle, current.id, cleared),
   );
 }
 
@@ -424,8 +424,8 @@ async function reachDone(
   // Completion releases an onboarding/upgrade's deferred sync. A false result keeps the map
   // in both the merge state and the outbox; task-end recovery or the sweep settles it later.
   if (repositoryId)
-    await settleProjections(db, repositoryId, state, async (cleared) => {
-      await saveMergeState(db, current.id, cleared);
+    await settleProjections(db, repositoryId, state, async (cleared, handle) => {
+      await saveMergeState(handle, current.id, cleared);
       state = cleared;
     });
   // Pushes the commit a section read, so a pass that lost the dir cannot send another task's work.

@@ -427,6 +427,69 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
     },
   );
 
+  it.each(['crash', 'guard-refused'] as const)(
+    'rolls back the legacy handoff when its marker save is %s',
+    async (failure) => {
+      const s = await fixture();
+      await s.write();
+      const rel = '.haive-data/state/project/render.json';
+      const state = {
+        phase: 'done',
+        mode: 'same-branch',
+        mergeDir: s.root,
+        keptMetadata: {
+          [rel]: { owner: { uid: process.getuid!(), gid: process.getgid!() }, mode: 0o600 },
+        },
+      } as unknown as import('@haive/database').MergeResolveState;
+      const [task] = await db!
+        .insert(schema.tasks)
+        .values({
+          userId: s.userId,
+          repositoryId: s.repo.id,
+          type: 'workflow',
+          title: 'completed merge',
+          status: 'completed',
+        })
+        .returning();
+      const [step] = await db!
+        .insert(schema.taskSteps)
+        .values({
+          taskId: task!.id,
+          stepId: '00a-sync-base',
+          stepIndex: 0,
+          title: 'merge',
+          status: 'done',
+          mergeResolveState: state,
+        })
+        .returning();
+      const save = async (
+        next: typeof state,
+        handle: Database | Parameters<Parameters<Database['transaction']>[0]>[0] = db!,
+      ) => {
+        if (failure === 'guard-refused') return false;
+        await handle
+          .update(schema.taskSteps)
+          .set({ mergeResolveState: next })
+          .where(eq(schema.taskSteps.id, step!.id));
+        throw new Error('crash between handoff writes');
+      };
+      if (failure === 'crash')
+        await expect(settleProjections(db!, s.repo.id, state, save)).rejects.toThrow(
+          'crash between handoff writes',
+        );
+      else expect(await settleProjections(db!, s.repo.id, state, save)).toBe(false);
+      expect((await s.outbox())!.keptMetadata).toBeNull();
+      const [saved] = await db!
+        .select()
+        .from(schema.taskSteps)
+        .where(eq(schema.taskSteps.id, step!.id));
+      expect(saved!.mergeResolveState).toEqual(state);
+      await chmod(join(s.root, rel), 0o644);
+      // A crash/refusal did not publish half a handoff for the outbox sweep.
+      expect((await s.outbox())!.keptMetadata).toBeNull();
+    },
+  );
+
   it('does not reapply a consumed map after the final merge-state save fails', async () => {
     const s = await fixture();
     await s.write();

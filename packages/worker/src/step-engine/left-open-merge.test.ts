@@ -74,8 +74,12 @@ function chainDb(results: unknown[][], findFirst: unknown = null) {
     }),
     update: () => ({
       set: (v: unknown) => ({
-        where: async () => {
+        where: () => {
           updates.push(v);
+          return {
+            returning: async () => [{ id: 'step-1' }],
+            then: (resolve: (value: unknown) => void) => resolve(undefined),
+          };
         },
       }),
     }),

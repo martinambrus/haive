@@ -53,7 +53,12 @@ function marksDb(): Database {
       }),
     }),
   });
-  return { select, execute: async () => [] } as unknown as Database;
+  const db = {
+    select,
+    execute: async () => [],
+    transaction: async (fn: (tx: Database) => Promise<unknown>) => fn(db),
+  } as unknown as Database;
+  return db;
 }
 
 beforeEach(() => {
@@ -112,6 +117,9 @@ describe('an unreadable git never makes a re-sync throw', () => {
     expect(
       await settleProjections(marksDb(), 'repo-1', given as unknown as MergeResolveState, save),
     ).toBe(false);
-    expect(save).toHaveBeenCalledExactlyOnceWith({ ...given, keptMetadataStored: true });
+    expect(save).toHaveBeenCalledExactlyOnceWith(
+      { ...given, keptMetadataStored: true },
+      expect.anything(),
+    );
   });
 });

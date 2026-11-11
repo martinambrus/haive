@@ -72,9 +72,9 @@ export async function sweepKeptProjectionMetadata(db: Database): Promise<number>
     try {
       if (
         !(await checkoutMissing(state.mergeDir)) &&
-        (await settleProjections(db, row.repositoryId!, state, async (next) => {
+        (await settleProjections(db, row.repositoryId!, state, async (next, handle) => {
           // Do not replace a newer merge state with the snapshot this sweep read.
-          await db
+          const rows = await handle
             .update(schema.taskSteps)
             .set({
               mergeResolveState: next,
@@ -85,8 +85,11 @@ export async function sweepKeptProjectionMetadata(db: Database): Promise<number>
                 eq(schema.taskSteps.id, row.id),
                 sql`${schema.taskSteps.mergeResolveState} = ${JSON.stringify(expected)}::jsonb`,
               ),
-            );
+            )
+            .returning({ id: schema.taskSteps.id });
+          if (rows.length === 0) return false;
           expected = next;
+          return true;
         }))
       )
         settled++;
