@@ -256,6 +256,16 @@ cliProviderRoutes.get('/catalog', async (c) => {
   return c.json({ providers });
 });
 
+// Like the completed-job poll, keep the global price/FX summary admin-only.
+cliProviderRoutes.get('/catalog/:name/refresh-result', async (c) => {
+  cliProviderNameSchema.parse(c.req.param('name'));
+  if (c.get('userRole') !== 'admin') return c.json({ run: null });
+  const run = await getDb().query.refreshRuns.findFirst({
+    where: eq(schema.refreshRuns.kind, 'versions'),
+  });
+  return c.json({ run: run ?? null });
+});
+
 cliProviderRoutes.post('/catalog/:name/refresh-versions', async (c) => {
   // Parsed for the 400 on an unknown CLI name; the job itself refreshes every catalog entry.
   cliProviderNameSchema.parse(c.req.param('name'));

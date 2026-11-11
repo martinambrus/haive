@@ -245,6 +245,14 @@ cliPricingRoutes.post('/refresh', async (c) => {
   return c.json({ jobId: job.id });
 });
 
+/** Durable result, independent of queue retention and the caller's poll window. */
+cliPricingRoutes.get('/refresh/latest', async (c) => {
+  const run = await getDb().query.refreshRuns.findFirst({
+    where: eq(schema.refreshRuns.kind, 'versions'),
+  });
+  return c.json({ run: run ?? null });
+});
+
 /** Poll the same refresh job that updates catalog, model prices and FX together. */
 cliPricingRoutes.get('/refresh/:jobId', async (c) => {
   const job = await loadPollableJob(c.req.param('jobId'), CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS);

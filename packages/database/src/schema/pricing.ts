@@ -16,6 +16,20 @@ import {
 import { sql } from 'drizzle-orm';
 import { cliProviderNameEnum } from './cli-providers.js';
 
+/** One latest run per refresh kind, including an unfinished run after a worker stops. */
+export const refreshRuns = pgTable('refresh_runs', {
+  kind: text('kind').primaryKey(),
+  runId: uuid('run_id').notNull(),
+  trigger: text('trigger').$type<'manual' | 'scheduled' | 'boot' | 'unknown'>().notNull(),
+  startedAt: timestamp('started_at').notNull(),
+  finishedAt: timestamp('finished_at'),
+  result: jsonb('result').$type<{
+    ok: boolean;
+    refreshed: { name: string; count: number; latest: string | null }[];
+    errors: { name: string; error: string }[];
+  }>(),
+});
+
 /** Where a stored rate came from. Keep in sync with `PriceFeed` in @haive/shared
  *  (this package cannot import shared — shared imports database, not the reverse).
  *

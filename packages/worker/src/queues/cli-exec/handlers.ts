@@ -37,6 +37,7 @@ import {
   type CliSignOutJobResult,
   type RefreshCliVersionsJobPayload,
   type RefreshCliVersionsJobResult,
+  type RefreshTrigger,
   type SandboxImageBuildJobPayload,
   type SandboxImageBuildResult,
   type SandboxImageRemoveJobPayload,
@@ -1008,7 +1009,22 @@ async function buildImage(
 
 export async function handleRefreshCliVersionsJob(
   db: Database,
+  trigger: RefreshTrigger = 'unknown',
 ): Promise<RefreshCliVersionsJobResult> {
+  const runId = randomUUID();
+  const started = {
+    kind: 'versions',
+    runId,
+    trigger,
+    startedAt: new Date(),
+    finishedAt: null,
+    result: null,
+  };
+  // Commit before any remote work. A throw or process death leaves an unfinished run.
+  await db.insert(schema.refreshRuns).values(started).onConflictDoUpdate({
+    target: schema.refreshRuns.kind,
+    set: started,
+  });
   // The OpenRouter model catalog rides this job rather than getting its own: it is
   // the same kind of cached remote list on the same cadence, and reusing the job
   // means the provider form's existing "refresh versions" button refreshes it too.
@@ -1033,7 +1049,7 @@ export async function handleRefreshCliVersionsJob(
   // record-the-error-and-return contract, so neither can fail the job.
   const prices = await refreshModelPrices(db);
   const fx = await refreshFxRates(db);
-  return {
+  const result: RefreshCliVersionsJobResult = {
     ok: cli.ok && tools.ok && openrouter.ok && browsers.ok && ruby.ok && prices.ok && fx.ok,
     refreshed: [
       ...cli.refreshed,
@@ -1052,8 +1068,14 @@ export async function handleRefreshCliVersionsJob(
       ...ruby.errors,
       ...prices.errors,
       ...fx.errors,
-    ],
+    ].map(({ name, error }) => ({ name, error: safeErrorMessage(error).slice(0, 2000) })),
   };
+  // A newer start owns the row even when an older overlapping run finishes last.
+  await db
+    .update(schema.refreshRuns)
+    .set({ finishedAt: new Date(), result })
+    .where(and(eq(schema.refreshRuns.kind, 'versions'), eq(schema.refreshRuns.runId, runId)));
+  return result;
 }
 
 export async function handleLoginCreateJob(
@@ -1275,7 +1297,7 @@ export async function scheduleCliVersionRefresh(): Promise<void> {
     { every: VERSION_REFRESH_INTERVAL_MS },
     {
       name: CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
-      data: {} satisfies RefreshCliVersionsJobPayload,
+      data: { trigger: 'scheduled' } satisfies RefreshCliVersionsJobPayload,
       opts: CLI_POLLABLE_JOB_OPTS,
     },
   );
@@ -1296,7 +1318,7 @@ export async function scheduleCliVersionRefresh(): Promise<void> {
   }
   await queue.add(
     CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
-    {} satisfies RefreshCliVersionsJobPayload,
+    { trigger: 'boot' } satisfies RefreshCliVersionsJobPayload,
     CLI_POLLABLE_JOB_OPTS,
   );
 }
@@ -1645,7 +1667,7 @@ export async function startCliExecWorker(
         return handleRemoveSandboxImageJob(db, job.data as SandboxImageRemoveJobPayload);
       }
       if (job.name === CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS) {
-        return handleRefreshCliVersionsJob(db);
+        return handleRefreshCliVersionsJob(db, (job.data as RefreshCliVersionsJobPayload).trigger);
       }
       if (job.name === CLI_EXEC_JOB_NAMES.LOGIN_CREATE) {
         return handleLoginCreateJob(db, job.data as CliLoginCreateJobPayload).catch((err) => {

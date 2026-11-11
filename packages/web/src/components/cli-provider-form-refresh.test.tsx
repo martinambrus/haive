@@ -67,6 +67,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   h.post.mockReset().mockResolvedValue({ jobId: '7' });
   h.get.mockReset().mockImplementation(async (path: string) => {
+    if (path.endsWith('/refresh-result')) return { run: null };
     if (path === POLL_PATH) return answer;
     throw new Error(`Unexpected GET ${path}`);
   });
@@ -92,6 +93,25 @@ const mount = () =>
   createRenderer(() => createElement(CliProviderForm, { mode: 'create', metadata }));
 
 describe('CLI version refresh in the provider form', () => {
+  it('shows the stored scheduled failure after reopening the form', async () => {
+    const original = h.get.getMockImplementation()!;
+    h.get.mockImplementation((path: string) =>
+      path.endsWith('/refresh-result')
+        ? Promise.resolve({
+            run: {
+              trigger: 'scheduled',
+              startedAt: '2026-11-01T00:00:00Z',
+              finishedAt: '2026-11-01T00:01:00Z',
+              result: OPENROUTER_FAILED,
+            },
+          })
+        : original(path),
+    );
+    const view = mount();
+    await settle(view);
+    expect(textOf(view.tree())).toContain('models endpoint HTTP 503');
+    expect(h.post).not.toHaveBeenCalled();
+  });
   it('names the failed source and its reason where the version is picked, and still applies the versions', async () => {
     answer = { status: 'done', entry, result: OPENROUTER_FAILED };
     const view = mount();

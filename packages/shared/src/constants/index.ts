@@ -494,7 +494,11 @@ export interface CliSignOutJobResult {
   failed: { name: string; stderr: string }[];
 }
 
-export type RefreshCliVersionsJobPayload = Record<string, never>;
+export type RefreshTrigger = 'manual' | 'scheduled' | 'boot' | 'unknown';
+export interface RefreshCliVersionsJobPayload {
+  /** Absent on jobs queued before durable refresh results shipped. */
+  trigger?: RefreshTrigger;
+}
 
 export type CliExecQueuePayload =
   | CliExecJobPayload
@@ -510,6 +514,15 @@ export interface RefreshCliVersionsJobResult {
   ok: boolean;
   refreshed: { name: string; count: number; latest: string | null }[];
   errors: { name: string; error: string }[];
+}
+
+export interface LatestRefreshRun {
+  kind: string;
+  runId: string;
+  trigger: RefreshTrigger;
+  startedAt: string;
+  finishedAt: string | null;
+  result: RefreshCliVersionsJobResult | null;
 }
 
 export type CliExecInvocationKind =

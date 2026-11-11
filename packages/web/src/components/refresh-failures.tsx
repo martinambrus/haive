@@ -1,4 +1,5 @@
 import type { RefreshCliVersionsJobResult } from '@haive/shared/constants';
+import { MarkdownView } from '@/components/markdown/markdown-view';
 
 /** One entry per distinct reason, in the order each reason first appeared. A feed outage is
  *  reported once per provider with the same text, so listing them apart would repeat it. */
@@ -28,11 +29,12 @@ export function RefreshFailures({
       role="alert"
       className="mt-2 rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300"
     >
-      <p className="font-semibold">Some sources could not be refreshed</p>
+      <MarkdownView body="**Some sources could not be refreshed**" />
       <ul className="mt-1 space-y-1">
         {groupRefreshFailures(result.errors).map((group) => (
           <li key={group.error} className="break-words">
-            <span className="font-mono">{group.names.join(', ')}</span> — {group.error}
+            <span className="font-mono">{group.names.join(', ')}</span>
+            <MarkdownView body={group.error} />
           </li>
         ))}
       </ul>

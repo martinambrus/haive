@@ -28,7 +28,7 @@ import {
   type OpenRouterModelEntry,
 } from '@/lib/api-client';
 import { Button, FormError, Input, Label } from '@/components/ui';
-import { RefreshFailures } from '@/components/refresh-failures';
+import { LatestRefresh } from '@/components/latest-refresh';
 import { runCatalogVersionRefresh, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { OllamaModelDownload } from '@/components/ollama-model-download';
 import { OpenRouterModelPicker } from '@/components/openrouter-model-picker';
@@ -814,7 +814,11 @@ export function CliProviderForm({
                 Last refresh failed: {versionCache.fetchError}
               </p>
             )}
-            <RefreshFailures result={refreshResult} />
+            <LatestRefresh
+              endpoint={`/cli-providers/catalog/${metadata.name}/refresh-result`}
+              active={refreshingVersions}
+              result={refreshResult}
+            />
           </>
         )}
       </div>
