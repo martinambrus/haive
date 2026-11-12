@@ -460,6 +460,36 @@ describe('explicit undo of a cancel-left committed merge', () => {
     expect(await git(f.dir, 'status', '--porcelain')).toBe('');
     await git(f.dir, 'commit', '--allow-empty', '-m', 'lock released');
   });
+  it('reports a moved ref when Git exits unsuccessfully after commit acknowledgment', async () => {
+    const f = await fixture();
+    const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+    vi.mocked(processes.spawn).mockImplementation((...args: Parameters<typeof processes.spawn>) => {
+      const child = actual.spawn(...args);
+      if ((args[1] as string[]).includes('--stdin')) {
+        let replies = '';
+        child.stdout!.on('data', (chunk: Buffer) => {
+          replies += chunk.toString();
+        });
+        const emit = child.emit.bind(child);
+        vi.spyOn(child, 'emit').mockImplementation((event, ...values) =>
+          event === 'close' && replies.includes('commit: ok\n')
+            ? emit(event, 128, values[1])
+            : emit(event, ...values),
+        );
+      }
+      return child;
+    });
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+    const reason = leftCommittedMerges(f.events)[0]?.refused?.reason;
+    expect(reason).toMatch(/base branch moved back.*later.*failed/i);
+    expect(reason).not.toContain('Git refused');
+    expect(h.sync).toHaveBeenCalledOnce();
+    vi.restoreAllMocks();
+    await f.run();
+    expect(leftCommittedMerges(f.events)[0]?.settled?.outcome).toBe('undone');
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+  });
   it.each(['git version 2.26.3', 'unrecognized version'])(
     'does not use the git version banner %s to decide transaction support',
     async (stdout) => {

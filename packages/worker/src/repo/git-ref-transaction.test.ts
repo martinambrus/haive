@@ -68,7 +68,56 @@ async function fixture() {
   };
 }
 
+function committedChild(closeCode: number | null) {
+  const child = Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    exitCode: null,
+    signalCode: null,
+    kill: vi.fn(() => true),
+    unref: vi.fn(),
+  });
+  child.stdin.on('data', (chunk: Buffer) => {
+    const command = chunk.toString();
+    if (command === 'start\n') child.stdout.write('start: ok\n');
+    else if (command.endsWith('\nprepare\n')) child.stdout.write('prepare: ok\n');
+    else if (command === 'commit\n') child.stdout.write('commit: ok\n');
+  });
+  child.stdin.on('finish', () => {
+    if (closeCode === null) return;
+    child.stdout.end();
+    child.emit('close', closeCode);
+  });
+  vi.mocked(processes.spawn).mockReturnValueOnce(
+    child as unknown as ReturnType<typeof processes.spawn>,
+  );
+  return child;
+}
+
 describe('git ref transactions', () => {
+  it.each([128, null])(
+    'identifies cleanup failure after commit acknowledgment, exit=%s',
+    async (code) => {
+      vi.useFakeTimers();
+      vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+      committedChild(code);
+      const result = withGitRefTransaction(
+        '.',
+        'refs/heads/main',
+        'a'.repeat(40),
+        'b'.repeat(40),
+        async () => true,
+      ).catch((error: unknown) => error);
+      await vi.runAllTimersAsync();
+      expect(await result).toMatchObject({
+        message: expect.stringMatching(
+          /Git committed the ref transaction, but a later cleanup step failed/,
+        ),
+      });
+    },
+  );
+
   it('bounds cleanup and reports a child that never exits after SIGKILL', async () => {
     vi.useFakeTimers();
     const log = vi.spyOn(logger, 'error').mockImplementation(() => undefined);

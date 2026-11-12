@@ -32,6 +32,7 @@ import { worktreesHoldingBranch } from '../repo/git-workspace.js';
 import { gitOperationInProgress, GitOperationUnreadableError } from '../repo/git-operation.js';
 import {
   checkGitRefTransactions,
+  GitRefTransactionCommittedError,
   GitRefTransactionError,
   GitRefTransactionsUnsupportedError,
   withGitRefTransaction,
@@ -826,6 +827,15 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
               },
             );
           } catch (error) {
+            if (error instanceof GitRefTransactionCommittedError) {
+              needsSync = true;
+              throw new UndoGitError(
+                gitFailureReason(
+                  'The base branch moved back, but a later Git cleanup step failed. Retry Undo to finish recovery.',
+                  error,
+                ),
+              );
+            }
             if (error instanceof GitRefTransactionError)
               throw new UndoGitError(gitFailureReason('Git refused the undo', error));
             throw error;
