@@ -469,6 +469,7 @@ export const VERSION_REFRESH_KIND = 'versions';
 export const CLI_LOGIN_CLOSE_CODES = {
   AUTH_BUSY: 4409,
   SETTINGS_CHANGED: 4410,
+  UNSUPPORTED: 4411,
 } as const;
 
 /** Terminal refusals sent only after origin, authentication and ownership checks. */

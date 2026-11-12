@@ -317,7 +317,7 @@ export function installCliLoginBannerWebSocket(
         }
         if (!SUPPORTED_PROVIDERS.has(provider.name)) {
           log.warn({ providerId, name: provider.name }, 'banner ws reject: unsupported');
-          rejectUpgrade(socket, 400, 'Login Unsupported');
+          closeRefused(wss, req, socket, head, auth.session, CLI_LOGIN_CLOSE_CODES.UNSUPPORTED);
           return;
         }
 

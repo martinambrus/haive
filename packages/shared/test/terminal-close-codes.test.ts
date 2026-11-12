@@ -10,6 +10,11 @@ it('pins terminal refusal codes without colliding with login banner codes', () =
     REPO_READ_ONLY: 4423,
     REPO_NOT_READY: 4424,
   });
+  expect(constants.CLI_LOGIN_CLOSE_CODES).toEqual({
+    AUTH_BUSY: 4409,
+    SETTINGS_CHANGED: 4410,
+    UNSUPPORTED: 4411,
+  });
   const all = [
     ...Object.values(codes as Record<string, number>),
     ...Object.values(constants.CLI_LOGIN_CLOSE_CODES),

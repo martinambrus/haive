@@ -90,8 +90,8 @@ const HELD = [
     install: installCliLoginBannerWebSocket,
     prefix: '/cli-login-banner/',
     id: PROVIDER,
-    status: 'HTTP/1.1 400 Login Unsupported',
-    closeCode: undefined,
+    status: 'HTTP/1.1 101 Switching Protocols',
+    closeCode: 4411,
   },
 ];
 const HANDLERS = [

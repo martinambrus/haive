@@ -333,6 +333,10 @@ it.each([
     'Another sign-in or sign-out for this account is in progress. Try again when it finishes.',
   ],
   [CLI_LOGIN_CLOSE_CODES.SETTINGS_CHANGED, 'Login settings changed. Reload and try again.'],
+  [
+    4411,
+    'Interactive sign-in is unavailable for this provider. Configure its credentials in provider settings.',
+  ],
 ])('shows application close code %s even around generic error callbacks', (code, message) => {
   socket.onerror?.();
   socket.onclose?.({ code: code as number, reason: 'unrelated reason text' });
