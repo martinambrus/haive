@@ -1,4 +1,3 @@
-import { gitTemplate } from '../../../../test/support/git-template.js';
 import { fixtureBase, networkGitArgs } from '../../../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
@@ -59,11 +58,10 @@ async function write(dir: string, file: string, body: string): Promise<void> {
 }
 
 /** A Haive repo and a remote made on its own, sharing no commit: both READMEs collide. */
-const unrelatedPairTemplate = gitTemplate(async (root) => {
-  const remote = path.join(root, 'remote');
-  const local = path.join(root, 'local');
-  await mkdir(remote);
-  await mkdir(local);
+async function unrelatedPair(): Promise<string> {
+  const remote = await mkdtemp(path.join(fixtureBase, 'planmerge-apply-remote-'));
+  const local = await mkdtemp(path.join(fixtureBase, 'planmerge-apply-local-'));
+  dirs.push(remote, local);
   for (const [dir, readme] of [
     [remote, '# vareska\n\nfrom the forge\n'],
     [local, '# vareska\n\nfrom Haive\n'],
@@ -74,12 +72,6 @@ const unrelatedPairTemplate = gitTemplate(async (root) => {
     await git(dir, ['add', '-A']);
     await git(dir, ['commit', '-m', 'initial']);
   }
-}, fixtureBase);
-async function unrelatedPair(): Promise<string> {
-  const { dir: root } = await unrelatedPairTemplate.copy();
-  dirs.push(root);
-  const remote = path.join(root, 'remote');
-  const local = path.join(root, 'local');
   await git(local, ['remote', 'add', 'origin', remote]);
   return local;
 }
@@ -656,11 +648,10 @@ describe('plan merge: the previous answer, offered as reference when the merge r
 });
 
 /** Local holds a FILE `docs`, the remote a DIRECTORY `docs/`: git moves the file to `docs~HEAD`. */
-const fileAndDirectoryPairTemplate = gitTemplate(async (root) => {
-  const remote = path.join(root, 'remote');
-  const local = path.join(root, 'local');
-  await mkdir(remote);
-  await mkdir(local);
+async function fileAndDirectoryPair(): Promise<string> {
+  const remote = await mkdtemp(path.join(fixtureBase, 'planmerge-apply-remote-'));
+  const local = await mkdtemp(path.join(fixtureBase, 'planmerge-apply-local-'));
+  dirs.push(remote, local);
   for (const [dir, files] of [
     [remote, { 'README.md': '# vareska\n\nfrom the forge\n', 'docs/guide.md': 'guide\n' }],
     [local, { 'README.md': '# vareska\n\nfrom Haive\n', docs: 'a file\n' }],
@@ -671,12 +662,6 @@ const fileAndDirectoryPairTemplate = gitTemplate(async (root) => {
     await git(dir, ['add', '-A']);
     await git(dir, ['commit', '-m', 'initial']);
   }
-}, fixtureBase);
-async function fileAndDirectoryPair(): Promise<string> {
-  const { dir: root } = await fileAndDirectoryPairTemplate.copy();
-  dirs.push(root);
-  const remote = path.join(root, 'remote');
-  const local = path.join(root, 'local');
   await git(local, ['remote', 'add', 'origin', remote]);
   return local;
 }
