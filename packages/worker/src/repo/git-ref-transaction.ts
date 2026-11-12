@@ -6,8 +6,11 @@ import { GIT_BASE_ENV, gitDefaultTimeoutMs, hardenGitArgs } from './git-exec.js'
 /** Only process/protocol failures use this type; caller callback errors keep their identity. */
 export class GitRefTransactionError extends Error {}
 
-/** Git exited without acknowledging start; the transaction protocol is unavailable. */
-export class GitRefTransactionsUnsupportedError extends GitRefTransactionError {}
+/** The commit acknowledgment proves the ref moved even when child cleanup later fails. */
+export class GitRefTransactionCommittedError extends GitRefTransactionError {}
+
+/** No start acknowledgment: the exit status alone cannot establish why Git stopped. */
+export class GitRefTransactionStartError extends GitRefTransactionError {}
 
 /** Probe with an empty transaction before callers set aside or refresh checkout files. */
 export async function checkGitRefTransactions(cwd: string): Promise<void> {
@@ -88,7 +91,7 @@ async function refTransaction(
         }),
       ]);
       if (line.done && input === 'start' && !spawnError)
-        throw new GitRefTransactionsUnsupportedError(failure().message);
+        throw new GitRefTransactionStartError(failure().message);
       if (line.done || line.value !== reply) throw failure();
     } catch (error) {
       if (error instanceof GitRefTransactionError) throw error;
@@ -145,19 +148,31 @@ async function refTransaction(
     })());
   let committed = false;
   try {
-    await command('start', 'start: ok');
-    if (!change) return false;
-    await command(`update ${change.ref} ${change.next} ${change.expected}\nprepare`, 'prepare: ok');
-    if (!(await change.move())) return false;
-    await command('commit', 'commit: ok');
-    committed = true;
-    if ((await finish(false)) !== 0) throw failure();
-    return true;
-  } finally {
     try {
-      await finish(!committed);
+      await command('start', 'start: ok');
+      if (!change) return false;
+      await command(
+        `update ${change.ref} ${change.next} ${change.expected}\nprepare`,
+        'prepare: ok',
+      );
+      if (!(await change.move())) return false;
+      await command('commit', 'commit: ok');
+      committed = true;
+      if ((await finish(false)) !== 0) throw failure();
+      return true;
     } finally {
-      lines.close();
+      try {
+        await finish(!committed);
+      } finally {
+        lines.close();
+      }
     }
+  } catch (error) {
+    if (committed)
+      throw new GitRefTransactionCommittedError(
+        `Git committed the ref transaction, but a later cleanup step failed: ${safeErrorMessage(error)}`,
+        { cause: error },
+      );
+    throw error;
   }
 }

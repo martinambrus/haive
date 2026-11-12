@@ -269,6 +269,47 @@ describe('explicit undo of a cancel-left committed merge', () => {
     expect(h.aside).not.toHaveBeenCalled();
   });
 
+  it('recovers an interrupted move with more touched paths than argv can carry', async () => {
+    const f = await fixture();
+    const names = Array.from(
+      { length: 18_000 },
+      (_, i) => `${i.toString().padStart(5, '0')}-${'x'.repeat(125)}`,
+    );
+    expect(Buffer.byteLength(names.map((p) => `:(literal)${p}\0`).join(''))).toBeGreaterThan(
+      2 * 1024 * 1024,
+    );
+    const blob = await git(f.dir, 'rev-parse', 'HEAD:feature');
+    const added = await gitPush.gitRun(f.dir, ['update-index', '-z', '--index-info'], undefined, {
+      input: Buffer.from(names.map((p) => `100644 ${blob}\t${p}\0`).join('')),
+    });
+    expect(added.code).toBe(0);
+    const tree = await git(f.dir, 'write-tree');
+    const after = await git(
+      f.dir,
+      'commit-tree',
+      tree,
+      '-p',
+      f.before,
+      '-p',
+      f.feature,
+      '-m',
+      'large merge',
+    );
+    await git(f.dir, 'update-ref', 'refs/heads/main', after, f.after);
+    f.payload.baseShaAfter = after;
+    f.job.baseShaAfter = after;
+    await git(f.dir, 'update-ref', `refs/haive/undo-left-merge/t/${after}`, after);
+    // Model the index and files left by read-tree before the ref transaction committed.
+    await git(f.dir, 'read-tree', f.before);
+    await rm(path.join(f.dir, 'feature'));
+    await writeFile(path.join(f.dir, 'base'), 'unrelated local bytes');
+    await f.run();
+    expect(leftCommittedMerges(f.events)[0]?.settled?.outcome).toBe('undone');
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+    expect(await readFile(path.join(f.dir, 'base'), 'utf8')).toBe('unrelated local bytes');
+    expect(h.aside).not.toHaveBeenCalled();
+  });
+
   it('refuses unrelated staged work after an interrupted checkout move', async () => {
     const f = await fixture();
     await interruptAfterCheckoutMove(f);
@@ -416,6 +457,36 @@ describe('explicit undo of a cancel-left committed merge', () => {
     expect(await git(f.dir, 'status', '--porcelain')).toBe('');
     await git(f.dir, 'commit', '--allow-empty', '-m', 'lock released');
   });
+  it('reports a moved ref when Git exits unsuccessfully after commit acknowledgment', async () => {
+    const f = await fixture();
+    const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+    vi.mocked(processes.spawn).mockImplementation((...args: Parameters<typeof processes.spawn>) => {
+      const child = actual.spawn(...args);
+      if ((args[1] as string[]).includes('--stdin')) {
+        let replies = '';
+        child.stdout!.on('data', (chunk: Buffer) => {
+          replies += chunk.toString();
+        });
+        const emit = child.emit.bind(child);
+        vi.spyOn(child, 'emit').mockImplementation((event, ...values) =>
+          event === 'close' && replies.includes('commit: ok\n')
+            ? emit(event, 128, values[1])
+            : emit(event, ...values),
+        );
+      }
+      return child;
+    });
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+    const reason = leftCommittedMerges(f.events)[0]?.refused?.reason;
+    expect(reason).toMatch(/base branch moved back.*later.*failed/i);
+    expect(reason).not.toContain('Git refused');
+    expect(h.sync).toHaveBeenCalledOnce();
+    vi.restoreAllMocks();
+    await f.run();
+    expect(leftCommittedMerges(f.events)[0]?.settled?.outcome).toBe('undone');
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+  });
   it.each(['git version 2.26.3', 'unrecognized version'])(
     'does not use the git version banner %s to decide transaction support',
     async (stdout) => {
@@ -429,9 +500,16 @@ describe('explicit undo of a cancel-left committed merge', () => {
       expect(leftCommittedMerges(f.events)[0]?.settled?.outcome).toBe('undone');
     },
   );
-  it.each(['fatal: unknown command', 'Fehler: unbekannter Befehl'])(
-    'refuses unsupported ref transactions before set-aside regardless of stderr: %s',
-    async (stderr) => {
+  it.each([
+    { code: 128, stderr: 'fatal: unknown command' },
+    { code: 128, stderr: 'Fehler: unbekannter Befehl' },
+    { code: 128, stderr: 'fatal: not a git repository' },
+    { code: 1, stderr: 'permission denied' },
+    { code: 0, stderr: '' },
+    { code: null, stderr: 'killed' },
+  ])(
+    'refuses a pre-start exit without inferring a Git version: $code, $stderr',
+    async ({ code, stderr }) => {
       const f = await fixture();
       const actual =
         await vi.importActual<typeof import('node:child_process')>('node:child_process');
@@ -449,7 +527,7 @@ describe('explicit undo of a cancel-left committed merge', () => {
           child.stdin.once('data', () => {
             child.stderr.write(stderr);
             child.stdout.end();
-            child.emit('close', 128);
+            child.emit('close', code);
           });
           return child as unknown as ReturnType<typeof processes.spawn>;
         },
@@ -459,8 +537,9 @@ describe('explicit undo of a cancel-left committed merge', () => {
       await f.run();
       expect(leftCommittedMerges(f.events)[0]).toMatchObject({
         settled: null,
-        refused: { count: 1, reason: expect.stringContaining('requires Git 2.27 or newer') },
+        refused: { count: 1, reason: expect.stringContaining('Git exited before acknowledging') },
       });
+      expect(leftCommittedMerges(f.events)[0]?.refused?.reason).not.toContain('2.27');
       expect(h.aside).not.toHaveBeenCalled();
       expect(
         calls.mock.calls.some(([, args]) =>
@@ -666,6 +745,8 @@ describe('explicit undo of a cancel-left committed merge', () => {
         settled: null,
         refused: { count: 1, reason: expect.stringMatching(/could not read.*index/i) },
       });
+      // The page prefixes "Undo refused:"; the stored sentence must not carry a second label.
+      expect(leftCommittedMerges(f.events)[0]?.refused?.reason).not.toMatch(/^Undo failed/);
       expect(h.sync).not.toHaveBeenCalled();
       vi.restoreAllMocks();
       await f.run();
@@ -735,6 +816,31 @@ describe('explicit undo of a cancel-left committed merge', () => {
     expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
     expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
   });
+  it('scrubs complete credentials before paths can split them', async () => {
+    const f = await fixture();
+    const token = '/credential/path,credential-suffix';
+    await git(f.dir, 'remote', 'add', 'origin', 'https://example.test/repo.git');
+    vi.spyOn(f.db.query.taskSteps, 'findFirst').mockResolvedValue({
+      formValues: { credentialId: 'credential' },
+    } as never);
+    vi.spyOn(gitPush, 'buildCredentialHelper').mockResolvedValue({
+      argv: [],
+      env: {},
+      secret: token,
+    });
+    vi.spyOn(gitPush, 'originGitRun').mockResolvedValue({
+      code: 128,
+      stdout: '',
+      stderr: `remote echoed ${token} in ${f.dir}`,
+    });
+    await f.run();
+    expect(leftCommittedMerges(f.events)[0]?.refused?.reason).toContain(
+      'remote echoed *** in [path]',
+    );
+    expect(JSON.stringify(f.settled())).not.toContain('credential-suffix');
+    expect(leftCommittedMerges(f.events)[0]?.refused?.reason).not.toContain(f.dir);
+  });
+
   it.each(['list', 'fetch', 'throw'])(
     'scrubs a standalone credential echoed by the remote during %s',
     async (failure) => {

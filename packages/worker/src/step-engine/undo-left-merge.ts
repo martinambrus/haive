@@ -32,8 +32,9 @@ import { worktreesHoldingBranch } from '../repo/git-workspace.js';
 import { gitOperationInProgress, GitOperationUnreadableError } from '../repo/git-operation.js';
 import {
   checkGitRefTransactions,
+  GitRefTransactionCommittedError,
   GitRefTransactionError,
-  GitRefTransactionsUnsupportedError,
+  GitRefTransactionStartError,
   withGitRefTransaction,
 } from '../repo/git-ref-transaction.js';
 import {
@@ -121,37 +122,57 @@ async function interruptedCheckoutMove(checkout: string, m: LeftCommittedMerge):
     .filter(Boolean)
     .map((p) => `:(literal)${p}`);
   if (!paths.length) return true;
-  const checked = await gitRun(checkout, ['ls-files', '-v', '-z', '--', ...paths]);
-  if (checked.code !== 0)
-    throw new UndoGitError(
-      gitFailureReason('Cannot read the Undo recovery index flags', checked.stderr),
-    );
-  if (checked.stdout.split('\0').some((entry) => /^([a-z]|S) /.test(entry))) return false;
-  const local = await gitRun(checkout, [
-    '-c',
-    'core.trustctime=true',
-    '-c',
-    'core.checkStat=default',
-    '-c',
-    'core.fileMode=true',
-    'diff',
-    '--quiet',
-    '--ignore-submodules=none',
-    '--',
-    ...paths,
-  ]);
-  if (local.code === 1) return false;
-  if (local.code !== 0)
-    throw new UndoGitError(
-      gitFailureReason('Cannot read local changes for Undo recovery', local.stderr),
-    );
-  // A removed path recreated as untracked (including ignored) is no longer the moved checkout.
-  const untracked = await gitRun(checkout, ['ls-files', '--others', '-z', '--', ...paths]);
-  if (untracked.code !== 0)
-    throw new UndoGitError(
-      gitFailureReason('Cannot read untracked paths for Undo recovery', untracked.stderr),
-    );
-  return !untracked.stdout;
+  // Neither ls-files nor diff accepts --pathspec-from-file. Bound their literal argv
+  // batches instead; byte counts include NULs and leave room for the environment.
+  const batches: string[][] = [];
+  let batch: string[] = [];
+  let bytes = 0;
+  for (const path of paths) {
+    const size = Buffer.byteLength(path) + 1;
+    if (size > 32_768) return false;
+    if (bytes + size > 32_768) {
+      batches.push(batch);
+      batch = [];
+      bytes = 0;
+    }
+    batch.push(path);
+    bytes += size;
+  }
+  batches.push(batch);
+  for (const paths of batches) {
+    const checked = await gitRun(checkout, ['ls-files', '-v', '-z', '--', ...paths]);
+    if (checked.code !== 0)
+      throw new UndoGitError(
+        gitFailureReason('Cannot read the Undo recovery index flags', checked.stderr),
+      );
+    if (checked.stdout.split('\0').some((entry) => /^([a-z]|S) /.test(entry))) return false;
+    const local = await gitRun(checkout, [
+      '-c',
+      'core.trustctime=true',
+      '-c',
+      'core.checkStat=default',
+      '-c',
+      'core.fileMode=true',
+      'diff',
+      '--quiet',
+      '--ignore-submodules=none',
+      '--',
+      ...paths,
+    ]);
+    if (local.code === 1) return false;
+    if (local.code !== 0)
+      throw new UndoGitError(
+        gitFailureReason('Cannot read local changes for Undo recovery', local.stderr),
+      );
+    // A removed path recreated as untracked (including ignored) is no longer the moved checkout.
+    const untracked = await gitRun(checkout, ['ls-files', '--others', '-z', '--', ...paths]);
+    if (untracked.code !== 0)
+      throw new UndoGitError(
+        gitFailureReason('Cannot read untracked paths for Undo recovery', untracked.stderr),
+      );
+    if (untracked.stdout) return false;
+  }
+  return true;
 }
 
 async function validBranch(dir: string, branch: string): Promise<boolean> {
@@ -337,7 +358,9 @@ export async function recordUndoFailure(
         // The one-shot helper's plaintext secret is scoped to remoteRefusal,
         // which scrubs all remote failures before returning. This queue fallback
         // has no helper or secret; still remove paths and URL credentials here.
-        reason: gitFailureReason('Undo failed', err),
+        // An UndoGitError already carries its sanitized, bounded sentence; prefixing it again
+        // doubled the label the page puts in front ("Undo refused: Undo failed: ...").
+        reason: err instanceof UndoGitError ? err.message : gitFailureReason('Undo failed', err),
       },
     });
     return true;
@@ -619,7 +642,7 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
               await checkGitRefTransactions(cwd);
               refTransactionsChecked = true;
             } catch (error) {
-              if (!(error instanceof GitRefTransactionsUnsupportedError)) {
+              if (!(error instanceof GitRefTransactionStartError)) {
                 if (error instanceof GitRefTransactionError)
                   throw new UndoGitError(gitFailureReason('Git refused the undo', error));
                 throw error;
@@ -627,7 +650,7 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
               await settle(
                 'refused',
                 gitFailureReason(
-                  'Undo requires Git 2.27 or newer to lock the base branch safely. Upgrade Git and retry.',
+                  'Git exited before acknowledging the ref transaction. Check Git and the repository, then retry Undo.',
                   error,
                 ),
               );
@@ -806,6 +829,15 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
               },
             );
           } catch (error) {
+            if (error instanceof GitRefTransactionCommittedError) {
+              needsSync = true;
+              throw new UndoGitError(
+                gitFailureReason(
+                  'The base branch moved back, but a later Git cleanup step failed. Retry Undo to finish recovery.',
+                  error,
+                ),
+              );
+            }
             if (error instanceof GitRefTransactionError)
               throw new UndoGitError(gitFailureReason('Git refused the undo', error));
             throw error;
