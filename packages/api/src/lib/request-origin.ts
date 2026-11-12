@@ -46,11 +46,27 @@ export function editorOrigin(web: string = webOrigin()): string | null {
       url.hash
     )
       throw new Error('Invalid origin');
-    return url.origin;
   } catch {
     throw new Error(
       'HAIVE_EDITOR_ORIGIN must be an HTTP(S) origin without credentials, path, query or fragment',
     );
+  }
+  const origin = new URL(configured).origin;
+  // A browser sends a hostname's cookies to every port, so an editor on the app's hostname
+  // carries the app's session and cannot be told apart from it. Unset keeps the default.
+  if (origin !== publicApiOrigin(web) && hostnameOf(origin) === hostnameOf(web)) {
+    throw new Error(
+      "HAIVE_EDITOR_ORIGIN must use a hostname other than the app's: browsers send a hostname's cookies to every port",
+    );
+  }
+  return origin;
+}
+
+function hostnameOf(origin: string): string | null {
+  try {
+    return new URL(origin).hostname;
+  } catch {
+    return null;
   }
 }
 

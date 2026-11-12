@@ -358,6 +358,8 @@ describe('upgrade authentication on every surface', () => {
 
 async function openAll({ bannerReady = false, editorSessions = false } = {}) {
   if (editorSessions) {
+    // The api's own origin on a local install: the default an explicit value may repeat.
+    vi.stubEnv('HAIVE_API_PORT', '3001');
     vi.stubEnv('HAIVE_EDITOR_ORIGIN', 'http://localhost:3001');
     vi.spyOn(secretsService, 'getJwtSecret').mockResolvedValue('synthetic-editor-session-key');
   }
