@@ -103,7 +103,11 @@ export function EditorTab({ taskId, repositoryId, className }: EditorTabProps) {
             const grant = await api.post<{ url: string }>(grantPath);
             if (cancelled) return;
             const editor = new URL(grant.url);
-            if (editor.protocol === 'http:' && editor.hostname !== window.location.hostname) {
+            // A different scheme makes the frame cross-site even on the same hostname.
+            if (
+              editor.protocol === 'http:' &&
+              (editor.hostname !== window.location.hostname || window.location.protocol !== 'http:')
+            ) {
               const { editorNeedsSecureCookie } = await import('@/lib/editor-origin');
               if (cancelled) return;
               if (editorNeedsSecureCookie(window.location.origin, grant.url)) {
