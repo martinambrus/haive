@@ -255,7 +255,8 @@ the client's `forwarded` and `x-forwarded-*`; names are matched against the requ
 malformed `Connection` token is ignored rather than thrown, and the WebSocket connect handler tears down only
 its own session on any error. The replay head is written as latin1 so non-ASCII header bytes arrive unchanged.
 code-server's port proxy is off twice: the api answers 403 to `/proxy/<port>` and `/absproxy/<port>` (first
-segment, any case) on both transports before anything reaches the container, and editors launch with
+segment, any case, of the raw remainder or its dot-segment-normalised form, since the socket bridge
+forwards the raw path) on both transports before anything reaches the container, and editors launch with
 `--disable-proxy`; one started before that flag is replaced once idle, by the editor lifecycle rule above.
 `IDE_ENABLED=false` refuses the HTTP proxy as it does the ensure. The response direction drops the
 same hop-by-hop headers and an upstream `Set-Cookie` for `haive_access`, `haive_refresh` or a
