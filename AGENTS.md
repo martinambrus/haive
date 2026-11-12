@@ -82,12 +82,12 @@ Step lifecycle: `pending` to `running(detect)` to `waiting_form` to `running(app
 - `pnpm install` installs all workspace dependencies.
 - `pnpm build` runs `turbo run build` across the workspace; `@haive/shared` and `@haive/database` build first because all other packages depend on them.
 - `pnpm typecheck` runs `tsc --noEmit` everywhere.
-- `pnpm test` runs Vitest across the workspace.
+- `pnpm test` runs Vitest across the workspace ([testing](docs/architecture/testing.md)).
 - `pnpm test:e2e` runs Playwright against the dev compose stack.
 - A smoke that puts jobs on a queue (`smoke:onboarding`, `smoke:workflow`, `smoke:fix-loop` and
   their siblings) needs its OWN Redis and database, as CI gives it. Pointed at the dev stack's, the
-  dev worker takes its jobs off the shared queue and runs them with the dev stack's code rather than
-  the branch's. Start a throwaway `redis` container and a scratch database for it. `smoke:ci` runs each smoke
+  dev worker takes its jobs off the shared queue and runs the dev stack's code, not the branch's.
+  Give it a throwaway Redis and database. `smoke:ci` runs each smoke
   under its own limit ([CI smokes](docs/architecture/ci-smokes.md)).
 - `pnpm --filter @haive/database migrate` applies pending SQL migrations to `DATABASE_URL`. This is the applier: the `db-migrate` compose one-shot and CI both run it, and api/worker/web wait for it via `depends_on: service_completed_successfully`.
 - `pnpm db:push` (`drizzle-kit push`, interactive) is the DEV escape hatch, not the applier. Use it to iterate on a schema shape, then hand-write the numbered migration before committing — the CI `schema-parity` job compares the two and goes red if they disagree. It will offer to DROP `schema_migrations`, because that table is deliberately absent from the Drizzle barrel; accepting is recoverable (the next `migrate` re-adopts) but never what you want.
