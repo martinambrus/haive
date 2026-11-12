@@ -39,6 +39,30 @@ describe('web-origin API forwarding', () => {
     }
   });
 
+  it('strips every incoming Fetch Metadata header while preserving session and Origin', async () => {
+    vi.stubEnv('API_URL_INTERNAL', 'http://api:3001');
+    const fetcher = vi.fn().mockResolvedValue(new Response('accepted'));
+    vi.stubGlobal('fetch', fetcher);
+    const res = await proxyApiRequest(
+      new Request('https://web.test/api/haive/auth/me', {
+        headers: {
+          'Sec-Fetch-Site': 'same-origin',
+          'sec-fetch-mode': 'cors',
+          'sec-fetch-dest': 'empty',
+          'sec-fetch-user': '?1',
+          'sec-fetch-future': 'future',
+          cookie: 'haive_access=session',
+          origin: 'https://web.test',
+        },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const headers = fetcher.mock.calls[0]![1].headers as Headers;
+    expect([...headers.keys()].filter((name) => name.startsWith('sec-fetch-'))).toEqual([]);
+    expect(headers.get('cookie')).toBe('haive_access=session');
+    expect(headers.get('origin')).toBe('https://web.test');
+  });
+
   it('reports invalid upstream configuration once and returns 502 on repeated requests', async () => {
     vi.stubEnv('API_URL_INTERNAL', 'missing-scheme.invalid');
     const log = vi.spyOn(logger, 'error').mockImplementation(() => {});
