@@ -15,6 +15,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
+  leaseSet: vi.fn(async () => 'OK'),
+  leaseEval: vi.fn(async () => 1),
+  loginPayload: undefined as Record<string, unknown> | undefined,
   authBusy: false,
   upgrade: vi.fn(),
   onAuthLock: undefined as (() => Promise<void>) | undefined,
@@ -59,6 +62,9 @@ vi.mock('ws', async (original) => ({
     }
   },
 }));
+vi.mock('../src/redis.js', () => ({
+  getRedis: () => ({ set: h.leaseSet, eval: h.leaseEval }),
+}));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/auth/jwt.js', () => ({ verifyAccessToken: async () => ({ sub: 'user', tv: 0 }) }));
 vi.mock('../src/routes/terminal.js', () => ({ attachContainerStream: h.attach }));
@@ -73,6 +79,7 @@ vi.mock('../src/queues.js', () => ({
   }),
   getCliExecQueue: () => ({
     add: async (name: string, payload: unknown) => {
+      if (name === 'cli-login-create') h.loginPayload = payload as Record<string, unknown>;
       if (name === 'cli-login-create' && h.loginEnqueueGate) await h.loginEnqueueGate;
       if (h.queueError) throw h.queueError;
       let delivered = false;
@@ -115,6 +122,9 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
   h.loginEnqueueGate = undefined;
+  h.loginPayload = undefined;
+  h.leaseSet.mockReset().mockResolvedValue('OK');
+  h.leaseEval.mockReset().mockResolvedValue(1);
   h.authBusy = false;
   h.assertAuth.mockReset().mockResolvedValue(undefined);
   h.onAuthLock = undefined;
@@ -2244,8 +2254,29 @@ it('releases the auth hold after bounded Docker teardown and observes a late rem
   ws.close();
   await settle();
   try {
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(h.releaseAuth).not.toHaveBeenCalled();
+    expect(h.leaseEval).toHaveBeenCalledWith(
+      expect.stringContaining('pexpire'),
+      1,
+      expect.any(String),
+      expect.any(String),
+      60_000,
+    );
+    expect(h.leaseEval).not.toHaveBeenCalledWith(
+      expect.stringContaining("'del'"),
+      1,
+      expect.any(String),
+      expect.any(String),
+    );
+    await vi.advanceTimersByTimeAsync(1);
     await settle();
+    expect(h.leaseEval).toHaveBeenCalledWith(
+      expect.stringContaining("'del'"),
+      1,
+      expect.any(String),
+      expect.any(String),
+    );
     expect(h.releaseAuth).toHaveBeenCalledOnce();
     expect(h.updates.some((v) => v.status === 'destroyed')).toBe(false);
     expect(
@@ -2258,4 +2289,49 @@ it('releases the auth hold after bounded Docker teardown and observes a late rem
   }
   expect(h.updates.some((v) => v.status === 'destroyed')).toBe(true);
   expect(h.releaseAuth).toHaveBeenCalledOnce();
+});
+
+it('owns a renewable lease before queueing a login container and drops it on auth release', async () => {
+  await start();
+  expect(h.leaseSet).toHaveBeenCalledOnce();
+  expect(h.loginPayload?.leaseId).toEqual(expect.any(String));
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(h.leaseEval).toHaveBeenCalled();
+  ws.close();
+  await settle();
+  expect(h.releaseAuth).toHaveBeenCalledOnce();
+  const calls = h.leaseEval.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(h.leaseEval).toHaveBeenCalledTimes(calls);
+});
+
+it('stops the login when its lease cannot be renewed', async () => {
+  await start();
+  h.leaseEval.mockRejectedValueOnce(new Error('Redis unavailable'));
+  await vi.advanceTimersByTimeAsync(20_000);
+  await settle();
+  expect(h.remove).toHaveBeenCalledOnce();
+  expect(h.releaseAuth).toHaveBeenCalledOnce();
+  expect(ws.readyState).toBe(3);
+});
+
+it('drops a lease whose initial write returns after the socket released authentication', async () => {
+  let finish!: (value: string) => void;
+  h.leaseSet.mockImplementationOnce(
+    () =>
+      new Promise<string>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  await start('', false);
+  ws.close();
+  await settle();
+  expect(h.releaseAuth).toHaveBeenCalledOnce();
+  finish('OK');
+  await settle();
+  expect(h.loginPayload).toBeUndefined();
+  expect(h.leaseEval).toHaveBeenCalledOnce();
+  const calls = h.leaseEval.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(h.leaseEval).toHaveBeenCalledTimes(calls);
 });

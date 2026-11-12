@@ -128,6 +128,8 @@ vi.mock('../src/redis.js', () => {
       },
       hset: async () => 1,
       get: async () => null,
+      set: async () => 'OK',
+      eval: async () => 1,
       xrevrange: async () => [],
       xread: (...args: unknown[]) => {
         observation.streamKeys.add(String(args[3]));
