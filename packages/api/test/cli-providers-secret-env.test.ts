@@ -104,6 +104,7 @@ const ENV = { ANTHROPIC_BASE_URL: 'https://api.example', ANTHROPIC_API_KEY: SECR
 beforeEach(() => {
   authLock.acquire.mockReset().mockResolvedValue(authLock.release);
   authLock.release.mockClear();
+  authLock.release.assertHeld.mockReset().mockResolvedValue(undefined);
   h.transactionOpen = false;
   h.auditLog.mockReset();
   h.add.mockReset();
@@ -737,3 +738,64 @@ it('a non-auth secret delete stays unlocked even when authentication is busy', a
   expect(authLock.acquire).not.toHaveBeenCalled();
   expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
 });
+
+it.each(['POST', 'PATCH', 'DELETE', 'disconnect'])(
+  'rolls back %s auth writes when the lock is lost before commit',
+  async (method) => {
+    const fake = setup(true);
+    const before = fake.rows(schema.cliProviders);
+    const lose = () => {
+      authLock.release.assertHeld.mockRejectedValue(new Error('lock lost'));
+    };
+    fake.hooks.beforeInsert = async () => lose();
+    fake.hooks.beforeDelete = async () => lose();
+    const path =
+      method === 'disconnect'
+        ? '/usage-auth'
+        : method === 'DELETE'
+          ? '/secrets/CLAUDE_CODE_OAUTH_TOKEN'
+          : method === 'POST'
+            ? '/secrets'
+            : '';
+    if (method === 'DELETE') {
+      fake.insert(schema.cliProviderSecrets, {
+        providerId: PROVIDER,
+        secretName: 'CLAUDE_CODE_OAUTH_TOKEN',
+      });
+    }
+    const secretsBefore = fake.rows(schema.cliProviderSecrets);
+    const res = await send(
+      method === 'disconnect' ? 'DELETE' : method,
+      '/' + PROVIDER + path,
+      method === 'POST'
+        ? { secretName: 'CLAUDE_CODE_OAUTH_TOKEN', value: 'new-token' }
+        : { envVars: { CLAUDE_CODE_OAUTH_TOKEN: 'new-token' } },
+    );
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'cli_auth_busy' });
+    expect(fake.rows(schema.cliProviders)).toEqual(before);
+    expect(fake.rows(schema.cliProviderSecrets)).toEqual(secretsBefore);
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+    expect(authLock.release).toHaveBeenCalledOnce();
+  },
+);
+
+it.each(['POST', 'PATCH'])(
+  'refuses %s credentials after losing the lock before the write',
+  async (method) => {
+    const fake = setup(true);
+    const before = fake.rows(schema.cliProviders);
+    authLock.release.assertHeld.mockRejectedValue(new Error('lock lost'));
+    const res = await send(
+      method,
+      '/' + PROVIDER + (method === 'POST' ? '/secrets' : ''),
+      method === 'POST'
+        ? { secretName: 'CLAUDE_CODE_OAUTH_TOKEN', value: 'new-token' }
+        : { envVars: { CLAUDE_CODE_OAUTH_TOKEN: 'new-token' } },
+    );
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'cli_auth_busy' });
+    expect(fake.rows(schema.cliProviderSecrets)).toEqual([]);
+    expect(fake.rows(schema.cliProviders)).toEqual(before);
+  },
+);

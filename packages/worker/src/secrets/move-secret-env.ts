@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
 import { and, eq } from 'drizzle-orm';
-import { schema, tryCliAuthLock, type Database } from '@haive/database';
+import { schema, tryCliAuthLock, type CliAuthLock, type Database } from '@haive/database';
 import { logger, secretsService, splitSecretLikeEnv, upsertProviderSecret } from '@haive/shared';
 
 const log = logger.child({ module: 'move-secret-env' });
@@ -16,7 +16,12 @@ type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 async function forEachLegacyProvider(
   db: Database,
   phase: string,
-  work: (tx: Tx, providerId: string, envVars: Record<string, string>) => Promise<void>,
+  work: (
+    tx: Tx,
+    providerId: string,
+    envVars: Record<string, string>,
+    assertHeld: () => Promise<void>,
+  ) => Promise<void>,
 ): Promise<number> {
   let failed = 0;
   const providers = await db.query.cliProviders.findMany({
@@ -31,7 +36,7 @@ async function forEachLegacyProvider(
   });
   for (const provider of providers) {
     if (Object.keys(splitSecretLikeEnv(provider.envVars ?? {}).secrets).length === 0) continue;
-    let release: (() => Promise<void>) | null = null;
+    let release: CliAuthLock | null = null;
     try {
       if (Object.keys(splitSecretLikeEnv(provider.envVars ?? {}).secrets).some(isAuthSecret)) {
         release = await tryCliAuthLock(db, cliAuthScope(provider));
@@ -44,7 +49,11 @@ async function forEachLegacyProvider(
           .from(schema.cliProviders)
           .where(eq(schema.cliProviders.id, provider.id))
           .for('update');
-        if (locked) await work(tx, provider.id, locked.envVars ?? {});
+        const assertHeld = async () => {
+          await release?.assertHeld();
+        };
+        if (locked) await work(tx, provider.id, locked.envVars ?? {}, assertHeld);
+        await assertHeld();
       });
     } catch (err) {
       failed += 1;
@@ -62,6 +71,7 @@ async function copyKeys(
   providerId: string,
   keys: Record<string, string>,
   masterKek: string,
+  assertHeld: () => Promise<void>,
 ): Promise<void> {
   for (const [name, value] of Object.entries(keys)) {
     const existing = isAuthSecret(name)
@@ -73,6 +83,7 @@ async function copyKeys(
           columns: { id: true },
         })
       : undefined;
+    await assertHeld();
     await upsertProviderSecret(tx, { providerId, name, value, masterKek, onExisting: 'keep' });
     if (isAuthSecret(name) && !existing) {
       await tx
@@ -87,9 +98,9 @@ async function copyKeys(
  *  are, so the release before this one still finds them after a rollback. */
 export async function copySecretLikeProviderEnv(db: Database): Promise<void> {
   let masterKek: string | undefined;
-  await forEachLegacyProvider(db, 'copy', async (tx, providerId, envVars) => {
+  await forEachLegacyProvider(db, 'copy', async (tx, providerId, envVars, assertHeld) => {
     masterKek ??= await secretsService.getMasterKek();
-    await copyKeys(tx, providerId, splitSecretLikeEnv(envVars).secrets, masterKek);
+    await copyKeys(tx, providerId, splitSecretLikeEnv(envVars).secrets, masterKek, assertHeld);
   });
 }
 
@@ -97,15 +108,19 @@ export async function copySecretLikeProviderEnv(db: Database): Promise<void> {
  *  one transaction per provider, so success means no secret is left in plain envVars. */
 export async function dropCopiedSecretLikeProviderEnv(db: Database): Promise<void> {
   let masterKek: string | undefined;
-  const failed = await forEachLegacyProvider(db, 'drop', async (tx, providerId, envVars) => {
-    masterKek ??= await secretsService.getMasterKek();
-    const split = splitSecretLikeEnv(envVars);
-    await copyKeys(tx, providerId, split.secrets, masterKek);
-    await tx
-      .update(schema.cliProviders)
-      .set({ envVars: split.envVars })
-      .where(eq(schema.cliProviders.id, providerId));
-  });
+  const failed = await forEachLegacyProvider(
+    db,
+    'drop',
+    async (tx, providerId, envVars, assertHeld) => {
+      masterKek ??= await secretsService.getMasterKek();
+      const split = splitSecretLikeEnv(envVars);
+      await copyKeys(tx, providerId, split.secrets, masterKek, assertHeld);
+      await tx
+        .update(schema.cliProviders)
+        .set({ envVars: split.envVars })
+        .where(eq(schema.cliProviders.id, providerId));
+    },
+  );
   // Not retried at boot, so the updater must not commit while a copy remains.
   if (failed > 0) throw new Error(`${failed} provider(s) still hold a secret in plain envVars`);
 }

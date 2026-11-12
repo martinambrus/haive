@@ -70,6 +70,7 @@ function setup(isolateAuth = true) {
 beforeEach(() => {
   h.acquire.mockReset().mockResolvedValue(h.release);
   h.release.mockClear();
+  h.release.assertHeld.mockReset().mockResolvedValue(undefined);
   h.debug.mockClear();
   h.fetch
     .mockReset()
@@ -171,6 +172,7 @@ it('leaves the usage secret and login generation unchanged when the upsert fails
       fake.rows(schema.cliProviders)[0]!.id as string,
       'CLAUDE_USAGE_OAUTH',
       'new',
+      h.release.assertHeld,
     ),
   ).rejects.toThrow('upsert refused');
   expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
@@ -263,3 +265,25 @@ it('refreshes using the token re-read under the lock', async () => {
   expect(h.refresh).toHaveBeenCalledWith('refresh');
   expect(h.release).toHaveBeenCalledTimes(2);
 });
+
+it.each(['key', 'write'])(
+  'rolls back refreshed usage credentials after lock loss during %s',
+  async (phase) => {
+    const fake = setup();
+    const lose = () => {
+      h.release.assertHeld.mockRejectedValue(new Error('lock lost'));
+    };
+    if (phase === 'key')
+      vi.spyOn(secretsService, 'getMasterKek').mockImplementationOnce(async () => {
+        lose();
+        return 'ab'.repeat(32);
+      });
+    else
+      fake.hooks.beforeInsert = async (table) => {
+        if (table === schema.cliProviderSecrets) lose();
+      };
+    await runUsagePollTick(fake.db as unknown as Database);
+    expect(h.refresh).toHaveBeenCalledOnce();
+    expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+  },
+);

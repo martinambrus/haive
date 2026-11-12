@@ -323,7 +323,12 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
           expect(h.auditLog.mock.calls[0]![0]).toBe(h.auditInsert.mock.calls[0]![0]);
           expect(JSON.stringify(rows)).not.toContain('synthetic-');
         }
-        if (label === 'usage connect' && refuse) expect(h.exchange).not.toHaveBeenCalled();
+        // The HTTP exchange finishes before the write transaction opens. Refusing
+        // its audit still rolls back the credential and never schedules a poll.
+        if (label === 'usage connect') {
+          expect(h.exchange).toHaveBeenCalledOnce();
+          if (refuse) expect(h.poll).not.toHaveBeenCalled();
+        }
       });
   }
   it.each(['create', 'patch', 'clone'])(

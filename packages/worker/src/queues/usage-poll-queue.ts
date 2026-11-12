@@ -212,7 +212,13 @@ async function resolveOauthRefreshToken(
       try {
         const fresh = await refreshClaudeToken(stored.refreshToken);
         await release.assertHeld();
-        await writeProviderSecret(db, provider.id, secretName, JSON.stringify(fresh));
+        await writeProviderSecret(
+          db,
+          provider.id,
+          secretName,
+          JSON.stringify(fresh),
+          release.assertHeld,
+        );
         deadUsageRefreshToken.delete(provider.id); // recovered (or was never dead)
         return { token: fresh.accessToken };
       } catch (err) {

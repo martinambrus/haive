@@ -612,7 +612,7 @@ cliProviderRoutes.patch('/:id', async (c) => {
     : authSecretNames.length
       ? [existing]
       : [];
-  const updated = await withCliAuthLocks(db, authProviders, () =>
+  const updated = await withCliAuthLocks(db, authProviders, (assertHeld) =>
     db.transaction(async (tx) => {
       if (startsJob) await admitNewWork(tx);
       const [current] = await tx
@@ -657,21 +657,25 @@ cliProviderRoutes.patch('/:id', async (c) => {
           }
         : undefined;
       if (event) await insertAuditEvent(tx, event);
+      await assertHeld();
       const rows = await tx
         .update(schema.cliProviders)
         .set({ ...updates, ...(authSecretNames.length ? { authGeneration: randomUUID() } : {}) })
         .where(eq(schema.cliProviders.id, id))
         .returning();
       for (const [name, value] of Object.entries(split?.secrets ?? {})) {
+        const masterKek = await secretsService.getMasterKek();
+        await assertHeld();
         await upsertProviderSecret(tx, {
           providerId: id,
           name,
           value,
-          masterKek: await secretsService.getMasterKek(),
+          masterKek,
           onExisting: 'overwrite',
         });
       }
       if (secretEvent) await insertAuditEvent(tx, secretEvent);
+      await assertHeld();
       return { rows, event };
     }),
   );
@@ -1042,9 +1046,10 @@ cliProviderRoutes.post('/:providerId/secrets', async (c) => {
     metadata: { source: 'manual', secretName: body.secretName },
   };
   const masterKek = await secretsService.getMasterKek();
-  const secret = await withCliAuthWrite(db, provider, [body.secretName], () =>
+  const secret = await withCliAuthWrite(db, provider, [body.secretName], (assertHeld) =>
     db.transaction(async (tx) => {
       await insertAuditEvent(tx, event);
+      await assertHeld();
       const secret = await upsertProviderSecret(tx, {
         providerId,
         name: body.secretName,
@@ -1058,6 +1063,7 @@ cliProviderRoutes.post('/:providerId/secrets', async (c) => {
           .set({ authGeneration: randomUUID() })
           .where(eq(schema.cliProviders.id, providerId));
       }
+      await assertHeld();
       return secret;
     }),
   );
@@ -1122,33 +1128,35 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
       'The pasted code is missing its state part; copy the whole code, including the part after #.',
     );
   }
-  const tokens = await withCliAuthWrite(db, provider, [CLAUDE_USAGE_OAUTH_SECRET], async () => {
-    const taken = (await getRedis().eval(
-      TAKE_USAGE_AUTH_STASH_SCRIPT,
-      1,
-      usageAuthStateKey(userId, providerId),
-      state,
-    )) as string | 0 | null;
-    if (taken === null) {
-      throw new HttpError(400, 'Authorization expired or not started; please restart.');
-    }
-    if (taken === 0) {
-      throw new HttpError(
-        400,
-        'The pasted code belongs to a different authorization; paste the code from this one, or restart it.',
-      );
-    }
-    const { verifier } = JSON.parse(taken) as { verifier: string };
-    const event: AuditEvent = {
-      actorUserId: userId,
-      action: 'cli_provider.secret.set',
-      targetType: 'cli_provider',
-      targetId: providerId,
-      metadata: { source: 'usage_oauth', secretName: CLAUDE_USAGE_OAUTH_SECRET },
-    };
-    const masterKek = await secretsService.getMasterKek();
-    const tokens = await db.transaction(async (tx) => {
-      await insertAuditEvent(tx, event);
+  const tokens = await withCliAuthWrite(
+    db,
+    provider,
+    [CLAUDE_USAGE_OAUTH_SECRET],
+    async (assertHeld) => {
+      const taken = (await getRedis().eval(
+        TAKE_USAGE_AUTH_STASH_SCRIPT,
+        1,
+        usageAuthStateKey(userId, providerId),
+        state,
+      )) as string | 0 | null;
+      if (taken === null) {
+        throw new HttpError(400, 'Authorization expired or not started; please restart.');
+      }
+      if (taken === 0) {
+        throw new HttpError(
+          400,
+          'The pasted code belongs to a different authorization; paste the code from this one, or restart it.',
+        );
+      }
+      const { verifier } = JSON.parse(taken) as { verifier: string };
+      const event: AuditEvent = {
+        actorUserId: userId,
+        action: 'cli_provider.secret.set',
+        targetType: 'cli_provider',
+        targetId: providerId,
+        metadata: { source: 'usage_oauth', secretName: CLAUDE_USAGE_OAUTH_SECRET },
+      };
+      const masterKek = await secretsService.getMasterKek();
       let tokens;
       try {
         tokens = await exchangeClaudeAuthCode(code, verifier, state);
@@ -1161,22 +1169,26 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
           'The granted token is missing the user:profile scope required for usage tracking.',
         );
       }
-      await upsertProviderSecret(tx, {
-        providerId,
-        name: CLAUDE_USAGE_OAUTH_SECRET,
-        value: JSON.stringify(tokens),
-        masterKek,
-        onExisting: 'overwrite',
+      await db.transaction(async (tx) => {
+        await insertAuditEvent(tx, event);
+        await assertHeld();
+        await upsertProviderSecret(tx, {
+          providerId,
+          name: CLAUDE_USAGE_OAUTH_SECRET,
+          value: JSON.stringify(tokens),
+          masterKek,
+          onExisting: 'overwrite',
+        });
+        await tx
+          .update(schema.cliProviders)
+          .set({ authGeneration: randomUUID() })
+          .where(eq(schema.cliProviders.id, providerId));
+        await assertHeld();
       });
-      await tx
-        .update(schema.cliProviders)
-        .set({ authGeneration: randomUUID() })
-        .where(eq(schema.cliProviders.id, providerId));
+      logAuditEvent(event);
       return tokens;
-    });
-    logAuditEvent(event);
-    return tokens;
-  });
+    },
+  );
   // Kick an immediate usage poll so the header meter refreshes within seconds instead of
   // waiting for the ~5-min repeatable tick: the freshly rotated token clears the worker's
   // dead-token gate and this poll overwrites the needs_reconnect snapshot with a live one.
@@ -1215,8 +1227,9 @@ cliProviderRoutes.delete('/:providerId/usage-auth', async (c) => {
     targetId: providerId,
     metadata: { source: 'usage_oauth', secretName: CLAUDE_USAGE_OAUTH_SECRET },
   };
-  const deleted = await withCliAuthWrite(db, provider, [CLAUDE_USAGE_OAUTH_SECRET], () =>
+  const deleted = await withCliAuthWrite(db, provider, [CLAUDE_USAGE_OAUTH_SECRET], (assertHeld) =>
     db.transaction(async (tx) => {
+      await assertHeld();
       const rows = await tx
         .delete(schema.cliProviderSecrets)
         .where(
@@ -1232,6 +1245,7 @@ cliProviderRoutes.delete('/:providerId/usage-auth', async (c) => {
       await tx
         .delete(schema.usageWindowSnapshots)
         .where(eq(schema.usageWindowSnapshots.providerId, providerId));
+      await assertHeld();
       return rows.length > 0;
     }),
   );
@@ -1253,8 +1267,9 @@ cliProviderRoutes.delete('/:providerId/secrets/:secretName', async (c) => {
     targetId: providerId,
     metadata: { source: 'manual', secretName },
   };
-  await withCliAuthWrite(db, provider, [secretName], () =>
+  await withCliAuthWrite(db, provider, [secretName], (assertHeld) =>
     db.transaction(async (tx) => {
+      await assertHeld();
       const result = await tx
         .delete(schema.cliProviderSecrets)
         .where(
@@ -1266,6 +1281,7 @@ cliProviderRoutes.delete('/:providerId/secrets/:secretName', async (c) => {
         .returning({ id: schema.cliProviderSecrets.id });
       if (result.length === 0) throw new HttpError(404, 'Secret not found');
       await insertAuditEvent(tx, event);
+      await assertHeld();
     }),
   );
   logAuditEvent(event);
