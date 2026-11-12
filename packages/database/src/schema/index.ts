@@ -27,3 +27,4 @@ export * from './integrations.js';
 export * from './custom-tools.js';
 export * from './modules.js';
 export * from './module-sources.js';
+export * from './cli-auth-containers.js';

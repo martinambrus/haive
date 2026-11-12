@@ -1,6 +1,8 @@
 import { CLI_LOGIN_CLOSE_CODES } from '@haive/shared/constants';
 vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
+  recordCliAuthContainer: h.recordAuthContainer,
+  forgetCliAuthContainer: h.forgetAuthContainer,
   tryCliAuthLock: async () => {
     await h.onAuthLock?.();
     return h.authBusy ? null : Object.assign(h.releaseAuth, { assertHeld: h.assertAuth });
@@ -19,6 +21,8 @@ const h = vi.hoisted(() => ({
   upgrade: vi.fn(),
   onAuthLock: undefined as (() => Promise<void>) | undefined,
   releaseAuth: vi.fn(async () => {}),
+  recordAuthContainer: vi.fn(async () => {}),
+  forgetAuthContainer: vi.fn(async () => {}),
   assertAuth: vi.fn(async () => {}),
   updates: [] as Record<string, unknown>[],
   stampGate: undefined as Promise<void> | undefined,
@@ -112,6 +116,8 @@ beforeEach(() => {
   h.authBusy = false;
   h.assertAuth.mockReset().mockResolvedValue(undefined);
   h.onAuthLock = undefined;
+  h.recordAuthContainer.mockReset().mockResolvedValue(undefined);
+  h.forgetAuthContainer.mockReset().mockResolvedValue(undefined);
   h.updates = [];
   h.stampGate = undefined;
   h.stampError = false;
@@ -2115,30 +2121,70 @@ it.each(['enqueue', 'attach', 'start'] as const)(
   },
 );
 
-it('releases the auth hold after bounded Docker teardown and observes a late removal safely', async () => {
-  await start();
-  let resume!: () => void;
-  h.remove.mockImplementation(
-    () =>
-      new Promise<void>((resolve) => {
-        resume = resolve;
-      }),
-  );
-  ws.close();
-  await settle();
-  try {
-    await vi.advanceTimersByTimeAsync(30_000);
+it.each([undefined, 404, 500])(
+  'releases the auth hold after bounded Docker teardown and observes a late removal safely (Docker %s)',
+  async (statusCode) => {
+    await start();
+    let resume!: () => void;
+    h.remove.mockImplementation(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          resume = () => {
+            if (statusCode === undefined) resolve();
+            else reject(Object.assign(new Error('late remove failed'), { statusCode }));
+          };
+        }),
+    );
+    ws.close();
     await settle();
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      await settle();
+      expect(h.releaseAuth).toHaveBeenCalledOnce();
+      expect(h.recordAuthContainer).toHaveBeenCalledWith(
+        h.db,
+        expect.stringContaining('claude'),
+        'container',
+      );
+      expect(h.recordAuthContainer.mock.invocationCallOrder[0]).toBeLessThan(
+        h.start.mock.invocationCallOrder[0]!,
+      );
+      expect(h.forgetAuthContainer).not.toHaveBeenCalled();
+      expect(h.updates.some((v) => v.status === 'destroyed')).toBe(false);
+      expect(
+        h.log.warn.mock.calls.some(
+          ([, message]) => message === 'login container removal timed out',
+        ),
+      ).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      resume();
+      await settle();
+    }
+    expect(h.updates.some((v) => v.status === 'destroyed')).toBe(true);
+    if (statusCode === 500) expect(h.forgetAuthContainer).not.toHaveBeenCalled();
+    else expect(h.forgetAuthContainer).toHaveBeenCalledWith(h.db, 'container');
     expect(h.releaseAuth).toHaveBeenCalledOnce();
-    expect(h.updates.some((v) => v.status === 'destroyed')).toBe(false);
-    expect(
-      h.log.warn.mock.calls.some(([, message]) => message === 'login container removal timed out'),
-    ).toBe(true);
-    expect(vi.getTimerCount()).toBe(0);
-  } finally {
-    resume();
-    await settle();
-  }
-  expect(h.updates.some((v) => v.status === 'destroyed')).toBe(true);
+  },
+);
+
+it('refuses to start a credential writer when its durable quarantine cannot be recorded', async () => {
+  h.recordAuthContainer.mockRejectedValueOnce(new Error('database unavailable'));
+  await start('', false);
+  expect(h.start).not.toHaveBeenCalled();
+  expect(h.remove).toHaveBeenCalledOnce();
   expect(h.releaseAuth).toHaveBeenCalledOnce();
 });
+
+it.each([404, 500])(
+  'clears the auth quarantine only on confirmed removal (Docker %s)',
+  async (statusCode) => {
+    await start();
+    h.remove.mockRejectedValueOnce(Object.assign(new Error('remove failed'), { statusCode }));
+    ws.close();
+    await settle();
+    expect(h.updates).toContainEqual({ status: 'destroyed', destroyedAt: expect.any(Date) });
+    expect(h.forgetAuthContainer).toHaveBeenCalledTimes(statusCode === 404 ? 1 : 0);
+    expect(h.releaseAuth).toHaveBeenCalledOnce();
+  },
+);
