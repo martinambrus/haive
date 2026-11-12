@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { Hono } from 'hono';
+import { Hono, type Handler } from 'hono';
 import { credentialFitsGitRemote, redactGitText, redactGitUrl } from '@haive/shared/schemas';
 import { and, asc, eq, inArray, ne, or, sql, type SQL } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -1110,6 +1110,7 @@ export const FILES_LIST_CAP = 5000;
 async function listExtractedFiles(
   anchor: string,
   rootRel: string,
+  cap = FILES_LIST_CAP,
 ): Promise<{
   files: Array<{ path: string; size: number }>;
   truncated: boolean;
@@ -1120,38 +1121,42 @@ async function listExtractedFiles(
   for await (const file of walkFilesNoFollow(anchor, rootRel, {
     skipNames: ['.git', '.DS_Store'],
   })) {
-    if (out.length >= FILES_LIST_CAP) {
+    if (out.length >= cap) {
       truncated = true;
       break;
     }
     out.push(file);
   }
-  return { files: out, truncated, cap: FILES_LIST_CAP };
+  return { files: out, truncated, cap };
 }
 
-bundleRoutes.get('/:id/files', async (c) => {
-  const userId = c.get('userId');
-  const bundleId = c.req.param('id');
-  const row = await loadBundle(userId, bundleId);
-  const anchor = bundleStorageRoot();
-  const rootRel = bundleContentRel(userId, bundleId, row.storageRoot);
-  // A stored root this route cannot place reads as an empty tree, the same answer a missing
-  // directory already gave — the listing is a convenience, not a contract about what exists.
-  if (rootRel === null) return c.json({ files: [], truncated: false, cap: FILES_LIST_CAP });
-  // A tree nested past the walk's depth is the bundle's own property, not a fault: say so (409
-  // with a code, as the routes answer a stored object's state that blocks a request) instead of an
-  // opaque 500, and as a warning rather than an unhandled error.
-  const result = await listExtractedFiles(anchor, rootRel).catch((err: unknown) => {
-    if (!isWalkDepthError(err)) throw err;
-    logger.warn({ userId, bundleId }, 'bundle tree is nested too deeply to list');
-    throw new HttpError(
-      409,
-      'This bundle is nested too deeply to list its files',
-      'bundle_too_deep',
-    );
-  });
-  return c.json(result);
-});
+export function bundleFilesHandler(cap = FILES_LIST_CAP): Handler<AppEnv, '/:id/files'> {
+  return async (c) => {
+    const userId = c.get('userId');
+    const bundleId = c.req.param('id');
+    const row = await loadBundle(userId, bundleId);
+    const anchor = bundleStorageRoot();
+    const rootRel = bundleContentRel(userId, bundleId, row.storageRoot);
+    // A stored root this route cannot place reads as an empty tree, the same answer a missing
+    // directory already gave — the listing is a convenience, not a contract about what exists.
+    if (rootRel === null) return c.json({ files: [], truncated: false, cap });
+    // A tree nested past the walk's depth is the bundle's own property, not a fault: say so (409
+    // with a code, as the routes answer a stored object's state that blocks a request) instead of an
+    // opaque 500, and as a warning rather than an unhandled error.
+    const result = await listExtractedFiles(anchor, rootRel, cap).catch((err: unknown) => {
+      if (!isWalkDepthError(err)) throw err;
+      logger.warn({ userId, bundleId }, 'bundle tree is nested too deeply to list');
+      throw new HttpError(
+        409,
+        'This bundle is nested too deeply to list its files',
+        'bundle_too_deep',
+      );
+    });
+    return c.json(result);
+  };
+}
+
+bundleRoutes.get('/:id/files', bundleFilesHandler());
 
 bundleRoutes.delete('/:id', async (c) => {
   const userId = c.get('userId');
