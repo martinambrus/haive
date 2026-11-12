@@ -388,3 +388,29 @@ describe('admin page: Ollama model allowlist card', () => {
     expect(textOf(view.tree())).toContain('Invalid model name');
   });
 });
+
+describe('admin page: allowlist editors during a save', () => {
+  for (const [label, PATH] of [
+    ['Ollama model allowlist', '/admin/config/ollama-model-allowlist'],
+    ['Private endpoint allowlist', '/admin/config/private-endpoint-allowlist'],
+  ] as const) {
+    it(`locks the ${label} text while its save is in flight`, async () => {
+      const view = await mount({ enabled: true });
+      openTabWith(view, new RegExp(label));
+      const box = () =>
+        findAll(
+          view.tree(),
+          (host) => host.tag === 'textarea' && host.props['aria-label'] === label,
+        )[0]!;
+      fire.type(box(), 'typed');
+      view.draw();
+      fire.click(buttons(view.tree(), /^save$/i, box().parent!)[0]!);
+      view.draw();
+      expect(box().props.disabled).toBe(true);
+      await view.flush();
+      view.draw();
+      expect(box().props.disabled).toBe(false);
+      expect(net.calls.some((call) => call.method === 'PUT' && call.path === PATH)).toBe(true);
+    });
+  }
+});

@@ -2579,6 +2579,7 @@ function AdminPageInner() {
             aria-label="Ollama model allowlist"
             className="block w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100"
             value={ollamaAllowlistInput}
+            disabled={savingOllamaAllowlist}
             onChange={(e) => setOllamaAllowlistInput(e.target.value)}
           />
           <div className="mt-2">
@@ -2616,6 +2617,7 @@ function AdminPageInner() {
             aria-label="Private endpoint allowlist"
             className="block w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100"
             value={privateAllowlistInput}
+            disabled={savingPrivateAllowlist}
             onChange={(e) => setPrivateAllowlistInput(e.target.value)}
           />
           <div className="mt-2">
