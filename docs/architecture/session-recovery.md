@@ -84,8 +84,9 @@ web to call its API. The loopback harness tests this contract (`127.0.0.1:46100`
 `127.0.0.1:46101`).
 
 Different hostnames (`resolveApiTransport` `viaWebProxy`): browser API traffic goes through the
-web origin's `/api/haive` proxy (`app/api/haive/[...path]/route.ts`, `lib/api-proxy.server.ts`)
-and editor traffic through `/ide` there. HTTP route handlers stream bodies; Next's existing
+web origin's `/api/haive` proxy (`app/api/haive/[...path]/route.ts`, `lib/api-proxy.server.ts`).
+The proxy never relays the editor (`/ide`); the editor is framed from its own origin (see the
+editor section in [Sandbox](sandbox.md)). HTTP route handlers stream bodies; Next's existing
 upgrade handler forwards WebSockets. Cookies stay host-only, HttpOnly and SameSite=Lax on the web
 hostname, and single-use refresh rotation is unchanged. `WEB_ORIGIN` must exactly match the
 browser-facing web origin. No cookie Domain or SSO is involved.
@@ -99,9 +100,8 @@ requests then answer 502 while public pages stay up.
 Every raw repository-file response, including one relayed by the proxy, carries
 `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox` (no `allow-scripts`, no
 `allow-same-origin`): SVG still renders in `<img>`, but a top-level repository document cannot
-run script with the app's origin. In proxy mode the editor shares the web origin; code-server
-runs repository code, so moving it to its own origin or a constrained iframe is an open design
-decision.
+run script with the app's origin. code-server runs repository code, so it is never served from
+the web origin, in either mode: it runs on the editor origin with a session of its own.
 
 Behind the proxy the API's sign-in throttle sees web as the peer; see the cross-host rule in
 [API auth](api-auth.md).
