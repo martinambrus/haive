@@ -1,7 +1,12 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import type { LatestRefreshRun, RefreshCliVersionsJobResult } from '@haive/shared/constants';
+import {
+  REFRESH_TRIGGER_LABELS,
+  type LatestRefreshRun,
+  type RefreshCliVersionsJobResult,
+  type RefreshTrigger,
+} from '@haive/shared/constants';
 import { api } from '@/lib/api-client';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { RefreshFailures } from './refresh-failures';
@@ -14,7 +19,10 @@ function refreshSummary(result: RefreshCliVersionsJobResult | null): string {
 }
 
 function triggerLabel(trigger: string): string {
-  return trigger === 'manual' || trigger === 'scheduled' || trigger === 'boot' ? ` ${trigger}` : '';
+  const label = Object.hasOwn(REFRESH_TRIGGER_LABELS, trigger)
+    ? REFRESH_TRIGGER_LABELS[trigger as RefreshTrigger]
+    : '';
+  return label ? ` ${label}` : '';
 }
 
 /** Read even with no manual poll: boot and scheduled runs have no browser job id. */

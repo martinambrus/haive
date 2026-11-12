@@ -95,7 +95,16 @@ it('uses a completed result with no start time when its run id matches', async (
   expect(textOf(view.tree())).not.toContain('has not finished');
 });
 
-it.each(['unknown', 'legacy-trigger'])(
+it.each(['manual', 'scheduled', 'boot'] as const)('labels a %s refresh', async (trigger) => {
+  h.get.mockResolvedValue({ run: stored({ trigger }) });
+  const view = createRenderer(() => (
+    <LatestRefresh endpoint="/latest" active={false} result={null} />
+  ));
+  await settle(view);
+  expect(textOf(view.tree())).toContain(`The latest ${trigger} refresh started at`);
+});
+
+it.each(['unknown', 'legacy-trigger', '__proto__'])(
   'describes a %s trigger plainly with readable dates',
   async (trigger) => {
     h.get.mockResolvedValue({
