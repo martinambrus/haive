@@ -185,12 +185,7 @@ export function BundleComposer({
         credentials: 'include',
       });
       if (!res.ok) {
-        // The api says why in `error` (a bundle nested too deeply to list, for one); the status is
-        // the fallback for an answer that names nothing.
-        const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
-        // An empty reason would store a falsy error and render the listing as an empty bundle.
-        const reason = typeof body?.error === 'string' ? body.error.trim() : '';
-        throw new Error(reason || `files fetch failed (${res.status})`);
+        throw await refusalError(res, 'files fetch failed');
       }
       const data = (await res.json()) as {
         files: BundleFileEntry[];
