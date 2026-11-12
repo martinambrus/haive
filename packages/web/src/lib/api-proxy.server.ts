@@ -2,16 +2,15 @@ import { API_PROXY_PATH } from './api-origin';
 import { resolveServerApiBase } from './api-base.server';
 
 /** The upstream is operator configuration only. Neither Host nor a path supplied by a client
- * can select another server. Keep /ide intact for the editor's redirects and relative assets. */
+ * can select another server. Editor traffic must stay on its own origin. */
 export function apiProxyTarget(requestUrl: string): URL | null {
   const request = new URL(requestUrl);
   const path = request.pathname;
-  const suffix = path.startsWith(`${API_PROXY_PATH}/`)
-    ? path.slice(API_PROXY_PATH.length)
-    : path.startsWith('/ide/')
-      ? path
-      : null;
-  if (suffix === null) return null;
+  if (!path.startsWith(`${API_PROXY_PATH}/`)) return null;
+  const suffix = path.slice(API_PROXY_PATH.length);
+  // Both HTTP routes and WebSocket rewrites use this boundary. Relaying an editor here
+  // would give repository-controlled script the app's origin and session authority.
+  if (suffix === '/ide' || suffix.startsWith('/ide/')) return null;
   const target = new URL(resolveServerApiBase());
   target.pathname = `${target.pathname.replace(/\/$/, '')}${suffix}`;
   target.search = request.search;

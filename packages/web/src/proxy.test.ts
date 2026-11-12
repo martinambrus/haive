@@ -30,17 +30,10 @@ describe('the actual Next proxy response', () => {
     expect(fetcher.mock.calls[0]![0]).toBe('https://api.example.test/prefix/auth/me');
   });
 
-  it('retains page slash normalization while preserving editor upgrade slashes', async () => {
+  it('retains page slash normalization', async () => {
     const page = await proxy(request('/login/?session=expired'));
     expect(page.status).toBe(308);
     expect(page.headers.get('location')).toBe('http://localhost:3000/login?session=expired');
-    vi.stubEnv('API_URL_INTERNAL', 'http://api:3001');
-    const editor = await proxy(
-      new NextRequest('http://localhost:3000/ide/id/', {
-        headers: { upgrade: 'websocket' },
-      }),
-    );
-    expect(editor.headers.get('x-middleware-rewrite')).toBe('http://api:3001/ide/id/');
   });
   it('redirects an anonymous private request without modifying cookies', async () => {
     const response = await proxy(request('/dashboard'));
@@ -132,3 +125,16 @@ it('admits the runtime editor override in the actual page CSP', async () => {
     "frame-src 'self' http://ide.example.test:8443 https://ide.example.test:8443",
   );
 });
+
+it.each(['/ide/id/', '/api/haive/ide/id/'])(
+  'does not rewrite an editor upgrade on %s',
+  async (path) => {
+    vi.stubEnv('API_URL_INTERNAL', 'http://api:3001');
+    const response = await proxy(
+      new NextRequest(`http://localhost:3000${path}`, {
+        headers: { upgrade: 'websocket' },
+      }),
+    );
+    expect(response.headers.get('x-middleware-rewrite')).toBeNull();
+  },
+);

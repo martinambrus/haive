@@ -7,7 +7,6 @@ import { EditorTab } from './editor-tab';
 const { post } = vi.hoisted(() => ({ post: vi.fn() }));
 vi.mock('@/lib/api-client', () => ({
   api: { post },
-  apiEditorUrl: (path: string) => `http://localhost:3001${path}`,
 }));
 vi.mock('@/components/task-source', () => ({ TaskSource: () => <div>Files</div> }));
 vi.mock('@/components/markdown/markdown-view', () => ({

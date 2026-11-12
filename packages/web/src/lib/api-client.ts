@@ -56,12 +56,6 @@ export function apiWebSocketUrl(path: string): string {
   return url.toString();
 }
 
-/** Keep the editor's established path: its root-absolute redirects use /ide/... too. */
-export function apiEditorUrl(path: string): string {
-  const base = new URL(API_BASE);
-  return `${API_USES_WEB_PROXY ? base.origin : API_BASE}${path}`;
-}
-
 export type { ApiError };
 
 let refreshing: Promise<boolean> | null = null;

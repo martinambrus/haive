@@ -90,13 +90,9 @@ export async function proxy(request: NextRequest) {
 
 export const config = {
   matcher: [
-    '/((?!_next|favicon.ico|api/haive(?:/|$)|ide(?:/|$)|.*\\..*).*)',
+    '/((?!_next|favicon.ico|api/haive(?:/|$)|.*\\..*).*)',
     {
       source: '/api/haive/:path*',
-      has: [{ type: 'header', key: 'upgrade', value: 'websocket' }],
-    },
-    {
-      source: '/ide/:path*',
       has: [{ type: 'header', key: 'upgrade', value: 'websocket' }],
     },
     // A module provider id holds dots, which the entry above takes for a static file.
