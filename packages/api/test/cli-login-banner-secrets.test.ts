@@ -1051,6 +1051,39 @@ describe('CLI login banner startup cleanup', () => {
   });
 });
 
+describe('CLI login banner lock watch', () => {
+  const frames = () => ws.send.mock.calls.map(([raw]) => JSON.parse(raw));
+
+  it('reports a lost lock and closes the session', async () => {
+    await start();
+    h.assertAuth.mockRejectedValue(new Error('lost'));
+    await vi.advanceTimersByTimeAsync(1_000);
+    await settle();
+    expect(frames()).toContainEqual({
+      type: 'error',
+      message: 'Authentication changed. Retry the login.',
+    });
+  });
+
+  it('does not report a lost lock for a check still running when the session ends', async () => {
+    await start();
+    let reject!: (err: Error) => void;
+    h.assertAuth.mockImplementation(() => new Promise<void>((_, r) => (reject = r)));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.assertAuth).toHaveBeenCalled();
+    // The session ends on its own (socket still open): cleanup releases the lock while the
+    // check is in flight, and the check then rejects as released.
+    stream.emit('end');
+    reject(new Error('CLI authentication lock was lost; retry the operation'));
+    await settle();
+    expect(JSON.stringify(frames())).not.toContain('Authentication changed');
+    expect(h.log.warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'login authentication lock lost; stopping session',
+    );
+  });
+});
+
 describe('CLI login banner antigravity PTY size', () => {
   const SIZE = { h: 40, w: 120 };
 

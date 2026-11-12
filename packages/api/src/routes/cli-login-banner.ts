@@ -458,6 +458,9 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     void heldAuth
       .assertHeld()
       .catch(() => {
+        // A check still in flight when cleanup releases the lock rejects as "released": the
+        // session is ending normally, so it must not report a lost lock over its result.
+        if (abort.aborted || releasePending) return;
         log.warn({ providerId }, 'login authentication lock lost; stopping session');
         abort.fire();
         wsSend(ws, { type: 'error', message: 'Authentication changed. Retry the login.' });
