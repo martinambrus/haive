@@ -655,7 +655,9 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = proje
         } finally {
           if (repositoryId) {
             try {
-              await resyncWithKeptMetadata(ctx.db, repositoryId, ctx.repoPath, kept);
+              // The base moved successfully; leave projection recovery to the durable sweep.
+              if (!(await resyncWithKeptMetadata(ctx.db, repositoryId, ctx.repoPath, kept)))
+                ctx.logger.warn({ repositoryId }, 'base synced; projection recovery pending');
             } catch (err) {
               if (!handBackFailed) throw err;
               ctx.logger.warn({ err }, 'projection resync failed after hand-back failure');

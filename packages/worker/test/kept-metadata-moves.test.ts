@@ -23,10 +23,14 @@ const kept = new Map([
   ],
 ]);
 
+import { logger } from '@haive/shared';
+import { vi } from 'vitest';
+
 describe('move callers retain metadata when re-sync does not finish', () => {
   it.each(['pull', 'save', 'confirm'] as const)(
     '%s uses durable settlement and leaves metadata alone',
     async (site) => {
+      const warning = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
       h.aside.mockResolvedValue({ outcome: 'set-aside', kept });
       if (site === 'pull') await pull(payload);
       else if (site === 'save') await save(payload).catch(() => undefined);
@@ -58,6 +62,12 @@ describe('move callers retain metadata when re-sync does not finish', () => {
             },
           )
           .catch(() => undefined);
+      if (site === 'pull')
+        expect(warning).toHaveBeenCalledWith(
+          { repositoryId: REPO },
+          'plan pulled; projection recovery pending',
+        );
+      warning.mockRestore();
       expect(h.resettle).toHaveBeenCalledWith(h.db, REPO, '/repo', kept);
       expect(h.metadata).not.toHaveBeenCalled();
       expect(kept.get('.haive-data/plan.json')?.mode).toBe(0o600);

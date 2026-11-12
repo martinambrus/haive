@@ -1907,8 +1907,15 @@ describe('fast-forward metadata recovery', () => {
         ]);
         projections.setAside.mockResolvedValue({ outcome: 'set-aside', kept });
         projections.resettle.mockImplementation(control.recover);
+        const warning = vi.spyOn(ctx.logger, 'warn');
         await syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }));
         expect(projections.resettle).toHaveBeenCalledWith(ctx.db, 'repo-1', local, kept);
+        expect(
+          warning.mock.calls.some(
+            ([, message]) => message === 'base synced; projection recovery pending',
+          ),
+        ).toBe(conflict);
+        warning.mockRestore();
         expect(projections.metadata).not.toHaveBeenCalled();
         expect(kept.size).toBe(1);
         expect(await control.recover()).toBe(!conflict);

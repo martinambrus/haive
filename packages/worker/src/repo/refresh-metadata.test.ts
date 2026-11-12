@@ -1,5 +1,6 @@
 import { pendingMetadataControl } from '../../test/support/pending-metadata-control.js';
 import { expect, it, vi } from 'vitest';
+import { logger } from '@haive/shared';
 import type { Database } from '@haive/database';
 import type { RepoJobPayload } from '@haive/shared';
 
@@ -49,6 +50,7 @@ it.each([false, true])(
     h.moved = false;
     h.resettle.mockReset();
     h.metadata.mockReset();
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
     const control = await pendingMetadataControl(conflict);
     const kept = new Map([
       [
@@ -79,9 +81,17 @@ it.each([false, true])(
       expect(h.metadata).not.toHaveBeenCalled();
       expect(kept.size).toBe(1);
       expect(result).toBeDefined();
+      expect(
+        warn.mock.calls.some(
+          ([fields, message]) =>
+            (fields as { repositoryId?: string }).repositoryId === 'r1' &&
+            message === 'checkout refreshed; projection recovery pending',
+        ),
+      ).toBe(conflict);
       expect(await control.recover()).toBe(!conflict);
       expect(control.pending()).not.toBeNull();
     } finally {
+      warn.mockRestore();
       await control.cleanup();
     }
   },
