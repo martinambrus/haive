@@ -45,6 +45,7 @@ import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { isUuid } from '../lib/uuid.js';
+import { ollamaModelAllowlistSchema } from '../lib/ollama-pull-policy.js';
 import { closeUserSockets } from '../lib/user-sockets.js';
 import { generateInviteToken, hashInviteToken } from '../lib/invites.js';
 
@@ -1509,6 +1510,21 @@ adminRoutes.put('/config/private-endpoint-allowlist', async (c) => {
     allowlist: [CONFIG_KEYS.PRIVATE_ENDPOINT_ALLOWLIST, allowlist, ''],
   });
   log.info({ entries: verdict.entries }, 'private endpoint allowlist updated');
+  return c.json({ allowlist });
+});
+
+const ollamaAllowlistSchema = ollamaModelAllowlistSchema();
+
+adminRoutes.get('/config/ollama-model-allowlist', async (c) => {
+  const allowlist = (await configService.get(CONFIG_KEYS.OLLAMA_MODEL_ALLOWLIST)) ?? '';
+  return c.json({ allowlist });
+});
+
+adminRoutes.put('/config/ollama-model-allowlist', async (c) => {
+  const { allowlist } = ollamaAllowlistSchema.parse(await c.req.json());
+  await saveConfig(c.get('userId'), 'ollama-model-allowlist', {
+    allowlist: [CONFIG_KEYS.OLLAMA_MODEL_ALLOWLIST, allowlist, ''],
+  });
   return c.json({ allowlist });
 });
 

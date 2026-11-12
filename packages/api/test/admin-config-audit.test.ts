@@ -11,6 +11,7 @@ const h = vi.hoisted(() => {
     audits: [] as unknown[],
     external: false,
     writeFails: false,
+    auditFails: false,
     failAfterWrites: null as number | null,
     gate: null as Promise<void> | null,
     onParked: () => {},
@@ -88,6 +89,7 @@ vi.mock('../src/db.js', () => ({
 }));
 vi.mock('../src/lib/audit.js', () => {
   const insertAuditEvent = async (db: object, event: unknown) => {
+    if (h.auditFails) throw new Error('audit refused');
     h.heldAtAudit.push(h.waiting.size > 0);
     h.auditOnTx.push(h.txRows.has(db));
     (h.txRows.get(db) ?? h.audits).push(event);
@@ -380,6 +382,13 @@ const ROUTES: Route[] = [
     b: { retentionDays: 90 },
   },
   {
+    name: 'ollama-model-allowlist',
+    initial: { allowlist: '' },
+    a: { allowlist: 'qwen3:8b\nnomic-embed-text' },
+    b: { allowlist: 'qwen3:latest' },
+    refuse: [{}, { allowlist: 5 }, { allowlist: '*' }, { allowlist: 'bad model' }],
+  },
+  {
     name: 'private-endpoint-allowlist',
     initial: { allowlist: '' },
     a: { allowlist: '10.0.0.0/8\nhost.docker.internal' },
@@ -426,6 +435,7 @@ beforeEach(() => {
   h.audits = [];
   h.external = false;
   h.writeFails = false;
+  h.auditFails = false;
   h.failAfterWrites = null;
   h.gate = null;
   h.onParked = () => {};
@@ -462,7 +472,14 @@ describe('every PUT /admin/config route', () => {
       .map((route) => route.path.slice('/config/'.length))
       .sort();
     expect(registered).toEqual(ROUTES.map((route) => route.name).sort());
-    expect(ROUTES).toHaveLength(40);
+    expect(ROUTES).toHaveLength(41);
+  });
+
+  it('does not save the Ollama allowlist when its required audit row fails', async () => {
+    h.auditFails = true;
+    expect((await put('ollama-model-allowlist', { allowlist: 'qwen3' })).status).toBe(500);
+    expect(h.writes).toEqual([]);
+    expect(h.audits).toEqual([]);
   });
 
   it('keeps the action names that were audited before', async () => {

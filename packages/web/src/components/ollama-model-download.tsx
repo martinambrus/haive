@@ -41,6 +41,10 @@ export function OllamaModelDownload({ model, ollamaUrl }: { model: string; ollam
         body: JSON.stringify({ ollamaUrl, model: m }),
         signal: controller.signal,
       });
+      if (!resp.ok) {
+        const body = (await resp.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(body?.error || `Model download failed (HTTP ${resp.status})`);
+      }
       const reader = resp.body?.getReader();
       if (!reader) {
         setError('No response body');

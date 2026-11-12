@@ -16,6 +16,8 @@ const EXEMPT: Record<string, string> = {
     'conditional enforcement controls; admin-only routes use requireAdmin and are swept',
   'routes/tasks/index.ts': 'allUsers policy is named in the sweep; pause controls are conditional',
   'routes/tasks/_helpers.ts': 'administrator pause-lock override, not an admin-only route',
+  'routes/tooling.ts': 'conditional model pull policy; ollama-pull-policy covers both roles',
+  'lib/ollama-pull-policy.ts': 'administrator pull exemption; ollama-pull-policy covers both roles',
   'lib/probe-egress.ts': 'administrator network policy is covered by probe-targets tests',
   'lib/probe-hosts.ts': 'selects the network policy, not route authorization',
 };

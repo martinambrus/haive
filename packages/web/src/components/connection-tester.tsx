@@ -152,6 +152,10 @@ export function OllamaTestButton({ formValues }: { formValues: FormValues }) {
         signal: controller.signal,
       });
 
+      if (!resp.ok) {
+        const body = (await resp.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(body?.error || `Model download failed (HTTP ${resp.status})`);
+      }
       const reader = resp.body?.getReader();
       if (!reader) {
         setPullError('No response body');
