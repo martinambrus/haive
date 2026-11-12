@@ -642,7 +642,7 @@ Owner decision 2026-11-12: item 2 admin-trusted, document it; item 3 remove the 
 Each needs a per-dial decision (guard, admin-trust, or remove).
 
 1. Shipped in PR #1049 (provider Test connection guarded by the owner role). Correction: api routes/cli-providers.ts:664 only enqueues and cli-adapters/zai.ts only sets env for the sandboxed CLI; neither is a dial.
-2. Admin-trusted by decision: Global KB external DSN (shared global-kb/connection.ts:172,177), `POST /global-kb/test-db`, vendor/module admin config. PRE-EXISTING; confirm or guard.
+2. DONE #1115 (documented in api-auth.md). Admin-trusted by decision: Global KB external DSN (shared global-kb/connection.ts:172,177), `POST /global-kb/test-db`, vendor/module admin config. PRE-EXISTING; confirm or guard.
 3. DONE #1110 (ce3dc139c): SMTP keys, defaults, secret name, compose env and .env.example removed; boot deletes the seeded `config:email:*` keys and any `smtp_password` row (live: api logged the removals, Redis scan empty).
 4. `integration_provider_configs.api_base_url` is unused (database schema/integrations.ts:51); a future dial must use the guarded fetch. PRE-EXISTING.
 5. Shipped in PR #1055 (caa59abf2): a non-admin's git remote (clone, refresh, bundle sync, task-step fetch/push) is resolved by the egress guard before git starts and the checked address is pinned; admin remotes unchanged. The remaining check-to-spawn window is T585.
