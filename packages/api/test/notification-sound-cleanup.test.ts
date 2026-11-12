@@ -39,7 +39,13 @@ import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { logger } from '@haive/shared';
-import { userSettingsRoutes } from '../src/routes/user-settings.js';
+import {
+  MAX_SOUND_BYTES,
+  SOUND_ENVELOPE_BYTES,
+  soundUploadHandlers,
+  userSettingsRoutes,
+} from '../src/routes/user-settings.js';
+import { requireAuth } from '../src/middleware/auth.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
@@ -47,6 +53,10 @@ import type { AppEnv } from '../src/context.js';
 // or a file put there meanwhile. The write is failed at FileHandle.prototype.write by its bytes.
 
 const app = new Hono<AppEnv>();
+const CAP = 256;
+const ENVELOPE = 512;
+app.use('*', requireAuth);
+app.post('/notifications/sound', ...soundUploadHandlers(CAP, ENVELOPE));
 app.route('/', userSettingsRoutes);
 app.onError(errorHandler);
 
@@ -183,15 +193,17 @@ describe('POST /notifications/sound when the write fails', () => {
     return lstat(file);
   }
 
-  it('accepts the full 2 MiB file cap including multipart overhead', async () => {
-    const bytes = Buffer.alloc(2 * 1024 * 1024, 65);
+  it('accepts the full file cap including multipart overhead', async () => {
+    expect(MAX_SOUND_BYTES).toBe(2 * 1024 * 1024);
+    expect(SOUND_ENVELOPE_BYTES).toBe(64 * 1024);
+    const bytes = Buffer.alloc(CAP, 65);
     const result = await upload(bytes);
     expect(result.status).toBe(201);
     expect(await readFile(soundPath)).toEqual(bytes);
-  }, 30_000);
+  });
 
   it('still refuses a file one byte above the cap inside a bounded form', async () => {
-    expect((await upload(Buffer.alloc(2 * 1024 * 1024 + 1))).status).toBe(413);
+    expect((await upload(Buffer.alloc(CAP + 1))).status).toBe(413);
     expect(await staged()).toEqual([]);
     expect(fake.rows(schema.userNotificationSettings)).toEqual([]);
   });
@@ -211,7 +223,7 @@ describe('POST /notifications/sound when the write fails', () => {
                   '--sound-boundary\r\nContent-Disposition: form-data; name="sound"; filename="chime.mp3"\r\nContent-Type: audio/mpeg\r\n\r\n',
                 ),
               );
-            else if (pulled <= 100) controller.enqueue(new Uint8Array(64 * 1024));
+            else if (pulled <= 100) controller.enqueue(new Uint8Array(64));
             else {
               controller.enqueue(encoder.encode('\r\n--sound-boundary--\r\n'));
               controller.close();
