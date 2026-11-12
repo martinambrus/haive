@@ -972,7 +972,12 @@ and never replays it over a later change. A captured file that is absent stays p
 recreated: no retry limit drops it, and deleting the repository retires it with its outbox row.
 An absent captured file or directory stays pending without failing an otherwise completed re-sync
 (the restore answers applied, pending or failed, and only an applied capture is cleared); the first
-time a path is found absent the worker warns once, naming it. A recovery waits while another move scope owns
+time a path is found absent the worker warns once, naming it. A restore root that is not a directory
+(ENOTDIR on the checkout anchor) is a conflict, not an absence. A re-sync that does not complete warns
+once per repository and standing reason (phase, outcome and code; a thrown fault by its class and
+code, since its message varies), again when the reason changes, and again after that repository next
+re-syncs; the bound is 4096 entries. Refresh, 00a and plan Pull keep their outcome on an incomplete
+re-sync and leave it to the sweeps, whose marks the set-aside raised. A recovery waits while another move scope owns
 that checkout; the scope spans set-aside, move and recovery, holds no pooled connection, and is
 process-local, which relies on the one worker per install (see [Worker restarts](worker-restarts.md)). The
 put-back is the same steps in reverse under the same rules (the stored patch applied with `-R`), and

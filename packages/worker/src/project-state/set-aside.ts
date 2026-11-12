@@ -957,7 +957,7 @@ function warnResyncOnce(
   reasons: Record<string, unknown>[],
   context?: string,
 ): void {
-  const key = JSON.stringify([repositoryId, reasons]);
+  const key = JSON.stringify([repositoryId, reasons.map(standingReason)]);
   if (resyncWarnings.has(key)) return;
   if (resyncWarnings.size >= 4096) resyncWarnings.delete(resyncWarnings.values().next().value!);
   resyncWarnings.add(key);
@@ -965,6 +965,13 @@ function warnResyncOnce(
     { repositoryId, reasons, ...(context ? { context } : {}) },
     'projection re-sync incomplete; recovery will retry',
   );
+}
+// A thrown phase's message and stack can vary per attempt (pids, paths, durations), so a standing
+// fault keys on its phase and error class and code; the warn still logs the full reasons.
+function standingReason(entry: Record<string, unknown>): unknown {
+  const error = entry.error as { type?: unknown; code?: unknown } | undefined;
+  if (!error) return entry;
+  return { phase: entry.phase, type: error.type, code: error.code };
 }
 function rearmResyncWarnings(repositoryId: string): void {
   const prefix = `[${JSON.stringify(repositoryId)},`;

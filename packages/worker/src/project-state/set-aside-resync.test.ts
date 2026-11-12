@@ -173,6 +173,22 @@ it('warns for changed reasons and re-arms all reasons after success for that rep
   expect(warn).toHaveBeenCalledTimes(4);
 });
 
+it('keys a standing thrown fault on its class, not its varying message', async () => {
+  const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  let attempt = 0;
+  restoreFaults.beforeResync = (phase) => {
+    if (phase === 'state') throw new Error(`lock held by pid ${++attempt}`);
+  };
+  try {
+    for (let n = 0; n < 3; n++) {
+      expect(await resyncHaiveProjections(marksDb(), 'volatile-fault', '/repo')).toBe(false);
+    }
+  } finally {
+    delete restoreFaults.beforeResync;
+  }
+  expect(warn).toHaveBeenCalledTimes(1);
+});
+
 it('deduplicates admission failures independently per repository', async () => {
   calls.open = true;
   const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
