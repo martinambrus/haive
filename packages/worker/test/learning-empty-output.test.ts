@@ -122,6 +122,39 @@ describe('learning results with no entries', () => {
     expect(gate(raw)).toBe(false);
   });
 
+  it.each([
+    { entries: [{ title: 'Uncited', body: 'Be careful.' }] },
+    { entries: [{ title: 'Missing body' }] },
+    { entries: [{ body: 'src/a.ts:1' }] },
+    { entries: [{ op: 'delete' }] },
+    [{ title: 'Uncited', body: 'Be careful.' }],
+    '[{"title":"Uncited","body":"Be careful."}]',
+  ])('retries when every raw draft is rejected: %j', (raw) => {
+    expect(parseLearningOutput(raw)).toEqual([]);
+    expect(gate(raw)).toBe(true);
+  });
+
+  it('explains rejected drafts after retries while retaining sync proposals', () => {
+    const rejectedReply = JSON.stringify({
+      entries: [{ title: 'Uncited', body: 'Be careful.' }],
+      ...sync,
+    });
+    const form = phase8LearningStep.form!(context(), detected, rejectedReply)!;
+    expect(form.description).toContain('Drafted learnings did not meet the grounding bar');
+    expect(form.description).not.toContain('No learnings were drafted');
+    expect(form.fields.map((f) => f.id)).toEqual(['keepKbSync', 'keepSkillSync', 'instruction']);
+  });
+
+  it.each([emptyReply, '{"entries":[]}'])(
+    'offers continuation or a new draft without claiming empty drafts can be written',
+    (raw) => {
+      const form = phase8LearningStep.form!(context(), detected, raw)!;
+      expect(form.description).toContain('Submit to continue');
+      expect(form.description).not.toContain('Review the drafts below');
+      expect(form.description).not.toContain('submit to write them');
+    },
+  );
+
   it('shows sync proposals and an explicit no-learnings state in the form', () => {
     const form = phase8LearningStep.form!(context(), detected, emptyReply)!;
     expect(form.description).toContain('No learnings were drafted');

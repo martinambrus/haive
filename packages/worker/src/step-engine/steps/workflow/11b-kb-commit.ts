@@ -37,21 +37,23 @@ async function resolveWorkspace(ctx: StepContext): Promise<string> {
 
 interface LearningCommitOutput {
   written?: string[];
+  deleted?: string[];
   investigationWritten?: string | null;
   kbSync?: { changes?: unknown[] } | null;
   kbReverted?: boolean;
 }
 
-/** True when the learning phase left local learning, investigation or accepted
- *  KB-sync files to commit. A global promotion alone writes no local file. */
+/** True when the learning phase left local learning writes/deletions, investigation
+ *  or accepted KB-sync files to commit. A global promotion alone writes no local file. */
 export function hasKbToCommit(out: LearningCommitOutput | null): boolean {
   if (!out) return false;
   const wroteLearnings = Array.isArray(out.written) && out.written.length > 0;
+  const deletedLearnings = Array.isArray(out.deleted) && out.deleted.length > 0;
   const inv = out.investigationWritten;
   const wroteLocalInvestigation = typeof inv === 'string' && !inv.startsWith('global-kb:');
   const keptKbSync =
     out.kbReverted !== true && Array.isArray(out.kbSync?.changes) && out.kbSync.changes.length > 0;
-  return wroteLearnings || wroteLocalInvestigation || keptKbSync;
+  return wroteLearnings || deletedLearnings || wroteLocalInvestigation || keptKbSync;
 }
 
 export const kbCommitStep: StepDefinition<KbCommitDetect, KbCommitApply> = {

@@ -509,6 +509,16 @@ export function parseLearningOutput(raw: unknown): LearningEntry[] | null {
   return null;
 }
 
+// Keep the parser's [] contract while distinguishing a genuine empty list from
+// drafts that normaliseEntries rejected, for both the retry gate and form copy.
+function hasRawLearningEntries(raw: unknown): boolean {
+  const parsed = typeof raw === 'string' ? parseJsonLoose(raw) : raw;
+  if (Array.isArray(parsed)) return parsed.length > 0;
+  if (typeof parsed !== 'object' || parsed === null) return false;
+  const entries = (parsed as Record<string, unknown>).entries;
+  return Array.isArray(entries) && entries.length > 0;
+}
+
 function normaliseEntries(raw: unknown[]): LearningEntry[] {
   const out: LearningEntry[] = [];
   for (const item of raw) {
@@ -1340,12 +1350,13 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         : base;
     },
     retry: { maxAttempts: 3, retryOn: (e) => e instanceof RetryableParseError },
-    // Re-roll only on parse failure. An empty learning list is valid and can still
-    // carry KB-sync and skill-sync proposals for the reviewer.
+    // Re-roll parse failures and drafts rejected in full by the admission bar.
+    // A genuine empty list can still carry KB-sync and skill-sync proposals.
     shouldRetryPreForm: (raw) => {
       const nonEmpty = typeof raw === 'string' ? raw.trim() !== '' : raw != null;
       if (!nonEmpty) return false;
-      return parseLearningOutput(raw) === null;
+      const parsed = parseLearningOutput(raw);
+      return parsed === null || (parsed.length === 0 && hasRawLearningEntries(raw));
     },
   },
 
@@ -1449,7 +1460,11 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       description: [
         `Task: ${detected.taskTitle || '(untitled)'}`,
         `Verification: ${detected.verifyPassed ? 'passed' : 'did not pass'}${notRunSuffix(detected.verifyNotRun)}`,
-        parsed?.length === 0 ? 'No learnings were drafted for this task.' : '',
+        parsed?.length === 0
+          ? hasRawLearningEntries(llmOutput)
+            ? 'Drafted learnings did not meet the grounding bar.'
+            : 'No learnings were drafted for this task.'
+          : '',
         detected.isBugFix ? 'Bug fix — a knowledge-base investigation was drafted below.' : '',
         kbChanged
           ? 'Feature KB sync — the agent updated the knowledge base; review the changes below.'
@@ -1457,7 +1472,9 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         skillOps.length > 0
           ? 'Skill sync — the agent proposed skill changes for what this task built/changed/removed; review below.'
           : '',
-        'Review the drafts below. Edit any file inline in the changes view — what you leave there is what gets written, and emptying a file drops it. Leave the instruction box blank and submit to write them (untick anything to skip); or type an instruction to have the agent revise the drafts and show them again, which replaces your edits with its new draft.',
+        entries.length > 0
+          ? 'Review the drafts below. Edit any file inline in the changes view — what you leave there is what gets written, and emptying a file drops it. Leave the instruction box blank and submit to write them (untick anything to skip); or type an instruction to have the agent revise the drafts and show them again, which replaces your edits with its new draft.'
+          : 'Submit to continue, or enter an instruction to request a new draft.',
       ]
         .filter(Boolean)
         .join('\n'),

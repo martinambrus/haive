@@ -57,6 +57,13 @@ function applyArgs(
 }
 
 describe('11b hasKbToCommit (shouldRun gate)', () => {
+  it('commits deletion-only learning captures', () => {
+    expect(hasKbToCommit({ written: [], deleted: ['.haive-data/learnings/obsolete.md'] })).toBe(
+      true,
+    );
+    expect(hasKbToCommit({ written: [], deleted: [] })).toBe(false);
+  });
+
   it('commits accepted KB sync edits even when no learnings were written', () => {
     const output = {
       written: [],

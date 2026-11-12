@@ -97,11 +97,11 @@ describe('KB admission bar', () => {
       expect(entries![0]!.op).toBe('delete');
     });
 
-    it('accepts a parsed draft when the admission bar leaves no entries', () => {
-      // Dropping uncited entries is a valid empty result, not a parse failure.
+    it('re-rolls the draft when the bar leaves no entries', () => {
+      // Ask for a fresh, grounded draft rather than parking rejected drafts as empty.
       const gate = phase8LearningStep.llm!.shouldRetryPreForm!;
       expect(gate('```json\n{"entries":[{"id":"g","title":"G","body":"Be careful."}]}\n```')).toBe(
-        false,
+        true,
       );
     });
   });
