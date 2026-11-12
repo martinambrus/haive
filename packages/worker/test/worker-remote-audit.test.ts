@@ -436,7 +436,7 @@ describe('gate 4 preserves saved repository settings', () => {
     const result = await s.apply();
     expect(result).toMatchObject({
       pushed: false,
-      message: expect.stringContaining('Change remote on the [Repositories page](/repos)'),
+      message: expect.stringContaining('Change remote on the Repositories page (/repos)'),
     });
     expectNoPushOrWrite(s, before);
   });
@@ -448,7 +448,7 @@ describe('gate 4 preserves saved repository settings', () => {
     const result = await s.apply();
     expect(result).toMatchObject({
       pushed: false,
-      message: expect.stringContaining('Change remote on the [Repositories page](/repos)'),
+      message: expect.stringContaining('Change remote on the Repositories page (/repos)'),
     });
     expectNoPushOrWrite(s, before);
   });
@@ -494,7 +494,7 @@ describe('gate 4 preserves saved repository settings', () => {
       const before = { ...s.repo(), ...saved };
       expect(await s.apply()).toMatchObject({
         pushed: false,
-        message: expect.stringContaining('Change remote on the [Repositories page](/repos)'),
+        message: expect.stringContaining('Change remote on the Repositories page (/repos)'),
       });
       expectNoPushOrWrite(s, before);
     },
@@ -522,7 +522,7 @@ describe('gate 4 saved-value submissions', () => {
     const before = { ...s.repo() };
     expect(await s.apply(true)).toMatchObject({
       pushed: false,
-      message: expect.stringContaining('Change remote on the [Repositories page](/repos)'),
+      message: expect.stringContaining('Change remote on the Repositories page (/repos)'),
     });
     expect(s.repo()).toEqual(before);
     expect(s.audits()).toEqual([]);

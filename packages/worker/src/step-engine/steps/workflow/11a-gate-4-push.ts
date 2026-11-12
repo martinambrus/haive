@@ -554,7 +554,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
           remote: null,
           branch,
           message:
-            'Push skipped: use Change remote on the [Repositories page](/repos) to change the saved remote or credential, then retry this step.',
+            'Push skipped: use Change remote on the Repositories page (/repos) to change the saved remote or credential, then retry this step.',
         };
     } else if (!hasOrigin) {
       if (credentialId) await buildCredentialHelper(ctx.db, credentialId, ctx.userId, remoteUrl);
