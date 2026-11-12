@@ -29,6 +29,7 @@ async function persistPushOrigin(
   credentialId: string | undefined,
   addOrigin: boolean,
   detectedOriginUrl: string | null,
+  snapshotFallbacks: { remoteUrl: boolean; credentialId: boolean },
 ): Promise<boolean> {
   // The common, already-bound push needs no repository write or row lock.
   const readStored = (db: Pick<StepContext['db'], 'select'>) =>
@@ -86,9 +87,12 @@ async function persistPushOrigin(
         if (!stored) throw new Error('Repository no longer exists');
         // An existing binding makes this a one-off push. Only an empty row needs Retry repair.
         if (!addOrigin && stored.remoteUrl !== null) return true;
-        // Parked schemas and detect snapshots can predate a settings edit. Decide from
-        // the locked row before touching credentials, audit, git or either saved slot.
+        // Snapshot fallbacks mean use the saved value, never restore a cleared slot.
+        // Require it to still exist and match; a changed binding needs fresh approval.
+        // Decide under the lock before credentials, audit, git or either saved slot.
         if (
+          (snapshotFallbacks.remoteUrl && stored.remoteUrl === null) ||
+          (snapshotFallbacks.credentialId && stored.credentialsSecretId === null) ||
           (stored.remoteUrl !== null && stored.remoteUrl !== remoteUrl) ||
           (credentialId &&
             stored.credentialsSecretId !== null &&
@@ -539,6 +543,10 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
         credentialId,
         !hasOrigin,
         detected.originUrl,
+        {
+          remoteUrl: !hasOrigin && values.remoteUrl == null,
+          credentialId: values.credentialId == null && credentialId !== undefined,
+        },
       );
       if (!accepted)
         return {

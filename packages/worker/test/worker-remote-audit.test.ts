@@ -531,3 +531,64 @@ describe('gate 4 saved-value submissions', () => {
     expect(h.push).not.toHaveBeenCalled();
   });
 });
+
+describe('gate 4 snapshot fallbacks never refill cleared slots', () => {
+  it.each([
+    { field: 'remoteUrl', hasOrigin: false, clearAtLock: false },
+    { field: 'remoteUrl', hasOrigin: false, clearAtLock: true },
+    { field: 'credentialsSecretId', hasOrigin: false, clearAtLock: false },
+    { field: 'credentialsSecretId', hasOrigin: false, clearAtLock: true },
+    { field: 'credentialsSecretId', hasOrigin: true, clearAtLock: false },
+    { field: 'credentialsSecretId', hasOrigin: true, clearAtLock: true },
+  ] as const)(
+    'refuses snapshot $field cleared after detect (hasOrigin=$hasOrigin, clearAtLock=$clearAtLock)',
+    async ({ field, hasOrigin, clearAtLock }) => {
+      const clear = () => s.fake.patch(schema.repositories, REPO, { [field]: null });
+      const s = setup(hasOrigin ? null : URL, false, false, clearAtLock ? clear : undefined);
+      s.fake.patch(schema.repositories, REPO, { credentialsSecretId: CREDENTIAL });
+      if (hasOrigin) h.origin = URL;
+      if (!clearAtLock) clear();
+      const before = { ...s.repo(), [field]: null };
+      const detected = {
+        hasGit: true,
+        workspacePath: '/unused',
+        branch: 'main',
+        hasOrigin,
+        originUrl: h.origin,
+        recentCommits: '',
+        repositoryId: REPO,
+        savedRemoteUrl: hasOrigin ? null : URL,
+        boundCredentialId: CREDENTIAL,
+        credentials: [{ id: CREDENTIAL, label: 'Saved token', host: 'example.com' }],
+      };
+      const form = gate4PushStep.form!({} as StepContext, detected, undefined)!;
+      const submitted = validateFormValues(form, { push: true });
+      expect(submitted.success).toBe(true);
+      if (!submitted.success) throw new Error('Expected the note-only form to validate');
+      const result = await s.apply(hasOrigin, URL, CREDENTIAL, h.origin, {
+        formValues: submitted.data,
+        detected,
+      });
+      expect(result).toMatchObject({ pushed: false });
+      expect(s.repo()).toEqual(before);
+      expect(s.audits()).toEqual([]);
+      expect(h.ensure).not.toHaveBeenCalled();
+      expect(h.push).not.toHaveBeenCalled();
+      expect(h.credential).not.toHaveBeenCalled();
+      expect(h.trace).toContain('lock no key update');
+      expect(h.trace).not.toContain('row update');
+    },
+  );
+});
+
+it('still fills cleared slots with explicitly submitted values from an old parked form', async () => {
+  const s = setup();
+  const result = await s.apply(false, URL, CREDENTIAL, null, {
+    detected: { savedRemoteUrl: URL, boundCredentialId: CREDENTIAL },
+    formValues: { push: true, remoteUrl: URL, credentialId: CREDENTIAL },
+  });
+  expect(result.pushed).toBe(true);
+  expect(s.repo()).toMatchObject({ remoteUrl: URL, credentialsSecretId: CREDENTIAL });
+  expect(s.audits()).toHaveLength(1);
+  expect(h.push).toHaveBeenCalledOnce();
+});
