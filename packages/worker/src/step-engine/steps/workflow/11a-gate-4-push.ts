@@ -29,7 +29,7 @@ async function persistPushOrigin(
   credentialId: string | undefined,
   addOrigin: boolean,
   detectedOriginUrl: string | null,
-): Promise<void> {
+): Promise<boolean> {
   // The common, already-bound push needs no repository write or row lock.
   const readStored = (db: Pick<StepContext['db'], 'select'>) =>
     db
@@ -43,8 +43,9 @@ async function persistPushOrigin(
       );
   const [initial] = await readStored(ctx.db);
   if (!initial) throw new Error('Repository no longer exists');
-  if (!addOrigin && initial.remoteUrl !== null) return;
+  if (!addOrigin && initial.remoteUrl !== null) return true;
 
+  let accepted = true;
   let addedOrigin = false;
   let restoreFailure: Error | undefined;
   let event: AuditEvent | undefined;
@@ -71,7 +72,7 @@ async function persistPushOrigin(
     throw err;
   };
   try {
-    await ctx.db.transaction(async (tx) => {
+    accepted = await ctx.db.transaction(async (tx) => {
       let settle!: () => void;
       callbackSettled = new Promise<void>((resolve) => {
         settle = resolve;
@@ -84,7 +85,16 @@ async function persistPushOrigin(
         await tx.execute(sql.raw('SET LOCAL lock_timeout = DEFAULT'));
         if (!stored) throw new Error('Repository no longer exists');
         // An existing binding makes this a one-off push. Only an empty row needs Retry repair.
-        if (!addOrigin && stored.remoteUrl !== null) return;
+        if (!addOrigin && stored.remoteUrl !== null) return true;
+        // Parked schemas and detect snapshots can predate a settings edit. Decide from
+        // the locked row before touching credentials, audit, git or either saved slot.
+        if (
+          (stored.remoteUrl !== null && stored.remoteUrl !== remoteUrl) ||
+          (credentialId &&
+            stored.credentialsSecretId !== null &&
+            stored.credentialsSecretId !== credentialId)
+        )
+          return false;
         let approvedUrl = remoteUrl;
         if (!addOrigin) {
           const current = await boundedRemoteGit((signal) => getOriginUrl(workspace, { signal }));
@@ -144,6 +154,7 @@ async function persistPushOrigin(
           // Restore before a queued relink can acquire the repository row.
           await restore(err);
         }
+        return true;
       } finally {
         settle();
       }
@@ -159,6 +170,7 @@ async function persistPushOrigin(
     await restore(err);
   }
   if (event) logAuditEvent(event);
+  return accepted;
 }
 
 /** A remote edit must release the row promptly, including a child that ignores SIGTERM. */
@@ -190,6 +202,8 @@ interface PushGateDetect {
   recentCommits: string;
   repositoryId: string | null;
   boundCredentialId: string | null;
+  /** Optional for detection snapshots persisted before saved remotes were shown. */
+  savedRemoteUrl?: string | null;
   credentials: CredentialOption[];
   /** The branch 01 forked the worktree from; absent where 01 did not run or the output predates it. */
   baseBranch?: string | null;
@@ -231,7 +245,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
     const repo = repositoryId
       ? await ctx.db.query.repositories.findFirst({
           where: eq(schema.repositories.id, repositoryId),
-          columns: { credentialsSecretId: true },
+          columns: { credentialsSecretId: true, remoteUrl: true },
         })
       : null;
 
@@ -258,6 +272,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
         recentCommits: '(no git)',
         repositoryId,
         boundCredentialId: repo?.credentialsSecretId ?? null,
+        savedRemoteUrl: repo?.remoteUrl ?? null,
         credentials,
         baseBranch,
       };
@@ -304,6 +319,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
       recentCommits,
       repositoryId,
       boundCredentialId: repo?.credentialsSecretId ?? null,
+      savedRemoteUrl: repo?.remoteUrl ?? null,
       credentials,
       baseBranch,
     };
@@ -319,6 +335,8 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
       detected.credentials.some((c) => c.id === detected.boundCredentialId)
         ? detected.boundCredentialId
         : MANUAL_CREDENTIAL_VALUE;
+
+    const savedCredentialBody = `${credentialOptions.find((c) => c.value === detected.boundCredentialId)?.label ?? 'Repository credential'}\n\nChange the saved credential in Repository settings.`;
 
     const descriptionLines = [
       `Workspace: ${detected.workspacePath}`,
@@ -372,15 +390,22 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
             label: `Push ${detected.branch ?? 'HEAD'} to origin (${detected.originUrl ? redactGitUrl(detected.originUrl) : 'origin'})`,
             default: false,
           },
-          {
-            type: 'select',
-            id: 'credentialId',
-            label: 'Credential to push with',
-            description:
-              'Used for this push. If the repository has no remote saved yet, this push also saves its address and this credential on the repository. The token is never written to git config. Choose "manually" for SSH or public remotes.',
-            options: credentialOptions,
-            default: defaultCredential,
-          },
+          detected.savedRemoteUrl === null && detected.boundCredentialId != null
+            ? {
+                type: 'note',
+                id: 'credentialId',
+                label: 'Saved credential',
+                body: savedCredentialBody,
+              }
+            : {
+                type: 'select',
+                id: 'credentialId',
+                label: 'Credential to push with',
+                description:
+                  'Used for this push. If the repository has no remote saved yet, this push also saves its address and fills an empty credential slot. Change a saved remote or credential in Repository settings. The token is never written to git config. Choose "manually" for SSH or public remotes.',
+                options: credentialOptions,
+                default: defaultCredential,
+              },
           {
             type: 'checkbox',
             id: 'setUpstream',
@@ -408,28 +433,44 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
           label: 'Add origin and push',
           default: false,
         },
-        {
-          type: 'text',
-          id: 'remoteUrl',
-          label: 'Origin remote URL',
-          placeholder: 'https://github.com/owner/repo.git',
-          required: true,
-          // Required only once the user asks to push. Without this gate the form
-          // demanded a URL even to DECLINE the push — an input apply() explicitly
-          // handles (`if (!values.push) ... 'push skipped'`) — so a repo with no origin
-          // had no valid submission and the step failed the whole task.
-          visibleWhen: { field: 'push', equals: true },
-        },
-        {
-          type: 'select',
-          id: 'credentialId',
-          label: 'Credential to push with',
-          description:
-            'Used for this push. This push also saves the address above and this credential as the repository\'s remote and credential, replacing any saved ones, so later tasks use them too. The token is never written to git config. Choose "manually" for SSH or public remotes.',
-          options: credentialOptions,
-          default: defaultCredential,
-          visibleWhen: { field: 'push', equals: true },
-        },
+        detected.savedRemoteUrl != null
+          ? {
+              type: 'note',
+              id: 'remoteUrl',
+              label: 'Saved origin remote URL',
+              body: `${redactGitUrl(detected.savedRemoteUrl)}\n\nChange the saved remote in Repository settings.`,
+              visibleWhen: { field: 'push', equals: true },
+            }
+          : {
+              type: 'text',
+              id: 'remoteUrl',
+              label: 'Origin remote URL',
+              placeholder: 'https://github.com/owner/repo.git',
+              required: true,
+              // Required only once the user asks to push. Without this gate the form
+              // demanded a URL even to DECLINE the push — an input apply() explicitly
+              // handles (`if (!values.push) ... 'push skipped'`) — so a repo with no origin
+              // had no valid submission and the step failed the whole task.
+              visibleWhen: { field: 'push', equals: true },
+            },
+        detected.boundCredentialId != null
+          ? {
+              type: 'note',
+              id: 'credentialId',
+              label: 'Saved credential',
+              body: savedCredentialBody,
+              visibleWhen: { field: 'push', equals: true },
+            }
+          : {
+              type: 'select',
+              id: 'credentialId',
+              label: 'Credential to push with',
+              description:
+                'Used for this push. This push also saves the address above and this credential in empty repository settings, so later tasks use them too. Change a saved remote or credential in Repository settings. The token is never written to git config. Choose "manually" for SSH or public remotes.',
+              options: credentialOptions,
+              default: defaultCredential,
+              visibleWhen: { field: 'push', equals: true },
+            },
       ],
       submitLabel: 'Add origin & push',
     };
@@ -476,7 +517,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
     const hasOrigin = originUrl !== null;
     let remoteUrl = originUrl;
     if (!hasOrigin) {
-      const suppliedUrl = (values.remoteUrl ?? '').trim();
+      const suppliedUrl = (values.remoteUrl ?? detected.savedRemoteUrl ?? '').trim();
       if (!suppliedUrl) {
         throw new Error('origin remote URL is required to push');
       }
@@ -484,19 +525,31 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
       if (!parsed.success) throw new Error(parsed.error.issues[0]!.message);
       remoteUrl = parsed.data;
     }
+    const credentialId =
+      values.credentialId ??
+      (!hasOrigin || detected.savedRemoteUrl === null
+        ? (detected.boundCredentialId ?? undefined)
+        : undefined);
     if (detected.repositoryId) {
-      await persistPushOrigin(
+      const accepted = await persistPushOrigin(
         ctx,
         detected.repositoryId,
         workspace,
         remoteUrl!,
-        values.credentialId,
+        credentialId,
         !hasOrigin,
         detected.originUrl,
       );
+      if (!accepted)
+        return {
+          pushed: false,
+          remote: null,
+          branch,
+          message:
+            'Push skipped: change the saved remote or credential in Repository settings, then retry this step.',
+        };
     } else if (!hasOrigin) {
-      if (values.credentialId)
-        await buildCredentialHelper(ctx.db, values.credentialId, ctx.userId, remoteUrl);
+      if (credentialId) await buildCredentialHelper(ctx.db, credentialId, ctx.userId, remoteUrl);
       await ensureOrigin(workspace, remoteUrl!);
     }
 
@@ -511,8 +564,8 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
         cwd: workspace,
         branch,
         setUpstream,
-        credentialId: values.credentialId || undefined,
-        remoteUrl: values.credentialId ? await taskRemoteUrl(ctx) : null,
+        credentialId: credentialId || undefined,
+        remoteUrl: credentialId ? await taskRemoteUrl(ctx) : null,
         db: ctx.db,
         userId: ctx.userId,
       });

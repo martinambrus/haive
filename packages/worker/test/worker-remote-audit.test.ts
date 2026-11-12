@@ -2,7 +2,7 @@ import { safeErrorMessage } from '@haive/shared/logger';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb, type FakeDbHandle } from '@haive/database/testing';
-import { logger } from '@haive/shared';
+import { logger, validateFormValues } from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { gate4PushStep } from '../src/step-engine/steps/workflow/11a-gate-4-push.js';
 
@@ -49,6 +49,7 @@ function setup(
   remoteUrl: string | null = null,
   dropDuringGit = false,
   failRowLock: boolean | Error = false,
+  beforeRowLock?: () => void,
 ) {
   let rejectTransaction: (err: Error) => void = () => {};
   const connectionFailure = dropDuringGit
@@ -75,6 +76,7 @@ function setup(
                 const take = query.for.bind(query);
                 query.for = ((strength: Parameters<typeof take>[0]) => {
                   h.trace.push('lock ' + strength);
+                  beforeRowLock?.();
                   if (failRowLock)
                     throw failRowLock instanceof Error
                       ? failRowLock
@@ -117,6 +119,10 @@ function setup(
     remote = URL,
     credentialId = CREDENTIAL,
     detectedOrigin = h.origin,
+    overrides: {
+      formValues?: Record<string, unknown>;
+      detected?: Partial<Parameters<typeof gate4PushStep.apply>[1]['detected']>;
+    } = {},
   ) =>
     gate4PushStep.apply(
       {
@@ -137,8 +143,9 @@ function setup(
           repositoryId: REPO,
           boundCredentialId: null,
           credentials: [],
+          ...overrides.detected,
         },
-        formValues: { push: true, remoteUrl: remote, credentialId },
+        formValues: overrides.formValues ?? { push: true, remoteUrl: remote, credentialId },
       },
     );
   return {
@@ -408,5 +415,119 @@ describe('Fix-1 approval and lock controls', () => {
       credentialsChanged: true,
       branchChanged: false,
     });
+  });
+});
+
+describe('gate 4 preserves saved repository settings', () => {
+  function expectNoPushOrWrite(s: ReturnType<typeof setup>, before: unknown) {
+    expect(s.repo()).toEqual(before);
+    expect(s.audits()).toEqual([]);
+    expect(h.origin).toBeNull();
+    expect(h.ensure).not.toHaveBeenCalled();
+    expect(h.push).not.toHaveBeenCalled();
+    expect(h.credential).not.toHaveBeenCalled();
+    expect(h.trace).not.toContain('row update');
+    expect(h.trace).toContain('lock no key update');
+  }
+
+  it('refuses a typed URL over a saved remote without changing git or repository state', async () => {
+    const s = setup('https://saved.example/repo.git');
+    const before = { ...s.repo() };
+    const result = await s.apply();
+    expect(result).toMatchObject({
+      pushed: false,
+      message: expect.stringMatching(/repository settings/i),
+    });
+    expectNoPushOrWrite(s, before);
+  });
+
+  it('refuses a chosen credential over a saved credential, including when the remote slot is empty', async () => {
+    const s = setup();
+    s.fake.patch(schema.repositories, REPO, { credentialsSecretId: 'saved-credential' });
+    const before = { ...s.repo() };
+    const result = await s.apply();
+    expect(result).toMatchObject({
+      pushed: false,
+      message: expect.stringMatching(/repository settings/i),
+    });
+    expectNoPushOrWrite(s, before);
+  });
+
+  it.each(['remoteUrl', 'credentialsSecretId'] as const)(
+    'fills only the empty %s slot when the other saved value matches',
+    async (emptySlot) => {
+      const s = setup(emptySlot === 'remoteUrl' ? null : URL);
+      if (emptySlot === 'remoteUrl')
+        s.fake.patch(schema.repositories, REPO, { credentialsSecretId: CREDENTIAL });
+      expect(await s.apply()).toMatchObject({ pushed: true });
+      expect(s.repo()).toMatchObject({ remoteUrl: URL, credentialsSecretId: CREDENTIAL });
+      expect(s.audits()).toHaveLength(1);
+      expect(s.audits()[0]?.metadata).toMatchObject({ fields: [emptySlot] });
+      expect(h.push).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(['remoteUrl', 'credentialsSecretId'] as const)(
+    'rejects a replacement accepted by an old parked form when %s changes after the initial read',
+    async (field) => {
+      const legacySchema = {
+        title: 'Gate 4: Push',
+        fields: [
+          { type: 'checkbox' as const, id: 'push', label: 'Push' },
+          { type: 'text' as const, id: 'remoteUrl', label: 'Remote URL', required: true },
+          {
+            type: 'select' as const,
+            id: 'credentialId',
+            label: 'Credential',
+            options: [{ value: CREDENTIAL, label: 'Chosen' }],
+          },
+        ],
+      };
+      expect(
+        validateFormValues(legacySchema, { push: true, remoteUrl: URL, credentialId: CREDENTIAL })
+          .success,
+      ).toBe(true);
+      const saved = {
+        [field]: field === 'remoteUrl' ? 'https://saved.example/repo.git' : 'saved-credential',
+      };
+      const s = setup(null, false, false, () => s.fake.patch(schema.repositories, REPO, saved));
+      const before = { ...s.repo(), ...saved };
+      expect(await s.apply()).toMatchObject({
+        pushed: false,
+        message: expect.stringMatching(/repository settings/i),
+      });
+      expectNoPushOrWrite(s, before);
+    },
+  );
+});
+
+describe('gate 4 saved-value submissions', () => {
+  it('uses the saved values displayed as notes when the form submits only push', async () => {
+    const s = setup(URL);
+    s.fake.patch(schema.repositories, REPO, { credentialsSecretId: CREDENTIAL });
+    const result = await s.apply(false, URL, CREDENTIAL, null, {
+      formValues: { push: true },
+      detected: { savedRemoteUrl: URL, boundCredentialId: CREDENTIAL },
+    });
+    expect(result.pushed).toBe(true);
+    expect(h.origin).toBe(URL);
+    expect(h.push).toHaveBeenCalledWith(expect.objectContaining({ credentialId: CREDENTIAL }));
+    expect(s.audits()).toEqual([]);
+  });
+
+  it('does not replace a saved credential while repairing an empty remote slot with an existing origin', async () => {
+    const s = setup();
+    s.fake.patch(schema.repositories, REPO, { credentialsSecretId: 'saved-credential' });
+    h.origin = URL;
+    const before = { ...s.repo() };
+    expect(await s.apply(true)).toMatchObject({
+      pushed: false,
+      message: expect.stringMatching(/repository settings/i),
+    });
+    expect(s.repo()).toEqual(before);
+    expect(s.audits()).toEqual([]);
+    expect(h.ensure).not.toHaveBeenCalled();
+    expect(h.credential).not.toHaveBeenCalled();
+    expect(h.push).not.toHaveBeenCalled();
   });
 });
