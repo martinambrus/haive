@@ -13,7 +13,8 @@ import {
 } from '@haive/shared';
 import { ideTarget, targetBelongsToUser, ensureIde, type IdeTarget } from '../lib/ide-target.js';
 import { editorBootstrap } from '../lib/editor-bootstrap.js';
-import { grantEditor } from '../lib/editor-grants.js';
+import { bodyLimit } from 'hono/body-limit';
+import { grantEditor, redeemEditor } from '../lib/editor-grants.js';
 import { getPatientRedis } from '../redis.js';
 import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
 import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
@@ -97,6 +98,7 @@ function upstreamRequestHeaders(source: Headers): Headers {
 
 export const ideRoutes = new Hono<AppEnv>();
 ideRoutes.get('/_handshake', editorBootstrap);
+ideRoutes.post('/_handshake', bodyLimit({ maxSize: 1024 }), redeemEditor);
 ideRoutes.use('*', requireAuth);
 
 // Starting an editor is an explicit POST. Loading its HTML/assets only proxies an existing one.

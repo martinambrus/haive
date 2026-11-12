@@ -45,6 +45,7 @@ const { installModules } = await import('../src/modules/loader.js');
 const { getDb } = await import('../src/db.js');
 
 const PUBLIC: Record<string, string> = {
+  'POST /ide/_handshake': 'redeems a single-use editor grant; it does not use the app session',
   'GET /ide/_handshake': 'static fragment bootstrap; it carries no app-session authority',
   'GET /health': 'liveness probe; the container health check carries no credential',
   'GET /version': 'an upgrade verifies the containers it swapped in before any credential exists',
@@ -113,6 +114,9 @@ function judge(rows: Row[]) {
     answeredAnonymously: rows.filter((r) => !guarded(r) && !(r.key in PUBLIC)).map(show),
     staleAllowlistEntries: Object.keys(PUBLIC).filter((key) => {
       const row = rows.find((r) => r.key === key);
+      // A public token redeemer refuses an absent grant with 403 by design.
+      if (key === 'POST /ide/_handshake')
+        return row === undefined || row.noRoute || row.status !== 403;
       return row === undefined || guarded(row);
     }),
   };

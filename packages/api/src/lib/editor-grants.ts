@@ -1,3 +1,12 @@
+import { z } from 'zod';
+import {
+  editorTargetSchema,
+  editorClaimsMatch,
+  requireEditorUser,
+  signEditorSession,
+  setEditorCookie,
+  type EditorSessionPayload,
+} from '../auth/editor-session.js';
 import { createHash, randomBytes } from 'node:crypto';
 import type { Context } from 'hono';
 import { CONFIG_KEYS, configService } from '@haive/shared';
@@ -61,4 +70,54 @@ export async function grantEditor(c: Context<AppEnv>, repository = false): Promi
   };
   await getRedis().set(editorGrantKey(secret), JSON.stringify(grant), 'PX', 60_000);
   return c.json({ url: `${origin}/ide/_handshake#${secret}` });
+}
+
+const grantSchema = z.object({
+  userId: z.string().refine(isCanonicalUuid),
+  tokenVersion: z.number().int().nonnegative(),
+  target: editorTargetSchema,
+  runtimeSessionId: z.string(),
+  editorOrigin: z.string(),
+});
+
+export async function redeemEditor(c: Context<AppEnv>): Promise<Response> {
+  c.header('Cache-Control', 'no-store');
+  const refused = () =>
+    new HttpError(403, 'Invalid or expired editor grant', 'invalid_editor_grant');
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    throw refused();
+  }
+  const secret = z.object({ secret: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }).safeParse(body);
+  if (!secret.success) throw refused();
+  // GETDEL is the only take: two concurrent redemptions cannot both obtain the grant.
+  const raw = await getRedis().getdel(editorGrantKey(secret.data.secret));
+  if (!raw) throw refused();
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw refused();
+  }
+  const grant = grantSchema.safeParse(value);
+  if (!grant.success) throw refused();
+  const g = grant.data;
+  const payload: EditorSessionPayload = {
+    sub: g.userId,
+    tv: g.tokenVersion,
+    target: g.target,
+    runtimeSessionId: g.runtimeSessionId,
+    editorOrigin: g.editorOrigin,
+  };
+  if (!editorClaimsMatch(payload, g.target)) throw refused();
+  const origin = c.req.header('origin');
+  if (origin !== undefined && origin !== g.editorOrigin) throw refused();
+  await requireEditorUser(g.userId, g.tokenVersion);
+  const target = ideTarget(g.target.id, g.userId, g.target.kind === 'repo');
+  if (!(await targetBelongsToUser(target))) throw refused();
+  const token = await signEditorSession(payload);
+  setEditorCookie(c, payload, token);
+  return c.json({ next: `${target.prefix}/` });
 }

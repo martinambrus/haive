@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { secretsService } from '@haive/shared';
-import { signAccessToken } from '../src/auth/jwt.js';
+import { requireAuth } from '../src/middleware/auth.js';
+import { verifyAccessToken, signAccessToken } from '../src/auth/jwt.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
@@ -29,6 +30,12 @@ vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
   configService: { getBoolean: async () => h.enabled },
 }));
+import {
+  editorCookieName,
+  verifyEditorSession,
+  signEditorSession,
+  type EditorSessionPayload,
+} from '../src/auth/editor-session.js';
 import { ideRoutes, taskIdeAccessRoutes, repoIdeAccessRoutes } from '../src/routes/ide.js';
 
 const USER = '00000000-0000-4000-8000-000000000001';
@@ -43,6 +50,7 @@ app.onError(errorHandler);
 app.route('/tasks', taskIdeAccessRoutes);
 app.route('/repos', repoIdeAccessRoutes);
 app.route('/ide', ideRoutes);
+app.get('/app', requireAuth, (c) => c.text('app'));
 
 beforeEach(async () => {
   vi.stubEnv('HAIVE_EDITOR_ORIGIN', 'https://ide.example.com');
@@ -163,5 +171,139 @@ describe('editor bootstrap', () => {
     expect(script.indexOf('history.replaceState')).toBeLessThan(script.indexOf('await fetch'));
     expect(h.ensure).not.toHaveBeenCalled();
     expect(h.set).not.toHaveBeenCalled();
+  });
+});
+
+async function mint(kind = 'tasks'): Promise<string> {
+  const res = await grant(kind);
+  expect(res.status).toBe(200);
+  return new URL((await res.json()).url).hash.slice(1);
+}
+function redeem(secret: string, origin = 'https://ide.example.com') {
+  return app.request('/ide/_handshake', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin, host: 'api:3001' },
+    body: JSON.stringify({ secret }),
+  });
+}
+function rewriteGrant(change: (g: Record<string, any>) => void) {
+  const row = [...h.store.values()][0]!;
+  const g = JSON.parse(row.value);
+  change(g);
+  row.value = JSON.stringify(g);
+}
+async function issued(kind = 'tasks') {
+  const res = await redeem(await mint(kind));
+  expect(res.status).toBe(200);
+  return { res, cookie: res.headers.getSetCookie()[0]!.split(';')[0]! };
+}
+
+describe('editor grant redemption', () => {
+  it('takes a grant exactly once under concurrent redemption', async () => {
+    const secret = await mint();
+    const responses = await Promise.all([redeem(secret), redeem(secret)]);
+    expect(responses.map((r) => r.status).sort()).toEqual([200, 403]);
+    expect(responses.flatMap((r) => r.headers.getSetCookie())).toHaveLength(1);
+    for (const res of responses) expect(res.headers.get('cache-control')).toBe('no-store');
+    expect((await redeem(secret)).status).toBe(403);
+  });
+  it('refuses missing, unknown and expired grants without a 401 or cookie', async () => {
+    for (const body of [{}, { secret: 'A'.repeat(43) }]) {
+      const res = await app.request('/ide/_handshake', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(403);
+      expect(res.headers.getSetCookie()).toEqual([]);
+    }
+    vi.useFakeTimers();
+    const secret = await mint();
+    vi.advanceTimersByTime(60000);
+    expect((await redeem(secret)).status).toBe(403);
+  });
+  it.each([
+    'version',
+    'deactivated',
+    'flagged',
+    'missing-user',
+    'ownership',
+    'runtime',
+    'target',
+    'origin',
+    'user',
+    'request-origin',
+  ])('refuses a changed %s', async (change) => {
+    const secret = await mint();
+    if (change === 'version') fake.patch(schema.users, USER, { tokenVersion: 1 });
+    if (change === 'deactivated') fake.patch(schema.users, USER, { status: 'deactivated' });
+    if (change === 'flagged') fake.patch(schema.users, USER, { mustChangePassword: true });
+    if (change === 'missing-user')
+      await fake.db.delete(schema.users).where(eq(schema.users.id, USER));
+    if (change === 'ownership') fake.patch(schema.tasks, ID, { userId: OTHER });
+    if (change === 'runtime')
+      rewriteGrant((g) => {
+        g.runtimeSessionId = MISSING;
+      });
+    if (change === 'target')
+      rewriteGrant((g) => {
+        g.target.kind = 'repo';
+      });
+    if (change === 'origin')
+      rewriteGrant((g) => {
+        g.editorOrigin = 'https://other.example.com';
+      });
+    if (change === 'user')
+      rewriteGrant((g) => {
+        g.userId = OTHER;
+      });
+    const res = await redeem(
+      secret,
+      change === 'request-origin' ? 'https://evil.example.com' : undefined,
+    );
+    expect(res.status).toBe(403);
+    expect(res.headers.getSetCookie()).toEqual([]);
+  });
+  it.each(['tasks', 'repos'])(
+    'issues the exact scoped HTTPS cookie and next path (%s)',
+    async (kind) => {
+      const { res, cookie } = await issued(kind);
+      const path = kind === 'repos' ? `/ide/repos/${ID}/` : `/ide/${ID}/`;
+      expect(await res.json()).toEqual({ next: path });
+      const header = res.headers.getSetCookie()[0]!;
+      for (const attr of [
+        `Path=${path}`,
+        'HttpOnly',
+        'Secure',
+        'SameSite=None',
+        'Partitioned',
+        'Max-Age=28800',
+      ])
+        expect(header).toContain(attr);
+      expect(header).not.toContain('Domain=');
+      const payload = await verifyEditorSession(cookie.slice(cookie.indexOf('=') + 1));
+      expect(payload).toMatchObject({
+        sub: USER,
+        tv: 0,
+        target: { kind: kind === 'repos' ? 'repo' : 'task', id: ID },
+      });
+    },
+  );
+  it('uses a host-only Lax cookie on HTTP', async () => {
+    vi.stubEnv('HAIVE_EDITOR_ORIGIN', 'http://localhost:3001');
+    const res = await redeem(await mint(), 'http://localhost:3001');
+    expect(res.status).toBe(200);
+    const header = res.headers.getSetCookie()[0]!;
+    expect(header).toContain('SameSite=Lax');
+    for (const attr of ['Secure', 'Partitioned', 'Domain=']) expect(header).not.toContain(attr);
+  });
+  it('cryptographically separates editor tokens from app access tokens in both directions', async () => {
+    const { cookie: editor } = await issued();
+    const editorToken = editor.slice(editor.indexOf('=') + 1);
+    await expect(verifyAccessToken(editorToken)).rejects.toThrow();
+    await expect(verifyEditorSession(cookie.slice('haive_access='.length))).rejects.toThrow();
+    expect(
+      (await app.request('/app', { headers: { cookie: `haive_access=${editorToken}` } })).status,
+    ).toBe(401);
   });
 });
