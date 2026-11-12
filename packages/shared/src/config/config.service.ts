@@ -1,5 +1,10 @@
 import { Redis, ReplyError } from 'ioredis';
-import { randomBytes } from 'node:crypto';
+import {
+  generateBootEncryptionKey,
+  PENDING_ENCRYPTION_KEY,
+  PENDING_ENCRYPTION_KEY_WAIT_MS,
+  type EncryptionKeyBootDatabase,
+} from './encryption-key-boot.js';
 import { createRedisConnection, type RedisFactoryOptions } from '../utils/redis-factory.js';
 import { ConfigUnavailableError } from './config-unavailable.js';
 import { logger } from '../logger/index.js';
@@ -798,7 +803,12 @@ export class ConfigService {
   // Bounds a Redis that stays LOADING: ioredis then neither becomes ready nor emits an error.
   private static READY_TIMEOUT_MS = 10_000;
 
-  async initialize(redisUrl?: string): Promise<void> {
+  constructor(private readonly pendingEncryptionKeyWaitMs = PENDING_ENCRYPTION_KEY_WAIT_MS) {}
+
+  async initialize(
+    redisUrl?: string,
+    db?: EncryptionKeyBootDatabase | (() => EncryptionKeyBootDatabase),
+  ): Promise<void> {
     if (this.initialized) return;
 
     const url = redisUrl ?? process.env.REDIS_URL;
@@ -824,7 +834,7 @@ export class ConfigService {
       await this.seedDefaults();
       await this.reconcileRaisedDefaults();
       await this.removeRetiredKeys();
-      await this.ensureEncryptionKey();
+      await this.ensureEncryptionKey(db);
     } catch (err) {
       // Otherwise the failed client reconnects forever.
       redis.disconnect();
@@ -942,21 +952,72 @@ export class ConfigService {
     }
   }
 
-  private async ensureEncryptionKey(): Promise<void> {
+  private async ensureEncryptionKey(
+    db?: EncryptionKeyBootDatabase | (() => EncryptionKeyBootDatabase),
+  ): Promise<void> {
     const exists = await this.redisCall('ensureEncryptionKey', (redis) =>
       redis.exists(CONFIG_KEYS.ENCRYPTION_KEY),
     );
-    const envKey = this.getEnvEncryptionKey();
+    const { key: envKey, invalid: envKeyInvalid } = this.getEnvEncryptionKey();
 
     if (!exists) {
-      const seeded = await this.redisCall('ensureEncryptionKey', (redis) =>
-        redis.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey ?? randomBytes(32).toString('hex'), 'NX'),
-      );
-      if (seeded === 'OK') {
-        if (envKey) logger.info('Seeded encryption key from CONFIG_ENCRYPTION_KEY');
-        else logger.warn('Generated new encryption key (CONFIG_ENCRYPTION_KEY not set)');
+      if (envKey) {
+        const seeded = await this.seedEnvEncryptionKey(envKey, 'ensureEncryptionKey');
+        logger.info(
+          seeded
+            ? 'Seeded encryption key from CONFIG_ENCRYPTION_KEY'
+            : 'Found encryption key seeded by another process',
+        );
       } else {
-        logger.info('Found encryption key seeded by another process');
+        await generateBootEncryptionKey(
+          typeof db === 'function' ? db() : db,
+          {
+            getKey: () =>
+              this.redisCall('ensureEncryptionKey', (redis) =>
+                redis.get(CONFIG_KEYS.ENCRYPTION_KEY),
+              ),
+            getPending: () =>
+              this.redisCall('ensureEncryptionKey', (redis) => redis.get(PENDING_ENCRYPTION_KEY)),
+            reservePending: async (value) => {
+              await this.redisCall('ensureEncryptionKey', (redis) =>
+                redis.eval(
+                  `if redis.call('exists', KEYS[1]) == 0 then
+                   return redis.call('set', KEYS[2], ARGV[1], 'NX')
+                 end
+                 return false`,
+                  2,
+                  CONFIG_KEYS.ENCRYPTION_KEY,
+                  PENDING_ENCRYPTION_KEY,
+                  value,
+                ),
+              );
+            },
+            publishPending: async (value) => {
+              const published = await this.redisCall('ensureEncryptionKey', (redis) =>
+                redis.eval(
+                  `
+              local published = 0
+              if redis.call('exists', KEYS[1]) == 0 then
+                if redis.call('get', KEYS[2]) ~= ARGV[1] then
+                  return redis.error_reply('pending encryption key changed')
+                end
+                redis.call('set', KEYS[1], cjson.decode(ARGV[1]).key)
+                published = 1
+              end
+              if redis.call('get', KEYS[2]) == ARGV[1] then redis.call('del', KEYS[2]) end
+              return published
+            `,
+                  2,
+                  CONFIG_KEYS.ENCRYPTION_KEY,
+                  PENDING_ENCRYPTION_KEY,
+                  value,
+                ),
+              );
+              return published === 1;
+            },
+          },
+          envKeyInvalid,
+        );
       }
     } else {
       logger.info('Found existing encryption key');
@@ -970,6 +1031,49 @@ export class ConfigService {
       value: stored,
       expiresAt: Date.now() + ConfigService.LOCAL_CACHE_TTL_MS,
     });
+  }
+
+  /** The env seed and the pending reservation serialize in Redis. Once a pending exists,
+   * no env-key writer can bypass its audited commit and publication, including fallback reads. */
+  private async seedEnvEncryptionKey(envKey: string, operation: string): Promise<boolean> {
+    const seeded = await this.redisCall(operation, (redis) =>
+      redis.eval(
+        `-- Seed environment key
+         if redis.call('exists', KEYS[1]) == 1 then return 0 end
+         local pending = redis.call('get', KEYS[2])
+         if pending then
+           local readable, candidate = pcall(cjson.decode, pending)
+           if not readable or type(candidate) ~= 'table'
+              or type(candidate.reservedAt) ~= 'number' then return -2 end
+           local reservedAt = candidate.reservedAt
+           local now = tonumber(ARGV[2])
+           if reservedAt ~= reservedAt or reservedAt < 0 or reservedAt > now
+              or now - reservedAt >= tonumber(ARGV[3]) then return -2 end
+           return -1
+         end
+         redis.call('set', KEYS[1], ARGV[1])
+         return 1`,
+        2,
+        CONFIG_KEYS.ENCRYPTION_KEY,
+        PENDING_ENCRYPTION_KEY,
+        envKey,
+        // Both reservation and age use Unix milliseconds from Date.now(). Passing now keeps
+        // the age decision in this atomic script without another Redis round trip.
+        Date.now(),
+        this.pendingEncryptionKeyWaitMs,
+      ),
+    );
+    if (seeded === -1) {
+      throw new ConfigUnavailableError(operation, {
+        cause: new Error('A secret discard is in progress; waiting for encryption key publication'),
+      });
+    }
+    if (seeded === -2) {
+      throw new Error(
+        `An interrupted secret discard is recorded in Redis key ${PENDING_ENCRYPTION_KEY}. To finish the discard, restart without CONFIG_ENCRYPTION_KEY and with HAIVE_DISCARD_UNREADABLE_SECRETS=1. To keep the secrets, check audit_events for action 'config.discard_unreadable_secrets' with id equal to the pending JSON's id; if that discard did not commit, delete Redis key ${PENDING_ENCRYPTION_KEY} and restart.`,
+      );
+    }
+    return seeded === 1;
   }
 
   private checkEncryptionKey(stored: string, envKey: string | null): void {
@@ -1104,11 +1208,9 @@ export class ConfigService {
   async getEncryptionKey(): Promise<string> {
     const key = await this.get(CONFIG_KEYS.ENCRYPTION_KEY);
     if (!key) {
-      const envKey = this.getEnvEncryptionKey();
+      const { key: envKey } = this.getEnvEncryptionKey();
       if (envKey) {
-        await this.redisCall('getEncryptionKey', (redis) =>
-          redis.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey, 'NX'),
-        );
+        await this.seedEnvEncryptionKey(envKey, 'getEncryptionKey');
         const stored = await this.redisCall('getEncryptionKey', (redis) =>
           redis.get(CONFIG_KEYS.ENCRYPTION_KEY),
         );
@@ -1125,7 +1227,7 @@ export class ConfigService {
     // Production refuses a mismatch on every read, not only while a cached null lasts; elsewhere
     // the boot check already warned once.
     if (process.env.NODE_ENV === 'production')
-      this.checkEncryptionKey(key, this.getEnvEncryptionKey(false));
+      this.checkEncryptionKey(key, this.getEnvEncryptionKey(false).key);
     return key;
   }
 
@@ -1159,22 +1261,22 @@ export class ConfigService {
   }
 
   /** `warn` false on a per-read path: an invalid value is reported at boot, not on every request. */
-  private getEnvEncryptionKey(warn = true): string | null {
+  private getEnvEncryptionKey(warn = true): { key: string | null; invalid: boolean } {
     const raw = process.env.CONFIG_ENCRYPTION_KEY?.trim();
-    if (!raw) return null;
+    if (!raw) return { key: null, invalid: false };
     if (/^[0-9a-fA-F]{64}$/.test(raw)) {
-      return raw.toLowerCase();
+      return { key: raw.toLowerCase(), invalid: false };
     }
     try {
       const decoded = Buffer.from(raw, 'base64');
       if (decoded.length === 32) {
-        return decoded.toString('hex');
+        return { key: decoded.toString('hex'), invalid: false };
       }
     } catch {
       // Ignore invalid base64
     }
     if (warn) logger.warn('CONFIG_ENCRYPTION_KEY must be 64 hex chars or base64-encoded 32 bytes');
-    return null;
+    return { key: null, invalid: true };
   }
 
   private ensureInitialized(): void {

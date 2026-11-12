@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
-  sql: Object.assign(vi.fn(), { end: vi.fn() }),
+  sql: Object.assign(vi.fn(), { end: vi.fn(), options: { parsers: {}, serializers: {} } }),
   initialize: vi.fn(),
 }));
-vi.mock('postgres', () => ({ default: () => h.sql }));
+vi.mock('postgres', () => ({ default: vi.fn(() => h.sql) }));
+import postgres from 'postgres';
 vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
   configService: { initialize: h.initialize },
@@ -48,6 +49,9 @@ const settings: images.ImageSettings = {
 };
 let argv: string[];
 beforeEach(() => {
+  vi.mocked(postgres)
+    .mockReset()
+    .mockReturnValue(h.sql as never);
   argv = process.argv;
   process.argv = [
     'node',
@@ -98,6 +102,52 @@ afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
 });
+it.each([false, true])(
+  'isolates boot codecs from the journal client and closes boot on failure=%s',
+  async (fail) => {
+    // Real driver codecs, without a connection: Drizzle mutates these when adapting a client.
+    const { default: rawPostgres } = await vi.importActual<{ default: typeof postgres }>(
+      'postgres',
+    );
+    const journalSql = rawPostgres('postgres://isolated', { max: 1, max_lifetime: 0 });
+    const bootSql = rawPostgres('postgres://isolated', { max: 1, max_lifetime: 0 });
+    const jsonSerializer = journalSql.options.serializers['3802'];
+    const timestampParser = journalSql.options.parsers['1184'];
+    const journalEnd = vi.spyOn(journalSql, 'end');
+    const bootEnd = vi.spyOn(bootSql, 'end');
+    vi.mocked(postgres).mockReturnValueOnce(journalSql).mockReturnValueOnce(bootSql);
+    h.initialize.mockImplementationOnce(async (_url, source) => {
+      source();
+      if (fail) throw new Error('boot refused');
+    });
+    try {
+      if (fail) await expect(main()).rejects.toThrow('boot refused');
+      else expect(await main()).toBe(0);
+      expect(journalSql.options.serializers['3802']).toBe(jsonSerializer);
+      expect(journalSql.options.parsers['1184']).toBe(timestampParser);
+      expect(postgres).toHaveBeenNthCalledWith(2, 'postgres://isolated', {
+        max: 1,
+        max_lifetime: 0,
+      });
+      expect(bootEnd).toHaveBeenCalledExactlyOnceWith({ timeout: 5 });
+      expect(journalEnd).toHaveBeenCalledExactlyOnceWith({ timeout: 5 });
+      if (!fail) {
+        expect(bootEnd.mock.invocationCallOrder[0]).toBeLessThan(
+          vi.mocked(journal.ensureJournal).mock.invocationCallOrder[0]!,
+        );
+      }
+    } finally {
+      await Promise.all([journalSql.end({ timeout: 5 }), bootSql.end({ timeout: 5 })]);
+    }
+  },
+);
+
+it('does not open a boot pool when configuration already has a key', async () => {
+  expect(await main()).toBe(0);
+  expect(postgres).toHaveBeenCalledTimes(1);
+  expect(h.sql.end).toHaveBeenCalledExactlyOnceWith({ timeout: 5 });
+});
+
 it('check applies install credentials before manifest IO, emits pins, and starts no run', async () => {
   vi.mocked(dk.readReleaseManifestImage).mockImplementation(async () => {
     expect(process.env.DOCKER_CONFIG).toBe('/host/install/.docker');

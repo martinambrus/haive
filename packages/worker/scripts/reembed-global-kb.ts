@@ -45,8 +45,8 @@ async function main(): Promise<void> {
   // Deliberately NOT the full bootstrap() — this script has no business running
   // data migrations or syncing the template manifest.
   initRedis(redisUrl);
-  await configService.initialize(redisUrl);
   const db = initDatabase(databaseUrl);
+  await configService.initialize(redisUrl, db);
   await secretsService.initialize(db);
 
   const settings = await resolveGlobalKbSettings();

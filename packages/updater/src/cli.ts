@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import postgres from 'postgres';
 import { safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
-import { configService, networkName } from '@haive/shared';
+import { configService, encryptionKeyBootDatabase, networkName } from '@haive/shared';
 import { CHANNEL_PATTERN, parseReleaseManifest, type ReleaseManifest } from '@haive/shared/release';
 import * as dk from './docker.js';
 import { attemptVersion } from './attempt-fields.js';
@@ -268,7 +268,17 @@ export async function main(): Promise<number> {
   };
   const sql = postgres(databaseUrl!, { max: 1, max_lifetime: 0 });
   try {
-    await configService.initialize(redisUrl!);
+    // Drizzle rewires postgres.js codecs; keep boot's client separate from the journal's.
+    let bootSql: ReturnType<typeof postgres> | undefined;
+    try {
+      await configService.initialize(redisUrl!, () =>
+        encryptionKeyBootDatabase(
+          (bootSql ??= postgres(databaseUrl!, { max: 1, max_lifetime: 0 })),
+        ),
+      );
+    } finally {
+      await bootSql?.end({ timeout: 5 });
+    }
     await ensureJournal(sql);
 
     // One upgrade at a time. The lock guards concurrency; the journal's partial unique index is

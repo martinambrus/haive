@@ -56,7 +56,7 @@ const forgedAcceptance = {
 
 async function main(): Promise<void> {
   initDatabase(process.env.DATABASE_URL!);
-  await configService.initialize(process.env.REDIS_URL!);
+  await configService.initialize(process.env.REDIS_URL!, getDb());
   const installKey = await configService.getEncryptionKey();
   const db = getDb();
   const userId = randomUUID();
