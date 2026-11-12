@@ -407,7 +407,7 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   credential write; after a PostgreSQL restart or a terminated backend it stops, and a login
   session closes with "Authentication changed. Retry the login." A login holds the lock at most 2
   minutes before its container exists. Its teardown waits at most 30 s for `docker remove`, then
-  releases the lock and leaves the container: nothing reaps it while its provider and user exist
+  releases the lock and stops waiting (the remove may still finish later); if it never does, nothing reaps it while its provider and user exist
   (`reapOrphanedAuthVolumes` runs at worker boot and only for a gone owner), so a later login or
   sign-out may run beside it. A task's sync-back waits up to 30 s for it; still held,
   it warns and the task copy is removed with its volume, so a token the task rotated is lost while
