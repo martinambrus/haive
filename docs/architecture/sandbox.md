@@ -399,8 +399,17 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   `secrets/:name`), answer 409 `cli_auth_busy` when it is held; a delete never advances the
   generation, so it cannot supersede a pending sign-out. The sign-out job defers itself (`deferJob`,
   2 s doubling to 15 s) and fails after `CLI_SIGN_OUT_AUTH_WAIT_MS` (30 minutes) with a sentence
-  saying nothing was removed; the page polls a sign-out for that cap plus 2 minutes (other jobs 10). The usage poll reads without the lock and takes it only to
-  refresh, re-reading the token under it. A task's sync-back waits up to 30 s for it; still held,
+  saying nothing was removed; the page polls a sign-out for that cap plus 2 minutes (other jobs 10). The usage poll takes the lock to refresh,
+  re-reading the token under it, and again for every snapshot write, so a Disconnect between its
+  fetch and its write leaves no stale snapshot. Each holder keeps the lock on its own connection, at
+  most 32 per process (`MAX_CLI_AUTH_LOCK_CONNECTIONS`; beyond it a writer answers busy). A holder
+  checks the lock is still its own (`assertHeld`, the backend pid it was taken on) before a
+  credential write; after a PostgreSQL restart or a terminated backend it stops, and a login
+  session closes with "Authentication changed. Retry the login." A login holds the lock at most 2
+  minutes before its container exists. Its teardown waits at most 30 s for `docker remove`, then
+  releases the lock and leaves the container: nothing reaps it while its provider and user exist
+  (`reapOrphanedAuthVolumes` runs at worker boot and only for a gone owner), so a later login or
+  sign-out may run beside it. A task's sync-back waits up to 30 s for it; still held,
   it warns and the task copy is removed with its volume, so a token the task rotated is lost while
   a login dialog on the same CLI stays open that long (that login replaces it when it succeeds).
 
