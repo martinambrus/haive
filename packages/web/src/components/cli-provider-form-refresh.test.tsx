@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
 import type { RefreshCliVersionsJobResult } from '@haive/shared/constants';
-import type { CliPackageVersionsEntry, CliProviderCatalogEntry } from '@/lib/api-client';
+import type {
+  CliPackageVersionsEntry,
+  CliProviderCatalogEntry,
+  CliProvider,
+} from '@/lib/api-client';
 import { CliProviderForm } from './cli-provider-form';
 import {
   buttons,
@@ -20,7 +24,7 @@ vi.mock('react', async (importOriginal) => ({
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: () => {}, refresh: () => {}, back: () => {} }),
 }));
-const h = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
+const h = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }));
 vi.mock('@/lib/api-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api-client')>()),
   api: h,
@@ -211,4 +215,54 @@ it('still names the failed sources of a manual refresh when the role read failed
   expect(shown).toHaveLength(1);
   expect(textOf(shown[0]!)).toContain('models endpoint HTTP 503');
   expect(h.get.mock.calls.filter(([path]) => path.endsWith('/refresh-result'))).toHaveLength(0);
+});
+
+it('retries a partial secret removal without deleting the already removed name again', async () => {
+  const secrets = [{ secretName: 'FIRST' }, { secretName: 'SECOND' }];
+  const deleted = new Set<string>();
+  let busy = true;
+  const original = h.get.getMockImplementation()!;
+  h.get.mockImplementation((path: string) =>
+    path === '/cli-providers/p/secrets'
+      ? Promise.resolve({ secrets: secrets.filter((s) => !deleted.has(s.secretName)) })
+      : original(path),
+  );
+  h.patch.mockResolvedValue({});
+  h.delete.mockImplementation(async (path: string) => {
+    const name = path.split('/').at(-1)!;
+    if (deleted.has(name)) throw Object.assign(new Error('Not found'), { status: 404 });
+    if (name === 'SECOND' && busy) {
+      busy = false;
+      throw Object.assign(new Error('Authentication busy'), { status: 409, code: 'cli_auth_busy' });
+    }
+    deleted.add(name);
+  });
+  const provider = {
+    id: 'p',
+    name: 'claude-code',
+    label: 'Claude',
+    envVars: {},
+    cliArgs: [],
+    networkPolicy: { mode: 'unrestricted' },
+    egressDomains: [],
+  } as unknown as CliProvider;
+  const view = createRenderer(() =>
+    createElement(CliProviderForm, { mode: 'edit', metadata, provider }),
+  );
+  await settle(view);
+  fire.type(controls(view.tree(), /^secrets$/)[0]!, '');
+  view.draw();
+  const submit = () =>
+    (
+      findAll(view.tree(), (h) => h.tag === 'form')[0]!.props.onSubmit as (
+        e: unknown,
+      ) => Promise<void>
+    )({ preventDefault() {} });
+  await submit();
+  await settle(view);
+  expect(deleted).toEqual(new Set(['FIRST']));
+  await submit();
+  await settle(view);
+  expect(deleted).toEqual(new Set(['FIRST', 'SECOND']));
+  expect(h.delete.mock.calls.filter(([path]) => path.endsWith('/FIRST'))).toHaveLength(1);
 });
