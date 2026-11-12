@@ -276,6 +276,11 @@ status: open · kind: fnf · found: #1108 review 2026-11-12 · priority: P4
 1. `api/src/routes/ide.ts` `isPortProxyPath` does not see `//proxy/80`, `/%70roxy/80` or `/proxy%2f80` (encoded letters or slash in the first segment); the HTTP side is identical. PRE-EXISTING, minor: `--disable-proxy` is the second guard, and code-server's own decoding is unverified. Fix: decode the first segment as Hono does before comparing, as `apiProxyTarget` does on the web.
 2. Five copies of `rawUrl.split(/[?#]/)[0]` (`ide.ts`, `terminal.ts`, `terminal-shell.ts`, `cli-stream.ts`, `browser-vnc.ts`); PRE-EXISTING, minor. Fix: one helper in `lib/upgrade-auth.ts`.
 
+### T629 · fix · learning step retries a valid empty learning list
+
+status: open · kind: fix · found: T300 second run 2026-11-12 · priority: P3
+`11-phase-8-learning.ts` `shouldRetryPreForm` (~:1345-1350) retries whenever `parseLearningOutput` returns an empty list. A small task can honestly have no learnings: the T300 workflow's learning call exited 0 with valid JSON `entries: []` plus three KB-sync changes and one skill-sync operation, and the step still requested a retry (paid, and it discards the sync proposals). Fix: retry only when the output does not parse (null), not when it parses to `[]`; check the form and apply accept an empty list with sync changes. Evidence `.claude/tmp/codex-run/T300-S/run7/learning-stop-evidence.json`.
+
 ### T628 · fix · 07_5 verify-files reports skills missing before they are generated
 
 status: open · kind: fix · found: T300 second run 2026-11-12 · priority: P3
@@ -447,8 +452,9 @@ Reconciled 2026-11-01: Track B shipped in PR988. The dependency is resolved, but
 
 ### T300 · live re-checks owed at the next real onboarding + workflow run
 
-status: parked · reason: corrected capped attempt stopped after confirmed T293; remaining checks need a future authorized run · kind: capped validation · priority: P1
+status: parked · reason: second capped run done 2026-11-12 (5 PASS + editor check); the remaining members need dedicated scenarios, not another general run · kind: capped validation · priority: P1
 Owner decision 2026-11-12: run it once T613 has shipped (same capped budget), so it also exercises the new editor path.
+Second run 2026-11-12, $5.02 notional in total, one repository (426b6077), one completed onboarding (3ad907de) and one workflow (2b333940) through gate 3 (local commit, no push). PASS: T293 (agent-written KB correction, bytes changed, README untouched), T299 (named-file selectForDispatch, zero tokens), 3 (agent_rules stamps on 28 calls), 4 (declared custom test ran, Off lint did not, gate 2 labels it off), 5 (AGENTS.md 12.6 KB with citable rules). Session browser check: the task Editor opens through ensure, grant, editor-origin handshake, redeem and the scoped editor session on a live worktree. Product findings: T628 (07_5 reports skills missing before 09_5), T629 (learning step retries a valid empty list). Five earlier launches stopped on driver harness mistakes or a monitor timeout, all before or around product work ($0.26). Still UNVERIFIED: 1, 2, 6, 7, 8, 9, 10-14, 16-20, T375, T395, T363, T427, T298; each needs its own scenario (all-CLI listing replay, plan build, DDEV, conflicting merge, Stop UI, OAuth bytes, graded data). Evidence `.claude/tmp/codex-run/T300-S/report4.md` to `report7.md`, `member-results7.json`.
 Preflight 2026-11-12 (read-only, $0): blocked before GO. Host C: had 18.75 GiB free, under the run's 20 GiB reserve, and the chosen Codex provider's usage poll answers 401 (last successful run 2026-11-01). Needs the owner to free disk (or lower the reserve) and confirm or replace the provider. Evidence `.claude/tmp/codex-run/T300-S/preflight.md`.
 Owner decision 2026-11-10: second capped run approved, same budget (one owned repository, one attempt, 90 min or $50 notional, no automatic retries); house-rules checks first. T298 and T299 stay blocked on it.
 Items 1-20 (each with its memory file): skills per CLI after 09_5; frontmatter YAML; agent_rules stamp; declared verify commands; invariants-doc lever; prompt guard/fence (07_7); onboarding artifacts; plan breadth refusals; agent isolation 1/2/4; fs-safe live verification; #169 DDEV runner boot-subpath; #241 Terminal cwd; AGENTS.md split citations; parked experiments (Astra vs Sol, container-cleanup race, global KB purge, haive_rag_ddevtest drop); T293; #287 EROFS on state; #800 mounts; #751 set-aside on a real merge; #806 put-back; #815 reindex spot-check; T375 gate 3 on a worktree holding an untracked nested repo, with and without a commit (#909); T395 Stop offered for a running task whose current row is pending, and the "Nothing was running to stop." notice (no such task on the dev install; pressing Stop changes a real task) (#908); T363 New Task with one failed upload, the plan starter and the task page Start, each with confirm yes and no (#913). Full list: task #300 text in the fnf-run ledger / memory. Also owed (T427): replay the raw attach bytes of one real `claude setup-token` run through the OAuth capture and pin its wrap, newline and escape shapes in a fixture.
@@ -467,7 +473,7 @@ Corrected attempt stopped 2026-11-01T16:55Z: T293 reproduced during normal09_3. 
 
 ### T298 · house rules PR8 · switch similarity on with per-rule floors
 
-status: blocked · blocked-by: T300 and graded evaluation data · priority: P3
+status: blocked · blocked-by: graded evaluation data (T300's general run cannot supply it) · priority: P3
 
 Validation scheduling decision 2026-11-01: attach to the dedicated capped T300 run before feature work; actual evidence/data prerequisites remain, and no successful live result is inferred.
 
@@ -475,7 +481,7 @@ The owner scheduled one capped validation attempt; this block is an evidence dep
 
 ### T299 · verify-first · house rules PR7a zero-token live check
 
-status: blocked · blocked-by: T300 · priority: P1
+status: done 2026-11-12: verified in the T300 second run before onboarding started. Real `resolveGlobalKbContext` + `selectForDispatch` selected the owned files-mode rule for its named path (`why.via: named`, non-null change set, no unscoped fallback, zero invocations). Evidence `.claude/tmp/codex-run/T300-S/run4/t299-selector.json`; hr6-live-d7 no longer needed for this check · priority: P1
 Read .claude/tmp/house-rules/ledger for a PR7a live-check entry; if absent, run it per the house_rules_series memory against repo hr6-live-d7 (3e2c0533), then decide whether hr6-live-d7 is still needed.
 
 Validation scheduling decision 2026-11-01: attach to the dedicated capped T300 run before feature work; actual evidence/data prerequisites remain, and no successful live result is inferred.
