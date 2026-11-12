@@ -10,7 +10,7 @@ import { getTableConfig, PgJsonb, PgUUID, type PgTable } from 'drizzle-orm/pg-co
  * It evaluates `where` rather than ignoring it, because the code under test rides on it: a
  * children lookup that ignored its filter would hand back a sibling archive's row and delete the
  * wrong folder. It supports exactly the conditions callers build — `and` and `or` of `eq` / `ne` /
- * `gt` / `gte` / `lt` / `inArray` / `notInArray` / `isNull` / `isNotNull`, a NULL matching only `isNull`,
+ * `gt` / `gte` / `lt` / `lte` / `inArray` / `notInArray` / `isNull` / `isNotNull`, a NULL matching only `isNull`,
  * a jsonb column's key that holds a string (`jsonb_typeof(column -> 'key') = 'string'`),
  * a string-valued jsonb member equal to a string (`column ->> 'key' = value`),
  * and `not(EXISTS (SELECT 1 FROM table WHERE inner_uuid = outer_uuid AND a IS NULL AND b IS NULL))`
@@ -34,6 +34,12 @@ import { getTableConfig, PgJsonb, PgUUID, type PgTable } from 'drizzle-orm/pg-co
 
 export type FakeRow = Record<string, unknown>;
 type Pred = (row: FakeRow) => boolean;
+
+function rejectConflictOptions(options: object, supported: string[]): void {
+  for (const key of Object.keys(options)) {
+    if (!supported.includes(key)) throw new Error(`fake db: unsupported conflict option ${key}`);
+  }
+}
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LOCK_SQL = /^select pg_advisory_xact_lock\(hashtextextended\($/;
@@ -150,8 +156,14 @@ interface SelectQuery extends PromiseLike<FakeRow[]> {
 
 /** `ON CONFLICT (target) DO UPDATE`: the row whose target columns hold the inserted values takes
  *  `set`, and an insert matching none goes in as a new row. */
+interface UpdateConflict {
+  target: Column | Column[];
+  set: FakeRow;
+  setWhere?: unknown;
+}
+
 interface Insert extends Lazy<FakeRow[]> {
-  onConflictDoUpdate(conflict: { target: Column | Column[]; set: FakeRow }): Lazy<FakeRow[]>;
+  onConflictDoUpdate(conflict: UpdateConflict): Lazy<FakeRow[]>;
   /** `ON CONFLICT (target) [WHERE where] DO NOTHING`: a value matching a row on the target
    *  columns, among the rows `where` selects, goes in as nothing and returns no row.
    *  An omitted target is supported for tables whose only constraint is their primary key. */
@@ -377,13 +389,15 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
           (text(op) === ' <> ' ||
             text(op) === ' > ' ||
             text(op) === ' >= ' ||
-            text(op) === ' < ') &&
+            text(op) === ' < ' ||
+            text(op) === ' <= ') &&
           is(val, Param)
         ) {
           const v = checkValue(col, val.value);
           const above = text(op) === ' > ';
           const atLeast = text(op) === ' >= ';
           const below = text(op) === ' < ';
+          const atMost = text(op) === ' <= ';
           return (row) =>
             row[key] != null &&
             v != null &&
@@ -393,7 +407,9 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
                 ? (comparisonValue(col, row[key]) as number) >= (v as number)
                 : below
                   ? (comparisonValue(col, row[key]) as number) < (v as number)
-                  : comparisonValue(col, row[key]) !== v);
+                  : atMost
+                    ? (comparisonValue(col, row[key]) as number) <= (v as number)
+                    : comparisonValue(col, row[key]) !== v);
         }
         if (
           ch.length === 3 &&
@@ -602,8 +618,10 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
     ctx: TxContext | null,
     table: PgTable,
     values: FakeRow,
-    conflict: { target: Column[]; set: FakeRow },
-  ): FakeRow {
+    conflict: UpdateConflict & { target: Column[] },
+  ): FakeRow | null {
+    const canUpdate =
+      conflict.setWhere === undefined ? () => true : compileWhere(table, conflict.setWhere);
     const keyOf = columnKeys(table);
     const keys = conflict.target.map((col) => {
       const key = keyOf.get(col);
@@ -614,6 +632,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
     });
     const hit = tableRows(table).find((row) => keys.every((k) => row[k] === values[k]));
     if (!hit) return insertRow(ctx, table, values);
+    if (!canUpdate(hit)) return null;
     return update(ctx, table, (row) => row === hit, compileSet(table, conflict.set))[0]!;
   }
 
@@ -720,7 +739,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
         values: (values: FakeRow | FakeRow[]): Insert => {
           const run = (
             conflict?:
-              | { target: Column[]; set: FakeRow }
+              | (UpdateConflict & { target: Column[] })
               | { target: Column[]; where?: unknown; doNothing: true },
           ) =>
             lazy(
@@ -732,15 +751,19 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
                     const row = insertUnlessConflict(ctx, table, v, conflict);
                     return row ? [row] : [];
                   }
-                  return [upsertRow(ctx, table, v, conflict)];
+                  const row = upsertRow(ctx, table, v, conflict);
+                  return row ? [row] : [];
                 });
               },
               (rows, fields) => rows.map((row) => project(table, fields, row)),
             );
           return Object.assign(run(), {
-            onConflictDoUpdate: (c: { target: Column | Column[]; set: FakeRow }) =>
-              run({ target: [c.target].flat(), set: c.set }),
+            onConflictDoUpdate: (c: UpdateConflict) => {
+              rejectConflictOptions(c, ['target', 'set', 'setWhere']);
+              return run({ target: [c.target].flat(), set: c.set, setWhere: c.setWhere });
+            },
             onConflictDoNothing: (c?: { target: Column | Column[]; where?: unknown }) => {
+              if (c) rejectConflictOptions(c, ['target', 'where']);
               if (c) return run({ target: [c.target].flat(), where: c.where, doNothing: true });
               const config = getTableConfig(table);
               if (
