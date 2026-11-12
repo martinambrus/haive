@@ -121,6 +121,30 @@ function event(
 }
 
 describe('worker audited repository settings', () => {
+  it.each([undefined, null, '', 'rules'])(
+    'preserves the rules presence summary for %s',
+    async (value) => {
+      const s = await setup();
+
+      const events = await audit.auditRepositorySettings(s.db, {
+        repositoryId: REPO,
+        actor: { userId: OWNER, kind: 'repository_owner' },
+        source: 'project_state_sync',
+        before: { agentRulesOverride: 'old rules' },
+        updates: { agentRulesOverride: value },
+      });
+
+      expect(events).toHaveLength(1);
+      expect(events[0]!.metadata).toEqual({
+        source: 'project_state_sync',
+        actorKind: 'repository_owner',
+        fields: ['agentRulesOverride'],
+        values: { agentRulesOverride: value != null },
+      });
+      expect(s.audits()).toEqual([expect.objectContaining(events[0]!)]);
+    },
+  );
+
   it('sync audits scope and rules separately, with owner attribution and no values; repeat is silent', async () => {
     const s = await setup();
     await s.record({

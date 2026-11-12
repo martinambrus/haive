@@ -51,7 +51,8 @@ export async function auditRepositorySettings(
       if (!delta.addedCount && !delta.removedCount) continue;
       summary = delta;
     } else {
-      summary = summarizeSecurityFields([field], updates);
+      // The worker has always treated undefined rules as cleared, just like null.
+      summary = summarizeSecurityFields([field], { [field]: updates[field] ?? null });
     }
     const event: AuditEvent = {
       actorUserId: actor.userId,
