@@ -30,6 +30,7 @@ import {
   PORTABLE_SETTING_NAMES,
   PROJECT_STATE_DIR,
   PROJECT_STATE_LIMITS,
+  type ProjectStateLimits,
   ProjectStateError,
   claimFileName,
   conflictSide,
@@ -121,11 +122,6 @@ export type ProjectStateSyncResult =
 const MIB = 1024 * 1024;
 // A first sync can replace a claim per file: the list is cut, settings first; `count` is the total.
 const MAX_LOGGED_UNITS = 10;
-const {
-  maxEntries: MAX_ENTRIES,
-  maxFileBytes: MAX_FILE_BYTES,
-  maxTotalBytes: MAX_TOTAL_BYTES,
-} = PROJECT_STATE_LIMITS;
 
 class Refusal extends Error {}
 class CheckoutMoved extends Error {}
@@ -153,8 +149,13 @@ const gone = (rel: string): Refusal =>
  *  so the whole tree is read, and the caps stop the walk as it goes: a planted tree is not read on. */
 export async function readStateFiles(
   repoPath: string,
-  options: { boundedDirectoryReads?: boolean; filesystemAnchor?: string } = {},
+  options: {
+    boundedDirectoryReads?: boolean;
+    filesystemAnchor?: string;
+    limits?: ProjectStateLimits;
+  } = {},
 ): Promise<Map<string, string> | null> {
+  const limits = options.limits ?? PROJECT_STATE_LIMITS;
   const anchor = options.filesystemAnchor ?? repoPath;
   const rooted = (rel: string) => relUnder(anchor, `${repoPath}/${stateRel(rel)}`);
   const files = new Map<string, string>();
@@ -164,15 +165,15 @@ export async function readStateFiles(
   for (let dir = pending.pop(); dir !== undefined; dir = pending.pop()) {
     const listing = await readdirNoFollow(anchor, rooted(dir), {
       strict: true,
-      ...(options.boundedDirectoryReads ? { maxEntries: MAX_ENTRIES - entries } : {}),
+      ...(options.boundedDirectoryReads ? { maxEntries: limits.maxEntries - entries } : {}),
     });
     if (listing === null) {
       if (dir === '') return null;
       throw gone(dir);
     }
     entries += listing.length;
-    if (entries > MAX_ENTRIES) {
-      throw new Refusal(`the state directory holds more than ${MAX_ENTRIES} entries`);
+    if (entries > limits.maxEntries) {
+      throw new Refusal(`the state directory holds more than ${limits.maxEntries} entries`);
     }
     for (const entry of listing) {
       const rel = dir === '' ? entry.name : `${dir}/${entry.name}`;
@@ -186,15 +187,15 @@ export async function readStateFiles(
       }
       const read = await readFileNoFollow(anchor, rooted(rel), {
         strict: true,
-        maxBytes: MAX_FILE_BYTES,
+        maxBytes: limits.maxFileBytes,
       });
       if (read === null) throw gone(rel);
       if (read.truncated) {
-        throw new Refusal(`${stateRel(rel)} is larger than ${MAX_FILE_BYTES / MIB} MiB`);
+        throw new Refusal(`${stateRel(rel)} is larger than ${limits.maxFileBytes / MIB} MiB`);
       }
       bytes += read.data.length;
-      if (bytes > MAX_TOTAL_BYTES) {
-        throw new Refusal(`the state directory holds more than ${MAX_TOTAL_BYTES / MIB} MiB`);
+      if (bytes > limits.maxTotalBytes) {
+        throw new Refusal(`the state directory holds more than ${limits.maxTotalBytes / MIB} MiB`);
       }
       if (!isUtf8(read.data)) throw new Refusal(`${stateRel(rel)} is not valid UTF-8`);
       files.set(rel, read.data.toString('utf8'));
@@ -223,10 +224,13 @@ const notRead = (detail: string): Checkout => ({
   reason: `the checkout's record was not read: ${oneLine(detail)}`,
 });
 
-export async function readCheckout(repoPath: string): Promise<Checkout> {
+export async function readCheckout(
+  repoPath: string,
+  limits: ProjectStateLimits = PROJECT_STATE_LIMITS,
+): Promise<Checkout> {
   let files: Map<string, string> | null;
   try {
-    files = await readStateFiles(repoPath);
+    files = await readStateFiles(repoPath, { limits });
   } catch (err) {
     if (err instanceof Refusal || isPathContainmentError(err)) return notRead(err.message);
     throw err;
@@ -686,8 +690,10 @@ export async function syncProjectStateFromCheckout(
     refuseDuringGitOperation,
     expectedCheckout,
     endingTaskId,
+    limits = PROJECT_STATE_LIMITS,
     actor,
   }: {
+    limits?: ProjectStateLimits;
     actor?: AuditActor;
     repositoryId: string;
     repoPath: string;
@@ -717,7 +723,7 @@ export async function syncProjectStateFromCheckout(
     .from(schema.repositories)
     .where(eq(schema.repositories.id, repositoryId))
     .limit(1);
-  const checkout = await readCheckout(repoPath);
+  const checkout = await readCheckout(repoPath, limits);
   if (checkout.kind === 'absent') {
     await reconcileImportedRules(db, repositoryId, repoPath);
     return { outcome: 'absent' };
@@ -736,6 +742,7 @@ export async function syncProjectStateFromCheckout(
         refuseDuringGitOperation,
         expectedCheckout,
         endingTaskId,
+        limits,
         checkout,
         seen,
         seenRepo,
@@ -768,8 +775,10 @@ export async function syncProjectStateLocked(
     checkout,
     seen,
     seenRepo,
+    limits = PROJECT_STATE_LIMITS,
   }: {
     auditEvents: AuditEvent[];
+    limits?: ProjectStateLimits;
     actor?: AuditActor;
     repositoryId: string;
     repoPath: string;
@@ -805,7 +814,7 @@ export async function syncProjectStateLocked(
   }
   // Every producer must reject an intermediate checkout, including clone scans and moved answers
   // that do not request the git-operation guard. The database base alone cannot see a file move.
-  if (checkout.kind === 'record' && !sameValue(checkout, await readCheckout(repoPath))) {
+  if (checkout.kind === 'record' && !sameValue(checkout, await readCheckout(repoPath, limits))) {
     return { outcome: 'superseded' };
   }
   // Upgrade admission takes FOR UPDATE explicitly; exclude it without blocking child FK checks.
@@ -1137,7 +1146,7 @@ export async function syncProjectStateLocked(
   // Import work can await many reads. Never acknowledge bytes that moved during it: throw so
   // its column/ledger/conflict mutations roll back as well as its watermark.
   if (
-    !sameValue(checkout, await readCheckout(repoPath)) ||
+    !sameValue(checkout, await readCheckout(repoPath, limits)) ||
     (refuseDuringGitOperation && (await gitOperationInProgress(repoPath))) ||
     (expectedCheckout &&
       !(await admitWatchedCheckout(tx, repositoryId, repoPath, expectedCheckout)))
