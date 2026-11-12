@@ -34,6 +34,33 @@ beforeEach(() => {
     fn.mockReset().mockResolvedValue({ ok: true, refreshed: [], errors: [] });
 });
 const fixture = () => createFakeDb({ refreshRuns: schema.refreshRuns });
+it('does not let a delayed older start replace a newer run or its completion', async () => {
+  const fake = fixture();
+  let release!: () => void;
+  fake.hooks.beforeInsert = async () => {
+    fake.hooks.beforeInsert = null;
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+  };
+  // Pin the actual Date constructor, not just Date.now, used by the start write.
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    vi.setSystemTime(new Date('2026-11-11T12:00:00Z'));
+    const older = handleRefreshCliVersionsJob(fake.db as unknown as Database, 'boot');
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    vi.setSystemTime(new Date('2026-11-11T13:00:00Z'));
+    const newer = await handleRefreshCliVersionsJob(fake.db as unknown as Database, 'manual');
+    const row = await fake.db.query.refreshRuns.findFirst();
+    release();
+    await older;
+    expect(await fake.db.query.refreshRuns.findFirst()).toEqual(row);
+    expect(row).toMatchObject({ runId: newer.runId, trigger: 'manual', result: newer });
+    expect(h.warn).not.toHaveBeenCalled();
+  } finally {
+    vi.useRealTimers();
+  }
+});
 it('persists a scheduled refresh and its failing FX source', async () => {
   const fake = fixture();
   h.fx.mockResolvedValue({
