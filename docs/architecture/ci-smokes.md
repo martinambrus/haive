@@ -54,7 +54,8 @@ now models each split job with those historical numbers and explicit setup allow
 The old model at 115 rows was 907 + 862.5 = 1769.5 s in one job. The split's expected critical path is the larger
 of 969 s and 982.5 s (about 16.4 minutes rather than 29.5), subject to runner scheduling and repeated setup. This is
 a projection; only green Actions runs of the split can establish the improvement. Other jobs may become the critical
-path: historical e2e took 584-927 s and lint/unit tests 579-1017 s. Total runner work increases with duplicated setup.
+path: historical e2e took 584-927 s and lint/unit tests 579-1017 s (unit tests now run in the `unit-tests` matrix,
+worker in two shards; see [Testing](testing.md)). Total runner work increases with duplicated setup.
 
 Only GATED row growth is modelled dynamically. The 907 s grew from 629 s in the week to 2026-10-31 (worker smokes and
 the auth throttle script), and the pin cannot see future growth outside the list: measure each split job again whenever
