@@ -157,60 +157,18 @@ Low unless marked. Code in `worker/src/project-state/refresh.ts`, `worker/src/qu
 17. Doubled "but" in a refusal message.
 18. CI budget: the gated Postgres step is at 134 of 138 rows its 26-minute limit holds; measure before the next raise (`docs/architecture/ci-smokes.md`).
 
-### T603 · FNF[task-start-wait-followups] · bounded start waits and plan-merge leftovers follow-ups (+5)
-
-status: open · kind: fix · found: F1 (#318) reviews 2026-11-11 · priority: P4
-Low unless marked. Code in `worker/src/queues/plan-mirror-queue.ts` (`integrateOrigin`), `worker/src/queues/usage-poll-queue.ts`, `01-plan-merge.ts`.
-
-1. `RevivalBusy` is logged at error level (`usage-poll-queue.ts` ~:654); a busy revival is expected and retried, so warn.
-2. `integrateOrigin`'s first transaction rethrows after the leftover marks by `reports.length`, not by error class (a failure before any report rethrows at once; one after is held until the marks commit). Key it on where the failure happened.
-3. No real-order test for the index-held path (worktree kept, removes 0); the unit test drives a fake.
-4. No real-PostgreSQL test that the leftovers report survives a failure in the merge transaction, nor one for a conversation opening between the two transactions.
-5. `discardPlanMerge` uses the pool inside a transaction (`01-plan-merge.ts` ~:794), the shape item 4 of the old T318 fixed in `mergeInScratch`. PRE-EXISTING.
-
 ### T604 · docs · document the 5 s start-admission bound against a large claim ledger
 
 status: open · kind: docs · found: F1 (#318) review 2026-11-11 · priority: P4
 DECIDED by the owner 2026-11-12: accept the current bound and document it (no publication protocol; T605 closed). A task start waits at most 5 s for the repository task lock and row admission, then answers 409 busy (`repository-task-lock.ts`). The worker project-state writer (`worker/src/project-state/write.ts:747`) holds that lock across preparation and publication, MEASURED 844-2,072 ms at 512 claim files, so a repository near the 4,096-entry cap (`shared/src/project-state/limits.ts`) can answer busy to routine starts while a write runs; retrying the start is the remedy. Document it in the topic file that covers task starts.
 
-### T606 · FNF[refresh-run-followups] · latest refresh-run record follow-ups (+12)
-
-status: open · kind: fix · found: F3 (#440) reviews 2026-11-11 · priority: P4
-Low unless marked. Code in `worker/src/queues/cli-exec/handlers.ts` (refresh_runs writes), `web/src/components/latest-refresh.tsx` and its pages, `@haive/database/testing` fake db.
-
-1. The start upsert's `setWhere` (an older overlapping start never overwrites a newer run) has no failing test: the fake db ignores `setWhere` and `<=`. Verified by hand on postgres:18 only.
-2. The fake db drops conflict options it does not support instead of failing, so a test can pass against a write the real database would treat differently.
-3. Run ordering compares `started_at` from the worker's clock; a clock step can reorder runs.
-4. A finished result with no `startedAt` beats the stored run.
-5. `skipped` sources are recorded only for prices; the copy shows raw source tokens.
-6. The inline `LatestRefresh` variants have no test.
-7. The trigger label (manual / scheduled / boot) is hard-coded in the component.
-8. The 10 s admin poll keeps running in a hidden tab.
-9. The result shape is declared twice (shared constants and the api response).
-10. A manual refresh that joins an in-flight job keeps that job's trigger.
-11. A failed `/auth/me` read never retries, so the stored-run panel stays hidden until reload.
-12. Probe and sign-out results are still not durable.
-
 ### T607 · FNF[a11y-sweep-2] · hand-faked React hooks in web tests (+1)
 
-status: open · kind: fix · found: H1 (#343) 2026-11-11 · priority: P4
+status: parked · kind: fix · found: H1 (#343) 2026-11-11 · priority: P4
 
 1. 15 web test harnesses still fake React hooks by hand (item 7 of the old T343, partly done in #1073, which moved the touched ones to Testing Library + JSDOM). Move the rest to real React rendering or one shared helper.
 
-### T608 · FNF[kept-metadata-recovery-followups] · durable owner/mode recovery follow-ups (+9)
-
-status: open · kind: fix · found: D3 (#310) reviews 2026-11-11 · priority: P4
-Low unless marked. Code in `worker/src/project-state/kept-metadata.ts`, `set-aside.ts`, `kept-metadata-recovery.ts`, the outbox sweep.
-
-1. ENOTDIR on a restore read is treated as absent (pending), not as a conflict.
-2. File metadata waits for its parents to be restorable; a parent conflict holds the file's restore too.
-3. The sweep's "settled" count includes rows that are still pending.
-4. The 4096-entry warn-once bound (`metadataWarnings`) is untested.
-5. A judged-but-not-kept entry can ride along on copied maps (review-3 D4).
-6. Kept metadata has no lifetime bound, and the 0644 default is a heuristic (review-3 D5).
-7. Test hygiene and the save handle's type (review-3 D6).
-8. A false re-sync is retried without a diagnosis (`kept-metadata-recovery.ts:33`).
-9. Refresh, 00a and plan Pull ignore the re-sync boolean.
+[parked: diminishing returns] 2026-11-12: the inventory found 56 hook-faking web harnesses, not 15 (`.claude/tmp/codex-run/Z1-S/T607-inventory.md`). Test-only migration with no product effect; resume when a file is touched for another reason, or when a faked hook hides a real regression.
 
 ### T611 · FNF[replace-zip-followups] · Replace ZIP mode and replacement-record follow-ups (+10)
 
@@ -241,7 +199,7 @@ status: open · kind: fix · found: S1 (#1091) review 2026-11-12 · priority: P4
 2. Inline mode always applies soft line breaks. Minor.
 3. (PRE-EXISTING, unverified) The browser VNC and IDE upgrades answer HTTP 503 while their runtime starts; check whether those clients would benefit from a close code.
 
-### T623 · FNF[gated-ratchet-and-bundle-recovery-lows] · gated-file ratchet and bundle recovery lows (+6)
+### T623 · FNF[gated-ratchet-and-bundle-recovery-lows] · gated-file ratchet, bundle recovery and follow-up lows (+12)
 
 status: open · kind: fix · found: #1093, #1094 reviews 2026-11-12 · priority: P4
 
@@ -251,6 +209,12 @@ status: open · kind: fix · found: #1093, #1094 reviews 2026-11-12 · priority:
 4. Bundle recovery concurrency tests use the fake database (no `FOR UPDATE`); the real-PostgreSQL script the driver used is not committed. Commit it as a gated test.
 5. A bundle job failing against a row already `failed` no longer refreshes `lastSyncError` (`worker/src/repo/bundle-ingest.ts` ~:317). Cosmetic.
 6. `restoreReplacementBundle` returns true when `recoverBundle` skipped because the id was held (`bundle-recovery.ts` ~:210-222): harmless, but "handled" is not "restored".
+7. (#1095) A crash between the plan-merge discard's report commit and its teardown leaves the worktree and merge open with the files already reported; a retry relocates nothing new (same trade as `integrateOrigin`). Minor.
+8. (#1095) `worker/test/plan-merge-followups-db.test.ts` runs its pool with a 1 s `statement_timeout` for every statement; a very loaded runner could trip it. Minor.
+9. (#1096) The fake database rejects a conflict `setWhere` built from an `excluded.*` SQL fragment (loud by design); a test needing it uses a real database. Minor.
+10. (T606 3, 5, 12, report-only) Refresh run ordering uses the worker clock; skipped sources are recorded only for prices and shown as raw tokens; probe and sign-out results are not durable.
+11. (#1097) For a standing re-sync reason, the first caller's flow name is the one logged; a later route with the same reason stays silent (intended). T608 items 5 (copied-map judged entry) and 6 (no lifetime bound, 0644 heuristic, design) stay open.
+12. Flaky: `worker/test/project-state-write-bounds.test.ts` "writes a ledger of 4,090 claims" timed out at 120 s in two full suite runs under load; passes alone in about 35 s. Fix direction: raise its own timeout or shrink the fixture.
 
 ### T612 · FNF[web-origin-proxy-followups] · cross-host web-origin proxy follow-ups (+1)
 
@@ -1643,6 +1607,10 @@ status: open · kind: design · found: G (#270) review 1 2026-11-10 · priority:
 Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/routes/tasks/steps.ts` ~:171-191), which deletes the step's done agent mining rows and supersedes their invocations; the Resume arm that keeps done rows needs `failed` rows (~:1257-1330). Any apply-time failure after the replies landed (a busy plan patch, a refused write) therefore re-pays the whole wave. PRE-EXISTING. Needs a decision: a "re-apply saved replies" Retry mode, or Resume accepting done unfolded rows.
 
 ## Done
+
+- T603 — plan-merge discard runs on its own transaction and commits its leftovers report before a second, re-checked teardown transaction; `integrateOrigin` keys its rethrow on an explicit phase; a busy revival warns; real-git and real-PostgreSQL controls — PR #1095 (d4df23f2c), 2026-11-12. Lows T623.
+- T606 — the fake database honours conflict `setWhere`/`<=` and throws on unsupported options; refresh run ordering needs evidence; hidden-tab poll pause; viewer-role read retry; shared trigger labels — PR #1096 (e914dee4a), 2026-11-12. Items 3, 5, 12 recorded in T623.
+- T608 — non-directory restore root is a conflict; one deduplicated, diagnosable re-sync warning; Refresh, 00a and Pull keep their outcome; settled count — PR #1097 (6dafbff3a), 2026-11-12. Items 5, 6 in T623.
 
 - T619 + T621 — nine env-gated test files CI skipped now run in the Postgres-gated step (three stale assertions fixed), a ratchet requires a row or a verified workflow step for every env-gated suite, and the gated step is modelled at the measured 10 s per row (step 36 min, job 38) — PR #1093 (7c790dedb), 2026-11-12. Lows T623.
 - T618 — no false Git Resync 409 from the sync tick; refused parent paths fail the record; stranded-bundle recovery and ingest rollback hold no transaction across the filesystem (claim, restore, compare-and-settle); one refusal parser; path-scrubbed reasons; composer refusals through MarkdownView — PR #1094 (74c7c7926), 2026-11-12. Lows T623.
