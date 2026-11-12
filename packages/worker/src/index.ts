@@ -2,6 +2,7 @@ import './fs-recovery.js';
 import { finalizeModuleDrains } from '@haive/shared/modularity-server';
 import { logger, configService, CONFIG_KEYS, retryWhileConfigUnavailable } from '@haive/shared';
 import { bootstrap } from './bootstrap.js';
+import { startBackgroundDataMigrations } from './data-migrations.js';
 import { initBuildStamp } from './build-stamp.js';
 import { getDb } from './db.js';
 import { getRedis } from './redis.js';
@@ -318,6 +319,7 @@ async function main(): Promise<void> {
   const stopModuleActivationWatch = startModuleActivationWatch(() => moduleJobsScheduler.request());
 
   logger.info('haive-worker ready');
+  const stopBackgroundDataMigrations = startBackgroundDataMigrations(getDb());
 
   const runShutdown = async (signal: string): Promise<void> => {
     logger.info({ signal }, 'Worker shutting down');
@@ -334,6 +336,7 @@ async function main(): Promise<void> {
     cliPriorityDecaySweeper.stop();
     stalledTaskSweeper.stop();
     stopDeadTaskRevival();
+    stopBackgroundDataMigrations();
     cliStreamLogReaper.stop();
     stopRuntimeLimitsWatch();
     stopModuleActivationWatch();

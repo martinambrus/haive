@@ -1,6 +1,10 @@
 import type { Database } from '@haive/database';
 import { configService, logger, rethrowIfConfigUnavailable } from '@haive/shared';
-import { resolveGlobalKbEnabled, withGlobalKb } from '@haive/shared/global-kb';
+import {
+  resolveGlobalKbEnabled,
+  withGlobalKb,
+  type GlobalKbCallOptions,
+} from '@haive/shared/global-kb';
 import { cosineSimilarity, hashEmbed } from '@haive/shared/rag';
 
 const log = logger.child({ module: 'global-kb-vector-provenance' });
@@ -23,51 +27,62 @@ function vectorOf(value: unknown): number[] | null {
  *  Convergent: it selects only rows still NULL and writes only rows still NULL, so a second run
  *  and a concurrent sync change nothing; it never deletes. A row whose vector cannot be read stays
  *  NULL (excluded from dense ranking, still found by words). Best-effort: a disabled, unconfigured
- *  or unreachable store is logged and left for the next boot. A configuration-store outage is not
- *  that: it propagates so the boot retry, or the sweep that also calls this, runs it again. */
-export async function classifyGlobalKbVectorProvenance(db: Database): Promise<void> {
+ *  or unreachable store is logged and left for the next sweep. Background boot passes a signal
+ *  and owns all retries; a configuration-store outage propagates to the sweep's owner too. */
+export async function classifyGlobalKbVectorProvenance(
+  db: Database,
+  opts: GlobalKbCallOptions = {},
+): Promise<void> {
   try {
     if (!(await resolveGlobalKbEnabled(configService))) return;
-    await withGlobalKb(db, async ({ conn }) => {
-      const usedPgvector =
-        (
-          (await conn.pg.unsafe(
-            `SELECT 1 FROM information_schema.columns WHERE table_name = 'ai_rag_embeddings' AND column_name = 'vector'`,
-          )) as unknown as unknown[]
-        ).length > 0;
-      const column = usedPgvector ? 'vector::text' : 'embedding_json';
-      let after = 0;
-      let hashed = 0;
-      let model = 0;
-      for (;;) {
-        const rows = (await conn.pg.unsafe(
-          `SELECT id, content, ${column} AS v FROM ai_rag_embeddings WHERE embed_kind IS NULL AND id > $1 ORDER BY id LIMIT $2`,
-          [after, BATCH_SIZE],
-        )) as unknown as Array<{ id: number; content: string; v: unknown }>;
-        if (rows.length === 0) break;
-        after = rows[rows.length - 1]!.id;
-        const ids: Record<'hashed' | 'model', number[]> = { hashed: [], model: [] };
-        for (const row of rows) {
-          const stored = vectorOf(row.v);
-          if (stored === null) continue;
-          const match = cosineSimilarity(stored, hashEmbed(row.content, stored.length));
-          ids[match >= HASH_MATCH_COSINE ? 'hashed' : 'model'].push(row.id);
+    await withGlobalKb(
+      db,
+      async ({ conn }) => {
+        const usedPgvector =
+          (
+            (await conn.pg.unsafe(
+              `SELECT 1 FROM information_schema.columns WHERE table_name = 'ai_rag_embeddings' AND column_name = 'vector'`,
+            )) as unknown as unknown[]
+          ).length > 0;
+        const column = usedPgvector ? 'vector::text' : 'embedding_json';
+        let after = 0;
+        let hashed = 0;
+        let model = 0;
+        for (;;) {
+          opts.signal?.throwIfAborted();
+          const rows = (await conn.pg.unsafe(
+            `SELECT id, content, ${column} AS v FROM ai_rag_embeddings WHERE embed_kind IS NULL AND id > $1 ORDER BY id LIMIT $2`,
+            [after, BATCH_SIZE],
+          )) as unknown as Array<{ id: number; content: string; v: unknown }>;
+          if (rows.length === 0) break;
+          after = rows[rows.length - 1]!.id;
+          const ids: Record<'hashed' | 'model', number[]> = { hashed: [], model: [] };
+          for (const row of rows) {
+            const stored = vectorOf(row.v);
+            if (stored === null) continue;
+            const match = cosineSimilarity(stored, hashEmbed(row.content, stored.length));
+            ids[match >= HASH_MATCH_COSINE ? 'hashed' : 'model'].push(row.id);
+          }
+          for (const kind of ['hashed', 'model'] as const) {
+            opts.signal?.throwIfAborted();
+            if (ids[kind].length === 0) continue;
+            await conn.pg.unsafe(
+              `UPDATE ai_rag_embeddings SET embed_kind = $1 WHERE embed_kind IS NULL AND id = ANY($2::int[])`,
+              [kind, `{${ids[kind].join(',')}}`],
+            );
+          }
+          hashed += ids.hashed.length;
+          model += ids.model.length;
         }
-        for (const kind of ['hashed', 'model'] as const) {
-          if (ids[kind].length === 0) continue;
-          await conn.pg.unsafe(
-            `UPDATE ai_rag_embeddings SET embed_kind = $1 WHERE embed_kind IS NULL AND id = ANY($2::int[])`,
-            [kind, `{${ids[kind].join(',')}}`],
-          );
+        if (hashed + model > 0) {
+          log.info({ hashed, model }, 'classified global KB vectors written before provenance');
         }
-        hashed += ids.hashed.length;
-        model += ids.model.length;
-      }
-      if (hashed + model > 0) {
-        log.info({ hashed, model }, 'classified global KB vectors written before provenance');
-      }
-    });
+      },
+      opts,
+    );
   } catch (err) {
+    // Background boot owns retries and shutdown; the periodic sweep keeps its best-effort contract.
+    if (opts.signal) throw err;
     rethrowIfConfigUnavailable(err);
     log.warn({ err }, 'global KB vector provenance classification skipped');
   }

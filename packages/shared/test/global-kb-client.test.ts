@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 type Store = { mode: 'internal' | 'external'; connectionString: string | null };
 
@@ -75,6 +75,7 @@ beforeAll(async () => {
 }, 60_000);
 
 beforeEach(() => {
+  vi.useFakeTimers();
   h.ensure.mockReset();
   h.backfill.mockReset();
   h.freshMode = 'internal';
@@ -87,6 +88,8 @@ beforeEach(() => {
   h.closes = 0;
   h.onEnd = undefined;
 });
+
+afterEach(() => vi.useRealTimers());
 
 describe('withGlobalKb', () => {
   it('hands the ensure a width read fresh from Redis when it asks, not the cached settings', async () => {
@@ -155,7 +158,7 @@ describe('withGlobalKb', () => {
     const first = withGlobalKb(haiveDb, async () => void ran.push('first'));
     const second = withGlobalKb(haiveDb, async () => void ran.push('second'));
     await vi.waitFor(() => expect(h.ensure).toHaveBeenCalled());
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await vi.advanceTimersByTimeAsync(0);
     expect(h.ensure).toHaveBeenCalledTimes(1);
     expect(ran).toEqual([]);
 
@@ -189,7 +192,7 @@ describe('withGlobalKb', () => {
     const external = withGlobalKb(haiveDb, async () => void ran.push('external'));
     finish.internal!();
     await internal;
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(ran).toEqual(['internal']);
     expect(h.ensure.mock.calls.map(([conn]) => conn.store)).toEqual([
@@ -331,17 +334,17 @@ describe('withGlobalKb with limits for one call', () => {
     const withGlobalKb = await load();
     let release!: (err: Error) => void;
     h.onEnd = () => release(new Error('connection destroyed'));
-    const started = performance.now();
     const call = withGlobalKb(
       haiveDb,
       () => new Promise<never>((_, reject) => (release = reject)),
       { deadlineMs: 80 },
     );
-    await expect(call).rejects.toMatchObject({
+    const outcome = expect(call).rejects.toMatchObject({
       code: 'GLOBAL_KB_DEADLINE',
       name: 'GlobalKbDeadlineError',
     });
-    expect(performance.now() - started).toBeLessThan(1000);
+    await vi.advanceTimersByTimeAsync(80);
+    await outcome;
     expect(h.ends).toEqual([{ timeout: 0 }]);
     // fn settles because the pool was destroyed, and the connection is still closed after it.
     await vi.waitFor(() => expect(h.closes).toBe(1));
@@ -350,11 +353,11 @@ describe('withGlobalKb with limits for one call', () => {
   it('rejects at the deadline while the schema is still being ensured', async () => {
     h.ensure.mockImplementation(() => new Promise(() => {}));
     const withGlobalKb = await load();
-    await expect(
+    const outcome = expect(
       withGlobalKb(haiveDb, async () => 'never', { deadlineMs: 60 }),
-    ).rejects.toMatchObject({
-      code: 'GLOBAL_KB_DEADLINE',
-    });
+    ).rejects.toMatchObject({ code: 'GLOBAL_KB_DEADLINE' });
+    await vi.advanceTimersByTimeAsync(60);
+    await outcome;
     expect(h.ends).toEqual([{ timeout: 0 }]);
   });
 
@@ -363,11 +366,15 @@ describe('withGlobalKb with limits for one call', () => {
     h.connectDelayMs = 150;
     const withGlobalKb = await load();
     const ran = vi.fn();
-    await expect(
+    const outcome = expect(
       withGlobalKb(haiveDb, async () => ran(), { deadlineMs: 40 }),
     ).rejects.toMatchObject({ code: 'GLOBAL_KB_DEADLINE' });
+    await vi.advanceTimersByTimeAsync(40);
+    await outcome;
     expect(h.ends).toEqual([]);
-    await vi.waitFor(() => expect(h.ends).toEqual([{ timeout: 0 }]), { timeout: 2000 });
+    await vi.advanceTimersByTimeAsync(110);
+    expect(h.ends).toEqual([{ timeout: 0 }]);
+    expect(ran).not.toHaveBeenCalled();
   });
 });
 
@@ -389,7 +396,9 @@ describe('the schema ensure of a call with a deadline', () => {
     await ensureStarted;
     const unbounded = withGlobalKb(haiveDb, async () => 'unbounded');
 
-    await expect(bounded).rejects.toMatchObject({ code: 'GLOBAL_KB_DEADLINE' });
+    const outcome = expect(bounded).rejects.toMatchObject({ code: 'GLOBAL_KB_DEADLINE' });
+    await vi.advanceTimersByTimeAsync(60);
+    await outcome;
     await expect(unbounded).resolves.toBe('unbounded');
   });
 
@@ -404,7 +413,7 @@ describe('the schema ensure of a call with a deadline', () => {
     const bounded = withGlobalKb(haiveDb, async () => void ran.push('bounded'), {
       deadlineMs: 5000,
     });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await vi.advanceTimersByTimeAsync(0);
     expect(ran).toEqual([]);
 
     finish();
@@ -431,4 +440,77 @@ describe('the schema ensure of a call with a deadline', () => {
     await withGlobalKb(haiveDb, async () => undefined, { deadlineMs: 5000 });
     expect(h.ensure).toHaveBeenCalledTimes(2);
   });
+});
+
+describe('cancelling a background KB call', () => {
+  it('destroys the pool, rejects immediately, clears its deadline and never caches a cancelled ensure', async () => {
+    let finish!: () => void;
+    h.ensure.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const withGlobalKb = await load();
+    const controller = new AbortController();
+    const ran = vi.fn(async () => 'ran');
+    const call = withGlobalKb(haiveDb, ran, { deadlineMs: 100, signal: controller.signal });
+    const outcome = call.catch((err) => err);
+    await vi.advanceTimersByTimeAsync(0);
+    const reason = new Error('worker stopping');
+    controller.abort(reason);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.ends).toEqual([{ timeout: 0 }]);
+    expect(await outcome).toBe(reason);
+    expect(vi.getTimerCount()).toBe(0);
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ran).not.toHaveBeenCalled();
+    await withGlobalKb(haiveDb, async () => {}, { deadlineMs: 100 });
+    expect(h.ensure).toHaveBeenCalledTimes(2);
+  });
+
+  it('never ensures or runs work on a connection arriving after cancellation', async () => {
+    h.connectDelayMs = 30;
+    const withGlobalKb = await load();
+    const controller = new AbortController();
+    const ran = vi.fn();
+    const call = withGlobalKb(haiveDb, async () => ran(), {
+      deadlineMs: 100,
+      signal: controller.signal,
+    });
+    const outcome = call.catch((err) => err);
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort(new Error('shutdown'));
+    await vi.advanceTimersByTimeAsync(30);
+    expect(h.ends).toEqual([{ timeout: 0 }]);
+    expect(await outcome).toMatchObject({ message: 'shutdown' });
+    expect(h.ensure).not.toHaveBeenCalled();
+    expect(ran).not.toHaveBeenCalled();
+    expect(h.closes).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+it('a timed-out waiter never runs after a shared ensure completes', async () => {
+  let finish!: () => void;
+  h.ensure.mockImplementationOnce(
+    () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const withGlobalKb = await load();
+  const first = withGlobalKb(haiveDb, async () => 'shared');
+  await vi.advanceTimersByTimeAsync(0);
+  const ran = vi.fn(async () => 'bounded');
+  const bounded = withGlobalKb(haiveDb, ran, { deadlineMs: 10 });
+  const outcome = expect(bounded).rejects.toMatchObject({ code: 'GLOBAL_KB_DEADLINE' });
+  await vi.advanceTimersByTimeAsync(10);
+  await outcome;
+  finish();
+  expect(await first).toBe('shared');
+  await vi.advanceTimersByTimeAsync(0);
+  expect(ran).not.toHaveBeenCalled();
+  expect(h.ensure).toHaveBeenCalledTimes(1);
 });

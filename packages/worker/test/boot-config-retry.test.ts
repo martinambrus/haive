@@ -13,3 +13,11 @@ describe('worker boot against an unavailable configuration store', () => {
     expect(call).toBeLessThan(source.indexOf('bootStepEngine('));
   });
 });
+
+it('starts store repairs after ready and stops them with the other background tasks', () => {
+  const start = source.indexOf(
+    'const stopBackgroundDataMigrations = startBackgroundDataMigrations(getDb())',
+  );
+  expect(start).toBeGreaterThan(source.indexOf("logger.info('haive-worker ready')"));
+  expect(source).toContain('stopBackgroundDataMigrations();');
+});

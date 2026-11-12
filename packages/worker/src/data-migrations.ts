@@ -42,6 +42,8 @@ import {
 import {
   FACET_VALUE_ALIAS_PAIRS,
   globalKbEntries,
+  GlobalKbDeadlineError,
+  type GlobalKbCallOptions,
   resolveGlobalKbEnabled,
   withGlobalKb,
 } from '@haive/shared/global-kb';
@@ -95,7 +97,9 @@ type DataMigrationKind = 'convergent' | 'destructive';
 export interface DataMigration {
   id: string;
   kind: DataMigrationKind;
-  run: (db: Database) => Promise<void>;
+  /** Store-only repairs run after ready, under a cancellable retry budget. */
+  background?: true;
+  run: (db: Database, opts?: GlobalKbCallOptions) => Promise<void>;
 }
 
 /** Every data fix, each declaring its own kind. There is deliberately NO default: a new entry
@@ -140,7 +144,12 @@ export const DATA_MIGRATIONS: DataMigration[] = [
   { id: 'relabelPlanReconcileForms', kind: 'convergent', run: relabelPlanReconcileForms },
   // After the schema backfill has canonicalised the facets those keys are derived from — it runs
   // on the global-KB connection at first use, which `withGlobalKb` here triggers.
-  { id: 'recomputeAliasedTopicKeys', kind: 'convergent', run: recomputeAliasedTopicKeys },
+  {
+    id: 'recomputeAliasedTopicKeys',
+    kind: 'convergent',
+    background: true,
+    run: recomputeAliasedTopicKeys,
+  },
   // Before both of the below, and before anything can retry a kb_author task: it is what makes
   // "no record" mean "no evidence" rather than "most of the tasks on this install".
   { id: 'backfillKbAuthorAnchors', kind: 'convergent', run: backfillKbAuthorAnchors },
@@ -170,6 +179,7 @@ export const DATA_MIGRATIONS: DataMigration[] = [
   {
     id: 'classifyGlobalKbVectorProvenance',
     kind: 'convergent',
+    background: true,
     run: classifyGlobalKbVectorProvenance,
   },
   // Convergent: a re-run is a no-op once the key exists, and the previous release never reads it.
@@ -290,9 +300,95 @@ async function runOne(db: Database, migration: DataMigration): Promise<void> {
  * CONVERGENT ONLY. Anything that destroys data waits for `runDestructiveDataMigrations`.
  */
 export async function runDataMigrations(db: Database): Promise<void> {
-  for (const migration of DATA_MIGRATIONS.filter((m) => m.kind === 'convergent')) {
+  for (const migration of DATA_MIGRATIONS.filter((m) => m.kind === 'convergent' && !m.background)) {
     await runOne(db, migration);
   }
+}
+
+export const BACKGROUND_MIGRATION_DEADLINE_MS = 60_000;
+export const BACKGROUND_MIGRATION_INITIAL_DELAY_MS = 1000;
+export const BACKGROUND_MIGRATION_MAX_DELAY_MS = 60_000;
+let backgroundStop: (() => void) | undefined;
+
+/** Like the held-revival retry, returns a shutdown hook and owns only unreferenced timers.
+ *  Global-store repairs cannot hold ready hostage. Classification must move too: with KB enabled
+ *  it would otherwise open the same unbounded store immediately after the deferred recompute.
+ *  A bounded call still ensures the schema, privately, with transaction-local lock/statement
+ *  timeouts. Only a completed ensure is memoized; interrupted steps roll back and are retried.
+ *  Partial key repairs are harmless: each alias rewrite is idempotent and guards the read values.
+ */
+export function startBackgroundDataMigrations(
+  db: Database,
+  opts: { deadlineMs?: number; initialDelayMs?: number; maxDelayMs?: number } = {},
+): () => void {
+  if (backgroundStop) return backgroundStop;
+  const deadlineMs = opts.deadlineMs ?? BACKGROUND_MIGRATION_DEADLINE_MS;
+  const initialDelayMs = opts.initialDelayMs ?? BACKGROUND_MIGRATION_INITIAL_DELAY_MS;
+  const maxDelayMs = opts.maxDelayMs ?? BACKGROUND_MIGRATION_MAX_DELAY_MS;
+  let stopped = false;
+  let attempt = 0;
+  let delayMs = initialDelayMs;
+  let timer: NodeJS.Timeout | undefined;
+  let controller: AbortController | undefined;
+  const stop = () => {
+    stopped = true;
+    clearTimeout(timer);
+    controller?.abort();
+    if (!controller && backgroundStop === stop) backgroundStop = undefined;
+  };
+  backgroundStop = stop;
+  const run = async (): Promise<void> => {
+    const current = new AbortController();
+    controller = current;
+    attempt++;
+    const deadline = setTimeout(
+      () => current.abort(new GlobalKbDeadlineError(deadlineMs)),
+      deadlineMs,
+    );
+    deadline.unref();
+    let rejectAborted!: () => void;
+    const aborted = new Promise<never>((_, reject) => {
+      rejectAborted = () => reject(current.signal.reason);
+      current.signal.addEventListener('abort', rejectAborted, { once: true });
+    });
+    let success = false;
+    try {
+      await Promise.race([
+        (async () => {
+          for (const migration of DATA_MIGRATIONS.filter((m) => m.background)) {
+            current.signal.throwIfAborted();
+            await migration.run(db, {
+              deadlineMs,
+              connectTimeoutSeconds: 3,
+              signal: current.signal,
+            });
+          }
+        })(),
+        aborted,
+      ]);
+      success = true;
+    } catch (err) {
+      if (!stopped)
+        logger.warn(
+          { err, attempt, delayMs },
+          'global KB boot repairs failed; retrying in background',
+        );
+    } finally {
+      clearTimeout(deadline);
+      current.signal.removeEventListener('abort', rejectAborted);
+      controller = undefined;
+    }
+    if (stopped || success) {
+      if (backgroundStop === stop) backgroundStop = undefined;
+      return;
+    }
+    timer = setTimeout(() => void run(), delayMs);
+    timer.unref();
+    delayMs = Math.min(delayMs * 2, maxDelayMs);
+  };
+  timer = setTimeout(() => void run(), 0);
+  timer.unref();
+  return stop;
 }
 
 /**
@@ -650,44 +746,60 @@ async function backfillKbAuthorAnchors(db: Database): Promise<void> {
  *  one in exactly ONE segment AND that difference is an alias pair — so a key that a caller's
  *  `fallbackTech` produced, or one the derivation has since changed for any other reason, is left
  *  alone rather than silently rewritten by a migration nobody asked for that. */
-async function recomputeAliasedTopicKeys(db: Database): Promise<void> {
+async function recomputeAliasedTopicKeys(
+  db: Database,
+  opts: GlobalKbCallOptions = {},
+): Promise<void> {
   const norm = (v: string): string => v.toLowerCase().replace(/[^a-z0-9]+/g, '');
-  await withGlobalKb(db, async ({ db: kb }) => {
-    const rows = await kb
-      .select({
-        id: globalKbEntries.id,
-        category: globalKbEntries.category,
-        facets: globalKbEntries.facets,
-        topicKey: globalKbEntries.topicKey,
-      })
-      .from(globalKbEntries)
-      .where(isNotNull(globalKbEntries.topicKey));
-    let updated = 0;
-    for (const row of rows) {
-      const stored = row.topicKey;
-      if (!stored) continue;
-      const recomputed = globalKbTopicKey(row.category, row.facets ?? {});
-      if (!recomputed || recomputed === stored) continue;
-      const before = stored.split(':');
-      const after = recomputed.split(':');
-      if (before.length !== after.length) continue;
-      const diffs = before
-        .map((seg, i) => (seg === after[i] ? null : ([seg, after[i] ?? ''] as const)))
-        .filter((d): d is readonly [string, string] => d !== null);
-      if (diffs.length !== 1) continue;
-      const [from, to] = diffs[0]!;
-      if (!FACET_VALUE_ALIAS_PAIRS.some((p) => norm(p.from) === from && norm(p.to) === to))
-        continue;
-      await kb
-        .update(globalKbEntries)
-        .set({ topicKey: recomputed })
-        .where(eq(globalKbEntries.id, row.id));
-      updated += 1;
-    }
-    if (updated > 0) {
-      log.info({ updated }, 'recomputed topic keys whose tech segment predated the facet alias');
-    }
-  });
+  await withGlobalKb(
+    db,
+    async ({ db: kb }) => {
+      const rows = await kb
+        .select({
+          id: globalKbEntries.id,
+          category: globalKbEntries.category,
+          facets: globalKbEntries.facets,
+          topicKey: globalKbEntries.topicKey,
+        })
+        .from(globalKbEntries)
+        .where(isNotNull(globalKbEntries.topicKey));
+      let updated = 0;
+      for (const row of rows) {
+        opts.signal?.throwIfAborted();
+        const stored = row.topicKey;
+        if (!stored) continue;
+        const recomputed = globalKbTopicKey(row.category, row.facets ?? {});
+        if (!recomputed || recomputed === stored) continue;
+        const before = stored.split(':');
+        const after = recomputed.split(':');
+        if (before.length !== after.length) continue;
+        const diffs = before
+          .map((seg, i) => (seg === after[i] ? null : ([seg, after[i] ?? ''] as const)))
+          .filter((d): d is readonly [string, string] => d !== null);
+        if (diffs.length !== 1) continue;
+        const [from, to] = diffs[0]!;
+        if (!FACET_VALUE_ALIAS_PAIRS.some((p) => norm(p.from) === from && norm(p.to) === to))
+          continue;
+        const changed = await kb
+          .update(globalKbEntries)
+          .set({ topicKey: recomputed })
+          .where(
+            and(
+              eq(globalKbEntries.id, row.id),
+              eq(globalKbEntries.topicKey, stored),
+              eq(globalKbEntries.category, row.category),
+              eq(globalKbEntries.facets, row.facets),
+            ),
+          )
+          .returning({ id: globalKbEntries.id });
+        updated += changed.length;
+      }
+      if (updated > 0) {
+        log.info({ updated }, 'recomputed topic keys whose tech segment predated the facet alias');
+      }
+    },
+    opts,
+  );
 }
 
 /** Flag repos whose RAG index was built with no embedding endpoint, so the query side

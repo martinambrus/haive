@@ -155,3 +155,14 @@ describe('classifying global KB vectors when the store is not there', () => {
     );
   });
 });
+
+it('lets background boot own store failures so its loop retries them', async () => {
+  const err = new Error('store unavailable');
+  h.storeError = err;
+  await expect(
+    classifyGlobalKbVectorProvenance({} as never, {
+      deadlineMs: 20,
+      signal: new AbortController().signal,
+    }),
+  ).rejects.toBe(err);
+});
