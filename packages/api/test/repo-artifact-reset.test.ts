@@ -570,8 +570,14 @@ describe('collectWrittenCliContent', () => {
     endedAt,
   });
   const collectMerged = (
-    rows: Parameters<typeof collectWrittenCliContent>[0],
+    rows: ReadonlyArray<
+      Parameters<typeof collectWrittenCliContent>[0][number] & {
+        mergeResolveState?: unknown;
+        landedMerge?: unknown;
+      }
+    >,
     epoch: Date | null = null,
+    checkoutBranch: string | null = null,
   ) =>
     collectWrittenCliContent(
       rows,
@@ -581,11 +587,80 @@ describe('collectWrittenCliContent', () => {
           taskId: (r as { taskId?: string }).taskId ?? '',
           stepId: r.stepId,
           mergeResolveState: (r as { mergeResolveState?: unknown }).mergeResolveState ?? null,
+          landedMerge: (r as { landedMerge?: unknown }).landedMerge,
           endedAt: (r as { endedAt?: Date | null }).endedAt ?? null,
         })),
         epoch,
+        checkoutBranch,
       ),
     );
+
+  it.each(['event', 'legacy-state'] as const)(
+    "keeps a person's untouched skill when the %s merge landed on another branch",
+    async (kind) => {
+      const root = await repo('reset-cross-branch-');
+      const skill = '.claude/skills/personal/SKILL.md';
+      await mkdir(path.dirname(path.join(root, skill)), { recursive: true });
+      await writeFile(path.join(root, skill), 'my untouched skill');
+      const row = {
+        ...cleanup('t1', true),
+        mergeResolveState: {
+          merged: true,
+          mergedAt: MERGED_AT.toISOString(),
+          baseBranch: 'feature-x',
+        },
+        ...(kind === 'event'
+          ? {
+              landedMerge: {
+                baseShaBefore: 'a'.repeat(40),
+                baseShaAfter: 'b'.repeat(40),
+                landedOn: 'feature-x',
+                landedAt: MERGED_AT.toISOString(),
+                repoPath: root,
+                dir: root,
+              },
+            }
+          : {}),
+      };
+      const written = collectMerged(
+        [skillSync('t1', { generated: ['personal'] }), row],
+        null,
+        'main',
+      );
+      expect(written.entries.has(skill)).toBe(false);
+      await resetOnboardingArtifacts(root, {
+        writtenHashes: new Map(),
+        haiveDirs: written.dirs,
+        haiveEntries: written.entries,
+      });
+      expect(await readFile(path.join(root, skill), 'utf8')).toBe('my untouched skill');
+    },
+  );
+
+  it.each([
+    { checkout: 'main', landing: 'main', count: true },
+    { checkout: 'main', landing: 'feature-x', count: false },
+    { checkout: null, landing: 'feature-x', count: true },
+    { checkout: 'main', landing: undefined, count: true },
+    { checkout: 'main', landing: '', count: true },
+  ])('compares legacy baseBranch: $checkout / $landing', ({ checkout, landing, count }) => {
+    const written = collectMerged(
+      [
+        skillSync('t1', { generated: ['personal'] }),
+        {
+          ...cleanup('t1', true),
+          mergeResolveState: {
+            merged: true,
+            mergedAt: MERGED_AT.toISOString(),
+            baseBranch: landing,
+          },
+        },
+      ],
+      null,
+      checkout,
+    );
+    expect(written.entries.has('.claude/skills/personal/SKILL.md')).toBe(count);
+  });
 
   it('ignores a workflow skill sync whose worktree was never merged', async () => {
     // Until the merge those writes live in the worktree and the root still holds what
@@ -1950,6 +2025,22 @@ describe('cancel-left merge provenance', () => {
     repoPath: '/repo',
     dir: '/repo',
   };
+  it.each([
+    { checkout: 'main', landing: 'main', count: true },
+    { checkout: 'main', landing: 'feature-x', count: false },
+    { checkout: null, landing: 'feature-x', count: true },
+  ])('compares event landedOn: $checkout / $landing', ({ checkout, landing, count }) => {
+    const rows = [
+      {
+        taskId: 'cancelled',
+        stepId: '11d-skill-sync',
+        mergeResolveState: null,
+        landedMerge: { ...landedMerge, landedOn: landing },
+        endedAt: new Date('2026-10-11T00:00:00Z'),
+      },
+    ];
+    expect(resolveMergedTasks(rows, null, checkout).has('cancelled')).toBe(count);
+  });
   it('uses the durable landing even when cancel left merged false or reset the cleanup row', () => {
     const rows = [
       {

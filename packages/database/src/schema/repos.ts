@@ -285,6 +285,11 @@ export const repositories = pgTable(
     agentRulesOverride: text('agent_rules_override'),
     /** Structural recovery state; written with status and cleared outside error. */
     errorCode: text('error_code'),
+    /** Actual symbolic HEAD last observed by the worker, not the configured branch above.
+     *  NULL means detached, unreadable or never observed. Reset awaits a fresh observation;
+     *  it ignores this stored value if that observation fails or times out.
+     *  Declared LAST so ALTER TABLE and drizzle-kit push agree on column order. */
+    checkoutBranch: text('checkout_branch'),
   },
   (table) => [
     index('repositories_user_id_idx').on(table.userId),
