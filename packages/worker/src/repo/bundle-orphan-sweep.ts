@@ -18,6 +18,16 @@ const ID = new RegExp(`^${UUID}$`);
 const STAGE = new RegExp(`^\\.haive-extract-\\d+-${UUID}$`);
 const ARCHIVE = new RegExp(`^source(?:\\.${UUID})?\\.(?:zip|tar|tar\\.gz)$`);
 const SIDECAR = new RegExp(`^source(?:\\.${UUID})?\\.(?:zip|tar|tar\\.gz)\\.replacement\\.json$`);
+
+function ownsArchive(stored: string | null | undefined, bundleId: string, archivePath: string) {
+  return (
+    stored === archivePath ||
+    (stored != null &&
+      path.basename(path.dirname(stored)) === bundleId &&
+      path.basename(stored) === path.basename(archivePath))
+  );
+}
+
 type LiveJobs = Partial<BundleJobPayload>[];
 type BundleQueueReader = Pick<Queue<BundleJobPayload>, 'getRanges' | 'getJob'>;
 let queue: Queue<BundleJobPayload> | undefined;
@@ -143,7 +153,7 @@ export class BundleOrphanSweeper {
         if (busy.has(dir.bundleId)) continue;
         try {
           // A stage has no durable name until beforeSwap. Keep ALL artifacts of a syncing
-          // bundle/job, including the previous archive and stage/old needed by rollback.
+          // or failed bundle: the previous archive and stage/old may be its only recovery copy.
           // Uploads also own an archive before promotion, while its row still names the partial.
           const [bundle] = await db
             .select()
@@ -155,7 +165,7 @@ export class BundleOrphanSweeper {
               ),
             )
             .limit(1);
-          if (bundle?.status === 'syncing') continue;
+          if (bundle && bundle.status !== 'active') continue;
           const [upload] = await db
             .select({ id: schema.customBundleUploads.id })
             .from(schema.customBundleUploads)
@@ -176,21 +186,28 @@ export class BundleOrphanSweeper {
             const rel = `${dir.rel}/${entry.name}`;
             const absolute = path.join(root, rel);
             const archivePath = sidecar ? absolute.slice(0, -'.replacement.json'.length) : absolute;
-            const current = bundle?.archivePath === absolute;
-            // Keep a failed row's current source too: a redelivered job may still retry it.
-            if (
-              current ||
-              jobArchives.has(archivePath) ||
-              (bundle?.status === 'failed' &&
-                sidecar &&
-                bundle.archivePath === path.join(root, rel.slice(0, -'.replacement.json'.length)))
-            )
-              continue;
+            const current = ownsArchive(bundle?.archivePath, dir.bundleId, absolute);
+            if (current || jobArchives.has(archivePath)) continue;
             try {
               const info = await lstatNoFollow(root, rel, { strict: true });
               if (!info || info.stats.mtimeMs >= cutoff) continue;
               if (info.kind !== (stage ? 'directory' : 'file')) continue;
               if (!stage) {
+                // Storage roots can change. Recheck this bundle's recorded suffix as well as
+                // exact references from any row before deleting an archive or recovery record.
+                const [recordedOwner] = await db
+                  .select({ archivePath: schema.customBundles.archivePath })
+                  .from(schema.customBundles)
+                  .where(
+                    and(
+                      eq(schema.customBundles.id, dir.bundleId),
+                      sidecar
+                        ? inArray(schema.customBundles.status, ['syncing', 'failed'])
+                        : undefined,
+                    ),
+                  )
+                  .limit(1);
+                if (ownsArchive(recordedOwner?.archivePath, dir.bundleId, archivePath)) continue;
                 // Check references by path as well as by bundle id. Even an unusual row naming
                 // another directory's source is not evidence that the source is ours to remove.
                 const [owner] = await db

@@ -156,6 +156,68 @@ describe('bundle orphan cleanup through the stalled sweep', () => {
     },
   );
 
+  it('keeps every failed replacement artifact until a later import becomes active', async () => {
+    bundle('failed');
+    await writeFile(
+      path.join(root, DIR, SIDECAR),
+      JSON.stringify({
+        mode: 'keep_until_success',
+        previousArchive: {
+          archivePath: path.join(root, DIR, 'source.zip'),
+          archiveFilename: 'old.zip',
+          archiveFormat: 'zip',
+        },
+        recovery: { stageName: STAGE, dev: '1', ino: '2' },
+      }),
+    );
+    await utimes(path.join(root, DIR, SIDECAR), OLD, OLD);
+    const worker = sweeper({ intervalMs: 0 });
+    await worker.sweep();
+    for (const name of ['source.zip', SIDECAR, STAGE, ARCHIVE])
+      await expect.soft(exists(name)).resolves.toBeDefined();
+    await expect
+      .soft(readFile(path.join(root, DIR, STAGE, 'old', 'kept.md'), 'utf8'))
+      .resolves.toBe('previous tree');
+
+    const nextArchive = 'source.00000000-0000-4000-8000-0000000000c2.zip';
+    await writeFile(path.join(root, DIR, nextArchive), 'successful replacement');
+    await utimes(path.join(root, DIR, nextArchive), OLD, OLD);
+    fake.patch(schema.customBundles, BUNDLE, {
+      status: 'active',
+      archivePath: path.join(root, DIR, nextArchive),
+    });
+    await worker.sweep();
+    for (const name of ['source.zip', SIDECAR, STAGE, ARCHIVE])
+      await expect(exists(name)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await exists(nextArchive)).isFile()).toBe(true);
+  });
+
+  it('keeps an owned archive recorded under a different storage root', async () => {
+    bundle('active');
+    fake.patch(schema.customBundles, BUNDLE, {
+      archivePath: path.join('/previous/bundle-root', DIR, ARCHIVE),
+    });
+    await sweeper().sweep();
+    expect((await exists(ARCHIVE)).isFile()).toBe(true);
+    await expect(exists('source.zip')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rechecks root-independent ownership immediately before removing an archive', async () => {
+    bundle('active');
+    fake.patch(schema.customBundles, BUNDLE, { archivePath: path.join(root, DIR, 'source.zip') });
+    const original = fsSafe.lstatNoFollow;
+    vi.spyOn(fsSafe, 'lstatNoFollow').mockImplementation(async (anchor, rel, opts) => {
+      const info = await original(anchor, rel, opts);
+      if (rel === `${DIR}/${ARCHIVE}`)
+        fake.patch(schema.customBundles, BUNDLE, {
+          archivePath: path.join('/previous/bundle-root', DIR, ARCHIVE),
+        });
+      return info;
+    });
+    await sweeper().sweep();
+    expect((await exists(ARCHIVE)).isFile()).toBe(true);
+  });
+
   it('keeps the previous archive and old tree until keep_until_success commits', async () => {
     bundle('syncing');
     await writeFile(
