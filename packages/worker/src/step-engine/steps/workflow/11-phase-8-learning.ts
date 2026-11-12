@@ -1340,18 +1340,18 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         : base;
     },
     retry: { maxAttempts: 3, retryOn: (e) => e instanceof RetryableParseError },
-    // Form-aware: re-roll before the validation form when the draft produced no usable
-    // learning entries, so the user validates a real draft rather than a stub.
+    // Re-roll only on parse failure. An empty learning list is valid and can still
+    // carry KB-sync and skill-sync proposals for the reviewer.
     shouldRetryPreForm: (raw) => {
       const nonEmpty = typeof raw === 'string' ? raw.trim() !== '' : raw != null;
       if (!nonEmpty) return false;
-      const parsed = parseLearningOutput(raw);
-      return !parsed || parsed.length === 0;
+      return parseLearningOutput(raw) === null;
     },
   },
 
   form(_ctx, detected, llmOutput): FormSchema {
-    const entries = parseLearningOutput(llmOutput ?? null) ?? [];
+    const parsed = parseLearningOutput(llmOutput ?? null);
+    const entries = parsed ?? [];
     const investigation = detected.isBugFix ? parseInvestigation(llmOutput ?? null) : null;
     const kbSync = detected.kbSyncSkipped ? null : parseKbSync(llmOutput ?? null);
     const kbChanged = (kbSync?.changes.length ?? 0) > 0;
@@ -1449,6 +1449,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       description: [
         `Task: ${detected.taskTitle || '(untitled)'}`,
         `Verification: ${detected.verifyPassed ? 'passed' : 'did not pass'}${notRunSuffix(detected.verifyNotRun)}`,
+        parsed?.length === 0 ? 'No learnings were drafted for this task.' : '',
         detected.isBugFix ? 'Bug fix — a knowledge-base investigation was drafted below.' : '',
         kbChanged
           ? 'Feature KB sync — the agent updated the knowledge base; review the changes below.'
@@ -1462,15 +1463,19 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         .join('\n'),
       infoSections: infoSections.length > 0 ? infoSections : undefined,
       fields: [
-        {
-          type: 'checkbox',
-          id: 'writeFiles',
-          label:
-            entries.length > 0
-              ? `Apply learning changes (${insertCount} new, ${updateCount} updated, ${deleteCount} removed) to ${LEARNINGS_DIR}/`
-              : `Write learning entries to ${LEARNINGS_DIR}/`,
-          default: true,
-        },
+        ...(parsed?.length === 0
+          ? []
+          : [
+              {
+                type: 'checkbox' as const,
+                id: 'writeFiles',
+                label:
+                  entries.length > 0
+                    ? `Apply learning changes (${insertCount} new, ${updateCount} updated, ${deleteCount} removed) to ${LEARNINGS_DIR}/`
+                    : `Write learning entries to ${LEARNINGS_DIR}/`,
+                default: true,
+              },
+            ]),
         ...(kbChanged && kbSync
           ? [
               {
@@ -1617,8 +1622,8 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     }
 
     const parsed = parseLearningOutput(args.llmOutput ?? null);
-    const source: 'llm' | 'stub' = parsed && parsed.length > 0 ? 'llm' : 'stub';
-    const entries = parsed && parsed.length > 0 ? parsed : stubLearning(args.detected);
+    const source: 'llm' | 'stub' = parsed !== null ? 'llm' : 'stub';
+    const entries = parsed ?? stubLearning(args.detected);
     const existingLearnings = await readExistingLearnings(worktreePath);
     // The reviewer's staged edits win over the agent's drafts, and an emptied draft
     // drops that entry — the gate's inline editor is the same decision as unticking
