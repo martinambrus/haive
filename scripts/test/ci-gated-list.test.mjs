@@ -15,7 +15,8 @@ function gatedEnvironment(source) {
   const guards = [];
   const visit = (node) => {
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer)
-      values.set(node.name.text, node.initializer);
+      // Every declaration of a name, so a shadowing one inside a test cannot hide the guard's.
+      values.set(node.name.text, [...(values.get(node.name.text) ?? []), node.initializer]);
     if (
       ts.isCallExpression(node) &&
       ts.isPropertyAccessExpression(node.expression) &&
@@ -44,7 +45,7 @@ function gatedEnvironment(source) {
       const name = ts.isPropertyAccessExpression(node) ? node.name : node.argumentExpression;
       if (ts.isIdentifier(name) || ts.isStringLiteral(name)) env.add(name.text);
     }
-    if (ts.isIdentifier(node)) trace(values.get(node.text));
+    if (ts.isIdentifier(node)) (values.get(node.text) ?? []).forEach(trace);
     ts.forEachChild(node, trace);
   };
   guards.forEach(trace);
@@ -94,6 +95,18 @@ const listedFiles = rows
   .sort();
 
 describe('environment guard discovery', () => {
+  it('keeps the guard env when a test shadows its variable', () => {
+    assert.deepEqual(
+      gatedEnvironment(`
+        const url = process.env.PG_URL;
+        describe.skipIf(!url)('suite', () => {
+          it('case', () => { const url = 'fixture'; });
+        });
+      `),
+      ['PG_URL'],
+    );
+  });
+
   it('follows aliases, combined guards and direct env reads under test or src', () => {
     assert.deepEqual(
       gatedEnvironment(`
@@ -168,7 +181,8 @@ describe('the environment-gated list in ci.yml', () => {
       steps.some(
         (step) =>
           step.run?.includes('vitest run --root . test/module-source-pin.test.ts') &&
-          pinEnv.every((name) => step.run.includes(`-e ${name}=`)),
+          // The test's guard demands exactly 'true'.
+          pinEnv.every((name) => step.run.includes(`-e ${name}=true`)),
       ),
       `exempt file has no workflow invocation with its guard environment: ${pin}`,
     );
