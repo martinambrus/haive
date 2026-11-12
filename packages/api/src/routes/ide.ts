@@ -145,8 +145,11 @@ repoIdeAccessRoutes.post('/:id/ensure-ide', requireAuth, async (c) => {
   }
 });
 
-function isPortProxyPath(path: string): boolean {
-  const firstSegment = path.split(/[/?]/)[1]?.toLowerCase();
+export function isPortProxyPath(path: string): boolean {
+  // Parse the remainder on its own: a leading .. must not climb out of the authenticated target.
+  // An absolute base keeps // in the path rather than interpreting it as another authority.
+  const normalized = new URL(`http://ide.invalid${path || '/'}`).pathname;
+  const firstSegment = normalized.split('/')[1]?.toLowerCase();
   return firstSegment === 'proxy' || firstSegment === 'absproxy';
 }
 
