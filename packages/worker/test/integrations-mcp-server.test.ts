@@ -1,4 +1,6 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { EventEmitter } from 'node:events';
+import { runInNewContext } from 'node:vm';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   API_URL_ENV,
   SERVER_NAME,
@@ -35,7 +37,47 @@ const TOOLS = [
 
 const tools = (list: unknown[] = TOOLS) => ({ status: 200, body: JSON.stringify({ tools: list }) });
 
-afterEach(runCleanups);
+afterEach(async () => {
+  vi.useRealTimers();
+  await runCleanups();
+});
+
+/** Run the generated script with its stdio, file and fetch seams supplied in memory. */
+async function clockedServer() {
+  vi.useFakeTimers();
+  const mod = await integrationsServerModule();
+  const input = new EventEmitter();
+  const replies: Array<{ id: number; result?: unknown }> = [];
+  const fetch = vi.fn(
+    (_url: string, init: RequestInit) =>
+      new Promise<never>((_, reject) => {
+        init.signal!.addEventListener('abort', () => reject(init.signal!.reason), { once: true });
+      }),
+  );
+  const timeout = vi.fn((ms: number) => {
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(new Error('deadline')), ms);
+    return controller.signal;
+  });
+  const source = mod.INTEGRATIONS_MCP_SERVER_JS.replace('#!/usr/bin/env node', '')
+    .replace("import { readFileSync } from 'node:fs';", '')
+    .replace("import { createInterface } from 'node:readline';", '')
+    .replaceAll('import.meta.url', "'file:///haive/haive-integrations-mcp.mjs'");
+  runInNewContext(source, {
+    URL,
+    readFileSync: () => TOKEN,
+    createInterface: () => input,
+    process: {
+      env: { [API_URL_ENV]: 'http://broker.test' },
+      stdin: {},
+      stdout: { write: (line: string) => replies.push(JSON.parse(line)) },
+    },
+    fetch,
+    AbortSignal: { timeout },
+  });
+  const send = (id: number, method: string) => input.emit('line', JSON.stringify({ id, method }));
+  return { send, replies, fetch, timeout };
+}
 
 describe('the haive-integrations MCP server script, spawned as the sandbox spawns it', () => {
   it('[W5] exports the sandbox paths of the script and of the token file it reads', async () => {
@@ -57,13 +99,15 @@ describe('the haive-integrations MCP server script, spawned as the sandbox spawn
     });
   });
 
-  it('[W5] answers initialize at once and makes no request, though its broker would never answer', async () => {
-    const silent = await broker(() => ({ hang: true }));
-    const { ask } = await start({ token: TOKEN, apiUrl: silent.url });
-    const init = await ask('initialize', { protocolVersion: '2024-11-05' }, 3_000);
-    expect(init.result).toMatchObject({ serverInfo: { name: SERVER_NAME } });
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(silent.seen).toEqual([]);
+  it('[W5] answers initialize without starting a broker request or deadline', async () => {
+    const server = await clockedServer();
+    server.send(1, 'initialize');
+    await vi.runAllTimersAsync();
+    expect(server.replies).toMatchObject([
+      { id: 1, result: { serverInfo: { name: SERVER_NAME } } },
+    ]);
+    expect(server.fetch).not.toHaveBeenCalled();
+    expect(server.timeout).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -244,21 +288,18 @@ describe('tools/list', () => {
     expect((await ask('ping')).result).toEqual({});
   });
 
-  it('[W5] gives a broker that never answers 5 seconds, then lists no tools and stays alive', async () => {
-    const silent = await broker(() => ({ hang: true }));
-    const { child, ask } = await start({ token: TOKEN, apiUrl: silent.url });
-    await ask('initialize');
-    const startedAt = performance.now();
-    const reply = await ask('tools/list', {}, 9_500);
-    const waitedMs = performance.now() - startedAt;
-    expect(reply.error).toBeUndefined();
-    expect(reply.result).toEqual({ tools: [] });
-    expect(silent.seen.length).toBeGreaterThanOrEqual(1);
-    expect(waitedMs).toBeGreaterThanOrEqual(4_000);
-    expect(waitedMs).toBeLessThan(9_000);
-    expect(child.exitCode).toBeNull();
-    expect((await ask('ping')).result).toEqual({});
-  }, 30_000);
+  it('[W5] gives a silent broker five seconds, then lists no tools and answers on', async () => {
+    const server = await clockedServer();
+    server.send(1, 'tools/list');
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(server.timeout).toHaveBeenCalledWith(5_000);
+    expect(server.fetch).toHaveBeenCalledTimes(1);
+    expect(server.replies).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(server.replies).toEqual([{ jsonrpc: '2.0', id: 1, result: { tools: [] } }]);
+    server.send(2, 'ping');
+    expect(server.replies[1]).toEqual({ jsonrpc: '2.0', id: 2, result: {} });
+  });
 });
 
 describe('tools/call', () => {

@@ -1,7 +1,8 @@
 import net from 'node:net';
+import { setImmediate } from 'node:timers/promises';
 import type { AddressInfo } from 'node:net';
 import postgres from 'postgres';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const CONNECTION_ERROR_CODES = new Set([
   'CONNECTION_CLOSED',
@@ -84,7 +85,6 @@ async function fakeServer(shape: Shape): Promise<FakeServer> {
 interface Outcome {
   settled: 'rejected' | 'resolved' | 'pending';
   code: string | undefined;
-  ms: number;
   connections: number;
   lateConnections: number;
 }
@@ -106,9 +106,9 @@ async function runBegin(
     onnotice: () => {},
   });
   try {
-    const started = Date.now();
     const timer: { id?: NodeJS.Timeout } = {};
-    const verdict = await Promise.race([
+    let settled = false;
+    const work = Promise.race([
       sql
         .begin(async (tx) => tx`select 1`)
         .then(
@@ -122,25 +122,39 @@ async function runBegin(
         );
       }),
     ]);
+    void work.then(() => {
+      settled = true;
+    });
+    for (let i = 0; i < opts.windowMs + 10 && !settled; i++) {
+      await setImmediate();
+      await vi.advanceTimersByTimeAsync(1);
+    }
+    expect(settled).toBe(true);
+    const verdict = await work;
     clearTimeout(timer.id);
-    const ms = Date.now() - started;
     const connections = server.connections();
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    return { ...verdict, ms, connections, lateConnections: server.connections() - connections };
+    await vi.advanceTimersByTimeAsync(500);
+    await setImmediate();
+    return { ...verdict, connections, lateConnections: server.connections() - connections };
   } finally {
-    await sql.end({ timeout: 0 });
+    const closing = sql.end({ timeout: 0 });
+    await vi.advanceTimersByTimeAsync(1);
+    await closing;
     await server.close();
   }
 }
 
 const expectRejectedWithoutStorm = (out: Outcome): void => {
-  expect(out.settled, `settled (${out.connections} connections in ${out.ms} ms)`).toBe('rejected');
-  expect(out.ms).toBeLessThan(1500);
+  expect(out.settled, `settled (${out.connections} connections)`).toBe('rejected');
   expect(out.connections, 'connections the server saw').toBeLessThanOrEqual(15);
   expect(out.lateConnections, 'connections in the 500 ms after the rejection').toBe(0);
 };
 
 describe('a store that hangs up while a connection starts', () => {
+  beforeEach(() =>
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'performance'] }),
+  );
+  afterEach(() => vi.useRealTimers());
   // postgres.js starts its array-type query unawaited, so destroying a pool that is still starting
   // rejects it with nobody listening; that is not what this file measures, and vitest would fail the run on it.
   const saved: Array<(...args: unknown[]) => void> = [];
@@ -151,7 +165,7 @@ describe('a store that hangs up while a connection starts', () => {
     process.on('unhandledRejection', (reason) => void unhandled.push(reason));
   });
   afterAll(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await setImmediate();
     process.removeAllListeners('unhandledRejection');
     for (const listener of saved) process.on('unhandledRejection', listener);
     // Only the driver's own unawaited type query may reject unheard, and only with a connection error.
@@ -183,7 +197,6 @@ describe('a store that hangs up while a connection starts', () => {
     });
     expect(out.settled).toBe('rejected');
     expect(out.code).toBe('CONNECT_TIMEOUT');
-    expect(out.ms).toBeLessThan(1500);
     expect(out.connections).toBeLessThanOrEqual(2);
   }, 15_000);
 });

@@ -62,7 +62,28 @@ vi.mock('@haive/shared/rag', async (importOriginal) => {
     },
     resolveRagConnection: async (...args: Parameters<typeof actual.resolveRagConnection>) => {
       h.openOptions.push(args[3]);
-      if (h.realStore) return actual.resolveRagConnection(...args);
+      if (h.realStore) {
+        return {
+          mode: 'external',
+          embeddingDimensions: 8,
+          pg: {
+            begin: () =>
+              new Promise((_, reject) =>
+                setTimeout(
+                  () =>
+                    reject(
+                      Object.assign(new Error('connect timeout'), { code: 'CONNECT_TIMEOUT' }),
+                    ),
+                  (args[3]?.connectTimeoutSeconds ?? 30) * 1_000,
+                ),
+              ),
+            end: async () => {
+              h.ended++;
+            },
+          },
+          close: async () => {},
+        };
+      }
       return {
         mode: 'external',
         embeddingDimensions: 8,
@@ -95,10 +116,9 @@ vi.mock('@haive/shared/rag', async (importOriginal) => {
   };
 });
 
-import net from 'node:net';
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
-import { CONFIG_KEYS, configService, userSecretsService } from '@haive/shared';
+import { userSecretsService } from '@haive/shared';
 import { createFakeDb } from '@haive/database/testing';
 import { ONBOARDING_TOOLING_SCHEMA_VERSION } from '@haive/shared';
 import { toolingUpgradeRoutes } from '../src/routes/tooling-upgrades.js';
@@ -174,39 +194,24 @@ const retry = () =>
     body: JSON.stringify({ ragEmbedAction: 'retry' }),
   });
 
-const stores: Array<() => Promise<void>> = [];
-
-afterEach(async () => {
+afterEach(() => {
   fakeLock.reset();
   vi.restoreAllMocks();
-  await Promise.all(stores.splice(0).map((close) => close()));
+  vi.useRealTimers();
 });
 
-/** The guard refuses a loopback store unless the allowlist covers it. */
-function allowLoopbackStore() {
-  h.realStore = true;
-  vi.spyOn(configService, 'get').mockImplementation(async (key) =>
-    key === CONFIG_KEYS.PRIVATE_ENDPOINT_ALLOWLIST ? '127.0.0.1' : null,
-  );
-}
-
-/** A Postgres that accepts the connection and never speaks. */
-async function mutePostgres() {
-  const sockets = new Set<net.Socket>();
-  const seen = { connections: 0 };
-  const server = net.createServer((socket) => {
-    seen.connections += 1;
-    sockets.add(socket);
-    socket.on('error', () => {});
-    socket.on('close', () => sockets.delete(socket));
+async function connectionTimeout(response: Response | Promise<Response>): Promise<Response> {
+  const work = Promise.resolve(response);
+  let settled = false;
+  void work.then(() => {
+    settled = true;
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  stores.push(async () => {
-    for (const socket of sockets) socket.destroy();
-    await new Promise((resolve) => server.close(resolve));
-  });
-  const { port } = server.address() as net.AddressInfo;
-  return { url: `postgres://rag:rag@127.0.0.1:${port}/rag`, seen };
+  await vi.advanceTimersByTimeAsync(0);
+  expect(h.openOptions).toEqual([{ connectTimeoutSeconds: 3, fetchTypes: false }]);
+  await vi.advanceTimersByTimeAsync(2_999);
+  expect(settled).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  return work;
 }
 
 describe('mixed RAG reset and security changes', () => {
@@ -348,19 +353,12 @@ describe('forcing a re-embed of a repository', () => {
     expect((await rebuild()).status).toBe(500);
   });
 
-  it('answers its error within the connect timeout when the store accepts the connection and never speaks', async () => {
-    const store = await mutePostgres();
-    setup(store.url);
-    allowLoopbackStore();
-
-    const started = Date.now();
-    const res = await rebuild();
-    const elapsed = Date.now() - started;
-
-    expect(res.status).toBe(500);
-    expect(store.seen.connections).toBeGreaterThan(0);
-    expect(elapsed).toBeLessThan(5_000);
-  }, 40_000);
+  it('answers an error at the connection deadline when the store never speaks', async () => {
+    vi.useFakeTimers();
+    setup('postgres://rag:rag@127.0.0.1:1/rag');
+    h.realStore = true;
+    expect((await connectionTimeout(rebuild())).status).toBe(500);
+  });
 });
 
 describe('retrying the embedding of a degraded repository', () => {
@@ -448,18 +446,14 @@ describe('retrying the embedding of a degraded repository', () => {
     expect(await res.json()).toMatchObject({ degradationKept: true });
   });
 
-  it('keeps the degradation, within the connect timeout, when the store accepts the connection and never speaks', async () => {
-    const store = await mutePostgres();
-    const fake = setup(store.url, true, true);
-    allowLoopbackStore();
-
-    const started = Date.now();
-    const res = await retry();
-
+  it('keeps degradation at the connection deadline when the store never speaks', async () => {
+    vi.useFakeTimers();
+    const fake = setup(STORE, true, true);
+    h.realStore = true;
+    const res = await connectionTimeout(retry());
     expect(await res.json()).toMatchObject({ degradationKept: true });
     expect(fake.rows(schema.repositories)[0]!.ragEmbedDegradedAt).toBeInstanceOf(Date);
-    expect(Date.now() - started).toBeLessThan(5_000);
-  }, 40_000);
+  });
 
   it('clears the degradation when the store holds no row awaiting re-embed', async () => {
     const fake = setup(STORE, true, true);

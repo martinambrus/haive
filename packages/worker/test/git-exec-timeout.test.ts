@@ -177,8 +177,8 @@ describe('a git that hangs', () => {
     helper = path.join(dir, 'helper.sh');
     await writeFile(helper, '#!/bin/sh\nexec sleep 20 >/dev/null 2>&1\n');
     await chmod(helper, 0o755);
-    gitTimeoutLimits.long = 2000;
-    gitTimeoutLimits.short = 2000;
+    gitTimeoutLimits.long = 100;
+    gitTimeoutLimits.short = 100;
   });
 
   afterAll(async () => {
@@ -190,31 +190,32 @@ describe('a git that hangs', () => {
 
   const argv = () => ['-c', `credential.helper=!${helper}`, 'ls-remote', url];
 
-  it('ends near the limit with code 124 and the timeout line (gitRun)', async () => {
-    const started = Date.now();
-    const result = await Promise.race([
-      gitRun(dir, argv()),
-      new Promise<'still running'>((ok) => setTimeout(() => ok('still running'), 4500)),
-    ]);
-    expect(result).not.toBe('still running');
-    const r = result as Awaited<ReturnType<typeof gitRun>>;
-    expect(Date.now() - started).toBeLessThan(4500);
-    expect(r.code).toBe(124);
-    expect(r.stderr.trimEnd().split('\n').at(-1)).toBe('git ls-remote timed out after 2 s');
+  // These deadlines expire real git/credential-helper processes; 100 ms is enough to prove
+  // termination. The timer ordering and production defaults are covered above without waiting.
+  it('returns code 124 and the timeout line when a real git is killed (gitRun)', async () => {
+    const result = await gitRun(dir, argv());
+    expect(result.code).toBe(124);
+    expect(result.stderr.trimEnd().split('\n').at(-1)).toBe('git ls-remote timed out after 0 s');
   });
 
   it('throws an error that says the same (gitExec)', async () => {
+    seen.options.length = 0;
     await expect(gitExec(argv(), { cwd: dir })).rejects.toThrow(
-      /git ls-remote timed out after 2 s/,
+      /git ls-remote timed out after 0 s/,
     );
+    expect(seen.options.at(-1)!.timeout).toBe(100);
   });
 
   it('keeps the caller timeout instead of the default', async () => {
-    const started = Date.now();
-    const r = await gitRun(dir, argv(), undefined, { timeout: 700 });
-    expect(r.code).toBe(124);
-    expect(r.stderr.trimEnd().split('\n').at(-1)).toBe('git ls-remote timed out after 1 s');
-    expect(Date.now() - started).toBeLessThan(1900);
+    const timeout = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      const result = await gitRun(dir, argv(), undefined, { timeout: 50 });
+      expect(timeout).toHaveBeenCalledWith(expect.any(Function), 50);
+      expect(result.code).toBe(124);
+      expect(result.stderr.trimEnd().split('\n').at(-1)).toBe('git ls-remote timed out after 0 s');
+    } finally {
+      timeout.mockRestore();
+    }
   });
 
   it('keeps zero unlimited even when the default would kill the run', async () => {
@@ -232,13 +233,22 @@ describe('a git that hangs', () => {
       expect(r).toMatchObject({ code: 0, stdout: 'finished' });
       expect(r.stderr).not.toContain('timed out');
     } finally {
-      gitTimeoutLimits.short = 2000;
+      gitTimeoutLimits.short = 100;
     }
   });
 
   it('does not call an ordinary non-zero exit a timeout', async () => {
-    const r = await gitRun(dir, ['rev-parse', '--verify', 'nope']);
-    expect(r.code).toBe(128);
-    expect(r.stderr).not.toContain('timed out');
+    // This git must finish, not be killed: give it the production deadlines, not the 100 ms
+    // this block uses to expire a hung helper, so a loaded runner cannot turn it into a timeout.
+    gitTimeoutLimits.long = saved.long;
+    gitTimeoutLimits.short = saved.short;
+    try {
+      const r = await gitRun(dir, ['rev-parse', '--verify', 'nope']);
+      expect(r.code).toBe(128);
+      expect(r.stderr).not.toContain('timed out');
+    } finally {
+      gitTimeoutLimits.long = 100;
+      gitTimeoutLimits.short = 100;
+    }
   });
 });

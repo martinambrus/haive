@@ -1,7 +1,8 @@
 import net from 'node:net';
+import { once } from 'node:events';
 import { Hono } from 'hono';
 import { ReplyError } from 'ioredis';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HttpError } from '../src/context.js';
 import { closeRedis, getPatientRedis, getRedis, initRedis } from '../src/redis.js';
 
@@ -9,6 +10,7 @@ type Fake = {
   port: number;
   commands: string[][];
   mute: boolean;
+  nextCommand: (name: string) => Promise<void>;
   dropAll: () => void;
   stop: () => Promise<void>;
 };
@@ -48,10 +50,12 @@ function parseCommands(buf: Buffer): { cmds: string[][]; rest: Buffer } {
 
 async function startFake(): Promise<Fake> {
   const sockets = new Set<net.Socket>();
+  const waiters: Array<{ name: string; resolve: () => void }> = [];
   const fake: Fake = {
     port: 0,
     commands: [],
     mute: false,
+    nextCommand: (name) => new Promise((resolve) => waiters.push({ name, resolve })),
     dropAll: () => {
       for (const s of sockets) s.destroy();
     },
@@ -71,6 +75,10 @@ async function startFake(): Promise<Fake> {
       pending = Buffer.from(rest);
       for (const args of cmds) {
         fake.commands.push(args);
+        for (const waiter of waiters.filter((w) => w.name === args[0]!.toUpperCase())) {
+          waiters.splice(waiters.indexOf(waiter), 1);
+          waiter.resolve();
+        }
         if (fake.mute) continue;
         const name = args[0]!.toUpperCase();
         if (name === 'INFO') {
@@ -111,11 +119,8 @@ function init(port: number) {
 }
 
 async function waitReady(): Promise<void> {
-  const deadline = Date.now() + 5000;
-  while (getRedis().status !== 'ready') {
-    if (Date.now() > deadline) throw new Error('redis client never became ready');
-    await new Promise((r) => setTimeout(r, 25));
-  }
+  const redis = getRedis();
+  if (redis.status !== 'ready') await once(redis, 'ready');
 }
 
 async function rejection(p: Promise<unknown>): Promise<unknown> {
@@ -127,33 +132,50 @@ async function rejection(p: Promise<unknown>): Promise<unknown> {
   throw new Error('expected rejection');
 }
 
+beforeEach(() => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] }));
+
+async function commandTimeout(work: Promise<unknown>, command: string): Promise<unknown> {
+  let settled = false;
+  const result = rejection(work).then((err) => {
+    settled = true;
+    return err;
+  });
+  await fake!.nextCommand(command);
+  await vi.advanceTimersByTimeAsync(1_999);
+  expect(settled).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  return result;
+}
+
 afterEach(async () => {
   if (fake) fake.mute = false;
-  await closeRedis();
+  const closing = closeRedis();
+  await vi.advanceTimersByTimeAsync(2_000);
+  await closing;
   await fake?.stop();
   fake = null;
+  vi.useRealTimers();
 });
 
 describe('api shared Redis client is bounded', () => {
-  it('a) closed port rejects typed within 500 ms', async () => {
+  it('a) closed port rejects typed without queueing', async () => {
     init(await closedPort());
-    const t0 = Date.now();
     const e = await rejection(getRedis().get('k'));
     expect(isTyped503(e)).toBe(true);
-    expect(Date.now() - t0).toBeLessThan(500);
+    expect(
+      (getRedis() as unknown as { offlineQueue: { length: number } }).offlineQueue.length,
+    ).toBe(0);
+    expect(getRedis().options.enableOfflineQueue).toBe(false);
   });
 
-  it('b) silent server rejects typed after about 2 s', async () => {
+  it('b) silent server rejects typed at the command deadline', async () => {
     fake = await startFake();
     init(fake.port);
     await waitReady();
     fake.mute = true;
-    const t0 = Date.now();
-    const e = await rejection(getRedis().get('k'));
-    const ms = Date.now() - t0;
+    const e = await commandTimeout(getRedis().get('k'), 'GET');
     expect(isTyped503(e)).toBe(true);
-    expect(ms).toBeGreaterThanOrEqual(1500);
-    expect(ms).toBeLessThanOrEqual(3500);
+    expect(getRedis().options.commandTimeout).toBe(2_000);
   });
 
   it('c) a server error reply passes through as a ReplyError', async () => {
@@ -170,13 +192,18 @@ describe('api shared Redis client is bounded', () => {
     init(fake.port);
     await waitReady();
     fake.mute = true;
-    const e = await rejection(getRedis().set('k', 'v'));
+    const e = await commandTimeout(getRedis().set('k', 'v'), 'SET');
     expect(isTyped503(e)).toBe(true);
     fake.mute = false;
+    const closed = once(getRedis(), 'close');
     fake.dropAll();
-    await new Promise((r) => setTimeout(r, 50));
-    await waitReady();
-    await new Promise((r) => setTimeout(r, 300));
+    await closed;
+    const ready = waitReady();
+    await vi.advanceTimersByTimeAsync(50);
+    await ready;
+    // A successful command fences the recovered connection after any replayed writes.
+    expect(await getRedis().ping()).toBe('PONG');
+    expect(getRedis().options.autoResendUnfulfilledCommands).toBe(false);
     expect(fake.commands.filter((c) => c[0]!.toUpperCase() === 'SET')).toHaveLength(1);
   });
 
@@ -199,7 +226,10 @@ describe('api shared Redis client is bounded', () => {
         () => (settled = true),
       )
       .catch(() => undefined);
-    await new Promise((r) => setTimeout(r, 300));
+    await vi.advanceTimersByTimeAsync(300);
+    expect(
+      (getPatientRedis() as unknown as { offlineQueue: { length: number } }).offlineQueue.length,
+    ).toBe(1);
     expect(settled).toBe(false);
     const dup = getPatientRedis().duplicate();
     dup.on('error', () => undefined);

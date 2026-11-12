@@ -1230,12 +1230,23 @@ describe('maskNonCode', () => {
     );
   });
 
-  it('gives up on regex literals after a few slashes on a line that closed none', () => {
-    const src = `x=${'/['.repeat(1_000_000)}\n`;
-    const started = performance.now();
-
-    expect(maskNonCode(src, 'js').length).toBe(src.length);
-    expect(performance.now() - started).toBeLessThan(1_500);
+  it('bounds character reads when regex literals never close on a line', () => {
+    for (const repeats of [256, 512]) {
+      const src = `x=${'/['.repeat(repeats)}\n`;
+      let reads = 0;
+      // Count the lexer's indexed character reads; methods retain normal string semantics.
+      // Without the regex-miss cap each slash rescans the rest of the line: quadratic reads.
+      const counted = new Proxy(new String(src), {
+        get(target, key) {
+          if (typeof key === 'string' && /^\d+$/.test(key)) reads += 1;
+          const value = Reflect.get(target, key);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      }) as unknown as string;
+      expect(maskNonCode(counted, 'js')).toBe(src);
+      expect(reads).toBeGreaterThan(src.length);
+      expect(reads).toBeLessThan(64 * src.length);
+    }
   });
 });
 

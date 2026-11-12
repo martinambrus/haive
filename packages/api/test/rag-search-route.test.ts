@@ -21,6 +21,10 @@ const h = vi.hoisted(() => ({
   statements: [] as string[],
   tx: {} as { unsafe: (statement: string) => Promise<unknown[]> },
   pg: {} as unknown,
+  stores: new Map<
+    string,
+    { behaviour: string; connections: number; queries: number; ends: unknown[] }
+  >(),
   realStore: false,
   connectionString: '',
   localOpenOptions: [] as unknown[],
@@ -30,6 +34,39 @@ const h = vi.hoisted(() => ({
   localEnds: [] as unknown[],
   realLocalStore: false,
   localConnectionString: '',
+}));
+
+// The route owns store deadlines; postgres' own wire protocol is covered in connection tests.
+vi.mock('postgres', () => ({
+  default: (url: string, options: { fetch_types?: boolean; connect_timeout?: number }) => {
+    const store = h.stores.get(url)!;
+    store.connections++;
+    expect(options.fetch_types).toBe(false);
+    const pg = {
+      begin: async (run: (tx: unknown) => Promise<unknown>) => run(pg),
+      unsafe: () => {
+        store.queries++;
+        if (store.behaviour === 'hang-up') {
+          return Promise.reject(
+            Object.assign(new Error('connection closed'), { code: 'CONNECTION_CLOSED' }),
+          );
+        }
+        return new Promise<never>((_, reject) => {
+          if (store.behaviour === 'mute') {
+            setTimeout(
+              () =>
+                reject(Object.assign(new Error('connect timeout'), { code: 'CONNECT_TIMEOUT' })),
+              (options.connect_timeout ?? 30) * 1_000,
+            );
+          }
+        });
+      },
+      end: async (options: unknown) => {
+        store.ends.push(options);
+      },
+    };
+    return pg;
+  },
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -81,7 +118,6 @@ vi.mock('@haive/shared/rag', async (importOriginal) => {
   };
 });
 
-import net from 'node:net';
 import { Hono } from 'hono';
 import { CONFIG_KEYS, configService, secretsService } from '@haive/shared';
 import type { GlobalKbContext } from '@haive/shared/global-kb';
@@ -132,6 +168,7 @@ async function search(): Promise<{ status: number; paths: string[] }> {
 
 beforeEach(() => {
   vi.stubEnv('CONFIG_ENCRYPTION_KEY', SECRET);
+  h.stores.clear();
   h.recorded = [];
   h.db = {
     query: {
@@ -250,13 +287,11 @@ beforeEach(() => {
   );
 });
 
-const stores: Array<() => Promise<void>> = [];
-
 afterEach(async () => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
-  await Promise.all(stores.splice(0).map((close) => close()));
+  vi.useRealTimers();
 });
 
 describe('rag_search, the global half', () => {
@@ -312,37 +347,43 @@ describe('rag_search, a query vector of the wrong width', () => {
   });
 });
 
-const AUTH_OK = Buffer.from([0x52, 0, 0, 0, 8, 0, 0, 0, 0]);
-const READY_FOR_QUERY = Buffer.from([0x5a, 0, 0, 0, 5, 0x49]);
+function fakePostgres(behaviour: 'mute' | 'silent' | 'hang-up') {
+  const url = `postgres://kb:kb@127.0.0.1:1234/${h.stores.size}`;
+  const seen = { behaviour, connections: 0, queries: 0, ends: [] as unknown[] };
+  h.stores.set(url, seen);
+  return { url, seen };
+}
 
-/** A Postgres that never speaks, or completes the startup handshake and then says nothing or hangs up on the first query. */
-async function fakePostgres(behaviour: 'mute' | 'silent' | 'hang-up') {
-  const sockets = new Set<net.Socket>();
-  const seen = { connections: 0, queries: 0 };
-  const server = net.createServer((socket) => {
-    seen.connections += 1;
-    sockets.add(socket);
-    socket.on('error', () => {});
-    socket.on('close', () => sockets.delete(socket));
-    let started = false;
-    socket.on('data', () => {
-      if (behaviour === 'mute') return;
-      if (!started) {
-        started = true;
-        socket.write(Buffer.concat([AUTH_OK, READY_FOR_QUERY]));
-        return;
-      }
-      seen.queries += 1;
-      if (behaviour === 'hang-up') socket.destroy();
-    });
+async function finish<T>(work: Promise<T>): Promise<T> {
+  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(3_000);
+  return work;
+}
+
+async function deadlineAfterEmbed(
+  store: ReturnType<typeof fakePostgres>,
+  scope: 'local' | 'global',
+) {
+  let settled = false;
+  const work = search().then((result) => {
+    settled = true;
+    return result;
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  stores.push(async () => {
-    for (const socket of sockets) socket.destroy();
-    await new Promise((resolve) => server.close(resolve));
-  });
-  const { port } = server.address() as net.AddressInfo;
-  return { url: `postgres://kb:kb@127.0.0.1:${port}/kb`, seen };
+  await vi.advanceTimersByTimeAsync(0);
+  // A slow embed must not spend the store's six-second budget.
+  await vi.advanceTimersByTimeAsync(1_499);
+  expect(h.events).toContain(`embed:${scope}`);
+  expect(scope === 'global' ? h.openOptions : h.localStatements).toEqual([]);
+  expect(store.seen.queries).toBe(0);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(store.seen.queries).toBeGreaterThan(0);
+  await vi.advanceTimersByTimeAsync(5_999);
+  expect(settled).toBe(false);
+  expect(store.seen.ends).toEqual([]);
+  await vi.advanceTimersByTimeAsync(1);
+  const result = await work;
+  expect(store.seen.ends).toContainEqual({ timeout: 0 });
+  return result;
 }
 
 describe('rag_search, the global store', () => {
@@ -401,57 +442,48 @@ describe('rag_search, the global store', () => {
   });
 
   it('answers with the local hits when the store never answers, a deadline after the embed', async () => {
-    const store = await fakePostgres('silent');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const store = fakePostgres('silent');
     h.realStore = true;
     h.connectionString = store.url;
     h.globalEmbed = { vector: Array(DIMS).fill(0.2), delayMs: EMBED_MS };
 
-    // Monotonic clock: this host's wall clock runs slow in bursts, so Date.now() undercounts a 6 s wait.
-    const started = performance.now();
-    const { status, paths } = await search();
-    const elapsed = performance.now() - started;
+    const { status, paths } = await deadlineAfterEmbed(store, 'global');
 
     expect(status).toBe(200);
     expect(paths).toEqual(['src/session.ts']);
     expect(store.seen.queries).toBeGreaterThan(0);
-    expect(elapsed).toBeGreaterThanOrEqual(EMBED_MS + DEADLINE_MS - 100);
-    expect(elapsed).toBeLessThan(EMBED_MS + DEADLINE_MS + 2_000);
-  }, 20_000);
+  });
 
   it('answers with the local hits when the store accepts the connection and never speaks', async () => {
-    const store = await fakePostgres('mute');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const store = fakePostgres('mute');
     h.realStore = true;
     h.connectionString = store.url;
 
-    const started = performance.now();
-    const { status, paths } = await search();
-    const elapsed = performance.now() - started;
+    const { status, paths } = await finish(search());
 
     expect(status).toBe(200);
     expect(paths).toEqual(['src/session.ts']);
     expect(store.seen.connections).toBeGreaterThan(0);
-    expect(elapsed).toBeLessThan(DEADLINE_MS + 2_000);
-  }, 20_000);
+  });
 
   it('answers with the local hits when the store hangs up on its first query', async () => {
-    const store = await fakePostgres('hang-up');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const store = fakePostgres('hang-up');
     h.realStore = true;
     h.connectionString = store.url;
 
-    const started = performance.now();
-    const { status, paths } = await search();
-    const elapsed = performance.now() - started;
+    const { status, paths } = await finish(search());
 
     expect(status).toBe(200);
     expect(paths).toEqual(['src/session.ts']);
     expect(store.seen.queries).toBeGreaterThan(0);
-    expect(elapsed).toBeLessThan(DEADLINE_MS + 2_000);
-  }, 20_000);
+  });
 });
 
 describe('rag_search, the local store', () => {
   const EMBED_MS = 1_500;
-  const DEADLINE_MS = 6_000;
 
   const failLocal = (error: Error): void => {
     h.search.mockImplementation(async (_conn, _vec, _text, _config, filter) => {
@@ -511,51 +543,44 @@ describe('rag_search, the local store', () => {
   });
 
   it('answers 500 when the store goes silent, a deadline after the embed', async () => {
-    const store = await fakePostgres('silent');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const store = fakePostgres('silent');
     h.realLocalStore = true;
     h.localConnectionString = store.url;
     searchAsksStore();
     h.localEmbed = { vector: Array(DIMS).fill(0.1), delayMs: EMBED_MS };
 
-    const started = performance.now();
-    const { status } = await search();
-    const elapsed = performance.now() - started;
+    const { status } = await deadlineAfterEmbed(store, 'local');
 
     expect(status).toBe(500);
     expect(store.seen.queries).toBeGreaterThan(0);
-    expect(elapsed).toBeGreaterThanOrEqual(EMBED_MS + DEADLINE_MS - 100);
-    expect(elapsed).toBeLessThan(EMBED_MS + DEADLINE_MS + 2_000);
-  }, 20_000);
+  });
 
   it('answers 500 when the store accepts the connection and never speaks', async () => {
-    const store = await fakePostgres('mute');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const store = fakePostgres('mute');
     h.realLocalStore = true;
     h.localConnectionString = store.url;
     searchAsksStore();
 
-    const started = performance.now();
-    const { status } = await search();
-    const elapsed = performance.now() - started;
+    const { status } = await finish(search());
 
     expect(status).toBe(500);
     expect(store.seen.connections).toBeGreaterThan(0);
-    expect(elapsed).toBeLessThan(DEADLINE_MS);
-  }, 20_000);
+  });
 
   it('answers 500 when the store hangs up on its first query', async () => {
-    const store = await fakePostgres('hang-up');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const store = fakePostgres('hang-up');
     h.realLocalStore = true;
     h.localConnectionString = store.url;
     searchAsksStore();
 
-    const started = performance.now();
-    const { status } = await search();
-    const elapsed = performance.now() - started;
+    const { status } = await finish(search());
 
     expect(status).toBe(500);
     expect(store.seen.queries).toBeGreaterThan(0);
-    expect(elapsed).toBeLessThan(DEADLINE_MS);
-  }, 20_000);
+  });
 });
 
 describe('RAG result snapshots', () => {

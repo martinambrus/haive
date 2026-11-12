@@ -1,4 +1,5 @@
 import net from 'node:net';
+import { setImmediate } from 'node:timers/promises';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { CONFIG_KEYS, SECRET_KEYS, configService, secretsService } from '@haive/shared';
@@ -60,8 +61,13 @@ const goesSilentAfterReady = (socket: net.Socket): void => {
 
 const neverSpeaks = (): void => {};
 
-const settle = (condition: () => boolean, ms: number) =>
-  vi.waitFor(() => expect(condition()).toBe(true), { timeout: ms, interval: 25 });
+async function settle(condition: () => boolean): Promise<void> {
+  for (let i = 0; i < 1_000 && !condition(); i++) {
+    await setImmediate();
+    await vi.advanceTimersByTimeAsync(1);
+  }
+  expect(condition()).toBe(true);
+}
 
 describe('resolveGlobalKbContext against a store that does not answer', () => {
   let server: FakeServer | null = null;
@@ -84,27 +90,40 @@ describe('resolveGlobalKbContext against a store that does not answer', () => {
 
   beforeEach(() => {
     server = null;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'performance'] });
+    vi.spyOn(globalThis, 'setTimeout');
   });
   afterEach(async () => {
     vi.restoreAllMocks();
     await server?.stop();
+    vi.useRealTimers();
   });
 
   const read = async (bounds: Parameters<typeof resolveGlobalKbContext>[3]) => {
-    const started = performance.now();
-    const out = await resolveGlobalKbContext(
+    let settled = false;
+    const work = resolveGlobalKbContext(
       {} as Database,
       'task-1',
       { houseRules: true },
       bounds,
-    );
-    return { out, ms: performance.now() - started };
+    ).then((out) => {
+      settled = true;
+      return { out };
+    });
+    // Real socket callbacks interleave with explicitly advanced driver/backoff timers.
+    for (let i = 0; i < 1_000 && !settled; i++) {
+      await setImmediate();
+      await vi.advanceTimersByTimeAsync(10);
+    }
+    expect(settled).toBe(true);
+    expect(setTimeout).toHaveBeenCalledWith(expect.any(Function), bounds!.deadlineMs);
+    return work;
   };
 
   it('stops waiting for a socket that accepts and never answers, after the connect timeout', async () => {
     server = await listen(neverSpeaks);
     pointAt(server.port);
-    const { out, ms } = await read({
+    const { out } = await read({
       connectTimeoutSeconds: 1,
       statementTimeoutMs: 1000,
       deadlineMs: 5000,
@@ -117,25 +136,23 @@ describe('resolveGlobalKbContext against a store that does not answer', () => {
       refused: [],
     });
     expect(out.digest.entries).toEqual([]);
-    expect(ms).toBeGreaterThan(800);
-    expect(ms).toBeLessThan(3000);
+
     expect(server.connections().total).toBeGreaterThanOrEqual(1);
-    await settle(() => server!.connections().open === 0, 2000);
+    await settle(() => server!.connections().open === 0);
   });
 
   it('stops waiting for a socket that goes silent after the connection was made, at the deadline', async () => {
     server = await listen(goesSilentAfterReady);
     pointAt(server.port);
-    const { out, ms } = await read({
+    const { out } = await read({
       connectTimeoutSeconds: 30,
       statementTimeoutMs: 30_000,
       deadlineMs: 1200,
     });
 
     expect(out).toMatchObject({ status: 'unavailable', errorClass: 'timeout' });
-    expect(ms).toBeGreaterThan(1000);
-    expect(ms).toBeLessThan(3000);
-    await settle(() => server!.connections().open === 0, 2000);
+
+    await settle(() => server!.connections().open === 0);
   });
 
   it('says a store nothing listens on refused the connection', async () => {
@@ -144,14 +161,13 @@ describe('resolveGlobalKbContext against a store that does not answer', () => {
     await server.stop();
     server = null;
     pointAt(port);
-    const { out, ms } = await read({
+    const { out } = await read({
       connectTimeoutSeconds: 5,
       statementTimeoutMs: 1000,
       deadlineMs: 5000,
     });
 
     expect(out).toMatchObject({ status: 'unavailable', errorClass: 'refused' });
-    expect(ms).toBeLessThan(3000);
   });
 
   it('names neither the host nor the credentials of the store in what it returns', async () => {
@@ -177,7 +193,8 @@ describe('resolveGlobalKbContext against a store that does not answer', () => {
       server = await listen(goesSilentAfterReady);
       pointAt(server.port);
       await read({ connectTimeoutSeconds: 30, statementTimeoutMs: 30_000, deadlineMs: 600 });
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await vi.advanceTimersByTimeAsync(300);
+      await setImmediate();
     } finally {
       process.off('unhandledRejection', record);
     }
