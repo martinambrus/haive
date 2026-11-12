@@ -202,6 +202,31 @@ describe('POST /notifications/sound when the write fails', () => {
     expect(await readFile(soundPath)).toEqual(bytes);
   });
 
+  it('registers the production route with the production limits', async () => {
+    const production = new Hono<AppEnv>();
+    production.route('/', userSettingsRoutes);
+    production.onError(errorHandler);
+    // Above the small injected cap, far below the production one: accepted.
+    const form = new FormData();
+    form.set('sound', new File([new Uint8Array(CAP + 1)], 'chime.mp3', { type: 'audio/mpeg' }));
+    const accepted = await production.request('/notifications/sound', {
+      method: 'POST',
+      body: form,
+    });
+    expect(accepted.status).toBe(201);
+    // bodyLimit refuses on the declared length before reading the body.
+    const refused = await production.request('/notifications/sound', {
+      method: 'POST',
+      headers: {
+        'content-type': 'multipart/form-data; boundary=sound-boundary',
+        'content-length': String(MAX_SOUND_BYTES + SOUND_ENVELOPE_BYTES + 1),
+      },
+      body: 'x',
+    });
+    expect(refused.status).toBe(413);
+    expect(await refused.json()).toMatchObject({ code: 'sound_upload_too_large' });
+  });
+
   it('still refuses a file one byte above the cap inside a bounded form', async () => {
     expect((await upload(Buffer.alloc(CAP + 1))).status).toBe(413);
     expect(await staged()).toEqual([]);
