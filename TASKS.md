@@ -173,6 +173,7 @@ status: parked · kind: fix · found: H1 (#343) 2026-11-11 · priority: P4
 ### T611 · FNF[replace-zip-followups] · Replace ZIP mode and replacement-record follow-ups (+10)
 
 status: open (items 1, 3-10 done in #1083: 3 was already handled on base; item 2 remains, a retention design) · kind: fix · found: J (#487) reviews 2026-11-11 · priority: P3
+Owner decision 2026-11-12: item 2: a periodic sweep deletes stages and sidecars no live replacement owns and older than 24 h; a superseded archive is deleted once its replacement has committed.
 Low unless marked. Code in api `routes/bundles.ts`, worker `bundle-ingest.ts`, `data-migrations.ts` (stranded-replacement sweep), web `bundle-composer.tsx`.
 
 1. (PRE-EXISTING, consequential) Replacement admission holds a DB transaction open during its Redis job check (`bundles.ts` ~:899). Do the Redis check outside the transaction or bound it.
@@ -189,6 +190,7 @@ Low unless marked. Code in api `routes/bundles.ts`, worker `bundle-ingest.ts`, `
 ### T620 · design · reaper for a live owner's timed-out login container
 
 status: open · kind: design · found: #1088 review 2026-11-12 · priority: P4
+Owner decision 2026-11-12: lease with heartbeat: the holder renews a short Redis lease; the reaper removes the container only after the lease expires.
 When an api process that still holds a CLI login's auth lock times out the login container, nothing removes it, and a restart forgets it. A permanent quarantine table was tried in #1088 and reverted: after an api restart it refused the scope forever. Needs a mechanism that tells a dead owner from a live one (lease with heartbeat, or a container label checked at boot) before anything removes the container or blocks the scope.
 
 ### T622 · FNF[terminal-close-codes-followups] · terminal close-code follow-ups (+3)
@@ -269,6 +271,7 @@ status: open · kind: ops · found: #1099 CI 2026-11-12 · priority: P3
 ### T625 · design · re-drive an Undo whose re-sync failed after settling
 
 status: open · kind: design · found: T614 item 5, #1099 drive 2026-11-12 · priority: P4
+Owner decision 2026-11-12: build the durable re-sync-owed marker with a visible Retry; P4 queue.
 An `undone` settlement whose projection re-sync then fails cannot be re-driven by the person, nor can a recovery still blocked after the queue's retry window (`worker/src/step-engine/undo-left-merge.ts`). The smallest fix needs new state: a durable "re-sync owed" marker on the settled report that the plan-mirror sweep or a person-visible Retry can drain. Needs an owner decision before any build.
 
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
@@ -427,6 +430,7 @@ Reconciled 2026-11-01: Track B shipped in PR988. The dependency is resolved, but
 ### T300 · live re-checks owed at the next real onboarding + workflow run
 
 status: parked · reason: corrected capped attempt stopped after confirmed T293; remaining checks need a future authorized run · kind: capped validation · priority: P1
+Owner decision 2026-11-12: run it once T613 has shipped (same capped budget), so it also exercises the new editor path.
 Owner decision 2026-11-10: second capped run approved, same budget (one owned repository, one attempt, 90 min or $50 notional, no automatic retries); house-rules checks first. T298 and T299 stay blocked on it.
 Items 1-20 (each with its memory file): skills per CLI after 09_5; frontmatter YAML; agent_rules stamp; declared verify commands; invariants-doc lever; prompt guard/fence (07_7); onboarding artifacts; plan breadth refusals; agent isolation 1/2/4; fs-safe live verification; #169 DDEV runner boot-subpath; #241 Terminal cwd; AGENTS.md split citations; parked experiments (Astra vs Sol, container-cleanup race, global KB purge, haive_rag_ddevtest drop); T293; #287 EROFS on state; #800 mounts; #751 set-aside on a real merge; #806 put-back; #815 reindex spot-check; T375 gate 3 on a worktree holding an untracked nested repo, with and without a commit (#909); T395 Stop offered for a running task whose current row is pending, and the "Nothing was running to stop." notice (no such task on the dev install; pressing Stop changes a real task) (#908); T363 New Task with one failed upload, the plan starter and the task page Start, each with confirm yes and no (#913). Full list: task #300 text in the fnf-run ledger / memory. Also owed (T427): replay the raw attach bytes of one real `claude setup-token` run through the OAuth capture and pin its wrap, newline and escape shapes in a fixture.
 
@@ -508,6 +512,7 @@ status: parked · reason: diminishing returns (owner triage 2026-11-10); resume 
 ### T540 · FNF[stop-settle-sweep] · no sweep re-drives a lost settle or Cancel job
 
 status: open · kind: design · priority: P3
+Owner decision 2026-11-12: add a sweep that re-queues settle/Cancel for stopped or cancelled tasks still holding something unsettled.
 PRE-EXISTING, from the T393 build (2026-11-07). A `settle-stopped-task` job that was never queued (Redis down past the 2 s bound) or exhausted its attempts has no re-drive; `redriveCancelledTasks` (worker queues/stalled-redrive.ts ~:586) covers cancelled tasks only. Backstops by what is held: task auth volumes, the boot reaper only; terminal shells, the idle reaper; onboarding re-sync, the 60 s checkout sweep (project-state/watch.ts ~:121); embed model, the boot reconcile; Ollama CLI models, keep_alive; a kb_author 'enriching' entry, none. Decide: a sweep over failed tasks with unsettled holdings, or accept the backstops.
 
 From the T355 build: `enqueueCancelJob` (api lib/cancel-task.ts ~:125, ~:145) is now bounded and can return without queueing; the same sweep would cover a Cancel whose job never reached Redis.
@@ -608,6 +613,7 @@ status: parked · reason: diminishing returns (owner triage 2026-11-10); resume 
 ### T557 · FNF[unguarded-dial-audit] · dials that still bypass the egress guard (design) (+10)
 
 status: open · kind: design · found: T347 run · priority: P2
+Owner decision 2026-11-12: item 2 admin-trusted, document it; item 3 remove the dead SMTP keys; item 12 non-admins may pull only models already named in a provider or Global KB config, plus an admin-managed allowlist (admin UI with GET/PUT), admins pull anything.
 Each needs a per-dial decision (guard, admin-trust, or remove).
 
 1. Shipped in PR #1049 (provider Test connection guarded by the owner role). Correction: api routes/cli-providers.ts:664 only enqueues and cli-adapters/zai.ts only sets env for the sandboxed CLI; neither is a dial.
@@ -719,6 +725,7 @@ status: open · kind: fix · found: T346 run · priority: P3
 ### T564 · per-tool optional flag for custom tools (design)
 
 status: open · kind: design · found: T346 run · priority: P4
+Owner decision 2026-11-12: keep parked until a task type needs a tool it can run without.
 Custom tools have no required/optional flag, so the Start gate treats every declared tool as required (user decision 2026-11-08). An `optional?: boolean` per tool, modelled on integration requirements (prompt-steps.ts:57), would need the schema, a tool-editor control, a dispatch rule that drops an unusable optional tool (and what the agent is told when its template names it), a `custom_tool.unusable` task event at Start, and docs. Resume when a task type needs a tool it can run without.
 
 ### T565 · FNF[module-runtime-report-gaps] · worker module report misses a few runtime transitions (+2)
@@ -755,6 +762,7 @@ PRE-EXISTING. shared config.service.ts `CONFIG_REDIS_OPTIONS` (~:785) and `redis
 ### T571 · FNF[global-kb-boot-store-stall] · worker boot waits forever on a stalled global KB store
 
 status: open · kind: design · found: T544 run 2026-11-08 · priority: P3
+Owner decision 2026-11-12: run the recompute off the boot path with its own deadline; boot completes, the recompute retries in the background with a logged warning.
 PRE-EXISTING. shared global-kb/client.ts `withGlobalKb` (~:121) via `recomputeAliasedTopicKeys` (worker data-migrations.ts ~:134, ~:599, ungated, every boot): a store that accepts and then stalls, or a held schema advisory lock, has no deadline. A plain `deadlineMs` skips the shared schema ensure (global-kb.md, "A call with a deadline never starts the shared schema ensure"), so it needs its own design. (T546 run) Same class: `dropHeadingOnlyGlobalKbChunks` (worker data-migrations.ts ~:1079, destructive, updater-only, documented best-effort) swallows a typed outage internally.
 
 ### T572 · FNF[boot-failure-dead-watcher] · a Postgres outage past 30 s at boot still exits
@@ -1535,6 +1543,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 ### T588 · FNF[worker-audit-writer] · worker audit writer follow-ups (+9)
 
 status: open · kind: fix · found: #1057 reviews 2026-11-10 · priority: P4
+Owner decision 2026-11-12: item 4: gate 4 refuses when the repository already has a saved remote or credential and points to the repository settings; typed values only fill an empty slot.
 
 1. DONE #1092. No worker mapping for a lock timeout: gate 4's bounded lock take and 02-upgrade-apply.ts ~:834-840 end the step with the raw PostgreSQL message; `isLockNotAvailable` exists in @haive/database (used by attachments/expand-archives.ts ~:687). PRE-EXISTING pattern, minor.
 2. DONE #1092. `packages/worker/src/audit.ts` duplicates the api's `insertAuditEvent`, `logAuditEvent` and `AuditEvent`, and metadata summaries are computed in both (worker audit.ts ~:78-91, api repos.ts ~:996-998); @haive/shared could host one copy. Minor, drift risk.
@@ -1549,6 +1558,7 @@ status: open · kind: fix · found: #1057 reviews 2026-11-10 · priority: P4
 ### T589 · FNF[encryption-key-and-seed-store] · boot key and seed store leftovers (+3)
 
 status: open · kind: design · found: #1060 reviews 2026-11-10 · priority: P3
+Owner decision 2026-11-12: item 1: boot refuses to generate a new key when encrypted secrets exist and no key is found; an explicit startup override (env setting naming the consequence) lets an operator start anyway, discarding the old secrets, and that choice is logged and audited.
 
 1. With no `CONFIG_ENCRYPTION_KEY` and an empty Redis (flush, new volume) `ensureEncryptionKey` (shared config.service.ts ~:939-967) generates a fresh key with only a warn, which orphans every secret encrypted under the lost key; it cannot tell a first install from a lost store. PRE-EXISTING, consequential, by design today; decide whether a non-empty secrets table should refuse to generate.
 2. `getEncryptionKey` caches `null` for 30 s via `get()` before throwing (config.service.ts ~:1098-1117), so a recovered key stays unseen for up to the cache TTL when no env key is set. PRE-EXISTING, minor.
