@@ -19,6 +19,8 @@ const h = vi.hoisted(() => ({
   transactionActive: false,
   reports: [] as boolean[],
   indexHeld: false,
+  leftoverFailure: null as { afterReport: boolean; error: unknown } | null,
+  commits: 0,
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -55,10 +57,12 @@ vi.mock('../src/plan/merge-baseline.js', async (original) => ({
     afterCommit?: (mark: () => Promise<void>) => void,
   ) => {
     h.leftoverHandles.push(db);
+    if (h.leftoverFailure && !h.leftoverFailure.afterReport) throw h.leftoverFailure.error;
     afterCommit?.(async () => {
       h.reports.push(h.transactionActive);
     });
     if (h.indexHeld) throw new Error('index held');
+    if (h.leftoverFailure) throw h.leftoverFailure.error;
   },
 }));
 vi.mock('../src/plan/mirror.js', () => ({
@@ -187,6 +191,8 @@ beforeEach(() => {
   h.transactions = [];
   h.reports = [];
   h.indexHeld = false;
+  h.leftoverFailure = null;
+  h.commits = 0;
   h.transactionActive = false;
   const db = {
     transaction: async (fn: (conn: unknown) => Promise<unknown>) => {
@@ -194,7 +200,9 @@ beforeEach(() => {
         const tx = { select: db.select };
         h.transactions.push(tx);
         h.transactionActive = true;
-        return await fn(tx);
+        const result = await fn(tx);
+        h.commits++;
+        return result;
       } finally {
         h.locked = false;
         h.transactionActive = false;
@@ -264,6 +272,32 @@ describe('a Save/Pull whose leftovers left the index held', () => {
     expect(h.removes).toBe(0);
     expect(hasScratch(worktrees())).toBe(true);
   });
+});
+
+describe('a leftovers failure at the report boundary', () => {
+  it('rolls back immediately when no report has been written', async () => {
+    fixture(false);
+    const error = new Error('report write failed');
+    h.leftoverFailure = { afterReport: false, error };
+    await expect(run()).rejects.toBe(error);
+    expect(h.commits).toBe(0);
+    expect(h.reports).toEqual([]);
+    expect(h.removes).toBe(0);
+  });
+
+  it.each([new Error('after the report'), null, undefined, false])(
+    'commits and marks the report before rethrowing %s',
+    async (error) => {
+      fixture(false);
+      h.leftoverFailure = { afterReport: true, error };
+      await expect(run()).rejects.toBe(error);
+      expect(h.commits).toBe(1);
+      expect(h.reports).toEqual([false]);
+      expect(h.transactions).toHaveLength(1);
+      expect(h.removes).toBe(0);
+      expect(hasScratch(worktrees())).toBe(true);
+    },
+  );
 });
 
 describe('a confirm landing', () => {

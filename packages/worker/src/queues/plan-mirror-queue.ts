@@ -308,8 +308,8 @@ async function integrateOriginInMove(args: {
     // worktree kept.
     const reports: (() => Promise<void>)[] = [];
     // A failure after the report was written (an index git would not give up) still commits it.
-    let failedAfterReport: unknown = null;
-    await db.transaction(async (tx) => {
+    const failedAfterReport = await db.transaction(async (tx) => {
+      let phase: 'relocating' | 'reported' = 'relocating';
       await lockPlanMerge(tx, args.repositoryId);
       await refuseOpenPlanMerge(tx, args.repositoryId);
       const worktree = await ensurePlanMergeWorktree(args.repoPath);
@@ -319,15 +319,19 @@ async function integrateOriginInMove(args: {
           args.repositoryId,
           worktree,
           `origin/${args.branch}`,
-          (mark) => reports.push(mark),
+          (mark) => {
+            phase = 'reported';
+            reports.push(mark);
+          },
         );
       } catch (err) {
-        if (reports.length === 0) throw err;
-        failedAfterReport = err;
+        if (phase === 'relocating') throw err;
+        return { error: err };
       }
+      return null;
     });
     for (const markReported of reports) await markReported();
-    if (failedAfterReport) throw failedAfterReport;
+    if (failedAfterReport) throw failedAfterReport.error;
     // A file found rewritten ends the transaction unmoved and goes back to the set-aside.
     const moved = await db.transaction(async (tx) => {
       await lockPlanMerge(tx, args.repositoryId);
