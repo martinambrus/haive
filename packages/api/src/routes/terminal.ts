@@ -10,7 +10,7 @@ import { logger, TERMINAL_CLOSE_CODES } from '@haive/shared';
 import { terminalClientFrameSchema } from '@haive/shared';
 import type { TerminalServerFrame } from '@haive/shared';
 import { getDb } from '../db.js';
-import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
+import { authenticateUpgrade, closeRefused, rejectUpgrade } from '../lib/upgrade-auth.js';
 import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import { TerminalLogBuffer } from '../terminal/log-buffer.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
@@ -62,21 +62,26 @@ export function installTerminalWebSocket(server: Server, opts: TerminalWsOptions
           rejectUpgrade(socket, 404, 'Not Found');
           return;
         }
-        // Browsers cannot read HTTP upgrade refusals. Disclose eligibility only
-        // after ownership is proven, and register revocation/error handling as usual.
-        const closeRefused = (code: number) => {
-          if (auth.session.revoked || socket.destroyed || socket.writableEnded) return;
-          wss.handleUpgrade(req, socket, head, (ws) => {
-            if (auth.session.accept(ws)) ws.close(code);
-            else ws.terminate();
-          });
-        };
         if (container.status !== 'running') {
-          closeRefused(TERMINAL_CLOSE_CODES.CONTAINER_NOT_RUNNING);
+          closeRefused(
+            wss,
+            req,
+            socket,
+            head,
+            auth.session,
+            TERMINAL_CLOSE_CODES.CONTAINER_NOT_RUNNING,
+          );
           return;
         }
         if (!container.dockerContainerId) {
-          closeRefused(TERMINAL_CLOSE_CODES.CONTAINER_NOT_BOUND);
+          closeRefused(
+            wss,
+            req,
+            socket,
+            head,
+            auth.session,
+            TERMINAL_CLOSE_CODES.CONTAINER_NOT_BOUND,
+          );
           return;
         }
 

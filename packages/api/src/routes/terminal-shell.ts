@@ -24,7 +24,7 @@ import {
 } from '@haive/shared';
 import { getDb } from '../db.js';
 import { getPatientRedis } from '../redis.js';
-import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
+import { authenticateUpgrade, closeRefused, rejectUpgrade } from '../lib/upgrade-auth.js';
 import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 import { isCanonicalUuid } from '../lib/uuid.js';
@@ -85,16 +85,6 @@ export function installTerminalShellWebSocket(
           return;
         }
 
-        // Browsers cannot read HTTP upgrade refusals. Disclose eligibility only
-        // after ownership is proven, and register revocation/error handling as usual.
-        const closeRefused = (code: number) => {
-          if (auth.session.revoked || socket.destroyed || socket.writableEnded) return;
-          wss.handleUpgrade(req, socket, head, (ws) => {
-            if (auth.session.accept(ws)) ws.close(code);
-            else ws.terminate();
-          });
-        };
-
         if (isRepo) {
           const ids = extractRepoIds(rawUrl, repoPathPrefix);
           if (!ids) {
@@ -107,7 +97,8 @@ export function installTerminalShellWebSocket(
             auth.userId,
           );
           if (!ownership.ok) {
-            if ('closeCode' in ownership) closeRefused(ownership.closeCode);
+            if ('closeCode' in ownership)
+              closeRefused(wss, req, socket, head, auth.session, ownership.closeCode);
             else rejectUpgrade(socket, 404, 'Not Found');
             return;
           }
@@ -146,7 +137,14 @@ export function installTerminalShellWebSocket(
           return;
         }
         if (ownership.taskTerminal === false) {
-          closeRefused(TERMINAL_CLOSE_CODES.TASK_TERMINAL_DISABLED);
+          closeRefused(
+            wss,
+            req,
+            socket,
+            head,
+            auth.session,
+            TERMINAL_CLOSE_CODES.TASK_TERMINAL_DISABLED,
+          );
           return;
         }
         if (auth.session.revoked) return;
