@@ -5,6 +5,9 @@ import type { Database } from './index.js';
 // leave capacity for their main pool and for the other service's auth holders.
 const MAX_CLI_AUTH_LOCK_CONNECTIONS = 32;
 let authConnections = 0;
+/** A holder checks its lock inside write transactions; a hung dedicated socket must not pin the
+ *  main-pool connection and row locks behind it (TCP keepalive alone takes minutes). */
+export const CLI_AUTH_ASSERT_TIMEOUT_MS = 5_000;
 
 export interface CliAuthLock {
   (): Promise<void>;
@@ -76,13 +79,24 @@ export async function tryCliAuthLock(db: Database, scope: string): Promise<CliAu
     return Object.assign(release, {
       assertHeld: async () => {
         if (released || lost) throw new CliAuthLockLostError();
+        let timer: ReturnType<typeof setTimeout> | undefined;
         try {
-          const [current] = await client`select pg_backend_pid() as pid`;
+          const [current] = await Promise.race([
+            client`select pg_backend_pid() as pid`,
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(
+                () => reject(new CliAuthLockLostError()),
+                CLI_AUTH_ASSERT_TIMEOUT_MS,
+              );
+            }),
+          ]);
           if (released || current?.pid !== row.pid) throw new CliAuthLockLostError();
         } catch {
           // postgres.js may reconnect transparently. Never adopt its replacement session.
           lost = true;
           throw new CliAuthLockLostError();
+        } finally {
+          clearTimeout(timer);
         }
       },
     });

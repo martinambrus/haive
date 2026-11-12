@@ -2,7 +2,11 @@ import { expect, it, vi } from 'vitest';
 import type { Database } from '../src/index.js';
 const h = vi.hoisted(() => ({ create: vi.fn() }));
 vi.mock('postgres', () => ({ default: h.create }));
-import { tryCliAuthLock } from '../src/cli-auth-lock.js';
+import {
+  CLI_AUTH_ASSERT_TIMEOUT_MS,
+  CliAuthLockLostError,
+  tryCliAuthLock,
+} from '../src/cli-auth-lock.js';
 it('uses a fresh shared state and disables startup type fetching for each dedicated connection', async () => {
   const shared = { retries: 7, typeArrayMap: { 23: 1007 } };
   const options = {
@@ -58,4 +62,30 @@ it('caps dedicated auth clients including concurrent acquisitions and frees slot
   const next = await tryCliAuthLock(db, 'freed');
   expect(next).not.toBeNull();
   await next?.();
+});
+
+it('treats a lock check that does not answer in time as a lost lock', async () => {
+  vi.useFakeTimers();
+  try {
+    let calls = 0;
+    const client = Object.assign(
+      vi.fn(() =>
+        ++calls === 1 ? Promise.resolve([{ held: true, pid: 1 }]) : new Promise(() => {}),
+      ),
+      { end: vi.fn(async () => {}) },
+    );
+    h.create.mockReturnValue(client);
+    const db = { $client: { options: { database: 'test', user: 'test' } } } as unknown as Database;
+    const release = await tryCliAuthLock(db, 'hung');
+    const check = release!.assertHeld();
+    const outcome = expect(check).rejects.toBeInstanceOf(CliAuthLockLostError);
+    await vi.advanceTimersByTimeAsync(CLI_AUTH_ASSERT_TIMEOUT_MS);
+    await outcome;
+    // Lost is permanent: a later check refuses without another query.
+    await expect(release!.assertHeld()).rejects.toBeInstanceOf(CliAuthLockLostError);
+    expect(calls).toBe(2);
+    await release!();
+  } finally {
+    vi.useRealTimers();
+  }
 });

@@ -403,7 +403,7 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   re-reading the token under it, and again for every snapshot write, so a Disconnect between its
   fetch and its write leaves no stale snapshot. Each holder keeps the lock on its own connection, at
   most 32 per process (`MAX_CLI_AUTH_LOCK_CONNECTIONS`; beyond it a writer answers busy). A holder
-  checks the lock is still its own (`assertHeld`, the backend pid it was taken on) before a
+  checks the lock is still its own (`assertHeld`, the backend pid it was taken on; a check unanswered within 5 s counts as lost) before a
   credential write; after a PostgreSQL restart or a terminated backend it stops, and a login
   session closes with "Authentication changed. Retry the login." A login holds the lock at most 2
   minutes before its container exists. Its teardown waits at most 30 s for `docker remove`, then
