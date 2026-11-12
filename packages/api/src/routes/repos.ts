@@ -1020,7 +1020,13 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
         action: 'repository.scope.update',
         targetType: 'repository',
         targetId: id,
-        metadata: { addedCount, removedCount },
+        metadata: {
+          source: 'api',
+          actorKind: 'authenticated_user',
+          fields: ['scopeExcludeGlobs'],
+          addedCount,
+          removedCount,
+        },
       };
       await insertAuditEvent(tx, event);
     }
@@ -2795,12 +2801,23 @@ repoRoutes.post('/:id/remote', async (c) => {
         if (!stored) throw new HttpError(404, 'Repository not found');
         await requireFittingCredential(tx, body.credentialsId ?? stored.credentialsSecretId);
         const host = parseScpLikeGitUrl(body.remoteUrl)?.host ?? new URL(body.remoteUrl).hostname;
+        const patch = {
+          remoteUrl: body.remoteUrl,
+          ...(body.credentialsId ? { credentialsSecretId: body.credentialsId } : {}),
+          ...(body.branch ? { branch: body.branch } : {}),
+        };
+        const fields = (Object.keys(patch) as (keyof typeof patch)[]).filter(
+          (field) => patch[field] !== stored[field],
+        );
         event = {
           actorUserId: userId,
           action: 'repository.remote.update',
           targetType: 'repository',
           targetId: id,
           metadata: {
+            source: 'api',
+            actorKind: 'authenticated_user',
+            fields,
             host,
             credentialsChanged:
               (body.credentialsId ?? stored.credentialsSecretId) !== stored.credentialsSecretId,
@@ -2877,9 +2894,7 @@ repoRoutes.post('/:id/remote', async (c) => {
           await tx
             .update(schema.repositories)
             .set({
-              remoteUrl: body.remoteUrl,
-              ...(body.credentialsId ? { credentialsSecretId: body.credentialsId } : {}),
-              ...(body.branch ? { branch: body.branch } : {}),
+              ...patch,
               updatedAt: new Date(),
             })
             .where(eq(schema.repositories.id, id));

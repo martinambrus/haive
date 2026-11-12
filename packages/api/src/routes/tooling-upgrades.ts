@@ -1029,6 +1029,8 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
         (field) => field in updates && !isDeepStrictEqual(stored[field], updates[field]),
       );
       securityEvent.metadata = {
+        source: 'api',
+        actorKind: 'authenticated_user',
         fields: changedFields,
         ...summarizeSecurityFields(changedFields, updates),
       };
