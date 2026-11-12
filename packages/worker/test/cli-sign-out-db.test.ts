@@ -54,6 +54,42 @@ describe.skipIf(!url)('sign-out generation and critical section on PostgreSQL', 
     vi.restoreAllMocks();
     await db.delete(schema.users).where(eq(schema.users.id, userId));
   });
+  it('stops sign-out before destructive writes after the lock backend is terminated', async () => {
+    const [provider] = await db
+      .insert(schema.cliProviders)
+      .values({
+        userId,
+        name: 'claude-code',
+        label: 'lock loss',
+        authStatus: 'ok',
+      })
+      .returning();
+    let removed = false;
+    const runner = {
+      volumeExists: async () => {
+        const scope = cliAuthScope(provider!);
+        const [holder] = await db.$client`
+          select pid from pg_locks where locktype = 'advisory'
+          and classid = ((hashtextextended(${`cli-auth:${scope}`}, 0) >> 32) & 4294967295)::oid
+          and objid = (hashtextextended(${`cli-auth:${scope}`}, 0) & 4294967295)::oid`;
+        await db.$client`select pg_terminate_backend(${holder!.pid})`;
+        return true;
+      },
+      volumeRemove: async () => {
+        removed = true;
+        return { ok: true, stderr: '' };
+      },
+    } as unknown as DockerRunner;
+    await expect(
+      handleSignOutJob(db, { providerId: provider!.id, userId }, runner),
+    ).rejects.toThrow();
+    expect(removed).toBe(false);
+    expect(
+      (await db.query.cliProviders.findFirst({ where: eq(schema.cliProviders.id, provider!.id) }))!
+        .authStatus,
+    ).toBe('ok');
+  });
+
   // Docker and CLI execution are controlled; provider rows, UPDATE predicates and
   // advisory-lock connections are real. This is the lock held by the API session.
   it('creates a login while its API session owns the real auth scope', async () => {

@@ -1331,6 +1331,7 @@ export async function handleSignOutJob(
       // and sign-out is the one operation that can never succeed. MEASURED on the dev
       // install: two helpers stranded on `haive_cli_auth_<user>_codex_0`. Stopped users
       // only — a running login or probe container is deliberately spared.
+      await release.assertHeld();
       const containerCleanup = await runner.removeStoppedContainersUsingVolume?.(name);
       if (containerCleanup && !containerCleanup.ok) {
         log.warn(
@@ -1343,6 +1344,7 @@ export async function handleSignOutJob(
           'removed stopped auth helper containers',
         );
       }
+      await release.assertHeld();
       let result = await runner.volumeRemove(name);
       // A closed login socket can release its scope while its 30 s chown helper still
       // mounts this volume. Retry refusals with 31 s total backoff, without parsing
@@ -1350,6 +1352,7 @@ export async function handleSignOutJob(
       for (const delayMs of [1_000, 2_000, 4_000, 8_000, 16_000]) {
         if (result.ok) break;
         await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+        await release.assertHeld();
         result = await runner.volumeRemove(name);
       }
       if (result.ok) removed.push(name);
@@ -1361,6 +1364,7 @@ export async function handleSignOutJob(
     // volumes alone leaves the provider authenticated and the next login skips browser auth.
     // Delete the login + usage-tracking token secrets to log out for real. A user-entered
     // BYOK key (apiKeyEnvName, e.g. ANTHROPIC_AUTH_TOKEN) is not a login artifact -> kept.
+    await release.assertHeld();
     if (provider.name === 'claude-code') {
       await db
         .delete(schema.cliProviderSecrets)
@@ -1375,6 +1379,7 @@ export async function handleSignOutJob(
         );
     }
 
+    await release.assertHeld();
     if (failed.length === 0) {
       await db
         .update(schema.cliProviders)

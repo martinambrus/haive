@@ -11,7 +11,7 @@ export async function saveCliLoginSecret(
   userId: string,
   providerId: string,
   token: string,
-  assertActive: () => void = () => {},
+  assertActive: () => void | Promise<void> = () => {},
   authLockHeld = false,
 ): Promise<void> {
   if (!authLockHeld) {
@@ -22,7 +22,17 @@ export async function saveCliLoginSecret(
     const release = await tryCliAuthLock(db, cliAuthScope(provider));
     if (!release) throw new Error('CLI authentication is busy');
     try {
-      return await saveCliLoginSecret(db, userId, providerId, token, assertActive, true);
+      return await saveCliLoginSecret(
+        db,
+        userId,
+        providerId,
+        token,
+        async () => {
+          await release.assertHeld();
+          await assertActive();
+        },
+        true,
+      );
     } finally {
       await release();
     }
@@ -35,7 +45,7 @@ export async function saveCliLoginSecret(
     targetId: providerId,
     metadata: { source: 'login', secretName: 'CLAUDE_CODE_OAUTH_TOKEN' },
   };
-  assertActive();
+  await assertActive();
   await db.transaction(async (tx) => {
     // Provider before secret, matching the environment editor's write order. The lock also
     // keeps the legacy cleanup from replacing environment edits made after its read.
@@ -44,10 +54,10 @@ export async function saveCliLoginSecret(
       .from(schema.cliProviders)
       .where(and(eq(schema.cliProviders.id, providerId), eq(schema.cliProviders.userId, userId)))
       .for('update');
-    assertActive();
+    await assertActive();
     if (!existing) throw new Error('Provider not found');
     await insertAuditEvent(tx, event);
-    assertActive();
+    await assertActive();
     await upsertProviderSecret(tx, {
       providerId,
       name: 'CLAUDE_CODE_OAUTH_TOKEN',
@@ -55,7 +65,7 @@ export async function saveCliLoginSecret(
       masterKek,
       onExisting: 'overwrite',
     });
-    assertActive();
+    await assertActive();
     const { CLAUDE_CODE_OAUTH_TOKEN: _drop, ...rest } = existing.envVars ?? {};
     await tx
       .update(schema.cliProviders)
@@ -71,7 +81,7 @@ export async function saveCliLoginSecret(
       })
       .where(eq(schema.cliProviders.id, providerId));
     // A close while a write was awaiting rolls back the token, health and audit together.
-    assertActive();
+    await assertActive();
   });
   logAuditEvent(event);
 }

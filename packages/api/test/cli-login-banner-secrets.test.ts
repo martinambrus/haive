@@ -3,7 +3,7 @@ vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
   tryCliAuthLock: async () => {
     await h.onAuthLock?.();
-    return h.authBusy ? null : h.releaseAuth;
+    return h.authBusy ? null : Object.assign(h.releaseAuth, { assertHeld: h.assertAuth });
   },
 }));
 import { EventEmitter } from 'node:events';
@@ -19,6 +19,7 @@ const h = vi.hoisted(() => ({
   upgrade: vi.fn(),
   onAuthLock: undefined as (() => Promise<void>) | undefined,
   releaseAuth: vi.fn(async () => {}),
+  assertAuth: vi.fn(async () => {}),
   updates: [] as Record<string, unknown>[],
   stampGate: undefined as Promise<void> | undefined,
   stampError: false,
@@ -34,6 +35,7 @@ const h = vi.hoisted(() => ({
   remove: vi.fn(),
   resize: vi.fn(),
   probe: vi.fn(),
+  usagePoll: vi.fn(),
   exec: vi.fn(),
   queueError: undefined as Error | undefined,
   createError: undefined as string | undefined,
@@ -63,7 +65,12 @@ vi.mock('../src/routes/terminal.js', () => ({ attachContainerStream: h.attach })
 vi.mock('../src/routes/docker-exec.js', () => ({ execInContainer: h.exec }));
 vi.mock('../src/queues.js', () => ({
   getCliExecQueueEvents: () => ({}),
-  getUsagePollQueue: () => ({ add: async () => ({}) }),
+  getUsagePollQueue: () => ({
+    add: async () => {
+      h.usagePoll();
+      return {};
+    },
+  }),
   getCliExecQueue: () => ({
     add: async (name: string, payload: unknown) => {
       if (name === 'cli-login-create' && h.loginEnqueueGate) await h.loginEnqueueGate;
@@ -101,7 +108,7 @@ let ws: EventEmitter & { readyState: number; send: ReturnType<typeof vi.fn>; clo
 let stream: Duplex;
 let providerName: CliProviderName;
 const settle = async () => {
-  for (let i = 0; i < 30; i++) await Promise.resolve();
+  for (let i = 0; i < 80; i++) await Promise.resolve();
 };
 
 beforeEach(() => {
@@ -109,6 +116,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   h.loginEnqueueGate = undefined;
   h.authBusy = false;
+  h.assertAuth.mockReset().mockResolvedValue(undefined);
   h.onAuthLock = undefined;
   h.updates = [];
   h.stampGate = undefined;
@@ -239,8 +247,9 @@ function assertNoCredentialText(...values: string[]) {
   );
   expect(leaked).toBe(false);
 }
-function paste() {
+async function paste() {
   ws.emit('message', Buffer.from(JSON.stringify({ type: 'token-input', token: CODE })));
+  await settle();
 }
 
 describe('Claude OAuth token capture controls', () => {
@@ -250,7 +259,7 @@ describe('Claude OAuth token capture controls', () => {
   async function ready() {
     await start();
     stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
-    paste();
+    await paste();
   }
 
   const crWrapCases = [
@@ -508,7 +517,7 @@ describe('Claude OAuth token capture controls', () => {
   it('fix-round1 F1 clears an incomplete escape when the user pastes again', async () => {
     await ready();
     stream.emit('data', Buffer.from('\x1b]unfinished'));
-    paste();
+    await paste();
     stream.emit('data', Buffer.from(`${TOKEN}\n\n`));
     await settle();
     expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === TOKEN).toBe(true);
@@ -570,7 +579,7 @@ describe('Claude OAuth token capture controls', () => {
       if (missing !== 'authorization URL') {
         stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
       }
-      if (missing !== 'pasted code') paste();
+      if (missing !== 'pasted code') await paste();
       const output = missing === 'prefix' ? TOKEN.slice('sk-ant-oat01-'.length) : TOKEN;
       stream.emit('data', Buffer.from(output));
       stream.emit('end');
@@ -578,6 +587,17 @@ describe('Claude OAuth token capture controls', () => {
       expect(h.save.mock.calls.length === 0).toBe(true);
     },
   );
+
+  it('requests the usage tick only after the login releases its auth lock', async () => {
+    await ready();
+    stream.emit('data', Buffer.from(`${TOKEN}\n\n`));
+    await settle();
+    expect(h.save).toHaveBeenCalledTimes(1);
+    expect(h.usagePoll).toHaveBeenCalledTimes(1);
+    expect(h.usagePoll.mock.invocationCallOrder[0]).toBeGreaterThan(
+      h.releaseAuth.mock.invocationCallOrder.at(-1)!,
+    );
+  });
 
   it('fix-round1 D1 does not save again at end after a data capture', async () => {
     await ready();
@@ -720,7 +740,7 @@ describe('Claude OAuth token capture controls', () => {
       if (missing !== 'authorization URL') {
         stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
       }
-      if (missing !== 'pasted code') paste();
+      if (missing !== 'pasted code') await paste();
       const output = missing === 'prefix' ? TOKEN.slice('sk-ant-oat01-'.length) : TOKEN;
       stream.emit('data', Buffer.from(`${output}\n\n`));
       await settle();
@@ -796,7 +816,7 @@ describe('CLI login banner credential logging', () => {
   it('captures a wrapped Claude token without logging any six-character substring', async () => {
     await start();
     stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
-    paste();
+    await paste();
     stream.emit('data', Buffer.from(`${TOKEN.slice(0, 47)}\n${TOKEN.slice(47)}\n\n`));
     await settle();
     expect(h.save.mock.calls.some(([, input]) => input.value === TOKEN)).toBe(true);
@@ -835,7 +855,7 @@ describe('CLI login banner credential logging', () => {
   it('does not log the rejected code echoed by the CLI', async () => {
     await start();
     stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
-    paste();
+    await paste();
     stream.emit('data', Buffer.from(`invalid token: ${CODE}\n`));
     assertNoCredentialText(CODE);
   });
@@ -843,7 +863,7 @@ describe('CLI login banner credential logging', () => {
   it('does not log or return partial credentials on capture timeout', async () => {
     await start();
     stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
-    paste();
+    await paste();
     stream.emit('data', Buffer.from(TOKEN.slice(0, 45)));
     await vi.advanceTimersByTimeAsync(60_000);
     assertNoCredentialText(TOKEN, CODE);
@@ -907,7 +927,7 @@ describe('CLI login banner credential logging', () => {
     );
     await start();
     stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
-    paste();
+    await paste();
     stream.emit('data', Buffer.from(`${TOKEN}\n\n`));
     await settle();
     assertNoCredentialText(TOKEN, CODE);
@@ -923,7 +943,7 @@ describe('CLI login banner credential logging', () => {
     h.save.mockRejectedValueOnce(new Error(`synthetic save failure: ${TOKEN}`));
     await start();
     stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
-    paste();
+    await paste();
     stream.emit('data', Buffer.from(`${TOKEN}\n\n`));
     await settle();
     expect(h.log.error).toHaveBeenCalled();
@@ -944,6 +964,7 @@ describe('CLI login banner startup cleanup', () => {
       await start('', false);
       expect(stream.writableEnded).toBe(true);
       expect(h.remove).toHaveBeenCalledWith({ force: true });
+      expect(h.updates).toContainEqual({ status: 'destroyed', destroyedAt: expect.any(Date) });
       expect(ws.readyState).toBe(3);
       expect(ws.send).toHaveBeenCalledWith(
         JSON.stringify({ type: 'error', message: 'Failed to start login container' }),
@@ -1030,6 +1051,39 @@ describe('CLI login banner startup cleanup', () => {
   });
 });
 
+describe('CLI login banner lock watch', () => {
+  const frames = () => ws.send.mock.calls.map(([raw]) => JSON.parse(raw));
+
+  it('reports a lost lock and closes the session', async () => {
+    await start();
+    h.assertAuth.mockRejectedValue(new Error('lost'));
+    await vi.advanceTimersByTimeAsync(1_000);
+    await settle();
+    expect(frames()).toContainEqual({
+      type: 'error',
+      message: 'Authentication changed. Retry the login.',
+    });
+  });
+
+  it('does not report a lost lock for a check still running when the session ends', async () => {
+    await start();
+    let reject!: (err: Error) => void;
+    h.assertAuth.mockImplementation(() => new Promise<void>((_, r) => (reject = r)));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.assertAuth).toHaveBeenCalled();
+    // The session ends on its own (socket still open): cleanup releases the lock while the
+    // check is in flight, and the check then rejects as released.
+    stream.emit('end');
+    reject(new Error('CLI authentication lock was lost; retry the operation'));
+    await settle();
+    expect(JSON.stringify(frames())).not.toContain('Authentication changed');
+    expect(h.log.warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'login authentication lock lost; stopping session',
+    );
+  });
+});
+
 describe('CLI login banner antigravity PTY size', () => {
   const SIZE = { h: 40, w: 120 };
 
@@ -1085,7 +1139,7 @@ describe('CLI login banner token paste', () => {
   it('writes the code, then Enter 150 ms later', async () => {
     await start();
     const seen = watchStream();
-    paste();
+    await paste();
     expect(seen.codes()).toEqual([true]);
     await vi.advanceTimersByTimeAsync(149);
     expect(seen.enters()).toBe(0);
@@ -1099,7 +1153,7 @@ describe('CLI login banner token paste', () => {
     async (when) => {
       await start();
       const seen = watchStream();
-      paste();
+      await paste();
       if (when === 'the stream ends') stream.emit('end');
       else ws.close();
       await settle();
@@ -1381,7 +1435,7 @@ describe('CLI login banner auth URL chunking', () => {
     providerName = 'grok';
     await start();
     stream.emit('data', Buffer.from(`${GROK.head}${GROK.url}\r\n`));
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 80; i++) {
       await vi.advanceTimersByTimeAsync(100);
       stream.emit('data', Buffer.from('⠋\r\n'));
     }
@@ -1662,7 +1716,7 @@ describe('CLI login banner auth URL chunking', () => {
 it('an audit refusal fails the verified login before credential storage', async () => {
   await start();
   stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
-  paste();
+  await paste();
   (h.db as { insert: () => never }).insert = () => {
     throw new Error('audit refused');
   };
@@ -1680,7 +1734,7 @@ describe('candidate verification before credential promotion', () => {
   const capture = async () => {
     await start();
     stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
-    paste();
+    await paste();
     stream.emit('data', Buffer.from(`${TOKEN}\n\n`));
     await settle();
   };
@@ -1791,7 +1845,7 @@ describe('login success wire persistence boundary', () => {
     };
     await start();
     stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
-    paste();
+    await paste();
     stream.emit('data', Buffer.from(`${TOKEN}\n\n`));
     await reached;
     try {
@@ -2023,5 +2077,139 @@ it('refuses a login when its settings change between the provider read and auth 
   );
   expect(h.attach).not.toHaveBeenCalled();
   expect(h.start).not.toHaveBeenCalled();
+  expect(h.releaseAuth).toHaveBeenCalledOnce();
+});
+
+it.each(['paste-enter', 'menu-enter'] as const)(
+  'checks lock ownership again before delayed %s input',
+  async (phase) => {
+    if (phase === 'menu-enter') providerName = 'antigravity';
+    await start();
+    const write = vi.spyOn(stream, 'write');
+    if (phase === 'paste-enter') await paste();
+    else {
+      stream.emit('data', Buffer.from('Select a login method\n'));
+      await vi.advanceTimersByTimeAsync(1000);
+    }
+    write.mockClear();
+    h.assertAuth.mockRejectedValue(new Error('authentication lock lost'));
+    await vi.advanceTimersByTimeAsync(phase === 'paste-enter' ? 150 : 500);
+    await settle();
+    expect(write).not.toHaveBeenCalled();
+    expect(h.releaseAuth).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  },
+);
+
+it('refuses promotion when the auth connection was lost during candidate verification', async () => {
+  let resume!: () => void;
+  h.probeGate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  await start();
+  stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
+  await paste();
+  stream.emit('data', Buffer.from(`${TOKEN}\n\n`));
+  await settle();
+  h.assertAuth.mockRejectedValue(new Error('authentication lock lost'));
+  resume();
+  await settle();
+  expect(h.save).not.toHaveBeenCalled();
+  expect(h.releaseAuth).toHaveBeenCalledOnce();
+  expect(h.updates.some((v) => v.authGeneration)).toBe(false);
+});
+
+it('stops an idle login when its auth backend is lost and refuses later input', async () => {
+  await start();
+  const write = vi.spyOn(stream, 'write');
+  h.assertAuth.mockRejectedValue(new Error('authentication lock lost'));
+  await vi.advanceTimersByTimeAsync(1_000);
+  await settle();
+  expect(h.remove).toHaveBeenCalledOnce();
+  expect(h.releaseAuth).toHaveBeenCalledOnce();
+  ws.emit('message', Buffer.from(JSON.stringify({ type: 'input', data: 'late-input' })));
+  await settle();
+  expect(write).not.toHaveBeenCalled();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it.each(['enqueue', 'attach', 'start'] as const)(
+  'bounds the pre-container auth hold while %s is stalled',
+  async (phase) => {
+    let resume!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    if (phase === 'enqueue') h.loginEnqueueGate = gate;
+    if (phase === 'attach')
+      h.attach.mockImplementation(async () => {
+        await gate;
+        return stream;
+      });
+    if (phase === 'start')
+      h.start.mockImplementation(async () => {
+        await gate;
+      });
+    await start('', false);
+    try {
+      await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+      await settle();
+      expect(ws.readyState).toBe(3);
+      expect(h.releaseAuth).toHaveBeenCalledOnce();
+    } finally {
+      resume();
+      await settle();
+    }
+    if (phase !== 'start') expect(h.start).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  },
+);
+
+it.each(['close', 'timeout'])('owns a late attach stream after startup %s', async (reason) => {
+  let resume!: () => void;
+  h.attach.mockImplementationOnce(
+    () =>
+      new Promise<Duplex>((resolve) => {
+        resume = () => resolve(stream);
+      }),
+  );
+  await start('', false);
+  if (reason === 'close') ws.close();
+  else await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+  await settle();
+  resume();
+  await settle();
+  expect(() => stream.emit('error', new Error('late attach socket failed'))).not.toThrow();
+  expect(stream.destroyed).toBe(true);
+  expect(h.start).not.toHaveBeenCalled();
+  expect(h.releaseAuth).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('releases the auth hold after bounded Docker teardown and observes a late removal safely', async () => {
+  await start();
+  let resume!: () => void;
+  h.remove.mockImplementation(
+    () =>
+      new Promise<void>((resolve) => {
+        resume = resolve;
+      }),
+  );
+  ws.close();
+  await settle();
+  try {
+    await vi.advanceTimersByTimeAsync(30_000);
+    await settle();
+    expect(h.releaseAuth).toHaveBeenCalledOnce();
+    expect(h.updates.some((v) => v.status === 'destroyed')).toBe(false);
+    expect(
+      h.log.warn.mock.calls.some(([, message]) => message === 'login container removal timed out'),
+    ).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    resume();
+    await settle();
+  }
+  expect(h.updates.some((v) => v.status === 'destroyed')).toBe(true);
   expect(h.releaseAuth).toHaveBeenCalledOnce();
 });

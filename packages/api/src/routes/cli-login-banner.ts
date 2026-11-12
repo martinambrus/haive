@@ -10,7 +10,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { Job } from 'bullmq';
 import Docker from 'dockerode';
 import { and, eq } from 'drizzle-orm';
-import { schema, tryCliAuthLock } from '@haive/database';
+import { schema, tryCliAuthLock, type CliAuthLock } from '@haive/database';
 import {
   AMP_PASTE_LOGIN_URL_PREFIX,
   AUTH_URL_PREFIXES,
@@ -60,6 +60,7 @@ const ANSI_TAIL_MAX = 4096;
 // of output.
 const AUTH_URL_SETTLE_MS = 1_000;
 const HEARTBEAT_MS = 15_000;
+const PRE_CONTAINER_TIMEOUT_MS = 2 * 60 * 1000;
 const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 // How often the queued dialog is told what it is waiting for. Two queue reads per tick, both
 // O(queue length) against Redis, so keep it lazy — the numbers move on the scale of a CLI run
@@ -67,6 +68,7 @@ const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 const QUEUE_REPORT_MS = 2_000;
 // Bound on the post-cancel drain only. Reached only when the worker had already picked the job
 // up, so it is waiting on a container create that is seconds away, not on a queue.
+const CONTAINER_TEARDOWN_TIMEOUT_MS = 30_000;
 const CANCEL_DRAIN_MS = 2 * 60 * 1000;
 
 /** Raised when the user closes the dialog while a cli-exec job is still queued. Distinct from a
@@ -168,7 +170,7 @@ const DEVICE_CODE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliProviderN
 
 interface BannerSession {
   provider: CliAuthProvider;
-  releaseAuth: () => Promise<void>;
+  releaseAuth: CliAuthLock;
   credentialSave?: Promise<void>;
   ws: WebSocket;
   userId: string;
@@ -195,6 +197,9 @@ interface BannerSession {
   tokenSubmittedAt: number | null;
   captureWatchdog: NodeJS.Timeout | null;
   probePending: boolean;
+  /** A saved credential asks for a usage tick, sent once the auth lock is released: the tick's
+   *  snapshot write takes the same lock and would skip a result fetched while this holds it. */
+  usagePollAfterRelease: boolean;
   createdAt: number;
   heartbeat: NodeJS.Timeout;
   timeout: NodeJS.Timeout;
@@ -332,12 +337,22 @@ export function installCliLoginBannerWebSocket(
           closeRefused(CLI_LOGIN_CLOSE_CODES.AUTH_BUSY);
           return;
         }
+        const startupDeadline = Date.now() + PRE_CONTAINER_TIMEOUT_MS;
+        let startupExpired = false;
+        const unclaimedTimeout = setTimeout(() => {
+          startupExpired = true;
+          log.warn({ providerId }, 'login startup timeout before upgrade');
+          void releaseAuth();
+          socket.destroy();
+        }, PRE_CONTAINER_TIMEOUT_MS);
         if (auth.session.revoked || socket.destroyed) {
+          clearTimeout(unclaimedTimeout);
           await releaseAuth();
           return;
         }
 
         const releaseUnclaimed = () => {
+          clearTimeout(unclaimedTimeout);
           void releaseAuth();
         };
         socket.once('close', releaseUnclaimed);
@@ -350,13 +365,16 @@ export function installCliLoginBannerWebSocket(
               eq(schema.cliProviders.userId, auth.userId),
             ),
           });
+          if (startupExpired) throw new LoginCancelled();
           if (!lockedProvider || cliAuthScope(lockedProvider) !== cliAuthScope(provider)) {
             socket.removeListener('close', releaseUnclaimed);
+            clearTimeout(unclaimedTimeout);
             await releaseAuth();
             closeRefused(CLI_LOGIN_CLOSE_CODES.SETTINGS_CHANGED);
             return;
           }
           wss.handleUpgrade(req, socket, head, (ws) => {
+            clearTimeout(unclaimedTimeout);
             socket.removeListener('close', releaseUnclaimed);
             if (!auth.session.accept(ws)) {
               void releaseAuth();
@@ -369,6 +387,7 @@ export function installCliLoginBannerWebSocket(
               providerName: lockedProvider.name,
               provider: lockedProvider,
               releaseAuth,
+              startupDeadline,
               docker,
             }).catch(async (err) => {
               // The user closing the dialog unwinds the session through the same throw path as a
@@ -389,6 +408,7 @@ export function installCliLoginBannerWebSocket(
           });
         } catch (err) {
           socket.removeListener('close', releaseUnclaimed);
+          clearTimeout(unclaimedTimeout);
           await releaseAuth();
           throw err;
         }
@@ -403,8 +423,9 @@ export function installCliLoginBannerWebSocket(
 }
 
 interface RunBannerOpts {
+  startupDeadline: number;
   provider: CliAuthProvider;
-  releaseAuth: () => Promise<void>;
+  releaseAuth: CliAuthLock;
   ws: WebSocket;
   userId: string;
   providerId: string;
@@ -420,6 +441,44 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   // mid-queue was simply unobserved. The 30s ttl used to bound the damage; without it a job the
   // user gave up on would go on to build a container nobody is attached to.
   const abort = createAbortHandle();
+  const startupTimeout = setTimeout(
+    () => {
+      log.warn({ providerId }, 'login startup timeout');
+      abort.fire();
+      wsSend(ws, { type: 'error', message: 'Login took too long to start. Retry the login.' });
+      ws.close(1011, 'startup_timeout');
+    },
+    Math.max(0, opts.startupDeadline - Date.now()),
+  );
+  const heldAuth = opts.releaseAuth;
+  let checkingLock = false;
+  const lockWatch = setInterval(() => {
+    if (checkingLock || abort.aborted) return;
+    checkingLock = true;
+    void heldAuth
+      .assertHeld()
+      .catch(() => {
+        // A check still in flight when cleanup releases the lock rejects as "released": the
+        // session is ending normally, so it must not report a lost lock over its result.
+        if (abort.aborted || releasePending) return;
+        log.warn({ providerId }, 'login authentication lock lost; stopping session');
+        abort.fire();
+        wsSend(ws, { type: 'error', message: 'Authentication changed. Retry the login.' });
+        ws.close(1011, 'auth_lock_lost');
+      })
+      .finally(() => {
+        checkingLock = false;
+      });
+  }, 1_000);
+  let releasePending: Promise<void> | undefined;
+  opts.releaseAuth = Object.assign(
+    async () => {
+      clearInterval(lockWatch);
+      clearTimeout(startupTimeout);
+      await (releasePending ??= heldAuth());
+    },
+    { assertHeld: heldAuth.assertHeld },
+  );
   let containerMayWrite = false;
   const pending: { job: Job | null } = { job: null };
   ws.on('close', () => {
@@ -436,7 +495,12 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   }
   wsSend(ws, { type: 'phase', phase: 'starting' });
 
-  const createResult = await enqueueLoginCreate(providerId, userId, abort, ws, pending);
+  const createResult = await enqueueLoginCreate(providerId, userId, abort, ws, pending).catch(
+    async (err) => {
+      await opts.releaseAuth();
+      throw err;
+    },
+  );
   if (!createResult.ok || !createResult.containerRowId || !createResult.dockerContainerId) {
     wsSend(ws, {
       type: 'error',
@@ -454,7 +518,19 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   const dockerContainer = docker.getContainer(createResult.dockerContainerId);
   let stream: Duplex;
   try {
-    stream = await attachContainerStream(docker, createResult.dockerContainerId);
+    const attaching = attachContainerStream(docker, createResult.dockerContainerId).then(
+      (attached) => {
+        if (abort.aborted) {
+          attached.on('error', (err: Error) => {
+            log.warn({ error: safeErrorDetails(err), providerId }, 'late attach stream error');
+          });
+          attached.end();
+          attached.destroy();
+        }
+        return attached;
+      },
+    );
+    stream = await Promise.race([attaching, abort.signal]);
   } catch (err) {
     log.error({ error: safeErrorDetails(err), providerId }, 'attach failed');
     await teardownContainer(createResult.containerRowId, docker, createResult.dockerContainerId);
@@ -513,8 +589,10 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     if (abort.aborted) throw new LoginCancelled();
 
     try {
+      await opts.releaseAuth.assertHeld();
+      if (abort.aborted) throw new LoginCancelled();
       containerMayWrite = true;
-      await dockerContainer.start();
+      await Promise.race([dockerContainer.start(), abort.signal]);
     } catch (err) {
       log.error({ error: safeErrorDetails(err), providerId }, 'start failed');
       await cleanup();
@@ -535,6 +613,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       return;
     }
 
+    clearTimeout(startupTimeout);
     const session: BannerSession = {
       provider: opts.provider,
       releaseAuth: opts.releaseAuth,
@@ -559,6 +638,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       tokenSubmittedAt: null,
       captureWatchdog: null,
       probePending: false,
+      usagePollAfterRelease: false,
       createdAt: Date.now(),
       heartbeat: (heartbeat = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
@@ -650,6 +730,15 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
         rows?: number;
         cols?: number;
       };
+      if (msg.type === 'input' || msg.type === 'token-input') {
+        try {
+          await session.releaseAuth.assertHeld();
+          if (session.cleanedUp || session.abort.aborted) return;
+        } catch {
+          void cleanupSession(session);
+          return;
+        }
+      }
       if (msg.type === 'input' && typeof msg.data === 'string') {
         // Terminal-login keystrokes (incl. the pasted auth code + Enter) -> stdin.
         try {
@@ -697,11 +786,14 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
           const wrote = session.stream.write(token);
           session.oneShotTimers.push(
             setTimeout(() => {
-              try {
-                session.stream.write('\r');
-              } catch {
-                // ignore
-              }
+              void session.releaseAuth
+                .assertHeld()
+                .then(() => {
+                  if (!session.cleanedUp && !session.abort.aborted) session.stream.write('\r');
+                })
+                .catch(() => {
+                  void cleanupSession(session);
+                });
             }, 150),
           );
           log.info({ providerId: session.providerId, wrote }, 'token written');
@@ -898,12 +990,22 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
             if (session.cleanedUp || session.authUrlSent || session.rawBuffer.includes('oauth2')) {
               return;
             }
-            session.menuAdvanceCount += 1;
-            try {
-              session.stream.write('\r');
-            } catch {
-              // stream may have closed mid-tick; ignore
-            }
+            void session.releaseAuth
+              .assertHeld()
+              .then(() => {
+                if (
+                  session.cleanedUp ||
+                  session.abort.aborted ||
+                  session.authUrlSent ||
+                  session.rawBuffer.includes('oauth2')
+                )
+                  return;
+                session.menuAdvanceCount += 1;
+                session.stream.write('\r');
+              })
+              .catch(() => {
+                void cleanupSession(session);
+              });
           }, 1500);
         }
       }
@@ -1176,20 +1278,21 @@ function stopCaptureWatchdog(session: BannerSession): void {
 
 /** Verify this capture in isolation before replacing the active encrypted credential. */
 async function saveOauthTokenAndProbe(session: BannerSession, oauthToken: string): Promise<void> {
-  const assertActive = (): void => {
+  const assertActive = async (): Promise<void> => {
+    await session.releaseAuth.assertHeld();
     if (session.abort.aborted || session.cleanedUp || session.ws.readyState !== WebSocket.OPEN) {
       throw new LoginCancelled();
     }
   };
   try {
-    assertActive();
+    await assertActive();
     const candidate = encryptCliLoginCandidate(
       session.userId,
       session.providerId,
       oauthToken,
       await secretsService.getMasterKek(),
     );
-    assertActive();
+    await assertActive();
     const result = await enqueueProbe(
       session.providerId,
       session.userId,
@@ -1198,7 +1301,7 @@ async function saveOauthTokenAndProbe(session: BannerSession, oauthToken: string
       session.pending,
       candidate,
     );
-    assertActive();
+    await assertActive();
     if (result?.ok !== true || result.cli?.ok !== true || result.cli.authStatus !== 'ok') {
       wsSend(session.ws, {
         type: 'error',
@@ -1216,7 +1319,7 @@ async function saveOauthTokenAndProbe(session: BannerSession, oauthToken: string
       true,
     );
     await session.credentialSave;
-    requestUsagePoll();
+    session.usagePollAfterRelease = true;
     log.info({ providerId: session.providerId }, 'verified oauth token saved to encrypted secret');
     // The browser's lost-result recovery treats auth-success as proof of durable storage.
     wsSend(session.ws, { type: 'auth-success' });
@@ -1245,6 +1348,7 @@ async function runProbeAndSave(session: BannerSession): Promise<void> {
     // Keep audit and completion stamping inside the promise cleanup awaits, so a
     // close during either write cannot release the credential lock early.
     session.credentialSave = (async () => {
+      await session.releaseAuth.assertHeld();
       // The CLI already wrote its credential. Audit it before attempting the stamp.
       await recordAuditEvent(getDb(), {
         actorUserId: session.userId,
@@ -1253,9 +1357,12 @@ async function runProbeAndSave(session: BannerSession): Promise<void> {
         targetId: session.providerId,
         metadata: { source: 'volume' },
       });
+      await session.releaseAuth.assertHeld();
       await advanceVolumeLoginGeneration(getDb(), session.provider);
     })();
     await session.credentialSave;
+    // The CLI wrote its credential into the volume; the tick follows the lock release.
+    session.usagePollAfterRelease = true;
     const result = await enqueueProbe(
       session.providerId,
       session.userId,
@@ -1299,8 +1406,8 @@ async function runProbeAndSave(session: BannerSession): Promise<void> {
  *  Replaces a 30s ttl that was wrong by orders of magnitude: these jobs share the cli-exec
  *  worker's concurrency with agent invocations that hold a slot for minutes, so a busy machine
  *  was reported to the user as a broken provider. There is deliberately no replacement
- *  deadline — the dialog shows the queue state and the user decides how long to wait — and
- *  SESSION_TIMEOUT_MS still bounds everything from the moment a container exists.
+ *  per-job deadline: the enclosing login startup/session timers bound the auth hold
+ *  while this helper reports queue state and observes cancellation.
  */
 async function awaitQueuedJob<T>(job: Job, abort: AbortHandle, ws: WebSocket): Promise<T> {
   const queue = getCliExecQueue();
@@ -1433,10 +1540,7 @@ async function enqueueProbe(
     }
     throw new LoginCancelled();
   }
-  const result = await awaitQueuedJob<CliProbeResult>(job, abort, ws);
-  // Volume-based logins already wrote their credential; candidates tick only after promotion.
-  if (!oauthCandidate) requestUsagePoll();
-  return result;
+  return awaitQueuedJob<CliProbeResult>(job, abort, ws);
 }
 
 function requestUsagePoll(): void {
@@ -1475,6 +1579,7 @@ async function cleanupSession(session: BannerSession): Promise<void> {
   // A close can race the awaited completion stamp/promotion. Never let sign-out enter that gap.
   await session.credentialSave?.catch(() => {});
   await session.releaseAuth();
+  if (session.usagePollAfterRelease) requestUsagePoll();
   try {
     if (session.ws.readyState === WebSocket.OPEN) {
       session.ws.close(1000, 'session_ended');
@@ -1489,19 +1594,42 @@ async function teardownContainer(
   docker: Docker,
   dockerContainerId: string,
 ): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const removing = (async () => {
+    try {
+      await docker.getContainer(dockerContainerId).remove({ force: true });
+    } catch (err) {
+      log.warn({ error: safeErrorDetails(err), dockerContainerId }, 'docker remove failed');
+    }
+    const db = getDb();
+    await db
+      .update(schema.containers)
+      .set({ status: 'destroyed', destroyedAt: new Date() })
+      .where(eq(schema.containers.id, containerRowId))
+      .catch((err) => {
+        log.warn({ error: safeErrorDetails(err), containerRowId }, 'container row update failed');
+      });
+  })();
   try {
-    await docker.getContainer(dockerContainerId).remove({ force: true });
-  } catch (err) {
-    log.warn({ error: safeErrorDetails(err), dockerContainerId }, 'docker remove failed');
+    await Promise.race([
+      removing,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          // Keep the row until removal really finishes. If it never does, nothing reaps the
+          // container while its provider and user exist: reapOrphanedAuthVolumes (worker boot)
+          // removes it only once the owner is gone. The lock is released regardless, so a later
+          // login or sign-out may run while this container still holds the auth volume.
+          log.warn(
+            { containerRowId, dockerContainerId, timeoutMs: CONTAINER_TEARDOWN_TIMEOUT_MS },
+            'login container removal timed out',
+          );
+          resolve();
+        }, CONTAINER_TEARDOWN_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
-  const db = getDb();
-  await db
-    .update(schema.containers)
-    .set({ status: 'destroyed', destroyedAt: new Date() })
-    .where(eq(schema.containers.id, containerRowId))
-    .catch((err) => {
-      log.warn({ error: safeErrorDetails(err), containerRowId }, 'container row update failed');
-    });
 }
 
 function extractProviderId(rawUrl: string, pathPrefix: string): string | null {

@@ -410,8 +410,17 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   since the api session already holds it: a volume probe publishes health only by compare-and-set
   on the generation, auth mode, isolation and the exact `auth_last_checked_at` it read, which a
   sign-out advances, so a probe that read before a sign-out cannot write over it; and a sign-out
-  retries a volume still in use by a login helper (six attempts, 31 s of backoff). The usage poll reads without the lock and takes it only to
-  refresh, re-reading the token under it. A task's sync-back waits up to 30 s for it; still held,
+  retries a volume still in use by a login helper (six attempts, 31 s of backoff). The usage poll takes the lock to refresh,
+  re-reading the token under it, and again for every snapshot write, so a Disconnect between its
+  fetch and its write leaves no stale snapshot. Each holder keeps the lock on its own connection, at
+  most 32 per process (`MAX_CLI_AUTH_LOCK_CONNECTIONS`; beyond it a writer answers busy). A holder
+  checks the lock is still its own (`assertHeld`, the backend pid it was taken on; a check unanswered within 5 s counts as lost) before a
+  credential write; after a PostgreSQL restart or a terminated backend it stops, and a login
+  session closes with "Authentication changed. Retry the login." A login holds the lock at most 2
+  minutes before its container exists. Its teardown waits at most 30 s for `docker remove`, then
+  releases the lock and stops waiting (the remove may still finish later); if it never does, nothing reaps it while its provider and user exist
+  (`reapOrphanedAuthVolumes` runs at worker boot and only for a gone owner), so a later login or
+  sign-out may run beside it. A task's sync-back waits up to 30 s for it; still held,
   it warns and the task copy is removed with its volume, so a token the task rotated is lost while
   a login dialog on the same CLI stays open that long (that login replaces it when it succeeds).
 

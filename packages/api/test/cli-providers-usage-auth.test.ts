@@ -1,4 +1,10 @@
-const authLock = vi.hoisted(() => ({ acquire: vi.fn(), release: vi.fn(async () => {}) }));
+const authLock = vi.hoisted(() => ({
+  acquire: vi.fn(),
+  release: Object.assign(
+    vi.fn(async () => {}),
+    { assertHeld: vi.fn(async () => {}) },
+  ),
+}));
 vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
   tryCliAuthLock: authLock.acquire,
@@ -89,6 +95,7 @@ let fake: ReturnType<typeof createFakeDb>;
 beforeEach(() => {
   authLock.acquire.mockReset().mockResolvedValue(authLock.release);
   authLock.release.mockClear();
+  authLock.release.assertHeld.mockReset().mockResolvedValue(undefined);
   h.user = randomUUID();
   h.redis = realRedis ?? memoryRedis();
   h.pollAdd.mockClear();
@@ -243,3 +250,29 @@ it('refuses a busy usage reconnect without consuming its authorization', async (
   expect(h.fetch).not.toHaveBeenCalled();
   expect((await post('complete', paste)).status).toBe(200);
 });
+
+it.each(['exchange', 'write'])(
+  'rolls back usage OAuth after lock loss during %s',
+  async (phase) => {
+    const { state } = await startAuthorization();
+    const before = fake.rows(schema.cliProviders);
+    const lose = () => {
+      authLock.release.assertHeld.mockRejectedValue(new Error('lock lost'));
+    };
+    const transaction = vi.spyOn(fake.db, 'transaction');
+    if (phase === 'exchange')
+      h.fetch.mockImplementationOnce(async () => {
+        expect(transaction).not.toHaveBeenCalled();
+        lose();
+        return new Response(JSON.stringify(TOKENS), { status: 200 });
+      });
+    else fake.hooks.beforeUpdate = async () => lose();
+    const res = await post('complete', { code: CODE + '#' + state });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'cli_auth_busy' });
+    expect(fake.rows(schema.cliProviderSecrets)).toEqual([]);
+    expect(fake.rows(schema.cliProviders)).toEqual(before);
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+    expect(h.pollAdd).not.toHaveBeenCalled();
+  },
+);

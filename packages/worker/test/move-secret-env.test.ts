@@ -1,4 +1,10 @@
-const authLock = vi.hoisted(() => ({ acquire: vi.fn(), release: vi.fn(async () => {}) }));
+const authLock = vi.hoisted(() => ({
+  acquire: vi.fn(),
+  release: Object.assign(
+    vi.fn(async () => {}),
+    { assertHeld: vi.fn(async () => {}) },
+  ),
+}));
 vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
   tryCliAuthLock: authLock.acquire,
@@ -55,6 +61,7 @@ function secrets(fake: ReturnType<typeof setup>['fake'], providerId: string) {
 beforeEach(() => {
   authLock.acquire.mockReset().mockResolvedValue(authLock.release);
   authLock.release.mockClear();
+  authLock.release.assertHeld.mockReset().mockResolvedValue(undefined);
   vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue(KEK);
 });
 
@@ -185,4 +192,31 @@ it('rolls back a copied legacy credential and its generation together', async ()
   expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
   expect(fake.rows(schema.cliProviders)).toEqual(before);
   expect(authLock.release).toHaveBeenCalledOnce();
+});
+
+it.each(['copy', 'drop'])('rolls back legacy %s on lock loss before commit', async (phase) => {
+  const { fake, db } = setup();
+  addProvider(fake, P1, LEGACY);
+  const before = fake.rows(schema.cliProviders);
+  fake.hooks.beforeInsert = async () => {
+    authLock.release.assertHeld.mockRejectedValue(new Error('lock lost'));
+  };
+  if (phase === 'copy') await copySecretLikeProviderEnv(db);
+  else await expect(dropCopiedSecretLikeProviderEnv(db)).rejects.toThrow('1 provider(s)');
+  expect(fake.rows(schema.cliProviderSecrets)).toEqual([]);
+  expect(fake.rows(schema.cliProviders)).toEqual(before);
+  expect(authLock.release).toHaveBeenCalledOnce();
+});
+
+it.each(['copy', 'drop'])('refuses legacy %s when key loading loses the lock', async (phase) => {
+  const { fake, db } = setup();
+  addProvider(fake, P1, LEGACY);
+  vi.spyOn(secretsService, 'getMasterKek').mockImplementationOnce(async () => {
+    authLock.release.assertHeld.mockRejectedValue(new Error('lock lost'));
+    return KEK;
+  });
+  if (phase === 'copy') await copySecretLikeProviderEnv(db);
+  else await expect(dropCopiedSecretLikeProviderEnv(db)).rejects.toThrow('1 provider(s)');
+  expect(fake.rows(schema.cliProviderSecrets)).toEqual([]);
+  expect(fake.rows(schema.cliProviders)[0]!.envVars).toEqual(LEGACY);
 });

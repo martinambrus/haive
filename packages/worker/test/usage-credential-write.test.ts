@@ -4,9 +4,13 @@ import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { configService, secretsService } from '@haive/shared';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
+import { ClaudeOauthError } from '@haive/shared/claude-oauth';
 const h = vi.hoisted(() => ({
   acquire: vi.fn(),
-  release: vi.fn(async () => {}),
+  release: Object.assign(
+    vi.fn(async () => {}),
+    { assertHeld: vi.fn(async () => {}) },
+  ),
   read: vi.fn(),
   refresh: vi.fn(),
   fetch: vi.fn(),
@@ -67,6 +71,7 @@ function setup(isolateAuth = true) {
 beforeEach(() => {
   h.acquire.mockReset().mockResolvedValue(h.release);
   h.release.mockClear();
+  h.release.assertHeld.mockReset().mockResolvedValue(undefined);
   h.debug.mockClear();
   h.fetch
     .mockReset()
@@ -107,7 +112,7 @@ it('holds the shared scope across the usage credential read, grant and write wit
   expect(fake.rows(schema.cliProviders)[0]!.authGeneration).toBe(
     '00000000-0000-4000-8000-000000000001',
   );
-  expect(h.release).toHaveBeenCalledOnce();
+  expect(h.release).toHaveBeenCalledTimes(2);
 });
 it('a usage refresh after a sign-out request still removes the volumes and both Claude secrets', async () => {
   const fake = setup();
@@ -168,6 +173,7 @@ it('leaves the usage secret and login generation unchanged when the upsert fails
       fake.rows(schema.cliProviders)[0]!.id as string,
       'CLAUDE_USAGE_OAUTH',
       'new',
+      h.release.assertHeld,
     ),
   ).rejects.toThrow('upsert refused');
   expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
@@ -176,7 +182,7 @@ it('leaves the usage secret and login generation unchanged when the upsert fails
   );
 });
 
-it('polls two same-scope providers in one tick without locking when no refresh is due', async () => {
+it('polls two same-scope providers unlocked and serialises their short snapshot writes', async () => {
   const fake = setup(false);
   const first = fake.rows(schema.cliProviders)[0]!;
   fake.insert(schema.cliProviders, { ...first, id: randomUUID() });
@@ -184,9 +190,16 @@ it('polls two same-scope providers in one tick without locking when no refresh i
   h.acquire.mockImplementation(async (_db, scope: string) => {
     if (scopes.has(scope)) return null;
     scopes.add(scope);
-    return async () => {
-      scopes.delete(scope);
-    };
+    return Object.assign(
+      async () => {
+        scopes.delete(scope);
+      },
+      {
+        assertHeld: async () => {
+          if (!scopes.has(scope)) throw new Error('lock lost');
+        },
+      },
+    );
   });
   h.read.mockResolvedValue(
     JSON.stringify({
@@ -208,7 +221,7 @@ it('polls two same-scope providers in one tick without locking when no refresh i
       .map((row) => row.id)
       .sort(),
   );
-  expect(h.acquire).not.toHaveBeenCalled();
+  expect(h.acquire).toHaveBeenCalledTimes(2);
   expect(h.refresh).not.toHaveBeenCalled();
 });
 
@@ -227,7 +240,7 @@ it.each([
     return h.release;
   });
   await runUsagePollTick(fake.db as unknown as Database);
-  expect(h.read).toHaveBeenCalledTimes(2);
+  expect(h.read).toHaveBeenCalledTimes(token ? 3 : 2);
   expect(h.refresh).not.toHaveBeenCalled();
   expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
   if (token) {
@@ -240,7 +253,7 @@ it.each([
   } else {
     expect(h.fetch).not.toHaveBeenCalled();
   }
-  expect(h.release).toHaveBeenCalledOnce();
+  expect(h.release).toHaveBeenCalledTimes(token ? 2 : 1);
 });
 
 it('refreshes using the token re-read under the lock', async () => {
@@ -249,7 +262,49 @@ it('refreshes using the token re-read under the lock', async () => {
     JSON.stringify({ accessToken: 'obsolete', refreshToken: 'spent', expiresAt: 0 }),
   );
   await runUsagePollTick(fake.db as unknown as Database);
-  expect(h.read).toHaveBeenCalledTimes(2);
+  expect(h.read).toHaveBeenCalledTimes(3);
   expect(h.refresh).toHaveBeenCalledWith('refresh');
-  expect(h.release).toHaveBeenCalledOnce();
+  expect(h.release).toHaveBeenCalledTimes(2);
+});
+
+it.each(['key', 'write'])(
+  'rolls back refreshed usage credentials after lock loss during %s',
+  async (phase) => {
+    const fake = setup();
+    const lose = () => {
+      h.release.assertHeld.mockRejectedValue(new Error('lock lost'));
+    };
+    if (phase === 'key')
+      vi.spyOn(secretsService, 'getMasterKek').mockImplementationOnce(async () => {
+        lose();
+        return 'ab'.repeat(32);
+      });
+    else
+      fake.hooks.beforeInsert = async (table) => {
+        if (table === schema.cliProviderSecrets) lose();
+      };
+    await runUsagePollTick(fake.db as unknown as Database);
+    expect(h.refresh).toHaveBeenCalledOnce();
+    expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+  },
+);
+
+it('retries a rejected-refresh snapshot after losing the auth lock', async () => {
+  const fake = setup();
+  let first = true;
+  h.refresh.mockImplementation(async () => {
+    if (first) {
+      first = false;
+      h.release.assertHeld.mockRejectedValue(new Error('lock lost'));
+    }
+    throw new ClaudeOauthError('refresh_token', 400, 'invalid_grant', 'rejected');
+  });
+  await runUsagePollTick(fake.db as unknown as Database);
+  expect(fake.rows(schema.usageWindowSnapshots)).toHaveLength(0);
+  h.release.assertHeld.mockResolvedValue(undefined);
+  await runUsagePollTick(fake.db as unknown as Database);
+  expect(h.refresh).toHaveBeenCalledTimes(2);
+  expect(fake.rows(schema.usageWindowSnapshots)).toMatchObject([{ status: 'needs_reconnect' }]);
+  await runUsagePollTick(fake.db as unknown as Database);
+  expect(h.refresh).toHaveBeenCalledTimes(2);
 });

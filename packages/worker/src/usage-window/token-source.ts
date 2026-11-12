@@ -33,28 +33,33 @@ export async function writeProviderSecret(
   providerId: string,
   secretName: string,
   value: string,
+  assertHeld: () => Promise<void>,
 ): Promise<void> {
   const masterKek = await secretsService.getMasterKek();
   const env = envelopeEncrypt(value, masterKek);
   const fingerprint = computeKeyFingerprint(value);
-  await db
-    .insert(schema.cliProviderSecrets)
-    .values({
-      providerId,
-      secretName,
-      encryptedValue: env.encryptedValue,
-      encryptedDek: env.encryptedDek,
-      fingerprint,
-    })
-    .onConflictDoUpdate({
-      target: [schema.cliProviderSecrets.providerId, schema.cliProviderSecrets.secretName],
-      set: {
+  await db.transaction(async (tx) => {
+    await assertHeld();
+    await tx
+      .insert(schema.cliProviderSecrets)
+      .values({
+        providerId,
+        secretName,
         encryptedValue: env.encryptedValue,
         encryptedDek: env.encryptedDek,
         fingerprint,
-        updatedAt: new Date(),
-      },
-    });
+      })
+      .onConflictDoUpdate({
+        target: [schema.cliProviderSecrets.providerId, schema.cliProviderSecrets.secretName],
+        set: {
+          encryptedValue: env.encryptedValue,
+          encryptedDek: env.encryptedDek,
+          fingerprint,
+          updatedAt: new Date(),
+        },
+      });
+    await assertHeld();
+  });
 }
 
 export interface AuthVolumeCtx {

@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const lock = vi.hoisted(() => ({ release: vi.fn(async () => {}), acquire: vi.fn() }));
+const lock = vi.hoisted(() => ({
+  release: Object.assign(
+    vi.fn(async () => {}),
+    { assertHeld: vi.fn(async () => {}) },
+  ),
+  acquire: vi.fn(),
+}));
 vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
   tryCliAuthLock: lock.acquire,

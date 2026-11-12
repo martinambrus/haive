@@ -1,6 +1,9 @@
 const authLock = vi.hoisted(() => ({
   acquire: vi.fn(),
-  release: vi.fn(async () => {}),
+  release: Object.assign(
+    vi.fn(async () => {}),
+    { assertHeld: vi.fn(async () => {}) },
+  ),
   debug: vi.fn(),
 }));
 vi.mock('@haive/shared', async (original) => {
@@ -104,6 +107,7 @@ function refreshFixture() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  authLock.release.assertHeld.mockReset().mockResolvedValue(undefined);
   authLock.acquire.mockReset().mockResolvedValue(authLock.release);
   vi.mocked(listTaskAuthVolumes).mockResolvedValue([]);
   vi.mocked(writeVolumeFile).mockResolvedValue(true);
@@ -250,4 +254,25 @@ it('releases its auth lock when a credential read throws', async () => {
   vi.mocked(readVolumeFile).mockRejectedValueOnce(new Error('read failed'));
   await refreshExpiringCliCredentials(db);
   expect(authLock.release).toHaveBeenCalledOnce();
+});
+
+it('retries a rejected Grok refresh status after losing the auth lock', async () => {
+  const { db, update } = refreshFixture();
+  let first = true;
+  const fetchMock = vi.fn(async () => {
+    if (first) {
+      first = false;
+      authLock.release.assertHeld.mockRejectedValue(new Error('lock lost'));
+    }
+    return { ok: false, status: 400, text: async () => '{"error":"invalid_grant"}' };
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  await refreshExpiringCliCredentials(db);
+  expect(update).not.toHaveBeenCalled();
+  authLock.release.assertHeld.mockResolvedValue(undefined);
+  await refreshExpiringCliCredentials(db);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(update).toHaveBeenCalledOnce();
+  await refreshExpiringCliCredentials(db);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
 });

@@ -4,7 +4,13 @@ import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import { syncProviderAuthBack } from '../src/sandbox/task-auth-volume.js';
 import type { DockerRunner, DockerRunOpts } from '../src/sandbox/docker-runner.js';
 
-const h = vi.hoisted(() => ({ acquire: vi.fn(), release: vi.fn(async () => {}) }));
+const h = vi.hoisted(() => ({
+  acquire: vi.fn(),
+  release: Object.assign(
+    vi.fn(async () => {}),
+    { assertHeld: vi.fn(async () => {}) },
+  ),
+}));
 vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
   tryCliAuthLock: h.acquire,
