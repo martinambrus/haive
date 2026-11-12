@@ -8,7 +8,7 @@ import { PassThrough } from 'node:stream';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as gitExec from './git-exec.js';
-import { withGitRefTransaction } from './git-ref-transaction.js';
+import { checkGitRefTransactions, withGitRefTransaction } from './git-ref-transaction.js';
 
 vi.mock('node:child_process', async (original) => {
   const actual = await original<typeof import('node:child_process')>();
@@ -64,6 +64,12 @@ async function fixture() {
 }
 
 describe('git ref transactions', () => {
+  it('checks support with an empty transaction without moving refs', async () => {
+    const f = await fixture();
+    await checkGitRefTransactions(f.dir);
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    await expect(access(f.lock)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
   it('keeps a slow callback outside the protocol deadline and releases the real ref lock', async () => {
     const f = await fixture();
     vi.spyOn(gitExec, 'gitDefaultTimeoutMs').mockReturnValue(100);

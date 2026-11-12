@@ -29,7 +29,11 @@ import { worktreeDirPaths, worktreeDirName } from '../repo/worktree-paths.js';
 import { checkoutHoldingTasks } from '../repo/refresh.js';
 import { findWorktreePathClaimant } from '../repo/worktree-claims.js';
 import { worktreesHoldingBranch } from '../repo/git-workspace.js';
-import { withGitRefTransaction } from '../repo/git-ref-transaction.js';
+import {
+  checkGitRefTransactions,
+  GitRefTransactionsUnsupportedError,
+  withGitRefTransaction,
+} from '../repo/git-ref-transaction.js';
 import {
   resyncHaiveProjections,
   setAsideHaiveProjections,
@@ -354,6 +358,7 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
   let movedCheckout: string | null = null;
   let prepared = false;
   let preparationRefusal: string | null = null;
+  let refTransactionsChecked = false;
   let kept: KeptFiles | null = null;
   const fence = async (conn: Parameters<typeof checkoutHoldingTasks>[0]) =>
     (await checkoutHoldingTasks(conn, task.repositoryId!, {
@@ -544,6 +549,23 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
             await settle('refused', remote.reason, remote.permanent);
             return;
           }
+          if (!refTransactionsChecked) {
+            try {
+              await checkGitRefTransactions(cwd);
+              refTransactionsChecked = true;
+            } catch (error) {
+              if (!(error instanceof GitRefTransactionsUnsupportedError))
+                throw new UndoGitError(gitFailureReason('Git refused the undo', error));
+              await settle(
+                'refused',
+                gitFailureReason(
+                  'Undo requires Git 2.27 or newer to lock the base branch safely. Upgrade Git and retry.',
+                  error,
+                ),
+              );
+              return;
+            }
+          }
           const checkoutReady = async () => {
             if (!movedCheckout) return true;
             const symbolic = await gitRun(movedCheckout, ['symbolic-ref', '-q', 'HEAD']);
@@ -634,24 +656,6 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
                   staged.stderr,
                 ),
               );
-          }
-          // start/prepare arrived in Git 2.27. Never fall back to a reset without CAS.
-          const version = await gitRun(cwd, ['--version']);
-          const parsed = /^git version (\d+)\.(\d+)(?:\.|$)/.exec(version.stdout.trim());
-          if (
-            version.code !== 0 ||
-            !parsed ||
-            Number(parsed[1]) < 2 ||
-            (Number(parsed[1]) === 2 && Number(parsed[2]) < 27)
-          ) {
-            await settle(
-              'refused',
-              gitFailureReason(
-                'Undo requires Git 2.27 or newer to lock the base branch safely. Upgrade Git and retry.',
-                version.code !== 0 ? version.stderr : '',
-              ),
-            );
-            return;
           }
           let moved: boolean;
           try {

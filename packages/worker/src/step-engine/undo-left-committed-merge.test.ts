@@ -1,4 +1,7 @@
 import { execFile } from 'node:child_process';
+import * as processes from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { mkdtemp, rm, writeFile, readFile, mkdir, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -23,7 +26,12 @@ const h = vi.hoisted(() => ({
   sync: vi.fn(),
   release: vi.fn(),
   duringPrep: null as null | (() => Promise<void>),
+  aside: vi.fn(async () => ({ outcome: 'clean' })),
 }));
+vi.mock('node:child_process', async (original) => {
+  const actual = await original<typeof import('node:child_process')>();
+  return { ...actual, spawn: vi.fn(actual.spawn) };
+});
 vi.mock('@haive/database', async (original) => ({
   ...(await original<object>()),
   acquireRootClaim: async () => {
@@ -56,7 +64,7 @@ vi.mock('./merge-dir-claim.js', () => ({
 vi.mock('../repo/refresh.js', () => ({ checkoutHoldingTasks: async () => h.holding }));
 vi.mock('../repo/worktree-claims.js', () => ({ findWorktreePathClaimant: async () => null }));
 vi.mock('../project-state/set-aside.js', () => ({
-  setAsideHaiveProjections: async () => ({ outcome: 'clean' }),
+  setAsideHaiveProjections: h.aside,
   restoreProjectionsInTx: async () => {
     await h.duringPrep?.();
     return { outcome: 'clean' };
@@ -102,7 +110,9 @@ const env = {
 };
 const git = async (dir: string, ...args: string[]) =>
   (await exec('git', args, { cwd: dir, env })).stdout.trim();
-beforeEach(() => {
+beforeEach(async () => {
+  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+  vi.mocked(processes.spawn).mockImplementation(actual.spawn);
   Object.assign(h, {
     holder: false,
     root: true,
@@ -114,6 +124,7 @@ beforeEach(() => {
   });
   h.sync.mockClear();
   h.release.mockClear();
+  h.aside.mockClear();
 });
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -266,7 +277,7 @@ describe('explicit undo of a cancel-left committed merge', () => {
     await git(f.dir, 'commit', '--allow-empty', '-m', 'lock released');
   });
   it.each(['git version 2.26.3', 'unrecognized version'])(
-    'refuses Undo with unsupported git probe %s without moving the tree',
+    'does not use the git version banner %s to decide transaction support',
     async (stdout) => {
       const f = await fixture();
       const actual = gitPush.gitRun;
@@ -274,12 +285,50 @@ describe('explicit undo of a cancel-left committed merge', () => {
         args[0] === '--version' ? { code: 0, stdout, stderr: '' } : actual(dir, args, ...rest),
       );
       await f.run();
-      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
-      expect(await readFile(path.join(f.dir, 'feature'), 'utf8')).toBe('feature');
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+      expect(leftCommittedMerges(f.events)[0]?.settled?.outcome).toBe('undone');
+    },
+  );
+  it.each(['fatal: unknown command', 'Fehler: unbekannter Befehl'])(
+    'refuses unsupported ref transactions before set-aside regardless of stderr: %s',
+    async (stderr) => {
+      const f = await fixture();
+      const actual =
+        await vi.importActual<typeof import('node:child_process')>('node:child_process');
+      vi.spyOn(processes, 'spawn').mockImplementation(
+        (...args: Parameters<typeof processes.spawn>) => {
+          if (!(args[1] as string[]).includes('--stdin')) return actual.spawn(...args);
+          const child = Object.assign(new EventEmitter(), {
+            stdin: new PassThrough(),
+            stdout: new PassThrough(),
+            stderr: new PassThrough(),
+            exitCode: null,
+            signalCode: null,
+            kill: vi.fn(),
+          });
+          child.stdin.once('data', () => {
+            child.stderr.write(stderr);
+            child.stdout.end();
+            child.emit('close', 128);
+          });
+          return child as unknown as ReturnType<typeof processes.spawn>;
+        },
+      );
+      const actualGit = gitPush.gitRun;
+      const calls = vi.spyOn(gitPush, 'gitRun').mockImplementation(actualGit);
+      await f.run();
       expect(leftCommittedMerges(f.events)[0]).toMatchObject({
         settled: null,
-        refused: { count: 1, reason: expect.stringContaining('Git 2.27') },
+        refused: { count: 1, reason: expect.stringContaining('requires Git 2.27 or newer') },
       });
+      expect(h.aside).not.toHaveBeenCalled();
+      expect(
+        calls.mock.calls.some(([, args]) =>
+          ['--version', 'update-index', 'read-tree'].includes(args[0]!),
+        ),
+      ).toBe(false);
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+      expect(await readFile(path.join(f.dir, 'feature'), 'utf8')).toBe('feature');
     },
   );
   it.each(['unrelated edit', 'unrelated deletion', 'untracked file'])(

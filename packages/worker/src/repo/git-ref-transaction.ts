@@ -2,6 +2,14 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { GIT_BASE_ENV, gitDefaultTimeoutMs, hardenGitArgs } from './git-exec.js';
 
+/** Git exited without acknowledging start; the transaction protocol is unavailable. */
+export class GitRefTransactionsUnsupportedError extends Error {}
+
+/** Probe with an empty transaction before callers set aside or refresh checkout files. */
+export async function checkGitRefTransactions(cwd: string): Promise<void> {
+  await refTransaction(cwd);
+}
+
 /** Hold the branch's compare-and-swap lock while a caller updates its checkout.
  * The caller must not write the branch ref itself. A false result or a throw aborts.
  * EOF also aborts a prepared transaction if the worker dies. */
@@ -11,6 +19,13 @@ export async function withGitRefTransaction(
   next: string,
   expected: string,
   move: () => Promise<boolean>,
+): Promise<boolean> {
+  return refTransaction(cwd, { ref, next, expected, move });
+}
+
+async function refTransaction(
+  cwd: string,
+  change?: { ref: string; next: string; expected: string; move: () => Promise<boolean> },
 ): Promise<boolean> {
   const args = ['update-ref', '-m', 'Undo merge', '--stdin'];
   const child = spawn('git', hardenGitArgs(args), {
@@ -60,6 +75,8 @@ export async function withGitRefTransaction(
           }, timeoutMs);
         }),
       ]);
+      if (line.done && input === 'start' && !spawnError)
+        throw new GitRefTransactionsUnsupportedError(failure().message);
       if (line.done || line.value !== reply) throw failure();
     } finally {
       clearTimeout(timer);
@@ -94,8 +111,9 @@ export async function withGitRefTransaction(
   let committed = false;
   try {
     await command('start', 'start: ok');
-    await command(`update ${ref} ${next} ${expected}\nprepare`, 'prepare: ok');
-    if (!(await move())) return false;
+    if (!change) return false;
+    await command(`update ${change.ref} ${change.next} ${change.expected}\nprepare`, 'prepare: ok');
+    if (!(await change.move())) return false;
     await command('commit', 'commit: ok');
     committed = true;
     if ((await finish(false)) !== 0) throw failure();
