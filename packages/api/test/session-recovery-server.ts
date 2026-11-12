@@ -173,11 +173,6 @@ app.get('/__fixture/events', requireAuth, (c) =>
     await stream.writeSSE({ data: 'after-default-proxy-timeout' });
   }),
 );
-app.get('/ide/:id/*', requireAuth, (c) =>
-  c.req.path.endsWith('/redirect')
-    ? c.redirect(`/ide/${c.req.param('id')}/asset.js`)
-    : c.text('editor asset'),
-);
 app.get('/user-settings/ui-prefs', requireAuth, (c) =>
   c.json({ settingsJson: '{"sidebarWidthPx":333}' }),
 );

@@ -97,11 +97,12 @@ test('web-origin login establishes the SSR and proxied API session across hostna
         .every((cookie) => cookie.domain === 'localhost'),
     ).toBe(true);
     const cookie = cookies.map((item) => `${item.name}=${item.value}`).join('; ');
-    for (const path of [`${PREFIX}/terminal/${ID}`]) {
-      expect(await handshake(path, WEB, cookie)).toBe('HTTP/1.1 404 Not Found');
-      expect(await handshake(path, WEB)).toBe('HTTP/1.1 401 Unauthorized');
-      expect(await handshake(path, 'http://localhost:5173', cookie)).toBe('HTTP/1.1 403 Forbidden');
-    }
+    const terminalPath = `${PREFIX}/terminal/${ID}`;
+    expect(await handshake(terminalPath, WEB, cookie)).toBe('HTTP/1.1 404 Not Found');
+    expect(await handshake(terminalPath, WEB)).toBe('HTTP/1.1 401 Unauthorized');
+    expect(await handshake(terminalPath, 'http://localhost:5173', cookie)).toBe(
+      'HTTP/1.1 403 Forbidden',
+    );
     expect(
       (
         await context.request.post(`${WEB}${PREFIX}/auth/logout`, {
