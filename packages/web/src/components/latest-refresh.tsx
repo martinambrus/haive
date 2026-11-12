@@ -32,7 +32,12 @@ export function LatestRefresh({
   useEffect(() => {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
+    let inFlight = false;
+    let hidden = document.hidden;
     const read = async () => {
+      if (controller.signal.aborted || document.hidden || inFlight) return;
+      inFlight = true;
+      clearTimeout(timer);
       try {
         const response = await api.get<{ run: LatestRefreshRun | null }>(
           endpoint,
@@ -45,13 +50,23 @@ export function LatestRefresh({
       } catch {
         if (!controller.signal.aborted) setLoadError(true);
       } finally {
-        if (!controller.signal.aborted) timer = setTimeout(() => void read(), 10_000);
+        inFlight = false;
+        if (!controller.signal.aborted && !document.hidden)
+          timer = setTimeout(() => void read(), 10_000);
       }
     };
+    const onVisibility = () => {
+      if (hidden === document.hidden) return;
+      hidden = document.hidden;
+      clearTimeout(timer);
+      if (!hidden) void read();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
     void read();
     return () => {
       controller.abort();
       clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [endpoint, active]);
 

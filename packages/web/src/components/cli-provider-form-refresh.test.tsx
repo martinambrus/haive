@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
 import type { RefreshCliVersionsJobResult } from '@haive/shared/constants';

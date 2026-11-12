@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { LatestRefreshRun, RefreshCliVersionsJobResult } from '@haive/shared/constants';
 import { LatestRefresh } from './latest-refresh';
