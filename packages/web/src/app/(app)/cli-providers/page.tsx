@@ -1,7 +1,7 @@
 'use client';
 import { LinkButton } from '@/components/ui';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   CircleArrowUp,
@@ -76,6 +76,14 @@ interface UsageConnectState {
 
 export default function CliProvidersPage() {
   usePageTitle('CLI Providers');
+  const signOutControllers = useRef(new Set<AbortController>());
+  useEffect(
+    () => () => {
+      for (const controller of signOutControllers.current) controller.abort();
+      signOutControllers.current.clear();
+    },
+    [],
+  );
   const [providers, setProviders] = useState<CliProvider[] | null>(null);
   const [catalog, setCatalog] = useState<CliProviderCatalogEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -289,8 +297,10 @@ export default function CliProvidersPage() {
       delete next[p.id];
       return next;
     });
+    const controller = new AbortController();
+    signOutControllers.current.add(controller);
     try {
-      const result = await runCliSignOut(p.id, setPhase);
+      const result = await runCliSignOut(p.id, setPhase, controller.signal);
       const informational = result.ok || result.outcomeUnknown === true;
       const summary = signOutSummary(result);
       setSignOutStates((s) => ({
@@ -303,6 +313,7 @@ export default function CliProvidersPage() {
       }));
       if (informational) await load();
     } catch (err) {
+      if (controller.signal.aborted) return;
       setSignOutStates((s) => ({
         ...s,
         [p.id]: {
@@ -311,6 +322,8 @@ export default function CliProvidersPage() {
           error: (err as Error).message ?? 'Sign-out failed',
         },
       }));
+    } finally {
+      signOutControllers.current.delete(controller);
     }
   }
 

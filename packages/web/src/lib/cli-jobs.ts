@@ -190,12 +190,13 @@ export async function runCliProbe(
 export async function runCliSignOut(
   providerId: string,
   onPhase?: (phase: QueuedJobPhase) => void,
+  signal?: AbortSignal,
 ): Promise<SignOutResult> {
   const { result } = await runQueuedJob<{ result: SignOutResult }>(
     `/cli-providers/${providerId}/sign-out`,
     (jobId) => `/cli-providers/${providerId}/sign-out/${jobId}`,
     onPhase,
-    undefined,
+    signal,
     {
       timeoutMs: SIGN_OUT_POLL_TIMEOUT_MS,
       timeoutError: signOutPollTimeout,
