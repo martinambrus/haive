@@ -230,6 +230,9 @@ function AdminPageInner() {
   const [planCanvasEnabled, setPlanCanvasEnabled] = useState<boolean | null>(null);
   const [registrationMode, setRegistrationMode] = useState<RegistrationMode | null>(null);
   const [savingRegistrationMode, setSavingRegistrationMode] = useState(false);
+  const [ollamaAllowlist, setOllamaAllowlist] = useState<string | null>(null);
+  const [ollamaAllowlistInput, setOllamaAllowlistInput] = useState('');
+  const [savingOllamaAllowlist, setSavingOllamaAllowlist] = useState(false);
   const [privateAllowlist, setPrivateAllowlist] = useState<string | null>(null);
   const [privateAllowlistInput, setPrivateAllowlistInput] = useState('');
   const [savingPrivateAllowlist, setSavingPrivateAllowlist] = useState(false);
@@ -325,6 +328,7 @@ function AdminPageInner() {
         taskTypesData,
         registrationModeData,
         privateAllowlistData,
+        ollamaAllowlistData,
         debugModeData,
         browserAccessData,
         dbAccessData,
@@ -370,6 +374,7 @@ function AdminPageInner() {
         api.get<{ customEnabled: boolean; moduleEnabled: boolean }>('/admin/config/task-types'),
         api.get<{ mode: RegistrationMode }>('/admin/config/registration-mode'),
         api.get<{ allowlist: string }>('/admin/config/private-endpoint-allowlist'),
+        api.get<{ allowlist: string }>('/admin/config/ollama-model-allowlist'),
         api.get<{ enabled: boolean }>('/admin/config/debug-mode'),
         api.get<{ enabled: boolean }>('/admin/config/browser-access'),
         api.get<{ enabled: boolean }>('/admin/config/db-access'),
@@ -429,6 +434,8 @@ function AdminPageInner() {
       setPlanCanvasEnabled(planCanvasData.enabled);
       setTaskTypes(taskTypesData);
       setRegistrationMode(registrationModeData.mode);
+      setOllamaAllowlist(ollamaAllowlistData.allowlist);
+      setOllamaAllowlistInput(ollamaAllowlistData.allowlist);
       setPrivateAllowlist(privateAllowlistData.allowlist);
       setPrivateAllowlistInput(privateAllowlistData.allowlist);
       setDebugModeEnabled(debugModeData.enabled);
@@ -1088,6 +1095,22 @@ function AdminPageInner() {
       setError((err as Error).message ?? 'Failed to update the registration mode');
     } finally {
       setSavingRegistrationMode(false);
+    }
+  }
+
+  async function saveOllamaAllowlist(raw: string) {
+    setSavingOllamaAllowlist(true);
+    try {
+      const result = await api.put<{ allowlist: string }>('/admin/config/ollama-model-allowlist', {
+        allowlist: raw,
+      });
+      setOllamaAllowlist(result.allowlist);
+      setOllamaAllowlistInput(result.allowlist);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update the Ollama model allowlist');
+    } finally {
+      setSavingOllamaAllowlist(false);
     }
   }
 
@@ -2538,6 +2561,40 @@ function AdminPageInner() {
         </Card>
       )}
 
+      {tab === 'data' && ollamaAllowlist !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Ollama model allowlist</CardTitle>
+            <CardDescription>
+              Users can pull models named in their saved CLI providers or the Global KB embedding
+              configuration, plus the models listed here. Administrators can pull any model. Enter
+              one model per line or comma-separated, at most 256 names and 16 KiB of text. Names are
+              case-insensitive; an omitted tag means :latest. Other tags need their own entry.
+              Applies within about 30 seconds. Save a new provider before downloading its model if
+              it is not already allowed.
+            </CardDescription>
+          </CardHeader>
+          <textarea
+            rows={6}
+            aria-label="Ollama model allowlist"
+            className="block w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100"
+            value={ollamaAllowlistInput}
+            disabled={savingOllamaAllowlist}
+            onChange={(e) => setOllamaAllowlistInput(e.target.value)}
+          />
+          <div className="mt-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={savingOllamaAllowlist}
+              onClick={() => void saveOllamaAllowlist(ollamaAllowlistInput)}
+            >
+              {savingOllamaAllowlist ? 'Saving...' : 'Save'}
+            </Button>
+          </div>
+        </Card>
+      )}
+
       {tab === 'data' && privateAllowlist !== null && (
         <Card>
           <CardHeader>
@@ -2560,6 +2617,7 @@ function AdminPageInner() {
             aria-label="Private endpoint allowlist"
             className="block w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100"
             value={privateAllowlistInput}
+            disabled={savingPrivateAllowlist}
             onChange={(e) => setPrivateAllowlistInput(e.target.value)}
           />
           <div className="mt-2">
