@@ -87,6 +87,8 @@ export async function mayPullOllamaModel(
   const embedModel =
     (await configService.get(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL)) || DEFAULT_EMBED_MODEL;
   if (normalizeOllamaModel(embedModel) === wanted) return true;
+  // The onboarding embedding default stays pullable after an admin changes the Global KB model.
+  if (normalizeOllamaModel(DEFAULT_EMBED_MODEL) === wanted) return true;
   const raw = (await configService.get(CONFIG_KEYS.OLLAMA_MODEL_ALLOWLIST)) ?? '';
   const parsed = allowlistSchema.safeParse({ allowlist: raw });
   return (

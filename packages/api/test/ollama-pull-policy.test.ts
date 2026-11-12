@@ -8,6 +8,7 @@ vi.mock('../src/lib/probe-hosts.js', () => ({
 
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { DEFAULT_EMBED_MODEL } from '@haive/shared/global-kb';
 import { CONFIG_KEYS, configService, secretsService } from '@haive/shared';
 import { signAccessToken } from '../src/auth/jwt.js';
 import { createApiApp } from '../src/index.js';
@@ -16,8 +17,7 @@ const USER = '00000000-0000-4000-8000-000000000001';
 const ADMIN = '00000000-0000-4000-8000-000000000002';
 const OTHER = '00000000-0000-4000-8000-000000000003';
 const PATH = '/admin/config/ollama-model-allowlist';
-// Literal until CONFIG_KEYS declares the setting, so these controls run on unchanged code.
-const KEY = 'config:security:ollamaModelAllowlist';
+const KEY = CONFIG_KEYS.OLLAMA_MODEL_ALLOWLIST;
 const stored = new Map<string, string>();
 let fake: ReturnType<typeof createFakeDb>;
 const app = createApiApp('http://localhost:3000');
@@ -76,6 +76,10 @@ async function allowed(model: string, user = USER) {
   expect(res.status).toBe(200);
   expect(await res.text()).toContain('event: done');
   expect(h.fetchFn).toHaveBeenCalledOnce();
+  // The model sent upstream is exactly the one the policy checked.
+  const [url, init] = h.fetchFn.mock.calls[0] as [string, { body: string }];
+  expect(url).toMatch(/\/api\/pull$/);
+  expect(JSON.parse(init.body)).toEqual({ model, stream: true });
 }
 
 describe('Ollama pull authorization before the stream and upstream request', () => {
@@ -99,6 +103,10 @@ describe('Ollama pull authorization before the stream and upstream request', () 
   it('allows the Global KB embedding model', async () => {
     stored.set(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, 'nomic-embed-text');
     await allowed('nomic-embed-text:latest');
+  });
+  it('keeps the onboarding embedding default pullable after the Global KB model changes', async () => {
+    stored.set(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, 'nomic-embed-text');
+    await allowed(DEFAULT_EMBED_MODEL);
   });
   it('allows the effective Global KB default without a stored key', async () => {
     await allowed('qwen3-embedding:4b');
