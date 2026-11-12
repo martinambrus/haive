@@ -3,6 +3,7 @@ import { createServer, type Server } from 'node:http';
 import { connect, type AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
+import { WebSocket } from 'ws';
 import { createFakeDb } from '@haive/database/testing';
 
 const h = vi.hoisted(() => {
@@ -74,13 +75,15 @@ const HELD = [
     prefix: '/cli-stream/',
     id: INVOCATION,
     status: 'HTTP/1.1 101 Switching Protocols',
+    closeCode: undefined,
   },
   {
     name: 'terminal',
     install: installTerminalWebSocket,
     prefix: '/terminal/',
     id: CONTAINER,
-    status: 'HTTP/1.1 409 Container not running',
+    status: 'HTTP/1.1 101 Switching Protocols',
+    closeCode: 4420,
   },
   {
     name: 'cli-login-banner',
@@ -88,6 +91,7 @@ const HELD = [
     prefix: '/cli-login-banner/',
     id: PROVIDER,
     status: 'HTTP/1.1 400 Login Unsupported',
+    closeCode: undefined,
   },
 ];
 const HANDLERS = [
@@ -101,13 +105,15 @@ const SHELLS = [
     name: 'terminal-shell',
     prefix: '/terminal-shell/',
     held: ENDED_TASK,
-    status: 'HTTP/1.1 409 Task is completed - terminal disabled',
+    status: 'HTTP/1.1 101 Switching Protocols',
+    closeCode: 4422,
   },
   {
     name: 'terminal-repo-shell',
     prefix: '/terminal-repo-shell/',
     held: REPOSITORY,
-    status: 'HTTP/1.1 409 Repository is cloning - terminal unavailable',
+    status: 'HTTP/1.1 101 Switching Protocols',
+    closeCode: 4424,
   },
 ];
 
@@ -187,6 +193,26 @@ function handshake(port: number, path: string): Promise<string> {
   });
 }
 
+async function expectAcceptedClose(port: number, path: string, code: number): Promise<void> {
+  const result = await new Promise<{ status: number; code: number }>((resolve, reject) => {
+    let status = 0;
+    const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`, {
+      headers: { Cookie: `${ACCESS_COOKIE}=token` },
+    });
+    ws.on('upgrade', (response) => {
+      status = response.statusCode!;
+    });
+    ws.on('close', (code) => resolve({ status, code }));
+    ws.on('unexpected-response', (_req, response) => {
+      response.resume();
+      ws.terminate();
+      resolve({ status: response.statusCode!, code: 0 });
+    });
+    ws.on('error', reject);
+  });
+  expect(result).toEqual({ status: 101, code });
+}
+
 describe.each(HANDLERS)('the $name upgrade', ({ install, prefix }) => {
   it.each(MALFORMED)(
     'answers the malformed id %j with 404, before any database read and without an error log',
@@ -225,18 +251,19 @@ describe.each([
 
 describe.each(HELD)(
   'the $name upgrade, an id the user holds',
-  ({ install, prefix, id, status }) => {
-    it('goes on to the handler it always did (passes before and after)', async () => {
+  ({ install, prefix, id, status, closeCode }) => {
+    it('uses the owned resource response and refusal close code', async () => {
       const port = await listen(install);
 
       expect(await handshake(port, `${prefix}${id}`)).toBe(status);
+      if (closeCode !== undefined) await expectAcceptedClose(port, `${prefix}${id}`, closeCode);
       expect(h.dbCalls).toBeGreaterThan(0);
       expect(h.error).not.toHaveBeenCalled();
     });
   },
 );
 
-describe.each(SHELLS)('the $name upgrade', ({ prefix, held, status }) => {
+describe.each(SHELLS)('the $name upgrade', ({ prefix, held, status, closeCode }) => {
   const malformed = MALFORMED.flatMap((id) => [`${id}/${PROVIDER}`, `${held}/${id}`]);
 
   it.each(malformed)(
@@ -273,10 +300,11 @@ describe.each(SHELLS)('the $name upgrade', ({ prefix, held, status }) => {
     expect(h.error).not.toHaveBeenCalled();
   });
 
-  it('goes on to the handler it always did for ids the user holds (passes before and after)', async () => {
+  it('accepts owned ids then closes with the eligibility refusal code', async () => {
     const port = await listen(installTerminalShellWebSocket);
 
     expect(await handshake(port, `${prefix}${held}/${PROVIDER}`)).toBe(status);
+    await expectAcceptedClose(port, `${prefix}${held}/${PROVIDER}`, closeCode);
     expect(h.dbCalls).toBeGreaterThan(0);
     expect(h.error).not.toHaveBeenCalled();
   });
