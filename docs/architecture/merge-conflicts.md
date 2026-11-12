@@ -337,7 +337,10 @@ baseShaBefore, baseShaAfter, landedAt}` in the same transaction as the step stat
   moves aside what the recorded fixers left, aborts the merge and removes the scratch worktree,
   unless another `plan_merge` task of the repository holds it, a live one or a failed one opened after it
   (`plan_merge.discard_skipped`),
-  and a move that fails keeps the worktree (`plan_merge.discard_failed`).
+  and a move that fails keeps the worktree (`plan_merge.discard_failed`). The move and its leftovers
+  report commit in one transaction, and the report is marked after that commit; the abort and the
+  removal then run in a second one that retakes the plan-merge lock and re-checks the holders, so a
+  teardown that fails or dies cannot take the report back with it.
 - **A read of the merge dir that failed is unknown, never "no merge open".** `revParse`
   (`git-merge.ts`; `mergeOpenFor`, `peekOpenMerge`, `abortMerge`, `abortOtherMerge`, `openMerge`,
   `relocateFixerChanges`, `completeMergeHostSide`, the squash, `project-state/branch-revert.ts` and

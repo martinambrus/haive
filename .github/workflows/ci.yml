@@ -320,8 +320,8 @@ jobs:
   postgres-gated:
     name: Postgres-gated tests
     runs-on: ubuntu-latest
-    # 143 rows × 10 s (measured) + 120 s setup = 1550 s green; 1.5 × row time = 2145 s.
-    # 38 minutes covers the 36-minute check plus setup and leaves 730 s over green.
+    # 144 rows × 10 s (measured) + 120 s setup = 1560 s green; 1.5 × row time = 2160 s.
+    # 38 minutes covers the 36-minute check plus setup and leaves 720 s over green.
     timeout-minutes: 38
     services:
       postgres:
@@ -544,6 +544,7 @@ jobs:
           api test/task-cancel-guard-db.test.ts TASK_CANCEL_GUARD_TEST_URL task_cancel_guard_test pg
           api test/task-cancel-lock-order-db.test.ts TASK_CANCEL_LOCK_ORDER_TEST_URL task_cancel_lock_order_test pg
           api test/task-cancel-late-row-db.test.ts TASK_CANCEL_LATE_ROW_TEST_URL task_cancel_late_row_test pg
+          worker test/plan-merge-followups-db.test.ts PLAN_MERGE_FOLLOWUPS_TEST_URL plan_merge_followups_test pg
           api test/plan-merge-cancel-db.test.ts PLAN_MERGE_CANCEL_TEST_URL plan_merge_cancel_test pg
           api test/step-row-lock-order-db.test.ts STEP_ROW_LOCK_ORDER_TEST_URL step_row_lock_order_test pg
           api test/step-fold-preread-db.test.ts STEP_FOLD_PREREAD_TEST_URL step_fold_preread_test pg

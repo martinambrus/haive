@@ -10,7 +10,7 @@ import {
   type FormSchema,
 } from '@haive/shared';
 import { lockPlanMerge } from '@haive/shared/plan';
-import type { Database } from '@haive/database';
+import type { Database, DbTx } from '@haive/database';
 import { logger } from '@haive/shared/logger';
 import type { StepDefinition } from '../../step-definition.js';
 import {
@@ -771,11 +771,8 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = pr
  *  may hold it: a live one, or a failed one opened after this one, whose Retry resumes it. Never
  *  throws: a cancel must finish. */
 export async function discardPlanMerge(db: Database, taskId: string): Promise<void> {
-  const note = (eventType: string, payload: Record<string, unknown>) =>
-    db
-      .insert(schema.taskEvents)
-      .values({ taskId, taskStepId: null, eventType, payload })
-      .catch(() => undefined);
+  const note = (conn: Database | DbTx, eventType: string, payload: Record<string, unknown>) =>
+    conn.insert(schema.taskEvents).values({ taskId, taskStepId: null, eventType, payload });
   try {
     const task = await db.query.tasks.findFirst({
       where: eq(schema.tasks.id, taskId),
@@ -789,8 +786,7 @@ export async function discardPlanMerge(db: Database, taskId: string): Promise<vo
     const repoPath = repo?.storagePath ?? repo?.localPath;
     if (!repoPath) return;
     const repositoryId = task.repositoryId;
-    await db.transaction(async (tx) => {
-      await lockPlanMerge(tx, repositoryId);
+    const skipIfHeld = async (tx: DbTx): Promise<boolean> => {
       const [other] = await tx.query.tasks.findMany({
         where: and(
           eq(schema.tasks.repositoryId, repositoryId),
@@ -804,17 +800,45 @@ export async function discardPlanMerge(db: Database, taskId: string): Promise<vo
         columns: { id: true },
         limit: 1,
       });
-      if (other) {
-        await note('plan_merge.discard_skipped', { otherTaskId: other.id });
-        return;
+      if (!other) return false;
+      await note(tx, 'plan_merge.discard_skipped', { otherTaskId: other.id });
+      return true;
+    };
+    const worktreePath = planMergeWorktreePath(repoPath);
+    const reports: (() => Promise<void>)[] = [];
+    // Commit and mark the report before teardown: once the worktree is gone, a retry cannot
+    // rediscover its open merge and report what was moved aside.
+    const relocation = await db.transaction(async (tx) => {
+      await lockPlanMerge(tx, repositoryId);
+      if (await skipIfHeld(tx)) return { skipped: true };
+      let phase: 'relocating' | 'reported' = 'relocating';
+      try {
+        await moveAsideRecordedLeftovers(
+          tx,
+          repositoryId,
+          worktreePath,
+          `origin/${await currentBranch(repoPath)}`,
+          (mark) => {
+            phase = 'reported';
+            reports.push(mark);
+          },
+        );
+      } catch (err) {
+        // An index refusal after the report was written still commits it.
+        if (phase === 'relocating') throw err;
+        return { err };
       }
-      const worktreePath = planMergeWorktreePath(repoPath);
-      await moveAsideRecordedLeftovers(
-        db,
-        repositoryId,
-        worktreePath,
-        `origin/${await currentBranch(repoPath)}`,
-      );
+      return null;
+    });
+    for (const markReported of reports) await markReported();
+    if (relocation) {
+      if ('err' in relocation) throw relocation.err;
+      return;
+    }
+    await db.transaction(async (tx) => {
+      await lockPlanMerge(tx, repositoryId);
+      // Another conversation may have taken the worktree after the report committed.
+      if (await skipIfHeld(tx)) return;
       const aborted = await abortGitMerge(worktreePath).catch((err: unknown) => ({
         ok: false as const,
         detail: err instanceof Error ? err.message : String(err),
@@ -835,8 +859,8 @@ export async function discardPlanMerge(db: Database, taskId: string): Promise<vo
     });
   } catch (err) {
     logger.warn({ err, taskId }, 'discarding the cancelled plan merge failed');
-    await note('plan_merge.discard_failed', {
+    await note(db, 'plan_merge.discard_failed', {
       error: err instanceof Error ? err.message : String(err),
-    });
+    }).catch(() => undefined);
   }
 }

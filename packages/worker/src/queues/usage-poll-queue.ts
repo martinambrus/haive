@@ -44,6 +44,7 @@ import {
   MaintenanceStateUnreadable,
   NewWorkHeld,
   readMaintenanceState,
+  RevivalBusy,
 } from './_revive-check.js';
 import { autoResumeFailedStep } from './_step-reset.js';
 import { pruneJobSchedulers } from './job-scheduler-prune.js';
@@ -734,6 +735,11 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
             log.info(
               { taskId: task.id, providerId: task.providerId, state: err.state },
               AUTO_RESUME_HELD,
+            );
+          } else if (err instanceof RevivalBusy) {
+            log.warn(
+              { taskId: task.id, providerId: task.providerId, err },
+              'provider recovered; auto-resume held, the repository is busy',
             );
           } else if (err instanceof MaintenanceStateUnreadable) {
             log.warn(

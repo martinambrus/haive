@@ -10,6 +10,8 @@ import {
 } from '@haive/shared';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { RevivalBusy } from '../src/queues/_revive-check.js';
+import * as stepReset from '../src/queues/_step-reset.js';
 
 const h = vi.hoisted(() => ({
   queued: [] as { name: string; data: unknown }[],
@@ -336,6 +338,49 @@ describe('the allowance auto-resume while the watch mode is off', () => {
     expect(t.fake.rows(schema.taskEvents)).toMatchObject([
       { eventType: 'task.allowance_replenished' },
     ]);
+  });
+});
+
+describe('the allowance auto-resume while revival is busy', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('warns on contention, keeps the watch armed and resumes on the next poll', async () => {
+    config('auto', 'normal');
+    const t = setup();
+    const busy = new RevivalBusy(new Error('lock held'));
+    vi.spyOn(stepReset, 'autoResumeFailedStep').mockRejectedValueOnce(busy);
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    await checkProviderRecovery(t.db);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: TASK, providerId: PROVIDER, err: busy }),
+      expect.any(String),
+    );
+    expect(error).not.toHaveBeenCalled();
+    expect(t.task()).toMatchObject({
+      status: 'failed',
+      awaitingAllowanceProviderId: PROVIDER,
+      allowanceAutoResumeCount: 0,
+    });
+    expect(h.queued).toEqual([]);
+    await checkProviderRecovery(t.db);
+    expect(t.task()).toMatchObject({ status: 'running', allowanceAutoResumeCount: 1 });
+    expect(h.queued).toHaveLength(1);
+  });
+
+  it('logs an unrelated failure at error level even when its words match a busy revival', async () => {
+    config('auto', 'normal');
+    const t = setup();
+    const failure = new Error(new RevivalBusy(null).message);
+    vi.spyOn(stepReset, 'autoResumeFailedStep').mockRejectedValueOnce(failure);
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    await checkProviderRecovery(t.db);
+    expect(warn).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: TASK, err: failure }),
+      expect.any(String),
+    );
   });
 });
 
