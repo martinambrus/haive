@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Terminal } from './Terminal';
 import { InteractiveShell } from './InteractiveShell';
 
+const h = vi.hoisted(() => ({ writeln: vi.fn() }));
+
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
     rows = 24;
@@ -16,7 +18,7 @@ vi.mock('@xterm/xterm', () => ({
     onData() {
       return { dispose() {} };
     }
-    writeln() {}
+    writeln = h.writeln;
     write() {}
     dispose() {}
   },
@@ -111,7 +113,8 @@ describe.each([
     const view = render(element());
     const ws = FakeWebSocket.instances[0]!;
     view.unmount();
+    h.writeln.mockClear();
     act(() => ws.onclose?.({ code: 4420, reason: '' }));
-    expect(screen.queryByText(messages[0]![1])).toBeNull();
+    expect(h.writeln).not.toHaveBeenCalled();
   });
 });
