@@ -17,9 +17,9 @@ export interface AuditEvent {
   metadata?: Record<string, unknown> | null;
 }
 
-/** Call only after the transaction that inserted this event commits. */
-export function logAuditEvent(event: AuditEvent): void {
-  log.info(
+/** Write an audit line to `sink`; a package passes its own `audit` child logger. */
+export function writeAuditLog(sink: Pick<typeof log, 'info'>, event: AuditEvent): void {
+  sink.info(
     {
       actorUserId: event.actorUserId,
       action: event.action,
@@ -29,6 +29,12 @@ export function logAuditEvent(event: AuditEvent): void {
     },
     `audit: ${event.action}`,
   );
+}
+
+/** Call only after the transaction that inserted this event commits. One argument, so it
+ *  can be passed to `forEach` directly. */
+export function logAuditEvent(event: AuditEvent): void {
+  writeAuditLog(log, event);
 }
 
 /** Throws on a failed insert, so inside a transaction a failed row fails the change; log after the commit. */
