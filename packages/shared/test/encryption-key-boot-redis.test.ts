@@ -64,6 +64,7 @@ function bootProcess(redisUrl: string, envKey: string) {
 describe.skipIf(!url)('boot encryption key atomic Redis store', () => {
   let redis: Redis;
   let config: ConfigService;
+  const waitMs = 10_000;
   let store: Parameters<typeof boot.generateBootEncryptionKey>[1];
 
   beforeAll(async () => {
@@ -74,7 +75,7 @@ describe.skipIf(!url)('boot encryption key atomic Redis store', () => {
   });
   beforeEach(async () => {
     await redis.del(key, pending);
-    config = new ConfigService();
+    config = new ConfigService(waitMs);
     // Call through: capture the callbacks supplied by ConfigService, including its actual Lua.
     // Only the ciphertext inventory is faked; all Redis commands use the real connection.
     const generate = vi.spyOn(boot, 'generateBootEncryptionKey');
@@ -151,12 +152,74 @@ describe.skipIf(!url)('boot encryption key atomic Redis store', () => {
     vi.stubEnv('CONFIG_ENCRYPTION_KEY', 'ef'.repeat(32));
     try {
       await redis.del(key);
-      await redis.set(pending, first);
+      await redis.set(pending, JSON.stringify({ ...JSON.parse(first), reservedAt: Date.now() }));
+      const reserved = await redis.get(pending);
       config.clearCache();
       await expect(config.getEncryptionKey()).rejects.toBeInstanceOf(ConfigUnavailableError);
       expect(await redis.get(key)).toBeNull();
-      expect(await redis.get(pending)).toBe(first);
+      expect(await redis.get(pending)).toBe(reserved);
     } finally {
+      vi.stubEnv('CONFIG_ENCRYPTION_KEY', '');
+    }
+  });
+
+  it.each([
+    ['young', (): string => JSON.stringify({ ...JSON.parse(first), reservedAt: Date.now() }), true],
+    [
+      'old',
+      (): string => JSON.stringify({ ...JSON.parse(first), reservedAt: Date.now() - waitMs - 1 }),
+      false,
+    ],
+    ['legacy', (): string => first, false],
+    ['invalid timestamp', (): string => JSON.stringify({ reservedAt: 'broken' }), false],
+    ['corrupt JSON', (): string => '{broken', false],
+    ['nonfinite timestamp', (): string => '{"reservedAt":NaN}', false],
+  ] as const)(
+    'classifies %s pending atomically on boot and fallback',
+    async (_label, value, retryable) => {
+      vi.stubEnv('CONFIG_ENCRYPTION_KEY', 'ef'.repeat(32));
+      try {
+        for (const path of ['boot', 'fallback']) {
+          await redis.del(key);
+          const reserved = value();
+          await redis.set(pending, reserved);
+          config.clearCache();
+          const svc = path === 'boot' ? new ConfigService(waitMs) : config;
+          try {
+            const error = await (
+              path === 'boot' ? svc.initialize(url!) : svc.getEncryptionKey()
+            ).catch((e) => e);
+            expect(error).toBeInstanceOf(Error);
+            if (retryable) {
+              expect(error).toBeInstanceOf(ConfigUnavailableError);
+              expect(error.cause.message).toContain('secret discard is in progress');
+            } else {
+              expect(error).not.toBeInstanceOf(ConfigUnavailableError);
+              expect(error.message).toContain(pending);
+              expect(error.message).toContain('interrupted secret discard');
+            }
+            expect(await redis.get(key)).toBeNull();
+            expect(await redis.get(pending)).toBe(reserved);
+          } finally {
+            if (path === 'boot') await svc.close();
+          }
+        }
+      } finally {
+        vi.stubEnv('CONFIG_ENCRYPTION_KEY', '');
+      }
+    },
+  );
+
+  it('seeds a healthy environment key when no pending exists', async () => {
+    vi.stubEnv('CONFIG_ENCRYPTION_KEY', 'ef'.repeat(32));
+    const svc = new ConfigService();
+    try {
+      await redis.del(key, pending);
+      await svc.initialize(url!);
+      expect(await svc.getEncryptionKey()).toBe('ef'.repeat(32));
+      expect(await redis.get(pending)).toBeNull();
+    } finally {
+      await svc.close();
       vi.stubEnv('CONFIG_ENCRYPTION_KEY', '');
     }
   });

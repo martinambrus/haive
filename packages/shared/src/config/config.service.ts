@@ -2,6 +2,7 @@ import { Redis, ReplyError } from 'ioredis';
 import {
   generateBootEncryptionKey,
   PENDING_ENCRYPTION_KEY,
+  PENDING_ENCRYPTION_KEY_WAIT_MS,
   type EncryptionKeyBootDatabase,
 } from './encryption-key-boot.js';
 import { createRedisConnection, type RedisFactoryOptions } from '../utils/redis-factory.js';
@@ -802,6 +803,8 @@ export class ConfigService {
   // Bounds a Redis that stays LOADING: ioredis then neither becomes ready nor emits an error.
   private static READY_TIMEOUT_MS = 10_000;
 
+  constructor(private readonly pendingEncryptionKeyWaitMs = PENDING_ENCRYPTION_KEY_WAIT_MS) {}
+
   async initialize(
     redisUrl?: string,
     db?: EncryptionKeyBootDatabase | (() => EncryptionKeyBootDatabase),
@@ -1037,19 +1040,38 @@ export class ConfigService {
       redis.eval(
         `-- Seed environment key
          if redis.call('exists', KEYS[1]) == 1 then return 0 end
-         if redis.call('exists', KEYS[2]) == 1 then return -1 end
+         local pending = redis.call('get', KEYS[2])
+         if pending then
+           local readable, candidate = pcall(cjson.decode, pending)
+           if not readable or type(candidate) ~= 'table'
+              or type(candidate.reservedAt) ~= 'number' then return -2 end
+           local reservedAt = candidate.reservedAt
+           local now = tonumber(ARGV[2])
+           if reservedAt ~= reservedAt or reservedAt < 0 or reservedAt > now
+              or now - reservedAt >= tonumber(ARGV[3]) then return -2 end
+           return -1
+         end
          redis.call('set', KEYS[1], ARGV[1])
          return 1`,
         2,
         CONFIG_KEYS.ENCRYPTION_KEY,
         PENDING_ENCRYPTION_KEY,
         envKey,
+        // Both reservation and age use Unix milliseconds from Date.now(). Passing now keeps
+        // the age decision in this atomic script without another Redis round trip.
+        Date.now(),
+        this.pendingEncryptionKeyWaitMs,
       ),
     );
     if (seeded === -1) {
       throw new ConfigUnavailableError(operation, {
-        cause: new Error('Encryption key publication is pending'),
+        cause: new Error('A secret discard is in progress; waiting for encryption key publication'),
       });
+    }
+    if (seeded === -2) {
+      throw new Error(
+        `An interrupted secret discard is recorded in Redis key ${PENDING_ENCRYPTION_KEY}. To finish the discard, restart without CONFIG_ENCRYPTION_KEY and with HAIVE_DISCARD_UNREADABLE_SECRETS=1. To keep the secrets, check audit_events for action 'config.discard_unreadable_secrets' with id equal to the pending JSON's id; if that discard did not commit, delete Redis key ${PENDING_ENCRYPTION_KEY} and restart.`,
+      );
     }
     return seeded === 1;
   }

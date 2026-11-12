@@ -1,6 +1,9 @@
 import { EventEmitter } from 'node:events';
 import type { Sql } from 'postgres';
-import { encryptionKeyBootDatabase } from '../src/config/encryption-key-boot.js';
+import {
+  encryptionKeyBootDatabase,
+  PENDING_ENCRYPTION_KEY_WAIT_MS,
+} from '../src/config/encryption-key-boot.js';
 import type { SQL } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { PgDialect } from 'drizzle-orm/pg-core';
@@ -46,10 +49,32 @@ class RedisFake extends EventEmitter {
   async del(key: string) {
     return Number(this.store.delete(key));
   }
-  async eval(script: string, _n: number, key: string, pending: string, expected: string) {
+  async eval(
+    script: string,
+    _n: number,
+    key: string,
+    pending: string,
+    expected: string,
+    now?: number,
+    waitMs?: number,
+  ) {
     if (script.includes('-- Seed environment key')) {
       if (this.store.has(key)) return 0;
-      if (this.store.has(pending)) return -1;
+      if (this.store.has(pending)) {
+        if (now === undefined || waitMs === undefined) return -1;
+        // Model return codes only; the gated Redis file exercises the actual Lua.
+        try {
+          const { reservedAt } = JSON.parse(this.store.get(pending)!);
+          return typeof reservedAt === 'number' &&
+            reservedAt >= 0 &&
+            reservedAt <= now &&
+            now - reservedAt < waitMs
+            ? -1
+            : -2;
+        } catch {
+          return -2;
+        }
+      }
       this.store.set(key, expected);
       return 1;
     }
@@ -109,8 +134,8 @@ function boot(service: ConfigService, db?: Parameters<ConfigService['initialize'
 
 let redis: RedisFake;
 const services: ConfigService[] = [];
-function service() {
-  const svc = new ConfigService();
+function service(waitMs?: number) {
+  const svc = waitMs === undefined ? new ConfigService() : new ConfigService(waitMs);
   services.push(svc);
   return svc;
 }
@@ -127,6 +152,7 @@ beforeEach(() => {
 afterEach(async () => {
   await Promise.all(services.splice(0).map((svc) => svc.close()));
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
 });
 
 describe('boot encryption key safety', () => {
@@ -241,6 +267,7 @@ describe('boot encryption key safety', () => {
       id: '00000000-0000-0000-0000-000000000001',
       key: 'cd'.repeat(32),
       discard: true,
+      reservedAt: Date.now(),
     });
     redis.store.set(PENDING, candidate);
     vi.stubEnv('CONFIG_ENCRYPTION_KEY', key);
@@ -260,10 +287,67 @@ describe('boot encryption key safety', () => {
     const svc = service();
     await boot(svc);
     redis.store.delete(CONFIG_KEYS.ENCRYPTION_KEY);
-    redis.store.set(PENDING, JSON.stringify({ discard: true, key: 'cd'.repeat(32) }));
+    redis.store.set(
+      PENDING,
+      JSON.stringify({ discard: true, key: 'cd'.repeat(32), reservedAt: Date.now() }),
+    );
     svc.clearCache();
     await expect(svc.getEncryptionKey()).rejects.toBeInstanceOf(ConfigUnavailableError);
     expect(redis.store.has(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(false);
+  });
+
+  it('pins the production pending wait to ten minutes', () => {
+    expect(PENDING_ENCRYPTION_KEY_WAIT_MS).toBe(10 * 60 * 1000);
+  });
+
+  it.each(['boot', 'fallback'])('reports a young discard as retryable during %s', async (path) => {
+    vi.spyOn(Date, 'now').mockReturnValue(1000);
+    vi.stubEnv('CONFIG_ENCRYPTION_KEY', 'ab'.repeat(32));
+    const svc = service(10);
+    if (path === 'fallback') await boot(svc);
+    redis.store.delete(CONFIG_KEYS.ENCRYPTION_KEY);
+    const pending = JSON.stringify({ reservedAt: 991, discard: true });
+    redis.store.set(PENDING, pending);
+    svc.clearCache();
+    const error = await (path === 'boot' ? boot(svc) : svc.getEncryptionKey()).catch((e) => e);
+    expect(error).toBeInstanceOf(ConfigUnavailableError);
+    expect(error.cause.message).toContain('secret discard is in progress');
+    expect(redis.store.get(PENDING)).toBe(pending);
+    expect(redis.store.has(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(false);
+  });
+
+  it.each([
+    ['at the bound', { reservedAt: 990 }],
+    ['past the bound', { reservedAt: 989 }],
+    ['legacy pending', {}],
+    ['unreadable timestamp', { reservedAt: '991' }],
+    ['corrupt JSON', null],
+  ])('fails loudly for %s on boot and fallback', async (_label, value) => {
+    vi.spyOn(Date, 'now').mockReturnValue(1000);
+    vi.stubEnv('CONFIG_ENCRYPTION_KEY', 'ab'.repeat(32));
+    const pending = value ? JSON.stringify(value) : '{broken';
+    for (const path of ['boot', 'fallback']) {
+      const svc = service(10);
+      redis.store.delete(PENDING);
+      if (path === 'fallback') await boot(svc);
+      redis.store.delete(CONFIG_KEYS.ENCRYPTION_KEY);
+      redis.store.set(PENDING, pending);
+      svc.clearCache();
+      const error = await (path === 'boot' ? boot(svc) : svc.getEncryptionKey()).catch((e) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(ConfigUnavailableError);
+      expect(error.message).toContain(PENDING);
+      expect(error.message).toContain('interrupted secret discard');
+      expect(error.message).toContain('without CONFIG_ENCRYPTION_KEY');
+      expect(error.message).toContain('HAIVE_DISCARD_UNREADABLE_SECRETS=1');
+      expect(error.message).toContain('audit_events');
+      expect(error.message).toContain('config.discard_unreadable_secrets');
+      expect(error.message).toContain('id');
+      expect(error.message).toContain('did not commit');
+      expect(error.message).toContain('delete');
+      expect(redis.store.get(PENDING)).toBe(pending);
+      expect(redis.store.has(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(false);
+    }
   });
 
   it('preserves a Redis key without querying the database or using the override', async () => {
@@ -353,6 +437,7 @@ describe('boot encryption key safety', () => {
     await expect(boot(service(), fixture.db)).rejects.toThrow('Configuration store unavailable');
     expect(fixture.audit.size).toBe(1);
     const pending = JSON.parse(redis.store.get(PENDING)!);
+    expect(pending.reservedAt).toEqual(expect.any(Number));
     redis.failPublish = false;
     const retry = service();
     await boot(retry, fixture.db);

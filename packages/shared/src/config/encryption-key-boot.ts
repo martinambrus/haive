@@ -8,13 +8,15 @@ import { logger } from '../logger/index.js';
 /** Only the inventory and audited-discard operations are needed during configuration boot. */
 export type EncryptionKeyBootDatabase = Pick<Database, 'execute' | 'transaction'>;
 
-/** Adapt an existing client without creating or owning a connection pool. */
+/** Adapt a dedicated client without owning its pool. Drizzle changes its parsers/serializers,
+ * so callers must not share it with raw postgres.js consumers. */
 export function encryptionKeyBootDatabase(client: Sql): EncryptionKeyBootDatabase {
   return drizzle(client, { schema });
 }
 
 /** No expiry: an interrupted discard resumes with the same key and audit id. */
 export const PENDING_ENCRYPTION_KEY = 'bootstrap:pendingEncryptionKey';
+export const PENDING_ENCRYPTION_KEY_WAIT_MS = 10 * 60 * 1000;
 const DISCARD_SETTING = 'HAIVE_DISCARD_UNREADABLE_SECRETS';
 
 /** Count rows, not individual fields. Nullable integration rows may contain no secret at all.
@@ -75,6 +77,7 @@ export async function generateBootEncryptionKey(
         id: randomUUID(),
         key: randomBytes(32).toString('hex'),
         discard: unreadableSecretCount > 0,
+        reservedAt: Date.now(),
       }),
     );
     pending = await store.getPending();
