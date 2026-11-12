@@ -35,19 +35,25 @@ async function resolveWorkspace(ctx: StepContext): Promise<string> {
   return out?.worktreePath ?? ctx.workspacePath;
 }
 
-/** True when the learning phase (11) wrote KB/learning FILES to disk that must be
- *  committed: learnings written, or a LOCAL investigation file. A promoted
- *  "global-kb:<id>" investigation writes no file, and a skipped/empty capture
- *  writes nothing — both make this false. Exported for the unit test; mirrors
- *  03c's hasRequirements. */
-export function hasKbToCommit(
-  out: { written?: string[]; investigationWritten?: string | null } | null,
-): boolean {
+interface LearningCommitOutput {
+  written?: string[];
+  deleted?: string[];
+  investigationWritten?: string | null;
+  kbSync?: { changes?: unknown[] } | null;
+  kbReverted?: boolean;
+}
+
+/** True when the learning phase left local learning writes/deletions, investigation
+ *  or accepted KB-sync files to commit. A global promotion alone writes no local file. */
+export function hasKbToCommit(out: LearningCommitOutput | null): boolean {
   if (!out) return false;
   const wroteLearnings = Array.isArray(out.written) && out.written.length > 0;
+  const deletedLearnings = Array.isArray(out.deleted) && out.deleted.length > 0;
   const inv = out.investigationWritten;
   const wroteLocalInvestigation = typeof inv === 'string' && !inv.startsWith('global-kb:');
-  return wroteLearnings || wroteLocalInvestigation;
+  const keptKbSync =
+    out.kbReverted !== true && Array.isArray(out.kbSync?.changes) && out.kbSync.changes.length > 0;
+  return wroteLearnings || deletedLearnings || wroteLocalInvestigation || keptKbSync;
 }
 
 export const kbCommitStep: StepDefinition<KbCommitDetect, KbCommitApply> = {
@@ -67,16 +73,11 @@ export const kbCommitStep: StepDefinition<KbCommitDetect, KbCommitApply> = {
     autoSubmitDefaults: true,
   },
 
-  // Only run when the learning phase actually wrote KB/learning files to disk in
-  // the worktree (writeFiles kept, or a LOCAL investigation written). A purely
-  // promoted-to-global investigation writes no file ("global-kb:<id>") and a
-  // skipped/empty learning capture writes nothing — both auto-skip this gate.
+  // Accepted KB sync edits need a commit even when the learning list is empty.
+  // Global-only promotions and captures with no local changes skip this gate.
   async shouldRun(ctx: StepContext): Promise<boolean> {
     const learning = await loadPreviousStepOutput(ctx.db, ctx.taskId, '11-phase-8-learning');
-    return hasKbToCommit(
-      (learning?.output as { written?: string[]; investigationWritten?: string | null } | null) ??
-        null,
-    );
+    return hasKbToCommit((learning?.output as LearningCommitOutput | null) ?? null);
   },
 
   async detect(ctx: StepContext): Promise<KbCommitDetect> {
