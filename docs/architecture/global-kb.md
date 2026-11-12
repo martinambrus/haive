@@ -291,13 +291,21 @@ that lock stayed on the server after the deadline had answered (MEASURED: 1 wait
 with them). On a large store the first ensure's backfill can outlast a short deadline, so bounded
 calls fail their ensure until an unbounded caller completes it.
 
-**Boot reads under a Redis outage are bounded; a stalled store is not.** At worker boot the two
+**Boot reads under a Redis outage are bounded, and a stalled store no longer holds boot.** At worker boot the two
 config reads in `resolveGlobalKbSettings` reject typed after about 2 s; `runOne`
 (`data-migrations.ts`) rethrows the typed outage and the boot retry runs the migrations again once
-the store answers. A KB store that accepts the connection and then
-stalls, or a held schema advisory lock, still waits without a deadline in `recomputeAliasedTopicKeys`,
-which runs every boot; a plain `deadlineMs` would skip the shared schema ensure above, so that needs
-its own design.
+the store answers. The two global-store repairs do not block boot: `recomputeAliasedTopicKeys` and
+`classifyGlobalKbVectorProvenance` are `background: true` migrations that
+`startBackgroundDataMigrations` starts after `haive-worker ready`, one loop per process. Each attempt
+passes `deadlineMs` (60 s) and a `signal` to `withGlobalKb`, so a store that accepts the connection and
+then stalls, or a held schema advisory lock, fails the attempt rather than hanging; the attempt runs the
+private bounded ensure above and marks nothing ready when it is cut off. The loop warns once per failed
+attempt, backs off from 1 s to 60 s, stops after the first success and is cancelled on shutdown. The
+alias update is guarded on the row's stored key, category and facets, so an edit made after the scan
+wins. The trade-off: while an alias repair is still pending, a promotion that computes the canonical key
+misses the legacy-spelled entry and writes a second, independent draft, which a reviewer merges or
+deletes. A repair has work only on the first boot after an alias fix or on a restored older store, and
+its first attempt starts right after ready.
 
 **Each opted run records what it got** in `cli_invocations.house_rules` (migration 0176), written
 with `agent_rules` by the UPDATE that sets `started_at`: `{mode, entries: [{id, hash, title, why}],
@@ -319,7 +327,7 @@ Every global vector row records its provenance: `embed_kind` (`model` or `hashed
 `embed_model`, written by the sync from `embedBatch`'s kind (ensure DDL, nullable, NULL = unknown). The
 scorer and the global dense half of `ragHybridSearch` read only `embed_kind = 'model'` rows, so a
 hash-fallback vector written with `RAG_EMBED_STRICT_ENABLED` off is never ranked as a model one; it is
-still found by words. Rows written before the column existed are classified at boot and on every 5-minute reconcile sweep, so a KB enabled or reachable only after boot is covered
+still found by words. Rows written before the column existed are classified by the background repair started after boot (above) and on every 5-minute reconcile sweep, so a KB enabled or reachable only after boot is covered
 (`classifyGlobalKbVectorProvenance`, convergent): a hash vector is a pure function of its chunk text, so
 a stored vector matching `hashEmbed(content, dims)` (cosine ≥ 0.9999) is `hashed` and anything else
 `model`, with no re-embed. The global HNSW index is partial (`WHERE embed_kind = 'model'`, replacing the full one): pgvector filters after its candidate scan, so hash rows in the index would crowd model candidates out of the dense half (MEASURED with EXPLAIN: the filtered query scans the partial index). `unknown_provenance` stays in the enum only so stored records parse.

@@ -4,10 +4,13 @@ import type { Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { globalKbEntries } from '@haive/shared/global-kb';
 
-const h = vi.hoisted(() => ({ kb: undefined as unknown }));
+const h = vi.hoisted(() => ({ kb: undefined as unknown, opts: undefined as unknown }));
 vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   ...(await importOriginal<object>()),
-  withGlobalKb: async (_db: unknown, fn: (ctx: unknown) => Promise<unknown>) => fn({ db: h.kb }),
+  withGlobalKb: async (_db: unknown, fn: (ctx: unknown) => Promise<unknown>, opts?: unknown) => {
+    h.opts = opts;
+    return fn({ db: h.kb });
+  },
 }));
 import * as migrations from '../src/data-migrations.js';
 
@@ -164,6 +167,14 @@ describe('alias key repair while jobs are admitted', () => {
     });
     return fake;
   };
+
+  it('forwards its deadline and signal to the store call', async () => {
+    setup();
+    const signal = new AbortController().signal;
+    const opts = { deadlineMs: 5, signal, connectTimeoutSeconds: 3 };
+    await recompute(db, opts);
+    expect(h.opts).toEqual(opts);
+  });
 
   it('converges aliases after the ensure, preserves other keys, and is idempotent', async () => {
     const fake = setup();
