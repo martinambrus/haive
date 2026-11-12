@@ -1143,6 +1143,7 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
       'The pasted code is missing its state part; copy the whole code, including the part after #.',
     );
   }
+  let codeExchanged = false;
   const tokens = await withCliAuthWrite(
     db,
     provider,
@@ -1175,6 +1176,7 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
       let tokens;
       try {
         tokens = await exchangeClaudeAuthCode(code, verifier, state);
+        codeExchanged = true;
       } catch (err) {
         throw new HttpError(400, err instanceof Error ? err.message : 'Token exchange failed');
       }
@@ -1206,7 +1208,8 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
       return tokens;
     },
   ).catch((err: unknown) => {
-    if (err instanceof HttpError && err.code === 'cli_auth_busy') {
+    // Only a code already exchanged needs fresh authorization after a lock refusal.
+    if (codeExchanged && err instanceof HttpError && err.code === 'cli_auth_busy') {
       throw new HttpError(
         409,
         'CLI authentication changed. Start a new usage connection and authorize again.',
