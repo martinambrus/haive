@@ -18,6 +18,16 @@ export function publicApiOrigin(web: string = webOrigin()): string | null {
   }
 }
 
+/** The serialised origin a browser sends in `Origin` (lower case, no default port, no path), so
+ *  an operator's spelling of WEB_ORIGIN cannot defeat an exact comparison. */
+export function canonicalOrigin(value: string): string {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return value;
+  }
+}
+
 /** The editor currently lives on the api's public origin. */
 export function editorOrigin(web: string = webOrigin()): string | null {
   return publicApiOrigin(web);
@@ -29,8 +39,9 @@ export function isIdePath(path: string): boolean {
 
 /** Only the editor's own requests may trust its origin. App routes trust the web origin. */
 export function trustedOrigins(web: string = webOrigin(), path = '/'): string[] {
+  const app = canonicalOrigin(web);
   const editor = editorOrigin(web);
-  return isIdePath(path) && editor !== null ? [web, editor] : [web];
+  return isIdePath(path) && editor !== null ? [app, editor] : [app];
 }
 
 /** A page on the same site still sends the SameSite=Lax cookie, so only `Origin` tells it from the

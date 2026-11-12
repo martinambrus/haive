@@ -227,6 +227,21 @@ describe('editor Fetch Metadata isolation', () => {
       (await app.request('/ide-other', { headers: { 'sec-fetch-site': 'same-origin' } })).status,
     ).toBe(403);
   });
+  it('recognises one origin when WEB_ORIGIN is spelled differently from the browser Origin', async () => {
+    vi.stubEnv('HAIVE_PUBLIC_API_URL', 'https://haive.example.com/base');
+    vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const app = authenticatedApp('HTTPS://Haive.Example.com:443/');
+    app.post('/origin-auth-test', requireAuth, (c) => c.json({ ok: true }));
+    const read = await app.request('/origin-auth-test', {
+      headers: { cookie: 'haive_access=session', 'sec-fetch-site': 'same-origin' },
+    });
+    expect(read.status).toBe(200);
+    const write = await app.request('/origin-auth-test', {
+      method: 'POST',
+      headers: { cookie: 'haive_access=session', origin: 'https://haive.example.com' },
+    });
+    expect(write.status).toBe(200);
+  });
   it('keeps one-origin installs working and logs one structured startup warning', async () => {
     vi.stubEnv('HAIVE_PUBLIC_API_URL', 'https://haive.example.com/base');
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
