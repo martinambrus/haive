@@ -121,6 +121,30 @@ function event(
 }
 
 describe('worker audited repository settings', () => {
+  it.each([undefined, null, '', 'rules'])(
+    'preserves the rules presence summary for %s',
+    async (value) => {
+      const s = await setup();
+
+      const events = await audit.auditRepositorySettings(s.db, {
+        repositoryId: REPO,
+        actor: { userId: OWNER, kind: 'repository_owner' },
+        source: 'project_state_sync',
+        before: { agentRulesOverride: 'old rules' },
+        updates: { agentRulesOverride: value },
+      });
+
+      expect(events).toHaveLength(1);
+      expect(events[0]!.metadata).toEqual({
+        source: 'project_state_sync',
+        actorKind: 'repository_owner',
+        fields: ['agentRulesOverride'],
+        values: { agentRulesOverride: value != null },
+      });
+      expect(s.audits()).toEqual([expect.objectContaining(events[0]!)]);
+    },
+  );
+
   it('sync audits scope and rules separately, with owner attribution and no values; repeat is silent', async () => {
     const s = await setup();
     await s.record({
@@ -381,5 +405,58 @@ describe('Fix-1 scope-save and metadata controls', () => {
       },
     ]);
     expect(JSON.stringify(s.audits())).not.toMatch(/kept|removed\/\*|added\/\*|secret rule text/);
+  });
+});
+
+describe('worker scope audit delta semantics', () => {
+  it.each([
+    { before: null, after: [], expected: null },
+    { before: [], after: null, expected: null },
+    { before: ['kept'], after: ['kept', 'kept'], expected: null },
+    { before: ['a', 'b'], after: ['b', 'a'], expected: null },
+    { before: null, after: ['added'], expected: { addedCount: 1, removedCount: 0 } },
+    { before: ['removed'], after: [], expected: { addedCount: 0, removedCount: 1 } },
+    {
+      before: ['kept', 'removed'],
+      after: ['kept', 'added', 'added'],
+      expected: { addedCount: 1, removedCount: 1 },
+    },
+  ])(
+    'matches API set-delta semantics for $before → $after',
+    async ({ before, after, expected }) => {
+      const s = await setup();
+      const events = await s.db.transaction((tx) =>
+        audit.auditRepositorySettings(tx, {
+          repositoryId: REPO,
+          actor: { userId: OWNER, kind: 'repository_owner' },
+          source: 'project_state_sync',
+          before: { scopeExcludeGlobs: before },
+          updates: { scopeExcludeGlobs: after },
+        }),
+      );
+      expect(events).toHaveLength(expected ? 1 : 0);
+      expect(s.audits()).toHaveLength(events.length);
+      if (expected)
+        expect(events[0]!.metadata).toEqual({
+          source: 'project_state_sync',
+          actorKind: 'repository_owner',
+          fields: ['scopeExcludeGlobs'],
+          ...expected,
+        });
+    },
+  );
+
+  it('still audits a rules change beside a null-to-empty scope update', async () => {
+    const s = await setup();
+    const events = await s.db.transaction((tx) =>
+      audit.auditRepositorySettings(tx, {
+        repositoryId: REPO,
+        actor: { userId: OWNER, kind: 'repository_owner' },
+        source: 'project_state_sync',
+        before: { scopeExcludeGlobs: null, agentRulesOverride: null },
+        updates: { scopeExcludeGlobs: [], agentRulesOverride: 'private rule' },
+      }),
+    );
+    expect(events.map((event) => event.action)).toEqual(['repository.security.update']);
   });
 });

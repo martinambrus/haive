@@ -120,6 +120,7 @@ import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { logger, type RepoRagCleanupPayload, type RepoResourceCleanupPayload } from '@haive/shared';
 import { getDb } from '../db.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
+import { summarizeScopeChange } from '@haive/shared/audit';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
 import { enqueueCheckoutSync, observeCheckoutBranchForReset } from '../lib/plan-mirror.js';
@@ -1003,10 +1004,10 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
       tx.select().from(schema.repositories).where(eq(schema.repositories.id, id)).for('update'),
     );
     if (!stored) throw new HttpError(404, 'Repository not found');
-    const previous = new Set(stored.scopeExcludeGlobs ?? []);
-    const wanted = new Set(scopeExcludeGlobs);
-    const addedCount = [...wanted].filter((glob) => !previous.has(glob)).length;
-    const removedCount = [...previous].filter((glob) => !wanted.has(glob)).length;
+    const { addedCount, removedCount } = summarizeScopeChange(
+      stored.scopeExcludeGlobs,
+      scopeExcludeGlobs,
+    );
     const rows = await tx
       .update(schema.repositories)
       .set({ scopeExcludeGlobs, updatedAt: new Date() })
@@ -1019,7 +1020,13 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
         action: 'repository.scope.update',
         targetType: 'repository',
         targetId: id,
-        metadata: { addedCount, removedCount },
+        metadata: {
+          source: 'api',
+          actorKind: 'authenticated_user',
+          fields: ['scopeExcludeGlobs'],
+          addedCount,
+          removedCount,
+        },
       };
       await insertAuditEvent(tx, event);
     }
@@ -2794,12 +2801,23 @@ repoRoutes.post('/:id/remote', async (c) => {
         if (!stored) throw new HttpError(404, 'Repository not found');
         await requireFittingCredential(tx, body.credentialsId ?? stored.credentialsSecretId);
         const host = parseScpLikeGitUrl(body.remoteUrl)?.host ?? new URL(body.remoteUrl).hostname;
+        const patch = {
+          remoteUrl: body.remoteUrl,
+          ...(body.credentialsId ? { credentialsSecretId: body.credentialsId } : {}),
+          ...(body.branch ? { branch: body.branch } : {}),
+        };
+        const fields = (Object.keys(patch) as (keyof typeof patch)[]).filter(
+          (field) => patch[field] !== stored[field],
+        );
         event = {
           actorUserId: userId,
           action: 'repository.remote.update',
           targetType: 'repository',
           targetId: id,
           metadata: {
+            source: 'api',
+            actorKind: 'authenticated_user',
+            fields,
             host,
             credentialsChanged:
               (body.credentialsId ?? stored.credentialsSecretId) !== stored.credentialsSecretId,
@@ -2876,9 +2894,7 @@ repoRoutes.post('/:id/remote', async (c) => {
           await tx
             .update(schema.repositories)
             .set({
-              remoteUrl: body.remoteUrl,
-              ...(body.credentialsId ? { credentialsSecretId: body.credentialsId } : {}),
-              ...(body.branch ? { branch: body.branch } : {}),
+              ...patch,
               updatedAt: new Date(),
             })
             .where(eq(schema.repositories.id, id));

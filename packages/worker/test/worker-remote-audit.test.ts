@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb, type FakeDbHandle } from '@haive/database/testing';
@@ -44,7 +45,11 @@ beforeEach(() => {
     return { code: 0, stdout: '', stderr: '' };
   });
 });
-function setup(remoteUrl: string | null = null, dropDuringGit = false, failRowLock = false) {
+function setup(
+  remoteUrl: string | null = null,
+  dropDuringGit = false,
+  failRowLock: boolean | Error = false,
+) {
   let rejectTransaction: (err: Error) => void = () => {};
   const connectionFailure = dropDuringGit
     ? new Promise<never>((_resolve, reject) => {
@@ -70,7 +75,10 @@ function setup(remoteUrl: string | null = null, dropDuringGit = false, failRowLo
                 const take = query.for.bind(query);
                 query.for = ((strength: Parameters<typeof take>[0]) => {
                   h.trace.push('lock ' + strength);
-                  if (failRowLock) throw new Error('repository lock timeout');
+                  if (failRowLock)
+                    throw failRowLock instanceof Error
+                      ? failRowLock
+                      : new Error('repository lock timeout');
                   return take(strength);
                 }) as typeof query.for;
                 return query;
@@ -262,6 +270,25 @@ describe('T505.1 transactional gate-4 remote', () => {
     expect(h.ensure).not.toHaveBeenCalled();
     expect(h.git).not.toHaveBeenCalled();
   });
+  it.each([false, true])(
+    'maps a lock timeout (wrapped: %s) before audit or git',
+    async (wrapped) => {
+      const pg = Object.assign(new Error('driver lock detail'), { code: '55P03' });
+      const error = wrapped
+        ? Object.assign(new Error('query detail', { cause: pg }), { params: ['bound value'] })
+        : pg;
+      const s = setup(null, false, error);
+      const failure = await s.apply().then(
+        () => null,
+        (err: unknown) => err,
+      );
+      expect(safeErrorMessage(failure)).toBe('Repository is busy. Retry this step in a moment.');
+      expect(s.repo().remoteUrl).toBeNull();
+      expect(s.audits()).toEqual([]);
+      expect(h.ensure).not.toHaveBeenCalled();
+      expect(h.push).not.toHaveBeenCalled();
+    },
+  );
   it('adding git origin to an already-matching row emits no setting audit', async () => {
     const s = setup(URL);
     s.fake.patch(schema.repositories, REPO, { credentialsSecretId: CREDENTIAL });

@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -42,7 +43,11 @@ const AGENT = {
 
 /** Applies an empty plan for a repository whose rules override is `override`, and returns the
  *  applicable set 02 wrote. The owner's provider holds rules of its own, which the set ignores. */
-async function run(withColumn: boolean, override: string | null = '- repository rule') {
+async function run(
+  withColumn: boolean,
+  override: string | null = '- repository rule',
+  lockError?: Error,
+) {
   const root = await mkdtemp(join(tmpdir(), 'upgrade-apply-set-'));
   dirs.push(root);
   const fake = createFakeDb({
@@ -144,6 +149,10 @@ async function run(withColumn: boolean, override: string | null = '- repository 
       },
     });
   };
+  if (lockError)
+    fake.hooks.beforeLock = () => {
+      throw lockError;
+    };
   const ctx = {
     db: withLockSetting(fake.db as unknown as FakeDbHandle),
     repoPath: root,
@@ -173,6 +182,25 @@ describe('02 writes the applicable set the way 01 and the sync do', () => {
     expect(set).toContain(`custom.${BUNDLE}.${ITEM}`);
     expect(set).toContain('cli-rules');
     expect(set).toContain('workflow-config');
+  });
+
+  it.each([false, true])(
+    'maps a bounded lock timeout (wrapped: %s) before applying the plan',
+    async (wrapped) => {
+      const pg = Object.assign(new Error('driver lock detail'), { code: '55P03' });
+      const error = wrapped
+        ? Object.assign(new Error('query detail', { cause: pg }), { params: ['bound value'] })
+        : pg;
+      const failure = await run(true, null, error).then(
+        () => null,
+        (err: unknown) => err,
+      );
+      expect(safeErrorMessage(failure)).toBe('Repository is busy. Retry this step in a moment.');
+    },
+  );
+  it('preserves a non-lock refusal', async () => {
+    const error = new Error('other refusal');
+    await expect(run(true, null, error)).rejects.toBe(error);
   });
 
   it('holds cli-rules for a repository with no override, which follows the default rules', async () => {

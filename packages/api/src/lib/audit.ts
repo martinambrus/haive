@@ -1,55 +1,18 @@
-import { sql } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import type { Database } from '@haive/database';
 import { logger } from '@haive/shared';
+import { insertAuditEvent, writeAuditLog, type AuditEvent } from '@haive/shared/audit';
 
 const log = logger.child({ module: 'audit' });
 
 /** No authenticated actor. A fixed sentinel records no login identifier or derived fingerprint. */
 export const ANONYMOUS_AUDIT_ACTOR = '00000000-0000-0000-0000-000000000000';
 
-export interface AuditEvent {
-  /** Who performed the action (plain uuid; no FK). */
-  actorUserId: string;
-  /** Namespaced action, e.g. 'credential.update', 'user.set_role'. */
-  action: string;
-  /** Affected entity kind, e.g. 'repo_credential', 'user'. */
-  targetType: string;
-  /** Affected entity id, when applicable. */
-  targetId?: string | null;
-  /** Extra non-secret context (host, label, changed-field booleans, role). */
-  metadata?: Record<string, unknown> | null;
-}
+export { insertAuditEvent, type AuditEvent };
 
+/** Call only after the transaction that inserted this event commits. Logs through the api's
+ *  own `audit` child logger. */
 export function logAuditEvent(event: AuditEvent): void {
-  log.info(
-    {
-      actorUserId: event.actorUserId,
-      action: event.action,
-      targetType: event.targetType,
-      targetId: event.targetId ?? null,
-      ...(event.metadata ?? {}),
-    },
-    `audit: ${event.action}`,
-  );
-}
-
-/** Throws on a failed insert, so inside a transaction a failed row fails the change; log after the commit. */
-export async function insertAuditEvent(
-  db: Pick<Database, 'insert'>,
-  event: AuditEvent,
-  options: { id?: string } = {},
-): Promise<void> {
-  await db.insert(schema.auditEvents).values({
-    // A caller compensating a failed external effect needs its exact committed row.
-    ...(options.id ? { id: options.id } : {}),
-    actorUserId: event.actorUserId,
-    action: event.action,
-    targetType: event.targetType,
-    targetId: event.targetId ?? null,
-    metadata: event.metadata ?? null,
-    // clock_timestamp(), not the default now(): inside a transaction now() is when it began.
-    createdAt: sql`clock_timestamp()`,
-  });
+  writeAuditLog(log, event);
 }
 
 /** Dual-write an audit event: a pino line (stream — greppable, shippable) plus a

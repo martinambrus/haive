@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 import type { FormSchema } from '@haive/shared';
-import { schema, initializeTaskDatabaseState } from '@haive/database';
+import { schema } from '@haive/database';
 import { databaseSnapshotRel } from '@haive/shared/database-snapshot-files';
 import { readTextNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import { splitUploadPath, workspaceAnchor } from '../../../repo/worktree-paths.js';
@@ -21,6 +21,7 @@ import {
 import { ensureDdevWithProgress, withDdevProgress } from './_app-runtime.js';
 import {
   verifyDatabaseSnapshotFile,
+  initializeTaskDatabaseState,
   withSnapshotStep,
   offerDatabaseRestore,
   sweepDatabaseSnapshots,
