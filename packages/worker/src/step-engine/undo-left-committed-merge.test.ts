@@ -503,9 +503,16 @@ describe('explicit undo of a cancel-left committed merge', () => {
       expect(leftCommittedMerges(f.events)[0]?.settled?.outcome).toBe('undone');
     },
   );
-  it.each(['fatal: unknown command', 'Fehler: unbekannter Befehl'])(
-    'refuses unsupported ref transactions before set-aside regardless of stderr: %s',
-    async (stderr) => {
+  it.each([
+    { code: 128, stderr: 'fatal: unknown command' },
+    { code: 128, stderr: 'Fehler: unbekannter Befehl' },
+    { code: 128, stderr: 'fatal: not a git repository' },
+    { code: 1, stderr: 'permission denied' },
+    { code: 0, stderr: '' },
+    { code: null, stderr: 'killed' },
+  ])(
+    'refuses a pre-start exit without inferring a Git version: $code, $stderr',
+    async ({ code, stderr }) => {
       const f = await fixture();
       const actual =
         await vi.importActual<typeof import('node:child_process')>('node:child_process');
@@ -523,7 +530,7 @@ describe('explicit undo of a cancel-left committed merge', () => {
           child.stdin.once('data', () => {
             child.stderr.write(stderr);
             child.stdout.end();
-            child.emit('close', 128);
+            child.emit('close', code);
           });
           return child as unknown as ReturnType<typeof processes.spawn>;
         },
@@ -533,8 +540,9 @@ describe('explicit undo of a cancel-left committed merge', () => {
       await f.run();
       expect(leftCommittedMerges(f.events)[0]).toMatchObject({
         settled: null,
-        refused: { count: 1, reason: expect.stringContaining('requires Git 2.27 or newer') },
+        refused: { count: 1, reason: expect.stringContaining('Git exited before acknowledging') },
       });
+      expect(leftCommittedMerges(f.events)[0]?.refused?.reason).not.toContain('2.27');
       expect(h.aside).not.toHaveBeenCalled();
       expect(
         calls.mock.calls.some(([, args]) =>

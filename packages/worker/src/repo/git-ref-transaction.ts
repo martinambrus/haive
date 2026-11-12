@@ -9,8 +9,8 @@ export class GitRefTransactionError extends Error {}
 /** The commit acknowledgment proves the ref moved even when child cleanup later fails. */
 export class GitRefTransactionCommittedError extends GitRefTransactionError {}
 
-/** Git exited without acknowledging start; the transaction protocol is unavailable. */
-export class GitRefTransactionsUnsupportedError extends GitRefTransactionError {}
+/** No start acknowledgment: the exit status alone cannot establish why Git stopped. */
+export class GitRefTransactionStartError extends GitRefTransactionError {}
 
 /** Probe with an empty transaction before callers set aside or refresh checkout files. */
 export async function checkGitRefTransactions(cwd: string): Promise<void> {
@@ -91,7 +91,7 @@ async function refTransaction(
         }),
       ]);
       if (line.done && input === 'start' && !spawnError)
-        throw new GitRefTransactionsUnsupportedError(failure().message);
+        throw new GitRefTransactionStartError(failure().message);
       if (line.done || line.value !== reply) throw failure();
     } catch (error) {
       if (error instanceof GitRefTransactionError) throw error;

@@ -34,7 +34,7 @@ import {
   checkGitRefTransactions,
   GitRefTransactionCommittedError,
   GitRefTransactionError,
-  GitRefTransactionsUnsupportedError,
+  GitRefTransactionStartError,
   withGitRefTransaction,
 } from '../repo/git-ref-transaction.js';
 import {
@@ -640,7 +640,7 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
               await checkGitRefTransactions(cwd);
               refTransactionsChecked = true;
             } catch (error) {
-              if (!(error instanceof GitRefTransactionsUnsupportedError)) {
+              if (!(error instanceof GitRefTransactionStartError)) {
                 if (error instanceof GitRefTransactionError)
                   throw new UndoGitError(gitFailureReason('Git refused the undo', error));
                 throw error;
@@ -648,7 +648,7 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
               await settle(
                 'refused',
                 gitFailureReason(
-                  'Undo requires Git 2.27 or newer to lock the base branch safely. Upgrade Git and retry.',
+                  'Git exited before acknowledging the ref transaction. Check Git and the repository, then retry Undo.',
                   error,
                 ),
               );
