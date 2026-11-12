@@ -57,13 +57,14 @@ export function LatestRefresh({
 
   if (active) return null;
   // The durable read can lag the job poll or fail. Only a newer run may supersede
-  // the completed result we already have; old jobs without identity still win locally.
+  // the completed result we already have. Without a start time, only a matching
+  // run id proves that the local result belongs to the stored run.
   const preferResult =
     result !== null &&
     (!run ||
       run.runId === result.runId ||
-      !result.startedAt ||
-      new Date(run.startedAt).getTime() <= new Date(result.startedAt).getTime());
+      (result.startedAt !== undefined &&
+        new Date(run.startedAt).getTime() <= new Date(result.startedAt).getTime()));
   const displayedRun =
     preferResult && (run?.runId !== result?.runId || run?.finishedAt === null) ? null : run;
   return (

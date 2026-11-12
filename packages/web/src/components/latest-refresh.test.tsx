@@ -74,6 +74,26 @@ it('lets a structurally newer stored run supersede the previous manual result', 
   expect(textOf(view.tree())).not.toContain('current failure');
 });
 
+it('keeps the stored run when a different completed result has no start time', async () => {
+  h.get.mockResolvedValue({ run: stored({ runId: 'newer' }) });
+  const view = createRenderer(() => (
+    <LatestRefresh endpoint="/latest" active={false} result={{ ...result, startedAt: undefined }} />
+  ));
+  await settle(view);
+  expect(textOf(view.tree())).toContain('has not finished');
+  expect(textOf(view.tree())).not.toContain('current failure');
+});
+
+it('uses a completed result with no start time when its run id matches', async () => {
+  h.get.mockResolvedValue({ run: stored() });
+  const view = createRenderer(() => (
+    <LatestRefresh endpoint="/latest" active={false} result={{ ...result, startedAt: undefined }} />
+  ));
+  await settle(view);
+  expect(textOf(view.tree())).toContain('current failure');
+  expect(textOf(view.tree())).not.toContain('has not finished');
+});
+
 it.each(['unknown', 'legacy-trigger'])(
   'describes a %s trigger plainly with readable dates',
   async (trigger) => {
