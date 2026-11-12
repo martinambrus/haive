@@ -817,6 +817,31 @@ describe('explicit undo of a cancel-left committed merge', () => {
     expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
     expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
   });
+  it('scrubs complete credentials before paths can split them', async () => {
+    const f = await fixture();
+    const token = '/credential/path,credential-suffix';
+    await git(f.dir, 'remote', 'add', 'origin', 'https://example.test/repo.git');
+    vi.spyOn(f.db.query.taskSteps, 'findFirst').mockResolvedValue({
+      formValues: { credentialId: 'credential' },
+    } as never);
+    vi.spyOn(gitPush, 'buildCredentialHelper').mockResolvedValue({
+      argv: [],
+      env: {},
+      secret: token,
+    });
+    vi.spyOn(gitPush, 'originGitRun').mockResolvedValue({
+      code: 128,
+      stdout: '',
+      stderr: `remote echoed ${token} in ${f.dir}`,
+    });
+    await f.run();
+    expect(leftCommittedMerges(f.events)[0]?.refused?.reason).toContain(
+      'remote echoed *** in [path]',
+    );
+    expect(JSON.stringify(f.settled())).not.toContain('credential-suffix');
+    expect(leftCommittedMerges(f.events)[0]?.refused?.reason).not.toContain(f.dir);
+  });
+
   it.each(['list', 'fetch', 'throw'])(
     'scrubs a standalone credential echoed by the remote during %s',
     async (failure) => {

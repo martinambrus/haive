@@ -96,6 +96,29 @@ function committedChild(closeCode: number | null) {
 }
 
 describe('git ref transactions', () => {
+  it('waits the full 10 seconds after commit acknowledgment before signaling cleanup', async () => {
+    vi.useFakeTimers();
+    const child = committedChild(null);
+    const result = withGitRefTransaction(
+      '.',
+      'refs/heads/main',
+      'a'.repeat(40),
+      'b'.repeat(40),
+      async () => true,
+    ).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(child.stdin.writableEnded).toBe(true);
+    await vi.advanceTimersByTimeAsync(9999);
+    expect(child.kill).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(child.kill.mock.calls).toEqual([['SIGTERM']]);
+    child.stdout.end();
+    child.emit('close', null);
+    expect(await result).toMatchObject({
+      message: expect.stringContaining('Git committed the ref transaction'),
+    });
+  });
+
   it.each([128, null])(
     'identifies cleanup failure after commit acknowledgment, exit=%s',
     async (code) => {
