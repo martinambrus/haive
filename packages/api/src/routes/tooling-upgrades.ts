@@ -52,6 +52,7 @@ import { getDb } from '../db.js';
 import { boundedLockWait, REPOSITORY_BUSY } from '../lib/repository-busy.js';
 import { readOptionalJsonObject, requireJsonObject } from '../lib/json-object.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
+import { summarizeSecurityFields } from '@haive/shared/audit';
 import { getRedis } from '../redis.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -1029,23 +1030,7 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
       );
       securityEvent.metadata = {
         fields: changedFields,
-        values: Object.fromEntries(
-          changedFields.map((field) => {
-            const value = updates[field as keyof typeof updates];
-            return [
-              field,
-              field === 'appAuth'
-                ? Boolean((value as { enabled?: boolean } | null)?.enabled)
-                : typeof value === 'boolean'
-                  ? value
-                  : Array.isArray(value)
-                    ? value.length
-                    : value && typeof value === 'object'
-                      ? Object.keys(value).length
-                      : value !== null,
-            ];
-          }),
-        ),
+        ...summarizeSecurityFields(changedFields, updates),
       };
       await tx
         .update(schema.repositories)

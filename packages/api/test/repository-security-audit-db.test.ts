@@ -273,7 +273,11 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
           expect((await audits(db))[0]).toMatchObject({
             action: 'repository.remote.update',
             targetId: repository,
-            metadata: { host: 'new.test', credentialsChanged: true, branchChanged: true },
+            metadata: {
+              source: 'api', actorKind: 'authenticated_user',
+              fields: ['remoteUrl', 'credentialsSecretId', 'branch'],
+              host: 'new.test', credentialsChanged: true, branchChanged: true,
+            },
           });
           expect(JSON.stringify(await audits(db))).not.toMatch(/synthetic-password|user:|https:/);
         }
@@ -289,7 +293,8 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
         .insert(schema.repoCredentials)
         .values({
           userId: h.actor,
-          host: 'same.test',
+          source: 'api', actorKind: 'authenticated_user', fields: ['remoteUrl'],
+        host: 'same.test',
           label: 'test',
           usernameEncrypted: 'synthetic',
           secretEncrypted: 'synthetic',
@@ -317,6 +322,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       expect(res.status).toBe(200);
       expect((await stored())!).toMatchObject({ credentialsSecretId: cred!.id, branch: 'main' });
       expect((await audits(db))[0]!.metadata).toEqual({
+        source: 'api', actorKind: 'authenticated_user', fields: ['remoteUrl'],
         host: 'same.test',
         credentialsChanged: false,
         branchChanged: false,
@@ -527,7 +533,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       'https://first.test/r',
     );
     expect((await audits(db)).map((row) => row.metadata)).toEqual([
-      { host: 'first.test', credentialsChanged: false, branchChanged: false },
+      { source: 'api', actorKind: 'authenticated_user', fields: ['remoteUrl'], host: 'first.test', credentialsChanged: false, branchChanged: false },
     ]);
   }, 30_000);
   const sendSetting = (suffix: string, body: unknown, method = 'PATCH') =>
@@ -865,6 +871,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       ).status,
     ).toBe(200);
     expect((await audits(db))[0]!.metadata).toEqual({
+      source: 'api', actorKind: 'authenticated_user',
       fields: ['prWorkflowEnabled'],
       values: { prWorkflowEnabled: !current.prWorkflowEnabled },
     });
@@ -945,7 +952,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       .set({ scopeExcludeGlobs: ['old'] })
       .where(eq(schema.repositories.id, repository));
     expect((await sendSetting('exclusions', { scopeExcludeGlobs: ['new'] })).status).toBe(200);
-    expect((await audits(db))[0]!.metadata).toEqual({ addedCount: 1, removedCount: 1 });
+    expect((await audits(db))[0]!.metadata).toEqual({ source: 'api', actorKind: 'authenticated_user', fields: ['scopeExcludeGlobs'], addedCount: 1, removedCount: 1 });
     expect((await sendSetting('exclusions', { scopeExcludeGlobs: ['new'] })).status).toBe(200);
     expect(await audits(db)).toHaveLength(1);
   });
@@ -1009,7 +1016,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
         } else {
           expect(rows[0]).toMatchObject({
             action: 'repository.security.update',
-            metadata: { fields: [field], values: { [field]: safeValue } },
+            metadata: { source: 'api', actorKind: 'authenticated_user', fields: [field], values: { [field]: safeValue } },
           });
           expect(JSON.stringify(rows)).not.toMatch(
             /synthetic-rule-content|synthetic-command|#user|#pass/,

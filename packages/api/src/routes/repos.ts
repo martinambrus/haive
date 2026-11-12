@@ -120,6 +120,7 @@ import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { logger, type RepoRagCleanupPayload, type RepoResourceCleanupPayload } from '@haive/shared';
 import { getDb } from '../db.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
+import { summarizeScopeChange } from '@haive/shared/audit';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
 import { enqueueCheckoutSync, observeCheckoutBranchForReset } from '../lib/plan-mirror.js';
@@ -1003,10 +1004,10 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
       tx.select().from(schema.repositories).where(eq(schema.repositories.id, id)).for('update'),
     );
     if (!stored) throw new HttpError(404, 'Repository not found');
-    const previous = new Set(stored.scopeExcludeGlobs ?? []);
-    const wanted = new Set(scopeExcludeGlobs);
-    const addedCount = [...wanted].filter((glob) => !previous.has(glob)).length;
-    const removedCount = [...previous].filter((glob) => !wanted.has(glob)).length;
+    const { addedCount, removedCount } = summarizeScopeChange(
+      stored.scopeExcludeGlobs,
+      scopeExcludeGlobs,
+    );
     const rows = await tx
       .update(schema.repositories)
       .set({ scopeExcludeGlobs, updatedAt: new Date() })
