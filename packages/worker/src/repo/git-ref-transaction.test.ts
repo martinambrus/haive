@@ -178,6 +178,7 @@ describe('git ref transactions', () => {
     expect(failure).toBeInstanceOf(GitRefTransactionError);
     expect((failure as Error).message).toMatch(/cleanup did not finish/i);
     expect(child.kill.mock.calls).toEqual([['SIGTERM'], ['SIGKILL']]);
+    expect(child.unref).toHaveBeenCalledOnce();
     expect(log).toHaveBeenCalledTimes(1);
   });
 
