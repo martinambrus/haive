@@ -958,6 +958,16 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       expect(await stored()).toMatchObject(change);
       expect(await audits(db)).toEqual([]);
     }, 30_000);
+  it('scope null-to-empty normalization records no membership change', async () => {
+    await db
+      .update(schema.repositories)
+      .set({ scopeExcludeGlobs: null })
+      .where(eq(schema.repositories.id, repository));
+    expect((await sendSetting('exclusions', { scopeExcludeGlobs: [] })).status).toBe(200);
+    expect((await stored())!.scopeExcludeGlobs).toEqual([]);
+    expect(await audits(db)).toEqual([]);
+  });
+
   it('scope records added and removed counts and omits no-op saves', async () => {
     await db
       .update(schema.repositories)

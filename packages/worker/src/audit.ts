@@ -41,13 +41,18 @@ export async function auditRepositorySettings(
       sameValue((before as Record<string, unknown>)[field] ?? null, updates[field] ?? null)
     )
       continue;
-    const summary =
-      field === 'scopeExcludeGlobs'
-        ? summarizeScopeChange(
-            (before as { scopeExcludeGlobs?: string[] | null }).scopeExcludeGlobs,
-            updates[field] as string[] | null,
-          )
-        : summarizeSecurityFields([field], updates);
+    let summary: Record<string, unknown>;
+    if (field === 'scopeExcludeGlobs') {
+      const delta = summarizeScopeChange(
+        (before as { scopeExcludeGlobs?: string[] | null }).scopeExcludeGlobs,
+        updates[field] as string[] | null,
+      );
+      // The API audits membership changes, not null/empty, ordering or duplicate-only changes.
+      if (!delta.addedCount && !delta.removedCount) continue;
+      summary = delta;
+    } else {
+      summary = summarizeSecurityFields([field], updates);
+    }
     const event: AuditEvent = {
       actorUserId: actor.userId,
       action,
