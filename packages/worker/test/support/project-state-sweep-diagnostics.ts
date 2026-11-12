@@ -1,10 +1,20 @@
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { readLiveRootClaim, schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES } from '@haive/shared';
+import { safeErrorMessage } from '@haive/shared/logger';
 import type { ProjectStateSweepOutcome } from '../../src/project-state/refresh.js';
 import { checkoutHoldingTasks } from '../../src/repo/refresh.js';
 import { gitOperationMarker } from '../../src/repo/git-operation.js';
 import { gitRun } from '../../src/repo/git-exec.js';
+
+/** Bounds a probe that takes no timeout of its own, so a stalled one cannot outlast the smoke. */
+function withinMs<T>(probe: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`probe timed out after ${ms} ms`)), ms);
+  });
+  return Promise.race([probe, expired]).finally(() => clearTimeout(timer));
+}
 
 /** Read-only snapshot of a dirty repository immediately after its actual sweep attempt.
  * synced_hash belongs to project_state_sync, not the outbox. No writer is called here. */
@@ -12,6 +22,7 @@ export async function projectStateSweepDiagnostic(
   db: Database,
   repositoryId: string,
   refresh: ProjectStateSweepOutcome,
+  probeTimeoutMs = 10_000,
 ) {
   const rows = await db.execute<{
     revision: number;
@@ -50,7 +61,7 @@ export async function projectStateSweepDiagnostic(
         ),
       )
       .limit(10),
-    repoPath ? gitOperationMarker(repoPath) : Promise.resolve(null),
+    repoPath ? withinMs(gitOperationMarker(repoPath), probeTimeoutMs) : Promise.resolve(null),
     repoPath
       ? gitRun(
           repoPath,
@@ -58,7 +69,7 @@ export async function projectStateSweepDiagnostic(
           {
             GIT_OPTIONAL_LOCKS: '0',
           },
-          { maxBuffer: 8192, timeout: 10_000 },
+          { maxBuffer: 8192, timeout: probeTimeoutMs },
         )
       : Promise.resolve(null),
   ]);
@@ -66,7 +77,8 @@ export async function projectStateSweepDiagnostic(
     const probe = probes[index]!;
     return probe.status === 'fulfilled'
       ? probe.value
-      : { error: String(probe.reason).slice(0, 500) };
+      : // Database errors carry bound values; safeErrorMessage drops them.
+        { error: safeErrorMessage(probe.reason).slice(0, 500) };
   };
   return {
     repositoryId,

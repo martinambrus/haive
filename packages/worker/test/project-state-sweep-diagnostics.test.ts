@@ -6,12 +6,17 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { projectStateSweepDiagnostic } from './support/project-state-sweep-diagnostics.js';
 
-const mocks = vi.hoisted(() => ({ claim: vi.fn(), holders: vi.fn() }));
+const mocks = vi.hoisted(() => ({ claim: vi.fn(), holders: vi.fn(), marker: vi.fn() }));
 vi.mock('@haive/database', async (original) => ({
   ...(await original<object>()),
   readLiveRootClaim: mocks.claim,
 }));
 vi.mock('../src/repo/refresh.js', () => ({ checkoutHoldingTasks: mocks.holders }));
+vi.mock('../src/repo/git-operation.js', async (original) => {
+  const real = await original<typeof import('../src/repo/git-operation.js')>();
+  mocks.marker.mockImplementation(real.gitOperationMarker);
+  return { ...real, gitOperationMarker: (path: string) => mocks.marker(path) };
+});
 
 let repo: string;
 const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' });
@@ -31,6 +36,10 @@ const fixture = (outbox = rows()) => {
 };
 beforeEach(async () => {
   vi.clearAllMocks();
+  const real = await vi.importActual<typeof import('../src/repo/git-operation.js')>(
+    '../src/repo/git-operation.js',
+  );
+  mocks.marker.mockImplementation(real.gitOperationMarker);
   repo = await mkdtemp(join(tmpdir(), 'sweep-diagnostic-'));
   git('init', '-q', '-b', 'main');
   git(
@@ -102,7 +111,24 @@ it('keeps the other probes when a lease cannot be read, and preserves the sync r
   const snapshot = await projectStateSweepDiagnostic(fixture(), 'repo', refresh);
   expect(snapshot).toMatchObject({
     refresh,
-    rootClaim: { error: 'Error: lease unavailable' },
+    rootClaim: { error: 'lease unavailable' },
+    rootCheckoutHolders: 1,
+    gitStatus: { code: 0 },
+  });
+});
+it('reports a database error without its bound values', async () => {
+  mocks.claim.mockRejectedValue(
+    Object.assign(new Error('insert failed for secret-value'), { parameters: ['secret-value'] }),
+  );
+  const snapshot = await projectStateSweepDiagnostic(fixture(), 'repo', { outcome: 'written' });
+  expect(snapshot?.rootClaim).toEqual({ error: 'Database operation failed' });
+  expect(JSON.stringify(snapshot)).not.toContain('secret-value');
+});
+it('bounds a stalled git operation probe and keeps the others', async () => {
+  mocks.marker.mockReturnValue(new Promise(() => {}));
+  const snapshot = await projectStateSweepDiagnostic(fixture(), 'repo', { outcome: 'written' }, 50);
+  expect(snapshot).toMatchObject({
+    gitOperationMarker: { error: 'probe timed out after 50 ms' },
     rootCheckoutHolders: 1,
     gitStatus: { code: 0 },
   });

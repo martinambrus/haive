@@ -36,6 +36,7 @@ import {
   type FormSchema,
 } from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
+import { safeErrorMessage } from '@haive/shared/logger';
 import {
   blocksUpgrade,
   bundleFileName,
@@ -123,7 +124,11 @@ async function sweepDirtyProjectStates(db: Database): Promise<number> {
       const diagnostic = await projectStateSweepDiagnostic(db, repositoryId, refresh);
       if (diagnostic) diagnostics.push(diagnostic);
     } catch (err) {
-      diagnostics.push({ repositoryId, refresh, diagnosticError: String(err).slice(0, 500) });
+      diagnostics.push({
+        repositoryId,
+        refresh,
+        diagnosticError: safeErrorMessage(err).slice(0, 500),
+      });
     }
   }
   sweepDiagnostics.set(db, diagnostics);
