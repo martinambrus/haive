@@ -57,6 +57,8 @@ const UUID = '00000000-0000-4000-8000-000000000001';
 const NO_ROUTE = 'x-no-route';
 
 const PUBLIC: Record<string, string> = {
+  'POST /ide/_handshake': 'redeems a single-use editor grant; it does not use the app session',
+  'GET /ide/_handshake': 'static fragment bootstrap; it carries no app-session authority',
   'GET /health': 'liveness probe; the container health check carries no credential',
   'GET /version': 'an upgrade verifies the containers it swapped in before any credential exists',
   'GET /auth/registration-status':

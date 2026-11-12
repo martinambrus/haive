@@ -126,6 +126,7 @@ services:
       # pages (the proxied editor) call it from even when a reverse proxy rewrites Host.
       HAIVE_API_PORT: ${HAIVE_API_PORT:-3001}
       HAIVE_PUBLIC_API_URL: ${HAIVE_PUBLIC_API_URL:-}
+      HAIVE_EDITOR_ORIGIN: ${HAIVE_EDITOR_ORIGIN:-}
       # IPs or CIDRs (comma separated) of the reverse proxies whose X-Forwarded-For header the api
       # may believe when it counts sign-in and registration attempts per client. Empty by default:
       # the TCP peer is used, and a header from anyone else is never read.

@@ -2,32 +2,31 @@ import net from 'node:net';
 import type { Server, IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { Hono, type Context } from 'hono';
-import { and, eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
   configService,
-  IDE_ENSURE_JOB_NAMES,
   IDE_INTERNAL_PORT,
   IDE_SESSION_PREFIX,
   ideRunnerName,
   ideSessionKey,
   logger,
-  repoIdeSessionId,
-  type IdeEnsurePayload,
-  type IdeEnsureResult,
 } from '@haive/shared';
-import { getDb } from '../db.js';
+import { ideTarget, targetBelongsToUser, ensureIde, type IdeTarget } from '../lib/ide-target.js';
+import { editorBootstrap } from '../lib/editor-bootstrap.js';
+import { bodyLimit } from 'hono/body-limit';
+import { grantEditor, redeemEditor } from '../lib/editor-grants.js';
 import { getPatientRedis } from '../redis.js';
-import { getIdeEnsureQueue, getIdeEnsureQueueEvents } from '../queues.js';
 import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
 import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import type { UpgradeSession } from '../lib/user-sockets.js';
 import {
   isSessionSetCookie,
+  getAccessCookie,
   withoutSessionCookies,
   withoutSessionSetCookies,
 } from '../auth/cookies.js';
+import { editorCookieFromHeader, requireEditorUser } from '../auth/editor-session.js';
+import { editorIdentity, authenticateEditorUpgrade } from '../lib/editor-auth.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
@@ -48,7 +47,6 @@ import { isCanonicalUuid } from '../lib/uuid.js';
 
 const log = logger.child({ module: 'ide-proxy' });
 const WS_PATH_PREFIX = '/ide/';
-const IDE_ENSURE_TIMEOUT_MS = 180_000;
 // Response headers that must not be forwarded verbatim. content-encoding/length
 // are dropped because undici's fetch auto-decodes the upstream body (we also force
 // identity upstream); the rest are connection-scoped.
@@ -102,42 +100,14 @@ function upstreamRequestHeaders(source: Headers): Headers {
 // ---- HTTP reverse proxy ---------------------------------------------------
 
 export const ideRoutes = new Hono<AppEnv>();
-ideRoutes.use('*', requireAuth);
-
-interface IdeTarget {
-  sessionId: string;
-  prefix: string;
-  payload: IdeEnsurePayload;
-}
-
-function ideTarget(id: string, userId: string, repository = false): IdeTarget {
-  return {
-    sessionId: repository ? repoIdeSessionId(id) : id,
-    prefix: repository ? `/ide/repos/${id}` : `/ide/${id}`,
-    payload: repository ? { repositoryId: id, userId } : { taskId: id, userId },
-  };
-}
-
-async function targetBelongsToUser(target: IdeTarget): Promise<boolean> {
-  const db = getDb();
-  const { userId, repositoryId, taskId } = target.payload;
-  const row = repositoryId
-    ? await db.query.repositories.findFirst({
-        where: and(
-          eq(schema.repositories.id, repositoryId),
-          eq(schema.repositories.userId, userId),
-        ),
-        columns: { id: true },
-      })
-    : await db.query.tasks.findFirst({
-        where: and(eq(schema.tasks.id, taskId!), eq(schema.tasks.userId, userId)),
-        columns: { id: true },
-      });
-  return row != null;
-}
+ideRoutes.get('/_handshake', editorBootstrap);
+ideRoutes.post('/_handshake', bodyLimit({ maxSize: 1024 }), redeemEditor);
 
 // Starting an editor is an explicit POST. Loading its HTML/assets only proxies an existing one.
+export const taskIdeAccessRoutes = new Hono<AppEnv>();
 export const repoIdeAccessRoutes = new Hono<AppEnv>();
+taskIdeAccessRoutes.post('/:id/editor-handshake', requireAuth, (c) => grantEditor(c));
+repoIdeAccessRoutes.post('/:id/editor-handshake', requireAuth, (c) => grantEditor(c, true));
 repoIdeAccessRoutes.post('/:id/ensure-ide', requireAuth, async (c) => {
   const id = c.req.param('id');
   if (!isCanonicalUuid(id)) throw new HttpError(404, 'Repository not found');
@@ -160,9 +130,25 @@ function isPortProxyPath(path: string): boolean {
 }
 
 async function proxyHttp(c: Context<AppEnv>, repository = false): Promise<Response> {
-  const userId = c.get('userId');
   const taskId = c.req.param('id');
   if (!taskId || !isCanonicalUuid(taskId)) throw new HttpError(404, 'Not found');
+  const scope = { kind: repository ? ('repo' as const) : ('task' as const), id: taskId };
+  let userId: string | undefined;
+  try {
+    const identity = await editorIdentity(c.req.header('cookie'), scope);
+    if (identity) {
+      const user = await requireEditorUser(identity.sub, identity.tv);
+      userId = user.id;
+    }
+  } catch (err) {
+    // A stale editor cookie must not mask a valid app session during the transition.
+    if (!(err instanceof HttpError && err.status === 403 && getAccessCookie(c))) throw err;
+  }
+  if (userId === undefined) {
+    // TRANSITION ONLY: deployed web still uses the app session. PR 4 removes this branch.
+    await requireAuth(c, async () => {});
+    userId = c.get('userId');
+  }
   const target = ideTarget(taskId, userId, repository);
   if (!(await targetBelongsToUser(target))) throw new HttpError(404, 'Not found');
 
@@ -251,9 +237,20 @@ export function installIdeWebSocket(server: Server): void {
           rejectUpgrade(socket, 404, 'Not Found');
           return;
         }
-        const auth = await authenticateUpgrade(req);
+        const scope = {
+          kind: parsed.repository ? ('repo' as const) : ('task' as const),
+          id: parsed.id,
+        };
+        const hasEditorCookie = editorCookieFromHeader(req.headers.cookie, scope) !== undefined;
+        let auth = hasEditorCookie ? await authenticateEditorUpgrade(req, scope) : null;
+        // TRANSITION ONLY: deployed web still uses the app session. PR 4 removes this branch.
+        if (!auth) auth = await authenticateUpgrade(req);
         if (!auth) {
-          rejectUpgrade(socket, 401, 'Unauthorized');
+          rejectUpgrade(
+            socket,
+            hasEditorCookie ? 403 : 401,
+            hasEditorCookie ? 'Forbidden' : 'Unauthorized',
+          );
           return;
         }
         const target = ideTarget(parsed.id, auth.userId, parsed.repository);
@@ -286,7 +283,7 @@ export function installIdeWebSocket(server: Server): void {
         if (auth.session.revoked) return;
         proxyWsUpgrade(req, socket, head, target, auth.session);
       } catch (err) {
-        log.error({ err, url: rawUrl }, 'ide upgrade handler failed');
+        log.error({ err, path: rawUrl.split(/[?#]/)[0] }, 'ide upgrade handler failed');
         rejectUpgrade(socket, 500, 'Internal Server Error');
       }
     })();
@@ -455,18 +452,6 @@ export async function resetStaleIdeRefcounts(): Promise<void> {
 }
 
 // ---- ensure + auth helpers (mirror browser-vnc) ---------------------------
-
-async function ensureIde(target: IdeTarget): Promise<IdeEnsureResult> {
-  const job = await getIdeEnsureQueue().add(IDE_ENSURE_JOB_NAMES.ENSURE, target.payload, {
-    jobId: `ensure-ide-${target.sessionId}`,
-    removeOnComplete: true,
-    removeOnFail: true,
-  });
-  return (await job.waitUntilFinished(
-    getIdeEnsureQueueEvents(),
-    IDE_ENSURE_TIMEOUT_MS,
-  )) as IdeEnsureResult;
-}
 
 function extractIdeTarget(rawUrl: string): { id: string; repository: boolean } | null {
   const withoutQuery = rawUrl.split('?')[0] ?? rawUrl;

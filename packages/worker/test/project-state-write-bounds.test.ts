@@ -4,7 +4,11 @@ import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { emptyProjectState, renderProjectState } from '@haive/shared/project-state';
+import {
+  PROJECT_STATE_LIMITS,
+  emptyProjectState,
+  renderProjectState,
+} from '@haive/shared/project-state';
 import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
 import {
   ProjectStateUnreadableError,
@@ -12,8 +16,7 @@ import {
   writeProjectStateRecord,
 } from '../src/project-state/write.js';
 
-// 4,094 files through the descriptor-held write take half a minute on a busy host; this test is
-// about how many files the writer plans, not how it writes each one.
+// The bound is about how many entries the writer plans, not how it writes each one.
 vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
   const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
   return {
@@ -30,8 +33,9 @@ const REPO = '00000000-0000-4000-8000-0000000000b1';
 const TASK = '00000000-0000-4000-8000-0000000000c1';
 const STATE = '.haive-data/state';
 // format.json, project/, project/render.json, artifacts/, cli/ and cli/claude-code.json
-// stand beside the claims. The real reader limit remains exactly4096 entries.
-const AT_LIMIT = 4096 - 6;
+// stand beside the claims.
+const LIMITS = { ...PROJECT_STATE_LIMITS, maxEntries: 10 };
+const AT_LIMIT = LIMITS.maxEntries - 6;
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -120,39 +124,42 @@ async function setup(claims: number) {
         repoPath: root,
         context: context() as never,
         rtkChoiceRecorded: true,
+        limits: LIMITS,
       }),
   };
 }
 
-const LONG = { timeout: 120_000 };
-
 describe('writeProjectStateRecord: a record the reader would refuse', () => {
-  it('refuses a ledger of 4,091 claims and writes no file', LONG, async () => {
+  it('refuses a ledger of one claim past the cap and writes no file', async () => {
+    expect(PROJECT_STATE_LIMITS.maxEntries).toBe(4096);
     const s = await setup(AT_LIMIT + 1);
 
-    expect(s.candidateEntries).toBe(4097);
+    expect(s.candidateEntries).toBe(LIMITS.maxEntries + 1);
     const err = await s.write().catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(ProjectStateWriteError);
     expect((err as ProjectStateWriteError).cause).toBeInstanceOf(ProjectStateUnreadableError);
-    expect((err as Error).message).toMatch(/more than 4096 entries/);
+    expect((err as Error).message).toMatch(/more than 10 entries/);
     expect((err as ProjectStateWriteError).written).toEqual([]);
     expect(await readdir(s.root)).toEqual([]);
     expect(s.fake.rows(schema.repositories)[0]?.renderContext ?? null).toBeNull();
     expect(s.fake.rows(schema.projectStateSync)).toEqual([]);
   });
 
-  it('writes a ledger of 4,090 claims, which the reader takes in whole', LONG, async () => {
+  it('writes a ledger of claims at the cap, which the reader takes in whole', async () => {
     const s = await setup(AT_LIMIT);
 
-    expect(s.candidateEntries).toBe(4096);
+    expect(s.candidateEntries).toBe(LIMITS.maxEntries);
     const { written } = await s.write();
 
     expect(written).toHaveLength(AT_LIMIT + 3);
-    expect((await readdir(join(s.root, STATE), { recursive: true })).length).toBe(4096);
+    expect((await readdir(join(s.root, STATE), { recursive: true })).length).toBe(
+      LIMITS.maxEntries,
+    );
     const synced = await syncProjectStateFromCheckout(s.db, {
       repositoryId: REPO,
       repoPath: s.root,
+      limits: LIMITS,
     });
     expect(synced.outcome).toBe('unchanged');
   });

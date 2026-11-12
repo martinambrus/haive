@@ -11,10 +11,15 @@ export const PROJECT_STATE_LIMITS = {
  *  setting's own cap, not one a reader of the directory enforces, so it is no entry above. */
 export const MAX_AGENT_RULES_BYTES = 64 * 1024;
 
+export type ProjectStateLimits = { [K in keyof typeof PROJECT_STATE_LIMITS]: number };
+
 export type RecordReadable = { readable: true } | { readable: false; reason: string };
 
 /** Whether a reader's walk of these files (relative to the state directory) would accept them. */
-export function recordReadable(files: ReadonlyMap<string, string>): RecordReadable {
+export function recordReadable(
+  files: ReadonlyMap<string, string>,
+  limits: ProjectStateLimits = PROJECT_STATE_LIMITS,
+): RecordReadable {
   const dirs = new Set<string>();
   const utf8 = new TextEncoder();
   let bytes = 0;
@@ -22,24 +27,24 @@ export function recordReadable(files: ReadonlyMap<string, string>): RecordReadab
     const parts = rel.split('/');
     for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'));
     const size = utf8.encode(text).length;
-    if (size > PROJECT_STATE_LIMITS.maxFileBytes) {
+    if (size > limits.maxFileBytes) {
       return {
         readable: false,
-        reason: `${rel} is larger than ${PROJECT_STATE_LIMITS.maxFileBytes / MIB} MiB`,
+        reason: `${rel} is larger than ${limits.maxFileBytes / MIB} MiB`,
       };
     }
     bytes += size;
   }
-  if (files.size + dirs.size > PROJECT_STATE_LIMITS.maxEntries) {
+  if (files.size + dirs.size > limits.maxEntries) {
     return {
       readable: false,
-      reason: `the state directory would hold more than ${PROJECT_STATE_LIMITS.maxEntries} entries`,
+      reason: `the state directory would hold more than ${limits.maxEntries} entries`,
     };
   }
-  if (bytes > PROJECT_STATE_LIMITS.maxTotalBytes) {
+  if (bytes > limits.maxTotalBytes) {
     return {
       readable: false,
-      reason: `the state directory would hold more than ${PROJECT_STATE_LIMITS.maxTotalBytes / MIB} MiB`,
+      reason: `the state directory would hold more than ${limits.maxTotalBytes / MIB} MiB`,
     };
   }
   return { readable: true };

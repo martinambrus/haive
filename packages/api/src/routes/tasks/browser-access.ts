@@ -6,21 +6,14 @@ import {
   CONFIG_KEYS,
   configService,
   RUNTIME_ENSURE_JOB_NAMES,
-  IDE_ENSURE_JOB_NAMES,
   type RuntimeEnsurePayload,
   type RuntimeEnsureResult,
-  type IdeEnsurePayload,
-  type IdeEnsureResult,
   type TaskAccessEndpoint,
 } from '@haive/shared';
+import { ideTarget, targetBelongsToUser, ensureIde } from '../../lib/ide-target.js';
 import { getDb } from '../../db.js';
 import { HttpError, type AppEnv } from '../../context.js';
-import {
-  getRuntimeEnsureQueue,
-  getRuntimeEnsureQueueEvents,
-  getIdeEnsureQueue,
-  getIdeEnsureQueueEvents,
-} from '../../queues.js';
+import { getRuntimeEnsureQueue, getRuntimeEnsureQueueEvents } from '../../queues.js';
 
 // Direct browser access: the user opens a task's running app in their OWN browser
 // (localhost + *.ddev.site URLs) instead of the VNC pixel stream. The worker
@@ -37,11 +30,6 @@ const DDEV_CA_PATH = process.env.DDEV_CA_PATH || '/var/lib/haive/ddev-ca/rootCA.
 /** Bound wait for a runtime cold boot, sized like the VNC ensure so a slow DDEV
  *  start bridges in one shot rather than erroring early. */
 const ACCESS_ENSURE_TIMEOUT_MS = 180_000;
-/** Bound wait for the IDE container to come up. A first-ever launch also pulls the
- *  code-server image; if that runs past this, the await times out → 202 pending and
- *  the Editor tab retries (the coalesced ensure job keeps running). */
-const IDE_ENSURE_TIMEOUT_MS = 180_000;
-
 async function requireOwnedTask(taskId: string, userId: string): Promise<void> {
   const db = getDb();
   const row = await db.query.tasks.findFirst({
@@ -150,21 +138,14 @@ browserAccessRoutes.post('/:id/open-mailpit', async (c) => {
 browserAccessRoutes.post('/:id/ensure-ide', async (c) => {
   const userId = c.get('userId');
   const taskId = c.req.param('id');
-  await requireOwnedTask(taskId, userId);
+  const target = ideTarget(taskId, userId);
+  if (!(await targetBelongsToUser(target))) throw new HttpError(404, 'Task not found');
 
   const enabled = await configService.getBoolean(CONFIG_KEYS.IDE_ENABLED, true);
   if (!enabled) return c.json({ enabled: false, ready: false });
 
   try {
-    const job = await getIdeEnsureQueue().add(
-      IDE_ENSURE_JOB_NAMES.ENSURE,
-      { taskId, userId } satisfies IdeEnsurePayload,
-      { jobId: `ensure-ide-${taskId}`, removeOnComplete: true, removeOnFail: true },
-    );
-    const result = (await job.waitUntilFinished(
-      getIdeEnsureQueueEvents(),
-      IDE_ENSURE_TIMEOUT_MS,
-    )) as IdeEnsureResult;
+    const result = await ensureIde(target);
     if (result?.ok) return c.json({ enabled: true, ready: true });
     return c.json({ enabled: true, ready: false, reason: result?.reason ?? 'unavailable' }, 409);
   } catch {

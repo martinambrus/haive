@@ -84,17 +84,16 @@ Step lifecycle: `pending` to `running(detect)` to `waiting_form` to `running(app
 - `pnpm typecheck` runs `tsc --noEmit` everywhere.
 - `pnpm test` runs Vitest across the workspace.
 - `pnpm test:e2e` runs Playwright against the dev compose stack.
-- A smoke that puts jobs on a queue (`smoke:onboarding`, `smoke:workflow`, `smoke:fix-loop` and
-  their siblings) needs its OWN Redis and database, as CI gives it. Pointed at the dev stack's, the
-  dev worker takes its jobs off the shared queue and runs them with the dev stack's code rather than
-  the branch's. Start a throwaway `redis` container and a scratch database for it. `smoke:ci` runs each smoke
-  under its own limit ([CI smokes](docs/architecture/ci-smokes.md)).
+- A smoke that puts jobs on a queue (`smoke:onboarding`, `smoke:workflow` and
+  siblings) needs its OWN Redis and database, as CI gives it. Pointed at the dev stack's, the
+  dev worker takes its jobs off the shared queue and runs the dev stack's code, not the branch's.
+  `smoke:ci` runs each smoke under its own limit ([CI smokes](docs/architecture/ci-smokes.md)).
 - `pnpm --filter @haive/database migrate` applies pending SQL migrations to `DATABASE_URL`. This is the applier: the `db-migrate` compose one-shot and CI both run it, and api/worker/web wait for it via `depends_on: service_completed_successfully`.
-- `pnpm db:push` (`drizzle-kit push`, interactive) is the DEV escape hatch, not the applier. Use it to iterate on a schema shape, then hand-write the numbered migration before committing — the CI `schema-parity` job compares the two and goes red if they disagree. It will offer to DROP `schema_migrations`, because that table is deliberately absent from the Drizzle barrel; accepting is recoverable (the next `migrate` re-adopts) but never what you want.
+- `pnpm db:push` (`drizzle-kit push`, interactive) is the DEV escape hatch, not the applier. Use it to iterate on a schema shape, then hand-write the numbered migration before committing — the CI `schema-parity` job compares the two and goes red if they disagree. It will offer to DROP `schema_migrations`, because that table is deliberately absent from the Drizzle barrel; accepting is recoverable (the next `migrate` re-adopts) but unwanted.
 - `pnpm docker:dev` (alias for `scripts/dev.sh up`) boots `docker-compose.yml` plus the dev override, GPU-aware. The script also exposes `rebuild`/`reset`/`restart`/`libs`/`logs`/`status` — run `pnpm docker help`.
 - `pnpm docker:down` (alias for `scripts/dev.sh down`) stops everything; it keeps all data volumes (never `-v`).
 
-The api and worker packages depend at build time on `@haive/shared` and `@haive/database`. Always build those two first when running anything outside of turbo.
+The api and worker packages depend at build time on `@haive/shared` and `@haive/database`. Build those two first when running anything outside turbo.
 
 ### Never drive compose directly
 
@@ -361,6 +360,11 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 - [Onboarding template versioning](docs/architecture/onboarding-upgrades.md): the manifest, what
   to bump, upgrade apply and rollback, RTK off. `template-manifest.ts`, `_agent-templates.ts`,
   `02-upgrade-apply`.
+
+### Testing
+
+- [Testing](docs/architecture/testing.md): cheapest layer, injectable limits, fake timers, fixtures,
+  CI matrix.
 
 ### Releases
 

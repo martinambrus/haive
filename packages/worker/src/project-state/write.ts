@@ -31,6 +31,7 @@ import {
 import {
   PROJECT_STATE_DIR,
   PROJECT_STATE_LIMITS,
+  type ProjectStateLimits,
   RENDER_UNIT,
   ENVIRONMENT_UNIT,
   bundleDescriptors,
@@ -93,6 +94,7 @@ export async function lockProjectState(tx: Tx, repositoryId: string): Promise<vo
 }
 
 interface ProjectStateColumnInput {
+  limits?: ProjectStateLimits;
   repositoryId: string;
   repoPath: string;
   /** The columns the writer planned against; a column found holding anything else (null aside)
@@ -588,6 +590,7 @@ export async function writeProjectStateColumn(
     keepColumnOnFailure,
     refuseDuringGitOperation,
     discardWriteIntentOnFailure,
+    limits = PROJECT_STATE_LIMITS,
   }: ProjectStateColumnInput & {
     column: RenderContextColumn;
     /** The column is what it was before the write, so a failure leaves it rather than clearing it. */
@@ -675,7 +678,7 @@ export async function writeProjectStateColumn(
     let plan: ReturnType<typeof planFor>;
     const writeFiles = async (baseFiles: readonly string[]): Promise<void> => {
       const files = renderProjectState(plan.record);
-      const readable = recordReadable(files);
+      const readable = recordReadable(files, limits);
       if (!readable.readable) throw new ProjectStateUnreadableError(readable.reason);
       const produced = new Set<string>();
       for (const [rel, text] of files) {
@@ -828,7 +831,7 @@ export async function writeProjectStateColumn(
     const preparation = db.transaction(async (tx) => {
       await gate(tx);
       await recoverWriteLocked(tx, repositoryId, repoPath, expectedCheckout);
-      const checkout = await readCheckout(repoPath);
+      const checkout = await readCheckout(repoPath, limits);
       if (checkout.kind === 'refused') throw new ProjectStateMovedError(checkout.reason);
       if (checkout.kind === 'absent' && checkout.hash !== 'absent') {
         throw new ProjectStateMovedError(
@@ -855,6 +858,7 @@ export async function writeProjectStateColumn(
           auditEvents,
           repositoryId,
           repoPath,
+          limits,
           checkout,
           seen: sync ?? null,
           seenRepo: repo,
@@ -882,9 +886,9 @@ export async function writeProjectStateColumn(
       const now = await lookAt(tx);
       plan = planFor(now);
       const files = renderProjectState(plan.record);
-      const readable = recordReadable(files);
+      const readable = recordReadable(files, limits);
       if (!readable.readable) throw new ProjectStateUnreadableError(readable.reason);
-      const before = (await readStateFiles(repoPath)) ?? new Map<string, string>();
+      const before = (await readStateFiles(repoPath, { limits })) ?? new Map<string, string>();
       if (hashFiles(before) !== checkout.hash) throw new ProjectStateMovedError();
       const changes: WriteIntent['changes'] = [];
       for (const rel of new Set([
@@ -990,7 +994,7 @@ export async function writeProjectStateColumn(
         .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
       if ((intent?.value as WriteIntent | null)?.id !== prepared.intentId)
         throw new ProjectStateMovedError();
-      const checkout = await readCheckout(repoPath);
+      const checkout = await readCheckout(repoPath, limits);
       if (checkout.kind === 'refused' || checkout.hash !== prepared.hash) {
         throw new ProjectStateMovedError();
       }
@@ -1006,7 +1010,7 @@ export async function writeProjectStateColumn(
       if (!sameValue(now, prepared.look)) throw new ProjectStateMovedError();
       plan = planFor(now);
       await writeFiles([...now.baseFiles, ...prepared.previousBaseFiles]);
-      const readBack = await readCheckout(repoPath);
+      const readBack = await readCheckout(repoPath, limits);
       if (readBack.kind !== 'record' || readBack.hash !== prepared.targetHash)
         throw new ProjectStateMovedError();
       if (
@@ -1051,7 +1055,7 @@ export async function writeProjectStateColumn(
         .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
       // SQL can yield to an external checkout or editor after the earlier output check. Refuse
       // the entire semantic tail while retaining the already committed undo intent on rollback.
-      const finalOutput = await readCheckout(repoPath);
+      const finalOutput = await readCheckout(repoPath, limits);
       if (finalOutput.kind !== 'record' || finalOutput.hash !== prepared.targetHash)
         throw new ProjectStateMovedError();
       await requireExpectedCheckout(tx, repositoryId, repoPath, expectedCheckout);
