@@ -18,7 +18,7 @@ const noOriginDetect = {
   credentials: [],
 };
 
-function buildForm(detected: typeof noOriginDetect) {
+function buildForm(detected: Parameters<NonNullable<typeof gate4PushStep.form>>[1]) {
   // form() is sync and only reads `detected` on this branch.
   return gate4PushStep.form!({} as unknown as StepContext, detected, undefined)!;
 }
@@ -64,5 +64,56 @@ describe('11a-gate-4-push — declining the push on a repo with no origin', () =
       } as never,
     );
     expect(out).toMatchObject({ pushed: false, message: 'push skipped' });
+  });
+});
+
+describe('gate 4 shows saved settings without replacement controls', () => {
+  const savedRemoteUrl = 'https://saved.example/repo.git';
+  const savedCredential = { id: 'saved-credential', label: 'Saved token', host: 'saved.example' };
+
+  it('shows a saved remote read-only while leaving an empty credential slot selectable', () => {
+    const form = buildForm({ ...noOriginDetect, savedRemoteUrl });
+    expect(form.fields.find((f) => f.id === 'remoteUrl')).toMatchObject({
+      type: 'note',
+      body: expect.stringContaining(savedRemoteUrl),
+      visibleWhen: { field: 'push', equals: true },
+    });
+    expect(form.fields.find((f) => f.id === 'remoteUrl')).toMatchObject({
+      body: expect.stringContaining('Change remote on the [Repositories page](/repos)'),
+    });
+    expect(form.fields.find((f) => f.id === 'credentialId')?.type).toBe('select');
+    expect(validateFormValues(form, { push: true }).success).toBe(true);
+  });
+
+  it('shows a saved credential read-only while leaving an empty remote slot editable', () => {
+    const form = buildForm({
+      ...noOriginDetect,
+      boundCredentialId: savedCredential.id,
+      credentials: [savedCredential],
+    });
+    expect(form.fields.find((f) => f.id === 'credentialId')).toMatchObject({
+      type: 'note',
+      body: expect.stringContaining(savedCredential.label),
+      visibleWhen: { field: 'push', equals: true },
+    });
+    expect(form.fields.find((f) => f.id === 'credentialId')).toMatchObject({
+      body: expect.stringContaining('Change remote on the [Repositories page](/repos)'),
+    });
+    expect(form.fields.find((f) => f.id === 'remoteUrl')?.type).toBe('text');
+    expect(validateFormValues(form, { push: false }).success).toBe(true);
+  });
+});
+
+it('keeps a saved credential read-only when repairing a missing saved remote with an existing origin', () => {
+  const form = buildForm({
+    ...noOriginDetect,
+    hasOrigin: true,
+    originUrl: 'https://example.com/repo.git',
+    savedRemoteUrl: null,
+    boundCredentialId: 'saved-credential',
+  });
+  expect(form.fields.find((f) => f.id === 'credentialId')).toMatchObject({
+    type: 'note',
+    body: expect.stringContaining('Change remote on the [Repositories page](/repos)'),
   });
 });

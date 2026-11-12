@@ -2658,9 +2658,17 @@ repoRoutes.post('/:id/remote', async (c) => {
     });
     if (!cred) throw new HttpError(404, 'Credentials not found');
     if (!credentialFitsGitRemote(cred, body.remoteUrl))
-      throw new HttpError(400, 'The Git credential does not fit the remote');
+      throw new HttpError(
+        400,
+        body.credentialsId === undefined
+          ? 'The saved Git credential does not fit the remote; choose a credential for the new host or clear it'
+          : 'The Git credential does not fit the remote',
+      );
   };
-  await requireFittingCredential(db, body.credentialsId ?? repo.credentialsSecretId);
+  await requireFittingCredential(
+    db,
+    body.credentialsId === undefined ? repo.credentialsSecretId : body.credentialsId,
+  );
 
   const git = async (
     args: string[],
@@ -2797,11 +2805,14 @@ repoRoutes.post('/:id/remote', async (c) => {
             .for('no key update'),
         );
         if (!stored) throw new HttpError(404, 'Repository not found');
-        await requireFittingCredential(tx, body.credentialsId ?? stored.credentialsSecretId);
+        await requireFittingCredential(
+          tx,
+          body.credentialsId === undefined ? stored.credentialsSecretId : body.credentialsId,
+        );
         const host = parseScpLikeGitUrl(body.remoteUrl)?.host ?? new URL(body.remoteUrl).hostname;
         const patch = {
           remoteUrl: body.remoteUrl,
-          ...(body.credentialsId ? { credentialsSecretId: body.credentialsId } : {}),
+          ...(body.credentialsId !== undefined ? { credentialsSecretId: body.credentialsId } : {}),
           ...(body.branch ? { branch: body.branch } : {}),
         };
         const fields = (Object.keys(patch) as (keyof typeof patch)[]).filter(
@@ -2818,7 +2829,7 @@ repoRoutes.post('/:id/remote', async (c) => {
             fields,
             host,
             credentialsChanged:
-              (body.credentialsId ?? stored.credentialsSecretId) !== stored.credentialsSecretId,
+              body.credentialsId !== undefined && body.credentialsId !== stored.credentialsSecretId,
             branchChanged: Boolean(body.branch && body.branch !== stored.branch),
           },
         };

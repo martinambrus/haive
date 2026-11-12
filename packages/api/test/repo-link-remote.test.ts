@@ -215,10 +215,70 @@ it.each([false, true])(
       }),
     });
     expect(res.status).toBe(400);
+    if (retained) {
+      expect(await res.json()).toMatchObject({
+        error: expect.stringContaining('choose a credential for the new host or clear it'),
+      });
+    }
     expect(h.git).not.toHaveBeenCalled();
     expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
   },
 );
+
+it('clears a saved credential without reading or fit-checking it and audits the change', async () => {
+  const credentialId = '00000000-0000-4000-8000-0000000000c1';
+  fake.patch(schema.repositories, REPO, { credentialsSecretId: credentialId });
+  // No credential row exists: looking up or checking the discarded binding must fail.
+  const credentialRead = vi.spyOn(fake.db.query.repoCredentials!, 'findFirst');
+  h.git.mockResolvedValueOnce({ stdout: 'true\n', stderr: '' });
+  const response = await app.request(`/${REPO}/remote`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      remoteUrl: 'git@other.example.test:public/repo.git',
+      credentialsId: null,
+    }),
+  });
+  expect(response.status).toBe(200);
+  expect(credentialRead).not.toHaveBeenCalled();
+  expect(fake.rows(schema.repositories)[0]).toMatchObject({
+    remoteUrl: 'git@other.example.test:public/repo.git',
+    credentialsSecretId: null,
+  });
+  expect(fake.rows(schema.auditEvents)).toEqual([
+    expect.objectContaining({
+      action: 'repository.remote.update',
+      metadata: expect.objectContaining({
+        credentialsChanged: true,
+        fields: expect.arrayContaining(['credentialsSecretId']),
+      }),
+    }),
+  ]);
+});
+
+it.each([false, true])('keeps or selects a fitting credential (explicit=%s)', async (explicit) => {
+  const saved = '00000000-0000-4000-8000-0000000000c1';
+  const selected = '00000000-0000-4000-8000-0000000000c2';
+  fake.insert(schema.repoCredentials, { id: saved, userId: USER, host: 'example.test' });
+  fake.insert(schema.repoCredentials, { id: selected, userId: USER, host: 'example.test' });
+  fake.patch(schema.repositories, REPO, { credentialsSecretId: saved });
+  const credentialRead = vi.spyOn(fake.db.query.repoCredentials!, 'findFirst');
+  h.git.mockResolvedValueOnce({ stdout: 'true\n', stderr: '' });
+  const response = await app.request(`/${REPO}/remote`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      remoteUrl: 'https://example.test/r',
+      ...(explicit ? { credentialsId: selected } : {}),
+    }),
+  });
+  expect(response.status).toBe(200);
+  expect(credentialRead).toHaveBeenCalledOnce(); // The transaction has its own query object.
+  expect(fake.rows(schema.repositories)[0]!.credentialsSecretId).toBe(explicit ? selected : saved);
+  expect(fake.rows(schema.auditEvents)[0]!.metadata).toMatchObject({
+    credentialsChanged: explicit,
+  });
+});
 
 it('rechecks a retained credential binding changed between the initial and locked reads', async () => {
   const fitting = '00000000-0000-4000-8000-0000000000c1';
@@ -235,7 +295,7 @@ it('rechecks a retained credential binding changed between the initial and locke
   const response = await link();
   expect(response.status).toBe(400);
   expect(await response.json()).toMatchObject({
-    error: 'The Git credential does not fit the remote',
+    error: expect.stringContaining('choose a credential for the new host or clear it'),
   });
   expect(h.git).toHaveBeenCalledTimes(1); // Only the pre-transaction checkout probe.
   expect(fake.rows(schema.repositories)[0]).toMatchObject({

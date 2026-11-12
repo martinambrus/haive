@@ -536,17 +536,14 @@ function RepoCard(props: RepoCardProps) {
               icon: Gauge,
               href: `/repos/${repo.id}/estimates`,
             },
-            // A repository with no remote cannot push ANYTHING — not the plan
-            // snapshot, not a finished task's branch. Offered here as well as on
-            // the plan page because the gap belongs to the repository, and this
-            // is the page where a repository is managed.
-            repo.status === 'ready' &&
-              !repo.remoteUrl && {
-                key: 'link-origin',
-                label: 'Link to origin',
-                icon: Link2,
-                onClick: () => setLinkingOrigin(true),
-              },
+            // The same dialog links the first origin or changes a saved remote
+            // and credential, so gate 4's refusal has an actionable destination.
+            repo.status === 'ready' && {
+              key: 'link-origin',
+              label: repo.remoteUrl ? 'Change remote' : 'Link to origin',
+              icon: Link2,
+              onClick: () => setLinkingOrigin(true),
+            },
             repo.status === 'ready' && {
               key: 'download',
               label: downloading ? 'Zipping...' : 'Download',
@@ -614,6 +611,7 @@ function RepoCard(props: RepoCardProps) {
         <LinkOriginDialog
           repositoryId={repo.id}
           currentUrl={repo.remoteUrl}
+          currentCredentialsId={repo.credentialsSecretId}
           onClose={() => setLinkingOrigin(false)}
           onLinked={() => void onReload()}
         />

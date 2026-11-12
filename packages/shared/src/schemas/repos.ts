@@ -103,9 +103,9 @@ export type CreateRepoRequest = z.infer<typeof createRepoRequestSchema>;
  *  exist, which stays true, and several resolvers key on it. */
 export const linkRepoRemoteRequestSchema = z.object({
   remoteUrl: gitRemoteUrlSchema,
-  /** A stored credential for a private remote. Omitted for a public remote, or
-   *  for SSH/manual auth handled outside Haive. */
-  credentialsId: z.string().uuid().optional(),
+  /** Omitted keeps the saved credential; an id selects one; null clears it
+   *  for a public remote or SSH/manual auth handled outside Haive. */
+  credentialsId: z.string().uuid().nullable().optional(),
   branch: z.string().max(255).optional(),
 });
 export type LinkRepoRemoteRequest = z.infer<typeof linkRepoRemoteRequestSchema>;
