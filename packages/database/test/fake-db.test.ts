@@ -10,6 +10,7 @@ import {
   isNull,
   like,
   lt,
+  lte,
   ne,
   not,
   notInArray,
@@ -51,6 +52,84 @@ function setup() {
 }
 
 describe('the fake database', () => {
+  it.each(['where', 'targetWhere', 'futureOption'])(
+    'refuses the unsupported update conflict option %s before writing',
+    async (option) => {
+      const fake = createFakeDb({ taskAttachments: t });
+      await expect(async () =>
+        fake.db
+          .insert(t)
+          .values({ filename: 'new' })
+          .onConflictDoUpdate({
+            target: t.id,
+            set: { filename: 'changed' },
+            [option]: sql`true`,
+          }),
+      ).rejects.toThrow(`unsupported conflict option ${option}`);
+      expect(fake.rows(t)).toEqual([]);
+    },
+  );
+
+  it('refuses an unsupported do-nothing conflict option before writing', async () => {
+    const fake = createFakeDb({ taskAttachments: t });
+    await expect(async () =>
+      fake.db.insert(t).values({ filename: 'new' }).onConflictDoNothing({
+        target: t.id,
+        // @ts-expect-error A future Drizzle option must not be silently dropped at runtime.
+        futureOption: true,
+      }),
+    ).rejects.toThrow('unsupported conflict option futureOption');
+    expect(fake.rows(t)).toEqual([]);
+  });
+
+  it('evaluates inclusive upper bounds for dates, numbers and NULL', () => {
+    const fake = createFakeDb({ taskAttachments: t });
+    const date = new Date('2026-11-11T12:00:00Z');
+    const dateMatch = fake.compileWhere(t, lte(t.createdAt, date));
+    expect(
+      [null, new Date(date.getTime() - 1), date, new Date(date.getTime() + 1)].map((createdAt) =>
+        dateMatch({ createdAt }),
+      ),
+    ).toEqual([false, true, true, false]);
+    const numberMatch = fake.compileWhere(t, lte(t.sizeBytes, 1));
+    expect([null, 0, 1, 2].map((sizeBytes) => numberMatch({ sizeBytes }))).toEqual([
+      false,
+      true,
+      true,
+      false,
+    ]);
+  });
+
+  it('applies setWhere only to conflicting rows and returns nothing for a refused update', async () => {
+    const table = schema.refreshRuns;
+    const fake = createFakeDb({ refreshRuns: table });
+    const newer = new Date('2026-11-11T13:00:00Z');
+    const older = new Date('2026-11-11T12:00:00Z');
+    const ids = {
+      newer: TASK,
+      older: TASK2,
+      equal: USER,
+      latest: '00000000-0000-4000-8000-000000000003',
+    };
+    const upsert = (startedAt: Date, run: keyof typeof ids) =>
+      fake.db
+        .insert(table)
+        .values({ kind: 'versions', startedAt, runId: ids[run] })
+        .onConflictDoUpdate({
+          target: table.kind,
+          set: { startedAt, runId: ids[run] },
+          setWhere: lte(table.startedAt, startedAt),
+        })
+        .returning();
+    expect(await upsert(newer, 'newer')).toMatchObject([{ runId: ids.newer }]);
+    expect(await upsert(older, 'older')).toEqual([]);
+    expect(fake.rows(table)).toMatchObject([{ runId: ids.newer, startedAt: newer }]);
+    expect(await upsert(newer, 'equal')).toMatchObject([{ runId: ids.equal }]);
+    expect(await upsert(new Date(newer.getTime() + 1), 'latest')).toMatchObject([
+      { runId: ids.latest },
+    ]);
+  });
+
   it('filters merge events by the string dir in their JSON payload', async () => {
     const events = schema.taskEvents;
     const fake = createFakeDb({ taskEvents: events });

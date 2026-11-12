@@ -524,6 +524,13 @@ export interface CliSignOutJobResult {
 }
 
 export type RefreshTrigger = 'manual' | 'scheduled' | 'boot' | 'unknown';
+export const REFRESH_TRIGGER_LABELS = {
+  manual: 'manual',
+  scheduled: 'scheduled',
+  boot: 'boot',
+  unknown: '',
+} as const satisfies Record<RefreshTrigger, string>;
+
 export interface RefreshCliVersionsJobPayload {
   /** Absent on jobs queued before durable refresh results shipped. */
   trigger?: RefreshTrigger;

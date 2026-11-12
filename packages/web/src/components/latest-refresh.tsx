@@ -1,7 +1,12 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import type { LatestRefreshRun, RefreshCliVersionsJobResult } from '@haive/shared/constants';
+import {
+  REFRESH_TRIGGER_LABELS,
+  type LatestRefreshRun,
+  type RefreshCliVersionsJobResult,
+  type RefreshTrigger,
+} from '@haive/shared/constants';
 import { api } from '@/lib/api-client';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { RefreshFailures } from './refresh-failures';
@@ -14,7 +19,10 @@ function refreshSummary(result: RefreshCliVersionsJobResult | null): string {
 }
 
 function triggerLabel(trigger: string): string {
-  return trigger === 'manual' || trigger === 'scheduled' || trigger === 'boot' ? ` ${trigger}` : '';
+  const label = Object.hasOwn(REFRESH_TRIGGER_LABELS, trigger)
+    ? REFRESH_TRIGGER_LABELS[trigger as RefreshTrigger]
+    : '';
+  return label ? ` ${label}` : '';
 }
 
 /** Read even with no manual poll: boot and scheduled runs have no browser job id. */
@@ -32,7 +40,12 @@ export function LatestRefresh({
   useEffect(() => {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
+    let inFlight = false;
+    let hidden = document.hidden;
     const read = async () => {
+      if (controller.signal.aborted || document.hidden || inFlight) return;
+      inFlight = true;
+      clearTimeout(timer);
       try {
         const response = await api.get<{ run: LatestRefreshRun | null }>(
           endpoint,
@@ -45,25 +58,36 @@ export function LatestRefresh({
       } catch {
         if (!controller.signal.aborted) setLoadError(true);
       } finally {
-        if (!controller.signal.aborted) timer = setTimeout(() => void read(), 10_000);
+        inFlight = false;
+        if (!controller.signal.aborted && !document.hidden)
+          timer = setTimeout(() => void read(), 10_000);
       }
     };
+    const onVisibility = () => {
+      if (hidden === document.hidden) return;
+      hidden = document.hidden;
+      clearTimeout(timer);
+      if (!hidden) void read();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
     void read();
     return () => {
       controller.abort();
       clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [endpoint, active]);
 
   if (active) return null;
   // The durable read can lag the job poll or fail. Only a newer run may supersede
-  // the completed result we already have; old jobs without identity still win locally.
+  // the completed result we already have. Without a start time, only a matching
+  // run id proves that the local result belongs to the stored run.
   const preferResult =
     result !== null &&
     (!run ||
       run.runId === result.runId ||
-      !result.startedAt ||
-      new Date(run.startedAt).getTime() <= new Date(result.startedAt).getTime());
+      (result.startedAt !== undefined &&
+        new Date(run.startedAt).getTime() <= new Date(result.startedAt).getTime()));
   const displayedRun =
     preferResult && (run?.runId !== result?.runId || run?.finishedAt === null) ? null : run;
   return (
