@@ -11,6 +11,7 @@ import { worktreeDirPaths, worktreeDirName } from '../repo/worktree-paths.js';
 import * as gitMerge from './git-merge.js';
 import * as gitPush from '../repo/git-push.js';
 import * as gitWorkspace from '../repo/git-workspace.js';
+import * as gitExec from '../repo/git-exec.js';
 
 const h = vi.hoisted(() => ({
   holder: false,
@@ -524,6 +525,23 @@ describe('explicit undo of a cancel-left committed merge', () => {
     await f.run();
     expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
   });
+  it('keeps remote failure detail while removing paths and URL credentials', async () => {
+    const f = await fixture();
+    await git(f.dir, 'remote', 'add', 'origin', 'https://example.test/repo.git');
+    vi.spyOn(gitPush, 'originGitRun').mockResolvedValue({
+      code: 128,
+      stdout: '',
+      stderr: `fatal: connection refused for https://user:private-token@example.test/repo.git in ${f.dir}`,
+    });
+    await f.run();
+    const reason = leftCommittedMerges(f.events)[0]?.refused?.reason;
+    expect(reason).toContain('connection refused');
+    expect(reason).toContain('[path]');
+    expect(reason).not.toContain(f.dir);
+    expect(reason).not.toContain('private-token');
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+  });
   it('refuses older events without immutable feature evidence', async () => {
     const f = await fixture();
     Object.assign(f.payload, { featureSha: undefined });
@@ -661,6 +679,45 @@ describe('explicit undo of a cancel-left committed merge', () => {
       'audit failed',
     );
   });
+  it.each([1, 3])(
+    'keeps bounded path-free detail when worktree-list read %s fails',
+    async (failedRead) => {
+      const f = await fixture();
+      const actual = gitExec.gitRun;
+      let reads = 0;
+      vi.spyOn(gitExec, 'gitRun').mockImplementation(async (dir, args, ...rest) =>
+        args[0] === 'worktree' && args[1] === 'list' && ++reads === failedRead
+          ? {
+              code: 128,
+              stdout: '',
+              stderr: `fatal: permission denied in ${f.dir}/.git/worktrees; ${'detail '.repeat(200)}`,
+            }
+          : actual(dir, args, ...rest),
+      );
+      await expect(f.run()).resolves.toBeUndefined();
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+      const reason = leftCommittedMerges(f.events)[0]?.refused?.reason;
+      expect(reason).toContain('permission denied');
+      expect(reason).toContain('[path]');
+      expect(reason).not.toContain(f.dir);
+      expect(reason!.length).toBeLessThan(650);
+      expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+      expect(h.sync).not.toHaveBeenCalled();
+      vi.restoreAllMocks();
+      await f.run();
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+    },
+  );
+  it('keeps the git refusal detail when conflicting local bytes prevent the move', async () => {
+    const f = await fixture();
+    await writeFile(path.join(f.dir, 'feature'), 'mine');
+    await f.run();
+    const reason = leftCommittedMerges(f.events)[0]?.refused?.reason;
+    expect(reason).toContain('not uptodate');
+    expect(reason).not.toContain(f.dir);
+    expect(await readFile(path.join(f.dir, 'feature'), 'utf8')).toBe('mine');
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+  });
   it('records a git read failure as a retryable attempt immediately', async () => {
     const f = await fixture();
     const actual = gitPush.gitRun;
@@ -671,6 +728,7 @@ describe('explicit undo of a cancel-left committed merge', () => {
     );
     await expect(f.run()).resolves.toBeUndefined();
     expect(f.settled()[0]?.payload.outcome).toBe('refused');
+    expect(leftCommittedMerges(f.events)[0]?.refused?.reason).toContain('unreadable object');
     expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
     expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
     vi.restoreAllMocks();

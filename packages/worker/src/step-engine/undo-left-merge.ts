@@ -18,7 +18,13 @@ import {
   type MergeLeftCommittedOutcome,
 } from '@haive/shared/merge-left-open';
 import { lstatNoFollow, relUnder } from '@haive/shared/fs-safe';
-import { detectOrigin, gitRun, originGitRun, buildCredentialHelper } from '../repo/git-push.js';
+import {
+  detectOrigin,
+  gitRun,
+  originGitRun,
+  buildCredentialHelper,
+  scrubSecret,
+} from '../repo/git-push.js';
 import { worktreeDirPaths, worktreeDirName } from '../repo/worktree-paths.js';
 import { checkoutHoldingTasks } from '../repo/refresh.js';
 import { findWorktreePathClaimant } from '../repo/worktree-claims.js';
@@ -43,10 +49,20 @@ import {
 
 /** Expected local git failures end this attempt immediately; a person can repair and retry. */
 class UndoGitError extends Error {}
+const gitFailureReason = (summary: string, error: unknown) => {
+  // Sanitize the original structure before converting it to persisted display copy.
+  const detail = scrubSecret(scrubErrorPaths(safeErrorMessage(error)), null)
+    .trim()
+    .slice(0, 500);
+  return detail ? `${summary}: ${detail}` : summary;
+};
 const undoRevParse = (dir: string, spec: string) =>
-  revParse(dir, spec).catch(() => {
+  revParse(dir, spec).catch((error: unknown) => {
     throw new UndoGitError(
-      'Git could not read the recorded merge or checkout. Repair the repository and retry Undo.',
+      gitFailureReason(
+        'Git could not read the recorded merge or checkout. Repair the repository and retry Undo.',
+        error,
+      ),
     );
   });
 
@@ -74,7 +90,10 @@ async function validBranch(dir: string, branch: string): Promise<boolean> {
   if (result.code === 0) return true;
   if (result.code === 1) return false;
   throw new UndoGitError(
-    'Git could not validate the recorded branch. Repair the repository and retry Undo.',
+    gitFailureReason(
+      'Git could not validate the recorded branch. Repair the repository and retry Undo.',
+      result.stderr,
+    ),
   );
 }
 
@@ -87,7 +106,8 @@ async function ownMerge(dir: string, m: LeftCommittedMerge): Promise<boolean> {
   if (!(await validBranch(dir, m.featureBranch)) || m.featureBranch === m.landedOn) return false;
   const parents = async (commit: string) => {
     const result = await gitRun(dir, ['rev-list', '--parents', '-n', '1', commit]);
-    if (result.code !== 0) throw new UndoGitError('Cannot read the merge parents');
+    if (result.code !== 0)
+      throw new UndoGitError(gitFailureReason('Cannot read the merge parents', result.stderr));
     return result.stdout.trim().split(/\s+/);
   };
   const p = await parents(m.baseShaAfter);
@@ -128,8 +148,10 @@ async function remoteRefusal(
       fetchUrl.stdout !== pushUrl.stdout
     )
       return {
-        reason:
+        reason: gitFailureReason(
           'The remote push destination cannot be checked safely. Configure one origin push destination matching its fetch URL, then retry Undo; the merge was left committed.',
+          fetchUrl.code !== 0 ? fetchUrl.stderr : pushUrl.code !== 0 ? pushUrl.stderr : '',
+        ),
       };
     const helper = credentialId
       ? await buildCredentialHelper(db, credentialId, userId, fetchUrl.stdout.trim())
@@ -149,7 +171,12 @@ async function remoteRefusal(
     );
     if (listed.code === 2) return null; // The remote has no such branch: it cannot contain the merge.
     if (listed.code !== 0)
-      return { reason: 'The remote branch could not be checked; the merge was left committed.' };
+      return {
+        reason: gitFailureReason(
+          'The remote branch could not be checked; the merge was left committed.',
+          listed.stderr,
+        ),
+      };
     const fetched = await originGitRun(
       m.repoPath,
       [
@@ -166,7 +193,12 @@ async function remoteRefusal(
       helper?.env,
     );
     if (fetched.code !== 0)
-      return { reason: 'The remote branch could not be checked; the merge was left committed.' };
+      return {
+        reason: gitFailureReason(
+          'The remote branch could not be checked; the merge was left committed.',
+          fetched.stderr,
+        ),
+      };
     const contains = await gitRun(m.repoPath, ['merge-base', '--is-ancestor', m.baseShaAfter, ref]);
     if (contains.code === 0)
       return {
@@ -175,9 +207,19 @@ async function remoteRefusal(
       };
     return contains.code === 1
       ? null
-      : { reason: 'The remote history could not be checked; the merge was left committed.' };
-  } catch {
-    return { reason: 'The remote branch could not be checked; the merge was left committed.' };
+      : {
+          reason: gitFailureReason(
+            'The remote history could not be checked; the merge was left committed.',
+            contains.stderr,
+          ),
+        };
+  } catch (error) {
+    return {
+      reason: gitFailureReason(
+        'The remote branch could not be checked; the merge was left committed.',
+        error,
+      ),
+    };
   } finally {
     await gitRun(m.repoPath, ['update-ref', '-d', ref]);
   }
@@ -424,7 +466,9 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
             if ((await undoRevParse(cwd, ref)) === null) {
               const created = await gitRun(cwd, ['update-ref', ref, m.featureSha, '0'.repeat(40)]);
               if (created.code !== 0 && (await undoRevParse(cwd, ref)) === null)
-                throw new UndoGitError('Feature branch could not be restored');
+                throw new UndoGitError(
+                  gitFailureReason('Feature branch could not be restored', created.stderr),
+                );
             }
           };
           if (m.settled) {
@@ -454,8 +498,8 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
           // This create-only ref also identifies an admitted attempt if SQL fails after git moved.
           const undoRef = `refs/haive/undo-left-merge/${taskId}/${baseShaAfter}`;
           // Git's update-ref does not protect a branch checked out in another worktree.
-          const holders = await worktreesHoldingBranch(cwd, branch).catch(() => {
-            throw new UndoGitError('Cannot read the repository worktrees');
+          const holders = await worktreesHoldingBranch(cwd, branch).catch((error: unknown) => {
+            throw new UndoGitError(gitFailureReason('Cannot read the repository worktrees', error));
           });
           const transient = worktreeDirPaths(
             cwd,
@@ -495,6 +539,13 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
           const checkoutReady = async () => {
             if (!movedCheckout) return true;
             const symbolic = await gitRun(movedCheckout, ['symbolic-ref', '-q', 'HEAD']);
+            if (symbolic.code !== 0 && symbolic.code !== 1)
+              throw new UndoGitError(
+                gitFailureReason(
+                  'Git could not read the checkout branch before Undo.',
+                  symbolic.stderr,
+                ),
+              );
             if (symbolic.code !== 0 || symbolic.stdout.trim() !== branch) {
               await settle(
                 'refused',
@@ -512,7 +563,12 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
           if (prior !== m.baseShaAfter) {
             const keep = await gitRun(cwd, ['update-ref', undoRef, m.baseShaAfter, '0'.repeat(40)]);
             if (keep.code !== 0)
-              throw new UndoGitError('The merge commit could not be preserved for recovery');
+              throw new UndoGitError(
+                gitFailureReason(
+                  'The merge commit could not be preserved for recovery',
+                  keep.stderr,
+                ),
+              );
           }
           if (movedCheckout === m.repoPath) {
             if (!prepared) return true;
@@ -537,7 +593,12 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
             const refreshed = await gitRun(movedCheckout, ['update-index', '-q', '--refresh']);
             // Exit 1 also reports real local edits, which reset --keep must judge and preserve.
             if (refreshed.code !== 0 && refreshed.code !== 1)
-              throw new UndoGitError('Git could not refresh the checkout index before Undo.');
+              throw new UndoGitError(
+                gitFailureReason(
+                  'Git could not refresh the checkout index before Undo.',
+                  refreshed.stderr,
+                ),
+              );
             // reset --keep moves whatever HEAD is now: re-check branch and sha last, so a
             // checkout switch or commit during preparation never rewinds another branch.
             if (!(await checkoutReady())) return;
@@ -559,7 +620,12 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
               return;
             }
             if (staged.code !== 0)
-              throw new UndoGitError('Git could not read the checkout index before Undo.');
+              throw new UndoGitError(
+                gitFailureReason(
+                  'Git could not read the checkout index before Undo.',
+                  staged.stderr,
+                ),
+              );
           }
           // start/prepare arrived in Git 2.27. Never fall back to a reset without CAS.
           const version = await gitRun(cwd, ['--version']);
@@ -572,7 +638,10 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
           ) {
             await settle(
               'refused',
-              'Undo requires Git 2.27 or newer to lock the base branch safely. Upgrade Git and retry.',
+              gitFailureReason(
+                'Undo requires Git 2.27 or newer to lock the base branch safely. Upgrade Git and retry.',
+                version.code !== 0 ? version.stderr : '',
+              ),
             );
             return;
           }
@@ -586,9 +655,13 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
               async () => {
                 // A checkout may have acquired the branch before prepare locked it.
                 // Refuse a changed holder set instead of moving a newly acquired tree.
-                const lockedHolders = await worktreesHoldingBranch(cwd, branch).catch(() => {
-                  throw new UndoGitError('Cannot read the repository worktrees');
-                });
+                const lockedHolders = await worktreesHoldingBranch(cwd, branch).catch(
+                  (error: unknown) => {
+                    throw new UndoGitError(
+                      gitFailureReason('Cannot read the repository worktrees', error),
+                    );
+                  },
+                );
                 if (
                   lockedHolders.length !== holders.length ||
                   lockedHolders.some((p) => !holders.includes(p))
@@ -614,15 +687,16 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
                 if (tree.code === 0) return true;
                 await settle(
                   'refused',
-                  'Git refused the undo; local changes or a changed branch were kept.',
+                  gitFailureReason(
+                    'Git refused the undo; local changes or a changed branch were kept.',
+                    tree.stderr,
+                  ),
                 );
                 return false;
               },
             );
           } catch (error) {
-            throw new UndoGitError(
-              `Git refused the undo: ${scrubErrorPaths(safeErrorMessage(error)).slice(0, 500)}`,
-            );
+            throw new UndoGitError(gitFailureReason('Git refused the undo', error));
           }
           if (!moved) return;
           needsSync = true;
