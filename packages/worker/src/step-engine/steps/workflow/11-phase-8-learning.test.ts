@@ -98,8 +98,7 @@ describe('KB admission bar', () => {
     });
 
     it('re-rolls the draft when the bar leaves no entries', () => {
-      // shouldRetryPreForm sees zero usable entries and asks for a fresh, grounded draft
-      // rather than parking an empty one in front of the human.
+      // Ask for a fresh, grounded draft rather than parking rejected drafts as empty.
       const gate = phase8LearningStep.llm!.shouldRetryPreForm!;
       expect(gate('```json\n{"entries":[{"id":"g","title":"G","body":"Be careful."}]}\n```')).toBe(
         true,

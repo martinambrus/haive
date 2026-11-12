@@ -7,7 +7,7 @@ import { mapWithConcurrency, orderByDefaultPriority } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { resolveParallelCap } from '../../_parallel-cap.js';
 import { readFrontmatterFields } from '../_yaml-scalar.js';
-import { isSkillPathId, resolveTaskSkillTargetDirs } from './_helpers.js';
+import { isSkillPathId, loadPreviousStepOutput, resolveTaskSkillTargetDirs } from './_helpers.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 
 /** Fallback skills dir when no enabled CLI declares one — passed explicitly to
@@ -83,6 +83,9 @@ export interface SkillCheck {
 export interface SkillVerificationDetect {
   checks: SkillCheck[];
   missingFileIds: string[];
+  /** Skills with no directory in any mirror: 09_5b's disk scan cannot discover them.
+   *  Optional for detected payloads persisted before this field was added. */
+  absentSkillIds?: string[];
   brokenStructureIds: string[];
   /** Skills whose SKILL.md exists and is readable but have zero sub-skill files —
    *  the disk-side signal of a truncated/partial 09_5 generation. */
@@ -307,14 +310,22 @@ export const skillVerificationStep: StepDefinition<
   async detect(ctx: StepContext): Promise<SkillVerificationDetect> {
     const skillTargetDirs = await resolveTaskSkillTargetDirs(ctx, [DEFAULT_PROJECT_SKILLS_DIR]);
     const bundleSkillIds = await loadBundleSkillIds(ctx);
+    const generated = await loadPreviousStepOutput(ctx.db, ctx.taskId, SKILL_GENERATION_STEP_ID);
+    const written = (generated?.output as { written?: { id: string }[] } | null)?.written;
+    const generatedIds = Array.isArray(written)
+      ? written.map((skill) => skill.id).filter(isSkillPathId)
+      : [];
     const cap = await resolveParallelCap();
 
-    // Union of skill ids across every mirror, so a skill present in one dir but
-    // absent from another is verified (and flagged missing) in the dir it's gone from.
+    // Generation's final output is cumulative. Include its IDs even when every mirror
+    // has disappeared; discovering only from disk would silently pass an empty library.
+    // Disk IDs also retain verification of pre-existing skills and legacy runs with no output.
     const idsByDir = await mapWithConcurrency(skillTargetDirs, cap, (dir) =>
       listSkillDirs(ctx.repoPath, dir),
     );
-    const allIds = dedupe(idsByDir.flat()).sort();
+    const diskIds = new Set(idsByDir.flat());
+    const allIds = dedupe([...generatedIds, ...diskIds]).sort();
+    const absentSkillIds = allIds.filter((id) => !diskIds.has(id));
 
     const pairs: { dir: string; id: string }[] = [];
     for (const dir of skillTargetDirs) {
@@ -365,6 +376,7 @@ export const skillVerificationStep: StepDefinition<
     return {
       checks,
       missingFileIds,
+      absentSkillIds,
       brokenStructureIds,
       deficientSubSkillIds,
       skillTargetDirs,
@@ -381,6 +393,8 @@ export const skillVerificationStep: StepDefinition<
     const failing = detected.checks.filter((c) => !c.passed);
     if (failing.length === 0) return null;
 
+    const absentIds = new Set(detected.absentSkillIds ?? []);
+    const canRepair = failing.some((check) => !absentIds.has(check.skillId));
     const body = failing
       .map((c) => `- \`${c.skillsDir}/${c.skillId}\` — ${c.issues.join('; ')}`)
       .join('\n');
@@ -409,7 +423,9 @@ export const skillVerificationStep: StepDefinition<
         label: 'How should these skill issues be handled?',
         options: [
           { value: 'accept', label: 'Accept as-is — keep the skills despite the issues' },
-          { value: 'repair', label: 'Repair — re-run only the failing skills (fast)' },
+          ...(canRepair
+            ? [{ value: 'repair', label: 'Repair — re-run only the failing skills (fast)' }]
+            : []),
           { value: 'regenerate', label: 'Regenerate — re-run the full skill library (slow)' },
         ],
         default: 'accept',
@@ -435,10 +451,15 @@ export const skillVerificationStep: StepDefinition<
       title: 'Skill verification found issues',
       description: [
         'One or more generated skills are missing, structurally broken, or have no',
-        'sub-skill leaf docs. Accept them as-is, repair only the failing skills (one agent',
-        'each — fast), or regenerate the whole library (slow). Either fix comes back here',
-        'for another check.',
-      ].join(' '),
+        'sub-skill leaf docs. Accept them as-is or regenerate the whole library (slow).',
+        canRepair
+          ? 'Repair fixes only skills with an existing directory (one agent each — fast).'
+          : '',
+        absentIds.size > 0 ? 'Skills absent from every mirror need Regenerate.' : '',
+        'After a fix, verification runs again.',
+      ]
+        .filter(Boolean)
+        .join(' '),
       infoSections,
       fields,
       submitLabel: 'Apply decision',
