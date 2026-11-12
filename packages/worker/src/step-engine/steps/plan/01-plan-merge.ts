@@ -786,9 +786,7 @@ export async function discardPlanMerge(db: Database, taskId: string): Promise<vo
     const repoPath = repo?.storagePath ?? repo?.localPath;
     if (!repoPath) return;
     const repositoryId = task.repositoryId;
-    const reports: (() => Promise<void>)[] = [];
-    const relocationFailure = await db.transaction(async (tx) => {
-      await lockPlanMerge(tx, repositoryId);
+    const skipIfHeld = async (tx: DbTx): Promise<boolean> => {
       const [other] = await tx.query.tasks.findMany({
         where: and(
           eq(schema.tasks.repositoryId, repositoryId),
@@ -802,11 +800,17 @@ export async function discardPlanMerge(db: Database, taskId: string): Promise<vo
         columns: { id: true },
         limit: 1,
       });
-      if (other) {
-        await note(tx, 'plan_merge.discard_skipped', { otherTaskId: other.id });
-        return null;
-      }
-      const worktreePath = planMergeWorktreePath(repoPath);
+      if (!other) return false;
+      await note(tx, 'plan_merge.discard_skipped', { otherTaskId: other.id });
+      return true;
+    };
+    const worktreePath = planMergeWorktreePath(repoPath);
+    const reports: (() => Promise<void>)[] = [];
+    // Commit and mark the report before teardown: once the worktree is gone, a retry cannot
+    // rediscover its open merge and report what was moved aside.
+    const relocation = await db.transaction(async (tx) => {
+      await lockPlanMerge(tx, repositoryId);
+      if (await skipIfHeld(tx)) return { skipped: true };
       let phase: 'relocating' | 'reported' = 'relocating';
       try {
         await moveAsideRecordedLeftovers(
@@ -819,32 +823,40 @@ export async function discardPlanMerge(db: Database, taskId: string): Promise<vo
             reports.push(mark);
           },
         );
-        const aborted = await abortGitMerge(worktreePath).catch((err: unknown) => ({
-          ok: false as const,
-          detail: err instanceof Error ? err.message : String(err),
-        }));
-        await removePlanMergeWorktree(repoPath);
-        // A forced removal takes an open merge with it, so the worktree being gone is what counts.
-        const listed = await gitRun(repoPath, ['worktree', 'list', '--porcelain', '-z']);
-        if (listed.code !== 0) {
-          throw new Error(
-            `the scratch worktree could not be confirmed gone: ${listed.stderr || listed.stdout}`,
-          );
-        }
-        if (listed.stdout.split('\0').includes(`worktree ${worktreePath}`)) {
-          throw new Error(
-            `the scratch worktree is still there${aborted.ok ? '' : `; the merge abort also failed: ${aborted.detail}`}`,
-          );
-        }
       } catch (err) {
-        // Keep an already-written report when a later Git operation fails.
+        // An index refusal after the report was written still commits it.
         if (phase === 'relocating') throw err;
         return { err };
       }
       return null;
     });
     for (const markReported of reports) await markReported();
-    if (relocationFailure) throw relocationFailure.err;
+    if (relocation) {
+      if ('err' in relocation) throw relocation.err;
+      return;
+    }
+    await db.transaction(async (tx) => {
+      await lockPlanMerge(tx, repositoryId);
+      // Another conversation may have taken the worktree after the report committed.
+      if (await skipIfHeld(tx)) return;
+      const aborted = await abortGitMerge(worktreePath).catch((err: unknown) => ({
+        ok: false as const,
+        detail: err instanceof Error ? err.message : String(err),
+      }));
+      await removePlanMergeWorktree(repoPath);
+      // A forced removal takes an open merge with it, so the worktree being gone is what counts.
+      const listed = await gitRun(repoPath, ['worktree', 'list', '--porcelain', '-z']);
+      if (listed.code !== 0) {
+        throw new Error(
+          `the scratch worktree could not be confirmed gone: ${listed.stderr || listed.stdout}`,
+        );
+      }
+      if (listed.stdout.split('\0').includes(`worktree ${worktreePath}`)) {
+        throw new Error(
+          `the scratch worktree is still there${aborted.ok ? '' : `; the merge abort also failed: ${aborted.detail}`}`,
+        );
+      }
+    });
   } catch (err) {
     logger.warn({ err, taskId }, 'discarding the cancelled plan merge failed');
     await note(db, 'plan_merge.discard_failed', {

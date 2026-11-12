@@ -138,7 +138,7 @@ describe.skipIf(!url)('plan merge transaction handles on real Postgres', () => {
       .insert(schema.taskSteps)
       .values({ id: taskStepId, taskId, stepId: '01-plan-merge', stepIndex: 0, title: 'merge' });
     const transaction = db.transaction.bind(db);
-    vi.spyOn(db, 'transaction').mockImplementation((fn) =>
+    vi.spyOn(db, 'transaction').mockImplementationOnce((fn) =>
       transaction(async (tx) => {
         const recorded = await planMergeFixBaseline(
           tx,
@@ -184,6 +184,100 @@ describe.skipIf(!url)('plan merge transaction handles on real Postgres', () => {
     expect(await readFile(path.join(repoPath, payload.folder, 'reported'), 'utf8')).toBe('');
     expect(await events('plan_merge.discard_failed')).toHaveLength(1);
   });
+
+  it('keeps the committed discard report when Postgres fails after removing the worktree', async () => {
+    const taskStepId = randomUUID();
+    await db.insert(schema.taskSteps).values({
+      id: taskStepId,
+      taskId,
+      stepId: '01-plan-merge',
+      stepIndex: 0,
+      title: 'merge',
+    });
+    await planMergeFixBaseline(db, { repositoryId, taskId, taskStepId, worktreePath }, true);
+    await writeFile(path.join(worktreePath, 'extra.txt'), 'fixer work\n');
+    const removeWorktree = merge.removePlanMergeWorktree;
+    let removed = false;
+    const remove = vi.spyOn(merge, 'removePlanMergeWorktree').mockImplementation(async (dir) => {
+      await removeWorktree(dir);
+      removed = true;
+    });
+    const transaction = db.transaction.bind(db);
+    vi.spyOn(db, 'transaction').mockImplementation((fn) =>
+      transaction(async (tx) => {
+        const result = await fn(tx);
+        if (removed) {
+          await tx.insert(schema.taskEvents).values({ taskId, eventType: 'test.discard_rollback' });
+          // Fail after the real Git removal, so this transaction cannot commit.
+          await tx.execute(sql`select 1 / 0`);
+        }
+        return result;
+      }),
+    );
+    await expect(discardPlanMerge(db, taskId)).resolves.toBeUndefined();
+    expect(remove).toHaveBeenCalledOnce();
+    expect(git(repoPath, 'worktree', 'list', '--porcelain')).not.toContain(worktreePath);
+    expect(await events('test.discard_rollback')).toEqual([]);
+    expect(await events('plan_merge.discard_failed')).toHaveLength(1);
+    const reports = await events('merge.fixer_leftovers');
+    expect(reports).toHaveLength(1);
+    const payload = reports[0]!.payload as { folder: string; moved: string[] };
+    expect(payload.moved).toContain('extra.txt');
+    expect(await readFile(path.join(repoPath, payload.folder, 'reported'), 'utf8')).toBe('');
+    expect(await readFile(path.join(repoPath, payload.folder, 'files/extra.txt'), 'utf8')).toBe(
+      'fixer work\n',
+    );
+  });
+
+  it.each(['running', 'failed'] as const)(
+    'keeps the worktree for a %s conversation opened after the discard report commits',
+    async (status) => {
+      const taskStepId = randomUUID();
+      await db.insert(schema.taskSteps).values({
+        id: taskStepId,
+        taskId,
+        stepId: '01-plan-merge',
+        stepIndex: 0,
+        title: 'merge',
+      });
+      await planMergeFixBaseline(db, { repositoryId, taskId, taskStepId, worktreePath }, true);
+      await writeFile(path.join(worktreePath, 'extra.txt'), 'fixer work\n');
+      const otherTaskId = randomUUID();
+      const transaction = db.transaction.bind(db);
+      let calls = 0;
+      vi.spyOn(db, 'transaction').mockImplementation(async (fn) => {
+        const result = await transaction(fn);
+        if (++calls === 1) {
+          await transaction(async (tx) => {
+            await lockPlanMerge(tx, repositoryId);
+            await tx.insert(schema.tasks).values({
+              id: otherTaskId,
+              userId,
+              repositoryId,
+              type: 'plan_merge',
+              title: 'new merge',
+              status,
+              createdAt: new Date(Date.now() + 1000),
+            });
+          });
+        }
+        return result;
+      });
+      const remove = vi.spyOn(merge, 'removePlanMergeWorktree');
+      await expect(discardPlanMerge(db, taskId)).resolves.toBeUndefined();
+      const reports = await events('merge.fixer_leftovers');
+      expect(reports).toHaveLength(1);
+      const payload = reports[0]!.payload as { folder: string };
+      expect(await readFile(path.join(repoPath, payload.folder, 'reported'), 'utf8')).toBe('');
+      expect(await events('plan_merge.discard_skipped')).toMatchObject([
+        { payload: { otherTaskId } },
+      ]);
+      expect(await events('plan_merge.discard_failed')).toEqual([]);
+      expect(remove).not.toHaveBeenCalled();
+      expect(git(repoPath, 'worktree', 'list', '--porcelain')).toContain(worktreePath);
+      expect(git(worktreePath, 'rev-parse', 'MERGE_HEAD')).not.toBe('');
+    },
+  );
 
   it('commits the leftovers report before recording a discard refusal and keeps the worktree', async () => {
     const taskStepId = randomUUID();
