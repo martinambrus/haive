@@ -6,6 +6,7 @@ import path from 'node:path';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
+import { lockPlanMerge } from '@haive/shared/plan';
 import { discardPlanMerge } from '../src/step-engine/steps/plan/01-plan-merge.js';
 import { ensurePlanMergeWorktree, mergeOriginInto } from '../src/plan/merge.js';
 import { planMergeFixBaseline } from '../src/plan/merge-baseline.js';
@@ -240,5 +241,101 @@ describe.skipIf(!url)('plan merge transaction handles on real Postgres', () => {
     expect(remove).not.toHaveBeenCalled();
     expect(git(repoPath, 'worktree', 'list', '--porcelain')).toContain(worktreePath);
     expect(git(worktreePath, 'rev-parse', 'MERGE_HEAD')).not.toBe('');
+  });
+  it('keeps the committed leftovers report when the merge transaction fails in Postgres', async () => {
+    const taskStepId = randomUUID();
+    await db.insert(schema.taskSteps).values({
+      id: taskStepId,
+      taskId,
+      stepId: '01-plan-merge',
+      stepIndex: 0,
+      title: 'merge',
+    });
+    await planMergeFixBaseline(db, { repositoryId, taskId, taskStepId, worktreePath }, true);
+    await writeFile(path.join(worktreePath, 'extra.txt'), 'fixer work\n');
+    const transaction = db.transaction.bind(db);
+    let calls = 0;
+    vi.spyOn(db, 'transaction').mockImplementation((fn) =>
+      transaction(async (tx) => {
+        calls++;
+        if (calls === 2) {
+          await tx.insert(schema.taskEvents).values({ taskId, eventType: 'test.merge_rollback' });
+          // A real SQL failure aborts the merge transaction and rolls its own event back.
+          await tx.execute(sql`select 1 / 0`);
+        }
+        return fn(tx);
+      }),
+    );
+    await expect(
+      integrateOrigin({
+        repositoryId,
+        repoPath,
+        branch: 'main',
+        userId,
+        identity,
+        kept: new Map(),
+      }),
+    ).rejects.toMatchObject({ cause: { code: '22012' } });
+    expect(calls).toBe(2);
+    expect(await events('test.merge_rollback')).toEqual([]);
+    const reports = await events('merge.fixer_leftovers');
+    expect(reports).toHaveLength(1);
+    const payload = reports[0]!.payload as { folder: string; moved: string[] };
+    expect(payload.moved).toContain('extra.txt');
+    expect(await readFile(path.join(repoPath, payload.folder, 'reported'), 'utf8')).toBe('');
+    expect(await readFile(path.join(repoPath, payload.folder, 'files/extra.txt'), 'utf8')).toBe(
+      'fixer work\n',
+    );
+  });
+
+  it('refuses a conversation opened between the transactions while keeping the first report', async () => {
+    const taskStepId = randomUUID();
+    await db.insert(schema.taskSteps).values({
+      id: taskStepId,
+      taskId,
+      stepId: '01-plan-merge',
+      stepIndex: 0,
+      title: 'merge',
+    });
+    await planMergeFixBaseline(db, { repositoryId, taskId, taskStepId, worktreePath }, true);
+    await writeFile(path.join(worktreePath, 'extra.txt'), 'fixer work\n');
+    const otherTaskId = randomUUID();
+    const transaction = db.transaction.bind(db);
+    let calls = 0;
+    vi.spyOn(db, 'transaction').mockImplementation(async (fn) => {
+      const result = await transaction(fn);
+      if (++calls === 1) {
+        // The opener uses the same lock, after the report commits and before the merge takes it.
+        await transaction(async (tx) => {
+          await lockPlanMerge(tx, repositoryId);
+          await tx.insert(schema.tasks).values({
+            id: otherTaskId,
+            userId,
+            repositoryId,
+            type: 'plan_merge',
+            title: 'new merge',
+            status: 'running',
+          });
+        });
+      }
+      return result;
+    });
+    const remove = vi.spyOn(merge, 'removePlanMergeWorktree');
+    await expect(
+      integrateOrigin({
+        repositoryId,
+        repoPath,
+        branch: 'main',
+        userId,
+        identity,
+        kept: new Map(),
+      }),
+    ).rejects.toMatchObject({ refusal: { code: 'plan_merge', taskId: otherTaskId } });
+    const reports = await events('merge.fixer_leftovers');
+    expect(reports).toHaveLength(1);
+    const payload = reports[0]!.payload as { folder: string };
+    expect(await readFile(path.join(repoPath, payload.folder, 'reported'), 'utf8')).toBe('');
+    expect(remove).not.toHaveBeenCalled();
+    expect(git(repoPath, 'worktree', 'list', '--porcelain')).toContain(worktreePath);
   });
 });
