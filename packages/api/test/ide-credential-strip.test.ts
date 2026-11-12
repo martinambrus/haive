@@ -23,6 +23,19 @@ vi.mock('../src/middleware/auth.js', () => ({
     await next();
   },
 }));
+// Credential policy is covered by editor-handshake; these controls exercise the proxy boundary.
+vi.mock('../src/lib/editor-auth.js', async (original) => ({
+  ...(await original<typeof import('../src/lib/editor-auth.js')>()),
+  editorIdentity: async () => ({ sub: USER, tv: 0 }),
+}));
+vi.mock('../src/auth/editor-session.js', async (original) => ({
+  ...(await original<typeof import('../src/auth/editor-session.js')>()),
+  editorCookieFromHeader: (header: string | undefined) =>
+    header ? 'synthetic-editor-session' : undefined,
+  verifyEditorSession: async () => ({ sub: USER, tv: 0 }),
+  editorClaimsMatch: () => true,
+  requireEditorUser: async () => ({ id: USER }),
+}));
 vi.mock('../src/queues.js', () => ({
   getIdeEnsureQueue: () => ({
     add: h.ensure,
@@ -640,6 +653,15 @@ describe('IDE API port proxy refusal', () => {
       },
     );
   }
+
+  it('WS normalizes dot segments before refusing a port proxy', async () => {
+    const rig = await wsRig();
+    const { head, reply } = await rig.upgrade([AUTH_LINE], `/ide/${TASK}/../proxy/80?x=1`);
+    expect(reply.split('\r\n')[0]).toBe('HTTP/1.1 403 Forbidden');
+    expect(head).toBe('');
+    expect(h.ensure).not.toHaveBeenCalled();
+    expect(net.connect).not.toHaveBeenCalled();
+  });
 
   it('keeps ordinary assets whose later segments contain proxy available', async () => {
     expect((await app.request(`/ide/${TASK}/static/proxy/asset.js`)).status).toBe(200);

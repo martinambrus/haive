@@ -101,7 +101,7 @@ export function installBrowserVncWebSocket(server: Server, opts: BrowserVncWsOpt
           runVncBridge(ws, host, vncPort, taskId);
         });
       } catch (err) {
-        log.error({ err, url: rawUrl }, 'vnc upgrade handler failed');
+        log.error({ err, path: rawUrl.split(/[?#]/)[0] }, 'vnc upgrade handler failed');
         rejectUpgrade(socket, 500, 'Internal Server Error');
       }
     })();

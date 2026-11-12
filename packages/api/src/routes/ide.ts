@@ -16,12 +16,11 @@ import { editorBootstrap } from '../lib/editor-bootstrap.js';
 import { bodyLimit } from 'hono/body-limit';
 import { grantEditor, redeemEditor } from '../lib/editor-grants.js';
 import { getPatientRedis } from '../redis.js';
-import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
+import { rejectUpgrade } from '../lib/upgrade-auth.js';
 import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import type { UpgradeSession } from '../lib/user-sockets.js';
 import {
   isSessionSetCookie,
-  getAccessCookie,
   withoutSessionCookies,
   withoutSessionSetCookies,
 } from '../auth/cookies.js';
@@ -42,7 +41,7 @@ import { isCanonicalUuid } from '../lib/uuid.js';
 //   - WebSocket (installIdeWebSocket): code-server's live session socket, bridged
 //     as a raw upgrade replay. Connection open/close drives the Redis refcount the
 //     worker's idle reaper reads to grace-stop the container after the tab closes.
-// code-server runs `--auth none`; the api proxy (cookie-JWT + task/repo ownership) is
+// code-server runs `--auth none`; the api proxy (editor session + task/repo ownership) is
 // the only auth boundary, and the container is never host-published.
 
 const log = logger.child({ module: 'ide-proxy' });
@@ -100,8 +99,31 @@ function upstreamRequestHeaders(source: Headers): Headers {
 // ---- HTTP reverse proxy ---------------------------------------------------
 
 export const ideRoutes = new Hono<AppEnv>();
+// Only the two public handshake routes and the bare-path redirect may be registered above the
+// editor-session gate below; a handler added above it is public.
 ideRoutes.get('/_handshake', editorBootstrap);
 ideRoutes.post('/_handshake', bodyLimit({ maxSize: 1024 }), redeemEditor);
+// The scoped cookie covers the slash form only. This canonical redirect reads no credentials.
+ideRoutes.use('*', async (c, next) => {
+  const parsed = extractIdeTarget(c.req.path);
+  if (parsed) {
+    const prefix = ideTarget(parsed.id, '', parsed.repository).prefix;
+    if (c.req.path === prefix) return c.redirect(`${prefix}/${new URL(c.req.url).search}`, 308);
+  }
+  await next();
+});
+
+// Registered after the two public handshake handlers, before every editor handler.
+ideRoutes.use('*', async (c, next) => {
+  const parsed = extractIdeTarget(c.req.path);
+  if (!parsed) throw new HttpError(401, 'Not authenticated');
+  const scope = { kind: parsed.repository ? ('repo' as const) : ('task' as const), id: parsed.id };
+  const identity = await editorIdentity(c.req.header('cookie'), scope);
+  if (!identity) throw new HttpError(401, 'Not authenticated');
+  const user = await requireEditorUser(identity.sub, identity.tv);
+  c.set('userId', user.id);
+  await next();
+});
 
 // Starting an editor is an explicit POST. Loading its HTML/assets only proxies an existing one.
 export const taskIdeAccessRoutes = new Hono<AppEnv>();
@@ -124,31 +146,24 @@ repoIdeAccessRoutes.post('/:id/ensure-ide', requireAuth, async (c) => {
   }
 });
 
-function isPortProxyPath(path: string): boolean {
-  const firstSegment = path.split(/[/?]/)[1]?.toLowerCase();
-  return firstSegment === 'proxy' || firstSegment === 'absproxy';
+export function isPortProxyPath(path: string): boolean {
+  // Parse the remainder on its own: a leading .. must not climb out of the authenticated target.
+  // An absolute base keeps // in the path rather than interpreting it as another authority.
+  // Check the raw form too: the bridge forwards the raw path, which the container may resolve itself.
+  const normalized = new URL(`http://ide.invalid${path || '/'}`).pathname;
+  const raw = path.split(/[?#]/)[0] ?? '';
+  return [raw, normalized].some((p) => {
+    const firstSegment = p.split('/')[1]?.toLowerCase();
+    return firstSegment === 'proxy' || firstSegment === 'absproxy';
+  });
 }
 
 async function proxyHttp(c: Context<AppEnv>, repository = false): Promise<Response> {
   const taskId = c.req.param('id');
   if (!taskId || !isCanonicalUuid(taskId)) throw new HttpError(404, 'Not found');
-  const scope = { kind: repository ? ('repo' as const) : ('task' as const), id: taskId };
-  let userId: string | undefined;
-  try {
-    const identity = await editorIdentity(c.req.header('cookie'), scope);
-    if (identity) {
-      const user = await requireEditorUser(identity.sub, identity.tv);
-      userId = user.id;
-    }
-  } catch (err) {
-    // A stale editor cookie must not mask a valid app session during the transition.
-    if (!(err instanceof HttpError && err.status === 403 && getAccessCookie(c))) throw err;
-  }
-  if (userId === undefined) {
-    // TRANSITION ONLY: deployed web still uses the app session. PR 4 removes this branch.
-    await requireAuth(c, async () => {});
-    userId = c.get('userId');
-  }
+  const userId = c.get('userId');
+  // Set by the editor-session gate; never proxy without it.
+  if (!userId) throw new HttpError(401, 'Not authenticated');
   const target = ideTarget(taskId, userId, repository);
   if (!(await targetBelongsToUser(target))) throw new HttpError(404, 'Not found');
 
@@ -242,9 +257,7 @@ export function installIdeWebSocket(server: Server): void {
           id: parsed.id,
         };
         const hasEditorCookie = editorCookieFromHeader(req.headers.cookie, scope) !== undefined;
-        let auth = hasEditorCookie ? await authenticateEditorUpgrade(req, scope) : null;
-        // TRANSITION ONLY: deployed web still uses the app session. PR 4 removes this branch.
-        if (!auth) auth = await authenticateUpgrade(req);
+        const auth = await authenticateEditorUpgrade(req, scope);
         if (!auth) {
           rejectUpgrade(
             socket,

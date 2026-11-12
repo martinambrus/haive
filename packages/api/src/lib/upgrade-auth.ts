@@ -1,9 +1,7 @@
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import type { WebSocketServer } from 'ws';
-import { eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
-import { getDb } from '../db.js';
+import { requireSessionUser } from '../middleware/auth.js';
 import { verifyAccessToken } from '../auth/jwt.js';
 import { accessCookieFromHeader } from '../auth/cookies.js';
 import { trackUserUpgrade, type UpgradeSession } from './user-sockets.js';
@@ -18,20 +16,8 @@ export async function authenticateUpgrade(
     if (!token) return null;
     const payload = await verifyAccessToken(token);
     session = trackUserUpgrade(payload.sub, req.socket);
-    const user = await getDb().query.users.findFirst({
-      where: eq(schema.users.id, payload.sub),
-      columns: { id: true, status: true, tokenVersion: true, mustChangePassword: true },
-    });
-    if (
-      session.revoked ||
-      !user ||
-      user.status !== 'active' ||
-      user.tokenVersion !== payload.tv ||
-      user.mustChangePassword
-    ) {
-      if (!session.revoked) session.dispose();
-      return null;
-    }
+    const user = await requireSessionUser(payload.sub, payload.tv);
+    if (session.revoked) return null;
     return { userId: user.id, session };
   } catch {
     if (!session?.revoked) session?.dispose();

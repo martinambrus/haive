@@ -171,7 +171,8 @@ describe.skipIf(!url)('a user who must change their password, on Postgres', () =
       await expectGated(await send('POST', '/tasks', { cookie, body: {} }));
       await expectGated(await send('GET', '/repos', { cookie }));
       await expectGated(await send('GET', '/cli-providers/catalog', { cookie }));
-      await expectGated(await send('GET', `/ide/${UUID}/`, { cookie }));
+      // The app session opens nothing under /ide: only an editor session does.
+      expect((await send('GET', `/ide/${UUID}/`, { cookie })).status).toBe(401);
       expect((await userRow(user.id)).name).toBe('before');
     });
 
@@ -283,8 +284,8 @@ describe.skipIf(!url)('a user who must change their password, on Postgres', () =
       expect((await userRow(user.id)).name).toBe('x');
       expect((await send('GET', '/repos', { cookie })).status).toBe(200);
       expect((await send('GET', '/cli-providers/catalog', { cookie })).status).toBe(200);
-      const ide = await send('GET', `/ide/${UUID}/`, { cookie });
-      expect(ide.status).toBe(404);
+      // The app session opens nothing under /ide: only an editor session does.
+      expect((await send('GET', `/ide/${UUID}/`, { cookie })).status).toBe(401);
 
       const res = await send('PUT', '/user-settings/password', {
         cookie,

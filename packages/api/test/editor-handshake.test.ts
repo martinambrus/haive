@@ -570,18 +570,18 @@ it('logs only the IDE pathname when an upgrade fails', async () => {
   expect(JSON.stringify(error.mock.calls)).not.toContain('must-not-be-logged');
 });
 
-it('keeps a valid transitional app session usable beside a stale editor cookie on HTTP and WS', async () => {
-  const stale = `${editorCookieName({ kind: 'task', id: ID })}=expired`;
-  const upstream = vi.fn().mockResolvedValue(new Response('editor'));
-  vi.stubGlobal('fetch', upstream);
-  try {
-    expect((await editorRequest(`${stale}; ${cookie}`)).status).toBe(200);
-  } finally {
-    vi.unstubAllGlobals();
-  }
-  const port = await editorWsRig();
-  expect(await wsHandshake(port, `${stale}; ${cookie}`).result).toBe(101);
-});
+it.each(['HTTP', 'WS'])(
+  'refuses an app session beside a stale editor cookie on %s',
+  async (transport) => {
+    const stale = `${editorCookieName({ kind: 'task', id: ID })}=expired`;
+    if (transport === 'HTTP') {
+      expect((await editorRequest(`${stale}; ${cookie}`)).status).toBe(403);
+    } else {
+      const port = await editorWsRig();
+      expect(await wsHandshake(port, `${stale}; ${cookie}`).result).toBe(403);
+    }
+  },
+);
 
 it('refuses a grant without an editor origin before waking the runtime', async () => {
   vi.stubEnv('HAIVE_EDITOR_ORIGIN', '');
@@ -590,3 +590,74 @@ it('refuses a grant without an editor origin before waking the runtime', async (
   expect((await grant()).status).toBe(503);
   expect(h.ensure).not.toHaveBeenCalled();
 });
+
+it.each([
+  ['tasks', 'HTTP'],
+  ['repos', 'HTTP'],
+  ['tasks', 'WS'],
+  ['repos', 'WS'],
+])('refuses an app session alone (%s, %s)', async (kind, transport) => {
+  if (transport === 'HTTP') {
+    expect((await editorRequest(cookie, kind)).status).toBe(401);
+  } else {
+    const port = await editorWsRig();
+    const path = kind === 'repos' ? `/ide/repos/${ID}/` : `/ide/${ID}/`;
+    expect(await wsHandshake(port, cookie, path).result).toBe(401);
+  }
+  expect(h.ensure).not.toHaveBeenCalled();
+  expect(h.upstreamHeaders).not.toHaveBeenCalled();
+});
+
+it.each(['tasks', 'repos'])(
+  'refuses target A credentials on target B on HTTP and WS (%s)',
+  async (kind) => {
+    const { cookie: editor } = await issued(kind);
+    const target = { kind: kind === 'repos' ? ('repo' as const) : ('task' as const), id: MISSING };
+    const renamed = `${editorCookieName(target)}=${editor.slice(editor.indexOf('=') + 1)}`;
+    expect((await editorRequest(renamed, kind, MISSING)).status).toBe(403);
+    const port = await editorWsRig();
+    const path = kind === 'repos' ? `/ide/repos/${MISSING}/` : `/ide/${MISSING}/`;
+    expect(await wsHandshake(port, renamed, path).result).toBe(403);
+  },
+);
+
+it.each([
+  '//evil.test',
+  '/%2F%2Fevil.test',
+  '/\\evil.test',
+  `/${ID.toUpperCase()}`,
+  `/repos/${ID.toUpperCase()}`,
+  `/${ID}%2F`,
+])('never redirects a hostile bare form off the editor path (%s)', async (suffix) => {
+  const res = await app.request(`/ide${suffix}`);
+  if (res.status === 308) expect(res.headers.get('location')).toMatch(/^\/ide\/[^/\\]/);
+  else expect(res.headers.get('location')).toBeNull();
+});
+
+it.each(['tasks', 'repos'])(
+  'redirects the bare target before reading authentication (%s)',
+  async (kind) => {
+    const prefix = kind === 'repos' ? `/ide/repos/${ID}` : `/ide/${ID}`;
+    const read = vi.spyOn(fake.db.query.users, 'findFirst');
+    const query = '?folder=%2Fworkspace&value=a%2Bb&value=two';
+    for (const method of ['GET', 'POST']) {
+      const responses = await Promise.all(
+        [
+          '',
+          cookie,
+          `${editorCookieName({ kind: kind === 'repos' ? 'repo' : 'task', id: ID })}=stale`,
+        ].map((auth) => app.request(prefix + query, { method, headers: { cookie: auth } })),
+      );
+      const bodies = [];
+      for (const res of responses) {
+        expect(res.status).toBe(308);
+        expect(res.headers.get('location')).toBe(prefix + '/' + query);
+        expect(res.headers.getSetCookie()).toEqual([]);
+        bodies.push(await res.text());
+      }
+      expect(new Set(bodies).size).toBe(1);
+    }
+    expect(read).not.toHaveBeenCalled();
+    expect(h.ensure).not.toHaveBeenCalled();
+  },
+);

@@ -57,6 +57,8 @@ const UUID = '00000000-0000-4000-8000-000000000001';
 const NO_ROUTE = 'x-no-route';
 
 const PUBLIC: Record<string, string> = {
+  'ALL /ide/:id': 'credential-independent canonical redirect to the editor cookie path',
+  'ALL /ide/repos/:id': 'credential-independent canonical redirect to the editor cookie path',
   'POST /ide/_handshake': 'redeems a single-use editor grant; it does not use the app session',
   'GET /ide/_handshake': 'static fragment bootstrap; it carries no app-session authority',
   'GET /health': 'liveness probe; the container health check carries no credential',
