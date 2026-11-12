@@ -1205,7 +1205,16 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
       logAuditEvent(event);
       return tokens;
     },
-  );
+  ).catch((err: unknown) => {
+    if (err instanceof HttpError && err.code === 'cli_auth_busy') {
+      throw new HttpError(
+        409,
+        'CLI authentication changed. Start a new usage connection and authorize again.',
+        'cli_auth_busy',
+      );
+    }
+    throw err;
+  });
   // Kick an immediate usage poll so the header meter refreshes within seconds instead of
   // waiting for the ~5-min repeatable tick: the freshly rotated token clears the worker's
   // dead-token gate and this poll overwrites the needs_reconnect snapshot with a live one.

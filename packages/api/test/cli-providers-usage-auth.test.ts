@@ -269,7 +269,10 @@ it.each(['exchange', 'write'])(
     else fake.hooks.beforeUpdate = async () => lose();
     const res = await post('complete', { code: CODE + '#' + state });
     expect(res.status).toBe(409);
-    expect(await res.json()).toMatchObject({ code: 'cli_auth_busy' });
+    expect(await res.json()).toMatchObject({
+      code: 'cli_auth_busy',
+      error: 'CLI authentication changed. Start a new usage connection and authorize again.',
+    });
     expect(fake.rows(schema.cliProviderSecrets)).toEqual([]);
     expect(fake.rows(schema.cliProviders)).toEqual(before);
     expect(fake.rows(schema.auditEvents)).toEqual([]);
