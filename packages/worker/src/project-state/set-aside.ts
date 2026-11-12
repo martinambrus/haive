@@ -41,7 +41,7 @@ import { readBlob } from '../plan/projection-merge.js';
 import { syncPlanFromCheckout } from '../plan/sync-checkout.js';
 import { gitRun } from '../repo/git-exec.js';
 import { GitOperationUnreadableError, gitOperationInProgress } from '../repo/git-operation.js';
-import { refreshProjectState } from './refresh.js';
+import { refreshProjectStateOutcome } from './refresh.js';
 import {
   readProjectStateBase,
   rebaseProjectStateOnHeadLocked,
@@ -1008,12 +1008,13 @@ export async function resyncHaiveProjections(
       synced = false;
       reasons.push({ phase: 'state_sync', ...sync });
     }
-    if (
-      (await isDirty(db, schema.projectStateOutbox, repositoryId)) &&
-      !(await refreshProjectState(db, repositoryId))
-    ) {
-      synced = false;
-      reasons.push({ phase: 'state_write', reason: 'write_pending', sync });
+    if (await isDirty(db, schema.projectStateOutbox, repositoryId)) {
+      const write = await refreshProjectStateOutcome(db, repositoryId);
+      // Preserve refreshProjectState's compatibility: stable writer blockages count as complete.
+      if (write.outcome !== 'written' && write.outcome !== 'blocked') {
+        synced = false;
+        reasons.push({ phase: 'state_write', ...write });
+      }
     }
   } catch (err) {
     synced = false;

@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database, MergeResolveState } from '@haive/database';
 import { logger } from '@haive/shared';
 import type { ProjectStateSyncOutcome } from './sync.js';
+import type { ProjectStateRefreshOutcome } from './refresh.js';
 
 const calls = vi.hoisted(() => ({
   outcome: 'applied' as string,
-  refreshed: true,
+  refreshOutcome: { outcome: 'written' } as ProjectStateRefreshOutcome,
   dirty: { state: false, plan: false },
   unreadable: false,
   open: false,
@@ -35,7 +36,7 @@ vi.mock('./sync.js', async (importOriginal) => ({
 }));
 vi.mock('./refresh.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./refresh.js')>()),
-  refreshProjectState: async () => calls.refreshed,
+  refreshProjectStateOutcome: async () => calls.refreshOutcome,
 }));
 vi.mock('../plan/sync-checkout.js', () => ({ syncPlanFromCheckout: async () => undefined }));
 vi.mock('../plan/mirror.js', async (importOriginal) => ({
@@ -70,7 +71,7 @@ function marksDb(): Database {
 
 beforeEach(() => {
   calls.outcome = 'applied';
-  calls.refreshed = true;
+  calls.refreshOutcome = { outcome: 'written' };
   calls.dirty = { state: false, plan: false };
   calls.unreadable = false;
   calls.open = false;
@@ -95,14 +96,14 @@ describe('resyncHaiveProjections settles only a state sync that finished', () =>
 
   it('answers false when the pending state could not be written', async () => {
     calls.dirty.state = true;
-    calls.refreshed = false;
+    calls.refreshOutcome = { outcome: 'held', reason: 'checkout' };
     expect(await resyncHaiveProjections(marksDb(), 'repo-1', '/repo')).toBe(false);
   });
 
   it('answers false for a deferred sync whose pending write deferred with it', async () => {
     calls.outcome = 'deferred';
     calls.dirty.state = true;
-    calls.refreshed = false;
+    calls.refreshOutcome = { outcome: 'held', reason: 'checkout' };
     expect(await resyncHaiveProjections(marksDb(), 'repo-1', '/repo')).toBe(false);
   });
 
@@ -221,4 +222,61 @@ it('retains sanitized database diagnostics in an incomplete attempt', async () =
   } finally {
     delete restoreFaults.beforeResync;
   }
+});
+
+it.each<ProjectStateRefreshOutcome>([
+  { outcome: 'missing' },
+  { outcome: 'absent' },
+  { outcome: 'superseded' },
+  { outcome: 'held', reason: 'git_operation' },
+  { outcome: 'held', reason: 'recovery' },
+  { outcome: 'held', reason: 'checkout' },
+  { outcome: 'held', reason: 'sync', code: 'write_pending', detail: 'record recovery pending' },
+  { outcome: 'refused', reason: 'record' },
+  { outcome: 'refused', reason: 'context' },
+])('diagnoses the state writer outcome $outcome $reason', async (result) => {
+  calls.dirty.state = true;
+  calls.refreshOutcome = result;
+  const repositoryId = `writer-${JSON.stringify(result)}`;
+  const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  expect(await resyncHaiveProjections(marksDb(), repositoryId, '/repo')).toBe(false);
+  expect(warn).toHaveBeenCalledExactlyOnceWith(
+    { repositoryId, reasons: [{ phase: 'state_write', ...result }] },
+    expect.any(String),
+  );
+});
+
+it('logs the sync result only once when the writer also holds', async () => {
+  calls.outcome = 'held';
+  calls.dirty.state = true;
+  calls.refreshOutcome = { outcome: 'held', reason: 'sync', code: 'write_pending' };
+  const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  expect(await resyncHaiveProjections(marksDb(), 'sync-and-write-held', '/repo')).toBe(false);
+  expect(warn).toHaveBeenCalledExactlyOnceWith(
+    {
+      repositoryId: 'sync-and-write-held',
+      reasons: [
+        {
+          phase: 'state_sync',
+          outcome: 'held',
+          reason: 'record read refused',
+          code: 'write_pending',
+        },
+        { phase: 'state_write', ...calls.refreshOutcome },
+      ],
+    },
+    expect.any(String),
+  );
+});
+
+it('continues to accept a stable writer blockage as completed', async () => {
+  calls.dirty.state = true;
+  calls.refreshOutcome = {
+    outcome: 'blocked',
+    code: 'unowned_malformed_rtk',
+    file: 'settings/rtk-enabled.json',
+  };
+  const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  expect(await resyncHaiveProjections(marksDb(), 'writer-blocked', '/repo')).toBe(true);
+  expect(warn).not.toHaveBeenCalled();
 });
