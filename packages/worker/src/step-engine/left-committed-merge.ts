@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import {
@@ -77,11 +77,19 @@ export async function recordLeftCommittedMerge(
         );
         return;
       }
+      const step = await tx.query.taskSteps.findFirst({
+        where: and(
+          eq(schema.taskSteps.taskId, taskId),
+          eq(schema.taskSteps.stepId, '12-worktree-cleanup'),
+        ),
+        orderBy: desc(schema.taskSteps.round),
+        columns: { mergeResolveState: true },
+      });
       await tx.insert(schema.taskEvents).values({
         taskId,
         taskStepId: null,
         eventType: MERGE_LEFT_COMMITTED_EVENT,
-        payload: { ...landed },
+        payload: { ...landed, pushed: step?.mergeResolveState?.pushed === true },
       });
     });
   }

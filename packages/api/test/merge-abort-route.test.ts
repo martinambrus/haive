@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppEnv } from '../src/context.js';
+import { ROOT_CLAIM_STALE_MS } from '@haive/database';
 
 const TASK = '11111111-2222-3333-4444-555555555555';
 const DIR = '/var/lib/haive/repos/u/r';
@@ -10,6 +11,11 @@ const state = vi.hoisted(() => ({
   events: [] as { eventType: string; payload: Record<string, unknown> }[],
   added: [] as unknown[][],
   hang: false,
+}));
+
+vi.mock('@haive/shared', async (original) => ({
+  ...(await original<object>()),
+  configService: { get: async () => null, getFresh: async () => null },
 }));
 
 vi.mock('../src/db.js', () => ({
@@ -126,6 +132,121 @@ describe('POST /tasks/:id/merges/abort', () => {
       body: JSON.stringify({ dir: DIR, mergeHead: 'm1' }),
     });
     expect(res.status).toBe(403);
+    expect(state.added).toEqual([]);
+  });
+});
+
+describe('POST /tasks/:id/merges/undo', () => {
+  const payload = {
+    dir: DIR,
+    repoPath: DIR,
+    landedOn: 'main',
+    landedAt: '2026-11-11T00:00:00Z',
+    baseShaBefore: 'a'.repeat(40),
+    baseShaAfter: 'b'.repeat(40),
+  };
+  const undo = (body: unknown = { dir: DIR, baseShaAfter: payload.baseShaAfter }) =>
+    app.request(`/tasks/${TASK}/merges/undo`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  beforeEach(() => {
+    state.events = [
+      { eventType: 'merge.left_committed', payload },
+      { eventType: 'task.cancel_finished', payload: {} },
+    ];
+  });
+  it('refuses Undo before cancellation teardown finishes with a plain 409 reason', async () => {
+    state.events = state.events.filter((e) => e.eventType !== 'task.cancel_finished');
+    const res = await undo();
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      error: 'Cancellation cleanup is still running; try again after it finishes.',
+    });
+    expect(state.added).toEqual([]);
+  });
+  it('queues only the exact reported merge of the cancelled task', async () => {
+    expect((await undo()).status).toBe(202);
+    expect(state.added[0]?.slice(0, 2)).toEqual([
+      'undo-left-merge',
+      {
+        taskId: TASK,
+        userId: 'u1',
+        dir: DIR,
+        baseShaAfter: payload.baseShaAfter,
+      },
+    ]);
+    const options = state.added[0]![2] as { attempts: number; backoff: { delay: number } };
+    const lastRetryAfter = options.backoff.delay * (2 ** (options.attempts - 1) - 1);
+    expect(
+      lastRetryAfter,
+      "post-move recovery must outlive a crashed worker's root lease",
+    ).toBeGreaterThan(ROOT_CLAIM_STALE_MS);
+  });
+  it.each(['done', 'moved'])('refuses an already settled %s report', async (outcome) => {
+    state.events.push({
+      eventType: 'merge.left_committed_settled',
+      payload: { ...payload, outcome: outcome === 'done' ? 'undone' : outcome, reason: 'settled' },
+    });
+    expect((await undo()).status).toBe(409);
+    expect(state.added).toEqual([]);
+  });
+  it('refuses another attempt after a permanent report-only refusal', async () => {
+    state.events.push({
+      eventType: 'merge.left_committed_settled',
+      payload: {
+        ...payload,
+        outcome: 'refused',
+        permanent: true,
+        reason: 'Pushed merge',
+      },
+    });
+    expect((await undo()).status).toBe(409);
+    expect(state.added).toEqual([]);
+  });
+  it('deduplicates the same attempt but queues a fresh job after a refusal', async () => {
+    await undo();
+    await undo();
+    const id = (index: number) => (state.added[index]![2] as { jobId: string }).jobId;
+    expect(id(0)).toBe(id(1));
+    state.events.push({
+      eventType: 'merge.left_committed_settled',
+      payload: { ...payload, outcome: 'refused', reason: 'busy' },
+    });
+    await undo();
+    expect(id(2)).not.toBe(id(0));
+  });
+  it('accepts another attempt after a retryable refusal', async () => {
+    state.events.push({
+      eventType: 'merge.left_committed_settled',
+      payload: { ...payload, outcome: 'refused', reason: 'busy' },
+    });
+    expect((await undo()).status).toBe(202);
+  });
+  it('refuses a mismatched report and an active task', async () => {
+    expect((await undo({ dir: DIR, baseShaAfter: 'c'.repeat(40) })).status).toBe(409);
+    state.task!.status = 'running';
+    expect((await undo()).status).toBe(409);
+    expect(state.added).toEqual([]);
+  });
+  it('requires ownership and a valid sha', async () => {
+    expect((await undo({ dir: DIR, baseShaAfter: '--bad' })).status).toBe(400);
+    state.task = null;
+    expect((await undo()).status).toBe(404);
+    expect(state.added).toEqual([]);
+  });
+  it('is protected by the foreign-origin gate and authentication', async () => {
+    const full = createApiApp('http://localhost:3000');
+    expect(
+      (
+        await full.request(`/tasks/${TASK}/merges/undo`, {
+          method: 'POST',
+          headers: { origin: 'http://localhost:5173' },
+        })
+      ).status,
+    ).toBe(403);
+    expect((await full.request(`/tasks/${TASK}/merges/undo`, { method: 'POST' })).status).toBe(401);
     expect(state.added).toEqual([]);
   });
 });

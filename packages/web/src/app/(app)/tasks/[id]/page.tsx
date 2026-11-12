@@ -2340,7 +2340,7 @@ export default function TaskDetailPage() {
             </div>
           )}
           {task.status === 'cancelled' && (
-            <TaskLeftMergeBanner taskId={id} taskStatus={task.status} />
+            <TaskLeftMergeBanner taskId={id} taskStatus={task.status} ownerId={task.userId} />
           )}
         </div>
       )}

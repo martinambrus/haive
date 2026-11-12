@@ -122,7 +122,7 @@ import { getDb } from '../db.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
-import { enqueueCheckoutSync } from '../lib/plan-mirror.js';
+import { enqueueCheckoutSync, observeCheckoutBranchForReset } from '../lib/plan-mirror.js';
 import {
   admitNewWork,
   assertNewWorkAllowed,
@@ -1202,6 +1202,7 @@ export function resolveMergedTasks(
     landedMerge?: unknown;
   }>,
   epoch: Date | null,
+  checkoutBranch: string | null = null,
 ): Map<string, Date> {
   const merged = new Map<string, Date>();
   for (const row of rows) {
@@ -1209,6 +1210,9 @@ export function resolveMergedTasks(
     // discarded the cleanup state. Its original landing time must still obey the epoch.
     const landed = readLandedMerge(row.landedMerge);
     if (landed) {
+      // A merge into another branch did not touch this checkout. Unknown observations retain
+      // the legacy behavior; the API reads the worker's branch and never runs Git itself.
+      if (checkoutBranch !== null && landed.landedOn !== checkoutBranch) continue;
       const at = new Date(landed.landedAt);
       if (epoch === null || at > epoch) merged.set(row.taskId, at);
       continue;
@@ -1221,8 +1225,21 @@ export function resolveMergedTasks(
     // Read from `merge_resolve_state`, NOT the cleanup step's apply output: that step throws
     // when `removeWorktreeDir` fails AFTER the merge is committed, leaving the step `failed`
     // while the merge is real. The merge phase wrote this before any of that could go wrong.
-    const state = row.mergeResolveState as { merged?: unknown; mergedAt?: unknown } | null;
+    const state = row.mergeResolveState as {
+      merged?: unknown;
+      mergedAt?: unknown;
+      baseBranch?: unknown;
+    } | null;
     if (state?.merged !== true) continue;
+    // Old states may record their target as baseBranch. Missing/empty targets remain counted
+    // as before, as do detached, unreadable and never-observed checkouts.
+    if (
+      checkoutBranch !== null &&
+      typeof state.baseBranch === 'string' &&
+      state.baseBranch.length > 0 &&
+      state.baseBranch !== checkoutBranch
+    )
+      continue;
     // The time the merge COMMIT landed, stamped in that state. The step's own `ended_at` is a
     // different thing: a cleanup that failed after merging can be RETRIED, and the rerun leaves
     // this state intact while stamping a fresh completion — which would date an old merge after
@@ -3171,6 +3188,8 @@ async function runOnboardingArtifactReset(
   // carry a `created_at` older than an end-of-request stamp, and `loadProvenanceSteps` would
   // exclude that run for good. Its writes land after the reset, so it belongs on the new side.
   const resetStartedAt = new Date();
+  // The root claim is a lease, not a pooled connection. No transaction spans this worker wait.
+  const checkoutBranch = await observeCheckoutBranchForReset(id, userId);
   const repoRow = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
     columns: { onboardingResetAt: true, renderContext: true },
@@ -3218,7 +3237,7 @@ async function runOnboardingArtifactReset(
   const written = collectWrittenCliContent(
     onboardingSteps,
     live,
-    resolveMergedTasks(onboardingSteps, epoch),
+    resolveMergedTasks(onboardingSteps, epoch, checkoutBranch),
   );
 
   // Read before the transaction below deletes the sync row.

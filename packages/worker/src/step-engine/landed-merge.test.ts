@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database, type MergeResolveState } from '@haive/database';
+import { failGit } from '../../test/support/fake-git.js';
 import { recordLandedMerge } from './landed-merge.js';
 
 vi.mock('./step-ownership.js', async (original) => ({
@@ -93,7 +94,31 @@ describe('step-12 durable landed merge', () => {
     ]);
     db.state = null;
     expect(events[0]?.payload.baseShaAfter).toBe(after);
+    expect(events[0]?.payload).toMatchObject({
+      featureBranch: 'feature',
+      featureSha: await git(dir, 'rev-parse', 'feature'),
+      mergeStage: 'feature',
+    });
     expect(await git(dir, 'rev-parse', 'main')).toBe(after);
+  });
+  it('keeps a landing report when optional feature evidence cannot be read', async () => {
+    const { dir, state, after } = await landed();
+    const { db, events } = fake();
+    const shim = await failGit(['rev-parse', '-q', '--verify', 'feature^{commit}']);
+    try {
+      await recordLandedMerge(db as unknown as Database, {
+        taskId: 't',
+        stepId: 's',
+        stepKey: '12-worktree-cleanup',
+        repoPath: dir,
+        state,
+      });
+      expect(events[0]?.payload.baseShaAfter).toBe(after);
+      expect(events[0]?.payload.featureSha).toBeUndefined();
+      expect(db.state).not.toBeNull();
+    } finally {
+      await shim.restore();
+    }
   });
   it('keeps the durable fact when cancel took the step during the merge section', async () => {
     const { dir, state, after } = await landed();
