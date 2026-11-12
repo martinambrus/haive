@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { eq } from 'drizzle-orm';
-import { schema, initializeTaskDatabaseState } from '@haive/database';
+import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import {
   applyTreeNoFollow,
@@ -11,6 +11,7 @@ import {
 } from '@haive/shared/fs-safe';
 import { SANDBOX_GID, SANDBOX_UID } from '../../../sandbox/sandbox-identity.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
+import { initializeTaskDatabaseState } from '../../../repo/database-snapshots.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { resolveDdevWorkspace } from './_task-meta.js';
 import { parseDdevConfig, renderDdevConfig } from '../_ddev-config.js';
