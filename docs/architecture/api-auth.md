@@ -9,7 +9,14 @@ it guards, an administrator included. `requireAuthAllowingPasswordChange` guards
 logout and refresh never had a session check. The six WebSocket handshakes (terminal, terminal-shell,
 cli-stream, cli-login-banner, browser-vnc and ide) share one authenticator, `authenticateUpgrade`
 (`lib/upgrade-auth.ts`), which selects the flag too and answers 401 for a flagged user, and one
-refusal, `rejectUpgrade`; a test fails a handler that keeps a copy of either. Two tests keep this
+refusal, `rejectUpgrade`; a test fails a handler that keeps a copy of either. A refusal about a
+resource the user owns (a container that is not running, a finished task, a repository that is not
+ready, a busy login) cannot be read by a browser as a refused upgrade's status, so once origin, auth
+and ownership have passed the handler accepts and closes at once with a 4000-4999 code through the
+one helper `closeRefused` (`lib/upgrade-auth.ts`): `CLI_LOGIN_CLOSE_CODES` (4409-4411) and
+`TERMINAL_CLOSE_CODES` (4420-4424, `@haive/shared/constants`); the client keys its sentence on the
+code. Origin, auth and ownership refusals stay HTTP and are sent before any accept, so a foreign page
+or another user learns nothing. Two tests keep this
 structural rather than remembered: `session-flag-drift.test.ts` fails when a file calls
 `verifyAccessToken(` without reading the flag (`maintenance.ts` is the one listed exception: it reads
 the role only to let administrators through a maintenance 503), and `flagged-session-routes.test.ts`

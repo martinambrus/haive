@@ -36,7 +36,7 @@ import { getDb } from '../db.js';
 import { recordAuditEvent } from '../lib/audit.js';
 import { saveCliLoginSecret } from '../lib/cli-login-secret.js';
 import { isJsonObject } from '../lib/json-object.js';
-import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
+import { authenticateUpgrade, closeRefused, rejectUpgrade } from '../lib/upgrade-auth.js';
 import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import { getCliExecQueue, getCliExecQueueEvents, getUsagePollQueue } from '../queues.js';
 import { attachContainerStream } from './terminal.js';
@@ -317,24 +317,13 @@ export function installCliLoginBannerWebSocket(
         }
         if (!SUPPORTED_PROVIDERS.has(provider.name)) {
           log.warn({ providerId, name: provider.name }, 'banner ws reject: unsupported');
-          rejectUpgrade(socket, 400, 'Login Unsupported');
+          closeRefused(wss, req, socket, head, auth.session, CLI_LOGIN_CLOSE_CODES.UNSUPPORTED);
           return;
         }
 
-        // Browsers cannot read an HTTP refusal of an upgrade. These authenticated,
-        // owned-provider refusals carry only a close code and never start a banner session.
-        const closeRefused = (code: number) => {
-          if (auth.session.revoked || socket.destroyed || socket.writableEnded) return;
-          wss.handleUpgrade(req, socket, head, (ws) => {
-            // Registers transport errors and session revocation policy, not a banner session.
-            if (auth.session.accept(ws)) ws.close(code);
-            else ws.terminate();
-          });
-        };
-
         const releaseAuth = await tryCliAuthLock(db, cliAuthScope(provider));
         if (!releaseAuth) {
-          closeRefused(CLI_LOGIN_CLOSE_CODES.AUTH_BUSY);
+          closeRefused(wss, req, socket, head, auth.session, CLI_LOGIN_CLOSE_CODES.AUTH_BUSY);
           return;
         }
         const startupDeadline = Date.now() + PRE_CONTAINER_TIMEOUT_MS;
@@ -370,7 +359,14 @@ export function installCliLoginBannerWebSocket(
             socket.removeListener('close', releaseUnclaimed);
             clearTimeout(unclaimedTimeout);
             await releaseAuth();
-            closeRefused(CLI_LOGIN_CLOSE_CODES.SETTINGS_CHANGED);
+            closeRefused(
+              wss,
+              req,
+              socket,
+              head,
+              auth.session,
+              CLI_LOGIN_CLOSE_CODES.SETTINGS_CHANGED,
+            );
             return;
           }
           wss.handleUpgrade(req, socket, head, (ws) => {

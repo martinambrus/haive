@@ -1,5 +1,6 @@
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
+import type { WebSocketServer } from 'ws';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { getDb } from '../db.js';
@@ -48,4 +49,22 @@ export function rejectUpgrade(socket: Duplex, status: number, statusText: string
     // ignore
   }
   socket.destroy();
+}
+
+/** Accept an owned-resource refusal so browsers can read its close code.
+ * Origin, authentication and ownership must already have passed. */
+export function closeRefused(
+  wss: WebSocketServer,
+  req: IncomingMessage,
+  socket: Duplex,
+  head: Buffer,
+  session: UpgradeSession,
+  code: number,
+): void {
+  if (session.revoked || socket.destroyed || socket.writableEnded) return;
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    // Install transport errors and revocation handling without starting session work.
+    if (session.accept(ws)) ws.close(code);
+    else ws.terminate();
+  });
 }

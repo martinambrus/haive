@@ -13,6 +13,8 @@ import { copyTerminalSelection } from '@/lib/terminal-copy';
 import { useTerminalCopy } from '@/lib/use-terminal-copy';
 import { usePendingCliCopy } from '@/lib/use-pending-cli-copy';
 import { stripDel } from '@/lib/terminal-sanitize';
+import { terminalRefusalMessage } from '@/lib/terminal-refusal-message';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
 import { Button } from '@/components/ui';
 
@@ -140,6 +142,7 @@ export function InteractiveShell(props: InteractiveShellProps) {
     const wsUrl = apiWebSocketUrl(wsPath);
     const ws = new WebSocket(wsUrl);
     setState('connecting');
+    setErrorMsg(null);
     setWorkdirMismatch(null);
     setConfirmRestart(false);
 
@@ -246,7 +249,13 @@ export function InteractiveShell(props: InteractiveShellProps) {
 
     ws.onclose = (ev) => {
       if (disposed) return;
-      setState((prev) => (prev === 'error' ? prev : 'closed'));
+      const refusal = terminalRefusalMessage(ev.code);
+      if (refusal) {
+        setState('error');
+        setErrorMsg(refusal);
+      } else {
+        setState((prev) => (prev === 'error' ? prev : 'closed'));
+      }
       reconnectIfRestarting();
       if (ev.code !== 1000) {
         term.writeln(
@@ -300,7 +309,7 @@ export function InteractiveShell(props: InteractiveShellProps) {
           {containerLabel && (
             <span className="font-mono text-[10px] text-neutral-500">{containerLabel}</span>
           )}
-          {errorMsg && <span className="text-red-400">{errorMsg}</span>}
+          {errorMsg && <InlineMarkdown inline body={errorMsg} className="text-red-400" />}
         </div>
         <div className="flex items-center gap-3">
           <span className="text-[10px] text-neutral-500">

@@ -6,11 +6,11 @@ import { WebSocketServer, WebSocket } from 'ws';
 import Docker from 'dockerode';
 import { eq, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { logger } from '@haive/shared';
+import { logger, TERMINAL_CLOSE_CODES } from '@haive/shared';
 import { terminalClientFrameSchema } from '@haive/shared';
 import type { TerminalServerFrame } from '@haive/shared';
 import { getDb } from '../db.js';
-import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
+import { authenticateUpgrade, closeRefused, rejectUpgrade } from '../lib/upgrade-auth.js';
 import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import { TerminalLogBuffer } from '../terminal/log-buffer.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
@@ -63,11 +63,25 @@ export function installTerminalWebSocket(server: Server, opts: TerminalWsOptions
           return;
         }
         if (container.status !== 'running') {
-          rejectUpgrade(socket, 409, 'Container not running');
+          closeRefused(
+            wss,
+            req,
+            socket,
+            head,
+            auth.session,
+            TERMINAL_CLOSE_CODES.CONTAINER_NOT_RUNNING,
+          );
           return;
         }
         if (!container.dockerContainerId) {
-          rejectUpgrade(socket, 409, 'Container not bound to docker');
+          closeRefused(
+            wss,
+            req,
+            socket,
+            head,
+            auth.session,
+            TERMINAL_CLOSE_CODES.CONTAINER_NOT_BOUND,
+          );
           return;
         }
 

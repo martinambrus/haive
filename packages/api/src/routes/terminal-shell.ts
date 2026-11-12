@@ -6,6 +6,7 @@ import type { Redis } from 'ioredis';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  TERMINAL_CLOSE_CODES,
   TERMINAL_CTL_CHANNEL_PREFIX,
   TERMINAL_WORKDIR_CHANNEL_PREFIX,
   TERMINAL_IN_CHANNEL_PREFIX,
@@ -23,7 +24,7 @@ import {
 } from '@haive/shared';
 import { getDb } from '../db.js';
 import { getPatientRedis } from '../redis.js';
-import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
+import { authenticateUpgrade, closeRefused, rejectUpgrade } from '../lib/upgrade-auth.js';
 import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 import { isCanonicalUuid } from '../lib/uuid.js';
@@ -96,7 +97,9 @@ export function installTerminalShellWebSocket(
             auth.userId,
           );
           if (!ownership.ok) {
-            rejectUpgrade(socket, ownership.status, ownership.message);
+            if ('closeCode' in ownership)
+              closeRefused(wss, req, socket, head, auth.session, ownership.closeCode);
+            else rejectUpgrade(socket, 404, 'Not Found');
             return;
           }
           if (auth.session.revoked) return;
@@ -134,7 +137,14 @@ export function installTerminalShellWebSocket(
           return;
         }
         if (ownership.taskTerminal === false) {
-          rejectUpgrade(socket, 409, `Task is ${ownership.taskStatus} - terminal disabled`);
+          closeRefused(
+            wss,
+            req,
+            socket,
+            head,
+            auth.session,
+            TERMINAL_CLOSE_CODES.TASK_TERMINAL_DISABLED,
+          );
           return;
         }
         if (auth.session.revoked) return;
@@ -489,7 +499,6 @@ function openSession(args: OpenSessionArgs): Promise<TerminalOpenResult> {
 
 interface OwnershipResult {
   taskTerminal: boolean;
-  taskStatus: string;
 }
 
 async function verifyOwnership(
@@ -515,14 +524,10 @@ async function verifyOwnership(
   // (terminal-session-manager.openSession) and the web tab (tasks/[id]/page.tsx) already
   // read it this way, and a 'failed' here rejected the handshake 409 before either ran.
   const terminalDisabled = task.status === 'completed' || task.status === 'cancelled';
-  return { taskTerminal: !terminalDisabled, taskStatus: task.status };
+  return { taskTerminal: !terminalDisabled };
 }
 
-interface RepoOwnershipResult {
-  ok: boolean;
-  status: number;
-  message: string;
-}
+type RepoOwnershipResult = { ok: true } | { ok: false } | { ok: false; closeCode: number };
 
 /** Repo-scope ownership + eligibility. Unlike tasks, repositories never "end";
  *  the gates are ownership, readiness, and source (read-only local-path repos
@@ -538,29 +543,27 @@ async function verifyRepoOwnership(
     where: eq(schema.repositories.id, repositoryId),
     columns: { userId: true, status: true, source: true, writable: true },
   });
-  if (!repo || repo.userId !== userId) return { ok: false, status: 404, message: 'Not Found' };
+  if (!repo || repo.userId !== userId) return { ok: false };
   const provider = await db.query.cliProviders.findFirst({
     where: eq(schema.cliProviders.id, cliProviderId),
     columns: { userId: true },
   });
   if (!provider || provider.userId !== userId) {
-    return { ok: false, status: 404, message: 'Not Found' };
+    return { ok: false };
   }
   if (isReadOnlyLocalRepo(repo)) {
     return {
       ok: false,
-      status: 409,
-      message: 'Terminal not available for read-only local-path repos',
+      closeCode: TERMINAL_CLOSE_CODES.REPO_READ_ONLY,
     };
   }
   if (repo.status !== 'ready') {
     return {
       ok: false,
-      status: 409,
-      message: `Repository is ${repo.status} - terminal unavailable`,
+      closeCode: TERMINAL_CLOSE_CODES.REPO_NOT_READY,
     };
   }
-  return { ok: true, status: 200, message: 'ok' };
+  return { ok: true };
 }
 
 function parseTwoSegmentPath(rawUrl: string, pathPrefix: string): [string, string] | null {

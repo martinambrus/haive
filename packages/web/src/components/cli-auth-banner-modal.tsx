@@ -248,7 +248,9 @@ export function CliAuthBannerModal({
           ? 'Another sign-in or sign-out for this account is in progress. Try again when it finishes.'
           : event?.code === CLI_LOGIN_CLOSE_CODES.SETTINGS_CHANGED
             ? 'Login settings changed. Reload and try again.'
-            : null;
+            : event?.code === CLI_LOGIN_CLOSE_CODES.UNSUPPORTED
+              ? 'Interactive sign-in is unavailable for this provider. Configure its credentials in provider settings.'
+              : null;
       if (refusal) {
         refusalCode = event.code;
         setQueueWait(null);

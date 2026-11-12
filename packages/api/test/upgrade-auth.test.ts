@@ -335,7 +335,7 @@ describe('upgrade authentication on every surface', () => {
       }
     });
   }
-  it('all upgrade routes import the one authenticator', () => {
+  it('all upgrade routes import shared authentication and refusal helpers', () => {
     for (const file of upgradeListenerFiles()) {
       const source = readFileSync(new URL(`../src/${file}`, import.meta.url), 'utf8');
       expect(source.includes("from '../lib/upgrade-auth.js'")).toBe(true);
@@ -344,6 +344,12 @@ describe('upgrade authentication on every surface', () => {
         /import\s*\{[^}]*\brejectUpgrade\b[^}]*\}\s*from ['"]\.\.\/lib\/upgrade-auth\.js['"]/,
       );
       expect(source).not.toMatch(/(?:function\s+|(?:const|let|var)\s+)rejectUpgrade\b/);
+      expect(source).not.toMatch(/(?:function\s+|(?:const|let|var)\s+)closeRefused\b/);
+      if (/\bcloseRefused\(/.test(source)) {
+        expect(source).toMatch(
+          /import\s*\{[^}]*\bcloseRefused\b[^}]*\}\s*from ['"]\.\.\/lib\/upgrade-auth\.js['"]/,
+        );
+      }
     }
   });
 });

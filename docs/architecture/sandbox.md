@@ -392,8 +392,9 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   scope, sorted; a save that sends them unchanged takes no lock. A login dialog
   holds it from the WebSocket upgrade until its session is torn down (at most the 10-minute session
   timeout once the container exists). A login upgrade that finds it held, or finds the scope moved
-  under it, is accepted and closed at once with `CLI_LOGIN_CLOSE_CODES` (4409 busy, 4410 settings
-  changed; `@haive/shared/constants`), since a browser cannot read a refused upgrade's status; the
+  under it, or whose provider has no login, is accepted and closed at once with
+  `CLI_LOGIN_CLOSE_CODES` (4409 busy, 4410 settings changed, 4411 login unsupported;
+  `@haive/shared/constants`), since a browser cannot read a refused upgrade's status; the
   origin, auth and ownership checks still refuse before any accept, and the modal keys its sentence
   on the code. Api writers, and the deletes of a login secret (DELETE `usage-auth` and
   `secrets/:name`), answer 409 `cli_auth_busy` when it is held; a delete never advances the

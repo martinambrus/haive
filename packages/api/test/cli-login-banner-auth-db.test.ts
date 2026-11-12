@@ -108,6 +108,16 @@ describe.skipIf(!url)('login banner refusal transport on Postgres', () => {
     }
   }
 
+  it('accepts an owned unsupported provider then closes without starting login work', async () => {
+    await db
+      .update(schema.cliProviders)
+      .set({ name: 'ollama' })
+      .where(eq(schema.cliProviders.id, provider.id));
+    expect(await connect()).toEqual({ opened: true, code: 4411 });
+    expect(h.add).not.toHaveBeenCalled();
+    await expectScopeFree(cliAuthScope(provider));
+  });
+
   it('accepts a busy account socket, closes with its code, and leaves the holder alone', async () => {
     const scope = cliAuthScope(provider);
     const release = await tryCliAuthLock(db, scope);
@@ -148,19 +158,14 @@ describe.skipIf(!url)('login banner refusal transport on Postgres', () => {
     }
   });
 
-  it.each(['authentication', 'ownership', 'unsupported'] as const)(
+  it.each(['authentication', 'ownership'] as const)(
     'keeps the earlier %s refusal on HTTP',
     async (reason) => {
       if (reason === 'authentication') h.actor = randomUUID();
       if (reason === 'ownership') endpoint = endpoint.replace(provider.id, randomUUID());
-      if (reason === 'unsupported')
-        await db
-          .update(schema.cliProviders)
-          .set({ name: 'ollama' })
-          .where(eq(schema.cliProviders.id, provider.id));
       expect(await connect()).toEqual({
         opened: false,
-        code: reason === 'authentication' ? 401 : reason === 'ownership' ? 404 : 400,
+        code: reason === 'authentication' ? 401 : 404,
       });
     },
   );
