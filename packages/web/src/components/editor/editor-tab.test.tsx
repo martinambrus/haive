@@ -16,7 +16,9 @@ vi.mock('@/components/markdown/markdown-view', () => ({
 const url = 'http://localhost:3001/ide/_handshake#single-use';
 const refusal = (status: number) => Object.assign(new Error('**Editor refused**'), { status });
 const settle = async () => {
-  await act(async () => {});
+  await act(async () => {
+    await vi.dynamicImportSettled();
+  });
 };
 
 beforeEach(() => {

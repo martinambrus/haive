@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Maximize2, Minimize2 } from 'lucide-react';
 import { api, type ApiError } from '@/lib/api-client';
-import { editorNeedsSecureCookie } from '@/lib/editor-origin';
 import { Button } from '@/components/ui';
 import { TaskSource } from '@/components/task-source';
 import { MarkdownView } from '@/components/markdown/markdown-view';
@@ -103,12 +102,17 @@ export function EditorTab({ taskId, repositoryId, className }: EditorTabProps) {
           try {
             const grant = await api.post<{ url: string }>(grantPath);
             if (cancelled) return;
-            if (editorNeedsSecureCookie(window.location.origin, grant.url)) {
-              setState('refused');
-              setMessage(
-                "Serve the editor over HTTPS or from a hostname under the app's domain, or set HAIVE_EDITOR_ORIGIN.",
-              );
-              return;
+            const editor = new URL(grant.url);
+            if (editor.protocol === 'http:' && editor.hostname !== window.location.hostname) {
+              const { editorNeedsSecureCookie } = await import('@/lib/editor-origin');
+              if (cancelled) return;
+              if (editorNeedsSecureCookie(window.location.origin, grant.url)) {
+                setState('refused');
+                setMessage(
+                  "Serve the editor over HTTPS or from a hostname under the app's domain, or set HAIVE_EDITOR_ORIGIN.",
+                );
+                return;
+              }
             }
             // Use the bootstrap URL verbatim. It redeems the grant and redirects to the
             // slash-terminated editor path covered by the scoped session cookie.
