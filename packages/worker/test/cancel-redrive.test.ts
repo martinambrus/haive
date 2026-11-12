@@ -1,3 +1,4 @@
+import { STOP_SETTLE_EVENTS } from '@haive/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/postgres-js';
@@ -214,6 +215,14 @@ describe('readQueuedCancelTaskIds', () => {
 });
 
 describe('Stop settlement queue snapshot', () => {
+  it('pins the durable event names', () => {
+    expect(STOP_SETTLE_EVENTS).toEqual({
+      REQUESTED: 'task.stop_settle_requested',
+      FINISHED: 'task.stop_settle_finished',
+      REDRIVEN: 'task.stop_settle_redriven',
+    });
+  });
+
   it('pins the production batch and minimum age', () => {
     expect(STOP_SETTLE_REDRIVE_BATCH).toBe(20);
     expect(STOP_SETTLE_STALE_MS).toBe(300_000);

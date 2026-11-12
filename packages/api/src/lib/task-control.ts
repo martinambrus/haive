@@ -10,7 +10,7 @@ import {
   getTableColumns,
 } from 'drizzle-orm';
 import { CLEAR_STEP_USAGE_STAMP, lockStepRows, schema } from '@haive/database';
-import { FIX_LOOP_ACTION_FIELD } from '@haive/shared';
+import { FIX_LOOP_ACTION_FIELD, STOP_SETTLE_EVENTS } from '@haive/shared';
 import { computeStepContribution } from '@haive/shared/timing';
 import { getDb } from '../db.js';
 import { killTaskSandboxes } from './sandbox-kill.js';
@@ -110,7 +110,7 @@ export async function supersedeLiveRuns(
       // so this request can never settle a task that Retry/Resume has moved on.
       await tx.insert(schema.taskEvents).values({
         taskId,
-        eventType: 'task.stop_settle_requested',
+        eventType: STOP_SETTLE_EVENTS.REQUESTED,
         payload: { failedAt },
       });
     }

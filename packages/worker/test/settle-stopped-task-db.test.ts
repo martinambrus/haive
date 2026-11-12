@@ -1,9 +1,12 @@
+import { STOP_SETTLE_EVENTS } from '@haive/shared';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { asc, eq } from 'drizzle-orm';
+import postgres from 'postgres';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import { asc, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createDatabase, schema, type Database } from '@haive/database';
+import { schema, type Database } from '@haive/database';
 import { processTaskJob, setContainerCleanupRunner } from '../src/queues/task-queue.js';
 import * as stalled from '../src/queues/stalled-redrive.js';
 
@@ -234,7 +237,10 @@ describe.skipIf(!url)('the worker settle job for a task the api Stop failed, on 
     callsFor(taskId).filter((c) => seams.includes(c));
 
   beforeAll(async () => {
-    db = createDatabase(url as string);
+    db = drizzle(postgres(url as string, { connection: { TimeZone: 'Europe/Bratislava' } }), {
+      schema,
+    });
+    expect((await db.execute(sql`show TimeZone`))[0]?.TimeZone).toBe('Europe/Bratislava');
     h.db = db;
     setContainerCleanupRunner(async (_db, taskId) => {
       h.seen('containerCleanup', taskId);
@@ -551,7 +557,7 @@ describe.skipIf(!url)('the worker settle job for a task the api Stop failed, on 
     const request = async (taskId: string, failedAt = FAILED_AT) => {
       await db.insert(schema.taskEvents).values({
         taskId,
-        eventType: 'task.stop_settle_requested',
+        eventType: STOP_SETTLE_EVENTS.REQUESTED,
         payload: { failedAt: failedAt.toISOString() },
         createdAt: T0,
       });
@@ -578,6 +584,33 @@ describe.skipIf(!url)('the worker settle job for a task the api Stop failed, on 
       expect(await sweep()).toEqual({ count: 0, queued: [] });
     });
 
+    it('re-drives an unfinished settlement again after its stamp ages past the cutoff', async () => {
+      const taskId = await seedTask('failed');
+      await request(taskId);
+      expect(await sweep()).toEqual({ count: 1, queued: [payloadFor(taskId)] });
+      await db
+        .update(schema.taskEvents)
+        .set({ createdAt: new Date(Date.now() - 300_001) })
+        .where(eq(schema.taskEvents.eventType, STOP_SETTLE_EVENTS.REDRIVEN));
+      expect(await sweep()).toEqual({ count: 1, queued: [payloadFor(taskId)] });
+      expect(await sweep()).toEqual({ count: 0, queued: [] });
+    });
+
+    it('records the matching finish in a non-UTC session', async () => {
+      const taskId = await seedTask('failed');
+      await request(taskId);
+      expect(describeOutcome(await run(payloadFor(taskId)))).toBe('resolved');
+      const events = await db.query.taskEvents.findMany({
+        where: eq(schema.taskEvents.taskId, taskId),
+      });
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          eventType: STOP_SETTLE_EVENTS.FINISHED,
+          payload: { failedAt: FAILED_AT.toISOString() },
+        }),
+      );
+    });
+
     it('requeues an exhausted settlement and a settled failure stays out of the sweep', async () => {
       const taskId = await seedTask('failed');
       await request(taskId);
@@ -587,14 +620,14 @@ describe.skipIf(!url)('the worker settle job for a task the api Stop failed, on 
       await db
         .update(schema.taskEvents)
         .set({ createdAt: T0 })
-        .where(eq(schema.taskEvents.eventType, 'task.stop_settle_redriven'));
+        .where(eq(schema.taskEvents.eventType, STOP_SETTLE_EVENTS.REDRIVEN));
       expect(await sweep()).toEqual({ count: 0, queued: [] });
       const events = await db.query.taskEvents.findMany({
         where: eq(schema.taskEvents.taskId, taskId),
       });
       expect(events).toContainEqual(
         expect.objectContaining({
-          eventType: 'task.stop_settle_finished',
+          eventType: STOP_SETTLE_EVENTS.FINISHED,
           payload: { failedAt: FAILED_AT.toISOString() },
         }),
       );

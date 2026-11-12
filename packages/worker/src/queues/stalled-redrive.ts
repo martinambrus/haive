@@ -18,6 +18,7 @@ import { schema, type Database } from '@haive/database';
 import {
   logger,
   TASK_JOB_NAMES,
+  STOP_SETTLE_EVENTS,
   type RepoRagCleanupPayload,
   type RepoResourceCleanupPayload,
 } from '@haive/shared';
@@ -583,7 +584,7 @@ export async function redriveStoppedTasks(
 ): Promise<number> {
   const cutoff = new Date(Date.now() - (opts.staleMs ?? STOP_SETTLE_STALE_MS));
   const event = taskEventsOf(db);
-  const sameFailure = sql`(${schema.taskEvents.payload}->>'failedAt')::timestamptz = ${schema.tasks.completedAt}`;
+  const sameFailure = sql`(${schema.taskEvents.payload}->>'failedAt')::timestamp = ${schema.tasks.completedAt}`;
   const candidates = await db
     .select({
       taskId: schema.tasks.id,
@@ -595,12 +596,12 @@ export async function redriveStoppedTasks(
       and(
         eq(schema.tasks.status, 'failed'),
         lt(schema.tasks.completedAt, cutoff),
-        exists(event('task.stop_settle_requested', sameFailure)),
-        not(exists(event('task.stop_settle_finished', sameFailure))),
+        exists(event(STOP_SETTLE_EVENTS.REQUESTED, sameFailure)),
+        not(exists(event(STOP_SETTLE_EVENTS.FINISHED, sameFailure))),
         not(
           exists(
             event(
-              'task.stop_settle_redriven',
+              STOP_SETTLE_EVENTS.REDRIVEN,
               sameFailure,
               gte(schema.taskEvents.createdAt, cutoff),
             ),
@@ -624,7 +625,7 @@ export async function redriveStoppedTasks(
         .insert(schema.taskEvents)
         .values({
           taskId: task.taskId,
-          eventType: 'task.stop_settle_redriven',
+          eventType: STOP_SETTLE_EVENTS.REDRIVEN,
           payload: { failedAt },
         })
         .returning({ id: schema.taskEvents.id });
@@ -955,7 +956,6 @@ export interface StalledTaskSweeperOptions {
 }
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
-const DEFAULT_STALE_MS = 300_000;
 
 export class StalledTaskSweeper {
   private readonly db: Database;
@@ -968,7 +968,7 @@ export class StalledTaskSweeper {
   constructor(opts: StalledTaskSweeperOptions) {
     this.db = opts.db;
     this.intervalMs = opts.intervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
-    this.staleMs = opts.staleMs ?? DEFAULT_STALE_MS;
+    this.staleMs = opts.staleMs ?? STOP_SETTLE_STALE_MS;
   }
 
   start(): void {

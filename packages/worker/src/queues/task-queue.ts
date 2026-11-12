@@ -50,6 +50,7 @@ import {
   QUEUE_NAMES,
   TASK_DEAD_EVENT,
   TASK_JOB_NAMES,
+  STOP_SETTLE_EVENTS,
   ideSessionKey,
   repoIdeSessionId,
   logger,
@@ -1057,12 +1058,18 @@ async function settleFailedTask(
   stoppedFailure?: { status: string; completedAt: Date | null },
 ): Promise<void> {
   // Capture the failure before any teardown: a later Stop must keep its own request pending.
-  const failure =
-    stoppedFailure ??
-    (await db.query.tasks.findFirst({
-      where: eq(schema.tasks.id, taskId),
-      columns: { status: true, completedAt: true },
-    }));
+  let failure = stoppedFailure;
+  if (!failure) {
+    try {
+      failure = await db.query.tasks.findFirst({
+        where: eq(schema.tasks.id, taskId),
+        columns: { status: true, completedAt: true },
+      });
+    } catch (err) {
+      // Keep a Stop's request pending for the sweep, but never block failure teardown.
+      logger.warn({ err, taskId }, 'failed-task settlement could not capture the failure');
+    }
+  }
   await cleanupTaskContainers(db, taskId, 'failed');
   await resyncAfterTaskEnd(db, taskId);
   await maybeUnloadTaskEmbedModel(db, taskId);
@@ -1074,23 +1081,27 @@ async function settleFailedTask(
     const failedAt = failure.completedAt.toISOString();
     // An ordinary failed task has no request. Both its pass and the Stop job may settle it;
     // recording their completion is harmless, and cannot acknowledge a different failure.
-    await db.execute(sql`
-      insert into ${schema.taskEvents} (task_id, event_type, payload)
-      select ${schema.tasks.id}, 'task.stop_settle_finished',
-             jsonb_build_object('failedAt', ${failedAt}::text)
-      from ${schema.tasks}
-      where ${schema.tasks.id} = ${taskId}
-        and ${schema.tasks.status} = 'failed'
-        and ${schema.tasks.completedAt} = ${failedAt}::timestamptz
-        and exists (select 1 from ${schema.taskEvents}
-          where ${schema.taskEvents.taskId} = ${schema.tasks.id}
-            and ${schema.taskEvents.eventType} = 'task.stop_settle_requested'
-            and ${schema.taskEvents.payload}->>'failedAt' = ${failedAt})
-        and not exists (select 1 from ${schema.taskEvents}
-          where ${schema.taskEvents.taskId} = ${schema.tasks.id}
-            and ${schema.taskEvents.eventType} = 'task.stop_settle_finished'
-            and ${schema.taskEvents.payload}->>'failedAt' = ${failedAt})
-    `);
+    try {
+      await db.execute(sql`
+        insert into ${schema.taskEvents} (task_id, event_type, payload)
+        select ${schema.tasks.id}, ${STOP_SETTLE_EVENTS.FINISHED},
+               jsonb_build_object('failedAt', ${failedAt}::text)
+        from ${schema.tasks}
+        where ${schema.tasks.id} = ${taskId}
+          and ${schema.tasks.status} = 'failed'
+          and ${schema.tasks.completedAt} = ${failedAt}::timestamp
+          and exists (select 1 from ${schema.taskEvents}
+            where ${schema.taskEvents.taskId} = ${schema.tasks.id}
+              and ${schema.taskEvents.eventType} = ${STOP_SETTLE_EVENTS.REQUESTED}
+              and ${schema.taskEvents.payload}->>'failedAt' = ${failedAt})
+          and not exists (select 1 from ${schema.taskEvents}
+            where ${schema.taskEvents.taskId} = ${schema.tasks.id}
+              and ${schema.taskEvents.eventType} = ${STOP_SETTLE_EVENTS.FINISHED}
+              and ${schema.taskEvents.payload}->>'failedAt' = ${failedAt})
+      `);
+    } catch (err) {
+      logger.warn({ err, taskId }, 'Stop settlement finish not recorded; request stays pending');
+    }
   }
 }
 

@@ -1,3 +1,4 @@
+import { STOP_SETTLE_EVENTS } from '@haive/shared';
 import { and, eq, inArray } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
@@ -280,7 +281,7 @@ describe.skipIf(!url)('settling a task right after an api Stop, on Postgres', ()
     });
     expect(requests).toContainEqual(
       expect.objectContaining({
-        eventType: 'task.stop_settle_requested',
+        eventType: STOP_SETTLE_EVENTS.REQUESTED,
         payload: { failedAt: job.payload.failedAt },
       }),
     );

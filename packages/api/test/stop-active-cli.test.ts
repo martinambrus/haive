@@ -1,3 +1,4 @@
+import { STOP_SETTLE_EVENTS } from '@haive/shared';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const kill = vi.hoisted(() => vi.fn(async (_taskId: string) => 0));
@@ -87,7 +88,7 @@ describe('stopping a task', () => {
     expect(fake.rows(schema.taskEvents)).toEqual([
       expect.objectContaining({
         taskId: TASK,
-        eventType: 'task.stop_settle_requested',
+        eventType: STOP_SETTLE_EVENTS.REQUESTED,
         payload: { failedAt: result.failedAt },
       }),
     ]);
