@@ -228,11 +228,6 @@ Low unless marked. Code in api `routes/bundles.ts`, worker `bundle-ingest.ts`, `
 9. The catalog parse holds a pooled connection while it reads the archive.
 10. The fence that keeps the replacement record out of the catalog is not pinned by a test.
 
-### T617 · fix · Undo merge: hold the ref lock across the reset
-
-status: open · kind: fix · found: E3 (#1081) review 2026-11-11 · priority: P3 · authorized (overnight 2026-11-11)
-`reset --keep` has no compare-and-swap, so a commit made in the checkout between Undo's final HEAD check and the reset is dropped from the branch (the reflog keeps it). Exact fix: move the ref inside an `update-ref --stdin` transaction (`start`/`prepare`/`commit`, git 2.27+) that holds the lock across the working-tree move, or refuse on older git. Code: `worker/src/step-engine/undo-left-merge.ts` ~:561.
-
 ### T619 · FNF[reset-provenance-followups] · checkout-branch provenance follow-ups (+1)
 
 status: open · kind: test · found: K1 (#1082) review 2026-11-11 · priority: P4
@@ -243,6 +238,19 @@ status: open · kind: test · found: K1 (#1082) review 2026-11-11 · priority: P
 
 status: open · kind: design · found: #1088 review 2026-11-12 · priority: P4
 When an api process that still holds a CLI login's auth lock times out the login container, nothing removes it, and a restart forgets it. A permanent quarantine table was tried in #1088 and reverted: after an api restart it refused the scope forever. Needs a mechanism that tells a dead owner from a live one (lease with heartbeat, or a container label checked at boot) before anything removes the container or blocks the scope.
+
+### T621 · FNF[gated-tests-not-in-ci] · gated api test fails on unchanged main and has no CI row
+
+status: open · kind: test · found: S1 (#1091) full suite 2026-11-12 · priority: P3
+`api/test/upgrade-cli-addition-db.test.ts` is gated and has no GATED row in `ci.yml`, so CI never runs it; on unchanged main it fails 7 tests ("status and actual01 agree on completed recorded target membership", a `hasUpgradeAvailable` mismatch). PRE-EXISTING. Investigate whether the test or the code drifted, fix, then add the row. Bundle with T619 (same shape).
+
+### T622 · FNF[terminal-close-codes-followups] · terminal close-code follow-ups (+3)
+
+status: open · kind: fix · found: S1 (#1091) review 2026-11-12 · priority: P4
+
+1. `InlineMarkdown inline` mode's phrasing-element allowlist has no test of its own (web components/markdown). Coverage.
+2. Inline mode always applies soft line breaks. Minor.
+3. (PRE-EXISTING, unverified) The browser VNC and IDE upgrades answer HTTP 503 while their runtime starts; check whether those clients would benefit from a close code.
 
 ### T618 · FNF[bundle-replace-followups-2] · Replace ZIP follow-ups after #1083 (+5)
 
@@ -271,19 +279,29 @@ DECIDED by the owner 2026-11-11: separate editor hostname (e.g. `ide.<domain>`) 
 APPROVED by the owner 2026-11-12 with a constraint: single-host installs (localhost, a company's internal network, one hostname for web and api) must keep working with no new setting. Design draft (M2 map, no code): `.claude/tmp/codex-run/M2-S/codex-1/design.txt` (`HAIVE_EDITOR_ORIGIN`, hashed single-use handshake + editor session tables, editor-host dispatch; cross-host refuses `/ide` without the setting).
 In cross-host mode `/ide` is proxied on the web origin, so code-server (which runs repository code) runs with the app's origin and can reach its API session. Options: a separate editor hostname (needs DNS/TLS per install), an API-host editor with its own scoped handshake token, or a sandboxed opaque-origin iframe (code-server may need storage it then lacks). Costs: `.claude/tmp/codex-run/H2-S/codex-2/editor-options.txt`. Needs an owner decision. Same-hostname installs are unaffected.
 
-### T614 · FNF[cancel-left-merge-followups] · cancel-left committed-merge report and Undo follow-ups (+8)
+### T614 · FNF[cancel-left-merge-followups] · cancel-left committed-merge report and Undo follow-ups (+18)
 
 status: open · kind: fix · found: E2 (#329) reviews 2026-11-11 · priority: P4
 Code in `worker/src/step-engine/left-committed-merge.ts`.
 
 1. Every git no-exit result is treated as "cannot confirm" and reported as nothing, including a signal kill or an `EMFILE`/`EAGAIN` spawn failure that a re-drive could fix (~:65). Kept on purpose: a persistent spawn error that rethrows would hold the abandon pass forever. Narrow to `ENOENT` only if a retry bound for the abandon pass exists.
 2. One report per task, from the latest landing only: with landings in two directories the earlier one is never checked (~:40-62). Reachable only with two step-12 landings in different directories.
-3. Undo (`undo-left-merge.ts`, #1081): a branch checked out in a linked worktree between the worktree check and `update-ref` is moved under it (seconds-wide; the update-ref CAS still holds the sha).
+3. DONE #1090. Undo (`undo-left-merge.ts`, #1081): a branch checked out in a linked worktree between the worktree check and `update-ref` is moved under it (seconds-wide; the update-ref CAS still holds the sha).
 4. Undo: worktree paths are compared without resolving symlinks; a symlinked path refuses (fails safe).
 5. Undo: an `undone` settlement whose projection re-sync then fails is not re-drivable by the person; nor is a recovery still blocked after the queue's retry window.
-6. Undo: a base that switched branch settles as `moved`, not as a retryable refusal.
-7. Undo: git stderr detail is dropped from the refusal reason; no test drives a failed worktree-list read through undo.
+6. DONE #1090. Undo: a base that switched branch settles as `moved`, not as a retryable refusal.
+7. DONE #1090. Undo: git stderr detail is dropped from the refusal reason; no test drives a failed worktree-list read through undo.
 8. (PRE-EXISTING) `restoreFeature` errors are swallowed once the report is settled.
+9. (#1090 low) The unsupported-git refusal names Git 2.27 for any exit before the `start` ack. Copy.
+10. (#1090 low) The real-git transaction tests share a 100 ms deadline with git's own start; can flake on a loaded runner.
+11. (#1090 low) The transaction callback has no timer of its own; the git calls inside it keep their bounds.
+12. (#1090 low) No test pins the 10 s post-commit wait or the secret-then-path scrub order.
+13. (#1090 low) (PRE-EXISTING) A ref `.lock` left by an external SIGKILL of `update-ref` needs manual removal.
+14. (#1090 low) Some interrupted-move detection branches have no test.
+15. (#1090 low) Interrupted-move recovery passes paths on argv; a large touched set can hit the argv limit. Fix: `--pathspec-from-file`.
+16. (#1090 low) Recovery does not exempt the projection paths from its clean-against-index check (fails safe: refuses).
+17. (#1090 low) The SIGKILL test does not assert the child is unref'd.
+18. (#1090 low) A failure after `commit: ok` can still be reported as "Git refused". Copy.
 
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
@@ -1546,15 +1564,19 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
-### T588 · FNF[worker-audit-writer] · worker audit writer follow-ups (+5)
+### T588 · FNF[worker-audit-writer] · worker audit writer follow-ups (+9)
 
 status: open · kind: fix · found: #1057 reviews 2026-11-10 · priority: P4
 
-1. No worker mapping for a lock timeout: gate 4's bounded lock take and 02-upgrade-apply.ts ~:834-840 end the step with the raw PostgreSQL message; `isLockNotAvailable` exists in @haive/database (used by attachments/expand-archives.ts ~:687). PRE-EXISTING pattern, minor.
-2. `packages/worker/src/audit.ts` duplicates the api's `insertAuditEvent`, `logAuditEvent` and `AuditEvent`, and metadata summaries are computed in both (worker audit.ts ~:78-91, api repos.ts ~:996-998); @haive/shared could host one copy. Minor, drift risk.
-3. Worker rows carry `source`, `actorKind`, `fields`, keys no api row for the same action has; a consumer filtering on `source` sees only worker rows. The admin list reads metadata generically. Minor.
+1. DONE #1092. No worker mapping for a lock timeout: gate 4's bounded lock take and 02-upgrade-apply.ts ~:834-840 end the step with the raw PostgreSQL message; `isLockNotAvailable` exists in @haive/database (used by attachments/expand-archives.ts ~:687). PRE-EXISTING pattern, minor.
+2. DONE #1092. `packages/worker/src/audit.ts` duplicates the api's `insertAuditEvent`, `logAuditEvent` and `AuditEvent`, and metadata summaries are computed in both (worker audit.ts ~:78-91, api repos.ts ~:996-998); @haive/shared could host one copy. Minor, drift risk.
+3. DONE #1092. Worker rows carry `source`, `actorKind`, `fields`, keys no api row for the same action has; a consumer filtering on `source` sees only worker rows. The admin list reads metadata generically. Minor.
 4. Gate 4's no-origin path replaces a saved remote and credential with the typed values (11a-gate-4-push.ts `persistPushOrigin` with `addOrigin`); audited and stated in the form since #1057, unchanged behaviour. PRE-EXISTING, minor; decide whether it should refuse instead.
-5. `repository.scope.update` from the worker reports `addedCount` 0 when a null list becomes `[]`. Nit.
+5. DONE #1092. `repository.scope.update` from the worker reports `addedCount` 0 when a null list becomes `[]`. Nit.
+6. Two inline `audit_events` inserts remain outside `@haive/shared/audit`: module drain, and the private-endpoint seed (in a transaction by design). Minor.
+7. Gate 4's remote update emits no event when nothing changed; the api remote route emits one with empty `fields`. Nit.
+8. (PRE-EXISTING) api `routes/tasks/index.ts` ~:805 calls the unmapped `initializeTaskDatabaseState`, so a lock timeout there surfaces raw. Minor.
+9. Nothing stops a new step from importing the unmapped `initializeTaskDatabaseState` instead of the lock-mapped wrapper. Fix: a lint or ratchet test.
 
 ### T589 · FNF[encryption-key-and-seed-store] · boot key and seed store leftovers (+3)
 
@@ -1565,9 +1587,9 @@ status: open · kind: design · found: #1060 reviews 2026-11-10 · priority: P3
 3. The seed's Redis compare-and-set runs inside the Postgres transaction but outside its rollback: a timed-out or ambiguous Redis write, or a COMMIT failing after it, leaves the grant applied with its audit row rolled back (worker private-endpoint-seed.ts ~:410-435). Same shape as the earlier `setIfAbsent`. PRE-EXISTING, minor.
 4. Seed attempts count seed runs, not distinct boots (bootstrap retries and crash loops count), and a malformed `bootstrap:privateEndpointSeed` blocks the seed until deleted; both documented in api-auth.md. Accepted, minor.
 
-### T590 · FNF[cli-auth-lock-followups] · CLI auth lock and sign-out follow-ups (+28)
+### T590 · FNF[cli-auth-lock-followups] · CLI auth lock and sign-out follow-ups (+31)
 
-status: open (groups C: 16, 17 and D: 11, 12, 13, plus 19-29) · kind: fix · found: #1061 reviews 2026-11-10 · priority: P3
+status: open (lows 20, 22, 24, 25, 26, 29, 30-31; item 2 accepted) · kind: fix · found: #1061 reviews 2026-11-10 · priority: P3
 DECIDED by the owner 2026-11-11: all remaining groups approved (lock correctness 4, 6, 7, 15; sign-out flow 8, 9, 10, 14, 18; web UI 16, 17; tests and minor 11, 12, 13). Item 2 stays accepted and documented. Overnight run authorized.
 
 1. DONE #1062. `DELETE /:providerId/usage-auth` and `DELETE /:providerId/secrets/:secretName` (api cli-providers.ts ~:1165-1230) take no auth lock, so a usage refresh that read the secret before the delete can write it back. PRE-EXISTING, moderate. Fix: take the lock (`withCliAuthLock`) like the writers.
@@ -1580,30 +1602,27 @@ DECIDED by the owner 2026-11-11: all remaining groups approved (lock correctness
 8. DONE #1086. `handleProbeJob` writes an `authStatus` computed before a sign-out that ran meanwhile (worker cli-exec/handlers.ts ~:705). PRE-EXISTING, minor.
 9. DONE #1086. LOGIN_CREATE's `chown -R` helper mounts the auth volume outside the lock (handlers.ts ~:1097); a sign-out can then fail with "volume in use". PRE-EXISTING, minor.
 10. DONE #1086. `job.updateData` in the sign-out contention path (handlers.ts ~:1158) is outside `deferJob`'s refusal retry; a Redis LOADING/OOM fails the sign-out with the raw error. Minor.
-11. `dropCopiedSecretLikeProviderEnv` fails the destructive migration on a busy lock with no bounded wait (worker secrets/move-secret-env.ts ~:37-39, ~:105). Minor.
-12. `GET /cli-providers` and `/:id` return `authGeneration` (api cli-providers.ts ~:224, ~:335). REGRESSION, minor (opaque, own-user).
-13. Tests: the PATCH stale-read refusal for an unchanged present value (`|| authSettingsRequested`, api cli-providers.ts ~:616) has no test; api writer and move-secret-env unit tests mock `tryCliAuthLock` without asserting its scope (gated PG tests cover it); harvest's `lockWaitMs = 0` is not pinned; usage-auth complete and `writeProviderSecret` lock rows secret-then-provider while others go provider-then-secret (safe under the advisory scope; add a comment). Minor.
+11. DONE #1089. `dropCopiedSecretLikeProviderEnv` fails the destructive migration on a busy lock with no bounded wait (worker secrets/move-secret-env.ts ~:37-39, ~:105). Minor.
+12. DONE #1089. `GET /cli-providers` and `/:id` return `authGeneration` (api cli-providers.ts ~:224, ~:335). REGRESSION, minor (opaque, own-user).
+13. DONE #1089. Tests: the PATCH stale-read refusal for an unchanged present value (`|| authSettingsRequested`, api cli-providers.ts ~:616) has no test; api writer and move-secret-env unit tests mock `tryCliAuthLock` without asserting its scope (gated PG tests cover it); harvest's `lockWaitMs = 0` is not pinned; usage-auth complete and `writeProviderSecret` lock rows secret-then-provider while others go provider-then-secret (safe under the advisory scope; add a comment). Minor.
 14. DONE #1086. The sign-out scope-change retry (worker cli-exec/handlers.ts, after the lock) has no own attempt cap; only repeated settings changes inside the read-to-lock window keep it looping. Minor.
 15. DONE #1088. The usage poller resolves the token without the lock, fetches, then writes the snapshot unlocked (worker usage-poll-queue.ts ~:351-435, upserts ~:228, ~:419, ~:435): a Disconnect in between deletes secret and snapshot, and the poller re-creates a stale snapshot nothing polls again. PRE-EXISTING, minor. Fix: write the snapshot under the scope lock and skip when the secret is gone.
-16. The provider form deletes removed secrets one by one and refreshes `existingSecrets` only after the whole save (web cli-provider-form.tsx ~:513-519): a mid-loop failure (now also a 409 `cli_auth_busy`) leaves it stale and the retry's DELETE of an already-removed name answers 404 until a reload. PRE-EXISTING, minor.
-17. `runCliSignOut` takes no AbortSignal (web lib/cli-jobs.ts ~:145-157; caller cli-providers/page.tsx ~:293): leaving the page keeps a 2 s poll running, now up to 32 min. PRE-EXISTING, minor.
+16. DONE #1089. The provider form deletes removed secrets one by one and refreshes `existingSecrets` only after the whole save (web cli-provider-form.tsx ~:513-519): a mid-loop failure (now also a 409 `cli_auth_busy`) leaves it stale and the retry's DELETE of an already-removed name answers 404 until a reload. PRE-EXISTING, minor.
+17. DONE #1089. `runCliSignOut` takes no AbortSignal (web lib/cli-jobs.ts ~:145-157; caller cli-providers/page.tsx ~:293): leaving the page keeps a 2 s poll running, now up to 32 min. PRE-EXISTING, minor.
 18. DONE #1086. The sign-out cap counts from the first contention (`authContentionStartedAt`, worker cli-exec/handlers.ts ~:1152), not enqueue, and each deferred retry re-queues behind CLI jobs, so under load the job can fail after the page's 32 min window; a tab stalled more than 15 min after the job finished reads `job_expired` (retention 900 s); `delayed` is also set by pause/outage gates, where the account-wait sentence is not the reason. Minor (copy and window).
-19. Api POST/PATCH credential writers: the `assertHeld` before commit has no test of its own (api cli-providers.ts). Minor, coverage.
+19. DONE #1089. Api POST/PATCH credential writers: the `assertHeld` before commit has no test of its own (api cli-providers.ts). Minor, coverage.
 20. The last `assertHeld` sits one round trip before COMMIT, so a lock lost in that window still commits. Minor, theoretical.
-21. A usage reconnect refused with 409 tells the user to "Retry", but the OAuth code is single-use and was already spent; the copy should say to reconnect again. Minor, copy.
+21. DONE #1089. A usage reconnect refused with 409 tells the user to "Retry", but the OAuth code is single-use and was already spent; the copy should say to reconnect again. Minor, copy.
 22. The usage-token refresh is re-posted on every tick, and one catch swallows its error unlogged (worker usage-poll-queue.ts). Minor.
-23. `move-secret-env` reads the scope before taking the lock (worker secrets/move-secret-env.ts). PRE-EXISTING, minor.
+23. DONE #1089. `move-secret-env` reads the scope before taking the lock (worker secrets/move-secret-env.ts). PRE-EXISTING, minor.
 24. A refresh token the provider rotated during a refresh is lost when the lock is lost before the write. Minor; the next reconnect recovers it.
 25. The volume-login flag path in the login banner is untested (api cli-login-banner.ts). Minor, coverage.
 26. A `releaseAuth` rejection in the banner cleanup skips the post-release usage tick. Minor.
-27. The `releasePending` half of the lock-watch guard (`abort.aborted || releasePending`) has no test. Minor, coverage.
-28. A resumed sign-out that reaches the retry cap still says "Nothing was removed" although credentials may already be gone (worker cli-exec/handlers.ts ~:1270). REGRESSION, minor. Fix: use the scope-changed sentence when `signOutStarted`.
+27. DONE #1089. The `releasePending` half of the lock-watch guard (`abort.aborted || releasePending`) has no test. Minor, coverage.
+28. DONE #1089. A resumed sign-out that reaches the retry cap still says "Nothing was removed" although credentials may already be gone (worker cli-exec/handlers.ts ~:1270). REGRESSION, minor. Fix: use the scope-changed sentence when `signOutStarted`.
 29. The superseded-job return runs before the resumed scope compare (handlers.ts). PRE-EXISTING ordering, minor. Also: one over-long line in docs/architecture/sandbox.md (sign-out section).
-
-### T591 · FNF[terminal-upgrade-refusal-codes] · terminal WebSocket refusals answer HTTP 409 the browser cannot read
-
-status: open · kind: fix · found: T590 (#1062) Codex and review 2026-11-10 · priority: P4
-PRE-EXISTING, minor to moderate. A browser cannot read a refused upgrade's status, so these show a generic error: api routes/terminal.ts ~:66 ("Container not running"), ~:70 ("Container not bound to docker"); routes/terminal-shell.ts ~:137 (task status disables the terminal), ~:552, ~:559 (repository eligibility). Clients: web Terminal.tsx ~:247-253, InteractiveShell.tsx ~:241-247. Fix: the #1062 pattern (accept after the origin, auth and ownership checks, then close with a 4000-4999 code from a shared constant; the client keys its sentence on the code).
+30. Sync-back reads the scope from its caller rather than re-reading it under the lock (worker sandbox/task-auth-volume.ts). PRE-EXISTING, minor (found #1089 review).
+31. Two stale code comments left by #1089 (move-secret-env.ts copy phase, cli-auth-lock.ts wait helper). Cosmetic.
 
 ### T592 · FNF[fs-park-recovery] · park recovery runs only where fs-safe writes; legacy truncated parks (+1)
 
@@ -1634,6 +1653,11 @@ status: open · kind: design · found: G (#270) review 1 2026-11-10 · priority:
 Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/routes/tasks/steps.ts` ~:171-191), which deletes the step's done agent mining rows and supersedes their invocations; the Resume arm that keeps done rows needs `failed` rows (~:1257-1330). Any apply-time failure after the replies landed (a busy plan patch, a refused write) therefore re-pays the whole wave. PRE-EXISTING. Needs a decision: a "re-apply saved replies" Retry mode, or Resume accepting done unfolded rows.
 
 ## Done
+
+- T590 groups C + D and lows 19, 21, 23, 27, 28 — provider form refreshes secrets per delete, sign-out poll aborts on leave, destructive env move waits 30 s for the lock only in its drop phase and re-reads scope under FOR UPDATE, `authGeneration` no longer returned, reconnect copy after a spent OAuth code, resumed sign-out cap copy — PR #1089 (1392c4ad0), 2026-11-12. Lows 20, 22, 24-26, 29-31 open; item 2 accepted.
+- T617 + T614 items 3, 6, 7 — Undo merge holds the base branch ref lock across the working-tree move (`update-ref --stdin` transaction, two-tree `read-tree`), refuses old git, re-checks holders under the lock, retryable refusals for a switched base or open git operation, interrupted-move recovery, scrubbed git detail — PR #1090 (a3ce986e2), 2026-11-12.
+- T591 — terminal and task-shell refusals after ownership checks accept and close with codes 4420-4424 (login unsupported 4411); the clients show a sentence per code — PR #1091 (c466edcff), 2026-11-12. Follow-ups T622.
+- T588 items 1, 2, 3, 5 — lock timeouts map to a plain sentence at five step sites, one audit writer in `@haive/shared/audit`, api events carry `source`/`actorKind`/`fields`, no zero-delta scope events — PR #1092 (00cb73090), 2026-11-12. Item 4 (decision) and 6-9 open.
 
 - T610 — two-install smoke logs why the project-state sweep held (refresh outcome, git operation marker, sync result; each probe bounded at 10 s, bound query errors redacted) on a failed sweep check — PR #1085 (98ac7dc4c), 2026-11-12. Investigation continues only if the hold recurs in CI.
 - T612 items 1, 3, 4 — blank `HAIVE_PUBLIC_API_URL` / `HAIVE_API_PORT` fall through to the next source in web and api; nosniff on every inline byte route; raw-file SVG control shown red against the old headers — PR #1087 (a38e37d78), 2026-11-12. Item 2 open.
