@@ -28,14 +28,14 @@ export async function withGitRefTransaction(
   child.on('error', (error) => {
     spawnError = error;
   });
-  const exited = new Promise<number | null>((resolve) => child.once('close', resolve));
-  const timer = setTimeout(
-    () => {
-      timedOut = true;
-      child.kill('SIGKILL');
-    },
-    gitDefaultTimeoutMs(hardenGitArgs(args)),
+  let closed = false;
+  const exited = new Promise<number | null>((resolve) =>
+    child.once('close', (code) => {
+      closed = true;
+      resolve(code);
+    }),
   );
+  const timeoutMs = gitDefaultTimeoutMs(hardenGitArgs(args));
   const lines = createInterface({ input: child.stdout });
   const replies = lines[Symbol.asyncIterator]();
   const failure = () =>
@@ -48,9 +48,48 @@ export async function withGitRefTransaction(
   const command = async (input: string, reply: string) => {
     if (child.exitCode !== null || child.signalCode !== null || child.stdin.destroyed)
       throw failure();
-    child.stdin.write(input + '\n');
-    const line = await replies.next();
-    if (line.done || line.value !== reply) throw failure();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      child.stdin.write(input + '\n');
+      const line = await Promise.race([
+        replies.next(),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            timedOut = true;
+            reject(failure());
+          }, timeoutMs);
+        }),
+      ]);
+      if (line.done || line.value !== reply) throw failure();
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  const waitForExit = async () => {
+    if (closed) return true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        exited.then(() => true),
+        new Promise<false>((resolve) => {
+          timer = setTimeout(() => resolve(false), 1000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  const finish = async (abort: boolean) => {
+    // EOF aborts even if a pending protocol read timed out. Do not wait for an
+    // abort ack: that read may still own the next reply. Git gets the first
+    // chance to remove its locks itself, followed by its signal cleanup handler.
+    if (!child.stdin.destroyed && !child.stdin.writableEnded)
+      child.stdin.end(abort ? 'abort\n' : undefined);
+    if (!(await waitForExit())) {
+      child.kill('SIGTERM');
+      if (!(await waitForExit())) child.kill('SIGKILL');
+    }
+    return exited;
   };
   let committed = false;
   try {
@@ -59,20 +98,10 @@ export async function withGitRefTransaction(
     if (!(await move())) return false;
     await command('commit', 'commit: ok');
     committed = true;
-    child.stdin.end();
-    if ((await exited) !== 0) throw failure();
+    if ((await finish(false)) !== 0) throw failure();
     return true;
   } finally {
-    try {
-      if (!committed) await command('abort', 'abort: ok');
-    } catch {
-      // A failed prepare/closed process already aborted; preserve the original failure.
-    } finally {
-      child.stdin.end();
-      // The protocol is finished. Bound a child that fails to exit after EOF too.
-      await exited;
-      clearTimeout(timer);
-      lines.close();
-    }
+    await finish(!committed);
+    lines.close();
   }
 }
