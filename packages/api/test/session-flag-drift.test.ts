@@ -6,6 +6,8 @@ const SRC = join(__dirname, '../src');
 
 const EXEMPT: Record<string, string> = {
   'auth/jwt.ts': 'defines verifyAccessToken',
+  'lib/editor-grants.ts':
+    'mounted behind requireAuth, and requireEditorUser re-reads the user through requireSessionUser, which refuses mustChangePassword',
   'middleware/maintenance.ts':
     'reads the role only to let administrators through a maintenance 503, and refuses nothing else',
 };
