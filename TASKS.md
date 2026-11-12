@@ -265,7 +265,7 @@ Code in `worker/src/step-engine/left-committed-merge.ts`.
 
 ### T624 · ops · Lint/Unit CI job runs near its 20-minute limit
 
-status: in progress: all batches merged: CI unit matrix #1101 (65dff5ead), rule doc #1103 (d576c1e31), 3a limits at small scale #1104 (f4eb14334; 260 s -> 7 s), 3b fake timers #1105 (c5deec93c; 129 s -> 9 s), 3c git fixtures #1106 (32a2705a5; 133 s -> 116 s; further git batches save under 60 s each, so stopped). Unit jobs on main 3-6 min (d576c1e31, 24f309b1a); close after a third main run under 10 min · kind: ops · found: #1099 CI 2026-11-12 · priority: P3
+status: done 2026-11-13: all batches merged: CI unit matrix #1101 (65dff5ead), rule doc #1103 (d576c1e31), 3a limits at small scale #1104 (f4eb14334; 260 s -> 7 s), 3b fake timers #1105 (c5deec93c; 129 s -> 9 s), 3c git fixtures #1106 (32a2705a5; 133 s -> 116 s; further git batches save under 60 s each, so stopped). Unit jobs on main 3-6 min (d576c1e31, 24f309b1a); close after a third main run under 10 min · kind: ops · found: #1099 CI 2026-11-12 · priority: P3 Closed: five consecutive green main runs (4a716fa22 through 2daca69a7) ran each unit job in 3-6 min. Flake source in T631
 Owner direction 2026-11-12: make tests fast and minimal rather than only raising limits; plan approved (`.claude/tmp/codex-run/T624-S/plan.md`): CI unit matrix first, then a testing rule doc, then batches (bounds at small scale, fake timers, git template fixtures). #1098, #1099, #1100 all cancelled at 20 min.
 `lint-typecheck-test` (`.github/workflows/ci.yml` ~:36, `timeout-minutes: 20`) took 12-19 min on recent main runs; #1099 and the docs-only #1098 were cancelled at 20 min in "Module scripts", and a re-run passed. Measure per-step time over recent runs, then raise the limit to a measured budget (as the gated step did in #1093) or split the job. Not an outage workaround: the job grew.
 
@@ -536,7 +536,7 @@ status: parked · reason: diminishing returns (owner triage 2026-11-10); resume 
 
 ### T540 · FNF[stop-settle-sweep] · no sweep re-drives a lost settle or Cancel job
 
-status: open · kind: design · priority: P3
+status: done 2026-11-13 #1117 (d60ebc24e): Stop writes a `task.stop_settle_requested` event in its transaction, settlement writes `task.stop_settle_finished`; the stalled sweep re-drives an unfinished request after 5 min, live jobs excluded before the batch of 20, once per 5 min per stamp. Lows in T632 · kind: design · priority: P3
 Owner decision 2026-11-12: add a sweep that re-queues settle/Cancel for stopped or cancelled tasks still holding something unsettled.
 PRE-EXISTING, from the T393 build (2026-11-07). A `settle-stopped-task` job that was never queued (Redis down past the 2 s bound) or exhausted its attempts has no re-drive; `redriveCancelledTasks` (worker queues/stalled-redrive.ts ~:586) covers cancelled tasks only. Backstops by what is held: task auth volumes, the boot reaper only; terminal shells, the idle reaper; onboarding re-sync, the 60 s checkout sweep (project-state/watch.ts ~:121); embed model, the boot reconcile; Ollama CLI models, keep_alive; a kb_author 'enriching' entry, none. Decide: a sweep over failed tasks with unsettled holdings, or accept the backstops.
 
@@ -794,6 +794,18 @@ PRE-EXISTING. shared global-kb/client.ts `withGlobalKb` (~:121) via `recomputeAl
 
 status: open · kind: fix · found: T571 review 2026-11-12 · priority: P3
 PRE-EXISTING, more reachable since #1116 made the bounded path the norm at boot. (1) `withGlobalKb` without `deadlineMs` in steps and the sweep: `_global-kb-promote.ts`, `kb-author/01-enrich.ts`, `09_6_4`/`09_6_5`, `global-kb-sync-queue.ts`; a store that accepts and stalls holds the step or sweep. Fix: pass a deadline and signal as the boot repairs do. (2) shared global-kb/connection.ts `resolveInternal` (~:148-152): the main-db `SELECT 1 FROM pg_database` / `CREATE DATABASE` has no client-side bound, so each timed-out background attempt can leave one query on the worker pool while main Postgres stalls (Greptile P2 on #1116, comment 4556974731). Fix: client-side bound; `SET LOCAL statement_timeout` cannot cover `CREATE DATABASE`. (3) worker data-migrations.ts `dropHeadingOnlyGlobalKbChunks` (~:1253) swallows a typed outage internally; and the recompute is not gated on `resolveGlobalKbEnabled` (the classify migration is).
+
+### T631 · fix · git-template test helper cleanup times out on a loaded runner
+
+status: open · kind: fix · found: #1117 CI 2026-11-12 · priority: P4
+worker `test/support/git-template.ts` ~:10 registers a module-scope `afterAll` that `rm`s every template and copy root with `maxRetries: 5`; on run 43322735643 (worker 1/2) it hit the 10 s hook timeout in `git-template.test.ts` while all 8537 tests passed, failing the shard (re-run passed). Fix direction: give the hook its own timeout or remove the roots per file without retries, and measure how long the removal takes on CI.
+
+### T632 · FNF[stop-settle-redrive-lows] · Stop and Cancel re-drive lows (+2)
+
+status: open · kind: fix · found: #1117 reviews 2026-11-12 · priority: P4
+
+1. The throttle compares `task_events.created_at` (timestamp without zone, DB `now()` in the session zone) with a JS UTC cutoff (`stalled-redrive.ts` `redriveStoppedTasks` ~:606 and `redriveCancelledTasks` ~:697, ~:817): in a session zone behind UTC an unfinished Stop or Cancel is re-queued every 60 s sweep instead of every 5 min; ahead of UTC the throttle lengthens by the offset. PRE-EXISTING pattern (Cancel), repeated by #1117. Fix: compare through UTC on both sides or stamp from JS.
+2. The Stop re-drive has no count cap (Cancel has `CANCEL_REDRIVE_MAX`): a task whose finish insert keeps failing is re-settled every 5 min with one `task.stop_settle_redriven` row per cycle until a Retry or Cancel. Low.
 
 ### T572 · FNF[boot-failure-dead-watcher] · a Postgres outage past 30 s at boot still exits
 
