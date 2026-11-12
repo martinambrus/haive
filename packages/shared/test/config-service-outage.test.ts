@@ -143,6 +143,13 @@ class FakeRedis {
           string,
           string,
         ];
+        if (args[1]!.includes('-- Seed environment key')) {
+          this.beforeEncryptionSet?.();
+          if (this.store.has(key)) return void socket.write(':0\r\n');
+          if (this.store.has(pending)) return void socket.write(':-1\r\n');
+          this.store.set(key, expected);
+          return void socket.write(':1\r\n');
+        }
         if (args[1]!.includes("'NX'")) {
           if (!this.store.has(key) && !this.store.has(pending)) this.store.set(pending, expected);
           return void socket.write('+OK\r\n');
@@ -511,7 +518,7 @@ describe('ConfigService while Redis is unavailable', () => {
       seed: { [CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES]: STALE_ATTACHMENT_CAP },
     },
     { cmd: 'EXISTS', op: 'ensureEncryptionKey', seed: {} },
-    { cmd: 'SET', op: 'ensureEncryptionKey', seed: {} },
+    { cmd: 'EVAL', op: 'ensureEncryptionKey', seed: {} },
   ])(
     'fails initialize typed as $op when the connection drops on $cmd',
     async ({ cmd, op, seed }) => {

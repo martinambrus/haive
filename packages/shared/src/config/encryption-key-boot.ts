@@ -1,7 +1,17 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import type { Sql } from 'postgres';
 import { schema, type Database } from '@haive/database';
 import { logger } from '../logger/index.js';
+
+/** Only the inventory and audited-discard operations are needed during configuration boot. */
+export type EncryptionKeyBootDatabase = Pick<Database, 'execute' | 'transaction'>;
+
+/** Adapt an existing client without creating or owning a connection pool. */
+export function encryptionKeyBootDatabase(client: Sql): EncryptionKeyBootDatabase {
+  return drizzle(client, { schema });
+}
 
 /** No expiry: an interrupted discard resumes with the same key and audit id. */
 export const PENDING_ENCRYPTION_KEY = 'bootstrap:pendingEncryptionKey';
@@ -40,7 +50,7 @@ interface KeyStore {
  * the idempotency id and candidate across processes/crashes, so an ambiguous Redis reply or
  * failed database COMMIT cannot publish an unaudited replacement or duplicate its audit. */
 export async function generateBootEncryptionKey(
-  db: Database | undefined,
+  db: EncryptionKeyBootDatabase | undefined,
   store: KeyStore,
   envKeyInvalid = false,
 ) {

@@ -1,6 +1,9 @@
 import { Redis, ReplyError } from 'ioredis';
-import type { Database } from '@haive/database';
-import { generateBootEncryptionKey, PENDING_ENCRYPTION_KEY } from './encryption-key-boot.js';
+import {
+  generateBootEncryptionKey,
+  PENDING_ENCRYPTION_KEY,
+  type EncryptionKeyBootDatabase,
+} from './encryption-key-boot.js';
 import { createRedisConnection, type RedisFactoryOptions } from '../utils/redis-factory.js';
 import { ConfigUnavailableError } from './config-unavailable.js';
 import { logger } from '../logger/index.js';
@@ -799,7 +802,10 @@ export class ConfigService {
   // Bounds a Redis that stays LOADING: ioredis then neither becomes ready nor emits an error.
   private static READY_TIMEOUT_MS = 10_000;
 
-  async initialize(redisUrl?: string, db?: Database | (() => Database)): Promise<void> {
+  async initialize(
+    redisUrl?: string,
+    db?: EncryptionKeyBootDatabase | (() => EncryptionKeyBootDatabase),
+  ): Promise<void> {
     if (this.initialized) return;
 
     const url = redisUrl ?? process.env.REDIS_URL;
@@ -943,7 +949,9 @@ export class ConfigService {
     }
   }
 
-  private async ensureEncryptionKey(db?: Database | (() => Database)): Promise<void> {
+  private async ensureEncryptionKey(
+    db?: EncryptionKeyBootDatabase | (() => EncryptionKeyBootDatabase),
+  ): Promise<void> {
     const exists = await this.redisCall('ensureEncryptionKey', (redis) =>
       redis.exists(CONFIG_KEYS.ENCRYPTION_KEY),
     );
@@ -951,11 +959,9 @@ export class ConfigService {
 
     if (!exists) {
       if (envKey) {
-        const seeded = await this.redisCall('ensureEncryptionKey', (redis) =>
-          redis.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey, 'NX'),
-        );
+        const seeded = await this.seedEnvEncryptionKey(envKey, 'ensureEncryptionKey');
         logger.info(
-          seeded === 'OK'
+          seeded
             ? 'Seeded encryption key from CONFIG_ENCRYPTION_KEY'
             : 'Found encryption key seeded by another process',
         );
@@ -1022,6 +1028,30 @@ export class ConfigService {
       value: stored,
       expiresAt: Date.now() + ConfigService.LOCAL_CACHE_TTL_MS,
     });
+  }
+
+  /** The env seed and the pending reservation serialize in Redis. Once a pending exists,
+   * no env-key writer can bypass its audited commit and publication, including fallback reads. */
+  private async seedEnvEncryptionKey(envKey: string, operation: string): Promise<boolean> {
+    const seeded = await this.redisCall(operation, (redis) =>
+      redis.eval(
+        `-- Seed environment key
+         if redis.call('exists', KEYS[1]) == 1 then return 0 end
+         if redis.call('exists', KEYS[2]) == 1 then return -1 end
+         redis.call('set', KEYS[1], ARGV[1])
+         return 1`,
+        2,
+        CONFIG_KEYS.ENCRYPTION_KEY,
+        PENDING_ENCRYPTION_KEY,
+        envKey,
+      ),
+    );
+    if (seeded === -1) {
+      throw new ConfigUnavailableError(operation, {
+        cause: new Error('Encryption key publication is pending'),
+      });
+    }
+    return seeded === 1;
   }
 
   private checkEncryptionKey(stored: string, envKey: string | null): void {
@@ -1158,9 +1188,7 @@ export class ConfigService {
     if (!key) {
       const { key: envKey } = this.getEnvEncryptionKey();
       if (envKey) {
-        await this.redisCall('getEncryptionKey', (redis) =>
-          redis.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey, 'NX'),
-        );
+        await this.seedEnvEncryptionKey(envKey, 'getEncryptionKey');
         const stored = await this.redisCall('getEncryptionKey', (redis) =>
           redis.get(CONFIG_KEYS.ENCRYPTION_KEY),
         );

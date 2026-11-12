@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
-  sql: Object.assign(vi.fn(), { end: vi.fn() }),
+  sql: Object.assign(vi.fn(), { end: vi.fn(), options: { parsers: {}, serializers: {} } }),
   initialize: vi.fn(),
 }));
-vi.mock('postgres', () => ({ default: () => h.sql }));
+vi.mock('postgres', () => ({ default: vi.fn(() => h.sql) }));
+import postgres from 'postgres';
 vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
   configService: { initialize: h.initialize },
@@ -98,6 +99,16 @@ afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
 });
+it('reuses the updater client for boot inventory instead of creating a second pool', async () => {
+  h.initialize.mockImplementationOnce(async (_url, source) => {
+    const db = typeof source === 'function' ? source() : source;
+    expect(db.$client).toBe(h.sql);
+  });
+  expect(await main()).toBe(0);
+  expect(postgres).toHaveBeenCalledTimes(1);
+  expect(h.sql.end).toHaveBeenCalledTimes(1);
+});
+
 it('check applies install credentials before manifest IO, emits pins, and starts no run', async () => {
   vi.mocked(dk.readReleaseManifestImage).mockImplementation(async () => {
     expect(process.env.DOCKER_CONFIG).toBe('/host/install/.docker');

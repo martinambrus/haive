@@ -1,7 +1,10 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { encrypt, encryptEmail, envelopeEncrypt, envelopeDecrypt } from '../src/crypto/index.js';
-import { generateBootEncryptionKey } from '../src/config/encryption-key-boot.js';
+import {
+  encryptionKeyBootDatabase,
+  generateBootEncryptionKey,
+} from '../src/config/encryption-key-boot.js';
 
 const url = process.env.ENCRYPTION_KEY_BOOT_TEST_URL;
 const oldKey = 'ab'.repeat(32);
@@ -60,7 +63,9 @@ describe.skipIf(!url)('boot encryption key database boundary', () => {
   it('refuses existing ciphertext without the explicit override', async () => {
     vi.stubEnv('HAIVE_DISCARD_UNREADABLE_SECRETS', '');
     const state = store();
-    await expect(generateBootEncryptionKey(db, state)).rejects.toThrow('CONFIG_ENCRYPTION_KEY');
+    await expect(
+      generateBootEncryptionKey(encryptionKeyBootDatabase(db.$client), state),
+    ).rejects.toThrow('CONFIG_ENCRYPTION_KEY');
     expect(await state.getKey()).toBeNull();
     expect(await db.select().from(schema.systemSecrets)).toHaveLength(1);
     expect(await db.select().from(schema.auditEvents)).toHaveLength(0);
@@ -78,7 +83,10 @@ describe.skipIf(!url)('boot encryption key database boundary', () => {
     const envelope = envelopeEncrypt('retained', oldMaster);
     await db.insert(schema.userSecrets).values({ userId: user!.id, keyName: 'token', ...envelope });
     const state = store();
-    await Promise.all([generateBootEncryptionKey(db, state), generateBootEncryptionKey(db, state)]);
+    await Promise.all([
+      generateBootEncryptionKey(db, state),
+      generateBootEncryptionKey(encryptionKeyBootDatabase(db.$client), state),
+    ]);
     const audits = await db.select().from(schema.auditEvents);
     expect(audits).toHaveLength(1);
     expect(audits[0]).toMatchObject({

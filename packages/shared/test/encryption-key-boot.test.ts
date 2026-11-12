@@ -1,4 +1,6 @@
 import { EventEmitter } from 'node:events';
+import type { Sql } from 'postgres';
+import { encryptionKeyBootDatabase } from '../src/config/encryption-key-boot.js';
 import type { SQL } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { PgDialect } from 'drizzle-orm/pg-core';
@@ -11,6 +13,7 @@ vi.mock('../src/logger/index.js', () => ({
 }));
 import { CONFIG_KEYS, ConfigService } from '../src/config/config.service.js';
 import { logger } from '../src/logger/index.js';
+import { ConfigUnavailableError } from '../src/config/config-unavailable.js';
 
 const PENDING = 'bootstrap:pendingEncryptionKey';
 const SOURCES = [
@@ -44,6 +47,12 @@ class RedisFake extends EventEmitter {
     return Number(this.store.delete(key));
   }
   async eval(script: string, _n: number, key: string, pending: string, expected: string) {
+    if (script.includes('-- Seed environment key')) {
+      if (this.store.has(key)) return 0;
+      if (this.store.has(pending)) return -1;
+      this.store.set(key, expected);
+      return 1;
+    }
     if (script.includes("'NX'")) {
       this.beforeReserve?.();
       if (!this.store.has(key)) await this.set(pending, expected, 'NX');
@@ -94,7 +103,7 @@ function database(counts: Record<string, number> = {}) {
   return { db: db as unknown as Database, audit, state, execute, remove };
 }
 
-function boot(service: ConfigService, db?: Database | (() => Database)) {
+function boot(service: ConfigService, db?: Parameters<ConfigService['initialize']>[1]) {
   return service.initialize('redis://unit.invalid', db);
 }
 
@@ -171,6 +180,29 @@ describe('boot encryption key safety', () => {
     expect(query.sql).toContain('is not null');
   });
 
+  it.each([0, 1])(
+    'boots through an existing postgres client only when its ciphertext inventory is empty: %i',
+    async (count) => {
+      const client = {
+        options: { parsers: {}, serializers: {} },
+        unsafe: vi.fn(async (_query: string, _params: unknown[]) => [
+          { source: 'system_secrets', count: String(count) },
+        ]),
+        begin: vi.fn(),
+      };
+      const source = encryptionKeyBootDatabase(client as unknown as Sql);
+      const svc = service();
+      if (count) await expect(boot(svc, () => source)).rejects.toThrow('Refusing to generate');
+      else {
+        await boot(svc, () => source);
+        expect(await svc.getEncryptionKey()).toMatch(/^[0-9a-f]{64}$/);
+      }
+      expect(client.unsafe).toHaveBeenCalledTimes(1);
+      for (const table of SOURCES) expect(client.unsafe.mock.calls[0]![0]).toContain(`"${table}"`);
+      expect(client.begin).not.toHaveBeenCalled();
+    },
+  );
+
   it('adopts a key published while the database inventory was being read', async () => {
     const fixture = database({ system_secrets: 3 });
     const key = 'ef'.repeat(32);
@@ -201,6 +233,37 @@ describe('boot encryption key safety', () => {
     expect(await svc.getEncryptionKey()).toBe(key);
     expect(fixture.execute).not.toHaveBeenCalled();
     expect(fixture.audit.size).toBe(0);
+  });
+
+  it('holds a restored environment key while a reserved discard is pending, then checks the winner', async () => {
+    const key = 'ab'.repeat(32);
+    const candidate = JSON.stringify({
+      id: '00000000-0000-0000-0000-000000000001',
+      key: 'cd'.repeat(32),
+      discard: true,
+    });
+    redis.store.set(PENDING, candidate);
+    vi.stubEnv('CONFIG_ENCRYPTION_KEY', key);
+    vi.stubEnv('NODE_ENV', 'production');
+    const svc = service();
+    await expect(boot(svc)).rejects.toBeInstanceOf(ConfigUnavailableError);
+    expect(redis.store.has(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(false);
+    expect(redis.store.get(PENDING)).toBe(candidate);
+    // The discarder commits and publishes before the env-key boot retries.
+    redis.store.set(CONFIG_KEYS.ENCRYPTION_KEY, JSON.parse(candidate).key);
+    redis.store.delete(PENDING);
+    await expect(boot(svc)).rejects.toThrow('does not match');
+  });
+
+  it('holds fallback environment-key recovery behind a pending discard too', async () => {
+    vi.stubEnv('CONFIG_ENCRYPTION_KEY', 'ab'.repeat(32));
+    const svc = service();
+    await boot(svc);
+    redis.store.delete(CONFIG_KEYS.ENCRYPTION_KEY);
+    redis.store.set(PENDING, JSON.stringify({ discard: true, key: 'cd'.repeat(32) }));
+    svc.clearCache();
+    await expect(svc.getEncryptionKey()).rejects.toBeInstanceOf(ConfigUnavailableError);
+    expect(redis.store.has(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(false);
   });
 
   it('preserves a Redis key without querying the database or using the override', async () => {

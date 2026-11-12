@@ -3,9 +3,8 @@ import { readFile, realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import postgres from 'postgres';
-import { createDatabase } from '@haive/database';
 import { safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
-import { configService, networkName } from '@haive/shared';
+import { configService, encryptionKeyBootDatabase, networkName } from '@haive/shared';
 import { CHANNEL_PATTERN, parseReleaseManifest, type ReleaseManifest } from '@haive/shared/release';
 import * as dk from './docker.js';
 import { attemptVersion } from './attempt-fields.js';
@@ -269,15 +268,7 @@ export async function main(): Promise<number> {
   };
   const sql = postgres(databaseUrl!, { max: 1, max_lifetime: 0 });
   try {
-    let configDb: ReturnType<typeof createDatabase> | undefined;
-    try {
-      await configService.initialize(redisUrl!, () => {
-        configDb = createDatabase(databaseUrl!);
-        return configDb;
-      });
-    } finally {
-      await configDb?.$client.end({ timeout: 5 });
-    }
+    await configService.initialize(redisUrl!, () => encryptionKeyBootDatabase(sql));
     await ensureJournal(sql);
 
     // One upgrade at a time. The lock guards concurrency; the journal's partial unique index is

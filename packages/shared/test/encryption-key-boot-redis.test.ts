@@ -1,8 +1,11 @@
+import { fork, type ChildProcess } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { Redis } from 'ioredis';
 import type { Database } from '@haive/database';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CONFIG_KEYS, ConfigService } from '../src/config/config.service.js';
 import * as boot from '../src/config/encryption-key-boot.js';
+import { ConfigUnavailableError } from '../src/config/config-unavailable.js';
 
 vi.mock('../src/logger/index.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -24,6 +27,39 @@ const second = JSON.stringify({
   key: 'cd'.repeat(32),
   discard: false,
 });
+
+// Independent processes keep their own startup environment throughout the interleaving.
+function bootProcess(redisUrl: string, envKey: string) {
+  const child = fork(new URL('./fixtures/encryption-key-boot-process.ts', import.meta.url), [], {
+    execArgv: ['--import', createRequire(import.meta.url).resolve('tsx')],
+    env: {
+      ...process.env,
+      REDIS_URL: redisUrl,
+      CONFIG_ENCRYPTION_KEY: envKey,
+      HAIVE_DISCARD_UNREADABLE_SECRETS: '1',
+      NODE_ENV: 'production',
+    },
+    stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+  });
+  const messages: Record<string, unknown>[] = [];
+  let receive: ((value: Record<string, unknown>) => void) | undefined;
+  child.on('message', (message) => {
+    if (receive) {
+      const resolve = receive;
+      receive = undefined;
+      resolve(message as Record<string, unknown>);
+    } else messages.push(message as Record<string, unknown>);
+  });
+  return {
+    child,
+    next: () =>
+      messages.length
+        ? Promise.resolve(messages.shift()!)
+        : new Promise<Record<string, unknown>>((resolve) => {
+            receive = resolve;
+          }),
+  };
+}
 
 describe.skipIf(!url)('boot encryption key atomic Redis store', () => {
   let redis: Redis;
@@ -61,6 +97,68 @@ describe.skipIf(!url)('boot encryption key atomic Redis store', () => {
   it('publishes a first-install key starting with no pending value', async () => {
     expect(await config.getEncryptionKey()).toMatch(/^[0-9a-f]{64}$/);
     expect(await redis.get(pending)).toBeNull();
+  });
+
+  it.each(['pending-first', 'env-first'] as const)(
+    'serializes the restored-key/discard race across processes: %s',
+    async (order) => {
+      await redis.del(key, pending);
+      const original = 'ef'.repeat(32);
+      const a = bootProcess(url!, '');
+      const b = bootProcess(url!, original);
+      try {
+        a.child.send('boot');
+        expect(await a.next()).toMatchObject({ event: 'inventory' });
+        if (order === 'pending-first') {
+          a.child.send('reserve');
+          expect(await a.next()).toMatchObject({ event: 'reserved' });
+          b.child.send('boot');
+          const restoredBoot = await b.next();
+          a.child.send('commit');
+          expect(await a.next()).toMatchObject({ event: 'done', discarded: true });
+          expect(await redis.get(key)).not.toBe(original);
+          expect(restoredBoot).toMatchObject({ event: 'error', retryable: true });
+          expect(await redis.get(pending)).toBeNull();
+          b.child.send('boot');
+          expect(await b.next()).toMatchObject({
+            event: 'error',
+            retryable: false,
+            message: expect.stringContaining('does not match'),
+          });
+        } else {
+          b.child.send('boot');
+          expect(await b.next()).toMatchObject({ event: 'done', discarded: false, key: original });
+          a.child.send('reserve');
+          expect(await a.next()).toMatchObject({ event: 'done', discarded: false, key: original });
+          expect(await redis.get(key)).toBe(original);
+          expect(await redis.get(pending)).toBeNull();
+        }
+      } finally {
+        await Promise.all(
+          [a.child, b.child].map(
+            (child: ChildProcess) =>
+              new Promise<void>((resolve) => {
+                child.once('exit', () => resolve());
+                child.kill();
+              }),
+          ),
+        );
+      }
+    },
+  );
+
+  it('blocks fallback recovery behind a pending reservation on real Redis', async () => {
+    vi.stubEnv('CONFIG_ENCRYPTION_KEY', 'ef'.repeat(32));
+    try {
+      await redis.del(key);
+      await redis.set(pending, first);
+      config.clearCache();
+      await expect(config.getEncryptionKey()).rejects.toBeInstanceOf(ConfigUnavailableError);
+      expect(await redis.get(key)).toBeNull();
+      expect(await redis.get(pending)).toBe(first);
+    } finally {
+      vi.stubEnv('CONFIG_ENCRYPTION_KEY', '');
+    }
   });
 
   it('refuses to reserve when a key already exists', async () => {
