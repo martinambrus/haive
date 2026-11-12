@@ -69,6 +69,8 @@ out falsely, and Ctrl-C works there.
 
 ## CI steps
 
+Every environment-gated test under `packages/` needs a GATED row or an explicit reasoned exemption in `scripts/test/ci-gated-list.test.mjs`, which also verifies that exempt Redis files already run in another workflow step with their guard environment.
+
 In the `smokes` and `postgres-gated` jobs of `.github/workflows/ci.yml` every step up to `Apply database migrations`
 (id `migrate`) is setup and keeps the default condition, so a failed one skips everything after it. Every step after it is an independent
 check, run on `if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}`: a failed check (the Postgres-gated

@@ -850,13 +850,17 @@ const REDIS_MUTANTS = [
 describe('gated Redis isolation', () => {
   const smokeJob = workflows['ci.yml'].jobs.smokes;
   const postgresJob = workflows['ci.yml'].jobs['postgres-gated'];
-  // Preserve the existing collision controls using the former combined shape as a fixture.
+  // The live jobs have separate Redis services, so each may use database 14.
+  // Move the RAG control to free database 2 only in this former combined-job fixture.
+  const smokeChecks = structuredClone(
+    smokeJob.steps.slice(smokeJob.steps.findIndex((step) => step.id === 'migrate') + 1),
+  );
+  smokeChecks.find(
+    (step) => step.env?.HAIVE_RAG_LOCK_TEST_REDIS_URL,
+  ).env.HAIVE_RAG_LOCK_TEST_REDIS_URL = 'redis://localhost:6379/2';
   const job = {
     ...structuredClone(postgresJob),
-    steps: [
-      ...postgresJob.steps,
-      ...smokeJob.steps.slice(smokeJob.steps.findIndex((step) => step.id === 'migrate') + 1),
-    ],
+    steps: [...postgresJob.steps, ...smokeChecks],
   };
   for (const [id, actual] of [
     ['smokes', smokeJob],
