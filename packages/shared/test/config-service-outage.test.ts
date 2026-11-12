@@ -2,6 +2,7 @@ import { afterEach, beforeEach, beforeAll, afterAll, describe, expect, it, vi } 
 import { createServer, type Server, type Socket } from 'node:net';
 import { once } from 'node:events';
 import { ReplyError } from 'ioredis';
+import type { Database } from '@haive/database';
 import {
   CONFIG_KEYS,
   ConfigService,
@@ -132,6 +133,24 @@ class FakeRedis {
         if (nx && this.store.has(args[1]!)) return void socket.write('$-1\r\n');
         this.store.set(args[1]!, args[2]!);
         return void socket.write('+OK\r\n');
+      }
+      case 'EVAL': {
+        const [, , , key, pending, expected] = args as [
+          string,
+          string,
+          string,
+          string,
+          string,
+          string,
+        ];
+        if (args[1]!.includes("'NX'")) {
+          if (!this.store.has(key) && !this.store.has(pending)) this.store.set(pending, expected);
+          return void socket.write('+OK\r\n');
+        }
+        this.beforeEncryptionSet?.();
+        if (!this.store.has(key)) this.store.set(key, JSON.parse(expected).key);
+        if (this.store.get(pending) === expected) this.store.delete(pending);
+        return void socket.write(bulk(this.store.get(key)!));
       }
       case 'SETNX': {
         const had = this.store.has(args[1]!);
@@ -277,7 +296,8 @@ describe('ConfigService while Redis is unavailable', () => {
     svc = new ConfigService();
     const peer = new ConfigService();
     try {
-      await Promise.all([svc.initialize(fake.url()), peer.initialize(fake.url())]);
+      const db = { execute: async () => [] } as unknown as Database;
+      await Promise.all([svc.initialize(fake.url(), db), peer.initialize(fake.url(), db)]);
       expect(await svc.getEncryptionKey()).toBe(ENC_KEY);
       expect(await peer.getEncryptionKey()).toBe(ENC_KEY);
       expect(fake.store.get(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(ENC_KEY);

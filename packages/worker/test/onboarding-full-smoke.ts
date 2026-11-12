@@ -131,8 +131,8 @@ async function main(): Promise<void> {
   try {
     log.info('bootstrapping full onboarding smoke');
     initRedis(process.env.REDIS_URL!);
-    await configService.initialize(process.env.REDIS_URL!);
     const db = initDatabase(process.env.DATABASE_URL!);
+    await configService.initialize(process.env.REDIS_URL!, db);
     await secretsService.initialize(db);
     const masterKek = await secretsService.getMasterKek();
     await userSecretsService.initialize(db, masterKek);

@@ -52,7 +52,7 @@ let worker: import('bullmq').Worker | undefined;
 try {
   const { bullRedis: fixtureConnection } = initRedis(redisUrl);
   initWorkerRedis(redisUrl);
-  await configService.initialize(redisUrl);
+  await configService.initialize(redisUrl, db);
   await secretsService.initialize(db);
   await userSecretsService.initialize(db, await secretsService.getMasterKek());
   await db.insert(schema.users).values({

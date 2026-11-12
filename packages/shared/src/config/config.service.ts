@@ -1,5 +1,6 @@
 import { Redis, ReplyError } from 'ioredis';
-import { randomBytes } from 'node:crypto';
+import type { Database } from '@haive/database';
+import { generateBootEncryptionKey, PENDING_ENCRYPTION_KEY } from './encryption-key-boot.js';
 import { createRedisConnection, type RedisFactoryOptions } from '../utils/redis-factory.js';
 import { ConfigUnavailableError } from './config-unavailable.js';
 import { logger } from '../logger/index.js';
@@ -798,7 +799,7 @@ export class ConfigService {
   // Bounds a Redis that stays LOADING: ioredis then neither becomes ready nor emits an error.
   private static READY_TIMEOUT_MS = 10_000;
 
-  async initialize(redisUrl?: string): Promise<void> {
+  async initialize(redisUrl?: string, db?: Database | (() => Database)): Promise<void> {
     if (this.initialized) return;
 
     const url = redisUrl ?? process.env.REDIS_URL;
@@ -824,7 +825,7 @@ export class ConfigService {
       await this.seedDefaults();
       await this.reconcileRaisedDefaults();
       await this.removeRetiredKeys();
-      await this.ensureEncryptionKey();
+      await this.ensureEncryptionKey(db);
     } catch (err) {
       // Otherwise the failed client reconnects forever.
       redis.disconnect();
@@ -942,21 +943,63 @@ export class ConfigService {
     }
   }
 
-  private async ensureEncryptionKey(): Promise<void> {
+  private async ensureEncryptionKey(db?: Database | (() => Database)): Promise<void> {
     const exists = await this.redisCall('ensureEncryptionKey', (redis) =>
       redis.exists(CONFIG_KEYS.ENCRYPTION_KEY),
     );
     const envKey = this.getEnvEncryptionKey();
 
     if (!exists) {
-      const seeded = await this.redisCall('ensureEncryptionKey', (redis) =>
-        redis.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey ?? randomBytes(32).toString('hex'), 'NX'),
-      );
-      if (seeded === 'OK') {
-        if (envKey) logger.info('Seeded encryption key from CONFIG_ENCRYPTION_KEY');
-        else logger.warn('Generated new encryption key (CONFIG_ENCRYPTION_KEY not set)');
+      if (envKey) {
+        const seeded = await this.redisCall('ensureEncryptionKey', (redis) =>
+          redis.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey, 'NX'),
+        );
+        logger.info(
+          seeded === 'OK'
+            ? 'Seeded encryption key from CONFIG_ENCRYPTION_KEY'
+            : 'Found encryption key seeded by another process',
+        );
       } else {
-        logger.info('Found encryption key seeded by another process');
+        await generateBootEncryptionKey(typeof db === 'function' ? db() : db, {
+          getKey: () =>
+            this.redisCall('ensureEncryptionKey', (redis) => redis.get(CONFIG_KEYS.ENCRYPTION_KEY)),
+          getPending: () =>
+            this.redisCall('ensureEncryptionKey', (redis) => redis.get(PENDING_ENCRYPTION_KEY)),
+          reservePending: async (value) => {
+            await this.redisCall('ensureEncryptionKey', (redis) =>
+              redis.eval(
+                `if redis.call('exists', KEYS[1]) == 0 then
+                   return redis.call('set', KEYS[2], ARGV[1], 'NX')
+                 end
+                 return false`,
+                2,
+                CONFIG_KEYS.ENCRYPTION_KEY,
+                PENDING_ENCRYPTION_KEY,
+                value,
+              ),
+            );
+          },
+          publishPending: async (value) => {
+            await this.redisCall('ensureEncryptionKey', (redis) =>
+              redis.eval(
+                `
+              if redis.call('exists', KEYS[1]) == 0 then
+                if redis.call('get', KEYS[2]) ~= ARGV[1] then
+                  return redis.error_reply('pending encryption key changed')
+                end
+                redis.call('set', KEYS[1], cjson.decode(ARGV[1]).key)
+              end
+              if redis.call('get', KEYS[2]) == ARGV[1] then redis.call('del', KEYS[2]) end
+              return redis.call('get', KEYS[1])
+            `,
+                2,
+                CONFIG_KEYS.ENCRYPTION_KEY,
+                PENDING_ENCRYPTION_KEY,
+                value,
+              ),
+            );
+          },
+        });
       }
     } else {
       logger.info('Found existing encryption key');
