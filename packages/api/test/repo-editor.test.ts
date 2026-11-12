@@ -19,6 +19,14 @@ vi.mock('../src/middleware/auth.js', () => ({
     await next();
   },
 }));
+// Credential policy is covered by editor-handshake; these controls exercise the proxy boundary.
+vi.mock('../src/auth/editor-session.js', async (original) => ({
+  ...(await original<typeof import('../src/auth/editor-session.js')>()),
+  editorCookieFromHeader: () => 'synthetic-editor-session',
+  verifyEditorSession: async () => ({ sub: USER, tv: 0 }),
+  editorClaimsMatch: () => true,
+  requireEditorUser: async () => ({ id: USER }),
+}));
 vi.mock('../src/queues.js', () => ({
   getIdeEnsureQueue: () => ({ add: h.add }),
   getIdeEnsureQueueEvents: () => ({}),

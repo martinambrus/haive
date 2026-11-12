@@ -34,6 +34,7 @@ vi.mock('../src/queues.js', async (importOriginal) => {
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { secretsService } from '@haive/shared';
+import { editorCookieName, signEditorSession } from '../src/auth/editor-session.js';
 import { ACCESS_COOKIE } from '../src/auth/cookies.js';
 import { signAccessToken } from '../src/auth/jwt.js';
 import { installTerminalWebSocket } from '../src/routes/terminal.js';
@@ -73,6 +74,8 @@ const HANDLERS: Array<{ file: string; install: (s: Server) => void; path: string
 let server: Server | null = null;
 
 beforeEach(() => {
+  vi.stubEnv('HAIVE_PUBLIC_API_URL', 'http://localhost:3001');
+  vi.stubEnv('HAIVE_EDITOR_ORIGIN', '');
   const fake = createFakeDb({
     users: schema.users,
     containers: schema.containers,
@@ -101,6 +104,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
   server = null;
 });
@@ -133,23 +137,44 @@ function handshake(port: number, path: string, cookie: string): Promise<string> 
   });
 }
 
-const cookieFor = async (sub: string) =>
-  `${ACCESS_COOKIE}=${await signAccessToken({ sub, role: 'user', tv: 0 })}`;
+async function cookieFor(sub: string, editor: boolean) {
+  if (!editor) return `${ACCESS_COOKIE}=${await signAccessToken({ sub, role: 'user', tv: 0 })}`;
+  const target = { kind: 'task' as const, id: ID };
+  return `${editorCookieName(target)}=${await signEditorSession({
+    sub,
+    tv: 0,
+    target,
+    runtimeSessionId: ID,
+    editorOrigin: 'http://localhost:3001',
+  })}`;
+}
 
 describe('a WebSocket handshake from a user who must change their password', () => {
   for (const handler of HANDLERS) {
-    it(`is refused with 401 (${handler.file})`, async () => {
+    it(`refuses a flagged session (${handler.file})`, async () => {
       const port = await listen(handler.install);
-      expect(await handshake(port, handler.path, await cookieFor(FLAGGED))).toBe(
-        'HTTP/1.1 401 Unauthorized',
+      expect(
+        await handshake(
+          port,
+          handler.path,
+          await cookieFor(FLAGGED, handler.install === installIdeWebSocket),
+        ),
+      ).toBe(
+        handler.install === installIdeWebSocket
+          ? 'HTTP/1.1 403 Forbidden'
+          : 'HTTP/1.1 401 Unauthorized',
       );
     });
 
     it(`from a user who has no such flag passes authentication and stops at ownership (${handler.file})`, async () => {
       const port = await listen(handler.install);
-      expect(await handshake(port, handler.path, await cookieFor(UNFLAGGED))).toBe(
-        'HTTP/1.1 404 Not Found',
-      );
+      expect(
+        await handshake(
+          port,
+          handler.path,
+          await cookieFor(UNFLAGGED, handler.install === installIdeWebSocket),
+        ),
+      ).toBe('HTTP/1.1 404 Not Found');
     });
   }
 });

@@ -223,6 +223,10 @@ const realConnect = net.connect.bind(net);
 const realRequest = http.request.bind(http);
 
 beforeEach(() => {
+  vi.stubEnv('HAIVE_API_PORT', '3001');
+  vi.stubEnv('HAIVE_PUBLIC_API_URL', '');
+  vi.stubEnv('HAIVE_EDITOR_ORIGIN', 'http://localhost:3001');
+  vi.spyOn(secretsService, 'getJwtSecret').mockResolvedValue('synthetic-editor-session-key');
   h.invalidJwt = false;
   h.redisConnectWait = null;
   h.loginReady = false;
@@ -356,13 +360,18 @@ describe('upgrade authentication on every surface', () => {
   });
 });
 
+async function editorCookieFor(path: string): Promise<string> {
+  const target = { kind: path.includes('/repos/') ? ('repo' as const) : ('task' as const), id: ID };
+  return `${editorCookieName(target)}=${await signEditorSession({
+    sub: USER,
+    tv: 0,
+    target,
+    runtimeSessionId: target.kind === 'repo' ? `repo-${ID}` : ID,
+    editorOrigin: 'http://localhost:3001',
+  })}`;
+}
+
 async function openAll({ bannerReady = false, editorSessions = false } = {}) {
-  if (editorSessions) {
-    // The api's own origin on a local install: the default an explicit value may repeat.
-    vi.stubEnv('HAIVE_API_PORT', '3001');
-    vi.stubEnv('HAIVE_EDITOR_ORIGIN', 'http://localhost:3001');
-    vi.spyOn(secretsService, 'getJwtSecret').mockResolvedValue('synthetic-editor-session-key');
-  }
   h.loginReady = bannerReady;
   if (bannerReady)
     fake.insert(schema.containers, {
@@ -435,18 +444,10 @@ async function openAll({ bannerReady = false, editorSessions = false } = {}) {
   const result = [];
   for (const handler of HANDLERS) {
     let cookie = 'haive_access=user-session';
-    if (editorSessions && handler.file === 'ide') {
-      const target = {
-        kind: handler.path.includes('/repos/') ? ('repo' as const) : ('task' as const),
-        id: ID,
-      };
-      cookie = `${editorCookieName(target)}=${await signEditorSession({
-        sub: USER,
-        tv: 0,
-        target,
-        runtimeSessionId: target.kind === 'repo' ? `repo-${ID}` : ID,
-        editorOrigin: 'http://localhost:3001',
-      })}`;
+    if (handler.file === 'ide') {
+      // Exercise editor-only cookies and editor cookies alongside an app session.
+      const editor = await editorCookieFor(handler.path);
+      cookie = editorSessions ? editor : `${editor}; ${cookie}`;
     }
     const client = new WebSocket(`ws://127.0.0.1:${port}${handler.path}`, {
       headers: { cookie },
@@ -590,7 +591,7 @@ describe('revocation ordering', () => {
       return realConnect(opts);
     }) as typeof net.connect);
     const port = await start(installIdeWebSocket);
-    const pending = handshake(port, `/ide/${ID}/`, 'haive_access=user-session');
+    const pending = handshake(port, `/ide/${ID}/`, await editorCookieFor(`/ide/${ID}/`));
     await arrived.promise;
     expect((await deactivate()).status).toBe(200);
     expect(await pending).toBe(401);
@@ -645,8 +646,10 @@ describe('upgrade transport controls', () => {
       const port = await start(handler.install);
       const client = net.connect(port, '127.0.0.1');
       await new Promise<void>((resolve) => client.once('connect', resolve));
+      const credential =
+        handler.file === 'ide' ? await editorCookieFor(handler.path) : 'haive_access=user-session';
       client.write(
-        `GET ${handler.path} HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nCookie: haive_access=user-session\r\n\r\n`,
+        `GET ${handler.path} HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nCookie: ${credential}\r\n\r\n`,
       );
       await captured.promise;
       const peer = [...peers][0]!;

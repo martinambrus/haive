@@ -52,6 +52,8 @@ vi.mock('@haive/shared', async (importOriginal) => ({
   logger: h.logger,
 }));
 
+import { secretsService } from '@haive/shared';
+import { editorCookieName, signEditorSession } from '../src/auth/editor-session.js';
 import { ACCESS_COOKIE } from '../src/auth/cookies.js';
 import { installBrowserVncWebSocket } from '../src/routes/browser-vnc.js';
 import { installCliLoginBannerWebSocket } from '../src/routes/cli-login-banner.js';
@@ -120,6 +122,9 @@ const SHELLS = [
 let server: Server | null = null;
 
 beforeEach(() => {
+  vi.stubEnv('HAIVE_PUBLIC_API_URL', 'http://localhost:3001');
+  vi.stubEnv('HAIVE_EDITOR_ORIGIN', '');
+  vi.spyOn(secretsService, 'getJwtSecret').mockResolvedValue('synthetic-editor-key');
   h.dbCalls = 0;
   h.error.mockClear();
   const fake = createFakeDb({
@@ -151,6 +156,8 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
   server = null;
 });
@@ -163,7 +170,18 @@ async function listen(install: (s: Server) => void): Promise<number> {
 }
 
 /** The status line a signed-in raw WebSocket handshake gets back. */
-function handshake(port: number, path: string): Promise<string> {
+async function handshake(port: number, path: string): Promise<string> {
+  let cookie = `${ACCESS_COOKIE}=token`;
+  if (path.startsWith('/ide/')) {
+    const id = path.slice('/ide/'.length).split(/[/?]/)[0]!;
+    cookie = `${editorCookieName({ kind: 'task', id })}=${await signEditorSession({
+      sub: h.USER,
+      tv: 0,
+      target: { kind: 'task', id },
+      runtimeSessionId: id,
+      editorOrigin: 'http://localhost:3001',
+    })}`;
+  }
   return new Promise((resolve, reject) => {
     let data = '';
     const socket = connect(port, '127.0.0.1', () => {
@@ -171,7 +189,7 @@ function handshake(port: number, path: string): Promise<string> {
         [
           `GET ${path} HTTP/1.1`,
           `Host: 127.0.0.1:${port}`,
-          `Cookie: ${ACCESS_COOKIE}=token`,
+          `Cookie: ${cookie}`,
           'Connection: Upgrade',
           'Upgrade: websocket',
           'Sec-WebSocket-Version: 13',

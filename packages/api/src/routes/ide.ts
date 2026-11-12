@@ -16,12 +16,11 @@ import { editorBootstrap } from '../lib/editor-bootstrap.js';
 import { bodyLimit } from 'hono/body-limit';
 import { grantEditor, redeemEditor } from '../lib/editor-grants.js';
 import { getPatientRedis } from '../redis.js';
-import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
+import { rejectUpgrade } from '../lib/upgrade-auth.js';
 import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import type { UpgradeSession } from '../lib/user-sockets.js';
 import {
   isSessionSetCookie,
-  getAccessCookie,
   withoutSessionCookies,
   withoutSessionSetCookies,
 } from '../auth/cookies.js';
@@ -133,22 +132,10 @@ async function proxyHttp(c: Context<AppEnv>, repository = false): Promise<Respon
   const taskId = c.req.param('id');
   if (!taskId || !isCanonicalUuid(taskId)) throw new HttpError(404, 'Not found');
   const scope = { kind: repository ? ('repo' as const) : ('task' as const), id: taskId };
-  let userId: string | undefined;
-  try {
-    const identity = await editorIdentity(c.req.header('cookie'), scope);
-    if (identity) {
-      const user = await requireEditorUser(identity.sub, identity.tv);
-      userId = user.id;
-    }
-  } catch (err) {
-    // A stale editor cookie must not mask a valid app session during the transition.
-    if (!(err instanceof HttpError && err.status === 403 && getAccessCookie(c))) throw err;
-  }
-  if (userId === undefined) {
-    // TRANSITION ONLY: deployed web still uses the app session. PR 4 removes this branch.
-    await requireAuth(c, async () => {});
-    userId = c.get('userId');
-  }
+  const identity = await editorIdentity(c.req.header('cookie'), scope);
+  if (!identity) throw new HttpError(401, 'Not authenticated');
+  const user = await requireEditorUser(identity.sub, identity.tv);
+  const userId = user.id;
   const target = ideTarget(taskId, userId, repository);
   if (!(await targetBelongsToUser(target))) throw new HttpError(404, 'Not found');
 
@@ -242,9 +229,7 @@ export function installIdeWebSocket(server: Server): void {
           id: parsed.id,
         };
         const hasEditorCookie = editorCookieFromHeader(req.headers.cookie, scope) !== undefined;
-        let auth = hasEditorCookie ? await authenticateEditorUpgrade(req, scope) : null;
-        // TRANSITION ONLY: deployed web still uses the app session. PR 4 removes this branch.
-        if (!auth) auth = await authenticateUpgrade(req);
+        const auth = await authenticateEditorUpgrade(req, scope);
         if (!auth) {
           rejectUpgrade(
             socket,
