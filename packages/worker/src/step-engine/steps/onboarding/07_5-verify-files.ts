@@ -44,7 +44,7 @@ export const verifyFilesStep: StepDefinition<
     index: 8,
     title: 'Verify generated files',
     description:
-      'Checks that the generated agents, skills, commands and workflow config exist with the minimum required counts. Not the knowledge base: 08-knowledge-acquisition writes that one step later.',
+      'Checks that generated agents meet the minimum count and workflow config exists. Skills and knowledge base files are verified after their later generation steps.',
     requiresCli: false,
     providerSensitive: true,
   },
@@ -74,14 +74,6 @@ export const verifyFilesStep: StepDefinition<
         detail: `found ${agentsCount}`,
       });
     }
-
-    const skillsCount = await countMatching(repo, '.claude/skills/', 'SKILL.md');
-    checks.push({
-      id: 'skills_dir',
-      label: '.claude/skills has at least 1 SKILL.md',
-      passed: skillsCount >= 1,
-      detail: `found ${skillsCount}`,
-    });
 
     const workflowConfigOk = await hasWorkspaceEntry(repo, '.claude/workflow-config.json');
     checks.push({

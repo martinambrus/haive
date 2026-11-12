@@ -278,12 +278,12 @@ status: open · kind: fnf · found: #1108 review 2026-11-12 · priority: P4
 
 ### T629 · fix · learning step retries a valid empty learning list
 
-status: open · kind: fix · found: T300 second run 2026-11-12 · priority: P3
+status: done 2026-11-12 #1112 (ce10052bc): retries only unparseable replies or drafts all rejected by the grounding bar; a genuine empty list keeps its sync proposals; 11b also commits accepted KB sync changes and learning deletions. Open: a sync-only reply that omits `entries` still retries and discards its proposals (11-phase-8-learning.ts ~:496, prompt-contract decision), and a rejected-draft re-roll drops that reply's KB/skill sync proposals (pre-existing) · kind: fix · found: T300 second run 2026-11-12 · priority: P3
 `11-phase-8-learning.ts` `shouldRetryPreForm` (~:1345-1350) retries whenever `parseLearningOutput` returns an empty list. A small task can honestly have no learnings: the T300 workflow's learning call exited 0 with valid JSON `entries: []` plus three KB-sync changes and one skill-sync operation, and the step still requested a retry (paid, and it discards the sync proposals). Fix: retry only when the output does not parse (null), not when it parses to `[]`; check the form and apply accept an empty list with sync changes. Evidence `.claude/tmp/codex-run/T300-S/run7/learning-stop-evidence.json`.
 
 ### T628 · fix · 07_5 verify-files reports skills missing before they are generated
 
-status: open · kind: fix · found: T300 second run 2026-11-12 · priority: P3
+status: done 2026-11-12 #1114 (6d504d893): 07_5 drops the skills check; 09_6 also checks 09_5's recorded ids and offers Repair only for skills with a directory; 11-final-review counts the task's resolved CLI destinations. Open, unverified: hard-coded `.claude/skills` defaults in 12-post-onboarding.ts ~:333 and _stage-paths.ts ~:14; 09_5 prompt wording names only `.claude/skills` · kind: fix · found: T300 second run 2026-11-12 · priority: P3
 `07_5-verify-files.ts` (~:78-84) counts `.claude/skills/**/SKILL.md` and records `skills_dir passed:false, found 0` on every fresh onboarding, because `09_5-skill-generation` writes skills four steps later. `apply` only logs, so onboarding continues, but the step reports a failed check that is always false (the T300 driver stopped on it). Same class as af1845fc3 (the KB assertion moved to where the KB exists). Fix: drop the skills check from 07_5 (09_6 verifies skills), or move it after 09_5; also check that it reads the active CLI's skills destination, not only `.claude/skills/`. Evidence `.claude/tmp/codex-run/T300-S/report5.md`.
 
 ### T627 · design · per-runtime editor isolation residuals
@@ -642,7 +642,7 @@ Owner decision 2026-11-12: item 2 admin-trusted, document it; item 3 remove the 
 Each needs a per-dial decision (guard, admin-trust, or remove).
 
 1. Shipped in PR #1049 (provider Test connection guarded by the owner role). Correction: api routes/cli-providers.ts:664 only enqueues and cli-adapters/zai.ts only sets env for the sandboxed CLI; neither is a dial.
-2. Admin-trusted by decision: Global KB external DSN (shared global-kb/connection.ts:172,177), `POST /global-kb/test-db`, vendor/module admin config. PRE-EXISTING; confirm or guard.
+2. DONE #1115 (documented in api-auth.md). Admin-trusted by decision: Global KB external DSN (shared global-kb/connection.ts:172,177), `POST /global-kb/test-db`, vendor/module admin config. PRE-EXISTING; confirm or guard.
 3. DONE #1110 (ce3dc139c): SMTP keys, defaults, secret name, compose env and .env.example removed; boot deletes the seeded `config:email:*` keys and any `smtp_password` row (live: api logged the removals, Redis scan empty).
 4. `integration_provider_configs.api_base_url` is unused (database schema/integrations.ts:51); a future dial must use the guarded fetch. PRE-EXISTING.
 5. Shipped in PR #1055 (caa59abf2): a non-admin's git remote (clone, refresh, bundle sync, task-step fetch/push) is resolved by the egress guard before git starts and the checked address is pinned; admin remotes unchanged. The remaining check-to-spawn window is T585.

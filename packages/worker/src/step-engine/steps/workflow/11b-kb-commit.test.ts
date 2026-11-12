@@ -57,6 +57,25 @@ function applyArgs(
 }
 
 describe('11b hasKbToCommit (shouldRun gate)', () => {
+  it('commits deletion-only learning captures', () => {
+    expect(hasKbToCommit({ written: [], deleted: ['.haive-data/learnings/obsolete.md'] })).toBe(
+      true,
+    );
+    expect(hasKbToCommit({ written: [], deleted: [] })).toBe(false);
+  });
+
+  it('commits accepted KB sync edits even when no learnings were written', () => {
+    const output = {
+      written: [],
+      investigationWritten: null,
+      kbSync: { changes: [{ file: '.haive-data/knowledge_base/API_REFERENCE.md', op: 'update' }] },
+      kbReverted: false,
+    };
+    expect(hasKbToCommit(output)).toBe(true);
+    expect(hasKbToCommit({ ...output, kbReverted: true })).toBe(false);
+    expect(hasKbToCommit({ ...output, kbSync: { changes: [] } })).toBe(false);
+  });
+
   it('is true when learnings were written or a LOCAL investigation file was written', () => {
     expect(hasKbToCommit({ written: ['.haive-data/learnings/x.md'] })).toBe(true);
     expect(
