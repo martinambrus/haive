@@ -1,3 +1,5 @@
+import { logger } from '@haive/shared';
+import { requireAuth } from '../src/middleware/auth.js';
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppEnv } from '../src/context.js';
@@ -159,4 +161,88 @@ describe('the runtime access routes', () => {
       expect(ensure.add).toHaveBeenCalledTimes(1);
     });
   }
+});
+describe('editor Fetch Metadata isolation', () => {
+  function authenticatedApp(web = 'http://localhost:3000') {
+    const app = createApiApp(web);
+    app.get('/origin-auth-test', requireAuth, (c) => c.json({ userId: c.get('userId') }));
+    return app;
+  }
+  it('refuses same-origin metadata on every method, including CORS preflights', async () => {
+    const app = authenticatedApp();
+    for (const method of ['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE']) {
+      const res = await app.request('/health', {
+        method,
+        headers: {
+          origin: 'http://localhost:3000',
+          'sec-fetch-site': 'same-origin',
+          'access-control-request-method': 'POST',
+        },
+      });
+      expect(res.status).toBe(403);
+    }
+  });
+  it('refuses same-origin session reads with 403 before authentication', async () => {
+    const app = authenticatedApp();
+    for (const cookie of ['haive_access=session', '']) {
+      const res = await app.request('/origin-auth-test', {
+        headers: { cookie, 'sec-fetch-site': 'same-origin' },
+      });
+      expect(res.status).toBe(403);
+    }
+    expect(
+      (await app.request('/auth/me', { headers: { 'sec-fetch-site': 'same-origin' } })).status,
+    ).toBe(403);
+  });
+  for (const site of [
+    'same-site',
+    'cross-site',
+    'none',
+    undefined,
+    'same-origin-other',
+    'Same-Origin',
+  ]) {
+    it(`leaves ${site ?? 'absent'} metadata unchanged`, async () => {
+      const res = await authenticatedApp().request('/origin-auth-test', {
+        headers: { cookie: 'haive_access=session', ...(site ? { 'sec-fetch-site': site } : {}) },
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ userId: 'u1' });
+    });
+  }
+  it('exempts only /ide and /ide/ descendants for reads and writes', async () => {
+    const app = authenticatedApp();
+    for (const path of ['/ide', '/ide/not-an-id', '/ide/not-an-id/resource']) {
+      for (const method of ['GET', 'POST']) {
+        const headers = { cookie: 'haive_access=session' };
+        const baseline = await app.request(path, { method, headers });
+        const res = await app.request(path, {
+          method,
+          headers: { ...headers, 'sec-fetch-site': 'same-origin' },
+        });
+        expect(res.status).toBe(baseline.status);
+      }
+    }
+    expect(
+      (await app.request('/ide-other', { headers: { 'sec-fetch-site': 'same-origin' } })).status,
+    ).toBe(403);
+  });
+  it('keeps one-origin installs working and logs one structured startup warning', async () => {
+    vi.stubEnv('HAIVE_PUBLIC_API_URL', 'https://haive.example.com/base');
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const app = authenticatedApp('https://haive.example.com');
+    for (let i = 0; i < 2; i++) {
+      expect(
+        (
+          await app.request('/origin-auth-test', {
+            headers: { cookie: 'haive_access=session', 'sec-fetch-site': 'same-origin' },
+          })
+        ).status,
+      ).toBe(200);
+    }
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      { webOrigin: 'https://haive.example.com', editorOrigin: 'https://haive.example.com' },
+      'The editor cannot be isolated without a separate editor hostname',
+    );
+  });
 });
