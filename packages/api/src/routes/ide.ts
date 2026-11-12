@@ -122,7 +122,6 @@ ideRoutes.use('*', async (c, next) => {
   if (!identity) throw new HttpError(401, 'Not authenticated');
   const user = await requireEditorUser(identity.sub, identity.tv);
   c.set('userId', user.id);
-  c.set('userRole', user.role);
   await next();
 });
 
