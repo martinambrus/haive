@@ -18,6 +18,7 @@ vi.mock('../src/middleware/auth.js', () => ({
 
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
+import { STOP_SETTLE_EVENTS } from '@haive/shared';
 import { createFakeDb } from '@haive/database/testing';
 import { maintenanceRoutes } from '../src/routes/maintenance.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -68,6 +69,7 @@ describe('POST /admin/maintenance/tasks/:id/action stop', () => {
     const failedAt = (completedAt as Date).toISOString();
     expect(await res.json()).toMatchObject({ ok: true, cancelled: 1, stopped: 1, failedAt });
     expect(fake.rows(schema.taskEvents).map((e) => [e.eventType, e.payload])).toEqual([
+      [STOP_SETTLE_EVENTS.REQUESTED, { failedAt }],
       [
         'task.stopped',
         {

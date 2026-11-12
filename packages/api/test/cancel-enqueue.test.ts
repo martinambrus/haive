@@ -18,6 +18,11 @@ describe('enqueueCancelJob', () => {
     queue.fail = false;
     await enqueueCancelJob('t1', 'u1');
     expect(queue.added).toHaveLength(1);
+    expect(queue.added[0]).toEqual([
+      'cancel-task',
+      { taskId: 't1', userId: 'u1' },
+      expect.objectContaining({ deduplication: { id: 'cancel-t1' } }),
+    ]);
   });
 
   it('does not fail a cancel that already committed when the queue refuses: the sweep re-drives it', async () => {

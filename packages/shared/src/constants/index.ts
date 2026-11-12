@@ -382,6 +382,13 @@ export const TASK_JOB_NAMES = {
   SETTLE_STOPPED: 'settle-stopped-task',
 } as const;
 
+/** Durable Stop settlement signals shared by the api producer and worker recovery. */
+export const STOP_SETTLE_EVENTS = {
+  REQUESTED: 'task.stop_settle_requested',
+  FINISHED: 'task.stop_settle_finished',
+  REDRIVEN: 'task.stop_settle_redriven',
+} as const;
+
 export interface TaskJobPayload {
   taskId: string;
   userId: string;
