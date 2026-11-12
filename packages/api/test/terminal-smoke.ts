@@ -52,8 +52,8 @@ async function main() {
   const state: TestState = { docker: new Docker() };
   try {
     log.info('bootstrapping');
-    await configService.initialize(process.env.REDIS_URL!);
     const db = initDatabase(process.env.DATABASE_URL!);
+    await configService.initialize(process.env.REDIS_URL!, db);
     await secretsService.initialize(db);
     const masterKek = await secretsService.getMasterKek();
     await userSecretsService.initialize(db, masterKek);

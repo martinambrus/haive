@@ -70,8 +70,8 @@ function check(id: string, name: string, pass: boolean, detail: unknown): void {
 
 async function main(): Promise<void> {
   initRedis(process.env.REDIS_URL!);
-  await configService.initialize(process.env.REDIS_URL!);
   const db = initDatabase(process.env.DATABASE_URL!);
+  await configService.initialize(process.env.REDIS_URL!, db);
   await secretsService.initialize(db);
   await userSecretsService.initialize(db, await secretsService.getMasterKek());
   setContainerCleanupRunner(async () => 0);

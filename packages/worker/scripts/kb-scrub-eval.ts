@@ -58,8 +58,8 @@ async function main(): Promise<void> {
   // resolver reads its settings from configService and its connection string from
   // secretsService. Deliberately NOT bootstrap() — this script reads and measures only.
   initRedis(redisUrl);
-  await configService.initialize(redisUrl);
   const db = initDatabase(databaseUrl);
+  await configService.initialize(redisUrl, db);
   await secretsService.initialize(db);
 
   const symbols = await collectRepoSymbols(repoPath, null).catch(() => new Set<string>());

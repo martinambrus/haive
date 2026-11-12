@@ -79,9 +79,9 @@ and the wait never settled. A transport error or that deadline rejects with
 `ConfigUnavailableError('initialize')`; a server reply (a wrong password) stays a raw `ReplyError`. A
 failed `initialize` disconnects its client, which otherwise reconnected forever, so the same instance
 can initialize again. The boot seed and key calls (`seedDefaults`, `reconcileRaisedDefaults`,
-`removeRetiredKeys`, `ensureEncryptionKey`) run through `redisCall` like every other read. `ensureEncryptionKey` writes a
-missing key with `SET NX` and then uses whatever the store holds, so an api and a worker booting together
-on an empty store end on one key; the `CONFIG_ENCRYPTION_KEY` mismatch check runs against that winner. The api and the worker run
+`removeRetiredKeys`, `ensureEncryptionKey`) run through `redisCall` like every other read. A key in
+Redis or in `CONFIG_ENCRYPTION_KEY` is used as before (an env key seeds an empty store), and the
+`CONFIG_ENCRYPTION_KEY` mismatch check runs against the stored key. The api and the worker run
 `bootstrap()` through `retryWhileConfigUnavailable` (`config/retry-config-unavailable.ts`): 500 ms
 doubling to 5 s, one warn per attempt (`what`, `attempt`, `waitedMs`, `delayMs`, `err`), never giving
 up, the same in dev and production. MEASURED before: a refused store exited 1 in about 1.4 s, which
@@ -96,6 +96,24 @@ global-store repairs are not among them: they run after ready in their own retry
 logged as failed and left until the next restart); any other migration error is still logged and
 skipped. The cost: a permanently wrong `REDIS_URL` retries
 forever, one warn per attempt, instead of crash-looping.
+
+**With no key anywhere, boot refuses to mint one over existing ciphertext.** `initialize` now takes
+the db and runs after `waitForDatabaseReady`. When neither Redis nor `CONFIG_ENCRYPTION_KEY` holds a
+usable key, `generateBootEncryptionKey` (`config/encryption-key-boot.ts`) counts ciphertext rows in
+`system_secrets`, `users`, `user_secrets`, `cli_provider_secrets`, `repo_credentials`,
+`integration_provider_configs` and `integration_connections`. None (a first install, since no migration
+seeds those tables): it generates the key as before. Any: boot exits 1 naming the cause, whether
+`CONFIG_ENCRYPTION_KEY` is unset or set but invalid, and asks for the original key back. A lost Redis
+volume with no env key used to mint a new key with a warn and orphan every secret. The last resort is
+`HAIVE_DISCARD_UNREADABLE_SECRETS=1` (exactly `1`; api and worker): boot deletes every `system_secrets` row (master key,
+JWT secret, email pepper, the global KB connection string) in the same transaction as a
+system-actor audit row, logs a warn with the row count, then publishes the new key. User fields and
+envelopes stay stored and keep failing their existing decrypt checks. Known gap: existing accounts
+cannot sign in afterwards (a regenerated pepper matches no stored email index, and setup stays closed
+while users exist), and the override has no recovery step for that yet. Remove the setting once boot
+succeeds. Concurrent boots and a crash between commit and publish reuse one Redis-reserved pending key
+and audit id; the reserve and publish Lua scripts run against a real Redis in CI
+(`encryption-key-boot-redis.test.ts`). A boot with a usable env key, and the fallback recovery, seed that key only while no pending exists: a pending younger than 10 minutes (`PENDING_ENCRYPTION_KEY_WAIT_MS`, timed by its `reservedAt`) is a discard in progress, so boot waits and retries; an older one, or one without a readable `reservedAt`, is a discard a crash interrupted, and boot exits naming Redis key `bootstrap:pendingEncryptionKey` with the two ways out: restart without `CONFIG_ENCRYPTION_KEY` and with the override to finish it, or, when `audit_events` holds no `config.discard_unreadable_secrets` row whose id is the pending JSON's `id` (the discard did not commit), delete that key and restart to keep the secrets. The updater gives boot its own short-lived one-connection client, since Drizzle rewrites the codecs of the postgres.js client it wraps and the updater's journal needs its own.
 
 The api answers `ConfigUnavailableError` with 503
 `{ error: 'Service temporarily unavailable', code: 'config_unavailable' }` and leaks no key or host.

@@ -139,8 +139,8 @@ async function main(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL;
   if (!redisUrl || !databaseUrl) throw new Error('DATABASE_URL and REDIS_URL are required');
   initRedis(redisUrl);
-  await configService.initialize(redisUrl);
   const db = initDatabase(databaseUrl);
+  await configService.initialize(redisUrl, db);
   await secretsService.initialize(db);
 
   const all = await db.query.cliProviders.findMany({

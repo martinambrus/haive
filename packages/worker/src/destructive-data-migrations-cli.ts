@@ -24,8 +24,8 @@ async function main(): Promise<void> {
   if (!redisUrl) throw new Error('REDIS_URL is required');
 
   // configService, because at least one entry is flag-gated and reads its switch from Redis.
-  await configService.initialize(redisUrl);
   const db = initDatabase(databaseUrl);
+  await configService.initialize(redisUrl, db);
   // The provider env drop encrypts with the master key.
   await secretsService.initialize(db);
 

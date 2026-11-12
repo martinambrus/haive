@@ -168,8 +168,8 @@ async function main(): Promise<void> {
   };
   try {
     initRedis(process.env.REDIS_URL!);
-    await configService.initialize(process.env.REDIS_URL!);
     const database = initDatabase(process.env.DATABASE_URL!);
+    await configService.initialize(process.env.REDIS_URL!, database);
     await secretsService.initialize(database);
     await userSecretsService.initialize(database, await secretsService.getMasterKek());
 

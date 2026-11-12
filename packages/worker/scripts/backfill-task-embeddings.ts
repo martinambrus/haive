@@ -72,7 +72,7 @@ function projectNameOf(envMirror: OnboardingEnvironmentMirror | null | undefined
 
 async function main(): Promise<void> {
   // Stored targets are guarded, and the allowlist is read from the config store.
-  await configService.initialize();
+  await configService.initialize(undefined, db);
   const tasks = await db.query.tasks.findMany({
     where: and(eq(schema.tasks.type, 'workflow'), eq(schema.tasks.status, 'completed')),
     columns: { id: true, repositoryId: true, title: true, description: true },

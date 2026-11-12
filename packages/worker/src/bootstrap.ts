@@ -29,13 +29,12 @@ export async function bootstrap(): Promise<BootstrapResult> {
   if (!redisUrl) throw new Error('REDIS_URL is required');
 
   initRedis(redisUrl);
-  await configService.initialize(redisUrl);
-
   const db = initDatabase(databaseUrl);
   await waitForDatabaseReady(db, {
     onRetry: ({ attempt, waitedMs, reason }) =>
       logger.warn({ attempt, waitedMs, reason }, 'database not ready, retrying'),
   });
+  await configService.initialize(redisUrl, db);
   await secretsService.initialize(db);
 
   const masterKek = await secretsService.getMasterKek();
