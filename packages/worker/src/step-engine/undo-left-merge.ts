@@ -621,11 +621,11 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
               return;
             }
           }
-          // Set-aside rewrites bytes without refreshing git's cached stat data. --keep
-          // otherwise intermittently refuses an unchanged projection as not up to date.
+          // Set-aside rewrites bytes without refreshing git's cached stat data. The
+          // two-tree read-tree otherwise intermittently refuses an unchanged projection.
           if (movedCheckout) {
             const refreshed = await gitRun(movedCheckout, ['update-index', '-q', '--refresh']);
-            // Exit 1 also reports real local edits, which reset --keep must judge and preserve.
+            // Exit 1 also reports real local edits, which the read-tree must judge and keep.
             if (refreshed.code !== 0 && refreshed.code !== 1)
               throw new UndoGitError(
                 gitFailureReason(
@@ -633,12 +633,12 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
                   refreshed.stderr,
                 ),
               );
-            // reset --keep moves whatever HEAD is now: re-check branch and sha last, so a
+            // The move acts on whatever HEAD is now: re-check branch and sha last, so a
             // checkout switch or commit during preparation never rewinds another branch.
             if (!(await checkoutReady())) return;
-            // --keep preserves working bytes but resets every index entry. Set-aside
-            // already restores projection entries to HEAD, so no paths need excluding.
-            // A configured submodule ignore would hide a staged gitlink the reset then drops.
+            // Staged changes are refused before the move so none is lost from the index.
+            // Set-aside already restores projection entries to HEAD, so no paths need
+            // excluding. A configured submodule ignore would hide a staged gitlink.
             const staged = await gitRun(movedCheckout, [
               'diff',
               '--cached',
@@ -690,7 +690,7 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
                 }
                 if (!movedCheckout) return true;
                 if (!(await checkoutReady())) return false;
-                // With no staged changes, this is reset --keep's two-tree unpack:
+                // With no staged changes, this matches reset --keep's two-tree unpack:
                 // paths changed by the move must be clean; unrelated local bytes stay.
                 // Unlike reset it never writes HEAD or acquires the held branch lock.
                 const tree = await gitRun(movedCheckout, [

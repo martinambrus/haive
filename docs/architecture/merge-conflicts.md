@@ -264,14 +264,27 @@ baseShaBefore, baseShaAfter, landedAt}` in the same transaction as the step stat
   fence, and moves `refs/heads/<landedOn>` back to `baseShaBefore` only when it is still exactly
   the task's own merge commit, proven by the recorded base and feature parents (a squash must
   also match the merge's tree). A base-sync landing and an event without that evidence stay
-  report-only. A branch checked out in Haive's own transient base worktree is reset there with
-  `reset --keep`, after re-checking right before it that the checkout is still on that branch
-  (`symbolic-ref`) at the merge commit; one checked out anywhere else is refused, and `update-ref` (a CAS on the
-  expected sha) is used only for a branch no worktree holds. Haive's projection files are set
-  aside and put back around the reset. The outcome is a `merge.left_committed_settled` event:
-  `undone`, or `moved`/permanent `refused` (base moved, pushed, host checkout, no evidence),
-  each final; a refusal a person can clear (a live claim, a busy root claim, an unknown remote,
-  an origin with more than one push destination, since only one is checked, local changes, staged changes in the checkout, which the reset would otherwise drop from the index) leaves the report open to try again. The moved-away commit stays reachable
+  report-only. The branch always moves inside one `git update-ref --stdin` transaction
+  (`withGitRefTransaction`, `repo/git-ref-transaction.ts`): `start`, an `update` that is a CAS on
+  the merge sha, `prepare`, which takes and holds `refs/heads/<branch>.lock`, then the working-tree
+  move, then `commit`; any failure sends `abort`. A git without ref transactions (before 2.27) is
+  found by an empty `start`/`abort` before any work and refused. Under the held lock the worker
+  re-reads which worktrees hold the branch and refuses if that changed. A branch checked out in
+  Haive's own transient base worktree is moved there by a two-tree `read-tree -m -u` (what
+  `reset --keep` does, without writing HEAD or taking the branch lock itself), after re-checking
+  that the checkout is still on that branch (`symbolic-ref`) at the merge commit; one checked out
+  anywhere else is refused. A plain `git checkout` of the branch takes no ref lock, so a switch
+  after that last re-check is not excluded. Each protocol round trip has its own timeout, and a
+  stuck `update-ref` gets `abort` and EOF before SIGTERM, with SIGKILL only last, since git cannot
+  remove its lock file after SIGKILL; a lock left by a kill stays until a person removes it.
+  Haive's projection files are set aside and put back around the move. A git failure keeps a
+  bounded, path-free excerpt of stderr with the remote credential scrubbed. The outcome is a
+  `merge.left_committed_settled` event: `undone`, or `moved`/permanent `refused` (base moved,
+  pushed, host checkout, no evidence), each final; a refusal a person can clear (a live claim, a
+  busy root claim, an unknown remote, an origin with more than one push destination, since only
+  one is checked, local changes, staged changes in the checkout, a base checkout that switched
+  or detached, a changed set of worktrees holding the branch) leaves the report open to try
+  again. The moved-away commit stays reachable
   as `refs/haive/undo-left-merge/<task>/<baseShaAfter>`, so an undo is reversed with
   `git update-ref refs/heads/<branch> <baseShaAfter> <baseShaBefore>`. The worker job
   (`abortLeftMerge`) runs under the directory's lock and records `merge.left_open_settled`
