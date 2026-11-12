@@ -2,10 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
 import { and, eq } from 'drizzle-orm';
-import { schema, tryCliAuthLock, type CliAuthLock, type Database } from '@haive/database';
+import { schema, type CliAuthLock, type Database } from '@haive/database';
 import { logger, secretsService, splitSecretLikeEnv, upsertProviderSecret } from '@haive/shared';
+import { waitForCliAuthLock } from '../sandbox/cli-auth-lock.js';
 
 const log = logger.child({ module: 'move-secret-env' });
+const SECRET_ENV_AUTH_LOCK_WAIT_MS = 30_000;
 const isAuthSecret = (name: string) =>
   name === 'CLAUDE_CODE_OAUTH_TOKEN' || name === CLAUDE_USAGE_OAUTH_SECRET;
 
@@ -39,7 +41,11 @@ async function forEachLegacyProvider(
     let release: CliAuthLock | null = null;
     try {
       if (Object.keys(splitSecretLikeEnv(provider.envVars ?? {}).secrets).some(isAuthSecret)) {
-        release = await tryCliAuthLock(db, cliAuthScope(provider));
+        release = await waitForCliAuthLock(
+          db,
+          cliAuthScope(provider),
+          SECRET_ENV_AUTH_LOCK_WAIT_MS,
+        );
         if (!release)
           throw new Error('CLI authentication is busy; provider secret migration was deferred');
       }

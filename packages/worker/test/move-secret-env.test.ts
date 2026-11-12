@@ -1,5 +1,6 @@
 const authLock = vi.hoisted(() => ({
   acquire: vi.fn(),
+  error: vi.fn(),
   release: Object.assign(
     vi.fn(async () => {}),
     { assertHeld: vi.fn(async () => {}) },
@@ -9,7 +10,11 @@ vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
   tryCliAuthLock: authLock.acquire,
 }));
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+vi.mock('@haive/shared', async (original) => ({
+  ...(await original<typeof import('@haive/shared')>()),
+  logger: { child: () => ({ error: authLock.error }) },
+}));
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { schema } from '@haive/database';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
@@ -63,7 +68,12 @@ beforeEach(() => {
   authLock.acquire.mockReset().mockResolvedValue(authLock.release);
   authLock.release.mockClear();
   authLock.release.assertHeld.mockReset().mockResolvedValue(undefined);
+  authLock.error.mockClear();
   vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue(KEK);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 const LEGACY = { ANTHROPIC_BASE_URL: 'u', CLAUDE_CODE_OAUTH_TOKEN: TOKEN };
@@ -177,13 +187,71 @@ it.each(
   },
 );
 it.each(['copy', 'drop'])(
-  'does not migrate a legacy credential while authentication is busy (%s)',
+  'waits for busy authentication to become available before migrating (%s)',
   async (phase) => {
+    vi.useFakeTimers();
     const { fake, db } = setup();
     addProvider(fake, P1, LEGACY);
     authLock.acquire.mockResolvedValueOnce(null);
-    if (phase === 'copy') await copySecretLikeProviderEnv(db);
-    else await expect(dropCopiedSecretLikeProviderEnv(db)).rejects.toThrow('1 provider(s)');
+    const transaction = vi.spyOn(db, 'transaction');
+    const run = phase === 'copy' ? copySecretLikeProviderEnv : dropCopiedSecretLikeProviderEnv;
+    const result = run(db).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    await vi.advanceTimersByTimeAsync(499);
+    expect(authLock.acquire).toHaveBeenCalledOnce();
+    expect(transaction).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await result).toBeNull();
+    expect(authLock.acquire).toHaveBeenCalledTimes(2);
+    expect(secrets(fake, P1)).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN });
+    expect(fake.rows(schema.cliProviders)[0]!.envVars).toEqual(
+      phase === 'copy' ? LEGACY : { ANTHROPIC_BASE_URL: 'u' },
+    );
+    expect(authLock.release).toHaveBeenCalledOnce();
+  },
+);
+
+it.each(['copy', 'drop'])(
+  'does not migrate a legacy credential while authentication stays busy past the deadline (%s)',
+  async (phase) => {
+    vi.useFakeTimers();
+    const { fake, db } = setup();
+    addProvider(fake, P1, LEGACY);
+    authLock.acquire.mockResolvedValue(null);
+    const transaction = vi.spyOn(db, 'transaction');
+    const run = phase === 'copy' ? copySecretLikeProviderEnv : dropCopiedSecretLikeProviderEnv;
+    let settled = false;
+    const result = run(db).then(
+      () => {
+        settled = true;
+        return null;
+      },
+      (err: unknown) => {
+        settled = true;
+        return err;
+      },
+    );
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(settled).toBe(false);
+    expect(authLock.error).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    if (phase === 'copy') expect(await result).toBeNull();
+    else
+      expect(await result).toEqual(new Error('1 provider(s) still hold a secret in plain envVars'));
+    expect(authLock.error).toHaveBeenCalledWith(
+      {
+        err: expect.objectContaining({
+          message: 'CLI authentication is busy; provider secret migration was deferred',
+        }),
+        providerId: P1,
+        phase,
+      },
+      'provider env secret migration failed',
+    );
+    expect(transaction).not.toHaveBeenCalled();
+    expect(authLock.release).not.toHaveBeenCalled();
     expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
     expect(fake.rows(schema.cliProviders)[0]!.envVars).toEqual(LEGACY);
   },
