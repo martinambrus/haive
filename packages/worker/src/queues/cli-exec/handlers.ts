@@ -1370,7 +1370,16 @@ export async function handleSignOutJob(
           authLastCheckedAt: sql`greatest(clock_timestamp()::timestamp, ${schema.cliProviders.authLastCheckedAt} + interval '1 microsecond')`,
           updatedAt: new Date(),
         })
-        .where(eq(schema.cliProviders.id, provider.id));
+        .where(
+          provider.isolateAuth
+            ? eq(schema.cliProviders.id, provider.id)
+            : and(
+                eq(schema.cliProviders.userId, provider.userId),
+                eq(schema.cliProviders.name, provider.name),
+                eq(schema.cliProviders.authMode, provider.authMode),
+                eq(schema.cliProviders.isolateAuth, false),
+              ),
+        );
     }
 
     log.info(

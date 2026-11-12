@@ -116,9 +116,14 @@ describe.skipIf(!url)('sign-out generation and critical section on PostgreSQL', 
     }
   });
 
-  it.each([null, new Date('2026-01-01T00:00:00Z')])(
-    'does not publish a probe read before sign-out (previous check: %s)',
-    async (authLastCheckedAt) => {
+  it.each([
+    [null, false],
+    [new Date('2026-01-01T00:00:00Z'), false],
+    [null, true],
+    [new Date('2026-01-01T00:00:00Z'), true],
+  ] as const)(
+    'does not publish a probe read before sign-out (previous check: %s, sibling: %s)',
+    async (authLastCheckedAt, sibling) => {
       const [provider] = await db
         .insert(schema.cliProviders)
         .values({
@@ -130,6 +135,22 @@ describe.skipIf(!url)('sign-out generation and critical section on PostgreSQL', 
           authLastCheckedAt,
         })
         .returning();
+      const probedProvider = sibling
+        ? (
+            await db
+              .insert(schema.cliProviders)
+              .values({
+                userId,
+                name: provider!.name,
+                label: 'shared-probe',
+                authMode: provider!.authMode,
+                authStatus: 'ok',
+                authLastCheckedAt,
+              })
+              .returning()
+          )[0]!
+        : provider!;
+      expect(cliAuthScope(probedProvider)).toBe(cliAuthScope(provider!));
       let afterSignOut: typeof provider;
       login.probe.mockImplementationOnce(async () => {
         // Sign-out succeeding here proves the probe holds no advisory lock during exec.
@@ -139,17 +160,20 @@ describe.skipIf(!url)('sign-out generation and critical section on PostgreSQL', 
           } as unknown as DockerRunner),
         ).toMatchObject({ ok: true });
         afterSignOut = await db.query.cliProviders.findFirst({
-          where: eq(schema.cliProviders.id, provider!.id),
+          where: eq(schema.cliProviders.id, probedProvider.id),
         });
         return { ok: true, authStatus: 'ok', authMessage: 'stale success' };
       });
       await expect(
-        handleProbeJob(db, { providerId: provider!.id, userId, targetMode: 'cli' }),
+        handleProbeJob(db, { providerId: probedProvider.id, userId, targetMode: 'cli' }),
       ).resolves.toMatchObject({ ok: true });
       expect(login.probe).toHaveBeenCalledOnce();
+      expect(afterSignOut!.authStatus).toBe('unknown');
+      expect(afterSignOut!.authMessage).toBeNull();
+      expect(afterSignOut!.authGeneration).toBe(probedProvider.authGeneration);
       expect(
         await db.query.cliProviders.findFirst({
-          where: eq(schema.cliProviders.id, provider!.id),
+          where: eq(schema.cliProviders.id, probedProvider.id),
         }),
       ).toEqual(afterSignOut!);
     },
