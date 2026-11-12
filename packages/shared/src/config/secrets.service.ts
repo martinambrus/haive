@@ -11,7 +11,6 @@ export const SECRET_KEYS = {
   JWT_SECRET: 'jwt_secret',
   EMAIL_BLIND_INDEX_PEPPER: 'email_blind_index_pepper',
   MASTER_KEK: 'master_kek',
-  SMTP_PASSWORD: 'smtp_password',
   // External global-KB Postgres connection string (may carry credentials).
   GLOBAL_KB_CONNECTION_STRING: 'global_kb_connection_string',
 } as const;
@@ -28,8 +27,21 @@ export class SecretsService {
     if (this.initialized) return;
     this.db = db;
     this.encryptionKey = await configService.getEncryptionKey();
+    await this.removeRetiredKeys();
     this.initialized = true;
     logger.info('SecretsService initialized');
+  }
+
+  /** Uses the injected connection so ordinary API and worker boots retire old secrets. */
+  private async removeRetiredKeys(): Promise<void> {
+    const retiredKeys = ['smtp_password'];
+    for (const key of retiredKeys) {
+      const removed = await this.db!.delete(schema.systemSecrets)
+        .where(eq(schema.systemSecrets.key, key))
+        .returning({ key: schema.systemSecrets.key });
+      this.cache.delete(key);
+      if (removed.length) logger.info({ key }, 'Removed retired system secret');
+    }
   }
 
   async get(key: string): Promise<string | null> {
