@@ -193,6 +193,38 @@ async function fixture(changeBase = false) {
 }
 
 describe('explicit undo of a cancel-left committed merge', () => {
+  it.each(['root', 'transient'] as const)(
+    'refuses an empty open merge in the %s checkout and permits retry after abort',
+    async (kind) => {
+      const f = await fixture();
+      let checkout = f.dir;
+      if (kind === 'transient') {
+        await git(f.dir, 'switch', 'feature');
+        checkout = worktreeDirPaths(f.dir, '', `${worktreeDirName('main')}--base`).worktreePath;
+        await git(f.dir, 'worktree', 'add', checkout, 'main');
+        f.payload.dir = checkout;
+        f.job.dir = checkout;
+      }
+      await git(checkout, 'switch', '-c', 'empty-divergent', f.before);
+      await git(checkout, 'commit', '--allow-empty', '-m', 'empty divergent commit');
+      await git(checkout, 'switch', 'main');
+      await git(checkout, 'merge', '--no-ff', '--no-commit', 'empty-divergent');
+      expect(await git(checkout, 'diff', '--cached', '--name-only')).toBe('');
+      const mergeHead = await git(checkout, 'rev-parse', 'MERGE_HEAD');
+      await f.run();
+      expect(await git(checkout, 'rev-parse', 'main')).toBe(f.after);
+      expect(await git(checkout, 'rev-parse', 'MERGE_HEAD')).toBe(mergeHead);
+      expect(leftCommittedMerges(f.events)[0]).toMatchObject({
+        settled: null,
+        refused: { reason: expect.stringMatching(/operation.*in progress/i) },
+      });
+      expect(h.aside).not.toHaveBeenCalled();
+      await git(checkout, 'merge', '--abort');
+      await f.run();
+      expect(await git(checkout, 'rev-parse', 'main')).toBe(f.before);
+    },
+  );
+
   async function interruptAfterCheckoutMove(f: Awaited<ReturnType<typeof fixture>>) {
     const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
     let interrupted = false;

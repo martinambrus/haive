@@ -29,6 +29,7 @@ import { worktreeDirPaths, worktreeDirName } from '../repo/worktree-paths.js';
 import { checkoutHoldingTasks } from '../repo/refresh.js';
 import { findWorktreePathClaimant } from '../repo/worktree-claims.js';
 import { worktreesHoldingBranch } from '../repo/git-workspace.js';
+import { gitOperationInProgress, GitOperationUnreadableError } from '../repo/git-operation.js';
 import {
   checkGitRefTransactions,
   GitRefTransactionError,
@@ -653,6 +654,21 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
             if ((await undoRevParse(movedCheckout, 'HEAD')) !== m.baseShaAfter) {
               await settle('moved', 'The checkout moved since this merge; nothing was changed.');
               return false;
+            }
+            try {
+              if (await gitOperationInProgress(movedCheckout, m.repoPath)) {
+                await settle(
+                  'refused',
+                  'A Git operation is in progress in this checkout. Finish or abort it, then retry Undo.',
+                );
+                return false;
+              }
+            } catch (error) {
+              if (error instanceof GitOperationUnreadableError)
+                throw new UndoGitError(
+                  gitFailureReason('Cannot check for a Git operation before Undo', error),
+                );
+              throw error;
             }
             return true;
           };

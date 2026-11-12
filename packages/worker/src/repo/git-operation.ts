@@ -1,4 +1,4 @@
-import { isAbsolute, relative } from 'node:path';
+import { isAbsolute, relative, resolve } from 'node:path';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { GIT_OPERATION_STATE_ENTRIES } from '@haive/shared/git-args';
 import { gitRun } from './git-exec.js';
@@ -16,12 +16,20 @@ export class GitOperationUnreadableError extends Error {
  *  would also resolve a branch or tag named MERGE_HEAD; a rebase stopped at an `exec` has its state
  *  directory but no REBASE_HEAD. A checkout with no `.git` has none; a read that fails in one that has
  *  a `.git` is unknown and throws. */
-export async function gitOperationInProgress(repoPath: string): Promise<boolean> {
-  return (await gitOperationMarker(repoPath)) !== null;
+export async function gitOperationInProgress(
+  repoPath: string,
+  anchor = repoPath,
+): Promise<boolean> {
+  return (await gitOperationMarker(repoPath, anchor)) !== null;
 }
 
-/** The first state entry that holds this checkout, using the same read as the operation guard. */
-export async function gitOperationMarker(repoPath: string): Promise<string | null> {
+/** The first state entry that holds this checkout, using the same read as the operation guard.
+ * A caller inspecting a linked worktree may supply its trusted repository root as anchor;
+ * git state outside that root is still unreadable. Never use a git-provided path as anchor. */
+export async function gitOperationMarker(
+  repoPath: string,
+  anchor = repoPath,
+): Promise<string | null> {
   for (const ref of GIT_OPERATION_STATE_ENTRIES) {
     const located = await gitRun(repoPath, ['rev-parse', '--git-path', ref]);
     if (located.code !== 0) {
@@ -32,13 +40,13 @@ export async function gitOperationMarker(repoPath: string): Promise<string | nul
     }
     const path = located.stdout.trim();
     if (!path) continue;
-    const rel = isAbsolute(path) ? relative(repoPath, path) : path;
+    const rel = relative(anchor, isAbsolute(path) ? path : resolve(repoPath, path));
     // The checkout anchor cannot inspect state outside it; that proves no operation either way.
     if (rel === '' || rel === '..' || rel.startsWith('../') || isAbsolute(rel)) {
       throw new GitOperationUnreadableError(`${ref} is outside the checkout anchor in ${repoPath}`);
     }
     try {
-      if ((await lstatNoFollow(repoPath, rel, { strict: true })) !== null) return ref;
+      if ((await lstatNoFollow(anchor, rel, { strict: true })) !== null) return ref;
     } catch (err) {
       throw new GitOperationUnreadableError(
         `${ref} could not be read in ${repoPath}: ${err instanceof Error ? err.message : String(err)}`,
