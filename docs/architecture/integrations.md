@@ -826,7 +826,7 @@ that row is bounded (`boundedLockWait`), so a relink behind another answers 409 
 git write. The general repository settings, tooling save, allow-list save and delete each bound their
 own row take too; the allow-list key and the delete's task-creation key have their own bounds. These
 waits are per statement, not one deadline for the whole request. Implicit row writers and worker
-`FOR UPDATE` takes still wait behind the relink's git work (T516). It inserts the audit row, changes git, then writes the column. Each git call is cut at 10 s with
+`FOR UPDATE` takes still wait behind the relink's git work (T516). It inserts the audit row, changes git, then writes the column. Its `credentialsId` keeps the saved credential when omitted, binds the named one when given (both fit-checked against the new URL) and clears the binding when `null` (no fit check); the web "Change remote" dialog defaults to keeping it. Each git call is cut at 10 s with
 SIGTERM, and with SIGKILL only if the child is still alive 2 s later: git removes its `config.lock` on
 SIGTERM and leaves it on SIGKILL (MEASURED with git 2.43.0 and 2.54.0), and a left lock fails every later write to that config. The route
 puts git's remote back when the transaction fails: inside the transaction for a failure its callback sees (a
