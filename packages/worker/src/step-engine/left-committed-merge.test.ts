@@ -75,7 +75,10 @@ async function fixture() {
     { eventType: 'merge.landed', payload },
   ];
   const db = {
-    query: { tasks: { findFirst: async () => ({ status: 'cancelled' }) } },
+    query: {
+      tasks: { findFirst: async () => ({ status: 'cancelled' }) },
+      taskSteps: { findFirst: async () => null },
+    },
     select: () => ({ from: () => ({ where: () => ({ orderBy: async () => events }) }) }),
     insert: () => ({
       values: async (e: (typeof events)[number]) => {
@@ -86,6 +89,14 @@ async function fixture() {
   return { dir, before, after, payload, events, db: db as unknown as Database };
 }
 describe('cancel reports a merge left committed on the local base', () => {
+  it('keeps a known pushed merge report-only for the owner', async () => {
+    const f = await fixture();
+    vi.spyOn(f.db.query.taskSteps, 'findFirst').mockResolvedValue({
+      mergeResolveState: { pushed: true },
+    } as never);
+    await recordLeftCommittedMerge(f.db, 't');
+    expect(f.events.at(-1)?.payload.pushed).toBe(true);
+  });
   it('checks every recorded directory before deciding that no landing exists', async () => {
     const f = await fixture();
     f.events.length = 0;

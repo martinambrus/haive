@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Queue, QueueEvents, type Worker } from 'bullmq';
@@ -56,6 +56,72 @@ afterAll(async () => {
 });
 
 describe.skipIf(!url || !redisUrl)('real checkout scheduler and worker queue', () => {
+  it('observes the branch for a reset without record import or its admission locks', async () => {
+    vi.spyOn(configService, 'getBoolean').mockRejectedValue(new Error('must not read sync config'));
+    const root = await mkdtemp(join(tmpdir(), 'k1-reset-observe-'));
+    dirs.push(root);
+    execFileSync('git', ['init', '-q', '-b', 'feature-x'], { cwd: root });
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.name=fixture',
+        '-c',
+        'user.email=fixture@local',
+        'commit',
+        '--allow-empty',
+        '-qm',
+        'initial',
+      ],
+      { cwd: root },
+    );
+    // An unreadable record and an active reset hold the full sync, but not branch observation.
+    await mkdir(join(root, '.haive-data/state'), { recursive: true });
+    await writeFile(join(root, '.haive-data/state/format.json'), 'invalid');
+    const userId = randomUUID();
+    users.push(userId);
+    await db!.insert(schema.users).values({
+      id: userId,
+      emailEncrypted: 'fixture',
+      emailBlindIndex: userId,
+      passwordHash: 'fixture',
+    });
+    const [repo] = await db!
+      .insert(schema.repositories)
+      .values({
+        userId,
+        source: 'blank',
+        name: 'reset observation',
+        storagePath: root,
+        checkoutBranch: 'main',
+        rootClaimedAt: new Date(),
+        rootClaimKind: 'reset',
+      })
+      .returning();
+    await events!.waitUntilReady();
+    worker = startPlanMirrorWorker();
+    const job = await queue!.add(
+      PLAN_MIRROR_JOB_NAMES.OBSERVE_CHECKOUT_BRANCH,
+      {
+        repositoryId: repo!.id,
+        userId,
+      },
+      { jobId: `reset-checkout-${randomUUID()}`, removeOnComplete: true },
+    );
+
+    expect(await job.waitUntilFinished(events!, 5_000)).toEqual({ branch: 'feature-x' });
+    expect(
+      (await db!.select().from(schema.repositories).where(eq(schema.repositories.id, repo!.id)))[0],
+    ).toMatchObject({ checkoutBranch: 'feature-x', renderContext: null });
+    expect(
+      await db!
+        .select()
+        .from(schema.projectStateSync)
+        .where(eq(schema.projectStateSync.repositoryId, repo!.id)),
+    ).toEqual([]);
+    expect(await readFile(join(root, '.haive-data/state/format.json'), 'utf8')).toBe('invalid');
+    expect(configService.getBoolean).not.toHaveBeenCalled();
+  });
   it('retains the 10s writer scheduler and registers a 60s checkout backstop', async () => {
     await schedulePlanMirrorSweep();
     const schedulers = await queue!.getJobSchedulers(0, -1, true);

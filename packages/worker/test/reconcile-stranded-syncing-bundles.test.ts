@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
+import * as recovery from '../src/repo/bundle-recovery.js';
 import { createFakeDb } from '@haive/database/testing';
 
 const getJobs = vi.fn<(types: string[]) => Promise<Array<{ data: unknown }>>>();
@@ -94,11 +95,12 @@ describe('reconcileStrandedSyncingBundles', () => {
 
   it.each([
     ['does not parse', 'failed'],
-    ['cannot be read', 'syncing'],
+    ['is a directory', 'failed'],
+    ['is a symlink', 'failed'],
   ] as const)(
     'a stranded bundle whose record %s ends %s, and the next bundle recovers',
     async (fault, status) => {
-      const { mkdir, mkdtemp, readFile, rm, writeFile } = await import('node:fs/promises');
+      const { mkdir, mkdtemp, readFile, rm, writeFile, symlink } = await import('node:fs/promises');
       const { tmpdir } = await import('node:os');
       const { join } = await import('node:path');
       const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');
@@ -110,9 +112,13 @@ describe('reconcileStrandedSyncingBundles', () => {
         const dir = join(root, USER, STRANDED);
         const archivePath = join(dir, 'source.new.zip');
         await mkdir(dir, { recursive: true });
-        // A directory where the record belongs is an I/O fault, left for a later tick.
-        if (fault === 'cannot be read') await mkdir(`${archivePath}.replacement.json`);
-        else await writeFile(`${archivePath}.replacement.json`, '{invalid json');
+        // Refused record leaves are terminal; never follow the link or change its target.
+        if (fault === 'is a directory') await mkdir(`${archivePath}.replacement.json`);
+        else if (fault === 'is a symlink') {
+          const target = join(root, 'outside-record');
+          await writeFile(target, 'untouched');
+          await symlink(target, `${archivePath}.replacement.json`);
+        } else await writeFile(`${archivePath}.replacement.json`, '{invalid json');
         bundle(STRANDED, { sourceType: 'zip', archivePath, lastReplacementNote: 'stale warning' });
         const before = structuredClone(row(STRANDED));
         const fixture = await seedCrashedReplacement(root, fake, 'after swap');
@@ -133,6 +139,8 @@ describe('reconcileStrandedSyncingBundles', () => {
         });
         expect(await readFile(join(fixture.dest, 'old.md'), 'utf8')).toBe('old tree');
         expect(fake.rows(schema.customBundleItems)).toEqual(items);
+        if (fault === 'is a symlink')
+          expect(await readFile(join(root, 'outside-record'), 'utf8')).toBe('untouched');
         expect(warn).toHaveBeenCalledWith(
           expect.objectContaining({ bundleId: STRANDED, err: expect.any(Error) }),
           expect.any(String),
@@ -142,6 +150,25 @@ describe('reconcileStrandedSyncingBundles', () => {
         if (saved === undefined) delete process.env.BUNDLE_STORAGE_ROOT;
         else process.env.BUNDLE_STORAGE_ROOT = saved;
         await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(['EACCES', 'EMFILE', 'ENFILE'])(
+    'retries a transient record read failure: %s',
+    async (code) => {
+      bundle(STRANDED, {
+        sourceType: 'zip',
+        archivePath: '/var/lib/haive/bundles/' + USER + '/' + STRANDED + '/source.new.zip',
+      });
+      const read = vi
+        .spyOn(recovery, 'readReplacement')
+        .mockRejectedValueOnce(Object.assign(new Error('read failed'), { code }));
+      try {
+        await run();
+        expect(row(STRANDED).status).toBe('syncing');
+      } finally {
+        read.mockRestore();
       }
     },
   );
@@ -241,6 +268,27 @@ describe('reconcileStrandedSyncingBundles', () => {
     await run();
 
     expect(row(STRANDED).status).toBe('active');
+  });
+
+  it('labels candidate counts as attempts when a candidate changes before recovery', async () => {
+    bundle(STRANDED);
+    bundle(OTHER);
+    getJobs.mockImplementation(async () => {
+      fake.patch(schema.customBundles, STRANDED, { updatedAt: new Date() });
+      return [];
+    });
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      await run();
+      expect(row(STRANDED).status).toBe('syncing');
+      expect(row(OTHER).status).toBe('failed');
+      expect(warn).toHaveBeenCalledWith(
+        { attempted: 2 },
+        'attempted recovery of bundles stranded at syncing',
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('writes nothing when the queue cannot be read', async () => {

@@ -119,7 +119,7 @@ clear inside the resume's transaction so that a pause placed since the route rea
 An owner's Retry of a failed task revives it but leaves that pause standing (a refusal would leave its
 owner nothing to do until an administrator acts); it lifts the hold it read only after judging whose it
 is again under the task row lock (`liftReadPause`), since a takeover keeps the stamp the Retry read.
-Cancel, the step abort and the plan merge discard still clear any pause, and an administrator may lift it from either route. One who owns the task
+Cancel, the step abort and the plan merge discard still clear any pause, and an administrator may lift it from either route. When the pause they clear is an administrator's (judged under the task row lock), they write the same `task.resumed` event and `task.admin_resume` row as Retry's resume, best effort: a savepoint keeps a row that cannot be written from undoing the cancel. One who owns the task
 and lifts an administrator's pause through the owner route gets the same `byAdmin` `task.resumed` event
 and `task.admin_resume` row as from the page (`recordAdminResume`, in the resume's transaction, so a row
 that cannot be written undoes it); lifting their own owner pause stays an owner action with neither, and

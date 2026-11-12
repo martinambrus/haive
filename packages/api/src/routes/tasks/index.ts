@@ -131,6 +131,7 @@ import {
   findAdminPausedTaskIds,
   findQueuedInvocationStepIds,
   loadFinishedRunsRevision,
+  clearCancelledTaskPause,
   liftReadPause,
   loadTaskTypeLabels,
   recordAdminResume,
@@ -1386,7 +1387,7 @@ taskRoutes.post('/:id/action', async (c) => {
       if (!result.cancelled) return c.json({ ok: true, status: result.status });
       // Cancel ends the pause as well. Step actions refuse cancelled tasks through
       // unendedTask in steps.ts; clearing this marker records that no hold remains.
-      await clearTaskPause(db, id);
+      await clearCancelledTaskPause(db, id, userId, task.userId);
       await enqueueCancelJob(id, userId);
       return c.json({ ok: true, status: 'cancelled' });
     }

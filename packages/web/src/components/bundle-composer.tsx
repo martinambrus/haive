@@ -44,6 +44,12 @@ interface BundleComposerProps {
 
 const CHUNK_SIZE = 4 * 1024 * 1024;
 
+async function refusalError(response: Response, fallback: string): Promise<Error> {
+  const body = (await response.json().catch(() => null)) as { error?: unknown } | null;
+  const reason = typeof body?.error === 'string' ? body.error.trim() : '';
+  return new Error(reason || `${fallback} (${response.status})`);
+}
+
 function isArchiveExt(name: string): 'zip' | 'tar' | 'tar.gz' | null {
   const lower = name.toLowerCase();
   if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) return 'tar.gz';
@@ -353,7 +359,7 @@ export function BundleComposer({
         method: 'DELETE',
         credentials: 'include',
       });
-      if (!res.ok) throw new Error(`delete failed (${res.status})`);
+      if (!res.ok) throw await refusalError(res, 'delete failed');
       onChange(value.filter((v) => v.id !== entry.id));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -371,7 +377,7 @@ export function BundleComposer({
         method: 'POST',
         credentials: 'include',
       });
-      if (!res.ok) throw new Error(`resync failed (${res.status})`);
+      if (!res.ok) throw await refusalError(res, 'resync failed');
       onChange(value.map((v) => (v.id === entry.id ? { ...v, status: 'syncing' } : v)));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -404,7 +410,7 @@ export function BundleComposer({
           chunkSize: CHUNK_SIZE,
         }),
       });
-      if (!initRes.ok) throw new Error(`replace init failed (${initRes.status})`);
+      if (!initRes.ok) throw await refusalError(initRes, 'replace init failed');
       const { session } = await initRes.json();
       const uploadId = session.id;
       let offset = 0;
@@ -420,7 +426,7 @@ export function BundleComposer({
           },
           body: chunk,
         });
-        if (!chunkRes.ok) throw new Error(`chunk upload failed (${chunkRes.status})`);
+        if (!chunkRes.ok) throw await refusalError(chunkRes, 'chunk upload failed');
         offset = end;
         setUploadProgress({ name: file.name, pct: Math.round((offset / file.size) * 100) });
       }
@@ -433,7 +439,7 @@ export function BundleComposer({
           body: JSON.stringify({ mode }),
         },
       );
-      if (!completeRes.ok) throw new Error(`replace complete failed (${completeRes.status})`);
+      if (!completeRes.ok) throw await refusalError(completeRes, 'replace complete failed');
       onChange(value.map((v) => (v.id === entry.id ? { ...v, status: 'syncing' } : v)));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -467,7 +473,7 @@ export function BundleComposer({
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error(`git bundle create failed (${res.status})`);
+      if (!res.ok) throw await refusalError(res, 'git bundle create failed');
       const { bundle: created } = await res.json();
       onChange([
         ...value,
@@ -508,7 +514,7 @@ export function BundleComposer({
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(initBody),
       });
-      if (!initRes.ok) throw new Error(`upload init failed (${initRes.status})`);
+      if (!initRes.ok) throw await refusalError(initRes, 'upload init failed');
       const { session } = await initRes.json();
       const uploadId = session.id;
       let offset = 0;
@@ -524,7 +530,7 @@ export function BundleComposer({
           },
           body: chunk,
         });
-        if (!chunkRes.ok) throw new Error(`chunk upload failed (${chunkRes.status})`);
+        if (!chunkRes.ok) throw await refusalError(chunkRes, 'chunk upload failed');
         offset = end;
         setUploadProgress({ name: file.name, pct: Math.round((offset / file.size) * 100) });
       }
@@ -532,7 +538,7 @@ export function BundleComposer({
         method: 'POST',
         credentials: 'include',
       });
-      if (!completeRes.ok) throw new Error(`upload complete failed (${completeRes.status})`);
+      if (!completeRes.ok) throw await refusalError(completeRes, 'upload complete failed');
       const { bundle: created } = await completeRes.json();
       onChange([
         ...value,

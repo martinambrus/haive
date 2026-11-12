@@ -314,8 +314,9 @@ async function deleteBundleRow(bundleId: string, repositoryId: string): Promise<
 }
 
 /** A failed row may still owe a job whose enqueue acknowledgement was lost. This read runs
- * under the winning row update's lock; a duplicate admission rolls back without changing copy.
- * A capped or unavailable queue read is unknown, never evidence that the bundle has no job. */
+ * before the admission transaction; under the row lock, callers then refuse any row generation
+ * changed since their pre-read snapshot. A capped or unavailable queue read is unknown, never
+ * evidence that the bundle has no job. */
 async function refuseLiveBundleJob(
   queue: ReturnType<typeof getBundleQueue>,
   bundleId: string,
@@ -586,7 +587,8 @@ bundleRoutes.put('/uploads/:id/chunk', async (c) => {
       await fh.truncate(Number(row.bytesReceived)).catch(() => {});
       await fh.close().catch(() => {});
       if (err instanceof HttpError) throw err;
-      throw new HttpError(500, `chunk write failed: ${(err as Error).message}`);
+      logger.error({ err, userId, uploadId: row.id }, 'Bundle upload chunk write failed');
+      throw new HttpError(500, 'chunk write failed');
     }
 
     const advanced = await tx
@@ -678,7 +680,8 @@ bundleRoutes.post('/uploads/:id/complete', requireNewWorkAllowed, async (c) => {
         await renameNoFollow(anchor, archiveRel, finalRel, { createParents: true });
       } catch (err) {
         if (!(await wholeFileAt(finalRel))) {
-          throw new HttpError(500, `failed to move archive: ${(err as Error).message}`);
+          logger.error({ err, userId, uploadId: row.id }, 'Bundle archive move failed');
+          throw new HttpError(500, 'failed to move archive');
         }
       }
     }
@@ -889,6 +892,7 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
       });
       return;
     }
+    await refuseLiveBundleJob(queue, bundleId);
     let replacement: BundleReplacement;
     const intentRel = `${finalRel}.replacement.json`;
     let createdIntent: FileIdentity | null = null;
@@ -904,7 +908,15 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
         if (current.status === 'syncing' && current.archivePath !== finalArchive) {
           throw new HttpError(409, 'another import of this bundle is already running');
         }
-        await refuseLiveBundleJob(queue, bundleId);
+        // The queue snapshot precedes this transaction. Refuse a changed generation rather than
+        // admitting against a snapshot taken before another import finished or failed.
+        if (
+          current.updatedAt.getTime() !== bundle.updatedAt.getTime() ||
+          current.status !== bundle.status ||
+          current.archivePath !== bundle.archivePath
+        ) {
+          throw new HttpError(409, 'The bundle changed while checking its import jobs. Try again.');
+        }
         const saved = await readFileNoFollow(anchor, intentRel, { maxBytes: 8192, strict: true });
         if (saved) {
           replacement = bundleReplacementSchema.parse(JSON.parse(saved.data.toString('utf8')));
@@ -1048,16 +1060,30 @@ bundleRoutes.post('/:id/sync', requireNewWorkAllowed, async (c) => {
 
   const db = getDb();
   const queue = getBundleQueue();
+  await refuseLiveBundleJob(queue, bundleId);
   const syncingAt = new Date();
   await db.transaction(async (tx) => {
     await admitNewWork(tx);
+    const [current] = await tx
+      .select()
+      .from(schema.customBundles)
+      .where(eq(schema.customBundles.id, bundleId))
+      .for('update');
+    if (!current) throw new HttpError(404, 'bundle not found');
+    // Compare the values read by the driver under the row lock. SQL timestamp equality
+    // against a JS Date would reject an unchanged database default with microseconds.
+    if (
+      current.updatedAt.getTime() !== row.updatedAt.getTime() ||
+      current.status !== row.status ||
+      current.archivePath !== row.archivePath
+    )
+      throw new HttpError(409, 'The bundle changed while checking its import jobs. Try again.');
     const [taken] = await tx
       .update(schema.customBundles)
       .set({ status: 'syncing', lastSyncError: null, updatedAt: syncingAt })
       .where(and(eq(schema.customBundles.id, bundleId), ne(schema.customBundles.status, 'syncing')))
       .returning({ id: schema.customBundles.id });
     if (!taken) throw new HttpError(409, 'an import of this bundle is already running');
-    await refuseLiveBundleJob(queue, bundleId);
   });
 
   const payload: BundleJobPayload = { bundleId, userId };

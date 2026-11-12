@@ -257,7 +257,23 @@ baseShaBefore, baseShaAfter, landedAt}` in the same transaction as the step stat
   (`recordLeftCommittedMerge`, read-only; pushed merges and host checkouts included). A git
   timeout or database fault throws (the re-drive retries); a deleted branch or repository
   cannot be confirmed, warns and reports nothing, so it never holds the teardown. The task
-  page says the merge stays committed and was not undone; nothing undoes it. The worker job
+  page says the merge stays committed and was not undone; nothing undoes it on its own.
+  Once `task.cancel_finished` exists the owner may press "Undo merge" behind a confirm that names
+  the branch and both shas (`POST /tasks/:id/merges/undo`, cancelled tasks only). The worker job
+  (`undoLeftMerge`) holds the directory's lock, the repository's root claim and the checkout
+  fence, and moves `refs/heads/<landedOn>` back to `baseShaBefore` only when it is still exactly
+  the task's own merge commit, proven by the recorded base and feature parents (a squash must
+  also match the merge's tree). A base-sync landing and an event without that evidence stay
+  report-only. A branch checked out in Haive's own transient base worktree is reset there with
+  `reset --keep`, after re-checking right before it that the checkout is still on that branch
+  (`symbolic-ref`) at the merge commit; one checked out anywhere else is refused, and `update-ref` (a CAS on the
+  expected sha) is used only for a branch no worktree holds. Haive's projection files are set
+  aside and put back around the reset. The outcome is a `merge.left_committed_settled` event:
+  `undone`, or `moved`/permanent `refused` (base moved, pushed, host checkout, no evidence),
+  each final; a refusal a person can clear (a live claim, a busy root claim, an unknown remote,
+  an origin with more than one push destination, since only one is checked, local changes, staged changes in the checkout, which the reset would otherwise drop from the index) leaves the report open to try again. The moved-away commit stays reachable
+  as `refs/haive/undo-left-merge/<task>/<baseShaAfter>`, so an undo is reversed with
+  `git update-ref refs/heads/<branch> <baseShaAfter> <baseShaBefore>`. The worker job
   (`abortLeftMerge`) runs under the directory's lock and records `merge.left_open_settled`
   `{dir, mergeHead, outcome, reason}`: `refused` while a live task's `merge_dir_claims` row holds the
   directory (`liveClaimHolder`, the staleness rules `claimMergeDir` uses), `moved` with nothing

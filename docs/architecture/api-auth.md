@@ -112,7 +112,9 @@ web's `/api/haive` proxy, so web is the peer. Next route handlers forward suppli
 `X-Forwarded-For` and expose no socket peer. Expose web only behind a front proxy that appends the
 real client to `X-Forwarded-For`, block direct access to web, and list the web container and every
 trusted intermediary hop in `HAIVE_TRUSTED_PROXIES`. Trusting web alone lets a direct caller pick
-its address bucket; leaving web's private peer untrusted turns the address bucket off.
+its address bucket; leaving web's private peer untrusted turns the address bucket off. The api logs one warning at boot
+when the hostnames differ and `HAIVE_TRUSTED_PROXIES` is empty (`bootstrap.ts`): the web's outbound
+address cannot be known at boot, so a non-empty list is taken as the operator having followed this rule.
 
 **Sign-ins, registrations and password changes leave audit rows.** A successful sign-in writes
 `auth.login.success` in the transaction that stores its refresh token, and a failed one

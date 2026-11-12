@@ -346,6 +346,24 @@ describe('a chunk of a chunked upload that is rolled back', () => {
   }
 
   describe.each(FAMILIES)('PUT chunk of the $name upload', (family) => {
+    it('returns a fixed reason for a filesystem failure and logs the original error', async () => {
+      const session = await seed(family);
+      const failure = new Error(`EIO: write failed at ${session.file}`);
+      const fault = interceptWriteOf(CHUNK, { error: failure });
+
+      const res = await put(family, CHUNK);
+
+      expect(fault.fired).toBe(1);
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: 'chunk write failed', code: null });
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ err: failure, userId: USER, uploadId: SESSION }),
+        expect.any(String),
+      );
+      expect(received(family)).toBe(PREVIOUS.length);
+      expect(await readFile(session.file, 'latin1')).toBe(PREVIOUS.toString('latin1'));
+    });
+
     it('E1 keeps a different file put at the session’s name when a chunk write fails part-way', async () => {
       const session = await seed(family);
       const { other, before } = await otherFile();

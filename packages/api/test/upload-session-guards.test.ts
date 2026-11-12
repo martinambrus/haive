@@ -833,6 +833,27 @@ describe('A1: a bundle complete that fails before it changes anything gives its 
     expect((await request(bundles.app, 'POST', bundles.completeUrl(SESSION))).status).toBe(201);
   });
 
+  it('create: returns a fixed move failure reason and logs the original error', async () => {
+    const staged = await stage(bundles);
+    const failure = new Error(`EIO: rename '${staged.partial}' -> '${staged.finished}'`);
+    h.beforeRename = () => {
+      h.beforeRename = null;
+      throw failure;
+    };
+
+    const res = await request(bundles.app, 'POST', bundles.completeUrl(SESSION));
+
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: 'failed to move archive', code: null });
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: failure, userId: USER, uploadId: SESSION }),
+      expect.any(String),
+    );
+    expect(rowOf(bundles).status).toBe('uploading');
+    expect(await readFile(staged.partial, 'utf8')).toBe(CONTENT);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
   it('create: a failure after the bundle exists gives the session back, and a repeat finishes it', async () => {
     const staged = await stage(bundles);
     h.beforeRename = () => {

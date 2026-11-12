@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   PLAN_MIRROR_JOB_NAMES,
   CONFIG_KEYS,
@@ -8,6 +9,51 @@ import {
 } from '@haive/shared';
 import type { HaiveDataSavePayload, HaiveDataSaveResult } from '@haive/shared/haive-data';
 import { getPlanMirrorQueue, getPlanMirrorQueueEvents } from '../queues.js';
+
+/** Five seconds for the entire Redis/worker round trip, including enqueue and event readiness.
+ * Never reuse a page hint's job: a reset needs an observation that started after this request.
+ * Returns the branch the job itself read, never the shared column, which a concurrent watcher
+ * holding an older read may overwrite. null = UNKNOWN (failure, detached, older worker). */
+export async function observeCheckoutBranchForReset(
+  repositoryId: string,
+  userId: string,
+): Promise<string | null> {
+  const timeoutMs = 5_000;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const observe = async () => {
+      const job = await getPlanMirrorQueue().add(
+        PLAN_MIRROR_JOB_NAMES.OBSERVE_CHECKOUT_BRANCH,
+        { repositoryId, userId } satisfies PlanMirrorJobPayload,
+        {
+          jobId: `reset-checkout-${repositoryId}-${randomUUID()}`,
+          // Keep the result a while: a job that finishes before the events listener is ready
+          // (first reset after api start) is recovered from its stored state, not from an event.
+          removeOnComplete: { age: 300 },
+          removeOnFail: { age: 300 },
+        },
+      );
+      const result: unknown = await job.waitUntilFinished(getPlanMirrorQueueEvents(), timeoutMs);
+      if (typeof result !== 'object' || result === null || !('branch' in result))
+        throw new Error('checkout branch observation did not complete');
+      return typeof result.branch === 'string' ? result.branch : null;
+    };
+    return await Promise.race([
+      observe(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('checkout branch observation timed out')),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } catch (err) {
+    logger.warn({ err, repositoryId }, 'reset checkout branch is unknown: observation failed');
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** Best-effort page hint; the complete periodic scan is the durable backstop. */
 export async function enqueueCheckoutSync(repositoryId: string, userId: string): Promise<void> {

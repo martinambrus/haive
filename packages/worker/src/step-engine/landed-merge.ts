@@ -1,7 +1,7 @@
 import { and, asc, eq } from 'drizzle-orm';
 import { schema, type MergeResolveState } from '@haive/database';
 import { MERGE_LANDED_EVENT, readLandedMerge } from '@haive/shared/merge-left-open';
-import { revParse } from './git-merge.js';
+import { isHostCheckout, revParse } from './git-merge.js';
 import type { DbHandle } from './merge-dir-claim.js';
 import { StepSupersededError, updateOwnedStep } from './step-ownership.js';
 
@@ -46,7 +46,11 @@ export async function recordLandedMerge(
             m.baseShaBefore === state.baseShaBefore &&
             m.landedOn === state.baseBranch,
         );
-      if (!sameMerge.some((m) => m?.baseShaAfter === after))
+      if (!sameMerge.some((m) => m?.baseShaAfter === after)) {
+        // Optional undo evidence must never prevent the durable landing record.
+        const featureSha = await revParse(repoPath, `${state.featureBranch}^{commit}`).catch(
+          () => null,
+        );
         await tx.insert(schema.taskEvents).values({
           taskId,
           taskStepId: stepId,
@@ -58,8 +62,16 @@ export async function recordLandedMerge(
             landedAt: sameMerge[0]?.landedAt ?? new Date().toISOString(),
             repoPath,
             dir: state.mergeDir,
+            // Capture the feature at landing, not at Undo: cancel can delete its branch and a
+            // re-entry can observe a later base tip. Parent/tree proofs still decide ownership.
+            featureBranch: state.featureBranch,
+            ...(featureSha ? { featureSha } : {}),
+            mergeStage: state.mergeStage ?? 'feature',
+            hostCheckout: isHostCheckout(repoPath) || isHostCheckout(state.mergeDir),
+            ...(state.squashMergeSha ? { squashMergeSha: state.squashMergeSha } : {}),
           },
         });
+      }
       factRecorded = true;
     }
   }

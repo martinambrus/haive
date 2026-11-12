@@ -3,6 +3,7 @@ import {
   MERGE_LEFT_OPEN_EVENT,
   MERGE_LEFT_OPEN_SETTLED_EVENT,
   leftOpenMerges,
+  leftCommittedMerges,
 } from '../src/merge-left-open.js';
 
 const open = (over: Record<string, unknown> = {}) => ({
@@ -65,5 +66,42 @@ describe('leftOpenMerges', () => {
       settled(),
     ]);
     expect(m?.settled?.outcome).toBe('aborted');
+  });
+});
+
+describe('leftCommittedMerges refusal permanence', () => {
+  const report = {
+    eventType: 'merge.left_committed',
+    payload: {
+      dir: '/repo',
+      repoPath: '/repo',
+      landedOn: 'main',
+      landedAt: '2026-11-11T00:00:00Z',
+      baseShaBefore: 'a'.repeat(40),
+      baseShaAfter: 'b'.repeat(40),
+    },
+  };
+  const attempt = (permanent = false) => ({
+    eventType: 'merge.left_committed_settled',
+    payload: { ...report.payload, outcome: 'refused', reason: 'reason', permanent },
+  });
+  it('counts retryable attempts and accepts a later successful settlement', () => {
+    const events = [report, attempt(), attempt()];
+    expect(leftCommittedMerges(events)[0]).toMatchObject({
+      settled: null,
+      refused: { count: 2, reason: 'reason' },
+    });
+    expect(
+      leftCommittedMerges([
+        ...events,
+        { ...attempt(), payload: { ...report.payload, outcome: 'undone' } },
+      ])[0]?.settled?.outcome,
+    ).toBe('undone');
+  });
+  it('keeps a report-only refusal terminal', () => {
+    expect(leftCommittedMerges([report, attempt(true), attempt()])[0]).toMatchObject({
+      settled: { outcome: 'refused' },
+      refused: null,
+    });
   });
 });

@@ -1,9 +1,26 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { ConfigUnavailableError, configService, logger } from '@haive/shared';
+
+const head = vi.hoisted(() => vi.fn());
+vi.mock('../src/repo/checkout-head.js', () => ({ readNamedCheckout: head }));
 import { sweepCheckoutRepositories, watchCheckout } from '../src/project-state/watch.js';
 
 const REPO = '00000000-0000-4000-8000-0000000000d1';
+
+function observationDb() {
+  head.mockResolvedValue({ ref: 'refs/heads/feature-x', sha: 'a'.repeat(40) });
+  const set = vi.fn(() => ({ where: async () => [] }));
+  const db = {
+    select: () => ({
+      from: () => ({
+        where: async () => [{ storagePath: '/fixture', localPath: null, status: 'ready' }],
+      }),
+    }),
+    update: () => ({ set }),
+  } as unknown as Database;
+  return { db, set };
+}
 
 /** A database that fails the test on first touch. */
 const untouched = () =>
@@ -18,12 +35,46 @@ const untouched = () =>
 
 afterEach(() => vi.restoreAllMocks());
 
+// This file has no database/Redis env gate: `pnpm test` runs these controls in default CI.
+describe('checkout branch recording without record sync', () => {
+  it('records the branch, follows a switch and clears it for detached HEAD', async () => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    const { db, set } = observationDb();
+    head
+      .mockResolvedValueOnce({ ref: 'refs/heads/main', sha: 'a'.repeat(40) })
+      .mockResolvedValueOnce({ ref: 'refs/heads/feature-x', sha: 'b'.repeat(40) })
+      .mockResolvedValueOnce(null);
+
+    for (let pass = 0; pass < 3; pass++) expect(await watchCheckout(db, REPO)).toBe('disabled');
+
+    expect(set.mock.calls).toEqual([
+      [{ checkoutBranch: 'main' }],
+      [{ checkoutBranch: 'feature-x' }],
+      [{ checkoutBranch: null }],
+    ]);
+  });
+
+  it('clears a previously known branch even when the HEAD read throws', async () => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    const { db, set } = observationDb();
+    await watchCheckout(db, REPO);
+    const failure = new Error('HEAD unreadable');
+    head.mockRejectedValueOnce(failure);
+
+    await expect(watchCheckout(db, REPO)).rejects.toBe(failure);
+
+    expect(set.mock.calls).toEqual([[{ checkoutBranch: 'feature-x' }], [{ checkoutBranch: null }]]);
+  });
+});
+
 describe('the checkout watch when the config store is unavailable', () => {
-  it('holds one observation with a warning and reads nothing else', async () => {
+  it('records the branch before holding record import with a warning', async () => {
     vi.spyOn(configService, 'getBoolean').mockRejectedValue(new ConfigUnavailableError('get'));
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
 
-    await expect(watchCheckout(untouched(), REPO)).resolves.toBe('held');
+    const { db, set } = observationDb();
+    await expect(watchCheckout(db, REPO)).resolves.toBe('held');
+    expect(set).toHaveBeenCalledWith({ checkoutBranch: 'feature-x' });
 
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith(
@@ -50,7 +101,9 @@ describe('the checkout watch when the config store is unavailable', () => {
   it('still rejects on any other error', async () => {
     const boom = new Error('ConfigService not initialized');
     vi.spyOn(configService, 'getBoolean').mockRejectedValue(boom);
-    await expect(watchCheckout(untouched(), REPO)).rejects.toBe(boom);
+    const { db, set } = observationDb();
+    await expect(watchCheckout(db, REPO)).rejects.toBe(boom);
+    expect(set).toHaveBeenCalledWith({ checkoutBranch: 'feature-x' });
     await expect(sweepCheckoutRepositories(untouched(), async () => undefined)).rejects.toBe(boom);
   });
 });

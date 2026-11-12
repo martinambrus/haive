@@ -168,17 +168,10 @@ Low unless marked. Code in `worker/src/queues/plan-mirror-queue.ts` (`integrateO
 4. No real-PostgreSQL test that the leftovers report survives a failure in the merge transaction, nor one for a conversation opening between the two transactions.
 5. `discardPlanMerge` uses the pool inside a transaction (`01-plan-merge.ts` ~:794), the shape item 4 of the old T318 fixed in `mergeInScratch`. PRE-EXISTING.
 
-### T604 · design · the 5 s start-admission bound against a large claim ledger
+### T604 · docs · document the 5 s start-admission bound against a large claim ledger
 
-status: open · kind: design · found: F1 (#318) review 2026-11-11 · priority: P3
-DECIDED by the owner 2026-11-11: resolved through T605 (narrow the key); no separate bound change.
-A task start waits at most 5 s for the repository task lock and row admission, then answers 409 busy (`repository-task-lock.ts`). MEASURED: the foreground project-state writer holds that lock 844-2,072 ms at 512 claim files; extrapolated, 5 s covers about 1,300-1,800 claim files, while the record allows 4,096 entries (`shared/src/project-state/limits.ts`). A repository near the cap can therefore answer busy to routine starts while a write runs. Decide: raise the bound with the ledger size, shorten the writer's hold (batch outside the lock), or accept and document.
-
-### T605 · design · git work under the task-creation key
-
-status: open · kind: design · found: F1 (#318) and D2 (#484) reviews 2026-11-11 · priority: P3
-DECIDED by the owner 2026-11-11: narrow the creation key to the row admission; git and file work fenced by the task's own epoch. Overnight run authorized; covers T604.
-Task creation holds the creation key across git and file work (worktree and branch checks, attachment staging), so a slow git or disk holds every other creation and start for that repository behind it. PRE-EXISTING, consequential. Decide whether the key covers only the row admission, with the file work fenced by the task's own epoch instead.
+status: open · kind: docs · found: F1 (#318) review 2026-11-11 · priority: P4
+DECIDED by the owner 2026-11-12: accept the current bound and document it (no publication protocol; T605 closed). A task start waits at most 5 s for the repository task lock and row admission, then answers 409 busy (`repository-task-lock.ts`). The worker project-state writer (`worker/src/project-state/write.ts:747`) holds that lock across preparation and publication, MEASURED 844-2,072 ms at 512 claim files, so a repository near the 4,096-entry cap (`shared/src/project-state/limits.ts`) can answer busy to routine starts while a write runs; retrying the start is the remedy. Document it in the topic file that covers task starts.
 
 ### T606 · FNF[refresh-run-followups] · latest refresh-run record follow-ups (+12)
 
@@ -228,7 +221,7 @@ Read so far: `refreshProjectState` (`worker/src/project-state/refresh.ts` ~:100-
 
 ### T611 · FNF[replace-zip-followups] · Replace ZIP mode and replacement-record follow-ups (+10)
 
-status: in progress (bundle K2, run 2026-11-11, branch fix/K2-replace-zip-followups) · kind: fix · found: J (#487) reviews 2026-11-11 · priority: P3
+status: open (items 1, 3-10 done in #1083: 3 was already handled on base; item 2 remains, a retention design) · kind: fix · found: J (#487) reviews 2026-11-11 · priority: P3
 Low unless marked. Code in api `routes/bundles.ts`, worker `bundle-ingest.ts`, `data-migrations.ts` (stranded-replacement sweep), web `bundle-composer.tsx`.
 
 1. (PRE-EXISTING, consequential) Replacement admission holds a DB transaction open during its Redis job check (`bundles.ts` ~:899). Do the Redis check outside the transaction or bound it.
@@ -242,6 +235,27 @@ Low unless marked. Code in api `routes/bundles.ts`, worker `bundle-ingest.ts`, `
 9. The catalog parse holds a pooled connection while it reads the archive.
 10. The fence that keeps the replacement record out of the catalog is not pinned by a test.
 
+### T617 · fix · Undo merge: hold the ref lock across the reset
+
+status: open · kind: fix · found: E3 (#1081) review 2026-11-11 · priority: P3 · authorized (overnight 2026-11-11)
+`reset --keep` has no compare-and-swap, so a commit made in the checkout between Undo's final HEAD check and the reset is dropped from the branch (the reflog keeps it). Exact fix: move the ref inside an `update-ref --stdin` transaction (`start`/`prepare`/`commit`, git 2.27+) that holds the lock across the working-tree move, or refuse on older git. Code: `worker/src/step-engine/undo-left-merge.ts` ~:561.
+
+### T619 · FNF[reset-provenance-followups] · checkout-branch provenance follow-ups (+1)
+
+status: open · kind: test · found: K1 (#1082) review 2026-11-11 · priority: P4
+
+1. The worker half (`OBSERVE_CHECKOUT_BRANCH` job, checkout watch) is pinned only by the gated `worker/test/checkout-watch-queue.test.ts`, which has no GATED row in `ci.yml`, so CI never runs it. Add the row or an ungated unit test.
+
+### T618 · FNF[bundle-replace-followups-2] · Replace ZIP follow-ups after #1083 (+5)
+
+status: open · kind: fix · found: K2 (#1083) reviews 2026-11-11 · priority: P4
+
+1. A git bundle's sync tick bumps `updated_at` with no queue job (`worker/src/repo/bundle-sync.ts:91-94`), so a Replace ZIP admitted during it answers a retryable 409 "The bundle changed while checking its import jobs" (`api/src/routes/bundles.ts` ~:910). Fails safe. Minor.
+2. `readReplacement` (`worker/src/repo/bundle-recovery.ts`) handles a link or non-directory only at the record LEAF; one in a parent component throws a plain error the stranded sweep retries forever. PRE-EXISTING, minor. Fix: classify as the leaf case.
+3. `bundle-composer.tsx:190` keeps its own copy of the refusal parsing that `refusalError` now centralises. PRE-EXISTING, minor.
+4. The stranded-bundle sweep holds a transaction and row lock across filesystem reads and tree restoration (`worker/src/data-migrations.ts:521-585`). Same class as #1083 items 1 and 9. PRE-EXISTING, minor.
+5. `api/src/routes/repos.ts:2710` puts raw `err.message` in a response reason; whether it can carry a path is unchecked. PRE-EXISTING. Also the composer renders refusal prose as plain `FormError`, not `MarkdownView` (`bundle-composer.tsx:841`, markdown-rendering.md). PRE-EXISTING, minor.
+
 ### T612 · FNF[web-origin-proxy-followups] · cross-host web-origin proxy follow-ups (+4)
 
 status: open · kind: fix · found: H2 (#435) review 2026-11-11 · priority: P4
@@ -254,28 +268,24 @@ Code in web `lib/api-proxy.server.ts`, `lib/api-base.server.ts`, `app/api/haive/
 
 ### T613 · design · code-server shares the web origin in cross-host proxy mode
 
-status: open · kind: design · found: H2 (#435) review 2026-11-11 · priority: P2
-DECIDED by the owner 2026-11-11: separate editor hostname (e.g. `ide.<domain>`) with a scoped handshake token for cross-host installs. Overnight run authorized.
+status: open, approved for planning 2026-11-12 (plan-mode plan first; multi-PR) · kind: design · found: H2 (#435) review 2026-11-11 · priority: P2
+DECIDED by the owner 2026-11-11: separate editor hostname (e.g. `ide.<domain>`) with a scoped handshake token for cross-host installs.
+APPROVED by the owner 2026-11-12 with a constraint: single-host installs (localhost, a company's internal network, one hostname for web and api) must keep working with no new setting. Design draft (M2 map, no code): `.claude/tmp/codex-run/M2-S/codex-1/design.txt` (`HAIVE_EDITOR_ORIGIN`, hashed single-use handshake + editor session tables, editor-host dispatch; cross-host refuses `/ide` without the setting).
 In cross-host mode `/ide` is proxied on the web origin, so code-server (which runs repository code) runs with the app's origin and can reach its API session. Options: a separate editor hostname (needs DNS/TLS per install), an API-host editor with its own scoped handshake token, or a sandboxed opaque-origin iframe (code-server may need storage it then lacks). Costs: `.claude/tmp/codex-run/H2-S/codex-2/editor-options.txt`. Needs an owner decision. Same-hostname installs are unaffected.
 
-### T614 · FNF[cancel-left-merge-followups] · cancel-left committed-merge report follow-ups (+2)
+### T614 · FNF[cancel-left-merge-followups] · cancel-left committed-merge report and Undo follow-ups (+8)
 
 status: open · kind: fix · found: E2 (#329) reviews 2026-11-11 · priority: P4
 Code in `worker/src/step-engine/left-committed-merge.ts`.
 
 1. Every git no-exit result is treated as "cannot confirm" and reported as nothing, including a signal kill or an `EMFILE`/`EAGAIN` spawn failure that a re-drive could fix (~:65). Kept on purpose: a persistent spawn error that rethrows would hold the abandon pass forever. Narrow to `ENOENT` only if a retry bound for the abandon pass exists.
 2. One report per task, from the latest landing only: with landings in two directories the earlier one is never checked (~:40-62). Reachable only with two step-12 landings in different directories.
-
-### T615 · design · reset provenance credits a merge into another branch
-
-status: in progress (bundle K1, run 2026-11-11, branch fix/K1-reset-provenance-branch) · kind: design · found: E2 (#1080) Greptile P1 2026-11-11 · priority: P2
-DECIDED by the owner 2026-11-11: the worker records the checkout branch when the reset starts; provenance counts only landings whose `landedOn` equals it; old merges without a branch stay counted as today. Overnight run authorized.
-`resolveMergedTasks` (api `routes/repos.ts` ~:1195-1245) counts a task's 11d skill-sync output as reaching the checkout when its step 12 merged, whatever branch the merge landed on: the legacy `merge_resolve_state.merged === true` path (PRE-EXISTING; `merge-resolver.ts` sets it with no branch check) and, since #1080, a `merge.landed` event. A cross-branch merge leaves the checkout unchanged, so a later onboarding reset can delete a user's untouched skill at the same path. A fix must compare the landing's `landedOn` with the branch the reset is reading, which the api cannot read (no git there): record the checkout branch at reset start in the worker, or have the worker resolve provenance. Decide where.
-
-### T616 · fix · boot warning for the cross-host sign-in throttle
-
-status: open · kind: fix · found: H2 (#435) · priority: P3
-DECIDED by the owner 2026-11-11: when web and api hostnames differ (web-origin proxy mode) and web's address is not covered by `HAIVE_TRUSTED_PROXIES`, log one warning at api boot naming the operator rule in `docs/architecture/api-auth.md` (cross-host web-proxy mode). The docs rule stays; the warning only reports it. Overnight run authorized.
+3. Undo (`undo-left-merge.ts`, #1081): a branch checked out in a linked worktree between the worktree check and `update-ref` is moved under it (seconds-wide; the update-ref CAS still holds the sha).
+4. Undo: worktree paths are compared without resolving symlinks; a symlinked path refuses (fails safe).
+5. Undo: an `undone` settlement whose projection re-sync then fails is not re-drivable by the person; nor is a recovery still blocked after the queue's retry window.
+6. Undo: a base that switched branch settles as `moved`, not as a retryable refusal.
+7. Undo: git stderr detail is dropped from the refusal reason; no test drives a failed worktree-list read through undo.
+8. (PRE-EXISTING) `restoreFeature` errors are swallowed once the report is settled.
 
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
@@ -472,22 +482,6 @@ status: open · kind: performance · user decision: resolved 2026-11-01 · prior
 1. set-aside.ts:264/:281/:474/:574 per-path git reads (prototype: 6,620 spawns → 20). 2. readStateTree one cat-file per file (projection-merge.ts:157); batch with `cat-file --batch`.
 
 User decision 2026-11-01: Re-measure current batching gain and keep scope bounded; behind functionality unless current delay is material.
-
-### T329 · FNF[cancel-merge-commit] · cancel reports a merge left COMMITTED on local base + one-click undo (+2)
-
-status: in progress (part A + items 1-2 DONE as #1080; part B = bundle E3, branch fix/E3-undo-left-merge, run 2026-11-11) · was modular #3 · priority: P2
-DECIDED by the user 2026-10-12: cancel reports a merge left COMMITTED on the local base, plus a one-click Undo. The Undo resets only if the base is still at that merge commit and no claim is live. Never auto-undo.
-Two PRs:
-
-- A (report): baseShaAfter/landedOn recorded at merge time, a merge.left_committed event, and a banner.
-- B (undo): UNDO_LEFT_MERGE job, root claim, merge-dir lock, 00a fence and containment, `reset --keep` with a sha CAS or update-ref CAS.
-  B note (E2 review, 2026-11-11): the `merge.landed` dedupe key does not pin the commit. A `mergeCommitted` re-entry after the base advanced for another reason writes a later `baseShaAfter`, and a base-sync round (`prePushSync`) records `(preFeature, syncMerge)`, which covers upstream commits. An undo to `baseShaBefore` would then drop commits that are not the task's; B must CAS on the task's own merge commit, not the latest landing tip.
-  Defaults: step 12 only. Undo re-creates a deleted feature branch (create-only). Pushed merges and /host-fs get the report only. Agree the merge-resolver hunks with the owner of merge-resolver.ts before building.
-
-1. (PRE-EXISTING) A cancel between the merge commit and reachDone leaves merged:false, so onboarding-reset provenance (api repos.ts ~:1103-1150) misses a merge that is on the base. A's baseShaAfter makes this cheap to fix.
-2. (PRE-EXISTING) A cancelled task's failed step 12 still says "retry the push", although a cancelled task cannot be retried. The comment at api routes/tasks/index.ts ~:1201-1203 wrongly says step retry has no status guard (steps.ts guards it).
-
-Dependency reconciliation 2026-11-01: B3.1c landed and modular-haive-plan is paused with no files held; old peer-ownership notes are not a current blocker. Existing user-decided report/explicitUndo semantics remain.
 
 ### T331 · I7 · modules/integration-google (Drive, Docs, Gmail)
 
@@ -1554,12 +1548,6 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
-### T587 · Cancel, step abort and plan discard clear an administrator's pause with no audit row (owner confirm)
-
-status: open · kind: decision · found: #1058 review 2026-11-10 · priority: P4
-DECIDED by the owner 2026-11-11: add a best-effort audit row when Cancel, step abort or plan discard clear an administrator's pause, as Retry's resume does. Overnight run authorized.
-PRE-EXISTING. Cancel (api tasks/index.ts ~:1379), step abort (tasks/steps.ts ~:1756) and plan merge discard (routes/plan.ts ~:1406) clear any pause, an administrator's included, with no `byAdmin` event or audit row. release.md ~:120 documents that they clear any pause; decide whether the audit trail should record it (a best-effort row like the Retry resume) or stay as documented.
-
 ### T588 · FNF[worker-audit-writer] · worker audit writer follow-ups (+5)
 
 status: open · kind: fix · found: #1057 reviews 2026-11-10 · priority: P4
@@ -1581,7 +1569,7 @@ status: open · kind: design · found: #1060 reviews 2026-11-10 · priority: P3
 
 ### T590 · FNF[cli-auth-lock-followups] · CLI auth lock and sign-out follow-ups (+17)
 
-status: open (items 1, 3, 5 done in #1062; the rest unapproved, awaiting owner pick) · kind: fix · found: #1061 reviews 2026-11-10 · priority: P3
+status: taken (bundle N1 (group A), overnight 2026-11-11) · kind: fix · found: #1061 reviews 2026-11-10 · priority: P3
 DECIDED by the owner 2026-11-11: all remaining groups approved (lock correctness 4, 6, 7, 15; sign-out flow 8, 9, 10, 14, 18; web UI 16, 17; tests and minor 11, 12, 13). Item 2 stays accepted and documented. Overnight run authorized.
 
 1. DONE #1062. `DELETE /:providerId/usage-auth` and `DELETE /:providerId/secrets/:secretName` (api cli-providers.ts ~:1165-1230) take no auth lock, so a usage refresh that read the secret before the delete can write it back. PRE-EXISTING, moderate. Fix: take the lock (`withCliAuthLock`) like the writers.
@@ -1638,6 +1626,11 @@ Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/rou
 
 ## Done
 
+- T329 part B — Undo merge: owner-clicked `POST /tasks/:id/merges/undo` moves a base branch back to `baseShaBefore` only while it is still the task's own merge commit (root claim, merge-dir lock, checkout fence; `reset --keep` in Haive's transient worktree, update-ref CAS otherwise; refusals for pushed merges, other worktrees, staged edits, multi-push remotes) — PR #1081 (a8d6a91e6), 2026-11-12. Race fix T617, lows T614.
+- T615 — reset provenance counts a merge only when its `landedOn` equals the checkout branch the worker observes at reset start (migration 0231 `repositories.checkout_branch`) — PR #1082 (b72fd2ac3), 2026-11-12. Lows T619.
+- T605 — closed by the owner 2026-11-12: task creation does no git or file work under the key (L1 map); the writer hold is accepted and documented under T604.
+- T587 + T616 — Cancel, step abort and plan merge discard write the Retry-style `task.resumed` event and `task.admin_resume` row (best effort, savepoint) when they clear an administrator's pause; the api warns once at boot in cross-host proxy mode with an empty `HAIVE_TRUSTED_PROXIES` — PR #1084 (be18fe456), 2026-11-11. Lows: the api's hostname compare duplicates the web rule; a list of only invalid entries counts as configured.
+- T611 items 1, 3-10 — Replace ZIP admission checks the bundle job outside its transaction and re-checks the row generation under the lock; catalogs parse before the write transaction; refused record leaves fail the replacement; stored bundle git failures and upload write/move 500s carry no paths; the composer shows API refusal reasons — PR #1083 (0de15fd1d), 2026-11-11.
 - T609 — closed by the owner 2026-11-11: the chmod window between capture and removal is accepted (milliseconds, needs a person chmodding a Haive projection mid-move, result is only the earlier mode); no mechanism
 - T329 part A + items 1-2 — a merge a cancel left committed on the local base is recorded (`merge.landed`, in the step-state transaction) and reported once under the merge-dir lock (`merge.left_committed`, banner), never undone; reset provenance counts it; cancelled push copy and step-retry guard comments corrected — PR #1080 (8256fdff6), 2026-11-11; full suite + PR CI green; part B open (E3)
 - T435 — different web/API hostnames: browser session traffic goes through the web origin (`/api/haive`, `/ide`), cookies stay host-only; raw task files carry nosniff + CSP sandbox; cross-host throttle operator rule documented — PR #1079 (a51990ce9), 2026-11-11; full suite + PR CI green; editor origin open as T613

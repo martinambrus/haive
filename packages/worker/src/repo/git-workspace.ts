@@ -87,3 +87,24 @@ export async function isWorktreeRegistered(
   }
   return list.stdout.split('\n').some((l) => l === `worktree ${worktreePath}`);
 }
+
+/** The worktrees git lists for `repoPath` with `branchRef` (`refs/heads/<name>`) checked out.
+ *  `-z` keeps paths literal. A list git could not give throws, never reads as "nobody holds it". */
+export async function worktreesHoldingBranch(
+  repoPath: string,
+  branchRef: string,
+): Promise<string[]> {
+  const list = await gitRun(repoPath, ['worktree', 'list', '--porcelain', '-z']);
+  if (list.code !== 0) {
+    throw new Error(
+      `git worktree list failed in ${repoPath}: ${(list.stderr || list.stdout).trim().slice(0, 500)}`,
+    );
+  }
+  const holders: string[] = [];
+  let worktree = '';
+  for (const field of list.stdout.split('\0')) {
+    if (field.startsWith('worktree ')) worktree = field.slice(9);
+    if (field === `branch ${branchRef}`) holders.push(worktree);
+  }
+  return holders;
+}
