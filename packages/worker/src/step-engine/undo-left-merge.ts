@@ -91,6 +91,68 @@ const records = (db: DbHandle, taskId: string) =>
 
 const sha = (v: unknown): v is string => typeof v === 'string' && /^[0-9a-f]{40}$/.test(v);
 
+/** EOF can abort the ref transaction after read-tree has already moved the checkout.
+ * Prove that exact index and the touched files before finishing only the ref move.
+ * Never roll files back: unrelated local edits must keep their bytes. */
+async function interruptedCheckoutMove(checkout: string, m: LeftCommittedMerge): Promise<boolean> {
+  const index = await gitRun(checkout, ['write-tree']);
+  if (index.code !== 0)
+    throw new UndoGitError(
+      gitFailureReason('Cannot read the checkout tree for Undo recovery', index.stderr),
+    );
+  if (index.stdout.trim() !== (await undoRevParse(checkout, `${m.baseShaBefore}^{tree}`)))
+    return false;
+  const changed = await gitRun(checkout, [
+    'diff',
+    '--name-only',
+    '-z',
+    '--no-renames',
+    m.baseShaAfter,
+    m.baseShaBefore,
+    '--',
+  ]);
+  if (changed.code !== 0)
+    throw new UndoGitError(gitFailureReason('Cannot read the Undo recovery paths', changed.stderr));
+  // gitRun decodes UTF-8; never check a replacement character in place of a filename byte.
+  if (changed.stdout.includes('\uFFFD')) return false;
+  const paths = changed.stdout
+    .split('\0')
+    .filter(Boolean)
+    .map((p) => `:(literal)${p}`);
+  if (!paths.length) return true;
+  const checked = await gitRun(checkout, ['ls-files', '-v', '-z', '--', ...paths]);
+  if (checked.code !== 0)
+    throw new UndoGitError(
+      gitFailureReason('Cannot read the Undo recovery index flags', checked.stderr),
+    );
+  if (checked.stdout.split('\0').some((entry) => /^([a-z]|S) /.test(entry))) return false;
+  const local = await gitRun(checkout, [
+    '-c',
+    'core.trustctime=true',
+    '-c',
+    'core.checkStat=default',
+    '-c',
+    'core.fileMode=true',
+    'diff',
+    '--quiet',
+    '--ignore-submodules=none',
+    '--',
+    ...paths,
+  ]);
+  if (local.code === 1) return false;
+  if (local.code !== 0)
+    throw new UndoGitError(
+      gitFailureReason('Cannot read local changes for Undo recovery', local.stderr),
+    );
+  // A removed path recreated as untracked (including ignored) is no longer the moved checkout.
+  const untracked = await gitRun(checkout, ['ls-files', '--others', '-z', '--', ...paths]);
+  if (untracked.code !== 0)
+    throw new UndoGitError(
+      gitFailureReason('Cannot read untracked paths for Undo recovery', untracked.stderr),
+    );
+  return !untracked.stdout;
+}
+
 async function validBranch(dir: string, branch: string): Promise<boolean> {
   const result = await gitRun(dir, ['check-ref-format', `refs/heads/${branch}`]);
   if (result.code === 0) return true;
@@ -595,17 +657,13 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
             return true;
           };
           if (!(await checkoutReady())) return;
-          if (prior !== m.baseShaAfter) {
-            const keep = await gitRun(cwd, ['update-ref', undoRef, m.baseShaAfter, '0'.repeat(40)]);
-            if (keep.code !== 0)
-              throw new UndoGitError(
-                gitFailureReason(
-                  'The merge commit could not be preserved for recovery',
-                  keep.stderr,
-                ),
-              );
-          }
-          if (movedCheckout === m.repoPath) {
+          // The retained ref proves an earlier Undo was admitted. Check before any
+          // projection set-aside can rewrite an interrupted index back toward HEAD.
+          const finishingInterruptedMove =
+            prior === m.baseShaAfter &&
+            movedCheckout !== null &&
+            (await interruptedCheckoutMove(movedCheckout, m));
+          if (movedCheckout === m.repoPath && !finishingInterruptedMove) {
             if (!prepared) return true;
             if (preparationRefusal) {
               await settle('refused', preparationRefusal);
@@ -624,7 +682,7 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
           }
           // Set-aside rewrites bytes without refreshing git's cached stat data. The
           // two-tree read-tree otherwise intermittently refuses an unchanged projection.
-          if (movedCheckout) {
+          if (movedCheckout && !finishingInterruptedMove) {
             const refreshed = await gitRun(movedCheckout, ['update-index', '-q', '--refresh']);
             // Exit 1 also reports real local edits, which the read-tree must judge and keep.
             if (refreshed.code !== 0 && refreshed.code !== 1)
@@ -662,6 +720,16 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
                 ),
               );
           }
+          if (prior !== m.baseShaAfter) {
+            const keep = await gitRun(cwd, ['update-ref', undoRef, m.baseShaAfter, '0'.repeat(40)]);
+            if (keep.code !== 0)
+              throw new UndoGitError(
+                gitFailureReason(
+                  'The merge commit could not be preserved for recovery',
+                  keep.stderr,
+                ),
+              );
+          }
           let moved: boolean;
           try {
             moved = await withGitRefTransaction(
@@ -691,6 +759,15 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
                 }
                 if (!movedCheckout) return true;
                 if (!(await checkoutReady())) return false;
+                if (finishingInterruptedMove) {
+                  // Re-prove under the prepared CAS lock; recovery writes no checkout bytes.
+                  if (await interruptedCheckoutMove(movedCheckout, m)) return true;
+                  await settle(
+                    'refused',
+                    'The interrupted Undo checkout changed; local changes were kept. Repair the checkout and retry Undo.',
+                  );
+                  return false;
+                }
                 // With no staged changes, this matches reset --keep's two-tree unpack:
                 // paths changed by the move must be clean; unrelated local bytes stay.
                 // Unlike reset it never writes HEAD or acquires the held branch lock.

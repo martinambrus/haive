@@ -131,7 +131,7 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
-async function fixture() {
+async function fixture(changeBase = false) {
   const root = await mkdtemp(path.join(tmpdir(), 'e3-undo-'));
   dirs.push(root);
   const dir = path.join(root, 'repo');
@@ -143,6 +143,7 @@ async function fixture() {
   const before = await git(dir, 'rev-parse', 'HEAD');
   await git(dir, 'switch', '-c', 'feature');
   await writeFile(path.join(dir, 'feature'), 'feature');
+  if (changeBase) await writeFile(path.join(dir, 'base'), 'merged base');
   await git(dir, 'add', '.');
   await git(dir, 'commit', '-m', 'feature');
   const feature = await git(dir, 'rev-parse', 'HEAD');
@@ -192,6 +193,113 @@ async function fixture() {
 }
 
 describe('explicit undo of a cancel-left committed merge', () => {
+  async function interruptAfterCheckoutMove(f: Awaited<ReturnType<typeof fixture>>) {
+    const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+    let interrupted = false;
+    vi.mocked(processes.spawn).mockImplementation((...args: Parameters<typeof processes.spawn>) => {
+      const child = actual.spawn(...args);
+      if ((args[1] as string[]).includes('--stdin')) {
+        const write = child.stdin!.write.bind(child.stdin);
+        vi.spyOn(child.stdin!, 'write').mockImplementation((chunk, ...rest) => {
+          if (chunk === 'commit\n' && !interrupted) {
+            interrupted = true;
+            // EOF/abort after read-tree, before the ref commit, leaves the same real git state.
+            return write('abort\n', ...rest);
+          }
+          return write(chunk, ...rest);
+        });
+      }
+      return child;
+    });
+    await f.run();
+    expect(interrupted).toBe(true);
+    expect(await git(f.dir, 'rev-parse', 'HEAD')).toBe(f.after);
+    expect(await git(f.dir, 'write-tree')).toBe(
+      await git(f.dir, 'rev-parse', `${f.before}^{tree}`),
+    );
+    expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+    vi.mocked(processes.spawn).mockImplementation(actual.spawn);
+  }
+
+  it('finishes an interrupted checkout move on redelivery without rewriting local bytes', async () => {
+    const f = await fixture();
+    await interruptAfterCheckoutMove(f);
+    await writeFile(path.join(f.dir, 'base'), 'unrelated local edit');
+    const actual = gitPush.gitRun;
+    const calls = vi.spyOn(gitPush, 'gitRun').mockImplementation(actual);
+    h.aside.mockClear();
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+    expect(await readFile(path.join(f.dir, 'base'), 'utf8')).toBe('unrelated local edit');
+    expect(await git(f.dir, 'diff', '--cached', '--name-only')).toBe('');
+    expect(leftCommittedMerges(f.events)[0]?.settled?.outcome).toBe('undone');
+    expect(calls.mock.calls.some(([, args]) => args[0] === 'read-tree')).toBe(false);
+    expect(h.aside).not.toHaveBeenCalled();
+  });
+
+  it('refuses unrelated staged work after an interrupted checkout move', async () => {
+    const f = await fixture();
+    await interruptAfterCheckoutMove(f);
+    await writeFile(path.join(f.dir, 'base'), 'person staged this');
+    await git(f.dir, 'add', 'base');
+    const index = await git(f.dir, 'write-tree');
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    expect(await git(f.dir, 'write-tree')).toBe(index);
+    expect(await readFile(path.join(f.dir, 'base'), 'utf8')).toBe('person staged this');
+    expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+  });
+
+  it('refuses new bytes on a path removed by an interrupted checkout move', async () => {
+    const f = await fixture();
+    await interruptAfterCheckoutMove(f);
+    await writeFile(path.join(f.dir, 'feature'), 'person recreated this');
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    expect(await readFile(path.join(f.dir, 'feature'), 'utf8')).toBe('person recreated this');
+    expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+  });
+
+  it('refuses unstaged edits on a tracked path touched by an interrupted checkout move', async () => {
+    const f = await fixture(true);
+    await interruptAfterCheckoutMove(f);
+    await writeFile(path.join(f.dir, 'base'), 'person edited the restored base');
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    expect(await readFile(path.join(f.dir, 'base'), 'utf8')).toBe(
+      'person edited the restored base',
+    );
+    expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+  });
+
+  it('rechecks the interrupted index while the ref lock is held', async () => {
+    const f = await fixture();
+    await interruptAfterCheckoutMove(f);
+    const actual = gitWorkspace.worktreesHoldingBranch;
+    let reads = 0;
+    vi.spyOn(gitWorkspace, 'worktreesHoldingBranch').mockImplementation(async (...args) => {
+      const holders = await actual(...args);
+      if (++reads === 2) {
+        await writeFile(path.join(f.dir, 'base'), 'staged during prepare');
+        await git(f.dir, 'add', 'base');
+      }
+      return holders;
+    });
+    await f.run();
+    expect(reads).toBe(2);
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    expect(await git(f.dir, 'show', ':base')).toBe('staged during prepare');
+    expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+  });
+
+  it('refuses a pre-merge staged tree without evidence of an admitted Undo', async () => {
+    const f = await fixture();
+    await git(f.dir, 'read-tree', '-m', '-u', f.after, f.before);
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+  });
+
   it('refuses Undo before cancellation teardown finishes', async () => {
     const f = await fixture();
     f.events.splice(0, 1);
