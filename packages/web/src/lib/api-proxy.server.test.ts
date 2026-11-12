@@ -175,6 +175,9 @@ describe('editor traffic cannot use the app proxy', () => {
   it.each([
     '/ide/id/',
     '/ide/repos/id/asset.js',
+    '/api/haive/%69de/id/',
+    '/api/haive/%69%64%65',
+    '/api/haive/%69de/%zz',
     '/api/haive/ide',
     '/api/haive/ide/_handshake',
     '/api/haive/ide/repos/id/asset.js',
@@ -187,3 +190,13 @@ describe('editor traffic cannot use the app proxy', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 });
+
+it.each(['/api/haive/tasks/a%20b', '/api/haive/%49de/id/'])(
+  'preserves ordinary escaped routes and case-sensitive routing: %s',
+  (path) => {
+    vi.stubEnv('API_URL_INTERNAL', 'http://api:3001');
+    expect(apiProxyTarget(`https://web.test${path}`)?.href).toBe(
+      `http://api:3001${path.slice('/api/haive'.length)}`,
+    );
+  },
+);

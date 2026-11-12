@@ -126,7 +126,7 @@ it('admits the runtime editor override in the actual page CSP', async () => {
   );
 });
 
-it.each(['/ide/id/', '/api/haive/ide/id/'])(
+it.each(['/ide/id/', '/api/haive/ide/id/', '/api/haive/%69de/id/'])(
   'does not rewrite an editor upgrade on %s',
   async (path) => {
     vi.stubEnv('API_URL_INTERNAL', 'http://api:3001');

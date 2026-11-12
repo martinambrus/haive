@@ -10,7 +10,14 @@ export function apiProxyTarget(requestUrl: string): URL | null {
   const suffix = path.slice(API_PROXY_PATH.length);
   // Both HTTP routes and WebSocket rewrites use this boundary. Relaying an editor here
   // would give repository-controlled script the app's origin and session authority.
-  if (suffix === '/ide' || suffix.startsWith('/ide/')) return null;
+  // Decode each valid escape independently: malformed escapes must not hide an
+  // encoded editor segment. Hono routes are case-sensitive.
+  const firstSegment = suffix
+    .split('/')[1]!
+    .replace(/%[0-9a-f]{2}/gi, (escape) =>
+      String.fromCharCode(Number.parseInt(escape.slice(1), 16)),
+    );
+  if (firstSegment === 'ide') return null;
   const target = new URL(resolveServerApiBase());
   target.pathname = `${target.pathname.replace(/\/$/, '')}${suffix}`;
   target.search = request.search;
