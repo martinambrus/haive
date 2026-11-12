@@ -265,7 +265,7 @@ Code in `worker/src/step-engine/left-committed-merge.ts`.
 
 ### T624 · ops · Lint/Unit CI job runs near its 20-minute limit
 
-status: in progress: CI unit matrix merged #1101 (65dff5ead; unit jobs 5-7 min, were 18-20); batch 3a (limits at small scale) merged #1104 (f4eb14334; 260 s -> 7 s); rule doc #1103, batch 3b fake timers #1105 (129 s -> 9 s) open; batch 3c git fixtures in progress (sec-TB3) · kind: ops · found: #1099 CI 2026-11-12 · priority: P3
+status: in progress: all batches merged: CI unit matrix #1101 (65dff5ead), rule doc #1103 (d576c1e31), 3a limits at small scale #1104 (f4eb14334; 260 s -> 7 s), 3b fake timers #1105 (c5deec93c; 129 s -> 9 s), 3c git fixtures #1106 (32a2705a5; 133 s -> 116 s; further git batches save under 60 s each, so stopped). Unit jobs on main 3-6 min (d576c1e31, 24f309b1a); close after a third main run under 10 min · kind: ops · found: #1099 CI 2026-11-12 · priority: P3
 Owner direction 2026-11-12: make tests fast and minimal rather than only raising limits; plan approved (`.claude/tmp/codex-run/T624-S/plan.md`): CI unit matrix first, then a testing rule doc, then batches (bounds at small scale, fake timers, git template fixtures). #1098, #1099, #1100 all cancelled at 20 min.
 `lint-typecheck-test` (`.github/workflows/ci.yml` ~:36, `timeout-minutes: 20`) took 12-19 min on recent main runs; #1099 and the docs-only #1098 were cancelled at 20 min in "Module scripts", and a re-run passed. Measure per-step time over recent runs, then raise the limit to a measured budget (as the gated step did in #1093) or split the job. Not an outage workaround: the job grew.
 

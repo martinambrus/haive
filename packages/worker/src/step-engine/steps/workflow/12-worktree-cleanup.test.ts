@@ -1,3 +1,4 @@
+import { gitTemplate } from '../../../../test/support/git-template.js';
 import { fixtureBase, networkGitArgs, httpOrigin } from '../../../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
 import {
@@ -200,22 +201,38 @@ async function writeIn(dir: string, files: Record<string, string>): Promise<void
 }
 
 /** A parent repo on `main` with a `feature/x` worktree that has one commit ahead. */
+const worktreeTemplates = new Map<string, ReturnType<typeof makeWorktreeTemplate>>();
+function makeWorktreeTemplate(seed: Record<string, string>) {
+  return gitTemplate(async (parent) => {
+    await git(parent, ['init', '-b', 'main']);
+    await git(parent, ['config', 'gc.auto', '0']);
+    await writeFile(path.join(parent, 'base.txt'), 'base\n', 'utf8');
+    await writeIn(parent, seed);
+    await git(parent, ['add', '-A']);
+    await git(parent, ['commit', '-m', 'initial']);
+    const wt = path.join(parent, '.haive', 'worktrees', 'feature-x');
+    await mkdir(path.dirname(wt), { recursive: true });
+    await git(parent, ['worktree', 'add', '-b', 'feature/x', wt, 'main']);
+    await writeFile(path.join(wt, 'feature.txt'), 'feature\n', 'utf8');
+    await git(wt, ['add', '-A']);
+    await git(wt, ['commit', '-m', 'feature work']);
+  }, fixtureBase);
+}
+// A lazy builder per seed keeps projection/fork content identical to the original fixture.
 async function setupWorktree(
   seed: Record<string, string> = {},
 ): Promise<{ parent: string; wt: string }> {
-  const parent = await mkdtemp(path.join(fixtureBase, 'wt-parent-'));
-  await git(parent, ['init', '-b', 'main']);
-  await git(parent, ['config', 'gc.auto', '0']);
-  await writeFile(path.join(parent, 'base.txt'), 'base\n', 'utf8');
-  await writeIn(parent, seed);
-  await git(parent, ['add', '-A']);
-  await git(parent, ['commit', '-m', 'initial']);
+  const key = JSON.stringify(Object.entries(seed).sort(([a], [b]) => a.localeCompare(b)));
+  let template = worktreeTemplates.get(key);
+  if (!template) {
+    template = makeWorktreeTemplate(seed);
+    worktreeTemplates.set(key, template);
+  }
+  const { dir: parent } = await template.copy();
   const wt = path.join(parent, '.haive', 'worktrees', 'feature-x');
-  await mkdir(path.dirname(wt), { recursive: true });
-  await git(parent, ['worktree', 'add', '-b', 'feature/x', wt, 'main']);
-  await writeFile(path.join(wt, 'feature.txt'), 'feature\n', 'utf8');
-  await git(wt, ['add', '-A']);
-  await git(wt, ['commit', '-m', 'feature work']);
+  const gitDir = path.join(parent, '.git', 'worktrees', 'feature-x');
+  await writeFile(path.join(wt, '.git'), `gitdir: ${gitDir}\n`);
+  await writeFile(path.join(gitDir, 'gitdir'), `${wt}/.git\n`);
   return { parent, wt };
 }
 
