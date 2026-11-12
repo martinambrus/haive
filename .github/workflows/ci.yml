@@ -320,9 +320,9 @@ jobs:
   postgres-gated:
     name: Postgres-gated tests
     runs-on: ubuntu-latest
-    # 143 rows × 7.5 s + 120 s setup = 1192.5 s green; 1.5 × row time = 1608.75 s.
-    # 30 minutes covers the 27-minute check plus setup and leaves 607.5 s over green.
-    timeout-minutes: 30
+    # 143 rows × 10 s (measured) + 120 s setup = 1550 s green; 1.5 × row time = 2145 s.
+    # 38 minutes covers the 36-minute check plus setup and leaves 730 s over green.
+    timeout-minutes: 38
     services:
       postgres:
         image: postgres:18-alpine
@@ -424,7 +424,7 @@ jobs:
       # Setup, including module builds, ends at migrate; a failed setup never runs the list.
       - name: Postgres-gated tests
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
-        timeout-minutes: 27
+        timeout-minutes: 36
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
           PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}

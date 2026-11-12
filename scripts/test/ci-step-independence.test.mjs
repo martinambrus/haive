@@ -57,10 +57,11 @@ const JOBS = [
     allStepsBounded: true,
     prerequisite: 'migrate',
     bounded: true,
-    // Keep the historical 7.5 s/row model; 120 s allows duplicate setup and module builds.
+    // MEASURED 2026-11-12: 1423 s for 143 rows (main: 1222 s for 134), so 10 s/row;
+    // 120 s allows duplicate setup and module builds.
     budget: {
       outsideGatedSeconds: 120,
-      secondsPerRow: 7.5,
+      secondsPerRow: 10,
       slowRunnerFactor: 1.5,
       marginSeconds: 600,
     },
