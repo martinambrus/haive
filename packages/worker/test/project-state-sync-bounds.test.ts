@@ -13,6 +13,7 @@ import {
   normalizeProjectState,
   recordReadable,
   renderProjectState,
+  type ProjectStateLimits,
   type ProjectRender,
   type ProjectStateClaim,
   type ProjectStateRecord,
@@ -42,8 +43,10 @@ vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
 const STATE = '.haive-data/state';
-const MAX_ENTRIES = 4_096;
-const MAX_BYTES = 16 * 1024 * 1024;
+const MAX_ENTRIES = 16;
+const MAX_BYTES = 2048;
+const LIMITS = { ...PROJECT_STATE_LIMITS, maxEntries: MAX_ENTRIES };
+const BYTE_LIMITS = { ...PROJECT_STATE_LIMITS, maxTotalBytes: MAX_BYTES };
 
 const dirs: string[] = [];
 beforeEach(() => {
@@ -56,8 +59,8 @@ afterEach(async () => {
 
 const json = (value: unknown): unknown => JSON.parse(JSON.stringify(value)) as unknown;
 // A number named whole, so a count that merely contains these digits does not satisfy it.
-const ENTRY_CAP = /(?<![\d,])4,?096(?![\d,])/;
-const BYTE_CAP = /(?<![\d,])(?:16 ?MiB|16 ?MB|16,?777,?216)(?![\d,])/i;
+const ENTRY_CAP = /(?<![\d,])16(?![\d,])/;
+const BYTE_CAP = /0\.001953125 MiB/;
 
 const BASE: ProjectRender = {
   projectInfo: { name: 'acme', framework: 'drupal' },
@@ -109,7 +112,8 @@ async function setup(seed: { column?: unknown; base?: unknown } = {}) {
   return {
     root,
     writes,
-    run: (repoPath = root) => syncProjectStateFromCheckout(db, { repositoryId: REPO, repoPath }),
+    run: (repoPath = root, limits: ProjectStateLimits = LIMITS) =>
+      syncProjectStateFromCheckout(db, { repositoryId: REPO, repoPath, limits }),
     column: () => fake.rows(schema.repositories)[0]?.renderContext ?? null,
     rows: () => fake.rows(schema.projectStateSync),
   };
@@ -169,10 +173,10 @@ async function directoriesTree(root: string, top: number, each: number): Promise
   });
 }
 
-/** A valid record and `n` files of a million bytes: each under the per-file cap of 1 MiB. */
+/** A valid record and `n` files of 100 bytes: each under the per-file cap of 1 MiB. */
 async function bytesTree(root: string, n: number): Promise<void> {
   await putRecord(root);
-  await fill(root, 'big', n, 1_000_000);
+  await fill(root, 'big', n, 100);
 }
 
 const claim = (i: number): ProjectStateClaim => ({
@@ -207,8 +211,6 @@ function expectReasonOnRow(s: Syncing, names: RegExp, notNames: RegExp): void {
   expect(row?.lastError).not.toMatch(/\n/);
 }
 
-const LONG = { timeout: 120_000 };
-
 describe('syncProjectStateFromCheckout: the walk is bounded', () => {
   it('reads the checkout through fs-safe, which is where the cases below look', async () => {
     const s = await setup();
@@ -221,7 +223,7 @@ describe('syncProjectStateFromCheckout: the walk is bounded', () => {
   });
 
   describe('entries', () => {
-    it('passes 4,096 entries in all and refuses 4,097, naming the entry cap', LONG, async () => {
+    it('passes 16 entries in all and refuses 17, naming the entry cap', async () => {
       const at = await setup();
       await entriesTree(at.root, MAX_ENTRIES);
 
@@ -239,72 +241,69 @@ describe('syncProjectStateFromCheckout: the walk is bounded', () => {
       expectReasonOnRow(past, ENTRY_CAP, BYTE_CAP);
     });
 
-    it(
-      'refuses claim files past the cap as it refuses any other file, and reads no file past the 4,097th entry',
-      LONG,
-      async () => {
-        const s = await setup();
-        const claims = Array.from({ length: 2 * MAX_ENTRIES - 4 }, (_, i) => claim(i));
-        await putRecord(s.root, { claims });
-        expect(await countEntries(s.root)).toBe(2 * MAX_ENTRIES);
+    it('refuses claim files past the cap as it refuses any other file, and reads no file past the 17th entry', async () => {
+      const s = await setup();
+      const claims = Array.from({ length: 2 * MAX_ENTRIES - 4 }, (_, i) => claim(i));
+      await putRecord(s.root, { claims });
+      expect(await countEntries(s.root)).toBe(2 * MAX_ENTRIES);
 
-        expect((await s.run()).outcome).toBe('refused');
+      expect((await s.run()).outcome).toBe('refused');
 
-        expectNothingImported(s);
-        expect(fsCalls.reads.length).toBeLessThanOrEqual(MAX_ENTRIES + 1);
-      },
-    );
+      expectNothingImported(s);
+      expect(fsCalls.reads.length).toBeLessThanOrEqual(MAX_ENTRIES + 1);
+    });
 
-    it(
-      'counts directories: nested directories holding no file are refused past 4,096, and listed no further',
-      LONG,
-      async () => {
-        const s = await setup();
-        await directoriesTree(s.root, 80, 80);
-        expect(await countEntries(s.root)).toBeGreaterThan(MAX_ENTRIES);
-        const found = await readdir(join(s.root, STATE), { recursive: true, withFileTypes: true });
-        expect(
-          found
-            .filter((e) => e.isFile())
-            .map((e) => e.name)
-            .sort(),
-        ).toEqual(['format.json', 'render.json']);
+    it('counts directories: nested directories holding no file are refused past 16, and listed no further', async () => {
+      const s = await setup();
+      await directoriesTree(s.root, 4, 4);
+      expect(await countEntries(s.root)).toBeGreaterThan(MAX_ENTRIES);
+      const found = await readdir(join(s.root, STATE), { recursive: true, withFileTypes: true });
+      expect(
+        found
+          .filter((e) => e.isFile())
+          .map((e) => e.name)
+          .sort(),
+      ).toEqual(['format.json', 'render.json']);
 
-        expect((await s.run()).outcome).toBe('refused');
+      expect((await s.run()).outcome).toBe('refused');
 
-        expectNothingImported(s);
-        expect(fsCalls.lists.length).toBeLessThanOrEqual(MAX_ENTRIES + 1);
-      },
-    );
+      expectNothingImported(s);
+      expect(fsCalls.lists.length).toBeLessThanOrEqual(MAX_ENTRIES + 1);
+    });
   });
 
   describe('bytes read in all', () => {
-    it('refuses files each under 1 MiB that total over 16 MiB, naming the byte cap', async () => {
+    it('refuses files each under 1 MiB that total over the injected byte cap, naming the byte cap', async () => {
       const bare = await setup();
-      await bytesTree(bare.root, 17);
+      await bytesTree(bare.root, 21);
 
-      expect((await bare.run()).outcome).toBe('refused');
+      expect((await bare.run(undefined, BYTE_LIMITS)).outcome).toBe('refused');
 
       expectNothingImported(bare);
       const seeded = await setup({ column: stored(), base: baseOf() });
-      expect((await seeded.run(bare.root)).outcome).toBe('refused');
+      expect((await seeded.run(bare.root, BYTE_LIMITS)).outcome).toBe('refused');
       expectReasonOnRow(seeded, BYTE_CAP, ENTRY_CAP);
     });
 
-    it('imports files each under 1 MiB that total 16,000,000 bytes: under the cap', async () => {
+    it('imports files each under 1 MiB that total exactly at the injected byte cap, then refuses one byte more', async () => {
       const s = await setup();
-      await bytesTree(s.root, 16);
-
-      expect((await s.run()).outcome).toBe('applied');
+      await putRecord(s.root);
+      const recordBytes = [
+        ...renderProjectState({ ...emptyProjectState(), render: BASE }).values(),
+      ].reduce((n, text) => n + Buffer.byteLength(text), 0);
+      await fill(s.root, 'big', 1, MAX_BYTES - recordBytes);
+      expect((await s.run(undefined, BYTE_LIMITS)).outcome).toBe('applied');
+      await writeFile(join(s.root, STATE, 'big', 'one-more.txt'), 'x');
+      expect((await s.run(undefined, BYTE_LIMITS)).outcome).toBe('refused');
 
       expect(json(s.column())).toEqual({ ...BASE, cliTargets: [], rtkChoiceRecorded: false });
     });
 
-    it('reads no file once the bytes read have passed 16 MiB: the file that crosses is the last', async () => {
+    it('reads no file once the bytes read have passed the injected byte cap: the file that crosses is the last', async () => {
       const s = await setup();
       await bytesTree(s.root, 40);
 
-      expect((await s.run()).outcome).toBe('refused');
+      expect((await s.run(undefined, BYTE_LIMITS)).outcome).toBe('refused');
 
       const sizes = fsCalls.reads.map((path) => statSync(path).size);
       expect(sizes.slice(0, -1).reduce((all, size) => all + size, 0)).toBeLessThanOrEqual(
@@ -324,15 +323,15 @@ describe('recordReadable: the writer counts what the reader walks', () => {
 
   it('takes the limits from the same constants the reader checks', () => {
     expect(PROJECT_STATE_LIMITS).toEqual({
-      maxEntries: MAX_ENTRIES,
+      maxEntries: 4096,
       maxFileBytes: 1024 * 1024,
-      maxTotalBytes: MAX_BYTES,
+      maxTotalBytes: 16 * 1024 * 1024,
     });
   });
 
-  it('counts the entries a recursive listing of the written record finds', LONG, async () => {
+  it('counts the entries a recursive listing of the written record finds', async () => {
     const s = await setup();
-    const record = sample(50);
+    const record = sample(2);
     await putRecord(s.root, record);
     const files = renderProjectState(record);
     const dirs = new Set(
@@ -349,13 +348,12 @@ describe('recordReadable: the writer counts what the reader walks', () => {
     [MAX_ENTRIES - 5, 'refused', false],
   ])(
     'a record of %i claims and one bundle: the reader says %s, and so does recordReadable',
-    LONG,
     async (claims, outcome, readable) => {
       const s = await setup();
       const record = sample(claims);
       await putRecord(s.root, record);
 
-      expect(recordReadable(renderProjectState(record)).readable).toBe(readable);
+      expect(recordReadable(renderProjectState(record), LIMITS).readable).toBe(readable);
       expect((await s.run()).outcome).toBe(outcome);
     },
   );

@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { MAX_AGENT_RULES_BYTES, PROJECT_STATE_LIMITS, recordReadable } from './limits.js';
 
 const MIB = 1024 * 1024;
+const LIMITS = { maxEntries: 8, maxFileBytes: 16, maxTotalBytes: 32 };
+const readable: typeof recordReadable = (files) => recordReadable(files, LIMITS);
 const files = (entries: Record<string, string>) => new Map(Object.entries(entries));
 const numbered = (n: number, dir = 'artifacts') =>
   new Map(Array.from({ length: n }, (_, i) => [`${dir}/f${i}.json`, '{}\n'] as const));
@@ -21,43 +23,46 @@ describe('recordReadable', () => {
   });
 
   it('counts a directory as an entry, once, however many files it holds', () => {
-    expect(recordReadable(numbered(PROJECT_STATE_LIMITS.maxEntries - 1))).toEqual({
+    expect(readable(numbered(LIMITS.maxEntries - 1))).toEqual({
       readable: true,
     });
-    expect(recordReadable(numbered(PROJECT_STATE_LIMITS.maxEntries))).toMatchObject({
+    expect(readable(numbered(LIMITS.maxEntries))).toMatchObject({
       readable: false,
-      reason: expect.stringMatching(/more than 4096 entries/) as string,
+      reason: expect.stringMatching(/more than 8 entries/) as string,
     });
   });
 
   it('counts every directory on a path', () => {
     const deep = files({ 'a/b/c/d/e.json': '{}\n' });
-    const filler = numbered(PROJECT_STATE_LIMITS.maxEntries - 6, 'x');
-    expect(recordReadable(new Map([...deep, ...filler]))).toEqual({ readable: true });
-    expect(
-      recordReadable(new Map([...deep, ...numbered(PROJECT_STATE_LIMITS.maxEntries - 5, 'x')])),
-    ).toMatchObject({
+    const filler = numbered(LIMITS.maxEntries - 6, 'x');
+    expect(readable(new Map([...deep, ...filler]))).toEqual({ readable: true });
+    expect(readable(new Map([...deep, ...numbered(LIMITS.maxEntries - 5, 'x')]))).toMatchObject({
       readable: false,
     });
   });
 
-  it('takes a file of exactly 1 MiB and refuses one byte more, counting bytes rather than characters', () => {
-    expect(recordReadable(files({ 'a.json': 'x'.repeat(MIB) }))).toEqual({ readable: true });
-    expect(recordReadable(files({ 'a.json': 'x'.repeat(MIB + 1) }))).toMatchObject({
-      readable: false,
-      reason: expect.stringMatching(/a\.json is larger than 1 MiB/) as string,
+  it('takes a file at the cap and refuses one byte more, counting bytes rather than characters', () => {
+    expect(readable(files({ 'a.json': 'x'.repeat(LIMITS.maxFileBytes) }))).toEqual({
+      readable: true,
     });
-    expect(recordReadable(files({ 'a.json': 'é'.repeat(MIB / 2 + 1) }))).toMatchObject({
+    expect(readable(files({ 'a.json': 'x'.repeat(LIMITS.maxFileBytes + 1) }))).toMatchObject({
+      readable: false,
+      reason: expect.stringMatching(/a\.json is larger than 0\.0000152587890625 MiB/) as string,
+    });
+    expect(readable(files({ 'a.json': 'é'.repeat(LIMITS.maxFileBytes / 2 + 1) }))).toMatchObject({
       readable: false,
     });
   });
 
-  it('takes files totalling exactly 16 MiB and refuses one byte more', () => {
-    const sixteen = Array.from({ length: 16 }, (_, i) => [`f${i}.json`, 'x'.repeat(MIB)] as const);
-    expect(recordReadable(new Map(sixteen))).toEqual({ readable: true });
-    expect(recordReadable(new Map([...sixteen, ['one-more.json', 'x'] as const]))).toMatchObject({
+  it('takes files totalling exactly the cap and refuses one byte more', () => {
+    const atCap = Array.from(
+      { length: 2 },
+      (_, i) => [`f${i}.json`, 'x'.repeat(LIMITS.maxFileBytes)] as const,
+    );
+    expect(readable(new Map(atCap))).toEqual({ readable: true });
+    expect(readable(new Map([...atCap, ['one-more.json', 'x'] as const]))).toMatchObject({
       readable: false,
-      reason: expect.stringMatching(/more than 16 MiB/) as string,
+      reason: expect.stringMatching(/more than 0\.000030517578125 MiB/) as string,
     });
   });
 });
