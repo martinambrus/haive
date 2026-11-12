@@ -151,8 +151,20 @@ describe('editor grants', () => {
     h.ensure.mockResolvedValue({ waitUntilFinished: async () => ({ ok: false }) });
     expect((await grant(kind)).status).toBe(409);
     h.ensure.mockRejectedValue(new Error('not ready'));
-    expect((await grant(kind)).status).toBe(409);
+    expect((await grant(kind)).status).toBe(503);
     expect(h.set).not.toHaveBeenCalled();
+  });
+  it('answers 503 when the ensure queue add never returns', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      h.ensure.mockReturnValue(new Promise(() => {}));
+      const pending = grant();
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect((await pending).status).toBe(503);
+      expect(h.set).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it('refuses disabled editors', async () => {
     h.enabled = false;

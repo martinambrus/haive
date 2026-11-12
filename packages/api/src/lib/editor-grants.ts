@@ -44,9 +44,12 @@ export async function grantEditor(c: Context<AppEnv>, repository = false): Promi
   const origin = editorOrigin();
   if (!origin) throw new HttpError(503, 'The public API or editor origin must be configured');
   // The worker owns runtime resolution; only its ready result authorizes a grant.
+  // A refusal from the worker is final (409); no answer in time is retryable (503).
   const ready = await ensureIde(target).then(
     (r) => r?.ok === true,
-    () => false,
+    () => {
+      throw new HttpError(503, 'Editor is starting, try again shortly', 'editor_starting');
+    },
   );
   if (!ready) throw new HttpError(409, 'Editor is not ready');
   // Re-read after the ensure wait. No transaction/reserved DB connection crosses Redis.

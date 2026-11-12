@@ -8,6 +8,7 @@ import {
 } from '@haive/shared';
 import { getDb } from '../db.js';
 import { getIdeEnsureQueue, getIdeEnsureQueueEvents } from '../queues.js';
+import { boundedAdd } from './queue-bounded.js';
 
 const IDE_ENSURE_TIMEOUT_MS = 180_000;
 
@@ -44,11 +45,15 @@ export async function targetBelongsToUser(target: IdeTarget): Promise<boolean> {
 }
 
 export async function ensureIde(target: IdeTarget): Promise<IdeEnsureResult> {
-  const job = await getIdeEnsureQueue().add(IDE_ENSURE_JOB_NAMES.ENSURE, target.payload, {
-    jobId: `ensure-ide-${target.sessionId}`,
-    removeOnComplete: true,
-    removeOnFail: true,
-  });
+  // Bounded: during a Redis outage the add would otherwise wait forever, and the readiness
+  // timeout below starts only once it returns. The job id coalesces a late add.
+  const job = await boundedAdd(() =>
+    getIdeEnsureQueue().add(IDE_ENSURE_JOB_NAMES.ENSURE, target.payload, {
+      jobId: `ensure-ide-${target.sessionId}`,
+      removeOnComplete: true,
+      removeOnFail: true,
+    }),
+  );
   return (await job.waitUntilFinished(
     getIdeEnsureQueueEvents(),
     IDE_ENSURE_TIMEOUT_MS,
