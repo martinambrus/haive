@@ -1,5 +1,5 @@
 import { and, desc, eq, sql } from 'drizzle-orm';
-import { REPOSITORY_TASKS_LOCK_TIMEOUT_MS, schema } from '@haive/database';
+import { isLockNotAvailable, REPOSITORY_TASKS_LOCK_TIMEOUT_MS, schema } from '@haive/database';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../../../audit.js';
 import type { FormSchema } from '@haive/shared';
 import { gitRemoteUrlSchema, parseScpLikeGitUrl, redactGitUrl } from '@haive/shared/schemas';
@@ -151,6 +151,11 @@ async function persistPushOrigin(
   } catch (err) {
     // A connection can reject the transaction while its callback is still doing git work.
     await callbackSettled;
+    if (isLockNotAvailable(err)) {
+      ctx.logger.warn({ err, repositoryId }, 'repository lock unavailable during push');
+      // A bound-query cause would make the runner replace this sentence with generic DB text.
+      await restore(new Error('Repository is busy. Retry this step in a moment.'));
+    }
     await restore(err);
   }
   if (event) logAuditEvent(event);

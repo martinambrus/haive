@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { createHash } from 'node:crypto';
 import {
   schema,
-  initializeTaskDatabaseState,
+  initializeTaskDatabaseState as initializeDatabaseState,
+  isLockNotAvailable,
   withDatabaseSnapshotLock,
   snapshotPromotionAllowed,
   type Database,
@@ -47,6 +48,22 @@ export async function verifyDatabaseSnapshotFile(
   } finally {
     await file.close();
   }
+}
+
+function snapshotLockFailure(err: unknown): never {
+  if (isLockNotAvailable(err)) {
+    logger.warn({ err }, 'saved database lock unavailable');
+    // Keep diagnostics in the structured log; a bound-query cause hides this sentence.
+    throw new Error('Saved database is busy. Retry this step in a moment.');
+  }
+  throw err;
+}
+
+/** Translate contention only after the failed metadata transaction has released its locks. */
+export async function initializeTaskDatabaseState(
+  ...args: Parameters<typeof initializeDatabaseState>
+) {
+  return initializeDatabaseState(...args).catch(snapshotLockFailure);
 }
 
 export async function loadDatabaseSnapshotState(ctx: StepContext) {
@@ -138,16 +155,18 @@ export async function withSnapshotStep<T>(
   fn: (tx: DbTx) => Promise<T>,
 ): Promise<T> {
   ctx.throwIfCancelled();
-  return ctx.db.transaction(async (tx) => {
-    await assertOwnsStep(tx, ctx.taskStepId);
-    const [task] = await tx
-      .select()
-      .from(schema.tasks)
-      .where(taskWriteTarget(ctx.taskId, { epoch }))
-      .for('share');
-    if (!task?.repositoryId) throw new StepSupersededError(ctx.taskStepId);
-    return withDatabaseSnapshotLock(tx, task.repositoryId, fn);
-  });
+  return ctx.db
+    .transaction(async (tx) => {
+      await assertOwnsStep(tx, ctx.taskStepId);
+      const [task] = await tx
+        .select()
+        .from(schema.tasks)
+        .where(taskWriteTarget(ctx.taskId, { epoch }))
+        .for('share');
+      if (!task?.repositoryId) throw new StepSupersededError(ctx.taskStepId);
+      return withDatabaseSnapshotLock(tx, task.repositoryId, fn);
+    })
+    .catch(snapshotLockFailure);
 }
 
 export async function reserveDatabaseSnapshot(

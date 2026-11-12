@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import { randomUUID, createHash } from 'node:crypto';
 import { mkdtemp, rm, readFile, access } from 'node:fs/promises';
 import path from 'node:path';
@@ -13,6 +14,7 @@ import {
   type Database,
 } from '@haive/database';
 import { logger } from '@haive/shared';
+import { createFakeDb } from '@haive/database/testing';
 import { writeFileNoFollow } from '@haive/shared/fs-safe';
 import { databaseSnapshotRel } from '@haive/shared/database-snapshot-files';
 import type { StepContext } from '../src/step-engine/step-definition.js';
@@ -23,6 +25,7 @@ import {
 } from '../src/step-engine/steps/workflow/11g-save-database.js';
 import {
   DATABASE_SAVE_STEP_ID,
+  withSnapshotStep,
   loadDatabaseSnapshotState,
   reserveDatabaseSnapshot,
   promoteDatabaseSnapshot,
@@ -630,4 +633,62 @@ describe.skipIf(!url)('database snapshot lifecycle on Postgres', () => {
       }),
     ).toBeUndefined();
   });
+});
+
+describe('snapshot step bounded-lock failures', () => {
+  it.each(['initialization', 'owned step'] as const)(
+    'maps the %s lock timeout and preserves other failures',
+    async (site) => {
+      const fake = createFakeDb({
+        tasks: schema.tasks,
+        taskSteps: schema.taskSteps,
+        taskDatabaseStates: schema.taskDatabaseStates,
+        repositoryDatabaseStates: schema.repositoryDatabaseStates,
+      });
+      const taskId = randomUUID();
+      const stepId = randomUUID();
+      fake.insert(schema.tasks, {
+        id: taskId,
+        repositoryId: randomUUID(),
+        userId: randomUUID(),
+        orchestrationEpoch: 0,
+        status: 'running',
+      });
+      fake.insert(schema.taskSteps, { id: stepId, taskId, status: 'running' });
+      const ctx = {
+        db: fake.db,
+        taskId,
+        taskStepId: stepId,
+        throwIfCancelled() {},
+      } as unknown as StepContext;
+      const apply = () =>
+        site === 'initialization'
+          ? loadDatabaseSnapshotState(ctx)
+          : withSnapshotStep(ctx, 0, async () => {
+              throw new Error('must not reach writes');
+            });
+      for (const wrapped of [false, true]) {
+        const pg = Object.assign(new Error('driver lock detail'), { code: '55P03' });
+        const error = wrapped
+          ? Object.assign(new Error('query detail', { cause: pg }), { params: ['bound value'] })
+          : pg;
+        fake.hooks.beforeLock = () => {
+          throw error;
+        };
+        const failure = await apply().then(
+          () => null,
+          (err: unknown) => err,
+        );
+        expect(safeErrorMessage(failure)).toBe(
+          'Saved database is busy. Retry this step in a moment.',
+        );
+      }
+      const other = new Error('other refusal');
+      fake.hooks.beforeLock = () => {
+        throw other;
+      };
+      await expect(apply()).rejects.toBe(other);
+      expect(fake.rows(schema.taskDatabaseStates)).toEqual([]);
+    },
+  );
 });

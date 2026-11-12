@@ -19,6 +19,7 @@ import {
 import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import {
   lockRepositoryTasksKey,
+  isLockNotAvailable,
   REPOSITORY_TASKS_LOCK_TIMEOUT_MS,
   schema,
   type Database,
@@ -876,6 +877,11 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           if (!sameValue(admitted, ownRecordColumn(plan))) throw new Error(PLAN_NO_LONGER_HOLDS);
         })
         .catch((err: unknown) => {
+          if (isLockNotAvailable(err)) {
+            ctx.logger.warn({ err, repositoryId: plan.repositoryId }, 'upgrade lock unavailable');
+            // Log the original before replacing it: a bound-query cause hides this sentence.
+            throw new Error('Repository is busy. Retry this step in a moment.');
+          }
           throw err instanceof ProjectStateMovedError ? new Error(PLAN_NO_LONGER_HOLDS) : err;
         });
     }
