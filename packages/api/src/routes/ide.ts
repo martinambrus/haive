@@ -2,24 +2,18 @@ import net from 'node:net';
 import type { Server, IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { Hono, type Context } from 'hono';
-import { and, eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
   configService,
-  IDE_ENSURE_JOB_NAMES,
   IDE_INTERNAL_PORT,
   IDE_SESSION_PREFIX,
   ideRunnerName,
   ideSessionKey,
   logger,
-  repoIdeSessionId,
-  type IdeEnsurePayload,
-  type IdeEnsureResult,
 } from '@haive/shared';
-import { getDb } from '../db.js';
+import { ideTarget, targetBelongsToUser, ensureIde, type IdeTarget } from '../lib/ide-target.js';
+import { grantEditor } from '../lib/editor-grants.js';
 import { getPatientRedis } from '../redis.js';
-import { getIdeEnsureQueue, getIdeEnsureQueueEvents } from '../queues.js';
 import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
 import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import type { UpgradeSession } from '../lib/user-sockets.js';
@@ -48,7 +42,6 @@ import { isCanonicalUuid } from '../lib/uuid.js';
 
 const log = logger.child({ module: 'ide-proxy' });
 const WS_PATH_PREFIX = '/ide/';
-const IDE_ENSURE_TIMEOUT_MS = 180_000;
 // Response headers that must not be forwarded verbatim. content-encoding/length
 // are dropped because undici's fetch auto-decodes the upstream body (we also force
 // identity upstream); the rest are connection-scoped.
@@ -104,40 +97,11 @@ function upstreamRequestHeaders(source: Headers): Headers {
 export const ideRoutes = new Hono<AppEnv>();
 ideRoutes.use('*', requireAuth);
 
-interface IdeTarget {
-  sessionId: string;
-  prefix: string;
-  payload: IdeEnsurePayload;
-}
-
-function ideTarget(id: string, userId: string, repository = false): IdeTarget {
-  return {
-    sessionId: repository ? repoIdeSessionId(id) : id,
-    prefix: repository ? `/ide/repos/${id}` : `/ide/${id}`,
-    payload: repository ? { repositoryId: id, userId } : { taskId: id, userId },
-  };
-}
-
-async function targetBelongsToUser(target: IdeTarget): Promise<boolean> {
-  const db = getDb();
-  const { userId, repositoryId, taskId } = target.payload;
-  const row = repositoryId
-    ? await db.query.repositories.findFirst({
-        where: and(
-          eq(schema.repositories.id, repositoryId),
-          eq(schema.repositories.userId, userId),
-        ),
-        columns: { id: true },
-      })
-    : await db.query.tasks.findFirst({
-        where: and(eq(schema.tasks.id, taskId!), eq(schema.tasks.userId, userId)),
-        columns: { id: true },
-      });
-  return row != null;
-}
-
 // Starting an editor is an explicit POST. Loading its HTML/assets only proxies an existing one.
+export const taskIdeAccessRoutes = new Hono<AppEnv>();
 export const repoIdeAccessRoutes = new Hono<AppEnv>();
+taskIdeAccessRoutes.post('/:id/editor-handshake', requireAuth, (c) => grantEditor(c));
+repoIdeAccessRoutes.post('/:id/editor-handshake', requireAuth, (c) => grantEditor(c, true));
 repoIdeAccessRoutes.post('/:id/ensure-ide', requireAuth, async (c) => {
   const id = c.req.param('id');
   if (!isCanonicalUuid(id)) throw new HttpError(404, 'Repository not found');
@@ -455,18 +419,6 @@ export async function resetStaleIdeRefcounts(): Promise<void> {
 }
 
 // ---- ensure + auth helpers (mirror browser-vnc) ---------------------------
-
-async function ensureIde(target: IdeTarget): Promise<IdeEnsureResult> {
-  const job = await getIdeEnsureQueue().add(IDE_ENSURE_JOB_NAMES.ENSURE, target.payload, {
-    jobId: `ensure-ide-${target.sessionId}`,
-    removeOnComplete: true,
-    removeOnFail: true,
-  });
-  return (await job.waitUntilFinished(
-    getIdeEnsureQueueEvents(),
-    IDE_ENSURE_TIMEOUT_MS,
-  )) as IdeEnsureResult;
-}
 
 function extractIdeTarget(rawUrl: string): { id: string; repository: boolean } | null {
   const withoutQuery = rawUrl.split('?')[0] ?? rawUrl;
