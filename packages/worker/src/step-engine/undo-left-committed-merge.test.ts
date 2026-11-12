@@ -795,7 +795,10 @@ describe('explicit undo of a cancel-left committed merge', () => {
     await writeFile(path.join(f.dir, 'feature'), 'mine');
     await f.run();
     const reason = leftCommittedMerges(f.events)[0]?.refused?.reason;
-    expect(reason).toContain('not uptodate');
+    // Git's detail may be translated; require a nonempty excerpt after our own refusal copy.
+    expect(reason).toMatch(
+      /^Git refused the undo; local changes or a changed branch were kept: \S/,
+    );
     expect(reason).not.toContain(f.dir);
     expect(await readFile(path.join(f.dir, 'feature'), 'utf8')).toBe('mine');
     expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
