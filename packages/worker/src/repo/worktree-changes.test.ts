@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -37,6 +38,25 @@ async function setup(): Promise<{ root: string; wt: string }> {
   await mkdir(path.dirname(wt), { recursive: true });
   await git(root, ['worktree', 'add', '-b', 'feat', wt, 'main']);
   return { root, wt };
+}
+
+/** Make only the index's cached ctime differ, without waiting for a filesystem clock tick. */
+async function staleCtime(root: string, file: string): Promise<void> {
+  const indexPath = path.join(root, '.git/worktrees/feat/index');
+  const index = await readFile(indexPath);
+  expect(index.subarray(0, 4).toString()).toBe('DIRC');
+  expect(index.readUInt32BE(4)).toBe(2);
+  expect(index.readUInt32BE(8)).toBe(1);
+  const { ctimeNs } = await stat(file, { bigint: true });
+  const seconds = Number(ctimeNs / 1_000_000_000n);
+  const nanos = Number(ctimeNs % 1_000_000_000n);
+  index.writeUInt32BE(seconds - 1, 12);
+  index.writeUInt32BE((nanos + 1) % 1_000_000_000, 16);
+  createHash('sha1')
+    .update(index.subarray(0, -20))
+    .digest()
+    .copy(index, index.length - 20);
+  await writeFile(indexPath, index);
 }
 
 describe('readUncommittedChanges', () => {
@@ -184,10 +204,14 @@ describe('readUncommittedChanges and repository stat settings', () => {
       const past = new Date(Date.now() - 120_000);
       await utimes(file, past, past);
       await git(wt, ['update-index', '--refresh']);
-      // git compares ctime in whole seconds, so the rewrite must land in a later second.
-      await new Promise((resolve) => setTimeout(resolve, 1100));
       await writeFile(file, 'two\n', 'utf8');
       await utimes(file, past, past);
+      await staleCtime(root, file);
+      const hidden = await exec('git', ['--no-optional-locks', 'status', '--porcelain'], {
+        cwd: wt,
+        env: GIT_ENV,
+      });
+      expect(hidden.stdout).toBe('');
       expect(await readUncommittedChanges(wt)).toEqual({ count: 1, paths: ['f.txt'] });
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -215,7 +239,6 @@ describe('readUncommittedChanges and settings that hide a change', () => {
       await git(root, ['config', 'core.fsmonitor', hook]);
       await git(wt, ['status', '--porcelain']);
       await git(wt, ['status', '--porcelain']);
-      await new Promise((resolve) => setTimeout(resolve, 1100));
       await writeIn(wt, { 'f.txt': 'edited, unseen by the hook\n' });
       expect(await readUncommittedChanges(wt)).toEqual({ count: 1, paths: ['f.txt'] });
     } finally {
