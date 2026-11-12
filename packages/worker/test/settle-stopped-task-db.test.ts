@@ -2,9 +2,10 @@ import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { asc, eq } from 'drizzle-orm';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { processTaskJob, setContainerCleanupRunner } from '../src/queues/task-queue.js';
+import * as stalled from '../src/queues/stalled-redrive.js';
 
 const url = process.env.WORKER_SETTLE_STOPPED_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/worker_settle_stopped_test'))
@@ -529,6 +530,109 @@ describe.skipIf(!url)('the worker settle job for a task the api Stop failed, on 
 
       const task = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) });
       expect(task?.status).toBe('failed');
+    });
+  });
+
+  describe('lost Stop settlement recovery', () => {
+    beforeEach(() => vi.useFakeTimers({ toFake: ['Date'] }));
+    afterEach(() => vi.useRealTimers());
+    it('recovers a Cancel that never reached Redis using the existing finish marker', async () => {
+      const taskId = await seedTask('cancelled');
+      await db
+        .insert(schema.taskEvents)
+        .values({ taskId, eventType: 'task.cancelled', createdAt: new Date(Date.now() - 600_000) });
+      const enqueueCancel = vi.fn(async () => undefined);
+      const deps = { enqueueCancel, queuedCancelTaskIds: async () => new Set<string>() };
+      expect(await stalled.redriveCancelledTasks(db, deps, { staleMs: 300_000 })).toBe(1);
+      expect(enqueueCancel).toHaveBeenCalledWith(taskId, userId);
+      await db.insert(schema.taskEvents).values({ taskId, eventType: 'task.cancel_finished' });
+      expect(await stalled.redriveCancelledTasks(db, deps, { staleMs: 300_000 })).toBe(0);
+    });
+    const request = async (taskId: string, failedAt = FAILED_AT) => {
+      await db.insert(schema.taskEvents).values({
+        taskId,
+        eventType: 'task.stop_settle_requested',
+        payload: { failedAt: failedAt.toISOString() },
+        createdAt: T0,
+      });
+    };
+    const sweep = async (live = new Set<string>(), batchSize = 2) => {
+      const queued: Record<string, unknown>[] = [];
+      const count = await stalled.redriveStoppedTasks(
+        db,
+        {
+          enqueueStopSettle: async (taskId: string, userId: string, failedAt: string) => {
+            queued.push({ taskId, userId, failedAt });
+          },
+          queuedStoppedTaskIds: async () => live,
+        },
+        { staleMs: 300_000, batchSize },
+      );
+      return { count, queued };
+    };
+
+    it('queues a never-enqueued Stop once and throttles the next tick', async () => {
+      const taskId = await seedTask('failed');
+      await request(taskId);
+      expect(await sweep()).toEqual({ count: 1, queued: [payloadFor(taskId)] });
+      expect(await sweep()).toEqual({ count: 0, queued: [] });
+    });
+
+    it('requeues an exhausted settlement and a settled failure stays out of the sweep', async () => {
+      const taskId = await seedTask('failed');
+      await request(taskId);
+      // Failed/completed queue history is absent from the live-job snapshot.
+      expect((await sweep()).count).toBe(1);
+      expect(describeOutcome(await run(payloadFor(taskId)))).toBe('resolved');
+      await db
+        .update(schema.taskEvents)
+        .set({ createdAt: T0 })
+        .where(eq(schema.taskEvents.eventType, 'task.stop_settle_redriven'));
+      expect(await sweep()).toEqual({ count: 0, queued: [] });
+      const events = await db.query.taskEvents.findMany({
+        where: eq(schema.taskEvents.taskId, taskId),
+      });
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          eventType: 'task.stop_settle_finished',
+          payload: { failedAt: FAILED_AT.toISOString() },
+        }),
+      );
+    });
+
+    it('leaves a resumed task and a later failure alone', async () => {
+      const taskId = await seedTask('running');
+      await request(taskId);
+      expect((await sweep()).count).toBe(0);
+      await db
+        .update(schema.tasks)
+        .set({ status: 'failed', completedAt: new Date(FAILED_AT.getTime() + 1) })
+        .where(eq(schema.tasks.id, taskId));
+      expect((await sweep()).count).toBe(0);
+    });
+
+    it('leaves a live settlement to its job', async () => {
+      const taskId = await seedTask('failed');
+      await request(taskId);
+      expect(await sweep(new Set([taskId]))).toEqual({ count: 0, queued: [] });
+    });
+
+    it('leaves a just-issued Stop alone and bounds each batch', async () => {
+      const fresh = await seedTask('failed', { completedAt: new Date() });
+      await request(fresh, new Date());
+      for (let i = 0; i < 3; i++) await request(await seedTask('failed'));
+      const result = await sweep(new Set(), 2);
+      expect(result.count).toBe(2);
+      expect(result.queued.map((p) => p.taskId)).not.toContain(fresh);
+    });
+
+    it('allows the original and recovered settlements to finish together safely', async () => {
+      const taskId = await seedTask('failed');
+      await request(taskId);
+      const outcomes = await Promise.all([run(payloadFor(taskId)), run(payloadFor(taskId))]);
+      expect(outcomes.map(describeOutcome)).toEqual(['resolved', 'resolved']);
+      expect((await sweep()).count).toBe(0);
+      expect(touched(taskId, NEVER)).toEqual([]);
     });
   });
 });

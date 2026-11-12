@@ -275,6 +275,15 @@ describe.skipIf(!url)('settling a task right after an api Stop, on Postgres', ()
     expect(Date.parse(job.payload.failedAt as string)).toBe(await failedAtOf(task.id));
     expect(job.task?.status, 'task row as read while add ran').toBe('failed');
     expect(job.kills, 'sandbox kills made before add ran').toBe(1);
+    const requests = await db.query.taskEvents.findMany({
+      where: eq(schema.taskEvents.taskId, task.id),
+    });
+    expect(requests).toContainEqual(
+      expect.objectContaining({
+        eventType: 'task.stop_settle_requested',
+        payload: { failedAt: job.payload.failedAt },
+      }),
+    );
   });
 
   describe('R2: a Stop that failed nothing queues nothing', () => {

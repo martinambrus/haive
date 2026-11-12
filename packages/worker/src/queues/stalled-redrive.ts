@@ -36,6 +36,7 @@ import {
   enqueueRedrive,
   enqueueRepoCleanup,
   enqueueStart,
+  enqueueStopSettle,
   finishFailedStep,
   getTaskQueue,
   readQueuedInvocationIds,
@@ -534,7 +535,7 @@ export interface CancelRedriveDeps {
 }
 
 /** Not completed or failed jobs: a CANCEL that died before `task.cancel_finished` must be re-driven. */
-export async function readQueuedCancelTaskIds(): Promise<Set<string> | null> {
+async function readQueuedTeardownTaskIds(name: string): Promise<Set<string> | null> {
   try {
     const jobs = await getTaskQueue().getJobs([
       'active',
@@ -546,13 +547,100 @@ export async function readQueuedCancelTaskIds(): Promise<Set<string> | null> {
     const ids = new Set<string>();
     for (const job of jobs) {
       const id = (job?.data as { taskId?: unknown } | undefined)?.taskId;
-      if (job?.name === TASK_JOB_NAMES.CANCEL && typeof id === 'string') ids.add(id);
+      if (job?.name === name && typeof id === 'string') ids.add(id);
     }
     return ids;
   } catch (err) {
-    log.warn({ err }, 'task queue unreadable; leaving cancelled tasks alone this pass');
+    log.warn({ err, name }, 'task queue unreadable; leaving task teardowns alone this pass');
     return null;
   }
+}
+
+export const readQueuedCancelTaskIds = () => readQueuedTeardownTaskIds(TASK_JOB_NAMES.CANCEL);
+export const readQueuedStoppedTaskIds = () =>
+  readQueuedTeardownTaskIds(TASK_JOB_NAMES.SETTLE_STOPPED);
+
+export interface StopRedriveDeps {
+  enqueueStopSettle: (taskId: string, userId: string, failedAt: string) => Promise<void>;
+  queuedStoppedTaskIds: () => Promise<Set<string> | null>;
+}
+
+export const defaultStopDeps: StopRedriveDeps = {
+  enqueueStopSettle,
+  queuedStoppedTaskIds: readQueuedStoppedTaskIds,
+};
+
+export const STOP_SETTLE_REDRIVE_BATCH = 20;
+export const STOP_SETTLE_STALE_MS = 5 * 60 * 1000;
+
+/** A request is committed with Stop, a finish only after settlement returns. Match the exact
+ * failure, never copy or all failed tasks: Retry/Resume and a later failure leave the old request
+ * inert. Failed/completed queue history does not owe a teardown; live jobs and deduplication do. */
+export async function redriveStoppedTasks(
+  db: Database,
+  deps: StopRedriveDeps = defaultStopDeps,
+  opts: { staleMs?: number; batchSize?: number } = {},
+): Promise<number> {
+  const cutoff = new Date(Date.now() - (opts.staleMs ?? STOP_SETTLE_STALE_MS));
+  const event = taskEventsOf(db);
+  const sameFailure = sql`(${schema.taskEvents.payload}->>'failedAt')::timestamptz = ${schema.tasks.completedAt}`;
+  const candidates = await db
+    .select({
+      taskId: schema.tasks.id,
+      userId: schema.tasks.userId,
+      failedAt: schema.tasks.completedAt,
+    })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.status, 'failed'),
+        lt(schema.tasks.completedAt, cutoff),
+        exists(event('task.stop_settle_requested', sameFailure)),
+        not(exists(event('task.stop_settle_finished', sameFailure))),
+        not(
+          exists(
+            event(
+              'task.stop_settle_redriven',
+              sameFailure,
+              gte(schema.taskEvents.createdAt, cutoff),
+            ),
+          ),
+        ),
+      ),
+    )
+    .orderBy(asc(schema.tasks.completedAt))
+    .limit(opts.batchSize ?? STOP_SETTLE_REDRIVE_BATCH);
+  if (candidates.length === 0) return 0;
+  const live = await deps.queuedStoppedTaskIds();
+  if (live === null) return 0;
+  let redriven = 0;
+  for (const task of candidates) {
+    if (live.has(task.taskId)) continue;
+    const failedAt = task.failedAt!.toISOString();
+    try {
+      // No database connection held across Redis. A crash after this stamp delays the next
+      // attempt by one cutoff; a refusal refunds it, as the existing CANCEL re-drive does.
+      const [record] = await db
+        .insert(schema.taskEvents)
+        .values({
+          taskId: task.taskId,
+          eventType: 'task.stop_settle_redriven',
+          payload: { failedAt },
+        })
+        .returning({ id: schema.taskEvents.id });
+      try {
+        await deps.enqueueStopSettle(task.taskId, task.userId, failedAt);
+      } catch (err) {
+        await db.delete(schema.taskEvents).where(eq(schema.taskEvents.id, record!.id));
+        throw err;
+      }
+      redriven++;
+      log.info({ taskId: task.taskId, failedAt }, 'queued a lost Stop settlement');
+    } catch (err) {
+      log.error({ err, taskId: task.taskId }, 'Stop settlement could not be queued');
+    }
+  }
+  return redriven;
 }
 
 export const defaultCancelDeps: CancelRedriveDeps = {
@@ -922,6 +1010,7 @@ export class StalledTaskSweeper {
   async sweep(): Promise<{ redriven: number }> {
     let redriven = await redriveStalledTasks(this.db, defaultDeps, { staleMs: this.staleMs });
     redriven += await redriveCancelledTasks(this.db, defaultCancelDeps, { staleMs: this.staleMs });
+    redriven += await redriveStoppedTasks(this.db, defaultStopDeps, { staleMs: this.staleMs });
     this.startAbandonPass();
     redriven += await redriveRepoCleanups(this.db);
     await reconcileStrandedCloningRepos(this.db);

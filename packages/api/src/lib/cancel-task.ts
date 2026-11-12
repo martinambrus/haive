@@ -125,6 +125,7 @@ export async function enqueueCancelJob(taskId: string, userId: string): Promise<
   await addBestEffort(
     () =>
       getTaskQueue().add(TASK_JOB_NAMES.CANCEL, { taskId, userId } as TaskJobPayload, {
+        deduplication: { id: `cancel-${taskId}` },
         removeOnComplete: 50,
         removeOnFail: 50,
       }),
@@ -148,13 +149,14 @@ export async function enqueueStopSettle(
         TASK_JOB_NAMES.SETTLE_STOPPED,
         { taskId, userId, failedAt } satisfies StopSettlePayload,
         {
+          deduplication: { id: `stop-settle-${taskId}-${Date.parse(failedAt)}` },
           attempts: 3,
           backoff: { type: 'exponential', delay: 5_000 },
           removeOnComplete: 50,
           removeOnFail: 50,
         },
       ),
-    'stop settlement not queued; it waits for a Retry, a Cancel or the next worker start',
+    'stop settlement not queued; the stalled sweep will queue it',
     { taskId },
   );
 }

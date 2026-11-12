@@ -104,7 +104,16 @@ export async function supersedeLiveRuns(
         ),
       )
       .returning({ id: schema.tasks.id });
-    if (moved) failedAt = now.toISOString();
+    if (moved) {
+      failedAt = now.toISOString();
+      // Durable before Redis (or the kill) is tried. A later failure has a different stamp,
+      // so this request can never settle a task that Retry/Resume has moved on.
+      await tx.insert(schema.taskEvents).values({
+        taskId,
+        eventType: 'task.stop_settle_requested',
+        payload: { failedAt },
+      });
+    }
   }
   return { cancelled: runs, stopped: failed.length, failedAt };
 }

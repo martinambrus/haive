@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import type { SQL } from 'drizzle-orm';
@@ -8,6 +8,9 @@ const queue = vi.hoisted(() => ({
   jobs: [] as { name: string; data: unknown; state: string }[],
   asked: [] as string[][],
 }));
+
+beforeEach(() => vi.useFakeTimers({ toFake: ['Date'] }));
+afterEach(() => vi.useRealTimers());
 
 vi.mock('../src/queues/task-queue.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
@@ -24,7 +27,12 @@ import {
   CANCEL_REDRIVE_LOOKBACK_MS,
   redriveCancelledTasks,
   readQueuedCancelTaskIds,
+  readQueuedStoppedTaskIds,
+  redriveStoppedTasks,
+  STOP_SETTLE_REDRIVE_BATCH,
+  STOP_SETTLE_STALE_MS,
   type CancelRedriveDeps,
+  type StopRedriveDeps,
 } from '../src/queues/stalled-redrive.js';
 
 function rendered(cond: unknown): { sql: string; params: unknown[] } {
@@ -34,7 +42,7 @@ function rendered(cond: unknown): { sql: string; params: unknown[] } {
 /** The candidates SELECT is faked; its subqueries are built by a real drizzle builder, so the
  *  rendered condition can be read back. */
 function makeDb(
-  rows: { taskId: string; userId: string }[],
+  rows: { taskId: string; userId: string; failedAt?: Date }[],
   opts: { insertFails?: boolean } = {},
 ): {
   db: Database;
@@ -144,9 +152,7 @@ describe('redriveCancelledTasks', () => {
       .map((v) => before - new Date(v).getTime())
       .sort((x, y) => x - y);
     expect(ages).toHaveLength(2);
-    expect(ages[0]).toBeGreaterThanOrEqual(300_000 - 1000);
-    expect(ages[0]).toBeLessThan(300_000 + 5000);
-    expect(ages[1]).toBeGreaterThanOrEqual(CANCEL_REDRIVE_LOOKBACK_MS - 1000);
+    expect(ages).toEqual([300_000, CANCEL_REDRIVE_LOOKBACK_MS]);
     expect(sql).toMatch(/created_at" > \$\d+/);
     expect(sql).toMatch(/created_at" >= \$\d+/);
   });
@@ -204,5 +210,60 @@ describe('readQueuedCancelTaskIds', () => {
     ];
     const ids = await readQueuedCancelTaskIds();
     expect([...ids!].sort()).toEqual(['active', 'delayed', 'waiting']);
+  });
+});
+
+describe('Stop settlement queue snapshot', () => {
+  it('pins the production batch and minimum age', () => {
+    expect(STOP_SETTLE_REDRIVE_BATCH).toBe(20);
+    expect(STOP_SETTLE_STALE_MS).toBe(300_000);
+  });
+
+  it('counts live settlement jobs and leaves exhausted/completed jobs to the sweep', async () => {
+    queue.jobs = [
+      'waiting',
+      'active',
+      'delayed',
+      'prioritized',
+      'waiting-children',
+      'completed',
+      'failed',
+    ].map((state) => ({ name: 'settle-stopped-task', data: { taskId: state }, state }));
+    expect([...(await readQueuedStoppedTaskIds())!].sort()).toEqual([
+      'active',
+      'delayed',
+      'prioritized',
+      'waiting',
+      'waiting-children',
+    ]);
+  });
+
+  it('keeps requests pending if Redis is unreadable or refuses an enqueue', async () => {
+    const { db, seen } = makeDb([{ taskId: 'stopped', userId: 'u1', failedAt: new Date(0) }]);
+    const enqueueStopSettle = vi.fn(async () => {
+      throw new Error('Redis refused');
+    });
+    const deps: StopRedriveDeps = { enqueueStopSettle, queuedStoppedTaskIds: async () => null };
+    expect(await redriveStoppedTasks(db, deps)).toBe(0);
+    expect(enqueueStopSettle).not.toHaveBeenCalled();
+    expect(seen.inserted).toEqual([]);
+    deps.queuedStoppedTaskIds = async () => new Set();
+    expect(await redriveStoppedTasks(db, deps)).toBe(0);
+    expect(enqueueStopSettle).toHaveBeenCalledWith('stopped', 'u1', new Date(0).toISOString());
+    expect(seen.deleted).toBe(1);
+  });
+
+  it('enqueues nothing if its durable re-drive stamp cannot be recorded', async () => {
+    const { db } = makeDb([{ taskId: 'stopped', userId: 'u1', failedAt: new Date(0) }], {
+      insertFails: true,
+    });
+    const enqueueStopSettle = vi.fn(async () => undefined);
+    expect(
+      await redriveStoppedTasks(db, {
+        enqueueStopSettle,
+        queuedStoppedTaskIds: async () => new Set(),
+      }),
+    ).toBe(0);
+    expect(enqueueStopSettle).not.toHaveBeenCalled();
   });
 });

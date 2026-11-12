@@ -18,6 +18,7 @@ function setup(task: Record<string, unknown> = {}) {
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     cliInvocations: schema.cliInvocations,
+    taskEvents: schema.taskEvents,
   });
   fake.insert(schema.tasks, { id: TASK, status: 'running', ...task });
   const step = fake.insert(schema.taskSteps, {
@@ -83,6 +84,30 @@ describe('stopping a task', () => {
     const { completedAt } = fake.rows(schema.tasks)[0]!;
     expect(completedAt).toBeInstanceOf(Date);
     expect(result.failedAt).toBe((completedAt as Date).toISOString());
+    expect(fake.rows(schema.taskEvents)).toEqual([
+      expect.objectContaining({
+        taskId: TASK,
+        eventType: 'task.stop_settle_requested',
+        payload: { failedAt: result.failedAt },
+      }),
+    ]);
+  });
+
+  it('rolls Stop back and kills nothing when its durable settlement request cannot be written', async () => {
+    const { fake } = setup();
+    fake.hooks.beforeInsert = (table) => {
+      if (table === schema.taskEvents) throw new Error('request write failed');
+    };
+    await expect(
+      stopActiveCliInvocations(fake.db as never, TASK, { failTask: true }),
+    ).rejects.toThrow('request write failed');
+    expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'running' });
+    expect(fake.rows(schema.taskSteps)[0]).toMatchObject({ status: 'waiting_cli' });
+    expect(fake.rows(schema.cliInvocations)[0]).toMatchObject({
+      endedAt: null,
+      supersededAt: null,
+    });
+    expect(kill).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -95,6 +120,7 @@ describe('stopping a task', () => {
       tasks: schema.tasks,
       taskSteps: schema.taskSteps,
       cliInvocations: schema.cliInvocations,
+      taskEvents: schema.taskEvents,
     });
     fake.insert(schema.tasks, { id: TASK, status: 'running' });
     fake.insert(schema.taskSteps, {
@@ -141,6 +167,7 @@ describe('stopping a task', () => {
         tasks: schema.tasks,
         taskSteps: schema.taskSteps,
         cliInvocations: schema.cliInvocations,
+        taskEvents: schema.taskEvents,
       });
       fake.insert(schema.tasks, { id: TASK, status: 'running', ...POINTER, ...task });
       fake.insert(schema.taskSteps, {

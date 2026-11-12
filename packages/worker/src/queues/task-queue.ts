@@ -1051,7 +1051,18 @@ async function routableFixLoopTarget(
 }
 
 /** What a task that ended failed releases. */
-async function settleFailedTask(db: Database, taskId: string): Promise<void> {
+async function settleFailedTask(
+  db: Database,
+  taskId: string,
+  stoppedFailure?: { status: string; completedAt: Date | null },
+): Promise<void> {
+  // Capture the failure before any teardown: a later Stop must keep its own request pending.
+  const failure =
+    stoppedFailure ??
+    (await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, taskId),
+      columns: { status: true, completedAt: true },
+    }));
   await cleanupTaskContainers(db, taskId, 'failed');
   await resyncAfterTaskEnd(db, taskId);
   await maybeUnloadTaskEmbedModel(db, taskId);
@@ -1059,6 +1070,28 @@ async function settleFailedTask(db: Database, taskId: string): Promise<void> {
   // A failed kb_author enrich leaves its global KB entry stuck in 'enriching'; mark
   // it 'failed' so the KB view can show a retry / go-to-task affordance.
   await reconcileKbAuthorEntryOnTaskEnd(db, taskId, 'failed', logger);
+  if (failure?.status === 'failed' && failure.completedAt) {
+    const failedAt = failure.completedAt.toISOString();
+    // An ordinary failed task has no request. Both its pass and the Stop job may settle it;
+    // recording their completion is harmless, and cannot acknowledge a different failure.
+    await db.execute(sql`
+      insert into ${schema.taskEvents} (task_id, event_type, payload)
+      select ${schema.tasks.id}, 'task.stop_settle_finished',
+             jsonb_build_object('failedAt', ${failedAt}::text)
+      from ${schema.tasks}
+      where ${schema.tasks.id} = ${taskId}
+        and ${schema.tasks.status} = 'failed'
+        and ${schema.tasks.completedAt} = ${failedAt}::timestamptz
+        and exists (select 1 from ${schema.taskEvents}
+          where ${schema.taskEvents.taskId} = ${schema.tasks.id}
+            and ${schema.taskEvents.eventType} = 'task.stop_settle_requested'
+            and ${schema.taskEvents.payload}->>'failedAt' = ${failedAt})
+        and not exists (select 1 from ${schema.taskEvents}
+          where ${schema.taskEvents.taskId} = ${schema.tasks.id}
+            and ${schema.taskEvents.eventType} = 'task.stop_settle_finished'
+            and ${schema.taskEvents.payload}->>'failedAt' = ${failedAt})
+    `);
+  }
 }
 
 /** After a task reaches a terminal state, evict its RAG embedding model from
@@ -1566,8 +1599,24 @@ export async function enqueueCancel(taskId: string, userId: string): Promise<voi
   await getTaskQueue().add(
     TASK_JOB_NAMES.CANCEL,
     { taskId, userId },
-    { removeOnComplete: 50, removeOnFail: 50 },
+    { deduplication: { id: `cancel-${taskId}` }, removeOnComplete: 50, removeOnFail: 50 },
   );
+}
+
+/** Same live-job deduplication id and retries as the api's original Stop enqueue. */
+export async function enqueueStopSettle(
+  taskId: string,
+  userId: string,
+  failedAt: string,
+): Promise<void> {
+  const payload: StopSettlePayload = { taskId, userId, failedAt };
+  await getTaskQueue().add(TASK_JOB_NAMES.SETTLE_STOPPED, payload, {
+    deduplication: { id: `stop-settle-${taskId}-${Date.parse(failedAt)}` },
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 5_000 },
+    removeOnComplete: 50,
+    removeOnFail: 50,
+  });
 }
 
 /** Queue a deleted repository's cleanup again, as the api's delete does; both handlers are idempotent. */
@@ -4306,7 +4355,7 @@ async function handleSettleStoppedTask(db: Database, payload: StopSettlePayload)
     );
     return;
   }
-  await settleFailedTask(db, payload.taskId);
+  await settleFailedTask(db, payload.taskId, task);
 }
 
 async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<void> {
