@@ -1,5 +1,6 @@
-import { afterEach, beforeAll, afterAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, beforeAll, afterAll, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server, type Socket } from 'node:net';
+import { once } from 'node:events';
 import { ReplyError } from 'ioredis';
 import {
   CONFIG_KEYS,
@@ -28,6 +29,12 @@ class FakeRedis {
   silentOn = new Set<string>();
   connections = 0;
   beforeEncryptionSet: (() => void) | null = null;
+  private commandWaiters: Array<{ name: string; resolve: () => void }> = [];
+
+  nextCommand(name: string): Promise<void> {
+    return new Promise((resolve) => this.commandWaiters.push({ name, resolve }));
+  }
+
   private server: Server | null = null;
   private sockets = new Set<Socket>();
 
@@ -53,9 +60,6 @@ class FakeRedis {
     this.server = null;
     this.dropConnections();
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
-    // Let the client notice the dead socket: a command written to one it has not yet seen
-    // closing waits for the command timeout instead of failing at once.
-    await new Promise((r) => setTimeout(r, 100));
   }
 
   restart(): Promise<void> {
@@ -96,6 +100,12 @@ class FakeRedis {
 
   private handle(socket: Socket, args: string[]): void {
     this.received.push(args);
+    for (const waiter of this.commandWaiters.filter(
+      (w) => w.name === '*' || w.name === args[0]!.toUpperCase(),
+    )) {
+      this.commandWaiters.splice(this.commandWaiters.indexOf(waiter), 1);
+      waiter.resolve();
+    }
     if (this.mode === 'silent') return;
     const name = args[0]!.toUpperCase();
     if (this.mode === 'loading') {
@@ -165,14 +175,11 @@ function parseCommand(buf: Buffer): { args: string[]; used: number } | null {
 }
 
 const ENC_KEY = 'ab'.repeat(32);
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-async function timed<T>(p: Promise<T>): Promise<{ err: unknown; ms: number }> {
-  const t0 = Date.now();
+async function rejection(p: Promise<unknown>): Promise<unknown> {
   try {
     await p;
   } catch (err) {
-    return { err, ms: Date.now() - t0 };
+    return err;
   }
   throw new Error('expected rejection');
 }
@@ -181,6 +188,8 @@ describe('ConfigService while Redis is unavailable', () => {
   let savedKey: string | undefined;
   let fake: FakeRedis;
   let svc: ConfigService;
+
+  beforeEach(() => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] }));
 
   beforeAll(() => {
     savedKey = process.env.CONFIG_ENCRYPTION_KEY;
@@ -199,14 +208,60 @@ describe('ConfigService while Redis is unavailable', () => {
   }
 
   afterEach(async () => {
-    vi.restoreAllMocks();
     try {
       svc?.getRedis().disconnect();
     } catch {
       // already closed by the test
     }
     await fake?.refuse();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
   });
+
+  async function refuse(): Promise<void> {
+    const closed = once(svc.getRedis(), 'close');
+    await fake.refuse();
+    await closed;
+  }
+
+  async function recover(drop = false): Promise<void> {
+    const redis = svc.getRedis();
+    const ready = once(redis, 'ready');
+    if (drop) {
+      const closed = once(redis, 'close');
+      fake.dropConnections();
+      await closed;
+    }
+    // The first reconnect is armed for 50 ms. Readiness, not a sleep, fences later assertions.
+    await vi.advanceTimersByTimeAsync(50);
+    await ready;
+    // Fence commands sent by reconnect callbacks before checking for replayed writes.
+    expect(await redis.ping()).toBe('OK');
+  }
+
+  async function timed(p: Promise<unknown>): Promise<{ err: unknown }> {
+    const result = rejection(p);
+    const command = fake.dropOn.values().next().value ?? fake.silentOn.values().next().value;
+    if (fake.mode === 'silent' || fake.mode === 'loading' || command) {
+      await fake.nextCommand(command ?? 'INFO');
+      await vi.advanceTimersByTimeAsync(2_000);
+    }
+    return { err: await result };
+  }
+
+  async function commandTimeout(p: Promise<unknown>, command: string): Promise<{ err: unknown }> {
+    const received = fake.nextCommand(command);
+    let settled = false;
+    const result = rejection(p).then((err) => {
+      settled = true;
+      return { err };
+    });
+    await received;
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    return result;
+  }
 
   it('concurrent initializers use the key that wins the write race', async () => {
     delete process.env.CONFIG_ENCRYPTION_KEY;
@@ -287,9 +342,15 @@ describe('ConfigService while Redis is unavailable', () => {
     expect(fake.countApplied('PUBLISH')).toBe(1);
   });
 
-  it('rejects every call quickly with ConfigUnavailableError once refused', async () => {
+  it('rejects every call without queueing with ConfigUnavailableError once refused', async () => {
     await boot();
-    await fake.refuse();
+    await refuse();
+    expect(svc.getRedis().options).toMatchObject({
+      commandTimeout: 2_000,
+      enableOfflineQueue: false,
+      autoResendUnfulfilledCommands: false,
+    });
+    expect([1, 2, 20].map((n) => svc.getRedis().options.retryStrategy!(n))).toEqual([50, 100, 500]);
     const calls: Record<string, () => Promise<unknown>> = {
       get: () => svc.get('fresh:key'),
       getFresh: () => svc.getFresh('fresh:key'),
@@ -300,10 +361,13 @@ describe('ConfigService while Redis is unavailable', () => {
       getBoolean: () => svc.getBoolean('fresh:bool', true),
     };
     for (const [name, call] of Object.entries(calls)) {
-      const { err, ms } = await timed(call());
+      const { err } = await timed(call());
       expect(err, name).toBeInstanceOf(ConfigUnavailableError);
       const e = err as ConfigUnavailableError;
-      expect(ms, name).toBeLessThan(800);
+      expect(
+        (svc.getRedis() as unknown as { offlineQueue: { length: number } }).offlineQueue.length,
+        name,
+      ).toBe(0);
       expect(e.cause, name).toBeDefined();
       expect('code' in e, name).toBe(false);
       expect(e.message, name).toMatch(/^Configuration store unavailable \(\w+\)$/);
@@ -318,40 +382,28 @@ describe('ConfigService while Redis is unavailable', () => {
   it('rejects after the command timeout when the server is silent', async () => {
     await boot();
     fake.mode = 'silent';
-    const { err, ms } = await timed(svc.get('silent:key'));
+    const { err } = await commandTimeout(svc.get('silent:key'), 'GET');
     expect(err).toBeInstanceOf(ConfigUnavailableError);
-    expect(ms).toBeGreaterThan(1800);
-    expect(ms).toBeLessThan(3500);
   });
 
   it('recovers on the same instance after the server returns on the same port', async () => {
     await boot();
-    await fake.refuse();
+    await refuse();
     await timed(svc.getFresh('rec:key'));
     await fake.restart();
-    const t0 = Date.now();
-    for (;;) {
-      try {
-        await svc.getFresh('rec:key');
-        break;
-      } catch (err) {
-        expect(err).toBeInstanceOf(ConfigUnavailableError);
-        if (Date.now() - t0 > 2000) throw err;
-        await sleep(50);
-      }
-    }
+    await recover();
+    expect(await svc.getFresh('rec:key')).toBeNull();
     await svc.set('rec:key', 'back');
     expect(fake.store.get('rec:key')).toBe('back');
-    expect(Date.now() - t0).toBeLessThan(2000);
   });
 
   it('never applies a write that was rejected while refused', async () => {
     await boot();
-    await fake.refuse();
+    await refuse();
     const { err } = await timed(svc.set('late:refused', 'v'));
     expect(err).toBeInstanceOf(ConfigUnavailableError);
     await fake.restart();
-    await sleep(1500);
+    await recover();
     expect(fake.countApplied('SET', 'late:refused')).toBe(0);
     expect(fake.store.has('late:refused')).toBe(false);
   });
@@ -359,12 +411,11 @@ describe('ConfigService while Redis is unavailable', () => {
   it('never applies a write that timed out on a silent connection', async () => {
     await boot();
     fake.mode = 'silent';
-    const { err } = await timed(svc.set('late:silent', 'v'));
+    const { err } = await commandTimeout(svc.set('late:silent', 'v'), 'SET');
     expect(err).toBeInstanceOf(ConfigUnavailableError);
     expect(fake.received.some((c) => c[0] === 'set' && c[1] === 'late:silent')).toBe(true);
-    fake.dropConnections();
     fake.mode = 'healthy';
-    await sleep(1500);
+    await recover(true);
     expect(fake.countApplied('SET', 'late:silent')).toBe(0);
     expect(fake.store.has('late:silent')).toBe(false);
   });
@@ -384,10 +435,10 @@ describe('ConfigService while Redis is unavailable', () => {
     await boot();
     fake.store.set('cache:key', 'old');
     expect(await svc.get('cache:key')).toBe('old');
-    await fake.refuse();
+    await refuse();
     await timed(svc.set('cache:key', 'new'));
     await fake.restart();
-    await sleep(700);
+    await recover();
     const before = fake.countApplied('GET', 'cache:key');
     expect(await svc.get('cache:key')).toBe('old');
     expect(fake.countApplied('GET', 'cache:key') - before).toBe(1);
@@ -400,16 +451,15 @@ describe('ConfigService while Redis is unavailable', () => {
       const setsBefore = fake.countApplied('SET', CONFIG_KEYS.ENCRYPTION_KEY);
       fake.store.delete(CONFIG_KEYS.ENCRYPTION_KEY);
       svc.clearCache();
-      if (how === 'refused') await fake.refuse();
+      if (how === 'refused') await refuse();
       else fake.mode = 'silent';
-      const { err } = await timed(svc.getEncryptionKey());
+      const { err } = await (how === 'silent'
+        ? commandTimeout(svc.getEncryptionKey(), 'GET')
+        : timed(svc.getEncryptionKey()));
       expect(err).toBeInstanceOf(ConfigUnavailableError);
       if (how === 'refused') await fake.restart();
-      else {
-        fake.dropConnections();
-        fake.mode = 'healthy';
-      }
-      await sleep(1000);
+      else fake.mode = 'healthy';
+      await recover(how === 'silent');
       expect(fake.countApplied('SET', CONFIG_KEYS.ENCRYPTION_KEY)).toBe(setsBefore);
       expect(fake.store.has(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(false);
     },
@@ -446,10 +496,9 @@ describe('ConfigService while Redis is unavailable', () => {
       for (const [k, v] of Object.entries(seed)) fake.store.set(k, v);
       await fake.start();
       svc = new ConfigService();
-      const { err, ms } = await timed(svc.initialize(fake.url()));
+      const { err } = await timed(svc.initialize(fake.url()));
       expect(err).toBeInstanceOf(ConfigUnavailableError);
       expect((err as ConfigUnavailableError).operation).toBe(op);
-      expect(ms).toBeLessThan(3500);
     },
   );
 
@@ -458,11 +507,9 @@ describe('ConfigService while Redis is unavailable', () => {
     fake.silentOn.add('SETNX');
     await fake.start();
     svc = new ConfigService();
-    const { err, ms } = await timed(svc.initialize(fake.url()));
+    const { err } = await commandTimeout(svc.initialize(fake.url()), 'SETNX');
     expect(err).toBeInstanceOf(ConfigUnavailableError);
     expect((err as ConfigUnavailableError).operation).toBe('seedDefaults');
-    expect(ms).toBeGreaterThan(1800);
-    expect(ms).toBeLessThan(3500);
   });
 
   it('keeps a server error reply on a boot-time call as a ReplyError', async () => {
@@ -492,12 +539,20 @@ describe('ConfigService while Redis is unavailable', () => {
       fake.mode = 'loading';
       await fake.start();
       svc = new ConfigService();
-      const { err, ms } = await timed(svc.initialize(fake.url()));
+      const received = fake.nextCommand('INFO');
+      let settled = false;
+      const result = rejection(svc.initialize(fake.url())).then((err) => {
+        settled = true;
+        return { err };
+      });
+      await received;
+      await vi.advanceTimersByTimeAsync(399);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const { err } = await result;
       expect(err).toBeInstanceOf(ConfigUnavailableError);
       expect((err as ConfigUnavailableError).operation).toBe('initialize');
       expect((err as ConfigUnavailableError).cause).toBeDefined();
-      expect(ms).toBeGreaterThanOrEqual(350);
-      expect(ms).toBeLessThanOrEqual(1500);
     });
   });
 
@@ -507,9 +562,13 @@ describe('ConfigService while Redis is unavailable', () => {
       fake.mode = 'loading';
       await fake.start();
       svc = new ConfigService();
-      await timed(svc.initialize(fake.url()));
+      const received = fake.nextCommand('INFO');
+      const result = rejection(svc.initialize(fake.url()));
+      await received;
+      await vi.advanceTimersByTimeAsync(400);
+      await result;
       const seen = fake.connections;
-      await sleep(1500);
+      await vi.advanceTimersByTimeAsync(1_500);
       expect(fake.connections).toBe(seen);
     });
   });
@@ -519,12 +578,12 @@ describe('ConfigService while Redis is unavailable', () => {
     await fake.start();
     await fake.refuse();
     svc = new ConfigService();
-    const { err, ms } = await timed(svc.initialize(fake.url()));
+    const { err } = await timed(svc.initialize(fake.url()));
     expect(err).toBeInstanceOf(ConfigUnavailableError);
     expect((err as ConfigUnavailableError).operation).toBe('initialize');
-    expect(ms).toBeLessThan(1500);
+
     await fake.restart();
-    await sleep(1500);
+    await vi.advanceTimersByTimeAsync(1_500);
     expect(fake.connections).toBe(0);
   });
 
@@ -546,10 +605,19 @@ describe('ConfigService while Redis is unavailable', () => {
       fake.mode = 'silent';
       await fake.start();
       svc = new ConfigService();
-      const { err, ms } = await timed(svc.initialize(fake.url()));
+      const received = fake.nextCommand('*');
+      let settled = false;
+      const result = rejection(svc.initialize(fake.url())).then((err) => {
+        settled = true;
+        return { err };
+      });
+      await received;
+      await vi.advanceTimersByTimeAsync(399);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const { err } = await result;
       expect(err).toBeInstanceOf(ConfigUnavailableError);
       expect((err as ConfigUnavailableError).operation).toBe('initialize');
-      expect(ms).toBeLessThan(1500);
     });
   });
 
@@ -572,7 +640,7 @@ describe('ConfigService while Redis is unavailable', () => {
     // A client left open would reconnect after the server drops it again.
     const seen = fake.connections;
     fake.dropConnections();
-    await sleep(800);
+    await vi.advanceTimersByTimeAsync(800);
     expect(fake.connections).toBe(seen);
   });
 
@@ -603,18 +671,27 @@ describe('ConfigService while Redis is unavailable', () => {
       await boot();
       const redis = svc.getRedis();
       const disconnect = vi.spyOn(redis, 'disconnect');
-      if (how === 'refused') await fake.refuse();
+      if (how === 'refused') await refuse();
       else fake.mode = 'silent';
-      const t0 = Date.now();
-      await svc.close();
-      expect(Date.now() - t0).toBeLessThan(3000);
+      const quit = how === 'silent' ? fake.nextCommand('QUIT') : null;
+      let settled = false;
+      const closing = svc.close().then(() => {
+        settled = true;
+      });
+      if (quit) {
+        await quit;
+        await vi.advanceTimersByTimeAsync(1_999);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+      }
+      await closing;
       expect(disconnect).toHaveBeenCalled();
       // disconnect() leaves `status` stale while the socket is already down, so assert the
       // behaviour that matters: the client never reconnects.
       const seen = fake.connections;
       if (how === 'refused') await fake.restart();
       else fake.mode = 'healthy';
-      await sleep(700);
+      await vi.advanceTimersByTimeAsync(700);
       expect(fake.connections).toBe(seen);
       expect(() => svc.getRedis()).toThrow(/not initialized/);
     },
