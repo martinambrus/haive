@@ -49,9 +49,9 @@ import {
 
 /** Expected local git failures end this attempt immediately; a person can repair and retry. */
 class UndoGitError extends Error {}
-const gitFailureReason = (summary: string, error: unknown) => {
+const gitFailureReason = (summary: string, error: unknown, secret?: string | null) => {
   // Sanitize the original structure before converting it to persisted display copy.
-  const detail = scrubSecret(scrubErrorPaths(safeErrorMessage(error)), null)
+  const detail = scrubSecret(scrubErrorPaths(safeErrorMessage(error)), secret ?? null)
     .trim()
     .slice(0, 500);
   return detail ? `${summary}: ${detail}` : summary;
@@ -132,6 +132,7 @@ async function remoteRefusal(
   credentialId?: string,
 ): Promise<{ reason: string; permanent?: boolean } | null> {
   const ref = `refs/haive/undo-check/${randomUUID()}`;
+  let helper: Awaited<ReturnType<typeof buildCredentialHelper>> | null = null;
   try {
     if ((await gitRun(m.repoPath, ['check-ref-format', `refs/heads/${m.landedOn}`])).code !== 0)
       return { reason: 'The recorded base branch is invalid; the merge was left committed.' };
@@ -153,7 +154,7 @@ async function remoteRefusal(
           fetchUrl.code !== 0 ? fetchUrl.stderr : pushUrl.code !== 0 ? pushUrl.stderr : '',
         ),
       };
-    const helper = credentialId
+    helper = credentialId
       ? await buildCredentialHelper(db, credentialId, userId, fetchUrl.stdout.trim())
       : null;
     const listed = await originGitRun(
@@ -175,6 +176,7 @@ async function remoteRefusal(
         reason: gitFailureReason(
           'The remote branch could not be checked; the merge was left committed.',
           listed.stderr,
+          helper?.secret,
         ),
       };
     const fetched = await originGitRun(
@@ -197,6 +199,7 @@ async function remoteRefusal(
         reason: gitFailureReason(
           'The remote branch could not be checked; the merge was left committed.',
           fetched.stderr,
+          helper?.secret,
         ),
       };
     const contains = await gitRun(m.repoPath, ['merge-base', '--is-ancestor', m.baseShaAfter, ref]);
@@ -211,6 +214,7 @@ async function remoteRefusal(
           reason: gitFailureReason(
             'The remote history could not be checked; the merge was left committed.',
             contains.stderr,
+            helper?.secret,
           ),
         };
   } catch (error) {
@@ -218,6 +222,7 @@ async function remoteRefusal(
       reason: gitFailureReason(
         'The remote branch could not be checked; the merge was left committed.',
         error,
+        helper?.secret,
       ),
     };
   } finally {
@@ -260,7 +265,10 @@ export async function recordUndoFailure(
         dir: payload.dir,
         baseShaAfter: payload.baseShaAfter,
         outcome: 'refused',
-        reason: `Undo failed: ${scrubErrorPaths(safeErrorMessage(err))}`,
+        // The one-shot helper's plaintext secret is scoped to remoteRefusal,
+        // which scrubs all remote failures before returning. This queue fallback
+        // has no helper or secret; still remove paths and URL credentials here.
+        reason: gitFailureReason('Undo failed', err),
       },
     });
     return true;

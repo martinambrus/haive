@@ -542,6 +542,34 @@ describe('explicit undo of a cancel-left committed merge', () => {
     expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
     expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
   });
+  it.each(['list', 'fetch', 'throw'])(
+    'scrubs a standalone credential echoed by the remote during %s',
+    async (failure) => {
+      const f = await fixture();
+      const token = 'standalone-private-credential';
+      await git(f.dir, 'remote', 'add', 'origin', 'https://example.test/repo.git');
+      vi.spyOn(f.db.query.taskSteps, 'findFirst').mockResolvedValue({
+        formValues: { credentialId: 'credential' },
+      } as never);
+      vi.spyOn(gitPush, 'buildCredentialHelper').mockResolvedValue({
+        argv: [],
+        env: {},
+        secret: token,
+      });
+      vi.spyOn(gitPush, 'originGitRun').mockImplementation(async (_dir, args) => {
+        if (failure === 'throw') throw new Error(`remote echoed ${token}`);
+        if (failure === 'fetch' && args.includes('ls-remote'))
+          return { code: 0, stdout: `${f.after}\trefs/heads/main\n`, stderr: '' };
+        return { code: 128, stdout: '', stderr: `remote echoed ${token}` };
+      });
+      await f.run();
+      const reason = leftCommittedMerges(f.events)[0]?.refused?.reason;
+      expect(reason).toContain('remote echoed ***');
+      expect(reason).not.toContain(token);
+      expect(JSON.stringify(f.settled())).not.toContain(token);
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    },
+  );
   it('refuses older events without immutable feature evidence', async () => {
     const f = await fixture();
     Object.assign(f.payload, { featureSha: undefined });
