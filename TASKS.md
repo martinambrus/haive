@@ -233,7 +233,7 @@ DECIDED by the owner 2026-11-11: separate editor hostname (e.g. `ide.<domain>`) 
 APPROVED by the owner 2026-11-12 with a constraint: single-host installs (localhost, a company's internal network, one hostname for web and api) must keep working with no new setting. Design draft (M2 map, no code): `.claude/tmp/codex-run/M2-S/codex-1/design.txt` (`HAIVE_EDITOR_ORIGIN`, hashed single-use handshake + editor session tables, editor-host dispatch; cross-host refuses `/ide` without the setting).
 In cross-host mode `/ide` is proxied on the web origin, so code-server (which runs repository code) runs with the app's origin and can reach its API session. Options: a separate editor hostname (needs DNS/TLS per install), an API-host editor with its own scoped handshake token, or a sandboxed opaque-origin iframe (code-server may need storage it then lacks). Costs: `.claude/tmp/codex-run/H2-S/codex-2/editor-options.txt`. Needs an owner decision. Same-hostname installs are unaffected.
 
-### T614 · FNF[cancel-left-merge-followups] · cancel-left committed-merge report and Undo follow-ups (+18)
+### T614 · FNF[cancel-left-merge-followups] · cancel-left committed-merge report and Undo follow-ups (+21)
 
 status: open · kind: fix · found: E2 (#329) reviews 2026-11-11 · priority: P4
 Code in `worker/src/step-engine/left-committed-merge.ts`.
@@ -242,20 +242,33 @@ Code in `worker/src/step-engine/left-committed-merge.ts`.
 2. One report per task, from the latest landing only: with landings in two directories the earlier one is never checked (~:40-62). Reachable only with two step-12 landings in different directories.
 3. DONE #1090. Undo (`undo-left-merge.ts`, #1081): a branch checked out in a linked worktree between the worktree check and `update-ref` is moved under it (seconds-wide; the update-ref CAS still holds the sha).
 4. Undo: worktree paths are compared without resolving symlinks; a symlinked path refuses (fails safe).
-5. Undo: an `undone` settlement whose projection re-sync then fails is not re-drivable by the person; nor is a recovery still blocked after the queue's retry window.
+5. MOVED to T625 (design). Undo: an `undone` settlement whose projection re-sync then fails is not re-drivable by the person; nor is a recovery still blocked after the queue's retry window.
 6. DONE #1090. Undo: a base that switched branch settles as `moved`, not as a retryable refusal.
 7. DONE #1090. Undo: git stderr detail is dropped from the refusal reason; no test drives a failed worktree-list read through undo.
-8. (PRE-EXISTING) `restoreFeature` errors are swallowed once the report is settled.
-9. (#1090 low) The unsupported-git refusal names Git 2.27 for any exit before the `start` ack. Copy.
+8. INVALID (#1099 review): `restoreFeature` errors on a settled report propagate to the queue retry; nothing is swallowed. Residual is item 21.
+9. DONE #1099. (#1090 low) The unsupported-git refusal names Git 2.27 for any exit before the `start` ack. Copy.
 10. (#1090 low) The real-git transaction tests share a 100 ms deadline with git's own start; can flake on a loaded runner.
 11. (#1090 low) The transaction callback has no timer of its own; the git calls inside it keep their bounds.
-12. (#1090 low) No test pins the 10 s post-commit wait or the secret-then-path scrub order.
+12. DONE #1099. (#1090 low) No test pins the 10 s post-commit wait or the secret-then-path scrub order.
 13. (#1090 low) (PRE-EXISTING) A ref `.lock` left by an external SIGKILL of `update-ref` needs manual removal.
 14. (#1090 low) Some interrupted-move detection branches have no test.
-15. (#1090 low) Interrupted-move recovery passes paths on argv; a large touched set can hit the argv limit. Fix: `--pathspec-from-file`.
+15. DONE #1099. (#1090 low) Interrupted-move recovery passes paths on argv; a large touched set can hit the argv limit. Fix: `--pathspec-from-file`.
 16. (#1090 low) Recovery does not exempt the projection paths from its clean-against-index check (fails safe: refuses).
-17. (#1090 low) The SIGKILL test does not assert the child is unref'd.
-18. (#1090 low) A failure after `commit: ok` can still be reported as "Git refused". Copy.
+17. DONE #1099. (#1090 low) The SIGKILL test does not assert the child is unref'd.
+18. DONE #1099. (#1090 low) A failure after `commit: ok` can still be reported as "Git refused". Copy.
+19. (#1099 low) A failure after `commit: ok` does not re-create the feature branch until the person retries (`restoreFeature` runs after the throw, `undo-left-merge.ts` ~:845); the retry path restores it.
+20. (#1099 low) (PRE-EXISTING) A reply timeout or EOF at `commit` is treated as pre-commit (`git-ref-transaction.ts` ~:159): plain "Git refused", no re-sync, kept projections put back over a tree that may have moved. Redelivery heals it. Fix: report an unacknowledged commit as unknown and run recovery.
+21. (#1099 low) (PRE-EXISTING) If `restoreFeature` throws on a settled report and the finally's re-sync also fails, the re-sync error replaces the original and nothing logs it. Fix: warn-log the original in the finally. Also item 11: the 32 KiB recovery batches run inside the lock callback, about 3 git spawns per batch.
+
+### T624 · ops · Lint/Unit CI job runs near its 20-minute limit
+
+status: open · kind: ops · found: #1099 CI 2026-11-12 · priority: P3
+`lint-typecheck-test` (`.github/workflows/ci.yml` ~:36, `timeout-minutes: 20`) took 12-19 min on recent main runs; #1099 and the docs-only #1098 were cancelled at 20 min in "Module scripts", and a re-run passed. Measure per-step time over recent runs, then raise the limit to a measured budget (as the gated step did in #1093) or split the job. Not an outage workaround: the job grew.
+
+### T625 · design · re-drive an Undo whose re-sync failed after settling
+
+status: open · kind: design · found: T614 item 5, #1099 drive 2026-11-12 · priority: P4
+An `undone` settlement whose projection re-sync then fails cannot be re-driven by the person, nor can a recovery still blocked after the queue's retry window (`worker/src/step-engine/undo-left-merge.ts`). The smallest fix needs new state: a durable "re-sync owed" marker on the settled report that the plan-mirror sweep or a person-visible Retry can drain. Needs an owner decision before any build.
 
 ## Done` (`T323 — <title> — PR #N (<merge sha>), <date>`).
 
