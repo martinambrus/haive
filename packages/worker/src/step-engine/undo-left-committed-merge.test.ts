@@ -380,10 +380,13 @@ describe('explicit undo of a cancel-left committed merge', () => {
         refused: { count: 1, reason: expect.stringMatching(/checkout.*branch/i) },
       });
       expect(h.sync).not.toHaveBeenCalled();
+      const reason = leftCommittedMerges(f.events)[0]?.refused?.reason;
+      expect(reason).not.toContain('Switch it back');
+      expect(reason).toContain('Retry Undo');
       h.duringPrep = null;
-      await git(f.dir, 'switch', 'main');
       await f.run();
       expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+      expect(await git(f.dir, 'rev-parse', 'HEAD')).toBe(f.after);
       expect(leftCommittedMerges(f.events)[0]?.settled?.outcome).toBe('undone');
     },
   );
@@ -585,6 +588,7 @@ describe('explicit undo of a cancel-left committed merge', () => {
     await f.run();
     const reason = leftCommittedMerges(f.events)[0]?.refused?.reason;
     expect(reason).toContain('connection refused');
+    expect(reason).not.toContain('.:');
     expect(reason).toContain('[path]');
     expect(reason).not.toContain(f.dir);
     expect(reason).not.toContain('private-token');

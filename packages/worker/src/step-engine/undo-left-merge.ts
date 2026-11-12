@@ -59,7 +59,7 @@ const gitFailureReason = (summary: string, error: unknown, secret?: string | nul
   const detail = scrubSecret(scrubErrorPaths(safeErrorMessage(error)), secret ?? null)
     .trim()
     .slice(0, 500);
-  return detail ? `${summary}: ${detail}` : summary;
+  return detail ? `${summary.replace(/\.$/, '')}: ${detail}` : summary;
 };
 const undoRevParse = (dir: string, spec: string) =>
   revParse(dir, spec).catch((error: unknown) => {
@@ -583,7 +583,7 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
             if (symbolic.code !== 0 || symbolic.stdout.trim() !== branch) {
               await settle(
                 'refused',
-                'The checkout is no longer on the base branch. Switch it back and retry Undo; nothing was changed.',
+                'The checkout is no longer on the base branch; nothing was changed. Retry Undo to check the current branch checkouts again.',
               );
               return false;
             }
