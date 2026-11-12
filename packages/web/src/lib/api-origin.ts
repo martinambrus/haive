@@ -41,9 +41,12 @@ export const API_PROXY_PATH = '/api/haive';
 /** The config the server hands the browser, from the container's environment. Server-only: these
  *  names are not `NEXT_PUBLIC_*`, so the client bundle reads them as undefined. */
 export function runtimeApiConfig(): RuntimeApiConfig {
+  // A blank or whitespace value is unset, as `resolveServerApiBase` reads it.
+  const apiUrl = process.env.HAIVE_PUBLIC_API_URL?.trim();
+  const apiPort = process.env.HAIVE_API_PORT?.trim();
   return {
-    ...(process.env.HAIVE_PUBLIC_API_URL ? { apiUrl: process.env.HAIVE_PUBLIC_API_URL } : {}),
-    ...(process.env.HAIVE_API_PORT ? { apiPort: process.env.HAIVE_API_PORT } : {}),
+    ...(apiUrl ? { apiUrl } : {}),
+    ...(apiPort ? { apiPort } : {}),
   };
 }
 
@@ -86,7 +89,7 @@ export function resolveApiTransport(inputs: ApiOriginInputs): ApiTransport {
     };
   }
 
-  return browserBase(buildTime ?? FALLBACK_API_URL);
+  return browserBase(buildTime?.trim() || FALLBACK_API_URL);
 }
 
 export function resolveApiOrigin(inputs: ApiOriginInputs): string {

@@ -2,7 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { resyncHaiveProjections } from './set-aside.js';
-import { refreshProjectState, refreshProjectStateOutcome } from './refresh.js';
+import {
+  refreshProjectState,
+  refreshProjectStateOutcome,
+  sweepDirtyProjectStates,
+  type ProjectStateSweepOutcome,
+} from './refresh.js';
 
 const mocks = vi.hoisted(() => ({
   missing: vi.fn(),
@@ -64,7 +69,7 @@ describe('refreshProjectStateOutcome', () => {
       const result = await refreshProjectStateOutcome(db(), 'repo');
       expect(result).toEqual(
         outcome === 'held'
-          ? { outcome: 'held', reason: 'sync' }
+          ? { outcome: 'held', reason: 'sync', detail: 'diagnostic only' }
           : outcome === 'deferred'
             ? { outcome: 'held', reason: 'checkout' }
             : outcome === 'refused'
@@ -189,3 +194,48 @@ it.each([
   );
   expect(mocks.write).not.toHaveBeenCalled();
 });
+
+it.each(['written', 'held', 'blocked', 'error'] as const)(
+  'captures the actual sweep %s result without retrying it',
+  async (outcome) => {
+    const id = '00000000-0000-4000-8000-000000000001';
+    const query = {
+      from: () => query,
+      innerJoin: () => query,
+      where: () => query,
+      orderBy: () => query,
+      limit: async () => [{ repositoryId: id }],
+    };
+    const fixture = {
+      ...db(),
+      select: vi.fn().mockReturnValueOnce(query).mockImplementation(db().select),
+    } as unknown as Database;
+    if (outcome === 'held')
+      mocks.sync.mockResolvedValue({
+        outcome: 'held',
+        code: 'write_pending',
+        reason: 'an interrupted project state write awaits recovery',
+      });
+    if (outcome === 'blocked')
+      mocks.write.mockResolvedValue({
+        blocked: {
+          code: 'unowned_malformed_rtk',
+          file: '.haive-data/state/settings/rtk-enabled.json',
+        },
+      });
+    if (outcome === 'error') mocks.recover.mockRejectedValue(new Error('recovery failed'));
+    const outcomes = new Map<string, ProjectStateSweepOutcome>();
+    expect(await sweepDirtyProjectStates(fixture, outcomes)).toBe(
+      outcome === 'written' || outcome === 'blocked' ? 1 : 0,
+    );
+    expect(outcomes.get(id)).toMatchObject({ outcome });
+    if (outcome === 'held')
+      expect(outcomes.get(id)).toMatchObject({
+        reason: 'sync',
+        code: 'write_pending',
+        detail: 'an interrupted project state write awaits recovery',
+      });
+    expect(mocks.recover).toHaveBeenCalledOnce();
+    expect(mocks.sync).toHaveBeenCalledTimes(outcome === 'error' ? 0 : 1);
+  },
+);

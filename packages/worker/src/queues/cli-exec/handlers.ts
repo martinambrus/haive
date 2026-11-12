@@ -15,6 +15,7 @@ import {
   VERSION_REFRESH_JOB_ID,
   CLI_POLLABLE_JOB_OPTS,
   CLI_SIGN_OUT_AUTH_WAIT_MS,
+  CLI_SIGN_OUT_EXPIRED_MESSAGE,
   CONFIG_CONCURRENCY_CHANNEL,
   CONFIG_KEYS,
   ConfigUnavailableError,
@@ -96,7 +97,7 @@ import {
 import { reserveAgentSlot, type AgentSlot } from './agent-lease.js';
 import { STATIC_PARALLEL_AGENTS, currentAgentCap, publishAgentCap } from './agent-pool-cap.js';
 import { enforceRuntimeHolderReserve } from './agent-reserve.js';
-import { deferJob } from './defer-job.js';
+import { deferJob, retryJobWrite } from './defer-job.js';
 import { executeByKind, interpretCliFailure } from './exec-core.js';
 import { fatalClassFromMessage } from './failure-class.js';
 import {
@@ -642,6 +643,13 @@ export async function handleProbeJob(
 ): Promise<CliProbeResult> {
   const provider = await db.query.cliProviders.findFirst({
     where: eq(schema.cliProviders.id, payload.providerId),
+    // Sign-out resets this check stamp without advancing the completed-login generation.
+    // Keep its exact database precision for the publication compare-and-set.
+    extras: {
+      authCheckRevision: sql<string | null>`${schema.cliProviders.authLastCheckedAt}::text`.as(
+        'auth_check_revision',
+      ),
+    },
   });
   if (!provider) {
     return {
@@ -652,6 +660,16 @@ export async function handleProbeJob(
     };
   }
 
+  // Login awaits its probe while the API owns the scope. No worker lock may span
+  // image builds, CLI execution or network calls; publication below is conditional.
+  return probeProvider(db, payload, provider);
+}
+
+async function probeProvider(
+  db: Database,
+  payload: CliProbeJobPayload,
+  provider: typeof schema.cliProviders.$inferSelect & { authCheckRevision: string | null },
+): Promise<CliProbeResult> {
   if (!cliAdapterRegistry.has(provider.name)) {
     return {
       ok: false,
@@ -714,7 +732,15 @@ export async function handleProbeJob(
         authLastCheckedAt: new Date(),
         updatedAt: new Date(),
       })
-      .where(eq(schema.cliProviders.id, provider.id));
+      .where(
+        and(
+          eq(schema.cliProviders.id, provider.id),
+          eq(schema.cliProviders.authGeneration, provider.authGeneration),
+          eq(schema.cliProviders.authMode, provider.authMode),
+          eq(schema.cliProviders.isolateAuth, provider.isolateAuth),
+          sql`${schema.cliProviders.authLastCheckedAt} IS NOT DISTINCT FROM ${provider.authCheckRevision}::timestamp`,
+        ),
+      );
   }
 
   return result;
@@ -1113,6 +1139,8 @@ export async function handleLoginCreateJob(
     return { ok: false, error: `no adapter registered for ${provider.name}` };
   }
 
+  // The API login session already owns this scope. A socket closed during creation
+  // can release it before the helper ends; sign-out retries transient removal failures.
   const adapter = cliAdapterRegistry.get(provider.name);
   const executable =
     provider.wrapperPath?.trim() || provider.executablePath?.trim() || adapter.defaultExecutable;
@@ -1173,12 +1201,26 @@ export async function handleLoginCreateJob(
   }
 }
 
+const CLI_SIGN_OUT_SCOPE_CHANGED_MESSAGE =
+  "Sign-out stopped: this CLI's sign-in settings changed while it was interrupted. Some credentials may already be removed. Sign out again.";
+
 export async function handleSignOutJob(
   db: Database,
   payload: CliSignOutJobPayload,
   runner: DockerRunner = defaultDockerRunner,
   job?: Job,
 ): Promise<CliSignOutJobResult> {
+  // BullMQ's timestamp survives every deferred retry, including time behind agent work.
+  const enqueuedAt = job?.timestamp ?? job?.data?.authContentionStartedAt;
+  const resuming = job?.data?.signOutStarted === true;
+  // A stalled worker can be redelivered after the start window with cleanup half done.
+  const deadline =
+    resuming || enqueuedAt === undefined ? undefined : enqueuedAt + CLI_SIGN_OUT_AUTH_WAIT_MS;
+  const assertInWindow = () => {
+    if (deadline !== undefined && Date.now() >= deadline)
+      throw new UnrecoverableError(CLI_SIGN_OUT_EXPIRED_MESSAGE);
+  };
+  assertInWindow();
   let provider = await db.query.cliProviders.findFirst({
     where: eq(schema.cliProviders.id, payload.providerId),
   });
@@ -1191,25 +1233,27 @@ export async function handleSignOutJob(
   const release = await tryCliAuthLock(db, lockedScope);
   if (!release) {
     if (!job) throw new Error('CLI authentication is busy');
-    const startedAt = job.data?.authContentionStartedAt ?? Date.now();
+    const startedAt = enqueuedAt ?? Date.now();
     const waitedMs = Date.now() - startedAt;
-    if (waitedMs >= CLI_SIGN_OUT_AUTH_WAIT_MS) {
-      throw new UnrecoverableError(
-        'A CLI sign-in or credential update kept this account busy. Nothing was removed.',
-      );
-    }
     const attempt = (job.data?.authContentionAttempts ?? 0) + 1;
     const delayMs = Math.min(2_000 * 2 ** Math.min(attempt - 1, 3), 15_000);
-    await job.updateData({
-      ...job.data,
-      authContentionStartedAt: startedAt,
-      authContentionAttempts: attempt,
-    });
     log.debug(
       { providerId: provider.id, scope: cliAuthScope(provider), attempt, waitedMs, delayMs },
       'cli sign-out deferred: a sign-in or credential update holds authentication',
     );
-    await deferJob(job, delayMs, job.token!);
+    await deferJob(
+      job,
+      delayMs,
+      job.token!,
+      () =>
+        job.updateData({
+          ...job.data,
+          authContentionStartedAt: startedAt,
+          authContentionAttempts: attempt,
+          signOutWaitReason: 'auth_busy',
+        }),
+      deadline,
+    );
     throw new DelayedError();
   }
   try {
@@ -1225,7 +1269,24 @@ export async function handleSignOutJob(
     if (cliAuthScope(provider) !== lockedScope) {
       if (!job) throw new Error('CLI authentication settings changed');
       log.debug({ providerId: provider.id }, 'cli sign-out retried: auth settings changed');
-      await deferJob(job, 1_000, job.token!);
+      const attempts = job.data?.authScopeChangeAttempts ?? 0;
+      if (attempts >= 5) {
+        throw new UnrecoverableError(
+          'CLI authentication settings kept changing. Nothing was removed. Try signing out again.',
+        );
+      }
+      await deferJob(
+        job,
+        1_000,
+        job.token!,
+        () =>
+          job.updateData({
+            ...job.data,
+            authScopeChangeAttempts: attempts + 1,
+            signOutWaitReason: 'settings_changed',
+          }),
+        deadline,
+      );
       throw new DelayedError();
     }
     if (
@@ -1235,12 +1296,33 @@ export async function handleSignOutJob(
       log.info({ providerId: provider.id }, 'cli sign-out superseded by a newer login');
       return { ok: true, superseded: true, removed: [], failed: [] };
     }
+    assertInWindow();
+    if (
+      resuming &&
+      job?.data?.signOutScope !== undefined &&
+      job.data.signOutScope !== lockedScope
+    ) {
+      // The settings changed while the sign-out was interrupted: the volumes it would remove now
+      // may be another profile's, and the ones it started on are no longer derivable. Stop.
+      throw new UnrecoverableError(CLI_SIGN_OUT_SCOPE_CHANGED_MESSAGE);
+    }
+    if (job && !resuming) {
+      // Persist BEFORE any container, volume or secret removal; a restart must resume it, on
+      // the scope it started on.
+      await retryJobWrite(job, () =>
+        job.updateData({ ...job.data, signOutStarted: true, signOutScope: lockedScope }),
+      );
+      assertInWindow();
+    }
     const meta = getCliProviderMetadata(provider.name);
     const removed: string[] = [];
     const failed: { name: string; stderr: string }[] = [];
     for (let idx = 0; idx < meta.authConfigPaths.length; idx += 1) {
       const name = authVolumeFor(provider, idx);
-      if (!(await runner.volumeExists(name))) continue;
+      if (!(await runner.volumeExists(name))) {
+        if (resuming) removed.push(name);
+        continue;
+      }
       // Exactly the hazard `cleanupTaskAuthVolumes` guards, on the volume class that
       // outlives every task: a worker killed between `docker create` and `docker start`
       // leaves a Created auth helper mounting this volume, and `docker volume rm --force`
@@ -1263,7 +1345,16 @@ export async function handleSignOutJob(
         );
       }
       await release.assertHeld();
-      const result = await runner.volumeRemove(name);
+      let result = await runner.volumeRemove(name);
+      // A closed login socket can release its scope while its 30 s chown helper still
+      // mounts this volume. Retry refusals with 31 s total backoff, without parsing
+      // Docker's stderr or stopping live containers. Keep the final failure diagnostics.
+      for (const delayMs of [1_000, 2_000, 4_000, 8_000, 16_000]) {
+        if (result.ok) break;
+        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+        await release.assertHeld();
+        result = await runner.volumeRemove(name);
+      }
       if (result.ok) removed.push(name);
       else failed.push({ name, stderr: result.stderr });
     }
@@ -1295,10 +1386,20 @@ export async function handleSignOutJob(
         .set({
           authStatus: 'unknown',
           authMessage: null,
-          authLastCheckedAt: new Date(),
+          // Always advance the check stamp, even when two writes share a clock tick.
+          authLastCheckedAt: sql`greatest(clock_timestamp()::timestamp, ${schema.cliProviders.authLastCheckedAt} + interval '1 microsecond')`,
           updatedAt: new Date(),
         })
-        .where(eq(schema.cliProviders.id, provider.id));
+        .where(
+          provider.isolateAuth
+            ? eq(schema.cliProviders.id, provider.id)
+            : and(
+                eq(schema.cliProviders.userId, provider.userId),
+                eq(schema.cliProviders.name, provider.name),
+                eq(schema.cliProviders.authMode, provider.authMode),
+                eq(schema.cliProviders.isolateAuth, false),
+              ),
+        );
     }
 
     log.info(

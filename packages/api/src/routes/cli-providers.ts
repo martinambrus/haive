@@ -1,3 +1,4 @@
+import { CLI_SIGN_OUT_AUTH_WAIT_MS, CLI_SIGN_OUT_EXPIRED_MESSAGE } from '@haive/shared/constants';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { and, asc, desc, eq } from 'drizzle-orm';
@@ -886,6 +887,7 @@ cliProviderRoutes.get('/:id/sign-out/:jobId', async (c) => {
     userId,
   });
 
+  const expiredBeforeRead = Date.now() >= job.timestamp + CLI_SIGN_OUT_AUTH_WAIT_MS;
   const state = await job.getState();
   if (state === 'completed') {
     return c.json({ status: 'done', result: job.returnvalue as CliSignOutJobResult });
@@ -893,7 +895,19 @@ cliProviderRoutes.get('/:id/sign-out/:jobId', async (c) => {
   if (state === 'failed') {
     return c.json({ status: 'failed', error: job.failedReason || 'sign-out failed' });
   }
-  return c.json({ status: 'pending', state });
+  // A delayed retry can wait behind agent work past its deadline. The worker checks
+  // this same enqueue timestamp before removing anything, so a pending job can be
+  // reported as expired without waiting for a worker slot. Active work may have begun, and a
+  // redelivered job that already started removing resumes past the deadline.
+  const data = job.data as CliSignOutJobPayload;
+  if (state !== 'active' && expiredBeforeRead && data.signOutStarted !== true)
+    return c.json({ status: 'failed', error: CLI_SIGN_OUT_EXPIRED_MESSAGE });
+  const waitReason = state === 'delayed' ? data.signOutWaitReason : undefined;
+  return c.json({
+    status: 'pending',
+    state,
+    ...(waitReason === 'auth_busy' || waitReason === 'settings_changed' ? { waitReason } : {}),
+  });
 });
 
 cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {

@@ -398,8 +398,19 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   on the code. Api writers, and the deletes of a login secret (DELETE `usage-auth` and
   `secrets/:name`), answer 409 `cli_auth_busy` when it is held; a delete never advances the
   generation, so it cannot supersede a pending sign-out. The sign-out job defers itself (`deferJob`,
-  2 s doubling to 15 s) and fails after `CLI_SIGN_OUT_AUTH_WAIT_MS` (30 minutes) with a sentence
-  saying nothing was removed; the page polls a sign-out for that cap plus 2 minutes (other jobs 10). The usage poll takes the lock to refresh,
+  2 s doubling to 15 s) and fails after `CLI_SIGN_OUT_AUTH_WAIT_MS` (30 minutes, counted from
+  enqueue) with a sentence saying nothing was removed. That deadline covers only a job that never
+  started: before its first removal the job records `signOutStarted` and the scope it removes
+  (`signOutScope`), so a job redelivered after a worker death resumes its cleanup past the deadline,
+  and stops with a sentence saying some credentials may be gone if the scope changed meanwhile; the page polls a sign-out for that cap plus
+  2 minutes (other jobs 10), labels a wait by the job's structural wait reason (an auth-lock wait,
+  or a pause/outage gate) rather than its message, and reads a finished job whose result has
+  expired as finished with an unknown outcome. A scope that keeps moving under the sign-out fails it
+  after five retries, again saying nothing was removed. The login's own jobs never take the lock,
+  since the api session already holds it: a volume probe publishes health only by compare-and-set
+  on the generation, auth mode, isolation and the exact `auth_last_checked_at` it read, which a
+  sign-out advances, so a probe that read before a sign-out cannot write over it; and a sign-out
+  retries a volume still in use by a login helper (six attempts, 31 s of backoff). The usage poll takes the lock to refresh,
   re-reading the token under it, and again for every snapshot write, so a Disconnect between its
   fetch and its write leaves no stale snapshot. Each holder keeps the lock on its own connection, at
   most 32 per process (`MAX_CLI_AUTH_LOCK_CONNECTIONS`; beyond it a writer answers busy). A holder

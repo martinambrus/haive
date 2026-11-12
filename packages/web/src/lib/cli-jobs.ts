@@ -1,4 +1,4 @@
-import { CLI_SIGN_OUT_AUTH_WAIT_MS } from '@haive/shared/constants';
+import { CLI_SIGN_OUT_AUTH_WAIT_MS, CLI_POLLABLE_JOB_OPTS } from '@haive/shared/constants';
 import type { CliSignOutJobResult, RefreshCliVersionsJobResult } from '@haive/shared/constants';
 import { api, type CliPackageVersionsEntry, type CliProbeResult } from './api-client';
 
@@ -18,9 +18,11 @@ export function jobPhaseForState(state: string | undefined): QueuedJobPhase {
   return state === 'active' ? 'running' : 'queued';
 }
 
-export type SignOutResult = CliSignOutJobResult;
+export type SignOutResult = CliSignOutJobResult & { outcomeUnknown?: boolean };
 
 export function signOutSummary(result: SignOutResult): string {
+  if (result.outcomeUnknown)
+    return 'Sign-out result is no longer available. Check the account status before trying again.';
   if (result.superseded)
     return 'Sign-out skipped because you signed in again. Your current login was kept.';
   if (!result.ok)
@@ -38,8 +40,20 @@ export const POLL_TIMEOUT_MS = 10 * 60 * 1000;
 // Leave time for the worker's deferred retry and the final status request after its auth wait.
 export const SIGN_OUT_POLL_TIMEOUT_MS = CLI_SIGN_OUT_AUTH_WAIT_MS + 2 * 60_000;
 
-function signOutPollTimeout(phase: QueuedJobPhase, state: string | undefined): Error {
+function signOutPollTimeout(
+  phase: QueuedJobPhase,
+  state: string | undefined,
+  waitReason?: string,
+): Error {
   if (state !== 'delayed') return pollTimeout(phase);
+  if (waitReason === 'settings_changed')
+    return new Error(
+      'CLI authentication settings changed. Sign-out keeps going in the background. Check the account status before trying again.',
+    );
+  if (waitReason !== 'auth_busy')
+    return new Error(
+      'Sign-out is still queued. It keeps going in the background. Check the account status before trying again.',
+    );
   return new Error(
     'Still waiting for this account to become available. Sign-out keeps going in the background. Check the account status before trying again.',
   );
@@ -78,7 +92,7 @@ function pollDelay(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 type PollResponse<TDone> =
-  | { status: 'pending'; state?: string }
+  | { status: 'pending'; state?: string; waitReason?: string }
   | ({ status: 'done' } & TDone)
   | { status: 'failed'; error: string };
 
@@ -94,7 +108,8 @@ async function runQueuedJob<TDone>(
   signal?: AbortSignal,
   polling: {
     timeoutMs: number;
-    timeoutError: (phase: QueuedJobPhase, state: string | undefined) => Error;
+    timeoutError: (phase: QueuedJobPhase, state: string | undefined, waitReason?: string) => Error;
+    expiredResult?: () => TDone;
   } = { timeoutMs: POLL_TIMEOUT_MS, timeoutError: pollTimeout },
 ): Promise<TDone> {
   signal?.throwIfAborted();
@@ -104,13 +119,18 @@ async function runQueuedJob<TDone>(
   signal?.throwIfAborted();
   let phase: QueuedJobPhase = 'queued';
   let lastState: string | undefined;
+  let lastWaitReason: string | undefined;
+  let lastObservedAt: number | undefined;
   onPhase?.(phase);
 
   const deadline = Date.now() + polling.timeoutMs;
   let failures = 0;
   for (;;) {
     signal?.throwIfAborted();
-    if (Date.now() >= deadline) throw polling.timeoutError(phase, lastState);
+    // A resumed sign-out tab gets one final lookup even after its polling window:
+    // completion or an expired result is more useful than stale timeout copy.
+    if (Date.now() >= deadline && !polling.expiredResult)
+      throw polling.timeoutError(phase, lastState, lastWaitReason);
     let res: PollResponse<TDone>;
     try {
       res = signal
@@ -119,6 +139,16 @@ async function runQueuedJob<TDone>(
     } catch (error) {
       signal?.throwIfAborted();
       const { status, code } = error as { status?: number; code?: string };
+      // Once an owned job was observed and a full retention window passed, a missing
+      // result cannot prove failure. Sign-out can return a neutral unknown outcome;
+      // other job kinds keep their existing error behavior.
+      if (
+        code === 'job_expired' &&
+        lastObservedAt !== undefined &&
+        Date.now() - lastObservedAt >= CLI_POLLABLE_JOB_OPTS.removeOnComplete.age * 1000 &&
+        polling.expiredResult
+      )
+        return polling.expiredResult();
       // Expiry and other client refusals are final; retry only transient requests.
       if (
         code === 'job_expired' ||
@@ -126,7 +156,7 @@ async function runQueuedJob<TDone>(
         ++failures >= MAX_CONSECUTIVE_POLL_FAILURES
       )
         throw error;
-      if (Date.now() >= deadline) throw polling.timeoutError(phase, lastState);
+      if (Date.now() >= deadline) throw polling.timeoutError(phase, lastState, lastWaitReason);
       await pollDelay(Math.min(POLL_INTERVAL_MS, deadline - Date.now()), signal);
       continue;
     }
@@ -135,10 +165,12 @@ async function runQueuedJob<TDone>(
     if (res.status === 'done') return res;
     if (res.status === 'failed') throw new Error(res.error);
 
+    lastObservedAt = Date.now();
     lastState = res.state;
+    lastWaitReason = res.waitReason;
     phase = jobPhaseForState(lastState);
     onPhase?.(phase);
-    if (Date.now() >= deadline) throw polling.timeoutError(phase, lastState);
+    if (Date.now() >= deadline) throw polling.timeoutError(phase, lastState, lastWaitReason);
     await pollDelay(Math.min(POLL_INTERVAL_MS, deadline - Date.now()), signal);
   }
 }
@@ -164,7 +196,13 @@ export async function runCliSignOut(
     (jobId) => `/cli-providers/${providerId}/sign-out/${jobId}`,
     onPhase,
     undefined,
-    { timeoutMs: SIGN_OUT_POLL_TIMEOUT_MS, timeoutError: signOutPollTimeout },
+    {
+      timeoutMs: SIGN_OUT_POLL_TIMEOUT_MS,
+      timeoutError: signOutPollTimeout,
+      expiredResult: () => ({
+        result: { ok: false, outcomeUnknown: true, removed: [], failed: [] },
+      }),
+    },
   );
   return result;
 }

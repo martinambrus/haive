@@ -184,6 +184,7 @@ browserAccessRoutes.get('/:id/ddev-ca', async (c) => {
   } catch {
     throw new HttpError(404, 'DDEV CA not available yet');
   }
+  c.header('X-Content-Type-Options', 'nosniff');
   c.header('Content-Type', 'application/x-pem-file');
   c.header('Content-Disposition', 'attachment; filename="haive-ddev-rootCA.pem"');
   c.header('Cache-Control', 'no-store');

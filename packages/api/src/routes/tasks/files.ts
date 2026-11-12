@@ -56,6 +56,7 @@ fileRoutes.get('/:id/files/archive', async (c) => {
 
   const { stream, filename } = await createTaskArchiveStream(root, id);
 
+  c.header('X-Content-Type-Options', 'nosniff');
   c.header('Content-Type', 'application/zip');
   c.header('Content-Disposition', `attachment; filename="${filename}"`);
   c.header('Cache-Control', 'no-store');

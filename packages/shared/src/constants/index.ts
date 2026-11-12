@@ -471,8 +471,10 @@ export const CLI_LOGIN_CLOSE_CODES = {
   SETTINGS_CHANGED: 4410,
 } as const;
 
-/** Maximum time a sign-out job waits for an account's auth scope to become available. */
+/** Maximum time from enqueue before a sign-out must acquire its auth scope and start. */
 export const CLI_SIGN_OUT_AUTH_WAIT_MS = 30 * 60_000;
+export const CLI_SIGN_OUT_EXPIRED_MESSAGE =
+  'Sign-out did not start within 30 minutes. Nothing was removed. Try signing out again.';
 
 /** Finished CLI jobs stay readable for 15 minutes AFTER completion or failure
  *  (packages/web/src/lib/cli-jobs.ts), including refreshes started by the worker.
@@ -495,6 +497,12 @@ export interface CliSignOutJobPayload {
   userId: string;
   /** Absent on jobs queued before generation fencing was deployed. */
   authGeneration?: string;
+  /** Worker bookkeeping for the reason of its most recent deferred retry. */
+  signOutWaitReason?: 'auth_busy' | 'settings_changed';
+  /** Set before the first removal; a redelivered job that has it resumes past the start deadline. */
+  signOutStarted?: boolean;
+  /** The auth scope the started sign-out removes; a resume on another scope stops. */
+  signOutScope?: string;
 }
 
 export interface CliSignOutJobResult {

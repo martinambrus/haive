@@ -10,9 +10,9 @@ const state = globalThis as typeof globalThis & { [cacheKey]?: ApiBaseCache };
  * configuration can contain credentials. Invalid configuration is diagnosed once per value. */
 export function resolveServerApiBase(): string {
   const value =
-    process.env.API_URL_INTERNAL ??
-    process.env.HAIVE_PUBLIC_API_URL ??
-    process.env.NEXT_PUBLIC_API_URL ??
+    process.env.API_URL_INTERNAL?.trim() ||
+    process.env.HAIVE_PUBLIC_API_URL?.trim() ||
+    process.env.NEXT_PUBLIC_API_URL?.trim() ||
     FALLBACK_API_URL;
   let cached = state[cacheKey];
   if (cached?.value !== value) {

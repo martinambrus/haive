@@ -291,13 +291,17 @@ export default function CliProvidersPage() {
     });
     try {
       const result = await runCliSignOut(p.id, setPhase);
-      const { ok } = result;
+      const informational = result.ok || result.outcomeUnknown === true;
       const summary = signOutSummary(result);
       setSignOutStates((s) => ({
         ...s,
-        [p.id]: { busy: false, message: ok ? summary : null, error: ok ? null : summary },
+        [p.id]: {
+          busy: false,
+          message: informational ? summary : null,
+          error: informational ? null : summary,
+        },
       }));
-      if (ok) await load();
+      if (informational) await load();
     } catch (err) {
       setSignOutStates((s) => ({
         ...s,

@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { gitTimeoutLimits } from '../src/repo/git-exec.js';
-import { gitOperationInProgress } from '../src/repo/git-operation.js';
+import { gitOperationInProgress, gitOperationMarker } from '../src/repo/git-operation.js';
 import { failGit, noGit, type FakeGit } from './support/fake-git.js';
 
 const git = (cwd: string, ...args: string[]) =>
@@ -47,6 +47,7 @@ describe('gitOperationInProgress', () => {
 
   it('reads no operation in a clean checkout', async () => {
     expect(await gitOperationInProgress(repo)).toBe(false);
+    expect(await gitOperationMarker(repo)).toBeNull();
   });
 
   it('ignores a branch or tag named like the pseudorefs', async () => {
@@ -77,6 +78,21 @@ describe('gitOperationInProgress', () => {
 
   it.each(['CHERRY_PICK_HEAD', 'REVERT_HEAD'])('sees a stopped %s', async (ref) => {
     writeFileSync(join(repo, '.git', ref), git(repo, 'rev-parse', 'HEAD'));
+    expect(await gitOperationInProgress(repo)).toBe(true);
+  });
+
+  it.each([
+    'MERGE_HEAD',
+    'REBASE_HEAD',
+    'CHERRY_PICK_HEAD',
+    'REVERT_HEAD',
+    'rebase-merge',
+    'rebase-apply',
+  ])('names the exact %s marker for diagnostics', async (marker) => {
+    const entry = join(repo, '.git', marker);
+    if (marker.startsWith('rebase-')) mkdirSync(entry);
+    else writeFileSync(entry, git(repo, 'rev-parse', 'HEAD'));
+    expect(await gitOperationMarker(repo)).toBe(marker);
     expect(await gitOperationInProgress(repo)).toBe(true);
   });
 

@@ -216,3 +216,65 @@ it('reports a superseded sign-out result truthfully', async () => {
   const res = await app.request(`/${PROVIDER}/sign-out/123`);
   expect(await res.json()).toEqual({ status: 'done', result });
 });
+
+it.each(['waiting', 'prioritized', 'delayed'])(
+  'reports an expired pending sign-out without waiting for worker pickup (%s)',
+  async (state) => {
+    h.getJob.mockResolvedValue({
+      ...job(CLI_EXEC_JOB_NAMES.SIGN_OUT),
+      timestamp: Date.now() - 31 * 60_000,
+      getState: async () => state,
+    });
+    const res = await app.request(`/${PROVIDER}/sign-out/123`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      status: 'failed',
+      error:
+        'Sign-out did not start within 30 minutes. Nothing was removed. Try signing out again.',
+    });
+  },
+);
+it.each([
+  ['delayed', 'auth_busy', 'auth_busy'],
+  ['delayed', 'settings_changed', 'settings_changed'],
+  ['delayed', undefined, undefined],
+  ['active', 'auth_busy', undefined],
+])(
+  'exposes only the structural current sign-out wait reason (%s, %s)',
+  async (state, reason, expected) => {
+    h.getJob.mockResolvedValue({
+      ...job(CLI_EXEC_JOB_NAMES.SIGN_OUT),
+      data: { providerId: PROVIDER, userId: USER, signOutWaitReason: reason },
+      timestamp: Date.now(),
+      getState: async () => state,
+    });
+    const body = await (await app.request(`/${PROVIDER}/sign-out/123`)).json();
+    expect(body).toEqual({
+      status: 'pending',
+      state,
+      ...(expected ? { waitReason: expected } : {}),
+    });
+  },
+);
+it('keeps a started sign-out pending past the enqueue deadline', async () => {
+  h.getJob.mockResolvedValue({
+    ...job(CLI_EXEC_JOB_NAMES.SIGN_OUT),
+    data: { providerId: PROVIDER, userId: USER, signOutStarted: true },
+    timestamp: Date.now() - 31 * 60_000,
+    getState: async () => 'waiting',
+  });
+  expect(await (await app.request(`/${PROVIDER}/sign-out/123`)).json()).toEqual({
+    status: 'pending',
+    state: 'waiting',
+  });
+});
+it('does not infer failure when an active sign-out reaches the enqueue deadline', async () => {
+  h.getJob.mockResolvedValue({
+    ...job(CLI_EXEC_JOB_NAMES.SIGN_OUT),
+    timestamp: Date.now() - 31 * 60_000,
+  });
+  expect(await (await app.request(`/${PROVIDER}/sign-out/123`)).json()).toEqual({
+    status: 'pending',
+    state: 'active',
+  });
+});

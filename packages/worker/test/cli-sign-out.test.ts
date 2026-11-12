@@ -268,17 +268,26 @@ describe('handleSignOutJob', () => {
   });
 
   it('reports failed volumes and skips authStatus reset when remove fails', async () => {
-    const calls: DbCalls = { updateSet: null };
-    const userId = 'failuser-1234';
-    const userSlug = 'failuser1234';
-    const failVol = `haive_cli_auth_${userSlug}_gemini_0`;
-    const row = makeProviderRow({ userId });
-    const db = makeDb(row, calls);
-    const runner = makeRunner({ existing: [failVol], removeFails: [failVol] });
-    const result = await handleSignOutJob(db, { providerId: row.id, userId }, runner);
-    expect(result.ok).toBe(false);
-    expect(result.failed).toEqual([{ name: failVol, stderr: 'in use' }]);
-    expect(calls.updateSet).toBeNull();
+    vi.useFakeTimers();
+    try {
+      const calls: DbCalls = { updateSet: null };
+      const userId = 'failuser-1234';
+      const userSlug = 'failuser1234';
+      const failVol = `haive_cli_auth_${userSlug}_gemini_0`;
+      const row = makeProviderRow({ userId });
+      const db = makeDb(row, calls);
+      const runner = makeRunner({ existing: [failVol], removeFails: [failVol] });
+      const removing = handleSignOutJob(db, { providerId: row.id, userId }, runner);
+      await vi.runAllTimersAsync();
+      const result = await removing;
+      expect(result.ok).toBe(false);
+      expect(result.failed).toEqual([{ name: failVol, stderr: 'in use' }]);
+      expect(calls.updateSet).toBeNull();
+      expect(runner.order.filter((call) => call.startsWith('remove:'))).toHaveLength(6);
+      expect(lock.release).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -389,7 +398,12 @@ it('retries under the new scope when auth settings changed while the lock was ta
   const runner = makeRunner({
     existing: ['haive_cli_auth_user1_gemini_0', 'haive_cli_auth_prov-default_gemini_0'],
   });
-  const job = { data: {}, token: 'token', moveToDelayed: vi.fn(async () => {}) };
+  const job = {
+    data: {},
+    token: 'token',
+    updateData: vi.fn(async () => {}),
+    moveToDelayed: vi.fn(async () => {}),
+  };
   await expect(
     handleSignOutJob(
       makeDb(row, calls),
@@ -468,9 +482,312 @@ it('fails after thirty minutes of auth contention without removing anything', as
       job as any,
     ),
   ).rejects.toThrow(
-    'A CLI sign-in or credential update kept this account busy. Nothing was removed.',
+    'Sign-out did not start within 30 minutes. Nothing was removed. Try signing out again.',
   );
   expect(job.moveToDelayed).not.toHaveBeenCalled();
   expect(runner.removed).toEqual([]);
   expect(calls.updateSet).toBeNull();
+});
+
+it.each(['LOADING Redis is loading', 'OOM command not allowed'])(
+  'retries a refused sign-out metadata write before deferring (%s)',
+  async (reason) => {
+    vi.useFakeTimers();
+    try {
+      lock.acquire.mockResolvedValue(null);
+      const row = makeProviderRow();
+      const calls: DbCalls = { updateSet: null };
+      const runner = makeRunner({ existing: ['haive_cli_auth_user1_gemini_0'] });
+      const job = {
+        data: {},
+        timestamp: Date.now(),
+        token: 'token',
+        updateData: vi.fn().mockRejectedValueOnce(new Error(reason)).mockResolvedValue(undefined),
+        moveToDelayed: vi.fn(async () => {}),
+      };
+      const result = handleSignOutJob(
+        makeDb(row, calls),
+        { providerId: row.id, userId: row.userId },
+        runner,
+        job as any,
+      ).catch((error: Error) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(job.moveToDelayed).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await result).toMatchObject({ name: 'DelayedError' });
+      expect(job.updateData).toHaveBeenCalledTimes(2);
+      expect(job.moveToDelayed).toHaveBeenCalledOnce();
+      expect(runner.removed).toEqual([]);
+      expect(calls.updateSet).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+
+it('bounds repeated scope changes independently of auth-lock contention', async () => {
+  const row = makeProviderRow();
+  const calls: DbCalls = { updateSet: null };
+  const runner = makeRunner({ existing: ['haive_cli_auth_user1_gemini_0'] });
+  lock.acquire.mockImplementation(async () => {
+    row.isolateAuth = !row.isolateAuth;
+    return lock.release;
+  });
+  const job = {
+    timestamp: Date.now(),
+    data: {},
+    token: 'token',
+    updateData: vi.fn(async (data: any) => {
+      job.data = data;
+    }),
+    moveToDelayed: vi.fn(async () => {}),
+  };
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await expect(
+      handleSignOutJob(
+        makeDb(row, calls),
+        { providerId: row.id, userId: row.userId },
+        runner,
+        job as any,
+      ),
+    ).rejects.toMatchObject({ name: 'DelayedError' });
+  }
+  await expect(
+    handleSignOutJob(
+      makeDb(row, calls),
+      { providerId: row.id, userId: row.userId },
+      runner,
+      job as any,
+    ),
+  ).rejects.toThrow(
+    'CLI authentication settings kept changing. Nothing was removed. Try signing out again.',
+  );
+  expect(job.moveToDelayed).toHaveBeenCalledTimes(5);
+  expect(lock.release).toHaveBeenCalledTimes(6);
+  expect(runner.removed).toEqual([]);
+  expect(calls.updateSet).toBeNull();
+});
+
+it.each([false, true])('expires from enqueue even with a %s busy scope', async (busy) => {
+  if (busy) lock.acquire.mockResolvedValue(null);
+  const row = makeProviderRow();
+  const calls: DbCalls = { updateSet: null };
+  const runner = makeRunner({ existing: ['haive_cli_auth_user1_gemini_0'] });
+  const job = {
+    timestamp: Date.now() - CLI_SIGN_OUT_AUTH_WAIT_MS - 1,
+    data: { authContentionStartedAt: Date.now() },
+    token: 'token',
+    updateData: vi.fn(),
+    moveToDelayed: vi.fn(),
+  };
+  await expect(
+    handleSignOutJob(
+      makeDb(row, calls),
+      { providerId: row.id, userId: row.userId },
+      runner,
+      job as any,
+    ),
+  ).rejects.toThrow(
+    'Sign-out did not start within 30 minutes. Nothing was removed. Try signing out again.',
+  );
+  expect(job.moveToDelayed).not.toHaveBeenCalled();
+  expect(runner.removed).toEqual([]);
+  expect(calls.updateSet).toBeNull();
+});
+it('never defers auth contention beyond the enqueue deadline', async () => {
+  vi.useFakeTimers();
+  try {
+    lock.acquire.mockResolvedValue(null);
+    const row = makeProviderRow();
+    const job = {
+      timestamp: Date.now() - CLI_SIGN_OUT_AUTH_WAIT_MS + 500,
+      data: {},
+      token: 'token',
+      updateData: vi.fn(async () => {}),
+      moveToDelayed: vi.fn(async () => {}),
+    };
+    await expect(
+      handleSignOutJob(
+        makeDb(row, { updateSet: null }),
+        { providerId: row.id, userId: row.userId },
+        makeRunner(),
+        job as any,
+      ),
+    ).rejects.toMatchObject({ name: 'DelayedError' });
+    expect(job.moveToDelayed).toHaveBeenCalledWith(
+      job.timestamp + CLI_SIGN_OUT_AUTH_WAIT_MS,
+      'token',
+    );
+    expect(job.updateData).toHaveBeenCalledWith(
+      expect.objectContaining({ signOutWaitReason: 'auth_busy' }),
+    );
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('retries removal until an abandoned login ownership helper releases its volume', async () => {
+  vi.useFakeTimers();
+  try {
+    const row = makeProviderRow();
+    const calls: DbCalls = { updateSet: null };
+    const volume = 'haive_cli_auth_user1_gemini_0';
+    const runner = makeRunner({ existing: [volume] });
+    const remove = vi
+      .spyOn(runner, 'volumeRemove')
+      .mockResolvedValueOnce({ ok: false, stderr: 'volume is in use' })
+      .mockResolvedValueOnce({ ok: false, stderr: 'volume is in use' });
+    const removing = handleSignOutJob(
+      makeDb(row, calls),
+      {
+        providerId: row.id,
+        userId: row.userId,
+      },
+      runner,
+    );
+    await vi.runAllTimersAsync();
+    expect(await removing).toMatchObject({ ok: true, removed: [volume], failed: [] });
+    expect(remove).toHaveBeenCalledTimes(3);
+    expect(calls.updateSet?.authStatus).toBe('unknown');
+    expect(lock.release).toHaveBeenCalledOnce();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('resumes partially removed auth after redelivery past the start deadline', async () => {
+  const row = makeProviderRow({ name: 'claude-code' });
+  const calls: DbCalls = { updateSet: null };
+  const runner = makeRunner({ existing: [] });
+  const job = {
+    timestamp: Date.now(),
+    data: {},
+    token: 'token',
+    updateData: vi.fn(async (data: any) => {
+      job.data = data;
+    }),
+  };
+  const db = makeDb(row, calls);
+  const originalDelete = db.delete.bind(db);
+  // Simulate a worker dying after volume cleanup but before secret removal.
+  db.delete = vi
+    .fn()
+    .mockImplementationOnce(() => {
+      throw new Error('worker died');
+    })
+    .mockImplementation(originalDelete);
+  await expect(
+    handleSignOutJob(db, { providerId: row.id, userId: row.userId }, runner, job as any),
+  ).rejects.toThrow('worker died');
+  expect(job.data).toMatchObject({ signOutStarted: true });
+  job.timestamp -= CLI_SIGN_OUT_AUTH_WAIT_MS + 1;
+  await expect(
+    handleSignOutJob(db, { providerId: row.id, userId: row.userId }, runner, job as any),
+  ).resolves.toMatchObject({ ok: true, failed: [] });
+  expect(calls.deleted).toBe(true);
+  expect(calls.updateSet?.authStatus).toBe('unknown');
+});
+
+it('resumes remaining volumes and stopped helpers after redelivery past the deadline', async () => {
+  const row = makeProviderRow();
+  const calls: DbCalls = { updateSet: null };
+  const volumes = ['haive_cli_auth_user1_gemini_0', 'haive_cli_auth_user1_gemini_1'];
+  const runner = makeRunner({ existing: [volumes[1]!], sweep: true });
+  const job = {
+    timestamp: Date.now() - CLI_SIGN_OUT_AUTH_WAIT_MS - 1,
+    data: { signOutStarted: true },
+  };
+  await expect(
+    handleSignOutJob(
+      makeDb(row, calls),
+      { providerId: row.id, userId: row.userId },
+      runner,
+      job as any,
+    ),
+  ).resolves.toEqual({ ok: true, removed: volumes, failed: [] });
+  expect(runner.swept).toEqual([volumes[1]]);
+  expect(runner.removed).toEqual([volumes[1]]);
+  expect(calls.updateSet?.authStatus).toBe('unknown');
+});
+
+it.each(['LOADING Redis is loading', 'OOM command not allowed'])(
+  'persists the start marker before any removal despite a refused write (%s)',
+  async (reason) => {
+    vi.useFakeTimers();
+    try {
+      const row = makeProviderRow();
+      const calls: DbCalls = { updateSet: null };
+      const volume = 'haive_cli_auth_user1_gemini_0';
+      const runner = makeRunner({ existing: [volume], sweep: true });
+      const job = {
+        timestamp: Date.now(),
+        data: {},
+        updateData: vi.fn().mockRejectedValueOnce(new Error(reason)).mockResolvedValue(undefined),
+      };
+      const result = handleSignOutJob(
+        makeDb(row, calls),
+        { providerId: row.id, userId: row.userId },
+        runner,
+        job as any,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(runner.order).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await result).toMatchObject({ ok: true });
+      expect(job.updateData).toHaveBeenCalledTimes(2);
+      expect(job.updateData).toHaveBeenLastCalledWith(
+        expect.objectContaining({ signOutStarted: true }),
+      );
+      expect(runner.removed).toEqual([volume]);
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+
+it('stops a resumed sign-out whose auth scope changed while it was interrupted', async () => {
+  const row = makeProviderRow();
+  const calls: DbCalls = { updateSet: null };
+  const runner = makeRunner({ existing: ['haive_cli_auth_user1_gemini_0'], sweep: true });
+  const job = {
+    timestamp: Date.now() - CLI_SIGN_OUT_AUTH_WAIT_MS - 1,
+    data: { signOutStarted: true, signOutScope: 'a-scope-the-settings-no-longer-give' },
+  };
+  await expect(
+    handleSignOutJob(
+      makeDb(row, calls),
+      { providerId: row.id, userId: row.userId },
+      runner,
+      job as any,
+    ),
+  ).rejects.toThrow(/settings changed while it was interrupted/);
+  expect(runner.removed).toEqual([]);
+  expect(calls.updateSet).toBeNull();
+});
+
+it('records the scope it starts on with the start marker', async () => {
+  const row = makeProviderRow();
+  const calls: DbCalls = { updateSet: null };
+  const runner = makeRunner({ existing: [] });
+  const job = {
+    timestamp: Date.now(),
+    data: {},
+    updateData: vi.fn(async (data: any) => {
+      job.data = data;
+    }),
+  };
+  await handleSignOutJob(
+    makeDb(row, calls),
+    { providerId: row.id, userId: row.userId },
+    runner,
+    job as any,
+  );
+  expect(job.data).toMatchObject({ signOutStarted: true, signOutScope: expect.any(String) });
+  // The recorded scope is the one the resumed job compares against, so a resume on it proceeds.
+  await expect(
+    handleSignOutJob(makeDb(row, calls), { providerId: row.id, userId: row.userId }, runner, {
+      ...job,
+      timestamp: Date.now() - CLI_SIGN_OUT_AUTH_WAIT_MS - 1,
+    } as any),
+  ).resolves.toMatchObject({ ok: true });
 });
