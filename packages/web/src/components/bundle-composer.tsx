@@ -8,7 +8,7 @@ import type {
   InitBundleUploadRequest,
   BundleReplacementMode,
 } from '@haive/shared';
-import { Button, FormError, Input, Label } from '@/components/ui';
+import { Button, Input, Label } from '@/components/ui';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { API_BASE_URL } from '@/lib/api-client';
@@ -833,7 +833,14 @@ export function BundleComposer({
         />
       )}
 
-      <FormError message={error} />
+      {error && (
+        <div
+          role="alert"
+          className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300"
+        >
+          <MarkdownView body={error} />
+        </div>
+      )}
     </div>
   );
 }
