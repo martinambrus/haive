@@ -344,6 +344,7 @@ export interface Repository {
   writable: boolean;
   localPath: string | null;
   remoteUrl: string | null;
+  credentialsSecretId: string | null;
   branch: string | null;
   status: 'cloning' | 'ready' | 'error';
   statusMessage: string | null;
@@ -2062,7 +2063,7 @@ export function pullPlanSnapshot(repositoryId: string): Promise<PlanSnapshotSave
  *  records it on the repository; pushes nothing. */
 export function linkRepositoryRemote(
   repositoryId: string,
-  body: { remoteUrl: string; credentialsId?: string; branch?: string },
+  body: { remoteUrl: string; credentialsId?: string | null; branch?: string },
 ): Promise<{ ok: true; remoteUrl: string; relinked: boolean }> {
   // `/repos`, not `/repositories`: the repository routes mount at the former and
   // only the plan routes use the latter.

@@ -826,7 +826,7 @@ that row is bounded (`boundedLockWait`), so a relink behind another answers 409 
 git write. The general repository settings, tooling save, allow-list save and delete each bound their
 own row take too; the allow-list key and the delete's task-creation key have their own bounds. These
 waits are per statement, not one deadline for the whole request. Implicit row writers and worker
-`FOR UPDATE` takes still wait behind the relink's git work (T516). It inserts the audit row, changes git, then writes the column. Each git call is cut at 10 s with
+`FOR UPDATE` takes still wait behind the relink's git work (T516). It inserts the audit row, changes git, then writes the column. Its `credentialsId` keeps the saved credential when omitted, binds the named one when given (both fit-checked against the new URL) and clears the binding when `null` (no fit check); the web "Change remote" dialog defaults to keeping it. Each git call is cut at 10 s with
 SIGTERM, and with SIGKILL only if the child is still alive 2 s later: git removes its `config.lock` on
 SIGTERM and leaves it on SIGKILL (MEASURED with git 2.43.0 and 2.54.0), and a left lock fails every later write to that config. The route
 puts git's remote back when the transaction fails: inside the transaction for a failure its callback sees (a
@@ -850,8 +850,11 @@ never rule text, globs or other setting values. Task writes name the task user, 
 answers name the resolving user, and unattended imports name the repository owner. Other portable
 settings have no API audit action and do not gain one here.
 
-Gate 4 writes the repository row when the checkout has no origin (the typed URL and the selected
-credential replace what the row held, as before) or when the row has no remote. A row that already
+Gate 4 writes the repository row when the checkout has no origin or when the row has no remote,
+and only into an empty slot: a saved remote or credential is never replaced. Re-checked under the
+row lock, a typed URL or chosen credential that differs from a saved one refuses the push
+(`pushed:false`, nothing written, no audit row) and points to "Change remote" on the Repositories
+page; a value the form only displayed from the detect snapshot never fills a slot cleared since. A row that already
 has a remote, with an origin in the checkout, makes the push a one-off: no row lock, no write, and
 the selected credential is used for that push only. Otherwise it takes a bounded `FOR NO KEY UPDATE` lock,
 re-checks the row under it, and follows the relink's order: `repository.remote.update` row

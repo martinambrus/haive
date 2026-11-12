@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createElement, type ReactNode } from 'react';
 import ReposPage from './page';
+import { LinkOriginDialog } from '@/components/repos/link-origin-dialog';
 import { buttons, createRenderer, fire, textOf } from '../../../../test/render-tree';
 import type { ActionMenuItem } from '@/components/action-menu';
 
@@ -24,6 +25,7 @@ vi.mock('@/components/action-menu', () => ({
       .filter((item): item is ActionMenuItem => !!item)
       .map((item) => createElement('button', { key: item.key, onClick: item.onClick }, item.label)),
 }));
+vi.mock('@/components/repos/link-origin-dialog', () => ({ LinkOriginDialog: vi.fn(() => null) }));
 const h = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
 vi.mock('@/lib/api-client', () => ({ api: h, API_BASE_URL: '' }));
 
@@ -32,6 +34,7 @@ const UNAVAILABLE =
 let repo: Record<string, unknown>;
 beforeEach(() => {
   vi.useFakeTimers();
+  vi.mocked(LinkOriginDialog).mockClear();
   repo = {
     id: 'repo-1',
     name: 'Uploaded repo',
@@ -181,4 +184,42 @@ it('offers repair guidance for a read-only folder even if the repository has a r
   const view = await mounted();
   expect(buttons(view.tree(), /^rebuild checkout$/i)).toHaveLength(0);
   expect(buttons(view.tree(), /^repair checkout$/i)).toHaveLength(1);
+});
+
+describe('repository remote actions', () => {
+  it.each([null, 'https://example.com/r.git'])(
+    'opens the remote dialog with the saved URL %s',
+    async (remoteUrl) => {
+      repo.status = 'ready';
+      repo.remoteUrl = remoteUrl;
+      repo.credentialsSecretId = 'saved-credential';
+      const view = await mounted();
+      const label = remoteUrl ? 'Change remote' : 'Link to origin';
+      const otherLabel = remoteUrl ? 'Link to origin' : 'Change remote';
+      expect(buttons(view.tree(), new RegExp('^' + otherLabel + '$', 'i'))).toHaveLength(0);
+      const action = buttons(view.tree(), new RegExp('^' + label + '$', 'i'));
+      expect(action).toHaveLength(1);
+      expect(LinkOriginDialog).not.toHaveBeenCalled();
+      fire.click(action[0]!);
+      view.draw();
+      expect(LinkOriginDialog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          repositoryId: 'repo-1',
+          currentUrl: remoteUrl,
+          currentCredentialsId: 'saved-credential',
+        }),
+      );
+    },
+  );
+
+  it.each(['cloning', 'error'])(
+    'hides remote actions while the repository is %s',
+    async (status) => {
+      repo.status = status;
+      repo.remoteUrl = 'https://example.com/r.git';
+      const view = await mounted();
+      expect(buttons(view.tree(), /^change remote$/i)).toHaveLength(0);
+      expect(buttons(view.tree(), /^link to origin$/i)).toHaveLength(0);
+    },
+  );
 });

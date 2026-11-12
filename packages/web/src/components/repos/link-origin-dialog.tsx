@@ -26,17 +26,25 @@ import {
 export function LinkOriginDialog({
   repositoryId,
   currentUrl,
+  currentCredentialsId,
   onClose,
   onLinked,
 }: {
   repositoryId: string;
   /** Set when re-pointing an existing origin rather than adding the first one. */
   currentUrl?: string | null;
+  /** The saved binding already returned by the repository list. */
+  currentCredentialsId?: string | null;
   onClose: () => void;
   onLinked: () => void;
 }) {
   const [url, setUrl] = useState(currentUrl ?? '');
-  const [credentialsId, setCredentialsId] = useState('');
+  // Fixed when the dialog opens: the list keeps polling, and a binding that vanishes
+  // mid-edit must not turn the selected Keep option into a credential id. Keep sends no
+  // credentialsId, so the server keeps whatever the row holds by then.
+  const [savedCredentialId] = useState(currentUrl ? (currentCredentialsId ?? null) : null);
+  const keepingSavedCredential = savedCredentialId !== null;
+  const [credentialsId, setCredentialsId] = useState(keepingSavedCredential ? 'keep-saved' : '');
   const [credentials, setCredentials] = useState<CredentialRow[] | null>(null);
   const [oauthLabel, setOauthLabel] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -55,7 +63,7 @@ export function LinkOriginDialog({
         const existing = findGithubOauthCredential(r.credentials);
         if (existing) {
           setOauthLabel(existing.label);
-          setCredentialsId((current) => current || existing.id);
+          if (!keepingSavedCredential) setCredentialsId((current) => current || existing.id);
         }
       })
       // A credential list that will not load must not block linking a PUBLIC
@@ -66,7 +74,7 @@ export function LinkOriginDialog({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [keepingSavedCredential]);
 
   async function submit(): Promise<void> {
     const trimmed = url.trim();
@@ -79,7 +87,13 @@ export function LinkOriginDialog({
     try {
       await linkRepositoryRemote(repositoryId, {
         remoteUrl: trimmed,
-        ...(credentialsId ? { credentialsId } : {}),
+        ...(keepingSavedCredential
+          ? credentialsId === 'keep-saved'
+            ? {}
+            : { credentialsId: credentialsId || null }
+          : credentialsId
+            ? { credentialsId }
+            : {}),
       });
       onLinked();
       onClose();
@@ -131,12 +145,25 @@ export function LinkOriginDialog({
             onChange={(e) => setCredentialsId(e.target.value)}
             className="rounded border border-neutral-700 bg-neutral-900 px-2 py-1.5 text-sm text-neutral-100"
           >
-            <option value="">None — public remote, or SSH handled outside Haive</option>
-            {(credentials ?? []).map((cred) => (
-              <option key={cred.id} value={cred.id}>
-                {cred.label} ({cred.host})
+            {keepingSavedCredential && (
+              <option value="keep-saved">
+                Keep saved credential (
+                {credentials?.find((cred) => cred.id === savedCredentialId)?.label ?? 'unavailable'}
+                )
               </option>
-            ))}
+            )}
+            <option value="">
+              {keepingSavedCredential
+                ? 'None (remove the saved credential)'
+                : 'None — public remote, or SSH handled outside Haive'}
+            </option>
+            {(credentials ?? [])
+              .filter((cred) => cred.id !== savedCredentialId)
+              .map((cred) => (
+                <option key={cred.id} value={cred.id}>
+                  {cred.label} ({cred.host})
+                </option>
+              ))}
           </select>
           <p className="text-[11px] text-neutral-600">
             A private <strong>https</strong> remote needs one, or the first push will fail. An ssh
