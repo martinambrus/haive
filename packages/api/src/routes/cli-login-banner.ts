@@ -197,6 +197,9 @@ interface BannerSession {
   tokenSubmittedAt: number | null;
   captureWatchdog: NodeJS.Timeout | null;
   probePending: boolean;
+  /** A saved credential asks for a usage tick, sent once the auth lock is released: the tick's
+   *  snapshot write takes the same lock and would skip a result fetched while this holds it. */
+  usagePollAfterRelease: boolean;
   createdAt: number;
   heartbeat: NodeJS.Timeout;
   timeout: NodeJS.Timeout;
@@ -632,6 +635,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       tokenSubmittedAt: null,
       captureWatchdog: null,
       probePending: false,
+      usagePollAfterRelease: false,
       createdAt: Date.now(),
       heartbeat: (heartbeat = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
@@ -1312,7 +1316,7 @@ async function saveOauthTokenAndProbe(session: BannerSession, oauthToken: string
       true,
     );
     await session.credentialSave;
-    requestUsagePoll();
+    session.usagePollAfterRelease = true;
     log.info({ providerId: session.providerId }, 'verified oauth token saved to encrypted secret');
     // The browser's lost-result recovery treats auth-success as proof of durable storage.
     wsSend(session.ws, { type: 'auth-success' });
@@ -1354,6 +1358,8 @@ async function runProbeAndSave(session: BannerSession): Promise<void> {
       await advanceVolumeLoginGeneration(getDb(), session.provider);
     })();
     await session.credentialSave;
+    // The CLI wrote its credential into the volume; the tick follows the lock release.
+    session.usagePollAfterRelease = true;
     const result = await enqueueProbe(
       session.providerId,
       session.userId,
@@ -1531,10 +1537,7 @@ async function enqueueProbe(
     }
     throw new LoginCancelled();
   }
-  const result = await awaitQueuedJob<CliProbeResult>(job, abort, ws);
-  // Volume-based logins already wrote their credential; candidates tick only after promotion.
-  if (!oauthCandidate) requestUsagePoll();
-  return result;
+  return awaitQueuedJob<CliProbeResult>(job, abort, ws);
 }
 
 function requestUsagePoll(): void {
@@ -1573,6 +1576,7 @@ async function cleanupSession(session: BannerSession): Promise<void> {
   // A close can race the awaited completion stamp/promotion. Never let sign-out enter that gap.
   await session.credentialSave?.catch(() => {});
   await session.releaseAuth();
+  if (session.usagePollAfterRelease) requestUsagePoll();
   try {
     if (session.ws.readyState === WebSocket.OPEN) {
       session.ws.close(1000, 'session_ended');

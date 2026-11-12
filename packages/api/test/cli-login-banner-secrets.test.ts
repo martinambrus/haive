@@ -35,6 +35,7 @@ const h = vi.hoisted(() => ({
   remove: vi.fn(),
   resize: vi.fn(),
   probe: vi.fn(),
+  usagePoll: vi.fn(),
   exec: vi.fn(),
   queueError: undefined as Error | undefined,
   createError: undefined as string | undefined,
@@ -64,7 +65,12 @@ vi.mock('../src/routes/terminal.js', () => ({ attachContainerStream: h.attach })
 vi.mock('../src/routes/docker-exec.js', () => ({ execInContainer: h.exec }));
 vi.mock('../src/queues.js', () => ({
   getCliExecQueueEvents: () => ({}),
-  getUsagePollQueue: () => ({ add: async () => ({}) }),
+  getUsagePollQueue: () => ({
+    add: async () => {
+      h.usagePoll();
+      return {};
+    },
+  }),
   getCliExecQueue: () => ({
     add: async (name: string, payload: unknown) => {
       if (name === 'cli-login-create' && h.loginEnqueueGate) await h.loginEnqueueGate;
@@ -581,6 +587,17 @@ describe('Claude OAuth token capture controls', () => {
       expect(h.save.mock.calls.length === 0).toBe(true);
     },
   );
+
+  it('requests the usage tick only after the login releases its auth lock', async () => {
+    await ready();
+    stream.emit('data', Buffer.from(`${TOKEN}\n\n`));
+    await settle();
+    expect(h.save).toHaveBeenCalledTimes(1);
+    expect(h.usagePoll).toHaveBeenCalledTimes(1);
+    expect(h.usagePoll.mock.invocationCallOrder[0]).toBeGreaterThan(
+      h.releaseAuth.mock.invocationCallOrder.at(-1)!,
+    );
+  });
 
   it('fix-round1 D1 does not save again at end after a data capture', async () => {
     await ready();
