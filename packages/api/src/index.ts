@@ -42,7 +42,12 @@ import { haiveDataRoutes } from './routes/haive-data.js';
 import { repositoryIntegrationRoutes } from './routes/repository-integrations.js';
 import { userSettingsRoutes } from './routes/user-settings.js';
 import { installBrowserVncWebSocket } from './routes/browser-vnc.js';
-import { ideRoutes, repoIdeAccessRoutes, installIdeWebSocket } from './routes/ide.js';
+import {
+  ideRoutes,
+  taskIdeAccessRoutes,
+  repoIdeAccessRoutes,
+  installIdeWebSocket,
+} from './routes/ide.js';
 import { installCliLoginBannerWebSocket } from './routes/cli-login-banner.js';
 import { installCliStreamWebSocket } from './routes/cli-stream.js';
 import { installTerminalWebSocket } from './routes/terminal.js';
@@ -117,6 +122,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   app.route('/integrations', integrationsRoutes);
   app.route('/user-settings', userSettingsRoutes);
   app.route('/filesystem', filesystemRoutes);
+  app.route('/tasks', taskIdeAccessRoutes);
   app.route('/tasks', taskRoutes);
   app.route('/system', systemRoutes);
   app.route('/usage-window', usageWindowRoutes);

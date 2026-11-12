@@ -28,9 +28,46 @@ export function canonicalOrigin(value: string): string {
   }
 }
 
-/** The editor currently lives on the api's public origin. */
+/** An optional dedicated editor origin, otherwise the api's public origin. */
 export function editorOrigin(web: string = webOrigin()): string | null {
-  return publicApiOrigin(web);
+  const configured = process.env.HAIVE_EDITOR_ORIGIN?.trim();
+  if (!configured) return publicApiOrigin(web);
+  try {
+    const url = new URL(configured);
+    // Check the raw suffix too: URL normalisation hides /./ and empty ?/#.
+    if (
+      !/^https?:\/\/[^/\\?#\s]+\/?$/i.test(configured) ||
+      !['http:', 'https:'].includes(url.protocol) ||
+      url.username ||
+      url.password ||
+      configured.includes('@') ||
+      url.pathname !== '/' ||
+      url.search ||
+      url.hash
+    )
+      throw new Error('Invalid origin');
+  } catch {
+    throw new Error(
+      'HAIVE_EDITOR_ORIGIN must be an HTTP(S) origin without credentials, path, query or fragment',
+    );
+  }
+  const origin = new URL(configured).origin;
+  // A browser sends a hostname's cookies to every port, so an editor on the app's hostname
+  // carries the app's session and cannot be told apart from it. Unset keeps the default.
+  if (origin !== publicApiOrigin(web) && hostnameOf(origin) === hostnameOf(web)) {
+    throw new Error(
+      "HAIVE_EDITOR_ORIGIN must use a hostname other than the app's: browsers send a hostname's cookies to every port",
+    );
+  }
+  return origin;
+}
+
+function hostnameOf(origin: string): string | null {
+  try {
+    return new URL(origin).hostname;
+  } catch {
+    return null;
+  }
 }
 
 export function isIdePath(path: string): boolean {

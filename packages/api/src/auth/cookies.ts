@@ -42,14 +42,15 @@ export function withoutSessionCookies(header: string): string | null {
     const name = pair.slice(0, pair.indexOf('=')).trim();
     // Session readers accept different grammars. Remove their union by name,
     // while keeping non-session data (including off-grammar values) verbatim.
-    if (name && !SESSION_COOKIES.has(name)) kept.push(pair);
+    if (name && !SESSION_COOKIES.has(name) && !name.startsWith('haive_editor_')) kept.push(pair);
   }
   return kept.length > 0 ? kept.join('; ') : null;
 }
 
 export function isSessionSetCookie(setCookieValue: string): boolean {
   const eq = setCookieValue.indexOf('=');
-  return SESSION_COOKIES.has((eq === -1 ? setCookieValue : setCookieValue.slice(0, eq)).trim());
+  const name = (eq === -1 ? setCookieValue : setCookieValue.slice(0, eq)).trim();
+  return SESSION_COOKIES.has(name) || name.startsWith('haive_editor_');
 }
 
 export function withoutSessionSetCookies(upstream: Headers): void {
