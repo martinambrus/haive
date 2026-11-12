@@ -1,4 +1,7 @@
 import { execFile } from 'node:child_process';
+import * as processes from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { mkdtemp, rm, writeFile, readFile, mkdir, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -10,6 +13,8 @@ import { leftCommittedMerges } from '@haive/shared/merge-left-open';
 import { worktreeDirPaths, worktreeDirName } from '../repo/worktree-paths.js';
 import * as gitMerge from './git-merge.js';
 import * as gitPush from '../repo/git-push.js';
+import * as gitWorkspace from '../repo/git-workspace.js';
+import * as gitExec from '../repo/git-exec.js';
 
 const h = vi.hoisted(() => ({
   holder: false,
@@ -21,7 +26,12 @@ const h = vi.hoisted(() => ({
   sync: vi.fn(),
   release: vi.fn(),
   duringPrep: null as null | (() => Promise<void>),
+  aside: vi.fn(async () => ({ outcome: 'clean' })),
 }));
+vi.mock('node:child_process', async (original) => {
+  const actual = await original<typeof import('node:child_process')>();
+  return { ...actual, spawn: vi.fn(actual.spawn) };
+});
 vi.mock('@haive/database', async (original) => ({
   ...(await original<object>()),
   acquireRootClaim: async () => {
@@ -54,7 +64,7 @@ vi.mock('./merge-dir-claim.js', () => ({
 vi.mock('../repo/refresh.js', () => ({ checkoutHoldingTasks: async () => h.holding }));
 vi.mock('../repo/worktree-claims.js', () => ({ findWorktreePathClaimant: async () => null }));
 vi.mock('../project-state/set-aside.js', () => ({
-  setAsideHaiveProjections: async () => ({ outcome: 'clean' }),
+  setAsideHaiveProjections: h.aside,
   restoreProjectionsInTx: async () => {
     await h.duringPrep?.();
     return { outcome: 'clean' };
@@ -100,7 +110,9 @@ const env = {
 };
 const git = async (dir: string, ...args: string[]) =>
   (await exec('git', args, { cwd: dir, env })).stdout.trim();
-beforeEach(() => {
+beforeEach(async () => {
+  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+  vi.mocked(processes.spawn).mockImplementation(actual.spawn);
   Object.assign(h, {
     holder: false,
     root: true,
@@ -112,13 +124,14 @@ beforeEach(() => {
   });
   h.sync.mockClear();
   h.release.mockClear();
+  h.aside.mockClear();
 });
 afterEach(async () => {
   vi.restoreAllMocks();
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
-async function fixture() {
+async function fixture(changeBase = false) {
   const root = await mkdtemp(path.join(tmpdir(), 'e3-undo-'));
   dirs.push(root);
   const dir = path.join(root, 'repo');
@@ -130,6 +143,7 @@ async function fixture() {
   const before = await git(dir, 'rev-parse', 'HEAD');
   await git(dir, 'switch', '-c', 'feature');
   await writeFile(path.join(dir, 'feature'), 'feature');
+  if (changeBase) await writeFile(path.join(dir, 'base'), 'merged base');
   await git(dir, 'add', '.');
   await git(dir, 'commit', '-m', 'feature');
   const feature = await git(dir, 'rev-parse', 'HEAD');
@@ -179,6 +193,145 @@ async function fixture() {
 }
 
 describe('explicit undo of a cancel-left committed merge', () => {
+  it.each(['root', 'transient'] as const)(
+    'refuses an empty open merge in the %s checkout and permits retry after abort',
+    async (kind) => {
+      const f = await fixture();
+      let checkout = f.dir;
+      if (kind === 'transient') {
+        await git(f.dir, 'switch', 'feature');
+        checkout = worktreeDirPaths(f.dir, '', `${worktreeDirName('main')}--base`).worktreePath;
+        await git(f.dir, 'worktree', 'add', checkout, 'main');
+        f.payload.dir = checkout;
+        f.job.dir = checkout;
+      }
+      await git(checkout, 'switch', '-c', 'empty-divergent', f.before);
+      await git(checkout, 'commit', '--allow-empty', '-m', 'empty divergent commit');
+      await git(checkout, 'switch', 'main');
+      await git(checkout, 'merge', '--no-ff', '--no-commit', 'empty-divergent');
+      expect(await git(checkout, 'diff', '--cached', '--name-only')).toBe('');
+      const mergeHead = await git(checkout, 'rev-parse', 'MERGE_HEAD');
+      await f.run();
+      expect(await git(checkout, 'rev-parse', 'main')).toBe(f.after);
+      expect(await git(checkout, 'rev-parse', 'MERGE_HEAD')).toBe(mergeHead);
+      expect(leftCommittedMerges(f.events)[0]).toMatchObject({
+        settled: null,
+        refused: { reason: expect.stringMatching(/operation.*in progress/i) },
+      });
+      expect(h.aside).not.toHaveBeenCalled();
+      await git(checkout, 'merge', '--abort');
+      await f.run();
+      expect(await git(checkout, 'rev-parse', 'main')).toBe(f.before);
+    },
+  );
+
+  async function interruptAfterCheckoutMove(f: Awaited<ReturnType<typeof fixture>>) {
+    const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+    let interrupted = false;
+    vi.mocked(processes.spawn).mockImplementation((...args: Parameters<typeof processes.spawn>) => {
+      const child = actual.spawn(...args);
+      if ((args[1] as string[]).includes('--stdin')) {
+        const write = child.stdin!.write.bind(child.stdin);
+        vi.spyOn(child.stdin!, 'write').mockImplementation((chunk, ...rest) => {
+          if (chunk === 'commit\n' && !interrupted) {
+            interrupted = true;
+            // EOF/abort after read-tree, before the ref commit, leaves the same real git state.
+            return write('abort\n', ...rest);
+          }
+          return write(chunk, ...rest);
+        });
+      }
+      return child;
+    });
+    await f.run();
+    expect(interrupted).toBe(true);
+    expect(await git(f.dir, 'rev-parse', 'HEAD')).toBe(f.after);
+    expect(await git(f.dir, 'write-tree')).toBe(
+      await git(f.dir, 'rev-parse', `${f.before}^{tree}`),
+    );
+    expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+    vi.mocked(processes.spawn).mockImplementation(actual.spawn);
+  }
+
+  it('finishes an interrupted checkout move on redelivery without rewriting local bytes', async () => {
+    const f = await fixture();
+    await interruptAfterCheckoutMove(f);
+    await writeFile(path.join(f.dir, 'base'), 'unrelated local edit');
+    const actual = gitPush.gitRun;
+    const calls = vi.spyOn(gitPush, 'gitRun').mockImplementation(actual);
+    h.aside.mockClear();
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+    expect(await readFile(path.join(f.dir, 'base'), 'utf8')).toBe('unrelated local edit');
+    expect(await git(f.dir, 'diff', '--cached', '--name-only')).toBe('');
+    expect(leftCommittedMerges(f.events)[0]?.settled?.outcome).toBe('undone');
+    expect(calls.mock.calls.some(([, args]) => args[0] === 'read-tree')).toBe(false);
+    expect(h.aside).not.toHaveBeenCalled();
+  });
+
+  it('refuses unrelated staged work after an interrupted checkout move', async () => {
+    const f = await fixture();
+    await interruptAfterCheckoutMove(f);
+    await writeFile(path.join(f.dir, 'base'), 'person staged this');
+    await git(f.dir, 'add', 'base');
+    const index = await git(f.dir, 'write-tree');
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    expect(await git(f.dir, 'write-tree')).toBe(index);
+    expect(await readFile(path.join(f.dir, 'base'), 'utf8')).toBe('person staged this');
+    expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+  });
+
+  it('refuses new bytes on a path removed by an interrupted checkout move', async () => {
+    const f = await fixture();
+    await interruptAfterCheckoutMove(f);
+    await writeFile(path.join(f.dir, 'feature'), 'person recreated this');
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    expect(await readFile(path.join(f.dir, 'feature'), 'utf8')).toBe('person recreated this');
+    expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+  });
+
+  it('refuses unstaged edits on a tracked path touched by an interrupted checkout move', async () => {
+    const f = await fixture(true);
+    await interruptAfterCheckoutMove(f);
+    await writeFile(path.join(f.dir, 'base'), 'person edited the restored base');
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    expect(await readFile(path.join(f.dir, 'base'), 'utf8')).toBe(
+      'person edited the restored base',
+    );
+    expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+  });
+
+  it('rechecks the interrupted index while the ref lock is held', async () => {
+    const f = await fixture();
+    await interruptAfterCheckoutMove(f);
+    const actual = gitWorkspace.worktreesHoldingBranch;
+    let reads = 0;
+    vi.spyOn(gitWorkspace, 'worktreesHoldingBranch').mockImplementation(async (...args) => {
+      const holders = await actual(...args);
+      if (++reads === 2) {
+        await writeFile(path.join(f.dir, 'base'), 'staged during prepare');
+        await git(f.dir, 'add', 'base');
+      }
+      return holders;
+    });
+    await f.run();
+    expect(reads).toBe(2);
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    expect(await git(f.dir, 'show', ':base')).toBe('staged during prepare');
+    expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+  });
+
+  it('refuses a pre-merge staged tree without evidence of an admitted Undo', async () => {
+    const f = await fixture();
+    await git(f.dir, 'read-tree', '-m', '-u', f.after, f.before);
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+  });
+
   it('refuses Undo before cancellation teardown finishes', async () => {
     const f = await fixture();
     f.events.splice(0, 1);
@@ -221,6 +374,119 @@ describe('explicit undo of a cancel-left committed merge', () => {
       expect(h.sync).toHaveBeenCalled();
     },
   );
+  it('keeps a commit landing after the final HEAD check and before the move', async () => {
+    const f = await fixture();
+    const actual = gitPush.gitRun;
+    let tip = '';
+    vi.spyOn(gitPush, 'gitRun').mockImplementation(async (dir, args, ...rest) => {
+      const result = await actual(dir, args, ...rest);
+      if (args[0] === 'diff' && args.includes('--cached') && result.code === 0) {
+        await git(f.dir, 'commit', '--allow-empty', '-m', 'person after HEAD check');
+        tip = await git(f.dir, 'rev-parse', 'main');
+      }
+      return result;
+    });
+    await f.run();
+    expect(tip).not.toBe('');
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(tip);
+    expect(await git(f.dir, 'rev-parse', `${tip}^`)).toBe(f.after);
+    expect(leftCommittedMerges(f.events)[0]).toMatchObject({
+      settled: null,
+      refused: { count: 1 },
+    });
+    expect(h.sync).not.toHaveBeenCalled();
+  });
+  it('holds the branch lock while moving the checkout and releases it afterwards', async () => {
+    const f = await fixture();
+    const actual = gitPush.gitRun;
+    let tried = false;
+    vi.spyOn(gitPush, 'gitRun').mockImplementation(async (dir, args, ...rest) => {
+      if (args[0] === 'read-tree') {
+        tried = true;
+        await expect(
+          git(f.dir, 'commit', '--allow-empty', '-m', 'competing commit'),
+        ).rejects.toThrow();
+        expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+      }
+      return actual(dir, args, ...rest);
+    });
+    await f.run();
+    expect(tried).toBe(true);
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+    expect(await git(f.dir, 'status', '--porcelain')).toBe('');
+    await git(f.dir, 'commit', '--allow-empty', '-m', 'lock released');
+  });
+  it.each(['git version 2.26.3', 'unrecognized version'])(
+    'does not use the git version banner %s to decide transaction support',
+    async (stdout) => {
+      const f = await fixture();
+      const actual = gitPush.gitRun;
+      vi.spyOn(gitPush, 'gitRun').mockImplementation(async (dir, args, ...rest) =>
+        args[0] === '--version' ? { code: 0, stdout, stderr: '' } : actual(dir, args, ...rest),
+      );
+      await f.run();
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+      expect(leftCommittedMerges(f.events)[0]?.settled?.outcome).toBe('undone');
+    },
+  );
+  it.each(['fatal: unknown command', 'Fehler: unbekannter Befehl'])(
+    'refuses unsupported ref transactions before set-aside regardless of stderr: %s',
+    async (stderr) => {
+      const f = await fixture();
+      const actual =
+        await vi.importActual<typeof import('node:child_process')>('node:child_process');
+      vi.spyOn(processes, 'spawn').mockImplementation(
+        (...args: Parameters<typeof processes.spawn>) => {
+          if (!(args[1] as string[]).includes('--stdin')) return actual.spawn(...args);
+          const child = Object.assign(new EventEmitter(), {
+            stdin: new PassThrough(),
+            stdout: new PassThrough(),
+            stderr: new PassThrough(),
+            exitCode: null,
+            signalCode: null,
+            kill: vi.fn(),
+          });
+          child.stdin.once('data', () => {
+            child.stderr.write(stderr);
+            child.stdout.end();
+            child.emit('close', 128);
+          });
+          return child as unknown as ReturnType<typeof processes.spawn>;
+        },
+      );
+      const actualGit = gitPush.gitRun;
+      const calls = vi.spyOn(gitPush, 'gitRun').mockImplementation(actualGit);
+      await f.run();
+      expect(leftCommittedMerges(f.events)[0]).toMatchObject({
+        settled: null,
+        refused: { count: 1, reason: expect.stringContaining('requires Git 2.27 or newer') },
+      });
+      expect(h.aside).not.toHaveBeenCalled();
+      expect(
+        calls.mock.calls.some(([, args]) =>
+          ['--version', 'update-index', 'read-tree'].includes(args[0]!),
+        ),
+      ).toBe(false);
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+      expect(await readFile(path.join(f.dir, 'feature'), 'utf8')).toBe('feature');
+    },
+  );
+  it.each(['unrelated edit', 'unrelated deletion', 'untracked file'])(
+    'keeps reset --keep local behaviour for %s',
+    async (kind) => {
+      const f = await fixture();
+      if (kind === 'unrelated edit') await writeFile(path.join(f.dir, 'base'), 'mine');
+      if (kind === 'unrelated deletion') await rm(path.join(f.dir, 'base'));
+      if (kind === 'untracked file') {
+        await writeFile(path.join(f.dir, 'untracked'), 'mine');
+      }
+      const status = await git(f.dir, 'status', '--porcelain');
+      await f.run();
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+      expect(await git(f.dir, 'status', '--porcelain')).toBe(status);
+      await git(f.dir, 'commit', '--allow-empty', '-m', 'lock released');
+    },
+  );
   it('never drops a commit made in the checkout while Undo prepares', async () => {
     const f = await fixture();
     h.duringPrep = async () => {
@@ -248,8 +514,20 @@ describe('explicit undo of a cancel-left committed merge', () => {
       expect(await git(f.dir, 'rev-parse', 'HEAD')).toBe(f.after);
       expect(await git(f.dir, 'rev-parse', 'other')).toBe(f.after);
       expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
-      expect(f.settled()[0]?.payload.outcome).toBe('moved');
+      expect(f.settled()[0]?.payload.outcome).toBe('refused');
+      expect(leftCommittedMerges(f.events)[0]).toMatchObject({
+        settled: null,
+        refused: { count: 1, reason: expect.stringMatching(/checkout.*branch/i) },
+      });
       expect(h.sync).not.toHaveBeenCalled();
+      const reason = leftCommittedMerges(f.events)[0]?.refused?.reason;
+      expect(reason).not.toContain('Switch it back');
+      expect(reason).toContain('Retry Undo');
+      h.duringPrep = null;
+      await f.run();
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+      expect(await git(f.dir, 'rev-parse', 'HEAD')).toBe(f.after);
+      expect(leftCommittedMerges(f.events)[0]?.settled?.outcome).toBe('undone');
     },
   );
   it.each(['personal', 'unrecorded-base'])(
@@ -272,6 +550,36 @@ describe('explicit undo of a cancel-left committed merge', () => {
       expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
     },
   );
+  it('refuses a worktree acquiring the branch after the first holder check', async () => {
+    const f = await fixture();
+    await git(f.dir, 'switch', 'feature');
+    const linked = path.join(f.root, 'late checkout');
+    const actual = gitWorkspace.worktreesHoldingBranch;
+    let reads = 0;
+    vi.spyOn(gitWorkspace, 'worktreesHoldingBranch').mockImplementation(async (...args) => {
+      const holders = await actual(...args);
+      if (++reads === 1) await git(f.dir, 'worktree', 'add', linked, 'main');
+      if (reads === 2) {
+        // The second list must run while the branch CAS lock is held.
+        await expect(
+          git(f.dir, 'update-ref', 'refs/heads/main', f.before, f.after),
+        ).rejects.toThrow();
+      }
+      return holders;
+    });
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    expect(await git(linked, 'status', '--porcelain')).toBe('');
+    expect(leftCommittedMerges(f.events)[0]).toMatchObject({
+      settled: null,
+      refused: { count: 1, reason: expect.stringMatching(/worktree/i) },
+    });
+    expect(reads).toBe(2);
+    expect(h.sync).not.toHaveBeenCalled();
+    await git(f.dir, 'worktree', 'remove', linked);
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+  });
   it('resets the recorded transient base worktree and leaves its index clean', async () => {
     const f = await fixture();
     await git(f.dir, 'switch', 'feature');
@@ -409,6 +717,52 @@ describe('explicit undo of a cancel-left committed merge', () => {
     await f.run();
     expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
   });
+  it('keeps remote failure detail while removing paths and URL credentials', async () => {
+    const f = await fixture();
+    await git(f.dir, 'remote', 'add', 'origin', 'https://example.test/repo.git');
+    vi.spyOn(gitPush, 'originGitRun').mockResolvedValue({
+      code: 128,
+      stdout: '',
+      stderr: `fatal: connection refused for https://user:private-token@example.test/repo.git in ${f.dir}`,
+    });
+    await f.run();
+    const reason = leftCommittedMerges(f.events)[0]?.refused?.reason;
+    expect(reason).toContain('connection refused');
+    expect(reason).not.toContain('.:');
+    expect(reason).toContain('[path]');
+    expect(reason).not.toContain(f.dir);
+    expect(reason).not.toContain('private-token');
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+  });
+  it.each(['list', 'fetch', 'throw'])(
+    'scrubs a standalone credential echoed by the remote during %s',
+    async (failure) => {
+      const f = await fixture();
+      const token = 'standalone-private-credential';
+      await git(f.dir, 'remote', 'add', 'origin', 'https://example.test/repo.git');
+      vi.spyOn(f.db.query.taskSteps, 'findFirst').mockResolvedValue({
+        formValues: { credentialId: 'credential' },
+      } as never);
+      vi.spyOn(gitPush, 'buildCredentialHelper').mockResolvedValue({
+        argv: [],
+        env: {},
+        secret: token,
+      });
+      vi.spyOn(gitPush, 'originGitRun').mockImplementation(async (_dir, args) => {
+        if (failure === 'throw') throw new Error(`remote echoed ${token}`);
+        if (failure === 'fetch' && args.includes('ls-remote'))
+          return { code: 0, stdout: `${f.after}\trefs/heads/main\n`, stderr: '' };
+        return { code: 128, stdout: '', stderr: `remote echoed ${token}` };
+      });
+      await f.run();
+      const reason = leftCommittedMerges(f.events)[0]?.refused?.reason;
+      expect(reason).toContain('remote echoed ***');
+      expect(reason).not.toContain(token);
+      expect(JSON.stringify(f.settled())).not.toContain(token);
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    },
+  );
   it('refuses older events without immutable feature evidence', async () => {
     const f = await fixture();
     Object.assign(f.payload, { featureSha: undefined });
@@ -546,6 +900,67 @@ describe('explicit undo of a cancel-left committed merge', () => {
       'audit failed',
     );
   });
+  it.each([1, 3])(
+    'keeps bounded path-free detail when worktree-list read %s fails',
+    async (failedRead) => {
+      const f = await fixture();
+      const actual = gitExec.gitRun;
+      let reads = 0;
+      vi.spyOn(gitExec, 'gitRun').mockImplementation(async (dir, args, ...rest) =>
+        args[0] === 'worktree' && args[1] === 'list' && ++reads === failedRead
+          ? {
+              code: 128,
+              stdout: '',
+              stderr: `fatal: permission denied in ${f.dir}/.git/worktrees; ${'detail '.repeat(200)}`,
+            }
+          : actual(dir, args, ...rest),
+      );
+      await expect(f.run()).resolves.toBeUndefined();
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+      const reason = leftCommittedMerges(f.events)[0]?.refused?.reason;
+      expect(reason).toContain('permission denied');
+      expect(reason).toContain('[path]');
+      expect(reason).not.toContain(f.dir);
+      expect(reason).not.toContain('Git refused the undo');
+      expect(reason!.length).toBeLessThan(650);
+      expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
+      expect(h.sync).not.toHaveBeenCalled();
+      vi.restoreAllMocks();
+      await f.run();
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+    },
+  );
+  it('keeps the git refusal detail when conflicting local bytes prevent the move', async () => {
+    const f = await fixture();
+    await writeFile(path.join(f.dir, 'feature'), 'mine');
+    await f.run();
+    const reason = leftCommittedMerges(f.events)[0]?.refused?.reason;
+    // Git's detail may be translated; require a nonempty excerpt after our own refusal copy.
+    expect(reason).toMatch(
+      /^Git refused the undo; local changes or a changed branch were kept: \S/,
+    );
+    expect(reason).not.toContain(f.dir);
+    expect(await readFile(path.join(f.dir, 'feature'), 'utf8')).toBe('mine');
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+  });
+  it('propagates a settlement database failure inside the prepared transaction for queue retry', async () => {
+    const f = await fixture();
+    const failure = new Error('audit database unavailable');
+    await writeFile(path.join(f.dir, 'feature'), 'mine');
+    vi.spyOn(f.db, 'insert').mockImplementationOnce(
+      () =>
+        ({
+          values: async () => {
+            throw failure;
+          },
+        }) as never,
+    );
+    await expect(f.run()).rejects.toBe(failure);
+    expect(f.settled()).toHaveLength(0);
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    expect(await readFile(path.join(f.dir, 'feature'), 'utf8')).toBe('mine');
+    await git(f.dir, 'commit', '--allow-empty', '-m', 'lock released');
+  });
   it('records a git read failure as a retryable attempt immediately', async () => {
     const f = await fixture();
     const actual = gitPush.gitRun;
@@ -556,6 +971,7 @@ describe('explicit undo of a cancel-left committed merge', () => {
     );
     await expect(f.run()).resolves.toBeUndefined();
     expect(f.settled()[0]?.payload.outcome).toBe('refused');
+    expect(leftCommittedMerges(f.events)[0]?.refused?.reason).toContain('unreadable object');
     expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
     expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
     vi.restoreAllMocks();

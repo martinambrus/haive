@@ -56,11 +56,39 @@ describe('gitOperationInProgress', () => {
     expect(await gitOperationInProgress(repo)).toBe(false);
   });
 
+  it.each([
+    'MERGE_HEAD',
+    'REBASE_HEAD',
+    'CHERRY_PICK_HEAD',
+    'REVERT_HEAD',
+    'rebase-merge',
+    'rebase-apply',
+  ])(
+    'reads linked-worktree %s only under an explicitly supplied repository anchor',
+    async (marker) => {
+      const checkout = join(repo, '.haive', 'worktrees', 'linked');
+      git(repo, 'worktree', 'add', '-b', 'linked', checkout, 'HEAD');
+      await expect(gitOperationInProgress(checkout)).rejects.toMatchObject({
+        name: 'GitOperationUnreadableError',
+      });
+      expect(await gitOperationInProgress(checkout, repo)).toBe(false);
+      const entry = git(checkout, 'rev-parse', '--git-path', marker).trim();
+      if (marker.startsWith('rebase-')) mkdirSync(entry);
+      else writeFileSync(entry, git(checkout, 'rev-parse', 'HEAD'));
+      expect(await gitOperationMarker(checkout, repo)).toBe(marker);
+      expect(await gitOperationInProgress(checkout, repo)).toBe(true);
+      expect(await gitOperationInProgress(repo)).toBe(false);
+    },
+  );
+
   it('reports a git dir outside the checkout as unreadable, never anchoring there', async () => {
     const outside = mkdtempSync(join(tmpdir(), 'git-operation-gitdir-'));
     try {
       git(repo, 'init', '-q', '--separate-git-dir', join(outside, 'git'));
       await expect(gitOperationInProgress(repo)).rejects.toMatchObject({
+        name: 'GitOperationUnreadableError',
+      });
+      await expect(gitOperationInProgress(repo, repo)).rejects.toMatchObject({
         name: 'GitOperationUnreadableError',
       });
     } finally {
