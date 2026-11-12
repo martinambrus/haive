@@ -2115,6 +2115,27 @@ it.each(['enqueue', 'attach', 'start'] as const)(
   },
 );
 
+it.each(['close', 'timeout'])('owns a late attach stream after startup %s', async (reason) => {
+  let resume!: () => void;
+  h.attach.mockImplementationOnce(
+    () =>
+      new Promise<Duplex>((resolve) => {
+        resume = () => resolve(stream);
+      }),
+  );
+  await start('', false);
+  if (reason === 'close') ws.close();
+  else await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+  await settle();
+  resume();
+  await settle();
+  expect(() => stream.emit('error', new Error('late attach socket failed'))).not.toThrow();
+  expect(stream.destroyed).toBe(true);
+  expect(h.start).not.toHaveBeenCalled();
+  expect(h.releaseAuth).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
 it('releases the auth hold after bounded Docker teardown and observes a late removal safely', async () => {
   await start();
   let resume!: () => void;

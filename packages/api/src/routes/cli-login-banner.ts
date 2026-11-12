@@ -514,7 +514,13 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   try {
     const attaching = attachContainerStream(docker, createResult.dockerContainerId).then(
       (attached) => {
-        if (abort.aborted) attached.end();
+        if (abort.aborted) {
+          attached.on('error', (err: Error) => {
+            log.warn({ error: safeErrorDetails(err), providerId }, 'late attach stream error');
+          });
+          attached.end();
+          attached.destroy();
+        }
         return attached;
       },
     );
