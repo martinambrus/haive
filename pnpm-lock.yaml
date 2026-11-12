@@ -335,6 +335,9 @@ importers:
       tiptap-markdown:
         specifier: ^0.9.0
         version: 0.9.0(@tiptap/core@3.31.4(@tiptap/pm@3.31.4))
+      tldts:
+        specifier: ^7.4.21
+        version: 7.4.21
     devDependencies:
       '@tailwindcss/postcss':
         specifier: ^4.3.3

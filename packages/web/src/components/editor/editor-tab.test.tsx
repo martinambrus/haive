@@ -128,3 +128,30 @@ describe('EditorTab grants', () => {
     expect(screen.getByTitle('Editor').getAttribute('src')).toBe(url);
   });
 });
+
+it('shows the operator message before loading a plain HTTP cross-site frame', async () => {
+  post.mockImplementation(async (path: string) =>
+    path.endsWith('/ensure-ide')
+      ? { enabled: true, ready: true }
+      : { url: 'http://editor.other.test/ide/_handshake#secret' },
+  );
+  render(<EditorTab taskId="task" />);
+  await settle();
+  expect(screen.queryByTitle('Editor')).toBeNull();
+  expect(screen.getByTestId('markdown').textContent).toBe(
+    "Serve the editor over HTTPS or from a hostname under the app's domain, or set HAIVE_EDITOR_ORIGIN.",
+  );
+  expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  await act(() => vi.advanceTimersByTimeAsync(60_000));
+  expect(post).toHaveBeenCalledTimes(2);
+});
+
+it('opens a cross-site HTTPS grant on its editor origin', async () => {
+  const secureUrl = 'https://editor.other.test/ide/_handshake#secret';
+  post.mockImplementation(async (path: string) =>
+    path.endsWith('/ensure-ide') ? { enabled: true, ready: true } : { url: secureUrl },
+  );
+  render(<EditorTab taskId="task" />);
+  await settle();
+  expect(screen.getByTitle('Editor').getAttribute('src')).toBe(secureUrl);
+});
