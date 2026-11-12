@@ -851,3 +851,42 @@ it.each(['authMode', 'isolateAuth'] as const)(
     expect(fake.rows(schema.auditEvents)).toEqual([]);
   },
 );
+
+it.each(['POST', 'PATCH'])(
+  'refuses %s when only the final pre-commit lock assertion is lost',
+  async (method) => {
+    const fake = setup(true);
+    const before = fake.rows(schema.cliProviders);
+    const commit = vi.fn();
+    fake.hooks.beforeCommit = commit;
+    let lostAtFinalWrite = false;
+    let audits = 0;
+    fake.hooks.beforeInsert = async (table) => {
+      if (table === schema.auditEvents && ++audits === 2 && method === 'PATCH')
+        lostAtFinalWrite = true;
+    };
+    fake.hooks.beforeUpdate = async (table) => {
+      if (table === schema.cliProviders && method === 'POST') lostAtFinalWrite = true;
+    };
+    authLock.release.assertHeld.mockImplementation(async () => {
+      if (lostAtFinalWrite) throw new Error('lock lost at pre-commit assertion');
+    });
+    const res = await send(
+      method,
+      `/${PROVIDER}${method === 'POST' ? '/secrets' : ''}`,
+      method === 'POST'
+        ? { secretName: 'CLAUDE_CODE_OAUTH_TOKEN', value: 'new-token' }
+        : { envVars: { CLAUDE_CODE_OAUTH_TOKEN: 'new-token' } },
+    );
+    expect(lostAtFinalWrite).toBe(true);
+    expect(authLock.release.assertHeld).toHaveBeenCalledTimes(method === 'POST' ? 2 : 3);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'cli_auth_busy' });
+    expect(commit).not.toHaveBeenCalled();
+    expect(fake.rows(schema.cliProviders)).toEqual(before);
+    expect(fake.rows(schema.cliProviderSecrets)).toEqual([]);
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+    expect(h.auditLog).not.toHaveBeenCalled();
+    expect(authLock.release).toHaveBeenCalledOnce();
+  },
+);
