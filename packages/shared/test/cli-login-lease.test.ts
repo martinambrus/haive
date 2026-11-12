@@ -104,3 +104,28 @@ it('drains an outstanding renewal before compare-deleting the owner lease', asyn
   expect(read(cliLoginLeaseKey(lease.id))).toBeNull();
   expect(redis.eval).toHaveBeenCalledTimes(2);
 });
+
+it('keeps a live owner through a failed renewal it can still retry', async () => {
+  const lost = vi.fn();
+  const lease = await startCliLoginLease(redis as never, lost, options);
+  redis.eval.mockRejectedValueOnce(new Error('Redis timeout'));
+  await vi.advanceTimersByTimeAsync(20);
+  expect(lost).not.toHaveBeenCalled();
+  expect(() => lease.assertHeld()).not.toThrow();
+  await vi.advanceTimersByTimeAsync(160);
+  expect(lost).not.toHaveBeenCalled();
+  expect(read(cliLoginLeaseKey(lease.id))).not.toBeNull();
+  await lease.stop();
+});
+it('ends a lease whose renewals keep failing no later than Redis would expire it', async () => {
+  const lost = vi.fn();
+  const startedAt = Date.now();
+  await startCliLoginLease(redis as never, lost, options);
+  redis.eval.mockRejectedValue(new Error('Redis down'));
+  await vi.advanceTimersByTimeAsync(40);
+  expect(lost).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(20);
+  expect(lost).toHaveBeenCalledOnce();
+  expect(Date.now()).toBeLessThanOrEqual(startedAt + options.ttlMs);
+  redis.eval.mockReset();
+});

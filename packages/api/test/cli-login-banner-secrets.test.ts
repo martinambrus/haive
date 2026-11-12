@@ -2305,10 +2305,20 @@ it('owns a renewable lease before queueing a login container and drops it on aut
   expect(h.leaseEval).toHaveBeenCalledTimes(calls);
 });
 
+it('keeps the login through one failed lease renewal', async () => {
+  await start();
+  h.leaseEval.mockRejectedValueOnce(new Error('Redis timeout'));
+  await vi.advanceTimersByTimeAsync(20_000);
+  await settle();
+  expect(h.remove).not.toHaveBeenCalled();
+  expect(h.releaseAuth).not.toHaveBeenCalled();
+  expect(ws.readyState).not.toBe(3);
+});
+
 it('stops the login when its lease cannot be renewed', async () => {
   await start();
-  h.leaseEval.mockRejectedValueOnce(new Error('Redis unavailable'));
-  await vi.advanceTimersByTimeAsync(20_000);
+  h.leaseEval.mockRejectedValue(new Error('Redis unavailable'));
+  await vi.advanceTimersByTimeAsync(60_000);
   await settle();
   expect(h.remove).toHaveBeenCalledOnce();
   expect(h.releaseAuth).toHaveBeenCalledOnce();

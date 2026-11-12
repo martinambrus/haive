@@ -56,7 +56,9 @@ export async function startCliLoginLease(
         }
         until = nextUntil;
       } catch {
-        lose();
+        // A failed call is unknown, not lost: the local deadline was set before the last
+        // successful renewal, so it passes no later than Redis expires the key.
+        if (Date.now() >= until) lose();
       }
     })().finally(() => {
       renewing = undefined;

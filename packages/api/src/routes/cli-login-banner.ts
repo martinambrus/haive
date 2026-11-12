@@ -378,7 +378,7 @@ export function installCliLoginBannerWebSocket(
               void releaseAuth();
               return;
             }
-            runBannerSession({
+            const sessionOpts: RunBannerOpts = {
               ws,
               userId: auth.userId,
               providerId: provider.id,
@@ -387,10 +387,12 @@ export function installCliLoginBannerWebSocket(
               releaseAuth,
               startupDeadline,
               docker,
-            }).catch(async (err) => {
+            };
+            runBannerSession(sessionOpts).catch(async (err) => {
               // The user closing the dialog unwinds the session through the same throw path as a
               // real failure. It is not one, and the socket it would report to is already gone.
-              await releaseAuth();
+              // The session replaced releaseAuth with a wrapper that also drops the login lease.
+              await sessionOpts.releaseAuth();
               if (err instanceof LoginCancelled) {
                 log.info({ providerId }, 'login dialog closed by the user');
                 return;
