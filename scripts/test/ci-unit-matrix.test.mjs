@@ -28,7 +28,10 @@ function checkMatrix(ci) {
     ],
   });
   assert.equal(unit.name, 'Unit tests (${{ matrix.name }})');
-  assert.deepEqual(unit.steps.slice(0, 4), lint.steps.slice(0, 4));
+  // Checkout, pnpm, Node, install, and the shared + database build: shared's own tests import
+  // its subpath exports from dist, which test's ^build does not produce.
+  assert.deepEqual(unit.steps.slice(0, 5), lint.steps.slice(0, 5));
+  assert.match(lint.steps[4].run, /pnpm --filter @haive\/shared build/);
   const tests = unit.steps.find((step) => step.id === 'tests');
   assert.ok(tests);
   assert.equal(swallowedFailure(tests.run), null);

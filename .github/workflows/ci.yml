@@ -145,6 +145,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # ^build builds a package's dependencies, never the package itself, and shared's tests
+      # import its own subpath exports (`@haive/shared/modularity`), which resolve to dist.
+      - name: Build shared + database (required by other packages)
+        run: |
+          pnpm --filter @haive/database build
+          pnpm --filter @haive/shared build
+
       # Turbo keeps test's ^build prerequisites and each package's existing test script.
       # Force real execution: cached test logs have no JSON report on a fresh runner.
       - name: Unit tests
