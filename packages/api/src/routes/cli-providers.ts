@@ -224,10 +224,11 @@ const log = logger.child({ module: 'cli-providers' });
 
 /** `rulesInherited` lets the provider form show the live default, which follows template edits,
  *  instead of the possibly stale copy of it stored on the row. */
-export function withRulesState<T extends { rulesContent: string }>(
+export function withRulesState<T extends { rulesContent: string; authGeneration?: string }>(
   row: T,
-): T & { rulesInherited: boolean } {
-  return { ...row, rulesInherited: inheritsDefaultRules(row.rulesContent) };
+): Omit<T, 'authGeneration'> & { rulesInherited: boolean } {
+  const { authGeneration: _authGeneration, ...publicRow } = row;
+  return { ...publicRow, rulesInherited: inheritsDefaultRules(row.rulesContent) };
 }
 
 cliProviderRoutes.use('*', requireAuth);
@@ -1142,6 +1143,7 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
       'The pasted code is missing its state part; copy the whole code, including the part after #.',
     );
   }
+  let codeExchanged = false;
   const tokens = await withCliAuthWrite(
     db,
     provider,
@@ -1174,6 +1176,7 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
       let tokens;
       try {
         tokens = await exchangeClaudeAuthCode(code, verifier, state);
+        codeExchanged = true;
       } catch (err) {
         throw new HttpError(400, err instanceof Error ? err.message : 'Token exchange failed');
       }
@@ -1186,6 +1189,8 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
       await db.transaction(async (tx) => {
         await insertAuditEvent(tx, event);
         await assertHeld();
+        // The secret upsert precedes the provider row lock. The auth-scope advisory lock
+        // serializes credential writers, including those that lock provider then secret.
         await upsertProviderSecret(tx, {
           providerId,
           name: CLAUDE_USAGE_OAUTH_SECRET,
@@ -1202,7 +1207,17 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
       logAuditEvent(event);
       return tokens;
     },
-  );
+  ).catch((err: unknown) => {
+    // Only a code already exchanged needs fresh authorization after a lock refusal.
+    if (codeExchanged && err instanceof HttpError && err.code === 'cli_auth_busy') {
+      throw new HttpError(
+        409,
+        'CLI authentication changed. Start a new usage connection and authorize again.',
+        'cli_auth_busy',
+      );
+    }
+    throw err;
+  });
   // Kick an immediate usage poll so the header meter refreshes within seconds instead of
   // waiting for the ~5-min repeatable tick: the freshly rotated token clears the worker's
   // dead-token gate and this poll overwrites the needs_reconnect snapshot with a live one.

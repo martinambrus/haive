@@ -246,9 +246,36 @@ it('refuses a busy usage reconnect without consuming its authorization', async (
   const paste = { code: `${CODE}#${state}` };
   const busy = await post('complete', paste);
   expect(busy.status).toBe(409);
-  expect(await busy.json()).toMatchObject({ code: 'cli_auth_busy' });
+  expect(await busy.json()).toMatchObject({
+    code: 'cli_auth_busy',
+    error:
+      'CLI authentication is busy. Finish the current sign-in or credential update and try again.',
+  });
   expect(h.fetch).not.toHaveBeenCalled();
   expect((await post('complete', paste)).status).toBe(200);
+});
+
+it('keeps a usage authorization retryable when settings change before the stash is taken', async () => {
+  const { state } = await startAuthorization();
+  authLock.acquire.mockImplementationOnce(async () => {
+    const provider = fake.rows(schema.cliProviders)[0]!;
+    fake.patch(schema.cliProviders, PROVIDER, { isolateAuth: !provider.isolateAuth });
+    return authLock.release;
+  });
+  const paste = { code: `${CODE}#${state}` };
+  const refused = await post('complete', paste);
+  expect(refused.status).toBe(409);
+  expect(await refused.json()).toMatchObject({
+    code: 'cli_auth_busy',
+    error: 'CLI authentication settings changed. Reload and try again.',
+  });
+  expect(h.fetch).not.toHaveBeenCalled();
+  expect(fake.rows(schema.cliProviderSecrets)).toEqual([]);
+  expect(fake.rows(schema.auditEvents)).toEqual([]);
+  expect(h.pollAdd).not.toHaveBeenCalled();
+  expect(authLock.release).toHaveBeenCalledOnce();
+  expect((await post('complete', paste)).status).toBe(200);
+  expect(h.fetch).toHaveBeenCalledOnce();
 });
 
 it.each(['exchange', 'write'])(
@@ -269,7 +296,13 @@ it.each(['exchange', 'write'])(
     else fake.hooks.beforeUpdate = async () => lose();
     const res = await post('complete', { code: CODE + '#' + state });
     expect(res.status).toBe(409);
-    expect(await res.json()).toMatchObject({ code: 'cli_auth_busy' });
+    expect(await res.json()).toMatchObject({
+      code: 'cli_auth_busy',
+      error: 'CLI authentication changed. Start a new usage connection and authorize again.',
+    });
+    expect(h.fetch).toHaveBeenCalledOnce();
+    expect((await post('complete', { code: CODE + '#' + state })).status).toBe(400);
+    expect(h.fetch).toHaveBeenCalledOnce();
     expect(fake.rows(schema.cliProviderSecrets)).toEqual([]);
     expect(fake.rows(schema.cliProviders)).toEqual(before);
     expect(fake.rows(schema.auditEvents)).toEqual([]);

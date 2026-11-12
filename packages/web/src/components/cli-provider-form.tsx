@@ -530,6 +530,9 @@ export function CliProviderForm({
         await api.delete(
           `/cli-providers/${provider.id}/secrets/${encodeURIComponent(s.secretName)}`,
         );
+        setExistingSecrets((current) =>
+          current.filter((secret) => secret.secretName !== s.secretName),
+        );
       }
     }
 

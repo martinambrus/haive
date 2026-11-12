@@ -1065,6 +1065,52 @@ describe('CLI login banner lock watch', () => {
     });
   });
 
+  it('does not report lock loss while startup releases authentication with the socket still open', async () => {
+    let rejectAttach!: (err: Error) => void;
+    let rejectCheck!: (err: Error) => void;
+    let finishRelease!: () => void;
+    h.attach.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectAttach = reject;
+        }),
+    );
+    h.releaseAuth.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishRelease = resolve;
+        }),
+    );
+    await start('', false);
+    h.assertAuth.mockImplementationOnce(
+      () =>
+        new Promise<void>((_, reject) => {
+          rejectCheck = reject;
+        }),
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    rejectAttach(new Error('attach refused'));
+    await settle();
+    expect(h.releaseAuth).toHaveBeenCalledOnce();
+    expect(ws.readyState).toBe(1);
+    rejectCheck(new Error('lock released'));
+    await settle();
+    expect(frames()).not.toContainEqual({
+      type: 'error',
+      message: 'Authentication changed. Retry the login.',
+    });
+    expect(h.log.warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'login authentication lock lost; stopping session',
+    );
+    finishRelease();
+    await settle();
+    expect(frames()).toContainEqual({
+      type: 'error',
+      message: 'Failed to attach to login container',
+    });
+  });
+
   it('does not report a lost lock for a check still running when the session ends', async () => {
     await start();
     let reject!: (err: Error) => void;

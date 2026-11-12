@@ -1,5 +1,13 @@
-import { describe, it, expect } from 'vitest';
-import { selectHarvestTargets, type HarvestCandidate } from './credential-harvest.js';
+const sync = vi.hoisted(() => vi.fn(async () => false));
+vi.mock('../sandbox/task-auth-volume.js', () => ({ syncProviderAuthBack: sync }));
+import type { Database } from '@haive/database';
+import type { DockerRunner } from '../sandbox/docker-runner.js';
+import { describe, it, expect, vi } from 'vitest';
+import {
+  harvestInTaskCredentials,
+  selectHarvestTargets,
+  type HarvestCandidate,
+} from './credential-harvest.js';
 
 // The two rules that keep a mid-task harvest from being worse than no harvest at all:
 // never read an auth file a running CLI may be rewriting, and never attribute one task
@@ -127,4 +135,22 @@ describe('selectHarvestTargets', () => {
   it('returns nothing on an empty input', () => {
     expect(selectHarvestTargets([], new Set())).toEqual({ targets: [], ambiguous: [] });
   });
+});
+
+it('harvest retries a busy auth scope next tick instead of waiting', async () => {
+  sync.mockClear();
+  const chosen = provider();
+  const chain = (rows: unknown[]) => {
+    const query = { from: () => query, innerJoin: () => query, where: async () => rows };
+    return query;
+  };
+  const db = {
+    selectDistinct: vi
+      .fn()
+      .mockReturnValueOnce(chain([{ taskId: TASK_A, ...chosen }]))
+      .mockReturnValueOnce(chain([])),
+  } as unknown as Database;
+  const runner = {} as DockerRunner;
+  await harvestInTaskCredentials(db, runner);
+  expect(sync).toHaveBeenCalledExactlyOnceWith(TASK_A, chosen, db, runner, 0);
 });

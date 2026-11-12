@@ -291,3 +291,15 @@ it('keeps an immediately missing unobserved sign-out as an error', async () => {
   );
   await expect(runCliSignOut('provider')).rejects.toThrow('expired');
 });
+
+it('stops sign-out polling and clears the pending delay when aborted', async () => {
+  const controller = new AbortController();
+  const result = runCliSignOut('p', undefined, controller.signal).catch((error: Error) => error);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(h.get).toHaveBeenCalledOnce();
+  controller.abort();
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(await result).toMatchObject({ name: 'AbortError' });
+  expect(h.get).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(0);
+});

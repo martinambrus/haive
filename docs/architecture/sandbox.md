@@ -406,7 +406,8 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   2 minutes (other jobs 10), labels a wait by the job's structural wait reason (an auth-lock wait,
   or a pause/outage gate) rather than its message, and reads a finished job whose result has
   expired as finished with an unknown outcome. A scope that keeps moving under the sign-out fails it
-  after five retries, again saying nothing was removed. The login's own jobs never take the lock,
+  after five retries, saying nothing was removed, or, for a job that had already started removing,
+  that some credentials may be gone. The login's own jobs never take the lock,
   since the api session already holds it: a volume probe publishes health only by compare-and-set
   on the generation, auth mode, isolation and the exact `auth_last_checked_at` it read, which a
   sign-out advances, so a probe that read before a sign-out cannot write over it; and a sign-out
@@ -420,7 +421,9 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   minutes before its container exists. Its teardown waits at most 30 s for `docker remove`, then
   releases the lock and stops waiting (the remove may still finish later); if it never does, nothing reaps it while its provider and user exist
   (`reapOrphanedAuthVolumes` runs at worker boot and only for a gone owner), so a later login or
-  sign-out may run beside it. A task's sync-back waits up to 30 s for it; still held,
+  sign-out may run beside it. The provider secret migration's destructive drop phase also waits up
+  to 30 s for it; its copy phase, which reruns at every worker boot, tries once and leaves a busy
+  provider for the next boot. A task's sync-back waits up to 30 s for it; still held,
   it warns and the task copy is removed with its volume, so a token the task rotated is lost while
   a login dialog on the same CLI stays open that long (that login replaces it when it succeeds).
 

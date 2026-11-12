@@ -1,5 +1,6 @@
 const authLock = vi.hoisted(() => ({
   acquire: vi.fn(),
+  error: vi.fn(),
   release: Object.assign(
     vi.fn(async () => {}),
     { assertHeld: vi.fn(async () => {}) },
@@ -9,9 +10,14 @@ vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
   tryCliAuthLock: authLock.acquire,
 }));
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+vi.mock('@haive/shared', async (original) => ({
+  ...(await original<typeof import('@haive/shared')>()),
+  logger: { child: () => ({ error: authLock.error }) },
+}));
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { schema } from '@haive/database';
+import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import { createFakeDb } from '@haive/database/testing';
 import { envelopeDecrypt, envelopeEncrypt, secretsService } from '@haive/shared';
 import {
@@ -62,7 +68,12 @@ beforeEach(() => {
   authLock.acquire.mockReset().mockResolvedValue(authLock.release);
   authLock.release.mockClear();
   authLock.release.assertHeld.mockReset().mockResolvedValue(undefined);
+  authLock.error.mockClear();
   vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue(KEK);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 const LEGACY = { ANTHROPIC_BASE_URL: 'u', CLAUDE_CODE_OAUTH_TOKEN: TOKEN };
@@ -152,34 +163,220 @@ describe('dropCopiedSecretLikeProviderEnv (committed upgrade)', () => {
   });
 });
 
-it.each(['copy', 'drop'])(
-  'fences the legacy %s writer and stamps only a newly created credential',
-  async (phase) => {
+it.each(
+  ['copy', 'drop'].flatMap((phase) => [false, true].map((isolateAuth) => ({ phase, isolateAuth }))),
+)(
+  'fences the legacy $phase writer with isolateAuth=$isolateAuth and stamps only a new credential',
+  async ({ phase, isolateAuth }) => {
     const { fake, db } = setup();
     addProvider(fake, P1, LEGACY);
+    fake.patch(schema.cliProviders, P1, { isolateAuth });
     const run = phase === 'copy' ? copySecretLikeProviderEnv : dropCopiedSecretLikeProviderEnv;
     const before = fake.rows(schema.cliProviders)[0]!.authGeneration;
     await run(db);
     expect(fake.rows(schema.cliProviders)[0]!.authGeneration).not.toBe(before);
     expect(authLock.acquire).toHaveBeenCalledOnce();
+    expect(authLock.acquire).toHaveBeenCalledWith(
+      db,
+      cliAuthScope(fake.rows(schema.cliProviders)[0] as never),
+    );
     expect(authLock.release).toHaveBeenCalledOnce();
     const after = fake.rows(schema.cliProviders)[0]!.authGeneration;
     await run(db);
     expect(fake.rows(schema.cliProviders)[0]!.authGeneration).toBe(after);
   },
 );
+it('defers a busy boot copy after one lock attempt without waiting', async () => {
+  vi.useFakeTimers();
+  const { fake, db } = setup();
+  addProvider(fake, P1, LEGACY);
+  const before = fake.rows(schema.cliProviders);
+  authLock.acquire.mockResolvedValueOnce(null);
+  const transaction = vi.spyOn(db, 'transaction');
+  let settled = false;
+  const result = copySecretLikeProviderEnv(db).then(() => {
+    settled = true;
+  });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(settled).toBe(true);
+  await result;
+  expect(authLock.acquire).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(0);
+  expect(transaction).not.toHaveBeenCalled();
+  expect(authLock.error).toHaveBeenCalledWith(
+    expect.objectContaining({ providerId: P1, phase: 'copy' }),
+    'provider env secret migration failed',
+  );
+  expect(authLock.release).not.toHaveBeenCalled();
+  expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+  expect(fake.rows(schema.cliProviders)).toEqual(before);
+});
+
+it.each(
+  ['copy', 'drop'].flatMap((phase) =>
+    [
+      { authMode: 'api_key' },
+      { isolateAuth: true },
+      { userId: '10000000-0000-4000-8000-0000000000a2' },
+      { name: 'codex' },
+    ].map((change) => ({ phase, change })),
+  ),
+)('defers legacy $phase when its locked scope changed: $change', async ({ phase, change }) => {
+  const { fake, db } = setup();
+  addProvider(fake, P1, LEGACY);
+  const scope = cliAuthScope(fake.rows(schema.cliProviders)[0] as never);
+  authLock.acquire.mockImplementationOnce(async () => {
+    fake.patch(schema.cliProviders, P1, change);
+    return authLock.release;
+  });
+  const before = fake.rows(schema.cliProviders)[0]!.authGeneration;
+  if (phase === 'copy') await copySecretLikeProviderEnv(db);
+  else await expect(dropCopiedSecretLikeProviderEnv(db)).rejects.toThrow('1 provider(s)');
+  expect(authLock.acquire).toHaveBeenCalledExactlyOnceWith(db, scope);
+  expect(cliAuthScope(fake.rows(schema.cliProviders)[0] as never)).not.toBe(scope);
+  expect(fake.rows(schema.cliProviderSecrets)).toEqual([]);
+  expect(fake.rows(schema.cliProviders)[0]).toMatchObject({
+    ...change,
+    envVars: LEGACY,
+    authGeneration: before,
+  });
+  expect(authLock.error).toHaveBeenCalledWith(
+    {
+      err: expect.objectContaining({
+        message: 'CLI authentication settings changed; provider secret migration was deferred',
+      }),
+      providerId: P1,
+      phase,
+    },
+    'provider env secret migration failed',
+  );
+  expect(authLock.release).toHaveBeenCalledOnce();
+
+  // The next boot copy / committed-upgrade retry takes the new scope and converges.
+  const retry = phase === 'copy' ? copySecretLikeProviderEnv : dropCopiedSecretLikeProviderEnv;
+  await retry(db);
+  expect(authLock.acquire).toHaveBeenLastCalledWith(
+    db,
+    cliAuthScope(fake.rows(schema.cliProviders)[0] as never),
+  );
+  expect(secrets(fake, P1)).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN });
+  expect(fake.rows(schema.cliProviders)[0]!.envVars).toEqual(
+    phase === 'copy' ? LEGACY : { ANTHROPIC_BASE_URL: 'u' },
+  );
+});
+
 it.each(['copy', 'drop'])(
-  'does not migrate a legacy credential while authentication is busy (%s)',
+  'defers legacy %s if the locked row newly needs auth fencing',
+  async (phase) => {
+    const { fake, db } = setup();
+    addProvider(fake, P1, { SERVICE_TOKEN: 'service-token' });
+    const real = db.transaction.bind(db);
+    vi.spyOn(db, 'transaction').mockImplementationOnce((run) => {
+      fake.patch(schema.cliProviders, P1, { envVars: LEGACY });
+      return real(run);
+    });
+    const before = fake.rows(schema.cliProviders)[0]!.authGeneration;
+    if (phase === 'copy') await copySecretLikeProviderEnv(db);
+    else await expect(dropCopiedSecretLikeProviderEnv(db)).rejects.toThrow('1 provider(s)');
+    expect(authLock.acquire).not.toHaveBeenCalled();
+    expect(fake.rows(schema.cliProviderSecrets)).toEqual([]);
+    expect(fake.rows(schema.cliProviders)[0]).toMatchObject({
+      envVars: LEGACY,
+      authGeneration: before,
+    });
+    expect(authLock.error).toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: P1, phase }),
+      'provider env secret migration failed',
+    );
+  },
+);
+
+it.each(['copy', 'drop'])(
+  'allows legacy %s when settings change within the same auth scope',
   async (phase) => {
     const { fake, db } = setup();
     addProvider(fake, P1, LEGACY);
-    authLock.acquire.mockResolvedValueOnce(null);
-    if (phase === 'copy') await copySecretLikeProviderEnv(db);
-    else await expect(dropCopiedSecretLikeProviderEnv(db)).rejects.toThrow('1 provider(s)');
-    expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
-    expect(fake.rows(schema.cliProviders)[0]!.envVars).toEqual(LEGACY);
+    fake.patch(schema.cliProviders, P1, { isolateAuth: true });
+    const scope = cliAuthScope(fake.rows(schema.cliProviders)[0] as never);
+    authLock.acquire.mockImplementationOnce(async () => {
+      fake.patch(schema.cliProviders, P1, { authMode: 'api_key' });
+      return authLock.release;
+    });
+    await (phase === 'copy' ? copySecretLikeProviderEnv : dropCopiedSecretLikeProviderEnv)(db);
+    expect(cliAuthScope(fake.rows(schema.cliProviders)[0] as never)).toBe(scope);
+    expect(secrets(fake, P1)).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN });
+    expect(authLock.error).not.toHaveBeenCalled();
   },
 );
+
+it.each(['copy', 'drop'])(
+  'skips legacy %s work when the locked row no longer has secrets',
+  async (phase) => {
+    const { fake, db } = setup();
+    addProvider(fake, P1, LEGACY);
+    authLock.acquire.mockImplementationOnce(async () => {
+      fake.patch(schema.cliProviders, P1, { envVars: { ANTHROPIC_BASE_URL: 'u' } });
+      return authLock.release;
+    });
+    const kek = vi.spyOn(secretsService, 'getMasterKek');
+    kek.mockClear();
+    await (phase === 'copy' ? copySecretLikeProviderEnv : dropCopiedSecretLikeProviderEnv)(db);
+    expect(kek).not.toHaveBeenCalled();
+    expect(fake.rows(schema.cliProviderSecrets)).toEqual([]);
+    expect(authLock.error).not.toHaveBeenCalled();
+    expect(authLock.release).toHaveBeenCalledOnce();
+  },
+);
+
+it('waits for busy authentication to become available before dropping legacy env', async () => {
+  vi.useFakeTimers();
+  const { fake, db } = setup();
+  addProvider(fake, P1, LEGACY);
+  authLock.acquire.mockResolvedValueOnce(null);
+  const transaction = vi.spyOn(db, 'transaction');
+  const result = dropCopiedSecretLikeProviderEnv(db);
+  await vi.advanceTimersByTimeAsync(499);
+  expect(authLock.acquire).toHaveBeenCalledOnce();
+  expect(transaction).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  await result;
+  expect(authLock.acquire).toHaveBeenCalledTimes(2);
+  expect(secrets(fake, P1)).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN });
+  expect(fake.rows(schema.cliProviders)[0]!.envVars).toEqual({ ANTHROPIC_BASE_URL: 'u' });
+  expect(authLock.release).toHaveBeenCalledOnce();
+});
+
+it('refuses a destructive drop when authentication stays busy past the deadline', async () => {
+  vi.useFakeTimers();
+  const { fake, db } = setup();
+  addProvider(fake, P1, LEGACY);
+  authLock.acquire.mockResolvedValue(null);
+  const transaction = vi.spyOn(db, 'transaction');
+  let settled = false;
+  const result = dropCopiedSecretLikeProviderEnv(db).catch((err: unknown) => {
+    settled = true;
+    return err;
+  });
+  await vi.advanceTimersByTimeAsync(29_999);
+  expect(settled).toBe(false);
+  expect(authLock.error).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(await result).toEqual(new Error('1 provider(s) still hold a secret in plain envVars'));
+  expect(authLock.error).toHaveBeenCalledWith(
+    {
+      err: expect.objectContaining({
+        message: 'CLI authentication is busy; provider secret migration was deferred',
+      }),
+      providerId: P1,
+      phase: 'drop',
+    },
+    'provider env secret migration failed',
+  );
+  expect(transaction).not.toHaveBeenCalled();
+  expect(authLock.release).not.toHaveBeenCalled();
+  expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+  expect(fake.rows(schema.cliProviders)[0]!.envVars).toEqual(LEGACY);
+});
 
 it('rolls back a copied legacy credential and its generation together', async () => {
   const { fake, db } = setup();

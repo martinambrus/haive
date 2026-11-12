@@ -1,7 +1,7 @@
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { createHash } from 'node:crypto';
 import { eq } from 'drizzle-orm';
-import { schema, tryCliAuthLock, type CliAuthLock, type Database } from '@haive/database';
+import { schema, type CliAuthLock, type Database } from '@haive/database';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import {
   CLI_PROVIDER_LIST,
@@ -20,6 +20,7 @@ import { SANDBOX_USER, SANDBOX_USER_HOME } from './sandbox-runner.js';
 import { CLI_CREDENTIAL_FILES } from '../usage-window/credential-files.js';
 import { readVolumeFile } from '../usage-window/token-source.js';
 import { shellQuote } from './shell-quote.js';
+import { waitForCliAuthLock } from './cli-auth-lock.js';
 
 export interface ProviderAuthCtx {
   userId: string;
@@ -1309,12 +1310,7 @@ export async function syncProviderAuthBack(
 
   let release: CliAuthLock | null = null;
   try {
-    const deadline = Date.now() + lockWaitMs;
-    do {
-      release = await tryCliAuthLock(db, cliAuthScope(provider));
-      if (release || Date.now() >= deadline) break;
-      await new Promise((resolve) => setTimeout(resolve, Math.min(500, deadline - Date.now())));
-    } while (!release);
+    release = await waitForCliAuthLock(db, cliAuthScope(provider), lockWaitMs);
     if (!release) {
       if (lockWaitMs > 0) {
         log.warn(
