@@ -101,6 +101,7 @@ import {
   readRenderContextColumn,
   settingFileName,
 } from '@haive/shared/project-state';
+import { scrubErrorPaths } from '@haive/shared/logger';
 import { buildScopeTree } from '@haive/shared/scope-tree';
 import {
   credentialFitsGitRemote,
@@ -2725,14 +2726,11 @@ repoRoutes.post('/:id/remote', async (c) => {
 
   // Keep snapshots intact for restoration; redact only text reported to the caller.
   const gitFailureText = (result: { stderr: string; stdout: string }) =>
-    redactGitText(result.stderr || result.stdout || 'no answer');
+    scrubErrorPaths(redactGitText(result.stderr || result.stdout || 'no answer'));
 
   // Without its own .git entry, upward discovery would relink a parent checkout.
   const entry = await lstatNoFollow(root, '.git', { strict: true }).catch((err: unknown) => {
-    throw new HttpError(
-      409,
-      `This repository could not be examined: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    throw new HttpError(409, `This repository could not be examined: ${scrubErrorPaths(err)}`);
   });
   if (!entry || entry.kind === 'symlink') {
     throw new HttpError(

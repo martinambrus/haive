@@ -89,7 +89,9 @@ export async function runBundleGitSyncTick(db: Database): Promise<BundleGitSyncT
       if (newSyncCommit && newSyncCommit !== b.lastSyncCommit) {
         await db
           .update(schema.customBundles)
-          .set({ lastSyncCommit: newSyncCommit, updatedAt: new Date() })
+          // Fetch metadata is not a new import generation. Admission and stranded-job
+          // recovery use updatedAt to detect real work; a tick must not move that clock.
+          .set({ lastSyncCommit: newSyncCommit })
           .where(eq(schema.customBundles.id, b.id));
         updated += 1;
       }

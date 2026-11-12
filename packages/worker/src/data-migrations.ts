@@ -4,7 +4,8 @@ import {
   readReplacement,
   ReplacementRecordUnreadable,
   UNREADABLE_REPLACEMENT_ERROR,
-  restoreReplacementBundle,
+  recoverBundle,
+  replacementRecoveryPatch,
 } from './repo/bundle-recovery.js';
 import { seedRepositoryCliTargets } from './project-state/cli-targets-backfill.js';
 import { isDeepStrictEqual } from 'node:util';
@@ -530,19 +531,7 @@ export async function reconcileStrandedSyncingBundles(db: Database): Promise<voi
   for (const id of stranded) {
     try {
       let restoredArchive: string | null = null;
-      await db.transaction(async (tx) => {
-        const [bundle] = await tx
-          .select()
-          .from(schema.customBundles)
-          .where(
-            and(
-              eq(schema.customBundles.id, id),
-              eq(schema.customBundles.status, 'syncing'),
-              lt(schema.customBundles.updatedAt, cutoff),
-            ),
-          )
-          .for('update');
-        if (!bundle) return;
+      await recoverBundle(db, id, lt(schema.customBundles.updatedAt, cutoff), async (bundle) => {
         const root = process.env.BUNDLE_STORAGE_ROOT ?? '/var/lib/haive/bundles';
         const archiveRel =
           bundle.sourceType === 'zip' && bundle.archivePath
@@ -558,35 +547,27 @@ export async function reconcileStrandedSyncingBundles(db: Database): Promise<voi
               return null;
             })
           : null;
-        if (
-          archiveRel &&
-          replacement &&
-          (await restoreReplacementBundle(
-            tx as unknown as Database,
-            root,
-            bundle,
-            replacement,
-            'The worker stopped before import finished.',
-          ))
-        ) {
-          const [restored] = await tx
-            .select()
-            .from(schema.customBundles)
-            .where(eq(schema.customBundles.id, id));
-          if (restored?.status === 'active') restoredArchive = archiveRel;
-          return;
+        const patch = replacement
+          ? await replacementRecoveryPatch(
+              root,
+              bundle,
+              replacement,
+              'The worker stopped before import finished.',
+            )
+          : null;
+        if (patch) {
+          if (patch.status === 'active') restoredArchive = archiveRel;
+          return patch;
         }
-        await tx
-          .update(schema.customBundles)
-          .set({
-            status: 'failed',
-            lastReplacementNote: null,
-            lastSyncError: unreadableRecord
-              ? UNREADABLE_REPLACEMENT_ERROR
-              : 'Importing this bundle did not finish: nothing is queued or running for it. Use Resync (git) or Replace ZIP to try again, or remove the bundle.',
-            updatedAt: new Date(),
-          })
-          .where(eq(schema.customBundles.id, id));
+        return {
+          status: 'failed',
+          lastReplacementNote: null,
+          lastSyncError: unreadableRecord
+            ? UNREADABLE_REPLACEMENT_ERROR
+            : 'Importing this bundle did not finish: nothing is queued or running for it. Use Resync (git) or Replace ZIP to try again, or remove the bundle.',
+        };
+      }).then((settled) => {
+        if (!settled) restoredArchive = null;
       });
       if (restoredArchive)
         await clearReplacementRecord(
@@ -594,7 +575,10 @@ export async function reconcileStrandedSyncingBundles(db: Database): Promise<voi
           restoredArchive,
         );
     } catch (err) {
-      log.warn({ err, bundleId: id }, 'stranded bundle recovery failed; leaving bundle unchanged');
+      log.warn(
+        { err, bundleId: id },
+        'stranded bundle recovery failed; will retry after the recovery cutoff',
+      );
     }
   }
   log.warn({ attempted: stranded.length }, 'attempted recovery of bundles stranded at syncing');

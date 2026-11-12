@@ -820,3 +820,22 @@ it('updates and clears a replacement note when the polled bundle stays active', 
   await settle(live.view);
   expect(live.text()).not.toContain('Latest replacement failure.');
 });
+
+it('renders an action refusal as Markdown inside the alert', async () => {
+  bundleSource = 'git';
+  actionFailure = {
+    path: '/bundles/b1/sync',
+    method: 'POST',
+    response: {
+      ok: false,
+      status: 409,
+      json: async () => ({ error: 'Retry **later** with `Resync`.' }),
+    },
+  };
+  const live = await mountLive();
+  await live.click('Resync');
+  const alert = findAll(live.view.tree(), (h) => h.props.role === 'alert')[0]!;
+  expect(alert).toBeDefined();
+  expect(findAll(alert, (h) => h.tag === 'strong').map((node) => textOf(node))).toContain('later');
+  expect(findAll(alert, (h) => h.tag === 'code').map((node) => textOf(node))).toContain('Resync');
+});

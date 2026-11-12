@@ -8,7 +8,7 @@ import type {
   InitBundleUploadRequest,
   BundleReplacementMode,
 } from '@haive/shared';
-import { Button, FormError, Input, Label } from '@/components/ui';
+import { Button, Input, Label } from '@/components/ui';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { API_BASE_URL } from '@/lib/api-client';
@@ -185,12 +185,7 @@ export function BundleComposer({
         credentials: 'include',
       });
       if (!res.ok) {
-        // The api says why in `error` (a bundle nested too deeply to list, for one); the status is
-        // the fallback for an answer that names nothing.
-        const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
-        // An empty reason would store a falsy error and render the listing as an empty bundle.
-        const reason = typeof body?.error === 'string' ? body.error.trim() : '';
-        throw new Error(reason || `files fetch failed (${res.status})`);
+        throw await refusalError(res, 'files fetch failed');
       }
       const data = (await res.json()) as {
         files: BundleFileEntry[];
@@ -767,7 +762,12 @@ export function BundleComposer({
                       <p className="text-xs text-neutral-500">Loading files…</p>
                     )}
                     {fileState && fileState.error !== null && (
-                      <p className="text-xs text-red-400">Error: {fileState.error}</p>
+                      <div
+                        role="alert"
+                        className="min-w-0 text-xs text-red-400 [&_.haive-md]:break-words"
+                      >
+                        <MarkdownView body={`Error: ${fileState.error}`} />
+                      </div>
                     )}
                     {fileState && !fileState.loading && fileState.error === null && (
                       <>
@@ -838,7 +838,14 @@ export function BundleComposer({
         />
       )}
 
-      <FormError message={error} />
+      {error && (
+        <div
+          role="alert"
+          className="min-w-0 rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300 [&_.haive-md]:break-words"
+        >
+          <MarkdownView body={error} />
+        </div>
+      )}
     </div>
   );
 }

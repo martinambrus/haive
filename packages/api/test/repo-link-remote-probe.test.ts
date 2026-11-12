@@ -86,3 +86,33 @@ it('refuses an unreadable .git entry before invoking git', async () => {
   expect((await link()).status).toBe(409);
   expect(h.git).not.toHaveBeenCalled();
 });
+
+it.each([
+  [
+    Object.assign(new Error("EACCES: denied, open '/private/repos/key/.git'"), { code: 'EACCES' }),
+    'EACCES: denied',
+  ],
+  [
+    Object.assign(new Error('query failed with secret-value'), { params: ['secret-value'] }),
+    'Database operation failed',
+  ],
+])('sanitizes an unreadable entry refusal (%s)', async (error, reason) => {
+  h.entry.mockRejectedValueOnce(error);
+  const res = await link();
+  expect(res.status).toBe(409);
+  const body = await res.text();
+  expect(body).toContain(reason);
+  expect(body).not.toContain('/private/repos');
+  expect(body).not.toContain('secret-value');
+  expect(h.git).not.toHaveBeenCalled();
+});
+
+it('scrubs paths in a failed Git probe while preserving the refusal', async () => {
+  h.git.mockRejectedValueOnce(fail(128, "fatal: cannot read '/private/repos/key/.git/config'"));
+  const res = await link();
+  expect(res.status).toBe(409);
+  const body = await res.text();
+  expect(body).toContain('cannot read');
+  expect(body).toContain('[path]');
+  expect(body).not.toContain('/private/repos');
+});
