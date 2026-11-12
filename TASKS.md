@@ -786,9 +786,14 @@ PRE-EXISTING. shared config.service.ts `CONFIG_REDIS_OPTIONS` (~:785) and `redis
 
 ### T571 · FNF[global-kb-boot-store-stall] · worker boot waits forever on a stalled global KB store
 
-status: open · kind: design · found: T544 run 2026-11-08 · priority: P3
+status: done 2026-11-12 #1116 (09338a763): recompute and vector classification run after ready in a background loop (60 s deadline per attempt, 1-60 s backoff, abort on shutdown); alias UPDATE guarded on key, category and facets. Follow-ups in T630 · kind: design · found: T544 run 2026-11-08 · priority: P3
 Owner decision 2026-11-12: run the recompute off the boot path with its own deadline; boot completes, the recompute retries in the background with a logged warning.
 PRE-EXISTING. shared global-kb/client.ts `withGlobalKb` (~:121) via `recomputeAliasedTopicKeys` (worker data-migrations.ts ~:134, ~:599, ungated, every boot): a store that accepts and then stalls, or a held schema advisory lock, has no deadline. A plain `deadlineMs` skips the shared schema ensure (global-kb.md, "A call with a deadline never starts the shared schema ensure"), so it needs its own design. (T546 run) Same class: `dropHeadingOnlyGlobalKbChunks` (worker data-migrations.ts ~:1079, destructive, updater-only, documented best-effort) swallows a typed outage internally.
+
+### T630 · FNF[global-kb-unbounded-calls] · global KB store calls outside boot still have no deadline (+2)
+
+status: open · kind: fix · found: T571 review 2026-11-12 · priority: P3
+PRE-EXISTING, more reachable since #1116 made the bounded path the norm at boot. (1) `withGlobalKb` without `deadlineMs` in steps and the sweep: `_global-kb-promote.ts`, `kb-author/01-enrich.ts`, `09_6_4`/`09_6_5`, `global-kb-sync-queue.ts`; a store that accepts and stalls holds the step or sweep. Fix: pass a deadline and signal as the boot repairs do. (2) shared global-kb/connection.ts `resolveInternal` (~:148-152): the main-db `SELECT 1 FROM pg_database` / `CREATE DATABASE` has no client-side bound, so each timed-out background attempt can leave one query on the worker pool while main Postgres stalls (Greptile P2 on #1116, comment 4556974731). Fix: client-side bound; `SET LOCAL statement_timeout` cannot cover `CREATE DATABASE`. (3) worker data-migrations.ts `dropHeadingOnlyGlobalKbChunks` (~:1253) swallows a typed outage internally; and the recompute is not gated on `resolveGlobalKbEnabled` (the classify migration is).
 
 ### T572 · FNF[boot-failure-dead-watcher] · a Postgres outage past 30 s at boot still exits
 
