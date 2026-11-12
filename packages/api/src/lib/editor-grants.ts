@@ -14,7 +14,6 @@ import { HttpError, type AppEnv } from '../context.js';
 import { getAccessCookie } from '../auth/cookies.js';
 import { verifyAccessToken } from '../auth/jwt.js';
 import { getRedis } from '../redis.js';
-import { requireSessionUser } from '../middleware/auth.js';
 import { editorOrigin } from './request-origin.js';
 import { ensureIde, ideTarget, targetBelongsToUser } from './ide-target.js';
 import { isCanonicalUuid } from './uuid.js';
@@ -50,15 +49,13 @@ export async function grantEditor(c: Context<AppEnv>, repository = false): Promi
   const origin = editorOrigin();
   if (!origin) throw new HttpError(503, 'The public API or editor origin must be configured');
   // Re-read after the ensure wait. No transaction/reserved DB connection crosses Redis.
-  let user;
+  let payload;
   try {
-    const payload = await verifyAccessToken(getAccessCookie(c)!);
-    user = await requireSessionUser(userId, payload.tv);
-  } catch (err) {
-    if (err instanceof HttpError && err.status === 401)
-      throw new HttpError(403, 'Editor access refused');
-    throw err;
+    payload = await verifyAccessToken(getAccessCookie(c)!);
+  } catch {
+    throw new HttpError(403, 'Editor access refused');
   }
+  const user = await requireEditorUser(userId, payload.tv);
   if (!(await targetBelongsToUser(target))) throw new HttpError(404, 'Not found');
   const secret = randomBytes(32).toString('base64url');
   const grant: EditorGrant = {

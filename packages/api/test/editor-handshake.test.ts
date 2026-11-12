@@ -1,4 +1,7 @@
 import { eq } from 'drizzle-orm';
+import { createServer, type Server } from 'node:http';
+import net, { type AddressInfo, type Socket } from 'node:net';
+import { WebSocket, WebSocketServer } from 'ws';
 import { createHash } from 'node:crypto';
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -25,6 +28,11 @@ vi.mock('../src/queues.js', () => ({
 }));
 vi.mock('../src/redis.js', () => ({
   getRedis: () => ({ set: h.set, getdel: h.getdel }),
+  getPatientRedis: () => ({
+    scan: async () => ['0', []],
+    hset: async () => 1,
+    hincrby: async () => 1,
+  }),
 }));
 vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
@@ -36,7 +44,12 @@ import {
   signEditorSession,
   type EditorSessionPayload,
 } from '../src/auth/editor-session.js';
-import { ideRoutes, taskIdeAccessRoutes, repoIdeAccessRoutes } from '../src/routes/ide.js';
+import {
+  ideRoutes,
+  taskIdeAccessRoutes,
+  repoIdeAccessRoutes,
+  installIdeWebSocket,
+} from '../src/routes/ide.js';
 
 const USER = '00000000-0000-4000-8000-000000000001';
 const OTHER = '00000000-0000-4000-8000-000000000002';
@@ -307,3 +320,202 @@ describe('editor grant redemption', () => {
     ).toBe(401);
   });
 });
+
+function editorRequest(sessionCookie: string, kind = 'tasks', id = ID) {
+  const prefix = kind === 'repos' ? `/ide/repos/${id}/` : `/ide/${id}/`;
+  return app.request(prefix, { headers: { cookie: sessionCookie, host: 'rewritten-api:3001' } });
+}
+describe('editor HTTP sessions', () => {
+  it.each(['tasks', 'repos'])(
+    'accepts only the owned scope and tolerates a rewritten Host (%s)',
+    async (kind) => {
+      const { cookie } = await issued(kind);
+      const upstream = vi.fn().mockResolvedValue(new Response('editor'));
+      vi.stubGlobal('fetch', upstream);
+      try {
+        expect((await editorRequest(cookie, kind)).status).toBe(200);
+        expect(upstream).toHaveBeenCalledOnce();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+  it.each(['version', 'deactivated', 'flagged', 'missing-user', 'ownership'])(
+    'refuses HTTP after %s changes',
+    async (change) => {
+      const { cookie } = await issued();
+      if (change === 'version') fake.patch(schema.users, USER, { tokenVersion: 1 });
+      if (change === 'deactivated') fake.patch(schema.users, USER, { status: 'deactivated' });
+      if (change === 'flagged') fake.patch(schema.users, USER, { mustChangePassword: true });
+      if (change === 'missing-user')
+        await fake.db.delete(schema.users).where(eq(schema.users.id, USER));
+      if (change === 'ownership') fake.patch(schema.tasks, ID, { userId: OTHER });
+      expect([403, 404]).toContain((await editorRequest(cookie)).status);
+    },
+  );
+  it.each(['target-id', 'target-kind', 'runtime', 'origin', 'user', 'access-jwt', 'expired'])(
+    'refuses an editor cookie with wrong %s',
+    async (change) => {
+      const { cookie: issuedCookie } = await issued();
+      const goodToken = issuedCookie.slice(issuedCookie.indexOf('=') + 1);
+      const p = await verifyEditorSession(goodToken);
+      const payload: EditorSessionPayload = {
+        sub: p.sub,
+        tv: p.tv,
+        target: { ...p.target },
+        runtimeSessionId: p.runtimeSessionId,
+        editorOrigin: p.editorOrigin,
+      };
+      if (change === 'target-id') payload.target.id = MISSING;
+      if (change === 'target-kind') payload.target.kind = 'repo';
+      if (change === 'runtime') payload.runtimeSessionId = MISSING;
+      if (change === 'origin') payload.editorOrigin = 'https://other.example.com';
+      if (change === 'user') payload.sub = OTHER;
+      let token =
+        change === 'access-jwt'
+          ? cookie.slice('haive_access='.length)
+          : await signEditorSession(payload);
+      if (change === 'expired') {
+        token = goodToken;
+        vi.useFakeTimers();
+        vi.advanceTimersByTime(8 * 3600 * 1000);
+      }
+      expect(
+        (await editorRequest(`${editorCookieName({ kind: 'task', id: ID })}=${token}`)).status,
+      ).toBe(change === 'user' ? 404 : 403);
+    },
+  );
+});
+
+const realConnect = net.connect.bind(net);
+const wsServers: Server[] = [];
+const wsPeers = new Set<Socket>();
+const wsClients = new Set<WebSocket>();
+afterEach(async () => {
+  for (const client of wsClients) client.terminate();
+  wsClients.clear();
+  for (const peer of wsPeers) peer.destroy();
+  wsPeers.clear();
+  await Promise.all(wsServers.splice(0).map((s) => new Promise<void>((r) => s.close(() => r()))));
+});
+async function listenWs(s: Server): Promise<number> {
+  wsServers.push(s);
+  s.on('connection', (peer) => {
+    wsPeers.add(peer);
+    peer.on('close', () => wsPeers.delete(peer));
+  });
+  await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
+  return (s.address() as AddressInfo).port;
+}
+async function editorWsRig() {
+  const upstream = createServer();
+  new WebSocketServer({ server: upstream });
+  const upstreamPort = await listenWs(upstream);
+  vi.spyOn(net, 'connect').mockImplementation(((opts: net.TcpNetConnectOpts) => {
+    if (opts.host?.startsWith('haive-ide-'))
+      return realConnect({ host: '127.0.0.1', port: upstreamPort });
+    return realConnect(opts);
+  }) as typeof net.connect);
+  const proxy = createServer();
+  installIdeWebSocket(proxy);
+  return listenWs(proxy);
+}
+function wsHandshake(port: number, cookie: string, path = `/ide/${ID}/`) {
+  const client = new WebSocket(`ws://127.0.0.1:${port}${path}`, {
+    headers: { cookie, origin: 'https://ide.example.com', host: 'rewritten-api:3001' },
+  });
+  wsClients.add(client);
+  const result = new Promise<number>((resolve, reject) => {
+    client.on('open', () => resolve(101));
+    client.on('unexpected-response', (_req, res) => {
+      res.resume();
+      client.terminate();
+      resolve(res.statusCode!);
+    });
+    client.on('error', () => {});
+    client.on('close', (code) => {
+      if (code !== 1006) return;
+    });
+    setTimeout(() => reject(new Error('editor upgrade timeout')), 3000).unref();
+  });
+  return { client, result };
+}
+describe('editor WebSocket sessions', () => {
+  it.each(['tasks', 'repos'])(
+    'accepts scoped editor credentials with a rewritten Host (%s)',
+    async (kind) => {
+      const { cookie } = await issued(kind);
+      const port = await editorWsRig();
+      const path = kind === 'repos' ? `/ide/repos/${ID}/` : `/ide/${ID}/`;
+      expect(await wsHandshake(port, cookie, path).result).toBe(101);
+    },
+  );
+  it.each([
+    'access-jwt',
+    'runtime',
+    'target',
+    'origin',
+    'version',
+    'deactivated',
+    'flagged',
+    'ownership',
+  ])('refuses editor WS for wrong %s', async (change) => {
+    const { cookie: c } = await issued();
+    const p = await verifyEditorSession(c.slice(c.indexOf('=') + 1));
+    const payload: EditorSessionPayload = {
+      sub: p.sub,
+      tv: p.tv,
+      target: { ...p.target },
+      runtimeSessionId: p.runtimeSessionId,
+      editorOrigin: p.editorOrigin,
+    };
+    if (change === 'runtime') payload.runtimeSessionId = MISSING;
+    if (change === 'target') payload.target.kind = 'repo';
+    if (change === 'origin') payload.editorOrigin = 'https://other.example.com';
+    if (change === 'version') fake.patch(schema.users, USER, { tokenVersion: 1 });
+    if (change === 'deactivated') fake.patch(schema.users, USER, { status: 'deactivated' });
+    if (change === 'flagged') fake.patch(schema.users, USER, { mustChangePassword: true });
+    if (change === 'ownership') fake.patch(schema.tasks, ID, { userId: OTHER });
+    const token =
+      change === 'access-jwt'
+        ? cookie.slice('haive_access='.length)
+        : await signEditorSession(payload);
+    const port = await editorWsRig();
+    expect(
+      await wsHandshake(port, `${editorCookieName({ kind: 'task', id: ID })}=${token}`).result,
+    ).toBe(change === 'ownership' ? 404 : 403);
+  });
+});
+
+it.each(['authentication', 'ownership'])(
+  'fences an editor upgrade suspended during %s',
+  async (stage) => {
+    const { cookie } = await issued();
+    const port = await editorWsRig();
+    let arrived!: () => void;
+    const captured = new Promise<void>((r) => {
+      arrived = r;
+    });
+    let resume!: () => void;
+    const pendingRead = new Promise<void>((r) => {
+      resume = r;
+    });
+    const table = stage === 'authentication' ? fake.db.query.users : fake.db.query.tasks;
+    const original = table.findFirst.bind(table);
+    vi.spyOn(table, 'findFirst').mockImplementationOnce(async (opts) => {
+      const row = await original(opts);
+      arrived();
+      await pendingRead;
+      return row;
+    });
+    const pending = wsHandshake(port, cookie);
+    await captured;
+    const { closeUserSockets } = await import('../src/lib/user-sockets.js');
+    fake.patch(schema.users, USER, { tokenVersion: 1 });
+    expect(closeUserSockets(USER)).toBe(1);
+    // The existing fence ends a pending raw handshake with 401; no editor is accepted.
+    expect(await pending.result).toBe(401);
+    resume();
+    await new Promise<void>((r) => setImmediate(r));
+  },
+);

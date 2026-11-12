@@ -9,7 +9,7 @@ import { schema } from '@haive/database';
 
 export async function requireSessionUser(
   userId: string,
-  tokenVersion?: number,
+  tokenVersion: number,
   allowPasswordChange = false,
 ) {
   const db = getDb();
@@ -20,7 +20,7 @@ export async function requireSessionUser(
   if (!user || user.status !== 'active') {
     throw new HttpError(401, 'User not found or deactivated');
   }
-  if (tokenVersion !== undefined && user.tokenVersion !== tokenVersion) {
+  if (user.tokenVersion !== tokenVersion) {
     throw new HttpError(401, 'Token revoked');
   }
   if (user.mustChangePassword && !allowPasswordChange) {

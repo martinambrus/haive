@@ -12,7 +12,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
-import { terminalSessionKey } from '@haive/shared';
+import { secretsService, terminalSessionKey } from '@haive/shared';
 import { createFakeDb } from '@haive/database/testing';
 import { eq } from 'drizzle-orm';
 import { DrizzleQueryError } from 'drizzle-orm/errors';
@@ -173,6 +173,7 @@ import { installTerminalShellWebSocket } from '../src/routes/terminal-shell.js';
 import { installCliStreamWebSocket } from '../src/routes/cli-stream.js';
 import { installCliLoginBannerWebSocket } from '../src/routes/cli-login-banner.js';
 import { installBrowserVncWebSocket } from '../src/routes/browser-vnc.js';
+import { signEditorSession, editorCookieName } from '../src/auth/editor-session.js';
 import { installIdeWebSocket } from '../src/routes/ide.js';
 import { adminRoutes } from '../src/routes/admin.js';
 import { userSettingsRoutes } from '../src/routes/user-settings.js';
@@ -267,6 +268,7 @@ afterEach(async () => {
   peers.clear();
   await Promise.all(servers.splice(0).map((s) => new Promise<void>((r) => s.close(() => r()))));
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 async function listen(s: net.Server): Promise<number> {
   servers.push(s);
@@ -354,7 +356,11 @@ describe('upgrade authentication on every surface', () => {
   });
 });
 
-async function openAll({ bannerReady = false } = {}) {
+async function openAll({ bannerReady = false, editorSessions = false } = {}) {
+  if (editorSessions) {
+    vi.stubEnv('HAIVE_EDITOR_ORIGIN', 'http://localhost:3001');
+    vi.spyOn(secretsService, 'getJwtSecret').mockResolvedValue('synthetic-editor-session-key');
+  }
   h.loginReady = bannerReady;
   if (bannerReady)
     fake.insert(schema.containers, {
@@ -426,8 +432,22 @@ async function openAll({ bannerReady = false } = {}) {
   });
   const result = [];
   for (const handler of HANDLERS) {
+    let cookie = 'haive_access=user-session';
+    if (editorSessions && handler.file === 'ide') {
+      const target = {
+        kind: handler.path.includes('/repos/') ? ('repo' as const) : ('task' as const),
+        id: ID,
+      };
+      cookie = `${editorCookieName(target)}=${await signEditorSession({
+        sub: USER,
+        tv: 0,
+        target,
+        runtimeSessionId: target.kind === 'repo' ? `repo-${ID}` : ID,
+        editorOrigin: 'http://localhost:3001',
+      })}`;
+    }
     const client = new WebSocket(`ws://127.0.0.1:${port}${handler.path}`, {
-      headers: { cookie: 'haive_access=user-session' },
+      headers: { cookie },
     });
     clients.add(client);
     const codes: number[] = [];
@@ -464,9 +484,11 @@ app.route('/admin', adminRoutes);
 app.route('/user-settings', userSettingsRoutes);
 
 describe('session writers close established sockets on all surfaces', () => {
-  for (const action of ['deactivate', 'reset_password', 'password']) {
-    it(action, async () => {
-      const { sockets, unaffected, port, upstreamWss } = await openAll();
+  for (const { action, editorSessions } of [false, true].flatMap((editorSessions) =>
+    ['deactivate', 'reset_password', 'password'].map((action) => ({ action, editorSessions })),
+  )) {
+    it(`${action} (editor sessions: ${editorSessions})`, async () => {
+      const { sockets, unaffected, port, upstreamWss } = await openAll({ editorSessions });
       const response = await app.request(
         action === 'password' ? '/user-settings/password' : `/admin/users/${USER}/action`,
         {
