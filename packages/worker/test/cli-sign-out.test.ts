@@ -648,3 +648,93 @@ it('retries removal until an abandoned login ownership helper releases its volum
     vi.useRealTimers();
   }
 });
+
+it('resumes partially removed auth after redelivery past the start deadline', async () => {
+  const row = makeProviderRow({ name: 'claude-code' });
+  const calls: DbCalls = { updateSet: null };
+  const runner = makeRunner({ existing: [] });
+  const job = {
+    timestamp: Date.now(),
+    data: {},
+    token: 'token',
+    updateData: vi.fn(async (data: any) => {
+      job.data = data;
+    }),
+  };
+  const db = makeDb(row, calls);
+  const originalDelete = db.delete.bind(db);
+  // Simulate a worker dying after volume cleanup but before secret removal.
+  db.delete = vi
+    .fn()
+    .mockImplementationOnce(() => {
+      throw new Error('worker died');
+    })
+    .mockImplementation(originalDelete);
+  await expect(
+    handleSignOutJob(db, { providerId: row.id, userId: row.userId }, runner, job as any),
+  ).rejects.toThrow('worker died');
+  expect(job.data).toMatchObject({ signOutStarted: true });
+  job.timestamp -= CLI_SIGN_OUT_AUTH_WAIT_MS + 1;
+  await expect(
+    handleSignOutJob(db, { providerId: row.id, userId: row.userId }, runner, job as any),
+  ).resolves.toMatchObject({ ok: true, failed: [] });
+  expect(calls.deleted).toBe(true);
+  expect(calls.updateSet?.authStatus).toBe('unknown');
+});
+
+it('resumes remaining volumes and stopped helpers after redelivery past the deadline', async () => {
+  const row = makeProviderRow();
+  const calls: DbCalls = { updateSet: null };
+  const volumes = ['haive_cli_auth_user1_gemini_0', 'haive_cli_auth_user1_gemini_1'];
+  const runner = makeRunner({ existing: [volumes[1]!], sweep: true });
+  const job = {
+    timestamp: Date.now() - CLI_SIGN_OUT_AUTH_WAIT_MS - 1,
+    data: { signOutStarted: true },
+  };
+  await expect(
+    handleSignOutJob(
+      makeDb(row, calls),
+      { providerId: row.id, userId: row.userId },
+      runner,
+      job as any,
+    ),
+  ).resolves.toEqual({ ok: true, removed: volumes, failed: [] });
+  expect(runner.swept).toEqual([volumes[1]]);
+  expect(runner.removed).toEqual([volumes[1]]);
+  expect(calls.updateSet?.authStatus).toBe('unknown');
+});
+
+it.each(['LOADING Redis is loading', 'OOM command not allowed'])(
+  'persists the start marker before any removal despite a refused write (%s)',
+  async (reason) => {
+    vi.useFakeTimers();
+    try {
+      const row = makeProviderRow();
+      const calls: DbCalls = { updateSet: null };
+      const volume = 'haive_cli_auth_user1_gemini_0';
+      const runner = makeRunner({ existing: [volume], sweep: true });
+      const job = {
+        timestamp: Date.now(),
+        data: {},
+        updateData: vi.fn().mockRejectedValueOnce(new Error(reason)).mockResolvedValue(undefined),
+      };
+      const result = handleSignOutJob(
+        makeDb(row, calls),
+        { providerId: row.id, userId: row.userId },
+        runner,
+        job as any,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(runner.order).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await result).toMatchObject({ ok: true });
+      expect(job.updateData).toHaveBeenCalledTimes(2);
+      expect(job.updateData).toHaveBeenLastCalledWith(
+        expect.objectContaining({ signOutStarted: true }),
+      );
+      expect(runner.removed).toEqual([volume]);
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);

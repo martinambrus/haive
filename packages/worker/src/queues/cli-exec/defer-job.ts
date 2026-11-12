@@ -32,12 +32,22 @@ export async function deferJob(
   prepare?: () => Promise<void>,
   latestAt?: number,
 ): Promise<void> {
+  await retryJobWrite(job, async () => {
+    // Metadata and the move share one refusal budget; repeating preparation is idempotent.
+    await prepare?.();
+    await job.moveToDelayed(Math.min(Date.now() + delayMs, latestAt ?? Infinity), token);
+  });
+}
+
+/** Persist job metadata with the same bounded refusal retry used by deferred jobs. */
+export async function retryJobWrite(
+  job: Pick<Job, 'id'>,
+  write: () => Promise<void>,
+): Promise<void> {
   const giveUpAt = Date.now() + DEFER_RETRY_WINDOW_MS;
   for (let attempt = 1; ; attempt += 1) {
     try {
-      // Metadata and the move share one refusal budget; repeating preparation is idempotent.
-      await prepare?.();
-      await job.moveToDelayed(Math.min(Date.now() + delayMs, latestAt ?? Infinity), token);
+      await write();
       return;
     } catch (err) {
       if (Date.now() >= giveUpAt) throw err;

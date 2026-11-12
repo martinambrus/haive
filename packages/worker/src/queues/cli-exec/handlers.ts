@@ -97,7 +97,7 @@ import {
 import { reserveAgentSlot, type AgentSlot } from './agent-lease.js';
 import { STATIC_PARALLEL_AGENTS, currentAgentCap, publishAgentCap } from './agent-pool-cap.js';
 import { enforceRuntimeHolderReserve } from './agent-reserve.js';
-import { deferJob } from './defer-job.js';
+import { deferJob, retryJobWrite } from './defer-job.js';
 import { executeByKind, interpretCliFailure } from './exec-core.js';
 import { fatalClassFromMessage } from './failure-class.js';
 import {
@@ -1209,7 +1209,10 @@ export async function handleSignOutJob(
 ): Promise<CliSignOutJobResult> {
   // BullMQ's timestamp survives every deferred retry, including time behind agent work.
   const enqueuedAt = job?.timestamp ?? job?.data?.authContentionStartedAt;
-  const deadline = enqueuedAt === undefined ? undefined : enqueuedAt + CLI_SIGN_OUT_AUTH_WAIT_MS;
+  const resuming = job?.data?.signOutStarted === true;
+  // A stalled worker can be redelivered after the start window with cleanup half done.
+  const deadline =
+    resuming || enqueuedAt === undefined ? undefined : enqueuedAt + CLI_SIGN_OUT_AUTH_WAIT_MS;
   const assertInWindow = () => {
     if (deadline !== undefined && Date.now() >= deadline)
       throw new UnrecoverableError(CLI_SIGN_OUT_EXPIRED_MESSAGE);
@@ -1291,12 +1294,20 @@ export async function handleSignOutJob(
       return { ok: true, superseded: true, removed: [], failed: [] };
     }
     assertInWindow();
+    if (job && !resuming) {
+      // Persist BEFORE any container, volume or secret removal; a restart must resume it.
+      await retryJobWrite(job, () => job.updateData({ ...job.data, signOutStarted: true }));
+      assertInWindow();
+    }
     const meta = getCliProviderMetadata(provider.name);
     const removed: string[] = [];
     const failed: { name: string; stderr: string }[] = [];
     for (let idx = 0; idx < meta.authConfigPaths.length; idx += 1) {
       const name = authVolumeFor(provider, idx);
-      if (!(await runner.volumeExists(name))) continue;
+      if (!(await runner.volumeExists(name))) {
+        if (resuming) removed.push(name);
+        continue;
+      }
       // Exactly the hazard `cleanupTaskAuthVolumes` guards, on the volume class that
       // outlives every task: a worker killed between `docker create` and `docker start`
       // leaves a Created auth helper mounting this volume, and `docker volume rm --force`
