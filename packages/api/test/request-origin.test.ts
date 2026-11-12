@@ -91,7 +91,7 @@ describe('a state-changing request', () => {
         cookie: 'haive_access=session',
       },
     });
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(401);
   });
 
   it('does not exempt /ide-like app paths', async () => {

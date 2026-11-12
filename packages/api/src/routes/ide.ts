@@ -101,6 +101,18 @@ function upstreamRequestHeaders(source: Headers): Headers {
 export const ideRoutes = new Hono<AppEnv>();
 ideRoutes.get('/_handshake', editorBootstrap);
 ideRoutes.post('/_handshake', bodyLimit({ maxSize: 1024 }), redeemEditor);
+// Registered after the two public handshake handlers, before every editor handler.
+ideRoutes.use('*', async (c, next) => {
+  const parsed = extractIdeTarget(c.req.path);
+  if (!parsed) throw new HttpError(401, 'Not authenticated');
+  const scope = { kind: parsed.repository ? ('repo' as const) : ('task' as const), id: parsed.id };
+  const identity = await editorIdentity(c.req.header('cookie'), scope);
+  if (!identity) throw new HttpError(401, 'Not authenticated');
+  const user = await requireEditorUser(identity.sub, identity.tv);
+  c.set('userId', user.id);
+  c.set('userRole', user.role);
+  await next();
+});
 
 // Starting an editor is an explicit POST. Loading its HTML/assets only proxies an existing one.
 export const taskIdeAccessRoutes = new Hono<AppEnv>();
@@ -131,11 +143,7 @@ function isPortProxyPath(path: string): boolean {
 async function proxyHttp(c: Context<AppEnv>, repository = false): Promise<Response> {
   const taskId = c.req.param('id');
   if (!taskId || !isCanonicalUuid(taskId)) throw new HttpError(404, 'Not found');
-  const scope = { kind: repository ? ('repo' as const) : ('task' as const), id: taskId };
-  const identity = await editorIdentity(c.req.header('cookie'), scope);
-  if (!identity) throw new HttpError(401, 'Not authenticated');
-  const user = await requireEditorUser(identity.sub, identity.tv);
-  const userId = user.id;
+  const userId = c.get('userId');
   const target = ideTarget(taskId, userId, repository);
   if (!(await targetBelongsToUser(target))) throw new HttpError(404, 'Not found');
 

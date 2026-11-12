@@ -43,6 +43,9 @@ vi.mock('../src/queues.js', async (importOriginal) => {
 const { createApiApp } = await import('../src/index.js');
 const { installModules } = await import('../src/modules/loader.js');
 const { getDb } = await import('../src/db.js');
+const { ideRoutes } = await import('../src/routes/ide.js');
+// Simulate a future handler with no inline authentication. The router must guard it.
+ideRoutes.get('/', (c) => c.json({ future: true }));
 
 const PUBLIC: Record<string, string> = {
   'POST /ide/_handshake': 'redeems a single-use editor grant; it does not use the app session',
@@ -123,6 +126,11 @@ function judge(rows: Row[]) {
 }
 
 describe('anonymous access to the api', () => {
+  it('the editor router guards a future handler without inline authentication', async () => {
+    const app = createApiApp('http://localhost:3000');
+    expect((await app.request('/ide')).status).toBe(401);
+  });
+
   it('every route refuses a request with no session before it reads anything, except the public ones', async () => {
     const app = createApiApp('http://localhost:3000');
     await installModules(app);
