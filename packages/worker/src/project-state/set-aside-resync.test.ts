@@ -280,3 +280,29 @@ it('continues to accept a stable writer blockage as completed', async () => {
   expect(await resyncHaiveProjections(marksDb(), 'writer-blocked', '/repo')).toBe(true);
   expect(warn).not.toHaveBeenCalled();
 });
+
+it('retains caller context in the shared warning without bypassing deduplication', async () => {
+  calls.outcome = 'held';
+  const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  const { resyncWithKeptMetadata } = await import('./set-aside.js');
+  for (const context of ['refresh', 'sync_base', 'plan_pull']) {
+    expect(
+      await resyncWithKeptMetadata(marksDb(), 'context-repo', '/repo', new Map(), context),
+    ).toBe(false);
+  }
+  expect(warn).toHaveBeenCalledExactlyOnceWith(
+    {
+      repositoryId: 'context-repo',
+      context: 'refresh',
+      reasons: [
+        {
+          phase: 'state_sync',
+          outcome: 'held',
+          reason: 'record read refused',
+          code: 'write_pending',
+        },
+      ],
+    },
+    expect.any(String),
+  );
+});

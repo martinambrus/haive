@@ -422,11 +422,7 @@ async function fastForwardInMove(
       } finally {
         try {
           // The move landed; the durable outbox retries projections without failing Refresh.
-          if (!(await resyncWithKeptMetadata(db, payload.repositoryId, dest, kept)))
-            logger.warn(
-              { repositoryId: payload.repositoryId },
-              'checkout refreshed; projection recovery pending',
-            );
+          await resyncWithKeptMetadata(db, payload.repositoryId, dest, kept, 'refresh');
         } catch (err) {
           if (!handBackFailed) throw err;
           logger.warn(

@@ -77,17 +77,17 @@ it.each([false, true])(
         { source: 'github_https', repositoryId: 'r1', userId: 'u1' } as RepoJobPayload,
         '/repo',
       );
-      expect(h.resettle).toHaveBeenCalledWith(db, 'r1', '/repo', kept);
+      expect(h.resettle).toHaveBeenCalledWith(db, 'r1', '/repo', kept, 'refresh');
       expect(h.metadata).not.toHaveBeenCalled();
       expect(kept.size).toBe(1);
-      expect(result).toBeDefined();
+      expect(result).toBeNull();
       expect(
         warn.mock.calls.some(
           ([fields, message]) =>
             (fields as { repositoryId?: string }).repositoryId === 'r1' &&
             message === 'checkout refreshed; projection recovery pending',
         ),
-      ).toBe(conflict);
+      ).toBe(false);
       expect(await control.recover()).toBe(!conflict);
       expect(control.pending()).not.toBeNull();
     } finally {

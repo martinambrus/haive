@@ -952,12 +952,19 @@ async function isDirty(
 // Bound standing diagnoses across all repositories and phases, including admission refusals.
 // Success re-arms every diagnosis for that repository; restart or eviction may warn again.
 const resyncWarnings = new Set<string>();
-function warnResyncOnce(repositoryId: string, reasons: Record<string, unknown>[]): void {
+function warnResyncOnce(
+  repositoryId: string,
+  reasons: Record<string, unknown>[],
+  context?: string,
+): void {
   const key = JSON.stringify([repositoryId, reasons]);
   if (resyncWarnings.has(key)) return;
   if (resyncWarnings.size >= 4096) resyncWarnings.delete(resyncWarnings.values().next().value!);
   resyncWarnings.add(key);
-  logger.warn({ repositoryId, reasons }, 'projection re-sync incomplete; recovery will retry');
+  logger.warn(
+    { repositoryId, reasons, ...(context ? { context } : {}) },
+    'projection re-sync incomplete; recovery will retry',
+  );
 }
 function rearmResyncWarnings(repositoryId: string): void {
   const prefix = `[${JSON.stringify(repositoryId)},`;
@@ -975,10 +982,11 @@ export async function resyncHaiveProjections(
   repositoryId: string,
   repoPath: string,
   endingTaskId?: string,
+  context?: string,
 ): Promise<boolean> {
   const reasons: Record<string, unknown>[] = [];
   const incomplete = (reason: Record<string, unknown>): false => {
-    warnResyncOnce(repositoryId, [...reasons, reason]);
+    warnResyncOnce(repositoryId, [...reasons, reason], context);
     return false;
   };
   if (projectionRecoveryHeld(repoPath))
@@ -1045,7 +1053,7 @@ export async function resyncHaiveProjections(
       });
     }
   }
-  if (!synced) warnResyncOnce(repositoryId, reasons);
+  if (!synced) warnResyncOnce(repositoryId, reasons, context);
   else rearmResyncWarnings(repositoryId);
   return synced;
 }
@@ -1056,10 +1064,11 @@ export async function resyncWithKeptMetadata(
   repositoryId: string,
   repoPath: string,
   _kept: KeptFiles,
+  context?: string,
 ): Promise<boolean> {
   // Capture was committed by the judge before removal. Never re-introduce a map
   // another successful recovery has already consumed.
-  return resyncHaiveProjections(db, repositoryId, repoPath);
+  return resyncHaiveProjections(db, repositoryId, repoPath, undefined, context);
 }
 
 /** The re-sync an onboarding or upgrade owes when it ends, since the sync deferred while it held the
