@@ -5,7 +5,7 @@ import {
   SESSION_EXPIRED_VALUE,
   PUBLIC_PATHS,
 } from '@/lib/route-access';
-import { resolveApiOrigin, runtimeApiConfig } from '@/lib/api-origin';
+import { resolveApiOrigin, resolveEditorOrigin, runtimeApiConfig } from '@/lib/api-origin';
 import { browserHostname, contentSecurityPolicy } from '@/lib/content-security-policy';
 import { apiProxyTarget } from '@/lib/api-proxy.server';
 import { resolveServerApiBase } from '@/lib/api-base.server';
@@ -72,7 +72,7 @@ export async function proxy(request: NextRequest) {
     // Keep the parsed request URL's port if an upstream supplies an invalid Host header.
   }
   // Per request, because the api origin is the browser's own hostname on a port set at runtime.
-  const apiOrigin = resolveApiOrigin({
+  const originInputs = {
     config: runtimeApiConfig(),
     location: {
       protocol: request.nextUrl.protocol,
@@ -80,20 +80,19 @@ export async function proxy(request: NextRequest) {
       port: browserPort,
     },
     buildTime: process.env.NEXT_PUBLIC_API_URL,
-  });
-  response.headers.set('Content-Security-Policy', contentSecurityPolicy(apiOrigin));
+  };
+  response.headers.set(
+    'Content-Security-Policy',
+    contentSecurityPolicy(resolveApiOrigin(originInputs), resolveEditorOrigin(originInputs)),
+  );
   return response;
 }
 
 export const config = {
   matcher: [
-    '/((?!_next|favicon.ico|api/haive(?:/|$)|ide(?:/|$)|.*\\..*).*)',
+    '/((?!_next|favicon.ico|api/haive(?:/|$)|.*\\..*).*)',
     {
       source: '/api/haive/:path*',
-      has: [{ type: 'header', key: 'upgrade', value: 'websocket' }],
-    },
-    {
-      source: '/ide/:path*',
       has: [{ type: 'header', key: 'upgrade', value: 'websocket' }],
     },
     // A module provider id holds dots, which the entry above takes for a static file.

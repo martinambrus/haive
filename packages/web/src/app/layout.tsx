@@ -24,7 +24,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   // Read here rather than in the client bundle: `NEXT_PUBLIC_*` is inlined at build time and a
-  // published image cannot be told a different port afterwards. These two are ordinary runtime
+  // published image cannot be told a different port afterwards. These are ordinary runtime
   // env vars, so the same image serves any install.
   const runtime = runtimeApiConfig();
 

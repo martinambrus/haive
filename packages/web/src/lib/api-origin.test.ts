@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   resolveApiOrigin,
+  resolveEditorOrigin,
   runtimeApiConfig,
   FALLBACK_API_URL,
   type ApiOriginInputs,
@@ -127,5 +128,48 @@ describe('blank settings count as unset', () => {
 
   it('falls back from an empty build-time URL when there is no location', () => {
     expect(resolveApiOrigin(inputs({ location: undefined, buildTime: '' }))).toBe(FALLBACK_API_URL);
+  });
+});
+
+describe('editor origin for page CSP', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('reads the optional editor override at runtime and canonicalizes its origin', () => {
+    vi.stubEnv('HAIVE_EDITOR_ORIGIN', ' https://ide.example.com:8443/ ');
+    expect(runtimeApiConfig()).toMatchObject({ editorOrigin: 'https://ide.example.com:8443/' });
+    expect(resolveEditorOrigin(inputs({ config: runtimeApiConfig() }))).toBe(
+      'https://ide.example.com:8443',
+    );
+  });
+
+  it('defaults to the public API origin across hostnames, bypassing the session proxy', () => {
+    expect(
+      resolveEditorOrigin(
+        inputs({
+          config: { apiUrl: 'https://api.example.com/prefix/' },
+          location: { protocol: 'https:', hostname: 'web.example.com', port: '443' },
+        }),
+      ),
+    ).toBe('https://api.example.com');
+  });
+
+  it('derives the same-host API port and protocol when no public URL is set', () => {
+    expect(
+      resolveEditorOrigin(
+        inputs({
+          config: { apiPort: '3003' },
+          location: { protocol: 'https:', hostname: 'remote.example.com' },
+        }),
+      ),
+    ).toBe('https://remote.example.com:3003');
+  });
+
+  it('uses the build-time fallback and drops invalid or non-http editor origins', () => {
+    expect(resolveEditorOrigin(inputs({ buildTime: 'https://api.example.com/base' }))).toBe(
+      'https://api.example.com',
+    );
+    for (const editorOrigin of ['bad', 'ftp://ide.example.com']) {
+      expect(resolveEditorOrigin(inputs({ config: { editorOrigin } }))).toBe('');
+    }
   });
 });

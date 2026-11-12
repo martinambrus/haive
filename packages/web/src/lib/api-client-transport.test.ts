@@ -18,10 +18,9 @@ describe('browser API transport', () => {
     });
     const client = await import('./api-client');
     expect(client.apiWebSocketUrl('/terminal/id')).toBe('ws://localhost:3000/terminal/id');
-    expect(client.apiEditorUrl('/ide/id/')).toBe('http://localhost:3000/api/haive/ide/id/');
   });
 
-  it('keeps REST, WebSockets and the editor at the web hostname with a remote API', async () => {
+  it('keeps REST and WebSockets at the web hostname with a remote API', async () => {
     vi.stubGlobal('window', {
       __HAIVE_RUNTIME__: { apiUrl: 'https://api.example.test' },
       location: {
@@ -36,10 +35,9 @@ describe('browser API transport', () => {
     expect(client.apiWebSocketUrl('/terminal/id')).toBe(
       'wss://web.example.test:8443/api/haive/terminal/id',
     );
-    expect(client.apiEditorUrl('/ide/id/')).toBe('https://web.example.test:8443/ide/id/');
   });
 
-  it('preserves direct same-host REST, WebSocket and editor URLs on different ports', async () => {
+  it('preserves direct same-host REST and WebSocket URLs on different ports', async () => {
     vi.stubGlobal('window', {
       __HAIVE_RUNTIME__: { apiUrl: 'http://localhost:3001/prefix' },
       location: {
@@ -52,7 +50,6 @@ describe('browser API transport', () => {
     const client = await import('./api-client');
     expect(client.API_BASE_URL).toBe('http://localhost:3001/prefix');
     expect(client.apiWebSocketUrl('/terminal/id')).toBe('ws://localhost:3001/terminal/id');
-    expect(client.apiEditorUrl('/ide/id/')).toBe('http://localhost:3001/prefix/ide/id/');
   });
 
   it('does not mistake an explicit same-host API path on another port for the web proxy', async () => {
@@ -67,6 +64,10 @@ describe('browser API transport', () => {
     });
     const client = await import('./api-client');
     expect(client.apiWebSocketUrl('/terminal/id')).toBe('ws://localhost:3001/terminal/id');
-    expect(client.apiEditorUrl('/ide/id/')).toBe('http://localhost:3001/api/haive/ide/id/');
   });
+});
+
+it('exposes no helper for constructing editor paths on the app transport', async () => {
+  const client = await import('./api-client');
+  expect('apiEditorUrl' in client).toBe(false);
 });
