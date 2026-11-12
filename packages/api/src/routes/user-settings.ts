@@ -548,6 +548,7 @@ userSettingsRoutes.get('/notifications/sound', async (c) => {
     (err: unknown) => containmentHttpError(err, 'Sound path is outside the uploads directory'),
   );
   if (!fh) throw new HttpError(404, 'Sound file missing on disk');
+  c.header('X-Content-Type-Options', 'nosniff');
   c.header('Content-Type', row.soundMime ?? 'application/octet-stream');
   c.header('Content-Length', String(info.stats.size));
   c.header('Cache-Control', 'no-store');
