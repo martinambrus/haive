@@ -1,4 +1,3 @@
-import { fixtureBase, httpOrigin, networkGitArgs } from './support/git-http.js';
 import { failGit, type FakeGit } from './support/fake-git.js';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -10,10 +9,16 @@ import { createDatabase, schema, type Database } from '@haive/database';
 import { discardPlanMerge } from '../src/step-engine/steps/plan/01-plan-merge.js';
 import { ensurePlanMergeWorktree, mergeOriginInto } from '../src/plan/merge.js';
 import { planMergeFixBaseline } from '../src/plan/merge-baseline.js';
+import * as merge from '../src/plan/merge.js';
+import { integrateOrigin } from '../src/queues/plan-mirror-queue.js';
+
+const h = vi.hoisted(() => ({ db: null as unknown }));
+vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 
 const url = process.env.PLAN_MERGE_FOLLOWUPS_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/plan_merge_followups_test'))
   throw new Error('Use a dedicated plan_merge_followups_test database');
+const fixture = url ? await import('./support/git-http.js') : null;
 const identity = {
   GIT_AUTHOR_NAME: 'fixture',
   GIT_AUTHOR_EMAIL: 'fixture@local',
@@ -21,7 +26,7 @@ const identity = {
   GIT_COMMITTER_EMAIL: 'fixture@local',
 };
 const git = (cwd: string, ...args: string[]) =>
-  execFileSync('git', networkGitArgs(args), {
+  execFileSync('git', fixture!.networkGitArgs(args), {
     cwd,
     env: { ...process.env, ...identity },
     encoding: 'utf8',
@@ -41,19 +46,20 @@ describe.skipIf(!url)('plan merge transaction handles on real Postgres', () => {
     const bounded = new URL(url!);
     bounded.searchParams.set('options', '-c statement_timeout=1000');
     db = createDatabase(bounded.toString());
+    h.db = db;
   });
   afterAll(async () => {
     await db.$client.end({ timeout: 5 });
   });
   beforeEach(async () => {
-    root = await mkdtemp(path.join(fixtureBase, 'plan-merge-followups-'));
+    root = await mkdtemp(path.join(fixture!.fixtureBase, 'plan-merge-followups-'));
     const origin = path.join(root, 'origin');
     repoPath = path.join(root, 'local');
     git(root, 'init', '-q', '-b', 'main', origin);
     await writeFile(path.join(origin, 'conflict.txt'), 'base\n');
     git(origin, 'add', '-A');
     git(origin, 'commit', '-qm', 'base');
-    git(root, 'clone', '-q', httpOrigin(origin), repoPath);
+    git(root, 'clone', '-q', fixture!.httpOrigin(origin), repoPath);
     await writeFile(path.join(origin, 'conflict.txt'), 'theirs\n');
     git(origin, 'commit', '-qam', 'theirs');
     await writeFile(path.join(repoPath, 'conflict.txt'), 'ours\n');
@@ -69,6 +75,7 @@ describe.skipIf(!url)('plan merge transaction handles on real Postgres', () => {
       emailEncrypted: 'test',
       emailBlindIndex: userId,
       passwordHash: 'test',
+      role: 'admin', // The dedicated fixture may fetch its loopback HTTP origin.
     });
     await db.insert(schema.repositories).values({
       id: repositoryId,
@@ -197,5 +204,41 @@ describe.skipIf(!url)('plan merge transaction handles on real Postgres', () => {
     expect(await readFile(path.join(repoPath, payload.folder, 'reported'), 'utf8')).toBe('');
     expect(await events('plan_merge.discard_failed')).toHaveLength(1);
     expect(git(repoPath, 'worktree', 'list', '--porcelain')).toContain(worktreePath);
+  });
+  it('reports a real staged fixer change before an index refusal, without removing the worktree', async () => {
+    const taskStepId = randomUUID();
+    await db.insert(schema.taskSteps).values({
+      id: taskStepId,
+      taskId,
+      stepId: '01-plan-merge',
+      stepIndex: 0,
+      title: 'merge',
+    });
+    await planMergeFixBaseline(db, { repositoryId, taskId, taskStepId, worktreePath }, true);
+    await writeFile(path.join(worktreePath, 'extra.txt'), 'staged fixer work\n');
+    git(worktreePath, 'add', 'extra.txt');
+    await writeFile(git(worktreePath, 'rev-parse', '--git-path', 'index.lock'), 'held');
+    const remove = vi.spyOn(merge, 'removePlanMergeWorktree');
+    await expect(
+      integrateOrigin({
+        repositoryId,
+        repoPath,
+        branch: 'main',
+        userId,
+        identity,
+        kept: new Map(),
+      }),
+    ).rejects.toThrow('A merge fixer staged changes');
+    const reports = await events('merge.fixer_leftovers');
+    expect(reports).toHaveLength(1);
+    const payload = reports[0]!.payload as { folder: string; leftCount: number };
+    expect(payload.leftCount).toBeGreaterThan(0);
+    expect(await readFile(path.join(repoPath, payload.folder, 'reported'), 'utf8')).toBe('');
+    expect(await readFile(path.join(repoPath, payload.folder, 'files/extra.txt'), 'utf8')).toBe(
+      'staged fixer work\n',
+    );
+    expect(remove).not.toHaveBeenCalled();
+    expect(git(repoPath, 'worktree', 'list', '--porcelain')).toContain(worktreePath);
+    expect(git(worktreePath, 'rev-parse', 'MERGE_HEAD')).not.toBe('');
   });
 });
