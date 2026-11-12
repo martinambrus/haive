@@ -1,11 +1,17 @@
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { readLiveRootClaim, schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES } from '@haive/shared';
-import { safeErrorMessage } from '@haive/shared/logger';
+import { boundQueryError, safeErrorMessage } from '@haive/shared/logger';
 import type { ProjectStateSweepOutcome } from '../../src/project-state/refresh.js';
 import { checkoutHoldingTasks } from '../../src/repo/refresh.js';
 import { gitOperationMarker } from '../../src/repo/git-operation.js';
 import { gitRun } from '../../src/repo/git-exec.js';
+
+/** `String(err)` with its class prefix, except a bound query error, whose text carries bound values
+ *  (docs/architecture/error-diagnostics.md). */
+export function diagnosticErrorText(err: unknown): string {
+  return (boundQueryError(err) ? safeErrorMessage(err) : String(err)).slice(0, 500);
+}
 
 /** Bounds a probe that takes no timeout of its own, so a stalled one cannot outlast the smoke. */
 function withinMs<T>(probe: Promise<T>, ms: number): Promise<T> {
@@ -77,8 +83,7 @@ export async function projectStateSweepDiagnostic(
     const probe = probes[index]!;
     return probe.status === 'fulfilled'
       ? probe.value
-      : // Database errors carry bound values; safeErrorMessage drops them.
-        { error: safeErrorMessage(probe.reason).slice(0, 500) };
+      : { error: diagnosticErrorText(probe.reason) };
   };
   return {
     repositoryId,

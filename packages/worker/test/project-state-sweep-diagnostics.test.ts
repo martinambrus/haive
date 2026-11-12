@@ -111,7 +111,7 @@ it('keeps the other probes when a lease cannot be read, and preserves the sync r
   const snapshot = await projectStateSweepDiagnostic(fixture(), 'repo', refresh);
   expect(snapshot).toMatchObject({
     refresh,
-    rootClaim: { error: 'lease unavailable' },
+    rootClaim: { error: 'Error: lease unavailable' },
     rootCheckoutHolders: 1,
     gitStatus: { code: 0 },
   });
@@ -128,7 +128,7 @@ it('bounds a stalled git operation probe and keeps the others', async () => {
   mocks.marker.mockReturnValue(new Promise(() => {}));
   const snapshot = await projectStateSweepDiagnostic(fixture(), 'repo', { outcome: 'written' }, 50);
   expect(snapshot).toMatchObject({
-    gitOperationMarker: { error: 'probe timed out after 50 ms' },
+    gitOperationMarker: { error: 'Error: probe timed out after 50 ms' },
     rootCheckoutHolders: 1,
     gitStatus: { code: 0 },
   });

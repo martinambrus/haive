@@ -36,7 +36,6 @@ import {
   type FormSchema,
 } from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
-import { safeErrorMessage } from '@haive/shared/logger';
 import {
   blocksUpgrade,
   bundleFileName,
@@ -97,7 +96,10 @@ import {
 } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { planMergeStep } from '../src/step-engine/steps/plan/01-plan-merge.js';
-import { projectStateSweepDiagnostic } from './support/project-state-sweep-diagnostics.js';
+import {
+  diagnosticErrorText,
+  projectStateSweepDiagnostic,
+} from './support/project-state-sweep-diagnostics.js';
 
 const log = logger.child({ module: 'two-install-smoke' });
 
@@ -127,7 +129,7 @@ async function sweepDirtyProjectStates(db: Database): Promise<number> {
       diagnostics.push({
         repositoryId,
         refresh,
-        diagnosticError: safeErrorMessage(err).slice(0, 500),
+        diagnosticError: diagnosticErrorText(err),
       });
     }
   }
