@@ -50,6 +50,12 @@ export async function proxyApiRequest(request: Request): Promise<Response> {
   if (!target) return new Response('Not found', { status: 404 });
   const headers = endToEndHeaders(request.headers);
   headers.delete('host');
+  // These describe the browser's request to the web origin, not this server-to-api hop.
+  // In proxy mode the app's own calls are same-origin at web; forwarding that value
+  // would make the api mistake them for script running on its editor origin.
+  for (const name of [...headers.keys()]) {
+    if (name.startsWith('sec-fetch-')) headers.delete(name);
+  }
   // Fetch decompresses responses. Asking for identity keeps the forwarded metadata accurate.
   headers.set('accept-encoding', 'identity');
   try {

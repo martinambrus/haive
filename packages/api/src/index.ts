@@ -7,6 +7,7 @@ import { bootstrap } from './bootstrap.js';
 import { HttpError, type AppEnv } from './context.js';
 import { isForeignOrigin, trustedOrigins } from './lib/request-origin.js';
 import { installUnhandledRejectionLogger } from './lib/unhandled-rejection.js';
+import { editorIsolation } from './middleware/editor-isolation.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { formBodyErrors } from './middleware/form-body.js';
 import { jsonBodyErrors } from './middleware/json-body.js';
@@ -62,6 +63,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
 
   app.use('*', requestLogger);
+  app.use('*', editorIsolation(webOrigin));
   app.use(
     '*',
     cors({
@@ -72,11 +74,15 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
     }),
   );
 
-  const trusted = trustedOrigins(webOrigin);
   app.use('*', async (c, next) => {
     if (
       !SAFE_METHODS.has(c.req.method) &&
-      isForeignOrigin(c.req.header('origin'), c.req.header('host'), trusted)
+      isForeignOrigin(
+        c.req.header('origin'),
+        c.req.header('host'),
+        trustedOrigins(webOrigin, c.req.path),
+        c.req.path,
+      )
     ) {
       throw new HttpError(403, 'Refused a request from another page');
     }

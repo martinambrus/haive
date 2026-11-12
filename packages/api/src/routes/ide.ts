@@ -232,7 +232,14 @@ export function installIdeWebSocket(server: Server): void {
     guardUpgradeSocket(socket);
     const rawUrl = req.url ?? '';
     if (!rawUrl.startsWith(WS_PATH_PREFIX)) return;
-    if (isForeignOrigin(req.headers.origin, req.headers.host, trustedOrigins())) {
+    if (
+      isForeignOrigin(
+        req.headers.origin,
+        req.headers.host,
+        trustedOrigins(undefined, '/ide'),
+        '/ide',
+      )
+    ) {
       rejectUpgrade(socket, 403, 'Forbidden');
       return;
     }

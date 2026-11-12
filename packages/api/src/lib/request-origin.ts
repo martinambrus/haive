@@ -18,20 +18,42 @@ export function publicApiOrigin(web: string = webOrigin()): string | null {
   }
 }
 
-/** The app's own origin, and the api's, where the editor it proxies runs. */
-export function trustedOrigins(web: string = webOrigin()): string[] {
-  const api = publicApiOrigin(web);
-  return api === null ? [web] : [web, api];
+/** The serialised origin a browser sends in `Origin` (lower case, no default port, no path), so
+ *  an operator's spelling of WEB_ORIGIN cannot defeat an exact comparison. */
+export function canonicalOrigin(value: string): string {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return value;
+  }
+}
+
+/** The editor currently lives on the api's public origin. */
+export function editorOrigin(web: string = webOrigin()): string | null {
+  return publicApiOrigin(web);
+}
+
+export function isIdePath(path: string): boolean {
+  return path === '/ide' || path.startsWith('/ide/');
+}
+
+/** Only the editor's own requests may trust its origin. App routes trust the web origin. */
+export function trustedOrigins(web: string = webOrigin(), path = '/'): string[] {
+  const app = canonicalOrigin(web);
+  const editor = editorOrigin(web);
+  return isIdePath(path) && editor !== null ? [app, editor] : [app];
 }
 
 /** A page on the same site still sends the SameSite=Lax cookie, so only `Origin` tells it from the
- *  app's own pages. The request's own host passes too, for an api reached directly. */
+ *  app's own pages. The api serves no app page: its own host is trusted only under /ide. */
 export function isForeignOrigin(
   origin: string | undefined,
   host: string | undefined,
   trusted: readonly string[],
+  path = '/',
 ): boolean {
   if (origin === undefined || trusted.includes(origin)) return false;
+  if (!isIdePath(path)) return true;
   try {
     return new URL(origin).host !== host;
   } catch {
