@@ -172,7 +172,7 @@ status: parked · kind: fix · found: H1 (#343) 2026-11-11 · priority: P4
 
 ### T611 · FNF[replace-zip-followups] · Replace ZIP mode and replacement-record follow-ups (+10)
 
-status: open (items 1, 3-10 done in #1083: 3 was already handled on base; item 2 remains, a retention design) · kind: fix · found: J (#487) reviews 2026-11-11 · priority: P3
+status: done 2026-11-13 #1118 (8c782c68b): item 2, an hourly sweep removes extraction stages, replacement records and superseded archives older than 24 h in active or unnamed bundle directories, never a failed bundle's; items 1, 3-10 done in #1083; lows in T633 · kind: fix · found: J (#487) reviews 2026-11-11 · priority: P3
 Owner decision 2026-11-12: item 2: a periodic sweep deletes stages and sidecars no live replacement owns and older than 24 h; a superseded archive is deleted once its replacement has committed.
 Low unless marked. Code in api `routes/bundles.ts`, worker `bundle-ingest.ts`, `data-migrations.ts` (stranded-replacement sweep), web `bundle-composer.tsx`.
 
@@ -806,6 +806,19 @@ status: open · kind: fix · found: #1117 reviews 2026-11-12 · priority: P4
 
 1. The throttle compares `task_events.created_at` (timestamp without zone, DB `now()` in the session zone) with a JS UTC cutoff (`stalled-redrive.ts` `redriveStoppedTasks` ~:606 and `redriveCancelledTasks` ~:697, ~:817): in a session zone behind UTC an unfinished Stop or Cancel is re-queued every 60 s sweep instead of every 5 min; ahead of UTC the throttle lengthens by the offset. PRE-EXISTING pattern (Cancel), repeated by #1117. Fix: compare through UTC on both sides or stamp from JS.
 2. The Stop re-drive has no count cap (Cancel has `CANCEL_REDRIVE_MAX`): a task whose finish insert keeps failing is re-settled every 5 min with one `task.stop_settle_redriven` row per cycle until a Retry or Cancel. Low.
+
+### T633 · FNF[bundle-orphan-sweep-lows] · bundle orphan sweep lows (+7)
+
+status: open · kind: fix · found: #1118 reviews 2026-11-13 · priority: P4
+All in worker `repo/bundle-orphan-sweep.ts` unless named. Low.
+
+1. `.move.json` intent files are never collected by the sweep.
+2. The sweep runs inline in the stalled-task sweep, so a slow pass delays the stalled sweep.
+3. A directory listing over 1000 entries is never collected (the pass stops at the cap).
+4. `reconcileStrandedSyncingBundles` reads `getJobs` unbounded and drops vanished hashes.
+5. `refuseLiveBundleJob` is a third copy of the live bundle state list.
+6. No control for a stage owned by a different bundle id in the same directory.
+7. Stage removal is age-based only; the bundle's status is not rechecked just before the removal.
 
 ### T572 · FNF[boot-failure-dead-watcher] · a Postgres outage past 30 s at boot still exits
 
