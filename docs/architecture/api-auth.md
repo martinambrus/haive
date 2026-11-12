@@ -173,6 +173,15 @@ built-in hosts, so the worker's dials are guarded too. `POST /global-kb/test-db`
 stored settings and ignores the body, so it dials only what an administrator saved, still through the guard. It
 stays open to them because the settings page and the status panel run it on load, where `requireAdmin` would 403.
 
+**What an administrator types is dialled unguarded, by decision.** The guard protects the install from users who
+are not administrators; an administrator already controls the install, so the dials only an administrator can
+aim stay on the plain transport: the Global KB external connection string (only an administrator can change it,
+`putConfig` in `routes/global-kb.ts`, and `resolveExternal` in `global-kb/connection.ts` opens plain
+postgres.js), `POST /global-kb/test-db` (`requireAdmin`), and module sources, which the admin-only module routes
+clone with a named admin-trusted owner (the git remote rule below). A new dial that someone other than an
+administrator can aim takes the guarded pair; a new administrator-only dial may stay plain and says so where it
+is defined.
+
 **A provider's Test connection follows the same rule in the worker.** `POST /cli-providers/:id/test` only queues
 a PROBE job, and for an OpenRouter or Ollama provider the worker then sends one request to the provider's base
 URL and shows the answer's text. The job carries no role, so `resolveProbeFetch` (`worker/src/cli-adapters/probe-fetch.ts`)

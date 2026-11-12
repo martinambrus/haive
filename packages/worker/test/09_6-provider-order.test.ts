@@ -18,7 +18,11 @@ it('offers enabled fix CLIs by oldest creation, then lower id', async () => {
     z: '00000000-0000-4000-8000-000000000004',
     disabled: '00000000-0000-4000-8000-000000000005',
   };
-  const fake = createFakeDb({ tasks: schema.tasks, cliProviders: schema.cliProviders });
+  const fake = createFakeDb({
+    tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+    cliProviders: schema.cliProviders,
+  });
   for (const [id, enabled, createdAt] of [
     ['new', true, '2026-10-20'],
     ['z', true, '2026-10-01'],
