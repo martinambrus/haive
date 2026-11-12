@@ -762,7 +762,12 @@ export function BundleComposer({
                       <p className="text-xs text-neutral-500">Loading files…</p>
                     )}
                     {fileState && fileState.error !== null && (
-                      <p className="text-xs text-red-400">Error: {fileState.error}</p>
+                      <div
+                        role="alert"
+                        className="min-w-0 text-xs text-red-400 [&_.haive-md]:break-words"
+                      >
+                        <MarkdownView body={`Error: ${fileState.error}`} />
+                      </div>
                     )}
                     {fileState && !fileState.loading && fileState.error === null && (
                       <>
@@ -836,7 +841,7 @@ export function BundleComposer({
       {error && (
         <div
           role="alert"
-          className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300"
+          className="min-w-0 rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300 [&_.haive-md]:break-words"
         >
           <MarkdownView body={error} />
         </div>
