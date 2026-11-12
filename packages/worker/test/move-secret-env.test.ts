@@ -186,76 +186,81 @@ it.each(
     expect(fake.rows(schema.cliProviders)[0]!.authGeneration).toBe(after);
   },
 );
-it.each(['copy', 'drop'])(
-  'waits for busy authentication to become available before migrating (%s)',
-  async (phase) => {
-    vi.useFakeTimers();
-    const { fake, db } = setup();
-    addProvider(fake, P1, LEGACY);
-    authLock.acquire.mockResolvedValueOnce(null);
-    const transaction = vi.spyOn(db, 'transaction');
-    const run = phase === 'copy' ? copySecretLikeProviderEnv : dropCopiedSecretLikeProviderEnv;
-    const result = run(db).then(
-      () => null,
-      (err: unknown) => err,
-    );
-    await vi.advanceTimersByTimeAsync(499);
-    expect(authLock.acquire).toHaveBeenCalledOnce();
-    expect(transaction).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1);
-    expect(await result).toBeNull();
-    expect(authLock.acquire).toHaveBeenCalledTimes(2);
-    expect(secrets(fake, P1)).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN });
-    expect(fake.rows(schema.cliProviders)[0]!.envVars).toEqual(
-      phase === 'copy' ? LEGACY : { ANTHROPIC_BASE_URL: 'u' },
-    );
-    expect(authLock.release).toHaveBeenCalledOnce();
-  },
-);
+it('defers a busy boot copy after one lock attempt without waiting', async () => {
+  vi.useFakeTimers();
+  const { fake, db } = setup();
+  addProvider(fake, P1, LEGACY);
+  const before = fake.rows(schema.cliProviders);
+  authLock.acquire.mockResolvedValueOnce(null);
+  const transaction = vi.spyOn(db, 'transaction');
+  let settled = false;
+  const result = copySecretLikeProviderEnv(db).then(() => {
+    settled = true;
+  });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(settled).toBe(true);
+  await result;
+  expect(authLock.acquire).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(0);
+  expect(transaction).not.toHaveBeenCalled();
+  expect(authLock.error).toHaveBeenCalledWith(
+    expect.objectContaining({ providerId: P1, phase: 'copy' }),
+    'provider env secret migration failed',
+  );
+  expect(authLock.release).not.toHaveBeenCalled();
+  expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+  expect(fake.rows(schema.cliProviders)).toEqual(before);
+});
 
-it.each(['copy', 'drop'])(
-  'does not migrate a legacy credential while authentication stays busy past the deadline (%s)',
-  async (phase) => {
-    vi.useFakeTimers();
-    const { fake, db } = setup();
-    addProvider(fake, P1, LEGACY);
-    authLock.acquire.mockResolvedValue(null);
-    const transaction = vi.spyOn(db, 'transaction');
-    const run = phase === 'copy' ? copySecretLikeProviderEnv : dropCopiedSecretLikeProviderEnv;
-    let settled = false;
-    const result = run(db).then(
-      () => {
-        settled = true;
-        return null;
-      },
-      (err: unknown) => {
-        settled = true;
-        return err;
-      },
-    );
-    await vi.advanceTimersByTimeAsync(29_999);
-    expect(settled).toBe(false);
-    expect(authLock.error).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1);
-    if (phase === 'copy') expect(await result).toBeNull();
-    else
-      expect(await result).toEqual(new Error('1 provider(s) still hold a secret in plain envVars'));
-    expect(authLock.error).toHaveBeenCalledWith(
-      {
-        err: expect.objectContaining({
-          message: 'CLI authentication is busy; provider secret migration was deferred',
-        }),
-        providerId: P1,
-        phase,
-      },
-      'provider env secret migration failed',
-    );
-    expect(transaction).not.toHaveBeenCalled();
-    expect(authLock.release).not.toHaveBeenCalled();
-    expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
-    expect(fake.rows(schema.cliProviders)[0]!.envVars).toEqual(LEGACY);
-  },
-);
+it('waits for busy authentication to become available before dropping legacy env', async () => {
+  vi.useFakeTimers();
+  const { fake, db } = setup();
+  addProvider(fake, P1, LEGACY);
+  authLock.acquire.mockResolvedValueOnce(null);
+  const transaction = vi.spyOn(db, 'transaction');
+  const result = dropCopiedSecretLikeProviderEnv(db);
+  await vi.advanceTimersByTimeAsync(499);
+  expect(authLock.acquire).toHaveBeenCalledOnce();
+  expect(transaction).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  await result;
+  expect(authLock.acquire).toHaveBeenCalledTimes(2);
+  expect(secrets(fake, P1)).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN });
+  expect(fake.rows(schema.cliProviders)[0]!.envVars).toEqual({ ANTHROPIC_BASE_URL: 'u' });
+  expect(authLock.release).toHaveBeenCalledOnce();
+});
+
+it('refuses a destructive drop when authentication stays busy past the deadline', async () => {
+  vi.useFakeTimers();
+  const { fake, db } = setup();
+  addProvider(fake, P1, LEGACY);
+  authLock.acquire.mockResolvedValue(null);
+  const transaction = vi.spyOn(db, 'transaction');
+  let settled = false;
+  const result = dropCopiedSecretLikeProviderEnv(db).catch((err: unknown) => {
+    settled = true;
+    return err;
+  });
+  await vi.advanceTimersByTimeAsync(29_999);
+  expect(settled).toBe(false);
+  expect(authLock.error).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(await result).toEqual(new Error('1 provider(s) still hold a secret in plain envVars'));
+  expect(authLock.error).toHaveBeenCalledWith(
+    {
+      err: expect.objectContaining({
+        message: 'CLI authentication is busy; provider secret migration was deferred',
+      }),
+      providerId: P1,
+      phase: 'drop',
+    },
+    'provider env secret migration failed',
+  );
+  expect(transaction).not.toHaveBeenCalled();
+  expect(authLock.release).not.toHaveBeenCalled();
+  expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+  expect(fake.rows(schema.cliProviders)[0]!.envVars).toEqual(LEGACY);
+});
 
 it('rolls back a copied legacy credential and its generation together', async () => {
   const { fake, db } = setup();

@@ -18,6 +18,7 @@ type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 async function forEachLegacyProvider(
   db: Database,
   phase: string,
+  lockWaitMs: number,
   work: (
     tx: Tx,
     providerId: string,
@@ -41,11 +42,7 @@ async function forEachLegacyProvider(
     let release: CliAuthLock | null = null;
     try {
       if (Object.keys(splitSecretLikeEnv(provider.envVars ?? {}).secrets).some(isAuthSecret)) {
-        release = await waitForCliAuthLock(
-          db,
-          cliAuthScope(provider),
-          SECRET_ENV_AUTH_LOCK_WAIT_MS,
-        );
+        release = await waitForCliAuthLock(db, cliAuthScope(provider), lockWaitMs);
         if (!release)
           throw new Error('CLI authentication is busy; provider secret migration was deferred');
       }
@@ -104,7 +101,8 @@ async function copyKeys(
  *  are, so the release before this one still finds them after a rollback. */
 export async function copySecretLikeProviderEnv(db: Database): Promise<void> {
   let masterKek: string | undefined;
-  await forEachLegacyProvider(db, 'copy', async (tx, providerId, envVars, assertHeld) => {
+  // Convergent and retried next boot: a busy login must not delay worker startup.
+  await forEachLegacyProvider(db, 'copy', 0, async (tx, providerId, envVars, assertHeld) => {
     masterKek ??= await secretsService.getMasterKek();
     await copyKeys(tx, providerId, splitSecretLikeEnv(envVars).secrets, masterKek, assertHeld);
   });
@@ -117,6 +115,7 @@ export async function dropCopiedSecretLikeProviderEnv(db: Database): Promise<voi
   const failed = await forEachLegacyProvider(
     db,
     'drop',
+    SECRET_ENV_AUTH_LOCK_WAIT_MS,
     async (tx, providerId, envVars, assertHeld) => {
       masterKek ??= await secretsService.getMasterKek();
       const split = splitSecretLikeEnv(envVars);
