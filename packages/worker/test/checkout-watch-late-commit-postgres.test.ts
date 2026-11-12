@@ -43,11 +43,8 @@ import {
 } from '../src/project-state/write.js';
 
 const url = process.env.T117_DATABASE_URL;
-if (
-  url &&
-  (!/^\/codex_t117_[a-z0-9_]+$/.test(new URL(url).pathname) ||
-    ['', '5432'].includes(new URL(url).port))
-)
+// CI owns its default-port service; an explicit URL and scratch name are still required.
+if (url && !/^\/codex_t117_[a-z0-9_]+$/.test(new URL(url).pathname))
   throw new Error('exclusive T117 scratch database required');
 const db = url ? createDatabase(url) : null;
 const users: string[] = [];

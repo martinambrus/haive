@@ -320,9 +320,9 @@ jobs:
   postgres-gated:
     name: Postgres-gated tests
     runs-on: ubuntu-latest
-    # 120 s setup allowance plus 7.5 s per GATED row; retain the 26-minute check limit.
-    # 30 minutes covers that whole limit plus setup and keeps >=600 s over modelled green.
-    timeout-minutes: 30
+    # 143 rows × 10 s (measured) + 120 s setup = 1550 s green; 1.5 × row time = 2145 s.
+    # 38 minutes covers the 36-minute check plus setup and leaves 730 s over green.
+    timeout-minutes: 38
     services:
       postgres:
         image: postgres:18-alpine
@@ -424,14 +424,15 @@ jobs:
       # Setup, including module builds, ends at migrate; a failed setup never runs the list.
       - name: Postgres-gated tests
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
-        timeout-minutes: 26
+        timeout-minutes: 36
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
           PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}
-          # This job owns its Redis service: gated databases 11-13, job default 0.
+          # This job owns its Redis service: gated databases 11-14, job default 0.
           INTEGRATIONS_BROKER_TEST_REDIS_URL: redis://localhost:6379/13
           MODULE_PURGE_API_TEST_REDIS_URL: redis://localhost:6379/12
           INTEGRATIONS_AUDIT_TEST_REDIS_URL: redis://localhost:6379/11
+          T117_REDIS_URL: redis://127.0.0.1:6379/14
         run: |
           set -uo pipefail
           failed=0
@@ -597,6 +598,15 @@ jobs:
           api test/stop-settle-db.test.ts STOP_SETTLE_TEST_URL stop_settle_test pg
           worker test/settle-stopped-task-db.test.ts WORKER_SETTLE_STOPPED_TEST_URL worker_settle_stopped_test pg
           database test/repository-task-lock.test.ts REPOSITORY_TASK_LOCK_TEST_URL repository_task_lock_test pg
+          api test/upgrade-cli-addition-db.test.ts T118_DATABASE_URL test_t118_upgrade_cli_ci pg
+          api test/onboarding-agentless-db.test.ts T118_DATABASE_URL test_t118_agentless_ci pg
+          api test/reset-cli-units-db.test.ts T118_DATABASE_URL test_t118_reset_units_ci pg
+          worker test/checkout-watch-late-commit-postgres.test.ts T117_DATABASE_URL codex_t117_late_ci pg
+          worker test/checkout-watch-postgres.test.ts T117_DATABASE_URL codex_t117_watch_ci pg
+          worker test/repository-cli-deferred-postgres.test.ts T118_DATABASE_URL test_t118_deferred_ci pg
+          worker test/onboarding-recorded-membership.test.ts T118_DATABASE_URL test_t118_recorded_ci pg
+          worker test/checkout-watch-queue.test.ts T117_DATABASE_URL codex_t117_queue_ci pg
+          worker test/imported-removed-cli-targets.test.ts T118_DATABASE_URL test_t118_removed_cli_ci pg
           GATED
           exit "$failed"
 
