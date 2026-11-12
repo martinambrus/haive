@@ -10,6 +10,7 @@ const h = vi.hoisted(() => ({
   fail: false,
   throwOutput: false,
 }));
+
 const KEK = 'ab'.repeat(32);
 const USER = 'candidate-owner';
 const PROVIDER = 'candidate-provider';

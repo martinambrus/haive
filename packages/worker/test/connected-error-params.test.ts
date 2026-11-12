@@ -226,7 +226,7 @@ it.each([true, false])(
       query: {
         cliProviders: {
           findFirst: async () => {
-            if (++reads === 1) return provider;
+            if (++reads <= 1) return provider;
             throw error;
           },
         },

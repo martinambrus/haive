@@ -233,7 +233,7 @@ it('a probe still times out at ten minutes', async () => {
 });
 
 it.each([
-  ['delayed', 'Still waiting for this account to become available.'],
+  ['delayed', 'Sign-out is still queued.'],
   ['waiting', 'Still queued behind running CLI jobs.'],
   ['prioritized', 'Still queued behind running CLI jobs.'],
   ['active', 'Still running.'],
@@ -255,3 +255,39 @@ it.each([
     expect(vi.getTimerCount()).toBe(0);
   },
 );
+
+it.each([
+  [undefined, 'Sign-out is still queued.'],
+  ['auth_busy', 'Still waiting for this account to become available.'],
+  ['settings_changed', 'CLI authentication settings changed.'],
+])('uses the structural defer reason at sign-out timeout (%s)', async (waitReason, message) => {
+  h.get.mockResolvedValue({ status: 'pending', state: 'delayed', waitReason });
+  const result = runCliSignOut('provider').catch((error: Error) => error);
+  await vi.advanceTimersByTimeAsync(SIGN_OUT_POLL_TIMEOUT_MS);
+  expect(await result).toMatchObject({ message: expect.stringContaining(message) });
+});
+it.each([16, 40])(
+  'shows an expired observed sign-out after a %s minute stall as an unknown outcome',
+  async (minutes) => {
+    h.get.mockResolvedValueOnce({ status: 'pending', state: 'active' });
+    const result = runCliSignOut('provider');
+    await vi.advanceTimersByTimeAsync(0);
+    h.get.mockRejectedValue(
+      Object.assign(new Error('expired'), { code: 'job_expired', status: 404 }),
+    );
+    vi.setSystemTime(Date.now() + minutes * 60_000);
+    await vi.advanceTimersByTimeAsync(2000);
+    const outcome = await result;
+    expect(outcome).toMatchObject({ ok: false, outcomeUnknown: true });
+    expect(signOutSummary(outcome)).toBe(
+      'Sign-out result is no longer available. Check the account status before trying again.',
+    );
+    expect(h.post).toHaveBeenCalledTimes(1);
+  },
+);
+it('keeps an immediately missing unobserved sign-out as an error', async () => {
+  h.get.mockRejectedValue(
+    Object.assign(new Error('expired'), { code: 'job_expired', status: 404 }),
+  );
+  await expect(runCliSignOut('provider')).rejects.toThrow('expired');
+});

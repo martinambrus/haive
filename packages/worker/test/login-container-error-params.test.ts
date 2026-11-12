@@ -1,11 +1,16 @@
 import { randomBytes } from 'node:crypto';
 import { DrizzleQueryError } from 'drizzle-orm/errors';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
-const h = vi.hoisted(() => ({ create: vi.fn() }));
+const h = vi.hoisted(() => ({ create: vi.fn(), run: vi.fn() }));
+beforeEach(() => {
+  vi.clearAllMocks();
+  h.run.mockResolvedValue({ exitCode: 0 });
+  h.create.mockResolvedValue({ containerRowId: 'row', dockerContainerId: 'container' });
+});
 vi.mock('../src/sandbox/login-container.js', () => ({ createSandboxLoginContainer: h.create }));
 vi.mock('../src/sandbox/docker-runner.js', () => ({
-  defaultDockerRunner: { run: async () => ({ exitCode: 0 }) },
+  defaultDockerRunner: { run: h.run },
 }));
 vi.mock('../src/cli-adapters/registry.js', () => ({
   cliAdapterRegistry: { has: () => true, get: () => ({ defaultExecutable: 'claude' }) },
@@ -49,4 +54,20 @@ it('returns a safe failure when the container insert binds environment secrets',
     ),
   ).toBe(false);
   expect(h.create).toHaveBeenCalledOnce();
+});
+
+const provider = () => ({
+  id: 'provider',
+  userId: 'user',
+  name: 'claude-code',
+  authMode: 'subscription',
+  isolateAuth: false,
+});
+const makeDb = (row = provider()) => ({
+  query: { cliProviders: { findFirst: vi.fn(async () => ({ ...row })) } },
+});
+const payload = { providerId: 'provider', userId: 'user' };
+it('returns a failure when login container creation fails', async () => {
+  h.create.mockRejectedValueOnce(new Error('create failed'));
+  expect(await handleLoginCreateJob(makeDb() as never, payload)).toMatchObject({ ok: false });
 });
