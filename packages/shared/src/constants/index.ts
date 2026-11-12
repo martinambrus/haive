@@ -471,6 +471,15 @@ export const CLI_LOGIN_CLOSE_CODES = {
   SETTINGS_CHANGED: 4410,
 } as const;
 
+/** Terminal refusals sent only after origin, authentication and ownership checks. */
+export const TERMINAL_CLOSE_CODES = {
+  CONTAINER_NOT_RUNNING: 4420,
+  CONTAINER_NOT_BOUND: 4421,
+  TASK_TERMINAL_DISABLED: 4422,
+  REPO_READ_ONLY: 4423,
+  REPO_NOT_READY: 4424,
+} as const;
+
 /** Maximum time from enqueue before a sign-out must acquire its auth scope and start. */
 export const CLI_SIGN_OUT_AUTH_WAIT_MS = 30 * 60_000;
 export const CLI_SIGN_OUT_EXPIRED_MESSAGE =

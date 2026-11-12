@@ -6,7 +6,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import Docker from 'dockerode';
 import { eq, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { logger } from '@haive/shared';
+import { logger, TERMINAL_CLOSE_CODES } from '@haive/shared';
 import { terminalClientFrameSchema } from '@haive/shared';
 import type { TerminalServerFrame } from '@haive/shared';
 import { getDb } from '../db.js';
@@ -62,12 +62,21 @@ export function installTerminalWebSocket(server: Server, opts: TerminalWsOptions
           rejectUpgrade(socket, 404, 'Not Found');
           return;
         }
+        // Browsers cannot read HTTP upgrade refusals. Disclose eligibility only
+        // after ownership is proven, and register revocation/error handling as usual.
+        const closeRefused = (code: number) => {
+          if (auth.session.revoked || socket.destroyed || socket.writableEnded) return;
+          wss.handleUpgrade(req, socket, head, (ws) => {
+            if (auth.session.accept(ws)) ws.close(code);
+            else ws.terminate();
+          });
+        };
         if (container.status !== 'running') {
-          rejectUpgrade(socket, 409, 'Container not running');
+          closeRefused(TERMINAL_CLOSE_CODES.CONTAINER_NOT_RUNNING);
           return;
         }
         if (!container.dockerContainerId) {
-          rejectUpgrade(socket, 409, 'Container not bound to docker');
+          closeRefused(TERMINAL_CLOSE_CODES.CONTAINER_NOT_BOUND);
           return;
         }
 
