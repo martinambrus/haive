@@ -157,3 +157,64 @@ it('opens a cross-site HTTPS grant on its editor origin', async () => {
   await settle();
   expect(screen.getByTitle('Editor').getAttribute('src')).toBe(secureUrl);
 });
+
+describe('EditorTab ensure polling', () => {
+  it.each([refusal(503), new TypeError('Network unavailable')])(
+    'keeps polling after a transient ensure failure: %s',
+    async (error) => {
+      post.mockRejectedValueOnce(error);
+      render(<EditorTab taskId="task" />);
+      await settle();
+      expect(post).toHaveBeenCalledTimes(1);
+      await act(() => vi.advanceTimersByTimeAsync(2499));
+      expect(post).toHaveBeenCalledTimes(1);
+      await act(() => vi.advanceTimersByTimeAsync(1));
+      expect(post.mock.calls.map(([path]) => path)).toEqual([
+        '/tasks/task/ensure-ide',
+        '/tasks/task/ensure-ide',
+        '/tasks/task/editor-handshake',
+      ]);
+      expect(screen.getByTitle('Editor').getAttribute('src')).toBe(url);
+    },
+  );
+
+  it.each([400, 403, 404, 429])('offers manual Retry after ensure %s', async (status) => {
+    post.mockRejectedValueOnce(refusal(status));
+    render(<EditorTab taskId="task" />);
+    await settle();
+    expect(screen.getByTestId('markdown').textContent).toBe('**Editor refused**');
+    await act(() => vi.advanceTimersByTimeAsync(60_000));
+    expect(post).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await settle();
+    expect(screen.getByTitle('Editor').getAttribute('src')).toBe(url);
+    expect(post).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([{ taskId: 'task' }, { repositoryId: 'repo' }])(
+    'keeps ensure 409 unavailable without Retry for %o',
+    async (props) => {
+      post.mockRejectedValueOnce(refusal(409));
+      render(<EditorTab {...props} />);
+      await settle();
+      expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+      expect(screen.queryByTitle('Editor')).toBeNull();
+      expect(screen.getByTestId('markdown').textContent).toContain(
+        'taskId' in props ? 'No editable workspace' : 'no editable workspace',
+      );
+      await act(() => vi.advanceTimersByTimeAsync(60_000));
+      expect(post).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('stops transient ensure polling when unmounted', async () => {
+    post.mockRejectedValue(refusal(503));
+    const view = render(<EditorTab taskId="task" />);
+    await settle();
+    expect(vi.getTimerCount()).toBe(1);
+    view.unmount();
+    expect(vi.getTimerCount()).toBe(0);
+    await act(() => vi.advanceTimersByTimeAsync(60_000));
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+});

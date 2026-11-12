@@ -141,12 +141,12 @@ export function EditorTab({ taskId, repositoryId, className }: EditorTabProps) {
           return;
         }
         if (e.status && e.status >= 400 && e.status < 500) {
-          setState('refused');
+          setState('error');
           setMessage(e.message || 'The editor could not be opened.');
           return;
         }
-        setState('error');
-        setMessage(e.message || 'The editor could not be opened.');
+        // Transient (network / 5xx) — keep retrying; the ensure job is coalesced.
+        timerRef.current = setTimeout(() => void attempt(), RETRY_DELAY_MS);
       }
     };
 
