@@ -124,3 +124,14 @@ it.each(['directory', 'symlink'] as const)(
     expect((await lstat(join(f.root, path))).isSymbolicLink()).toBe(kind === 'symlink');
   },
 );
+
+it.each([false, true])('a non-directory checkout is a conflict: file capture=%s', async (file) => {
+  const metadata = file ? { [parent + '/file.json']: { owner, mode: 0o600 } } : capture;
+  const f = await fixture(metadata);
+  await rm(f.root, { recursive: true });
+  await writeFile(f.root, 'replacement');
+  expect(await restoreKeptMetadata(f.root, keptFilesOf(metadata))).toBe(false);
+  expect(await f.recover()).toBe(false);
+  expect(f.pending()).toEqual({ [f.root]: metadata });
+  expect((await lstat(f.root)).isFile()).toBe(true);
+});

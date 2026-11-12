@@ -14,6 +14,7 @@ import {
   chownNoFollow,
   readFileNoFollow,
   lstatNoFollow,
+  openDirNoFollow,
   readdirNoFollow,
   removeFileIfNoFollow,
   removeNoFollow,
@@ -1077,6 +1078,22 @@ function warnAbsentMetadata(repoPath: string, path: string): void {
 /** The mode fs-safe's createExclusive gives a file it creates; a file at any other mode was changed since. */
 const WRITER_FILE_MODE = 0o644;
 
+// Strict lstat folds raw ENOTDIR (including a replaced checkout anchor) into absence.
+// Probe an absent entry's parent with the throwing directory primitive before calling it pending.
+async function readMetadataEntry(repoPath: string, path: string) {
+  const entry = await lstatNoFollow(repoPath, path, { strict: true });
+  if (!entry) {
+    try {
+      const parent = posix.dirname(path);
+      const held = await openDirNoFollow(repoPath, parent === '.' ? path : parent);
+      await held.close();
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
+  return entry;
+}
+
 /** After the re-sync: removed projections and pruned directories get their metadata back while
  *  writer-owned. An interrupted hand-back resumes at the captured uid only at the writer's default
  *  mode; a group or nondefault file mode changed meanwhile stays. */
@@ -1096,7 +1113,7 @@ export async function restoreKeptMetadata(
     }
     const warn = metadataWarn(repoPath, path);
     try {
-      const now = await lstatNoFollow(repoPath, path, { strict: true });
+      const now = await readMetadataEntry(repoPath, path);
       // Reset can remove a captured path before it is recreated. Keep that obligation
       // until restoration succeeds (or explicit repository deletion retires its outbox).
       // Do not touch its parents on every absent-file retry either.
@@ -1159,7 +1176,7 @@ async function restoreKeptParents(
   for (const { path, owner, mode } of parents ?? []) {
     const warn = metadataWarn(repoPath, path);
     try {
-      const now = await lstatNoFollow(repoPath, path, { strict: true });
+      const now = await readMetadataEntry(repoPath, path);
       if (!now) {
         warnAbsentMetadata(repoPath, path);
         if (restored !== false) restored = 'pending';
