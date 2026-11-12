@@ -163,7 +163,7 @@ export function installTerminalShellWebSocket(
           });
         });
       } catch (err) {
-        log.error({ err, url: rawUrl }, 'shell upgrade failed');
+        log.error({ err, path: rawUrl.split(/[?#]/)[0] }, 'shell upgrade failed');
         rejectUpgrade(socket, 500, 'Internal Server Error');
       }
     })();

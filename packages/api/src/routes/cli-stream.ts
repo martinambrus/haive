@@ -69,7 +69,7 @@ export function installCliStreamWebSocket(server: Server, opts: CliStreamWsOptio
           );
         });
       } catch (err) {
-        log.error({ err, url: rawUrl }, 'cli-stream upgrade failed');
+        log.error({ err, path: rawUrl.split(/[?#]/)[0] }, 'cli-stream upgrade failed');
         rejectUpgrade(socket, 500, 'Internal Server Error');
       }
     })();

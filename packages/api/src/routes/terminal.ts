@@ -96,7 +96,7 @@ export function installTerminalWebSocket(server: Server, opts: TerminalWsOptions
           });
         });
       } catch (err) {
-        log.error({ err, url: rawUrl }, 'upgrade handler failed');
+        log.error({ err, path: rawUrl.split(/[?#]/)[0] }, 'upgrade handler failed');
         rejectUpgrade(socket, 500, 'Internal Server Error');
       }
     })();
