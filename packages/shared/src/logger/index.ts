@@ -9,12 +9,50 @@ export {
   serializeError,
 } from './errors.js';
 
+// A grant is a bearer secret and an editor cookie must never become log data.
+// Walk structured bodies/headers at any depth, including batches, without changing callers.
+function redactCredentials(value: unknown, seen = new WeakMap<object, unknown>()): unknown {
+  if (!value || typeof value !== 'object') return value;
+  const proto = Object.getPrototypeOf(value);
+  if (!Array.isArray(value) && proto !== Object.prototype && proto !== null) return value;
+  const prior = seen.get(value);
+  if (prior) return prior;
+  const copy = Array.isArray(value) ? [] : {};
+  seen.set(value, copy);
+  for (const [name, field] of Object.entries(value)) {
+    const lower = name.toLowerCase();
+    const hidden =
+      lower === 'secret' ||
+      lower === 'cookie' ||
+      lower === 'cookies' ||
+      lower === 'set-cookie' ||
+      lower.startsWith('haive_editor_');
+    Object.defineProperty(copy, name, {
+      value: hidden ? '[Redacted]' : redactCredentials(field, seen),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return copy;
+}
+
+function redactError(err: unknown): unknown {
+  const serialized = serializeError(err);
+  return redactCredentials(
+    serialized && typeof serialized === 'object' ? { ...serialized } : serialized,
+  );
+}
+
 export const logger = pino({
   level: process.env.LOG_LEVEL ?? 'info',
+  formatters: {
+    log: (object) => redactCredentials(object) as Record<string, unknown>,
+  },
   serializers: {
-    err: serializeError,
+    err: redactError,
     // Existing `error` fields use ordinary JSON serialization for non-DB errors.
-    error: (err: unknown) => (boundQueryError(err) ? serializeError(err) : err),
+    error: (err: unknown) => (boundQueryError(err) ? redactError(err) : err),
   },
   hooks: {
     logMethod(args, method) {
@@ -34,6 +72,20 @@ export const logger = pino({
     },
   },
 });
+
+// Pino deliberately resets its bindings formatter on children. Sanitize bindings
+// before child creation as well, including descendants that inherit this method.
+const createChild = logger.child;
+logger.child = function <ChildCustomLevels extends string = never>(
+  this: pino.Logger,
+  bindings: pino.Bindings,
+  options?: pino.ChildLoggerOptions<ChildCustomLevels>,
+): pino.Logger<ChildCustomLevels> {
+  return Reflect.apply(createChild<ChildCustomLevels>, this, [
+    redactCredentials(bindings) as pino.Bindings,
+    options,
+  ]);
+};
 
 /** Log while the error still has structure, before BullMQ reduces it to message/stack. */
 export function safeErrorForTransport(err: unknown, job?: { name: string; id?: string }): unknown {

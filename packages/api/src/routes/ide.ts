@@ -21,6 +21,7 @@ import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import type { UpgradeSession } from '../lib/user-sockets.js';
 import {
   isSessionSetCookie,
+  getAccessCookie,
   withoutSessionCookies,
   withoutSessionSetCookies,
 } from '../auth/cookies.js';
@@ -132,12 +133,18 @@ async function proxyHttp(c: Context<AppEnv>, repository = false): Promise<Respon
   const taskId = c.req.param('id');
   if (!taskId || !isCanonicalUuid(taskId)) throw new HttpError(404, 'Not found');
   const scope = { kind: repository ? ('repo' as const) : ('task' as const), id: taskId };
-  const identity = await editorIdentity(c.req.header('cookie'), scope);
-  let userId: string;
-  if (identity) {
-    const user = await requireEditorUser(identity.sub, identity.tv);
-    userId = user.id;
-  } else {
+  let userId: string | undefined;
+  try {
+    const identity = await editorIdentity(c.req.header('cookie'), scope);
+    if (identity) {
+      const user = await requireEditorUser(identity.sub, identity.tv);
+      userId = user.id;
+    }
+  } catch (err) {
+    // A stale editor cookie must not mask a valid app session during the transition.
+    if (!(err instanceof HttpError && err.status === 403 && getAccessCookie(c))) throw err;
+  }
+  if (userId === undefined) {
     // TRANSITION ONLY: deployed web still uses the app session. PR 4 removes this branch.
     await requireAuth(c, async () => {});
     userId = c.get('userId');
@@ -235,10 +242,9 @@ export function installIdeWebSocket(server: Server): void {
           id: parsed.id,
         };
         const hasEditorCookie = editorCookieFromHeader(req.headers.cookie, scope) !== undefined;
+        let auth = hasEditorCookie ? await authenticateEditorUpgrade(req, scope) : null;
         // TRANSITION ONLY: deployed web still uses the app session. PR 4 removes this branch.
-        const auth = hasEditorCookie
-          ? await authenticateEditorUpgrade(req, scope)
-          : await authenticateUpgrade(req);
+        if (!auth) auth = await authenticateUpgrade(req);
         if (!auth) {
           rejectUpgrade(
             socket,
@@ -277,7 +283,7 @@ export function installIdeWebSocket(server: Server): void {
         if (auth.session.revoked) return;
         proxyWsUpgrade(req, socket, head, target, auth.session);
       } catch (err) {
-        log.error({ err, url: rawUrl }, 'ide upgrade handler failed');
+        log.error({ err, path: rawUrl.split(/[?#]/)[0] }, 'ide upgrade handler failed');
         rejectUpgrade(socket, 500, 'Internal Server Error');
       }
     })();

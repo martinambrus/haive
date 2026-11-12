@@ -33,3 +33,9 @@ describe('configured editor origin', () => {
     expect(editorOrigin()).toBe('https://api.example.com');
   });
 });
+
+it('refuses an invalid editor origin at boot before opening connections', async () => {
+  vi.stubEnv('HAIVE_EDITOR_ORIGIN', 'https://ide.example.com/path');
+  const { bootstrap } = await import('../src/bootstrap.js');
+  await expect(bootstrap()).rejects.toThrow('HAIVE_EDITOR_ORIGIN');
+});

@@ -206,12 +206,17 @@ async function wsCookie(rig: WsRig, cookieLines: string[]): Promise<string | nul
   return headCookie(head);
 }
 
-const STRIPPED = ['haive_access', 'haive_refresh'];
+const STRIPPED = [
+  'haive_access',
+  'haive_refresh',
+  'haive_editor_task_unrelated',
+  'haive_editor_repo_unrelated',
+];
 
 describe('IDE-1 http proxy strips Haive credentials', () => {
   it('drops the session cookies and authorization headers, keeps the rest', async () => {
     const forwarded = await httpForwarded([
-      ['cookie', 'haive_access=A; haive_refresh=R; other=1; theme=dark'],
+      ['cookie', 'haive_access=A; haive_refresh=R; haive_editor_repo_other=E; other=1; theme=dark'],
       ['authorization', 'Bearer x'],
       ['proxy-authorization', 'Basic y'],
       ['x-forwarded-for', '1.2.3.4'],
@@ -231,7 +236,7 @@ describe('IDE-2 websocket proxy strips Haive credentials', () => {
     const rig = await wsRig();
     const { head } = await rig.upgrade([
       AUTH_LINE,
-      'Cookie: haive_access=A; haive_refresh=R; other=1; theme=dark',
+      'Cookie: haive_access=A; haive_refresh=R; haive_editor_repo_other=E; other=1; theme=dark',
       'Authorization: Bearer x',
       'Proxy-Authorization: Basic y',
       'X-Forwarded-For: 1.2.3.4',
@@ -348,6 +353,8 @@ function prng(seed: number): () => number {
 }
 
 const NAMES = [
+  'haive_editor_task_unrelated',
+  'haive_editor_repo_unrelated',
   'haive_access',
   'haive_refresh',
   'haive_access',
@@ -733,5 +740,28 @@ describe('IDE proxy boundary controls', () => {
     expect(head).toContain('x-app: cafÃ©');
     expect(head).not.toContain('haive_access');
     expect(await httpCookie('name=cafÃ©; haive_access=A')).toBe('name=cafÃ©');
+  });
+});
+
+describe('editor cookie response isolation', () => {
+  it('drops upstream editor cookies on HTTP', async () => {
+    fetchStub.mockResolvedValue(
+      new Response('ok', {
+        headers: [
+          ['set-cookie', 'haive_editor_task_any=evil; Path=/'],
+          ['set-cookie', 'theme=dark; Path=/'],
+        ],
+      }),
+    );
+    const res = await app.request(`/ide/${TASK}/`);
+    expect(res.headers.getSetCookie()).toEqual(['theme=dark; Path=/']);
+  });
+  it('drops upstream editor cookies on raw upgrades', async () => {
+    const rig = await wsRig(
+      'HTTP/1.1 101 Switching Protocols\r\nSet-Cookie: haive_editor_repo_any=evil; Path=/\r\nSet-Cookie: theme=dark\r\n\r\n',
+    );
+    const { reply } = await rig.upgrade([AUTH_LINE]);
+    expect(reply).not.toContain('haive_editor_');
+    expect(reply).toContain('Set-Cookie: theme=dark');
   });
 });

@@ -7,7 +7,8 @@ import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { secretsService } from '@haive/shared';
+import { logger, secretsService } from '@haive/shared';
+import type { EditorGrant } from '../src/lib/editor-grants.js';
 import { requireAuth } from '../src/middleware/auth.js';
 import { verifyAccessToken, signAccessToken } from '../src/auth/jwt.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -19,6 +20,7 @@ const h = vi.hoisted(() => ({
   ensure: vi.fn(),
   set: vi.fn(),
   getdel: vi.fn(),
+  upstreamHeaders: vi.fn(),
   store: new Map<string, { value: string; expires: number }>(),
 }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -83,6 +85,7 @@ beforeEach(async () => {
   fake.insert(schema.repositories, { id: ID, userId: USER, status: 'ready', writable: true });
   cookie = `haive_access=${await signAccessToken({ sub: USER, role: 'user', tv: 0 })}`;
   h.enabled = true;
+  h.upstreamHeaders.mockReset();
   h.store.clear();
   h.ensure.mockReset().mockResolvedValue({ waitUntilFinished: async () => ({ ok: true }) });
   h.set
@@ -126,7 +129,7 @@ describe('editor grants', () => {
       const res = await grant(kind);
       expect(res.status).toBe(200);
       expect(res.headers.get('cache-control')).toBe('no-store');
-      const { url } = await res.json();
+      const { url } = (await res.json()) as { url: string };
       const secret = new URL(url).hash.slice(1);
       expect(Buffer.from(secret, 'base64url')).toHaveLength(32);
       expect(url).toBe(`https://ide.example.com/ide/_handshake#${secret}`);
@@ -190,7 +193,7 @@ describe('editor bootstrap', () => {
 async function mint(kind = 'tasks'): Promise<string> {
   const res = await grant(kind);
   expect(res.status).toBe(200);
-  return new URL((await res.json()).url).hash.slice(1);
+  return new URL(((await res.json()) as { url: string }).url).hash.slice(1);
 }
 function redeem(secret: string, origin = 'https://ide.example.com') {
   return app.request('/ide/_handshake', {
@@ -199,7 +202,7 @@ function redeem(secret: string, origin = 'https://ide.example.com') {
     body: JSON.stringify({ secret }),
   });
 }
-function rewriteGrant(change: (g: Record<string, any>) => void) {
+function rewriteGrant(change: (g: EditorGrant) => void) {
   const row = [...h.store.values()][0]!;
   const g = JSON.parse(row.value);
   change(g);
@@ -335,6 +338,7 @@ describe('editor HTTP sessions', () => {
       try {
         expect((await editorRequest(cookie, kind)).status).toBe(200);
         expect(upstream).toHaveBeenCalledOnce();
+        expect(new Headers(upstream.mock.calls[0]![1].headers).get('cookie')).toBeNull();
       } finally {
         vi.unstubAllGlobals();
       }
@@ -410,6 +414,7 @@ async function listenWs(s: Server): Promise<number> {
 async function editorWsRig() {
   const upstream = createServer();
   new WebSocketServer({ server: upstream });
+  upstream.on('upgrade', (req) => h.upstreamHeaders(req.headers));
   const upstreamPort = await listenWs(upstream);
   vi.spyOn(net, 'connect').mockImplementation(((opts: net.TcpNetConnectOpts) => {
     if (opts.host?.startsWith('haive-ide-'))
@@ -447,7 +452,10 @@ describe('editor WebSocket sessions', () => {
       const { cookie } = await issued(kind);
       const port = await editorWsRig();
       const path = kind === 'repos' ? `/ide/repos/${ID}/` : `/ide/${ID}/`;
-      expect(await wsHandshake(port, cookie, path).result).toBe(101);
+      expect(
+        await wsHandshake(port, `${cookie}; haive_access=app; haive_refresh=refresh`, path).result,
+      ).toBe(101);
+      expect(h.upstreamHeaders.mock.calls[0]![0].cookie).toBeUndefined();
     },
   );
   it.each([
@@ -519,3 +527,46 @@ it.each(['authentication', 'ownership'])(
     await new Promise<void>((r) => setImmediate(r));
   },
 );
+
+it('fails closed when bounded grant storage is unavailable', async () => {
+  const { RedisUnavailableError } = await import('../src/lib/redis-unavailable.js');
+  h.set.mockRejectedValue(new RedisUnavailableError(new Error('synthetic outage')));
+  expect((await grant()).status).toBe(503);
+  h.set.mockImplementation(async (key: string, value: string) => {
+    h.store.set(key, { value, expires: Date.now() + 60000 });
+    return 'OK';
+  });
+  const secret = await mint();
+  h.getdel.mockRejectedValue(new RedisUnavailableError(new Error('synthetic outage')));
+  const res = await redeem(secret);
+  expect(res.status).toBe(503);
+  expect(res.headers.getSetCookie()).toEqual([]);
+});
+
+it('logs only the IDE pathname when an upgrade fails', async () => {
+  const { cookie } = await issued();
+  const port = await editorWsRig();
+  const error = vi.spyOn(logger, 'error');
+  vi.spyOn(fake.db.query.tasks, 'findFirst').mockRejectedValueOnce(new Error('synthetic failure'));
+  expect(
+    await wsHandshake(port, cookie, `/ide/${ID}/socket?secret=must-not-be-logged`).result,
+  ).toBe(500);
+  expect(error).toHaveBeenCalledWith(
+    expect.objectContaining({ path: `/ide/${ID}/socket` }),
+    'ide upgrade handler failed',
+  );
+  expect(JSON.stringify(error.mock.calls)).not.toContain('must-not-be-logged');
+});
+
+it('keeps a valid transitional app session usable beside a stale editor cookie on HTTP and WS', async () => {
+  const stale = `${editorCookieName({ kind: 'task', id: ID })}=expired`;
+  const upstream = vi.fn().mockResolvedValue(new Response('editor'));
+  vi.stubGlobal('fetch', upstream);
+  try {
+    expect((await editorRequest(`${stale}; ${cookie}`)).status).toBe(200);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+  const port = await editorWsRig();
+  expect(await wsHandshake(port, `${stale}; ${cookie}`).result).toBe(101);
+});
