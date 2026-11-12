@@ -579,6 +579,21 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
               m.baseShaBefore,
               m.baseShaAfter,
               async () => {
+                // A checkout may have acquired the branch before prepare locked it.
+                // Refuse a changed holder set instead of moving a newly acquired tree.
+                const lockedHolders = await worktreesHoldingBranch(cwd, branch).catch(() => {
+                  throw new UndoGitError('Cannot read the repository worktrees');
+                });
+                if (
+                  lockedHolders.length !== holders.length ||
+                  lockedHolders.some((p) => !holders.includes(p))
+                ) {
+                  await settle(
+                    'refused',
+                    'The base branch checkout changed. Release any other worktree and retry Undo.',
+                  );
+                  return false;
+                }
                 if (!movedCheckout) return true;
                 const symbolic = await gitRun(movedCheckout, ['symbolic-ref', '-q', 'HEAD']);
                 if (

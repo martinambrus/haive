@@ -10,6 +10,7 @@ import { leftCommittedMerges } from '@haive/shared/merge-left-open';
 import { worktreeDirPaths, worktreeDirName } from '../repo/worktree-paths.js';
 import * as gitMerge from './git-merge.js';
 import * as gitPush from '../repo/git-push.js';
+import * as gitWorkspace from '../repo/git-workspace.js';
 
 const h = vi.hoisted(() => ({
   holder: false,
@@ -347,6 +348,36 @@ describe('explicit undo of a cancel-left committed merge', () => {
       expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
     },
   );
+  it('refuses a worktree acquiring the branch after the first holder check', async () => {
+    const f = await fixture();
+    await git(f.dir, 'switch', 'feature');
+    const linked = path.join(f.root, 'late checkout');
+    const actual = gitWorkspace.worktreesHoldingBranch;
+    let reads = 0;
+    vi.spyOn(gitWorkspace, 'worktreesHoldingBranch').mockImplementation(async (...args) => {
+      const holders = await actual(...args);
+      if (++reads === 1) await git(f.dir, 'worktree', 'add', linked, 'main');
+      if (reads === 2) {
+        // The second list must run while the branch CAS lock is held.
+        await expect(
+          git(f.dir, 'update-ref', 'refs/heads/main', f.before, f.after),
+        ).rejects.toThrow();
+      }
+      return holders;
+    });
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    expect(await git(linked, 'status', '--porcelain')).toBe('');
+    expect(leftCommittedMerges(f.events)[0]).toMatchObject({
+      settled: null,
+      refused: { count: 1, reason: expect.stringMatching(/worktree/i) },
+    });
+    expect(reads).toBe(2);
+    expect(h.sync).not.toHaveBeenCalled();
+    await git(f.dir, 'worktree', 'remove', linked);
+    await f.run();
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+  });
   it('resets the recorded transient base worktree and leaves its index clean', async () => {
     const f = await fixture();
     await git(f.dir, 'switch', 'feature');
