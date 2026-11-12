@@ -40,14 +40,15 @@ export async function grantEditor(c: Context<AppEnv>, repository = false): Promi
   if (!(await configService.getBoolean(CONFIG_KEYS.IDE_ENABLED, true))) {
     throw new HttpError(403, 'IDE disabled');
   }
+  // Checked before the ensure: a missing origin is a configuration error, not a cold start.
+  const origin = editorOrigin();
+  if (!origin) throw new HttpError(503, 'The public API or editor origin must be configured');
   // The worker owns runtime resolution; only its ready result authorizes a grant.
   const ready = await ensureIde(target).then(
     (r) => r?.ok === true,
     () => false,
   );
   if (!ready) throw new HttpError(409, 'Editor is not ready');
-  const origin = editorOrigin();
-  if (!origin) throw new HttpError(503, 'The public API or editor origin must be configured');
   // Re-read after the ensure wait. No transaction/reserved DB connection crosses Redis.
   let payload;
   try {

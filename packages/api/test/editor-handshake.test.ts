@@ -570,3 +570,11 @@ it('keeps a valid transitional app session usable beside a stale editor cookie o
   const port = await editorWsRig();
   expect(await wsHandshake(port, `${stale}; ${cookie}`).result).toBe(101);
 });
+
+it('refuses a grant without an editor origin before waking the runtime', async () => {
+  vi.stubEnv('HAIVE_EDITOR_ORIGIN', '');
+  vi.stubEnv('HAIVE_PUBLIC_API_URL', '');
+  vi.stubEnv('HAIVE_API_PORT', '');
+  expect((await grant()).status).toBe(503);
+  expect(h.ensure).not.toHaveBeenCalled();
+});
