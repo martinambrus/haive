@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database, MergeResolveState } from '@haive/database';
+import { logger } from '@haive/shared';
 import type { ProjectStateSyncOutcome } from './sync.js';
 
 const calls = vi.hoisted(() => ({
@@ -25,7 +26,11 @@ vi.mock('../repo/git-operation.js', () => {
 });
 vi.mock('./sync.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./sync.js')>()),
-  syncProjectStateFromCheckout: async () => ({ outcome: calls.outcome }),
+  syncProjectStateFromCheckout: async () => ({
+    outcome: calls.outcome,
+    reason: 'record read refused',
+    code: 'write_pending',
+  }),
 }));
 vi.mock('./refresh.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./refresh.js')>()),
@@ -37,7 +42,7 @@ vi.mock('../plan/mirror.js', async (importOriginal) => ({
   flushPlanMirrorForRepository: async () => ({ files: [], repoPath: '/repo' }),
 }));
 
-const { resyncHaiveProjections } = await import('./set-aside.js');
+const { resyncHaiveProjections, restoreFaults } = await import('./set-aside.js');
 const { settleProjections } = await import('../step-engine/merge-projections.js');
 const { schema } = await import('@haive/database');
 
@@ -55,6 +60,7 @@ function marksDb(): Database {
   });
   const db = {
     select,
+    insert: () => ({ values: () => ({ onConflictDoUpdate: async () => [] }) }),
     execute: async () => [],
     transaction: async (fn: (tx: Database) => Promise<unknown>) => fn(db),
   } as unknown as Database;
@@ -122,4 +128,61 @@ describe('an unreadable git never makes a re-sync throw', () => {
       expect.anything(),
     );
   });
+});
+
+afterEach(() => vi.restoreAllMocks());
+it.each<ProjectStateSyncOutcome>(['held', 'superseded', 'refused'])(
+  'warns once per attempt with the structured %s diagnosis',
+  async (outcome) => {
+    calls.outcome = outcome;
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      expect(await resyncHaiveProjections(marksDb(), 'repo-1', '/repo')).toBe(false);
+      expect(warn).toHaveBeenCalledTimes(attempt);
+      expect(warn).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          repositoryId: 'repo-1',
+          reasons: [
+            expect.objectContaining({
+              phase: 'state_sync',
+              outcome,
+              reason: 'record read refused',
+              code: 'write_pending',
+            }),
+          ],
+        }),
+        expect.any(String),
+      );
+    }
+  },
+);
+
+it('retains sanitized database diagnostics in an incomplete attempt', async () => {
+  const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  restoreFaults.beforeResync = (phase) => {
+    if (phase === 'state')
+      throw Object.assign(new Error('bound secret'), {
+        params: ['secret'],
+        code: '23505',
+        query: 'UPDATE x SET v = $1',
+      });
+  };
+  try {
+    expect(await resyncHaiveProjections(marksDb(), 'repo-1', '/repo')).toBe(false);
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      {
+        repositoryId: 'repo-1',
+        reasons: [
+          {
+            phase: 'state',
+            reason: 'Database operation failed',
+            error: { type: 'Error', code: '23505', query: 'UPDATE x SET v = $1' },
+          },
+        ],
+      },
+      expect.any(String),
+    );
+  } finally {
+    delete restoreFaults.beforeResync;
+  }
 });

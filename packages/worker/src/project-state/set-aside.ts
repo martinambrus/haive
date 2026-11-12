@@ -3,7 +3,7 @@ import {
   holdProjectionMove,
   projectionRecoveryHeld,
 } from './projection-move.js';
-import { safeErrorMessage } from '@haive/shared/logger';
+import { safeErrorMessage, serializeError } from '@haive/shared/logger';
 import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
 import { eq } from 'drizzle-orm';
@@ -961,34 +961,51 @@ export async function resyncHaiveProjections(
   repoPath: string,
   endingTaskId?: string,
 ): Promise<boolean> {
-  if (projectionRecoveryHeld(repoPath)) return false;
+  const reasons: Record<string, unknown>[] = [];
+  const incomplete = (reason: Record<string, unknown>): false => {
+    logger.warn(
+      { repositoryId, reasons: [...reasons, reason] },
+      'projection re-sync incomplete; recovery will retry',
+    );
+    return false;
+  };
+  if (projectionRecoveryHeld(repoPath))
+    return incomplete({ phase: 'admission', reason: 'projection_move' });
   // A merge, rebase, cherry-pick or revert still open holds an intermediate record: nothing is read in until it ends.
   try {
-    if (await gitOperationInProgress(repoPath)) return false;
+    if (await gitOperationInProgress(repoPath))
+      return incomplete({ phase: 'admission', reason: 'git_operation' });
   } catch (err) {
     if (!(err instanceof GitOperationUnreadableError)) throw err;
-    logger.warn({ err, repositoryId }, 'projections not re-synced: git cannot be read');
-    return false;
+    return incomplete({
+      phase: 'admission',
+      reason: 'git_unreadable',
+      error: serializeError(err),
+    });
   }
   let synced = true;
   try {
     restoreFaults.beforeResync?.('state');
-    const { outcome } = await syncProjectStateFromCheckout(db, {
+    const sync = await syncProjectStateFromCheckout(db, {
       repositoryId,
       repoPath,
       refuseDuringGitOperation: true,
       endingTaskId,
     });
-    if (outcome === 'held' || outcome === 'superseded' || outcome === 'refused') synced = false;
+    if (sync.outcome === 'held' || sync.outcome === 'superseded' || sync.outcome === 'refused') {
+      synced = false;
+      reasons.push({ phase: 'state_sync', ...sync });
+    }
     if (
       (await isDirty(db, schema.projectStateOutbox, repositoryId)) &&
       !(await refreshProjectState(db, repositoryId))
     ) {
       synced = false;
+      reasons.push({ phase: 'state_write', reason: 'write_pending', sync });
     }
   } catch (err) {
     synced = false;
-    logger.warn({ err, repositoryId }, 'project state not re-synced after a checkout move');
+    reasons.push({ phase: 'state', reason: safeErrorMessage(err), error: serializeError(err) });
     await raiseMarkAfterFailure(db, schema.projectStateOutbox, repositoryId, markProjectStateDirty);
   }
   try {
@@ -999,17 +1016,24 @@ export async function resyncHaiveProjections(
     }
   } catch (err) {
     synced = false;
-    logger.warn({ err, repositoryId }, 'plan not re-synced after a checkout move');
+    reasons.push({ phase: 'plan', reason: safeErrorMessage(err), error: serializeError(err) });
     await raiseMarkAfterFailure(db, schema.planMirrorState, repositoryId, markPlanMirrorDirty);
   }
   if (synced) {
     try {
       synced = await restorePendingKeptMetadata(db, repositoryId, repoPath, restoreKeptMetadata);
+      if (!synced) reasons.push({ phase: 'metadata', reason: 'restore_failed' });
     } catch (err) {
       synced = false;
-      logger.warn({ err, repositoryId }, 'captured projection metadata not settled');
+      reasons.push({
+        phase: 'metadata',
+        reason: safeErrorMessage(err),
+        error: serializeError(err),
+      });
     }
   }
+  if (!synced)
+    logger.warn({ repositoryId, reasons }, 'projection re-sync incomplete; recovery will retry');
   return synced;
 }
 
