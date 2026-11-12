@@ -228,10 +228,11 @@ Code in web `lib/api-proxy.server.ts`, `lib/api-base.server.ts`, `app/api/haive/
 
 ### T613 · design · code-server shares the web origin in cross-host proxy mode
 
-status: open, approved for planning 2026-11-12 (plan-mode plan first; multi-PR) · kind: design · found: H2 (#435) review 2026-11-11 · priority: P2
+status: in progress, plan approved 2026-11-12 (`docs/plans/tranquil-hugging-willow.md`, 5 PRs) · kind: design · found: H2 (#435) review 2026-11-11 · priority: P2
 DECIDED by the owner 2026-11-11: separate editor hostname (e.g. `ide.<domain>`) with a scoped handshake token for cross-host installs.
 APPROVED by the owner 2026-11-12 with a constraint: single-host installs (localhost, a company's internal network, one hostname for web and api) must keep working with no new setting. Design draft (M2 map, no code): `.claude/tmp/codex-run/M2-S/codex-1/design.txt` (`HAIVE_EDITOR_ORIGIN`, hashed single-use handshake + editor session tables, editor-host dispatch; cross-host refuses `/ide` without the setting).
 In cross-host mode `/ide` is proxied on the web origin, so code-server (which runs repository code) runs with the app's origin and can reach its API session. Options: a separate editor hostname (needs DNS/TLS per install), an API-host editor with its own scoped handshake token, or a sandboxed opaque-origin iframe (code-server may need storage it then lacks). Costs: `.claude/tmp/codex-run/H2-S/codex-2/editor-options.txt`. Needs an owner decision. Same-hostname installs are unaffected.
+PLAN 2026-11-12 (approved): same-host installs are NOT unaffected: the host-only session cookie reaches the api port and `trustedOrigins` admits the api origin, so the editor on `:3001` holds the session too. Editor origin = `HAIVE_EDITOR_ORIGIN` if set, else the api's public origin (a separate hostname in cross-host mode, so no new DNS). Layers: editor origin untrusted for app routes; `Sec-Fetch-Site: same-origin` refuses the app session off `/ide`; `/ide` takes only a scoped editor session (Redis single-use grant, derived-key JWT, no migration).
 
 ### T614 · FNF[cancel-left-merge-followups] · cancel-left committed-merge report and Undo follow-ups (+21)
 
