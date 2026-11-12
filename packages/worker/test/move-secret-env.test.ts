@@ -12,6 +12,7 @@ vi.mock('@haive/database', async (original) => ({
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { schema } from '@haive/database';
+import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import { createFakeDb } from '@haive/database/testing';
 import { envelopeDecrypt, envelopeEncrypt, secretsService } from '@haive/shared';
 import {
@@ -152,16 +153,23 @@ describe('dropCopiedSecretLikeProviderEnv (committed upgrade)', () => {
   });
 });
 
-it.each(['copy', 'drop'])(
-  'fences the legacy %s writer and stamps only a newly created credential',
-  async (phase) => {
+it.each(
+  ['copy', 'drop'].flatMap((phase) => [false, true].map((isolateAuth) => ({ phase, isolateAuth }))),
+)(
+  'fences the legacy $phase writer with isolateAuth=$isolateAuth and stamps only a new credential',
+  async ({ phase, isolateAuth }) => {
     const { fake, db } = setup();
     addProvider(fake, P1, LEGACY);
+    fake.patch(schema.cliProviders, P1, { isolateAuth });
     const run = phase === 'copy' ? copySecretLikeProviderEnv : dropCopiedSecretLikeProviderEnv;
     const before = fake.rows(schema.cliProviders)[0]!.authGeneration;
     await run(db);
     expect(fake.rows(schema.cliProviders)[0]!.authGeneration).not.toBe(before);
     expect(authLock.acquire).toHaveBeenCalledOnce();
+    expect(authLock.acquire).toHaveBeenCalledWith(
+      db,
+      cliAuthScope(fake.rows(schema.cliProviders)[0] as never),
+    );
     expect(authLock.release).toHaveBeenCalledOnce();
     const after = fake.rows(schema.cliProviders)[0]!.authGeneration;
     await run(db);

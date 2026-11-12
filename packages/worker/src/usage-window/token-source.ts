@@ -40,6 +40,8 @@ export async function writeProviderSecret(
   const fingerprint = computeKeyFingerprint(value);
   await db.transaction(async (tx) => {
     await assertHeld();
+    // The secret upsert can take the provider FK lock after the secret row lock.
+    // The caller's auth-scope advisory lock serializes this with provider-first writers.
     await tx
       .insert(schema.cliProviderSecrets)
       .values({

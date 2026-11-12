@@ -513,10 +513,15 @@ it('a sign-out audit commit failure queues nothing', async () => {
 });
 
 describe('sign-out secret writers advance the generation under the auth lock', () => {
-  it.each(['CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_USAGE_OAUTH'])(
-    'fences manual and environment writes of %s',
-    async (secretName) => {
+  it.each(
+    ['CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_USAGE_OAUTH'].flatMap((secretName) =>
+      [false, true].map((isolateAuth) => ({ secretName, isolateAuth })),
+    ),
+  )(
+    'fences manual and environment writes of $secretName with isolateAuth=$isolateAuth',
+    async ({ secretName, isolateAuth }) => {
       const fake = setup(true);
+      fake.patch(schema.cliProviders, PROVIDER, { isolateAuth });
       for (const method of secretName === 'CLAUDE_CODE_OAUTH_TOKEN'
         ? ['POST', 'PATCH']
         : ['POST']) {
@@ -533,6 +538,9 @@ describe('sign-out secret writers advance the generation under the auth lock', (
       }
       const writes = secretName === 'CLAUDE_CODE_OAUTH_TOKEN' ? 2 : 1;
       expect(authLock.acquire).toHaveBeenCalledTimes(writes);
+      expect(authLock.acquire.mock.calls.map((call) => call[1])).toEqual(
+        Array(writes).fill(cliAuthScope(fake.rows(schema.cliProviders)[0] as never)),
+      );
       expect(authLock.release).toHaveBeenCalledTimes(writes);
     },
   );
@@ -816,5 +824,30 @@ it.each(['/', `/${PROVIDER}`])(
     const providers = path === '/' ? body.providers : [body.provider];
     expect(providers).toHaveLength(1);
     expect(providers[0]).not.toHaveProperty('authGeneration');
+  },
+);
+
+it.each(['authMode', 'isolateAuth'] as const)(
+  'refuses an unchanged present %s after a stale read without taking an auth lock',
+  async (field) => {
+    const fake = setup(true);
+    const before = fake.rows(schema.cliProviders)[0]!;
+    const transaction = fake.db.transaction.bind(fake.db);
+    vi.spyOn(fake.db, 'transaction').mockImplementationOnce(async (fn) => {
+      fake.patch(schema.cliProviders, PROVIDER, {
+        [field]: field === 'authMode' ? 'api_key' : true,
+      });
+      return transaction(fn);
+    });
+    const res = await send('PATCH', `/${PROVIDER}`, {
+      [field]: before[field],
+      label: 'must not persist',
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'cli_auth_busy' });
+    expect(authLock.acquire).not.toHaveBeenCalled();
+    expect(fake.rows(schema.cliProviders)[0]!.label).toBe(before.label);
+    expect(fake.rows(schema.cliProviders)[0]![field]).toBe(field === 'authMode' ? 'api_key' : true);
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
   },
 );

@@ -1187,6 +1187,8 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
       await db.transaction(async (tx) => {
         await insertAuditEvent(tx, event);
         await assertHeld();
+        // The secret upsert precedes the provider row lock. The auth-scope advisory lock
+        // serializes credential writers, including those that lock provider then secret.
         await upsertProviderSecret(tx, {
           providerId,
           name: CLAUDE_USAGE_OAUTH_SECRET,
