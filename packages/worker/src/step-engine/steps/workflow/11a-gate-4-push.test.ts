@@ -79,7 +79,7 @@ describe('gate 4 shows saved settings without replacement controls', () => {
       visibleWhen: { field: 'push', equals: true },
     });
     expect(form.fields.find((f) => f.id === 'remoteUrl')).toMatchObject({
-      body: expect.stringMatching(/repository settings/i),
+      body: expect.stringContaining('Change remote on the [Repositories page](/repos)'),
     });
     expect(form.fields.find((f) => f.id === 'credentialId')?.type).toBe('select');
     expect(validateFormValues(form, { push: true }).success).toBe(true);
@@ -97,7 +97,7 @@ describe('gate 4 shows saved settings without replacement controls', () => {
       visibleWhen: { field: 'push', equals: true },
     });
     expect(form.fields.find((f) => f.id === 'credentialId')).toMatchObject({
-      body: expect.stringMatching(/repository settings/i),
+      body: expect.stringContaining('Change remote on the [Repositories page](/repos)'),
     });
     expect(form.fields.find((f) => f.id === 'remoteUrl')?.type).toBe('text');
     expect(validateFormValues(form, { push: false }).success).toBe(true);
@@ -114,6 +114,6 @@ it('keeps a saved credential read-only when repairing a missing saved remote wit
   });
   expect(form.fields.find((f) => f.id === 'credentialId')).toMatchObject({
     type: 'note',
-    body: expect.stringMatching(/repository settings/i),
+    body: expect.stringContaining('Change remote on the [Repositories page](/repos)'),
   });
 });

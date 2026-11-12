@@ -336,7 +336,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
         ? detected.boundCredentialId
         : MANUAL_CREDENTIAL_VALUE;
 
-    const savedCredentialBody = `${credentialOptions.find((c) => c.value === detected.boundCredentialId)?.label ?? 'Repository credential'}\n\nChange the saved credential in Repository settings.`;
+    const savedCredentialBody = `${credentialOptions.find((c) => c.value === detected.boundCredentialId)?.label ?? 'Repository credential'}\n\nTo change the saved credential, use Change remote on the [Repositories page](/repos).`;
 
     const descriptionLines = [
       `Workspace: ${detected.workspacePath}`,
@@ -402,7 +402,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
                 id: 'credentialId',
                 label: 'Credential to push with',
                 description:
-                  'Used for this push. If the repository has no remote saved yet, this push also saves its address and fills an empty credential slot. Change a saved remote or credential in Repository settings. The token is never written to git config. Choose "manually" for SSH or public remotes.',
+                  'Used for this push. If the repository has no remote saved yet, this push also saves its address and fills an empty credential slot. To change a saved remote or credential, use Change remote on the [Repositories page](/repos). The token is never written to git config. Choose "manually" for SSH or public remotes.',
                 options: credentialOptions,
                 default: defaultCredential,
               },
@@ -438,7 +438,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
               type: 'note',
               id: 'remoteUrl',
               label: 'Saved origin remote URL',
-              body: `${redactGitUrl(detected.savedRemoteUrl)}\n\nChange the saved remote in Repository settings.`,
+              body: `${redactGitUrl(detected.savedRemoteUrl)}\n\nTo change the saved remote, use Change remote on the [Repositories page](/repos).`,
               visibleWhen: { field: 'push', equals: true },
             }
           : {
@@ -466,7 +466,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
               id: 'credentialId',
               label: 'Credential to push with',
               description:
-                'Used for this push. This push also saves the address above and this credential in empty repository settings, so later tasks use them too. Change a saved remote or credential in Repository settings. The token is never written to git config. Choose "manually" for SSH or public remotes.',
+                'Used for this push. This push also saves the address above and this credential in empty repository slots, so later tasks use them too. To change a saved remote or credential, use Change remote on the [Repositories page](/repos). The token is never written to git config. Choose "manually" for SSH or public remotes.',
               options: credentialOptions,
               default: defaultCredential,
               visibleWhen: { field: 'push', equals: true },
@@ -546,7 +546,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
           remote: null,
           branch,
           message:
-            'Push skipped: change the saved remote or credential in Repository settings, then retry this step.',
+            'Push skipped: use Change remote on the [Repositories page](/repos) to change the saved remote or credential, then retry this step.',
         };
     } else if (!hasOrigin) {
       if (credentialId) await buildCredentialHelper(ctx.db, credentialId, ctx.userId, remoteUrl);
