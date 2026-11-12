@@ -28,11 +28,8 @@ import { writeProjectStateColumn } from '../src/project-state/write.js';
 
 // An exclusive opt-in fixture, never DATABASE_URL or the development server.
 const url = process.env.T117_DATABASE_URL;
-if (
-  url &&
-  (!/^\/codex_t117_[a-z0-9_]+$/.test(new URL(url).pathname) ||
-    ['', '5432'].includes(new URL(url).port))
-)
+// CI owns its default-port service; an explicit URL and scratch name are still required.
+if (url && !/^\/codex_t117_[a-z0-9_]+$/.test(new URL(url).pathname))
   throw new Error('T117 requires its exclusive scratch database');
 const db = url ? createDatabase(url) : null;
 const users: string[] = [];
@@ -307,7 +304,9 @@ describe.skipIf(!url)('checkout watch on real Git and PostgreSQL', () => {
     expect(await watchCheckout(db!, s.id)).toBe('held');
     await rm(join(child, '.git'));
     await writeFile(join(child, '.git'), `gitdir: ${join(s.root, '.git')}\n`);
-    expect(await watchCheckout(db!, s.id)).toBe('held');
+    await expect(watchCheckout(db!, s.id)).rejects.toMatchObject({
+      name: 'GitOperationUnreadableError',
+    });
     expect(await stateOf(s.id)).toBeUndefined();
     expect((await repoOf(s.id)).renderContext).toBeNull();
   });

@@ -33,11 +33,8 @@ import type { StepContext } from '../src/step-engine/step-definition.js';
 
 // No ambient DATABASE_URL fallback: this control owns users and checkouts only in its scratch DB.
 const url = process.env.T118_DATABASE_URL;
-if (
-  url &&
-  (!/^\/(?:codex|test)_t118_[a-z0-9_]+$/.test(new URL(url).pathname) ||
-    ['', '5432', '6379'].includes(new URL(url).port))
-)
+// CI owns its default-port service; retain the explicit opt-in and scratch-name guard.
+if (url && !/^\/(?:codex|test)_t118_[a-z0-9_]+$/.test(new URL(url).pathname))
   throw new Error('T118 deferred membership requires its assigned scratch PostgreSQL database');
 const db = url ? createDatabase(url) : null;
 const users: string[] = [];
@@ -605,6 +602,7 @@ describe.skipIf(!url)('deferred legacy membership PostgreSQL', () => {
     expect((await s.row()).renderContext).toEqual(original);
     const persisted = await upgradeApplyStep.detect!(ctx);
     let restoredTimeout = 0;
+    let lockTimeouts = 0;
     let blockedPhase = false;
     const guardedDb = new Proxy(db!, {
       get(target, prop) {
@@ -623,7 +621,9 @@ describe.skipIf(!url)('deferred legacy membership PostgreSQL', () => {
             } catch (err) {
               // A PostgreSQL lock timeout aborts the transaction; an ordinary plan refusal does
               // not. The latter must restore the caller's setting before its remaining work.
-              if (!isLockNotAvailable(err)) {
+              if (isLockNotAvailable(err)) {
+                lockTimeouts++;
+              } else {
                 const [setting] = await tx.execute<{ value: string }>(
                   sql`select current_setting('lock_timeout') as value`,
                 );
@@ -676,7 +676,9 @@ describe.skipIf(!url)('deferred legacy membership PostgreSQL', () => {
     await db!.transaction(async (holder) => {
       await lockRepositoryTasksKey(holder, s.repo.id);
       const started = Date.now();
-      await expect(apply()).rejects.toMatchObject({ cause: { code: '55P03' } });
+      // The step maps the database error to user copy; observe SQLSTATE before that mapping.
+      await expect(apply()).rejects.toThrow('Repository is busy');
+      expect(lockTimeouts).toBe(1);
       expect(Date.now() - started).toBeGreaterThanOrEqual(REPOSITORY_TASKS_LOCK_TIMEOUT_MS - 100);
       expect(Date.now() - started).toBeLessThan(REPOSITORY_TASKS_LOCK_TIMEOUT_MS + 10_000);
     });

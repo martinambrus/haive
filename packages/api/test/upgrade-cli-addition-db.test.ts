@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
@@ -17,11 +17,9 @@ import {
 } from '@haive/shared';
 
 const url = process.env.T118_DATABASE_URL;
-if (
-  url &&
-  (new URL(url).port !== '46537' || new URL(url).pathname !== '/codex_t118_cli_union_20261026')
-)
-  throw new Error('Use only the assigned T118 scratch database for CLI-addition controls');
+// Explicit opt-in and scratch names protect local stores; CI owns its default-port service.
+if (url && !/^\/(?:codex|test)_t118_[a-z0-9_]+$/.test(new URL(url).pathname))
+  throw new Error('Use a dedicated CLI-addition scratch database');
 const h = vi.hoisted(() => ({ db: undefined as unknown }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({}) }));
@@ -450,11 +448,17 @@ describe.skipIf(!url)('CLI addition availability through authenticated status', 
         .where(eq(schema.cliProviders.userId, userId));
       await db
         .delete(schema.onboardingArtifacts)
-        .where(eq(schema.onboardingArtifacts.repositoryId, repositoryId));
+        .where(
+          and(
+            eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+            ne(schema.onboardingArtifacts.templateId, CLI_RULES_TEMPLATE_ID),
+          ),
+        );
       await db
         .update(schema.repositories)
         .set({ renderContext: column, applicableTemplateIds: [] })
         .where(eq(schema.repositories.id, repositoryId));
+      // Keep the installed rules row: membership controls must not introduce unrelated rules drift.
       // A real live row supplies strict snapshot provenance. Its non-applicable proof path holds
       // a person's changed bytes, so it is not an obsolete removal or template drift reason.
       await mkdir(path.join(root, '.haive'), { recursive: true });

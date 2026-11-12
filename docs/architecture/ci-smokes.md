@@ -40,12 +40,15 @@ now models each split job with those historical numbers and explicit setup allow
 - `smokes`: 907 + 62 = 969 s modelled green. Its 32-minute limit (1920 s) leaves 951 s over that model and covers
   the largest check's entire 900 s limit plus modelled green (1869 s), so later checks still have room after a hang.
   The extra 62 s conservatively allows moving module preparation from the old gated step into this job's setup.
-- `postgres-gated`: 120 s setup/module allowance + 7.5 s per row = 982.5 s at 115 rows. Its 30-minute limit (1800 s)
-  leaves 817.5 s over modelled green and covers the 26-minute gated step limit plus setup (1680 s).
-  The 120 s allowance rounds up the historical 62 s setup maximum to include module preparation.
+- `postgres-gated`: 120 s setup/module allowance + 10 s per row = 1550 s at 143 rows. MEASURED 2026-11-12 on
+  ubuntu-latest: the gated step took 1222 s for 134 rows on main and 1423 s for 143 rows, about 10 s per row, so the
+  older 7.5 s figure undercounted. Its 38-minute limit (2280 s) leaves 730 s over modelled green and covers the
+  36-minute gated step limit plus setup (2280 s). The 120 s allowance rounds up the historical 62 s setup maximum to
+  include module preparation.
 - Both jobs retain at least 600 s over modelled green, stay within twice that model and leave room for a check's
   whole time limit plus the rest of a green run. The gated step also retains at least 1.5 times its modelled row time:
-  its 26 minutes holds 138 rows and fails the pin at 139 (raised from 25 at 134 rows); the new job's 600 s margin lasts through 144 rows.
+  its 36 minutes holds 144 rows and fails the pin at 145 (raised from 27 at 143 rows); the job's 600 s margin lasts
+  through 156 rows.
   Measure again before raising a limit when those pins fail.
 
 The old model at 115 rows was 907 + 862.5 = 1769.5 s in one job. The split's expected critical path is the larger
@@ -68,6 +71,8 @@ the same way.
 out falsely, and Ctrl-C works there.
 
 ## CI steps
+
+Every environment-gated test under `packages/` needs a GATED row or an explicit reasoned exemption in `scripts/test/ci-gated-list.test.mjs`, which also verifies that exempt Redis files already run in another workflow step with their guard environment.
 
 In the `smokes` and `postgres-gated` jobs of `.github/workflows/ci.yml` every step up to `Apply database migrations`
 (id `migrate`) is setup and keeps the default condition, so a failed one skips everything after it. Every step after it is an independent

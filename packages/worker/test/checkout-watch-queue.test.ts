@@ -23,14 +23,11 @@ const { schedulePlanMirrorSweep, startPlanMirrorWorker, sweepCheckouts } = check
 
 const url = process.env.T117_DATABASE_URL;
 const redisUrl = process.env.T117_REDIS_URL;
-if (
-  url &&
-  (!/^\/codex_t117_[a-z0-9_]+$/.test(new URL(url).pathname) ||
-    ['', '5432'].includes(new URL(url).port))
-)
+// CI owns its default-port service; an explicit URL and scratch name are still required.
+if (url && !/^\/codex_t117_[a-z0-9_]+$/.test(new URL(url).pathname))
   throw new Error('exclusive T117 database required');
-if (redisUrl && ['', '6379'].includes(new URL(redisUrl).port))
-  throw new Error('exclusive T117 Redis required');
+if (redisUrl && !/^redis:\/\/(?:127\.0\.0\.1|localhost):\d+\/14$/.test(redisUrl))
+  throw new Error('dedicated loopback Redis database 14 required');
 const db = url ? createDatabase(url) : null;
 const connection = redisUrl ? createBullRedisConnection(redisUrl) : null;
 h.db = db;

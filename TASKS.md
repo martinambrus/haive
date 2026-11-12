@@ -228,21 +228,10 @@ Low unless marked. Code in api `routes/bundles.ts`, worker `bundle-ingest.ts`, `
 9. The catalog parse holds a pooled connection while it reads the archive.
 10. The fence that keeps the replacement record out of the catalog is not pinned by a test.
 
-### T619 · FNF[reset-provenance-followups] · checkout-branch provenance follow-ups (+1)
-
-status: open · kind: test · found: K1 (#1082) review 2026-11-11 · priority: P4
-
-1. The worker half (`OBSERVE_CHECKOUT_BRANCH` job, checkout watch) is pinned only by the gated `worker/test/checkout-watch-queue.test.ts`, which has no GATED row in `ci.yml`, so CI never runs it. Add the row or an ungated unit test.
-
 ### T620 · design · reaper for a live owner's timed-out login container
 
 status: open · kind: design · found: #1088 review 2026-11-12 · priority: P4
 When an api process that still holds a CLI login's auth lock times out the login container, nothing removes it, and a restart forgets it. A permanent quarantine table was tried in #1088 and reverted: after an api restart it refused the scope forever. Needs a mechanism that tells a dead owner from a live one (lease with heartbeat, or a container label checked at boot) before anything removes the container or blocks the scope.
-
-### T621 · FNF[gated-tests-not-in-ci] · gated api test fails on unchanged main and has no CI row
-
-status: open · kind: test · found: S1 (#1091) full suite 2026-11-12 · priority: P3
-`api/test/upgrade-cli-addition-db.test.ts` is gated and has no GATED row in `ci.yml`, so CI never runs it; on unchanged main it fails 7 tests ("status and actual01 agree on completed recorded target membership", a `hasUpgradeAvailable` mismatch). PRE-EXISTING. Investigate whether the test or the code drifted, fix, then add the row. Bundle with T619 (same shape).
 
 ### T622 · FNF[terminal-close-codes-followups] · terminal close-code follow-ups (+3)
 
@@ -252,15 +241,16 @@ status: open · kind: fix · found: S1 (#1091) review 2026-11-12 · priority: P4
 2. Inline mode always applies soft line breaks. Minor.
 3. (PRE-EXISTING, unverified) The browser VNC and IDE upgrades answer HTTP 503 while their runtime starts; check whether those clients would benefit from a close code.
 
-### T618 · FNF[bundle-replace-followups-2] · Replace ZIP follow-ups after #1083 (+5)
+### T623 · FNF[gated-ratchet-and-bundle-recovery-lows] · gated-file ratchet and bundle recovery lows (+6)
 
-status: open · kind: fix · found: K2 (#1083) reviews 2026-11-11 · priority: P4
+status: open · kind: fix · found: #1093, #1094 reviews 2026-11-12 · priority: P4
 
-1. A git bundle's sync tick bumps `updated_at` with no queue job (`worker/src/repo/bundle-sync.ts:91-94`), so a Replace ZIP admitted during it answers a retryable 409 "The bundle changed while checking its import jobs" (`api/src/routes/bundles.ts` ~:910). Fails safe. Minor.
-2. `readReplacement` (`worker/src/repo/bundle-recovery.ts`) handles a link or non-directory only at the record LEAF; one in a parent component throws a plain error the stranded sweep retries forever. PRE-EXISTING, minor. Fix: classify as the leaf case.
-3. `bundle-composer.tsx:190` keeps its own copy of the refusal parsing that `refusalError` now centralises. PRE-EXISTING, minor.
-4. The stranded-bundle sweep holds a transaction and row lock across filesystem reads and tree restoration (`worker/src/data-migrations.ts:521-585`). Same class as #1083 items 1 and 9. PRE-EXISTING, minor.
-5. `api/src/routes/repos.ts:2710` puts raw `err.message` in a response reason; whether it can carry a path is unchecked. PRE-EXISTING. Also the composer renders refusal prose as plain `FormError`, not `MarkdownView` (`bundle-composer.tsx:841`, markdown-rendering.md). PRE-EXISTING, minor.
+1. The gated-file ratchet (`scripts/test/ci-gated-list.test.mjs`) does not follow a guard through a helper function, and does not scan `modules/` or `tests/` (no gated files there today). Minor.
+2. The T117/T118 test guards no longer refuse the default port; they still need the opt-in env and a dedicated database name. `checkout-watch-queue.test.ts` obliterates its queue on the Redis db the env names. Minor; a comment would do.
+3. Bundle recovery (#1094): a Replace complete that resumes the same upload while a claimed restore runs is admitted; the settle refuses, but the restore's renames can overlap the resumed ingest (documented in worker-restarts.md). Fix direction: refuse a resume of a `syncing` row whose `updated_at` is a fresh recovery claim. Minor.
+4. Bundle recovery concurrency tests use the fake database (no `FOR UPDATE`); the real-PostgreSQL script the driver used is not committed. Commit it as a gated test.
+5. A bundle job failing against a row already `failed` no longer refreshes `lastSyncError` (`worker/src/repo/bundle-ingest.ts` ~:317). Cosmetic.
+6. `restoreReplacementBundle` returns true when `recoverBundle` skipped because the id was held (`bundle-recovery.ts` ~:210-222): harmless, but "handled" is not "restored".
 
 ### T612 · FNF[web-origin-proxy-followups] · cross-host web-origin proxy follow-ups (+1)
 
@@ -1653,6 +1643,9 @@ status: open · kind: design · found: G (#270) review 1 2026-11-10 · priority:
 Retry of any mining step runs `resetRowsForRerun` -> `sweepRunsOf` (`api/src/routes/tasks/steps.ts` ~:171-191), which deletes the step's done agent mining rows and supersedes their invocations; the Resume arm that keeps done rows needs `failed` rows (~:1257-1330). Any apply-time failure after the replies landed (a busy plan patch, a refused write) therefore re-pays the whole wave. PRE-EXISTING. Needs a decision: a "re-apply saved replies" Retry mode, or Resume accepting done unfolded rows.
 
 ## Done
+
+- T619 + T621 — nine env-gated test files CI skipped now run in the Postgres-gated step (three stale assertions fixed), a ratchet requires a row or a verified workflow step for every env-gated suite, and the gated step is modelled at the measured 10 s per row (step 36 min, job 38) — PR #1093 (7c790dedb), 2026-11-12. Lows T623.
+- T618 — no false Git Resync 409 from the sync tick; refused parent paths fail the record; stranded-bundle recovery and ingest rollback hold no transaction across the filesystem (claim, restore, compare-and-settle); one refusal parser; path-scrubbed reasons; composer refusals through MarkdownView — PR #1094 (74c7c7926), 2026-11-12. Lows T623.
 
 - T590 groups C + D and lows 19, 21, 23, 27, 28 — provider form refreshes secrets per delete, sign-out poll aborts on leave, destructive env move waits 30 s for the lock only in its drop phase and re-reads scope under FOR UPDATE, `authGeneration` no longer returned, reconnect copy after a spent OAuth code, resumed sign-out cap copy — PR #1089 (1392c4ad0), 2026-11-12. Lows 20, 22, 24-26, 29-31 open; item 2 accepted.
 - T617 + T614 items 3, 6, 7 — Undo merge holds the base branch ref lock across the working-tree move (`update-ref --stdin` transaction, two-tree `read-tree`), refuses old git, re-checks holders under the lock, retryable refusals for a switched base or open git operation, interrupted-move recovery, scrubbed git detail — PR #1090 (a3ce986e2), 2026-11-12.
