@@ -470,8 +470,8 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   compare-and-deleted when the lock is released. A renewal never recreates an expired key, and a
   failed renewal call ends the login only once the owner's own deadline passes, which comes no
   later than the key's expiry. The worker's login reaper (`sandbox/login-container-reaper.ts`, at
-  boot and every 30 s) removes a login container whose lease is absent; when Redis cannot be read
-  it removes nothing that pass. It never touches the auth lock, so a reaped scope starts a fresh
+  boot and every 30 s) removes a login container whose lease is absent; when Redis cannot be read,
+  or does not answer within 5 s, it removes nothing that pass. It never touches the auth lock, so a reaped scope starts a fresh
   login at once. A container from before the lease, found through its stored Docker id with no
   lease label, is kept for 13 minutes from its creation (2 minutes to start, a 10-minute session,
   30 s of teardown, and margin) and then reaped. Until the next pass a later login or sign-out

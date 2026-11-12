@@ -217,3 +217,22 @@ it('labels Docker creation with the API attempt lease before persisting its row'
     }),
   );
 });
+
+it('gives up on a Redis read that never answers and lets the next pass run', async () => {
+  candidates = [
+    { id: 'orphan', createdAt: 0, leaseId: 'old' },
+    { id: 'legacy', createdAt: 0 },
+  ];
+  redis.mget.mockReturnValueOnce(new Promise(() => {}) as never);
+  const stop = startLoginContainerReaper(redis as never, deps, {
+    intervalMs: 50,
+    graceMs: 100,
+    leaseReadMs: 20,
+  });
+  await vi.advanceTimersByTimeAsync(20);
+  expect(remove).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(30);
+  expect(redis.mget).toHaveBeenCalledTimes(2);
+  expect(remove).toHaveBeenCalledTimes(2);
+  stop();
+});

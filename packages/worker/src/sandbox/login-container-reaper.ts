@@ -13,6 +13,9 @@ const log = logger.child({ module: 'login-container-reaper' });
 // Old API: up to 2 min before start, then 10 min session + 30 s teardown; round up.
 export const LEGACY_LOGIN_GRACE_MS = 13 * 60_000;
 export const LOGIN_REAPER_INTERVAL_MS = 30_000;
+// The worker's Redis client has no command timeout and queues offline, so a stalled server
+// would otherwise hold the pass, and with it every later pass, indefinitely.
+export const LOGIN_LEASE_READ_TIMEOUT_MS = 5_000;
 const DOCKER_TIMEOUT_MS = 10_000;
 
 export interface LoginContainerReaperDeps {
@@ -82,18 +85,29 @@ export function loginContainerReaperDeps(
 export async function sweepLoginContainers(
   redis: Pick<Redis, 'mget'>,
   deps: LoginContainerReaperDeps,
-  options: { graceMs?: number } = {},
+  options: { graceMs?: number; leaseReadMs?: number } = {},
 ): Promise<number> {
   const containers = await deps.list();
   if (containers.length === 0) return 0;
   const keys = containers.filter((c) => c.leaseId).map((c) => cliLoginLeaseKey(c.leaseId!));
   let leases: (string | null)[];
+  let deadline: NodeJS.Timeout | undefined;
   try {
     // Also verify Redis for a legacy-only pass: unreadable means unknown for every container.
-    leases = await redis.mget(...(keys.length ? keys : [cliLoginLeaseKey('health')]));
+    leases = await Promise.race([
+      redis.mget(...(keys.length ? keys : [cliLoginLeaseKey('health')])),
+      new Promise<never>((_, reject) => {
+        deadline = setTimeout(
+          () => reject(new Error('lease read timed out')),
+          options.leaseReadMs ?? LOGIN_LEASE_READ_TIMEOUT_MS,
+        );
+      }),
+    ]);
   } catch {
     log.warn('login container leases unreadable; keeping every container this pass');
     return 0;
+  } finally {
+    clearTimeout(deadline);
   }
   const held = new Set(keys.filter((_key, i) => leases[i] !== null));
   let removed = 0;
@@ -123,7 +137,7 @@ export async function sweepLoginContainers(
 export function startLoginContainerReaper(
   redis: Pick<Redis, 'mget'>,
   deps: LoginContainerReaperDeps,
-  options: { intervalMs?: number; graceMs?: number } = {},
+  options: { intervalMs?: number; graceMs?: number; leaseReadMs?: number } = {},
 ): () => void {
   let inFlight = false;
   const run = () => {
