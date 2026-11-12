@@ -850,8 +850,11 @@ never rule text, globs or other setting values. Task writes name the task user, 
 answers name the resolving user, and unattended imports name the repository owner. Other portable
 settings have no API audit action and do not gain one here.
 
-Gate 4 writes the repository row when the checkout has no origin (the typed URL and the selected
-credential replace what the row held, as before) or when the row has no remote. A row that already
+Gate 4 writes the repository row when the checkout has no origin or when the row has no remote,
+and only into an empty slot: a saved remote or credential is never replaced. Re-checked under the
+row lock, a typed URL or chosen credential that differs from a saved one refuses the push
+(`pushed:false`, nothing written, no audit row) and points to "Change remote" on the Repositories
+page; a value the form only displayed from the detect snapshot never fills a slot cleared since. A row that already
 has a remote, with an origin in the checkout, makes the push a one-off: no row lock, no write, and
 the selected credential is used for that push only. Otherwise it takes a bounded `FOR NO KEY UPDATE` lock,
 re-checks the row under it, and follows the relink's order: `repository.remote.update` row
