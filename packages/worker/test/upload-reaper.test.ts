@@ -18,7 +18,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb, type FakeRow } from '@haive/database/testing';
 import { placeReplacementArchive, replacementArchiveRel } from '@haive/shared/bundle-replacement';
-import { reapAbandonedUploads, startUploadReaper } from '../src/repo/upload-reaper.js';
+import {
+  MAX_ORPHAN_FAILURES,
+  MAX_INVALID_DUMP_PATHS,
+  reapAbandonedUploads,
+  startUploadReaper,
+} from '../src/repo/upload-reaper.js';
 
 const guard = vi.hoisted(() => ({
   claims: 0,
@@ -389,8 +394,9 @@ describe('T323: unreadable reaping files', () => {
 
 describe('T323: invalid completed dump paths', () => {
   it('bounds invalid-path warning history by row id without evicting remembered rows', async () => {
-    const reap = reapAbandonedUploads;
-    for (let i = 0; i < 1001; i += 1) {
+    expect(MAX_INVALID_DUMP_PATHS).toBe(1000);
+    const reap = (db: Database) => reapAbandonedUploads(db, { maxInvalidDumpPaths: 3 });
+    for (let i = 0; i < 4; i += 1) {
       fake.insert(schema.dbUploads, {
         id: randomUUID(),
         userId: USER,
@@ -406,15 +412,15 @@ describe('T323: invalid completed dump paths', () => {
     }
 
     await reap(db());
-    expect(guard.warnings).toHaveLength(1001);
+    expect(guard.warnings).toHaveLength(4);
     await reap(db());
-    expect(guard.warnings).toHaveLength(1002);
-    expect(guard.debugs).toHaveLength(1000);
+    expect(guard.warnings).toHaveLength(5);
+    expect(guard.debugs).toHaveLength(3);
     await reap(db());
-    expect(guard.warnings).toHaveLength(1003);
-    expect(guard.debugs).toHaveLength(2000);
+    expect(guard.warnings).toHaveLength(6);
+    expect(guard.debugs).toHaveLength(6);
     expect(new Set(guard.warnings.map(([data]) => (data as { dumpId: string }).dumpId)).size).toBe(
-      1001,
+      4,
     );
     expect(fake.rows(schema.dbUploads).every((row) => row.status === 'complete')).toBe(true);
   });
@@ -1410,29 +1416,29 @@ describe('T323: repeated orphan removal failures', () => {
     expect(guard.debugs).toHaveLength(0);
   });
 
-  // 1001 files through six passes: past vitest's 20 s default under a loaded CI runner, and a timed-out
-  // run keeps reaping in the background into the next test's warnings.
   it('keeps remembered failures at capacity across repeated passes', async () => {
-    for (let i = 0; i < 1001; i += 1) await orphan();
+    expect(MAX_ORPHAN_FAILURES).toBe(1000);
+    const reap = () => reapAbandonedUploads(db(), { maxOrphanFailures: 3 });
+    for (let i = 0; i < 4; i += 1) await orphan();
     guard.removal = () => true;
-    await reapAbandonedUploads(db());
-    expect(guard.warnings).toHaveLength(1001);
+    await reap();
+    expect(guard.warnings).toHaveLength(4);
 
-    await reapAbandonedUploads(db());
-    expect(guard.warnings).toHaveLength(1002);
-    expect(guard.debugs).toHaveLength(1000);
+    await reap();
+    expect(guard.warnings).toHaveLength(5);
+    expect(guard.debugs).toHaveLength(3);
 
-    await reapAbandonedUploads(db());
-    expect(guard.warnings).toHaveLength(1003);
-    expect(guard.debugs).toHaveLength(2000);
+    await reap();
+    expect(guard.warnings).toHaveLength(6);
+    expect(guard.debugs).toHaveLength(6);
 
     guard.removalCode = 'EPERM';
-    await reapAbandonedUploads(db());
-    expect(guard.warnings).toHaveLength(2004);
-    await reapAbandonedUploads(db());
-    expect(guard.warnings).toHaveLength(2005);
-    expect(guard.debugs).toHaveLength(3000);
-  }, 120_000);
+    await reap();
+    expect(guard.warnings).toHaveLength(10);
+    await reap();
+    expect(guard.warnings).toHaveLength(11);
+    expect(guard.debugs).toHaveLength(9);
+  });
 
   it('warns separately for the same relative path in different storage roots', async () => {
     const id = randomUUID();

@@ -14,9 +14,9 @@ const REAP_RETRY_MS = IDLE_MS;
 const SWEEP_INTERVAL_MS = 15 * 60 * 1000;
 const UPLOADS_DIR = '_uploads';
 const BATCH = 100;
-const MAX_ORPHAN_FAILURES = 1000;
+export const MAX_ORPHAN_FAILURES = 1000;
 const orphanFailures = new Map<string, { root: string; rel: string; code: string | undefined }>();
-const MAX_INVALID_DUMP_PATHS = 1000;
+export const MAX_INVALID_DUMP_PATHS = 1000;
 const invalidDumpPaths = new Set<string>();
 const ENDED_TASK_STATUSES = ['completed', 'failed', 'cancelled'] as const;
 
@@ -111,7 +111,11 @@ async function claimIdleSessions(db: Database, kind: UploadKind, cutoff: Date): 
 
 // A failed or cancelled task can be retried, so a dump stays a day after its last task changed;
 // one no task names stays a day after the upload, since task creation follows it.
-async function claimEndedDumps(db: Database, cutoff: Date): Promise<void> {
+async function claimEndedDumps(
+  db: Database,
+  cutoff: Date,
+  maxInvalidDumpPaths: number,
+): Promise<void> {
   const dumps = await db
     .select({
       id: schema.dbUploads.id,
@@ -161,7 +165,7 @@ async function claimEndedDumps(db: Database, cutoff: Date): Promise<void> {
           log.debug(details, message);
         } else {
           log.warn(details, message);
-          if (invalidDumpPaths.size < MAX_INVALID_DUMP_PATHS) invalidDumpPaths.add(dump.id);
+          if (invalidDumpPaths.size < maxInvalidDumpPaths) invalidDumpPaths.add(dump.id);
         }
         continue;
       }
@@ -447,7 +451,7 @@ async function forgetGoneOrphanFailures(): Promise<void> {
   }
 }
 
-function logOrphanFailure(root: string, rel: string, err: unknown): void {
+function logOrphanFailure(root: string, rel: string, err: unknown, maxFailures: number): void {
   const key = path.join(root, rel);
   const code = (err as NodeJS.ErrnoException | null)?.code;
   const previous = orphanFailures.get(key);
@@ -456,7 +460,7 @@ function logOrphanFailure(root: string, rel: string, err: unknown): void {
   } else {
     log.debug({ err, root, rel }, 'orphan upload file was not removed');
   }
-  if (previous !== undefined || orphanFailures.size < MAX_ORPHAN_FAILURES) {
+  if (previous !== undefined || orphanFailures.size < maxFailures) {
     orphanFailures.set(key, { root, rel, code });
   }
 }
@@ -467,6 +471,7 @@ async function reapOrphanPartials(
   shapes: RegExp[],
   pass: string,
   cutoff: Date,
+  maxFailures: number,
   alsoKept?: (ids: string[], owner: string) => Promise<Set<string>>,
 ): Promise<number> {
   const owners = await readdirNoFollow(root, UPLOADS_DIR);
@@ -509,7 +514,7 @@ async function reapOrphanPartials(
           }
           orphanFailures.delete(path.join(root, rel));
         } catch (err) {
-          logOrphanFailure(root, rel, err);
+          logOrphanFailure(root, rel, err, maxFailures);
         }
       }
     }
@@ -523,7 +528,13 @@ async function reapOrphanPartials(
 }
 
 /** One reaper pass: claim the idle and the ended, finish what is reaping, sweep orphan partials. */
-export async function reapAbandonedUploads(db: Database): Promise<UploadReapResult> {
+export async function reapAbandonedUploads(
+  db: Database,
+  {
+    maxOrphanFailures = MAX_ORPHAN_FAILURES,
+    maxInvalidDumpPaths = MAX_INVALID_DUMP_PATHS,
+  }: { maxOrphanFailures?: number; maxInvalidDumpPaths?: number } = {},
+): Promise<UploadReapResult> {
   const cutoff = new Date(Date.now() - IDLE_MS);
   const finishedCutoff = new Date(Date.now() - FINISHED_METADATA_MS);
   await forgetGoneOrphanFailures();
@@ -539,7 +550,11 @@ export async function reapAbandonedUploads(db: Database): Promise<UploadReapResu
   for (const kind of KINDS) {
     await guarded('an idle-session pass', () => claimIdleSessions(db, kind, cutoff), undefined);
   }
-  await guarded('the ended-dump pass', () => claimEndedDumps(db, cutoff), undefined);
+  await guarded(
+    'the ended-dump pass',
+    () => claimEndedDumps(db, cutoff, maxInvalidDumpPaths),
+    undefined,
+  );
   for (const kind of KINDS) {
     const done = await guarded('a cleanup pass', () => finishReaping(db, kind), {
       sessions: 0,
@@ -562,7 +577,15 @@ export async function reapAbandonedUploads(db: Database): Promise<UploadReapResu
   }
   result.orphans += await guarded(
     'the repository file pass',
-    () => reapOrphanPartials(db, repoRoot(), [ARCHIVE_PARTIAL, DUMP_PARTIAL], 'repository', cutoff),
+    () =>
+      reapOrphanPartials(
+        db,
+        repoRoot(),
+        [ARCHIVE_PARTIAL, DUMP_PARTIAL],
+        'repository',
+        cutoff,
+        maxOrphanFailures,
+      ),
     0,
   );
   let cloning: Promise<Set<string>> | null = null;
@@ -581,6 +604,7 @@ export async function reapAbandonedUploads(db: Database): Promise<UploadReapResu
         [ARCHIVE_FINISHED],
         'finished archive',
         cutoff,
+        maxOrphanFailures,
         (ids, owner) => liveRepositories(db, ids, owner, cloningOwners),
       ),
     0,
@@ -588,18 +612,27 @@ export async function reapAbandonedUploads(db: Database): Promise<UploadReapResu
   result.orphans += await guarded(
     'the finished dump pass',
     () =>
-      reapOrphanPartials(db, repoRoot(), [DUMP_FILE], 'finished dump', cutoff, async (ids) => {
-        const rows = await db
-          .select({ id: schema.dbUploads.id })
-          .from(schema.dbUploads)
-          .where(inArray(schema.dbUploads.id, ids));
-        return new Set(rows.map((row) => row.id));
-      }),
+      reapOrphanPartials(
+        db,
+        repoRoot(),
+        [DUMP_FILE],
+        'finished dump',
+        cutoff,
+        maxOrphanFailures,
+        async (ids) => {
+          const rows = await db
+            .select({ id: schema.dbUploads.id })
+            .from(schema.dbUploads)
+            .where(inArray(schema.dbUploads.id, ids));
+          return new Set(rows.map((row) => row.id));
+        },
+      ),
     0,
   );
   result.orphans += await guarded(
     'the bundle file pass',
-    () => reapOrphanPartials(db, bundleRoot(), [ARCHIVE_PARTIAL], 'bundle', cutoff),
+    () =>
+      reapOrphanPartials(db, bundleRoot(), [ARCHIVE_PARTIAL], 'bundle', cutoff, maxOrphanFailures),
     0,
   );
   if (result.sessions + result.dumps + result.orphans > 0) {
