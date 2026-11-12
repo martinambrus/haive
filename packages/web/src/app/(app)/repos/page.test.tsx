@@ -192,6 +192,7 @@ describe('repository remote actions', () => {
     async (remoteUrl) => {
       repo.status = 'ready';
       repo.remoteUrl = remoteUrl;
+      repo.credentialsSecretId = 'saved-credential';
       const view = await mounted();
       const label = remoteUrl ? 'Change remote' : 'Link to origin';
       const otherLabel = remoteUrl ? 'Link to origin' : 'Change remote';
@@ -202,7 +203,11 @@ describe('repository remote actions', () => {
       fire.click(action[0]!);
       view.draw();
       expect(LinkOriginDialog).toHaveBeenCalledWith(
-        expect.objectContaining({ repositoryId: 'repo-1', currentUrl: remoteUrl }),
+        expect.objectContaining({
+          repositoryId: 'repo-1',
+          currentUrl: remoteUrl,
+          currentCredentialsId: 'saved-credential',
+        }),
       );
     },
   );

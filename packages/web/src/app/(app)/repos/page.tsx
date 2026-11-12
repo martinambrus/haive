@@ -611,6 +611,7 @@ function RepoCard(props: RepoCardProps) {
         <LinkOriginDialog
           repositoryId={repo.id}
           currentUrl={repo.remoteUrl}
+          currentCredentialsId={repo.credentialsSecretId}
           onClose={() => setLinkingOrigin(false)}
           onLinked={() => void onReload()}
         />
