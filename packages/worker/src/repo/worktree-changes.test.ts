@@ -14,6 +14,9 @@ const GIT_ENV = {
   GIT_AUTHOR_EMAIL: 't@haive.local',
   GIT_COMMITTER_NAME: 'T',
   GIT_COMMITTER_EMAIL: 't@haive.local',
+  // staleCtime rewrites a version-2 index and its SHA-1 trailer: pin both against the caller's
+  // git defaults (index.version, feature.manyFiles, init.defaultObjectFormat).
+  GIT_INDEX_VERSION: '2',
 };
 async function git(dir: string, args: string[]): Promise<void> {
   await exec('git', args, { cwd: dir, env: GIT_ENV });
@@ -29,7 +32,7 @@ async function writeIn(dir: string, files: Record<string, string>): Promise<void
 /** A repo on `main` with a linked worktree at .haive/worktrees/feat, laid out as 01-worktree-setup does. */
 async function setup(): Promise<{ root: string; wt: string }> {
   const root = await mkdtemp(path.join(tmpdir(), 'wt-changes-'));
-  await git(root, ['init', '-b', 'main']);
+  await git(root, ['init', '-b', 'main', '--object-format=sha1']);
   await git(root, ['config', 'gc.auto', '0']);
   await writeFile(path.join(root, 'f.txt'), 'one\n', 'utf8');
   await git(root, ['add', '-A']);
@@ -175,7 +178,7 @@ describe('readUncommittedChanges and files git is told not to check', () => {
   it('reads a worktree made from a core.ignoreStat repository as unknown', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'wt-changes-ignorestat-'));
     try {
-      await git(root, ['init', '-b', 'main']);
+      await git(root, ['init', '-b', 'main', '--object-format=sha1']);
       await git(root, ['config', 'gc.auto', '0']);
       await git(root, ['config', 'core.ignoreStat', 'true']);
       await writeIn(root, { 'f.txt': 'one\n' });
@@ -252,12 +255,12 @@ describe('readUncommittedChanges and submodules', () => {
     const sub = await mkdtemp(path.join(tmpdir(), 'wt-changes-sub-'));
     const root = await mkdtemp(path.join(tmpdir(), 'wt-changes-super-'));
     try {
-      await git(sub, ['init', '-b', 'main']);
+      await git(sub, ['init', '-b', 'main', '--object-format=sha1']);
       await git(sub, ['config', 'gc.auto', '0']);
       await writeIn(sub, { 'inner.txt': 'one\n' });
       await git(sub, ['add', '-A']);
       await git(sub, ['commit', '-m', 'inner']);
-      await git(root, ['init', '-b', 'main']);
+      await git(root, ['init', '-b', 'main', '--object-format=sha1']);
       await git(root, ['config', 'gc.auto', '0']);
       await git(root, ['-c', 'protocol.file.allow=always', 'submodule', 'add', sub, 'mod']);
       await git(root, ['commit', '-m', 'add submodule']);
@@ -276,12 +279,12 @@ describe('readUncommittedChanges and submodules', () => {
     const sub = await mkdtemp(path.join(tmpdir(), 'wt-changes-sub-'));
     const root = await mkdtemp(path.join(tmpdir(), 'wt-changes-super-'));
     try {
-      await git(sub, ['init', '-b', 'main']);
+      await git(sub, ['init', '-b', 'main', '--object-format=sha1']);
       await git(sub, ['config', 'gc.auto', '0']);
       await writeIn(sub, { 'inner.txt': 'one\n' });
       await git(sub, ['add', '-A']);
       await git(sub, ['commit', '-m', 'inner']);
-      await git(root, ['init', '-b', 'main']);
+      await git(root, ['init', '-b', 'main', '--object-format=sha1']);
       await git(root, ['config', 'gc.auto', '0']);
       await git(root, ['-c', 'protocol.file.allow=always', 'submodule', 'add', sub, 'mod']);
       await git(root, ['commit', '-m', 'add submodule']);

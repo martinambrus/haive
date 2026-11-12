@@ -238,8 +238,17 @@ describe('a git that hangs', () => {
   });
 
   it('does not call an ordinary non-zero exit a timeout', async () => {
-    const r = await gitRun(dir, ['rev-parse', '--verify', 'nope']);
-    expect(r.code).toBe(128);
-    expect(r.stderr).not.toContain('timed out');
+    // This git must finish, not be killed: give it the production deadlines, not the 100 ms
+    // this block uses to expire a hung helper, so a loaded runner cannot turn it into a timeout.
+    gitTimeoutLimits.long = saved.long;
+    gitTimeoutLimits.short = saved.short;
+    try {
+      const r = await gitRun(dir, ['rev-parse', '--verify', 'nope']);
+      expect(r.code).toBe(128);
+      expect(r.stderr).not.toContain('timed out');
+    } finally {
+      gitTimeoutLimits.long = 100;
+      gitTimeoutLimits.short = 100;
+    }
   });
 });
