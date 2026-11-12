@@ -35,6 +35,7 @@ vi.mock('../src/bundle-parser/index.js', () => ({
 
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
+import * as fsSafe from '@haive/shared/fs-safe';
 import * as recovery from '../src/repo/bundle-recovery.js';
 import { createFakeDb } from '@haive/database/testing';
 import type { Database } from '@haive/database';
@@ -391,6 +392,68 @@ describe('handleIngestZip', () => {
       );
     },
   );
+
+  it('keeps a completed source active when a remove-first delivery fails late', async () => {
+    const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');
+    const fake = createFakeDb({
+      customBundles: schema.customBundles,
+      customBundleItems: schema.customBundleItems,
+    });
+    const fixture = await seedCrashedReplacement(tmpRoot, fake, 'before extract');
+    const replacement = { mode: 'remove_first' as const, previousArchive: null };
+    await writeFile(fixture.archivePath + '.replacement.json', JSON.stringify(replacement));
+    const zip = new JSZip();
+    zip.file('agents/new.md', agent);
+    await writeFile(fixture.archivePath, await zip.generateAsync({ type: 'nodebuffer' }));
+    h.beforeParse = async () => {
+      fake.patch(schema.customBundles, fixture.payload.bundleId, {
+        status: 'active',
+        lastSyncError: null,
+      });
+      throw new Error('late delivery failure');
+    };
+    await expect(
+      handleIngestZip({ ...fixture.payload, replacement }, fake.db as unknown as Database, tmpRoot),
+    ).rejects.toThrow('late delivery failure');
+    expect(fake.rows(schema.customBundles)[0]).toMatchObject({
+      status: 'active',
+      lastSyncError: null,
+    });
+  });
+
+  it('restores a failed redelivery without holding a transaction during filesystem work', async () => {
+    const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');
+    const fake = createFakeDb({
+      customBundles: schema.customBundles,
+      customBundleItems: schema.customBundleItems,
+    });
+    const fixture = await seedCrashedReplacement(tmpRoot, fake, 'after swap');
+    const transaction = fake.db.transaction.bind(fake.db);
+    let depth = 0;
+    vi.spyOn(fake.db, 'transaction').mockImplementation(async (fn) => {
+      depth++;
+      try {
+        return await transaction(fn);
+      } finally {
+        depth--;
+      }
+    });
+    const lstat = fsSafe.lstatNoFollow;
+    const depths: number[] = [];
+    vi.spyOn(fsSafe, 'lstatNoFollow').mockImplementation(async (...args) => {
+      depths.push(depth);
+      return lstat(...args);
+    });
+    await expect(
+      handleIngestZip(fixture.payload, fake.db as unknown as Database, tmpRoot),
+    ).rejects.toThrow();
+    expect(fake.rows(schema.customBundles)[0]).toMatchObject({
+      status: 'active',
+      ...fixture.previousArchive,
+    });
+    expect(depths.length).toBeGreaterThan(0);
+    expect(depths.every((n) => n === 0)).toBe(true);
+  });
 
   it('recovers the real swap after SIGKILL and a failing redelivery', async () => {
     const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');

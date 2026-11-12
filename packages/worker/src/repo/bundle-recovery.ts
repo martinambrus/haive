@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { logger } from '@haive/shared';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, type SQL } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { bundleReplacementSchema, type BundleReplacement } from '@haive/shared/schemas';
 import {
@@ -14,7 +14,7 @@ import {
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 
-/** A malformed record or refused record leaf cannot supply the saved choice, so the bundle
+/** A malformed record or refused record path cannot supply the saved choice, so the bundle
  *  is failed rather than left for a retry. An I/O error stays a plain error, left to retry. */
 export class ReplacementRecordUnreadable extends Error {
   constructor(cause: unknown) {
@@ -35,12 +35,11 @@ export async function readReplacement(
     maxBytes: 8192,
     strict: true,
   }).catch((err: unknown) => {
-    // A refused leaf cannot become a valid record on a later tick. Leave real I/O faults
-    // retryable, and never follow or remove a refused leaf to recover its contents.
+    // A refused path cannot become a valid record on a later tick. Leave real I/O faults
+    // retryable, and never follow or remove a refused path to recover its contents.
     if (
       isPathContainmentError(err) &&
-      err.at === recordRel &&
-      (err.reason === 'link' || err.reason === 'not-regular-file')
+      (err.reason === 'link' || err.reason === 'not-directory' || err.reason === 'not-regular-file')
     )
       throw new ReplacementRecordUnreadable(err);
     throw err;
@@ -109,44 +108,118 @@ export async function restoreReplacementTree(
   return await matches(destRel);
 }
 
-export async function restoreReplacementBundle(
+type Bundle = typeof schema.customBundles.$inferSelect;
+type RecoveryPatch = Partial<typeof schema.customBundles.$inferInsert>;
+
+// One live worker per install. Keep a slow pass owned even after its durable retry clock ages.
+const recoveringBundles = new Set<string>();
+
+/** Claim with a fresh retry clock, release the connection for disk work, then fence settlement.
+ * A process death leaves syncing + the clock; after the stranded cutoff the next pass repeats
+ * the inode-checked restoration. Neither a concurrent sweep nor a new source may settle it. */
+export async function recoverBundle(
   db: Database,
+  id: string,
+  eligible: SQL | undefined,
+  prepare: (bundle: Bundle) => Promise<RecoveryPatch | null>,
+): Promise<boolean> {
+  if (recoveringBundles.has(id)) return false;
+  recoveringBundles.add(id);
+  try {
+    const claimed = await db.transaction(async (tx) => {
+      const [bundle] = await tx
+        .select()
+        .from(schema.customBundles)
+        .where(
+          and(
+            eq(schema.customBundles.id, id),
+            eq(schema.customBundles.status, 'syncing'),
+            eligible,
+          ),
+        )
+        .for('update');
+      if (!bundle) return null;
+      const updatedAt = new Date();
+      await tx
+        .update(schema.customBundles)
+        .set({ updatedAt })
+        .where(eq(schema.customBundles.id, id));
+      return { ...bundle, updatedAt };
+    });
+    if (!claimed) return false;
+    const patch = await prepare(claimed);
+    if (!patch) return false;
+    return await db.transaction(async (tx) => {
+      const [current] = await tx
+        .select()
+        .from(schema.customBundles)
+        .where(eq(schema.customBundles.id, id))
+        .for('update');
+      if (
+        !current ||
+        current.status !== 'syncing' ||
+        current.updatedAt.getTime() !== claimed.updatedAt.getTime() ||
+        current.archivePath !== claimed.archivePath
+      )
+        return false;
+      await tx
+        .update(schema.customBundles)
+        .set({ ...patch, updatedAt: new Date() })
+        .where(eq(schema.customBundles.id, id));
+      return true;
+    });
+  } finally {
+    recoveringBundles.delete(id);
+  }
+}
+
+/** Prepare only: callers settle this patch under their recovery claim, after disk work ends. */
+export async function replacementRecoveryPatch(
   root: string,
-  bundle: typeof schema.customBundles.$inferSelect,
+  bundle: Bundle,
   replacement: BundleReplacement,
   reason: string,
-): Promise<boolean> {
-  if (replacement.mode !== 'keep_until_success' || !replacement.previousArchive) return false;
+): Promise<RecoveryPatch | null> {
+  if (replacement.mode !== 'keep_until_success' || !replacement.previousArchive) return null;
   const restored = await restoreReplacementTree(
     root,
     `${bundle.userId}/${bundle.id}/extracted`,
     replacement,
   );
-  await db
-    .update(schema.customBundles)
-    .set(
-      restored
-        ? {
-            ...replacement.previousArchive,
-            status: 'active',
-            lastSyncError: null,
-            lastReplacementNote: `Replacement failed; the previous bundle remains in use. ${reason}`,
-            updatedAt: new Date(),
-          }
-        : {
-            status: 'failed',
-            lastReplacementNote: null,
-            lastSyncError: `Replacement failed and the previous extracted tree is unavailable; automatic rollback cannot restore it. ${reason}`,
-            updatedAt: new Date(),
-          },
-    )
-    .where(
-      and(
-        eq(schema.customBundles.id, bundle.id),
-        eq(schema.customBundles.archivePath, bundle.archivePath!),
-      ),
-    );
-  return true;
+  return restored
+    ? {
+        ...replacement.previousArchive,
+        status: 'active',
+        lastSyncError: null,
+        lastReplacementNote: `Replacement failed; the previous bundle remains in use. ${reason}`,
+      }
+    : {
+        status: 'failed',
+        lastReplacementNote: null,
+        lastSyncError: `Replacement failed and the previous extracted tree is unavailable; automatic rollback cannot restore it. ${reason}`,
+      };
+}
+
+export async function restoreReplacementBundle(
+  db: Database,
+  root: string,
+  bundle: Bundle,
+  replacement: BundleReplacement,
+  reason: string,
+): Promise<boolean> {
+  let handled = true;
+  await recoverBundle(
+    db,
+    bundle.id,
+    eq(schema.customBundles.archivePath, bundle.archivePath!),
+    async (current) => {
+      const patch = await replacementRecoveryPatch(root, current, replacement, reason);
+      if (!patch) handled = false;
+      return patch;
+    },
+  );
+  // A newer admission or completed catalog owns a row that no longer matches.
+  return handled;
 }
 
 /** Cleanup follows the catalog commit. Failure must not roll a committed tree back. */
