@@ -757,9 +757,8 @@ async function pullInMove(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobR
       // the reconcile keeps local-only nodes and local values under a question, so the
       // checkout's plan.json no longer says everything the plan does.
       const files = outcome.skipped ? [] : (await flushPlanMirrorForRepository(db, repo.id)).files;
-      if (integrated.landed) {
-        await resyncWithKeptMetadata(db, repo.id, repoPath, kept);
-      }
+      // Pull already reconciled and flushed its plan; the outbox retries the remaining projections.
+      if (integrated.landed) await resyncWithKeptMetadata(db, repo.id, repoPath, kept, 'plan_pull');
 
       return resultFor(repo.id, files, {
         committed: false,

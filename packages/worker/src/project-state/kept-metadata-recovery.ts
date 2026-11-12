@@ -30,7 +30,8 @@ export async function sweepKeptProjectionMetadata(db: Database): Promise<number>
         path &&
         row.kept?.[path] &&
         !(await checkoutMissing(path)) &&
-        (await resyncHaiveProjections(db, row.repositoryId, path))
+        (await resyncHaiveProjections(db, row.repositoryId, path)) &&
+        (await metadataSettled(db, row.repositoryId))
       )
         settled++;
     } catch (err) {
@@ -90,7 +91,8 @@ export async function sweepKeptProjectionMetadata(db: Database): Promise<number>
           if (rows.length === 0) return false;
           expected = next;
           return true;
-        }))
+        })) &&
+        (await metadataSettled(db, row.repositoryId!))
       )
         settled++;
     } catch (err) {
@@ -107,4 +109,14 @@ export async function sweepKeptProjectionMetadata(db: Database): Promise<number>
       );
   }
   return settled;
+}
+
+/** A successful re-sync may still owe absent paths or a concurrently captured entry. */
+async function metadataSettled(db: Database, repositoryId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ kept: schema.projectStateOutbox.keptMetadata })
+    .from(schema.projectStateOutbox)
+    .where(eq(schema.projectStateOutbox.repositoryId, repositoryId))
+    .limit(1);
+  return !row?.kept || Object.keys(row.kept).length === 0;
 }

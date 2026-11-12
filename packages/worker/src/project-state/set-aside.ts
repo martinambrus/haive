@@ -3,7 +3,7 @@ import {
   holdProjectionMove,
   projectionRecoveryHeld,
 } from './projection-move.js';
-import { safeErrorMessage } from '@haive/shared/logger';
+import { safeErrorMessage, serializeError } from '@haive/shared/logger';
 import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
 import { eq } from 'drizzle-orm';
@@ -14,6 +14,7 @@ import {
   chownNoFollow,
   readFileNoFollow,
   lstatNoFollow,
+  openDirNoFollow,
   readdirNoFollow,
   removeFileIfNoFollow,
   removeNoFollow,
@@ -40,7 +41,7 @@ import { readBlob } from '../plan/projection-merge.js';
 import { syncPlanFromCheckout } from '../plan/sync-checkout.js';
 import { gitRun } from '../repo/git-exec.js';
 import { GitOperationUnreadableError, gitOperationInProgress } from '../repo/git-operation.js';
-import { refreshProjectState } from './refresh.js';
+import { refreshProjectStateOutcome } from './refresh.js';
 import {
   readProjectStateBase,
   rebaseProjectStateOnHeadLocked,
@@ -948,6 +949,35 @@ async function isDirty(
   return row !== null && row.written < row.revision;
 }
 
+// Bound standing diagnoses across all repositories and phases, including admission refusals.
+// Success re-arms every diagnosis for that repository; restart or eviction may warn again.
+const resyncWarnings = new Set<string>();
+function warnResyncOnce(
+  repositoryId: string,
+  reasons: Record<string, unknown>[],
+  context?: string,
+): void {
+  const key = JSON.stringify([repositoryId, reasons.map(standingReason)]);
+  if (resyncWarnings.has(key)) return;
+  if (resyncWarnings.size >= 4096) resyncWarnings.delete(resyncWarnings.values().next().value!);
+  resyncWarnings.add(key);
+  logger.warn(
+    { repositoryId, reasons, ...(context ? { context } : {}) },
+    'projection re-sync incomplete; recovery will retry',
+  );
+}
+// A thrown phase's message and stack can vary per attempt (pids, paths, durations), so a standing
+// fault keys on its phase and error class and code; the warn still logs the full reasons.
+function standingReason(entry: Record<string, unknown>): unknown {
+  const error = entry.error as { type?: unknown; code?: unknown } | undefined;
+  if (!error) return entry;
+  return { phase: entry.phase, type: error.type, code: error.code };
+}
+function rearmResyncWarnings(repositoryId: string): void {
+  const prefix = `[${JSON.stringify(repositoryId)},`;
+  for (const key of resyncWarnings) if (key.startsWith(prefix)) resyncWarnings.delete(key);
+}
+
 /** After a move of the checkout: reads the new head's record and plan in, then writes what this install
  *  still has pending over them. A step that fails here leaves its mark raised, so the sweep retries it.
  *  Whether both halves re-synced: false while a merge, rebase, cherry-pick or revert is open, when either threw, or when the
@@ -959,35 +989,51 @@ export async function resyncHaiveProjections(
   repositoryId: string,
   repoPath: string,
   endingTaskId?: string,
+  context?: string,
 ): Promise<boolean> {
-  if (projectionRecoveryHeld(repoPath)) return false;
+  const reasons: Record<string, unknown>[] = [];
+  const incomplete = (reason: Record<string, unknown>): false => {
+    warnResyncOnce(repositoryId, [...reasons, reason], context);
+    return false;
+  };
+  if (projectionRecoveryHeld(repoPath))
+    return incomplete({ phase: 'admission', reason: 'projection_move' });
   // A merge, rebase, cherry-pick or revert still open holds an intermediate record: nothing is read in until it ends.
   try {
-    if (await gitOperationInProgress(repoPath)) return false;
+    if (await gitOperationInProgress(repoPath))
+      return incomplete({ phase: 'admission', reason: 'git_operation' });
   } catch (err) {
     if (!(err instanceof GitOperationUnreadableError)) throw err;
-    logger.warn({ err, repositoryId }, 'projections not re-synced: git cannot be read');
-    return false;
+    return incomplete({
+      phase: 'admission',
+      reason: 'git_unreadable',
+      error: serializeError(err),
+    });
   }
   let synced = true;
   try {
     restoreFaults.beforeResync?.('state');
-    const { outcome } = await syncProjectStateFromCheckout(db, {
+    const sync = await syncProjectStateFromCheckout(db, {
       repositoryId,
       repoPath,
       refuseDuringGitOperation: true,
       endingTaskId,
     });
-    if (outcome === 'held' || outcome === 'superseded' || outcome === 'refused') synced = false;
-    if (
-      (await isDirty(db, schema.projectStateOutbox, repositoryId)) &&
-      !(await refreshProjectState(db, repositoryId))
-    ) {
+    if (sync.outcome === 'held' || sync.outcome === 'superseded' || sync.outcome === 'refused') {
       synced = false;
+      reasons.push({ phase: 'state_sync', ...sync });
+    }
+    if (await isDirty(db, schema.projectStateOutbox, repositoryId)) {
+      const write = await refreshProjectStateOutcome(db, repositoryId);
+      // Preserve refreshProjectState's compatibility: stable writer blockages count as complete.
+      if (write.outcome !== 'written' && write.outcome !== 'blocked') {
+        synced = false;
+        reasons.push({ phase: 'state_write', ...write });
+      }
     }
   } catch (err) {
     synced = false;
-    logger.warn({ err, repositoryId }, 'project state not re-synced after a checkout move');
+    reasons.push({ phase: 'state', reason: safeErrorMessage(err), error: serializeError(err) });
     await raiseMarkAfterFailure(db, schema.projectStateOutbox, repositoryId, markProjectStateDirty);
   }
   try {
@@ -998,17 +1044,24 @@ export async function resyncHaiveProjections(
     }
   } catch (err) {
     synced = false;
-    logger.warn({ err, repositoryId }, 'plan not re-synced after a checkout move');
+    reasons.push({ phase: 'plan', reason: safeErrorMessage(err), error: serializeError(err) });
     await raiseMarkAfterFailure(db, schema.planMirrorState, repositoryId, markPlanMirrorDirty);
   }
   if (synced) {
     try {
       synced = await restorePendingKeptMetadata(db, repositoryId, repoPath, restoreKeptMetadata);
+      if (!synced) reasons.push({ phase: 'metadata', reason: 'restore_failed' });
     } catch (err) {
       synced = false;
-      logger.warn({ err, repositoryId }, 'captured projection metadata not settled');
+      reasons.push({
+        phase: 'metadata',
+        reason: safeErrorMessage(err),
+        error: serializeError(err),
+      });
     }
   }
+  if (!synced) warnResyncOnce(repositoryId, reasons, context);
+  else rearmResyncWarnings(repositoryId);
   return synced;
 }
 
@@ -1018,10 +1071,11 @@ export async function resyncWithKeptMetadata(
   repositoryId: string,
   repoPath: string,
   _kept: KeptFiles,
+  context?: string,
 ): Promise<boolean> {
   // Capture was committed by the judge before removal. Never re-introduce a map
   // another successful recovery has already consumed.
-  return resyncHaiveProjections(db, repositoryId, repoPath);
+  return resyncHaiveProjections(db, repositoryId, repoPath, undefined, context);
 }
 
 /** The re-sync an onboarding or upgrade owes when it ends, since the sync deferred while it held the
@@ -1077,6 +1131,22 @@ function warnAbsentMetadata(repoPath: string, path: string): void {
 /** The mode fs-safe's createExclusive gives a file it creates; a file at any other mode was changed since. */
 const WRITER_FILE_MODE = 0o644;
 
+// Strict lstat folds raw ENOTDIR (including a replaced checkout anchor) into absence.
+// Probe an absent entry's parent with the throwing directory primitive before calling it pending.
+async function readMetadataEntry(repoPath: string, path: string) {
+  const entry = await lstatNoFollow(repoPath, path, { strict: true });
+  if (!entry) {
+    try {
+      const parent = posix.dirname(path);
+      const held = await openDirNoFollow(repoPath, parent === '.' ? path : parent);
+      await held.close();
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
+  return entry;
+}
+
 /** After the re-sync: removed projections and pruned directories get their metadata back while
  *  writer-owned. An interrupted hand-back resumes at the captured uid only at the writer's default
  *  mode; a group or nondefault file mode changed meanwhile stays. */
@@ -1096,7 +1166,7 @@ export async function restoreKeptMetadata(
     }
     const warn = metadataWarn(repoPath, path);
     try {
-      const now = await lstatNoFollow(repoPath, path, { strict: true });
+      const now = await readMetadataEntry(repoPath, path);
       // Reset can remove a captured path before it is recreated. Keep that obligation
       // until restoration succeeds (or explicit repository deletion retires its outbox).
       // Do not touch its parents on every absent-file retry either.
@@ -1159,7 +1229,7 @@ async function restoreKeptParents(
   for (const { path, owner, mode } of parents ?? []) {
     const warn = metadataWarn(repoPath, path);
     try {
-      const now = await lstatNoFollow(repoPath, path, { strict: true });
+      const now = await readMetadataEntry(repoPath, path);
       if (!now) {
         warnAbsentMetadata(repoPath, path);
         if (restored !== false) restored = 'pending';
