@@ -738,3 +738,50 @@ it.each(['LOADING Redis is loading', 'OOM command not allowed'])(
     }
   },
 );
+
+it('stops a resumed sign-out whose auth scope changed while it was interrupted', async () => {
+  const row = makeProviderRow();
+  const calls: DbCalls = { updateSet: null };
+  const runner = makeRunner({ existing: ['haive_cli_auth_user1_gemini_0'], sweep: true });
+  const job = {
+    timestamp: Date.now() - CLI_SIGN_OUT_AUTH_WAIT_MS - 1,
+    data: { signOutStarted: true, signOutScope: 'a-scope-the-settings-no-longer-give' },
+  };
+  await expect(
+    handleSignOutJob(
+      makeDb(row, calls),
+      { providerId: row.id, userId: row.userId },
+      runner,
+      job as any,
+    ),
+  ).rejects.toThrow(/settings changed while it was interrupted/);
+  expect(runner.removed).toEqual([]);
+  expect(calls.updateSet).toBeNull();
+});
+
+it('records the scope it starts on with the start marker', async () => {
+  const row = makeProviderRow();
+  const calls: DbCalls = { updateSet: null };
+  const runner = makeRunner({ existing: [] });
+  const job = {
+    timestamp: Date.now(),
+    data: {},
+    updateData: vi.fn(async (data: any) => {
+      job.data = data;
+    }),
+  };
+  await handleSignOutJob(
+    makeDb(row, calls),
+    { providerId: row.id, userId: row.userId },
+    runner,
+    job as any,
+  );
+  expect(job.data).toMatchObject({ signOutStarted: true, signOutScope: expect.any(String) });
+  // The recorded scope is the one the resumed job compares against, so a resume on it proceeds.
+  await expect(
+    handleSignOutJob(makeDb(row, calls), { providerId: row.id, userId: row.userId }, runner, {
+      ...job,
+      timestamp: Date.now() - CLI_SIGN_OUT_AUTH_WAIT_MS - 1,
+    } as any),
+  ).resolves.toMatchObject({ ok: true });
+});

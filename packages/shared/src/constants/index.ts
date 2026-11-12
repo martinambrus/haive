@@ -501,6 +501,8 @@ export interface CliSignOutJobPayload {
   signOutWaitReason?: 'auth_busy' | 'settings_changed';
   /** Set before the first removal; a redelivered job that has it resumes past the start deadline. */
   signOutStarted?: boolean;
+  /** The auth scope the started sign-out removes; a resume on another scope stops. */
+  signOutScope?: string;
 }
 
 export interface CliSignOutJobResult {

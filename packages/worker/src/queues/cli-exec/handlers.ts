@@ -1201,6 +1201,9 @@ export async function handleLoginCreateJob(
   }
 }
 
+const CLI_SIGN_OUT_SCOPE_CHANGED_MESSAGE =
+  "Sign-out stopped: this CLI's sign-in settings changed while it was interrupted. Some credentials may already be removed. Sign out again.";
+
 export async function handleSignOutJob(
   db: Database,
   payload: CliSignOutJobPayload,
@@ -1294,9 +1297,21 @@ export async function handleSignOutJob(
       return { ok: true, superseded: true, removed: [], failed: [] };
     }
     assertInWindow();
+    if (
+      resuming &&
+      job?.data?.signOutScope !== undefined &&
+      job.data.signOutScope !== lockedScope
+    ) {
+      // The settings changed while the sign-out was interrupted: the volumes it would remove now
+      // may be another profile's, and the ones it started on are no longer derivable. Stop.
+      throw new UnrecoverableError(CLI_SIGN_OUT_SCOPE_CHANGED_MESSAGE);
+    }
     if (job && !resuming) {
-      // Persist BEFORE any container, volume or secret removal; a restart must resume it.
-      await retryJobWrite(job, () => job.updateData({ ...job.data, signOutStarted: true }));
+      // Persist BEFORE any container, volume or secret removal; a restart must resume it, on
+      // the scope it started on.
+      await retryJobWrite(job, () =>
+        job.updateData({ ...job.data, signOutStarted: true, signOutScope: lockedScope }),
+      );
       assertInWindow();
     }
     const meta = getCliProviderMetadata(provider.name);
