@@ -1,5 +1,5 @@
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { gitTemplate } from './support/git-template.js';
+import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { writeFileNoFollow } from '@haive/shared/fs-safe';
@@ -135,10 +135,9 @@ describe.each(sites)('%s commit decisions', (site) => {
     }
   };
 
-  beforeEach(async () => {
-    control.result.mockReset();
+  const template = gitTemplate(async (dir) => {
+    repo = dir;
     skillTargetDirs = ['.claude/skills'];
-    repo = await mkdtemp(path.join(tmpdir(), 'haive-commit-wording-'));
     ({ ctx, writes } = context(repo));
     await command(repo, ['init', '-q', '-b', 'main']);
     await writeFileNoFollow(repo, 'README.md', 'base\n');
@@ -152,7 +151,12 @@ describe.each(sites)('%s commit decisions', (site) => {
     await command(repo, ['add', '-A']);
     await command(repo, ['commit', '-qm', 'base']);
     if (site === 'skill sync') await apply(); // Materialise and commit the stable README index.
-    writes.length = 0;
+  });
+  beforeEach(async () => {
+    control.result.mockReset();
+    skillTargetDirs = ['.claude/skills'];
+    repo = (await template.copy()).dir;
+    ({ ctx, writes } = context(repo));
     vi.mocked(gitRun).mockClear();
   });
 
@@ -240,24 +244,23 @@ describe.each(sites)('%s commit decisions', (site) => {
       },
     );
 
-    it.each([1, 128, 2, -1, 124])(
-      'rejects a failed missing-root tracked read: %i',
-      async (code) => {
-        if (site === 'skill sync') skillTargetDirs.push('.gemini/skills');
-        control.result.mockImplementation((_cwd: string, args: string[]) =>
-          args[0] === 'ls-files'
-            ? { code, stdout: 'not a successful read', stderr: 'opaque diagnostic' }
-            : undefined,
-        );
+    // Exit-code variants are covered without git in git-commit-decisions.test.ts.
+    // Keep one real checkout per caller/behaviour to prove propagation and no writes.
+    it.each([128])('rejects a failed missing-root tracked read: %i', async (code) => {
+      if (site === 'skill sync') skillTargetDirs.push('.gemini/skills');
+      control.result.mockImplementation((_cwd: string, args: string[]) =>
+        args[0] === 'ls-files'
+          ? { code, stdout: 'not a successful read', stderr: 'opaque diagnostic' }
+          : undefined,
+      );
 
-        await expect(apply()).rejects.toThrow(/^git tracked paths read failed:/);
-        expect(
-          vi.mocked(gitRun).mock.calls.some(([, args]) => ['add', 'commit'].includes(args[0]!)),
-        ).toBe(false);
-      },
-    );
+      await expect(apply()).rejects.toThrow(/^git tracked paths read failed:/);
+      expect(
+        vi.mocked(gitRun).mock.calls.some(([, args]) => ['add', 'commit'].includes(args[0]!)),
+      ).toBe(false);
+    });
 
-    it.each([128, 2, -1, 124])('rejects a failed missing-root staged read: %i', async (code) => {
+    it.each([128])('rejects a failed missing-root staged read: %i', async (code) => {
       if (site === 'skill sync') skillTargetDirs.push('.gemini/skills');
       control.result.mockImplementation((_cwd: string, args: string[]) =>
         args[0] === 'diff' && args.includes('--cached') && args.includes('--quiet')
@@ -271,21 +274,18 @@ describe.each(sites)('%s commit decisions', (site) => {
       ).toBe(false);
     });
 
-    it.each([128, 2, -1, 124])(
-      'rejects a failed merge read even with scoped changes: %i',
-      async (code) => {
-        const ownFile =
-          site === 'knowledge trees' ? `${KB_DIR}/entry.md` : '.claude/skills/kept/SKILL.md';
-        await writeFileNoFollow(repo, ownFile, 'changed\n');
-        control.result.mockImplementation((_cwd: string, args: string[]) =>
-          args[0] === 'rev-parse' && args.includes('MERGE_HEAD')
-            ? { code, stdout: '', stderr: 'opaque diagnostic' }
-            : undefined,
-        );
-        await expect(apply()).rejects.toThrow(/^git merge read failed:/);
-        expect(vi.mocked(gitRun).mock.calls.some(([, args]) => args[0] === 'commit')).toBe(false);
-      },
-    );
+    it.each([128])('rejects a failed merge read even with scoped changes: %i', async (code) => {
+      const ownFile =
+        site === 'knowledge trees' ? `${KB_DIR}/entry.md` : '.claude/skills/kept/SKILL.md';
+      await writeFileNoFollow(repo, ownFile, 'changed\n');
+      control.result.mockImplementation((_cwd: string, args: string[]) =>
+        args[0] === 'rev-parse' && args.includes('MERGE_HEAD')
+          ? { code, stdout: '', stderr: 'opaque diagnostic' }
+          : undefined,
+      );
+      await expect(apply()).rejects.toThrow(/^git merge read failed:/);
+      expect(vi.mocked(gitRun).mock.calls.some(([, args]) => args[0] === 'commit')).toBe(false);
+    });
 
     it('leaves an open merge alone even with no changes in its own paths', async () => {
       await command(repo, ['checkout', '-q', '-b', 'side']);
@@ -412,7 +412,7 @@ describe.each(sites)('%s commit decisions', (site) => {
   );
 
   // Run-app's pinned-tree write fence replaces gitCommitStaged's index read.
-  it.each([128, 2, -1, 124])(
+  it.each(site === 'run-app' ? [128, 2, -1, 124] : [128])(
     site === 'run-app'
       ? 'rejects a failed preview ref update with code %i'
       : 'rejects a failed staged read with code %i',
@@ -447,21 +447,28 @@ describe.each(sites)('%s commit decisions', (site) => {
     },
   );
 
-  it.each([128, 2, -1, 124])('rejects a failed merge read with code %i', async (code) => {
-    if (site === 'run-app') await writeFileNoFollow(repo, 'README.md', 'session edits\n');
-    const head = await command(repo, ['rev-parse', 'HEAD']);
-    control.result.mockImplementation((_cwd: string, args: string[]): GitRunResult | undefined => {
-      if (args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) {
-        return { code, stdout: '', stderr: 'opaque diagnostic' };
-      }
-      return undefined;
-    });
-    await expect(apply()).rejects.toThrow(/^git merge read failed:/);
-    expect(await command(repo, ['rev-parse', 'HEAD'])).toBe(head);
-    expect(writes).toEqual([]);
-    expect(vi.mocked(gitRun).mock.calls.some(([, args]) => args[0] === 'commit')).toBe(false);
-    expect(vi.mocked(gitRun).mock.calls.some(([, args]) => args[0] === 'commit-tree')).toBe(false);
-  });
+  it.each(site === 'run-app' ? [128, 2, -1, 124] : [128])(
+    'rejects a failed merge read with code %i',
+    async (code) => {
+      if (site === 'run-app') await writeFileNoFollow(repo, 'README.md', 'session edits\n');
+      const head = await command(repo, ['rev-parse', 'HEAD']);
+      control.result.mockImplementation(
+        (_cwd: string, args: string[]): GitRunResult | undefined => {
+          if (args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) {
+            return { code, stdout: '', stderr: 'opaque diagnostic' };
+          }
+          return undefined;
+        },
+      );
+      await expect(apply()).rejects.toThrow(/^git merge read failed:/);
+      expect(await command(repo, ['rev-parse', 'HEAD'])).toBe(head);
+      expect(writes).toEqual([]);
+      expect(vi.mocked(gitRun).mock.calls.some(([, args]) => args[0] === 'commit')).toBe(false);
+      expect(vi.mocked(gitRun).mock.calls.some(([, args]) => args[0] === 'commit-tree')).toBe(
+        false,
+      );
+    },
+  );
 
   it('rejects a real commit failure even when its output mentions nothing to commit', async () => {
     const file =

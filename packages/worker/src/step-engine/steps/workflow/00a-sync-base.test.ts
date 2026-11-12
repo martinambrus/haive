@@ -1,7 +1,8 @@
+import { gitTemplate } from '../../../../test/support/git-template.js';
 import { pendingMetadataControl } from '../../../../test/support/pending-metadata-control.js';
 import { fixtureBase, networkGitArgs, httpOrigin } from '../../../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { readFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -208,16 +209,27 @@ it('owner-role control: the step fetch passes its owner and refuses loopback bef
 });
 
 /** A bare origin on `main` with one commit, plus a seed working clone to advance it. */
-async function seedOrigin(): Promise<{ bare: string; seed: string }> {
-  const bare = await mkdtemp(path.join(fixtureBase, 'sync-bare-'));
+const originTemplate = gitTemplate(async (root) => {
+  const bare = path.join(root, 'bare');
+  const seed = path.join(root, 'seed');
+  await mkdir(bare);
+  await mkdir(seed);
   await git(bare, ['init', '--bare', '-b', 'main']);
-  const seed = await mkdtemp(path.join(fixtureBase, 'sync-seed-'));
   await git(seed, ['init', '-b', 'main']);
-  await git(seed, ['remote', 'add', 'origin', httpOrigin(bare)]);
+  const origin = httpOrigin(bare);
+  await git(seed, ['remote', 'add', 'origin', origin]);
   await writeFile(path.join(seed, 'a.txt'), '1\n', 'utf8');
   await git(seed, ['add', '-A']);
   await git(seed, ['commit', '-m', 'c1']);
   await git(seed, ['push', '-u', 'origin', 'main']);
+  return origin;
+}, fixtureBase);
+async function seedOrigin(): Promise<{ bare: string; seed: string }> {
+  const { dir: root, data: oldOrigin } = await originTemplate.copy();
+  const bare = path.join(root, 'bare');
+  const seed = path.join(root, 'seed');
+  const config = path.join(seed, '.git', 'config');
+  await writeFile(config, (await readFile(config, 'utf8')).replace(oldOrigin, httpOrigin(bare)));
   return { bare, seed };
 }
 async function cloneLocal(bare: string): Promise<string> {

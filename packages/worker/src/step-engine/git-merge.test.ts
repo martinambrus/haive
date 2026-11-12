@@ -1,8 +1,10 @@
+import { gitTemplate } from '../../test/support/git-template.js';
 import { unregisteredGitlinks } from './steps/workflow/_gitlink-registration.js';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   chmod,
+  cp,
   lstat,
   mkdir,
   mkdtemp,
@@ -76,8 +78,7 @@ async function initRepo(dir: string): Promise<void> {
 }
 
 /** A repo on `main` whose `feature/x` diverges `base.txt` so a merge conflicts. */
-async function setupConflict(): Promise<string> {
-  const dir = await mkdtemp(path.join(tmpdir(), 'gm-'));
+const setupConflictTemplate = gitTemplate(async (dir) => {
   await initRepo(dir);
   await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
   await git(dir, ['add', '-A']);
@@ -88,7 +89,9 @@ async function setupConflict(): Promise<string> {
   await git(dir, ['checkout', 'main']);
   await writeFile(path.join(dir, 'base.txt'), 'main\n', 'utf8');
   await git(dir, ['commit', '-am', 'main edit']);
-  return dir;
+});
+async function setupConflict(): Promise<string> {
+  return (await setupConflictTemplate.copy()).dir;
 }
 
 describe('buildMergeFixPrompt', () => {
@@ -153,21 +156,34 @@ describe('mergeCommitted / completeMergeHostSide (real git)', () => {
 });
 
 /** A conflict on `name` beside `clean.txt`, which only `feature/x` changes, so the merge stages it. */
+function setupNamedConflictTemplate(name: string) {
+  return gitTemplate(async (dir) => {
+    await initRepo(dir);
+    await writeFile(path.join(dir, name), 'base\n', 'utf8');
+    await writeFile(path.join(dir, 'clean.txt'), 'one\n', 'utf8');
+    await git(dir, ['add', '-A']);
+    await git(dir, ['commit', '-m', 'init']);
+    await git(dir, ['checkout', '-b', 'feature/x']);
+    await writeFile(path.join(dir, name), 'feature\n', 'utf8');
+    await writeFile(path.join(dir, 'clean.txt'), 'two\n', 'utf8');
+    await git(dir, ['commit', '-am', 'feature edit']);
+    await git(dir, ['checkout', 'main']);
+    await writeFile(path.join(dir, name), 'main\n', 'utf8');
+    await git(dir, ['commit', '-am', 'main edit']);
+  });
+}
+const setupNamedConflictTemplates = new Map<
+  string,
+  ReturnType<typeof setupNamedConflictTemplate>
+>();
 async function setupNamedConflict(name: string): Promise<string> {
-  const dir = await mkdtemp(path.join(tmpdir(), 'gm-named-'));
-  await initRepo(dir);
-  await writeFile(path.join(dir, name), 'base\n', 'utf8');
-  await writeFile(path.join(dir, 'clean.txt'), 'one\n', 'utf8');
-  await git(dir, ['add', '-A']);
-  await git(dir, ['commit', '-m', 'init']);
-  await git(dir, ['checkout', '-b', 'feature/x']);
-  await writeFile(path.join(dir, name), 'feature\n', 'utf8');
-  await writeFile(path.join(dir, 'clean.txt'), 'two\n', 'utf8');
-  await git(dir, ['commit', '-am', 'feature edit']);
-  await git(dir, ['checkout', 'main']);
-  await writeFile(path.join(dir, name), 'main\n', 'utf8');
-  await git(dir, ['commit', '-am', 'main edit']);
-  return dir;
+  const key = name;
+  let template = setupNamedConflictTemplates.get(key);
+  if (!template) {
+    template = setupNamedConflictTemplate(name);
+    setupNamedConflictTemplates.set(key, template);
+  }
+  return (await template.copy()).dir;
 }
 
 const mergeHead = (dir: string) => gitCode(dir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
@@ -175,8 +191,11 @@ const noSecrets = async () => null;
 
 /** setupNamedConflict('base.txt') plus two files only `main` has, one of them left edited by the
  *  person, and an untracked file of theirs; the merge is left open on the conflict. */
-async function setupMergeWithOwnWork(): Promise<string> {
-  const dir = await setupNamedConflict('base.txt');
+const setupMergeWithOwnWorkTemplate = gitTemplate(async (root) => {
+  const source = await setupNamedConflict('base.txt');
+  await cp(source, root, { recursive: true });
+  await rm(source, REMOVE);
+  const dir = root;
   await writeFile(path.join(dir, 'untouched.txt'), 'untouched\n', 'utf8');
   await writeFile(path.join(dir, 'dirt.txt'), 'dirt\n', 'utf8');
   await mkdir(path.join(dir, 'lib', 'deep'), { recursive: true });
@@ -188,13 +207,17 @@ async function setupMergeWithOwnWork(): Promise<string> {
   await writeFile(path.join(dir, 'dirt.txt'), 'person dirt\n', 'utf8');
   await writeFile(path.join(dir, 'mine.txt'), 'mine\n', 'utf8');
   await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+});
+async function setupMergeWithOwnWork(): Promise<string> {
+  const { dir } = await setupMergeWithOwnWorkTemplate.copy();
+  // Copying changes inode/ctime; refresh clean entries beside the deliberate dirt/conflict.
+  await gitCode(dir, ['update-index', '--refresh', '--unmerged']);
   return dir;
 }
 
 /** A merge left open on `.gitignore`, which ignores `cache/`, with a file in it and an untracked
  *  log nothing ignores. */
-async function setupIgnoreConflict(): Promise<{ dir: string; kept: string }> {
-  const dir = await mkdtemp(path.join(tmpdir(), 'gm-ignore-'));
+const setupIgnoreConflictTemplate = gitTemplate(async (dir) => {
   await initRepo(dir);
   await writeFile(path.join(dir, '.gitignore'), 'cache/\n', 'utf8');
   await git(dir, ['add', '-A']);
@@ -210,6 +233,11 @@ async function setupIgnoreConflict(): Promise<{ dir: string; kept: string }> {
   await writeFile(path.join(dir, 'cache', 'keep'), kept, 'utf8');
   await writeFile(path.join(dir, 'app.log'), 'line1\n', 'utf8');
   await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+  return kept;
+});
+async function setupIgnoreConflict(): Promise<{ dir: string; kept: string }> {
+  const { dir, data: kept } = await setupIgnoreConflictTemplate.copy();
+  await gitCode(dir, ['update-index', '--refresh', '--unmerged']);
   return { dir, kept };
 }
 
@@ -229,8 +257,7 @@ async function writeMany(
 }
 
 /** 300 files conflicting in DEEP beside a directory/file conflict on `DEEP/foo`, left open. */
-async function setupWideConflict(): Promise<string> {
-  const dir = await mkdtemp(path.join(tmpdir(), 'gm-wide-'));
+const setupWideConflictTemplate = gitTemplate(async (dir) => {
   await initRepo(dir);
   await writeMany(dir, DEEP, 300, () => 'base\n');
   await git(dir, ['add', '-A']);
@@ -247,12 +274,15 @@ async function setupWideConflict(): Promise<string> {
   await git(dir, ['add', '-A']);
   await git(dir, ['commit', '-m', 'main']);
   await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+});
+async function setupWideConflict(): Promise<string> {
+  const { dir } = await setupWideConflictTemplate.copy();
+  await gitCode(dir, ['update-index', '--refresh', '--unmerged']);
   return dir;
 }
 
 /** A merge left open on `base.txt` that also cleanly staged feature/x's change to `bad<0xff>.txt`. */
-async function setupOddNameMerge(): Promise<{ dir: string; odd: Buffer }> {
-  const dir = await mkdtemp(path.join(tmpdir(), 'gm-odd-'));
+const setupOddNameMergeTemplate = gitTemplate(async (dir) => {
   const odd = Buffer.concat([Buffer.from(`${dir}/bad`), Buffer.from([0xff]), Buffer.from('.txt')]);
   await initRepo(dir);
   await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
@@ -267,6 +297,11 @@ async function setupOddNameMerge(): Promise<{ dir: string; odd: Buffer }> {
   await writeFile(path.join(dir, 'base.txt'), 'main\n', 'utf8');
   await git(dir, ['commit', '-am', 'main']);
   await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+});
+async function setupOddNameMerge(): Promise<{ dir: string; odd: Buffer }> {
+  const { dir } = await setupOddNameMergeTemplate.copy();
+  const odd = Buffer.concat([Buffer.from(`${dir}/bad`), Buffer.from([0xff]), Buffer.from('.txt')]);
+  await gitCode(dir, ['update-index', '--refresh', '--unmerged']);
   return { dir, odd };
 }
 
@@ -287,26 +322,39 @@ async function headEntries(dir: string): Promise<Map<string, string>> {
 
 /** One side holds a file `foo` and the other a directory `foo/bar`, so git moves the file aside and
  *  reports only the name it gave it; the merge of `feature/x` into `main` is left open. */
-async function setupDirectoryFileConflict(fileOn: 'main' | 'feature/x'): Promise<string> {
-  const dir = await mkdtemp(path.join(tmpdir(), 'gm-df-'));
-  await initRepo(dir);
-  await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
-  await git(dir, ['add', '-A']);
-  await git(dir, ['commit', '-m', 'init']);
-  await git(dir, ['checkout', '-b', 'feature/x']);
-  for (const branch of ['feature/x', 'main']) {
-    await git(dir, ['checkout', branch]);
-    if (branch === fileOn) {
-      await writeFile(path.join(dir, 'foo'), 'file\n', 'utf8');
-    } else {
-      await mkdir(path.join(dir, 'foo'));
-      await writeFile(path.join(dir, 'foo', 'bar'), 'bar\n', 'utf8');
-    }
+function setupDirectoryFileConflictTemplate(fileOn: 'main' | 'feature/x') {
+  return gitTemplate(async (dir) => {
+    await initRepo(dir);
+    await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
     await git(dir, ['add', '-A']);
-    await git(dir, ['commit', '-m', `${branch} foo`]);
+    await git(dir, ['commit', '-m', 'init']);
+    await git(dir, ['checkout', '-b', 'feature/x']);
+    for (const branch of ['feature/x', 'main']) {
+      await git(dir, ['checkout', branch]);
+      if (branch === fileOn) {
+        await writeFile(path.join(dir, 'foo'), 'file\n', 'utf8');
+      } else {
+        await mkdir(path.join(dir, 'foo'));
+        await writeFile(path.join(dir, 'foo', 'bar'), 'bar\n', 'utf8');
+      }
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', `${branch} foo`]);
+    }
+    await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+  });
+}
+const setupDirectoryFileConflictTemplates = new Map<
+  string,
+  ReturnType<typeof setupDirectoryFileConflictTemplate>
+>();
+async function setupDirectoryFileConflict(fileOn: 'main' | 'feature/x'): Promise<string> {
+  const key = fileOn;
+  let template = setupDirectoryFileConflictTemplates.get(key);
+  if (!template) {
+    template = setupDirectoryFileConflictTemplate(fileOn);
+    setupDirectoryFileConflictTemplates.set(key, template);
   }
-  await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
-  return dir;
+  return (await template.copy()).dir;
 }
 
 describe('fixer leftovers (real git)', () => {
@@ -1336,8 +1384,7 @@ describe('merge helpers (real git)', () => {
 });
 
 /** A repo on `main` with a `feature/x` that adds two commits and does NOT conflict. */
-async function setupCleanFeature(): Promise<string> {
-  const dir = await mkdtemp(path.join(tmpdir(), 'gs-'));
+const setupCleanFeatureTemplate = gitTemplate(async (dir) => {
   await initRepo(dir);
   await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
   await git(dir, ['add', '-A']);
@@ -1350,7 +1397,9 @@ async function setupCleanFeature(): Promise<string> {
   await git(dir, ['add', '-A']);
   await git(dir, ['commit', '-m', 'ISS-2: two']);
   await git(dir, ['checkout', 'main']);
-  return dir;
+});
+async function setupCleanFeature(): Promise<string> {
+  return (await setupCleanFeatureTemplate.copy()).dir;
 }
 
 const count = async (dir: string, ref: string): Promise<number> =>
@@ -1515,8 +1564,7 @@ describe('a root abort that cannot hand back a name', () => {
 });
 
 /** `main` behind `feature/x`, which edits `base.txt` and adds `top.txt` and `dir/sub/deep.txt`. */
-async function setupFastForward(): Promise<string> {
-  const dir = await mkdtemp(path.join(tmpdir(), 'gm-ff-'));
+const setupFastForwardTemplate = gitTemplate(async (dir) => {
   await initRepo(dir);
   await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
   await git(dir, ['add', '-A']);
@@ -1529,7 +1577,9 @@ async function setupFastForward(): Promise<string> {
   await git(dir, ['add', '-A']);
   await git(dir, ['commit', '-m', 'feature']);
   await git(dir, ['checkout', 'main']);
-  return dir;
+});
+async function setupFastForward(): Promise<string> {
+  return (await setupFastForwardTemplate.copy()).dir;
 }
 
 const FAST_FORWARDED = ['base.txt', 'dir', 'dir/sub', 'dir/sub/deep.txt', 'top.txt'];
@@ -1642,28 +1692,41 @@ const AGENT_DIRS = ['.haive-data', '.haive-data/knowledge_base', '.haive-data/le
 const ROOT = { uid: 0, gid: 0 };
 
 /** `feature/x` writes the projection files and `others`; with `conflict`, `main` has them all and both edit `base.txt`. */
-async function setupProjectionBranch(others: string[], conflict: boolean): Promise<string> {
-  const dir = await mkdtemp(path.join(tmpdir(), 'gm-proj-'));
-  await initRepo(dir);
-  const write = async (rels: string[], text: string) => {
-    for (const rel of rels) {
-      await mkdir(path.dirname(path.join(dir, rel)), { recursive: true });
-      await writeFile(path.join(dir, rel), text, 'utf8');
+function setupProjectionBranchTemplate(others: string[], conflict: boolean) {
+  return gitTemplate(async (dir) => {
+    await initRepo(dir);
+    const write = async (rels: string[], text: string) => {
+      for (const rel of rels) {
+        await mkdir(path.dirname(path.join(dir, rel)), { recursive: true });
+        await writeFile(path.join(dir, rel), text, 'utf8');
+      }
+    };
+    await write(['base.txt', ...(conflict ? [...PROJECTIONS, ...others] : [])], 'base\n');
+    await git(dir, ['add', '-A']);
+    await git(dir, ['commit', '-m', 'init']);
+    await git(dir, ['checkout', '-b', 'feature/x']);
+    await write([...PROJECTIONS, ...others, ...(conflict ? ['base.txt'] : [])], 'feature\n');
+    await git(dir, ['add', '-A']);
+    await git(dir, ['commit', '-m', 'feature']);
+    await git(dir, ['checkout', 'main']);
+    if (conflict) {
+      await write(['base.txt'], 'main\n');
+      await git(dir, ['commit', '-am', 'main edit']);
     }
-  };
-  await write(['base.txt', ...(conflict ? [...PROJECTIONS, ...others] : [])], 'base\n');
-  await git(dir, ['add', '-A']);
-  await git(dir, ['commit', '-m', 'init']);
-  await git(dir, ['checkout', '-b', 'feature/x']);
-  await write([...PROJECTIONS, ...others, ...(conflict ? ['base.txt'] : [])], 'feature\n');
-  await git(dir, ['add', '-A']);
-  await git(dir, ['commit', '-m', 'feature']);
-  await git(dir, ['checkout', 'main']);
-  if (conflict) {
-    await write(['base.txt'], 'main\n');
-    await git(dir, ['commit', '-am', 'main edit']);
+  });
+}
+const setupProjectionBranchTemplates = new Map<
+  string,
+  ReturnType<typeof setupProjectionBranchTemplate>
+>();
+async function setupProjectionBranch(others: string[], conflict: boolean): Promise<string> {
+  const key = JSON.stringify([others, conflict]);
+  let template = setupProjectionBranchTemplates.get(key);
+  if (!template) {
+    template = setupProjectionBranchTemplate(others, conflict);
+    setupProjectionBranchTemplates.set(key, template);
   }
-  return dir;
+  return (await template.copy()).dir;
 }
 
 /** git-merge.js and set-aside.js over an fs-safe that reads every path as root's and records a chown in `owners` instead of making it. */

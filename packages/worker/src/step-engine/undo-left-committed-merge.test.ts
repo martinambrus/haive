@@ -1,9 +1,9 @@
+import { gitTemplate } from '../../test/support/git-template.js';
 import { execFile } from 'node:child_process';
 import * as processes from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { mkdtemp, rm, writeFile, readFile, mkdir, symlink } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile, readFile, mkdir, symlink } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -131,25 +131,35 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
+const undoTemplates = [false, true].map((changeBase) =>
+  gitTemplate(async (root) => {
+    const dir = path.join(root, 'repo');
+    await mkdir(dir);
+    await git(dir, 'init', '-b', 'main');
+    await writeFile(path.join(dir, 'base'), 'base');
+    await git(dir, 'add', '.');
+    await git(dir, 'commit', '-m', 'base');
+    const before = await git(dir, 'rev-parse', 'HEAD');
+    await git(dir, 'switch', '-c', 'feature');
+    await writeFile(path.join(dir, 'feature'), 'feature');
+    if (changeBase) await writeFile(path.join(dir, 'base'), 'merged base');
+    await git(dir, 'add', '.');
+    await git(dir, 'commit', '-m', 'feature');
+    const feature = await git(dir, 'rev-parse', 'HEAD');
+    await git(dir, 'switch', 'main');
+    await git(dir, 'merge', '--no-ff', 'feature', '-m', 'merge');
+    const after = await git(dir, 'rev-parse', 'HEAD');
+    return { before, after, feature };
+  }),
+);
 async function fixture(changeBase = false) {
-  const root = await mkdtemp(path.join(tmpdir(), 'e3-undo-'));
+  const {
+    dir: root,
+    data: { before, after, feature },
+  } = await undoTemplates[Number(changeBase)]!.copy();
   dirs.push(root);
   const dir = path.join(root, 'repo');
-  await mkdir(dir);
-  await git(dir, 'init', '-b', 'main');
-  await writeFile(path.join(dir, 'base'), 'base');
-  await git(dir, 'add', '.');
-  await git(dir, 'commit', '-m', 'base');
-  const before = await git(dir, 'rev-parse', 'HEAD');
-  await git(dir, 'switch', '-c', 'feature');
-  await writeFile(path.join(dir, 'feature'), 'feature');
-  if (changeBase) await writeFile(path.join(dir, 'base'), 'merged base');
-  await git(dir, 'add', '.');
-  await git(dir, 'commit', '-m', 'feature');
-  const feature = await git(dir, 'rev-parse', 'HEAD');
-  await git(dir, 'switch', 'main');
-  await git(dir, 'merge', '--no-ff', 'feature', '-m', 'merge');
-  const after = await git(dir, 'rev-parse', 'HEAD');
+  await git(dir, 'update-index', '--refresh');
   const payload = {
     repoPath: dir,
     dir,
