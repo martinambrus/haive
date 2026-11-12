@@ -121,37 +121,57 @@ async function interruptedCheckoutMove(checkout: string, m: LeftCommittedMerge):
     .filter(Boolean)
     .map((p) => `:(literal)${p}`);
   if (!paths.length) return true;
-  const checked = await gitRun(checkout, ['ls-files', '-v', '-z', '--', ...paths]);
-  if (checked.code !== 0)
-    throw new UndoGitError(
-      gitFailureReason('Cannot read the Undo recovery index flags', checked.stderr),
-    );
-  if (checked.stdout.split('\0').some((entry) => /^([a-z]|S) /.test(entry))) return false;
-  const local = await gitRun(checkout, [
-    '-c',
-    'core.trustctime=true',
-    '-c',
-    'core.checkStat=default',
-    '-c',
-    'core.fileMode=true',
-    'diff',
-    '--quiet',
-    '--ignore-submodules=none',
-    '--',
-    ...paths,
-  ]);
-  if (local.code === 1) return false;
-  if (local.code !== 0)
-    throw new UndoGitError(
-      gitFailureReason('Cannot read local changes for Undo recovery', local.stderr),
-    );
-  // A removed path recreated as untracked (including ignored) is no longer the moved checkout.
-  const untracked = await gitRun(checkout, ['ls-files', '--others', '-z', '--', ...paths]);
-  if (untracked.code !== 0)
-    throw new UndoGitError(
-      gitFailureReason('Cannot read untracked paths for Undo recovery', untracked.stderr),
-    );
-  return !untracked.stdout;
+  // Neither ls-files nor diff accepts --pathspec-from-file. Bound their literal argv
+  // batches instead; byte counts include NULs and leave room for the environment.
+  const batches: string[][] = [];
+  let batch: string[] = [];
+  let bytes = 0;
+  for (const path of paths) {
+    const size = Buffer.byteLength(path) + 1;
+    if (size > 32_768) return false;
+    if (bytes + size > 32_768) {
+      batches.push(batch);
+      batch = [];
+      bytes = 0;
+    }
+    batch.push(path);
+    bytes += size;
+  }
+  batches.push(batch);
+  for (const paths of batches) {
+    const checked = await gitRun(checkout, ['ls-files', '-v', '-z', '--', ...paths]);
+    if (checked.code !== 0)
+      throw new UndoGitError(
+        gitFailureReason('Cannot read the Undo recovery index flags', checked.stderr),
+      );
+    if (checked.stdout.split('\0').some((entry) => /^([a-z]|S) /.test(entry))) return false;
+    const local = await gitRun(checkout, [
+      '-c',
+      'core.trustctime=true',
+      '-c',
+      'core.checkStat=default',
+      '-c',
+      'core.fileMode=true',
+      'diff',
+      '--quiet',
+      '--ignore-submodules=none',
+      '--',
+      ...paths,
+    ]);
+    if (local.code === 1) return false;
+    if (local.code !== 0)
+      throw new UndoGitError(
+        gitFailureReason('Cannot read local changes for Undo recovery', local.stderr),
+      );
+    // A removed path recreated as untracked (including ignored) is no longer the moved checkout.
+    const untracked = await gitRun(checkout, ['ls-files', '--others', '-z', '--', ...paths]);
+    if (untracked.code !== 0)
+      throw new UndoGitError(
+        gitFailureReason('Cannot read untracked paths for Undo recovery', untracked.stderr),
+      );
+    if (untracked.stdout) return false;
+  }
+  return true;
 }
 
 async function validBranch(dir: string, branch: string): Promise<boolean> {

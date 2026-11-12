@@ -269,6 +269,50 @@ describe('explicit undo of a cancel-left committed merge', () => {
     expect(h.aside).not.toHaveBeenCalled();
   });
 
+  it('recovers an interrupted move with more touched paths than argv can carry', async () => {
+    const f = await fixture();
+    const names = Array.from(
+      { length: 18_000 },
+      (_, i) => `${i.toString().padStart(5, '0')}-${'x'.repeat(125)}`,
+    );
+    expect(Buffer.byteLength(names.map((p) => `:(literal)${p}\0`).join(''))).toBeGreaterThan(
+      2 * 1024 * 1024,
+    );
+    await expect(async () =>
+      exec('git', ['ls-files', '--', ...names], { cwd: f.dir, env }),
+    ).rejects.toMatchObject({ code: 'E2BIG' });
+    const blob = await git(f.dir, 'rev-parse', 'HEAD:feature');
+    const added = await gitPush.gitRun(f.dir, ['update-index', '-z', '--index-info'], undefined, {
+      input: Buffer.from(names.map((p) => `100644 ${blob}\t${p}\0`).join('')),
+    });
+    expect(added.code).toBe(0);
+    const tree = await git(f.dir, 'write-tree');
+    const after = await git(
+      f.dir,
+      'commit-tree',
+      tree,
+      '-p',
+      f.before,
+      '-p',
+      f.feature,
+      '-m',
+      'large merge',
+    );
+    await git(f.dir, 'update-ref', 'refs/heads/main', after, f.after);
+    f.payload.baseShaAfter = after;
+    f.job.baseShaAfter = after;
+    await git(f.dir, 'update-ref', `refs/haive/undo-left-merge/t/${after}`, after);
+    // Model the index and files left by read-tree before the ref transaction committed.
+    await git(f.dir, 'read-tree', f.before);
+    await rm(path.join(f.dir, 'feature'));
+    await writeFile(path.join(f.dir, 'base'), 'unrelated local bytes');
+    await f.run();
+    expect(leftCommittedMerges(f.events)[0]?.settled?.outcome).toBe('undone');
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+    expect(await readFile(path.join(f.dir, 'base'), 'utf8')).toBe('unrelated local bytes');
+    expect(h.aside).not.toHaveBeenCalled();
+  });
+
   it('refuses unrelated staged work after an interrupted checkout move', async () => {
     const f = await fixture();
     await interruptAfterCheckoutMove(f);
