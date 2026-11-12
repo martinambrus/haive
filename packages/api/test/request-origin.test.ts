@@ -272,3 +272,74 @@ describe('editor Fetch Metadata isolation', () => {
     );
   });
 });
+
+describe('a configured editor origin across the app isolation layers', () => {
+  const appOrigin = 'https://app.example.com';
+  const editor = 'https://ide.example.com';
+  beforeEach(() => {
+    vi.stubEnv('WEB_ORIGIN', appOrigin);
+    vi.stubEnv('HAIVE_PUBLIC_API_URL', 'https://api.example.com');
+    vi.stubEnv('HAIVE_EDITOR_ORIGIN', editor);
+  });
+
+  it.each([
+    { path: '/tasks', method: 'POST', origin: editor, site: 'same-site', status: 403 },
+    { path: '/tasks', method: 'POST', origin: editor, site: undefined, status: 403 },
+    { path: '/ide-other', method: 'POST', origin: editor, site: 'same-site', status: 403 },
+    {
+      path: '/editor-origin-policy-probe',
+      method: 'GET',
+      origin: editor,
+      site: 'same-origin',
+      status: 403,
+    },
+    {
+      path: '/editor-origin-policy-probe',
+      method: 'GET',
+      origin: appOrigin,
+      site: 'same-site',
+      status: 200,
+    },
+    {
+      path: '/editor-origin-policy-probe',
+      method: 'GET',
+      origin: appOrigin,
+      site: undefined,
+      status: 200,
+    },
+    {
+      path: '/editor-origin-policy-probe',
+      method: 'POST',
+      origin: appOrigin,
+      site: 'same-site',
+      status: 200,
+    },
+    { path: '/ide/_handshake', method: 'GET', origin: editor, site: 'same-origin', status: 200 },
+    {
+      path: `/ide/${TASK}/resource`,
+      method: 'POST',
+      origin: editor,
+      site: 'same-origin',
+      status: 401,
+    },
+  ])(
+    '$method $path from $origin with $site metadata answers $status',
+    async ({ path, method, origin, site, status }) => {
+      const app = createApiApp(appOrigin);
+      app.on(['GET', 'POST'], '/editor-origin-policy-probe', requireAuth, (c) =>
+        c.json({ ok: true }),
+      );
+      const res = await app.request(path, {
+        method,
+        headers: {
+          cookie: 'haive_access=session',
+          host: 'ide.example.com',
+          origin,
+          ...(site ? { 'sec-fetch-site': site } : {}),
+        },
+      });
+      expect(res.status).toBe(status);
+      if (status === 401) expect(await res.json()).toMatchObject({ error: 'Not authenticated' });
+    },
+  );
+});

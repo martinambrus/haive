@@ -102,6 +102,19 @@ describe('a WebSocket handshake', () => {
       );
     });
 
+    it(`trusts the configured editor origin only for ide (${h.file})`, async () => {
+      vi.stubEnv('WEB_ORIGIN', 'https://app.example.com');
+      vi.stubEnv('HAIVE_PUBLIC_API_URL', 'https://api.example.com');
+      vi.stubEnv('HAIVE_EDITOR_ORIGIN', 'https://ide.example.com');
+      const port = await listen(h.install);
+      expect(await handshake(port, h.path, 'https://ide.example.com', 'ide.example.com')).toBe(
+        h.install === installIdeWebSocket ? 'HTTP/1.1 401 Unauthorized' : 'HTTP/1.1 403 Forbidden',
+      );
+      expect(await handshake(port, h.path, 'https://app.example.com', 'api:3001')).toBe(
+        'HTTP/1.1 401 Unauthorized',
+      );
+    });
+
     it(`from the editor with a matching Host is refused except for ide (${h.file})`, async () => {
       vi.stubEnv('HAIVE_PUBLIC_API_URL', '');
       vi.stubEnv('HAIVE_API_PORT', '3001');
