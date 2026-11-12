@@ -1,12 +1,13 @@
 /** Where a page may load images, media and fonts from: itself, inline data, object URLs and the api
  *  (screenshots). A body can name any URL, and this is what keeps the browser from fetching it. No
  *  `script-src` or `default-src`, so the root layout's inline script needs no nonce. */
-export function contentSecurityPolicy(apiUrl: string): string {
+export function contentSecurityPolicy(apiUrl: string, editorUrl = apiUrl): string {
   const api = apiSources(apiUrl);
   return [
     `img-src 'self' data: blob:${api}`,
     `media-src 'self' blob:${api}`,
     "font-src 'self' data:",
+    `frame-src 'self'${apiSources(editorUrl)}`,
   ].join('; ');
 }
 

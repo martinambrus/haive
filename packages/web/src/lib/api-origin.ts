@@ -23,6 +23,8 @@ export interface RuntimeApiConfig {
   apiUrl?: string;
   /** The port the api is published on. Combined with the browser's own protocol and hostname. */
   apiPort?: string;
+  /** Optional dedicated editor origin, shared with the API configuration. */
+  editorOrigin?: string;
 }
 
 export interface ApiOriginInputs {
@@ -44,9 +46,11 @@ export function runtimeApiConfig(): RuntimeApiConfig {
   // A blank or whitespace value is unset, as `resolveServerApiBase` reads it.
   const apiUrl = process.env.HAIVE_PUBLIC_API_URL?.trim();
   const apiPort = process.env.HAIVE_API_PORT?.trim();
+  const editorOrigin = process.env.HAIVE_EDITOR_ORIGIN?.trim();
   return {
     ...(apiUrl ? { apiUrl } : {}),
     ...(apiPort ? { apiPort } : {}),
+    ...(editorOrigin ? { editorOrigin } : {}),
   };
 }
 
@@ -100,4 +104,20 @@ export function resolveApiOrigin(inputs: ApiOriginInputs): string {
  *  URL is as likely to include one as not. */
 function stripTrailingSlash(url: string): string {
   return url.endsWith('/') ? url.slice(0, -1) : url;
+}
+
+/** CSP must name the public editor host, even when app API calls use the web session proxy.
+ * The API returns the authoritative grant URL; this helper only configures allowed frames. */
+export function resolveEditorOrigin({ config, location, buildTime }: ApiOriginInputs): string {
+  const api =
+    config?.apiUrl ||
+    (config?.apiPort && location
+      ? `${location.protocol}//${location.hostname}:${config.apiPort}`
+      : buildTime?.trim() || FALLBACK_API_URL);
+  try {
+    const url = new URL(config?.editorOrigin || api);
+    return ['http:', 'https:'].includes(url.protocol) ? url.origin : '';
+  } catch {
+    return '';
+  }
 }

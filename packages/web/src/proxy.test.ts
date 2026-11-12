@@ -55,7 +55,7 @@ describe('the actual Next proxy response', () => {
     const response = await proxy(request('/dashboard', 'haive_refresh=retained'));
     expect(response.headers.get('x-middleware-next')).toBe('1');
     expect(response.headers.get('content-security-policy')).toBe(
-      "img-src 'self' data: blob: http://browser.example.test:46113 https://browser.example.test:46113; media-src 'self' blob: http://browser.example.test:46113 https://browser.example.test:46113; font-src 'self' data:",
+      "img-src 'self' data: blob: http://browser.example.test:46113 https://browser.example.test:46113; media-src 'self' blob: http://browser.example.test:46113 https://browser.example.test:46113; font-src 'self' data:; frame-src 'self' http://browser.example.test:46113 https://browser.example.test:46113",
     );
     expect(response.headers.get('set-cookie')).toBeNull();
   });
@@ -65,7 +65,12 @@ describe('the actual Next proxy response', () => {
     const response = await proxy(request('/login'));
     const policy = response.headers.get('content-security-policy')!;
     expect(policy).toContain("img-src 'self'");
-    expect(policy).not.toMatch(/api\.example|prefix|\*/);
+    expect(policy.split('; ').find((part) => part.startsWith('img-src'))).not.toMatch(
+      /api\.example|prefix|\*/,
+    );
+    expect(policy).toContain(
+      "frame-src 'self' http://api.example.test:9443 https://api.example.test:9443",
+    );
   });
 
   it('rewrites API upgrades without page-cookie redirects or changing Origin', async () => {
@@ -118,4 +123,12 @@ describe('the actual Next proxy response', () => {
     expect(expired.headers.get('set-cookie')).toBeNull();
     expect(fetch).not.toHaveBeenCalled();
   });
+});
+
+it('admits the runtime editor override in the actual page CSP', async () => {
+  vi.stubEnv('HAIVE_EDITOR_ORIGIN', 'https://ide.example.test:8443');
+  const response = await proxy(request('/login'));
+  expect(response.headers.get('content-security-policy')).toContain(
+    "frame-src 'self' http://ide.example.test:8443 https://ide.example.test:8443",
+  );
 });
