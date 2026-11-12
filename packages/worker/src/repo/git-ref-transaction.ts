@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { safeErrorMessage } from '@haive/shared/logger';
+import { logger, safeErrorMessage } from '@haive/shared/logger';
 import { GIT_BASE_ENV, gitDefaultTimeoutMs, hardenGitArgs } from './git-exec.js';
 
 /** Only process/protocol failures use this type; caller callback errors keep their identity. */
@@ -111,20 +111,38 @@ async function refTransaction(
       clearTimeout(timer);
     }
   };
-  const finish = async (abort: boolean) => {
-    // EOF aborts even if a pending protocol read timed out. Do not wait for an
-    // abort ack: that read may still own the next reply. Git gets the first
-    // chance to remove its locks itself, followed by its signal cleanup handler.
-    if (!child.stdin.destroyed && !child.stdin.writableEnded)
-      child.stdin.end(abort ? 'abort\n' : undefined);
-    // After `commit: ok` the ref has moved and git has nothing left but to exit; give
-    // it longer before a signal turns a finished move into a reported failure.
-    if (!(await waitForExit(abort ? 1000 : 10_000))) {
-      child.kill('SIGTERM');
-      if (!(await waitForExit(1000))) child.kill('SIGKILL');
-    }
-    return exited;
-  };
+  let finishing: Promise<number | null> | undefined;
+  const finish = (abort: boolean) =>
+    (finishing ??= (async () => {
+      // EOF aborts even if a pending protocol read timed out. Do not wait for an
+      // abort ack: that read may still own the next reply. Git gets the first
+      // chance to remove its locks itself, followed by its signal cleanup handler.
+      if (!child.stdin.destroyed && !child.stdin.writableEnded)
+        child.stdin.end(abort ? 'abort\n' : undefined);
+      // After `commit: ok` the ref has moved and git has nothing left but to exit; give
+      // it longer before a signal turns a finished move into a reported failure.
+      if (!(await waitForExit(abort ? 1000 : 10_000))) {
+        child.kill('SIGTERM');
+        if (!(await waitForExit(1000))) {
+          child.kill('SIGKILL');
+          if (!(await waitForExit(1000))) {
+            logger.error(
+              { pid: child.pid },
+              'Git ref transaction cleanup did not finish after SIGKILL',
+            );
+            // A child stuck in kernel IO must not keep this job or the worker's event loop waiting.
+            child.unref();
+            child.stdin.destroy();
+            child.stdout.destroy();
+            child.stderr.destroy();
+            throw new GitRefTransactionError(
+              'Git ref transaction cleanup did not finish after SIGKILL; retry after checking Git and its locks',
+            );
+          }
+        }
+      }
+      return exited;
+    })());
   let committed = false;
   try {
     await command('start', 'start: ok');
@@ -136,7 +154,10 @@ async function refTransaction(
     if ((await finish(false)) !== 0) throw failure();
     return true;
   } finally {
-    await finish(!committed);
-    lines.close();
+    try {
+      await finish(!committed);
+    } finally {
+      lines.close();
+    }
   }
 }

@@ -8,7 +8,12 @@ import { PassThrough } from 'node:stream';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as gitExec from './git-exec.js';
-import { checkGitRefTransactions, withGitRefTransaction } from './git-ref-transaction.js';
+import { logger } from '@haive/shared';
+import {
+  checkGitRefTransactions,
+  GitRefTransactionError,
+  withGitRefTransaction,
+} from './git-ref-transaction.js';
 
 vi.mock('node:child_process', async (original) => {
   const actual = await original<typeof import('node:child_process')>();
@@ -64,6 +69,46 @@ async function fixture() {
 }
 
 describe('git ref transactions', () => {
+  it('bounds cleanup and reports a child that never exits after SIGKILL', async () => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const child = Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      exitCode: null,
+      signalCode: null,
+      kill: vi.fn(() => true),
+      unref: vi.fn(),
+    });
+    vi.mocked(processes.spawn).mockReturnValueOnce(
+      child as unknown as ReturnType<typeof processes.spawn>,
+    );
+    let failure: unknown;
+    let finished = false;
+    const result = withGitRefTransaction(
+      '.',
+      'refs/heads/main',
+      'a'.repeat(40),
+      'b'.repeat(40),
+      async () => true,
+    )
+      .catch((err: unknown) => {
+        failure = err;
+      })
+      .finally(() => {
+        finished = true;
+      });
+    await vi.runAllTimersAsync();
+    // Assert before awaiting so the old, unbounded wait fails without hanging the test.
+    expect(finished).toBe(true);
+    await result;
+    expect(failure).toBeInstanceOf(GitRefTransactionError);
+    expect((failure as Error).message).toMatch(/cleanup did not finish/i);
+    expect(child.kill.mock.calls).toEqual([['SIGTERM'], ['SIGKILL']]);
+    expect(log).toHaveBeenCalledTimes(1);
+  });
+
   it('checks support with an empty transaction without moving refs', async () => {
     const f = await fixture();
     await checkGitRefTransactions(f.dir);
