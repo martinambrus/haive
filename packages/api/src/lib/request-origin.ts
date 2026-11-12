@@ -6,9 +6,10 @@ export function webOrigin(): string {
  *  reverse proxy may rewrite `Host`, so the request alone cannot say what that origin is. */
 export function publicApiOrigin(web: string = webOrigin()): string | null {
   try {
-    const configured = process.env.HAIVE_PUBLIC_API_URL;
+    // A blank or whitespace value is unset, as the web app reads it.
+    const configured = process.env.HAIVE_PUBLIC_API_URL?.trim();
     if (configured) return new URL(configured).origin;
-    const port = process.env.HAIVE_API_PORT;
+    const port = process.env.HAIVE_API_PORT?.trim();
     if (!port) return null;
     const page = new URL(web);
     return new URL(`${page.protocol}//${page.hostname}:${port}`).origin;
