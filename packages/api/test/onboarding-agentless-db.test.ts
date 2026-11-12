@@ -12,11 +12,9 @@ import { renderContextAdmitsUpgrade } from '@haive/shared/onboarding-admission';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 
 const url = process.env.T118_DATABASE_URL;
-if (
-  url &&
-  (new URL(url).port !== '46537' || new URL(url).pathname !== '/codex_t118_cli_union_20261026')
-)
-  throw new Error('Use only the assigned T118 scratch database for agent-less completion');
+// Explicit opt-in and scratch names protect local stores; CI owns its default-port service.
+if (url && !/^\/(?:codex|test)_t118_[a-z0-9_]+$/.test(new URL(url).pathname))
+  throw new Error('Use a dedicated agent-less completion scratch database');
 const h = vi.hoisted(() => ({ db: undefined as unknown }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({}) }));
