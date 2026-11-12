@@ -242,6 +242,17 @@ describe('editor Fetch Metadata isolation', () => {
     });
     expect(write.status).toBe(200);
   });
+  it('lets the app read its api on one origin when the editor has its own hostname', async () => {
+    vi.stubEnv('HAIVE_PUBLIC_API_URL', 'https://haive.example.com');
+    vi.stubEnv('HAIVE_EDITOR_ORIGIN', 'https://ide.example.com');
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const app = authenticatedApp('https://haive.example.com');
+    const res = await app.request('/origin-auth-test', {
+      headers: { cookie: 'haive_access=session', 'sec-fetch-site': 'same-origin' },
+    });
+    expect(res.status).toBe(200);
+    expect(warn).not.toHaveBeenCalled();
+  });
   it('keeps one-origin installs working and logs one structured startup warning', async () => {
     vi.stubEnv('HAIVE_PUBLIC_API_URL', 'https://haive.example.com/base');
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
