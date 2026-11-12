@@ -6,10 +6,13 @@
 While it is set `requireAuth` (`middleware/auth.ts`) answers 403 `must_change_password` on every route
 it guards, an administrator included. `requireAuthAllowingPasswordChange` guards exactly two routes,
 `GET /auth/me` (the app layout reads the flag there) and `PUT /user-settings/password`; login, register,
-logout and refresh never had a session check. The six WebSocket handshakes (terminal, terminal-shell,
-cli-stream, cli-login-banner, browser-vnc and ide) share one authenticator, `authenticateUpgrade`
-(`lib/upgrade-auth.ts`), which selects the flag too and answers 401 for a flagged user, and one
-refusal, `rejectUpgrade`; a test fails a handler that keeps a copy of either. A refusal about a
+logout and refresh never had a session check. The five app WebSocket handshakes (terminal, terminal-shell,
+cli-stream, cli-login-banner and browser-vnc) share one authenticator, `authenticateUpgrade`
+(`lib/upgrade-auth.ts`), which reads the user through `requireSessionUser` (the policy `requireAuth`
+uses, flag included) and answers 401 for a flagged user, and one refusal, `rejectUpgrade`. The
+editor socket authenticates its own editor session instead (`authenticateEditorUpgrade`,
+`lib/editor-auth.ts`), with the same user policy and revocation fence; see the editor section in
+[Sandbox](sandbox.md). A test fails a handler that keeps a copy of either. A refusal about a
 resource the user owns (a container that is not running, a finished task, a repository that is not
 ready, a busy login) cannot be read by a browser as a refused upgrade's status, so once origin, auth
 and ownership have passed the handler accepts and closes at once with a 4000-4999 code through the

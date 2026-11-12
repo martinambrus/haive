@@ -177,16 +177,16 @@ in-progress task steps.
   `hosts × 3` such closes. `pg-startup-storm.test.ts` (database) pins every shape.
 - Secrets are stored via envelope encryption: per-user DEK encrypts the secret, master KEK from `CONFIG_ENCRYPTION_KEY` encrypts the DEK. AES-256-GCM throughout.
 - Drizzle schema lives in `packages/database/src/schema/`. Migrations are hand-written SQL in `packages/database/migrations/`, applied in filename order by the runner in `packages/database/src/migrate/`, one transaction per file with its `schema_migrations` row written inside it. **To add one:** iterate with `pnpm db:push`, then write `NNNN_name.sql` in that directory, keeping the guarded idempotent style (`ADD COLUMN IF NOT EXISTS`, `DO $$ … EXCEPTION WHEN duplicate_object`) — a developer's database is often legitimately AHEAD of the baseline and must survive your file. Declare a new column LAST in its Drizzle table: `ALTER TABLE ADD COLUMN` appends while `drizzle-kit push` builds the table in declaration order, so a column declared anywhere else makes the two schemas differ by column ORDER and turns `schema-parity` red — a failure no migration can fix. Never edit an applied migration: its sha256 is recorded, and a change hard-fails every install that ran it. `0000_baseline.sql` is generated and FROZEN; re-cutting the schema means a later numbered baseline, never an edit to that one. `pre-baseline/` is the record written before the directory was executable and is NEVER run — see its README: 19 of those files are unsafe to replay and one is destructive.
-- Each router in `api/src/routes/` mounts its own `requireAuth`, except the WebSocket and task/MCP-token
-  routers, which authenticate themselves. Any other route it does not cover (one above it, or in a
+- Each router in `api/src/routes/` mounts its own `requireAuth`, except the WebSocket, task/MCP-token and
+  editor routers, which authenticate themselves. Any other route it does not cover (one above it, or in a
   router without it) is public and must be in `PUBLIC` (`api/test/anonymous-routes.test.ts`) with its
   reason.
 - A request that changes state, and every WebSocket handshake, is refused when it comes from a page
   other than the app's own (`isForeignOrigin`, `api/src/lib/request-origin.ts`). The session cookie
   is `SameSite=Lax`, and every page on the same site still sends it: on localhost that is every
   other port, the task's own app among them, so the cookie alone cannot say which page asked. The
-  api's own origin is allowed because the editor it proxies runs there. It is resolved as the
-  browser resolves it (`HAIVE_PUBLIC_API_URL`, else the app's host on `HAIVE_API_PORT`), not read
+  editor origin is trusted only under `/ide`. The api origin is resolved as the browser
+  resolves it (`HAIVE_PUBLIC_API_URL`, else the app's host on `HAIVE_API_PORT`), not read
   off `Host`, which a reverse proxy may rewrite to its upstream. A request with no `Origin` did not
   come from a browser page. A GET must not start work either, since a link from any site carries
   the cookie on a top-level GET; that is why the runtime access routes are POST. A new `'upgrade'`

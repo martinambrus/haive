@@ -199,9 +199,53 @@ docker-level launch option added later must join the spec: `IDE_SERVER_ARGS` cov
 the image. The debug setup after boot (PHP debugger install, forwards) is best-effort, its task
 lookup included: a lookup that fails is logged and skips it, and the ensure still succeeds.
 
+**The editor runs on its own origin with its own session.** code-server runs repository code, so
+nothing it serves may act with the app's authority. The editor origin is `HAIVE_EDITOR_ORIGIN`, else the
+api's public origin (`editorOrigin`, `api/src/lib/request-origin.ts`); both the api and the web read it,
+so compose passes it to both (the web needs it for its `frame-src`). A configured origin on the app's
+hostname is refused at boot unless it equals the default, because a browser sends a hostname's cookies to
+every port. The web never relays `/ide`: `apiProxyTarget` refuses a first path segment that decodes to
+`ide`, as Hono decodes it, so `/api/haive/%69de/...` is refused too. Opening an editor:
+
+1. `EditorTab` polls `POST /tasks/:id/ensure-ide` (or `/repos/:id/ensure-ide`) until ready.
+2. It asks for one grant per iframe load, `POST /tasks/:id/editor-handshake` (`lib/editor-grants.ts`):
+   a 32-byte secret stored in Redis for 60 s (`editor-grant:<sha256>`), answered as
+   `<editor origin>/ide/_handshake#<secret>`. A 409 is final; a 503 or a network failure offers Retry.
+3. The iframe loads that URL. `GET /ide/_handshake` is a static page with one hashed inline script that
+   reads the fragment, clears it, and POSTs it. `POST /ide/_handshake` takes the grant with `GETDEL`
+   (single use), re-checks the user as `requireAuth` does and the target's ownership, and sets the editor
+   session: a JWT signed with a key derived from the JWT secret (the HMAC-SHA256 of
+   `haive-editor-session-v1` under that secret, so neither verifier accepts the other's token), bound to the target, its
+   runtime session and the editor origin, valid 8 h, in cookie `haive_editor_<task|repo>_<id>` with
+   `Path=/ide/<target>/`, HttpOnly, host-only; `Secure; SameSite=None; Partitioned` on https,
+   `SameSite=Lax` on http. It then redirects to `/ide/<target>/`.
+4. Every `/ide` route except the two `_handshake` routes sits behind one router-level gate that accepts only
+   that cookie for exactly that target and runtime; the app session opens nothing there. A bare
+   `/ide/<target>` is redirected (308) to the slash form before any credential is read, since the cookie's
+   Path does not cover it. The WebSocket uses the same session (`authenticateEditorUpgrade`,
+   `lib/editor-auth.ts`) and the revocation fence the other sockets use.
+
+Over plain http the Lax cookie survives only when the editor and the app are one site (scheme plus
+registrable domain, ports ignored): the default `localhost:3000` and `:3001` are, while `app.localhost` and
+`api.localhost`, two single-label hosts, or an http editor under an https app are not. There the tab shows
+an operator message instead of a broken frame; serve the editor over https or under the app's registrable
+domain. The site check (`lib/editor-origin.ts`, `tldts`) loads only for an http grant whose hostname or
+scheme differs from the page's.
+
+The app side is closed in three layers. The api trusts the editor origin as an `Origin` only under `/ide`
+(`trustedOrigins`). `editorIsolation` (`middleware/editor-isolation.ts`) refuses a request off `/ide` that
+carries `Sec-Fetch-Site: same-origin`, which is how the editor's own fetches to the api look when the app is
+not served from the api origin. And the editor holds only its own cookie. Residuals: a browser without Fetch
+Metadata can still make same-origin reads of the api from the editor in the default single-host install,
+and an install that serves the app from the api origin needs a dedicated editor hostname for isolation (the
+api warns at boot). All editors share one editor origin, so script in one editor can request another
+runtime's `/ide/<target>/` while the browser holds that runtime's cookie (8 h); a per-runtime hostname
+would close it. An open editor WebSocket is not closed when its 8 h session expires, only on revocation, as
+with the app's sockets.
+
 **The editor proxy never forwards the Haive session.** code-server runs `--auth none` and executes
-repository code, so `routes/ide.ts` removes `haive_access` and `haive_refresh` (every occurrence, by trimmed
-exact name, `withoutSessionCookies` in `auth/cookies.ts`), `Authorization` and `Proxy-Authorization` from the
+repository code, so `routes/ide.ts` removes `haive_access`, `haive_refresh` and every `haive_editor_*` cookie
+(every occurrence, by trimmed name, `withoutSessionCookies` in `auth/cookies.ts`), `Authorization` and `Proxy-Authorization` from the
 HTTP request and from the WebSocket replay before anything is forwarded; a Cookie header left with no pairs is
 dropped. The filter cuts the header into `;` groups by the quote rules, drops a group that still holds a `;`
 inside quotes, and forwards every other non-session pair byte for byte, so a quoted value cannot smuggle or hide
@@ -211,14 +255,14 @@ the client's `forwarded` and `x-forwarded-*`; names are matched against the requ
 malformed `Connection` token is ignored rather than thrown, and the WebSocket connect handler tears down only
 its own session on any error. The replay head is written as latin1 so non-ASCII header bytes arrive unchanged.
 code-server's port proxy is off twice: the api answers 403 to `/proxy/<port>` and `/absproxy/<port>` (first
-segment, any case) on both transports before anything reaches the container, and editors launch with
+segment, any case, of the raw remainder or its dot-segment-normalised form, since the socket bridge
+forwards the raw path) on both transports before anything reaches the container, and editors launch with
 `--disable-proxy`; one started before that flag is replaced once idle, by the editor lifecycle rule above.
 `IDE_ENABLED=false` refuses the HTTP proxy as it does the ensure. The response direction drops the
-same hop-by-hop headers and an upstream `Set-Cookie` for `haive_access` or `haive_refresh` (exact name,
-`isSessionSetCookie`), on HTTP responses and on the WebSocket upgrade response head, so the container cannot
-plant or clear the session; its other cookies, `forwarded` and `x-forwarded-*` still reach the browser. The
-editor is served from the api origin, which is on the state-change allow list on purpose, so this removes the
-credentials from the container's reach and nothing more.
+same hop-by-hop headers and an upstream `Set-Cookie` for `haive_access`, `haive_refresh` or a
+`haive_editor_*` cookie (`isSessionSetCookie`), on HTTP responses and on the WebSocket upgrade response head, so the container cannot
+plant or clear the session; its other cookies, `forwarded` and `x-forwarded-*` still reach the browser. This
+removes the credentials from the container's reach; the editor's own authority is the scoped session above.
 
 ## Container attachment startup
 
