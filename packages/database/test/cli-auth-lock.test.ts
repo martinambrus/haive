@@ -1,11 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import {
-  createDatabase,
-  tryCliAuthLock,
-  recordCliAuthContainer,
-  forgetCliAuthContainer,
-} from '../src/index.js';
+import { createDatabase, tryCliAuthLock } from '../src/index.js';
 
 const url = process.env.CLI_AUTH_LOCK_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/cli_secrets_audit_test'))
@@ -39,36 +34,6 @@ describe.skipIf(!url)('CLI auth session lock on PostgreSQL', () => {
     const next = await tryCliAuthLock(other, scope);
     expect(next).not.toBeNull();
     await next?.();
-    await next?.();
-  });
-  it('refuses a quarantined scope after its holder exits, without retaining a connection', async () => {
-    const scope = randomUUID();
-    const id = randomUUID();
-    const release = await tryCliAuthLock(db, scope);
-    expect(release).not.toBeNull();
-    try {
-      await recordCliAuthContainer(db, scope, id);
-    } finally {
-      await release?.();
-    }
-    try {
-      // More attempts than the process cap prove a refused scope closes its client.
-      for (let attempt = 0; attempt < 40; attempt += 1) {
-        const contender = await tryCliAuthLock(other, scope);
-        try {
-          expect(contender).toBeNull();
-        } finally {
-          await contender?.();
-        }
-      }
-      const unrelated = await tryCliAuthLock(other, randomUUID());
-      expect(unrelated).not.toBeNull();
-      await unrelated?.();
-    } finally {
-      await forgetCliAuthContainer(db, id);
-    }
-    const next = await tryCliAuthLock(other, scope);
-    expect(next).not.toBeNull();
     await next?.();
   });
   it('detects a terminated backend and refuses a protected write even after reconnect', async () => {

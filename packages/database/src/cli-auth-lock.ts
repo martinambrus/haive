@@ -66,16 +66,6 @@ export async function tryCliAuthLock(db: Database, scope: string): Promise<CliAu
       await close();
       return null;
     }
-    // The previous holder may have released after bounded teardown while Docker still
-    // owns a writable auth mount. Check on this client, without pinning the main pool.
-    const [quarantine] = await client`
-      select exists (select 1 from cli_auth_containers where scope = ${scope}) as blocked,
-      pg_backend_pid() as pid`;
-    if (!quarantine || quarantine.pid !== row.pid) throw new CliAuthLockLostError();
-    if (quarantine.blocked) {
-      await close();
-      return null;
-    }
     let released = false;
     let lost = false;
     const release = async () => {
@@ -100,23 +90,4 @@ export async function tryCliAuthLock(db: Database, scope: string): Promise<CliAu
     await close();
     throw err;
   }
-}
-
-/** Record before start, while holding the scope lock. Survives lock loss or API restart. */
-export async function recordCliAuthContainer(
-  db: Database,
-  scope: string,
-  dockerContainerId: string,
-): Promise<void> {
-  await db.$client`
-    insert into cli_auth_containers (docker_container_id, scope)
-    values (${dockerContainerId}, ${scope})`;
-}
-
-/** Call only once Docker confirmed removal (including 404), never on an uncertain error. */
-export async function forgetCliAuthContainer(
-  db: Database,
-  dockerContainerId: string,
-): Promise<void> {
-  await db.$client`delete from cli_auth_containers where docker_container_id = ${dockerContainerId}`;
 }

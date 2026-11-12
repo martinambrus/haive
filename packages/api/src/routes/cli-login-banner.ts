@@ -10,13 +10,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { Job } from 'bullmq';
 import Docker from 'dockerode';
 import { and, eq } from 'drizzle-orm';
-import {
-  schema,
-  tryCliAuthLock,
-  recordCliAuthContainer,
-  forgetCliAuthContainer,
-  type CliAuthLock,
-} from '@haive/database';
+import { schema, tryCliAuthLock, type CliAuthLock } from '@haive/database';
 import {
   AMP_PASTE_LOGIN_URL_PREFIX,
   AUTH_URL_PREFIXES,
@@ -583,13 +577,6 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     if (abort.aborted) throw new LoginCancelled();
 
     try {
-      // Persist before start: if removal times out, every later scope holder stays
-      // busy until Docker has confirmed this container is gone, even after API restart.
-      await recordCliAuthContainer(
-        getDb(),
-        cliAuthScope(opts.provider),
-        createResult.dockerContainerId,
-      );
       await opts.releaseAuth.assertHeld();
       if (abort.aborted) throw new LoginCancelled();
       containerMayWrite = true;
@@ -1596,24 +1583,12 @@ async function teardownContainer(
 ): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
   const removing = (async () => {
-    let removed = false;
     try {
       await docker.getContainer(dockerContainerId).remove({ force: true });
-      removed = true;
     } catch (err) {
-      removed =
-        typeof err === 'object' && err !== null && 'statusCode' in err && err.statusCode === 404;
       log.warn({ error: safeErrorDetails(err), dockerContainerId }, 'docker remove failed');
     }
     const db = getDb();
-    if (removed) {
-      await forgetCliAuthContainer(db, dockerContainerId).catch((err) => {
-        log.warn(
-          { error: safeErrorDetails(err), dockerContainerId },
-          'auth container quarantine clear failed',
-        );
-      });
-    }
     await db
       .update(schema.containers)
       .set({ status: 'destroyed', destroyedAt: new Date() })
@@ -1627,8 +1602,8 @@ async function teardownContainer(
       removing,
       new Promise<void>((resolve) => {
         timer = setTimeout(() => {
-          // The durable scope quarantine survives this timeout and uncertain errors.
-          // No reaper covers a live owner; auth writers stay busy until confirmed removal.
+          // Keep the row until removal really finishes. If it never does,
+          // reapOrphanedAuthVolumes removes the container when its owner is gone.
           log.warn(
             { containerRowId, dockerContainerId, timeoutMs: CONTAINER_TEARDOWN_TIMEOUT_MS },
             'login container removal timed out',
