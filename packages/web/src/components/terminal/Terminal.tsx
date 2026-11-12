@@ -17,6 +17,8 @@ import { copyTerminalSelection } from '@/lib/terminal-copy';
 import { useTerminalCopy } from '@/lib/use-terminal-copy';
 import { usePendingCliCopy } from '@/lib/use-pending-cli-copy';
 import { stripDel } from '@/lib/terminal-sanitize';
+import { terminalRefusalMessage } from '@/lib/terminal-refusal-message';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 
 type ConnectionState = 'connecting' | 'connected' | 'closed' | 'error';
 
@@ -152,6 +154,7 @@ export function Terminal({ containerId, onExit, fill = false }: TerminalProps) {
     let firstOutputSeen = false;
     const ws = new WebSocket(apiWebSocketUrl(`/terminal/${containerId}`));
     setState('connecting');
+    setErrorMsg(null);
 
     const sendFrame = (frame: unknown) => {
       if (ws.readyState === WebSocket.OPEN) {
@@ -252,7 +255,13 @@ export function Terminal({ containerId, onExit, fill = false }: TerminalProps) {
 
     ws.onclose = (ev) => {
       if (disposed) return;
-      setState((prev) => (prev === 'error' ? prev : 'closed'));
+      const refusal = terminalRefusalMessage(ev.code);
+      if (refusal) {
+        setState('error');
+        setErrorMsg(refusal);
+      } else {
+        setState((prev) => (prev === 'error' ? prev : 'closed'));
+      }
       if (ev.code !== 1000) {
         term.writeln(
           `\r\n\x1b[31m[socket closed: ${ev.code}${ev.reason ? ` ${ev.reason}` : ''}]\x1b[0m`,
@@ -288,7 +297,7 @@ export function Terminal({ containerId, onExit, fill = false }: TerminalProps) {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-xs">
           <StatusBadge state={state} />
-          {errorMsg && <span className="text-red-400">{errorMsg}</span>}
+          {errorMsg && <InlineMarkdown body={errorMsg} className="text-red-400" />}
         </div>
         <div className="flex items-center gap-3">
           {cliPendingChars !== null && (
