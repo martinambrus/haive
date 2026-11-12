@@ -221,6 +221,81 @@ describe('explicit undo of a cancel-left committed merge', () => {
       expect(h.sync).toHaveBeenCalled();
     },
   );
+  it('keeps a commit landing after the final HEAD check and before the move', async () => {
+    const f = await fixture();
+    const actual = gitPush.gitRun;
+    let tip = '';
+    vi.spyOn(gitPush, 'gitRun').mockImplementation(async (dir, args, ...rest) => {
+      const result = await actual(dir, args, ...rest);
+      if (args[0] === 'diff' && args.includes('--cached') && result.code === 0) {
+        await git(f.dir, 'commit', '--allow-empty', '-m', 'person after HEAD check');
+        tip = await git(f.dir, 'rev-parse', 'main');
+      }
+      return result;
+    });
+    await f.run();
+    expect(tip).not.toBe('');
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(tip);
+    expect(await git(f.dir, 'rev-parse', `${tip}^`)).toBe(f.after);
+    expect(leftCommittedMerges(f.events)[0]).toMatchObject({
+      settled: null,
+      refused: { count: 1 },
+    });
+    expect(h.sync).not.toHaveBeenCalled();
+  });
+  it('holds the branch lock while moving the checkout and releases it afterwards', async () => {
+    const f = await fixture();
+    const actual = gitPush.gitRun;
+    let tried = false;
+    vi.spyOn(gitPush, 'gitRun').mockImplementation(async (dir, args, ...rest) => {
+      if (args[0] === 'read-tree') {
+        tried = true;
+        await expect(
+          git(f.dir, 'commit', '--allow-empty', '-m', 'competing commit'),
+        ).rejects.toThrow();
+        expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+      }
+      return actual(dir, args, ...rest);
+    });
+    await f.run();
+    expect(tried).toBe(true);
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+    expect(await git(f.dir, 'status', '--porcelain')).toBe('');
+    await git(f.dir, 'commit', '--allow-empty', '-m', 'lock released');
+  });
+  it.each(['git version 2.26.3', 'unrecognized version'])(
+    'refuses Undo with unsupported git probe %s without moving the tree',
+    async (stdout) => {
+      const f = await fixture();
+      const actual = gitPush.gitRun;
+      vi.spyOn(gitPush, 'gitRun').mockImplementation(async (dir, args, ...rest) =>
+        args[0] === '--version' ? { code: 0, stdout, stderr: '' } : actual(dir, args, ...rest),
+      );
+      await f.run();
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+      expect(await readFile(path.join(f.dir, 'feature'), 'utf8')).toBe('feature');
+      expect(leftCommittedMerges(f.events)[0]).toMatchObject({
+        settled: null,
+        refused: { count: 1, reason: expect.stringContaining('Git 2.27') },
+      });
+    },
+  );
+  it.each(['unrelated edit', 'unrelated deletion', 'untracked file'])(
+    'keeps reset --keep local behaviour for %s',
+    async (kind) => {
+      const f = await fixture();
+      if (kind === 'unrelated edit') await writeFile(path.join(f.dir, 'base'), 'mine');
+      if (kind === 'unrelated deletion') await rm(path.join(f.dir, 'base'));
+      if (kind === 'untracked file') {
+        await writeFile(path.join(f.dir, 'untracked'), 'mine');
+      }
+      const status = await git(f.dir, 'status', '--porcelain');
+      await f.run();
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+      expect(await git(f.dir, 'status', '--porcelain')).toBe(status);
+      await git(f.dir, 'commit', '--allow-empty', '-m', 'lock released');
+    },
+  );
   it('never drops a commit made in the checkout while Undo prepares', async () => {
     const f = await fixture();
     h.duringPrep = async () => {

@@ -23,6 +23,7 @@ import { worktreeDirPaths, worktreeDirName } from '../repo/worktree-paths.js';
 import { checkoutHoldingTasks } from '../repo/refresh.js';
 import { findWorktreePathClaimant } from '../repo/worktree-claims.js';
 import { worktreesHoldingBranch } from '../repo/git-workspace.js';
+import { withGitRefTransaction } from '../repo/git-ref-transaction.js';
 import {
   resyncHaiveProjections,
   setAsideHaiveProjections,
@@ -555,19 +556,66 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
             if (staged.code !== 0)
               throw new UndoGitError('Git could not read the checkout index before Undo.');
           }
-          const move = await gitRun(
-            movedCheckout ?? cwd,
-            movedCheckout
-              ? ['reset', '--keep', m.baseShaBefore]
-              : ['update-ref', branch, m.baseShaBefore, m.baseShaAfter],
-          );
-          if (move.code !== 0) {
+          // start/prepare arrived in Git 2.27. Never fall back to a reset without CAS.
+          const version = await gitRun(cwd, ['--version']);
+          const parsed = /^git version (\d+)\.(\d+)(?:\.|$)/.exec(version.stdout.trim());
+          if (
+            version.code !== 0 ||
+            !parsed ||
+            Number(parsed[1]) < 2 ||
+            (Number(parsed[1]) === 2 && Number(parsed[2]) < 27)
+          ) {
             await settle(
               'refused',
-              'Git refused the undo; local changes or a changed branch were kept.',
+              'Undo requires Git 2.27 or newer to lock the base branch safely. Upgrade Git and retry.',
             );
             return;
           }
+          let moved: boolean;
+          try {
+            moved = await withGitRefTransaction(
+              cwd,
+              branch,
+              m.baseShaBefore,
+              m.baseShaAfter,
+              async () => {
+                if (!movedCheckout) return true;
+                const symbolic = await gitRun(movedCheckout, ['symbolic-ref', '-q', 'HEAD']);
+                if (
+                  symbolic.code !== 0 ||
+                  symbolic.stdout.trim() !== branch ||
+                  (await undoRevParse(movedCheckout, 'HEAD')) !== m.baseShaAfter
+                ) {
+                  await settle(
+                    'moved',
+                    'The checkout moved since this merge; nothing was changed.',
+                  );
+                  return false;
+                }
+                // With no staged changes, this is reset --keep's two-tree unpack:
+                // paths changed by the move must be clean; unrelated local bytes stay.
+                // Unlike reset it never writes HEAD or acquires the held branch lock.
+                const tree = await gitRun(movedCheckout, [
+                  'read-tree',
+                  '-m',
+                  '-u',
+                  m.baseShaAfter,
+                  m.baseShaBefore,
+                ]);
+                if (tree.code === 0) return true;
+                await settle(
+                  'refused',
+                  'Git refused the undo; local changes or a changed branch were kept.',
+                );
+                return false;
+              },
+            );
+          } catch (error) {
+            throw new UndoGitError(
+              `Git refused the undo: ${scrubErrorPaths(safeErrorMessage(error)).slice(0, 500)}`,
+            );
+          }
+          if (!moved) return;
           needsSync = true;
           await restoreFeature();
           await settle(
