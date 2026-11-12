@@ -29,6 +29,7 @@ import { resolveProjectStateConflict } from '../project-state/resolve.js';
 import { markProjectStatesDirtyAtBoot, sweepDirtyProjectStates } from '../project-state/refresh.js';
 import { sweepKeptProjectionMetadata } from '../project-state/kept-metadata-recovery.js';
 import {
+  observeCheckoutBranch,
   sweepCheckoutRepositories,
   watchCheckout,
   type CheckoutWatchResult,
@@ -866,6 +867,8 @@ export function startPlanMirrorWorker(): Worker<
   | ProjectStateResolveResult
   | HaiveDataSaveResult
   | CheckoutWatchResult
+  | { branch: string | null }
+  | boolean
   | number
 > {
   const worker = new Worker<
@@ -874,6 +877,8 @@ export function startPlanMirrorWorker(): Worker<
     | ProjectStateResolveResult
     | HaiveDataSaveResult
     | CheckoutWatchResult
+    | { branch: string | null }
+    | boolean
     | number
   >(
     QUEUE_NAMES.PLAN_MIRROR,
@@ -910,6 +915,14 @@ export function startPlanMirrorWorker(): Worker<
           case PLAN_MIRROR_JOB_NAMES.SYNC_CHECKOUT:
             if (!data.repositoryId) throw new Error('repositoryId required');
             return watchCheckout(getDb(), data.repositoryId);
+          case PLAN_MIRROR_JOB_NAMES.OBSERVE_CHECKOUT_BRANCH:
+            if (!data.repositoryId) throw new Error('repositoryId required');
+            {
+              // Return what THIS job read: a concurrent watcher may overwrite the column with an
+              // older observation before the reset reads it.
+              const observed = await observeCheckoutBranch(getDb(), data.repositoryId);
+              return observed ? { branch: observed.checkoutBranch } : false;
+            }
           default:
             throw new Error(`unknown plan-mirror job: ${job.name}`);
         }

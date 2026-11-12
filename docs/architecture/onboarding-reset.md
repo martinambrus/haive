@@ -84,6 +84,20 @@ A merged sync therefore RETIRES the claims of what it removed and re-claims what
 It records no sub-skill slugs, so `sub-skills` under a skill it wrote stays unclaimed and is
 moved aside.
 
+**A merge counts only when it landed on the branch the checkout is on.** A step 12 that merged
+into another branch left the checkout untouched, so its 11d record would delete a person's
+untouched skill at the same path. The worker records the checkout's symbolic branch in
+`repositories.checkout_branch` (0231; null when detached, unborn or unreadable): every watcher
+pass that runs writes it before its config gate, and a reset asks for a fresh read when it starts
+(`observeCheckoutBranchForReset`, a dedicated plan-mirror job that takes no lock, bounded at 5 s
+for the whole round trip) and uses the branch that job returns, never the column, which a
+concurrent watcher holding an older read may overwrite meanwhile. `resolveMergedTasks` then counts a `merge.landed` event or a legacy
+`merged` state only when its `landedOn` (or the state's `baseBranch`) equals that branch.
+`repositories.branch` is the CONFIGURED branch and is never used here. When the read fails or
+times out (both plan-mirror slots busy, Redis down, a worker without the job), or the branch is
+null, or a legacy state names no branch, the merge counts as it did before: that fallback can
+still credit a cross-branch merge, so it is the documented gap, not a proof.
+
 **A claimed DIRECTORY is walked when anything claimed lives beneath it, and taken whole when
 nothing does.** That is what separates a generated skill (`<skills>/<id>`, which holds Haive's
 `SKILL.md` and `sub-skills` and may also hold a `NOTES.md` a person left there) from

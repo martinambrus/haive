@@ -141,6 +141,34 @@ describe.skipIf(!url)('checkout watch on real Git and PostgreSQL', () => {
     expect((await stateOf(s.id))?.syncedHead).toBe(git(s.root, 'rev-parse', 'HEAD'));
     expect(await watchCheckout(db!, s.id)).toBe('unchanged');
   });
+  it('records the checkout branch even when record sync is disabled', async () => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    const s = await fixture();
+    expect(await watchCheckout(db!, s.id)).toBe('disabled');
+    expect(await repoOf(s.id)).toMatchObject({ checkoutBranch: 'main' });
+    git(s.root, 'checkout', '-qb', 'feature-x');
+    expect(await watchCheckout(db!, s.id)).toBe('disabled');
+    expect(await repoOf(s.id)).toMatchObject({ checkoutBranch: 'feature-x' });
+    expect(await stateOf(s.id)).toBeUndefined();
+  });
+  it('records the actual checkout branch through switches, detachment and unreadable Git', async () => {
+    enabled();
+    const s = await fixture();
+    await watchCheckout(db!, s.id);
+    expect(await repoOf(s.id)).toMatchObject({ checkoutBranch: 'main' });
+    git(s.root, 'checkout', '-qb', 'feature-x');
+    await watchCheckout(db!, s.id);
+    expect(await repoOf(s.id)).toMatchObject({ checkoutBranch: 'feature-x' });
+    git(s.root, 'checkout', '--detach', '-q');
+    expect(await watchCheckout(db!, s.id)).toBe('held');
+    expect(await repoOf(s.id)).toMatchObject({ checkoutBranch: null });
+    git(s.root, 'checkout', '-q', 'main');
+    await watchCheckout(db!, s.id);
+    expect(await repoOf(s.id)).toMatchObject({ checkoutBranch: 'main' });
+    await writeFile(join(s.root, '.git/config'), '[broken');
+    expect(await watchCheckout(db!, s.id)).toBe('held');
+    expect(await repoOf(s.id)).toMatchObject({ checkoutBranch: null });
+  });
   it('imports another actual named branch but holds detached HEAD and a missing HEAD', async () => {
     enabled();
     const s = await fixture();
