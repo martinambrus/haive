@@ -85,18 +85,42 @@ describe('a WebSocket handshake', () => {
       expect(await handshake(port, h.path, 'null')).toBe('HTTP/1.1 403 Forbidden');
     });
 
-    it(`from the app, the api itself or no page reaches auth (${h.file})`, async () => {
+    it(`from the app or no page reaches auth (${h.file})`, async () => {
       const port = await listen(h.install);
-      for (const origin of ['http://localhost:3000', `http://127.0.0.1:${port}`, undefined]) {
+      for (const origin of ['http://localhost:3000', undefined]) {
         expect(await handshake(port, h.path, origin)).toBe('HTTP/1.1 401 Unauthorized');
       }
     });
 
-    it(`from the api's public origin behind a proxy that rewrites Host reaches auth (${h.file})`, async () => {
+    it(`from the editor public origin is refused except for ide (${h.file})`, async () => {
       vi.stubEnv('HAIVE_PUBLIC_API_URL', 'https://api.example.com');
       const port = await listen(h.install);
       expect(await handshake(port, h.path, 'https://api.example.com', 'api:3001')).toBe(
-        'HTTP/1.1 401 Unauthorized',
+        h.file.includes('ide') || h.file === 'repository editor'
+          ? 'HTTP/1.1 401 Unauthorized'
+          : 'HTTP/1.1 403 Forbidden',
+      );
+    });
+
+    it(`from the editor with a matching Host is refused except for ide (${h.file})`, async () => {
+      vi.stubEnv('HAIVE_PUBLIC_API_URL', '');
+      vi.stubEnv('HAIVE_API_PORT', '3001');
+      const port = await listen(h.install);
+      expect(await handshake(port, h.path, 'http://localhost:3001', 'localhost:3001')).toBe(
+        h.file.includes('ide') || h.file === 'repository editor'
+          ? 'HTTP/1.1 401 Unauthorized'
+          : 'HTTP/1.1 403 Forbidden',
+      );
+    });
+
+    it(`from the request host without public configuration is refused except for ide (${h.file})`, async () => {
+      vi.stubEnv('HAIVE_PUBLIC_API_URL', '');
+      vi.stubEnv('HAIVE_API_PORT', '');
+      const port = await listen(h.install);
+      expect(await handshake(port, h.path, `http://127.0.0.1:${port}`)).toBe(
+        h.file.includes('ide') || h.file === 'repository editor'
+          ? 'HTTP/1.1 401 Unauthorized'
+          : 'HTTP/1.1 403 Forbidden',
       );
     });
 

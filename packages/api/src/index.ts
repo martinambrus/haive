@@ -72,11 +72,15 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
     }),
   );
 
-  const trusted = trustedOrigins(webOrigin);
   app.use('*', async (c, next) => {
     if (
       !SAFE_METHODS.has(c.req.method) &&
-      isForeignOrigin(c.req.header('origin'), c.req.header('host'), trusted)
+      isForeignOrigin(
+        c.req.header('origin'),
+        c.req.header('host'),
+        trustedOrigins(webOrigin, c.req.path),
+        c.req.path,
+      )
     ) {
       throw new HttpError(403, 'Refused a request from another page');
     }
