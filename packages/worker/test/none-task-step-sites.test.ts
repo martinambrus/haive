@@ -44,7 +44,11 @@ const claudeNewer = provider(CLAUDE_ID, 'claude-code', 2);
 type Row = ReturnType<typeof provider>;
 
 function dbWith(rows: Row[]): Database {
-  const fake = createFakeDb({ cliProviders: schema.cliProviders, tasks: schema.tasks });
+  const fake = createFakeDb({
+    cliProviders: schema.cliProviders,
+    tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+  });
   for (const r of rows) fake.insert(schema.cliProviders, r);
   return fake.db as unknown as Database;
 }

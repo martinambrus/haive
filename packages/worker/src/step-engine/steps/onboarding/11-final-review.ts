@@ -5,6 +5,7 @@ import { KB_DIR } from '@haive/shared/knowledge-paths';
 import { closesFence, fenceOpener } from '@haive/shared/markdown-fences';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { resolveActiveAgentsTarget, type ActiveAgentsTarget } from './_active-agents-target.js';
+import { resolveTaskSkillTargetDirs } from './_helpers.js';
 
 interface ReviewFinding {
   id: string;
@@ -40,32 +41,35 @@ async function countFiles(
   return entries.filter((e) => e.isFile() && predicate(e.name)).length;
 }
 
-async function countSkillDirs(anchor: string, relDir: string): Promise<number> {
+async function listInstalledSkillIds(anchor: string, relDir: string): Promise<string[]> {
   const entries = await readdirNoFollow(anchor, relDir);
-  if (entries === null) return 0;
-  let n = 0;
+  if (entries === null) return [];
+  const ids: string[] = [];
   for (const e of entries) {
     if (!e.isDirectory()) continue;
     // A skill counts only when its SKILL.md is a REGULAR FILE. `pathExists` is `stat`-based, so it
     // followed a link — counting a skill whose definition lives wherever that link pointed.
     const info = await lstatNoFollow(anchor, `${relDir}/${e.name}/SKILL.md`);
-    if (info?.kind === 'file') n += 1;
+    if (info?.kind === 'file') ids.push(e.name);
   }
-  return n;
+  return ids;
 }
 
 export async function collectReviewFindings(
   repo: string,
   activeAgentsTarget: ActiveAgentsTarget | null = { dir: '.claude/agents', ext: '.md' },
+  skillTargetDirs: string[] = ['.claude/skills'],
 ): Promise<FinalReviewDetect> {
   const agentsRel = activeAgentsTarget?.dir ?? null;
   const agentExt = activeAgentsTarget?.ext ?? '.md';
 
-  const [knowledgeBase, skills, agents] = await Promise.all([
+  const [knowledgeBase, skillIdsByDir, agents] = await Promise.all([
     countFiles(repo, KB_DIR, (n) => n.endsWith('.md')),
-    countSkillDirs(repo, '.claude/skills'),
+    Promise.all(skillTargetDirs.map((dir) => listInstalledSkillIds(repo, dir))),
     agentsRel ? countFiles(repo, agentsRel, (n) => n.endsWith(agentExt)) : Promise.resolve(0),
   ]);
+  // Mirroring a skill into another CLI's directory does not create a second skill.
+  const skills = new Set(skillIdsByDir.flat()).size;
   const findings: ReviewFinding[] = [];
   if (knowledgeBase === 0) {
     findings.push({
@@ -75,12 +79,12 @@ export async function collectReviewFindings(
       detail: `No ${KB_DIR}/*.md files were produced.`,
     });
   }
-  if (skills === 0) {
+  if (skillTargetDirs.length > 0 && skills === 0) {
     findings.push({
       id: 'no-skills',
       severity: 'warn',
       label: 'No skills generated',
-      detail: 'No .claude/skills/*/SKILL.md files were produced.',
+      detail: `No ${skillTargetDirs.map((dir) => `${dir}/*/SKILL.md`).join(' or ')} files were produced.`,
     });
   }
   if (activeAgentsTarget === null) {
@@ -178,7 +182,8 @@ export const finalReviewStep: StepDefinition<FinalReviewDetect, FinalReviewApply
 
   async detect(ctx: StepContext): Promise<FinalReviewDetect> {
     const agentsTarget = await resolveActiveAgentsTarget(ctx);
-    const detect = await collectReviewFindings(ctx.repoPath, agentsTarget);
+    const skillTargetDirs = await resolveTaskSkillTargetDirs(ctx, ['.claude/skills']);
+    const detect = await collectReviewFindings(ctx.repoPath, agentsTarget, skillTargetDirs);
     ctx.logger.info(
       { counts: detect.counts, findings: detect.findings.length, agentsTarget },
       'final review collected',
