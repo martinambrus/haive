@@ -54,6 +54,9 @@ const NOT_A_RESOURCE = [
   /haive\.[a-z.]+/, // label KEYS and the haive.local hostname
   /haive-(?:env-build|sandbox-build|compose|net|dump|shots|merge-snapshot)-/, // host temp paths
   /haive_(?:access|refresh)\b/, // cookie names
+  /haive_editor_/, // the editor session cookie prefix (one cookie per runtime)
+  // The HMAC label the editor session key is derived under, never a resource name.
+  /^haive-editor-session-v1$/,
   // DDEV snapshot files (access/migrated/import) live in the task's repository, not Docker's
   // resource namespace; their task UUID supplies the isolation.
   /haive-(?:task|rag|mcp|chrome-mcp-proxy|price-sync|runtime-tools|worker|data|ide-ensure|api-|access-|migrated-|import-|pre-migrate|pre-rename)/,
