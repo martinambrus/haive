@@ -11,13 +11,15 @@ const h = vi.hoisted(() => ({
   enabled: true,
   storeError: null as Error | null,
   connected: 0,
+  opts: undefined as unknown,
 }));
 
 vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   resolveGlobalKbEnabled: async () => h.enabled,
-  withGlobalKb: async (_db: unknown, fn: (ctx: unknown) => Promise<void>) => {
+  withGlobalKb: async (_db: unknown, fn: (ctx: unknown) => Promise<void>, opts?: unknown) => {
     h.connected += 1;
+    h.opts = opts;
     if (h.storeError) throw h.storeError;
     const pg = {
       unsafe: async (sql: string, params: unknown[] = []) => {
@@ -133,6 +135,13 @@ describe.each([
   },
 );
 
+it('forwards its deadline and signal to the store call', async () => {
+  const signal = new AbortController().signal;
+  const opts = { deadlineMs: 5, signal, connectTimeoutSeconds: 3 };
+  await classifyGlobalKbVectorProvenance({} as never, opts);
+  expect(h.opts).toEqual(opts);
+});
+
 describe('classifying global KB vectors when the store is not there', () => {
   it('does not connect to a disabled global KB', async () => {
     h.enabled = false;
@@ -154,4 +163,15 @@ describe('classifying global KB vectors when the store is not there', () => {
       ConfigUnavailableError,
     );
   });
+});
+
+it('lets background boot own store failures so its loop retries them', async () => {
+  const err = new Error('store unavailable');
+  h.storeError = err;
+  await expect(
+    classifyGlobalKbVectorProvenance({} as never, {
+      deadlineMs: 20,
+      signal: new AbortController().signal,
+    }),
+  ).rejects.toBe(err);
 });

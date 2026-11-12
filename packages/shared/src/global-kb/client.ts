@@ -45,6 +45,8 @@ export interface GlobalKbCallOptions {
   /** Past it the pool is destroyed and the call rejects with `GlobalKbDeadlineError`; nothing else
    *  bounds a socket that goes silent once connected. */
   deadlineMs?: number;
+  /** Cancels this call and destroys its pool, for background worker shutdown. */
+  signal?: AbortSignal;
   /** Settings the caller already read, so what it did with them (a query embed) and the store this
    *  call opens are one snapshot; read afresh when absent. */
   settings?: GlobalKbSettings;
@@ -57,13 +59,15 @@ async function openAndRun<T>(
   onOpen?: (conn: GlobalKbConnection) => void,
 ): Promise<T> {
   const settings = opts.settings ?? (await resolveGlobalKbSettings());
+  opts.signal?.throwIfAborted();
   const conn = await resolveGlobalKbConnection(settings, haiveDb, {
     connectTimeoutSeconds: opts.connectTimeoutSeconds,
     // A pool destroyed at the deadline while that query is pending rejects it with nobody awaiting it.
-    ...(opts.deadlineMs === undefined ? {} : { fetchTypes: false }),
+    ...(opts.deadlineMs === undefined && !opts.signal ? {} : { fetchTypes: false }),
   });
   onOpen?.(conn);
   try {
+    opts.signal?.throwIfAborted();
     const key = storeKey(settings);
     // Fresh, not cached: the api may have saved a new width a moment ago in another process. It
     // applies only while the configured store is still the one this call opened.
@@ -92,7 +96,7 @@ async function openAndRun<T>(
     const shared = schemaReady.get(key);
     if (shared) {
       await shared;
-    } else if (opts.deadlineMs === undefined) {
+    } else if (opts.deadlineMs === undefined && !opts.signal) {
       const ready = ensureGlobalKbSchema(conn, { resolveDims }).then(
         (r) => noteIdentifierBackfill(key, r.identifierBackfillDone),
         (err: unknown) => {
@@ -104,9 +108,11 @@ async function openAndRun<T>(
       await ready;
     } else {
       const r = await ensureGlobalKbSchema(conn, { timeoutMs: opts.deadlineMs, resolveDims });
+      opts.signal?.throwIfAborted();
       noteIdentifierBackfill(key, r.identifierBackfillDone);
       if (!schemaReady.has(key)) schemaReady.set(key, Promise.resolve());
     }
+    opts.signal?.throwIfAborted();
     const db = createGlobalKbDb(conn.pg);
     return await fn({ conn, db, settings });
   } finally {
@@ -123,30 +129,44 @@ export async function withGlobalKb<T>(
   fn: (ctx: GlobalKbContext) => Promise<T>,
   opts: GlobalKbCallOptions = {},
 ): Promise<T> {
-  const { deadlineMs } = opts;
-  if (deadlineMs === undefined) return openAndRun(haiveDb, fn, opts);
+  const { deadlineMs, signal } = opts;
+  if (deadlineMs === undefined && !signal) return openAndRun(haiveDb, fn, opts);
 
+  // Both timeout and shutdown invalidate late opens/ensures before they can publish readiness
+  // or call fn. The private ensure commits one idempotent step at a time; destroying its pool
+  // rolls back the active step, and a retry resumes the rest without poisoning shared waiters.
+  const controller = new AbortController();
   let open: GlobalKbConnection | null = null;
-  let expired = false;
   let timer: NodeJS.Timeout | undefined;
   const destroy = (conn: GlobalKbConnection | null): void => {
     void conn?.pg.end({ timeout: 0 }).catch(() => {});
   };
-  const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      expired = true;
-      reject(new GlobalKbDeadlineError(deadlineMs));
+  const forwardAbort = () => controller.abort(signal!.reason);
+  signal?.addEventListener('abort', forwardAbort, { once: true });
+  if (signal?.aborted) forwardAbort();
+  if (deadlineMs !== undefined) {
+    timer = setTimeout(() => controller.abort(new GlobalKbDeadlineError(deadlineMs)), deadlineMs);
+    timer.unref();
+  }
+  let rejectAborted!: () => void;
+  const aborted = new Promise<never>((_, reject) => {
+    rejectAborted = () => {
       destroy(open);
-    }, deadlineMs);
+      reject(controller.signal.reason);
+    };
+    controller.signal.addEventListener('abort', rejectAborted, { once: true });
+    if (controller.signal.aborted) rejectAborted();
   });
-  const work = openAndRun(haiveDb, fn, opts, (conn) => {
+  const work = openAndRun(haiveDb, fn, { ...opts, signal: controller.signal }, (conn) => {
     open = conn;
-    if (expired) destroy(conn);
+    if (controller.signal.aborted) destroy(conn);
   });
   try {
-    return await Promise.race([work, deadline]);
+    return await Promise.race([work, aborted]);
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', forwardAbort);
+    controller.signal.removeEventListener('abort', rejectAborted);
   }
 }
 

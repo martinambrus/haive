@@ -90,8 +90,9 @@ is a crash loop against a store still down; after, the api served 200 about 2.5 
 back, same PID. Only `ConfigUnavailableError` is retried (`instanceof`); any other boot error (missing
 env var, wrong password, Postgres, key mismatch) still logs and exits 1. Every init step `bootstrap()`
 repeats on a retry is a no-op the second time, and the worker's boot data migrations run inside it:
-`runOne` (`data-migrations.ts`) and `classifyGlobalKbVectorProvenance` rethrow a typed outage so the
-retry runs them again (MEASURED before: the private-endpoint seed and the imported MCP server hold were
+`runOne` (`data-migrations.ts`) rethrows a typed outage so the retry runs them again (the two
+global-store repairs are not among them: they run after ready in their own retry loop, see
+[Global knowledge base](global-kb.md)) (MEASURED before: the private-endpoint seed and the imported MCP server hold were
 logged as failed and left until the next restart); any other migration error is still logged and
 skipped. The cost: a permanently wrong `REDIS_URL` retries
 forever, one warn per attempt, instead of crash-looping.
