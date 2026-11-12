@@ -1565,7 +1565,7 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
-### T588 · FNF[worker-audit-writer] · worker audit writer follow-ups (+11)
+### T588 · FNF[worker-audit-writer] · worker audit writer follow-ups (+12)
 
 status: open · kind: fix · found: #1057 reviews 2026-11-10 · priority: P4
 Owner decision 2026-11-12: item 4: gate 4 refuses when the repository already has a saved remote or credential and points to the repository settings; typed values only fill an empty slot.
@@ -1573,14 +1573,15 @@ Owner decision 2026-11-12: item 4: gate 4 refuses when the repository already ha
 1. DONE #1092. No worker mapping for a lock timeout: gate 4's bounded lock take and 02-upgrade-apply.ts ~:834-840 end the step with the raw PostgreSQL message; `isLockNotAvailable` exists in @haive/database (used by attachments/expand-archives.ts ~:687). PRE-EXISTING pattern, minor.
 2. DONE #1092. `packages/worker/src/audit.ts` duplicates the api's `insertAuditEvent`, `logAuditEvent` and `AuditEvent`, and metadata summaries are computed in both (worker audit.ts ~:78-91, api repos.ts ~:996-998); @haive/shared could host one copy. Minor, drift risk.
 3. DONE #1092. Worker rows carry `source`, `actorKind`, `fields`, keys no api row for the same action has; a consumer filtering on `source` sees only worker rows. The admin list reads metadata generically. Minor.
-4. Gate 4's no-origin path replaces a saved remote and credential with the typed values (11a-gate-4-push.ts `persistPushOrigin` with `addOrigin`); audited and stated in the form since #1057, unchanged behaviour. PRE-EXISTING, minor; decide whether it should refuse instead.
+4. DONE #1111. Gate 4's no-origin path replaces a saved remote and credential with the typed values (11a-gate-4-push.ts `persistPushOrigin` with `addOrigin`); audited and stated in the form since #1057, unchanged behaviour. PRE-EXISTING, minor; decide whether it should refuse instead.
 5. DONE #1092. `repository.scope.update` from the worker reports `addedCount` 0 when a null list becomes `[]`. Nit.
 6. Two inline `audit_events` inserts remain outside `@haive/shared/audit`: module drain, and the private-endpoint seed (in a transaction by design). Minor.
 7. Gate 4's remote update emits no event when nothing changed; the api remote route emits one with empty `fields`. Nit.
 8. (PRE-EXISTING) api `routes/tasks/index.ts` ~:805 calls the unmapped `initializeTaskDatabaseState`, so a lock timeout there surfaces raw. Minor.
 9. Nothing stops a new step from importing the unmapped `initializeTaskDatabaseState` instead of the lock-mapped wrapper. Fix: a lint or ratchet test.
 10. After a gate 4 refusal (or any `pushed:false`), `12-worktree-cleanup.ts` ~:908 pushes the branch again ("pushed at 11a") through `taskRemoteUrl`, which reads `formValues.push === true`; nothing records that 11a did not push. PRE-EXISTING, harmless today; key it on 11a's output. Found by the T588-4 review.
-11. `LinkOriginDialog` (web `components/.../link-origin-dialog.tsx` ~:59-61, :76) cannot clear a saved credential: "None" omits `credentialsId` and `POST /repositories/:id/remote` (api repos.ts ~:2800) keeps the stored one; it also preselects a GitHub OAuth credential, so a re-point can silently swap the saved credential (only the audit's `credentialsChanged` records it). PRE-EXISTING; reachable for repositories with a remote since Change remote (T588-4). Fix: an explicit keep / change / clear choice, no preselect when a credential is saved.
+11. DONE #1111. `LinkOriginDialog` (web `components/.../link-origin-dialog.tsx` ~:59-61, :76) cannot clear a saved credential: "None" omits `credentialsId` and `POST /repositories/:id/remote` (api repos.ts ~:2800) keeps the stored one; it also preselects a GitHub OAuth credential, so a re-point can silently swap the saved credential (only the audit's `credentialsChanged` records it). PRE-EXISTING; reachable for repositories with a remote since Change remote (T588-4). Fix: an explicit keep / change / clear choice, no preselect when a credential is saved.
+12. Gate 4 can push with the detect snapshot's credential after that credential was cleared (Change remote) while the remote stays saved and an origin appeared after detect: `persistPushOrigin`'s early return for an existing binding (11a-gate-4-push.ts ~:47) runs before the snapshot-fallback checks. Nothing is written or audited, and `buildCredentialHelper` still refuses a credential that does not fit the row's remote. PRE-EXISTING shape (same gap for a detected origin with no saved remote), widened slightly by #1111; minor. Fix: check `snapshotFallbacks.credentialId` against the stored credential before that early return. Found by the #1111 round 4 review.
 
 ### T589 · FNF[encryption-key-and-seed-store] · boot key and seed store leftovers (+3)
 
