@@ -499,6 +499,8 @@ export interface CliSignOutJobPayload {
   authGeneration?: string;
   /** Worker bookkeeping for the reason of its most recent deferred retry. */
   signOutWaitReason?: 'auth_busy' | 'settings_changed';
+  /** Set before the first removal; a redelivered job that has it resumes past the start deadline. */
+  signOutStarted?: boolean;
 }
 
 export interface CliSignOutJobResult {

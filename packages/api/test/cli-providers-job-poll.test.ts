@@ -256,6 +256,18 @@ it.each([
     });
   },
 );
+it('keeps a started sign-out pending past the enqueue deadline', async () => {
+  h.getJob.mockResolvedValue({
+    ...job(CLI_EXEC_JOB_NAMES.SIGN_OUT),
+    data: { providerId: PROVIDER, userId: USER, signOutStarted: true },
+    timestamp: Date.now() - 31 * 60_000,
+    getState: async () => 'waiting',
+  });
+  expect(await (await app.request(`/${PROVIDER}/sign-out/123`)).json()).toEqual({
+    status: 'pending',
+    state: 'waiting',
+  });
+});
 it('does not infer failure when an active sign-out reaches the enqueue deadline', async () => {
   h.getJob.mockResolvedValue({
     ...job(CLI_EXEC_JOB_NAMES.SIGN_OUT),

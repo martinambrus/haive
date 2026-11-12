@@ -893,11 +893,12 @@ cliProviderRoutes.get('/:id/sign-out/:jobId', async (c) => {
   }
   // A delayed retry can wait behind agent work past its deadline. The worker checks
   // this same enqueue timestamp before removing anything, so a pending job can be
-  // reported as expired without waiting for a worker slot. Active work may have begun.
-  if (state !== 'active' && expiredBeforeRead)
+  // reported as expired without waiting for a worker slot. Active work may have begun, and a
+  // redelivered job that already started removing resumes past the deadline.
+  const data = job.data as CliSignOutJobPayload;
+  if (state !== 'active' && expiredBeforeRead && data.signOutStarted !== true)
     return c.json({ status: 'failed', error: CLI_SIGN_OUT_EXPIRED_MESSAGE });
-  const waitReason =
-    state === 'delayed' ? (job.data as CliSignOutJobPayload).signOutWaitReason : undefined;
+  const waitReason = state === 'delayed' ? data.signOutWaitReason : undefined;
   return c.json({
     status: 'pending',
     state,
