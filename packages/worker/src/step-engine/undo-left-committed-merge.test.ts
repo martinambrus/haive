@@ -324,8 +324,17 @@ describe('explicit undo of a cancel-left committed merge', () => {
       expect(await git(f.dir, 'rev-parse', 'HEAD')).toBe(f.after);
       expect(await git(f.dir, 'rev-parse', 'other')).toBe(f.after);
       expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
-      expect(f.settled()[0]?.payload.outcome).toBe('moved');
+      expect(f.settled()[0]?.payload.outcome).toBe('refused');
+      expect(leftCommittedMerges(f.events)[0]).toMatchObject({
+        settled: null,
+        refused: { count: 1, reason: expect.stringMatching(/checkout.*branch/i) },
+      });
       expect(h.sync).not.toHaveBeenCalled();
+      h.duringPrep = null;
+      await git(f.dir, 'switch', 'main');
+      await f.run();
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.before);
+      expect(leftCommittedMerges(f.events)[0]?.settled?.outcome).toBe('undone');
     },
   );
   it.each(['personal', 'unrecorded-base'])(

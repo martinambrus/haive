@@ -492,10 +492,23 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
             await settle('refused', remote.reason, remote.permanent);
             return;
           }
-          if (movedCheckout && (await undoRevParse(movedCheckout, 'HEAD')) !== m.baseShaAfter) {
-            await settle('moved', 'The checkout moved since this merge; nothing was changed.');
-            return;
-          }
+          const checkoutReady = async () => {
+            if (!movedCheckout) return true;
+            const symbolic = await gitRun(movedCheckout, ['symbolic-ref', '-q', 'HEAD']);
+            if (symbolic.code !== 0 || symbolic.stdout.trim() !== branch) {
+              await settle(
+                'refused',
+                'The checkout is no longer on the base branch. Switch it back and retry Undo; nothing was changed.',
+              );
+              return false;
+            }
+            if ((await undoRevParse(movedCheckout, 'HEAD')) !== m.baseShaAfter) {
+              await settle('moved', 'The checkout moved since this merge; nothing was changed.');
+              return false;
+            }
+            return true;
+          };
+          if (!(await checkoutReady())) return;
           if (prior !== m.baseShaAfter) {
             const keep = await gitRun(cwd, ['update-ref', undoRef, m.baseShaAfter, '0'.repeat(40)]);
             if (keep.code !== 0)
@@ -527,15 +540,7 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
               throw new UndoGitError('Git could not refresh the checkout index before Undo.');
             // reset --keep moves whatever HEAD is now: re-check branch and sha last, so a
             // checkout switch or commit during preparation never rewinds another branch.
-            const symbolic = await gitRun(movedCheckout, ['symbolic-ref', '-q', 'HEAD']);
-            if (
-              symbolic.code !== 0 ||
-              symbolic.stdout.trim() !== branch ||
-              (await undoRevParse(movedCheckout, 'HEAD')) !== m.baseShaAfter
-            ) {
-              await settle('moved', 'The checkout moved since this merge; nothing was changed.');
-              return;
-            }
+            if (!(await checkoutReady())) return;
             // --keep preserves working bytes but resets every index entry. Set-aside
             // already restores projection entries to HEAD, so no paths need excluding.
             // A configured submodule ignore would hide a staged gitlink the reset then drops.
@@ -595,18 +600,7 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
                   return false;
                 }
                 if (!movedCheckout) return true;
-                const symbolic = await gitRun(movedCheckout, ['symbolic-ref', '-q', 'HEAD']);
-                if (
-                  symbolic.code !== 0 ||
-                  symbolic.stdout.trim() !== branch ||
-                  (await undoRevParse(movedCheckout, 'HEAD')) !== m.baseShaAfter
-                ) {
-                  await settle(
-                    'moved',
-                    'The checkout moved since this merge; nothing was changed.',
-                  );
-                  return false;
-                }
+                if (!(await checkoutReady())) return false;
                 // With no staged changes, this is reset --keep's two-tree unpack:
                 // paths changed by the move must be clean; unrelated local bytes stay.
                 // Unlike reset it never writes HEAD or acquires the held branch lock.
