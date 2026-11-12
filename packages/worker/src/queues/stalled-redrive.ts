@@ -25,6 +25,7 @@ import {
   reconcileStrandedCloningRepos,
   reconcileStrandedSyncingBundles,
 } from '../data-migrations.js';
+import { BundleOrphanSweeper, type BundleOrphanSweepOptions } from '../repo/bundle-orphan-sweep.js';
 import { resyncAfterTaskEnd } from '../project-state/set-aside.js';
 import { supersedeTaskRuns } from '../sandbox/cli-sandbox-fence.js';
 import { killCliSandboxesForTask, listCliSandboxesForTask } from '../sandbox/sandbox-kill.js';
@@ -864,6 +865,7 @@ export interface StalledTaskSweeperOptions {
   db: Database;
   intervalMs?: number;
   staleMs?: number;
+  bundleOrphans?: BundleOrphanSweepOptions;
 }
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
@@ -876,11 +878,13 @@ export class StalledTaskSweeper {
   private timer: NodeJS.Timeout | null = null;
   private inFlight = false;
   private abandoning = false;
+  private readonly bundleOrphans: BundleOrphanSweeper;
 
   constructor(opts: StalledTaskSweeperOptions) {
     this.db = opts.db;
     this.intervalMs = opts.intervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
     this.staleMs = opts.staleMs ?? DEFAULT_STALE_MS;
+    this.bundleOrphans = new BundleOrphanSweeper(opts.bundleOrphans);
   }
 
   start(): void {
@@ -926,6 +930,7 @@ export class StalledTaskSweeper {
     redriven += await redriveRepoCleanups(this.db);
     await reconcileStrandedCloningRepos(this.db);
     await reconcileStrandedSyncingBundles(this.db);
+    await this.bundleOrphans.sweep(this.db);
     return { redriven };
   }
 }
