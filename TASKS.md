@@ -1559,7 +1559,7 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
-### T588 · FNF[worker-audit-writer] · worker audit writer follow-ups (+10)
+### T588 · FNF[worker-audit-writer] · worker audit writer follow-ups (+11)
 
 status: open · kind: fix · found: #1057 reviews 2026-11-10 · priority: P4
 Owner decision 2026-11-12: item 4: gate 4 refuses when the repository already has a saved remote or credential and points to the repository settings; typed values only fill an empty slot.
@@ -1574,6 +1574,7 @@ Owner decision 2026-11-12: item 4: gate 4 refuses when the repository already ha
 8. (PRE-EXISTING) api `routes/tasks/index.ts` ~:805 calls the unmapped `initializeTaskDatabaseState`, so a lock timeout there surfaces raw. Minor.
 9. Nothing stops a new step from importing the unmapped `initializeTaskDatabaseState` instead of the lock-mapped wrapper. Fix: a lint or ratchet test.
 10. After a gate 4 refusal (or any `pushed:false`), `12-worktree-cleanup.ts` ~:908 pushes the branch again ("pushed at 11a") through `taskRemoteUrl`, which reads `formValues.push === true`; nothing records that 11a did not push. PRE-EXISTING, harmless today; key it on 11a's output. Found by the T588-4 review.
+11. `LinkOriginDialog` (web `components/.../link-origin-dialog.tsx` ~:59-61, :76) cannot clear a saved credential: "None" omits `credentialsId` and `POST /repositories/:id/remote` (api repos.ts ~:2800) keeps the stored one; it also preselects a GitHub OAuth credential, so a re-point can silently swap the saved credential (only the audit's `credentialsChanged` records it). PRE-EXISTING; reachable for repositories with a remote since Change remote (T588-4). Fix: an explicit keep / change / clear choice, no preselect when a credential is saved.
 
 ### T589 · FNF[encryption-key-and-seed-store] · boot key and seed store leftovers (+3)
 
