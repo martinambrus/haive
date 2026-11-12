@@ -7,6 +7,7 @@ import { leftMergeBanners, leftCommittedMergeBanner } from '@/lib/step-banners';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { Button, FormError } from '@/components/ui';
+import { useViewerId } from '@/lib/use-viewer-id';
 
 const POLL_MS = 3000;
 const CANCEL_FINISHED = 'task.cancel_finished';
@@ -19,18 +20,29 @@ const ABORT_CONFIRM =
 export function TaskLeftMergeBanner({
   taskId,
   taskStatus,
+  ownerId,
 }: {
   taskId: string;
   taskStatus: string;
+  ownerId: string;
 }) {
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [confirming, setConfirming] = useState<string | null>(null);
   const [requested, setRequested] = useState<ReadonlyMap<string, number>>(new Map());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [undoConfirming, setUndoConfirming] = useState(false);
+  const [undoRequested, setUndoRequested] = useState<{ sha: string; refusals: number } | null>(
+    null,
+  );
+  const viewerId = useViewerId(taskStatus === 'cancelled');
 
   const banners = leftMergeBanners(events, { taskStatus });
-  const committed = leftCommittedMergeBanner(events, { taskStatus });
+  const committed = leftCommittedMergeBanner(events, { taskStatus, isOwner: viewerId === ownerId });
+  const undoInFlight =
+    committed?.canUndo &&
+    undoRequested?.sha === committed.baseShaAfter &&
+    undoRequested.refusals === committed.refusals;
   const inFlight = (key: string) => {
     const b = banners.find((x) => x.key === key && x.canAbort);
     return b !== undefined && requested.get(key) === b.refusals;
@@ -38,7 +50,9 @@ export function TaskLeftMergeBanner({
   // The cancel records its reports before `task.cancel_finished`, so polling may stop once that is
   // in and no abort is waiting on its outcome.
   const polling =
-    !events.some((e) => e.eventType === CANCEL_FINISHED) || banners.some((b) => inFlight(b.key));
+    !events.some((e) => e.eventType === CANCEL_FINISHED) ||
+    banners.some((b) => inFlight(b.key)) ||
+    undoInFlight;
 
   useEffect(() => {
     if (taskStatus !== 'cancelled') return;
@@ -46,7 +60,7 @@ export function TaskLeftMergeBanner({
     const load = async () => {
       try {
         const data = await api.get<{ events: TaskEvent[] }>(
-          `/tasks/${taskId}/events?type=merge.left_committed,merge.left_open,merge.left_open_settled,${CANCEL_FINISHED}`,
+          `/tasks/${taskId}/events?type=merge.left_committed,merge.left_committed_settled,merge.left_open,merge.left_open_settled,${CANCEL_FINISHED}`,
         );
         if (!stop) setEvents(data.events);
       } catch {
@@ -82,6 +96,24 @@ export function TaskLeftMergeBanner({
     }
   }
 
+  async function undo(): Promise<void> {
+    if (!committed?.canUndo) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post(`/tasks/${taskId}/merges/undo`, {
+        dir: committed.dir,
+        baseShaAfter: committed.baseShaAfter,
+      });
+      setUndoRequested({ sha: committed.baseShaAfter, refusals: committed.refusals });
+      setUndoConfirming(false);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <>
       {committed && (
@@ -90,7 +122,26 @@ export function TaskLeftMergeBanner({
           className="flex items-start gap-3 rounded-md border border-amber-900 bg-amber-950/40 px-4 py-3 text-amber-300"
         >
           <GitMerge className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
-          <InlineMarkdown className="text-sm [overflow-wrap:anywhere]" body={committed.text} />
+          <div className="flex min-w-0 flex-1 flex-col gap-2">
+            <InlineMarkdown className="text-sm [overflow-wrap:anywhere]" body={committed.text} />
+            {committed.canUndo &&
+              (undoInFlight ? (
+                <span className="text-xs opacity-80">Undoing…</span>
+              ) : (
+                <div>
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    onClick={() => {
+                      setError(null);
+                      setUndoConfirming(true);
+                    }}
+                  >
+                    Undo merge
+                  </Button>
+                </div>
+              ))}
+          </div>
         </div>
       )}
       {banners.map((b) => (
@@ -142,6 +193,37 @@ export function TaskLeftMergeBanner({
               disabled={busy}
             >
               {busy ? 'Aborting…' : 'Abort merge'}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={undoConfirming}
+        aria-label="Undo merge"
+        onOpenChange={(open) => !busy && setUndoConfirming(open)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Undo this merge?</DialogTitle>
+            <InlineMarkdown className="text-sm text-neutral-400" body={committed?.confirm ?? ''} />
+          </DialogHeader>
+          {error && <FormError message={error} />}
+          <div className="mt-4 flex justify-end gap-2">
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => setUndoConfirming(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              variant="destructive"
+              disabled={busy || !committed?.canUndo}
+              onClick={() => void undo()}
+            >
+              {busy ? 'Undoing…' : 'Undo merge'}
             </Button>
           </div>
         </DialogContent>
