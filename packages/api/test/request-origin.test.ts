@@ -82,7 +82,7 @@ describe('a state-changing request', () => {
     expect((await post('http://localhost:3001')).status).toBe(403);
   });
 
-  it('under /ide still reaches its handler from the editor', async () => {
+  it('under /ide passes the origin guard from the editor (reaches the editor gate)', async () => {
     const res = await app.request('/ide/not-an-id/resource', {
       method: 'POST',
       headers: {

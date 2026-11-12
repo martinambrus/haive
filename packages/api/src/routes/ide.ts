@@ -41,7 +41,7 @@ import { isCanonicalUuid } from '../lib/uuid.js';
 //   - WebSocket (installIdeWebSocket): code-server's live session socket, bridged
 //     as a raw upgrade replay. Connection open/close drives the Redis refcount the
 //     worker's idle reaper reads to grace-stop the container after the tab closes.
-// code-server runs `--auth none`; the api proxy (cookie-JWT + task/repo ownership) is
+// code-server runs `--auth none`; the api proxy (editor session + task/repo ownership) is
 // the only auth boundary, and the container is never host-published.
 
 const log = logger.child({ module: 'ide-proxy' });
@@ -99,6 +99,8 @@ function upstreamRequestHeaders(source: Headers): Headers {
 // ---- HTTP reverse proxy ---------------------------------------------------
 
 export const ideRoutes = new Hono<AppEnv>();
+// Only the two public handshake routes and the bare-path redirect may be registered above the
+// editor-session gate below; a handler added above it is public.
 ideRoutes.get('/_handshake', editorBootstrap);
 ideRoutes.post('/_handshake', bodyLimit({ maxSize: 1024 }), redeemEditor);
 // The scoped cookie covers the slash form only. This canonical redirect reads no credentials.
@@ -157,6 +159,8 @@ async function proxyHttp(c: Context<AppEnv>, repository = false): Promise<Respon
   const taskId = c.req.param('id');
   if (!taskId || !isCanonicalUuid(taskId)) throw new HttpError(404, 'Not found');
   const userId = c.get('userId');
+  // Set by the editor-session gate; never proxy without it.
+  if (!userId) throw new HttpError(401, 'Not authenticated');
   const target = ideTarget(taskId, userId, repository);
   if (!(await targetBelongsToUser(target))) throw new HttpError(404, 'Not found');
 

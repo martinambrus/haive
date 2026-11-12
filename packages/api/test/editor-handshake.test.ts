@@ -621,6 +621,19 @@ it.each(['tasks', 'repos'])(
   },
 );
 
+it.each([
+  '//evil.test',
+  '/%2F%2Fevil.test',
+  '/\\evil.test',
+  `/${ID.toUpperCase()}`,
+  `/repos/${ID.toUpperCase()}`,
+  `/${ID}%2F`,
+])('never redirects a hostile bare form off the editor path (%s)', async (suffix) => {
+  const res = await app.request(`/ide${suffix}`);
+  if (res.status === 308) expect(res.headers.get('location')).toMatch(/^\/ide\/[^/\\]/);
+  else expect(res.headers.get('location')).toBeNull();
+});
+
 it.each(['tasks', 'repos'])(
   'redirects the bare target before reading authentication (%s)',
   async (kind) => {
