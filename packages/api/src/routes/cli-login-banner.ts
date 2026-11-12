@@ -1602,8 +1602,10 @@ async function teardownContainer(
       removing,
       new Promise<void>((resolve) => {
         timer = setTimeout(() => {
-          // Keep the row until removal really finishes. If it never does,
-          // reapOrphanedAuthVolumes removes the container when its owner is gone.
+          // Keep the row until removal really finishes. If it never does, nothing reaps the
+          // container while its provider and user exist: reapOrphanedAuthVolumes (worker boot)
+          // removes it only once the owner is gone. The lock is released regardless, so a later
+          // login or sign-out may run while this container still holds the auth volume.
           log.warn(
             { containerRowId, dockerContainerId, timeoutMs: CONTAINER_TEARDOWN_TIMEOUT_MS },
             'login container removal timed out',
