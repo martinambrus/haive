@@ -278,16 +278,35 @@ baseShaBefore, baseShaAfter, landedAt}` in the same transaction as the step stat
   after that last re-check is not excluded. Each protocol round trip has its own timeout, and a
   stuck `update-ref` gets `abort` and EOF before SIGTERM, with SIGKILL only last, since git cannot
   remove its lock file after SIGKILL; a lock left by a kill stays until a person removes it.
-  Haive's projection files are set aside and put back around the move. A git failure keeps a
+  The wait after SIGKILL is bounded too (1 s): if git still has not exited, the worker logs its
+  pid, unreferences the child, destroys its pipes and throws a `GitRefTransactionError`, which
+  Undo records as a retryable refusal, so a git stuck in the kernel never holds the job or its
+  claims. Haive's projection files are set aside and put back around the move. Before the
+  set-aside, after the index refresh and again under the held ref lock,
+  `gitOperationInProgress(checkout, repoPath)` refuses an open merge, rebase, cherry-pick or
+  revert, because `read-tree -m -u` (unlike `reset --keep`) would rewind the branch under it; it
+  reads a linked worktree's git dir under the repository root as the fs-safe anchor, and a state
+  it cannot read refuses retryably. A git failure keeps a
   bounded excerpt of stderr with the remote credential and absolute paths scrubbed. The outcome is a
   `merge.left_committed_settled` event: `undone`, or `moved`/permanent `refused` (base moved,
   pushed, host checkout, no evidence), each final; a refusal a person can clear (a live claim, a
   busy root claim, an unknown remote, an origin with more than one push destination, since only
   one is checked, local changes, staged changes in the checkout, a base checkout that switched
-  or detached, a changed set of worktrees holding the branch) leaves the report open to try
+  or detached, a Git operation open in the checkout, a changed set of worktrees holding the
+  branch) leaves the report open to try
   again. The moved-away commit stays reachable
   as `refs/haive/undo-left-merge/<task>/<baseShaAfter>`, so an undo is reversed with
-  `git update-ref refs/heads/<branch> <baseShaAfter> <baseShaBefore>`. The worker job
+  `git update-ref refs/heads/<branch> <baseShaAfter> <baseShaBefore>`. That ref is written just
+  before the ref transaction, after the projection and staged-change checks, so a refusal there
+  leaves none, and its presence on redelivery marks an admitted attempt. An Undo killed after
+  `read-tree -m -u` but before `commit` leaves the branch and HEAD at `baseShaAfter` with the
+  index and the touched paths at `baseShaBefore`; the redelivery finishes only the ref move,
+  without writing the checkout, when all hold: the retained ref exists, the checkout is on the
+  branch at `baseShaAfter`, `write-tree` equals the tree of `baseShaBefore`, and every path that
+  differs between the two commits is clean against the index (no assume-unchanged or
+  skip-worktree flag, no untracked or ignored file, no name that is not UTF-8), checked again
+  under the held ref lock (`interruptedCheckoutMove`). A staged change anywhere else or an edit
+  to a touched path keeps the old refusal. The worker job
   (`abortLeftMerge`) runs under the directory's lock and records `merge.left_open_settled`
   `{dir, mergeHead, outcome, reason}`: `refused` while a live task's `merge_dir_claims` row holds the
   directory (`liveClaimHolder`, the staleness rules `claimMergeDir` uses), `moved` with nothing
