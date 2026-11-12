@@ -33,7 +33,11 @@ vi.mock('@haive/shared/fs-safe', async (original) => ({
 }));
 
 import { holdProjectionMove, withProjectionMove } from './projection-move.js';
-import { resyncHaiveProjections, resyncWithKeptMetadata } from './set-aside.js';
+import {
+  restoreKeptMetadata,
+  resyncHaiveProjections,
+  resyncWithKeptMetadata,
+} from './set-aside.js';
 import { restorePendingKeptMetadata, keptFilesOf, type KeptMetadata } from './kept-metadata.js';
 
 const metadata: KeptMetadata = {
@@ -283,4 +287,20 @@ describe('persisted projection metadata', () => {
     expect(kept.size).toBe(1);
     expect(h.chown).not.toHaveBeenCalled();
   });
+});
+
+it('evicts the oldest warn-once path at the 4096-entry bound', async () => {
+  h.absent = true;
+  const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  const restore = (index: number) =>
+    restoreKeptMetadata(
+      '/warning-bound',
+      keptFilesOf({ ['file-' + index]: { owner: { uid: 1000, gid: 1000 }, mode: 0o600 } }),
+    );
+  for (let index = 0; index <= 4096; index++) await restore(index);
+  expect(warn).toHaveBeenCalledTimes(4097);
+  await restore(4096);
+  expect(warn).toHaveBeenCalledTimes(4097);
+  await restore(0);
+  expect(warn).toHaveBeenCalledTimes(4098);
 });
