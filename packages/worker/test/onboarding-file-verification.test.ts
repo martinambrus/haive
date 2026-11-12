@@ -66,7 +66,7 @@ function world(cliTargets: string[] = ['codex']) {
       round,
       output: { written: ids.map((id) => ({ id })) },
     });
-  return { ctx, generated };
+  return { ctx, generated, fake };
 }
 
 beforeEach(() => {
@@ -101,7 +101,12 @@ it.each([
     { skillId: 'missing', skillsDir: dir, passed: false, issues: ['SKILL.md missing'] },
   ]);
   expect(detected.missingFileIds).toEqual(['missing']);
-  expect(skillVerificationStep.form!(ctx, detected)).not.toBeNull();
+  const form = skillVerificationStep.form!(ctx, detected)!;
+  expect(form.fields.find((field) => field.id === 'decision')).toMatchObject({
+    options: [{ value: 'accept' }, { value: 'regenerate' }],
+    default: 'accept',
+  });
+  expect(form.description).toContain('Skills absent from every mirror need Regenerate');
   const output = await skillVerificationStep.apply(ctx, {
     detected,
     formValues: {},
@@ -129,6 +134,45 @@ it('09_6 still discovers existing skills without a generation output', async () 
   ]);
   const detected = await skillVerificationStep.detect!(ctx);
   expect(detected.missingFileIds).toEqual(['existing']);
+});
+
+it('09_6 offers Repair for present skills and explains Regenerate for mixed absent failures', async () => {
+  const { ctx, generated } = world(['codex', 'gemini']);
+  // Only one mirror has the directory, with a missing SKILL.md. Repair discovers it
+  // from that directory and can restore both mirrors; absence of the file is not absence
+  // of the directory from every mirror.
+  vi.mocked(readdirNoFollow).mockImplementation(async (_root, rel) =>
+    rel === '.agents/skills' ? [{ name: 'existing', isDirectory: () => true } as Dirent] : [],
+  );
+  const present = await skillVerificationStep.detect!(ctx);
+  const presentForm = skillVerificationStep.form!(ctx, present)!;
+  expect(presentForm.fields.find((field) => field.id === 'decision')).toMatchObject({
+    options: [{ value: 'accept' }, { value: 'repair' }, { value: 'regenerate' }],
+  });
+
+  generated(['existing', 'absent']);
+  const mixed = await skillVerificationStep.detect!(ctx);
+  const mixedForm = skillVerificationStep.form!(ctx, mixed)!;
+  expect(mixedForm.fields.find((field) => field.id === 'decision')).toMatchObject({
+    options: [{ value: 'accept' }, { value: 'repair' }, { value: 'regenerate' }],
+  });
+  expect(mixedForm.description).toContain('Repair fixes only skills with an existing directory');
+  expect(mixedForm.description).toContain('Skills absent from every mirror need Regenerate');
+});
+
+it('09_6 falls back to disk discovery when written is not an array', async () => {
+  const { ctx, fake } = world();
+  fake.insert(schema.taskSteps, {
+    taskId: TASK,
+    stepId: '09_5-skill-generation',
+    round: 0,
+    output: { written: { id: 'not-an-array' } },
+  });
+  vi.mocked(readdirNoFollow).mockResolvedValue([
+    { name: 'existing', isDirectory: () => true } as Dirent,
+  ]);
+  const detected = await skillVerificationStep.detect!(ctx);
+  expect(detected.checks.map((check) => check.skillId)).toEqual(['existing']);
 });
 
 it('09_6 keeps an explicit empty destination list empty even with old generated skills', async () => {
