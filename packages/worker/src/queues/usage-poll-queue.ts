@@ -231,8 +231,7 @@ async function resolveOauthRefreshToken(
             { providerId: provider.id },
             'usage OAuth refresh rejected (invalid_grant); marking needs_reconnect, polling paused until re-auth',
           );
-          deadUsageRefreshToken.set(provider.id, stored.refreshToken);
-          await writeSnapshotIfCurrent(
+          const written = await writeSnapshotIfCurrent(
             db,
             provider,
             { token: stored.accessToken },
@@ -243,7 +242,9 @@ async function resolveOauthRefreshToken(
               reconnect: true,
             },
             release,
-          ).catch(() => {});
+          ).catch(() => false);
+          // A skipped/failed write must retry next tick so the reconnect prompt is not lost.
+          if (written) deadUsageRefreshToken.set(provider.id, stored.refreshToken);
           return null;
         }
         // Transient (network / 5xx): try the stale token anyway; the fetch surfaces the

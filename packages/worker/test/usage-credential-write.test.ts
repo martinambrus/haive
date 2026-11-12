@@ -4,6 +4,7 @@ import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { configService, secretsService } from '@haive/shared';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
+import { ClaudeOauthError } from '@haive/shared/claude-oauth';
 const h = vi.hoisted(() => ({
   acquire: vi.fn(),
   release: Object.assign(
@@ -287,3 +288,23 @@ it.each(['key', 'write'])(
     expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
   },
 );
+
+it('retries a rejected-refresh snapshot after losing the auth lock', async () => {
+  const fake = setup();
+  let first = true;
+  h.refresh.mockImplementation(async () => {
+    if (first) {
+      first = false;
+      h.release.assertHeld.mockRejectedValue(new Error('lock lost'));
+    }
+    throw new ClaudeOauthError('refresh_token', 400, 'invalid_grant', 'rejected');
+  });
+  await runUsagePollTick(fake.db as unknown as Database);
+  expect(fake.rows(schema.usageWindowSnapshots)).toHaveLength(0);
+  h.release.assertHeld.mockResolvedValue(undefined);
+  await runUsagePollTick(fake.db as unknown as Database);
+  expect(h.refresh).toHaveBeenCalledTimes(2);
+  expect(fake.rows(schema.usageWindowSnapshots)).toMatchObject([{ status: 'needs_reconnect' }]);
+  await runUsagePollTick(fake.db as unknown as Database);
+  expect(h.refresh).toHaveBeenCalledTimes(2);
+});

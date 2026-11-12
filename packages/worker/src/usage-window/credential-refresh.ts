@@ -160,7 +160,6 @@ async function refreshGrokVolume(
     // Permanently rejected — revoked, or the refresh token was already spent by a run
     // whose copy never made it back. Only a re-login fixes it, so say so on the provider
     // rows instead of letting the next task discover it as "Not signed in".
-    deadRefreshToken.set(vol, cred.refreshToken);
     log.warn(
       { vol, providerIds: sharing.map((r) => r.id) },
       'grok refresh token rejected (invalid_grant); marking the provider as needing a re-login',
@@ -180,6 +179,8 @@ async function refreshGrokVolume(
           sharing.map((r) => r.id),
         ),
       );
+    // Suppress retries only after the re-login status was recorded successfully.
+    deadRefreshToken.set(vol, cred.refreshToken);
     return;
   }
 
