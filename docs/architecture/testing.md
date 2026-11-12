@@ -19,7 +19,9 @@ variant against real git, real timers or a real server.
   behaviour; the input variants go to unit tests of the pure part.
 - End-to-end and smoke tests (`pnpm test:e2e`, `smoke:*`) cover a user path across services, not a branch of one
   function. A test that needs a database or Redis server is an env-gated file (`describe.skipIf` on its URL)
-  with a row in the CI GATED list ([CI smokes](ci-smokes.md)); CI fails a gated file that has no row.
+  with a row in the CI GATED list, or a reasoned exemption in `scripts/test/ci-gated-list.test.mjs` when another
+  CI step already runs it with its guard environment (several Redis files run in the smokes job); CI fails a gated
+  file with neither ([CI smokes](ci-smokes.md)).
 
 ## Limits are injectable
 
@@ -49,6 +51,6 @@ A new or changed test file runs in under 5 s locally (`pnpm --filter <pkg> exec 
 ## How CI runs them
 
 Unit tests run in their own matrix job, separate from lint and typecheck: `@haive/worker` as two vitest shards
-and one job for every other package. Each job lists its 15 slowest files in the job summary; the list is report
-only, because a timing gate on shared runners would flake. Env-gated real-store tests run in the
-**Postgres-gated tests** job.
+and one shared job for all other packages. Each job lists its 15 slowest files in the job summary; the list is
+report only, because a timing gate on shared runners would flake. Env-gated real-store tests run in the
+**Postgres-gated tests** job, or in the step their exemption names.
