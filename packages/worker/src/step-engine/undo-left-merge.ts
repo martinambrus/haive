@@ -14,6 +14,7 @@ import {
   MERGE_LANDED_EVENT,
   MERGE_LEFT_COMMITTED_EVENT,
   MERGE_LEFT_COMMITTED_SETTLED_EVENT,
+  MERGE_LEFT_COMMITTED_RESYNCED_EVENT,
   type LeftCommittedMerge,
   type MergeLeftCommittedOutcome,
 } from '@haive/shared/merge-left-open';
@@ -86,6 +87,7 @@ const records = (db: DbHandle, taskId: string) =>
           MERGE_LANDED_EVENT,
           MERGE_LEFT_COMMITTED_EVENT,
           MERGE_LEFT_COMMITTED_SETTLED_EVENT,
+          MERGE_LEFT_COMMITTED_RESYNCED_EVENT,
         ]),
       ),
     )
@@ -377,7 +379,7 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
   const initial = leftCommittedMerges(initialEvents).find(
     (m) => m.dir === dir && m.baseShaAfter === baseShaAfter,
   );
-  if (!initial) return;
+  if (!initial || (initial.settled && !initial.resyncOwed)) return;
   if (!initialEvents.some((e) => e.eventType === 'task.cancel_finished')) {
     await inMergeDirLock(db, dir, async (tx) => {
       const m = leftCommittedMerges(await records(tx, taskId)).find(
@@ -466,9 +468,7 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
           (m) => m.dir === dir && m.baseShaAfter === baseShaAfter,
         );
         if (!m) return;
-        const recoveryPending =
-          m.settled?.outcome === 'undone' || m.settled?.resyncRequired === true;
-        if (m.settled && !recoveryPending) return;
+        if (m.settled && !m.resyncOwed) return;
         const settle = async (
           outcome: MergeLeftCommittedOutcome,
           reason: string,
@@ -559,6 +559,13 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
           await settle('refused', 'The recorded directory could not be read safely.');
           return;
         }
+        if (m.settled) {
+          // A settled report is final for git. Recovery only re-syncs project files,
+          // after the live-claim, root-claim, checkout and containment checks admit it.
+          // In particular, do not recreate a branch a person deleted after Undo.
+          needsSync = true;
+          return;
+        }
         {
           const cwd = m.repoPath;
           const restoreFeature = async () => {
@@ -572,20 +579,6 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
                 );
             }
           };
-          if (m.settled) {
-            // Arm recovery in finally only after the live-claim, root-claim, checkout
-            // and containment checks admit it; a refused attempt leaves recovery pending.
-            needsSync = true;
-            await restoreFeature();
-            const symbolic = await gitRun(m.dir, ['symbolic-ref', '-q', 'HEAD']);
-            if (
-              symbolic.code === 0 &&
-              symbolic.stdout.trim() === `refs/heads/${m.landedOn}` &&
-              (await undoRevParse(m.dir, 'HEAD')) === m.baseShaBefore
-            )
-              movedCheckout = m.dir;
-            return;
-          }
           if (!(await validBranch(cwd, m.landedOn)) || !(await ownMerge(cwd, m))) {
             await settle(
               'refused',
@@ -871,6 +864,20 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
         if (movedCheckout) await handBackAfterMove(movedCheckout, initial.baseShaAfter);
         if (!(await resyncHaiveProjections(db, task.repositoryId, initial.repoPath, taskId)))
           throw new Error("Haive's project files were not re-synced yet; the job will retry");
+        // Re-sync owns its transactions. Journal its success afterwards under the report's
+        // lock, so redelivery adds no duplicate and no connection is held over re-sync.
+        await inMergeDirLock(db, dir, async (tx) => {
+          const m = leftCommittedMerges(await records(tx, taskId)).find(
+            (m) => m.dir === dir && m.baseShaAfter === baseShaAfter,
+          );
+          if (!m?.resyncOwed) return;
+          await tx.insert(schema.taskEvents).values({
+            taskId,
+            taskStepId: null,
+            eventType: MERGE_LEFT_COMMITTED_RESYNCED_EVENT,
+            payload: { dir, baseShaAfter },
+          });
+        });
       } else if (kept) {
         await putBackProjections(db, task.repositoryId, initial.repoPath, kept, section);
       }

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { Hono } from 'hono';
+import { Hono, type Handler } from 'hono';
 import { z } from 'zod';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import { ROOT_CLAIM_STALE_MS, schema } from '@haive/database';
@@ -18,6 +18,7 @@ import {
   leftCommittedMerges,
   MERGE_LEFT_COMMITTED_EVENT,
   MERGE_LEFT_COMMITTED_SETTLED_EVENT,
+  MERGE_LEFT_COMMITTED_RESYNCED_EVENT,
 } from '@haive/shared/merge-left-open';
 import type { UndoLeftMergePayload } from '@haive/shared';
 
@@ -93,59 +94,77 @@ const UNDO_RETRY_DELAY_MS = 2000;
 // lease fresh. Keep a retry beyond that lease; refusal outcomes themselves need no retry.
 const UNDO_ATTEMPTS = Math.ceil(Math.log2(ROOT_CLAIM_STALE_MS / UNDO_RETRY_DELAY_MS + 1)) + 1;
 
-mergeRoutes.post('/:id/merges/undo', async (c) => {
-  const userId = c.get('userId');
-  const taskId = c.req.param('id');
-  const parsed = undoBody.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) throw new HttpError(400, 'dir and baseShaAfter are required');
-  const { dir, baseShaAfter } = parsed.data;
-  const db = getDb();
-  const task = await db.query.tasks.findFirst({
-    where: and(eq(schema.tasks.id, taskId), eq(schema.tasks.userId, userId)),
-    columns: { id: true, status: true },
-  });
-  if (!task) throw new HttpError(404, 'Task not found');
-  if (task.status !== 'cancelled')
-    throw new HttpError(409, 'Only a cancelled task can undo this merge');
-  const events = await db
-    .select({ eventType: schema.taskEvents.eventType, payload: schema.taskEvents.payload })
-    .from(schema.taskEvents)
-    .where(
-      and(
-        eq(schema.taskEvents.taskId, taskId),
-        inArray(schema.taskEvents.eventType, [
-          'task.cancel_finished',
-          MERGE_LEFT_COMMITTED_EVENT,
-          MERGE_LEFT_COMMITTED_SETTLED_EVENT,
-        ]),
-      ),
-    )
-    .orderBy(asc(schema.taskEvents.createdAt));
-  if (!events.some((e) => e.eventType === 'task.cancel_finished'))
-    throw new HttpError(409, 'Cancellation cleanup is still running; try again after it finishes.');
-  const target = leftCommittedMerges(events).find(
-    (m) => m.dir === dir && m.baseShaAfter === baseShaAfter,
-  );
-  if (!target || target.settled)
-    throw new HttpError(
-      409,
-      'No unsettled committed merge is reported for that directory and commit',
+const undoOrResync =
+  (resyncOnly: boolean): Handler<AppEnv, '/:id/merges/undo' | '/:id/merges/resync'> =>
+  async (c) => {
+    const userId = c.get('userId');
+    const taskId = c.req.param('id');
+    const parsed = undoBody.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HttpError(400, 'dir and baseShaAfter are required');
+    const { dir, baseShaAfter } = parsed.data;
+    const db = getDb();
+    const task = await db.query.tasks.findFirst({
+      where: and(eq(schema.tasks.id, taskId), eq(schema.tasks.userId, userId)),
+      columns: { id: true, status: true },
+    });
+    if (!task) throw new HttpError(404, 'Task not found');
+    if (task.status !== 'cancelled')
+      throw new HttpError(
+        409,
+        resyncOnly
+          ? 'Only a cancelled task can retry this re-sync'
+          : 'Only a cancelled task can undo this merge',
+      );
+    const events = await db
+      .select({ eventType: schema.taskEvents.eventType, payload: schema.taskEvents.payload })
+      .from(schema.taskEvents)
+      .where(
+        and(
+          eq(schema.taskEvents.taskId, taskId),
+          inArray(schema.taskEvents.eventType, [
+            'task.cancel_finished',
+            MERGE_LEFT_COMMITTED_EVENT,
+            MERGE_LEFT_COMMITTED_SETTLED_EVENT,
+            MERGE_LEFT_COMMITTED_RESYNCED_EVENT,
+          ]),
+        ),
+      )
+      .orderBy(asc(schema.taskEvents.createdAt));
+    if (!events.some((e) => e.eventType === 'task.cancel_finished'))
+      throw new HttpError(
+        409,
+        'Cancellation cleanup is still running; try again after it finishes.',
+      );
+    const target = leftCommittedMerges(events).find(
+      (m) => m.dir === dir && m.baseShaAfter === baseShaAfter,
     );
-  await addOrRefuse(
-    () =>
-      getTaskQueue().add(
-        TASK_JOB_NAMES.UNDO_LEFT_MERGE,
-        { taskId, userId, dir, baseShaAfter } satisfies UndoLeftMergePayload,
-        {
-          jobId: `undo-left-merge-${taskId}-${createHash('sha1').update(`${dir}\0${baseShaAfter}`).digest('hex')}-${target.refused?.count ?? 0}`,
-          attempts: UNDO_ATTEMPTS,
-          backoff: { type: 'exponential', delay: UNDO_RETRY_DELAY_MS },
-          removeOnComplete: true,
-          removeOnFail: true,
-        },
-      ),
-    'undo left merge',
-    { taskId },
-  );
-  return c.json({ queued: true }, 202);
-});
+    if (!target || (resyncOnly ? !target.resyncOwed : target.settled !== null))
+      throw new HttpError(
+        409,
+        resyncOnly
+          ? 'No project file re-sync is owed for that directory and commit'
+          : 'No unsettled committed merge is reported for that directory and commit',
+      );
+    await addOrRefuse(
+      () =>
+        getTaskQueue().add(
+          TASK_JOB_NAMES.UNDO_LEFT_MERGE,
+          { taskId, userId, dir, baseShaAfter } satisfies UndoLeftMergePayload,
+          {
+            // Retry shares the original Undo id, including its refusal generation. BullMQ
+            // coalesces queued/active jobs; terminal jobs are removed so a later Retry can run.
+            jobId: `undo-left-merge-${taskId}-${createHash('sha1').update(`${dir}\0${baseShaAfter}`).digest('hex')}-${target.refused?.count ?? 0}`,
+            attempts: UNDO_ATTEMPTS,
+            backoff: { type: 'exponential', delay: UNDO_RETRY_DELAY_MS },
+            removeOnComplete: true,
+            removeOnFail: true,
+          },
+        ),
+      'undo left merge',
+      { taskId },
+    );
+    return c.json({ queued: true }, 202);
+  };
+
+mergeRoutes.post('/:id/merges/undo', undoOrResync(false));
+mergeRoutes.post('/:id/merges/resync', undoOrResync(true));

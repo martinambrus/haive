@@ -104,4 +104,49 @@ describe('leftCommittedMerges refusal permanence', () => {
       refused: null,
     });
   });
+
+  const settlement = (over: Record<string, unknown> = {}) => ({
+    eventType: 'merge.left_committed_settled',
+    payload: { ...report.payload, outcome: 'undone', ...over },
+  });
+  const completion = (over: Record<string, unknown> = {}) => ({
+    eventType: 'merge.left_committed_resynced',
+    payload: { dir: report.payload.dir, baseShaAfter: report.payload.baseShaAfter, ...over },
+  });
+  it('owes re-sync only after an Undo or an explicit recovery settlement', () => {
+    for (const [events, owed] of [
+      [[report], false],
+      [[report, attempt()], false],
+      [[report, settlement()], true],
+      [[report, settlement({ outcome: 'moved' })], false],
+      [[report, settlement({ outcome: 'refused', permanent: true })], false],
+      [[report, settlement({ outcome: 'refused', permanent: true, resyncRequired: true })], true],
+    ] as const) {
+      expect(leftCommittedMerges(events)[0]?.resyncOwed).toBe(owed);
+    }
+  });
+  it('requires a later completion for the exact report, ignoring early or unrelated events', () => {
+    for (const early of [
+      completion(),
+      completion({ dir: '/other' }),
+      completion({ baseShaAfter: 'c'.repeat(40) }),
+    ]) {
+      expect(leftCommittedMerges([report, early, settlement()])[0]?.resyncOwed).toBe(true);
+    }
+    expect(
+      leftCommittedMerges([report, settlement(), completion({ dir: '/other' })])[0]?.resyncOwed,
+    ).toBe(true);
+    expect(
+      leftCommittedMerges([report, settlement(), completion({ baseShaAfter: 'c'.repeat(40) })])[0]
+        ?.resyncOwed,
+    ).toBe(true);
+  });
+  it('keeps a completed re-sync complete across duplicate settlements and redelivery', () => {
+    const events = [report, settlement(), completion(), settlement(), report, completion()];
+    expect(leftCommittedMerges(events)).toHaveLength(1);
+    expect(leftCommittedMerges(events)[0]).toMatchObject({
+      resyncOwed: false,
+      settled: { outcome: 'undone' },
+    });
+  });
 });
