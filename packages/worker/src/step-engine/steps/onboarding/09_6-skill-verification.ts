@@ -7,7 +7,7 @@ import { mapWithConcurrency, orderByDefaultPriority } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { resolveParallelCap } from '../../_parallel-cap.js';
 import { readFrontmatterFields } from '../_yaml-scalar.js';
-import { isSkillPathId, resolveTaskSkillTargetDirs } from './_helpers.js';
+import { isSkillPathId, loadPreviousStepOutput, resolveTaskSkillTargetDirs } from './_helpers.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 
 /** Fallback skills dir when no enabled CLI declares one — passed explicitly to
@@ -307,14 +307,18 @@ export const skillVerificationStep: StepDefinition<
   async detect(ctx: StepContext): Promise<SkillVerificationDetect> {
     const skillTargetDirs = await resolveTaskSkillTargetDirs(ctx, [DEFAULT_PROJECT_SKILLS_DIR]);
     const bundleSkillIds = await loadBundleSkillIds(ctx);
+    const generated = await loadPreviousStepOutput(ctx.db, ctx.taskId, SKILL_GENERATION_STEP_ID);
+    const written = (generated?.output as { written?: { id: string }[] } | null)?.written ?? [];
+    const generatedIds = written.map((skill) => skill.id).filter(isSkillPathId);
     const cap = await resolveParallelCap();
 
-    // Union of skill ids across every mirror, so a skill present in one dir but
-    // absent from another is verified (and flagged missing) in the dir it's gone from.
+    // Generation's final output is cumulative. Include its IDs even when every mirror
+    // has disappeared; discovering only from disk would silently pass an empty library.
+    // Disk IDs also retain verification of pre-existing skills and legacy runs with no output.
     const idsByDir = await mapWithConcurrency(skillTargetDirs, cap, (dir) =>
       listSkillDirs(ctx.repoPath, dir),
     );
-    const allIds = dedupe(idsByDir.flat()).sort();
+    const allIds = dedupe([...generatedIds, ...idsByDir.flat()]).sort();
 
     const pairs: { dir: string; id: string }[] = [];
     for (const dir of skillTargetDirs) {
