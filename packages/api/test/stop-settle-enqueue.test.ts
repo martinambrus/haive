@@ -37,19 +37,19 @@ const enqueueStopSettle = (
   );
 };
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
 describe('enqueueStopSettle', () => {
   let unhandled: unknown[];
   const onUnhandled = (reason: unknown) => void unhandled.push(reason);
 
   beforeEach(() => {
+    vi.useFakeTimers();
     queue.added = [];
     queue.impl = null;
     unhandled = [];
     process.on('unhandledRejection', onUnhandled);
   });
   afterEach(() => {
+    vi.useRealTimers();
     process.off('unhandledRejection', onUnhandled);
   });
 
@@ -79,7 +79,7 @@ describe('enqueueStopSettle', () => {
     };
     await expect(enqueueStopSettle('t1', 'u1', FAILED_AT)).resolves.toBeUndefined();
     expect(queue.added).toHaveLength(1);
-    await sleep(50);
+    await vi.advanceTimersByTimeAsync(50);
     expect(unhandled).toEqual([]);
   });
 
@@ -89,26 +89,24 @@ describe('enqueueStopSettle', () => {
       new Promise((_resolve, reject) => {
         rejectLate = reject;
       });
-    const started = Date.now();
-    const outcome = await Promise.race([
-      enqueueStopSettle('t1', 'u1', FAILED_AT).then(() => 'resolved'),
-      sleep(5_000).then(() => 'hung'),
-    ]);
+    const pending = enqueueStopSettle('t1', 'u1', FAILED_AT).then(() => 'resolved');
+    await vi.advanceTimersByTimeAsync(2_000);
+    const outcome = await pending;
     expect(outcome, 'enqueueStopSettle against an add that never settles').toBe('resolved');
-    expect(Date.now() - started).toBeLessThan(5_000);
     expect(queue.added).toHaveLength(1);
 
     rejectLate(new Error('redis came back too late'));
-    await sleep(100);
+    await vi.advanceTimersByTimeAsync(100);
     expect(unhandled).toEqual([]);
   }, 15_000);
 
-  it('A5: queues without a job id, with finite retention and at least two attempts', async () => {
+  it('A5: deduplicates the same failure while live, with finite retention and retries', async () => {
     await enqueueStopSettle('t1', 'u1', FAILED_AT);
     expect(queue.added).toHaveLength(1);
     const opts = queue.added[0]![2] as Record<string, unknown> | undefined;
     expect(opts, 'the options the job is queued with').toBeDefined();
     expect(opts).not.toHaveProperty('jobId');
+    expect(opts).toHaveProperty('deduplication', { id: `stop-settle-t1-${Date.parse(FAILED_AT)}` });
     expect(typeof opts!.removeOnComplete).toBe('number');
     expect(Number.isFinite(opts!.removeOnComplete)).toBe(true);
     expect(typeof opts!.removeOnFail).toBe('number');

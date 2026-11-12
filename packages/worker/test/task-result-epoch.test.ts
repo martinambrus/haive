@@ -1,10 +1,20 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import {
   handleResult,
   markTaskCompleted,
+  markTaskFailed,
   setContainerCleanupRunner,
 } from '../src/queues/task-queue.js';
+import {
+  cleanupTaskAuthVolumes,
+  syncRefreshedAuthToUserVolumes,
+} from '../src/sandbox/task-auth-volume.js';
+import { reapAllSessionsForTask } from '../src/sandbox/terminal-session-reaper.js';
+import { resyncAfterTaskEnd } from '../src/project-state/set-aside.js';
+import { unloadTaskOllamaCliModels } from '../src/sandbox/ollama-provision.js';
+import { reconcileKbAuthorEntryOnTaskEnd } from '../src/step-engine/steps/_global-kb-promote.js';
+import { resolveTaskEmbedTarget } from '@haive/shared/rag';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 
@@ -30,6 +40,18 @@ vi.mock('../src/sandbox/ollama-provision.js', async (importOriginal) => ({
 vi.mock('@haive/shared/rag', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared/rag')>()),
   resolveTaskEmbedTarget: vi.fn(async () => null),
+}));
+
+vi.mock('../src/sandbox/terminal-session-reaper.js', () => ({
+  reapAllSessionsForTask: vi.fn(async () => 0),
+}));
+vi.mock('../src/project-state/set-aside.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  resyncAfterTaskEnd: vi.fn(async () => undefined),
+}));
+vi.mock('../src/step-engine/steps/_global-kb-promote.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  reconcileKbAuthorEntryOnTaskEnd: vi.fn(async () => undefined),
 }));
 
 const STEP_ID = 'epoch-fence-step';
@@ -204,4 +226,46 @@ describe('a result handed off after a Retry moved the task on', () => {
     expect(statements).toEqual(['update tasks']);
     expect(cleanup).not.toHaveBeenCalled();
   });
+});
+
+describe('failed-task settlement bookkeeping is best-effort', () => {
+  beforeEach(() => vi.clearAllMocks());
+  afterEach(() => setContainerCleanupRunner(null));
+
+  it.each(['capture', 'finish'] as const)(
+    'runs the full teardown and does not throw when the %s fails',
+    async (stage) => {
+      const { db } = taskDb(5);
+      const cleanup = vi.fn(async () => 0);
+      setContainerCleanupRunner(cleanup);
+      const capture = vi.spyOn(db.query.tasks, 'findFirst');
+      if (stage === 'capture') capture.mockRejectedValueOnce(new Error('capture unavailable'));
+      else capture.mockResolvedValueOnce({ status: 'failed', completedAt: new Date(0) } as never);
+      const finish = vi.fn(async () => {
+        throw new Error('finish unavailable');
+      });
+      Object.assign(db, { execute: finish });
+
+      await expect(markTaskFailed(db, 'task-1', 'boom')).resolves.toBe(true);
+
+      expect(cleanup).toHaveBeenCalledWith(db, 'task-1');
+      expect(syncRefreshedAuthToUserVolumes).toHaveBeenCalledWith(db, 'task-1');
+      expect(cleanupTaskAuthVolumes).toHaveBeenCalledWith('task-1');
+      expect(reapAllSessionsForTask).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        'task-1',
+      );
+      expect(resyncAfterTaskEnd).toHaveBeenCalledWith(db, 'task-1');
+      expect(resolveTaskEmbedTarget).toHaveBeenCalledWith(db, 'task-1');
+      expect(unloadTaskOllamaCliModels).toHaveBeenCalledWith(db, 'task-1');
+      expect(reconcileKbAuthorEntryOnTaskEnd).toHaveBeenCalledWith(
+        db,
+        'task-1',
+        'failed',
+        expect.anything(),
+      );
+      expect(finish).toHaveBeenCalledTimes(stage === 'capture' ? 0 : 1);
+    },
+  );
 });

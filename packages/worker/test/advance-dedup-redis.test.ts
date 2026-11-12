@@ -17,6 +17,8 @@ import { defaultDeps } from '../src/queues/stalled-redrive.js';
 import {
   closeTaskQueue,
   enqueueAdvance,
+  enqueueCancel,
+  enqueueStopSettle,
   getTaskQueue,
   reconcileOrphanedSteps,
 } from '../src/queues/task-queue.js';
@@ -168,6 +170,44 @@ describe.skipIf(!redisUrl)("the recovery re-drives' advance job id, on an isolat
     if (hoisted.original === undefined) delete process.env.REDIS_URL;
     else process.env.REDIS_URL = hoisted.original;
   });
+
+  it.each(['Stop', 'Cancel'] as const)(
+    '%s recovery collapses onto a live teardown and requeues an exhausted one',
+    async (kind) => {
+      const t = tuple();
+      const failedAt = '2026-11-12T10:00:00.000Z';
+      const enqueue = () =>
+        kind === 'Stop'
+          ? enqueueStopSettle(t.taskId, t.userId, failedAt)
+          : enqueueCancel(t.taskId, t.userId);
+      await enqueue();
+      const connection = createBullRedisConnection(redisUrl!);
+      const worker = new Worker(QUEUE_NAMES.TASK, async () => undefined, {
+        connection,
+        prefix: hoisted.prefix,
+        autorun: false,
+      });
+      try {
+        await worker.waitUntilReady();
+        const job = await worker.getNextJob('teardown-lock');
+        expect(job).toBeTruthy();
+        if (!job) throw new Error('missing teardown job');
+        expect(job.opts.deduplication?.id).toBe(
+          kind === 'Stop'
+            ? `stop-settle-${t.taskId}-${Date.parse(failedAt)}`
+            : `cancel-${t.taskId}`,
+        );
+        await enqueue();
+        expect(await statesOf(t.taskId)).toEqual(['active']);
+        await job.moveToFailed(new UnrecoverableError('teardown exhausted'), 'teardown-lock');
+        await enqueue();
+        expect(await statesOf(t.taskId)).toEqual(['failed', 'waiting']);
+      } finally {
+        await worker.close();
+        await connection.quit();
+      }
+    },
+  );
 
   describe('the deduplication option', () => {
     it('D1: two adds for one tuple while the first is waiting leave one job', async () => {
