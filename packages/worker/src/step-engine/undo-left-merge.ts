@@ -560,9 +560,17 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
           return;
         }
         if (m.settled) {
-          // A settled report is final for git. Recovery only re-syncs project files,
-          // after the live-claim, root-claim, checkout and containment checks admit it.
-          // In particular, do not recreate a branch a person deleted after Undo.
+          // Settlement finalized the git move, but a crash may have skipped hand-back.
+          // Only hand back the checkout still at the Undo result; a switched/detached
+          // checkout or a later commit is unrelated. Its projections still need re-sync.
+          const symbolic = await gitRun(m.dir, ['symbolic-ref', '-q', 'HEAD']);
+          if (
+            symbolic.code === 0 &&
+            symbolic.stdout.trim() === `refs/heads/${m.landedOn}` &&
+            (await undoRevParse(m.dir, 'HEAD')) === m.baseShaBefore
+          )
+            movedCheckout = m.dir;
+          // Do not recreate a feature branch a person deleted after Undo.
           needsSync = true;
           return;
         }
