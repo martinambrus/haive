@@ -11,7 +11,9 @@ describe('editor port-proxy paths', () => {
     '/static/%2e%2e/absproxy/80',
     '/./proxy/80',
     '/%2e/absproxy/80',
-  ])('refuses normalized remainder %s', (path) => {
+    '/proxy/80/../../socket',
+    '/absproxy/80/%2e%2e/%2e%2e/x',
+  ])('refuses a proxy remainder, raw or normalized: %s', (path) => {
     expect(isPortProxyPath(path)).toBe(true);
   });
 
