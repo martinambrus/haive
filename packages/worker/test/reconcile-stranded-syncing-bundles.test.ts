@@ -97,6 +97,8 @@ describe('reconcileStrandedSyncingBundles', () => {
     ['does not parse', 'failed'],
     ['is a directory', 'failed'],
     ['is a symlink', 'failed'],
+    ['has a linked parent', 'failed'],
+    ['has a non-directory parent', 'failed'],
   ] as const)(
     'a stranded bundle whose record %s ends %s, and the next bundle recovers',
     async (fault, status) => {
@@ -118,6 +120,14 @@ describe('reconcileStrandedSyncingBundles', () => {
           const target = join(root, 'outside-record');
           await writeFile(target, 'untouched');
           await symlink(target, `${archivePath}.replacement.json`);
+        } else if (fault === 'has a linked parent' || fault === 'has a non-directory parent') {
+          await rm(dir, { recursive: true });
+          const target = join(root, 'outside-parent');
+          if (fault === 'has a linked parent') {
+            await mkdir(target);
+            await writeFile(join(target, 'source.new.zip.replacement.json'), 'untouched');
+            await symlink(target, dir);
+          } else await writeFile(dir, 'untouched');
         } else await writeFile(`${archivePath}.replacement.json`, '{invalid json');
         bundle(STRANDED, { sourceType: 'zip', archivePath, lastReplacementNote: 'stale warning' });
         const before = structuredClone(row(STRANDED));
@@ -139,6 +149,12 @@ describe('reconcileStrandedSyncingBundles', () => {
         });
         expect(await readFile(join(fixture.dest, 'old.md'), 'utf8')).toBe('old tree');
         expect(fake.rows(schema.customBundleItems)).toEqual(items);
+        if (fault === 'has a linked parent')
+          expect(
+            await readFile(join(root, 'outside-parent', 'source.new.zip.replacement.json'), 'utf8'),
+          ).toBe('untouched');
+        if (fault === 'has a non-directory parent')
+          expect(await readFile(dir, 'utf8')).toBe('untouched');
         if (fault === 'is a symlink')
           expect(await readFile(join(root, 'outside-record'), 'utf8')).toBe('untouched');
         expect(warn).toHaveBeenCalledWith(

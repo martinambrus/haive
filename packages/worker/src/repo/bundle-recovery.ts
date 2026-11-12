@@ -14,7 +14,7 @@ import {
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 
-/** A malformed record or refused record leaf cannot supply the saved choice, so the bundle
+/** A malformed record or refused record path cannot supply the saved choice, so the bundle
  *  is failed rather than left for a retry. An I/O error stays a plain error, left to retry. */
 export class ReplacementRecordUnreadable extends Error {
   constructor(cause: unknown) {
@@ -35,12 +35,11 @@ export async function readReplacement(
     maxBytes: 8192,
     strict: true,
   }).catch((err: unknown) => {
-    // A refused leaf cannot become a valid record on a later tick. Leave real I/O faults
-    // retryable, and never follow or remove a refused leaf to recover its contents.
+    // A refused path cannot become a valid record on a later tick. Leave real I/O faults
+    // retryable, and never follow or remove a refused path to recover its contents.
     if (
       isPathContainmentError(err) &&
-      err.at === recordRel &&
-      (err.reason === 'link' || err.reason === 'not-regular-file')
+      (err.reason === 'link' || err.reason === 'not-directory' || err.reason === 'not-regular-file')
     )
       throw new ReplacementRecordUnreadable(err);
     throw err;
