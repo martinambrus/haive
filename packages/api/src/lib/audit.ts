@@ -1,13 +1,13 @@
 import type { Database } from '@haive/database';
 import { logger } from '@haive/shared';
+import { insertAuditEvent, logAuditEvent, type AuditEvent } from '@haive/shared/audit';
 
 const log = logger.child({ module: 'audit' });
 
 /** No authenticated actor. A fixed sentinel records no login identifier or derived fingerprint. */
 export const ANONYMOUS_AUDIT_ACTOR = '00000000-0000-0000-0000-000000000000';
 
-export { insertAuditEvent, logAuditEvent, type AuditEvent } from '@haive/shared/audit';
-import { insertAuditEvent, logAuditEvent, type AuditEvent } from '@haive/shared/audit';
+export { insertAuditEvent, logAuditEvent, type AuditEvent };
 
 /** Dual-write an audit event: a pino line (stream — greppable, shippable) plus a
  *  durable audit_events row (survives log rotation). The DB insert is
