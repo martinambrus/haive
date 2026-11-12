@@ -56,7 +56,8 @@ import {
 class UndoGitError extends Error {}
 const gitFailureReason = (summary: string, error: unknown, secret?: string | null) => {
   // Sanitize the original structure before converting it to persisted display copy.
-  const detail = scrubSecret(scrubErrorPaths(safeErrorMessage(error)), secret ?? null)
+  // Known secrets first, then paths (error-diagnostics.md): a path scrub can split a secret.
+  const detail = scrubErrorPaths(scrubSecret(safeErrorMessage(error), secret ?? null))
     .trim()
     .slice(0, 500);
   return detail ? `${summary.replace(/\.$/, '')}: ${detail}` : summary;

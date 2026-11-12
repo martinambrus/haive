@@ -97,14 +97,14 @@ async function refTransaction(
       clearTimeout(timer);
     }
   };
-  const waitForExit = async () => {
+  const waitForExit = async (ms: number) => {
     if (closed) return true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
         exited.then(() => true),
         new Promise<false>((resolve) => {
-          timer = setTimeout(() => resolve(false), 1000);
+          timer = setTimeout(() => resolve(false), ms);
         }),
       ]);
     } finally {
@@ -117,9 +117,11 @@ async function refTransaction(
     // chance to remove its locks itself, followed by its signal cleanup handler.
     if (!child.stdin.destroyed && !child.stdin.writableEnded)
       child.stdin.end(abort ? 'abort\n' : undefined);
-    if (!(await waitForExit())) {
+    // After `commit: ok` the ref has moved and git has nothing left but to exit; give
+    // it longer before a signal turns a finished move into a reported failure.
+    if (!(await waitForExit(abort ? 1000 : 10_000))) {
       child.kill('SIGTERM');
-      if (!(await waitForExit())) child.kill('SIGKILL');
+      if (!(await waitForExit(1000))) child.kill('SIGKILL');
     }
     return exited;
   };
