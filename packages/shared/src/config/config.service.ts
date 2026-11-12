@@ -43,12 +43,6 @@ export const CONFIG_KEYS = {
   DATABASE_URL: 'config:database:url',
   API_PORT: 'config:server:apiPort',
 
-  SMTP_HOST: 'config:email:smtpHost',
-  SMTP_PORT: 'config:email:smtpPort',
-  SMTP_USER: 'config:email:smtpUser',
-  SMTP_FROM: 'config:email:from',
-  SMTP_FROM_NAME: 'config:email:fromName',
-
   // Max CLI/agent invocations that run in parallel GLOBALLY: bounds the cli-exec
   // queue concurrency AND the in-process fan-out limiter (e.g. DAG coders,
   // onboarding fan-outs). A positive value pins it (no upper limit — some machines
@@ -669,10 +663,6 @@ export function parseRegistrationMode(raw: string | null | undefined): Registrat
 
 const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.API_PORT]: '3001',
-  [CONFIG_KEYS.SMTP_HOST]: 'mailpit',
-  [CONFIG_KEYS.SMTP_PORT]: '1025',
-  [CONFIG_KEYS.SMTP_FROM]: 'no-reply@haive.local',
-  [CONFIG_KEYS.SMTP_FROM_NAME]: 'Haive',
   [CONFIG_KEYS.MAX_PARALLEL_AGENTS]: '0',
   [CONFIG_KEYS.MAX_PARALLEL_AGENTS_PER_TASK]: '5',
   [CONFIG_KEYS.OLLAMA_CLI_TIMEOUT_MS]: '7200000',
@@ -833,6 +823,7 @@ export class ConfigService {
       await this.waitUntilReady(redis);
       await this.seedDefaults();
       await this.reconcileRaisedDefaults();
+      await this.removeRetiredKeys();
       await this.ensureEncryptionKey();
     } catch (err) {
       // Otherwise the failed client reconnects forever.
@@ -933,6 +924,21 @@ export class ConfigService {
         { key: raise.key, from: raise.previous, to: raise.next, why: raise.why },
         'raised a configuration default that this install had already seeded',
       );
+    }
+  }
+
+  /** Retire persisted defaults on every deploy; absent keys make subsequent boots a no-op. */
+  private async removeRetiredKeys(): Promise<void> {
+    const retiredKeys = [
+      'config:email:smtpHost',
+      'config:email:smtpPort',
+      'config:email:from',
+      'config:email:fromName',
+    ];
+    for (const key of retiredKeys) {
+      const removed = await this.redisCall('removeRetiredKeys', (redis) => redis.del(key));
+      this.localCache.delete(key);
+      if (removed) logger.info({ key }, 'Removed retired configuration key');
     }
   }
 

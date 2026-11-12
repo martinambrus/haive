@@ -140,6 +140,8 @@ class FakeRedis {
       }
       case 'EXISTS':
         return void socket.write(`:${this.store.has(args[1]!) ? 1 : 0}\r\n`);
+      case 'DEL':
+        return void socket.write(`:${this.store.delete(args[1]!) ? 1 : 0}\r\n`);
       case 'PUBLISH':
         return void socket.write(':0\r\n');
       case 'QUIT':
@@ -481,6 +483,7 @@ describe('ConfigService while Redis is unavailable', () => {
   it.each([
     { cmd: 'SETNX', op: 'seedDefaults', seed: {} },
     { cmd: 'GET', op: 'reconcileRaisedDefaults', seed: {} },
+    { cmd: 'DEL', op: 'removeRetiredKeys', seed: {} },
     {
       cmd: 'SET',
       op: 'reconcileRaisedDefaults',

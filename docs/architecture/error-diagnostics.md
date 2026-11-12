@@ -79,7 +79,7 @@ and the wait never settled. A transport error or that deadline rejects with
 `ConfigUnavailableError('initialize')`; a server reply (a wrong password) stays a raw `ReplyError`. A
 failed `initialize` disconnects its client, which otherwise reconnected forever, so the same instance
 can initialize again. The boot seed and key calls (`seedDefaults`, `reconcileRaisedDefaults`,
-`ensureEncryptionKey`) run through `redisCall` like every other read. `ensureEncryptionKey` writes a
+`removeRetiredKeys`, `ensureEncryptionKey`) run through `redisCall` like every other read. `ensureEncryptionKey` writes a
 missing key with `SET NX` and then uses whatever the store holds, so an api and a worker booting together
 on an empty store end on one key; the `CONFIG_ENCRYPTION_KEY` mismatch check runs against that winner. The api and the worker run
 `bootstrap()` through `retryWhileConfigUnavailable` (`config/retry-config-unavailable.ts`): 500 ms

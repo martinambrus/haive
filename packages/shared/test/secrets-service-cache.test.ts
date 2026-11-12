@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database, DbTx } from '@haive/database';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { encrypt, generateEncryptionKey } from '../src/crypto/index.js';
 
 const h = vi.hoisted(() => ({ key: '' }));
@@ -29,8 +31,9 @@ describe('SecretsService cache', () => {
         }),
       }),
       delete: () => ({
-        where: async () => {
-          stored = null;
+        where: (where: SQL) => {
+          if (new PgDialect().sqlToQuery(where).params[0] === 'k') stored = null;
+          return Object.assign(Promise.resolve(), { returning: async () => [] });
         },
       }),
       query: {
