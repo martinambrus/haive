@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { LatestRefreshRun, RefreshCliVersionsJobResult } from '@haive/shared/constants';
 import { LatestRefresh } from './latest-refresh';
@@ -74,7 +75,36 @@ it('lets a structurally newer stored run supersede the previous manual result', 
   expect(textOf(view.tree())).not.toContain('current failure');
 });
 
-it.each(['unknown', 'legacy-trigger'])(
+it('keeps the stored run when a different completed result has no start time', async () => {
+  h.get.mockResolvedValue({ run: stored({ runId: 'newer' }) });
+  const view = createRenderer(() => (
+    <LatestRefresh endpoint="/latest" active={false} result={{ ...result, startedAt: undefined }} />
+  ));
+  await settle(view);
+  expect(textOf(view.tree())).toContain('has not finished');
+  expect(textOf(view.tree())).not.toContain('current failure');
+});
+
+it('uses a completed result with no start time when its run id matches', async () => {
+  h.get.mockResolvedValue({ run: stored() });
+  const view = createRenderer(() => (
+    <LatestRefresh endpoint="/latest" active={false} result={{ ...result, startedAt: undefined }} />
+  ));
+  await settle(view);
+  expect(textOf(view.tree())).toContain('current failure');
+  expect(textOf(view.tree())).not.toContain('has not finished');
+});
+
+it.each(['manual', 'scheduled', 'boot'] as const)('labels a %s refresh', async (trigger) => {
+  h.get.mockResolvedValue({ run: stored({ trigger }) });
+  const view = createRenderer(() => (
+    <LatestRefresh endpoint="/latest" active={false} result={null} />
+  ));
+  await settle(view);
+  expect(textOf(view.tree())).toContain(`The latest ${trigger} refresh started at`);
+});
+
+it.each(['unknown', 'legacy-trigger', '__proto__'])(
   'describes a %s trigger plainly with readable dates',
   async (trigger) => {
     h.get.mockResolvedValue({
