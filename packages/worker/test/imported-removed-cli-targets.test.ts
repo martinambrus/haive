@@ -27,11 +27,9 @@ import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02
 import type { StepContext } from '../src/step-engine/step-definition.js';
 
 const url = process.env.T118_DATABASE_URL;
-if (
-  url &&
-  (new URL(url).port !== '46537' || new URL(url).pathname !== '/codex_t118_cli_union_20261026')
-)
-  throw new Error('Use only the assigned T118 scratch database');
+// Explicit opt-in and scratch names protect local stores; CI owns its default-port service.
+if (url && !/^\/(?:codex|test)_t118_[a-z0-9_]+$/.test(new URL(url).pathname))
+  throw new Error('Use a dedicated CLI membership scratch database');
 const db = url ? createDatabase(url) : null;
 const users: string[] = [],
   roots: string[] = [];
