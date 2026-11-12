@@ -620,3 +620,31 @@ it.each(['tasks', 'repos'])(
     expect(await wsHandshake(port, renamed, path).result).toBe(403);
   },
 );
+
+it.each(['tasks', 'repos'])(
+  'redirects the bare target before reading authentication (%s)',
+  async (kind) => {
+    const prefix = kind === 'repos' ? `/ide/repos/${ID}` : `/ide/${ID}`;
+    const read = vi.spyOn(fake.db.query.users, 'findFirst');
+    const query = '?folder=%2Fworkspace&value=a%2Bb&value=two';
+    for (const method of ['GET', 'POST']) {
+      const responses = await Promise.all(
+        [
+          '',
+          cookie,
+          `${editorCookieName({ kind: kind === 'repos' ? 'repo' : 'task', id: ID })}=stale`,
+        ].map((auth) => app.request(prefix + query, { method, headers: { cookie: auth } })),
+      );
+      const bodies = [];
+      for (const res of responses) {
+        expect(res.status).toBe(308);
+        expect(res.headers.get('location')).toBe(prefix + '/' + query);
+        expect(res.headers.getSetCookie()).toEqual([]);
+        bodies.push(await res.text());
+      }
+      expect(new Set(bodies).size).toBe(1);
+    }
+    expect(read).not.toHaveBeenCalled();
+    expect(h.ensure).not.toHaveBeenCalled();
+  },
+);

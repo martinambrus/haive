@@ -101,6 +101,16 @@ function upstreamRequestHeaders(source: Headers): Headers {
 export const ideRoutes = new Hono<AppEnv>();
 ideRoutes.get('/_handshake', editorBootstrap);
 ideRoutes.post('/_handshake', bodyLimit({ maxSize: 1024 }), redeemEditor);
+// The scoped cookie covers the slash form only. This canonical redirect reads no credentials.
+ideRoutes.use('*', async (c, next) => {
+  const parsed = extractIdeTarget(c.req.path);
+  if (parsed) {
+    const prefix = ideTarget(parsed.id, '', parsed.repository).prefix;
+    if (c.req.path === prefix) return c.redirect(`${prefix}/${new URL(c.req.url).search}`, 308);
+  }
+  await next();
+});
+
 // Registered after the two public handshake handlers, before every editor handler.
 ideRoutes.use('*', async (c, next) => {
   const parsed = extractIdeTarget(c.req.path);
