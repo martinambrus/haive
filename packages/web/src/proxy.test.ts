@@ -30,17 +30,10 @@ describe('the actual Next proxy response', () => {
     expect(fetcher.mock.calls[0]![0]).toBe('https://api.example.test/prefix/auth/me');
   });
 
-  it('retains page slash normalization while preserving editor upgrade slashes', async () => {
+  it('retains page slash normalization', async () => {
     const page = await proxy(request('/login/?session=expired'));
     expect(page.status).toBe(308);
     expect(page.headers.get('location')).toBe('http://localhost:3000/login?session=expired');
-    vi.stubEnv('API_URL_INTERNAL', 'http://api:3001');
-    const editor = await proxy(
-      new NextRequest('http://localhost:3000/ide/id/', {
-        headers: { upgrade: 'websocket' },
-      }),
-    );
-    expect(editor.headers.get('x-middleware-rewrite')).toBe('http://api:3001/ide/id/');
   });
   it('redirects an anonymous private request without modifying cookies', async () => {
     const response = await proxy(request('/dashboard'));
@@ -55,7 +48,7 @@ describe('the actual Next proxy response', () => {
     const response = await proxy(request('/dashboard', 'haive_refresh=retained'));
     expect(response.headers.get('x-middleware-next')).toBe('1');
     expect(response.headers.get('content-security-policy')).toBe(
-      "img-src 'self' data: blob: http://browser.example.test:46113 https://browser.example.test:46113; media-src 'self' blob: http://browser.example.test:46113 https://browser.example.test:46113; font-src 'self' data:",
+      "img-src 'self' data: blob: http://browser.example.test:46113 https://browser.example.test:46113; media-src 'self' blob: http://browser.example.test:46113 https://browser.example.test:46113; font-src 'self' data:; frame-src 'self' http://browser.example.test:46113 https://browser.example.test:46113",
     );
     expect(response.headers.get('set-cookie')).toBeNull();
   });
@@ -65,7 +58,12 @@ describe('the actual Next proxy response', () => {
     const response = await proxy(request('/login'));
     const policy = response.headers.get('content-security-policy')!;
     expect(policy).toContain("img-src 'self'");
-    expect(policy).not.toMatch(/api\.example|prefix|\*/);
+    expect(policy.split('; ').find((part) => part.startsWith('img-src'))).not.toMatch(
+      /api\.example|prefix|\*/,
+    );
+    expect(policy).toContain(
+      "frame-src 'self' http://api.example.test:9443 https://api.example.test:9443",
+    );
   });
 
   it('rewrites API upgrades without page-cookie redirects or changing Origin', async () => {
@@ -119,3 +117,24 @@ describe('the actual Next proxy response', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 });
+
+it('admits the runtime editor override in the actual page CSP', async () => {
+  vi.stubEnv('HAIVE_EDITOR_ORIGIN', 'https://ide.example.test:8443');
+  const response = await proxy(request('/login'));
+  expect(response.headers.get('content-security-policy')).toContain(
+    "frame-src 'self' http://ide.example.test:8443 https://ide.example.test:8443",
+  );
+});
+
+it.each(['/ide/id/', '/api/haive/ide/id/', '/api/haive/%69de/id/'])(
+  'does not rewrite an editor upgrade on %s',
+  async (path) => {
+    vi.stubEnv('API_URL_INTERNAL', 'http://api:3001');
+    const response = await proxy(
+      new NextRequest(`http://localhost:3000${path}`, {
+        headers: { upgrade: 'websocket' },
+      }),
+    );
+    expect(response.headers.get('x-middleware-rewrite')).toBeNull();
+  },
+);

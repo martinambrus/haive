@@ -56,7 +56,7 @@ try {
   const csp = login.headers.get('content-security-policy');
   assert.equal(
     csp,
-    "img-src 'self' data: blob: http://127.0.0.1:46113 https://127.0.0.1:46113; media-src 'self' blob: http://127.0.0.1:46113 https://127.0.0.1:46113; font-src 'self' data:",
+    "img-src 'self' data: blob: http://127.0.0.1:46113 https://127.0.0.1:46113; media-src 'self' blob: http://127.0.0.1:46113 https://127.0.0.1:46113; font-src 'self' data:; frame-src 'self' http://127.0.0.1:46113 https://127.0.0.1:46113",
   );
   assert.equal(login.headers.get('set-cookie'), null, 'anonymous login must not change cookies');
   assert.match(await login.text(), /Sign in/, 'login must render the actual auth layout');

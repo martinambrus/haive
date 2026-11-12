@@ -77,13 +77,10 @@ describe('web-origin API forwarding', () => {
     expect(log).toHaveBeenCalledOnce();
   });
 
-  it('uses only the configured upstream, retaining path, query and editor namespace', () => {
+  it('uses only the configured upstream, retaining path and query', () => {
     vi.stubEnv('API_URL_INTERNAL', 'http://api:3001/base/');
     expect(apiProxyTarget('https://web.test/api/haive//evil.test/asset.js?q=%2F')?.href).toBe(
       'http://api:3001/base//evil.test/asset.js?q=%2F',
-    );
-    expect(apiProxyTarget('https://web.test/ide/repos/id/asset.js')?.href).toBe(
-      'http://api:3001/base/ide/repos/id/asset.js',
     );
     expect(apiProxyTarget('https://web.test/api/app-build')).toBeNull();
     expect(apiProxyTarget('https://web.test/api/haive-other/auth/login')).toBeNull();
@@ -163,13 +160,43 @@ describe('web-origin API forwarding', () => {
       vi.fn().mockResolvedValue(
         new Response(null, {
           status: 302,
-          headers: { location: '/ide/id/login' },
+          headers: { location: '/auth/login' },
         }),
       ),
     );
-    const redirect = await proxyApiRequest(new Request('https://web.test/ide/id/'));
+    const redirect = await proxyApiRequest(new Request('https://web.test/api/haive/auth/me'));
     expect(redirect.status).toBe(302);
-    expect(redirect.headers.get('location')).toBe('/ide/id/login');
+    expect(redirect.headers.get('location')).toBe('/auth/login');
     expect(redirect.headers.getSetCookie()).toEqual([]);
   });
 });
+
+describe('editor traffic cannot use the app proxy', () => {
+  it.each([
+    '/ide/id/',
+    '/ide/repos/id/asset.js',
+    '/api/haive/%69de/id/',
+    '/api/haive/%69%64%65',
+    '/api/haive/%69de/%zz',
+    '/api/haive/ide',
+    '/api/haive/ide/_handshake',
+    '/api/haive/ide/repos/id/asset.js',
+  ])('refuses %s without reaching upstream', async (path) => {
+    vi.stubEnv('API_URL_INTERNAL', 'http://api:3001');
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+    expect(apiProxyTarget(`https://web.test${path}`)).toBeNull();
+    expect((await proxyApiRequest(new Request(`https://web.test${path}`))).status).toBe(404);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+});
+
+it.each(['/api/haive/tasks/a%20b', '/api/haive/%49de/id/'])(
+  'preserves ordinary escaped routes and case-sensitive routing: %s',
+  (path) => {
+    vi.stubEnv('API_URL_INTERNAL', 'http://api:3001');
+    expect(apiProxyTarget(`https://web.test${path}`)?.href).toBe(
+      `http://api:3001${path.slice('/api/haive'.length)}`,
+    );
+  },
+);

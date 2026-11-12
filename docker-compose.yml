@@ -239,6 +239,8 @@ services:
       # public hostname; unset, the browser derives the origin from the page it is already on.
       HAIVE_API_PORT: ${HAIVE_API_PORT:-3001}
       HAIVE_PUBLIC_API_URL: ${HAIVE_PUBLIC_API_URL:-}
+      # Same public editor override as api, read at runtime for the page frame CSP.
+      HAIVE_EDITOR_ORIGIN: ${HAIVE_EDITOR_ORIGIN:-}
     networks:
       - haive-network
 

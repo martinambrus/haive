@@ -5,7 +5,7 @@ describe('contentSecurityPolicy', () => {
   it('admits images and media from the page, inline data, object URLs and the api only', () => {
     expect(contentSecurityPolicy('http://localhost:3001')).toBe(
       "img-src 'self' data: blob: http://localhost:3001 https://localhost:3001; " +
-        "media-src 'self' blob: http://localhost:3001 https://localhost:3001; font-src 'self' data:",
+        "media-src 'self' blob: http://localhost:3001 https://localhost:3001; font-src 'self' data:; frame-src 'self' http://localhost:3001 https://localhost:3001",
     );
   });
 
@@ -16,7 +16,8 @@ describe('contentSecurityPolicy', () => {
   });
 
   it('leaves the api out rather than throwing when its URL does not parse or is not http', () => {
-    const none = "img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:";
+    const none =
+      "img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; frame-src 'self'";
     expect(contentSecurityPolicy('not a url')).toBe(none);
     expect(contentSecurityPolicy('ftp://example.com')).toBe(none);
   });
@@ -32,5 +33,19 @@ describe('browserHostname', () => {
   it('falls back when the header is missing or does not parse', () => {
     expect(browserHostname(null, 'localhost')).toBe('localhost');
     expect(browserHostname('a b', 'localhost')).toBe('localhost');
+  });
+});
+
+describe('editor frame origin', () => {
+  it('admits the configured editor host while media stays on the API transport', () => {
+    const policy = contentSecurityPolicy(
+      'https://web.example.com/api/haive',
+      'https://ide.example.com:8443/ide/',
+    );
+    expect(policy.split('; ').find((part) => part.startsWith('frame-src'))).toBe(
+      "frame-src 'self' http://ide.example.com:8443 https://ide.example.com:8443",
+    );
+    expect(policy.split('; ')[0]).not.toContain('ide.example.com');
+    expect(policy).not.toContain('connect-src');
   });
 });

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Maximize2, Minimize2 } from 'lucide-react';
-import { api, apiEditorUrl, type ApiError } from '@/lib/api-client';
+import { api, type ApiError } from '@/lib/api-client';
 import { Button } from '@/components/ui';
 import { TaskSource } from '@/components/task-source';
 import { MarkdownView } from '@/components/markdown/markdown-view';
@@ -20,10 +20,10 @@ interface EnsureIdeResponse {
 
 const RETRY_DELAY_MS = 2500;
 
-type EditorState = 'starting' | 'ready' | 'unavailable' | 'error';
+type EditorState = 'starting' | 'ready' | 'unavailable' | 'refused' | 'error';
 
 /** The Editor tab: a full browser VS Code (code-server) for the task's worktree,
- *  reverse-proxied through the api at /ide/<taskId>/. Lazily started on open via
+ *  opened through a single-use grant on the editor origin. Lazily started on open via
  *  POST /tasks/:id/ensure-ide (polled while the worker boots / pulls the image),
  *  then embedded in an iframe. The proxied editor WebSocket holds the server alive
  *  while this tab is mounted; switching away unmounts the iframe, and the worker
@@ -33,9 +33,12 @@ export function EditorTab({ taskId, repositoryId, className }: EditorTabProps) {
   const ensurePath = repositoryId
     ? `/repos/${repositoryId}/ensure-ide`
     : `/tasks/${taskId}/ensure-ide`;
-  const editorPath = repositoryId ? `/ide/repos/${repositoryId}/` : `/ide/${taskId}/`;
+  const grantPath = repositoryId
+    ? `/repos/${repositoryId}/editor-handshake`
+    : `/tasks/${taskId}/editor-handshake`;
   const frameClassName = className ?? 'h-[75vh] w-full';
   const [state, setState] = useState<EditorState>('starting');
+  const [editorUrl, setEditorUrl] = useState<string | null>(null);
   const [message, setMessage] = useState<string>('');
   const [attemptKey, setAttemptKey] = useState(0);
   const [maximized, setMaximized] = useState(false);
@@ -77,6 +80,7 @@ export function EditorTab({ taskId, repositoryId, className }: EditorTabProps) {
     let cancelled = false;
     setState('starting');
     setMessage('');
+    setEditorUrl(null);
 
     const clearTimer = (): void => {
       if (timerRef.current) {
@@ -95,7 +99,35 @@ export function EditorTab({ taskId, repositoryId, className }: EditorTabProps) {
           return;
         }
         if (res.ready) {
-          setState('ready');
+          try {
+            const grant = await api.post<{ url: string }>(grantPath);
+            if (cancelled) return;
+            const editor = new URL(grant.url);
+            // A different scheme makes the frame cross-site even on the same hostname.
+            if (
+              editor.protocol === 'http:' &&
+              (editor.hostname !== window.location.hostname || window.location.protocol !== 'http:')
+            ) {
+              const { editorNeedsSecureCookie } = await import('@/lib/editor-origin');
+              if (cancelled) return;
+              if (editorNeedsSecureCookie(window.location.origin, grant.url)) {
+                setState('refused');
+                setMessage(
+                  "Serve the editor over HTTPS or from a hostname under the app's domain, or set HAIVE_EDITOR_ORIGIN.",
+                );
+                return;
+              }
+            }
+            // Use the bootstrap URL verbatim. It redeems the grant and redirects to the
+            // slash-terminated editor path covered by the scoped session cookie.
+            setEditorUrl(grant.url);
+            setState('ready');
+          } catch (err) {
+            if (cancelled) return;
+            const e = err as ApiError;
+            setState(e.status && e.status >= 400 && e.status < 500 ? 'refused' : 'error');
+            setMessage(e.message || 'The editor could not be opened.');
+          }
           return;
         }
         // 202 pending (the worker is still booting / pulling the image) — retry.
@@ -127,9 +159,9 @@ export function EditorTab({ taskId, repositoryId, className }: EditorTabProps) {
       cancelled = true;
       clearTimer();
     };
-  }, [ensurePath, repositoryId, attemptKey]);
+  }, [ensurePath, grantPath, repositoryId, attemptKey]);
 
-  if (state === 'ready') {
+  if (state === 'ready' && editorUrl) {
     return (
       <div
         ref={editorRef}
@@ -153,7 +185,7 @@ export function EditorTab({ taskId, repositoryId, className }: EditorTabProps) {
         </div>
         {/* Keep the iframe mounted while changing size so the editor session and buffers survive. */}
         <iframe
-          src={apiEditorUrl(editorPath)}
+          src={editorUrl}
           title="Editor"
           className="min-h-0 w-full flex-1 rounded border border-neutral-800 bg-neutral-950"
           allow="clipboard-read; clipboard-write; fullscreen"
@@ -171,7 +203,7 @@ export function EditorTab({ taskId, repositoryId, className }: EditorTabProps) {
     );
   }
 
-  if (state === 'error') {
+  if (state === 'error' || state === 'refused') {
     return (
       <div
         className={`${frameClassName} flex flex-col items-center justify-center gap-3 rounded border border-neutral-800 bg-neutral-950`}
@@ -180,13 +212,15 @@ export function EditorTab({ taskId, repositoryId, className }: EditorTabProps) {
           body={message || 'The editor failed to start.'}
           className="text-sm text-rose-300"
         />
-        <button
-          type="button"
-          onClick={() => setAttemptKey((k) => k + 1)}
-          className="rounded border border-neutral-700 px-3 py-1 text-sm text-neutral-200 hover:bg-neutral-800"
-        >
-          Retry
-        </button>
+        {state === 'error' && (
+          <button
+            type="button"
+            onClick={() => setAttemptKey((k) => k + 1)}
+            className="rounded border border-neutral-700 px-3 py-1 text-sm text-neutral-200 hover:bg-neutral-800"
+          >
+            Retry
+          </button>
+        )}
       </div>
     );
   }
@@ -197,7 +231,7 @@ export function EditorTab({ taskId, repositoryId, className }: EditorTabProps) {
       className={`${frameClassName} flex flex-col items-center justify-center gap-3 rounded border border-neutral-800 bg-neutral-950`}
     >
       <div className="h-6 w-6 animate-spin rounded-full border-2 border-neutral-600 border-t-neutral-200" />
-      <p className="text-sm text-neutral-400">Starting editor…</p>
+      <MarkdownView body="Starting editor…" className="text-sm text-neutral-400" />
       <MarkdownView
         body="First launch can take a minute while the image downloads."
         className="text-xs text-neutral-600"
