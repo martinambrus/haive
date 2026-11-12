@@ -309,7 +309,7 @@ export function InteractiveShell(props: InteractiveShellProps) {
           {containerLabel && (
             <span className="font-mono text-[10px] text-neutral-500">{containerLabel}</span>
           )}
-          {errorMsg && <InlineMarkdown body={errorMsg} className="text-red-400" />}
+          {errorMsg && <InlineMarkdown inline body={errorMsg} className="text-red-400" />}
         </div>
         <div className="flex items-center gap-3">
           <span className="text-[10px] text-neutral-500">

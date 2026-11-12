@@ -95,7 +95,11 @@ describe.each([
     render(element());
     const ws = FakeWebSocket.instances[0]!;
     act(() => ws.onclose?.({ code, reason: 'untrusted reason' }));
-    expect(screen.getByText(message)).toBeTruthy();
+    const prose = screen.getByText(message);
+    expect(prose).toBeTruthy();
+    const row = screen.getByText('error').parentElement!;
+    expect(row.lastElementChild?.tagName).toBe('SPAN');
+    expect(row.lastElementChild?.querySelector('div, p, pre')).toBeNull();
     expect(screen.getByText('error')).toBeTruthy();
     expect(screen.queryByText('untrusted reason')).toBeNull();
   });
