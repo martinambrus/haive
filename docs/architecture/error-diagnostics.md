@@ -112,7 +112,7 @@ cannot sign in afterwards (a regenerated pepper matches no stored email index, a
 while users exist), and the override has no recovery step for that yet. Remove the setting once boot
 succeeds. Concurrent boots and a crash between commit and publish reuse one Redis-reserved pending key
 and audit id; the reserve and publish Lua scripts run against a real Redis in CI
-(`encryption-key-boot-redis.test.ts`).
+(`encryption-key-boot-redis.test.ts`). A boot with a usable env key, and the fallback recovery, seed that key only while no pending exists: a pending younger than 10 minutes (`PENDING_ENCRYPTION_KEY_WAIT_MS`, timed by its `reservedAt`) is a discard in progress, so boot waits and retries; an older one, or one without a readable `reservedAt`, is a discard a crash interrupted, and boot exits naming Redis key `bootstrap:pendingEncryptionKey` with the two ways out: restart without `CONFIG_ENCRYPTION_KEY` and with the override to finish it, or, when `audit_events` holds no `config.discard_unreadable_secrets` row whose id is the pending JSON's `id` (the discard did not commit), delete that key and restart to keep the secrets. The updater gives boot its own short-lived one-connection client, since Drizzle rewrites the codecs of the postgres.js client it wraps and the updater's journal needs its own.
 
 The api answers `ConfigUnavailableError` with 503
 `{ error: 'Service temporarily unavailable', code: 'config_unavailable' }` and leaks no key or host.
