@@ -1,9 +1,13 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import { safeErrorMessage } from '@haive/shared/logger';
 import { GIT_BASE_ENV, gitDefaultTimeoutMs, hardenGitArgs } from './git-exec.js';
 
+/** Only process/protocol failures use this type; caller callback errors keep their identity. */
+export class GitRefTransactionError extends Error {}
+
 /** Git exited without acknowledging start; the transaction protocol is unavailable. */
-export class GitRefTransactionsUnsupportedError extends Error {}
+export class GitRefTransactionsUnsupportedError extends GitRefTransactionError {}
 
 /** Probe with an empty transaction before callers set aside or refresh checkout files. */
 export async function checkGitRefTransactions(cwd: string): Promise<void> {
@@ -28,10 +32,16 @@ async function refTransaction(
   change?: { ref: string; next: string; expected: string; move: () => Promise<boolean> },
 ): Promise<boolean> {
   const args = ['update-ref', '-m', 'Undo merge', '--stdin'];
-  const child = spawn('git', hardenGitArgs(args), {
-    cwd,
-    env: { ...process.env, ...GIT_BASE_ENV },
-  });
+  let child: ChildProcessWithoutNullStreams;
+  try {
+    child = spawn('git', hardenGitArgs(args), {
+      cwd,
+      env: { ...process.env, ...GIT_BASE_ENV },
+      stdio: 'pipe',
+    });
+  } catch (error) {
+    throw new GitRefTransactionError(safeErrorMessage(error), { cause: error });
+  }
   let detail = '';
   let spawnError: Error | undefined;
   let timedOut = false;
@@ -54,11 +64,13 @@ async function refTransaction(
   const lines = createInterface({ input: child.stdout });
   const replies = lines[Symbol.asyncIterator]();
   const failure = () =>
-    spawnError ??
-    new Error(
-      timedOut
-        ? 'Git ref transaction timed out'
-        : `Git ref transaction failed${detail.trim() ? `: ${detail.trim()}` : ''}`,
+    new GitRefTransactionError(
+      spawnError
+        ? spawnError.message
+        : timedOut
+          ? 'Git ref transaction timed out'
+          : `Git ref transaction failed${detail.trim() ? `: ${detail.trim()}` : ''}`,
+      { cause: spawnError },
     );
   const command = async (input: string, reply: string) => {
     if (child.exitCode !== null || child.signalCode !== null || child.stdin.destroyed)
@@ -78,6 +90,9 @@ async function refTransaction(
       if (line.done && input === 'start' && !spawnError)
         throw new GitRefTransactionsUnsupportedError(failure().message);
       if (line.done || line.value !== reply) throw failure();
+    } catch (error) {
+      if (error instanceof GitRefTransactionError) throw error;
+      throw new GitRefTransactionError(safeErrorMessage(error), { cause: error });
     } finally {
       clearTimeout(timer);
     }

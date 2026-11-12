@@ -31,6 +31,7 @@ import { findWorktreePathClaimant } from '../repo/worktree-claims.js';
 import { worktreesHoldingBranch } from '../repo/git-workspace.js';
 import {
   checkGitRefTransactions,
+  GitRefTransactionError,
   GitRefTransactionsUnsupportedError,
   withGitRefTransaction,
 } from '../repo/git-ref-transaction.js';
@@ -554,8 +555,11 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
               await checkGitRefTransactions(cwd);
               refTransactionsChecked = true;
             } catch (error) {
-              if (!(error instanceof GitRefTransactionsUnsupportedError))
-                throw new UndoGitError(gitFailureReason('Git refused the undo', error));
+              if (!(error instanceof GitRefTransactionsUnsupportedError)) {
+                if (error instanceof GitRefTransactionError)
+                  throw new UndoGitError(gitFailureReason('Git refused the undo', error));
+                throw error;
+              }
               await settle(
                 'refused',
                 gitFailureReason(
@@ -708,7 +712,9 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
               },
             );
           } catch (error) {
-            throw new UndoGitError(gitFailureReason('Git refused the undo', error));
+            if (error instanceof GitRefTransactionError)
+              throw new UndoGitError(gitFailureReason('Git refused the undo', error));
+            throw error;
           }
           if (!moved) return;
           needsSync = true;

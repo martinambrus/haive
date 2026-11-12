@@ -777,6 +777,7 @@ describe('explicit undo of a cancel-left committed merge', () => {
       expect(reason).toContain('permission denied');
       expect(reason).toContain('[path]');
       expect(reason).not.toContain(f.dir);
+      expect(reason).not.toContain('Git refused the undo');
       expect(reason!.length).toBeLessThan(650);
       expect(leftCommittedMerges(f.events)[0]?.settled).toBeNull();
       expect(h.sync).not.toHaveBeenCalled();
@@ -794,6 +795,24 @@ describe('explicit undo of a cancel-left committed merge', () => {
     expect(reason).not.toContain(f.dir);
     expect(await readFile(path.join(f.dir, 'feature'), 'utf8')).toBe('mine');
     expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+  });
+  it('propagates a settlement database failure inside the prepared transaction for queue retry', async () => {
+    const f = await fixture();
+    const failure = new Error('audit database unavailable');
+    await writeFile(path.join(f.dir, 'feature'), 'mine');
+    vi.spyOn(f.db, 'insert').mockImplementationOnce(
+      () =>
+        ({
+          values: async () => {
+            throw failure;
+          },
+        }) as never,
+    );
+    await expect(f.run()).rejects.toBe(failure);
+    expect(f.settled()).toHaveLength(0);
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.after);
+    expect(await readFile(path.join(f.dir, 'feature'), 'utf8')).toBe('mine');
+    await git(f.dir, 'commit', '--allow-empty', '-m', 'lock released');
   });
   it('records a git read failure as a retryable attempt immediately', async () => {
     const f = await fixture();

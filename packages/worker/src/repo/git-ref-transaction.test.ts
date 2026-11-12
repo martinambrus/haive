@@ -133,7 +133,7 @@ describe('git ref transactions', () => {
         'b'.repeat(40),
         move,
       ),
-    ).rejects.toMatchObject({ code: 'ENOENT' });
+    ).rejects.toMatchObject({ cause: { code: 'ENOENT' } });
     expect(move).not.toHaveBeenCalled();
   });
 
