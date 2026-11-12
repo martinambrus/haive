@@ -224,10 +224,11 @@ const log = logger.child({ module: 'cli-providers' });
 
 /** `rulesInherited` lets the provider form show the live default, which follows template edits,
  *  instead of the possibly stale copy of it stored on the row. */
-export function withRulesState<T extends { rulesContent: string }>(
+export function withRulesState<T extends { rulesContent: string; authGeneration?: string }>(
   row: T,
-): T & { rulesInherited: boolean } {
-  return { ...row, rulesInherited: inheritsDefaultRules(row.rulesContent) };
+): Omit<T, 'authGeneration'> & { rulesInherited: boolean } {
+  const { authGeneration: _authGeneration, ...publicRow } = row;
+  return { ...publicRow, rulesInherited: inheritsDefaultRules(row.rulesContent) };
 }
 
 cliProviderRoutes.use('*', requireAuth);

@@ -799,3 +799,22 @@ it.each(['POST', 'PATCH'])(
     expect(fake.rows(schema.cliProviders)).toEqual(before);
   },
 );
+
+it.each(['/', `/${PROVIDER}`])(
+  'does not expose the internal auth generation in GET %s',
+  async (path) => {
+    const fake = setup(true);
+    fake.patch(schema.cliProviders, PROVIDER, {
+      authGeneration: '00000000-0000-4000-8000-0000000000c1',
+    });
+    const res = await app.request(path);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      providers: Record<string, unknown>[];
+      provider: Record<string, unknown>;
+    };
+    const providers = path === '/' ? body.providers : [body.provider];
+    expect(providers).toHaveLength(1);
+    expect(providers[0]).not.toHaveProperty('authGeneration');
+  },
+);
