@@ -358,7 +358,9 @@ export async function recordUndoFailure(
         // The one-shot helper's plaintext secret is scoped to remoteRefusal,
         // which scrubs all remote failures before returning. This queue fallback
         // has no helper or secret; still remove paths and URL credentials here.
-        reason: gitFailureReason('Undo failed', err),
+        // An UndoGitError already carries its sanitized, bounded sentence; prefixing it again
+        // doubled the label the page puts in front ("Undo refused: Undo failed: ...").
+        reason: err instanceof UndoGitError ? err.message : gitFailureReason('Undo failed', err),
       },
     });
     return true;

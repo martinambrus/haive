@@ -268,8 +268,12 @@ baseShaBefore, baseShaAfter, landedAt}` in the same transaction as the step stat
   (`withGitRefTransaction`, `repo/git-ref-transaction.ts`): `start`, an `update` that is a CAS on
   the merge sha, `prepare`, which takes and holds `refs/heads/<branch>.lock`, then the working-tree
   move, then `commit`; any failure sends `abort`. A git that exits before acknowledging `start`
-  (one without ref transactions, before 2.27) is found by an empty `start`/`abort` before the
-  set-aside and the index refresh, and refused. Under the held lock the worker
+  is found by an empty `start`/`abort` before the set-aside and the index refresh, and refused
+  with one generic early-exit reason keyed on the missing acknowledgment, not on stderr wording
+  (a git without ref transactions, before 2.27, is one such case). A failure after `commit` is
+  acknowledged is not a refusal: the branch has moved, so it is reported as "moved back, but a
+  later Git cleanup step failed" (`GitRefTransactionCommittedError`), projection recovery still
+  runs, and Retry finishes the rest. Under the held lock the worker
   re-reads which worktrees hold the branch and refuses if that changed. A branch checked out in
   the repository's own checkout or Haive's transient base worktree is moved there by a two-tree
   `read-tree -m -u` (matching `reset --keep` in the measured cases, without writing HEAD or taking
@@ -305,7 +309,10 @@ baseShaBefore, baseShaAfter, landedAt}` in the same transaction as the step stat
   branch at `baseShaAfter`, `write-tree` equals the tree of `baseShaBefore`, and every path that
   differs between the two commits is clean against the index (no assume-unchanged or
   skip-worktree flag, no untracked or ignored file, no name that is not UTF-8), checked again
-  under the held ref lock (`interruptedCheckoutMove`). A staged change anywhere else or an edit
+  under the held ref lock (`interruptedCheckoutMove`). The touched paths go to `ls-files` and
+  `diff` as `:(literal)` pathspecs in batches of at most 32 KiB of arguments, since neither
+  accepts `--pathspec-from-file`, so a large set never exceeds the argument limit and a name is
+  never read as pathspec magic; every batch must pass. A staged change anywhere else or an edit
   to a touched path keeps the old refusal. The worker job
   (`abortLeftMerge`) runs under the directory's lock and records `merge.left_open_settled`
   `{dir, mergeHead, outcome, reason}`: `refused` while a live task's `merge_dir_claims` row holds the

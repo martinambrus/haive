@@ -278,9 +278,6 @@ describe('explicit undo of a cancel-left committed merge', () => {
     expect(Buffer.byteLength(names.map((p) => `:(literal)${p}\0`).join(''))).toBeGreaterThan(
       2 * 1024 * 1024,
     );
-    await expect(async () =>
-      exec('git', ['ls-files', '--', ...names], { cwd: f.dir, env }),
-    ).rejects.toMatchObject({ code: 'E2BIG' });
     const blob = await git(f.dir, 'rev-parse', 'HEAD:feature');
     const added = await gitPush.gitRun(f.dir, ['update-index', '-z', '--index-info'], undefined, {
       input: Buffer.from(names.map((p) => `100644 ${blob}\t${p}\0`).join('')),
@@ -748,6 +745,8 @@ describe('explicit undo of a cancel-left committed merge', () => {
         settled: null,
         refused: { count: 1, reason: expect.stringMatching(/could not read.*index/i) },
       });
+      // The page prefixes "Undo refused:"; the stored sentence must not carry a second label.
+      expect(leftCommittedMerges(f.events)[0]?.refused?.reason).not.toMatch(/^Undo failed/);
       expect(h.sync).not.toHaveBeenCalled();
       vi.restoreAllMocks();
       await f.run();
