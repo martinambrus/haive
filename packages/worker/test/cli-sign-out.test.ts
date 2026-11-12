@@ -525,7 +525,7 @@ it.each(['LOADING Redis is loading', 'OOM command not allowed'])(
   },
 );
 
-it('bounds repeated scope changes independently of auth-lock contention', async () => {
+it.each([false, true])('bounds repeated scope changes with resumed=%s', async (resuming) => {
   const row = makeProviderRow();
   const calls: DbCalls = { updateSet: null };
   const runner = makeRunner({ existing: ['haive_cli_auth_user1_gemini_0'] });
@@ -535,7 +535,7 @@ it('bounds repeated scope changes independently of auth-lock contention', async 
   });
   const job = {
     timestamp: Date.now(),
-    data: {},
+    data: { signOutStarted: resuming },
     token: 'token',
     updateData: vi.fn(async (data: any) => {
       job.data = data;
@@ -560,7 +560,9 @@ it('bounds repeated scope changes independently of auth-lock contention', async 
       job as any,
     ),
   ).rejects.toThrow(
-    'CLI authentication settings kept changing. Nothing was removed. Try signing out again.',
+    resuming
+      ? "Sign-out stopped: this CLI's sign-in settings changed while it was interrupted. Some credentials may already be removed. Sign out again."
+      : 'CLI authentication settings kept changing. Nothing was removed. Try signing out again.',
   );
   expect(job.moveToDelayed).toHaveBeenCalledTimes(5);
   expect(lock.release).toHaveBeenCalledTimes(6);

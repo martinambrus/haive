@@ -1272,7 +1272,9 @@ export async function handleSignOutJob(
       const attempts = job.data?.authScopeChangeAttempts ?? 0;
       if (attempts >= 5) {
         throw new UnrecoverableError(
-          'CLI authentication settings kept changing. Nothing was removed. Try signing out again.',
+          resuming
+            ? CLI_SIGN_OUT_SCOPE_CHANGED_MESSAGE
+            : 'CLI authentication settings kept changing. Nothing was removed. Try signing out again.',
         );
       }
       await deferJob(
