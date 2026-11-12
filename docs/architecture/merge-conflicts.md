@@ -313,7 +313,19 @@ baseShaBefore, baseShaAfter, landedAt}` in the same transaction as the step stat
   `diff` as `:(literal)` pathspecs in batches of at most 32 KiB of arguments, since neither
   accepts `--pathspec-from-file`, so a large set never exceeds the argument limit and a name is
   never read as pathspec magic; every batch must pass. A staged change anywhere else or an edit
-  to a touched path keeps the old refusal. The worker job
+  to a touched path keeps the old refusal. An `undone` settlement, or one marked
+  `resyncRequired`, owes a re-sync of Haive's project files until a later
+  `merge.left_committed_resynced` event for the same directory and `baseShaAfter` records that
+  `resyncHaiveProjections` succeeded (the reader's `resyncOwed`); the job writes it once, under
+  the directory's lock, only after the re-sync returns true. While it is owed the report shows
+  that the files were not re-synced and offers the owner Retry (`POST /tasks/:id/merges/resync`,
+  cancelled tasks after `task.cancel_finished` only), which re-enqueues the Undo job under its
+  own job id, so a press while that job waits or runs joins it. On a settled report the job only
+  re-syncs: it repeats no git write and does not recreate the feature branch, so a branch the
+  person deleted after the Undo stays deleted. It hands the moved files back to the sandbox user
+  first, but only while the checkout is still on the branch at `baseShaBefore`; after a switch,
+  detach or new commit those files are the person's. A report settled `undone` before the
+  completion event existed reads as owed once; one Retry re-syncs and clears it. The worker job
   (`abortLeftMerge`) runs under the directory's lock and records `merge.left_open_settled`
   `{dir, mergeHead, outcome, reason}`: `refused` while a live task's `merge_dir_claims` row holds the
   directory (`liveClaimHolder`, the staleness rules `claimMergeDir` uses), `moved` with nothing
