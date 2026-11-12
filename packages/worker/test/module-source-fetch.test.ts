@@ -3,7 +3,12 @@ import { access, mkdir, readFile, writeFile, symlink, truncate } from 'node:fs/p
 import { dirname, join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { logger } from '@haive/shared';
-import { fetchModuleSource, sourceFetchError } from '../src/modules/source-fetch.js';
+import {
+  MODULE_TREE_BYTES,
+  MODULE_TREE_ENTRIES,
+  fetchModuleSource,
+  sourceFetchError,
+} from '../src/modules/source-fetch.js';
 
 const git = vi.hoisted(() => vi.fn());
 const image = vi.hoisted(() => vi.fn());
@@ -24,6 +29,9 @@ const source = {
   resolvedSha: null,
 };
 const sha = 'a'.repeat(40);
+const LIMITS = { maxBytes: 4096, maxEntries: 32 };
+const fetchSmall: typeof fetchModuleSource = (source, token, pin, resolved, validateUrl) =>
+  fetchModuleSource(source, token, pin, resolved, validateUrl, LIMITS);
 afterEach(() => {
   for (const root of new Set(git.mock.calls.map(([cwd]) => dirname(cwd))))
     logger.info({ removed: root }, 'T337 fetch temp cleanup');
@@ -69,7 +77,9 @@ describe('fetch and pin a module source', () => {
           if (args.includes(phase)) {
             temporary = dirname(cwd);
             await Promise.all(
-              Array.from({ length: 5001 }, (_, i) => writeFile(join(cwd, `empty-${i}`), '')),
+              Array.from({ length: LIMITS.maxEntries + 1 }, (_, i) =>
+                writeFile(join(cwd, `empty-${i}`), ''),
+              ),
             );
             await new Promise<void>((resolve) => {
               const timer = setTimeout(() => {
@@ -89,7 +99,7 @@ describe('fetch and pin a module source', () => {
         },
       );
       const pin = vi.fn();
-      await expect(fetchModuleSource(source, null, pin)).rejects.toThrow(
+      await expect(fetchSmall(source, null, pin)).rejects.toThrow(
         'Module tree exceeds entry limit',
       );
       expect(aborted).toBe(true);
@@ -105,7 +115,7 @@ describe('fetch and pin a module source', () => {
     image.mockRejectedValueOnce(new Error('module_source_worker_image_unavailable'));
     const resolved = vi.fn();
     const pin = vi.fn();
-    await expect(fetchModuleSource(source, null, pin, resolved)).rejects.toThrow(
+    await expect(fetchSmall(source, null, pin, resolved)).rejects.toThrow(
       'module_source_worker_image_unavailable',
     );
     expect(git).not.toHaveBeenCalled();
@@ -113,6 +123,8 @@ describe('fetch and pin a module source', () => {
     expect(pin).not.toHaveBeenCalled();
   });
   it('aborts an oversized transfer before it completes or checks out', async () => {
+    expect(MODULE_TREE_BYTES).toBe(64 * 1024 * 1024);
+    expect(MODULE_TREE_ENTRIES).toBe(5000);
     setup();
     const previous = git.getMockImplementation()!;
     let aborted = false;
@@ -124,7 +136,7 @@ describe('fetch and pin a module source', () => {
           await mkdir(join(cwd, '.git', 'objects', 'pack'), { recursive: true });
           const pack = join(cwd, '.git', 'objects', 'pack', 'tmp_pack');
           await writeFile(pack, '');
-          await truncate(pack, 65 * 1024 * 1024);
+          await truncate(pack, LIMITS.maxBytes + 1);
           await new Promise<void>((resolve) => {
             const timeout = setTimeout(resolve, 500);
             io.signal?.addEventListener(
@@ -142,9 +154,7 @@ describe('fetch and pin a module source', () => {
       },
     );
     const pin = vi.fn();
-    await expect(fetchModuleSource(source, null, pin)).rejects.toThrow(
-      'Module tree exceeds size limit',
-    );
+    await expect(fetchSmall(source, null, pin)).rejects.toThrow('Module tree exceeds size limit');
     expect(aborted).toBe(true);
     expect(git.mock.calls.some(([, args]) => args.includes('checkout'))).toBe(false);
     expect(pin).not.toHaveBeenCalled();
@@ -161,7 +171,7 @@ describe('fetch and pin a module source', () => {
         const result = await previous(cwd, args, env, io);
         if (args.includes('checkout')) {
           temporary = dirname(cwd);
-          await truncate(join(cwd, 'value'), 65 * 1024 * 1024);
+          await truncate(join(cwd, 'value'), LIMITS.maxBytes + 1);
           await new Promise<void>((resolve) => {
             const timer = setTimeout(() => {
               completed = true;
@@ -182,9 +192,7 @@ describe('fetch and pin a module source', () => {
       },
     );
     const pin = vi.fn();
-    await expect(fetchModuleSource(source, null, pin)).rejects.toThrow(
-      'Module tree exceeds size limit',
-    );
+    await expect(fetchSmall(source, null, pin)).rejects.toThrow('Module tree exceeds size limit');
     expect(aborted).toBe(true);
     expect(completed).toBe(false);
     expect(pin).not.toHaveBeenCalled();
@@ -197,13 +205,16 @@ describe('fetch and pin a module source', () => {
       const result = await previous(cwd, args, env, io);
       if (args.includes('checkout')) {
         await writeFile(join(cwd, '.git', 'objects', 'aa', 'large'), '');
-        await truncate(join(cwd, '.git', 'objects', 'aa', 'large'), 40 * 1024 * 1024);
-        await truncate(join(cwd, 'value'), 40 * 1024 * 1024);
+        await truncate(
+          join(cwd, '.git', 'objects', 'aa', 'large'),
+          Math.floor(LIMITS.maxBytes * 0.6),
+        );
+        await truncate(join(cwd, 'value'), Math.floor(LIMITS.maxBytes * 0.6));
       }
       return result;
     });
     const pin = vi.fn();
-    await expect(fetchModuleSource(source, null, pin)).resolves.toBe(sha);
+    await expect(fetchSmall(source, null, pin)).resolves.toBe(sha);
     expect(pin).toHaveBeenCalledOnce();
   });
   it.each(['link', 'size', 'name'])('refuses a fetched tree with an invalid %s', async (kind) => {
@@ -213,7 +224,7 @@ describe('fetch and pin a module source', () => {
       const result = await previous(cwd, args, env);
       if (args.includes('checkout')) {
         if (kind === 'link') await symlink('/etc', join(cwd, 'escape'));
-        if (kind === 'size') await truncate(join(cwd, 'value'), 65 * 1024 * 1024);
+        if (kind === 'size') await truncate(join(cwd, 'value'), LIMITS.maxBytes + 1);
         if (kind === 'name')
           await writeFile(
             join(cwd, 'package.json'),
@@ -223,7 +234,7 @@ describe('fetch and pin a module source', () => {
       return result;
     });
     const pin = vi.fn();
-    await expect(fetchModuleSource(source, null, pin)).rejects.toThrow();
+    await expect(fetchSmall(source, null, pin)).rejects.toThrow();
     expect(pin).not.toHaveBeenCalled();
   });
   it('resolves an annotated tag to its peeled commit', async () => {
@@ -239,7 +250,7 @@ describe('fetch and pin a module source', () => {
         : previous(cwd, args, env),
     );
     const resolved = vi.fn();
-    expect(await fetchModuleSource({ ...source, ref: 'v1' }, null, vi.fn(), resolved)).toBe(sha);
+    expect(await fetchSmall({ ...source, ref: 'v1' }, null, vi.fn(), resolved)).toBe(sha);
     expect(resolved).toHaveBeenCalledWith(sha, 'refs/tags/v1');
   });
   it('serves the token only over the credential helper protocol for the stored HTTPS host', async () => {
@@ -262,7 +273,7 @@ describe('fetch and pin a module source', () => {
       }
       return previous(cwd, args, env);
     });
-    await fetchModuleSource(source, 'private-token', vi.fn());
+    await fetchSmall(source, 'private-token', vi.fn());
   });
   it('scrubs a failing remote before it reaches any caller', async () => {
     setup();
@@ -272,7 +283,7 @@ describe('fetch and pin a module source', () => {
       stderr: 'private-token https://u:p@example.com/a',
     });
     try {
-      await fetchModuleSource(source, 'private-token', vi.fn());
+      await fetchSmall(source, 'private-token', vi.fn());
       throw new Error('unexpected success');
     } catch (error) {
       expect(String(error)).not.toMatch(/private-token|u:p/);
@@ -289,7 +300,7 @@ describe('fetch and pin a module source', () => {
       });
       await expect(access(join(root, '.git'))).rejects.toThrow();
     });
-    expect(await fetchModuleSource(source, 'private-token', pin)).toBe(sha);
+    expect(await fetchSmall(source, 'private-token', pin)).toBe(sha);
     expect(pin).toHaveBeenCalledOnce();
     await expect(access(temporary)).rejects.toThrow();
     const calls = JSON.stringify(git.mock.calls);
@@ -311,11 +322,7 @@ describe('fetch and pin a module source', () => {
         return previous(cwd, args, env);
       });
       await expect(
-        fetchModuleSource(
-          { ...source, ref: qualified.endsWith('v1') ? 'v1' : 'main' },
-          null,
-          vi.fn(),
-        ),
+        fetchSmall({ ...source, ref: qualified.endsWith('v1') ? 'v1' : 'main' }, null, vi.fn()),
       ).resolves.toBe(sha);
       const fallback = git.mock.calls.find(
         ([, args]) => args.includes('fetch') && args.at(-1) === qualified,
@@ -351,7 +358,7 @@ describe('fetch and pin a module source', () => {
       });
       const resolved = vi.fn();
       await expect(
-        fetchModuleSource(
+        fetchSmall(
           { ...source, ref: 'v1', resolvedSha: sha, resolvedRef },
           null,
           vi.fn(),
@@ -372,7 +379,7 @@ describe('fetch and pin a module source', () => {
     });
     const resolved = vi.fn();
     await expect(
-      fetchModuleSource(
+      fetchSmall(
         { ...source, resolvedSha: sha, resolvedRef: 'refs/heads/main' },
         null,
         vi.fn(),
@@ -398,7 +405,7 @@ describe('fetch and pin a module source', () => {
       const pin = vi.fn();
       const resolved = vi.fn();
       await expect(
-        fetchModuleSource({ ...source, resolvedSha: sha, resolvedRef }, null, pin, resolved),
+        fetchSmall({ ...source, resolvedSha: sha, resolvedRef }, null, pin, resolved),
       ).rejects.toThrow('module_source_ref_unavailable: Module branch or tag was not found');
       expect(resolved).not.toHaveBeenCalled();
       expect(pin).not.toHaveBeenCalled();
@@ -417,9 +424,9 @@ describe('fetch and pin a module source', () => {
     });
     const pin = vi.fn();
     const resolved = vi.fn();
-    await expect(
-      fetchModuleSource({ ...source, resolvedSha: sha }, null, pin, resolved),
-    ).rejects.toThrow('Module git fetch failed: ' + failure.stderr);
+    await expect(fetchSmall({ ...source, resolvedSha: sha }, null, pin, resolved)).rejects.toThrow(
+      'Module git fetch failed: ' + failure.stderr,
+    );
     expect(git.mock.calls.filter(([, args]) => args.includes('fetch'))).toHaveLength(1);
     expect(git.mock.calls.some(([, args]) => args.includes('ls-remote'))).toBe(false);
     expect(git.mock.calls.some(([, args]) => args.includes('checkout'))).toBe(false);
@@ -442,7 +449,7 @@ describe('fetch and pin a module source', () => {
     const pin = vi.fn();
     const resolved = vi.fn();
     await expect(
-      fetchModuleSource(
+      fetchSmall(
         { ...source, resolvedSha: sha, resolvedRef: 'refs/heads/main' },
         null,
         pin,
@@ -459,7 +466,7 @@ describe('fetch and pin a module source', () => {
       setup();
       const resolved = vi.fn();
       await expect(
-        fetchModuleSource({ ...source, resolvedSha: sha, resolvedRef }, null, vi.fn(), resolved),
+        fetchSmall({ ...source, resolvedSha: sha, resolvedRef }, null, vi.fn(), resolved),
       ).rejects.toThrow('Invalid recorded ref namespace');
       expect(git).not.toHaveBeenCalled();
       expect(resolved).not.toHaveBeenCalled();
@@ -477,7 +484,7 @@ describe('fetch and pin a module source', () => {
     const pin = vi.fn();
     const resolved = vi.fn();
     await expect(
-      fetchModuleSource({ ...source, resolvedSha: sha, resolvedRef: null }, null, pin, resolved),
+      fetchSmall({ ...source, resolvedSha: sha, resolvedRef: null }, null, pin, resolved),
     ).rejects.toThrow('module_source_ref_moved');
     expect(pin).not.toHaveBeenCalled();
     expect(resolved).not.toHaveBeenCalled();
@@ -485,12 +492,7 @@ describe('fetch and pin a module source', () => {
   it('keeps a legacy pin namespace NULL when object fetch succeeds without resolving a ref', async () => {
     setup();
     const resolved = vi.fn();
-    await fetchModuleSource(
-      { ...source, resolvedSha: sha, resolvedRef: null },
-      null,
-      vi.fn(),
-      resolved,
-    );
+    await fetchSmall({ ...source, resolvedSha: sha, resolvedRef: null }, null, vi.fn(), resolved);
     expect(resolved).toHaveBeenCalledWith(sha, null);
     expect(git.mock.calls.some(([, args]) => args.includes('ls-remote'))).toBe(false);
   });
@@ -498,26 +500,24 @@ describe('fetch and pin a module source', () => {
     'refuses invalid ref %s before network IO',
     async (ref) => {
       setup();
-      await expect(fetchModuleSource({ ...source, ref }, null, vi.fn())).rejects.toThrow(/ref/i);
+      await expect(fetchSmall({ ...source, ref }, null, vi.fn())).rejects.toThrow(/ref/i);
       expect(git).not.toHaveBeenCalled();
     },
   );
   it('refuses a source checkout and an unset directory', async () => {
     setup();
     vi.stubEnv('HAIVE_PUBLISHED_INSTALL', '');
-    await expect(fetchModuleSource(source, null, vi.fn())).rejects.toThrow(/published/i);
+    await expect(fetchSmall(source, null, vi.fn())).rejects.toThrow(/published/i);
     vi.stubEnv('HAIVE_PUBLISHED_INSTALL', 'true');
     vi.stubEnv('HAIVE_OWN_MODULES_HOST_DIR', '');
-    await expect(fetchModuleSource(source, null, vi.fn())).rejects.toThrow(
-      /HAIVE_OWN_MODULES_HOST_DIR/,
-    );
+    await expect(fetchSmall(source, null, vi.fn())).rejects.toThrow(/HAIVE_OWN_MODULES_HOST_DIR/);
     expect(git).not.toHaveBeenCalled();
   });
   it('removes the private directory after a pin failure and scrubs secrets and URL userinfo', async () => {
     setup();
     let temporary = '';
     await expect(
-      fetchModuleSource(source, 'private-token', async (root) => {
+      fetchSmall(source, 'private-token', async (root) => {
         temporary = root;
         throw new Error('private-token https://user:password@example.com/a');
       }),

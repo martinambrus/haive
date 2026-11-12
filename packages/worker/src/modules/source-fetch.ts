@@ -35,14 +35,24 @@ export function sourceFetchError(error: unknown, token: string | null): string {
   return scrubErrorPaths(scrubSecret(safeErrorMessage(error), token)).slice(0, 4096);
 }
 
-const MODULE_TREE_BYTES = 64 * 1024 * 1024;
-const MODULE_TREE_ENTRIES = 5000;
+export const MODULE_TREE_BYTES = 64 * 1024 * 1024;
+export const MODULE_TREE_ENTRIES = 5000;
+
+interface ModuleTreeLimits {
+  maxBytes: number;
+  maxEntries: number;
+}
+const MODULE_TREE_LIMITS: ModuleTreeLimits = {
+  maxBytes: MODULE_TREE_BYTES,
+  maxEntries: MODULE_TREE_ENTRIES,
+};
 
 /** Bound git writes on disk: packed objects during fetch, expanded work-tree files during checkout. */
 async function boundedTransfer<T>(
   root: string,
   transfer: (signal: AbortSignal) => Promise<T>,
   worktreeOnly = false,
+  limits: ModuleTreeLimits = MODULE_TREE_LIMITS,
 ): Promise<T> {
   const controller = new AbortController();
   let failure: unknown;
@@ -56,10 +66,10 @@ async function boundedTransfer<T>(
       if (depth > 32) throw new Error('Module tree exceeds depth limit');
       for (const entry of (await readdirSizesNoFollow(root, rel)) ?? []) {
         if (worktreeOnly && rel === '' && entry.name === '.git') continue;
-        if (++count > MODULE_TREE_ENTRIES) throw new Error('Module tree exceeds entry limit');
+        if (++count > limits.maxEntries) throw new Error('Module tree exceeds entry limit');
         if (entry.isDirectory) await walk(rel ? `${rel}/${entry.name}` : entry.name, depth + 1);
         else bytes += entry.size ?? 0;
-        if (bytes > MODULE_TREE_BYTES) throw new Error('Module tree exceeds size limit');
+        if (bytes > limits.maxBytes) throw new Error('Module tree exceeds size limit');
       }
     };
     await walk('', 0);
@@ -90,7 +100,11 @@ async function boundedTransfer<T>(
   }
 }
 
-async function validateTree(root: string, moduleId: string): Promise<void> {
+async function validateTree(
+  root: string,
+  moduleId: string,
+  limits: ModuleTreeLimits = MODULE_TREE_LIMITS,
+): Promise<void> {
   let count = 0;
   let size = 0;
   async function walk(rel: string, depth: number): Promise<void> {
@@ -99,14 +113,14 @@ async function validateTree(root: string, moduleId: string): Promise<void> {
     if (!entries) throw new Error('Module tree is missing');
     for (const entry of entries) {
       count++;
-      if (count > MODULE_TREE_ENTRIES) throw new Error('Module tree exceeds entry limit');
+      if (count > limits.maxEntries) throw new Error('Module tree exceeds entry limit');
       const child = rel ? `${rel}/${entry.name}` : entry.name;
       if (entry.name === '.git') throw new Error('Nested git metadata is refused');
       if (entry.isDirectory) await walk(child, depth + 1);
       else {
         if (entry.size === null) throw new Error('Module links and special files are refused');
         size += entry.size;
-        if (size > MODULE_TREE_BYTES) throw new Error('Module tree exceeds size limit');
+        if (size > limits.maxBytes) throw new Error('Module tree exceeds size limit');
       }
     }
   }
@@ -140,6 +154,7 @@ export async function fetchModuleSource(
   ) => Promise<void> = pinModuleTree,
   resolved: (sha: string, ref: string | null) => Promise<void> = async () => {},
   validateUrl: (raw: string) => URL = moduleSourceUrl,
+  limits: ModuleTreeLimits = MODULE_TREE_LIMITS,
 ): Promise<string> {
   if (process.env.HAIVE_PUBLISHED_INSTALL !== 'true')
     throw new Error('Module fetch requires a published install');
@@ -290,14 +305,18 @@ export async function fetchModuleSource(
         throw new Error('Module branch or tag was not found');
     }
     const fetch = (target: string) =>
-      boundedTransfer(tree, (signal) =>
-        originGitRun(
-          tree,
-          [...auth, 'fetch', '--no-tags', '--depth=1', '--end-of-options', url.href, target],
-          ADMIN_MODULE_SOURCE,
-          env,
-          { ...io, signal },
-        ),
+      boundedTransfer(
+        tree,
+        (signal) =>
+          originGitRun(
+            tree,
+            [...auth, 'fetch', '--no-tags', '--depth=1', '--end-of-options', url.href, target],
+            ADMIN_MODULE_SOURCE,
+            env,
+            { ...io, signal },
+          ),
+        false,
+        limits,
       );
     const byObject = await fetch(sha);
     if (byObject.code !== 0) {
@@ -314,9 +333,14 @@ export async function fetchModuleSource(
     if (commit !== sha)
       throw new Error('module_source_ref_moved: Fetched commit does not match the pinned SHA');
     await resolved(sha, qualifiedRef ?? null);
-    await boundedTransfer(tree, (signal) => run(['checkout', '--detach', sha, '--'], signal), true);
+    await boundedTransfer(
+      tree,
+      (signal) => run(['checkout', '--detach', sha, '--'], signal),
+      true,
+      limits,
+    );
     await removeNoFollow(tree, '.git', { recursive: true });
-    await validateTree(tree, source.moduleId);
+    await validateTree(tree, source.moduleId, limits);
     await writeFileNoFollow(
       tree,
       '.haive-source.json',

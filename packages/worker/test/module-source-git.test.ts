@@ -57,7 +57,7 @@ it('refuses a real-git oversized blob before checkout', async () => {
       }),
     );
     // Incompressible bytes exercise the packed-object transfer bound, before checkout can run.
-    await writeFile(join(root, 'blob'), randomBytes(65 * 1024 * 1024));
+    await writeFile(join(root, 'blob'), randomBytes(16 * 1024 + 1));
     await run(['add', 'package.json', 'blob']);
     await run([
       '-c',
@@ -83,6 +83,7 @@ it('refuses a real-git oversized blob before checkout', async () => {
         pin,
         undefined,
         (raw) => new URL(raw),
+        { maxBytes: 16 * 1024, maxEntries: 32 },
       ),
     ).rejects.toThrow('Module tree exceeds size limit');
     expect(checkout.attempts).toBe(0);
