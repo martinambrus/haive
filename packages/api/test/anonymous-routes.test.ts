@@ -45,6 +45,7 @@ const { installModules } = await import('../src/modules/loader.js');
 const { getDb } = await import('../src/db.js');
 
 const PUBLIC: Record<string, string> = {
+  'GET /ide/_handshake': 'static fragment bootstrap; it carries no app-session authority',
   'GET /health': 'liveness probe; the container health check carries no credential',
   'GET /version': 'an upgrade verifies the containers it swapped in before any credential exists',
   'GET /auth/registration-status':

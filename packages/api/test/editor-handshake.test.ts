@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm';
 import { createHash } from 'node:crypto';
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -139,10 +140,28 @@ describe('editor grants', () => {
 it('refuses a grant when the app session is revoked during runtime resolution', async () => {
   h.ensure.mockResolvedValue({
     waitUntilFinished: async () => {
-      fake.rows(schema.users).find((u) => u.id === USER)!.tokenVersion = 1;
+      await fake.db.update(schema.users).set({ tokenVersion: 1 }).where(eq(schema.users.id, USER));
       return { ok: true };
     },
   });
   expect((await grant()).status).toBe(403);
   expect(h.set).not.toHaveBeenCalled();
+});
+
+describe('editor bootstrap', () => {
+  it('is public, static, non-cacheable, and hashes exactly its script', async () => {
+    const res = await app.request('/ide/_handshake');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    const html = await res.text();
+    const script = html.split('<script>')[1]!.split('</script>')[0]!;
+    const hash = createHash('sha256').update(script).digest('base64');
+    expect(res.headers.get('content-security-policy')).toBe(
+      `default-src 'none'; script-src 'sha256-${hash}'; connect-src 'self'; frame-ancestors https://app.example.com`,
+    );
+    expect(script.indexOf('history.replaceState')).toBeLessThan(script.indexOf('await fetch'));
+    expect(h.ensure).not.toHaveBeenCalled();
+    expect(h.set).not.toHaveBeenCalled();
+  });
 });
