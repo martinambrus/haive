@@ -276,6 +276,11 @@ status: open · kind: fnf · found: #1108 review 2026-11-12 · priority: P4
 1. `api/src/routes/ide.ts` `isPortProxyPath` does not see `//proxy/80`, `/%70roxy/80` or `/proxy%2f80` (encoded letters or slash in the first segment); the HTTP side is identical. PRE-EXISTING, minor: `--disable-proxy` is the second guard, and code-server's own decoding is unverified. Fix: decode the first segment as Hono does before comparing, as `apiProxyTarget` does on the web.
 2. Five copies of `rawUrl.split(/[?#]/)[0]` (`ide.ts`, `terminal.ts`, `terminal-shell.ts`, `cli-stream.ts`, `browser-vnc.ts`); PRE-EXISTING, minor. Fix: one helper in `lib/upgrade-auth.ts`.
 
+### T628 · fix · 07_5 verify-files reports skills missing before they are generated
+
+status: open · kind: fix · found: T300 second run 2026-11-12 · priority: P3
+`07_5-verify-files.ts` (~:78-84) counts `.claude/skills/**/SKILL.md` and records `skills_dir passed:false, found 0` on every fresh onboarding, because `09_5-skill-generation` writes skills four steps later. `apply` only logs, so onboarding continues, but the step reports a failed check that is always false (the T300 driver stopped on it). Same class as af1845fc3 (the KB assertion moved to where the KB exists). Fix: drop the skills check from 07_5 (09_6 verifies skills), or move it after 09_5; also check that it reads the active CLI's skills destination, not only `.claude/skills/`. Evidence `.claude/tmp/codex-run/T300-S/report5.md`.
+
 ### T627 · design · per-runtime editor isolation residuals
 
 status: open · kind: design · found: T613 PR 2 review 2026-11-12 · priority: P4
@@ -1554,7 +1559,7 @@ Moved from T362 member2 so shipping the readiness fix does not mark this layout 
 
 Resume for an explicit owner priority change, a real mobile task-creation usability report, or a feature deliberately changing this header. The owner currently prioritizes functionality and demonstrated operational bugs; no broad UI audit is authorized.
 
-### T588 · FNF[worker-audit-writer] · worker audit writer follow-ups (+9)
+### T588 · FNF[worker-audit-writer] · worker audit writer follow-ups (+10)
 
 status: open · kind: fix · found: #1057 reviews 2026-11-10 · priority: P4
 Owner decision 2026-11-12: item 4: gate 4 refuses when the repository already has a saved remote or credential and points to the repository settings; typed values only fill an empty slot.
@@ -1568,6 +1573,7 @@ Owner decision 2026-11-12: item 4: gate 4 refuses when the repository already ha
 7. Gate 4's remote update emits no event when nothing changed; the api remote route emits one with empty `fields`. Nit.
 8. (PRE-EXISTING) api `routes/tasks/index.ts` ~:805 calls the unmapped `initializeTaskDatabaseState`, so a lock timeout there surfaces raw. Minor.
 9. Nothing stops a new step from importing the unmapped `initializeTaskDatabaseState` instead of the lock-mapped wrapper. Fix: a lint or ratchet test.
+10. After a gate 4 refusal (or any `pushed:false`), `12-worktree-cleanup.ts` ~:908 pushes the branch again ("pushed at 11a") through `taskRemoteUrl`, which reads `formValues.push === true`; nothing records that 11a did not push. PRE-EXISTING, harmless today; key it on 11a's output. Found by the T588-4 review.
 
 ### T589 · FNF[encryption-key-and-seed-store] · boot key and seed store leftovers (+3)
 
