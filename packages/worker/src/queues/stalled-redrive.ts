@@ -10,6 +10,7 @@ import {
   isNull,
   lt,
   not,
+  notInArray,
   or,
   sql,
   type SQLWrapper,
@@ -585,38 +586,43 @@ export async function redriveStoppedTasks(
   const cutoff = new Date(Date.now() - (opts.staleMs ?? STOP_SETTLE_STALE_MS));
   const event = taskEventsOf(db);
   const sameFailure = sql`(${schema.taskEvents.payload}->>'failedAt')::timestamp = ${schema.tasks.completedAt}`;
-  const candidates = await db
-    .select({
-      taskId: schema.tasks.id,
-      userId: schema.tasks.userId,
-      failedAt: schema.tasks.completedAt,
-    })
-    .from(schema.tasks)
-    .where(
-      and(
-        eq(schema.tasks.status, 'failed'),
-        lt(schema.tasks.completedAt, cutoff),
-        exists(event(STOP_SETTLE_EVENTS.REQUESTED, sameFailure)),
-        not(exists(event(STOP_SETTLE_EVENTS.FINISHED, sameFailure))),
-        not(
-          exists(
-            event(
-              STOP_SETTLE_EVENTS.REDRIVEN,
-              sameFailure,
-              gte(schema.taskEvents.createdAt, cutoff),
+  const unsettled = (live: Set<string>, limit: number) =>
+    db
+      .select({
+        taskId: schema.tasks.id,
+        userId: schema.tasks.userId,
+        failedAt: schema.tasks.completedAt,
+      })
+      .from(schema.tasks)
+      .where(
+        and(
+          eq(schema.tasks.status, 'failed'),
+          lt(schema.tasks.completedAt, cutoff),
+          live.size > 0 ? notInArray(schema.tasks.id, [...live]) : undefined,
+          exists(event(STOP_SETTLE_EVENTS.REQUESTED, sameFailure)),
+          not(exists(event(STOP_SETTLE_EVENTS.FINISHED, sameFailure))),
+          not(
+            exists(
+              event(
+                STOP_SETTLE_EVENTS.REDRIVEN,
+                sameFailure,
+                gte(schema.taskEvents.createdAt, cutoff),
+              ),
             ),
           ),
         ),
-      ),
-    )
-    .orderBy(asc(schema.tasks.completedAt))
-    .limit(opts.batchSize ?? STOP_SETTLE_REDRIVE_BATCH);
-  if (candidates.length === 0) return 0;
+      )
+      .orderBy(asc(schema.tasks.completedAt))
+      .limit(limit);
+  // The queue is read only when something is unsettled, and its live jobs are excluded before the
+  // batch limit, so tasks whose jobs are still queued cannot fill every batch and hold back the
+  // ones whose jobs were lost.
+  if ((await unsettled(new Set(), 1)).length === 0) return 0;
   const live = await deps.queuedStoppedTaskIds();
   if (live === null) return 0;
+  const candidates = await unsettled(live, opts.batchSize ?? STOP_SETTLE_REDRIVE_BATCH);
   let redriven = 0;
   for (const task of candidates) {
-    if (live.has(task.taskId)) continue;
     const failedAt = task.failedAt!.toISOString();
     try {
       // No database connection held across Redis. A crash after this stamp delays the next

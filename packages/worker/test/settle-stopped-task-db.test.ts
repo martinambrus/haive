@@ -650,6 +650,18 @@ describe.skipIf(!url)('the worker settle job for a task the api Stop failed, on 
       expect(await sweep(new Set([taskId]))).toEqual({ count: 0, queued: [] });
     });
 
+    it('does not let tasks with live jobs fill the batch ahead of a lost one', async () => {
+      const older = new Date(FAILED_AT.getTime() - 60_000);
+      const queuedTask = await seedTask('failed', { completedAt: older });
+      await request(queuedTask, older);
+      const lost = await seedTask('failed');
+      await request(lost);
+      expect(await sweep(new Set([queuedTask]), 1)).toEqual({
+        count: 1,
+        queued: [payloadFor(lost)],
+      });
+    });
+
     it('leaves a just-issued Stop alone and bounds each batch', async () => {
       const fresh = await seedTask('failed', { completedAt: new Date() });
       await request(fresh, new Date());
