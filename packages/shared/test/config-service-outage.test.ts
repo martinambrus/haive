@@ -148,9 +148,10 @@ class FakeRedis {
           return void socket.write('+OK\r\n');
         }
         this.beforeEncryptionSet?.();
-        if (!this.store.has(key)) this.store.set(key, JSON.parse(expected).key);
+        const published = !this.store.has(key);
+        if (published) this.store.set(key, JSON.parse(expected).key);
         if (this.store.get(pending) === expected) this.store.delete(pending);
-        return void socket.write(bulk(this.store.get(key)!));
+        return void socket.write(`:${Number(published)}\r\n`);
       }
       case 'SETNX': {
         const had = this.store.has(args[1]!);

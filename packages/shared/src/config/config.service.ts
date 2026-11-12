@@ -947,7 +947,7 @@ export class ConfigService {
     const exists = await this.redisCall('ensureEncryptionKey', (redis) =>
       redis.exists(CONFIG_KEYS.ENCRYPTION_KEY),
     );
-    const envKey = this.getEnvEncryptionKey();
+    const { key: envKey, invalid: envKeyInvalid } = this.getEnvEncryptionKey();
 
     if (!exists) {
       if (envKey) {
@@ -960,46 +960,55 @@ export class ConfigService {
             : 'Found encryption key seeded by another process',
         );
       } else {
-        await generateBootEncryptionKey(typeof db === 'function' ? db() : db, {
-          getKey: () =>
-            this.redisCall('ensureEncryptionKey', (redis) => redis.get(CONFIG_KEYS.ENCRYPTION_KEY)),
-          getPending: () =>
-            this.redisCall('ensureEncryptionKey', (redis) => redis.get(PENDING_ENCRYPTION_KEY)),
-          reservePending: async (value) => {
-            await this.redisCall('ensureEncryptionKey', (redis) =>
-              redis.eval(
-                `if redis.call('exists', KEYS[1]) == 0 then
+        await generateBootEncryptionKey(
+          typeof db === 'function' ? db() : db,
+          {
+            getKey: () =>
+              this.redisCall('ensureEncryptionKey', (redis) =>
+                redis.get(CONFIG_KEYS.ENCRYPTION_KEY),
+              ),
+            getPending: () =>
+              this.redisCall('ensureEncryptionKey', (redis) => redis.get(PENDING_ENCRYPTION_KEY)),
+            reservePending: async (value) => {
+              await this.redisCall('ensureEncryptionKey', (redis) =>
+                redis.eval(
+                  `if redis.call('exists', KEYS[1]) == 0 then
                    return redis.call('set', KEYS[2], ARGV[1], 'NX')
                  end
                  return false`,
-                2,
-                CONFIG_KEYS.ENCRYPTION_KEY,
-                PENDING_ENCRYPTION_KEY,
-                value,
-              ),
-            );
-          },
-          publishPending: async (value) => {
-            await this.redisCall('ensureEncryptionKey', (redis) =>
-              redis.eval(
-                `
+                  2,
+                  CONFIG_KEYS.ENCRYPTION_KEY,
+                  PENDING_ENCRYPTION_KEY,
+                  value,
+                ),
+              );
+            },
+            publishPending: async (value) => {
+              const published = await this.redisCall('ensureEncryptionKey', (redis) =>
+                redis.eval(
+                  `
+              local published = 0
               if redis.call('exists', KEYS[1]) == 0 then
                 if redis.call('get', KEYS[2]) ~= ARGV[1] then
                   return redis.error_reply('pending encryption key changed')
                 end
                 redis.call('set', KEYS[1], cjson.decode(ARGV[1]).key)
+                published = 1
               end
               if redis.call('get', KEYS[2]) == ARGV[1] then redis.call('del', KEYS[2]) end
-              return redis.call('get', KEYS[1])
+              return published
             `,
-                2,
-                CONFIG_KEYS.ENCRYPTION_KEY,
-                PENDING_ENCRYPTION_KEY,
-                value,
-              ),
-            );
+                  2,
+                  CONFIG_KEYS.ENCRYPTION_KEY,
+                  PENDING_ENCRYPTION_KEY,
+                  value,
+                ),
+              );
+              return published === 1;
+            },
           },
-        });
+          envKeyInvalid,
+        );
       }
     } else {
       logger.info('Found existing encryption key');
@@ -1147,7 +1156,7 @@ export class ConfigService {
   async getEncryptionKey(): Promise<string> {
     const key = await this.get(CONFIG_KEYS.ENCRYPTION_KEY);
     if (!key) {
-      const envKey = this.getEnvEncryptionKey();
+      const { key: envKey } = this.getEnvEncryptionKey();
       if (envKey) {
         await this.redisCall('getEncryptionKey', (redis) =>
           redis.set(CONFIG_KEYS.ENCRYPTION_KEY, envKey, 'NX'),
@@ -1168,7 +1177,7 @@ export class ConfigService {
     // Production refuses a mismatch on every read, not only while a cached null lasts; elsewhere
     // the boot check already warned once.
     if (process.env.NODE_ENV === 'production')
-      this.checkEncryptionKey(key, this.getEnvEncryptionKey(false));
+      this.checkEncryptionKey(key, this.getEnvEncryptionKey(false).key);
     return key;
   }
 
@@ -1202,22 +1211,22 @@ export class ConfigService {
   }
 
   /** `warn` false on a per-read path: an invalid value is reported at boot, not on every request. */
-  private getEnvEncryptionKey(warn = true): string | null {
+  private getEnvEncryptionKey(warn = true): { key: string | null; invalid: boolean } {
     const raw = process.env.CONFIG_ENCRYPTION_KEY?.trim();
-    if (!raw) return null;
+    if (!raw) return { key: null, invalid: false };
     if (/^[0-9a-fA-F]{64}$/.test(raw)) {
-      return raw.toLowerCase();
+      return { key: raw.toLowerCase(), invalid: false };
     }
     try {
       const decoded = Buffer.from(raw, 'base64');
       if (decoded.length === 32) {
-        return decoded.toString('hex');
+        return { key: decoded.toString('hex'), invalid: false };
       }
     } catch {
       // Ignore invalid base64
     }
     if (warn) logger.warn('CONFIG_ENCRYPTION_KEY must be 64 hex chars or base64-encoded 32 bytes');
-    return null;
+    return { key: null, invalid: true };
   }
 
   private ensureInitialized(): void {

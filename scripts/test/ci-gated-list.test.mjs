@@ -70,6 +70,8 @@ const gatedFiles = testFiles(join(root, 'packages'))
 const exemptions = {
   'packages/api/test/auth-throttle.test.ts': 'smokes runs the auth throttle Redis check.',
   'packages/shared/test/rag-sync-lock.test.ts': 'smokes runs the RAG sync lock Redis check.',
+  'packages/shared/test/encryption-key-boot-redis.test.ts':
+    'smokes runs the boot encryption key Redis check.',
   'packages/shared/test/private-endpoint-seed-store.test.ts':
     'smokes runs the private endpoint seed Redis check.',
   'packages/worker/test/advance-dedup-redis.test.ts':

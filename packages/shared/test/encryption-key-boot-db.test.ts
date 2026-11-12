@@ -42,8 +42,10 @@ describe.skipIf(!url)('boot encryption key database boundary', () => {
           await db.$client`select id from audit_events where id = ${JSON.parse(value).id}`;
         expect(rows).toHaveLength(1);
       }
+      const published = key === null;
       key ??= JSON.parse(value).key;
       if (pending === value) pending = null;
+      return published;
     });
     return {
       getKey: async () => key,

@@ -345,6 +345,13 @@ jobs:
         env:
           CONFIG_SEED_REDIS_TEST_URL: redis://127.0.0.1:6379/4
 
+      - name: Boot encryption key scripts on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
+        run: pnpm --filter @haive/shared exec vitest run test/encryption-key-boot-redis.test.ts
+        env:
+          ENCRYPTION_KEY_BOOT_REDIS_TEST_URL: redis://127.0.0.1:6379/3
+
       - name: Usage-auth stash script on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         timeout-minutes: 5
@@ -376,9 +383,9 @@ jobs:
   postgres-gated:
     name: Postgres-gated tests
     runs-on: ubuntu-latest
-    # 144 rows × 10 s (measured) + 120 s setup = 1560 s green; 1.5 × row time = 2160 s.
-    # 38 minutes covers the 36-minute check plus setup and leaves 720 s over green.
-    timeout-minutes: 38
+    # 145 rows × 10 s (measured) + 120 s setup = 1570 s green; 1.5 × row time = 2175 s.
+    # 39 minutes covers the 37-minute check plus setup and leaves 770 s over green.
+    timeout-minutes: 39
     services:
       postgres:
         image: postgres:18-alpine
@@ -480,7 +487,7 @@ jobs:
       # Setup, including module builds, ends at migrate; a failed setup never runs the list.
       - name: Postgres-gated tests
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
-        timeout-minutes: 36
+        timeout-minutes: 37
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
           PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}

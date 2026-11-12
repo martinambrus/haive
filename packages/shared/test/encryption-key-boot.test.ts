@@ -50,12 +50,13 @@ class RedisFake extends EventEmitter {
       return null;
     }
     if (this.failPublish) throw new Error('publish failed');
-    if (!this.store.has(key)) {
+    const published = !this.store.has(key);
+    if (published) {
       if (this.store.get(pending) !== expected) throw new Error('pending key changed');
       this.store.set(key, JSON.parse(expected).key);
     }
     if (this.store.get(pending) === expected) this.store.delete(pending);
-    return this.store.get(key);
+    return Number(published);
   }
   pipeline() {
     return { setnx: vi.fn(), exec: async () => [] };
@@ -131,6 +132,22 @@ describe('boot encryption key safety', () => {
     expect(fixture.remove).not.toHaveBeenCalled();
   });
 
+  it('identifies an invalid environment key instead of reporting it unset', async () => {
+    vi.stubEnv('CONFIG_ENCRYPTION_KEY', 'replace-with-your-key');
+    await expect(boot(service(), database({ users: 1 }).db)).rejects.toThrow(
+      /CONFIG_ENCRYPTION_KEY is set but invalid \(ignored\)/,
+    );
+    expect(redis.store.has(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(false);
+  });
+
+  it('reports corrupt pending JSON with the key recovery guidance', async () => {
+    redis.store.set(PENDING, '{broken');
+    await expect(boot(service(), database().db)).rejects.toThrow(
+      'Invalid pending encryption key; restore the original CONFIG_ENCRYPTION_KEY',
+    );
+    expect(redis.store.has(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(false);
+  });
+
   it('requires a database rather than assuming this is a fresh install', async () => {
     await expect(boot(service())).rejects.toThrow(/database/i);
     expect(redis.store.has(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(false);
@@ -204,6 +221,14 @@ describe('boot encryption key safety', () => {
     const b = service();
     await Promise.all([boot(a, fixture.db), boot(b, fixture.db)]);
     expect(await a.getEncryptionKey()).toBe(await b.getEncryptionKey());
+    expect(
+      vi
+        .mocked(logger.warn)
+        .mock.calls.filter(
+          ([message]) =>
+            typeof message === 'string' && message.startsWith('Generated new encryption key'),
+        ),
+    ).toHaveLength(1);
   });
 
   it('does not reserve or audit after a peer publishes just before reservation', async () => {
