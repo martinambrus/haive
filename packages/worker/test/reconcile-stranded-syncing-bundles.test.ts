@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
+import * as fsSafe from '@haive/shared/fs-safe';
 import * as recovery from '../src/repo/bundle-recovery.js';
 import { createFakeDb } from '@haive/database/testing';
 
@@ -163,6 +164,101 @@ describe('reconcileStrandedSyncingBundles', () => {
         );
       } finally {
         warn.mockRestore();
+        if (saved === undefined) delete process.env.BUNDLE_STORAGE_ROOT;
+        else process.env.BUNDLE_STORAGE_ROOT = saved;
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(['outside transactions', 'racing sweeps', 'crash before settlement', 'new generation'])(
+    'recovers through short phases: %s',
+    async (scenario) => {
+      const { mkdtemp, readFile, rm } = await import('node:fs/promises');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+      const { seedCrashedReplacement } = await import('./bundle-replacement-fixture.js');
+      const root = await mkdtemp(join(tmpdir(), 'bundle-phases-'));
+      const saved = process.env.BUNDLE_STORAGE_ROOT;
+      process.env.BUNDLE_STORAGE_ROOT = root;
+      const fixture = await seedCrashedReplacement(root, fake, 'after swap');
+      const originalStamp = row(fixture.payload.bundleId).updatedAt;
+      const transaction = fake.db.transaction.bind(fake.db);
+      let depth = 0;
+      const tx = vi.spyOn(fake.db, 'transaction').mockImplementation(async (fn) => {
+        depth++;
+        try {
+          return await transaction(fn);
+        } finally {
+          depth--;
+        }
+      });
+      const readOriginal = recovery.readReplacement;
+      let entered!: () => void;
+      let release!: () => void;
+      const reached = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const read = vi.spyOn(recovery, 'readReplacement').mockImplementation(async (...args) => {
+        if (scenario === 'outside transactions') expect(depth).toBe(0);
+        if (scenario === 'racing sweeps') {
+          entered();
+          await gate;
+        }
+        return readOriginal(...args);
+      });
+      const treeOriginal = fsSafe.renameNoFollow;
+      const tree = vi.spyOn(fsSafe, 'renameNoFollow').mockImplementation(async (...args) => {
+        if (scenario === 'outside transactions') expect(depth).toBe(0);
+        const restored = await treeOriginal(...args);
+        if (scenario === 'new generation')
+          fake.patch(schema.customBundles, fixture.payload.bundleId, {
+            status: 'active',
+            archivePath: 'newer-source.zip',
+            updatedAt: new Date(),
+          });
+        return restored;
+      });
+      try {
+        if (scenario === 'crash before settlement') {
+          let writes = 0;
+          fake.hooks.beforeUpdate = async () => {
+            if (++writes === 2) throw new Error('process died before settlement');
+          };
+          await run();
+          fake.hooks.beforeUpdate = null;
+          expect(row(fixture.payload.bundleId).status).toBe('syncing');
+          expect(row(fixture.payload.bundleId).updatedAt).not.toEqual(originalStamp);
+          expect(await readFile(join(fixture.dest, 'old.md'), 'utf8')).toBe('old tree');
+          fake.patch(schema.customBundles, fixture.payload.bundleId, { updatedAt: minutesAgo(10) });
+          await run();
+        } else if (scenario === 'racing sweeps') {
+          const first = run();
+          await reached;
+          const second = run();
+          // Both passes have had a chance to observe the candidate. Only the owner reads disk.
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          const reads = read.mock.calls.length;
+          release();
+          await Promise.all([first, second]);
+          expect(reads).toBe(1);
+        } else await run();
+        expect(row(fixture.payload.bundleId)).toMatchObject(
+          scenario === 'new generation'
+            ? { status: 'active', archivePath: 'newer-source.zip' }
+            : { status: 'active', ...fixture.previousArchive },
+        );
+        await run();
+        expect(await readFile(join(fixture.dest, 'old.md'), 'utf8')).toBe('old tree');
+      } finally {
+        release();
+        tx.mockRestore();
+        read.mockRestore();
+        tree.mockRestore();
+        fake.hooks.beforeUpdate = null;
         if (saved === undefined) delete process.env.BUNDLE_STORAGE_ROOT;
         else process.env.BUNDLE_STORAGE_ROOT = saved;
         await rm(root, { recursive: true, force: true });

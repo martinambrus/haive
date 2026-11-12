@@ -279,27 +279,13 @@ export async function handleIngestZip(
     try {
       restored =
         !published && archiveRel && replacement
-          ? await db.transaction(async (tx) => {
-              const [current] = await tx
-                .select()
-                .from(schema.customBundles)
-                .where(
-                  and(
-                    eq(schema.customBundles.id, bundle.id),
-                    eq(schema.customBundles.archivePath, bundle.archivePath!),
-                    eq(schema.customBundles.status, 'syncing'),
-                  ),
-                )
-                .for('update');
-              if (!current) return true; // A newer admission or completed catalog owns the tree.
-              return restoreReplacementBundle(
-                tx as unknown as Database,
-                bundleStorageRoot,
-                current,
-                replacement!,
-                scrubErrorPaths(msg),
-              );
-            })
+          ? await restoreReplacementBundle(
+              db,
+              bundleStorageRoot,
+              bundle,
+              replacement,
+              scrubErrorPaths(msg),
+            )
           : false;
       if (restored && archiveRel && replacement) {
         const current = await loadBundle(db, bundle.id);
@@ -328,6 +314,7 @@ export async function handleIngestZip(
         .where(
           and(
             eq(schema.customBundles.id, bundle.id),
+            eq(schema.customBundles.status, 'syncing'),
             bundle.archivePath
               ? eq(schema.customBundles.archivePath, bundle.archivePath)
               : undefined,
