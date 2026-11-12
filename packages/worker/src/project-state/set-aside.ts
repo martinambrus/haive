@@ -949,6 +949,21 @@ async function isDirty(
   return row !== null && row.written < row.revision;
 }
 
+// Bound standing diagnoses across all repositories and phases, including admission refusals.
+// Success re-arms every diagnosis for that repository; restart or eviction may warn again.
+const resyncWarnings = new Set<string>();
+function warnResyncOnce(repositoryId: string, reasons: Record<string, unknown>[]): void {
+  const key = JSON.stringify([repositoryId, reasons]);
+  if (resyncWarnings.has(key)) return;
+  if (resyncWarnings.size >= 4096) resyncWarnings.delete(resyncWarnings.values().next().value!);
+  resyncWarnings.add(key);
+  logger.warn({ repositoryId, reasons }, 'projection re-sync incomplete; recovery will retry');
+}
+function rearmResyncWarnings(repositoryId: string): void {
+  const prefix = `[${JSON.stringify(repositoryId)},`;
+  for (const key of resyncWarnings) if (key.startsWith(prefix)) resyncWarnings.delete(key);
+}
+
 /** After a move of the checkout: reads the new head's record and plan in, then writes what this install
  *  still has pending over them. A step that fails here leaves its mark raised, so the sweep retries it.
  *  Whether both halves re-synced: false while a merge, rebase, cherry-pick or revert is open, when either threw, or when the
@@ -963,10 +978,7 @@ export async function resyncHaiveProjections(
 ): Promise<boolean> {
   const reasons: Record<string, unknown>[] = [];
   const incomplete = (reason: Record<string, unknown>): false => {
-    logger.warn(
-      { repositoryId, reasons: [...reasons, reason] },
-      'projection re-sync incomplete; recovery will retry',
-    );
+    warnResyncOnce(repositoryId, [...reasons, reason]);
     return false;
   };
   if (projectionRecoveryHeld(repoPath))
@@ -1032,8 +1044,8 @@ export async function resyncHaiveProjections(
       });
     }
   }
-  if (!synced)
-    logger.warn({ repositoryId, reasons }, 'projection re-sync incomplete; recovery will retry');
+  if (!synced) warnResyncOnce(repositoryId, reasons);
+  else rearmResyncWarnings(repositoryId);
   return synced;
 }
 

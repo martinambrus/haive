@@ -8,6 +8,7 @@ const calls = vi.hoisted(() => ({
   refreshed: true,
   dirty: { state: false, plan: false },
   unreadable: false,
+  open: false,
 }));
 
 vi.mock('../repo/git-operation.js', () => {
@@ -20,7 +21,7 @@ vi.mock('../repo/git-operation.js', () => {
           'git rev-parse --git-path MERGE_HEAD failed in /repo: fatal: bad config line 11',
         );
       }
-      return false;
+      return calls.open;
     },
   };
 });
@@ -72,6 +73,7 @@ beforeEach(() => {
   calls.refreshed = true;
   calls.dirty = { state: false, plan: false };
   calls.unreadable = false;
+  calls.open = false;
 });
 
 describe('resyncHaiveProjections settles only a state sync that finished', () => {
@@ -132,30 +134,64 @@ describe('an unreadable git never makes a re-sync throw', () => {
 
 afterEach(() => vi.restoreAllMocks());
 it.each<ProjectStateSyncOutcome>(['held', 'superseded', 'refused'])(
-  'warns once per attempt with the structured %s diagnosis',
+  'warns once for a standing structured %s diagnosis',
   async (outcome) => {
     calls.outcome = outcome;
+    const repositoryId = `standing-${outcome}`;
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      expect(await resyncHaiveProjections(marksDb(), 'repo-1', '/repo')).toBe(false);
-      expect(warn).toHaveBeenCalledTimes(attempt);
-      expect(warn).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          repositoryId: 'repo-1',
-          reasons: [
-            expect.objectContaining({
-              phase: 'state_sync',
-              outcome,
-              reason: 'record read refused',
-              code: 'write_pending',
-            }),
-          ],
-        }),
-        expect.any(String),
-      );
+    for (let attempt = 0; attempt < 5; attempt++) {
+      expect(await resyncHaiveProjections(marksDb(), repositoryId, '/repo')).toBe(false);
     }
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      {
+        repositoryId,
+        reasons: [
+          { phase: 'state_sync', outcome, reason: 'record read refused', code: 'write_pending' },
+        ],
+      },
+      expect.any(String),
+    );
   },
 );
+
+it('warns for changed reasons and re-arms all reasons after success for that repository', async () => {
+  const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  const retry = () => resyncHaiveProjections(marksDb(), 'changed-reasons', '/repo');
+  calls.outcome = 'held';
+  expect(await retry()).toBe(false);
+  calls.outcome = 'refused';
+  expect(await retry()).toBe(false);
+  expect(await retry()).toBe(false);
+  expect(warn).toHaveBeenCalledTimes(2);
+  calls.outcome = 'applied';
+  expect(await retry()).toBe(true);
+  calls.outcome = 'held';
+  expect(await retry()).toBe(false);
+  calls.outcome = 'refused';
+  expect(await retry()).toBe(false);
+  expect(warn).toHaveBeenCalledTimes(4);
+});
+
+it('deduplicates admission failures independently per repository', async () => {
+  calls.open = true;
+  const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  for (const repositoryId of ['admission-a', 'admission-a', 'admission-b', 'admission-b']) {
+    expect(await resyncHaiveProjections(marksDb(), repositoryId, '/repo')).toBe(false);
+  }
+  expect(warn).toHaveBeenCalledTimes(2);
+});
+
+it('evicts the oldest warning at the 4096-entry bound', async () => {
+  calls.open = true;
+  const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  const retry = (n: number) => resyncHaiveProjections(marksDb(), `bounded-${n}`, '/repo');
+  for (let n = 0; n <= 4096; n++) expect(await retry(n)).toBe(false);
+  expect(warn).toHaveBeenCalledTimes(4097);
+  expect(await retry(4096)).toBe(false);
+  expect(warn).toHaveBeenCalledTimes(4097);
+  expect(await retry(0)).toBe(false);
+  expect(warn).toHaveBeenCalledTimes(4098);
+});
 
 it('retains sanitized database diagnostics in an incomplete attempt', async () => {
   const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
