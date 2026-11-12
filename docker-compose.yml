@@ -24,7 +24,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-haive} -d ${POSTGRES_DB:-haive}"]
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-haive} -d ${POSTGRES_DB:-haive}']
       interval: 5s
       timeout: 5s
       retries: 5
@@ -47,7 +47,7 @@ services:
     command:
       - redis-server
       - --appendonly
-      - "yes"
+      - 'yes'
       - --maxmemory
       - 256mb
       - --maxmemory-policy
@@ -55,7 +55,7 @@ services:
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
       timeout: 3s
       retries: 5
@@ -84,7 +84,7 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     healthcheck:
-      test: ["CMD", "ollama", "list"]
+      test: ['CMD', 'ollama', 'list']
       interval: 10s
       timeout: 5s
       retries: 5
@@ -126,6 +126,7 @@ services:
       # pages (the proxied editor) call it from even when a reverse proxy rewrites Host.
       HAIVE_API_PORT: ${HAIVE_API_PORT:-3001}
       HAIVE_PUBLIC_API_URL: ${HAIVE_PUBLIC_API_URL:-}
+      HAIVE_EDITOR_ORIGIN: ${HAIVE_EDITOR_ORIGIN:-}
       # IPs or CIDRs (comma separated) of the reverse proxies whose X-Forwarded-For header the api
       # may believe when it counts sign-in and registration attempts per client. Empty by default:
       # the TCP peer is used, and a header from anyone else is never read.
@@ -214,8 +215,8 @@ services:
         RTK_RELEASE_VERSION: ${RTK_RELEASE_VERSION:-v1.0.1}
         RTK_X86_64_MUSL_SHA256: ${RTK_X86_64_MUSL_SHA256:-5b919c3bccb799b67a61866d0e617410a4fcdf173e2614440e59de2fa2003436}
     image: ${HAIVE_INSTALL_ID:-haive}-cli-sandbox:latest
-    profiles: ["sandbox"]
-    command: ["true"]
+    profiles: ['sandbox']
+    command: ['true']
 
   web:
     build:

@@ -2,7 +2,11 @@ import { configService, secretsService, userSecretsService, logger } from '@haiv
 import { waitForDatabaseReady } from '@haive/database';
 import { initDatabase } from './db.js';
 import { initRedis } from './redis.js';
-import { publicApiOrigin, webOrigin as resolveWebOrigin } from './lib/request-origin.js';
+import {
+  editorOrigin,
+  publicApiOrigin,
+  webOrigin as resolveWebOrigin,
+} from './lib/request-origin.js';
 
 export interface BootstrapResult {
   databaseUrl: string;
@@ -12,6 +16,7 @@ export interface BootstrapResult {
 }
 
 export async function bootstrap(): Promise<BootstrapResult> {
+  editorOrigin(); // Validate the optional operator setting before opening connections.
   const databaseUrl = process.env.DATABASE_URL;
   const redisUrl = process.env.REDIS_URL;
   if (!databaseUrl) throw new Error('DATABASE_URL is required');

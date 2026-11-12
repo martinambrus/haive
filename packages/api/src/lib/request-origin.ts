@@ -28,9 +28,30 @@ export function canonicalOrigin(value: string): string {
   }
 }
 
-/** The editor currently lives on the api's public origin. */
+/** An optional dedicated editor origin, otherwise the api's public origin. */
 export function editorOrigin(web: string = webOrigin()): string | null {
-  return publicApiOrigin(web);
+  const configured = process.env.HAIVE_EDITOR_ORIGIN?.trim();
+  if (!configured) return publicApiOrigin(web);
+  try {
+    const url = new URL(configured);
+    // Check the raw suffix too: URL normalisation hides /./ and empty ?/#.
+    if (
+      !/^https?:\/\/[^/\\?#\s]+\/?$/i.test(configured) ||
+      !['http:', 'https:'].includes(url.protocol) ||
+      url.username ||
+      url.password ||
+      configured.includes('@') ||
+      url.pathname !== '/' ||
+      url.search ||
+      url.hash
+    )
+      throw new Error('Invalid origin');
+    return url.origin;
+  } catch {
+    throw new Error(
+      'HAIVE_EDITOR_ORIGIN must be an HTTP(S) origin without credentials, path, query or fragment',
+    );
+  }
 }
 
 export function isIdePath(path: string): boolean {
