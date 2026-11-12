@@ -209,15 +209,29 @@ export function CliProviderForm({
   useEffect(() => {
     if (!metadata.versionPinnable) return;
     const controller = new AbortController();
-    api
-      .get<{ user: { role: 'admin' | 'user' } | null }>('/auth/me', controller.signal)
-      .then(({ user }) => {
+    let timer: ReturnType<typeof setTimeout>;
+    const read = async () => {
+      try {
+        const { user } = await api.get<{ user: { role: 'admin' | 'user' } | null }>(
+          '/auth/me',
+          controller.signal,
+        );
         if (!controller.signal.aborted) setCanReadRefresh(user?.role === 'admin');
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) setCanReadRefresh(false);
-      });
-    return () => controller.abort();
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        setCanReadRefresh(false);
+        // Match job polling: transport errors, 5xx, timeouts and throttling can recover;
+        // an authentication or authorization refusal needs no background retry.
+        const status = (err as ApiError).status;
+        if (status === undefined || status >= 500 || status === 408 || status === 429)
+          timer = setTimeout(() => void read(), 10_000);
+      }
+    };
+    void read();
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
   }, [metadata.versionPinnable]);
   const [refreshingVersions, setRefreshingVersions] = useState(false);
   const [refreshPhase, setRefreshPhase] = useState<QueuedJobPhase>('queued');

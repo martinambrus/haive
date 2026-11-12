@@ -218,6 +218,62 @@ it('still names the failed sources of a manual refresh when the role read failed
   expect(h.get.mock.calls.filter(([path]) => path.endsWith('/refresh-result'))).toHaveLength(0);
 });
 
+it('retries a transient role read and reveals the stored result without reloading', async () => {
+  const original = h.get.getMockImplementation()!;
+  let attempts = 0;
+  h.get.mockImplementation((path: string) => {
+    if (path === '/auth/me' && ++attempts === 1) return Promise.reject(new Error('offline'));
+    return original(path);
+  });
+  const view = mount();
+  await settle(view);
+  expect(h.get.mock.calls.filter(([path]) => path.endsWith('/refresh-result'))).toHaveLength(0);
+  await vi.advanceTimersByTimeAsync(10_000);
+  await settle(view);
+  expect(h.get.mock.calls.filter(([path]) => path === '/auth/me')).toHaveLength(2);
+  expect(h.get.mock.calls.filter(([path]) => path.endsWith('/refresh-result'))).toHaveLength(1);
+});
+
+it('cancels a pending role retry when the form unmounts', async () => {
+  h.get.mockRejectedValue(new Error('offline'));
+  let mounted = true;
+  const view = createRenderer(() =>
+    mounted ? createElement(CliProviderForm, { mode: 'create', metadata }) : null,
+  );
+  await settle(view);
+  mounted = false;
+  view.draw();
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(h.get).toHaveBeenCalledOnce();
+});
+
+it.each([401, 403])('does not retry a role read refused with %s', async (status) => {
+  h.get.mockRejectedValue(Object.assign(new Error('refused'), { status }));
+  const view = mount();
+  await settle(view);
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(h.get).toHaveBeenCalledOnce();
+});
+
+it('does not retry when an in-flight role read fails after unmount', async () => {
+  let reject!: (error: Error) => void;
+  h.get.mockImplementation(
+    () =>
+      new Promise((_resolve, fail) => {
+        reject = fail;
+      }),
+  );
+  let mounted = true;
+  const view = createRenderer(() =>
+    mounted ? createElement(CliProviderForm, { mode: 'create', metadata }) : null,
+  );
+  mounted = false;
+  view.draw();
+  reject(new Error('offline'));
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(h.get).toHaveBeenCalledOnce();
+});
+
 it('retries a partial secret removal without deleting the already removed name again', async () => {
   const secrets = [{ secretName: 'FIRST' }, { secretName: 'SECOND' }];
   const deleted = new Set<string>();
