@@ -81,7 +81,7 @@ const exemptions = {
   'packages/worker/src/queues/cli-exec/agent-lease.test.ts':
     'smokes runs the agent pool Redis check.',
   'packages/worker/test/module-source-pin.test.ts':
-    'Docker opt-in control requires a built worker image; it is outside the store-backed list.',
+    'smokes runs it inside the built worker image with its Docker opt-in set.',
 };
 
 const ci = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8');
@@ -161,5 +161,16 @@ describe('the environment-gated list in ci.yml', () => {
         `exempt file has no workflow invocation with its guard environment: ${file}`,
       );
     }
+    // The Docker control runs through `docker run <image> ... vitest run`, not the pnpm filter.
+    const pin = 'packages/worker/test/module-source-pin.test.ts';
+    const pinEnv = gatedEnvironment(readFileSync(join(root, pin), 'utf8'));
+    assert.ok(
+      steps.some(
+        (step) =>
+          step.run?.includes('vitest run --root . test/module-source-pin.test.ts') &&
+          pinEnv.every((name) => step.run.includes(`-e ${name}=`)),
+      ),
+      `exempt file has no workflow invocation with its guard environment: ${pin}`,
+    );
   });
 });

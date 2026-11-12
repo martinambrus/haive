@@ -677,7 +677,7 @@ describe.skipIf(!url)('deferred legacy membership PostgreSQL', () => {
       await lockRepositoryTasksKey(holder, s.repo.id);
       const started = Date.now();
       // The step maps the database error to user copy; observe SQLSTATE before that mapping.
-      await expect(apply()).rejects.toBeInstanceOf(Error);
+      await expect(apply()).rejects.toThrow('Repository is busy');
       expect(lockTimeouts).toBe(1);
       expect(Date.now() - started).toBeGreaterThanOrEqual(REPOSITORY_TASKS_LOCK_TIMEOUT_MS - 100);
       expect(Date.now() - started).toBeLessThan(REPOSITORY_TASKS_LOCK_TIMEOUT_MS + 10_000);
