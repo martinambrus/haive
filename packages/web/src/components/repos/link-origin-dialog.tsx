@@ -39,7 +39,11 @@ export function LinkOriginDialog({
   onLinked: () => void;
 }) {
   const [url, setUrl] = useState(currentUrl ?? '');
-  const keepingSavedCredential = Boolean(currentUrl && currentCredentialsId);
+  // Fixed when the dialog opens: the list keeps polling, and a binding that vanishes
+  // mid-edit must not turn the selected Keep option into a credential id. Keep sends no
+  // credentialsId, so the server keeps whatever the row holds by then.
+  const [savedCredentialId] = useState(currentUrl ? (currentCredentialsId ?? null) : null);
+  const keepingSavedCredential = savedCredentialId !== null;
   const [credentialsId, setCredentialsId] = useState(keepingSavedCredential ? 'keep-saved' : '');
   const [credentials, setCredentials] = useState<CredentialRow[] | null>(null);
   const [oauthLabel, setOauthLabel] = useState<string | null>(null);
@@ -144,8 +148,7 @@ export function LinkOriginDialog({
             {keepingSavedCredential && (
               <option value="keep-saved">
                 Keep saved credential (
-                {credentials?.find((cred) => cred.id === currentCredentialsId)?.label ??
-                  'unavailable'}
+                {credentials?.find((cred) => cred.id === savedCredentialId)?.label ?? 'unavailable'}
                 )
               </option>
             )}
@@ -155,7 +158,7 @@ export function LinkOriginDialog({
                 : 'None — public remote, or SSH handled outside Haive'}
             </option>
             {(credentials ?? [])
-              .filter((cred) => !keepingSavedCredential || cred.id !== currentCredentialsId)
+              .filter((cred) => cred.id !== savedCredentialId)
               .map((cred) => (
                 <option key={cred.id} value={cred.id}>
                   {cred.label} ({cred.host})

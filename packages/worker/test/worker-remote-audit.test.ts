@@ -515,6 +515,19 @@ describe('gate 4 saved-value submissions', () => {
     expect(s.audits()).toEqual([]);
   });
 
+  it('keeps the saved credential shown as a note when an origin appears after detect', async () => {
+    const s = setup(URL);
+    s.fake.patch(schema.repositories, REPO, { credentialsSecretId: CREDENTIAL });
+    h.origin = URL;
+    const result = await s.apply(false, URL, CREDENTIAL, null, {
+      formValues: { push: true },
+      detected: { savedRemoteUrl: URL, boundCredentialId: CREDENTIAL },
+    });
+    expect(result.pushed).toBe(true);
+    expect(h.push).toHaveBeenCalledWith(expect.objectContaining({ credentialId: CREDENTIAL }));
+    expect(s.audits()).toEqual([]);
+  });
+
   it('does not replace a saved credential while repairing an empty remote slot with an existing origin', async () => {
     const s = setup();
     s.fake.patch(schema.repositories, REPO, { credentialsSecretId: 'saved-credential' });

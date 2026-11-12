@@ -66,6 +66,28 @@ describe('remote dialog credential selection', () => {
     });
   });
 
+  it('never sends Keep saved as a credential id after the saved binding disappears', async () => {
+    let bound: string | null = saved.id;
+    const view = createRenderer(() => (
+      <LinkOriginDialog
+        repositoryId="repo-1"
+        currentUrl="https://old.example.test/repo.git"
+        currentCredentialsId={bound}
+        onClose={() => {}}
+        onLinked={() => {}}
+      />
+    ));
+    await vi.advanceTimersByTimeAsync(0);
+    view.draw();
+    bound = null;
+    view.draw();
+    fire.click(buttons(view.tree(), /^change remote$/i)[0]!);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.link).toHaveBeenCalledExactlyOnceWith('repo-1', {
+      remoteUrl: 'https://old.example.test/repo.git',
+    });
+  });
+
   it('sends null when removing a saved credential for a public or SSH remote', async () => {
     const t = await mount('https://old.example.test/repo.git', saved.id);
     const none = findAll(t.credential(), (n) => n.tag === 'option').find(

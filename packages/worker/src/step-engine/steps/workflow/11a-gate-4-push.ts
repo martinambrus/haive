@@ -529,9 +529,12 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
       if (!parsed.success) throw new Error(parsed.error.issues[0]!.message);
       remoteUrl = parsed.data;
     }
+    // The form showed the saved credential as a note (no select) exactly when detect saw
+    // no origin or no saved remote. Key on that snapshot, not the live origin: an origin
+    // that appeared since must not drop the credential the user saw and approved.
     const credentialId =
       values.credentialId ??
-      (!hasOrigin || detected.savedRemoteUrl === null
+      (!detected.hasOrigin || detected.savedRemoteUrl === null
         ? (detected.boundCredentialId ?? undefined)
         : undefined);
     if (detected.repositoryId) {
