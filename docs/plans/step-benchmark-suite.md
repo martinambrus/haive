@@ -146,7 +146,7 @@ Candidate steps, to be cut down by P0: onboarding `01-env-detect`, `06_5-agent-d
   skill) and stores that agent's dispatch input, and the result row carries the agent id. The
   capture point for those is the mining dispatch, not `llm`. `dagExecute` steps are out of scope.
 - **Result row.** step id, fixture, mining agent id (when any), fixture hash, prompt hash,
-  step-source hash, `haive_build` stamp (`worker/src/build-stamp.ts`: `commit:` or `tree:` of the
+  step-source hash, `haive_build` stamp (`worker/src/build-stamp.ts`: `release:<version>` on a release image, else `commit:` or `tree:` of the
   working copy, so a dirty checkout gets its own id), CLI provider, requested and served model,
   effort level and source, CLI version, git sha, run index, tokens, cost, duration, grade breakdown,
   the raw output, and the workspace diff the dispatch left (tracked and untracked files against
@@ -164,10 +164,11 @@ Candidate steps, to be cut down by P0: onboarding `01-env-detect`, `06_5-agent-d
   results with old ones and reports the fixture as stale. Results are compared only within one `haive_build`: a
   change to a shared prompt helper, adapter, `apply` or grader leaves the step-source hash and the
   git sha unchanged on a dirty tree, but not the build stamp. Re-capture is one cheap run of the
-  upstream steps on the fixture repo, not a benchmark. That rule holds for a local matrix. Results
-  from other installs (P6, P7) never share a build stamp, so a cross-install comparison keys on
-  (pack hash, step-source hash, grader version) and shows the build and CLI versions as labels; a
-  result whose step-source hash is not the current one is left out of the default view.
+  upstream steps on the fixture repo, not a benchmark. The rule holds across installs too (P6, P7):
+  two results are compared only when their pack hash, build stamp, grader version and CLI versions
+  all match. Installs on one release share the stamp `release:<version>`, so users on that release
+  pool their runs. A `tree:` stamp names an uncommitted checkout no other install can reproduce,
+  so such results stay local and are never exported.
 - **Replay at zero tokens.** Every cell and every repeat gets the same prompt, so a prompt hash
   cannot identify a response. A replay restores the fixture, applies the workspace diff stored on
   one chosen result row (that row's id is the key), and runs `apply` and the grader on that row's
@@ -279,31 +280,35 @@ tables for packs, result rows and judge verdicts, and two sources:
 
 **Topic report, computed on read.** Grades from different packs are not on one scale: averaging a
 hard Rust pack with an easy one ranks whichever model happened to run on the easy one. So models
-are compared only within a pack both ran on, as the difference of their cell means against that
-pack's A/A floor, and a topic's report combines those per-pack differences across every pack with
-the topic tag, weighted by run count and showing the number of packs behind each comparison. Two
+are compared only within a pack both ran on and under one cohort (P1: same build stamp, grader
+version and CLI versions), as the difference of their cell means against that pack's A/A floor. A
+topic's report combines those per-pack differences across every pack with the topic tag, weighted
+by run count and showing the number of packs and builds behind each comparison. Each difference is
+controlled for the Haive build on its own, so differences from several releases can be combined;
+the default view takes only the current release. Two
 models that never shared a pack are not ranked against each other; the report says so rather than
 guessing. Packs are public, so filling such a gap means running the missing model on an existing
 pack. Tokens, cost and wall time are reported per pack, never averaged across packs.
 
 The page shows local and official results side by side and filters by topic, step, CLI version and
-step-source hash (default: current).
+build (default: current release).
 
 **Check.** Importing the same directory twice changes no row. A fixed set of bundles gives a
 byte-identical topic report. A synthetic case where A beats B on every pack both ran, while B alone
 also ran easier packs where it scores higher than A did anywhere, still reports A ahead.
 
-**Rollback.** Additive. `pnpm module remove benchmarks` and the module's teardown drop its tables;
-nothing outside the module reads them.
+**Rollback.** Additive; nothing outside the module reads its tables. Deactivate the module and run
+its teardown while it is still installed, then `pnpm module remove benchmarks` and rebuild. A module
+already removed keeps its data (`Missing`) until "Purge data..." on `/admin/modules` drops it.
 
 ## P7 — Sharing through GitHub
 
-- **Export.** The page exports a result bundle: pack id and hash, step-source hashes, grader
+- **Export.** The page exports a result bundle: pack id and hash, build stamp, step-source hashes, grader
   version, CLI versions, models and efforts, A/A floors, per-cell grades with intervals, tokens,
   cost and wall time. No raw outputs, prompts or diffs. Only public packs export; a private pack,
   and any fixture captured from a user's repository, never leaves the install.
 - **Submission.** A GitHub issue template takes the bundle, and the pack when it is new. A GitHub
-  Action validates the schema, recomputes the hashes, checks the pack against P2's check, and labels
+  Action validates the schema, recomputes the hashes, refuses a `tree:` build stamp, checks the pack against P2's check, and labels
   the issue.
 - **Acceptance.** A maintainer moves an accepted bundle into `benchmarks/community/` by PR; P6
   ingests it on the next update. Results are self-reported: the page marks them so, and because the
