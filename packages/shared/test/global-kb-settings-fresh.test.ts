@@ -1,5 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { CONFIG_KEYS, ConfigService, configService } from '../src/config/config.service.js';
 import { SECRET_KEYS, SecretsService, secretsService } from '../src/config/secrets.service.js';
 import { encrypt, generateEncryptionKey } from '../src/crypto/index.js';
@@ -42,8 +44,10 @@ const db = {
     },
   },
   delete: () => ({
-    where: async () => {
-      storedSecret = null;
+    where: (where: SQL) => {
+      if (new PgDialect().sqlToQuery(where).params[0] === SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING)
+        storedSecret = null;
+      return Object.assign(Promise.resolve(), { returning: async () => [] });
     },
   }),
 } as unknown as Database;

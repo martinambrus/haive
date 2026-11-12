@@ -137,9 +137,6 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-1d}
       JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-30d}
-      SMTP_HOST: ${SMTP_HOST:-mailpit}
-      SMTP_PORT: ${SMTP_PORT:-1025}
-      SMTP_FROM: ${SMTP_FROM:-no-reply@haive.local}
       HOST_REPO_ROOT: /host-fs
       REPO_STORAGE_ROOT: /var/lib/haive/repos
       BUNDLE_STORAGE_ROOT: /var/lib/haive/bundles
