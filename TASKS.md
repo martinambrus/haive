@@ -230,7 +230,7 @@ Code in web `lib/api-proxy.server.ts`, `lib/api-base.server.ts`, `app/api/haive/
 
 ### T613 · design · code-server shares the web origin in cross-host proxy mode
 
-status: in progress, plan approved 2026-11-12 (`docs/plans/tranquil-hugging-willow.md`, 5 PRs) · kind: design · found: H2 (#435) review 2026-11-11 · priority: P2
+status: in progress, plan approved 2026-11-12 (`docs/plans/tranquil-hugging-willow.md`, 5 PRs); PR 1 merged #1100 (3c87c6f02), live-checked: an api-origin page gets 403 on reads and writes, the dashboard is unaffected. Next: PR 2 (also adds `HAIVE_EDITOR_ORIGIN`), PR 3, PR 4, PR 5 docs (AGENTS.md origin paragraph and sandbox.md ~:220 now contradict the code) · kind: design · found: H2 (#435) review 2026-11-11 · priority: P2
 DECIDED by the owner 2026-11-11: separate editor hostname (e.g. `ide.<domain>`) with a scoped handshake token for cross-host installs.
 APPROVED by the owner 2026-11-12 with a constraint: single-host installs (localhost, a company's internal network, one hostname for web and api) must keep working with no new setting. Design draft (M2 map, no code): `.claude/tmp/codex-run/M2-S/codex-1/design.txt` (`HAIVE_EDITOR_ORIGIN`, hashed single-use handshake + editor session tables, editor-host dispatch; cross-host refuses `/ide` without the setting).
 In cross-host mode `/ide` is proxied on the web origin, so code-server (which runs repository code) runs with the app's origin and can reach its API session. Options: a separate editor hostname (needs DNS/TLS per install), an API-host editor with its own scoped handshake token, or a sandboxed opaque-origin iframe (code-server may need storage it then lacks). Costs: `.claude/tmp/codex-run/H2-S/codex-2/editor-options.txt`. Needs an owner decision. Same-hostname installs are unaffected.
@@ -266,6 +266,7 @@ Code in `worker/src/step-engine/left-committed-merge.ts`.
 ### T624 · ops · Lint/Unit CI job runs near its 20-minute limit
 
 status: open · kind: ops · found: #1099 CI 2026-11-12 · priority: P3
+Owner direction 2026-11-12: make tests fast and minimal rather than only raising limits; plan approved (`.claude/tmp/codex-run/T624-S/plan.md`): CI unit matrix first, then a testing rule doc, then batches (bounds at small scale, fake timers, git template fixtures). #1098, #1099, #1100 all cancelled at 20 min.
 `lint-typecheck-test` (`.github/workflows/ci.yml` ~:36, `timeout-minutes: 20`) took 12-19 min on recent main runs; #1099 and the docs-only #1098 were cancelled at 20 min in "Module scripts", and a re-run passed. Measure per-step time over recent runs, then raise the limit to a measured budget (as the gated step did in #1093) or split the job. Not an outage workaround: the job grew.
 
 ### T625 · design · re-drive an Undo whose re-sync failed after settling
