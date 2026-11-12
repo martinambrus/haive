@@ -78,6 +78,13 @@ describe('behind a proxy that rewrites Host', () => {
     expect((await post(app, 'https://haive.example.com:3001')).status).toBe(404);
     expect((await post(app, 'https://haive.example.com:8080')).status).toBe(403);
   });
+
+  it('a whitespace public URL counts as unset and falls through to the published port', async () => {
+    vi.stubEnv('HAIVE_PUBLIC_API_URL', '   ');
+    vi.stubEnv('HAIVE_API_PORT', ' 3001 ');
+    const app = createApiApp('https://haive.example.com');
+    expect((await post(app, 'https://haive.example.com:3001')).status).toBe(404);
+  });
 });
 
 describe('the runtime access routes', () => {

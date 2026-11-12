@@ -1,5 +1,10 @@
-import { describe, expect, it } from 'vitest';
-import { resolveApiOrigin, FALLBACK_API_URL, type ApiOriginInputs } from './api-origin';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  resolveApiOrigin,
+  runtimeApiConfig,
+  FALLBACK_API_URL,
+  type ApiOriginInputs,
+} from './api-origin';
 
 function inputs(over: Partial<ApiOriginInputs> = {}): ApiOriginInputs {
   return {
@@ -108,5 +113,19 @@ describe('falling back', () => {
         inputs({ config: { apiPort: '3003' }, location: undefined, buildTime: 'http://api:3001' }),
       ),
     ).toBe('http://api:3001');
+  });
+});
+
+describe('blank settings count as unset', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('drops a whitespace runtime URL and port from the browser config', () => {
+    vi.stubEnv('HAIVE_PUBLIC_API_URL', '   ');
+    vi.stubEnv('HAIVE_API_PORT', ' ');
+    expect(runtimeApiConfig()).toEqual({});
+  });
+
+  it('falls back from an empty build-time URL when there is no location', () => {
+    expect(resolveApiOrigin(inputs({ location: undefined, buildTime: '' }))).toBe(FALLBACK_API_URL);
   });
 });

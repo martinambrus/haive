@@ -504,6 +504,7 @@ attachmentRoutes.get('/:id/attachments/:attachmentId/raw', async (c) => {
   // The BASENAME: `filename` may be a relative path now, and a header carrying
   // `docs/api/spec.md` names a directory the downloader does not have.
   const safeHeaderName = splitAttachmentPath(row.filename).base.replace(/["\r\n]/g, '_');
+  c.header('X-Content-Type-Options', 'nosniff');
   c.header('Content-Type', row.contentType ?? 'application/octet-stream');
   c.header('Content-Disposition', `attachment; filename="${safeHeaderName}"`);
   c.header('Content-Length', String(size));
